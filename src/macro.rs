@@ -70,7 +70,7 @@ macro_rules! __debug_grouped_impl {
                 let elapsed_str = if let Some(last_time) = *last_time_guard {
                     let diff = now.duration_since(last_time);
                     if diff.as_millis() > 1 {
-                        format!(" \x1b[35m+{:?}\x1b[0m", diff)
+                        format!(" \x1b[35m+{}ms\x1b[0m", diff.as_millis())
                     } else {
                         String::new()
                     }
@@ -91,10 +91,10 @@ macro_rules! __debug_grouped_impl {
                 // Print line number in Dark Gray, then the message
                 // \x1b[90m = Dark Gray (Bright Black)
                 println!(
-                    concat!("\x1b[90m  {:>4}\x1b[0m  ", "{}", "{}"),
+                    concat!("{}\x1b[90m  {:>4}\x1b[0m  ", $user_fmt),
+                    elapsed_str,
                     line!(),
-                    format_args!($user_fmt, $($user_args)*),
-                    elapsed_str
+                    $($user_args)*
                 );
             }
         }
@@ -126,7 +126,7 @@ macro_rules! __debug_start_impl {
                 let elapsed_str = if let Some(last_time) = *last_time_guard {
                     let diff = now.duration_since(last_time);
                     if diff.as_millis() > 1 {
-                        format!(" \x1b[35m+{:?}\x1b[0m", diff)
+                        format!(" \x1b[35m+{}ms\x1b[0m", diff.as_millis())
                     } else {
                         String::new()
                     }
@@ -143,10 +143,10 @@ macro_rules! __debug_start_impl {
                 }
 
                 print!(
-                    concat!("\x1b[90m  {:>4}\x1b[0m  ", "{}", "{}"),
+                    concat!("{}\x1b[90m  {:>4}\x1b[0m  ", $user_fmt),
+                    elapsed_str,
                     line!(),
-                    format_args!($user_fmt, $($user_args)*),
-                    elapsed_str
+                    $($user_args)*
                 );
                 use std::io::Write;
                 let _ = std::io::stdout().flush();

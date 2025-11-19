@@ -1,7 +1,7 @@
 local_system:
   attached_files:
     - src/macro.rs
-  conversation_file:
+  conversation_file: conversation.yaml
   compile_command:
   initial_file_contents:
     src/macro.rs: |
@@ -326,7 +326,7 @@ local_system:
                       let elapsed_str = if let Some(last_time) = *last_time_guard {
                           let diff = now.duration_since(last_time);
                           if diff.as_millis() > 1 {
-                              format!(" \x1b[35m+{:?}\x1b[0m", diff)
+                              format!(" \x1b[35m+{}ms\x1b[0m", diff.as_millis())
                           } else {
                               String::new()
                           }
@@ -347,10 +347,10 @@ local_system:
                       // Print line number in Dark Gray, then the message
                       // \x1b[90m = Dark Gray (Bright Black)
                       println!(
-                          concat!("\x1b[90m  {:>4}\x1b[0m  ", "{}", "{}"),
+                          concat!("{}\x1b[90m  {:>4}\x1b[0m  ", $user_fmt),
+                          elapsed_str,
                           line!(),
-                          format_args!($user_fmt, $($user_args)*),
-                          elapsed_str
+                          $($user_args)*
                       );
                   }
               }
@@ -382,7 +382,7 @@ local_system:
                       let elapsed_str = if let Some(last_time) = *last_time_guard {
                           let diff = now.duration_since(last_time);
                           if diff.as_millis() > 1 {
-                              format!(" \x1b[35m+{:?}\x1b[0m", diff)
+                              format!(" \x1b[35m+{}ms\x1b[0m", diff.as_millis())
                           } else {
                               String::new()
                           }
@@ -399,10 +399,10 @@ local_system:
                       }
 
                       print!(
-                          concat!("\x1b[90m  {:>4}\x1b[0m  ", "{}", "{}"),
+                          concat!("{}\x1b[90m  {:>4}\x1b[0m  ", $user_fmt),
+                          elapsed_str,
                           line!(),
-                          format_args!($user_fmt, $($user_args)*),
-                          elapsed_str
+                          $($user_args)*
                       );
                       use std::io::Write;
                       let _ = std::io::stdout().flush();
@@ -904,5 +904,151 @@ messages:
     metadata:
   - user: 'Changes committed with message: "Refactor: Move elapsed time to end of
       debug line for better alignment"'
+    metadata:
+  - user: |-
+      Diff of src/macro.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |
+      We don't need so much precision in the number
+    metadata:
+  - assistant: |-
+      To address the alignment issues and reduce the precision of the timing output, I will modify the debug macros to:
+
+      1.  **Reduce Precision**: Change the elapsed time format from the default `Debug` output (e.g., `10.867792ms`) to integer milliseconds (e.g., `10ms`).
+      2.  **Fix Alignment**: Move the elapsed time indicator to the **end** of the line. This ensures that the file line numbers and the start of your log messages remain perfectly vertically aligned.
+      3.  **Safe Formatting**: Use `format_args!` to wrap the user's message, ensuring that moving the timing variable to the end doesn't interfere with the user's arguments (especially if trailing commas are used).
+
+      Here are the step-by-step instructions:
+
+      1.  **Edit `src/macro.rs`**:
+          *   In `__debug_grouped_impl`, change the `elapsed_str` formatting to use `diff.as_millis()` and add a leading space instead of a trailing one.
+          *   In the `println!` call within `__debug_grouped_impl`, update the `concat!` string to place the message placeholder `{}` before the elapsed time placeholder `{}`. Move `elapsed_str` to the end of the argument list and wrap the user's message in `format_args!`.
+          *   Apply the exact same changes to `__debug_start_impl` (updating the `print!` call).
+
+      ```diff
+      diff --git a/src/macro.rs b/src/macro.rs
+      index 1234567..89abcdef 100644
+      --- a/src/macro.rs
+      +++ b/src/macro.rs
+      @@ -72,7 +72,7 @@
+                       let elapsed_str = if let Some(last_time) = *last_time_guard {
+                           let diff = now.duration_since(last_time);
+                           if diff.as_millis() > 1 {
+      -                        format!("\x1b[35m+{:?}\x1b[0m ", diff)
+      +                        format!(" \x1b[35m+{}ms\x1b[0m", diff.as_millis())
+                           } else {
+                               String::new()
+                           }
+      @@ -93,10 +93,10 @@
+                       // Print line number in Dark Gray, then the message
+                       // \x1b[90m = Dark Gray (Bright Black)
+                       println!(
+      -                    concat!("{}\x1b[90m  {:>4}\x1b[0m  ", $user_fmt),
+      -                    elapsed_str,
+      +                    concat!("\x1b[90m  {:>4}\x1b[0m  ", "{}", "{}"),
+                           line!(),
+      -                    $($user_args)*
+      +                    format_args!($user_fmt, $($user_args)*),
+      +                    elapsed_str
+                       );
+                   }
+               }
+      @@ -128,7 +128,7 @@
+                       let elapsed_str = if let Some(last_time) = *last_time_guard {
+                           let diff = now.duration_since(last_time);
+                           if diff.as_millis() > 1 {
+      -                        format!("\x1b[35m+{:?}\x1b[0m ", diff)
+      +                        format!(" \x1b[35m+{}ms\x1b[0m", diff.as_millis())
+                           } else {
+                               String::new()
+                           }
+      @@ -145,10 +145,10 @@
+                       }
+       
+                       print!(
+      -                    concat!("{}\x1b[90m  {:>4}\x1b[0m  ", $user_fmt),
+      -                    elapsed_str,
+      +                    concat!("\x1b[90m  {:>4}\x1b[0m  ", "{}", "{}"),
+                           line!(),
+      -                    $($user_args)*
+      +                    format_args!($user_fmt, $($user_args)*),
+      +                    elapsed_str
+                       );
+                       use std::io::Write;
+                       let _ = std::io::stdout().flush();
+      ```
+    metadata:
+  - user: Git apply failed. A corrected patch was generated by model 'gf' and is being
+      applied now.
+    metadata:
+  - assistant: |-
+      ```diff
+      diff --git a/src/macro.rs b/src/macro.rs
+      index 1234567..89abcdef 100644
+      --- a/src/macro.rs
+      +++ b/src/macro.rs
+      @@ -72,7 +72,7 @@
+                       let elapsed_str = if let Some(last_time) = *last_time_guard {
+                           let diff = now.duration_since(last_time);
+                           if diff.as_millis() > 1 {
+      -                        format!(" \x1b[35m+{:?}\x1b[0m", diff)
+      +                        format!(" \x1b[35m+{}ms\x1b[0m", diff.as_millis())
+                           } else {
+                               String::new()
+                           }
+      @@ -93,10 +93,10 @@
+                       // Print line number in Dark Gray, then the message
+                       // \x1b[90m = Dark Gray (Bright Black)
+                       println!(
+      -                    concat!("\x1b[90m  {:>4}\x1b[0m  ", "{}", "{}"),
+      -                    line!(),
+      -                    format_args!($user_fmt, $($user_args)*),
+      -                    elapsed_str
+      +                    concat!("{}\x1b[90m  {:>4}\x1b[0m  ", $user_fmt),
+      +                    elapsed_str,
+      +                    line!(),
+      +                    $($user_args)*
+                       );
+                   }
+               }
+      @@ -128,7 +128,7 @@
+                       let elapsed_str = if let Some(last_time) = *last_time_guard {
+                           let diff = now.duration_since(last_time);
+                           if diff.as_millis() > 1 {
+      -                        format!(" \x1b[35m+{:?}\x1b[0m", diff)
+      +                        format!(" \x1b[35m+{}ms\x1b[0m", diff.as_millis())
+                           } else {
+                               String::new()
+                           }
+      @@ -145,10 +145,10 @@
+                       }
+       
+                       print!(
+      -                    concat!("\x1b[90m  {:>4}\x1b[0m  ", "{}", "{}"),
+      -                    line!(),
+      -                    format_args!($user_fmt, $($user_args)*),
+      -                    elapsed_str
+      +                    concat!("{}\x1b[90m  {:>4}\x1b[0m  ", $user_fmt),
+      +                    elapsed_str,
+      +                    line!(),
+      +                    $($user_args)*
+                       );
+                       use std::io::Write;
+                       let _ = std::io::stdout().flush();
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/macro.rs
+      Applying patch to 'src/macro.rs' using custom patcher...
+      Successfully applied patch and wrote to src/macro.rs.
+    metadata:
+  - user: 'Changes committed with message: "No changes applied in this step"'
     metadata:
 ...
