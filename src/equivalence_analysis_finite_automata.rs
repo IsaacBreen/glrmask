@@ -311,7 +311,7 @@ pub fn find_state_equivalence_classes(
     pb.inc(1);
 
     pb.set_message("Grouping...");
-    let mut classes = BTreeMap::new();
+    let mut classes: BTreeMap<Vec<usize>, Vec<usize>> = BTreeMap::new();
     let mut hash_map = HashMap::new();
     let mut next_id = 0;
 
@@ -433,7 +433,7 @@ fn precompute_remainder_hashes(regex: &Regex, strings: &[Vec<u8>]) -> Vec<Vec<u6
 fn group_by_hash(accumulators: &[u128]) -> BTreeMap<Vec<usize>, Vec<usize>> {
     let mut map = HashMap::new();
     let mut next_id = 0;
-    let mut classes = BTreeMap::new();
+    let mut classes: BTreeMap<Vec<usize>, Vec<usize>> = BTreeMap::new();
     for (i, &h) in accumulators.iter().enumerate() {
         let id = *map.entry(h).or_insert_with(|| { next_id += 1; next_id - 1 });
         classes.entry(vec![id]).or_default().push(i);
@@ -449,7 +449,7 @@ fn create_pb(len: u64) -> ProgressBar {
 }
 
 fn verify_string_classes(regex: &Regex, strings: &[Vec<u8>], initial_states: &[usize], classes: &mut BTreeMap<Vec<usize>, Vec<usize>>) {
-    let mut new_classes = BTreeMap::new();
+    let mut new_classes: BTreeMap<Vec<usize>, Vec<usize>> = BTreeMap::new();
     let mut next_id = 0;
 
     for (_, group) in classes.iter() {
@@ -489,7 +489,7 @@ fn are_strings_eq(regex: &Regex, strings: &[Vec<u8>], states: &[usize], a: usize
 }
 
 fn verify_state_classes(regex: &Regex, strings: &[Vec<u8>], classes: &mut BTreeMap<Vec<usize>, Vec<usize>>) {
-    let mut new_classes = BTreeMap::new();
+    let mut new_classes: BTreeMap<Vec<usize>, Vec<usize>> = BTreeMap::new();
     let mut next_id = 0;
 
     for (_, group) in classes.iter() {
