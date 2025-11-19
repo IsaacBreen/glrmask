@@ -176,27 +176,23 @@ pub fn precompute4(
     max_llm_token_id: usize,
 ) -> DWA {
     crate::debug!(4, "Optimizing precomputed1 via NWA/DWA conversion...");
-    crate::debug!(4, "Precompute1 trie before: {}", Trie::pretty_print(&trie1_god, &precomputed1.iter().map(|(k, v)| *v).collect::<Vec<_>>()));
     let mut nwa = convert_precompute1_to_nwa(precomputed1, trie1_god);
-    crate::debug!(4, "NWA after conversion: {}", nwa);
-    crate::debug!(4, "Optimizing precomputed1 via NWA/DWA conversion... done.");
+    crate::debug!(5, "Optimizing precomputed1 via NWA/DWA conversion... done.");
     nwa.simplify();
-    crate::debug!(4, "Simplified precomputed1 NWA... done.");
+    crate::debug!(5, "Simplified precomputed1 NWA... done.");
     let mut dwa = nwa.determinize();
-    crate::debug!(4, "Determinized precomputed1 NWA... done.");
+    crate::debug!(5, "Determinized precomputed1 NWA... done.");
     dwa.minimize_with_rustfst();
     crate::debug!(
-        4,
+        5,
         "Optimized precomputed1 DWA has {} states and {} transitions.",
         dwa.states.len(),
         dwa.num_transitions(),
     );
-    crate::debug!(4, "Optimized precomputed1 DWA: {}", dwa);
 
     let (optimized_precomputed1, optimized_trie1_god) = convert_dwa_to_precompute1(&dwa, max_llm_token_id);
     let precomputed1 = &optimized_precomputed1;
     let trie1_god = &optimized_trie1_god;
-    crate::debug!(4, "Precompute1 trie after: {}", Trie::pretty_print(&trie1_god, &precomputed1.iter().map(|(k, v)| *v).collect::<Vec<_>>()));
 
     let now_total = Instant::now();
     let now = Instant::now();
