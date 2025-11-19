@@ -5,7 +5,7 @@ use crate::glr::analyze::{
     remove_productions_with_undefined_nonterminals, simplify_grammar, validate,
 };
 use crate::glr::automaton::{
-    compute_closure_compact, compute_first_sets_compact, compute_follow_sets_compact,
+    compute_closure_compact, compute_first_sets_compact, compute_follow_sets_compact, precompute_closures,
     compute_goto_compact, compute_nullable_nonterminals_compact, split_on_dot_compact,
 };
 pub(crate) use crate::glr::grammar::{CompactProduction, CompactSymbol, NonTerminal, NonTerminalID, Production, ProductionID, Symbol, Terminal};
@@ -439,11 +439,7 @@ fn stage_1(productions: &[CompactProduction], num_non_terminals: usize) -> (Stag
     };
     let initial_item_set = BTreeSet::from([initial_item]);
 
-    // Map each non-terminal to the indices of its productions.
-    let mut prods_by_lhs: Vec<Vec<usize>> = vec![Vec::new(); num_non_terminals];
-    for (idx, p) in productions.iter().enumerate() {
-        prods_by_lhs[p.lhs.0].push(idx);
-    }
+    let precomputed_closures = precompute_closures(productions, num_non_terminals);
 
     let mut item_set_map = BiBTreeMap::new();
     let mut next_state_id = 0;
@@ -474,7 +470,7 @@ fn stage_1(productions: &[CompactProduction], num_non_terminals: usize) -> (Stag
 
     while let Some(item_set) = worklist.pop_front() {
         let state_id = *item_set_map.get_by_left(&item_set).unwrap();
-        let closure = compute_closure_compact(&item_set, &prods_by_lhs, productions);
+        let closure = compute_closure_compact(&item_set, &precomputed_closures, productions);
         let splits = split_on_dot_compact(&closure, productions);
 
         let mut row: Stage1Row = BTreeMap::new();
@@ -759,15 +755,14 @@ pub fn stage_9(
     table: &Table,
     non_terminal_map: &BiBTreeMap<NonTerminal, NonTerminalID>,
 ) -> BTreeMap<NonTerminalID, SubstringGoto> {
-    let mut substring_gotos = BTreeMap::new();
+    let mut substring_gotos_vec: Vec<SubstringGoto> = vec![
+        SubstringGoto { accepting_sources: BTreeSet::new(), gotos: BTreeMap::new() }; 
+        non_terminal_map.len()
+    ];
 
     for (&source_state_id, row) in table {
         for (nt_id, goto) in &row.gotos {
-             let entry = substring_gotos.entry(*nt_id).or_insert_with(|| SubstringGoto {
-                 accepting_sources: BTreeSet::new(),
-                 gotos: BTreeMap::new(),
-             });
-             
+             let entry = &mut substring_gotos_vec[nt_id.0];
              if goto.accept {
                  entry.accepting_sources.insert(source_state_id);
              }
@@ -777,24 +772,34 @@ pub fn stage_9(
         }
     }
 
+    let mut substring_gotos = BTreeMap::new();
+    for (i, val) in substring_gotos_vec.into_iter().enumerate() {
+        if !val.accepting_sources.is_empty() || !val.gotos.is_empty() {
+            substring_gotos.insert(NonTerminalID(i), val);
+        }
+    }
     substring_gotos
 }
 
 /// Inverted GOTO index: (reduce non-terminal, goto state) -> bitvector of source states.
-pub fn stage_10(table: &Table) -> BTreeMap<NonTerminalID, BTreeMap<StateID, StateIDBV>> {
-    let mut reduce_goto_map: BTreeMap<NonTerminalID, BTreeMap<StateID, StateIDBV>> =
-        BTreeMap::new();
+pub fn stage_10(table: &Table, num_non_terminals: usize) -> BTreeMap<NonTerminalID, BTreeMap<StateID, StateIDBV>> {
+    let mut reduce_goto_vec: Vec<BTreeMap<StateID, StateIDBV>> = vec![BTreeMap::new(); num_non_terminals];
 
     for (&source_state_id, row) in table {
         for (&nt_id, goto) in &row.gotos {
             if let Some(goto_state_id) = goto.state_id {
-                reduce_goto_map
-                    .entry(nt_id)
-                    .or_default()
+                reduce_goto_vec[nt_id.0]
                     .entry(goto_state_id)
                     .or_default()
                     .insert(source_state_id.0);
             }
+        }
+    }
+    
+    let mut reduce_goto_map = BTreeMap::new();
+    for (i, val) in reduce_goto_vec.into_iter().enumerate() {
+        if !val.is_empty() {
+            reduce_goto_map.insert(NonTerminalID(i), val);
         }
     }
     reduce_goto_map
@@ -933,7 +938,7 @@ pub fn generate_glr_parser_with_maps(
 
     crate::debug!(2, "Stage 10: Precomputing reduce goto map");
     let start = std::time::Instant::now();
-    let reduce_goto_map = stage_10(&final_table);
+    let reduce_goto_map = stage_10(&final_table, num_non_terminals);
     crate::debug!(2, "Stage 10 done in {:.2?}", start.elapsed());
     print_memory_usage("After Stage 10 (reduce goto map)");
 

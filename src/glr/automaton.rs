@@ -390,6 +390,100 @@ pub fn compute_follow_sets_for_nonterminals(
     follow_sets
 }
 
+fn strongconnect(
+    v: usize,
+    index: &mut usize,
+    stack: &mut Vec<usize>,
+    indices: &mut Vec<Option<usize>>,
+    lowlinks: &mut Vec<usize>,
+    on_stack: &mut Vec<bool>,
+    sccs: &mut Vec<Vec<usize>>,
+    dependencies: &[Vec<NonTerminalID>],
+) {
+    indices[v] = Some(*index);
+    lowlinks[v] = *index;
+    *index += 1;
+    stack.push(v);
+    on_stack[v] = true;
+
+    for w in &dependencies[v] {
+        let w_idx = w.0;
+        if indices[w_idx].is_none() {
+            strongconnect(w_idx, index, stack, indices, lowlinks, on_stack, sccs, dependencies);
+            lowlinks[v] = lowlinks[v].min(lowlinks[w_idx]);
+        } else if on_stack[w_idx] {
+            lowlinks[v] = lowlinks[v].min(indices[w_idx].unwrap());
+        }
+    }
+
+    if lowlinks[v] == indices[v].unwrap() {
+        let mut scc = Vec::new();
+        loop {
+            let w = stack.pop().unwrap();
+            on_stack[w] = false;
+            scc.push(w);
+            if w == v { break; }
+        }
+        sccs.push(scc);
+    }
+}
+
+pub fn precompute_closures(
+    productions: &[CompactProduction],
+    num_non_terminals: usize,
+) -> Vec<BTreeSet<Item>> {
+    let mut closures: Vec<BTreeSet<Item>> = vec![BTreeSet::new(); num_non_terminals];
+    let mut direct_items: Vec<Vec<Item>> = vec![Vec::new(); num_non_terminals];
+    let mut dependencies: Vec<Vec<NonTerminalID>> = vec![Vec::new(); num_non_terminals];
+
+    for (prod_idx, prod) in productions.iter().enumerate() {
+        let item = Item { production_id: prod_idx, dot_position: 0 };
+        direct_items[prod.lhs.0].push(item);
+        if let Some(CompactSymbol::NonTerminal(nt)) = prod.rhs.get(0) {
+            dependencies[prod.lhs.0].push(*nt);
+        }
+    }
+
+    let mut index = 0;
+    let mut stack = Vec::new();
+    let mut indices = vec![None; num_non_terminals];
+    let mut lowlinks = vec![0; num_non_terminals];
+    let mut on_stack = vec![false; num_non_terminals];
+    let mut sccs = Vec::new();
+
+    for i in 0..num_non_terminals {
+        if indices[i].is_none() {
+            strongconnect(
+                i, &mut index, &mut stack, &mut indices, &mut lowlinks, &mut on_stack, &mut sccs, &dependencies
+            );
+        }
+    }
+
+    for scc in sccs {
+        let mut scc_items = BTreeSet::new();
+        for &nt_idx in &scc {
+            for item in &direct_items[nt_idx] {
+                scc_items.insert(*item);
+            }
+        }
+        
+        for &nt_idx in &scc {
+            for &dep_nt in &dependencies[nt_idx] {
+                if !scc.contains(&dep_nt.0) {
+                    let dep_items = &closures[dep_nt.0];
+                    scc_items.extend(dep_items.iter().cloned());
+                }
+            }
+        }
+        
+        for &nt_idx in &scc {
+            closures[nt_idx] = scc_items.clone();
+        }
+    }
+    
+    closures
+}
+
 #[time_it]
 pub fn compute_closure(
     items: &BTreeSet<Item>,
@@ -422,25 +516,14 @@ pub fn compute_closure(
 #[time_it]
 pub fn compute_closure_compact(
     items: &BTreeSet<Item>,
-    prods_by_lhs: &[Vec<usize>],
+    precomputed_closures: &[BTreeSet<Item>],
     productions: &[CompactProduction],
 ) -> BTreeSet<Item> {
     let mut closure = items.clone();
-    let mut worklist: VecDeque<Item> = items.iter().cloned().collect();
-
-    while let Some(item) = worklist.pop_front() {
+    for item in items {
         let prod = &productions[item.production_id];
         if let Some(CompactSymbol::NonTerminal(nt_id)) = prod.rhs.get(item.dot_position) {
-            // Direct array access using ID
-            for &prod_idx in &prods_by_lhs[nt_id.0] {
-                let new_item = Item {
-                    production_id: prod_idx,
-                    dot_position: 0,
-                };
-                if closure.insert(new_item) {
-                    worklist.push_back(new_item);
-                }
-            }
+            closure.extend(precomputed_closures[nt_id.0].iter().cloned());
         }
     }
     closure
