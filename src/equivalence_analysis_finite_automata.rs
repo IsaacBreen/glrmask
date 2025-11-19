@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::time::Instant;
 use crate::finite_automata::Regex;
 
 mod impl1 {
@@ -1313,9 +1314,15 @@ pub fn find_equivalence_classes(
     strings: &[Vec<u8>],
     initial_states: &[usize],
 ) -> BTreeMap<Vec<usize>, Vec<usize>> {
+    let mut instant = Instant::now();
     let impl1 = impl1::find_equivalence_classes(regex, strings, initial_states);
+    crate::debug!(5, "Impl1 took {:?}", instant.elapsed());
+    instant = Instant::now();
     let impl2 = impl2::find_equivalence_classes(regex, strings, initial_states);
+    crate::debug!(5, "Impl2 took {:?}", instant.elapsed());
+    instant = Instant::now();
     let impl3 = impl3::find_equivalence_classes(regex, strings, initial_states);
+    crate::debug!(5, "Impl3 took {:?}", instant.elapsed());
 
     let normalize = |map: &BTreeMap<_, Vec<usize>>| -> Vec<Vec<usize>> {
         let mut p: Vec<Vec<usize>> = map.values().cloned().collect();
@@ -1344,5 +1351,5 @@ pub fn find_equivalence_classes(
 
     println!("All implementations match.");
 
-    impl2
+    impl3
 }
