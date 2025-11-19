@@ -2,6 +2,7 @@ use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::glr::items::Item;
 use profiler_macro::time_it;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::HashSet;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Nullability {
@@ -388,38 +389,107 @@ pub fn compute_follow_sets_for_nonterminals(
     crate::debug!(3, "Computed follow sets in {:.2?}", start.elapsed());
     follow_sets
 }
+// New functions for precomputing NT closures
+pub fn precompute_nt_closures(productions: &[Production]) -> BTreeMap<NonTerminal, Vec<Item>> {
+    let mut direct: BTreeMap<NonTerminal, Vec<Item>> = BTreeMap::new();
+    let mut graph: BTreeMap<NonTerminal, Vec<NonTerminal>> = BTreeMap::new();
 
-#[time_it]
-pub fn compute_closure(
-    items: &BTreeSet<Item>,
-    prods_by_lhs: &BTreeMap<NonTerminal, Vec<usize>>,
-    productions: &[Production],
-) -> BTreeSet<Item> {
-    // crate::debug!(3, "Computing closure");
-    let mut closure = items.clone();
-    let mut worklist: VecDeque<Item> = items.iter().cloned().collect();
+    for (pid, prod) in productions.iter().enumerate() {
+        direct
+            .entry(prod.lhs.clone())
+            .or_default()
+            .push(Item {
+                production_id: pid,
+                dot_position: 0,
+            });
+        if let Some(Symbol::NonTerminal(nt)) = prod.rhs.get(0) {
+            graph.entry(prod.lhs.clone()).or_default().push(nt.clone());
+        }
+    }
 
-    while let Some(item) = worklist.pop_front() {
-        let prod = &productions[item.production_id];
-        if let Some(Symbol::NonTerminal(nt)) = prod.rhs.get(item.dot_position) {
-            if let Some(prod_indices) = prods_by_lhs.get(nt) {
-                for &prod_idx in prod_indices {
-                    let new_item = Item {
-                        production_id: prod_idx,
-                        dot_position: 0,
-                    };
-                    if closure.insert(new_item) {
-                        worklist.push_back(new_item);
+    // Compute reverse post-order for efficient propagation
+    let mut visited = HashSet::new();
+    let mut post_order = Vec::new();
+    for nt in direct.keys() {
+        if !visited.contains(nt) {
+            dfs_post_order(nt, &graph, &mut visited, &mut post_order);
+        }
+    }
+    let reverse_post_order: Vec<_> = post_order.into_iter().rev().collect();
+
+    let mut closures = direct;
+    let mut changed = true;
+    // Propagate closures. With reverse post-order, this converges quickly (1 pass for DAGs).
+    while changed {
+        changed = false;
+        for nt in &reverse_post_order {
+            if let Some(neighbors) = graph.get(nt) {
+                let mut to_add = Vec::new();
+                for neighbor in neighbors {
+                    if let Some(neighbor_items) = closures.get(neighbor) {
+                        to_add.extend_from_slice(neighbor_items);
+                    }
+                }
+                if !to_add.is_empty() {
+                    let items = closures.entry(nt.clone()).or_default();
+                    let len_before = items.len();
+                    items.extend(to_add);
+                    items.sort_unstable();
+                    items.dedup();
+                    if items.len() > len_before {
+                        changed = true;
                     }
                 }
             }
         }
     }
+
+    closures
+}
+
+fn dfs_post_order(
+    u: &NonTerminal,
+    graph: &BTreeMap<NonTerminal, Vec<NonTerminal>>,
+    visited: &mut HashSet<NonTerminal>,
+    post_order: &mut Vec<NonTerminal>,
+) {
+    visited.insert(u.clone());
+    if let Some(neighbors) = graph.get(u) {
+        for v in neighbors {
+            if !visited.contains(v) {
+                dfs_post_order(v, graph, visited, post_order);
+            }
+        }
+    }
+    post_order.push(u.clone());
+}
+
+#[time_it]
+pub fn compute_closure(
+    items: &[Item],
+    nt_closures: &BTreeMap<NonTerminal, Vec<Item>>,
+    productions: &[Production],
+) -> Vec<Item> {
+    let mut closure = items.to_vec();
+    let mut seen_nts = HashSet::new();
+
+    for item in items {
+        let prod = &productions[item.production_id];
+        if let Some(Symbol::NonTerminal(nt)) = prod.rhs.get(item.dot_position) {
+            if seen_nts.insert(nt) {
+                if let Some(cached) = nt_closures.get(nt) {
+                    closure.extend_from_slice(cached);
+                }
+            }
+        }
+    }
+    closure.sort_unstable();
+    closure.dedup();
     closure
 }
 
-pub fn compute_goto(items: &BTreeSet<Item>, productions: &[Production]) -> BTreeSet<Item> {
-    items
+pub fn compute_goto(items: &[Item], productions: &[Production]) -> Vec<Item> {
+    let mut result: Vec<Item> = items
         .iter()
         .filter_map(|item| {
             let prod = &productions[item.production_id];
@@ -432,18 +502,21 @@ pub fn compute_goto(items: &BTreeSet<Item>, productions: &[Production]) -> BTree
                 None
             }
         })
-        .collect()
+        .collect();
+    result.sort_unstable();
+    result.dedup();
+    result
 }
 
 pub fn split_on_dot(
-    items: &BTreeSet<Item>,
+    items: &[Item],
     productions: &[Production],
-) -> BTreeMap<Option<Symbol>, BTreeSet<Item>> {
-    let mut result: BTreeMap<Option<Symbol>, BTreeSet<Item>> = BTreeMap::new();
+) -> BTreeMap<Option<Symbol>, Vec<Item>> {
+    let mut result: BTreeMap<Option<Symbol>, Vec<Item>> = BTreeMap::new();
     for item in items {
         let prod = &productions[item.production_id];
         let key = prod.rhs.get(item.dot_position).cloned();
-        result.entry(key).or_default().insert(item.clone());
+        result.entry(key).or_default().push(item.clone());
     }
     result
 }
