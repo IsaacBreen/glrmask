@@ -835,6 +835,12 @@ impl NWA {
         }
     }
 
+    pub fn minimize_with_rustfst(&mut self) {
+        let mut fst = self.to_rustfst();
+        minimize_with_config(&mut fst, MinimizeConfig::default().with_allow_nondet(true)).unwrap();
+        *self = NWA::from_rustfst(&fst);
+    }
+
     fn run_optimization_experiment(&mut self) {
         let initial_clone = self.clone();
         let initial_states = self.states.len();

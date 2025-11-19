@@ -111,17 +111,17 @@ pub fn precompute4(
         let actual_start_state = nwa.states.add_state();
         nwa.add_transition(actual_start_state, sid.0 as i16, start_state, Weight::all()).unwrap();
         nwa.body.start_state = actual_start_state;
-        let mut dwa = nwa.determinize_to_dwa2();
-        dwa.simplify();
-        nwabig.union(&NWA::from_dwa(&dwa));
+        nwa.minimize_with_rustfst();
+        nwabig.union(&nwa);
     }
     nwabig.simplify();
     let mut dwa = nwabig.determinize_to_dwa_with_rustfst();
     dwa.minimize_with_rustfst();
     crate::debug!(
         4,
-        "Built DWA with {} states",
+        "Built DWA with {} states, NWA with {} states.",
         dwa.states.len(),
+        nwabig.states.len()
     );
 
 
