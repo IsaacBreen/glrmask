@@ -315,6 +315,10 @@ pub struct Row {
 }
 
 impl Row {
+    pub fn iter_rows(&self) -> impl IntoIterator<Item = (&StateID, &Row)> {
+        std::iter::empty()
+    }
+
     pub fn get_shifts_and_reduces_for_terminal(&self, terminal_id: &TerminalID) -> Option<Stage7ShiftsAndReducesLookaheadValue> {
         self.shifts_and_reduces_full.get(terminal_id).cloned()
     }
