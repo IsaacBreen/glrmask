@@ -24,3 +24,28 @@ MACRO_DEBUG_LEVEL=4 python scripts/compile.py \
     --output .cache/test_vocabs/example_diff_constraint.json.gz \
     --vocab-url "https://huggingface.co/openai-community/gpt2/raw/main/vocab.json"
 ```
+
+---
+
+As a result of debug! macro usages, the stdout of this will contain timings like this:
+
+```
+src/precompute4/full_dwa.rs
+   178  Optimizing precomputed1 via NWA/DWA conversion... +20ms
+   187  Unrolling cycles in precomputed1 DWA... +1.35s
+```
+
+Note that the timing values (e.g., `+20ms`, `+1.35s`) displayed in purple at the end of the lines represent the **time elapsed since the previous debug message was printed**.
+
+This is a "delta" timestamp, calculated globally across the application.
+
+*   **`+20ms` on line 178**: Indicates that 20 milliseconds passed between the log message *prior* to line 178 and the moment line 178 was reached.
+*   **`+1.35s` on line 187**: Indicates that 1.35 seconds passed between printing line 178 and printing line 187.
+
+Therefore, to read performance from these logs, you usually look at the time appended to the **next** log line to understand how long the **current** block took to execute. In the example above, the step "Optimizing precomputed1 via NWA/DWA conversion..." took approximately 1.35 seconds.
+
+If you see a log line like:
+```text
+   187  ... (...) +1.35s
+```
+The `+1.35s` is the "gap" time. If you use `debug_timer_end!`, you will see an explicit duration in parentheses (e.g., `(500ms)`) followed by the gap time.
