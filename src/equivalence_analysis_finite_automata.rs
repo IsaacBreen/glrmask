@@ -867,6 +867,24 @@ pub fn find_equivalence_classes(
 ) -> BTreeMap<Vec<usize>, Vec<usize>> {
     let new = new::find_equivalence_classes(regex, strings, initial_states);
     let old = old::find_equivalence_classes(regex, strings, initial_states);
-    assert_eq!(new, old);
+
+    // Verify that both implementations produce the same partition of the input strings.
+    // The keys (signatures) differ between implementations, so we only compare the values (groups).
+    let mut new_partitions: Vec<Vec<usize>> = new.values().cloned().collect();
+    for group in &mut new_partitions {
+        group.sort_unstable();
+    }
+    new_partitions.sort_unstable();
+
+    let mut old_partitions: Vec<Vec<usize>> = old.values().cloned().collect();
+    for group in &mut old_partitions {
+        group.sort_unstable();
+    }
+    old_partitions.sort_unstable();
+
+    if new_partitions != old_partitions {
+        panic!("Equivalence analysis mismatch!\nNew: {:?}\nOld: {:?}", new_partitions, old_partitions);
+    }
+
     new
 }
