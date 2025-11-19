@@ -1,6 +1,6 @@
 use super::common::{StateID, Weight};
 use super::dwa::DWA;
-use std::collections::{hash_map::Entry, BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 
 impl DWA {
     /// Unrolls cycles in the DWA by expanding states into (state, accumulated_weight) pairs.
@@ -49,8 +49,10 @@ impl DWA {
             let u_state = &self.states[u];
 
             // Collect transitions to bulk insert later, avoiding repeated re-borrows of new_dwa
-            let mut new_transitions = BTreeMap::new();
-            let mut new_trans_weights = BTreeMap::new();
+            // Pre-allocate vectors for bulk BTreeMap construction
+            let capacity = u_state.transitions.len();
+            let mut new_transitions_vec = Vec::with_capacity(capacity);
+            let mut new_trans_weights_vec = Vec::with_capacity(capacity);
 
             // Iterate transitions and weights in lockstep to avoid O(log N) lookups
             for ((&label, &v), (_, trans_w)) in u_state.transitions.iter().zip(u_state.trans_weights.iter()) {
@@ -71,33 +73,29 @@ impl DWA {
                     }
                 }
 
-                if visited[v].is_none() {
-                    visited[v] = Some(HashMap::new());
-                }
-                let v_visited = visited[v].as_mut().unwrap();
+                let v_visited = visited[v].get_or_insert_with(HashMap::new);
 
-                let new_v = match v_visited.entry(next_w.clone()) {
-                    Entry::Occupied(e) => *e.get(),
-                    Entry::Vacant(e) => {
-                        let id = new_dwa.add_state();
-                        // Initialize new state
-                        let new_st = &mut new_dwa.states[id];
-                        new_st.state_weight = v_state.state_weight.clone();
-                        new_st.final_weight = v_state.final_weight.clone();
-                        
-                        e.insert(id);
-                        queue.push_back((id, v, next_w));
-                        id
-                    }
+                let new_v = if let Some(&id) = v_visited.get(&next_w) {
+                    id
+                } else {
+                    let id = new_dwa.add_state();
+                    // Initialize new state
+                    let new_st = &mut new_dwa.states[id];
+                    new_st.state_weight = v_state.state_weight.clone();
+                    new_st.final_weight = v_state.final_weight.clone();
+                    
+                    v_visited.insert(next_w.clone(), id);
+                    queue.push_back((id, v, next_w));
+                    id
                 };
 
-                new_transitions.insert(label, new_v);
-                new_trans_weights.insert(label, trans_w.clone());
+                new_transitions_vec.push((label, new_v));
+                new_trans_weights_vec.push((label, trans_w.clone()));
             }
 
             let src_st = &mut new_dwa.states[new_u];
-            src_st.transitions = new_transitions;
-            src_st.trans_weights = new_trans_weights;
+            src_st.transitions = new_transitions_vec.into_iter().collect();
+            src_st.trans_weights = new_trans_weights_vec.into_iter().collect();
         }
 
         new_dwa
