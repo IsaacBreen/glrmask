@@ -773,7 +773,8 @@ impl NFAState {
 fn print_memory_usage(label: &str) {
     if let Some(usage) = memory_stats() {
         let physical_mem_mb = usage.physical_mem / 1024 / 1024;
-        crate::debug!(2, "Memory usage at '{}': Physical: {} MB", label, physical_mem_mb);
+        let virtual_mem_mb = usage.virtual_mem / 1024 / 1024;
+        crate::debug!(2, "Memory usage at '{}': Physical: {} MB, Virtual: {} MB", label, physical_mem_mb, virtual_mem_mb);
     } else {
         crate::debug!(2, "Couldn't get memory usage at '{}'", label);
     }
