@@ -67,15 +67,15 @@ macro_rules! __debug_grouped_impl {
                 }
                 let now = std::time::Instant::now();
 
-                let elapsed_str = if let Some(last_time) = *last_time_guard {
+                let elapsed_suffix = if let Some(last_time) = *last_time_guard {
                     let diff = now.duration_since(last_time);
                     if diff.as_millis() > 1 {
-                        format!(" \x1b[35m+{:>5}ms\x1b[0m", diff.as_millis())
+                        format!(" \x1b[35m+{}ms\x1b[0m", diff.as_millis())
                     } else {
-                        "         ".to_string()
+                        String::new()
                     }
                 } else {
-                    "         ".to_string()
+                    String::new()
                 };
                 *last_time_guard = Some(now);
 
@@ -91,10 +91,10 @@ macro_rules! __debug_grouped_impl {
                 // Print line number in Dark Gray, then the message
                 // \x1b[90m = Dark Gray (Bright Black)
                 println!(
-                    concat!("\x1b[90m  {:>4}\x1b[0m{}  ", $user_fmt),
+                    concat!("\x1b[90m  {:>4}\x1b[0m  ", $user_fmt, "{}"),
                     line!(),
-                    elapsed_str,
-                    $($user_args)*
+                    $($user_args)*,
+                    elapsed_suffix
                 );
             }
         }
@@ -123,15 +123,15 @@ macro_rules! __debug_start_impl {
                 }
                 let now = std::time::Instant::now();
 
-                let elapsed_str = if let Some(last_time) = *last_time_guard {
+                let elapsed_suffix = if let Some(last_time) = *last_time_guard {
                     let diff = now.duration_since(last_time);
                     if diff.as_millis() > 1 {
-                        format!(" \x1b[35m+{:>5}ms\x1b[0m", diff.as_millis())
+                        format!(" \x1b[35m+{}ms\x1b[0m", diff.as_millis())
                     } else {
-                        "         ".to_string()
+                        String::new()
                     }
                 } else {
-                    "         ".to_string()
+                    String::new()
                 };
                 *last_time_guard = Some(now);
 
@@ -143,10 +143,10 @@ macro_rules! __debug_start_impl {
                 }
 
                 print!(
-                    concat!("\x1b[90m  {:>4}\x1b[0m{}  ", $user_fmt),
+                    concat!("\x1b[90m  {:>4}\x1b[0m  ", $user_fmt, "{}"),
                     line!(),
-                    elapsed_str,
-                    $($user_args)*
+                    $($user_args)*,
+                    elapsed_suffix
                 );
                 use std::io::Write;
                 let _ = std::io::stdout().flush();
@@ -206,15 +206,15 @@ macro_rules! __debug_timer_end_impl {
                     *pending_guard = false;
                 }
 
-                let elapsed_str = if let Some(last_time) = *last_time_guard {
+                let elapsed_suffix = if let Some(last_time) = *last_time_guard {
                     let diff = now.duration_since(last_time);
                     if diff.as_millis() > 1 {
-                        format!(" \x1b[35m+{:>5}ms\x1b[0m", diff.as_millis())
+                        format!(" \x1b[35m+{}ms\x1b[0m", diff.as_millis())
                     } else {
-                        "         ".to_string()
+                        String::new()
                     }
                 } else {
-                    "         ".to_string()
+                    String::new()
                 };
                 *last_time_guard = Some(now);
 
@@ -225,12 +225,12 @@ macro_rules! __debug_timer_end_impl {
                 }
 
                 println!(
-                    concat!("\x1b[90m  {:>4}\x1b[0m{}  {} ... {} (\x1b[35m{}ms\x1b[0m)"),
+                    concat!("\x1b[90m  {:>4}\x1b[0m  {} ... {} (\x1b[35m{}ms\x1b[0m){}"),
                     start_line,
-                    elapsed_str,
                     start_msg,
                     format!($user_fmt, $($user_args)*),
-                    elapsed.as_millis()
+                    elapsed.as_millis(),
+                    elapsed_suffix
                 );
             }
         }
