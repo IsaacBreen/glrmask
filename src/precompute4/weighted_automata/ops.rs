@@ -172,6 +172,10 @@ impl NWA {
         Self::internal_union_components(states, body1, body2)
     }
 
+    pub fn union(&mut self, other: &Self) {
+        self.body = Self::internal_union_components(&mut self.states, &self.body, &other.body);
+    }
+
     fn internal_concatenate_components(
         states: &mut NWAStates,
         left: &NWABody,

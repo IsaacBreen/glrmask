@@ -1,82 +1,46 @@
-use std::collections::{BTreeMap, HashMap};
-use std::fmt::{self, Display, Formatter};
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::env;
+use std::time::Instant;
 
-use crate::constraint::{PrecomputeNode1Index, Precomputed, Trie1GodWrapper};
-use crate::glr::parser::GLRParser;
-use crate::json_serialization::{JSONConvertible, JSONNode};
-use crate::precompute4::weighted_automata::{DWA, NWA, StateID, Weight};
+use chrono::Local;
+
+use crate::constraint::{LLMTokenBV, PrecomputeNode1Index, Trie1GodWrapper};
+use crate::datastructures::trie::{Trie, Trie2Index};
+use crate::glr::parser::{ExpectElse, GLRParser};
+use crate::json_serialization::JSONConvertible;
+use crate::precompute4::nwa_optimizations::{prune_continuations_from_final_states, simplify_default_transitions};
+use crate::precompute4::resolve_negatives::{apply_cancellations, apply_finality_fixpoint, remove_negative_transitions};
+use crate::precompute4::template_nwa::{build_epsilon_dwa, build_ignore_terminal_dwa, build_template_dwas};
+use crate::precompute4::weighted_automata::{DWA, NWA, NWABody, NWAStateID, NWAStates, Weight, StateID};
+use crate::r#macro::is_debug_level_enabled;
+use crate::glr::table::TerminalID;
 use crate::tokenizer::TokenizerStateID;
 
-#[derive(Debug, Clone)]
-pub struct Precomputed4 {
-    pub dwas: Vec<DWA>,
-    pub state_to_dwa: BTreeMap<TokenizerStateID, usize>,
+struct SimplifyRustfstConfig {
+    rm_epsilon: bool,
+    determinize: bool,
 }
 
-impl Display for Precomputed4 {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        writeln!(
-            f,
-            "Precomputed4 ({} unique DWAs, {} mapped states)",
-            self.dwas.len(),
-            self.state_to_dwa.len()
-        )?;
-        for (i, dwa) in self.dwas.iter().enumerate() {
-            writeln!(f, "DWA #{}: {}", i, dwa.stats())?;
-        }
-        Ok(())
-    }
+impl SimplifyRustfstConfig {
+    fn default() -> Self { Self { rm_epsilon: false, determinize: false } }
+    fn with_rm_epsilon(mut self, val: bool) -> Self { self.rm_epsilon = val; self }
+    fn with_determinize(mut self, val: bool) -> Self { self.determinize = val; self }
 }
 
-impl JSONConvertible for Precomputed4 {
-    fn to_json(&self) -> JSONNode {
-        JSONNode::Null
+impl NWA {
+    pub fn determinize_to_dwa_with_rustfst(&self) -> DWA {
+        determinize_nwa_to_dwa(self)
     }
-
-    fn from_json(_node: JSONNode) -> Result<Self, String> {
-        Ok(Precomputed4 {
-            dwas: Vec::new(),
-            state_to_dwa: BTreeMap::new(),
-        })
-    }
+    pub fn simplify_rustfst(&mut self) { self.simplify(); }
+    pub fn simplify_rustfst_with_config(&mut self, _config: SimplifyRustfstConfig) { self.simplify(); }
 }
 
-pub fn precompute4(
-    _parser: &GLRParser,
-    precomputed1: &Precomputed,
-    trie1_god: &Trie1GodWrapper,
-) -> Precomputed4 {
-    let mut dwas = Vec::new();
-    let mut state_to_dwa = BTreeMap::new();
-    let mut root_to_dwa_index: HashMap<PrecomputeNode1Index, usize> = HashMap::new();
+// Re-export for backward compatibility: `FullDWABuildError` used to be defined here.
+pub use crate::precompute4::template_nwa::FullDWABuildError;
+use crate::precompute4::weighted_automata::determinization_rustfst::determinize_nwa_to_dwa;
 
-    for (sid, root_idx) in precomputed1 {
-        if let Some(&idx) = root_to_dwa_index.get(root_idx) {
-            state_to_dwa.insert(*sid, idx);
-            continue;
-        }
-
-        // Build NWA from the Trie node
-        let mut nwa = NWA::new();
-        nwa.states.0.clear(); // Clear default start state
-        let mut node_cache = HashMap::new();
-        let start_state = convert_node_to_nwa(*root_idx, trie1_god, &mut nwa, &mut node_cache);
-        nwa.body.start_state = start_state;
-
-        // Determinize to DWA
-        let mut dwa = nwa.determinize_to_dwa2();
-
-        // Simplify (minimize) the DWA
-        dwa.simplify();
-
-        let idx = dwas.len();
-        dwas.push(dwa);
-        root_to_dwa_index.insert(*root_idx, idx);
-        state_to_dwa.insert(*sid, idx);
-    }
-
-    Precomputed4 { dwas, state_to_dwa }
-}
+pub type Precomputed4 = DWA;
 
 fn convert_node_to_nwa(
     node_idx: PrecomputeNode1Index,
@@ -107,61 +71,18 @@ fn convert_node_to_nwa(
         let label = edge_key.map(|tid| tid.0 as i16).unwrap_or(-1);
         for (child_idx, edge_bv) in child_map {
             let child_sid = convert_node_to_nwa(child_idx, god, nwa, cache);
-            
+
             let mut trans_w = Weight::zeros();
             for t in edge_bv.iter() {
                 trans_w.insert(t);
             }
-            
+
             // Add transition (NWA allows multiple transitions for same label)
             nwa.add_transition(sid, label, child_sid, trans_w).unwrap();
         }
     }
     sid
 }
-use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
-use std::env;
-use std::time::Instant;
-
-use chrono::Local;
-
-use crate::constraint::{LLMTokenBV, PrecomputeNode1Index, Trie1GodWrapper};
-use crate::datastructures::trie::{Trie, Trie2Index};
-use crate::glr::parser::{ExpectElse, GLRParser};
-use crate::json_serialization::JSONConvertible;
-use crate::precompute4::nwa_optimizations::{prune_continuations_from_final_states, simplify_default_transitions};
-use crate::precompute4::resolve_negatives::{apply_cancellations, apply_finality_fixpoint, remove_negative_transitions};
-use crate::precompute4::template_nwa::{build_epsilon_dwa, build_ignore_terminal_dwa, build_template_dwas};
-use crate::precompute4::weighted_automata::{DWA, NWA, NWABody, NWAStateID, NWAStates, Weight};
-use crate::r#macro::is_debug_level_enabled;
-use crate::glr::table::TerminalID;
-use crate::tokenizer::TokenizerStateID;
-
-struct SimplifyRustfstConfig {
-    rm_epsilon: bool,
-    determinize: bool,
-}
-
-impl SimplifyRustfstConfig {
-    fn default() -> Self { Self { rm_epsilon: false, determinize: false } }
-    fn with_rm_epsilon(mut self, val: bool) -> Self { self.rm_epsilon = val; self }
-    fn with_determinize(mut self, val: bool) -> Self { self.determinize = val; self }
-}
-
-impl NWA {
-    pub fn determinize_to_dwa_with_rustfst(&self) -> DWA {
-        determinize_nwa_to_dwa(self)
-    }
-    pub fn simplify_rustfst(&mut self) { self.simplify(); }
-    pub fn simplify_rustfst_with_config(&mut self, _config: SimplifyRustfstConfig) { self.simplify(); }
-}
-
-// Re-export for backward compatibility: `FullDWABuildError` used to be defined here.
-pub use crate::precompute4::template_nwa::FullDWABuildError;
-use crate::precompute4::weighted_automata::determinization_rustfst::determinize_nwa_to_dwa;
-
-pub type Precomputed4 = DWA;
 
 /// Public API: precompute4 using an NWA-first approach, determinizing at the end.
 pub fn precompute4(
@@ -169,6 +90,39 @@ pub fn precompute4(
     precomputed1: &BTreeMap<TokenizerStateID, PrecomputeNode1Index>,
     trie1_god: &Trie1GodWrapper,
 ) -> DWA {
+    let mut state_to_dwa = BTreeMap::new();
+    let mut root_to_dwa_index: HashMap<PrecomputeNode1Index, usize> = HashMap::new();
+    let mut nwabig = NWA::new();
+
+    for (sid, root_idx) in precomputed1 {
+        if let Some(&idx) = root_to_dwa_index.get(root_idx) {
+            state_to_dwa.insert(*sid, idx);
+            continue;
+        }
+
+        // Build NWA from the Trie node
+        let mut nwa = NWA::new();
+        nwa.states.0.clear(); // Clear default start state
+        let mut node_cache = HashMap::new();
+        let start_state = convert_node_to_nwa(*root_idx, trie1_god, &mut nwa, &mut node_cache);
+        let actual_start_state = nwa.states.add_state();
+        nwa.add_transition(actual_start_state, sid.0 as i16, start_state, Weight::all()).unwrap();
+        nwa.body.start_state = actual_start_state;
+        let mut dwa = nwa.determinize_to_dwa2();
+        dwa.simplify();
+        nwabig.union(&NWA::from_dwa(&dwa));
+    }
+    nwabig.simplify();
+    let mut dwa = nwabig.determinize_to_dwa2();
+    dwa.simplify();
+    crate::debug!(
+        4,
+        "Built DWA with {} states",
+        dwa.states.len(),
+    );
+
+
+
     let now_total = Instant::now();
     let now = Instant::now();
     crate::debug!(5, "Starting precompute4...");
