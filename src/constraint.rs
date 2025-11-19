@@ -1736,6 +1736,7 @@ impl GrammarConstraint {
             &strings,
             &states,
         );
+        crate::debug!(2, "Got {} equivalence classes for {} tokenizer states", equivalence_classes.len(), states.len());
 
         let mut state_mapping: BTreeMap<TokenizerStateID, TokenizerStateID> = BTreeMap::new();
         let mut representative_states: Vec<TokenizerStateID> = Vec::new();
