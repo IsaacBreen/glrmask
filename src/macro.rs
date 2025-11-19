@@ -188,6 +188,55 @@ macro_rules! __debug_line_impl {
     }};
 }
 
+/// Internal implementation for the timer end (debug_timer_end!).
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __debug_timer_end_impl {
+    ($token:expr, $thresh:expr, $user_fmt:expr, $($user_args:tt)*) => {{
+        if let Some((start_time, start_msg, start_file, start_line)) = $token {
+            let now = std::time::Instant::now();
+            let elapsed = now.duration_since(start_time);
+            if elapsed.as_millis() >= $thresh as u128 {
+                let mut last_file_guard = $crate::r#macro::LAST_DEBUG_FILE.lock().unwrap();
+                let mut last_time_guard = $crate::r#macro::LAST_DEBUG_TIME.lock().unwrap();
+                let mut pending_guard = $crate::r#macro::PENDING_INCOMPLETE_LINE.lock().unwrap();
+
+                if *pending_guard {
+                    println!();
+                    *pending_guard = false;
+                }
+
+                let elapsed_str = if let Some(last_time) = *last_time_guard {
+                    let diff = now.duration_since(last_time);
+                    if diff.as_millis() > 1 {
+                        format!(" \x1b[35m+{}ms\x1b[0m", diff.as_millis())
+                    } else {
+                        String::new()
+                    }
+                } else {
+                    String::new()
+                };
+                *last_time_guard = Some(now);
+
+                let current_file_str = start_file;
+                if *last_file_guard != current_file_str {
+                    println!("\x1b[1;36m{}\x1b[0m", current_file_str);
+                    *last_file_guard = current_file_str.to_string();
+                }
+
+                println!(
+                    concat!("{}\x1b[90m  {:>4}\x1b[0m  {} ... {} (\x1b[35m{}ms\x1b[0m)"),
+                    elapsed_str,
+                    start_line,
+                    start_msg,
+                    format!($user_fmt, $($user_args)*),
+                    elapsed.as_millis()
+                );
+            }
+        }
+    }};
+}
+
 /// The main debug macro.
 /// Prints filename (Bold Cyan) only when it changes.
 /// Prints line numbers (Dark Gray) indented.
@@ -243,5 +292,49 @@ macro_rules! debug_end {
     };
     ($token:expr, $msg:expr) => {
         $crate::debug_end!($token, "{:?}", $msg);
+    };
+}
+
+/// Starts a debug timer. Returns a token to be passed to `debug_timer_end!`.
+/// Nothing is printed immediately.
+#[macro_export]
+macro_rules! debug_timer_start {
+    ($level:expr, $fmt:literal $(, $($arg:tt)*)?) => {
+        if $level <= $crate::r#macro::get_macro_debug_level() {
+            let current_file_path = std::path::Path::new(file!());
+            let current_filename = current_file_path.file_name()
+                .map_or("", |os_str| os_str.to_str().unwrap_or(""));
+
+            if $crate::r#macro::ALLOWED_FILES.is_empty() || $crate::r#macro::ALLOWED_FILES.contains(&current_filename) {
+                Some((std::time::Instant::now(), format!($fmt $(, $($arg)*)?), file!(), line!()))
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    };
+    ($level:expr, $msg:expr) => {
+        $crate::debug_timer_start!($level, "{:?}", $msg)
+    };
+}
+
+/// Ends a debug timer. Prints only if elapsed time >= threshold (default 10ms).
+/// Usage:
+/// debug_timer_end!(token, "Done"); // Default 10ms
+/// debug_timer_end!(token, thresh=50, "Done"); // 50ms threshold
+#[macro_export]
+macro_rules! debug_timer_end {
+    ($token:expr, thresh = $thresh:expr, $fmt:literal $(, $($arg:tt)*)?) => {
+        $crate::__debug_timer_end_impl!($token, $thresh, $fmt $(, $($arg)*)?)
+    };
+    ($token:expr, thresh = $thresh:expr, $msg:expr) => {
+        $crate::__debug_timer_end_impl!($token, $thresh, "{:?}", $msg)
+    };
+    ($token:expr, $fmt:literal $(, $($arg:tt)*)?) => {
+        $crate::__debug_timer_end_impl!($token, 10, $fmt $(, $($arg)*)?)
+    };
+    ($token:expr, $msg:expr) => {
+        $crate::__debug_timer_end_impl!($token, 10, "{:?}", $msg)
     };
 }

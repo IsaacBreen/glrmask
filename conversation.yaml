@@ -444,6 +444,55 @@ local_system:
           }};
       }
 
+      /// Internal implementation for the timer end (debug_timer_end!).
+      #[doc(hidden)]
+      #[macro_export]
+      macro_rules! __debug_timer_end_impl {
+          ($token:expr, $thresh:expr, $user_fmt:expr, $($user_args:tt)*) => {{
+              if let Some((start_time, start_msg, start_file, start_line)) = $token {
+                  let now = std::time::Instant::now();
+                  let elapsed = now.duration_since(start_time);
+                  if elapsed.as_millis() >= $thresh as u128 {
+                      let mut last_file_guard = $crate::r#macro::LAST_DEBUG_FILE.lock().unwrap();
+                      let mut last_time_guard = $crate::r#macro::LAST_DEBUG_TIME.lock().unwrap();
+                      let mut pending_guard = $crate::r#macro::PENDING_INCOMPLETE_LINE.lock().unwrap();
+
+                      if *pending_guard {
+                          println!();
+                          *pending_guard = false;
+                      }
+
+                      let elapsed_str = if let Some(last_time) = *last_time_guard {
+                          let diff = now.duration_since(last_time);
+                          if diff.as_millis() > 1 {
+                              format!(" \x1b[35m+{}ms\x1b[0m", diff.as_millis())
+                          } else {
+                              String::new()
+                          }
+                      } else {
+                          String::new()
+                      };
+                      *last_time_guard = Some(now);
+
+                      let current_file_str = start_file;
+                      if *last_file_guard != current_file_str {
+                          println!("\x1b[1;36m{}\x1b[0m", current_file_str);
+                          *last_file_guard = current_file_str.to_string();
+                      }
+
+                      println!(
+                          concat!("{}\x1b[90m  {:>4}\x1b[0m  {} ... {} (\x1b[35m{}ms\x1b[0m)"),
+                          elapsed_str,
+                          start_line,
+                          start_msg,
+                          format!($user_fmt, $($user_args)*),
+                          elapsed.as_millis()
+                      );
+                  }
+              }
+          }};
+      }
+
       /// The main debug macro.
       /// Prints filename (Bold Cyan) only when it changes.
       /// Prints line numbers (Dark Gray) indented.
@@ -501,9 +550,53 @@ local_system:
               $crate::debug_end!($token, "{:?}", $msg);
           };
       }
-  diffs_applied_this_send: false
+
+      /// Starts a debug timer. Returns a token to be passed to `debug_timer_end!`.
+      /// Nothing is printed immediately.
+      #[macro_export]
+      macro_rules! debug_timer_start {
+          ($level:expr, $fmt:literal $(, $($arg:tt)*)?) => {
+              if $level <= $crate::r#macro::get_macro_debug_level() {
+                  let current_file_path = std::path::Path::new(file!());
+                  let current_filename = current_file_path.file_name()
+                      .map_or("", |os_str| os_str.to_str().unwrap_or(""));
+
+                  if $crate::r#macro::ALLOWED_FILES.is_empty() || $crate::r#macro::ALLOWED_FILES.contains(&current_filename) {
+                      Some((std::time::Instant::now(), format!($fmt $(, $($arg)*)?), file!(), line!()))
+                  } else {
+                      None
+                  }
+              } else {
+                  None
+              }
+          };
+          ($level:expr, $msg:expr) => {
+              $crate::debug_timer_start!($level, "{:?}", $msg)
+          };
+      }
+
+      /// Ends a debug timer. Prints only if elapsed time >= threshold (default 10ms).
+      /// Usage:
+      /// debug_timer_end!(token, "Done"); // Default 10ms
+      /// debug_timer_end!(token, thresh=50, "Done"); // 50ms threshold
+      #[macro_export]
+      macro_rules! debug_timer_end {
+          ($token:expr, thresh = $thresh:expr, $fmt:literal $(, $($arg:tt)*)?) => {
+              $crate::__debug_timer_end_impl!($token, $thresh, $fmt $(, $($arg)*)?)
+          };
+          ($token:expr, thresh = $thresh:expr, $msg:expr) => {
+              $crate::__debug_timer_end_impl!($token, $thresh, "{:?}", $msg)
+          };
+          ($token:expr, $fmt:literal $(, $($arg:tt)*)?) => {
+              $crate::__debug_timer_end_impl!($token, 10, $fmt $(, $($arg)*)?)
+          };
+          ($token:expr, $msg:expr) => {
+              $crate::__debug_timer_end_impl!($token, 10, "{:?}", $msg)
+          };
+      }
+  diffs_applied_this_send: true
   core_guidance_inserted: true
-  prev_apply_mode:
+  prev_apply_mode: git-llm
   default_end_line:
 system:
   message: |-
@@ -800,5 +893,163 @@ messages:
       but which waits for the end to print anything, and allows a time to be specified,
       and if the runtime is less than the specified time then it doesn't print *anything*.
       This'll keep the output clean. Make this number 10ms by default.
+    metadata:
+  - user: |-
+      Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
+                  - First, give concrete, step-by-step edits the user can apply. Be explicit about filenames, code regions, and exact insertions/deletions.
+                  - After the instructions, output the corresponding git diff patches.
+                  - Use one fenced ```diff code block per file.
+                  - The diff must follow the standard unified diff format. It must start with a `diff --git a/FILE b/FILE` line, followed by `--- a/FILE` and `+++ b/FILE` lines, and then one or more hunk headers like `@@ -x,y +x,y @@`.
+                  - Do NOT include any other text, metadata, or markers like `*** Begin Patch ***` or `*** End Patch ***` inside the diff block.
+                  - The patch must be directly applicable to the current working tree. **IMPORTANT**: Any changes from previous turns in this conversation have already been applied. Your diff must apply cleanly to the *current* state of the files, not their original state at the start of our conversation. Do not re-generate changes that have already been applied.
+                  - Do not combine multiple files into a single diff block.
+                  Additional general constraints:
+      - Do not split your response across multiple messages.
+      - Avoid local cache/config advice; focus on actionable fixes or outputs.
+      - Only use leading '+' or '-' in a fenced ```diff block, never elsewhere.
+    metadata:
+      kind: mode-guidance
+      mode: git-llm
+      phase: default
+  - assistant: |-
+      To implement the requested functionality, we will add two new macros: `debug_timer_start!` and `debug_timer_end!`.
+
+      1.  **`debug_timer_start!`**: This macro will capture the current time and the start message (formatted) but will **not** print anything immediately. It returns a token containing the start time, message, and location info.
+      2.  **`debug_timer_end!`**: This macro takes the token from the start macro. It calculates the elapsed time.
+          *   If the elapsed time is less than the threshold (default 10ms), it prints nothing.
+          *   If the elapsed time is greater, it prints the start message, the end message, and the duration, formatted similarly to the existing debug macros (handling file headers and indentation).
+          *   It supports an optional `thresh = N` argument to override the default 10ms threshold.
+
+      Here are the step-by-step instructions:
+
+      1.  **Edit `src/macro.rs`**:
+          *   Add a new internal macro `__debug_timer_end_impl` that handles the logic of checking the elapsed time and printing the combined message if the threshold is met.
+          *   Add the `debug_timer_start!` macro which prepares the token.
+          *   Add the `debug_timer_end!` macro which provides the user-facing API (handling default vs. explicit thresholds).
+
+      ### Git Diff
+
+      ```diff
+      diff --git a/src/macro.rs b/src/macro.rs
+      index 1234567..89abcdef 100644
+      --- a/src/macro.rs
+      +++ b/src/macro.rs
+      @@ -188,6 +188,55 @@ macro_rules! __debug_line_impl {
+           }};
+       }
+       
+      +/// Internal implementation for the timer end (debug_timer_end!).
+      +#[doc(hidden)]
+      +#[macro_export]
+      +macro_rules! __debug_timer_end_impl {
+      +    ($token:expr, $thresh:expr, $user_fmt:expr, $($user_args:tt)*) => {{
+      +        if let Some((start_time, start_msg, start_file, start_line)) = $token {
+      +            let now = std::time::Instant::now();
+      +            let elapsed = now.duration_since(start_time);
+      +            if elapsed.as_millis() >= $thresh as u128 {
+      +                let mut last_file_guard = $crate::r#macro::LAST_DEBUG_FILE.lock().unwrap();
+      +                let mut last_time_guard = $crate::r#macro::LAST_DEBUG_TIME.lock().unwrap();
+      +                let mut pending_guard = $crate::r#macro::PENDING_INCOMPLETE_LINE.lock().unwrap();
+      +
+      +                if *pending_guard {
+      +                    println!();
+      +                    *pending_guard = false;
+      +                }
+      +
+      +                let elapsed_str = if let Some(last_time) = *last_time_guard {
+      +                    let diff = now.duration_since(last_time);
+      +                    if diff.as_millis() > 1 {
+      +                        format!(" \x1b[35m+{}ms\x1b[0m", diff.as_millis())
+      +                    } else {
+      +                        String::new()
+      +                    }
+      +                } else {
+      +                    String::new()
+      +                };
+      +                *last_time_guard = Some(now);
+      +
+      +                let current_file_str = start_file;
+      +                if *last_file_guard != current_file_str {
+      +                    println!("\x1b[1;36m{}\x1b[0m", current_file_str);
+      +                    *last_file_guard = current_file_str.to_string();
+      +                }
+      +
+      +                println!(
+      +                    concat!("{}\x1b[90m  {:>4}\x1b[0m  {} ... {} (\x1b[35m{}ms\x1b[0m)"),
+      +                    elapsed_str,
+      +                    start_line,
+      +                    start_msg,
+      +                    format!($user_fmt, $($user_args)*),
+      +                    elapsed.as_millis()
+      +                );
+      +            }
+      +        }
+      +    }};
+      +}
+      +
+       /// The main debug macro.
+       /// Prints filename (Bold Cyan) only when it changes.
+       /// Prints line numbers (Dark Gray) indented.
+      @@ -246,3 +295,46 @@ macro_rules! debug_end {
+               $crate::debug_end!($token, "{:?}", $msg);
+           };
+       }
+      +
+      +/// Starts a debug timer. Returns a token to be passed to `debug_timer_end!`.
+      +/// Nothing is printed immediately.
+      +#[macro_export]
+      +macro_rules! debug_timer_start {
+      +    ($level:expr, $fmt:literal $(, $($arg:tt)*)?) => {
+      +        if $level <= $crate::r#macro::get_macro_debug_level() {
+      +            let current_file_path = std::path::Path::new(file!());
+      +            let current_filename = current_file_path.file_name()
+      +                .map_or("", |os_str| os_str.to_str().unwrap_or(""));
+      +
+      +            if $crate::r#macro::ALLOWED_FILES.is_empty() || $crate::r#macro::ALLOWED_FILES.contains(&current_filename) {
+      +                Some((std::time::Instant::now(), format!($fmt $(, $($arg)*)?), file!(), line!()))
+      +            } else {
+      +                None
+      +            }
+      +        } else {
+      +            None
+      +        }
+      +    };
+      +    ($level:expr, $msg:expr) => {
+      +        $crate::debug_timer_start!($level, "{:?}", $msg)
+      +    };
+      +}
+      +
+      +/// Ends a debug timer. Prints only if elapsed time >= threshold (default 10ms).
+      +/// Usage:
+      +/// debug_timer_end!(token, "Done"); // Default 10ms
+      +/// debug_timer_end!(token, thresh=50, "Done"); // 50ms threshold
+      +#[macro_export]
+      +macro_rules! debug_timer_end {
+      +    ($token:expr, thresh = $thresh:expr, $fmt:literal $(, $($arg:tt)*)?) => {
+      +        $crate::__debug_timer_end_impl!($token, $thresh, $fmt $(, $($arg)*)?)
+      +    };
+      +    ($token:expr, thresh = $thresh:expr, $msg:expr) => {
+      +        $crate::__debug_timer_end_impl!($token, $thresh, "{:?}", $msg)
+      +    };
+      +    ($token:expr, $fmt:literal $(, $($arg:tt)*)?) => {
+      +        $crate::__debug_timer_end_impl!($token, 10, $fmt $(, $($arg)*)?)
+      +    };
+      +    ($token:expr, $msg:expr) => {
+      +        $crate::__debug_timer_end_impl!($token, 10, "{:?}", $msg)
+      +    };
+      +}
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/macro.rs
+      Applying patch to 'src/macro.rs' using custom patcher...
+      Successfully applied patch and wrote to src/macro.rs.
+    metadata:
+  - user: 'Changes committed with message: "Feat: Add debug_timer_start/end macros
+      for conditional timing output"'
     metadata:
 ...
