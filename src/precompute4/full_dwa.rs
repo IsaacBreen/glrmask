@@ -162,7 +162,7 @@ pub fn precompute4(
     use crate::glr::table::TerminalID;
     let initial_term_map: BTreeMap<Option<TerminalID>, Weight> = BTreeMap::from([(None, Weight::all())]);
     let initial_body_map = BTreeMap::from([(initial_nwa_body, initial_term_map)]);
-    let initial_values: Vec<(Trie2Index, (BTreeMap<NWABody, BTreeMap<Option<TerminalID>, Weight>>, LLMTokenBV))> =
+    let initial_values: Vec<(usize, (BTreeMap<NWABody, BTreeMap<Option<TerminalID>, Weight>>, LLMTokenBV))> =
         vec![(reversed_nwa_root, (initial_body_map, initial_tokens))];
 
     let traversal_data =
@@ -468,7 +468,7 @@ fn simplify_remove_epsilon(nwa: &mut NWA) {
 }
 
 use crate::datastructures::trie::Trie2Index;
-
+use crate::json_serialization::JSONConvertible;
 // NWA Traversal Utilities
 
 #[derive(Debug, Clone)]
