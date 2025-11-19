@@ -1,6 +1,6 @@
 use super::common::{StateID, Weight};
 use super::dwa::DWA;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{hash_map::Entry, BTreeMap, HashMap, VecDeque};
 
 impl DWA {
     /// Unrolls cycles in the DWA by expanding states into (state, accumulated_weight) pairs.
@@ -24,9 +24,9 @@ impl DWA {
             return new_dwa;
         }
 
-        // Optimization: Use a vector of maps instead of a single map.
         // visited[original_state_id] -> HashMap<Weight, new_state_id>
-        let mut visited: Vec<HashMap<Weight, StateID>> = vec![HashMap::new(); self.states.len()];
+        // Use Option to lazy initialize HashMaps to save memory/time for sparse traversals
+        let mut visited: Vec<Option<HashMap<Weight, StateID>>> = vec![None; self.states.len()];
         
         // Queue stores (new_state_id, original_state_id, accumulated_weight)
         let mut queue: VecDeque<(StateID, StateID, Weight)> = VecDeque::new();
@@ -42,18 +42,22 @@ impl DWA {
             new_state_ref.final_weight = start_state_ref.final_weight.clone();
         }
 
-        visited[start_node].insert(start_weight.clone(), new_start);
+        visited[start_node] = Some(HashMap::from([(start_weight.clone(), new_start)]));
         queue.push_back((new_start, start_node, start_weight));
 
         while let Some((new_u, u, w_u)) = queue.pop_front() {
             let u_state = &self.states[u];
 
-            for (&label, &v) in &u_state.transitions {
+            // Collect transitions to bulk insert later, avoiding repeated re-borrows of new_dwa
+            let mut new_transitions = BTreeMap::new();
+            let mut new_trans_weights = BTreeMap::new();
+
+            // Iterate transitions and weights in lockstep to avoid O(log N) lookups
+            for ((&label, &v), (_, trans_w)) in u_state.transitions.iter().zip(u_state.trans_weights.iter()) {
                 if v >= self.states.len() {
                     continue;
                 }
 
-                let trans_w = u_state.trans_weights.get(&label).unwrap();
                 let mut next_w = &w_u & trans_w;
                 if next_w.is_empty() {
                     continue;
@@ -67,24 +71,33 @@ impl DWA {
                     }
                 }
 
-                let v_visited = &mut visited[v];
-                let new_v = if let Some(&id) = v_visited.get(&next_w) {
-                    id
-                } else {
-                    let id = new_dwa.add_state();
-                    let new_st = &mut new_dwa.states[id];
-                    new_st.state_weight = v_state.state_weight.clone();
-                    new_st.final_weight = v_state.final_weight.clone();
-                    
-                    v_visited.insert(next_w.clone(), id);
-                    queue.push_back((id, v, next_w));
-                    id
+                if visited[v].is_none() {
+                    visited[v] = Some(HashMap::new());
+                }
+                let v_visited = visited[v].as_mut().unwrap();
+
+                let new_v = match v_visited.entry(next_w.clone()) {
+                    Entry::Occupied(e) => *e.get(),
+                    Entry::Vacant(e) => {
+                        let id = new_dwa.add_state();
+                        // Initialize new state
+                        let new_st = &mut new_dwa.states[id];
+                        new_st.state_weight = v_state.state_weight.clone();
+                        new_st.final_weight = v_state.final_weight.clone();
+                        
+                        e.insert(id);
+                        queue.push_back((id, v, next_w));
+                        id
+                    }
                 };
 
-                let src_st = &mut new_dwa.states[new_u];
-                src_st.transitions.insert(label, new_v);
-                src_st.trans_weights.insert(label, trans_w.clone());
+                new_transitions.insert(label, new_v);
+                new_trans_weights.insert(label, trans_w.clone());
             }
+
+            let src_st = &mut new_dwa.states[new_u];
+            src_st.transitions = new_transitions;
+            src_st.trans_weights = new_trans_weights;
         }
 
         new_dwa
