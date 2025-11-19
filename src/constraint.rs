@@ -51,6 +51,7 @@ use crate::datastructures::bitset::Bitset;
 use crate::datastructures::gss_acc::Acc;
 use crate::glr::parser::{ParseState, ParseStateEdgeContent};
 use crate::glr::table::StateID;
+use crate::precompute4::weighted_automata::{NWA, NWAStateID, Weight};
 // ---------------------------------------------------------------------------
 // Basic aliases
 // ---------------------------------------------------------------------------
@@ -625,11 +626,6 @@ impl TempPrecomputedNodeContents {
     }
 }
 
-type TempPrecomputeNode1 =
-    Trie<Option<GrammarTokenID>, RangeSetBlaze<usize>, TempPrecomputedNodeContents>;
-type TempPrecomputeNode1Index = Trie2Index;
-type TempTrie1GodWrapper =
-    GodWrapper<Option<GrammarTokenID>, RangeSetBlaze<usize>, TempPrecomputedNodeContents>;
 
 // Final precompute1 types
 pub type PrecomputeNode1 =
@@ -1345,7 +1341,7 @@ impl GrammarConstraint {
 
         // Precompute1
         let precompute_vocab_before_p1 = vocab.clone();
-        let (precomputed1, trie1_god) = Self::precompute1(
+        let (nwa, nwa_roots) = Self::precompute1(
             &tokenizer,
             Some(&parser),
             Some(llm_vocab.clone()),
@@ -1422,20 +1418,12 @@ impl GrammarConstraint {
         // Precompute4 (DWA). Even if config.run_precompute4 is false, we build it;
         // there is no longer a trie3-based fallback.
         let max_internal_llm_token_id = vocab.internal_max_llm_token;
-        let precomputed4 = precompute4(&parser, &precomputed1, &trie1_god, max_internal_llm_token_id);
+        let precomputed4 = precompute4(&parser, nwa, &nwa_roots, max_internal_llm_token_id);
 
-        // Stats for precompute1
-        let mut stats = PrecomputeStats::default();
-        crate::constraint_extra::calculate_final_stats1(
-            &precomputed1,
-            &mut stats,
-            &trie1_god,
-        );
-        crate::constraint_extra::print_precompute_stats1(
-            &stats,
-            &token_name_map,
-            &trie1_god,
-        );
+        // We no longer have precomputed1 trie stats to print.
+        // Initialize empty precomputed1 and trie1_god for struct compatibility.
+        let precomputed1 = Precomputed::new();
+        let trie1_god = Trie1GodWrapper::new();
 
         let internal_to_original_sparse_matrix = StageVocab::build_internal_to_original_sparse_matrix(
             &vocab.internal_to_original,
@@ -1464,25 +1452,21 @@ impl GrammarConstraint {
         gc
     }
 
-    // -----------------------------------------------------------------------
-    // Precompute1
-    // -----------------------------------------------------------------------
-
     fn has_llm_compatible_cycle_temp(
-        arena: &TempTrie1GodWrapper,
-        roots: &[TempPrecomputeNode1Index],
+        nwa: &NWA,
+        roots: &[NWAStateID],
         internal_max_llm_token: usize,
     ) {
-        let mut visited: HashMap<TempPrecomputeNode1Index, RangeSetBlaze<usize>> =
+        let mut visited: HashMap<NWAStateID, Weight> =
             HashMap::new();
-        let initial_tokens = RangeSetBlaze::from_iter(0..=internal_max_llm_token);
+        let initial_tokens = Weight::from_rsb(RangeSetBlaze::from_iter(0..=internal_max_llm_token));
 
         for &root in roots {
             if let Some((cycle_path, llm_token_id)) = Self::detect_cycle_recursive_temp(
                 root,
                 None,
                 initial_tokens.clone(),
-                arena,
+                nwa,
                 &mut HashMap::new(),
                 &mut visited,
                 &mut Vec::new(),
@@ -1511,24 +1495,24 @@ impl GrammarConstraint {
     }
 
     fn detect_cycle_recursive_temp(
-        node_idx: TempPrecomputeNode1Index,
+        node_idx: NWAStateID,
         edge_key_opt: Option<Option<GrammarTokenID>>,
-        current_tokens: RangeSetBlaze<usize>,
-        arena: &TempTrie1GodWrapper,
+        current_tokens: Weight,
+        nwa: &NWA,
         recursion_stack: &mut HashMap<
-            TempPrecomputeNode1Index,
-            (RangeSetBlaze<usize>, usize),
+            NWAStateID,
+            (Weight, usize),
         >,
-        visited: &mut HashMap<TempPrecomputeNode1Index, RangeSetBlaze<usize>>,
-        path: &mut Vec<(TempPrecomputeNode1Index, Option<Option<GrammarTokenID>>)>,
-    ) -> Option<(Vec<(TempPrecomputeNode1Index, Option<Option<GrammarTokenID>>)>, LLMTokenID)>
+        visited: &mut HashMap<NWAStateID, Weight>,
+        path: &mut Vec<(NWAStateID, Option<Option<GrammarTokenID>>)>,
+    ) -> Option<(Vec<(NWAStateID, Option<Option<GrammarTokenID>>)>, LLMTokenID)>
     {
         path.push((node_idx, edge_key_opt));
 
         if let Some((tokens_on_stack, path_start_idx)) = recursion_stack.get(&node_idx) {
             let intersection = &current_tokens & tokens_on_stack;
             if !intersection.is_empty() {
-                let cycle_llm_token = intersection.iter().next().unwrap();
+                let cycle_llm_token = intersection.rsb.iter().next().unwrap();
                 let cycle_path = path[*path_start_idx..].to_vec();
                 path.pop();
                 return Some((cycle_path, LLMTokenID(cycle_llm_token)));
@@ -1554,23 +1538,42 @@ impl GrammarConstraint {
 
         recursion_stack.insert(node_idx, (current_tokens, path.len() - 1));
 
-        let children_to_visit = if let Some(guard) = node_idx.read(arena) {
-            guard.children().clone()
-        } else {
+        if node_idx >= nwa.states.len() {
             recursion_stack.remove(&node_idx);
             path.pop();
             return None;
-        };
+        }
+        let st = &nwa.states[node_idx];
 
-        for (edge_key, dest_map) in children_to_visit.iter() {
-            for (child_idx, edge_tokens) in dest_map.iter() {
+        // Epsilons (key = None)
+        for &(child_idx, ref edge_tokens) in &st.epsilons {
+            let next_tokens = &new_tokens_to_process & edge_tokens;
+            if !next_tokens.is_empty() {
+                if let Some(report) = Self::detect_cycle_recursive_temp(
+                    child_idx,
+                    Some(None),
+                    next_tokens,
+                    nwa,
+                    recursion_stack,
+                    visited,
+                    path,
+                ) {
+                    return Some(report);
+                }
+            }
+        }
+
+        // Transitions (key = Some(GrammarTokenID))
+        for (&label, targets) in &st.transitions {
+            let edge_key = Some(Some(GrammarTokenID(label as usize)));
+            for &(child_idx, ref edge_tokens) in targets {
                 let next_tokens = &new_tokens_to_process & edge_tokens;
                 if !next_tokens.is_empty() {
                     if let Some(report) = Self::detect_cycle_recursive_temp(
-                        *child_idx,
-                        Some(edge_key.clone()),
+                        child_idx,
+                        edge_key.clone(),
                         next_tokens,
-                        arena,
+                        nwa,
                         recursion_stack,
                         visited,
                         path,
@@ -1710,7 +1713,7 @@ impl GrammarConstraint {
         terminal_follow_map: &BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
         config: &GrammarConstraintConfig,
         original_to_dummy_map: BTreeMap<TerminalID, TerminalID>,
-    ) -> (BTreeMap<TokenizerStateID, PrecomputeNode1Index>, Trie1GodWrapper)
+    ) -> (NWA, BTreeMap<TokenizerStateID, NWAStateID>)
     {
         let mut dummy_terminal_penalties: BTreeMap<TerminalID, usize> =
             BTreeMap::new();
@@ -1754,49 +1757,12 @@ impl GrammarConstraint {
         helper.run_dfs();
         let roots_before: Vec<_> = helper.roots.values().cloned().collect();
         Self::has_llm_compatible_cycle_temp(
-            &helper.trie1_god,
+            &helper.nwa,
             &roots_before,
             stage_vocab.internal_max_llm_token,
         );
 
-        let (mut precomputed1, trie1_god) = helper.finish();
-        let roots_after: Vec<_> = precomputed1.values().cloned().collect();
-
-        Self::has_llm_compatible_cycle(
-            &trie1_god,
-            &roots_after,
-            stage_vocab.internal_max_llm_token,
-        );
-
-        let mut stats = PrecomputeStats::default();
-        crate::constraint_extra::calculate_final_stats1(
-            &precomputed1,
-            &mut stats,
-            &trie1_god,
-        );
-        crate::constraint_extra::print_precompute_stats1(
-            &stats,
-            token_name_map,
-            &trie1_god,
-        );
-
-        // Trie1 optimization (size, vocab compression)
-        constraint_precompute1_utils::optimize_trie1_size(
-            &mut precomputed1,
-            &trie1_god,
-            // Dummy values for Trie0-dependent params (we no longer build Trie0).
-            &Trie0GodWrapper::new(),
-            &HashMap::new(),
-            parser.and_then(|p| p.ignore_terminal_id),
-            stage_vocab.internal_max_llm_token,
-            terminal_follow_map,
-            &config.trie1,
-            stage_vocab,
-            token_name_map,
-            &dummy_terminal_penalties,
-        );
-
-        (precomputed1, trie1_god)
+        (helper.nwa, helper.roots)
     }
 
     // -----------------------------------------------------------------------
@@ -2097,18 +2063,19 @@ pub(crate) struct Precomputer1<'r> {
     pub(crate) parser: Option<&'r GLRParser>,
     pub(crate) llm_vocab: Option<Arc<LLMVocab>>,
     pub(crate) vocab: VocabPrefixTree,
-    pub(crate) roots: BTreeMap<TokenizerStateID, TempPrecomputeNode1Index>,
+    pub(crate) roots: BTreeMap<TokenizerStateID, NWAStateID>,
     pub(crate) possible_matches: RefCell<
         BTreeMap<
             *const VocabPrefixTreeNode,
             BTreeMap<TokenizerStateID, BTreeMap<GrammarTokenID, LLMTokenBV>>,
         >,
     >,
-    pub(crate) all_llm_tokens: RangeSetBlaze<usize>,
+    pub(crate) all_llm_tokens: Weight,
     pub(crate) pb: ProgressBar,
     pub(crate) stats: PrecomputeStats,
-    pub(crate) leaf_node: TempPrecomputeNode1Index,
-    pub(crate) trie1_god: TempTrie1GodWrapper,
+    pub(crate) leaf_node: NWAStateID,
+    pub(crate) nwa: NWA,
+    pub(crate) node_values: Vec<(Weight, bool)>, // (live_tokens, end)
     pub(crate) original_to_dummy_map: BTreeMap<TerminalID, TerminalID>,
 }
 
@@ -2132,16 +2099,16 @@ impl<'r> Precomputer1<'r> {
         crate::debug!(2, "Done building vocab prefix tree");
 
         let mut roots = BTreeMap::new();
-        let trie1_god = TempTrie1GodWrapper::new();
+        let mut nwa = NWA::new();
+        nwa.states.0.clear(); // Clear default start state
+        let mut node_values = Vec::new();
+
+        let all_tokens_weight = Weight::from_rsb(RangeSetBlaze::from_iter(0..=internal_max_llm_token));
+
         for sid in active_states {
-            roots.insert(
-                sid,
-                TempPrecomputeNode1Index::new(trie1_god.insert(
-                    TempPrecomputeNode1::new(
-                        TempPrecomputedNodeContents::root(internal_max_llm_token),
-                    ),
-                )),
-            );
+            let id = nwa.add_state();
+            node_values.push((all_tokens_weight.clone(), false));
+            roots.insert(sid, id);
         }
         crate::debug!(
             2,
@@ -2165,9 +2132,9 @@ impl<'r> Precomputer1<'r> {
             pb.set_draw_target(ProgressDrawTarget::hidden());
         }
 
-        let leaf_node = TempPrecomputeNode1Index::new(trie1_god.insert(
-            TempPrecomputeNode1::new(TempPrecomputedNodeContents::leaf()),
-        ));
+        let leaf_node = nwa.add_state();
+        node_values.push((Weight::zeros(), true));
+        nwa.states[leaf_node].final_weight = Some(Weight::all()); // Mark as final in NWA
         crate::debug!(2, "Created trie1 leaf node");
 
         Self {
@@ -2177,161 +2144,20 @@ impl<'r> Precomputer1<'r> {
             vocab,
             roots,
             possible_matches: RefCell::new(BTreeMap::new()),
-            all_llm_tokens: RangeSetBlaze::from_iter(0..=internal_max_llm_token),
+            all_llm_tokens: all_tokens_weight,
             pb,
             stats: PrecomputeStats::default(),
             leaf_node,
-            trie1_god,
+            nwa,
+            node_values,
             original_to_dummy_map,
         }
     }
 
-    fn get_leaf_node(&self) -> TempPrecomputeNode1Index {
+    fn get_leaf_node(&self) -> NWAStateID {
         self.leaf_node.clone()
     }
 
-    fn finish(self) -> (BTreeMap<TokenizerStateID, PrecomputeNode1Index>, Trie1GodWrapper)
-    {
-        let final_trie1_god = Trie1GodWrapper::new();
-        let mut final_roots = BTreeMap::new();
-        let mut node_map: HashMap<
-            TempPrecomputeNode1Index,
-            PrecomputeNode1Index,
-        > = HashMap::new();
-
-        for (sid, temp_root) in &self.roots {
-            let final_root = self.convert_trie1_recursive(
-                *temp_root,
-                &self.trie1_god,
-                &final_trie1_god,
-                &mut node_map,
-            );
-            final_roots.insert(*sid, final_root);
-        }
-
-        (final_roots, final_trie1_god)
-    }
-
-    fn convert_trie1_recursive(
-        &self,
-        temp_idx: TempPrecomputeNode1Index,
-        temp_god: &TempTrie1GodWrapper,
-        final_god: &Trie1GodWrapper,
-        node_map: &mut HashMap<TempPrecomputeNode1Index, PrecomputeNode1Index>,
-    ) -> PrecomputeNode1Index {
-        if let Some(final_idx) = node_map.get(&temp_idx) {
-            return *final_idx;
-        }
-
-        let temp_guard = temp_idx.read(temp_god).unwrap();
-        let final_node_contents = PrecomputedNodeContents {
-            end: temp_guard.value.end,
-            live_tokens: HybridBitset::from(temp_guard.value.live_tokens.clone()),
-        };
-        let new_node = PrecomputeNode1::new(final_node_contents);
-        let final_idx = PrecomputeNode1Index::new(final_god.insert(new_node));
-        node_map.insert(temp_idx, final_idx);
-
-        let children_to_copy = temp_guard.children().clone();
-        drop(temp_guard);
-
-        if self.original_to_dummy_map.is_empty() {
-            for (ek, dest_map) in children_to_copy {
-                for (temp_child_idx, rs_blaze) in dest_map {
-                    let final_child_idx = self.convert_trie1_recursive(
-                        temp_child_idx,
-                        temp_god,
-                        final_god,
-                        node_map,
-                    );
-                    let hybrid_bitset = HybridBitset::from(rs_blaze);
-                    final_god.insert_edge_simple(
-                        final_idx,
-                        final_child_idx,
-                        ek.clone(),
-                        hybrid_bitset,
-                    );
-                }
-            }
-        } else {
-            let mut direct_edges = Vec::new();
-            let mut injected_edges_by_dummy: BTreeMap<
-                TerminalID,
-                Vec<(
-                    Option<TerminalID>,
-                    OrderedHashMap<TempPrecomputeNode1Index, RangeSetBlaze<usize>>,
-                )>,
-            > = BTreeMap::new();
-
-            for (ek, dest_map) in children_to_copy {
-                if let Some(tid) = ek {
-                    if let Some(dummy_tid) =
-                        self.original_to_dummy_map.get(&tid)
-                    {
-                        injected_edges_by_dummy
-                            .entry(*dummy_tid)
-                            .or_default()
-                            .push((Some(tid), dest_map));
-                        continue;
-                    }
-                }
-                direct_edges.push((ek, dest_map));
-            }
-
-            for (ek, dest_map) in direct_edges {
-                for (temp_child_idx, rs_blaze) in dest_map {
-                    let final_child_idx = self.convert_trie1_recursive(
-                        temp_child_idx,
-                        temp_god,
-                        final_god,
-                        node_map,
-                    );
-                    let hybrid_bitset = HybridBitset::from(rs_blaze);
-                    final_god.insert_edge_simple(
-                        final_idx,
-                        final_child_idx,
-                        ek.clone(),
-                        hybrid_bitset,
-                    );
-                }
-            }
-
-            for (dummy_tid, edges) in injected_edges_by_dummy {
-                let inter_node =
-                    PrecomputeNode1::new(PrecomputedNodeContents::internal());
-                let inter_idx =
-                    PrecomputeNode1Index::new(final_god.insert(inter_node));
-                let mut total_inter_bitset = HybridBitset::zeros();
-
-                for (original_ek, dest_map) in edges {
-                    for (temp_child_idx, rs_blaze) in dest_map {
-                        let final_child_idx = self.convert_trie1_recursive(
-                            temp_child_idx,
-                            temp_god,
-                            final_god,
-                            node_map,
-                        );
-                        let hybrid_bitset = HybridBitset::from(rs_blaze);
-                        total_inter_bitset |= &hybrid_bitset;
-                        final_god.insert_edge_simple(
-                            inter_idx,
-                            final_child_idx,
-                            original_ek,
-                            hybrid_bitset,
-                        );
-                    }
-                }
-                final_god.insert_edge_simple(
-                    final_idx,
-                    inter_idx,
-                    Some(dummy_tid),
-                    total_inter_bitset,
-                );
-            }
-        }
-
-        final_idx
-    }
 
     fn possible_matches(
         &self,
@@ -2402,7 +2228,7 @@ impl<'r> Precomputer1<'r> {
     fn run_dfs(&mut self) {
         let mut assoc: BTreeMap<
             TokenizerStateID,
-            HashMap<TempPrecomputeNode1Index, RangeSetBlaze<usize>>,
+            HashMap<NWAStateID, Weight>,
         > = BTreeMap::new();
 
         for (sid, arc) in &self.roots {
@@ -2432,7 +2258,7 @@ impl<'r> Precomputer1<'r> {
         vocab_node: &VocabPrefixTreeNode,
         assoc_by_state: BTreeMap<
             TokenizerStateID,
-            HashMap<TempPrecomputeNode1Index, RangeSetBlaze<usize>>,
+            HashMap<NWAStateID, Weight>,
         >,
     ) {
         self.pb.inc(1);
@@ -2441,7 +2267,7 @@ impl<'r> Precomputer1<'r> {
                 usize,
                 BTreeMap<
                     TokenizerStateID,
-                    HashMap<TempPrecomputeNode1Index, RangeSetBlaze<usize>>,
+                    HashMap<NWAStateID, Weight>,
                 >,
             > = BTreeMap::new();
             work_queue.insert(0, assoc_by_state.clone());
@@ -2449,31 +2275,27 @@ impl<'r> Precomputer1<'r> {
             let mut next_level_assoc: BTreeMap<_, HashMap<_, _>> = BTreeMap::new();
 
             let mut node_cache: HashMap<
-                TempPrecomputeNode1Index,
-                (RangeSetBlaze<usize>, bool),
+                NWAStateID,
+                (Weight, bool),
             > = HashMap::new();
             let get_node_data = |cache: &mut HashMap<_, _>,
-                                 idx: TempPrecomputeNode1Index,
-                                 god: &TempTrie1GodWrapper| {
+                                 idx: NWAStateID,
+                                 node_values: &Vec<(Weight, bool)>| {
                 cache
                     .entry(idx)
                     .or_insert_with(|| {
-                        let guard = idx.read(god).unwrap();
-                        (guard.value.live_tokens.clone(), guard.value.end)
+                        node_values[idx].clone()
                     })
                     .clone()
             };
 
             let mut pending_edges: Vec<(
-                TempPrecomputeNode1Index,
-                TempPrecomputeNode1Index,
+                NWAStateID,
+                NWAStateID,
                 Option<GrammarTokenID>,
-                RangeSetBlaze<usize>,
+                Weight,
             )> = Vec::new();
-            let mut pending_live_token_updates: HashMap<
-                TempPrecomputeNode1Index,
-                RangeSetBlaze<usize>,
-            > = HashMap::new();
+            let mut pending_live_token_updates: HashMap<NWAStateID, Weight> = HashMap::new();
 
             let child_reachable = child_vocab_node.reachable_token_ids();
             let child_token_id = child_vocab_node.token_id();
@@ -2491,7 +2313,7 @@ impl<'r> Precomputer1<'r> {
                         for (node, tokens) in nodes_with_tokens {
                             entry
                                 .entry(node)
-                                .or_insert_with(RangeSetBlaze::new)
+                                .or_insert_with(Weight::zeros)
                                 .bitor_assign(&tokens);
                         }
                     }
@@ -2527,10 +2349,10 @@ impl<'r> Precomputer1<'r> {
                             let src_node_idx = *src_node_wrapper;
 
                             let (src_live_tokens, _) =
-                                get_node_data(&mut node_cache, src_node_idx, &self.trie1_god);
+                                get_node_data(&mut node_cache, src_node_idx, &self.node_values);
 
                             if next_pos == segment_bytes.len() {
-                                let mut edge_bv = RangeSetBlaze::new();
+                                let mut edge_bv = Weight::zeros();
                                 edge_bv.insert(child_token_id);
                                 let final_edge_bv = &(&edge_bv & src_contextual_tokens)
                                     & &src_live_tokens;
@@ -2545,12 +2367,12 @@ impl<'r> Precomputer1<'r> {
                                     ));
                                     pending_live_token_updates
                                         .entry(end_idx)
-                                        .or_insert_with(RangeSetBlaze::new)
+                                        .or_insert_with(Weight::zeros)
                                         .bitor_assign(&final_edge_bv);
                                 }
                             }
 
-                            let mut edge_bv = child_reachable.clone();
+                            let mut edge_bv = Weight::from_rsb(child_reachable.clone());
                             if next_pos == segment_bytes.len() {
                                 edge_bv.remove(child_token_id);
                             }
@@ -2558,7 +2380,7 @@ impl<'r> Precomputer1<'r> {
                                 possible_matches_at_end.get(&terminal_id)
                             {
                                 edge_bv =
-                                    &edge_bv - matches_for_terminal.inner.as_ref();
+                                    &edge_bv - &Weight::from(matches_for_terminal.clone());
                             }
 
                             let edge_bv_for_inserter =
@@ -2583,7 +2405,7 @@ impl<'r> Precomputer1<'r> {
                                             get_node_data(
                                                 &mut node_cache,
                                                 *dest_node,
-                                                &self.trie1_god,
+                                                &self.node_values,
                                             );
                                         if is_end {
                                             return None;
@@ -2605,26 +2427,24 @@ impl<'r> Precomputer1<'r> {
                                 .next();
 
                             if dest_node_opt.is_none() {
-                                let children_of_src: Vec<
-                                    TempPrecomputeNode1Index,
-                                > = {
-                                    let guard =
-                                        src_node_idx.read(&self.trie1_god).unwrap();
-                                    guard
-                                        .children()
-                                        .values()
-                                        .flat_map(|m| m.keys().cloned())
-                                        .collect()
+                                let children_of_src: Vec<NWAStateID> = {
+                                    let st = &self.nwa.states[src_node_idx];
+                                    let mut children = Vec::new();
+                                    for &(v, _) in &st.epsilons { children.push(v); }
+                                    for targets in st.transitions.values() {
+                                        for &(v, _) in targets { children.push(v); }
+                                    }
+                                    children
                                 };
 
                                 dest_node_opt = children_of_src
                                     .iter()
-                                    .filter(|child_arc| {
+                                    .filter(|&child_arc| {
                                         let (child_live_tokens, is_end) =
                                             get_node_data(
                                                 &mut node_cache,
-                                                **child_arc,
-                                                &self.trie1_god,
+                                                *child_arc,
+                                                &self.node_values,
                                             );
                                         !is_end
                                             && (&child_live_tokens
@@ -2636,15 +2456,11 @@ impl<'r> Precomputer1<'r> {
                             }
 
                             let result_node = dest_node_opt.unwrap_or_else(|| {
-                                let new_node = TempPrecomputeNode1::new(
-                                    TempPrecomputedNodeContents::internal(),
-                                );
-                                let idx = TempPrecomputeNode1Index::new(
-                                    self.trie1_god.insert(new_node),
-                                );
+                                let idx = self.nwa.add_state();
+                                self.node_values.push((Weight::zeros(), false));
                                 node_cache.insert(
                                     idx,
-                                    (RangeSetBlaze::new(), false),
+                                    (Weight::zeros(), false),
                                 );
                                 idx
                             });
@@ -2657,7 +2473,7 @@ impl<'r> Precomputer1<'r> {
                             ));
                             pending_live_token_updates
                                 .entry(result_node)
-                                .or_insert_with(RangeSetBlaze::new)
+                                .or_insert_with(Weight::zeros)
                                 .bitor_assign(&edge_bv_for_inserter);
 
                             node_cache
@@ -2668,7 +2484,7 @@ impl<'r> Precomputer1<'r> {
 
                             dest_nodes_in_queue
                                 .entry(result_node)
-                                .or_insert_with(RangeSetBlaze::new)
+                                .or_insert_with(Weight::zeros)
                                 .bitor_assign(&edge_bv_for_inserter);
                         }
                     }
@@ -2683,7 +2499,7 @@ impl<'r> Precomputer1<'r> {
                         for (src_node_wrapper, src_contextual_tokens) in
                             &precompute_nodes_with_tokens
                         {
-                            let mut edge_bv = RangeSetBlaze::new();
+                            let mut edge_bv = Weight::zeros();
                             edge_bv.insert(child_token_id);
                             let edge_bv_for_inserter =
                                 &edge_bv & src_contextual_tokens;
@@ -2693,7 +2509,7 @@ impl<'r> Precomputer1<'r> {
 
                             let src_node_idx = *src_node_wrapper;
                             let (src_live_tokens, _) =
-                                get_node_data(&mut node_cache, src_node_idx, &self.trie1_god);
+                                get_node_data(&mut node_cache, src_node_idx, &self.node_values);
                             let final_edge_bv =
                                 &edge_bv_for_inserter & &src_live_tokens;
 
@@ -2708,7 +2524,7 @@ impl<'r> Precomputer1<'r> {
                                     ));
                                     pending_live_token_updates
                                         .entry(end_idx)
-                                        .or_insert_with(RangeSetBlaze::new)
+                                        .or_insert_with(Weight::zeros)
                                         .bitor_assign(&final_edge_bv);
                                 }
                             }
@@ -2728,12 +2544,14 @@ impl<'r> Precomputer1<'r> {
 
             // Batch writes
             for (src, dst, key, bv) in pending_edges {
-                self.trie1_god.insert_edge_simple(src, dst, key, bv);
+                if let Some(label) = key {
+                    self.nwa.add_transition(src, label.0 as i16, dst, bv).unwrap();
+                } else {
+                    self.nwa.add_epsilon(src, dst, bv);
+                }
             }
             for (node_idx, live_tokens) in pending_live_token_updates {
-                if let Some(mut guard) = node_idx.write(&self.trie1_god) {
-                    guard.value.live_tokens |= &live_tokens;
-                }
+                self.node_values[node_idx].0 |= &live_tokens;
             }
 
             if !next_level_assoc.is_empty() {
