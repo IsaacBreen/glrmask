@@ -36,7 +36,7 @@ pub type Table = BTreeMap<StateID, Row>;
 #[derive(Debug, Clone)]
 struct Stage1Entry {
     /// Items in this state whose symbol under the dot is `symbol`.
-    kernel: BTreeSet<Item>,
+    kernel: Vec<Item>,
     /// ID of the state reached by shifting over that symbol.
     goto_id: Option<StateID>,
 }
@@ -47,28 +47,28 @@ type Stage1Row = BTreeMap<Option<Symbol>, Stage1Entry>;
 struct Stage2Row {
     shifts: BTreeMap<Terminal, StateID>,
     gotos: BTreeMap<NonTerminal, StateID>,
-    reduces: BTreeSet<Item>,
+    reduces: Vec<Item>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct Stage3Row {
     shifts: BTreeMap<Terminal, StateID>,
     gotos: BTreeMap<NonTerminal, StateID>,
-    reduces: BTreeMap<Option<Terminal>, BTreeSet<Item>>,
+    reduces: BTreeMap<Option<Terminal>, Vec<Item>>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct Stage4Row {
     shifts: BTreeMap<Terminal, StateID>,
     gotos: BTreeMap<NonTerminal, StateID>,
-    reduces: BTreeMap<Option<Terminal>, BTreeSet<ProductionID>>,
+    reduces: BTreeMap<Option<Terminal>, Vec<ProductionID>>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct Stage5Row {
     shifts: BTreeMap<Terminal, StateID>,
     gotos: BTreeMap<NonTerminal, StateID>,
-    reduces: BTreeMap<Terminal, BTreeSet<ProductionID>>,
+    reduces: BTreeMap<Terminal, Vec<ProductionID>>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -80,7 +80,7 @@ pub(crate) struct Stage6Row {
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(crate) struct Stage6ShiftsAndReduces {
     pub(crate) shift: Option<StateID>,
-    pub(crate) reduces: BTreeSet<ProductionID>,
+    pub(crate) reduces: Vec<ProductionID>,
 }
 
 #[derive(Debug, Clone, Eq, Ord, PartialEq, PartialOrd)]
@@ -89,11 +89,11 @@ pub enum Stage7ShiftsAndReducesLookaheadValue {
     Reduce {
         nonterminal_id: NonTerminalID,
         len: usize,
-        production_ids: BTreeSet<ProductionID>,
+        production_ids: Vec<ProductionID>,
     },
     Split {
         shift: Option<StateID>,
-        reduces: BTreeMap<usize, BTreeMap<NonTerminalID, BTreeSet<ProductionID>>>,
+        reduces: BTreeMap<usize, BTreeMap<NonTerminalID, Vec<ProductionID>>>,
     },
 }
 
@@ -189,7 +189,7 @@ impl JSONConvertible for Stage7ShiftsAndReducesLookaheadValue {
                         let production_ids = obj
                             .remove("production_ids")
                             .ok_or_else(|| "Missing field production_ids for Reduce".to_string())
-                            .and_then(|n| BTreeSet::<ProductionID>::from_json(n))?;
+                            .and_then(|n| Vec::<ProductionID>::from_json(n))?;
                         Ok(Stage7ShiftsAndReducesLookaheadValue::Reduce {
                             nonterminal_id,
                             len,
@@ -207,7 +207,7 @@ impl JSONConvertible for Stage7ShiftsAndReducesLookaheadValue {
                             .and_then(|n| {
                                 BTreeMap::<
                                     usize,
-                                    BTreeMap<NonTerminalID, BTreeSet<ProductionID>>,
+                                    BTreeMap<NonTerminalID, Vec<ProductionID>>,
                                 >::from_json(n)
                             })?;
                         Ok(Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces })
@@ -231,7 +231,7 @@ pub type ShiftsAndReducesFull = BTreeMap<TerminalID, Stage7ShiftsAndReducesLooka
 pub struct Reduce {
     pub nonterminal_id: NonTerminalID,
     pub len: usize,
-    pub production_ids: BTreeSet<ProductionID>,
+    pub production_ids: Vec<ProductionID>,
 }
 
 impl JSONConvertible for Reduce {
@@ -256,10 +256,9 @@ impl JSONConvertible for Reduce {
                     obj.remove("len")
                         .ok_or_else(|| "Missing field len for Reduce".to_string())?,
                 )?,
-                production_ids: BTreeSet::<ProductionID>::from_json(
-                    obj.remove("production_ids").ok_or_else(|| {
-                        "Missing field production_ids for Reduce".to_string()
-                    })?,
+                production_ids: Vec::<ProductionID>::from_json(
+                    obj.remove("production_ids")
+                        .ok_or_else(|| "Missing field production_ids for Reduce".to_string())?,
                 )?,
             }),
             _ => Err("Expected JSONNode::Object for Reduce".to_string()),
@@ -304,7 +303,7 @@ impl Row {
         &self,
         terminal_id: TerminalID,
         shiftfn: impl FnOnce(&StateID),
-        mut reducefn: impl FnMut(&NonTerminalID, &usize, &BTreeSet<ProductionID>),
+        mut reducefn: impl FnMut(&NonTerminalID, &usize, &Vec<ProductionID>),
     ) {
         if let Some(action) = self.shifts_and_reduces_full.get(&terminal_id) {
             match action {
@@ -428,13 +427,13 @@ type Stage6Result = Stage6Table;
 type Stage7Result = (Stage7Table, StateID, StateID);
 
 #[time_it]
-fn stage_1(productions: &[Production]) -> (Stage1Result, BiBTreeMap<BTreeSet<Item>, StateID>) {
+fn stage_1(productions: &[Production]) -> (Stage1Result, BiBTreeMap<Vec<Item>, StateID>) {
     let start_production_id = 0;
     let initial_item = Item {
         production_id: start_production_id,
         dot_position: 0,
     };
-    let initial_item_set = BTreeSet::from([initial_item]);
+    let initial_item_set = vec![initial_item];
 
     // 1. Intern Symbols
     let mut symbol_to_id: HashMap<Symbol, usize> = HashMap::new();
@@ -494,7 +493,7 @@ fn stage_1(productions: &[Production]) -> (Stage1Result, BiBTreeMap<BTreeSet<Ite
     }
 
     // 3. State Generation Loop
-    let mut item_set_map_fast: HashMap<BTreeSet<Item>, StateID> = HashMap::new();
+    let mut item_set_map_fast: HashMap<Vec<Item>, StateID> = HashMap::new();
     let mut next_state_id = 0;
 
     let mut worklist = VecDeque::new();
@@ -505,16 +504,18 @@ fn stage_1(productions: &[Production]) -> (Stage1Result, BiBTreeMap<BTreeSet<Ite
     worklist.push_back(initial_item_set);
     
     if EVERYTHING {
-        let mut everything_item_set = BTreeSet::new();
+        let mut everything_item_set = Vec::new();
         for (prod_idx, prod) in productions.iter().enumerate() {
             for dot_position in 0..=prod.rhs.len() {
                 let item = Item {
                     production_id: prod_idx,
                     dot_position,
                 };
-                everything_item_set.insert(item);
+                everything_item_set.push(item);
             }
         }
+        everything_item_set.sort_unstable();
+        everything_item_set.dedup();
         if !item_set_map_fast.contains_key(&everything_item_set) {
             item_set_map_fast.insert(everything_item_set.clone(), StateID(next_state_id));
             next_state_id += 1;
@@ -549,9 +550,11 @@ fn stage_1(productions: &[Production]) -> (Stage1Result, BiBTreeMap<BTreeSet<Ite
         let mut row: Stage1Row = BTreeMap::new();
         for (symbol_id_opt, items_in_split_vec) in buckets.drain() {
             let goto_id = if symbol_id_opt.is_some() {
-                let goto_set: BTreeSet<Item> = items_in_split_vec.iter().map(|item| {
+                let mut goto_set: Vec<Item> = items_in_split_vec.iter().map(|item| {
                     Item { production_id: item.production_id, dot_position: item.dot_position + 1 }
                 }).collect();
+                goto_set.sort_unstable();
+                goto_set.dedup();
 
                 if let Some(id) = item_set_map_fast.get(&goto_set) {
                     Some(*id)
@@ -570,7 +573,7 @@ fn stage_1(productions: &[Production]) -> (Stage1Result, BiBTreeMap<BTreeSet<Ite
             let kernel = if symbol.is_none() {
                 items_in_split_vec.into_iter().collect()
             } else {
-                BTreeSet::new()
+                Vec::new()
             };
             
             row.insert(symbol, Stage1Entry { kernel, goto_id });
@@ -591,7 +594,7 @@ fn stage_2(stage_1_table: Stage1Table, productions: &[Production]) -> Stage2Resu
     for (state_id, transitions) in stage_1_table {
         let mut shifts = BTreeMap::new();
         let mut gotos = BTreeMap::new();
-        let mut reduces = BTreeSet::new();
+        let mut reduces = Vec::new();
 
         for (symbol_opt, Stage1Entry { kernel, goto_id }) in transitions {
             match (symbol_opt, goto_id) {
@@ -608,12 +611,14 @@ fn stage_2(stage_1_table: Stage1Table, productions: &[Production]) -> Stage2Resu
                             productions[item.production_id].rhs.len(),
                             "Reduce item must have dot at end"
                         );
-                        reduces.insert(*item);
+                        reduces.push(*item);
                     }
                 }
                 _ => {}
             }
         }
+        reduces.sort_unstable();
+        reduces.dedup();
 
         stage_2_table.insert(state_id, Stage2Row { shifts, gotos, reduces });
     }
@@ -629,14 +634,18 @@ fn stage_3(stage_2_table: Stage2Table, productions: &[Production]) -> Stage3Resu
         compute_follow_sets_for_nonterminals(productions, &first_sets, &nullable_nonterminals);
 
     for (state_id, row) in stage_2_table {
-        let mut reduces: BTreeMap<Option<Terminal>, BTreeSet<Item>> = BTreeMap::new();
+        let mut reduces: BTreeMap<Option<Terminal>, Vec<Item>> = BTreeMap::new();
         for item in &row.reduces {
             let lhs = &productions[item.production_id].lhs;
             if let Some(follows) = follow_sets.get(lhs) {
                 for look in follows {
-                    reduces.entry(look.clone()).or_default().insert(item.clone());
+                    reduces.entry(look.clone()).or_default().push(item.clone());
                 }
             }
+        }
+        for vec in reduces.values_mut() {
+            vec.sort_unstable();
+            vec.dedup();
         }
         stage_3_table.insert(
             state_id,
@@ -656,10 +665,12 @@ fn stage_4(stage_3_table: Stage3Table) -> Stage4Result {
     for (state_id, row) in stage_3_table {
         let mut reduces = BTreeMap::new();
         for (terminal, item_set_for_terminal) in row.reduces {
-            let mut prod_ids = BTreeSet::new();
+            let mut prod_ids = Vec::new();
             for item in item_set_for_terminal {
-                prod_ids.insert(ProductionID(item.production_id));
+                prod_ids.push(ProductionID(item.production_id));
             }
+            prod_ids.sort_unstable();
+            prod_ids.dedup();
             reduces.insert(terminal.clone(), prod_ids);
         }
         stage_4_table.insert(
@@ -687,7 +698,7 @@ fn stage_5(
             gotos,
             reduces,
         } = row;
-        let mut new_reduces: BTreeMap<Terminal, BTreeSet<ProductionID>> = BTreeMap::new();
+        let mut new_reduces: BTreeMap<Terminal, Vec<ProductionID>> = BTreeMap::new();
         for (opt_term, prod_ids) in reduces {
             if let Some(term) = opt_term {
                 new_reduces.entry(term).or_default().extend(prod_ids.into_iter());
@@ -699,6 +710,10 @@ fn stage_5(
                         .extend(prod_ids.iter().cloned());
                 }
             }
+        }
+        for vec in new_reduces.values_mut() {
+            vec.sort_unstable();
+            vec.dedup();
         }
         stage_5_table.insert(state_id, Stage5Row { shifts, gotos, reduces: new_reduces });
     }
@@ -713,7 +728,9 @@ fn stage_6(stage_5_table: Stage5Table) -> Stage6Result {
             row.shifts.keys().chain(row.reduces.keys()).cloned().collect();
         for terminal in all_terminals {
             let shift = row.shifts.get(&terminal).cloned();
-            let reduces = row.reduces.get(&terminal).cloned().unwrap_or_default();
+            let mut reduces = row.reduces.get(&terminal).cloned().unwrap_or_default();
+            reduces.sort_unstable();
+            reduces.dedup();
             shifts_and_reduces.insert(
                 terminal,
                 Stage6ShiftsAndReduces {
@@ -729,7 +746,7 @@ fn stage_6(stage_5_table: Stage5Table) -> Stage6Result {
 
 fn stage_7(
     stage_6_table: Stage6Table,
-    item_set_map: &BiBTreeMap<BTreeSet<Item>, StateID>,
+    item_set_map: &BiBTreeMap<Vec<Item>, StateID>,
     productions: &[Production],
     terminal_map: &BiBTreeMap<Terminal, TerminalID>,
     non_terminal_map: &BiBTreeMap<NonTerminal, NonTerminalID>,
@@ -751,7 +768,7 @@ fn stage_7(
                 .expect_else(|| format!("Terminal {} not found in terminal map. Terminals: {:?}", terminal, terminal_map.left_values()));
             let maybe_shift: Option<StateID> = action.shift;
 
-            let mut reduces: BTreeMap<usize, BTreeMap<NonTerminalID, BTreeSet<ProductionID>>> =
+            let mut reduces: BTreeMap<usize, BTreeMap<NonTerminalID, Vec<ProductionID>>> =
                 BTreeMap::new();
             for &production_id in &action.reduces {
                 let (len, nonterminal_id) = prod_meta[production_id.0];
@@ -760,7 +777,13 @@ fn stage_7(
                     .or_default()
                     .entry(nonterminal_id)
                     .or_default()
-                    .insert(production_id);
+                    .push(production_id);
+            }
+            for inner in reduces.values_mut() {
+                for vec in inner.values_mut() {
+                    vec.sort_unstable();
+                    vec.dedup();
+                }
             }
 
             if maybe_shift.is_none() && reduces.is_empty() {
@@ -792,7 +815,7 @@ fn stage_7(
         production_id: start_production_id,
         dot_position: 0,
     };
-    let initial_item_set = BTreeSet::from([initial_item]);
+    let initial_item_set = vec![initial_item];
     let start_state_id = *item_set_map.get_by_left(&initial_item_set).unwrap();
 
     let start_non_terminal_id =
@@ -807,16 +830,18 @@ fn stage_7(
 
     let everything_state_id;
     if EVERYTHING {
-        let mut everything_item_set = BTreeSet::new();
+        let mut everything_item_set = Vec::new();
         for (prod_idx, prod) in productions.iter().enumerate() {
             for dot_position in 0..=prod.rhs.len() {
                 let item = Item {
                     production_id: prod_idx,
                     dot_position,
                 };
-                everything_item_set.insert(item);
+                everything_item_set.push(item);
             }
         }
+        everything_item_set.sort_unstable();
+        everything_item_set.dedup();
         everything_state_id = *item_set_map
             .get_by_left(&everything_item_set)
             .expect("Everything item set not found in state map");
