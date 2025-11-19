@@ -185,7 +185,9 @@ impl JSONConvertible for GLRParser {
         obj.insert("start_state_id".to_string(), self.start_state_id.to_json());
         obj.insert("everything_state_id".to_string(), self.everything_state_id.to_json());
         obj.insert("ignore_terminal_id".to_string(), self.ignore_terminal_id.to_json());
-        // substring_gotos, reduce_goto_map, actions are recomputed or provided at runtime.
+        obj.insert("substring_gotos".to_string(), self.substring_gotos.to_json());
+        obj.insert("reduce_goto_map".to_string(), self.reduce_goto_map.to_json());
+        // actions are provided at runtime.
         JSONNode::Object(obj)
     }
 
@@ -227,8 +229,15 @@ impl JSONConvertible for GLRParser {
                     .ok_or_else(|| "Missing field ignore_terminal_id for GLRParser".to_string())
                     .and_then(Option::<TerminalID>::from_json)?;
 
-                let substring_gotos = crate::glr::table::stage_9(&table, &non_terminal_map);
-                let reduce_goto_map = crate::glr::table::stage_10(&table);
+                let substring_gotos = obj
+                    .remove("substring_gotos")
+                    .ok_or_else(|| "Missing field substring_gotos".to_string())
+                    .and_then(|n| BTreeMap::<NonTerminalID, SubstringGoto>::from_json(n))?;
+                let reduce_goto_map = obj
+                    .remove("reduce_goto_map")
+                    .ok_or_else(|| "Missing field reduce_goto_map".to_string())
+                    .and_then(|n| BTreeMap::<NonTerminalID, BTreeMap<StateID, StateIDBV>>::from_json(n))?;
+
                 Ok(GLRParser::new(
                     table,
                     productions,

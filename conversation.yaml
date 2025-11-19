@@ -7,6 +7,7 @@ local_system:
     - src/glr/grammar.rs
     - src/glr/automaton.rs
     - src/glr/table.rs
+    - src/glr/parser.rs
   conversation_file:
   compile_command:
   initial_file_contents:
@@ -1898,15 +1899,15 @@ local_system:
 
       const EVERYTHING: bool = false;
 
-      type Stage1Table = BTreeMap<StateID, Stage1Row>;
-      type Stage2Table = BTreeMap<StateID, Stage2Row>;
-      type Stage3Table = BTreeMap<StateID, Stage3Row>;
-      type Stage4Table = BTreeMap<StateID, Stage4Row>;
-      type Stage5Table = BTreeMap<StateID, Stage5Row>;
-      pub(crate) type Stage6Table = BTreeMap<StateID, Stage6Row>;
-      type Stage7Table = BTreeMap<StateID, Stage7Row>;
-      type Stage8Table = BTreeMap<StateID, Row>;
-      pub type Table = BTreeMap<StateID, Row>;
+      type Stage1Table = Vec<Stage1Row>;
+      type Stage2Table = Vec<Stage2Row>;
+      type Stage3Table = Vec<Stage3Row>;
+      type Stage4Table = Vec<Stage4Row>;
+      type Stage5Table = Vec<Stage5Row>;
+      pub(crate) type Stage6Table = Vec<Stage6Row>;
+      type Stage7Table = Vec<Stage7Row>;
+      type Stage8Table = Vec<Row>;
+      pub type Table = Vec<Row>;
 
       #[derive(Debug, Clone)]
       struct Stage1Entry {
@@ -2184,7 +2185,7 @@ local_system:
 
       #[derive(Debug, Clone, PartialEq, Eq)]
       pub struct Row {
-          pub shifts_and_reduces_full: ShiftsAndReducesFull,
+          shifts_and_reduces_full: ShiftsAndReducesFull,
           pub gotos: BTreeMap<NonTerminalID, Goto>,
       }
 
@@ -2347,7 +2348,7 @@ local_system:
           let mut next_state_id = 0;
 
           let mut worklist = VecDeque::new();
-          let mut table: Stage1Table = BTreeMap::new();
+          let mut table: Stage1Table = Vec::new();
 
           item_set_map.insert(initial_item_set.clone(), StateID(next_state_id));
           next_state_id += 1;
@@ -2372,6 +2373,7 @@ local_system:
 
           while let Some(item_set) = worklist.pop_front() {
               let state_id = *item_set_map.get_by_left(&item_set).unwrap();
+              assert_eq!(state_id.0, table.len());
               let closure = compute_closure(&item_set, &prods_by_lhs, productions);
               let splits = split_on_dot(&closure, productions);
 
@@ -2393,15 +2395,16 @@ local_system:
                   };
                   row.insert(symbol, Stage1Entry { kernel: items_in_split, goto_id });
               }
-              table.insert(state_id, row);
+              table.push(row);
           }
 
           (table, item_set_map)
       }
 
       fn stage_2(stage_1_table: Stage1Table, productions: &[Production]) -> Stage2Result {
-          let mut stage_2_table = BTreeMap::new();
-          for (state_id, transitions) in stage_1_table {
+          let mut stage_2_table = Vec::with_capacity(stage_1_table.len());
+          for (state_idx, transitions) in stage_1_table.into_iter().enumerate() {
+              let state_id = StateID(state_idx);
               let mut shifts = BTreeMap::new();
               let mut gotos = BTreeMap::new();
               let mut reduces = BTreeSet::new();
@@ -2428,20 +2431,21 @@ local_system:
                   }
               }
 
-              stage_2_table.insert(state_id, Stage2Row { shifts, gotos, reduces });
+              stage_2_table.push(Stage2Row { shifts, gotos, reduces });
           }
           stage_2_table
       }
 
       fn stage_3(stage_2_table: Stage2Table, productions: &[Production]) -> Stage3Result {
-          let mut stage_3_table = BTreeMap::new();
+          let mut stage_3_table = Vec::with_capacity(stage_2_table.len());
 
           let nullable_nonterminals = compute_nullable_nonterminals(productions);
           let first_sets = compute_first_sets_for_nonterminals(productions, &nullable_nonterminals);
           let follow_sets =
               compute_follow_sets_for_nonterminals(productions, &first_sets, &nullable_nonterminals);
 
-          for (state_id, row) in stage_2_table {
+          for (state_idx, row) in stage_2_table.into_iter().enumerate() {
+              let state_id = StateID(state_idx);
               let mut reduces: BTreeMap<Option<Terminal>, BTreeSet<Item>> = BTreeMap::new();
               for item in &row.reduces {
                   let lhs = &productions[item.production_id].lhs;
@@ -2451,8 +2455,7 @@ local_system:
                       }
                   }
               }
-              stage_3_table.insert(
-                  state_id,
+              stage_3_table.push(
                   Stage3Row {
                       shifts: row.shifts,
                       gotos: row.gotos,
@@ -2465,8 +2468,9 @@ local_system:
       }
 
       fn stage_4(stage_3_table: Stage3Table) -> Stage4Result {
-          let mut stage_4_table = BTreeMap::new();
-          for (state_id, row) in stage_3_table {
+          let mut stage_4_table = Vec::with_capacity(stage_3_table.len());
+          for (state_idx, row) in stage_3_table.into_iter().enumerate() {
+              let state_id = StateID(state_idx);
               let mut reduces = BTreeMap::new();
               for (terminal, item_set_for_terminal) in row.reduces {
                   let mut prod_ids = BTreeSet::new();
@@ -2475,8 +2479,7 @@ local_system:
                   }
                   reduces.insert(terminal.clone(), prod_ids);
               }
-              stage_4_table.insert(
-                  state_id,
+              stage_4_table.push(
                   Stage4Row {
                       shifts: row.shifts,
                       gotos: row.gotos,
@@ -2491,10 +2494,11 @@ local_system:
           stage_4_table: Stage4Table,
           terminal_map: &BiBTreeMap<Terminal, TerminalID>,
       ) -> Stage5Result {
-          let mut stage_5_table = BTreeMap::new();
+          let mut stage_5_table = Vec::with_capacity(stage_4_table.len());
 
           let all_terminals: BTreeSet<Terminal> = terminal_map.left_values().cloned().collect();
-          for (state_id, row) in stage_4_table {
+          for (state_idx, row) in stage_4_table.into_iter().enumerate() {
+              let state_id = StateID(state_idx);
               let Stage4Row {
                   shifts,
                   gotos,
@@ -2513,14 +2517,15 @@ local_system:
                       }
                   }
               }
-              stage_5_table.insert(state_id, Stage5Row { shifts, gotos, reduces: new_reduces });
+              stage_5_table.push(Stage5Row { shifts, gotos, reduces: new_reduces });
           }
           stage_5_table
       }
 
       fn stage_6(stage_5_table: Stage5Table) -> Stage6Result {
-          let mut stage_6_table = BTreeMap::new();
-          for (state_id, row) in stage_5_table {
+          let mut stage_6_table = Vec::with_capacity(stage_5_table.len());
+          for (state_idx, row) in stage_5_table.into_iter().enumerate() {
+              let state_id = StateID(state_idx);
               let mut shifts_and_reduces = BTreeMap::new();
               let all_terminals: BTreeSet<_> =
                   row.shifts.keys().chain(row.reduces.keys()).cloned().collect();
@@ -2535,7 +2540,7 @@ local_system:
                       },
                   );
               }
-              stage_6_table.insert(state_id, Stage6Row { shifts_and_reduces, gotos: row.gotos });
+              stage_6_table.push(Stage6Row { shifts_and_reduces, gotos: row.gotos });
           }
           stage_6_table
       }
@@ -2549,8 +2554,9 @@ local_system:
       ) -> (Stage7Table, StateID, StateID) {
           let start_production_id = 0;
 
-          let mut stage_7_table = BTreeMap::new();
-          for (state_id, row) in stage_6_table {
+          let mut stage_7_table = Vec::with_capacity(stage_6_table.len());
+          for (state_idx, row) in stage_6_table.into_iter().enumerate() {
+              let state_id = StateID(state_idx);
               let mut shifts_and_reduces_full: ShiftsAndReducesFull = BTreeMap::new();
 
               for (terminal, action) in &row.shifts_and_reduces {
@@ -2595,7 +2601,7 @@ local_system:
                   gotos.insert(non_terminal_id, goto);
               }
 
-              stage_7_table.insert(state_id, Stage7Row { shifts_and_reduces_full, gotos });
+              stage_7_table.push(Stage7Row { shifts_and_reduces_full, gotos });
           }
 
           let initial_item = Item {
@@ -2607,9 +2613,7 @@ local_system:
 
           let start_non_terminal_id =
               *non_terminal_map.get_by_left(&productions[start_production_id].lhs).unwrap();
-          stage_7_table
-              .get_mut(&start_state_id)
-              .unwrap()
+          stage_7_table[start_state_id.0]
               .gotos
               .entry(start_non_terminal_id)
               .or_default()
@@ -2630,9 +2634,7 @@ local_system:
               everything_state_id = *item_set_map
                   .get_by_left(&everything_item_set)
                   .expect("Everything item set not found in state map");
-              stage_7_table
-                  .get_mut(&everything_state_id)
-                  .unwrap()
+              stage_7_table[everything_state_id.0]
                   .gotos
                   .entry(start_non_terminal_id)
                   .or_default()
@@ -2645,14 +2647,14 @@ local_system:
       }
 
       fn stage_8(stage_7_table: Stage7Table) -> Stage8Table {
-          let mut stage_8_table = BTreeMap::new();
-          for (state_id, row) in stage_7_table {
+          let mut stage_8_table = Vec::with_capacity(stage_7_table.len());
+          for (state_idx, row) in stage_7_table.into_iter().enumerate() {
+              let state_id = StateID(state_idx);
               let Stage7Row {
                   shifts_and_reduces_full,
                   gotos,
               } = row;
-              stage_8_table.insert(
-                  state_id,
+              stage_8_table.push(
                   Row {
                       shifts_and_reduces_full,
                       gotos,
@@ -2667,56 +2669,60 @@ local_system:
           table: &Table,
           non_terminal_map: &BiBTreeMap<NonTerminal, NonTerminalID>,
       ) -> BTreeMap<NonTerminalID, SubstringGoto> {
-          let mut substring_gotos = BTreeMap::new();
-          let all_nt_ids: Vec<_> = non_terminal_map.right_values().copied().collect();
+          let num_nts = non_terminal_map.len();
+          let mut temp_gotos: Vec<SubstringGoto> = (0..num_nts)
+              .map(|_| SubstringGoto {
+                  accepting_sources: BTreeSet::new(),
+                  gotos: BTreeMap::new(),
+              })
+              .collect();
 
-          for &nt_id in &all_nt_ids {
-              let mut accepting_sources = BTreeSet::new();
-              let mut gotos: BTreeMap<StateID, BTreeSet<StateID>> = BTreeMap::new();
-
-              for (&source_state_id, row) in table {
-                  if let Some(goto) = row.gotos.get(&nt_id) {
-                      if goto.accept {
-                          accepting_sources.insert(source_state_id);
-                      }
-                      if let Some(goto_state_id) = goto.state_id {
-                          gotos.entry(goto_state_id).or_default().insert(source_state_id);
-                      }
+          for (source_idx, row) in table.iter().enumerate() {
+              let source_state_id = StateID(source_idx);
+              for (&nt_id, goto) in &row.gotos {
+                  let entry = &mut temp_gotos[nt_id.0];
+                  if goto.accept {
+                      entry.accepting_sources.insert(source_state_id);
                   }
-              }
-
-              if !accepting_sources.is_empty() || !gotos.is_empty() {
-                  substring_gotos.insert(
-                      nt_id,
-                      SubstringGoto {
-                          accepting_sources,
-                          gotos,
-                      },
-                  );
+                  if let Some(goto_state_id) = goto.state_id {
+                      entry.gotos.entry(goto_state_id).or_default().insert(source_state_id);
+                  }
               }
           }
 
-          substring_gotos
+          temp_gotos
+              .into_iter()
+              .enumerate()
+              .filter(|(_, g)| !g.accepting_sources.is_empty() || !g.gotos.is_empty())
+              .map(|(i, g)| (NonTerminalID(i), g))
+              .collect()
       }
 
       /// Inverted GOTO index: (reduce non-terminal, goto state) -> bitvector of source states.
-      pub fn stage_10(table: &Table) -> BTreeMap<NonTerminalID, BTreeMap<StateID, StateIDBV>> {
-          let mut reduce_goto_map: BTreeMap<NonTerminalID, BTreeMap<StateID, StateIDBV>> =
-              BTreeMap::new();
+      pub fn stage_10(
+          table: &Table,
+          num_nts: usize,
+      ) -> BTreeMap<NonTerminalID, BTreeMap<StateID, StateIDBV>> {
+          let mut temp_map: Vec<BTreeMap<StateID, StateIDBV>> = vec![BTreeMap::new(); num_nts];
 
-          for (&source_state_id, row) in table {
+          for (source_idx, row) in table.iter().enumerate() {
+              let source_state_id = StateID(source_idx);
               for (&nt_id, goto) in &row.gotos {
                   if let Some(goto_state_id) = goto.state_id {
-                      reduce_goto_map
-                          .entry(nt_id)
-                          .or_default()
+                      temp_map[nt_id.0]
                           .entry(goto_state_id)
                           .or_default()
                           .insert(source_state_id.0);
                   }
               }
           }
-          reduce_goto_map
+
+          temp_map
+              .into_iter()
+              .enumerate()
+              .filter(|(_, m)| !m.is_empty())
+              .map(|(i, m)| (NonTerminalID(i), m))
+              .collect()
       }
 
       fn print_memory_usage(label: &str) {
@@ -2836,7 +2842,7 @@ local_system:
 
           crate::debug!(2, "Stage 10: Precomputing reduce goto map");
           let start = std::time::Instant::now();
-          let reduce_goto_map = stage_10(&final_table);
+          let reduce_goto_map = stage_10(&final_table, non_terminal_map.len());
           crate::debug!(2, "Stage 10 done in {:.2?}", start.elapsed());
           print_memory_usage("After Stage 10 (reduce goto map)");
 
@@ -2910,6 +2916,485 @@ local_system:
               }
           }
           non_terminal_map
+      }
+    src/glr/parser.rs: |
+      use crate::constraint::{LLMVocab, StateIDBV};
+      use crate::datastructures::leveled_gss::{LeveledGSS, LeveledGSSStats};
+      use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
+      use crate::glr::items::{Item};
+      use crate::glr::table::{
+          Goto, NonTerminalID, Row, Stage7ShiftsAndReducesLookaheadValue, StateID, SubstringGoto, Table,
+          TerminalID,
+      };
+      use crate::json_serialization::{JSONConvertible, JSONNode};
+      use crate::profiler::GSS_LOGGING_ENABLED;
+      use crate::{debug, hit};
+      use bimap::BiBTreeMap;
+      use profiler_macro::time_it;
+      use std::any::Any;
+      use std::cmp::Ordering;
+      use std::collections::BTreeMap as StdMap;
+      use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+      use std::fmt::{self, Debug, Display, Formatter, Write};
+      use std::hash::{Hash, Hasher};
+      use std::sync::Arc;
+      use crate::datastructures::gss_acc::Acc;
+
+      /// A trait to provide a lazily-evaluated `expect`.
+      pub trait ExpectElse<T> {
+          fn expect_else<F>(self, f: F) -> T
+          where
+              F: FnOnce() -> String;
+      }
+
+      impl<T> ExpectElse<T> for Option<T> {
+          #[inline]
+          #[track_caller]
+          fn expect_else<F>(self, f: F) -> T
+          where
+              F: FnOnce() -> String,
+          {
+              match self {
+                  Some(v) => v,
+                  None => panic!("{}", f()),
+              }
+          }
+      }
+
+      pub trait DynEq {
+          fn dyn_eq(&self, other: &dyn Any) -> bool;
+      }
+      pub trait DynOrd {
+          fn dyn_cmp(&self, other: &dyn Any) -> Ordering;
+      }
+      pub trait DynHash {
+          fn dyn_hash(&self, state: &mut dyn std::hash::Hasher);
+      }
+
+      impl DynEq for () {
+          fn dyn_eq(&self, _other: &dyn Any) -> bool {
+              true
+          }
+      }
+      impl DynOrd for () {
+          fn dyn_cmp(&self, _other: &dyn Any) -> Ordering {
+              Ordering::Equal
+          }
+      }
+      impl DynHash for () {
+          fn dyn_hash(&self, _state: &mut dyn std::hash::Hasher) {}
+      }
+
+      pub trait UserDataTrait: Any + Send + Sync + Debug + DynEq + DynOrd + DynHash {}
+      impl UserDataTrait for () {}
+
+      pub type ActionFn = Arc<dyn Fn(&mut Arc<dyn UserDataTrait>) -> bool + Send + Sync>;
+
+      #[derive(Debug, Copy, Clone)]
+      pub struct ParseStateEdgeContent {
+          pub state_id: StateID,
+      }
+
+      impl PartialEq for ParseStateEdgeContent {
+          fn eq(&self, other: &Self) -> bool {
+              self.state_id == other.state_id
+          }
+      }
+      impl Eq for ParseStateEdgeContent {}
+      impl PartialOrd for ParseStateEdgeContent {
+          fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+              self.state_id.partial_cmp(&other.state_id)
+          }
+      }
+      impl Ord for ParseStateEdgeContent {
+          fn cmp(&self, other: &Self) -> Ordering {
+              self.state_id.cmp(&other.state_id)
+          }
+      }
+      impl Hash for ParseStateEdgeContent {
+          fn hash<H: Hasher>(&self, state: &mut H) {
+              self.state_id.hash(state);
+          }
+      }
+
+      impl JSONConvertible for ParseStateEdgeContent {
+          fn to_json(&self) -> JSONNode {
+              let mut obj = StdMap::new();
+              obj.insert("state_id".to_string(), self.state_id.to_json());
+              JSONNode::Object(obj)
+          }
+          fn from_json(node: JSONNode) -> Result<Self, String> {
+              match node {
+                  JSONNode::Object(mut obj) => {
+                      let state_id = obj
+                          .remove("state_id")
+                          .ok_or_else(|| "Missing field state_id for ParseStateEdgeContent".to_string())
+                          .and_then(StateID::from_json)?;
+                      Ok(ParseStateEdgeContent { state_id })
+                  }
+                  _ => Err("Expected JSONNode::Object for ParseStateEdgeContent".to_string()),
+              }
+          }
+      }
+
+      pub type ParserGSS = LeveledGSS<ParseStateEdgeContent, Acc>;
+      pub type GSSStats = LeveledGSSStats<ParseStateEdgeContent, Acc>;
+
+      #[derive(Clone)]
+      pub struct ParseState {
+          pub stack: ParserGSS,
+      }
+
+      impl Debug for ParseState {
+          fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+              f.debug_struct("ParseState")
+                  // .field("stack", &self.stack)
+                  .finish()
+          }
+      }
+
+      impl PartialEq for ParseState {
+          fn eq(&self, other: &Self) -> bool {
+              todo!()
+          }
+      }
+
+      impl Eq for ParseState {}
+
+      impl ParseState {
+          pub fn new() -> Self {
+              ParseState { stack: LeveledGSS::empty() }
+          }
+
+          pub(crate) fn with_stack(stack: ParserGSS) -> Self {
+              ParseState { stack }
+          }
+      }
+
+      #[derive(Clone)]
+      pub struct GLRParser {
+          pub table: Table,
+          pub productions: Vec<Production>,
+          pub terminal_map: BiBTreeMap<Terminal, TerminalID>,
+          pub non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>,
+          pub item_set_map: BiBTreeMap<BTreeSet<Item>, StateID>,
+          pub start_state_id: StateID,
+          pub everything_state_id: StateID,
+          pub ignore_terminal_id: Option<TerminalID>,
+          pub substring_gotos: BTreeMap<NonTerminalID, SubstringGoto>,
+          pub reduce_goto_map: BTreeMap<NonTerminalID, BTreeMap<StateID, StateIDBV>>,
+          pub actions: BTreeMap<NonTerminalID, ActionFn>,
+      }
+
+      impl Display for GLRParser {
+          fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+              writeln!(f, "GLRParser:")?;
+              eprintln!("TODO:");
+              return Ok(());
+          }
+      }
+
+      impl JSONConvertible for GLRParser {
+          fn to_json(&self) -> JSONNode {
+              let mut obj = StdMap::new();
+              obj.insert("stage_7_table".to_string(), self.table.to_json());
+              obj.insert("productions".to_string(), self.productions.to_json());
+              obj.insert("terminal_map".to_string(), self.terminal_map.to_json());
+              obj.insert("non_terminal_map".to_string(), self.non_terminal_map.to_json());
+              obj.insert("item_set_map".to_string(), self.item_set_map.to_json());
+              obj.insert("start_state_id".to_string(), self.start_state_id.to_json());
+              obj.insert("everything_state_id".to_string(), self.everything_state_id.to_json());
+              obj.insert("ignore_terminal_id".to_string(), self.ignore_terminal_id.to_json());
+              // substring_gotos, reduce_goto_map, actions are recomputed or provided at runtime.
+              JSONNode::Object(obj)
+          }
+
+          fn from_json(node: JSONNode) -> Result<Self, String> {
+              match node {
+                  JSONNode::Object(mut obj) => {
+                      let table = obj
+                          .remove("stage_7_table")
+                          .ok_or_else(|| "Missing field stage_7_table".to_string())
+                          .and_then(Table::from_json)?;
+                      let productions = obj
+                          .remove("productions")
+                          .ok_or_else(|| "Missing field productions".to_string())
+                          .and_then(Vec::<Production>::from_json)?;
+                      let _start_production_id =
+                          obj.remove("start_production_id").and_then(|n| usize::from_json(n).ok());
+                      let terminal_map = obj
+                          .remove("terminal_map")
+                          .ok_or_else(|| "Missing field terminal_map".to_string())
+                          .and_then(|n| BiBTreeMap::<Terminal, TerminalID>::from_json(n))?;
+                      let non_terminal_map = obj
+                          .remove("non_terminal_map")
+                          .ok_or_else(|| "Missing field non_terminal_map".to_string())
+                          .and_then(|n| BiBTreeMap::<NonTerminal, NonTerminalID>::from_json(n))?;
+                      let item_set_map = obj
+                          .remove("item_set_map")
+                          .ok_or_else(|| "Missing field item_set_map".to_string())
+                          .and_then(|n| BiBTreeMap::<BTreeSet<Item>, StateID>::from_json(n))?;
+                      let start_state_id = obj
+                          .remove("start_state_id")
+                          .ok_or_else(|| "Missing field start_state_id".to_string())
+                          .and_then(StateID::from_json)?;
+                      let everything_state_id = obj
+                          .remove("everything_state_id")
+                          .ok_or_else(|| "Missing field everything_state_id".to_string())
+                          .and_then(StateID::from_json)?;
+                      let ignore_terminal_id = obj
+                          .remove("ignore_terminal_id")
+                          .ok_or_else(|| "Missing field ignore_terminal_id for GLRParser".to_string())
+                          .and_then(Option::<TerminalID>::from_json)?;
+
+                      let substring_gotos = crate::glr::table::stage_9(&table, &non_terminal_map);
+                      let reduce_goto_map = crate::glr::table::stage_10(&table);
+                      Ok(GLRParser::new(
+                          table,
+                          productions,
+                          terminal_map,
+                          non_terminal_map,
+                          item_set_map,
+                          start_state_id,
+                          everything_state_id,
+                          BTreeMap::new(),
+                          ignore_terminal_id,
+                          substring_gotos,
+                          reduce_goto_map,
+                      ))
+                  }
+                  _ => Err("Expected JSONNode::Object for GLRParser".to_string()),
+              }
+          }
+      }
+
+      impl Debug for GLRParser {
+          fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+              f.debug_struct("GLRParser")
+                  .field("table_len", &self.table.len())
+                  .field("productions_len", &self.productions.len())
+                  .field("start_state_id", &self.start_state_id)
+                  .field("everything_state_id", &self.everything_state_id)
+                  .field("ignore_terminal_id", &self.ignore_terminal_id)
+                  .field("substring_gotos_size", &self.substring_gotos.len())
+                  .field("reduce_goto_map_size", &self.reduce_goto_map.len())
+                  .field("actions_size", &self.actions.len())
+                  .finish()
+          }
+      }
+
+      impl PartialEq for GLRParser {
+          fn eq(&self, other: &Self) -> bool {
+              self.table == other.table
+                  && self.productions == other.productions
+                  && self.terminal_map == other.terminal_map
+                  && self.non_terminal_map == other.non_terminal_map
+                  && self.item_set_map == other.item_set_map
+                  && self.start_state_id == other.start_state_id
+                  && self.everything_state_id == other.everything_state_id
+                  && self.ignore_terminal_id == other.ignore_terminal_id
+                  && self.substring_gotos == other.substring_gotos
+                  && self.reduce_goto_map == other.reduce_goto_map
+          }
+      }
+      impl Eq for GLRParser {}
+
+      impl GLRParser {
+          pub fn new(
+              table: Table,
+              productions: Vec<Production>,
+              terminal_map: BiBTreeMap<Terminal, TerminalID>,
+              non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>,
+              item_set_map: BiBTreeMap<BTreeSet<Item>, StateID>,
+              start_state_id: StateID,
+              everything_state_id: StateID,
+              actions: BTreeMap<NonTerminal, ActionFn>,
+              ignore_terminal_id: Option<TerminalID>,
+              substring_gotos: BTreeMap<NonTerminalID, SubstringGoto>,
+              reduce_goto_map: BTreeMap<NonTerminalID, BTreeMap<StateID, StateIDBV>>,
+          ) -> Self {
+              let converted_actions: BTreeMap<NonTerminalID, ActionFn> = actions
+                  .into_iter()
+                  .map(|(nt, func)| {
+                      let nt_id = non_terminal_map.get_by_left(&nt).unwrap_or_else(|| {
+                          panic!(
+                              "NonTerminal {:?} not found in non_terminal_map during GLRParser construction",
+                              nt
+                          )
+                      });
+                      (*nt_id, func)
+                  })
+                  .collect();
+
+              GLRParser {
+                  table,
+                  productions,
+                  terminal_map,
+                  non_terminal_map,
+                  item_set_map,
+                  start_state_id,
+                  everything_state_id,
+                  ignore_terminal_id,
+                  substring_gotos,
+                  reduce_goto_map,
+                  actions: converted_actions,
+              }
+          }
+
+          pub fn init_glr_parser(&self, _llm_vocab: Option<Arc<LLMVocab>>) -> GLRParserState {
+              self.init_glr_parser_with_acc()
+          }
+
+          pub fn init_glr_parser_with_acc(&self) -> GLRParserState {
+              let initial_parse_state = self.init_parse_state_with_acc();
+              GLRParserState { parser: self, stack: initial_parse_state.stack }
+          }
+
+          pub fn init_parse_state_with_acc(&self) -> ParseState {
+              let initial_edge = ParseStateEdgeContent { state_id: self.start_state_id };
+              let acc = Acc::new_fresh();
+              let gss = LeveledGSS::from_stacks(&[(vec![], acc)]).push(initial_edge);
+              ParseState::with_stack(gss)
+          }
+
+          pub fn init_parse_state_with_gss(&self, gss: LeveledGSS<ParseStateEdgeContent, Acc>) -> GLRParserState {
+              GLRParserState { parser: self, stack: gss }
+          }
+
+          pub fn init_glr_parser_null(&self, llm_vocab: Option<Arc<LLMVocab>>) -> GLRParserState {
+              let initial_parse_state = self.init_parse_state_with_acc();
+              GLRParserState { parser: self, stack: initial_parse_state.stack }
+          }
+
+          pub fn parse(&self, input: &[TerminalID], llm_vocab: Option<Arc<LLMVocab>>) -> GLRParserState {
+              let mut state = self.init_glr_parser(llm_vocab);
+              state.parse(input);
+              state
+          }
+
+          #[time_it]
+          pub fn process_token_gss(&self, gss: &ParserGSS, token: TerminalID) -> ParserGSS {
+              if Some(token) == self.ignore_terminal_id {
+                  return gss.clone();
+              }
+              if gss.is_empty() {
+                  return gss.clone();
+              }
+
+              let mut heads_by_state: BTreeMap<StateID, ParserGSS> = BTreeMap::new();
+              for edge in gss.peek() {
+                  let sid = edge.state_id;
+                  let iso = gss.isolate(Some(edge));
+                  heads_by_state.entry(sid).and_modify(|acc| *acc = acc.merge(&iso)).or_insert(iso);
+              }
+
+              let mut shifted: Vec<ParserGSS> = Vec::new();
+
+              while let Some((state_id, state_gss)) = heads_by_state.pop_first() {
+                  if let Some(row) = self.table.get(&state_id) {
+                      row.handle_shifts_and_reduces_for_terminal(
+                          token,
+                          |to| shifted.push(state_gss.push(ParseStateEdgeContent { state_id: *to })),
+                          |nt_id, len, pids| {
+                              self.apply_reduces(&state_gss, *len, *nt_id, &mut heads_by_state);
+                          },
+                      );
+                  }
+              }
+
+              if shifted.is_empty() {
+                  return LeveledGSS::empty();
+              }
+              let mut it = shifted.into_iter();
+              let first = it.next().unwrap();
+              it.fold(first, |acc, g| acc.merge(&g))
+          }
+
+          fn apply_reduces(
+              &self,
+              state_gss: &ParserGSS,
+              len: usize,
+              nt: NonTerminalID,
+              heads_by_state: &mut BTreeMap<StateID, ParserGSS>,
+          ) {
+              let popped = state_gss.popn(len as isize);
+              if popped.is_empty() {
+                  return;
+              }
+
+              for edge in popped.peek() {
+                  let from_id = edge.state_id;
+                  if let Some(goto) = self.table[&from_id].gotos.get(&nt) {
+                      if let Some(next_id) = goto.state_id {
+                          let iso = popped.isolate(Some(edge));
+                          let pushed = iso.push(ParseStateEdgeContent { state_id: next_id });
+                          heads_by_state
+                              .entry(next_id)
+                              .and_modify(|acc| *acc = acc.merge(&pushed))
+                              .or_insert(pushed);
+                      }
+                  }
+              }
+          }
+      }
+
+      #[derive(Clone)]
+      pub struct GLRParserState<'a> {
+          pub parser: &'a GLRParser,
+          pub stack: ParserGSS,
+      }
+
+      impl Debug for GLRParserState<'_> {
+          fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+              f.debug_struct("GLRParserState")
+                  .field("parser", &self.parser)
+                  // .field("stack", &self.stack)
+                  .finish()
+          }
+      }
+
+      impl PartialEq for GLRParserState<'_> {
+          fn eq(&self, other: &Self) -> bool {
+              self.stack.to_stacks() == other.stack.to_stacks()
+          }
+      }
+
+      impl Eq for GLRParserState<'_> {}
+
+      impl<'a> GLRParserState<'a> {
+          pub fn step(&mut self, token_id: TerminalID) {
+              self.stack = self.parser.process_token_gss(&self.stack, token_id);
+          }
+
+          pub fn parse(&mut self, input: &[TerminalID]) {
+              for &t in input {
+                  self.step(t);
+              }
+          }
+
+          pub fn is_ok(&self) -> bool {
+              !self.stack.is_empty()
+          }
+
+          pub fn stats(&self) -> GSSStats {
+              self.stack.stats()
+          }
+
+          pub fn log_gss(&self, phase: &str, token: TerminalID) {
+              if !GSS_LOGGING_ENABLED {
+                  return;
+              }
+              let stats = self.stats();
+              debug!(2, "{} - token {} - GSS stats: {:?}", phase, token.0, stats);
+              if let Some((path, _acc)) = self.stack.get_first_path() {
+                  let ids: Vec<_> = path.into_iter().map(|e| e.state_id.0).collect();
+                  debug!(3, "Sample path: {:?}", ids);
+              }
+          }
+
+          pub fn merge_with(&mut self, other: Self) {
+              self.stack = self.stack.merge(&other.stack);
+          }
       }
   prev_file_contents:
     scripts/generate_diff_grammar.py: |
@@ -5086,7 +5571,7 @@ local_system:
 
       #[derive(Debug, Clone, PartialEq, Eq)]
       pub struct Row {
-          pub shifts_and_reduces_full: ShiftsAndReducesFull,
+          shifts_and_reduces_full: ShiftsAndReducesFull,
           pub gotos: BTreeMap<NonTerminalID, Goto>,
       }
 
@@ -5817,6 +6302,494 @@ local_system:
               }
           }
           non_terminal_map
+      }
+    src/glr/parser.rs: |
+      use crate::constraint::{LLMVocab, StateIDBV};
+      use crate::datastructures::leveled_gss::{LeveledGSS, LeveledGSSStats};
+      use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
+      use crate::glr::items::{Item};
+      use crate::glr::table::{
+          Goto, NonTerminalID, Row, Stage7ShiftsAndReducesLookaheadValue, StateID, SubstringGoto, Table,
+          TerminalID,
+      };
+      use crate::json_serialization::{JSONConvertible, JSONNode};
+      use crate::profiler::GSS_LOGGING_ENABLED;
+      use crate::{debug, hit};
+      use bimap::BiBTreeMap;
+      use profiler_macro::time_it;
+      use std::any::Any;
+      use std::cmp::Ordering;
+      use std::collections::BTreeMap as StdMap;
+      use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+      use std::fmt::{self, Debug, Display, Formatter, Write};
+      use std::hash::{Hash, Hasher};
+      use std::sync::Arc;
+      use crate::datastructures::gss_acc::Acc;
+
+      /// A trait to provide a lazily-evaluated `expect`.
+      pub trait ExpectElse<T> {
+          fn expect_else<F>(self, f: F) -> T
+          where
+              F: FnOnce() -> String;
+      }
+
+      impl<T> ExpectElse<T> for Option<T> {
+          #[inline]
+          #[track_caller]
+          fn expect_else<F>(self, f: F) -> T
+          where
+              F: FnOnce() -> String,
+          {
+              match self {
+                  Some(v) => v,
+                  None => panic!("{}", f()),
+              }
+          }
+      }
+
+      pub trait DynEq {
+          fn dyn_eq(&self, other: &dyn Any) -> bool;
+      }
+      pub trait DynOrd {
+          fn dyn_cmp(&self, other: &dyn Any) -> Ordering;
+      }
+      pub trait DynHash {
+          fn dyn_hash(&self, state: &mut dyn std::hash::Hasher);
+      }
+
+      impl DynEq for () {
+          fn dyn_eq(&self, _other: &dyn Any) -> bool {
+              true
+          }
+      }
+      impl DynOrd for () {
+          fn dyn_cmp(&self, _other: &dyn Any) -> Ordering {
+              Ordering::Equal
+          }
+      }
+      impl DynHash for () {
+          fn dyn_hash(&self, _state: &mut dyn std::hash::Hasher) {}
+      }
+
+      pub trait UserDataTrait: Any + Send + Sync + Debug + DynEq + DynOrd + DynHash {}
+      impl UserDataTrait for () {}
+
+      pub type ActionFn = Arc<dyn Fn(&mut Arc<dyn UserDataTrait>) -> bool + Send + Sync>;
+
+      #[derive(Debug, Copy, Clone)]
+      pub struct ParseStateEdgeContent {
+          pub state_id: StateID,
+      }
+
+      impl PartialEq for ParseStateEdgeContent {
+          fn eq(&self, other: &Self) -> bool {
+              self.state_id == other.state_id
+          }
+      }
+      impl Eq for ParseStateEdgeContent {}
+      impl PartialOrd for ParseStateEdgeContent {
+          fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+              self.state_id.partial_cmp(&other.state_id)
+          }
+      }
+      impl Ord for ParseStateEdgeContent {
+          fn cmp(&self, other: &Self) -> Ordering {
+              self.state_id.cmp(&other.state_id)
+          }
+      }
+      impl Hash for ParseStateEdgeContent {
+          fn hash<H: Hasher>(&self, state: &mut H) {
+              self.state_id.hash(state);
+          }
+      }
+
+      impl JSONConvertible for ParseStateEdgeContent {
+          fn to_json(&self) -> JSONNode {
+              let mut obj = StdMap::new();
+              obj.insert("state_id".to_string(), self.state_id.to_json());
+              JSONNode::Object(obj)
+          }
+          fn from_json(node: JSONNode) -> Result<Self, String> {
+              match node {
+                  JSONNode::Object(mut obj) => {
+                      let state_id = obj
+                          .remove("state_id")
+                          .ok_or_else(|| "Missing field state_id for ParseStateEdgeContent".to_string())
+                          .and_then(StateID::from_json)?;
+                      Ok(ParseStateEdgeContent { state_id })
+                  }
+                  _ => Err("Expected JSONNode::Object for ParseStateEdgeContent".to_string()),
+              }
+          }
+      }
+
+      pub type ParserGSS = LeveledGSS<ParseStateEdgeContent, Acc>;
+      pub type GSSStats = LeveledGSSStats<ParseStateEdgeContent, Acc>;
+
+      #[derive(Clone)]
+      pub struct ParseState {
+          pub stack: ParserGSS,
+      }
+
+      impl Debug for ParseState {
+          fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+              f.debug_struct("ParseState")
+                  // .field("stack", &self.stack)
+                  .finish()
+          }
+      }
+
+      impl PartialEq for ParseState {
+          fn eq(&self, other: &Self) -> bool {
+              todo!()
+          }
+      }
+
+      impl Eq for ParseState {}
+
+      impl ParseState {
+          pub fn new() -> Self {
+              ParseState { stack: LeveledGSS::empty() }
+          }
+
+          pub(crate) fn with_stack(stack: ParserGSS) -> Self {
+              ParseState { stack }
+          }
+      }
+
+      #[derive(Clone)]
+      pub struct GLRParser {
+          pub table: Table,
+          pub productions: Vec<Production>,
+          pub terminal_map: BiBTreeMap<Terminal, TerminalID>,
+          pub non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>,
+          pub item_set_map: BiBTreeMap<BTreeSet<Item>, StateID>,
+          pub start_state_id: StateID,
+          pub everything_state_id: StateID,
+          pub ignore_terminal_id: Option<TerminalID>,
+          pub substring_gotos: BTreeMap<NonTerminalID, SubstringGoto>,
+          pub reduce_goto_map: BTreeMap<NonTerminalID, BTreeMap<StateID, StateIDBV>>,
+          pub actions: BTreeMap<NonTerminalID, ActionFn>,
+      }
+
+      impl Display for GLRParser {
+          fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+              writeln!(f, "GLRParser:")?;
+              eprintln!("TODO:");
+              return Ok(());
+          }
+      }
+
+      impl JSONConvertible for GLRParser {
+          fn to_json(&self) -> JSONNode {
+              let mut obj = StdMap::new();
+              obj.insert("stage_7_table".to_string(), self.table.to_json());
+              obj.insert("productions".to_string(), self.productions.to_json());
+              obj.insert("terminal_map".to_string(), self.terminal_map.to_json());
+              obj.insert("non_terminal_map".to_string(), self.non_terminal_map.to_json());
+              obj.insert("item_set_map".to_string(), self.item_set_map.to_json());
+              obj.insert("start_state_id".to_string(), self.start_state_id.to_json());
+              obj.insert("everything_state_id".to_string(), self.everything_state_id.to_json());
+              obj.insert("ignore_terminal_id".to_string(), self.ignore_terminal_id.to_json());
+              obj.insert("substring_gotos".to_string(), self.substring_gotos.to_json());
+              obj.insert("reduce_goto_map".to_string(), self.reduce_goto_map.to_json());
+              // actions are provided at runtime.
+              JSONNode::Object(obj)
+          }
+
+          fn from_json(node: JSONNode) -> Result<Self, String> {
+              match node {
+                  JSONNode::Object(mut obj) => {
+                      let table = obj
+                          .remove("stage_7_table")
+                          .ok_or_else(|| "Missing field stage_7_table".to_string())
+                          .and_then(Table::from_json)?;
+                      let productions = obj
+                          .remove("productions")
+                          .ok_or_else(|| "Missing field productions".to_string())
+                          .and_then(Vec::<Production>::from_json)?;
+                      let _start_production_id =
+                          obj.remove("start_production_id").and_then(|n| usize::from_json(n).ok());
+                      let terminal_map = obj
+                          .remove("terminal_map")
+                          .ok_or_else(|| "Missing field terminal_map".to_string())
+                          .and_then(|n| BiBTreeMap::<Terminal, TerminalID>::from_json(n))?;
+                      let non_terminal_map = obj
+                          .remove("non_terminal_map")
+                          .ok_or_else(|| "Missing field non_terminal_map".to_string())
+                          .and_then(|n| BiBTreeMap::<NonTerminal, NonTerminalID>::from_json(n))?;
+                      let item_set_map = obj
+                          .remove("item_set_map")
+                          .ok_or_else(|| "Missing field item_set_map".to_string())
+                          .and_then(|n| BiBTreeMap::<BTreeSet<Item>, StateID>::from_json(n))?;
+                      let start_state_id = obj
+                          .remove("start_state_id")
+                          .ok_or_else(|| "Missing field start_state_id".to_string())
+                          .and_then(StateID::from_json)?;
+                      let everything_state_id = obj
+                          .remove("everything_state_id")
+                          .ok_or_else(|| "Missing field everything_state_id".to_string())
+                          .and_then(StateID::from_json)?;
+                      let ignore_terminal_id = obj
+                          .remove("ignore_terminal_id")
+                          .ok_or_else(|| "Missing field ignore_terminal_id for GLRParser".to_string())
+                          .and_then(Option::<TerminalID>::from_json)?;
+
+                      let substring_gotos = obj
+                          .remove("substring_gotos")
+                          .ok_or_else(|| "Missing field substring_gotos".to_string())
+                          .and_then(|n| BTreeMap::<NonTerminalID, SubstringGoto>::from_json(n))?;
+                      let reduce_goto_map = obj
+                          .remove("reduce_goto_map")
+                          .ok_or_else(|| "Missing field reduce_goto_map".to_string())
+                          .and_then(|n| BTreeMap::<NonTerminalID, BTreeMap<StateID, StateIDBV>>::from_json(n))?;
+
+                      Ok(GLRParser::new(
+                          table,
+                          productions,
+                          terminal_map,
+                          non_terminal_map,
+                          item_set_map,
+                          start_state_id,
+                          everything_state_id,
+                          BTreeMap::new(),
+                          ignore_terminal_id,
+                          substring_gotos,
+                          reduce_goto_map,
+                      ))
+                  }
+                  _ => Err("Expected JSONNode::Object for GLRParser".to_string()),
+              }
+          }
+      }
+
+      impl Debug for GLRParser {
+          fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+              f.debug_struct("GLRParser")
+                  .field("table_len", &self.table.len())
+                  .field("productions_len", &self.productions.len())
+                  .field("start_state_id", &self.start_state_id)
+                  .field("everything_state_id", &self.everything_state_id)
+                  .field("ignore_terminal_id", &self.ignore_terminal_id)
+                  .field("substring_gotos_size", &self.substring_gotos.len())
+                  .field("reduce_goto_map_size", &self.reduce_goto_map.len())
+                  .field("actions_size", &self.actions.len())
+                  .finish()
+          }
+      }
+
+      impl PartialEq for GLRParser {
+          fn eq(&self, other: &Self) -> bool {
+              self.table == other.table
+                  && self.productions == other.productions
+                  && self.terminal_map == other.terminal_map
+                  && self.non_terminal_map == other.non_terminal_map
+                  && self.item_set_map == other.item_set_map
+                  && self.start_state_id == other.start_state_id
+                  && self.everything_state_id == other.everything_state_id
+                  && self.ignore_terminal_id == other.ignore_terminal_id
+                  && self.substring_gotos == other.substring_gotos
+                  && self.reduce_goto_map == other.reduce_goto_map
+          }
+      }
+      impl Eq for GLRParser {}
+
+      impl GLRParser {
+          pub fn new(
+              table: Table,
+              productions: Vec<Production>,
+              terminal_map: BiBTreeMap<Terminal, TerminalID>,
+              non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>,
+              item_set_map: BiBTreeMap<BTreeSet<Item>, StateID>,
+              start_state_id: StateID,
+              everything_state_id: StateID,
+              actions: BTreeMap<NonTerminal, ActionFn>,
+              ignore_terminal_id: Option<TerminalID>,
+              substring_gotos: BTreeMap<NonTerminalID, SubstringGoto>,
+              reduce_goto_map: BTreeMap<NonTerminalID, BTreeMap<StateID, StateIDBV>>,
+          ) -> Self {
+              let converted_actions: BTreeMap<NonTerminalID, ActionFn> = actions
+                  .into_iter()
+                  .map(|(nt, func)| {
+                      let nt_id = non_terminal_map.get_by_left(&nt).unwrap_or_else(|| {
+                          panic!(
+                              "NonTerminal {:?} not found in non_terminal_map during GLRParser construction",
+                              nt
+                          )
+                      });
+                      (*nt_id, func)
+                  })
+                  .collect();
+
+              GLRParser {
+                  table,
+                  productions,
+                  terminal_map,
+                  non_terminal_map,
+                  item_set_map,
+                  start_state_id,
+                  everything_state_id,
+                  ignore_terminal_id,
+                  substring_gotos,
+                  reduce_goto_map,
+                  actions: converted_actions,
+              }
+          }
+
+          pub fn init_glr_parser(&self, _llm_vocab: Option<Arc<LLMVocab>>) -> GLRParserState {
+              self.init_glr_parser_with_acc()
+          }
+
+          pub fn init_glr_parser_with_acc(&self) -> GLRParserState {
+              let initial_parse_state = self.init_parse_state_with_acc();
+              GLRParserState { parser: self, stack: initial_parse_state.stack }
+          }
+
+          pub fn init_parse_state_with_acc(&self) -> ParseState {
+              let initial_edge = ParseStateEdgeContent { state_id: self.start_state_id };
+              let acc = Acc::new_fresh();
+              let gss = LeveledGSS::from_stacks(&[(vec![], acc)]).push(initial_edge);
+              ParseState::with_stack(gss)
+          }
+
+          pub fn init_parse_state_with_gss(&self, gss: LeveledGSS<ParseStateEdgeContent, Acc>) -> GLRParserState {
+              GLRParserState { parser: self, stack: gss }
+          }
+
+          pub fn init_glr_parser_null(&self, llm_vocab: Option<Arc<LLMVocab>>) -> GLRParserState {
+              let initial_parse_state = self.init_parse_state_with_acc();
+              GLRParserState { parser: self, stack: initial_parse_state.stack }
+          }
+
+          pub fn parse(&self, input: &[TerminalID], llm_vocab: Option<Arc<LLMVocab>>) -> GLRParserState {
+              let mut state = self.init_glr_parser(llm_vocab);
+              state.parse(input);
+              state
+          }
+
+          #[time_it]
+          pub fn process_token_gss(&self, gss: &ParserGSS, token: TerminalID) -> ParserGSS {
+              if Some(token) == self.ignore_terminal_id {
+                  return gss.clone();
+              }
+              if gss.is_empty() {
+                  return gss.clone();
+              }
+
+              let mut heads_by_state: BTreeMap<StateID, ParserGSS> = BTreeMap::new();
+              for edge in gss.peek() {
+                  let sid = edge.state_id;
+                  let iso = gss.isolate(Some(edge));
+                  heads_by_state.entry(sid).and_modify(|acc| *acc = acc.merge(&iso)).or_insert(iso);
+              }
+
+              let mut shifted: Vec<ParserGSS> = Vec::new();
+
+              while let Some((state_id, state_gss)) = heads_by_state.pop_first() {
+                  if let Some(row) = self.table.get(state_id) {
+                      row.handle_shifts_and_reduces_for_terminal(
+                          token,
+                          |to| shifted.push(state_gss.push(ParseStateEdgeContent { state_id: *to })),
+                          |nt_id, len, pids| {
+                              self.apply_reduces(&state_gss, *len, *nt_id, &mut heads_by_state);
+                          },
+                      );
+                  }
+              }
+
+              if shifted.is_empty() {
+                  return LeveledGSS::empty();
+              }
+              let mut it = shifted.into_iter();
+              let first = it.next().unwrap();
+              it.fold(first, |acc, g| acc.merge(&g))
+          }
+
+          fn apply_reduces(
+              &self,
+              state_gss: &ParserGSS,
+              len: usize,
+              nt: NonTerminalID,
+              heads_by_state: &mut BTreeMap<StateID, ParserGSS>,
+          ) {
+              let popped = state_gss.popn(len as isize);
+              if popped.is_empty() {
+                  return;
+              }
+
+              for edge in popped.peek() {
+                  let from_id = edge.state_id;
+                  if let Some(goto) = self.table[from_id].gotos.get(&nt) {
+                      if let Some(next_id) = goto.state_id {
+                          let iso = popped.isolate(Some(edge));
+                          let pushed = iso.push(ParseStateEdgeContent { state_id: next_id });
+                          heads_by_state
+                              .entry(next_id)
+                              .and_modify(|acc| *acc = acc.merge(&pushed))
+                              .or_insert(pushed);
+                      }
+                  }
+              }
+          }
+      }
+
+      #[derive(Clone)]
+      pub struct GLRParserState<'a> {
+          pub parser: &'a GLRParser,
+          pub stack: ParserGSS,
+      }
+
+      impl Debug for GLRParserState<'_> {
+          fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+              f.debug_struct("GLRParserState")
+                  .field("parser", &self.parser)
+                  // .field("stack", &self.stack)
+                  .finish()
+          }
+      }
+
+      impl PartialEq for GLRParserState<'_> {
+          fn eq(&self, other: &Self) -> bool {
+              self.stack.to_stacks() == other.stack.to_stacks()
+          }
+      }
+
+      impl Eq for GLRParserState<'_> {}
+
+      impl<'a> GLRParserState<'a> {
+          pub fn step(&mut self, token_id: TerminalID) {
+              self.stack = self.parser.process_token_gss(&self.stack, token_id);
+          }
+
+          pub fn parse(&mut self, input: &[TerminalID]) {
+              for &t in input {
+                  self.step(t);
+              }
+          }
+
+          pub fn is_ok(&self) -> bool {
+              !self.stack.is_empty()
+          }
+
+          pub fn stats(&self) -> GSSStats {
+              self.stack.stats()
+          }
+
+          pub fn log_gss(&self, phase: &str, token: TerminalID) {
+              if !GSS_LOGGING_ENABLED {
+                  return;
+              }
+              let stats = self.stats();
+              debug!(2, "{} - token {} - GSS stats: {:?}", phase, token.0, stats);
+              if let Some((path, _acc)) = self.stack.get_first_path() {
+                  let ids: Vec<_> = path.into_iter().map(|e| e.state_id.0).collect();
+                  debug!(3, "Sample path: {:?}", ids);
+              }
+          }
+
+          pub fn merge_with(&mut self, other: Self) {
+              self.stack = self.stack.merge(&other.stack);
+          }
       }
   diffs_applied_this_send: true
   core_guidance_inserted: true
@@ -8869,15 +9842,15 @@ messages:
 
       const EVERYTHING: bool = false;
 
-      type Stage1Table = BTreeMap<StateID, Stage1Row>;
-      type Stage2Table = BTreeMap<StateID, Stage2Row>;
-      type Stage3Table = BTreeMap<StateID, Stage3Row>;
-      type Stage4Table = BTreeMap<StateID, Stage4Row>;
-      type Stage5Table = BTreeMap<StateID, Stage5Row>;
-      pub(crate) type Stage6Table = BTreeMap<StateID, Stage6Row>;
-      type Stage7Table = BTreeMap<StateID, Stage7Row>;
-      type Stage8Table = BTreeMap<StateID, Row>;
-      pub type Table = BTreeMap<StateID, Row>;
+      type Stage1Table = Vec<Stage1Row>;
+      type Stage2Table = Vec<Stage2Row>;
+      type Stage3Table = Vec<Stage3Row>;
+      type Stage4Table = Vec<Stage4Row>;
+      type Stage5Table = Vec<Stage5Row>;
+      pub(crate) type Stage6Table = Vec<Stage6Row>;
+      type Stage7Table = Vec<Stage7Row>;
+      type Stage8Table = Vec<Row>;
+      pub type Table = Vec<Row>;
 
       #[derive(Debug, Clone)]
       struct Stage1Entry {
@@ -9155,7 +10128,7 @@ messages:
 
       #[derive(Debug, Clone, PartialEq, Eq)]
       pub struct Row {
-          pub shifts_and_reduces_full: ShiftsAndReducesFull,
+          shifts_and_reduces_full: ShiftsAndReducesFull,
           pub gotos: BTreeMap<NonTerminalID, Goto>,
       }
 
@@ -9318,7 +10291,7 @@ messages:
           let mut next_state_id = 0;
 
           let mut worklist = VecDeque::new();
-          let mut table: Stage1Table = BTreeMap::new();
+          let mut table: Stage1Table = Vec::new();
 
           item_set_map.insert(initial_item_set.clone(), StateID(next_state_id));
           next_state_id += 1;
@@ -9343,6 +10316,7 @@ messages:
 
           while let Some(item_set) = worklist.pop_front() {
               let state_id = *item_set_map.get_by_left(&item_set).unwrap();
+              assert_eq!(state_id.0, table.len());
               let closure = compute_closure(&item_set, &prods_by_lhs, productions);
               let splits = split_on_dot(&closure, productions);
 
@@ -9364,15 +10338,16 @@ messages:
                   };
                   row.insert(symbol, Stage1Entry { kernel: items_in_split, goto_id });
               }
-              table.insert(state_id, row);
+              table.push(row);
           }
 
           (table, item_set_map)
       }
 
       fn stage_2(stage_1_table: Stage1Table, productions: &[Production]) -> Stage2Result {
-          let mut stage_2_table = BTreeMap::new();
-          for (state_id, transitions) in stage_1_table {
+          let mut stage_2_table = Vec::with_capacity(stage_1_table.len());
+          for (state_idx, transitions) in stage_1_table.into_iter().enumerate() {
+              let state_id = StateID(state_idx);
               let mut shifts = BTreeMap::new();
               let mut gotos = BTreeMap::new();
               let mut reduces = BTreeSet::new();
@@ -9399,20 +10374,21 @@ messages:
                   }
               }
 
-              stage_2_table.insert(state_id, Stage2Row { shifts, gotos, reduces });
+              stage_2_table.push(Stage2Row { shifts, gotos, reduces });
           }
           stage_2_table
       }
 
       fn stage_3(stage_2_table: Stage2Table, productions: &[Production]) -> Stage3Result {
-          let mut stage_3_table = BTreeMap::new();
+          let mut stage_3_table = Vec::with_capacity(stage_2_table.len());
 
           let nullable_nonterminals = compute_nullable_nonterminals(productions);
           let first_sets = compute_first_sets_for_nonterminals(productions, &nullable_nonterminals);
           let follow_sets =
               compute_follow_sets_for_nonterminals(productions, &first_sets, &nullable_nonterminals);
 
-          for (state_id, row) in stage_2_table {
+          for (state_idx, row) in stage_2_table.into_iter().enumerate() {
+              let state_id = StateID(state_idx);
               let mut reduces: BTreeMap<Option<Terminal>, BTreeSet<Item>> = BTreeMap::new();
               for item in &row.reduces {
                   let lhs = &productions[item.production_id].lhs;
@@ -9422,8 +10398,7 @@ messages:
                       }
                   }
               }
-              stage_3_table.insert(
-                  state_id,
+              stage_3_table.push(
                   Stage3Row {
                       shifts: row.shifts,
                       gotos: row.gotos,
@@ -9436,8 +10411,9 @@ messages:
       }
 
       fn stage_4(stage_3_table: Stage3Table) -> Stage4Result {
-          let mut stage_4_table = BTreeMap::new();
-          for (state_id, row) in stage_3_table {
+          let mut stage_4_table = Vec::with_capacity(stage_3_table.len());
+          for (state_idx, row) in stage_3_table.into_iter().enumerate() {
+              let state_id = StateID(state_idx);
               let mut reduces = BTreeMap::new();
               for (terminal, item_set_for_terminal) in row.reduces {
                   let mut prod_ids = BTreeSet::new();
@@ -9446,8 +10422,7 @@ messages:
                   }
                   reduces.insert(terminal.clone(), prod_ids);
               }
-              stage_4_table.insert(
-                  state_id,
+              stage_4_table.push(
                   Stage4Row {
                       shifts: row.shifts,
                       gotos: row.gotos,
@@ -9462,10 +10437,11 @@ messages:
           stage_4_table: Stage4Table,
           terminal_map: &BiBTreeMap<Terminal, TerminalID>,
       ) -> Stage5Result {
-          let mut stage_5_table = BTreeMap::new();
+          let mut stage_5_table = Vec::with_capacity(stage_4_table.len());
 
           let all_terminals: BTreeSet<Terminal> = terminal_map.left_values().cloned().collect();
-          for (state_id, row) in stage_4_table {
+          for (state_idx, row) in stage_4_table.into_iter().enumerate() {
+              let state_id = StateID(state_idx);
               let Stage4Row {
                   shifts,
                   gotos,
@@ -9484,14 +10460,15 @@ messages:
                       }
                   }
               }
-              stage_5_table.insert(state_id, Stage5Row { shifts, gotos, reduces: new_reduces });
+              stage_5_table.push(Stage5Row { shifts, gotos, reduces: new_reduces });
           }
           stage_5_table
       }
 
       fn stage_6(stage_5_table: Stage5Table) -> Stage6Result {
-          let mut stage_6_table = BTreeMap::new();
-          for (state_id, row) in stage_5_table {
+          let mut stage_6_table = Vec::with_capacity(stage_5_table.len());
+          for (state_idx, row) in stage_5_table.into_iter().enumerate() {
+              let state_id = StateID(state_idx);
               let mut shifts_and_reduces = BTreeMap::new();
               let all_terminals: BTreeSet<_> =
                   row.shifts.keys().chain(row.reduces.keys()).cloned().collect();
@@ -9506,7 +10483,7 @@ messages:
                       },
                   );
               }
-              stage_6_table.insert(state_id, Stage6Row { shifts_and_reduces, gotos: row.gotos });
+              stage_6_table.push(Stage6Row { shifts_and_reduces, gotos: row.gotos });
           }
           stage_6_table
       }
@@ -9520,8 +10497,9 @@ messages:
       ) -> (Stage7Table, StateID, StateID) {
           let start_production_id = 0;
 
-          let mut stage_7_table = BTreeMap::new();
-          for (state_id, row) in stage_6_table {
+          let mut stage_7_table = Vec::with_capacity(stage_6_table.len());
+          for (state_idx, row) in stage_6_table.into_iter().enumerate() {
+              let state_id = StateID(state_idx);
               let mut shifts_and_reduces_full: ShiftsAndReducesFull = BTreeMap::new();
 
               for (terminal, action) in &row.shifts_and_reduces {
@@ -9566,7 +10544,7 @@ messages:
                   gotos.insert(non_terminal_id, goto);
               }
 
-              stage_7_table.insert(state_id, Stage7Row { shifts_and_reduces_full, gotos });
+              stage_7_table.push(Stage7Row { shifts_and_reduces_full, gotos });
           }
 
           let initial_item = Item {
@@ -9578,9 +10556,7 @@ messages:
 
           let start_non_terminal_id =
               *non_terminal_map.get_by_left(&productions[start_production_id].lhs).unwrap();
-          stage_7_table
-              .get_mut(&start_state_id)
-              .unwrap()
+          stage_7_table[start_state_id.0]
               .gotos
               .entry(start_non_terminal_id)
               .or_default()
@@ -9601,9 +10577,7 @@ messages:
               everything_state_id = *item_set_map
                   .get_by_left(&everything_item_set)
                   .expect("Everything item set not found in state map");
-              stage_7_table
-                  .get_mut(&everything_state_id)
-                  .unwrap()
+              stage_7_table[everything_state_id.0]
                   .gotos
                   .entry(start_non_terminal_id)
                   .or_default()
@@ -9616,14 +10590,14 @@ messages:
       }
 
       fn stage_8(stage_7_table: Stage7Table) -> Stage8Table {
-          let mut stage_8_table = BTreeMap::new();
-          for (state_id, row) in stage_7_table {
+          let mut stage_8_table = Vec::with_capacity(stage_7_table.len());
+          for (state_idx, row) in stage_7_table.into_iter().enumerate() {
+              let state_id = StateID(state_idx);
               let Stage7Row {
                   shifts_and_reduces_full,
                   gotos,
               } = row;
-              stage_8_table.insert(
-                  state_id,
+              stage_8_table.push(
                   Row {
                       shifts_and_reduces_full,
                       gotos,
@@ -9638,56 +10612,60 @@ messages:
           table: &Table,
           non_terminal_map: &BiBTreeMap<NonTerminal, NonTerminalID>,
       ) -> BTreeMap<NonTerminalID, SubstringGoto> {
-          let mut substring_gotos = BTreeMap::new();
-          let all_nt_ids: Vec<_> = non_terminal_map.right_values().copied().collect();
+          let num_nts = non_terminal_map.len();
+          let mut temp_gotos: Vec<SubstringGoto> = (0..num_nts)
+              .map(|_| SubstringGoto {
+                  accepting_sources: BTreeSet::new(),
+                  gotos: BTreeMap::new(),
+              })
+              .collect();
 
-          for &nt_id in &all_nt_ids {
-              let mut accepting_sources = BTreeSet::new();
-              let mut gotos: BTreeMap<StateID, BTreeSet<StateID>> = BTreeMap::new();
-
-              for (&source_state_id, row) in table {
-                  if let Some(goto) = row.gotos.get(&nt_id) {
-                      if goto.accept {
-                          accepting_sources.insert(source_state_id);
-                      }
-                      if let Some(goto_state_id) = goto.state_id {
-                          gotos.entry(goto_state_id).or_default().insert(source_state_id);
-                      }
+          for (source_idx, row) in table.iter().enumerate() {
+              let source_state_id = StateID(source_idx);
+              for (&nt_id, goto) in &row.gotos {
+                  let entry = &mut temp_gotos[nt_id.0];
+                  if goto.accept {
+                      entry.accepting_sources.insert(source_state_id);
                   }
-              }
-
-              if !accepting_sources.is_empty() || !gotos.is_empty() {
-                  substring_gotos.insert(
-                      nt_id,
-                      SubstringGoto {
-                          accepting_sources,
-                          gotos,
-                      },
-                  );
+                  if let Some(goto_state_id) = goto.state_id {
+                      entry.gotos.entry(goto_state_id).or_default().insert(source_state_id);
+                  }
               }
           }
 
-          substring_gotos
+          temp_gotos
+              .into_iter()
+              .enumerate()
+              .filter(|(_, g)| !g.accepting_sources.is_empty() || !g.gotos.is_empty())
+              .map(|(i, g)| (NonTerminalID(i), g))
+              .collect()
       }
 
       /// Inverted GOTO index: (reduce non-terminal, goto state) -> bitvector of source states.
-      pub fn stage_10(table: &Table) -> BTreeMap<NonTerminalID, BTreeMap<StateID, StateIDBV>> {
-          let mut reduce_goto_map: BTreeMap<NonTerminalID, BTreeMap<StateID, StateIDBV>> =
-              BTreeMap::new();
+      pub fn stage_10(
+          table: &Table,
+          num_nts: usize,
+      ) -> BTreeMap<NonTerminalID, BTreeMap<StateID, StateIDBV>> {
+          let mut temp_map: Vec<BTreeMap<StateID, StateIDBV>> = vec![BTreeMap::new(); num_nts];
 
-          for (&source_state_id, row) in table {
+          for (source_idx, row) in table.iter().enumerate() {
+              let source_state_id = StateID(source_idx);
               for (&nt_id, goto) in &row.gotos {
                   if let Some(goto_state_id) = goto.state_id {
-                      reduce_goto_map
-                          .entry(nt_id)
-                          .or_default()
+                      temp_map[nt_id.0]
                           .entry(goto_state_id)
                           .or_default()
                           .insert(source_state_id.0);
                   }
               }
           }
-          reduce_goto_map
+
+          temp_map
+              .into_iter()
+              .enumerate()
+              .filter(|(_, m)| !m.is_empty())
+              .map(|(i, m)| (NonTerminalID(i), m))
+              .collect()
       }
 
       fn print_memory_usage(label: &str) {
@@ -9807,7 +10785,7 @@ messages:
 
           crate::debug!(2, "Stage 10: Precomputing reduce goto map");
           let start = std::time::Instant::now();
-          let reduce_goto_map = stage_10(&final_table);
+          let reduce_goto_map = stage_10(&final_table, non_terminal_map.len());
           crate::debug!(2, "Stage 10 done in {:.2?}", start.elapsed());
           print_memory_usage("After Stage 10 (reduce goto map)");
 
@@ -9887,83 +10865,491 @@ messages:
     metadata:
       filename: src/glr/table.rs
   - user: |-
-      ```
-      Constructing GrammarConstraint...
-        1127  Building tokenizer from definition
-      src/finite_automata.rs
-         785  Building NFA...
-         790  Converting NFA to DFA...
-         793  Converted NFA to DFA in 11.15s
-         795  Minimizing DFA...
-         800  Done!
-      src/interface/interface.rs
-        1132  Building GLR parser from definition
-      src/glr/table.rs
-         865  Number of productions: 20984
-         851  Memory usage at 'Start of parser generation': Physical: 185 MB
-         868  Validating initial grammar
-      src/glr/automaton.rs
-         187  Computing nullable non-terminals
-         195  Computed nullable non-terminals in 21.29ms
-         187  Computing nullable non-terminals
-         195  Computed nullable non-terminals in 20.43ms
-      src/glr/table.rs
-         871  Validated grammar in 77.58ms
-         851  Memory usage at 'After validation': Physical: 196 MB
-         877  Removing productions with undefined non-terminals
-         881  Removed undefined productions in 5.95ms
-         851  Memory usage at 'After removing undefined': Physical: 199 MB
-         851  Memory usage at 'After right recursion resolution': Physical: 206 MB
-         851  Memory usage at 'After inlining null productions': Physical: 218 MB
-         907  Number of productions: 35970
-         851  Memory usage at 'Before Stage 1': Physical: 218 MB
-         910  Stage 1
-         913  Stage 1 done in 34.74s
-         851  Memory usage at 'After Stage 1': Physical: 1293 MB
-         915  Stage 2
-         918  Stage 2 done in 9.57s
-         851  Memory usage at 'After Stage 2': Physical: 2963 MB
-         920  Stage 3
-      src/glr/automaton.rs
-         187  Computing nullable non-terminals
-         195  Computed nullable non-terminals in 26.67ms
-         203  Computing first sets for non-terminals
-         281  Computed first sets in 1.47s
-         290  Computing follow sets for non-terminals
-         388  Computed follow sets in 25.99ms
-      src/glr/table.rs
-         923  Stage 3 done in 1.72s
-         851  Memory usage at 'After Stage 3': Physical: 2730 MB
-         925  Stage 4
-         928  Stage 4 done in 12.97ms
-         851  Memory usage at 'After Stage 4': Physical: 2759 MB
-         930  Stage 5
-         933  Stage 5 done in 14.08ms
-         851  Memory usage at 'After Stage 5': Physical: 2768 MB
-         935  Stage 6
-         938  Stage 6 done in 4.61s
-         851  Memory usage at 'After Stage 6': Physical: 2252 MB
-         940  Stage 7
-         949  Stage 7 done in 8.55s
-         851  Memory usage at 'After Stage 7': Physical: 2330 MB
-         951  Stage 8
-         954  Stage 8 done in 7.62ms
-         851  Memory usage at 'After Stage 8 (final table)': Physical: 2334 MB
-         957  Stage 9: Precomputing substring gotos
-         960  Stage 9 done in 21.54s
-         851  Memory usage at 'After Stage 9 (substring gotos)': Physical: 882 MB
-         963  Stage 10: Precomputing reduce goto map
-      ```
+      ```rust "src/glr/parser.rs"
+      use crate::constraint::{LLMVocab, StateIDBV};
+      use crate::datastructures::leveled_gss::{LeveledGSS, LeveledGSSStats};
+      use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
+      use crate::glr::items::{Item};
+      use crate::glr::table::{
+          Goto, NonTerminalID, Row, Stage7ShiftsAndReducesLookaheadValue, StateID, SubstringGoto, Table,
+          TerminalID,
+      };
+      use crate::json_serialization::{JSONConvertible, JSONNode};
+      use crate::profiler::GSS_LOGGING_ENABLED;
+      use crate::{debug, hit};
+      use bimap::BiBTreeMap;
+      use profiler_macro::time_it;
+      use std::any::Any;
+      use std::cmp::Ordering;
+      use std::collections::BTreeMap as StdMap;
+      use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+      use std::fmt::{self, Debug, Display, Formatter, Write};
+      use std::hash::{Hash, Hasher};
+      use std::sync::Arc;
+      use crate::datastructures::gss_acc::Acc;
 
-      I have a grammar with 50k productions. Table building is far too slow for it, in general. Stages are taking too long. We need it to be under 100 ms.
-      In fact, the grammar in question is generated using scripts/generate_diff_grammar.py of a 3k line source file.
-      I've had trouble in hte past trying to solve this task. It's easy to make changes that result in e.g. stage 3 getting really inefficient, blowing up, never finishing.
-      Right now, well, you can see which stages are slowing us down. But there's no timing for "Stage 10: Precomputing reduce goto map" that's because stage 10 never finishes. It consumes all RAM on my system.
-      Don't focus solely on stage 10, though. Fix it, but also fix the other parts.
-      Keep the code succinct.
-      Should be elegant and fast. The current code is quite elegant. It's easy to see how stages flow into one another, strong SOC. Try not to lose the charm. The final code can be even better.
-      Change anything you need. I'll update downsteam code myself if needed.
-      Think mathematically and deeply. Hypothesise. State your hypotheses. Rigorously prove them and the validity of your output.
+      /// A trait to provide a lazily-evaluated `expect`.
+      pub trait ExpectElse<T> {
+          fn expect_else<F>(self, f: F) -> T
+          where
+              F: FnOnce() -> String;
+      }
+
+      impl<T> ExpectElse<T> for Option<T> {
+          #[inline]
+          #[track_caller]
+          fn expect_else<F>(self, f: F) -> T
+          where
+              F: FnOnce() -> String,
+          {
+              match self {
+                  Some(v) => v,
+                  None => panic!("{}", f()),
+              }
+          }
+      }
+
+      pub trait DynEq {
+          fn dyn_eq(&self, other: &dyn Any) -> bool;
+      }
+      pub trait DynOrd {
+          fn dyn_cmp(&self, other: &dyn Any) -> Ordering;
+      }
+      pub trait DynHash {
+          fn dyn_hash(&self, state: &mut dyn std::hash::Hasher);
+      }
+
+      impl DynEq for () {
+          fn dyn_eq(&self, _other: &dyn Any) -> bool {
+              true
+          }
+      }
+      impl DynOrd for () {
+          fn dyn_cmp(&self, _other: &dyn Any) -> Ordering {
+              Ordering::Equal
+          }
+      }
+      impl DynHash for () {
+          fn dyn_hash(&self, _state: &mut dyn std::hash::Hasher) {}
+      }
+
+      pub trait UserDataTrait: Any + Send + Sync + Debug + DynEq + DynOrd + DynHash {}
+      impl UserDataTrait for () {}
+
+      pub type ActionFn = Arc<dyn Fn(&mut Arc<dyn UserDataTrait>) -> bool + Send + Sync>;
+
+      #[derive(Debug, Copy, Clone)]
+      pub struct ParseStateEdgeContent {
+          pub state_id: StateID,
+      }
+
+      impl PartialEq for ParseStateEdgeContent {
+          fn eq(&self, other: &Self) -> bool {
+              self.state_id == other.state_id
+          }
+      }
+      impl Eq for ParseStateEdgeContent {}
+      impl PartialOrd for ParseStateEdgeContent {
+          fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+              self.state_id.partial_cmp(&other.state_id)
+          }
+      }
+      impl Ord for ParseStateEdgeContent {
+          fn cmp(&self, other: &Self) -> Ordering {
+              self.state_id.cmp(&other.state_id)
+          }
+      }
+      impl Hash for ParseStateEdgeContent {
+          fn hash<H: Hasher>(&self, state: &mut H) {
+              self.state_id.hash(state);
+          }
+      }
+
+      impl JSONConvertible for ParseStateEdgeContent {
+          fn to_json(&self) -> JSONNode {
+              let mut obj = StdMap::new();
+              obj.insert("state_id".to_string(), self.state_id.to_json());
+              JSONNode::Object(obj)
+          }
+          fn from_json(node: JSONNode) -> Result<Self, String> {
+              match node {
+                  JSONNode::Object(mut obj) => {
+                      let state_id = obj
+                          .remove("state_id")
+                          .ok_or_else(|| "Missing field state_id for ParseStateEdgeContent".to_string())
+                          .and_then(StateID::from_json)?;
+                      Ok(ParseStateEdgeContent { state_id })
+                  }
+                  _ => Err("Expected JSONNode::Object for ParseStateEdgeContent".to_string()),
+              }
+          }
+      }
+
+      pub type ParserGSS = LeveledGSS<ParseStateEdgeContent, Acc>;
+      pub type GSSStats = LeveledGSSStats<ParseStateEdgeContent, Acc>;
+
+      #[derive(Clone)]
+      pub struct ParseState {
+          pub stack: ParserGSS,
+      }
+
+      impl Debug for ParseState {
+          fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+              f.debug_struct("ParseState")
+                  // .field("stack", &self.stack)
+                  .finish()
+          }
+      }
+
+      impl PartialEq for ParseState {
+          fn eq(&self, other: &Self) -> bool {
+              todo!()
+          }
+      }
+
+      impl Eq for ParseState {}
+
+      impl ParseState {
+          pub fn new() -> Self {
+              ParseState { stack: LeveledGSS::empty() }
+          }
+
+          pub(crate) fn with_stack(stack: ParserGSS) -> Self {
+              ParseState { stack }
+          }
+      }
+
+      #[derive(Clone)]
+      pub struct GLRParser {
+          pub table: Table,
+          pub productions: Vec<Production>,
+          pub terminal_map: BiBTreeMap<Terminal, TerminalID>,
+          pub non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>,
+          pub item_set_map: BiBTreeMap<BTreeSet<Item>, StateID>,
+          pub start_state_id: StateID,
+          pub everything_state_id: StateID,
+          pub ignore_terminal_id: Option<TerminalID>,
+          pub substring_gotos: BTreeMap<NonTerminalID, SubstringGoto>,
+          pub reduce_goto_map: BTreeMap<NonTerminalID, BTreeMap<StateID, StateIDBV>>,
+          pub actions: BTreeMap<NonTerminalID, ActionFn>,
+      }
+
+      impl Display for GLRParser {
+          fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+              writeln!(f, "GLRParser:")?;
+              eprintln!("TODO:");
+              return Ok(());
+          }
+      }
+
+      impl JSONConvertible for GLRParser {
+          fn to_json(&self) -> JSONNode {
+              let mut obj = StdMap::new();
+              obj.insert("stage_7_table".to_string(), self.table.to_json());
+              obj.insert("productions".to_string(), self.productions.to_json());
+              obj.insert("terminal_map".to_string(), self.terminal_map.to_json());
+              obj.insert("non_terminal_map".to_string(), self.non_terminal_map.to_json());
+              obj.insert("item_set_map".to_string(), self.item_set_map.to_json());
+              obj.insert("start_state_id".to_string(), self.start_state_id.to_json());
+              obj.insert("everything_state_id".to_string(), self.everything_state_id.to_json());
+              obj.insert("ignore_terminal_id".to_string(), self.ignore_terminal_id.to_json());
+              // substring_gotos, reduce_goto_map, actions are recomputed or provided at runtime.
+              JSONNode::Object(obj)
+          }
+
+          fn from_json(node: JSONNode) -> Result<Self, String> {
+              match node {
+                  JSONNode::Object(mut obj) => {
+                      let table = obj
+                          .remove("stage_7_table")
+                          .ok_or_else(|| "Missing field stage_7_table".to_string())
+                          .and_then(Table::from_json)?;
+                      let productions = obj
+                          .remove("productions")
+                          .ok_or_else(|| "Missing field productions".to_string())
+                          .and_then(Vec::<Production>::from_json)?;
+                      let _start_production_id =
+                          obj.remove("start_production_id").and_then(|n| usize::from_json(n).ok());
+                      let terminal_map = obj
+                          .remove("terminal_map")
+                          .ok_or_else(|| "Missing field terminal_map".to_string())
+                          .and_then(|n| BiBTreeMap::<Terminal, TerminalID>::from_json(n))?;
+                      let non_terminal_map = obj
+                          .remove("non_terminal_map")
+                          .ok_or_else(|| "Missing field non_terminal_map".to_string())
+                          .and_then(|n| BiBTreeMap::<NonTerminal, NonTerminalID>::from_json(n))?;
+                      let item_set_map = obj
+                          .remove("item_set_map")
+                          .ok_or_else(|| "Missing field item_set_map".to_string())
+                          .and_then(|n| BiBTreeMap::<BTreeSet<Item>, StateID>::from_json(n))?;
+                      let start_state_id = obj
+                          .remove("start_state_id")
+                          .ok_or_else(|| "Missing field start_state_id".to_string())
+                          .and_then(StateID::from_json)?;
+                      let everything_state_id = obj
+                          .remove("everything_state_id")
+                          .ok_or_else(|| "Missing field everything_state_id".to_string())
+                          .and_then(StateID::from_json)?;
+                      let ignore_terminal_id = obj
+                          .remove("ignore_terminal_id")
+                          .ok_or_else(|| "Missing field ignore_terminal_id for GLRParser".to_string())
+                          .and_then(Option::<TerminalID>::from_json)?;
+
+                      let substring_gotos = crate::glr::table::stage_9(&table, &non_terminal_map);
+                      let reduce_goto_map = crate::glr::table::stage_10(&table);
+                      Ok(GLRParser::new(
+                          table,
+                          productions,
+                          terminal_map,
+                          non_terminal_map,
+                          item_set_map,
+                          start_state_id,
+                          everything_state_id,
+                          BTreeMap::new(),
+                          ignore_terminal_id,
+                          substring_gotos,
+                          reduce_goto_map,
+                      ))
+                  }
+                  _ => Err("Expected JSONNode::Object for GLRParser".to_string()),
+              }
+          }
+      }
+
+      impl Debug for GLRParser {
+          fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+              f.debug_struct("GLRParser")
+                  .field("table_len", &self.table.len())
+                  .field("productions_len", &self.productions.len())
+                  .field("start_state_id", &self.start_state_id)
+                  .field("everything_state_id", &self.everything_state_id)
+                  .field("ignore_terminal_id", &self.ignore_terminal_id)
+                  .field("substring_gotos_size", &self.substring_gotos.len())
+                  .field("reduce_goto_map_size", &self.reduce_goto_map.len())
+                  .field("actions_size", &self.actions.len())
+                  .finish()
+          }
+      }
+
+      impl PartialEq for GLRParser {
+          fn eq(&self, other: &Self) -> bool {
+              self.table == other.table
+                  && self.productions == other.productions
+                  && self.terminal_map == other.terminal_map
+                  && self.non_terminal_map == other.non_terminal_map
+                  && self.item_set_map == other.item_set_map
+                  && self.start_state_id == other.start_state_id
+                  && self.everything_state_id == other.everything_state_id
+                  && self.ignore_terminal_id == other.ignore_terminal_id
+                  && self.substring_gotos == other.substring_gotos
+                  && self.reduce_goto_map == other.reduce_goto_map
+          }
+      }
+      impl Eq for GLRParser {}
+
+      impl GLRParser {
+          pub fn new(
+              table: Table,
+              productions: Vec<Production>,
+              terminal_map: BiBTreeMap<Terminal, TerminalID>,
+              non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>,
+              item_set_map: BiBTreeMap<BTreeSet<Item>, StateID>,
+              start_state_id: StateID,
+              everything_state_id: StateID,
+              actions: BTreeMap<NonTerminal, ActionFn>,
+              ignore_terminal_id: Option<TerminalID>,
+              substring_gotos: BTreeMap<NonTerminalID, SubstringGoto>,
+              reduce_goto_map: BTreeMap<NonTerminalID, BTreeMap<StateID, StateIDBV>>,
+          ) -> Self {
+              let converted_actions: BTreeMap<NonTerminalID, ActionFn> = actions
+                  .into_iter()
+                  .map(|(nt, func)| {
+                      let nt_id = non_terminal_map.get_by_left(&nt).unwrap_or_else(|| {
+                          panic!(
+                              "NonTerminal {:?} not found in non_terminal_map during GLRParser construction",
+                              nt
+                          )
+                      });
+                      (*nt_id, func)
+                  })
+                  .collect();
+
+              GLRParser {
+                  table,
+                  productions,
+                  terminal_map,
+                  non_terminal_map,
+                  item_set_map,
+                  start_state_id,
+                  everything_state_id,
+                  ignore_terminal_id,
+                  substring_gotos,
+                  reduce_goto_map,
+                  actions: converted_actions,
+              }
+          }
+
+          pub fn init_glr_parser(&self, _llm_vocab: Option<Arc<LLMVocab>>) -> GLRParserState {
+              self.init_glr_parser_with_acc()
+          }
+
+          pub fn init_glr_parser_with_acc(&self) -> GLRParserState {
+              let initial_parse_state = self.init_parse_state_with_acc();
+              GLRParserState { parser: self, stack: initial_parse_state.stack }
+          }
+
+          pub fn init_parse_state_with_acc(&self) -> ParseState {
+              let initial_edge = ParseStateEdgeContent { state_id: self.start_state_id };
+              let acc = Acc::new_fresh();
+              let gss = LeveledGSS::from_stacks(&[(vec![], acc)]).push(initial_edge);
+              ParseState::with_stack(gss)
+          }
+
+          pub fn init_parse_state_with_gss(&self, gss: LeveledGSS<ParseStateEdgeContent, Acc>) -> GLRParserState {
+              GLRParserState { parser: self, stack: gss }
+          }
+
+          pub fn init_glr_parser_null(&self, llm_vocab: Option<Arc<LLMVocab>>) -> GLRParserState {
+              let initial_parse_state = self.init_parse_state_with_acc();
+              GLRParserState { parser: self, stack: initial_parse_state.stack }
+          }
+
+          pub fn parse(&self, input: &[TerminalID], llm_vocab: Option<Arc<LLMVocab>>) -> GLRParserState {
+              let mut state = self.init_glr_parser(llm_vocab);
+              state.parse(input);
+              state
+          }
+
+          #[time_it]
+          pub fn process_token_gss(&self, gss: &ParserGSS, token: TerminalID) -> ParserGSS {
+              if Some(token) == self.ignore_terminal_id {
+                  return gss.clone();
+              }
+              if gss.is_empty() {
+                  return gss.clone();
+              }
+
+              let mut heads_by_state: BTreeMap<StateID, ParserGSS> = BTreeMap::new();
+              for edge in gss.peek() {
+                  let sid = edge.state_id;
+                  let iso = gss.isolate(Some(edge));
+                  heads_by_state.entry(sid).and_modify(|acc| *acc = acc.merge(&iso)).or_insert(iso);
+              }
+
+              let mut shifted: Vec<ParserGSS> = Vec::new();
+
+              while let Some((state_id, state_gss)) = heads_by_state.pop_first() {
+                  if let Some(row) = self.table.get(&state_id) {
+                      row.handle_shifts_and_reduces_for_terminal(
+                          token,
+                          |to| shifted.push(state_gss.push(ParseStateEdgeContent { state_id: *to })),
+                          |nt_id, len, pids| {
+                              self.apply_reduces(&state_gss, *len, *nt_id, &mut heads_by_state);
+                          },
+                      );
+                  }
+              }
+
+              if shifted.is_empty() {
+                  return LeveledGSS::empty();
+              }
+              let mut it = shifted.into_iter();
+              let first = it.next().unwrap();
+              it.fold(first, |acc, g| acc.merge(&g))
+          }
+
+          fn apply_reduces(
+              &self,
+              state_gss: &ParserGSS,
+              len: usize,
+              nt: NonTerminalID,
+              heads_by_state: &mut BTreeMap<StateID, ParserGSS>,
+          ) {
+              let popped = state_gss.popn(len as isize);
+              if popped.is_empty() {
+                  return;
+              }
+
+              for edge in popped.peek() {
+                  let from_id = edge.state_id;
+                  if let Some(goto) = self.table[&from_id].gotos.get(&nt) {
+                      if let Some(next_id) = goto.state_id {
+                          let iso = popped.isolate(Some(edge));
+                          let pushed = iso.push(ParseStateEdgeContent { state_id: next_id });
+                          heads_by_state
+                              .entry(next_id)
+                              .and_modify(|acc| *acc = acc.merge(&pushed))
+                              .or_insert(pushed);
+                      }
+                  }
+              }
+          }
+      }
+
+      #[derive(Clone)]
+      pub struct GLRParserState<'a> {
+          pub parser: &'a GLRParser,
+          pub stack: ParserGSS,
+      }
+
+      impl Debug for GLRParserState<'_> {
+          fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+              f.debug_struct("GLRParserState")
+                  .field("parser", &self.parser)
+                  // .field("stack", &self.stack)
+                  .finish()
+          }
+      }
+
+      impl PartialEq for GLRParserState<'_> {
+          fn eq(&self, other: &Self) -> bool {
+              self.stack.to_stacks() == other.stack.to_stacks()
+          }
+      }
+
+      impl Eq for GLRParserState<'_> {}
+
+      impl<'a> GLRParserState<'a> {
+          pub fn step(&mut self, token_id: TerminalID) {
+              self.stack = self.parser.process_token_gss(&self.stack, token_id);
+          }
+
+          pub fn parse(&mut self, input: &[TerminalID]) {
+              for &t in input {
+                  self.step(t);
+              }
+          }
+
+          pub fn is_ok(&self) -> bool {
+              !self.stack.is_empty()
+          }
+
+          pub fn stats(&self) -> GSSStats {
+              self.stack.stats()
+          }
+
+          pub fn log_gss(&self, phase: &str, token: TerminalID) {
+              if !GSS_LOGGING_ENABLED {
+                  return;
+              }
+              let stats = self.stats();
+              debug!(2, "{} - token {} - GSS stats: {:?}", phase, token.0, stats);
+              if let Some((path, _acc)) = self.stack.get_first_path() {
+                  let ids: Vec<_> = path.into_iter().map(|e| e.state_id.0).collect();
+                  debug!(3, "Sample path: {:?}", ids);
+              }
+          }
+
+          pub fn merge_with(&mut self, other: Self) {
+              self.stack = self.stack.merge(&other.stack);
+          }
+      }
+
+      ```
+    metadata:
+      filename: src/glr/parser.rs
+  - user: Modify parser.rs so that it doesn't use stage_9 or stage_10 but instead
+      serializes that data to the JSON too.
     metadata:
   - user: |-
       Mode instruction: For this turn, first provide step-by-step instructions, and then provide git diffs in the same response.
@@ -9983,372 +11369,51 @@ messages:
       mode: git-llm
       phase: default
   - assistant: |-
-      To address the performance issues and the Out-Of-Memory (OOM) error in Stage 10, we will optimize the core data structures and algorithms in `src/glr/table.rs`.
+      Here are the step-by-step instructions to modify `src/glr/parser.rs`:
 
-      **Key Changes:**
+      1.  **Open** `src/glr/parser.rs`.
+      2.  **Locate** the `impl JSONConvertible for GLRParser` block.
+      3.  **Modify** the `to_json` method:
+          *   Add lines to insert `substring_gotos` and `reduce_goto_map` into the JSON object.
+          *   Update the comment regarding recomputed fields.
+      4.  **Modify** the `from_json` method:
+          *   Remove the calls to `crate::glr::table::stage_9` and `crate::glr::table::stage_10`.
+          *   Add logic to deserialize `substring_gotos` and `reduce_goto_map` directly from the JSON object.
 
-      1.  **Switch from `BTreeMap` to `Vec` for Tables:**
-          The parser tables (`Stage1Table` through `Table`) currently use `BTreeMap<StateID, Row>`. Since `StateID`s are assigned sequentially starting from 0, we can replace these maps with `Vec<Row>`. This eliminates the $O(\log N)$ overhead for every state access and iteration, which is significant given 50k+ states.
-
-      2.  **Optimize Stage 9 (Substring Gotos):**
-          The current implementation iterates over all non-terminals and then all states ($O(|NT| \times |States|)$), which is extremely slow ($6000 \times 50000 \approx 3 \times 10^8$ iterations). We will invert the loop to iterate over the table once ($O(|States| \times \text{fanout})$) and populate a vector of results.
-
-      3.  **Optimize Stage 10 (Reduce Goto Map):**
-          The current implementation also iterates over the table but performs nested `BTreeMap` lookups in the inner loop, causing the OOM and infinite runtime. We will invert the loop and use a pre-allocated `Vec` to accumulate results, avoiding the overhead of searching the outer `BTreeMap` millions of times.
-
-      **Step-by-step Instructions:**
-
-      1.  **Modify `src/glr/table.rs`**:
-          *   Change all `StageXTable` type definitions from `BTreeMap<StateID, ...>` to `Vec<...>`.
-          *   Update `stage_1` to initialize `table` as a `Vec`, use `push` instead of `insert`, and assert that `state_id` matches `table.len()` (ensuring order).
-          *   Update `stage_2` through `stage_8` to iterate over the vector using `.into_iter().enumerate()` to retrieve the `StateID`, and `push` results to a new vector.
-          *   Update `stage_7` to access the table using array indexing `[start_state_id.0]` instead of map lookup.
-          *   Rewrite `stage_9` to use loop inversion and a temporary `Vec` buffer.
-          *   Rewrite `stage_10` to use loop inversion and a temporary `Vec` buffer. Update its signature to accept `num_nts`.
-          *   Update `generate_glr_parser_with_maps` to pass `non_terminal_map.len()` to the updated `stage_10`.
-
-      ```diff "src/glr/table.rs"
-      --- a/src/glr/table.rs
-      +++ b/src/glr/table.rs
-      @@ -24,13 +24,13 @@
-       
-       const EVERYTHING: bool = false;
-       
-      -type Stage1Table = BTreeMap<StateID, Stage1Row>;
-      -type Stage2Table = BTreeMap<StateID, Stage2Row>;
-      -type Stage3Table = BTreeMap<StateID, Stage3Row>;
-      -type Stage4Table = BTreeMap<StateID, Stage4Row>;
-      -type Stage5Table = BTreeMap<StateID, Stage5Row>;
-      -pub(crate) type Stage6Table = BTreeMap<StateID, Stage6Row>;
-      -type Stage7Table = BTreeMap<StateID, Stage7Row>;
-      -type Stage8Table = BTreeMap<StateID, Row>;
-      -pub type Table = BTreeMap<StateID, Row>;
-      +type Stage1Table = Vec<Stage1Row>;
-      +type Stage2Table = Vec<Stage2Row>;
-      +type Stage3Table = Vec<Stage3Row>;
-      +type Stage4Table = Vec<Stage4Row>;
-      +type Stage5Table = Vec<Stage5Row>;
-      +pub(crate) type Stage6Table = Vec<Stage6Row>;
-      +type Stage7Table = Vec<Stage7Row>;
-      +type Stage8Table = Vec<Row>;
-      +pub type Table = Vec<Row>;
-       
-       #[derive(Debug, Clone)]
-      @@ -453,7 +453,7 @@
-           let mut next_state_id = 0;
-       
-           let mut worklist = VecDeque::new();
-      -    let mut table: Stage1Table = BTreeMap::new();
-      +    let mut table: Stage1Table = Vec::new();
-       
-           item_set_map.insert(initial_item_set.clone(), StateID(next_state_id));
-           next_state_id += 1;
-      @@ -478,6 +478,7 @@
-           while let Some(item_set) = worklist.pop_front() {
-               let state_id = *item_set_map.get_by_left(&item_set).unwrap();
-      +        assert_eq!(state_id.0, table.len());
-               let closure = compute_closure(&item_set, &prods_by_lhs, productions);
-               let splits = split_on_dot(&closure, productions);
-       
-      @@ -499,15 +500,16 @@
-                   };
-                   row.insert(symbol, Stage1Entry { kernel: items_in_split, goto_id });
-               }
-      -        table.insert(state_id, row);
-      +        table.push(row);
+      ```diff "src/glr/parser.rs"
+      diff --git a/src/glr/parser.rs b/src/glr/parser.rs
+      index 1234567..89abcdef 100644
+      --- a/src/glr/parser.rs
+      +++ b/src/glr/parser.rs
+      @@ -186,7 +186,9 @@ impl JSONConvertible for GLRParser {
+               obj.insert("start_state_id".to_string(), self.start_state_id.to_json());
+               obj.insert("everything_state_id".to_string(), self.everything_state_id.to_json());
+               obj.insert("ignore_terminal_id".to_string(), self.ignore_terminal_id.to_json());
+      -        // substring_gotos, reduce_goto_map, actions are recomputed or provided at runtime.
+      +        obj.insert("substring_gotos".to_string(), self.substring_gotos.to_json());
+      +        obj.insert("reduce_goto_map".to_string(), self.reduce_goto_map.to_json());
+      +        // actions are provided at runtime.
+               JSONNode::Object(obj)
            }
        
-           (table, item_set_map)
-       }
+      @@ -228,8 +230,14 @@ impl JSONConvertible for GLRParser {
+                           .ok_or_else(|| "Missing field ignore_terminal_id for GLRParser".to_string())
+                           .and_then(Option::<TerminalID>::from_json)?;
        
-       fn stage_2(stage_1_table: Stage1Table, productions: &[Production]) -> Stage2Result {
-      -    let mut stage_2_table = BTreeMap::new();
-      -    for (state_id, transitions) in stage_1_table {
-      +    let mut stage_2_table = Vec::with_capacity(stage_1_table.len());
-      +    for (state_idx, transitions) in stage_1_table.into_iter().enumerate() {
-      +        let state_id = StateID(state_idx);
-               let mut shifts = BTreeMap::new();
-               let mut gotos = BTreeMap::new();
-               let mut reduces = BTreeSet::new();
-      @@ -534,19 +536,20 @@
-                   }
-               }
-       
-      -        stage_2_table.insert(state_id, Stage2Row { shifts, gotos, reduces });
-      +        stage_2_table.push(Stage2Row { shifts, gotos, reduces });
-           }
-           stage_2_table
-       }
-       
-       fn stage_3(stage_2_table: Stage2Table, productions: &[Production]) -> Stage3Result {
-      -    let mut stage_3_table = BTreeMap::new();
-      +    let mut stage_3_table = Vec::with_capacity(stage_2_table.len());
-       
-           let nullable_nonterminals = compute_nullable_nonterminals(productions);
-           let first_sets = compute_first_sets_for_nonterminals(productions, &nullable_nonterminals);
-           let follow_sets =
-               compute_follow_sets_for_nonterminals(productions, &first_sets, &nullable_nonterminals);
-       
-      -    for (state_id, row) in stage_2_table {
-      +    for (state_idx, row) in stage_2_table.into_iter().enumerate() {
-      +        let state_id = StateID(state_idx);
-               let mut reduces: BTreeMap<Option<Terminal>, BTreeSet<Item>> = BTreeMap::new();
-               for item in &row.reduces {
-                   let lhs = &productions[item.production_id].lhs;
-      @@ -556,8 +559,7 @@
-                       }
-                   }
-               }
-      -        stage_3_table.insert(
-      -            state_id,
-      +        stage_3_table.push(
-                   Stage3Row {
-                       shifts: row.shifts,
-                       gotos: row.gotos,
-      @@ -570,8 +572,9 @@
-       }
-       
-       fn stage_4(stage_3_table: Stage3Table) -> Stage4Result {
-      -    let mut stage_4_table = BTreeMap::new();
-      -    for (state_id, row) in stage_3_table {
-      +    let mut stage_4_table = Vec::with_capacity(stage_3_table.len());
-      +    for (state_idx, row) in stage_3_table.into_iter().enumerate() {
-      +        let state_id = StateID(state_idx);
-               let mut reduces = BTreeMap::new();
-               for (terminal, item_set_for_terminal) in row.reduces {
-                   let mut prod_ids = BTreeSet::new();
-      @@ -579,8 +582,7 @@
-                       prod_ids.insert(ProductionID(item.production_id));
-                   }
-                   reduces.insert(terminal.clone(), prod_ids);
-               }
-      -        stage_4_table.insert(
-      -            state_id,
-      +        stage_4_table.push(
-                   Stage4Row {
-                       shifts: row.shifts,
-                       gotos: row.gotos,
-      @@ -594,10 +596,11 @@
-           stage_4_table: Stage4Table,
-           terminal_map: &BiBTreeMap<Terminal, TerminalID>,
-       ) -> Stage5Result {
-      -    let mut stage_5_table = BTreeMap::new();
-      +    let mut stage_5_table = Vec::with_capacity(stage_4_table.len());
-       
-           let all_terminals: BTreeSet<Terminal> = terminal_map.left_values().cloned().collect();
-      -    for (state_id, row) in stage_4_table {
-      +    for (state_idx, row) in stage_4_table.into_iter().enumerate() {
-      +        let state_id = StateID(state_idx);
-               let Stage4Row {
-                   shifts,
-                   gotos,
-      @@ -616,14 +619,15 @@
-                       }
-                   }
-               }
-      -        stage_5_table.insert(state_id, Stage5Row { shifts, gotos, reduces: new_reduces });
-      +        stage_5_table.push(Stage5Row { shifts, gotos, reduces: new_reduces });
-           }
-           stage_5_table
-       }
-       
-       fn stage_6(stage_5_table: Stage5Table) -> Stage6Result {
-      -    let mut stage_6_table = BTreeMap::new();
-      -    for (state_id, row) in stage_5_table {
-      +    let mut stage_6_table = Vec::with_capacity(stage_5_table.len());
-      +    for (state_idx, row) in stage_5_table.into_iter().enumerate() {
-      +        let state_id = StateID(state_idx);
-               let mut shifts_and_reduces = BTreeMap::new();
-               let all_terminals: BTreeSet<_> =
-                   row.shifts.keys().chain(row.reduces.keys()).cloned().collect();
-      @@ -638,7 +642,7 @@
-                       },
-                   );
-               }
-      -        stage_6_table.insert(state_id, Stage6Row { shifts_and_reduces, gotos: row.gotos });
-      +        stage_6_table.push(Stage6Row { shifts_and_reduces, gotos: row.gotos });
-           }
-           stage_6_table
-       }
-      @@ -652,8 +656,9 @@
-       ) -> (Stage7Table, StateID, StateID) {
-           let start_production_id = 0;
-       
-      -    let mut stage_7_table = BTreeMap::new();
-      -    for (state_id, row) in stage_6_table {
-      +    let mut stage_7_table = Vec::with_capacity(stage_6_table.len());
-      +    for (state_idx, row) in stage_6_table.into_iter().enumerate() {
-      +        let state_id = StateID(state_idx);
-               let mut shifts_and_reduces_full: ShiftsAndReducesFull = BTreeMap::new();
-       
-               for (terminal, action) in &row.shifts_and_reduces {
-      @@ -698,7 +703,7 @@
-                   gotos.insert(non_terminal_id, goto);
-               }
-       
-      -        stage_7_table.insert(state_id, Stage7Row { shifts_and_reduces_full, gotos });
-      +        stage_7_table.push(Stage7Row { shifts_and_reduces_full, gotos });
-           }
-       
-           let initial_item = Item {
-      @@ -710,9 +715,7 @@
-       
-           let start_non_terminal_id =
-               *non_terminal_map.get_by_left(&productions[start_production_id].lhs).unwrap();
-      -    stage_7_table
-      -        .get_mut(&start_state_id)
-      -        .unwrap()
-      +    stage_7_table[start_state_id.0]
-               .gotos
-               .entry(start_non_terminal_id)
-               .or_default()
-      @@ -732,9 +735,7 @@
-               everything_state_id = *item_set_map
-                   .get_by_left(&everything_item_set)
-                   .expect("Everything item set not found in state map");
-      -        stage_7_table
-      -            .get_mut(&everything_state_id)
-      -            .unwrap()
-      +        stage_7_table[everything_state_id.0]
-                   .gotos
-                   .entry(start_non_terminal_id)
-                   .or_default()
-      @@ -747,13 +748,13 @@
-       }
-       
-       fn stage_8(stage_7_table: Stage7Table) -> Stage8Table {
-      -    let mut stage_8_table = BTreeMap::new();
-      -    for (state_id, row) in stage_7_table {
-      +    let mut stage_8_table = Vec::with_capacity(stage_7_table.len());
-      +    for (state_idx, row) in stage_7_table.into_iter().enumerate() {
-      +        let state_id = StateID(state_idx);
-               let Stage7Row {
-                   shifts_and_reduces_full,
-                   gotos,
-               } = row;
-      -        stage_8_table.insert(
-      -            state_id,
-      +        stage_8_table.push(
-                   Row {
-                       shifts_and_reduces_full,
-                       gotos,
-      @@ -768,42 +769,43 @@
-           table: &Table,
-           non_terminal_map: &BiBTreeMap<NonTerminal, NonTerminalID>,
-       ) -> BTreeMap<NonTerminalID, SubstringGoto> {
-      -    let mut substring_gotos = BTreeMap::new();
-      -    let all_nt_ids: Vec<_> = non_terminal_map.right_values().copied().collect();
-      -
-      -    for &nt_id in &all_nt_ids {
-      -        let mut accepting_sources = BTreeSet::new();
-      -        let mut gotos: BTreeMap<StateID, BTreeSet<StateID>> = BTreeMap::new();
-      -
-      -        for (&source_state_id, row) in table {
-      -            if let Some(goto) = row.gotos.get(&nt_id) {
-      -                if goto.accept {
-      -                    accepting_sources.insert(source_state_id);
-      -                }
-      -                if let Some(goto_state_id) = goto.state_id {
-      -                    gotos.entry(goto_state_id).or_default().insert(source_state_id);
-      -                }
-      -            }
-      -        }
-      -
-      -        if !accepting_sources.is_empty() || !gotos.is_empty() {
-      -            substring_gotos.insert(
-      -                nt_id,
-      -                SubstringGoto {
-      -                    accepting_sources,
-      -                    gotos,
-      -                },
-      -            );
-      -        }
-      -    }
-      -
-      -    substring_gotos
-      +    let num_nts = non_terminal_map.len();
-      +    let mut temp_gotos: Vec<SubstringGoto> = (0..num_nts)
-      +        .map(|_| SubstringGoto {
-      +            accepting_sources: BTreeSet::new(),
-      +            gotos: BTreeMap::new(),
-      +        })
-      +        .collect();
+      -                let substring_gotos = crate::glr::table::stage_9(&table, &non_terminal_map);
+      -                let reduce_goto_map = crate::glr::table::stage_10(&table);
+      +                let substring_gotos = obj
+      +                    .remove("substring_gotos")
+      +                    .ok_or_else(|| "Missing field substring_gotos".to_string())
+      +                    .and_then(|n| BTreeMap::<NonTerminalID, SubstringGoto>::from_json(n))?;
+      +                let reduce_goto_map = obj
+      +                    .remove("reduce_goto_map")
+      +                    .ok_or_else(|| "Missing field reduce_goto_map".to_string())
+      +                    .and_then(|n| BTreeMap::<NonTerminalID, BTreeMap<StateID, StateIDBV>>::from_json(n))?;
       +
-      +    for (source_idx, row) in table.iter().enumerate() {
-      +        let source_state_id = StateID(source_idx);
-      +        for (&nt_id, goto) in &row.gotos {
-      +            let entry = &mut temp_gotos[nt_id.0];
-      +            if goto.accept {
-      +                entry.accepting_sources.insert(source_state_id);
-      +            }
-      +            if let Some(goto_state_id) = goto.state_id {
-      +                entry.gotos.entry(goto_state_id).or_default().insert(source_state_id);
-      +            }
-      +        }
-      +    }
-      +
-      +    temp_gotos
-      +        .into_iter()
-      +        .enumerate()
-      +        .filter(|(_, g)| !g.accepting_sources.is_empty() || !g.gotos.is_empty())
-      +        .map(|(i, g)| (NonTerminalID(i), g))
-      +        .collect()
-       }
-       
-       /// Inverted GOTO index: (reduce non-terminal, goto state) -> bitvector of source states.
-      -pub fn stage_10(table: &Table) -> BTreeMap<NonTerminalID, BTreeMap<StateID, StateIDBV>> {
-      -    let mut reduce_goto_map: BTreeMap<NonTerminalID, BTreeMap<StateID, StateIDBV>> =
-      -        BTreeMap::new();
-      -
-      -    for (&source_state_id, row) in table {
-      -        for (&nt_id, goto) in &row.gotos {
-      -            if let Some(goto_state_id) = goto.state_id {
-      -                reduce_goto_map
-      -                    .entry(nt_id)
-      -                    .or_default()
-      -                    .entry(goto_state_id)
-      -                    .or_default()
-      -                    .insert(source_state_id.0);
-      -            }
-      -        }
-      -    }
-      -    reduce_goto_map
-      +pub fn stage_10(
-      +    table: &Table,
-      +    num_nts: usize,
-      +) -> BTreeMap<NonTerminalID, BTreeMap<StateID, StateIDBV>> {
-      +    let mut temp_map: Vec<BTreeMap<StateID, StateIDBV>> = vec![BTreeMap::new(); num_nts];
-      +
-      +    for (source_idx, row) in table.iter().enumerate() {
-      +        let source_state_id = StateID(source_idx);
-      +        for (&nt_id, goto) in &row.gotos {
-      +            if let Some(goto_state_id) = goto.state_id {
-      +                temp_map[nt_id.0]
-      +                    .entry(goto_state_id)
-      +                    .or_default()
-      +                    .insert(source_state_id.0);
-      +            }
-      +        }
-      +    }
-      +
-      +    temp_map
-      +        .into_iter()
-      +        .enumerate()
-      +        .filter(|(_, m)| !m.is_empty())
-      +        .map(|(i, m)| (NonTerminalID(i), m))
-      +        .collect()
-       }
-       
-       fn print_memory_usage(label: &str) {
-      @@ -963,7 +965,7 @@
-       
-           crate::debug!(2, "Stage 10: Precomputing reduce goto map");
-           let start = std::time::Instant::now();
-      -    let reduce_goto_map = stage_10(&final_table);
-      +    let reduce_goto_map = stage_10(&final_table, non_terminal_map.len());
-           crate::debug!(2, "Stage 10 done in {:.2?}", start.elapsed());
-           print_memory_usage("After Stage 10 (reduce goto map)");
-       
+                       Ok(GLRParser::new(
+                           table,
+                           productions,
       ```
     metadata:
   - user: |
@@ -10356,11 +11421,11 @@ messages:
       Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
-      Identified target file: src/glr/table.rs
-      Applying patch to 'src/glr/table.rs' using custom patcher...
-      Successfully applied patch and wrote to src/glr/table.rs.
+      Identified target file: src/glr/parser.rs
+      Applying patch to 'src/glr/parser.rs' using custom patcher...
+      Successfully applied patch and wrote to src/glr/parser.rs.
     metadata:
-  - user: 'Changes committed with message: "Refactor: Replace BTreeMap with Vec for
-      state tables and optimize GLR table construction stages (1-10)"'
+  - user: 'Changes committed with message: "GLRParser: Serialize/deserialize substring_gotos
+      and reduce_goto_map, removing stage_9/10 calls on load"'
     metadata:
 ...
