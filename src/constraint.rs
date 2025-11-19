@@ -1749,7 +1749,6 @@ impl GrammarConstraint {
                 state_mapping.insert(TokenizerStateID(s), rep);
             }
         }
-        crate::debug!(2, "Reduced {} tokenizer states to {} equivalence classes", states.len(), representative_states.len());
 
         let mut helper = Precomputer1::new(
             tokenizer,
