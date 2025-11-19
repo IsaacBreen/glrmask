@@ -72,10 +72,10 @@ macro_rules! __debug_grouped_impl {
                     if diff.as_millis() > 1 {
                         format!(" \x1b[35m+{:>5}ms\x1b[0m", diff.as_millis())
                     } else {
-                        String::new()
+                        "         ".to_string()
                     }
                 } else {
-                    String::new()
+                    "         ".to_string()
                 };
                 *last_time_guard = Some(now);
 
@@ -128,10 +128,10 @@ macro_rules! __debug_start_impl {
                     if diff.as_millis() > 1 {
                         format!(" \x1b[35m+{:>5}ms\x1b[0m", diff.as_millis())
                     } else {
-                        String::new()
+                        "         ".to_string()
                     }
                 } else {
-                    String::new()
+                    "         ".to_string()
                 };
                 *last_time_guard = Some(now);
 
@@ -211,10 +211,10 @@ macro_rules! __debug_timer_end_impl {
                     if diff.as_millis() > 1 {
                         format!(" \x1b[35m+{:>5}ms\x1b[0m", diff.as_millis())
                     } else {
-                        String::new()
+                        "         ".to_string()
                     }
                 } else {
-                    String::new()
+                    "         ".to_string()
                 };
                 *last_time_guard = Some(now);
 
