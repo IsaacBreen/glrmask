@@ -316,6 +316,32 @@ pub struct Row {
     pub gotos: BTreeMap<NonTerminalID, Goto>,
 }
 
+impl Row {
+    pub fn get_shifts_and_reduces(&self, terminal_id: &TerminalID) -> Some(Stage7ShiftsAndReducesLookaheadValue) {
+        let shift = self.shifts.get(terminal_id).copied();
+        let terminal_index = terminal_id.0;
+
+        // Group reductions by (len, nonterminal_id)
+        let mut grouped_reduces: BTreeMap<usize, BTreeMap<NonTerminalID, BTreeSet<ProductionID>>> = BTreeMap::new();
+
+        for (bv, reduce) in &self.reduces {
+            if bv.contains(terminal_index) {
+                grouped_reduces
+                    .entry(reduce.len)
+                    .or_default()
+                    .entry(reduce.nonterminal_id)
+                    .or_default()
+                    .extend(reduce.production_ids.iter().copied());
+            }
+        }
+
+        let mut action = Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces: grouped_reduces };
+
+        action.simplify();
+        Some(action)
+    }
+}
+
 impl JSONConvertible for Row {
     fn to_json(&self) -> JSONNode {
         let mut obj = StdMap::new();
