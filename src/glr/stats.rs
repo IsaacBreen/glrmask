@@ -102,54 +102,55 @@ impl fmt::Display for GLRStats {
 
 /// Computes various statistics about the generated GLR parser table.
 pub fn get_stats(parser: &GLRParser) -> GLRStats {
-    let mut num_shift_reduce_conflicts = 0;
-    let mut num_reduce_reduce_conflicts = 0;
-    let mut all_state_stats: BTreeMap<StateID, StateStats> = BTreeMap::new();
-
-    for (state_id, row) in &parser.table {
-        let mut current_state_stats = StateStats::default();
-        current_state_stats.num_gotos = row.gotos.len();
-
-        // Stats are based on phase 2, which contains the full set of actions.
-        let actions = &row.shifts_and_reduces_full;
-        current_state_stats.total_actions = actions.len();
-
-        for (_, action) in actions {
-            *current_state_stats.unique_actions.entry(action.clone()).or_insert(0) += 1;
-
-            match action {
-                Stage7ShiftsAndReducesLookaheadValue::Shift(_) => {
-                    current_state_stats.num_shifts += 1;
-                }
-                Stage7ShiftsAndReducesLookaheadValue::Reduce { production_ids, .. } => {
-                    current_state_stats.num_reduces += 1;
-                    if production_ids.len() > 1 {
-                        num_reduce_reduce_conflicts += 1;
-                    }
-                }
-                Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
-                    current_state_stats.num_splits += 1;
-                    if shift.is_some() {
-                        num_shift_reduce_conflicts += 1;
-                    }
-                    let total_reduce_productions = reduces.values().flat_map(|nts| nts.values()).map(|pids| pids.len()).sum::<usize>();
-                    if total_reduce_productions > 1 {
-                        num_reduce_reduce_conflicts += 1;
-                    }
-                }
-            }
-        }
-        
-        all_state_stats.insert(*state_id, current_state_stats);
-    }
-
-    GLRStats {
-        num_productions: parser.productions.len(),
-        num_terminals: parser.terminal_map.len(),
-        num_non_terminals: parser.non_terminal_map.len(),
-        num_states: parser.item_set_map.len(),
-        num_shift_reduce_conflicts,
-        num_reduce_reduce_conflicts,
-        state_stats: all_state_stats,
-    }
+    todo!()
+    // let mut num_shift_reduce_conflicts = 0;
+    // let mut num_reduce_reduce_conflicts = 0;
+    // let mut all_state_stats: BTreeMap<StateID, StateStats> = BTreeMap::new();
+    //
+    // for (state_id, row) in &parser.table {
+    //     let mut current_state_stats = StateStats::default();
+    //     current_state_stats.num_gotos = row.gotos.len();
+    //
+    //     // Stats are based on phase 2, which contains the full set of actions.
+    //     let actions = &row.shifts_and_reduces_full;
+    //     current_state_stats.total_actions = actions.len();
+    //
+    //     for (_, action) in actions {
+    //         *current_state_stats.unique_actions.entry(action.clone()).or_insert(0) += 1;
+    //
+    //         match action {
+    //             Stage7ShiftsAndReducesLookaheadValue::Shift(_) => {
+    //                 current_state_stats.num_shifts += 1;
+    //             }
+    //             Stage7ShiftsAndReducesLookaheadValue::Reduce { production_ids, .. } => {
+    //                 current_state_stats.num_reduces += 1;
+    //                 if production_ids.len() > 1 {
+    //                     num_reduce_reduce_conflicts += 1;
+    //                 }
+    //             }
+    //             Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
+    //                 current_state_stats.num_splits += 1;
+    //                 if shift.is_some() {
+    //                     num_shift_reduce_conflicts += 1;
+    //                 }
+    //                 let total_reduce_productions = reduces.values().flat_map(|nts| nts.values()).map(|pids| pids.len()).sum::<usize>();
+    //                 if total_reduce_productions > 1 {
+    //                     num_reduce_reduce_conflicts += 1;
+    //                 }
+    //             }
+    //         }
+    //     }
+    //
+    //     all_state_stats.insert(*state_id, current_state_stats);
+    // }
+    //
+    // GLRStats {
+    //     num_productions: parser.productions.len(),
+    //     num_terminals: parser.terminal_map.len(),
+    //     num_non_terminals: parser.non_terminal_map.len(),
+    //     num_states: parser.item_set_map.len(),
+    //     num_shift_reduce_conflicts,
+    //     num_reduce_reduce_conflicts,
+    //     state_stats: all_state_stats,
+    // }
 }

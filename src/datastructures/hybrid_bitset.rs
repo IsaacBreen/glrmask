@@ -141,6 +141,10 @@ impl HybridBitset {
         }
     }
 
+    pub fn new_empty(len: usize) -> Self {
+        Self::zeros()
+    }
+
     /// Creates a new HybridBitset with all indices from 0 up to `max_value` (inclusive) set to true.
     pub fn ones(len: usize) -> Self {
         if len == 0 {

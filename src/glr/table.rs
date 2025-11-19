@@ -593,7 +593,7 @@ fn stage_4(stage_3_table: Stage3Table) -> Stage4Result {
             let pid = ProductionID(item.production_id);
             reduces_map
                 .entry(pid)
-                .and_modify(|acc| acc.union(&bv))
+                .and_modify(|acc| *acc |= &bv)
                 .or_insert(bv);
         }
 
@@ -663,7 +663,7 @@ fn stage_7(
             let key = (len, nonterminal_id);
 
             let entry = grouped_reduces.entry(key).or_insert_with(|| (TerminalBV::new_empty(terminal_map.len()), BTreeSet::new()));
-            entry.0.union(&bv);
+            entry.0 |= bv;
             entry.1.insert(pid);
         }
 
