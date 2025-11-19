@@ -116,8 +116,7 @@ pub fn precompute4(
         nwabig.union(&NWA::from_dwa(&dwa));
     }
     nwabig.simplify();
-    let mut dwa = nwabig.determinize_to_dwa2();
-    dwa.simplify();
+    let mut dwa = nwabig.determinize_to_dwa_with_rustfst();
     crate::debug!(
         4,
         "Built DWA with {} states",

@@ -6,7 +6,7 @@ use super::nwa::{NWAState, NWAStates, NWA};
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::collections::hash_map::DefaultHasher;
-use rustfst::algorithms::{minimize_with_config, MinimizeConfig};
+use rustfst::algorithms::{minimize, minimize_with_config, MinimizeConfig};
 
 const MAX_OPTIMIZE_ITERATIONS: usize = 20;
 
@@ -195,6 +195,12 @@ impl DWA {
         } else {
             self.simplify_internal();
         }
+    }
+
+    pub fn minimize_with_rustfst(&mut self) {
+        let mut fst = self.to_rustfst();
+        minimize(&mut fst).unwrap();
+        *self = DWA::from_rustfst(&fst);
     }
 
     fn run_optimization_experiment(&mut self) {
