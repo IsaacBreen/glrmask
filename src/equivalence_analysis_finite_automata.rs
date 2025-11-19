@@ -6,48 +6,19 @@ use smallvec::SmallVec;
 use std::collections::BTreeMap;
 
 // -----------------------------------------------------------------------------
-// 256-bit Hashing Primitives
+// Configuration
 // -----------------------------------------------------------------------------
 
-/// A 256-bit hash composed of two independent 128-bit hashes.
-/// This provides cryptographic-grade collision resistance ($10^{-77}$).
-#[derive(Clone, Copy, Default, PartialEq, Eq, Hash)]
-struct DualHash(u128, u128);
+/// If true, performs a brute-force verification step after hashing.
+/// This guarantees 100% correctness at the cost of performance.
+const VERIFY_RESULTS: bool = false;
 
-impl DualHash {
-    #[inline(always)]
-    fn zero() -> Self {
-        DualHash(0, 0)
-    }
+// -----------------------------------------------------------------------------
+// Hashing Utilities (128-bit)
+// -----------------------------------------------------------------------------
 
-    #[inline(always)]
-    fn wrapping_add(self, other: Self) -> Self {
-        DualHash(
-            self.0.wrapping_add(other.0),
-            self.1.wrapping_add(other.1),
-        )
-    }
-
-    #[inline(always)]
-    fn wrapping_sub(self, other: Self) -> Self {
-        DualHash(
-            self.0.wrapping_sub(other.0),
-            self.1.wrapping_sub(other.1),
-        )
-    }
-
-    #[inline(always)]
-    fn wrapping_mul(self, other: Self) -> Self {
-        DualHash(
-            self.0.wrapping_mul(other.0),
-            self.1.wrapping_mul(other.1),
-        )
-    }
-}
-
-// --- Mixer A (Standard Variant) ---
 #[inline(always)]
-fn mix_a(mut x: u128) -> u128 {
+fn mix_u128(mut x: u128) -> u128 {
     x ^= x >> 33;
     x = x.wrapping_mul(0xff51afd7ed558ccd);
     x ^= x >> 33;
@@ -56,25 +27,9 @@ fn mix_a(mut x: u128) -> u128 {
     x
 }
 
-// --- Mixer B (Independent Constants) ---
-// Uses different prime constants to ensure linear independence from Mixer A.
-// This ensures that even if Mixer A has a collision, Mixer B likely won't.
 #[inline(always)]
-fn mix_b(mut x: u128) -> u128 {
-    x ^= x >> 31;
-    x = x.wrapping_mul(0x9E3779B97F4A7C159E3779B97F4A7C15); // Golden Ratio expansion
-    x ^= x >> 29;
-    x = x.wrapping_mul(0xBF58476D1CE4E5B9BF58476D1CE4E5B9); // SplitMix constant expansion
-    x ^= x >> 32;
-    x
-}
-
-#[inline(always)]
-fn get_init_weight(idx: usize) -> DualHash {
-    // Seed A: (idx << 1) | 1
-    // Seed B: ~(idx << 1) (Bitwise inverse to ensure difference)
-    let raw = (idx as u128) << 1 | 1;
-    DualHash(mix_a(raw) | 1, mix_b(!raw) | 1)
+fn get_init_weight(idx: usize) -> u128 {
+    mix_u128((idx as u128) << 1 | 1) | 1
 }
 
 #[inline(always)]
@@ -82,25 +37,18 @@ fn hash_outcome(
     is_match: bool,
     match_group: u32,
     match_pos: u32,
-    remainder_sig: DualHash,
+    remainder_sig: u64,
     final_state: u32,
-) -> DualHash {
+) -> u128 {
     let flags = (if is_match { 1 } else { 0 }) | (final_state << 1);
-
-    // Layout: [ match_pos (32) | match_group (32) | flags (32) | padding (32) ]
     let packed = ((match_pos as u128) << 96)
         | ((match_group as u128) << 64)
         | ((flags as u128) << 32);
-
-    // Mix both lanes independently
-    DualHash(
-        mix_a(packed ^ remainder_sig.0),
-        mix_b(packed ^ remainder_sig.1),
-    )
+    mix_u128(packed ^ (remainder_sig as u128))
 }
 
 // -----------------------------------------------------------------------------
-// Trie Definition (Unchanged)
+// Trie Definition
 // -----------------------------------------------------------------------------
 
 #[derive(Default, Clone)]
@@ -117,9 +65,7 @@ struct Trie {
 
 impl Trie {
     fn new() -> Self {
-        Trie {
-            nodes: vec![TrieNode::default()],
-        }
+        Trie { nodes: vec![TrieNode::default()] }
     }
 
     fn insert(&mut self, s: &[u8], original_idx: u32) {
@@ -168,7 +114,7 @@ impl Trie {
 }
 
 // -----------------------------------------------------------------------------
-// Analysis Logic
+// String Equivalence Analysis
 // -----------------------------------------------------------------------------
 
 pub fn find_equivalence_classes(
@@ -176,24 +122,13 @@ pub fn find_equivalence_classes(
     strings: &[Vec<u8>],
     initial_states: &[usize],
 ) -> BTreeMap<Vec<usize>, Vec<usize>> {
-    crate::debug!(
-        2,
-        "Starting high-precision (256-bit) equivalence analysis for {} strings.",
-        strings.len()
-    );
+    crate::debug!(2, "Analyzing string equivalence for {} strings.", strings.len());
+    let pb = create_pb(4);
 
-    let pb = ProgressBar::new(4);
-    pb.set_style(ProgressStyle::default_bar().template("{spinner:.green} {msg}").unwrap());
-    if !PROGRESS_BAR_ENABLED {
-        pb.set_draw_target(ProgressDrawTarget::hidden());
-    }
-
-    // 1. Precompute Dual Signatures
-    pb.set_message("Precomputing 256-bit signatures...");
+    pb.set_message("Precomputing signatures...");
     let remainder_hashes = precompute_remainder_hashes(regex, strings);
     pb.inc(1);
 
-    // 2. Build Trie
     pb.set_message("Building Trie...");
     let mut trie = Trie::new();
     for (i, s) in strings.iter().enumerate() {
@@ -202,227 +137,392 @@ pub fn find_equivalence_classes(
     let linearized_mapping = trie.linearize();
     pb.inc(1);
 
-    // 3. Symbolic Execution
     pb.set_message("Symbolic Execution...");
+    let mut accumulators = vec![0u128; strings.len()];
+    let mut diffs = vec![0u128; strings.len() + 1];
 
-    // We use DualHash for accumulators to prevent collisions
-    let mut accumulators = vec![DualHash::zero(); strings.len()];
-    let mut diffs = vec![DualHash::zero(); strings.len() + 1];
-
-    let mut root_states_map: HashMap<u32, DualHash> = HashMap::new();
+    let mut root_states_map: HashMap<u32, u128> = HashMap::new();
     for (idx, &state) in initial_states.iter().enumerate() {
-        let weight = get_init_weight(idx);
-        let entry = root_states_map.entry(state as u32).or_default();
-        *entry = entry.wrapping_add(weight);
+        *root_states_map.entry(state as u32).or_default() += get_init_weight(idx);
     }
+    let mut root_active = root_states_map.into_iter().collect::<Vec<_>>();
+    root_active.sort_unstable_by_key(|k| k.0);
 
-    let mut root_active_states: Vec<(u32, DualHash)> = root_states_map.into_iter().collect();
-    root_active_states.sort_unstable_by_key(|k| k.0);
-
-    process_node(
-        regex,
-        &trie,
-        0,
-        root_active_states,
-        &remainder_hashes,
-        &linearized_mapping,
-        &mut accumulators,
-        &mut diffs,
-        0,
+    process_string_node(
+        regex, &trie, 0, root_active, &remainder_hashes,
+        &linearized_mapping, &mut accumulators, &mut diffs, 0
     );
     pb.inc(1);
 
-    // 4. Grouping
-    pb.set_message("Grouping results...");
-
-    let mut current_diff = DualHash::zero();
+    pb.set_message("Grouping...");
+    let mut current_diff = 0u128;
     for (lin_idx, &orig_idx) in linearized_mapping.iter().enumerate() {
         current_diff = current_diff.wrapping_add(diffs[lin_idx]);
         accumulators[orig_idx] = accumulators[orig_idx].wrapping_add(current_diff);
     }
 
-    let mut hash_to_sig_id: HashMap<DualHash, usize> = HashMap::new();
-    let mut next_sig_id = 0;
-    let mut classes: BTreeMap<Vec<usize>, Vec<usize>> = BTreeMap::new();
+    let mut classes = group_by_hash(&accumulators);
 
-    for (str_idx, &h) in accumulators.iter().enumerate() {
-        let sig_id = *hash_to_sig_id.entry(h).or_insert_with(|| {
-            let id = next_sig_id;
-            next_sig_id += 1;
-            id
-        });
-        classes.entry(vec![sig_id]).or_default().push(str_idx);
+    if VERIFY_RESULTS {
+        pb.set_message("Verifying...");
+        verify_string_classes(regex, strings, initial_states, &mut classes);
     }
-    pb.finish_with_message("Done");
 
+    pb.finish_with_message("Done");
     classes
 }
 
 #[allow(clippy::too_many_arguments)]
-fn process_node(
+fn process_string_node(
     regex: &Regex,
     trie: &Trie,
     node_idx: usize,
-    active_states: Vec<(u32, DualHash)>,
-    remainder_hashes: &[Vec<DualHash>],
+    active_states: Vec<(u32, u128)>,
+    remainder_hashes: &[Vec<u64>],
     linearized_mapping: &[usize],
-    accumulators: &mut Vec<DualHash>,
-    diffs: &mut Vec<DualHash>,
+    accumulators: &mut Vec<u128>,
+    diffs: &mut Vec<u128>,
     depth: u32,
 ) {
     let node = &trie.nodes[node_idx];
 
-    // Handle Terminals
+    // 1. Terminals
     if let Some(_orig_idx) = node.terminal_string_idx {
         let lin_idx = node.range_start as usize;
         for &(dfa_state, weight) in &active_states {
-            let end_state_val = if regex.dfa.states[dfa_state as usize].transitions.is_empty() {
-                0
-            } else {
-                dfa_state + 1
-            };
-
-            let h = hash_outcome(false, 0, 0, DualHash::zero(), end_state_val);
-            let contribution = weight.wrapping_mul(h);
-
-            diffs[lin_idx] = diffs[lin_idx].wrapping_add(contribution);
-            diffs[lin_idx + 1] = diffs[lin_idx + 1].wrapping_sub(contribution);
+            let end_val = if regex.dfa.states[dfa_state as usize].transitions.is_empty() { 0 } else { dfa_state + 1 };
+            let h = hash_outcome(false, 0, 0, 0, end_val);
+            let contrib = weight.wrapping_mul(h);
+            diffs[lin_idx] = diffs[lin_idx].wrapping_add(contrib);
+            diffs[lin_idx + 1] = diffs[lin_idx + 1].wrapping_sub(contrib);
         }
     }
 
-    if node.transitions.is_empty() {
-        return;
-    }
+    if node.transitions.is_empty() { return; }
 
-    let mut next_batch: Vec<(u32, u32, DualHash)> = Vec::with_capacity(active_states.len());
+    // 2. Transitions
+    let mut next_batch: Vec<(u32, u32, u128)> = Vec::with_capacity(active_states.len());
 
     for &(dfa_state, weight) in &active_states {
-        let dfa_state_node = &regex.dfa.states[dfa_state as usize];
-
-        for &(byte, child_node_idx) in &node.transitions {
-            if let Some(&next_dfa_state) = dfa_state_node.transitions.get(byte) {
-                let next_state_data = &regex.dfa.states[next_dfa_state];
-
-                if !next_state_data.finalizers.is_empty() {
-                    let child_node = &trie.nodes[child_node_idx as usize];
-                    let r_start = child_node.range_start as usize;
-                    let r_end = child_node.range_end as usize;
-
-                    for &group_id in &next_state_data.finalizers {
-                        for lin_idx in r_start..r_end {
-                            let orig_idx = linearized_mapping[lin_idx];
-                            let rem_sig = remainder_hashes[orig_idx][(depth + 1) as usize];
-                            let h = hash_outcome(true, group_id as u32, depth + 1, rem_sig, 0);
-                            let contribution = weight.wrapping_mul(h);
-                            accumulators[orig_idx] = accumulators[orig_idx].wrapping_add(contribution);
+        let dfa_node = &regex.dfa.states[dfa_state as usize];
+        for &(byte, child_idx) in &node.transitions {
+            if let Some(&next_state) = dfa_node.transitions.get(byte) {
+                let next_data = &regex.dfa.states[next_state];
+                if !next_data.finalizers.is_empty() {
+                    let child = &trie.nodes[child_idx as usize];
+                    for &gid in &next_data.finalizers {
+                        for lin_idx in (child.range_start as usize)..(child.range_end as usize) {
+                            let orig = linearized_mapping[lin_idx];
+                            let rem = remainder_hashes[orig][(depth + 1) as usize];
+                            let h = hash_outcome(true, gid as u32, depth + 1, rem, 0);
+                            accumulators[orig] = accumulators[orig].wrapping_add(weight.wrapping_mul(h));
                         }
                     }
                 }
-                next_batch.push((child_node_idx, next_dfa_state as u32, weight));
+                next_batch.push((child_idx, next_state as u32, weight));
             } else {
                 // Dead End
-                let h = hash_outcome(false, 0, 0, DualHash::zero(), 0);
-                let contribution = weight.wrapping_mul(h);
-
-                let child_node = &trie.nodes[child_node_idx as usize];
-                let r_start = child_node.range_start as usize;
-                let r_end = child_node.range_end as usize;
-
-                diffs[r_start] = diffs[r_start].wrapping_add(contribution);
-                diffs[r_end] = diffs[r_end].wrapping_sub(contribution);
+                let h = hash_outcome(false, 0, 0, 0, 0);
+                let contrib = weight.wrapping_mul(h);
+                let child = &trie.nodes[child_idx as usize];
+                let r_start = child.range_start as usize;
+                let r_end = child.range_end as usize;
+                diffs[r_start] = diffs[r_start].wrapping_add(contrib);
+                diffs[r_end] = diffs[r_end].wrapping_sub(contrib);
             }
         }
     }
 
-    if next_batch.is_empty() {
-        return;
-    }
+    if next_batch.is_empty() { return; }
 
+    // 3. Merge & Recurse
     next_batch.sort_unstable_by_key(|k| k.0);
-
     let mut i = 0;
     while i < next_batch.len() {
-        let current_child = next_batch[i].0;
-        let start_i = i;
-        while i < next_batch.len() && next_batch[i].0 == current_child {
-            i += 1;
-        }
-        let child_states_raw = &next_batch[start_i..i];
+        let child = next_batch[i].0;
+        let start = i;
+        while i < next_batch.len() && next_batch[i].0 == child { i += 1; }
 
-        let mut temp: SmallVec<[(u32, DualHash); 16]> = SmallVec::new();
-        for &(_, state, w) in child_states_raw {
-            temp.push((state, w));
-        }
+        let mut temp: SmallVec<[(u32, u128); 16]> = SmallVec::new();
+        for &(_, s, w) in &next_batch[start..i] { temp.push((s, w)); }
         temp.sort_unstable_by_key(|k| k.0);
 
-        let mut merged_states: Vec<(u32, DualHash)> = Vec::with_capacity(temp.len());
+        let mut merged = Vec::with_capacity(temp.len());
         if !temp.is_empty() {
-            let mut curr_state = temp[0].0;
-            let mut curr_w = temp[0].1;
-
+            let (mut cs, mut cw) = (temp[0].0, temp[0].1);
             for &(s, w) in &temp[1..] {
-                if s == curr_state {
-                    curr_w = curr_w.wrapping_add(w);
-                } else {
-                    merged_states.push((curr_state, curr_w));
-                    curr_state = s;
-                    curr_w = w;
-                }
+                if s == cs { cw = cw.wrapping_add(w); }
+                else { merged.push((cs, cw)); cs = s; cw = w; }
             }
-            merged_states.push((curr_state, curr_w));
+            merged.push((cs, cw));
         }
 
-        process_node(
-            regex,
-            trie,
-            current_child as usize,
-            merged_states,
-            remainder_hashes,
-            linearized_mapping,
-            accumulators,
-            diffs,
-            depth + 1,
-        );
+        process_string_node(regex, trie, child as usize, merged, remainder_hashes, linearized_mapping, accumulators, diffs, depth + 1);
     }
 }
 
-fn precompute_remainder_hashes(regex: &Regex, strings: &[Vec<u8>]) -> Vec<Vec<DualHash>> {
-    let mut results = Vec::with_capacity(strings.len());
-    for s in strings {
-        let mut row = Vec::with_capacity(s.len() + 1);
-        for i in 0..=s.len() {
-            let suffix = &s[i..];
-            let exec = regex.execute_from_state_fast(suffix, regex.dfa.start_state);
+// -----------------------------------------------------------------------------
+// State Equivalence Analysis
+// -----------------------------------------------------------------------------
 
-            let mut h = DualHash::zero();
-            for m in exec.matches {
-                // Mix (Group, Pos)
-                let k_a = (m.group_id as u64).wrapping_mul(0x9E3779B97F4A7C15)
-                    ^ ((m.position as u64).rotate_left(32));
+pub fn find_state_equivalence_classes(
+    regex: &Regex,
+    strings: &[Vec<u8>],
+    states_to_analyze: &[usize],
+) -> BTreeMap<Vec<usize>, Vec<usize>> {
+    crate::debug!(2, "Analyzing state equivalence for {} states.", states_to_analyze.len());
+    let pb = create_pb(5);
 
-                // Use different constants for Lane B
-                let k_b = (m.group_id as u64).wrapping_mul(0x1B873593C6A4A793)
-                    ^ ((m.position as u64).rotate_right(27));
+    pb.set_message("Precomputing signatures...");
+    let remainder_hashes = precompute_remainder_hashes(regex, strings);
+    pb.inc(1);
 
-                let term = DualHash(
-                    (k_a as u128).wrapping_mul(0xC6A4A7935BD1E995),
-                    (k_b as u128).wrapping_mul(0x5BD1E995C6A4A793),
-                );
-                h = h.wrapping_add(term);
-            }
+    pb.set_message("Building Trie...");
+    let mut trie = Trie::new();
+    for (i, s) in strings.iter().enumerate() { trie.insert(s, i as u32); }
+    let linearized_mapping = trie.linearize();
+    pb.inc(1);
 
-            let end_val = if let Some(fs) = exec.end_state {
-                (fs as u64).wrapping_add(1)
-            } else {
-                0
-            };
+    pb.set_message("Weighing subtrees...");
+    let mut string_weights = vec![0u128; strings.len()];
+    for i in 0..strings.len() { string_weights[i] = get_init_weight(i); }
+    let mut subtree_weights = vec![0u128; trie.nodes.len()];
+    compute_subtree_weights(&trie, 0, &string_weights, &mut subtree_weights);
+    pb.inc(1);
 
-            h.0 ^= (end_val.rotate_left(17)) as u128;
-            h.1 ^= (end_val.rotate_right(13)) as u128;
+    pb.set_message("Inverse Execution...");
+    let max_state = states_to_analyze.iter().max().copied().unwrap_or(0);
+    let mut state_acc = vec![0u128; max_state + 1];
 
-            row.push(h);
-        }
-        results.push(row);
+    // Group initial states by their ID (trivial, but fits the recursive signature)
+    let mut root_groups = Vec::new();
+    for &s in states_to_analyze {
+        // We group by current DFA state. Initially, Current == Original.
+        // We need to merge duplicates if states_to_analyze has duplicates, but usually it doesn't.
+        // We'll just push them individually and let the first recursion step merge them.
+        let mut v = SmallVec::new(); v.push(s as u32);
+        root_groups.push((s as u32, v));
     }
-    results
+
+    process_state_node(
+        regex, &trie, 0, &root_groups, &remainder_hashes,
+        &linearized_mapping, &string_weights, &subtree_weights, &mut state_acc, 0
+    );
+    pb.inc(1);
+
+    pb.set_message("Grouping...");
+    let mut classes = BTreeMap::new();
+    let mut hash_map = HashMap::new();
+    let mut next_id = 0;
+
+    for &s in states_to_analyze {
+        let h = state_acc[s];
+        let id = *hash_map.entry(h).or_insert_with(|| { next_id += 1; next_id - 1 });
+        classes.entry(vec![id]).or_default().push(s);
+    }
+
+    if VERIFY_RESULTS {
+        pb.set_message("Verifying...");
+        verify_state_classes(regex, strings, &mut classes);
+    }
+
+    pb.finish_with_message("Done");
+    classes
+}
+
+fn compute_subtree_weights(trie: &Trie, node_idx: usize, str_w: &[u128], sub_w: &mut Vec<u128>) {
+    let node = &trie.nodes[node_idx];
+    let mut w = if let Some(idx) = node.terminal_string_idx { str_w[idx as usize] } else { 0 };
+    for &(_, child) in &node.transitions {
+        compute_subtree_weights(trie, child as usize, str_w, sub_w);
+        w = w.wrapping_add(sub_w[child as usize]);
+    }
+    sub_w[node_idx] = w;
+}
+
+#[allow(clippy::too_many_arguments)]
+fn process_state_node(
+    regex: &Regex,
+    trie: &Trie,
+    node_idx: usize,
+    active_groups: &[(u32, SmallVec<[u32; 4]>)],
+    remainder_hashes: &[Vec<u64>],
+    linearized_mapping: &[usize],
+    str_w: &[u128],
+    sub_w: &[u128],
+    state_acc: &mut Vec<u128>,
+    depth: u32,
+) {
+    let node = &trie.nodes[node_idx];
+
+    // 1. Terminals
+    if let Some(orig_idx) = node.terminal_string_idx {
+        let sw = str_w[orig_idx as usize];
+        for (curr, origins) in active_groups {
+            let end_val = if regex.dfa.states[*curr as usize].transitions.is_empty() { 0 } else { curr + 1 };
+            let h = hash_outcome(false, 0, 0, 0, end_val);
+            let contrib = sw.wrapping_mul(h);
+            for &o in origins { state_acc[o as usize] = state_acc[o as usize].wrapping_add(contrib); }
+        }
+    }
+
+    if node.transitions.is_empty() { return; }
+
+    // 2. Transitions
+    for &(byte, child_idx) in &node.transitions {
+        let child_w = sub_w[child_idx as usize];
+        let mut next_groups_map: Vec<(u32, SmallVec<[u32; 4]>)> = Vec::new();
+
+        for (curr, origins) in active_groups {
+            let dfa_node = &regex.dfa.states[*curr as usize];
+            if let Some(&next) = dfa_node.transitions.get(byte) {
+                let next_data = &regex.dfa.states[next];
+                if !next_data.finalizers.is_empty() {
+                    let child = &trie.nodes[child_idx as usize];
+                    for &gid in &next_data.finalizers {
+                        for lin_idx in (child.range_start as usize)..(child.range_end as usize) {
+                            let orig = linearized_mapping[lin_idx];
+                            let rem = remainder_hashes[orig][(depth + 1) as usize];
+                            let h = hash_outcome(true, gid as u32, depth + 1, rem, 0);
+                            let contrib = str_w[orig].wrapping_mul(h);
+                            for &o in origins { state_acc[o as usize] = state_acc[o as usize].wrapping_add(contrib); }
+                        }
+                    }
+                }
+                // Merge into next groups
+                match next_groups_map.iter_mut().find(|g| g.0 == next as u32) {
+                    Some(e) => e.1.extend_from_slice(origins),
+                    None => {
+                        let mut v = SmallVec::new(); v.extend_from_slice(origins);
+                        next_groups_map.push((next as u32, v));
+                    }
+                }
+            } else {
+                // Dead End
+                let h = hash_outcome(false, 0, 0, 0, 0);
+                let contrib = child_w.wrapping_mul(h);
+                for &o in origins { state_acc[o as usize] = state_acc[o as usize].wrapping_add(contrib); }
+            }
+        }
+
+        if !next_groups_map.is_empty() {
+            process_state_node(regex, trie, child_idx as usize, &next_groups_map, remainder_hashes, linearized_mapping, str_w, sub_w, state_acc, depth + 1);
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Helpers & Verification
+// -----------------------------------------------------------------------------
+
+fn precompute_remainder_hashes(regex: &Regex, strings: &[Vec<u8>]) -> Vec<Vec<u64>> {
+    strings.iter().map(|s| {
+        (0..=s.len()).map(|i| {
+            let exec = regex.execute_from_state_fast(&s[i..], regex.dfa.start_state);
+            let mut h = 0u64;
+            for m in exec.matches {
+                let k = (m.group_id as u64).wrapping_mul(0x9E3779B97F4A7C15) ^ ((m.position as u64).rotate_left(32));
+                h = h.wrapping_mul(0xC6A4A7935BD1E995).wrapping_add(k);
+            }
+            let end_val = if let Some(fs) = exec.end_state { (fs as u64).wrapping_add(1) } else { 0 };
+            h ^ end_val.rotate_left(17)
+        }).collect()
+    }).collect()
+}
+
+fn group_by_hash(accumulators: &[u128]) -> BTreeMap<Vec<usize>, Vec<usize>> {
+    let mut map = HashMap::new();
+    let mut next_id = 0;
+    let mut classes = BTreeMap::new();
+    for (i, &h) in accumulators.iter().enumerate() {
+        let id = *map.entry(h).or_insert_with(|| { next_id += 1; next_id - 1 });
+        classes.entry(vec![id]).or_default().push(i);
+    }
+    classes
+}
+
+fn create_pb(len: u64) -> ProgressBar {
+    let pb = ProgressBar::new(len);
+    pb.set_style(ProgressStyle::default_bar().template("{spinner:.green} {msg}").unwrap());
+    if !PROGRESS_BAR_ENABLED { pb.set_draw_target(ProgressDrawTarget::hidden()); }
+    pb
+}
+
+fn verify_string_classes(regex: &Regex, strings: &[Vec<u8>], initial_states: &[usize], classes: &mut BTreeMap<Vec<usize>, Vec<usize>>) {
+    let mut new_classes = BTreeMap::new();
+    let mut next_id = 0;
+
+    for (_, group) in classes.iter() {
+        if group.len() <= 1 {
+            new_classes.entry(vec![next_id]).or_default().extend(group);
+            next_id += 1;
+            continue;
+        }
+        let mut subgroups: Vec<(usize, Vec<usize>)> = Vec::new();
+        'outer: for &idx in group {
+            for (leader, members) in &mut subgroups {
+                if are_strings_eq(regex, strings, initial_states, *leader, idx) {
+                    members.push(idx);
+                    continue 'outer;
+                }
+            }
+            subgroups.push((idx, vec![idx]));
+        }
+        for (_, members) in subgroups {
+            new_classes.entry(vec![next_id]).or_default().extend(members);
+            next_id += 1;
+        }
+    }
+    *classes = new_classes;
+}
+
+fn are_strings_eq(regex: &Regex, strings: &[Vec<u8>], states: &[usize], a: usize, b: usize) -> bool {
+    let (sa, sb) = (&strings[a], &strings[b]);
+    for &st in states {
+        let (ra, rb) = (regex.execute_from_state_fast(sa, st), regex.execute_from_state_fast(sb, st));
+        if ra.end_state != rb.end_state || ra.matches.len() != rb.matches.len() { return false; }
+        for (ma, mb) in ra.matches.iter().zip(rb.matches.iter()) {
+            if ma.group_id != mb.group_id || ma.position != mb.position { return false; }
+        }
+    }
+    true
+}
+
+fn verify_state_classes(regex: &Regex, strings: &[Vec<u8>], classes: &mut BTreeMap<Vec<usize>, Vec<usize>>) {
+    let mut new_classes = BTreeMap::new();
+    let mut next_id = 0;
+
+    for (_, group) in classes.iter() {
+        if group.len() <= 1 {
+            new_classes.entry(vec![next_id]).or_default().extend(group);
+            next_id += 1;
+            continue;
+        }
+        let mut subgroups: Vec<(usize, Vec<usize>)> = Vec::new();
+        'outer: for &state in group {
+            for (leader, members) in &mut subgroups {
+                if are_states_eq(regex, strings, *leader, state) {
+                    members.push(state);
+                    continue 'outer;
+                }
+            }
+            subgroups.push((state, vec![state]));
+        }
+        for (_, members) in subgroups {
+            new_classes.entry(vec![next_id]).or_default().extend(members);
+            next_id += 1;
+        }
+    }
+    *classes = new_classes;
+}
+
+fn are_states_eq(regex: &Regex, strings: &[Vec<u8>], a: usize, b: usize) -> bool {
+    for s in strings {
+        let (ra, rb) = (regex.execute_from_state_fast(s, a), regex.execute_from_state_fast(s, b));
+        if ra.end_state != rb.end_state || ra.matches.len() != rb.matches.len() { return false; }
+        for (ma, mb) in ra.matches.iter().zip(rb.matches.iter()) {
+            if ma.group_id != mb.group_id || ma.position != mb.position { return false; }
+        }
+    }
+    true
 }
