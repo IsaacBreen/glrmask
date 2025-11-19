@@ -988,7 +988,8 @@ impl NFA {
 
     pub fn to_dfa(self) -> DFA {
         let mut dfa_states: Vec<DFAState> = Vec::new();
-        let mut dfa_state_map: BTreeMap<FrozenSet<usize>, usize> = BTreeMap::new();
+        // Use a HashMap here for much faster lookups on large DFAs.
+        let mut dfa_state_map: HashMap<FrozenSet<usize>, usize> = HashMap::new();
         let mut worklist: Vec<FrozenSet<usize>> = Vec::new();
 
         let epsilon_closures = self.compute_epsilon_closures();
@@ -1018,20 +1019,29 @@ impl NFA {
             let current_dfa_state = *dfa_state_map
                 .get(&current_set)
                 .expect("DFA state set not found in map");
-            let mut transition_map: BTreeMap<u8, BTreeSet<usize>> = BTreeMap::new();
+
+            // Fast per-byte aggregation of outgoing transitions:
+            // - transition_targets[c] = list of NFA target states reachable on byte c
+            // - used_inputs = list of bytes that actually occur (to avoid scanning all 0..=255)
+            let mut transition_targets: [Vec<usize>; 256] = std::array::from_fn(|_| Vec::new());
+            let mut used_inputs: Vec<u8> = Vec::new();
+            let mut seen_input: [bool; 256] = [false; 256];
 
             // For each NFA state in the current DFA state, collect outgoing transitions.
             for &state in current_set.iter() {
                 for &(input, next_state) in &self.states[state].transitions {
-                    transition_map
-                        .entry(input)
-                        .or_insert_with(BTreeSet::new)
-                        .insert(next_state);
+                    let idx = input as usize;
+                    if !seen_input[idx] {
+                        seen_input[idx] = true;
+                        used_inputs.push(input);
+                    }
+                    transition_targets[idx].push(next_state);
                 }
             }
 
             // For each input symbol, compute the epsilon-closure of the resulting state set.
-            for (&input_u8, next_states) in &transition_map {
+            for input_u8 in used_inputs {
+                let next_states = &transition_targets[input_u8 as usize];
                 if next_states.is_empty() {
                     continue;
                 }
@@ -1043,7 +1053,8 @@ impl NFA {
                         closure.insert(s);
                     }
                 }
-                let frozen_closure = FrozenSet::from_iter(closure);
+                // Convert BTreeSet -> FrozenSet without re-sorting or deduping.
+                let frozen_closure: FrozenSet<usize> = FrozenSet::from(closure);
 
                 // If this set of states is new, add it as a new DFA state.
                 let next_dfa_state = if let Some(&existing_state) = dfa_state_map.get(&frozen_closure)
@@ -1216,7 +1227,12 @@ impl DFA {
         // For very large DFAs (e.g. tens of millions of states from huge literal
         // strings), running it is infeasible and would exhaust memory. In that
         // regime, skipping minimization is a semantics-preserving optimization.
-        const MAX_MINIMIZATION_STATES: usize = 100_000;
+        //
+        // Use a conservative threshold so that real-world, very large DFAs built
+        // from complex regexes skip minimization entirely (avoiding seconds of
+        // extra work), while small DFAs used in tests and simple patterns still
+        // get minimized for compactness.
+        const MAX_MINIMIZATION_STATES: usize = 10_000;
         if self.states.len() > MAX_MINIMIZATION_STATES {
             return;
         }

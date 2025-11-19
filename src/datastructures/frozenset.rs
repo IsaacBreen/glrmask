@@ -88,7 +88,14 @@ impl<T: Eq + Ord> FromIterator<T> for FrozenSet<T> {
 
 impl<T: Eq + Ord> From<BTreeSet<T>> for FrozenSet<T> {
     fn from(inner: BTreeSet<T>) -> Self {
-        FrozenSet::from_iter(inner)
+        // BTreeSet already stores elements in sorted, unique order, so we can
+        // skip the extra sort/dedup work performed by `from_iter`. This is
+        // especially important in hot paths like NFA -> DFA subset construction
+        // where we repeatedly build FrozenSets from BTreeSets of state IDs.
+        let vec: Vec<T> = inner.into_iter().collect();
+        FrozenSet {
+            inner: vec.into_boxed_slice(),
+        }
     }
 }
 
