@@ -407,7 +407,7 @@ impl PyGLRParser {
             let row_dict = PyDict::new_bound(py);
 
             let actions_dict = PyDict::new_bound(py);
-            for (&terminal_id, action) in &row.shifts_and_reduces_full {
+            for (&terminal_id, action) in &row.get_shifts_and_reduces_map() {
                 let py_action = match action {
                     sep1::glr::table::Stage7ShiftsAndReducesLookaheadValue::Shift(to_state) => {
                         ("shift", to_state.0).to_object(py)
