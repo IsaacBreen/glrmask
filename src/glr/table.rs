@@ -5,8 +5,8 @@ use crate::glr::analyze::{
     remove_productions_with_undefined_nonterminals, simplify_grammar, validate,
 };
 use crate::glr::automaton::{
-    compute_closure, compute_first_sets_for_nonterminals, compute_follow_sets_for_nonterminals,
-    compute_goto, compute_nullable_nonterminals, split_on_dot,
+    compute_first_sets_for_nonterminals, compute_follow_sets_for_nonterminals,
+    compute_goto, compute_nullable_nonterminals,
 };
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::interface::display_productions;
@@ -15,7 +15,7 @@ pub use crate::types::TerminalID;
 use bimap::BiBTreeMap;
 use profiler_macro::time_it;
 use std::collections::BTreeMap as StdMap;
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt::Display;
 use memory_stats::memory_stats;
 use crate::glr::parser::{ActionFn, ExpectElse, GLRParser};
@@ -427,6 +427,66 @@ type Stage5Result = Stage5Table;
 type Stage6Result = Stage6Table;
 type Stage7Result = (Stage7Table, StateID, StateID);
 
+fn precompute_closure_cache(
+    productions: &[Production],
+    prods_by_lhs: &BTreeMap<NonTerminal, Vec<usize>>,
+) -> BTreeMap<NonTerminal, Vec<Item>> {
+    let mut cache = BTreeMap::new();
+    for lhs in prods_by_lhs.keys() {
+        let mut visited = HashSet::new();
+        let mut stack = vec![lhs];
+        visited.insert(lhs);
+
+        let mut items = Vec::new();
+
+        while let Some(curr) = stack.pop() {
+            if let Some(indices) = prods_by_lhs.get(curr) {
+                for &pid in indices {
+                    items.push(Item {
+                        production_id: pid,
+                        dot_position: 0,
+                    });
+                    if let Some(Symbol::NonTerminal(next_nt)) = productions[pid].rhs.first() {
+                        if visited.insert(next_nt) {
+                            stack.push(next_nt);
+                        }
+                    }
+                }
+            }
+        }
+        cache.insert(lhs.clone(), items);
+    }
+    cache
+}
+
+fn split_closure_with_cache(
+    kernel: &BTreeSet<Item>,
+    closure_cache: &BTreeMap<NonTerminal, Vec<Item>>,
+    productions: &[Production],
+) -> BTreeMap<Option<Symbol>, BTreeSet<Item>> {
+    let mut buckets: BTreeMap<Option<Symbol>, BTreeSet<Item>> = BTreeMap::new();
+    let mut processed_nts = HashSet::new();
+
+    for item in kernel {
+        let prod = &productions[item.production_id];
+        let sym = prod.rhs.get(item.dot_position);
+        buckets.entry(sym.cloned()).or_default().insert(*item);
+
+        if let Some(Symbol::NonTerminal(nt)) = sym {
+            if processed_nts.insert(nt) {
+                if let Some(cached) = closure_cache.get(nt) {
+                    for cached_item in cached {
+                        let c_prod = &productions[cached_item.production_id];
+                        let c_sym = c_prod.rhs.get(0).cloned();
+                        buckets.entry(c_sym).or_default().insert(*cached_item);
+                    }
+                }
+            }
+        }
+    }
+    buckets
+}
+
 #[time_it]
 fn stage_1(productions: &[Production]) -> (Stage1Result, BiBTreeMap<BTreeSet<Item>, StateID>) {
     let start_production_id = 0;
@@ -442,13 +502,15 @@ fn stage_1(productions: &[Production]) -> (Stage1Result, BiBTreeMap<BTreeSet<Ite
         prods_by_lhs.entry(p.lhs.clone()).or_default().push(idx);
     }
 
-    let mut item_set_map = BiBTreeMap::new();
+    let closure_cache = precompute_closure_cache(productions, &prods_by_lhs);
+
+    let mut item_set_map_fast: HashMap<BTreeSet<Item>, StateID> = HashMap::new();
     let mut next_state_id = 0;
 
     let mut worklist = VecDeque::new();
     let mut table: Stage1Table = BTreeMap::new();
 
-    item_set_map.insert(initial_item_set.clone(), StateID(next_state_id));
+    item_set_map_fast.insert(initial_item_set.clone(), StateID(next_state_id));
     next_state_id += 1;
     worklist.push_back(initial_item_set);
     if EVERYTHING {
@@ -462,28 +524,27 @@ fn stage_1(productions: &[Production]) -> (Stage1Result, BiBTreeMap<BTreeSet<Ite
                 everything_item_set.insert(item);
             }
         }
-        if !item_set_map.contains_left(&everything_item_set) {
-            item_set_map.insert(everything_item_set.clone(), StateID(next_state_id));
+        if !item_set_map_fast.contains_key(&everything_item_set) {
+            item_set_map_fast.insert(everything_item_set.clone(), StateID(next_state_id));
             next_state_id += 1;
             worklist.push_back(everything_item_set);
         }
     }
 
     while let Some(item_set) = worklist.pop_front() {
-        let state_id = *item_set_map.get_by_left(&item_set).unwrap();
-        let closure = compute_closure(&item_set, &prods_by_lhs, productions);
-        let splits = split_on_dot(&closure, productions);
+        let state_id = *item_set_map_fast.get(&item_set).unwrap();
+        let splits = split_closure_with_cache(&item_set, &closure_cache, productions);
 
         let mut row: Stage1Row = BTreeMap::new();
         for (symbol, items_in_split) in splits {
             let goto_id = if symbol.is_some() {
                 let goto_set = compute_goto(&items_in_split, productions);
-                if let Some(id) = item_set_map.get_by_left(&goto_set) {
+                if let Some(id) = item_set_map_fast.get(&goto_set) {
                     Some(*id)
                 } else {
                     let new_id = StateID(next_state_id);
                     next_state_id += 1;
-                    item_set_map.insert(goto_set.clone(), new_id);
+                    item_set_map_fast.insert(goto_set.clone(), new_id);
                     worklist.push_back(goto_set);
                     Some(new_id)
                 }
@@ -493,6 +554,11 @@ fn stage_1(productions: &[Production]) -> (Stage1Result, BiBTreeMap<BTreeSet<Ite
             row.insert(symbol, Stage1Entry { kernel: items_in_split, goto_id });
         }
         table.insert(state_id, row);
+    }
+
+    let mut item_set_map = BiBTreeMap::new();
+    for (k, v) in item_set_map_fast {
+        item_set_map.insert(k, v);
     }
 
     (table, item_set_map)
@@ -648,6 +714,11 @@ fn stage_7(
 ) -> (Stage7Table, StateID, StateID) {
     let start_production_id = 0;
 
+    let prod_meta: Vec<(usize, NonTerminalID)> = productions
+        .iter()
+        .map(|p| (p.rhs.len(), *non_terminal_map.get_by_left(&p.lhs).unwrap()))
+        .collect();
+
     let mut stage_7_table = BTreeMap::new();
     for (state_id, row) in stage_6_table {
         let mut shifts_and_reduces_full: ShiftsAndReducesFull = BTreeMap::new();
@@ -661,9 +732,7 @@ fn stage_7(
             let mut reduces: BTreeMap<usize, BTreeMap<NonTerminalID, BTreeSet<ProductionID>>> =
                 BTreeMap::new();
             for &production_id in &action.reduces {
-                let production = &productions[production_id.0];
-                let len = production.rhs.len();
-                let nonterminal_id = *non_terminal_map.get_by_left(&production.lhs).unwrap();
+                let (len, nonterminal_id) = prod_meta[production_id.0];
                 reduces
                     .entry(len)
                     .or_default()

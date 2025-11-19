@@ -2,8 +2,9 @@ use crate::glr::grammar::{Production, Symbol};
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use std::collections::BTreeMap as StdMap;
 use std::fmt::{Display, Formatter};
+use std::hash::Hash;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Item {
     /// Index into the `productions` array passed around the parser generator.
     pub production_id: usize,
