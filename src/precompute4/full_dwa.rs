@@ -68,10 +68,7 @@ fn convert_node_to_nwa(
         for (child_idx, edge_bv) in child_map {
             let child_sid = convert_node_to_nwa(child_idx, god, nwa, cache);
 
-            let mut trans_w = Weight::zeros();
-            for t in edge_bv.iter() {
-                trans_w.insert(t);
-            }
+            let trans_w: Weight = edge_bv.into();
 
             // Add transition (NWA allows multiple transitions for same label)
             if let Some(label) = edge_key {
@@ -154,10 +151,7 @@ fn convert_dwa_state_to_trie_node(
     for (label, target) in &state.transitions {
         let target_idx = convert_dwa_state_to_trie_node(*target, dwa, god, cache, max_llm_token_id, end_node_idx);
         let weight = state.trans_weights.get(label).cloned().unwrap_or_else(Weight::all);
-        let mut edge_bv = LLMTokenBV::zeros();
-        for t in weight.iter_up_to(max_llm_token_id) {
-            edge_bv.insert(t);
-        }
+        let edge_bv: LLMTokenBV = weight.into();
         let term_id = GrammarTokenID(*label as usize);
         god.insert_edge_simple(idx, target_idx, Some(term_id), edge_bv);
     }
