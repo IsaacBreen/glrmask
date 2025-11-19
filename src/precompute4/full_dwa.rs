@@ -139,7 +139,7 @@ pub fn precompute4(
     let states_arena = RefCell::new(NWAStates::default());
 
     // 3. Reverse the precompute1 trie.
-    let reversed_nwa = reverse_nwa(&dwa);
+    let reversed_nwa = reverse_nwa(&NWA::from_dwa(&dwa));
     // The leaf node of the original DWA (which had final weights) becomes the root of the reversed NWA.
     // In `reverse_nwa`, we don't set a single start state.
     // However, `dwa` from precompute1 should have states with final weights.
@@ -189,15 +189,15 @@ pub fn precompute4(
          edge_terminal_opt: Option<i16>, 
          dest_list: &Vec<(NWAStateID, Weight)>| {
             let (current_nwa_body, current_tokens) = current_val;
-            let terminal_id = *edge_terminal_opt;
+            let terminal_id = edge_terminal_opt;
 
             let mut results = Vec::new();
             for (dest_idx, llm_token_bv) in dest_list.iter() {
-                let next_tokens = current_tokens & llm_token_bv;
+                let next_tokens = current_tokens & &LLMTokenBV::from(llm_token_bv.clone());
                 if next_tokens.is_empty() {
                     continue;
                 }
-                let weight = Weight::from_rsb(llm_token_bv.inner.as_ref().clone());
+                let weight = Weight::from_rsb(llm_token_bv.rsb.clone());
                 let mut terminal_map = BTreeMap::new();
                 terminal_map.insert(terminal_id, weight);
                 // We need to return a map of bodies, but here we are processing one body at a time?
@@ -205,7 +205,7 @@ pub fn precompute4(
                 // But the signature of `step` in Trie::special_map_grouped was `FnMut(&U, &EK, &OrderedHashMap) -> I`.
                 // Here I am defining `step` to take the aggregated value.
                 let mut body_map = BTreeMap::new();
-                body_map.insert(*current_nwa_body, terminal_map);
+                body_map.insert(current_nwa_body.clone(), terminal_map);
                 results.push((*dest_idx, (body_map, next_tokens.clone())));
             }
             results
