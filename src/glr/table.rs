@@ -485,6 +485,10 @@ fn stage_1(
     let max_item_index = (max_prod_id << item_index_shift) | (max_rhs_len + 1);
     let mut seen_items_bitset = BitSet::new(max_item_index + 1);
 
+    // Reusable buffer for goto sets
+    let mut scratch_goto_set: Vec<Item> = Vec::with_capacity(128);
+    let mut indices_to_clear: Vec<usize> = Vec::with_capacity(128);
+
     while let Some(item_set) = worklist.pop_front() {
         let state_id = *item_set_map_fast.get(&item_set).unwrap();
         
@@ -551,8 +555,8 @@ fn stage_1(
         for &sym_id in &active_symbols {
             let items_in_split_vec = &buckets[sym_id];
             
-            let mut goto_set: Vec<Item> = Vec::with_capacity(items_in_split_vec.len());
-            let mut indices_to_clear: Vec<usize> = Vec::with_capacity(items_in_split_vec.len());
+            scratch_goto_set.clear();
+            indices_to_clear.clear();
 
             for item in items_in_split_vec {
                 let next_dot = item.dot_position + 1;
@@ -560,7 +564,7 @@ fn stage_1(
                 
                 if seen_items_bitset.insert(index) {
                     indices_to_clear.push(index);
-                    goto_set.push(Item { production_id: item.production_id, dot_position: next_dot });
+                    scratch_goto_set.push(Item { production_id: item.production_id, dot_position: next_dot });
                 }
             }
 
@@ -572,15 +576,16 @@ fn stage_1(
             }
 
             // Sort for canonical key
-            goto_set.sort_unstable();
+            scratch_goto_set.sort_unstable();
 
-            let goto_id = if let Some(id) = item_set_map_fast.get(&goto_set) {
+            let goto_id = if let Some(id) = item_set_map_fast.get(&scratch_goto_set) {
                 *id
             } else {
                 let new_id = StateID(next_state_id);
                 next_state_id += 1;
-                item_set_map_fast.insert(goto_set.clone(), new_id);
-                worklist.push_back(goto_set);
+                let new_set = scratch_goto_set.clone();
+                item_set_map_fast.insert(new_set.clone(), new_id);
+                worklist.push_back(new_set);
                 new_id
             };
 
@@ -624,12 +629,27 @@ fn compute_final_table(
         .map(|(i, p)| (p.rhs.len(), NonTerminalID(lhs_ids[i])))
         .collect();
 
+    // Flatten follow sets for fast iteration
+    let flat_follow_sets: Vec<Vec<Option<TerminalID>>> = follow_sets.iter()
+        .map(|set| set.iter().cloned().collect())
+        .collect();
+
+    // Reusable dense structures
+    let mut dense_shifts: Vec<Option<StateID>> = vec![None; num_terminals];
+    let mut dense_reduces: Vec<Vec<ProductionID>> = vec![Vec::new(); num_terminals];
+    let mut active_terminals_indices: Vec<usize> = Vec::with_capacity(num_terminals);
+    let mut eof_reduces: Vec<ProductionID> = Vec::new();
+
     for (state_idx, row) in stage_1_table.into_iter().enumerate() {
-        let mut shifts: BTreeMap<TerminalID, StateID> = BTreeMap::new();
-        let mut gotos: BTreeMap<NonTerminalID, Goto> = BTreeMap::new();
+        // Clear reusable structures
+        for &idx in &active_terminals_indices {
+            dense_shifts[idx] = None;
+            dense_reduces[idx].clear();
+        }
+        active_terminals_indices.clear();
+        eof_reduces.clear();
         
-        let mut reduces_map: BTreeMap<TerminalID, Vec<ProductionID>> = BTreeMap::new();
-        let mut eof_reduces: Vec<ProductionID> = Vec::new();
+        let mut gotos: BTreeMap<NonTerminalID, Goto> = BTreeMap::new();
 
         // 1. Extract info from Stage 1 Row
         for (key, entry) in row {
@@ -637,7 +657,10 @@ fn compute_final_table(
                 // Shift or Goto
                 if let Some(sym_id) = key {
                     if sym_id < num_terminals {
-                        shifts.insert(TerminalID(sym_id), goto_id);
+                        if dense_shifts[sym_id].is_none() && dense_reduces[sym_id].is_empty() {
+                            active_terminals_indices.push(sym_id);
+                        }
+                        dense_shifts[sym_id] = Some(goto_id);
                     } else {
                         let nt_id = NonTerminalID(sym_id - num_terminals);
                         gotos.insert(nt_id, Goto { state_id: Some(goto_id), accept: false });
@@ -648,11 +671,17 @@ fn compute_final_table(
                 for item in entry.kernel {
                     let prod_id = item.production_id;
                     let lhs = lhs_ids[prod_id];
-                    let follow = &follow_sets[lhs];
+                    let follow = &flat_follow_sets[lhs];
                     
                     for lookahead in follow {
                         match lookahead {
-                            Some(t) => reduces_map.entry(*t).or_default().push(ProductionID(prod_id)),
+                            Some(t) => {
+                                let t_idx = t.0;
+                                if dense_shifts[t_idx].is_none() && dense_reduces[t_idx].is_empty() {
+                                    active_terminals_indices.push(t_idx);
+                                }
+                                dense_reduces[t_idx].push(ProductionID(prod_id));
+                            },
                             None => eof_reduces.push(ProductionID(prod_id)),
                         }
                     }
@@ -684,18 +713,16 @@ fn compute_final_table(
         // 3. Construct Final Row
         let mut shifts_and_reduces_full: ShiftsAndReducesFull = BTreeMap::new();
         
-        // The set of terminals to process is the union of shifts and reduces.
-        // We do NOT iterate all terminals if we have a default reduce.
-        let active_terminals: BTreeSet<TerminalID> = shifts.keys().chain(reduces_map.keys()).cloned().collect();
+        // Sort active indices to ensure deterministic iteration order
+        active_terminals_indices.sort_unstable();
 
-        for t in active_terminals {
-            let shift_opt = shifts.get(&t).cloned();
-            let mut reduc_list = reduces_map.remove(&t).unwrap_or_default();
+        for &t_idx in &active_terminals_indices {
+            let t = TerminalID(t_idx);
+            let shift_opt = dense_shifts[t_idx];
+            let reduc_list = &mut dense_reduces[t_idx];
             
             // If we have a default reduce, we must merge it into this specific terminal's action
-            // because this terminal has a specific action (shift or specific reduce) that overrides/augments the default.
             if let Some(default) = &default_reduce {
-                // Extract PIDs from default reduce
                 let default_pids = match default {
                     Stage7ShiftsAndReducesLookaheadValue::Reduce { production_ids, .. } => production_ids.clone(),
                     Stage7ShiftsAndReducesLookaheadValue::Split { reduces, .. } => {
@@ -723,9 +750,9 @@ fn compute_final_table(
 
             // Group reduces by len and NT (Stage 7 logic)
             let mut reduces_grouped: BTreeMap<usize, BTreeMap<NonTerminalID, Vec<ProductionID>>> = BTreeMap::new();
-            for pid in reduc_list {
+            for pid in reduc_list.iter() {
                 let (len, nt) = prod_meta[pid.0];
-                reduces_grouped.entry(len).or_default().entry(nt).or_default().push(pid);
+                reduces_grouped.entry(len).or_default().entry(nt).or_default().push(*pid);
             }
 
             let mut val = Stage7ShiftsAndReducesLookaheadValue::Split { 
