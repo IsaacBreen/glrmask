@@ -1,5 +1,4 @@
 use crate::json_serialization::{JSONConvertible, JSONNode};
-pub(crate) use crate::types::TerminalID;
 use std::collections::BTreeMap as StdMap;
 use std::fmt::{Display, Formatter};
 // Added for derive macro pattern
@@ -201,32 +200,4 @@ pub fn prod(name: &str, rhs: Vec<Symbol>) -> Production {
         lhs: NonTerminal(name.to_string()),
         rhs,
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct NonTerminalID(pub usize);
-
-impl JSONConvertible for NonTerminalID {
-    fn to_json(&self) -> JSONNode { self.0.to_json() }
-    fn from_json(node: JSONNode) -> Result<Self, String> { usize::from_json(node).map(NonTerminalID) }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ProductionID(pub usize);
-
-impl JSONConvertible for ProductionID {
-    fn to_json(&self) -> JSONNode { self.0.to_json() }
-    fn from_json(node: JSONNode) -> Result<Self, String> { usize::from_json(node).map(ProductionID) }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum CompactSymbol {
-    Terminal(TerminalID),
-    NonTerminal(NonTerminalID),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct CompactProduction {
-    pub lhs: NonTerminalID,
-    pub rhs: Vec<CompactSymbol>,
 }

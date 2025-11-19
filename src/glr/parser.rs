@@ -228,7 +228,7 @@ impl JSONConvertible for GLRParser {
                     .and_then(Option::<TerminalID>::from_json)?;
 
                 let substring_gotos = crate::glr::table::stage_9(&table, &non_terminal_map);
-                let reduce_goto_map = crate::glr::table::stage_10(&table, non_terminal_map.len());
+                let reduce_goto_map = crate::glr::table::stage_10(&table);
                 Ok(GLRParser::new(
                     table,
                     productions,
