@@ -395,7 +395,7 @@ impl GLRParser {
                     }
                     for (len, nts) in reduces {
                         for (&nt_id, _pids) in nts.iter() {
-                            self.apply_reduces(&state_gss, len, nt_id, &mut heads_by_state);
+                            self.apply_reduces(&state_gss, *len, nt_id, &mut heads_by_state);
                         }
                     }
                 }
