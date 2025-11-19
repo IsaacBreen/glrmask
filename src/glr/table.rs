@@ -17,7 +17,6 @@ use profiler_macro::time_it;
 use std::collections::BTreeMap as StdMap;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt::Display;
-use crate::constraint::StateIDBV;
 use memory_stats::memory_stats;
 use crate::glr::parser::{ActionFn, ExpectElse, GLRParser};
 use crate::profiler::{print_summary, print_summary_flat};
@@ -222,40 +221,6 @@ impl JSONConvertible for Stage7ShiftsAndReducesLookaheadValue {
             _ => Err(
                 "Expected JSONNode::Object for Stage7ShiftsAndReducesLookaheadValue".to_string(),
             ),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Eq, Ord, PartialEq, PartialOrd)]
-pub struct SubstringGoto {
-    pub accepting_sources: BTreeSet<StateID>,
-    pub gotos: BTreeMap<StateID, BTreeSet<StateID>>,
-}
-
-impl JSONConvertible for SubstringGoto {
-    fn to_json(&self) -> JSONNode {
-        let mut obj = StdMap::new();
-        obj.insert(
-            "accepting_sources".to_string(),
-            self.accepting_sources.to_json(),
-        );
-        obj.insert("gotos".to_string(), self.gotos.to_json());
-        JSONNode::Object(obj)
-    }
-    fn from_json(node: JSONNode) -> Result<Self, String> {
-        match node {
-            JSONNode::Object(mut obj) => Ok(SubstringGoto {
-                accepting_sources: BTreeSet::<StateID>::from_json(
-                    obj.remove("accepting_sources").ok_or_else(|| {
-                        "Missing field accepting_sources for SubstringGoto".to_string()
-                    })?,
-                )?,
-                gotos: BTreeMap::<StateID, BTreeSet<StateID>>::from_json(
-                    obj.remove("gotos")
-                        .ok_or_else(|| "Missing field gotos for SubstringGoto".to_string())?,
-                )?,
-            }),
-            _ => Err("Expected JSONNode::Object for SubstringGoto".to_string()),
         }
     }
 }
@@ -796,63 +761,6 @@ fn stage_8(stage_7_table: Stage7Table) -> Stage8Table {
     stage_8_table
 }
 
-/// Pre-compute complex GOTO relations used by substring parsing.
-pub fn stage_9(
-    table: &Table,
-    non_terminal_map: &BiBTreeMap<NonTerminal, NonTerminalID>,
-) -> BTreeMap<NonTerminalID, SubstringGoto> {
-    let mut substring_gotos = BTreeMap::new();
-    let all_nt_ids: Vec<_> = non_terminal_map.right_values().copied().collect();
-
-    for &nt_id in &all_nt_ids {
-        let mut accepting_sources = BTreeSet::new();
-        let mut gotos: BTreeMap<StateID, BTreeSet<StateID>> = BTreeMap::new();
-
-        for (&source_state_id, row) in table {
-            if let Some(goto) = row.gotos.get(&nt_id) {
-                if goto.accept {
-                    accepting_sources.insert(source_state_id);
-                }
-                if let Some(goto_state_id) = goto.state_id {
-                    gotos.entry(goto_state_id).or_default().insert(source_state_id);
-                }
-            }
-        }
-
-        if !accepting_sources.is_empty() || !gotos.is_empty() {
-            substring_gotos.insert(
-                nt_id,
-                SubstringGoto {
-                    accepting_sources,
-                    gotos,
-                },
-            );
-        }
-    }
-
-    substring_gotos
-}
-
-/// Inverted GOTO index: (reduce non-terminal, goto state) -> bitvector of source states.
-pub fn stage_10(table: &Table) -> BTreeMap<NonTerminalID, BTreeMap<StateID, StateIDBV>> {
-    let mut reduce_goto_map: BTreeMap<NonTerminalID, BTreeMap<StateID, StateIDBV>> =
-        BTreeMap::new();
-
-    for (&source_state_id, row) in table {
-        for (&nt_id, goto) in &row.gotos {
-            if let Some(goto_state_id) = goto.state_id {
-                reduce_goto_map
-                    .entry(nt_id)
-                    .or_default()
-                    .entry(goto_state_id)
-                    .or_default()
-                    .insert(source_state_id.0);
-            }
-        }
-    }
-    reduce_goto_map
-}
-
 fn print_memory_usage(label: &str) {
     if let Some(usage) = memory_stats() {
         let physical_mem_mb = usage.physical_mem / 1024 / 1024;
@@ -962,18 +870,6 @@ pub fn generate_glr_parser_with_maps(
     crate::debug!(2, "Stage 8 done in {:.2?}", start.elapsed());
     print_memory_usage("After Stage 8 (final table)");
 
-    crate::debug!(2, "Stage 9: Precomputing substring gotos");
-    let start = std::time::Instant::now();
-    let substring_gotos = stage_9(&final_table, &non_terminal_map);
-    crate::debug!(2, "Stage 9 done in {:.2?}", start.elapsed());
-    print_memory_usage("After Stage 9 (substring gotos)");
-
-    crate::debug!(2, "Stage 10: Precomputing reduce goto map");
-    let start = std::time::Instant::now();
-    let reduce_goto_map = stage_10(&final_table);
-    crate::debug!(2, "Stage 10 done in {:.2?}", start.elapsed());
-    print_memory_usage("After Stage 10 (reduce goto map)");
-
     crate::debug!(2, "Done generating GLR parser");
     print_summary();
     print_summary_flat();
@@ -988,8 +884,6 @@ pub fn generate_glr_parser_with_maps(
         everything_state_id,
         actions,
         ignore_terminal_id,
-        substring_gotos,
-        reduce_goto_map,
     )
 }
 

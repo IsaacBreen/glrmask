@@ -1,8 +1,8 @@
-use crate::constraint::{LLMVocab, StateIDBV};
+use crate::constraint::{LLMVocab};
 use crate::datastructures::leveled_gss::{LeveledGSS, LeveledGSSStats};
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::glr::items::{Item};
-use crate::glr::table::{get_row, Goto, NonTerminalID, Row, Stage7ShiftsAndReducesLookaheadValue, StateID, SubstringGoto, Table, TerminalID};
+use crate::glr::table::{get_row, Goto, NonTerminalID, Row, Stage7ShiftsAndReducesLookaheadValue, StateID, Table, TerminalID};
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use crate::profiler::GSS_LOGGING_ENABLED;
 use crate::{debug, hit};
@@ -158,8 +158,6 @@ pub struct GLRParser {
     pub start_state_id: StateID,
     pub everything_state_id: StateID,
     pub ignore_terminal_id: Option<TerminalID>,
-    pub substring_gotos: BTreeMap<NonTerminalID, SubstringGoto>,
-    pub reduce_goto_map: BTreeMap<NonTerminalID, BTreeMap<StateID, StateIDBV>>,
     pub actions: BTreeMap<NonTerminalID, ActionFn>,
 }
 
@@ -182,8 +180,6 @@ impl JSONConvertible for GLRParser {
         obj.insert("start_state_id".to_string(), self.start_state_id.to_json());
         obj.insert("everything_state_id".to_string(), self.everything_state_id.to_json());
         obj.insert("ignore_terminal_id".to_string(), self.ignore_terminal_id.to_json());
-        obj.insert("substring_gotos".to_string(), self.substring_gotos.to_json());
-        obj.insert("reduce_goto_map".to_string(), self.reduce_goto_map.to_json());
         // actions are provided at runtime.
         JSONNode::Object(obj)
     }
@@ -226,15 +222,6 @@ impl JSONConvertible for GLRParser {
                     .ok_or_else(|| "Missing field ignore_terminal_id for GLRParser".to_string())
                     .and_then(Option::<TerminalID>::from_json)?;
 
-                let substring_gotos = obj
-                    .remove("substring_gotos")
-                    .ok_or_else(|| "Missing field substring_gotos".to_string())
-                    .and_then(|n| BTreeMap::<NonTerminalID, SubstringGoto>::from_json(n))?;
-                let reduce_goto_map = obj
-                    .remove("reduce_goto_map")
-                    .ok_or_else(|| "Missing field reduce_goto_map".to_string())
-                    .and_then(|n| BTreeMap::<NonTerminalID, BTreeMap<StateID, StateIDBV>>::from_json(n))?;
-
                 Ok(GLRParser::new(
                     table,
                     productions,
@@ -245,8 +232,6 @@ impl JSONConvertible for GLRParser {
                     everything_state_id,
                     BTreeMap::new(),
                     ignore_terminal_id,
-                    substring_gotos,
-                    reduce_goto_map,
                 ))
             }
             _ => Err("Expected JSONNode::Object for GLRParser".to_string()),
@@ -262,8 +247,6 @@ impl Debug for GLRParser {
             .field("start_state_id", &self.start_state_id)
             .field("everything_state_id", &self.everything_state_id)
             .field("ignore_terminal_id", &self.ignore_terminal_id)
-            .field("substring_gotos_size", &self.substring_gotos.len())
-            .field("reduce_goto_map_size", &self.reduce_goto_map.len())
             .field("actions_size", &self.actions.len())
             .finish()
     }
@@ -279,8 +262,6 @@ impl PartialEq for GLRParser {
             && self.start_state_id == other.start_state_id
             && self.everything_state_id == other.everything_state_id
             && self.ignore_terminal_id == other.ignore_terminal_id
-            && self.substring_gotos == other.substring_gotos
-            && self.reduce_goto_map == other.reduce_goto_map
     }
 }
 impl Eq for GLRParser {}
@@ -296,8 +277,6 @@ impl GLRParser {
         everything_state_id: StateID,
         actions: BTreeMap<NonTerminal, ActionFn>,
         ignore_terminal_id: Option<TerminalID>,
-        substring_gotos: BTreeMap<NonTerminalID, SubstringGoto>,
-        reduce_goto_map: BTreeMap<NonTerminalID, BTreeMap<StateID, StateIDBV>>,
     ) -> Self {
         let converted_actions: BTreeMap<NonTerminalID, ActionFn> = actions
             .into_iter()
@@ -321,8 +300,6 @@ impl GLRParser {
             start_state_id,
             everything_state_id,
             ignore_terminal_id,
-            substring_gotos,
-            reduce_goto_map,
             actions: converted_actions,
         }
     }
