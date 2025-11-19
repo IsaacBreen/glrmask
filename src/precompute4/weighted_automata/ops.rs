@@ -173,7 +173,8 @@ impl NWA {
     }
 
     pub fn union(&mut self, other: &Self) {
-        self.body = Self::internal_union_components(&mut self.states, &self.body, &other.body);
+        let other_copied = self.states.copy_subgraph_from_and_return_body(&other.states, other.body.clone());
+        self.body = Self::internal_union_components(&mut self.states, &self.body, &other_copied);
     }
 
     fn internal_concatenate_components(
