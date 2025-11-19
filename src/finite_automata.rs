@@ -110,38 +110,6 @@ impl JSONConvertible for NFAState {
     }
 }
 
-/// A simple bitset implementation for efficient set operations on dense integers.
-struct BitSet {
-    words: Vec<u64>,
-}
-
-impl BitSet {
-    fn new(size: usize) -> Self {
-        Self {
-            words: vec![0; (size + 63) / 64],
-        }
-    }
-
-    fn clear(&mut self) {
-        for word in &mut self.words {
-            *word = 0;
-        }
-    }
-
-    fn insert_all(&mut self, iter: impl Iterator<Item = usize>) {
-        for bit in iter {
-            self.words[bit / 64] |= 1 << (bit % 64);
-        }
-    }
-
-    fn iter(&self) -> impl Iterator<Item = usize> + '_ {
-        self.words.iter().enumerate().flat_map(|(i, &word)| {
-            (0..64)
-                .filter(move |&bit| word & (1 << bit) != 0)
-                .map(move |bit| i * 64 + bit)
-        })
-    }
-}
 #[derive(Debug, Clone)]
 pub struct NFA {
     states: Vec<NFAState>,
@@ -840,12 +808,11 @@ impl ExprGroups {
         };
 
         let mut cache: HashMap<usize, (usize, usize)> = HashMap::new();
-        let mut value_cache: HashMap<Expr, (usize, usize)> = HashMap::new();
         for (group, ExprGroup { expr, is_non_greedy }) in self.groups.into_iter().enumerate() {
             let group_start_state = nfa.add_state();
             nfa.add_epsilon_transition(nfa.start_state, group_start_state);
             let end_state =
-                Expr::handle_expr_cached(expr, &mut nfa, group_start_state, &mut cache, &mut value_cache);
+                Expr::handle_expr_cached(expr, &mut nfa, group_start_state, &mut cache);
             if is_non_greedy {
                 nfa.states[end_state].finalizers.insert(group);
                 // Additionally, track that this finalizer is non-greedy
@@ -877,16 +844,7 @@ impl Expr {
         nfa: &mut NFA,
         mut current_state: usize,
         cache: &mut HashMap<usize, (usize, usize)>,
-        value_cache: &mut HashMap<Expr, (usize, usize)>,
     ) -> usize {
-        // Check value-based cache to deduplicate identical expressions
-        if let Some(&(start, end)) = value_cache.get(&expr) {
-            nfa.add_epsilon_transition(current_state, start);
-            return end;
-        }
-
-        let expr_key = expr.clone();
-
         match expr {
             Expr::U8Seq(u8s) => {
                 let mut next_state = current_state;
@@ -895,7 +853,6 @@ impl Expr {
                     nfa.add_transition(next_state, c, new_state);
                     next_state = new_state;
                 }
-                value_cache.insert(expr_key, (current_state, next_state));
                 next_state
             }
             Expr::U8Class(u8s) => {
@@ -903,7 +860,6 @@ impl Expr {
                 for ch in u8s.iter() {
                     nfa.add_transition(current_state, ch, new_state);
                 }
-                value_cache.insert(expr_key, (current_state, new_state));
                 new_state
             }
             Expr::Shared(inner) => {
@@ -915,7 +871,7 @@ impl Expr {
                 } else {
                     // Create a dedicated entry for this shared fragment
                     let entry = nfa.add_state();
-                    let end = Self::handle_expr_cached((*inner).clone(), nfa, entry, cache, value_cache);
+                    let end = Self::handle_expr_cached((*inner).clone(), nfa, entry, cache);
                     cache.insert(key, (entry, end));
                     nfa.add_epsilon_transition(current_state, entry);
                     end
@@ -925,30 +881,27 @@ impl Expr {
                 QuantifierType::ZeroOrMore => {
                     let entry_state = nfa.add_state();
                     nfa.add_epsilon_transition(current_state, entry_state);
-                    let body_end_state = Self::handle_expr_cached(*expr, nfa, entry_state, cache, value_cache);
+                    let body_end_state = Self::handle_expr_cached(*expr, nfa, entry_state, cache);
                     let exit_state = nfa.add_state();
                     nfa.add_epsilon_transition(entry_state, exit_state); // 0 times
                     nfa.add_epsilon_transition(body_end_state, entry_state); // loop
                     nfa.add_epsilon_transition(body_end_state, exit_state); // exit loop
-                    value_cache.insert(expr_key, (current_state, exit_state));
                     exit_state
                 }
                 QuantifierType::OneOrMore => {
                     let entry_state = current_state;
-                    let body_end_state = Self::handle_expr_cached(*expr, nfa, entry_state, cache, value_cache);
+                    let body_end_state = Self::handle_expr_cached(*expr, nfa, entry_state, cache);
                     let exit_state = nfa.add_state();
                     nfa.add_epsilon_transition(body_end_state, entry_state); // loop
                     nfa.add_epsilon_transition(body_end_state, exit_state); // exit loop
-                    value_cache.insert(expr_key, (current_state, exit_state));
                     exit_state
                 }
                 QuantifierType::ZeroOrOne => {
                     let body_end_state =
-                        Self::handle_expr_cached(*expr, nfa, current_state, cache, value_cache);
+                        Self::handle_expr_cached(*expr, nfa, current_state, cache);
                     let exit_state = nfa.add_state();
                     nfa.add_epsilon_transition(current_state, exit_state); // skip
                     nfa.add_epsilon_transition(body_end_state, exit_state); // take
-                    value_cache.insert(expr_key, (current_state, exit_state));
                     exit_state
                 }
             },
@@ -958,22 +911,19 @@ impl Expr {
 
                 for expr in exprs {
                     // Process the expr and get its end state
-                    let expr_end_state = Self::handle_expr_cached(expr, nfa, current_state, cache, value_cache);
+                    let expr_end_state = Self::handle_expr_cached(expr, nfa, current_state, cache);
 
                     // Connect the end state of the expr to the end state of the choice
                     nfa.add_epsilon_transition(expr_end_state, choice_end_state);
                 }
 
                 // The end state of the choice becomes the new current state
-                value_cache.insert(expr_key, (current_state, choice_end_state));
                 choice_end_state
             }
             Expr::Seq(exprs) => {
-                let start_state = current_state;
                 for expr in exprs {
-                    current_state = Self::handle_expr_cached(expr, nfa, current_state, cache, value_cache);
+                    current_state = Self::handle_expr_cached(expr, nfa, current_state, cache);
                 }
-                value_cache.insert(expr_key, (start_state, current_state));
                 current_state
             }
             Expr::Epsilon => current_state,
@@ -982,8 +932,7 @@ impl Expr {
 
     fn handle_expr(expr: Expr, nfa: &mut NFA, mut current_state: usize) -> usize {
         let mut cache: HashMap<usize, (usize, usize)> = HashMap::new();
-        let mut value_cache: HashMap<Expr, (usize, usize)> = HashMap::new();
-        Self::handle_expr_cached(expr, nfa, current_state, &mut cache, &mut value_cache)
+        Self::handle_expr_cached(expr, nfa, current_state, &mut cache)
     }
 }
 
@@ -1042,7 +991,6 @@ impl NFA {
         let mut dfa_state_map: BTreeMap<FrozenSet<usize>, usize> = BTreeMap::new();
         let mut worklist: Vec<FrozenSet<usize>> = Vec::new();
 
-        // Precompute epsilon closures
         let epsilon_closures = self.compute_epsilon_closures();
 
         // Compute epsilon-closure of the NFA start state and use it as the DFA start state.
@@ -1066,42 +1014,36 @@ impl NFA {
             group_id_to_u8set: BTreeMap::new(),         // Will be computed later
         });
 
-        // Reusable buffers to avoid allocation in the loop
-        let mut transition_buckets: Vec<Vec<usize>> = vec![Vec::new(); 256];
-        let mut next_state_bits = BitSet::new(self.states.len());
-
         while let Some(current_set) = worklist.pop() {
             let current_dfa_state = *dfa_state_map
                 .get(&current_set)
                 .expect("DFA state set not found in map");
-
-            // Clear buckets
-            for bucket in &mut transition_buckets {
-                bucket.clear();
-            }
+            let mut transition_map: BTreeMap<u8, BTreeSet<usize>> = BTreeMap::new();
 
             // For each NFA state in the current DFA state, collect outgoing transitions.
             for &state in current_set.iter() {
                 for &(input, next_state) in &self.states[state].transitions {
-                    transition_buckets[input as usize].push(next_state);
+                    transition_map
+                        .entry(input)
+                        .or_insert_with(BTreeSet::new)
+                        .insert(next_state);
                 }
             }
 
             // For each input symbol, compute the epsilon-closure of the resulting state set.
-            for (input_val, next_states) in transition_buckets.iter().enumerate() {
+            for (&input_u8, next_states) in &transition_map {
                 if next_states.is_empty() {
                     continue;
                 }
-                let input_u8 = input_val as u8;
 
                 // epsilon-closure(move(S, input_u8))
-                next_state_bits.clear();
+                let mut closure = BTreeSet::new();
                 for &next_state in next_states {
-                    // Union of epsilon closures
-                    next_state_bits.insert_all(epsilon_closures[next_state].iter().cloned());
+                    for &s in &epsilon_closures[next_state] {
+                        closure.insert(s);
+                    }
                 }
-
-                let frozen_closure = FrozenSet::from_iter(next_state_bits.iter());
+                let frozen_closure = FrozenSet::from_iter(closure);
 
                 // If this set of states is new, add it as a new DFA state.
                 let next_dfa_state = if let Some(&existing_state) = dfa_state_map.get(&frozen_closure)
@@ -1274,7 +1216,7 @@ impl DFA {
         // For very large DFAs (e.g. tens of millions of states from huge literal
         // strings), running it is infeasible and would exhaust memory. In that
         // regime, skipping minimization is a semantics-preserving optimization.
-        const MAX_MINIMIZATION_STATES: usize = 10_000;
+        const MAX_MINIMIZATION_STATES: usize = 100_000;
         if self.states.len() > MAX_MINIMIZATION_STATES {
             return;
         }
