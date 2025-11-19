@@ -36,6 +36,9 @@ pub static LAST_DEBUG_FILE: Lazy<Mutex<String>> = Lazy::new(|| Mutex::new(String
 /// Tracks the last time a debug message was printed.
 pub static LAST_DEBUG_TIME: Lazy<Mutex<Option<std::time::Instant>>> = Lazy::new(|| Mutex::new(None));
 
+/// Tracks if the last debug message was a 'start' message that didn't print a newline.
+pub static PENDING_INCOMPLETE_LINE: Lazy<Mutex<bool>> = Lazy::new(|| Mutex::new(false));
+
 /// A list of filenames (not full paths) to allow debug messages from.
 pub const ALLOWED_FILES: &[&str] = &[
     // "parser.rs",
@@ -56,6 +59,12 @@ macro_rules! __debug_grouped_impl {
             if $crate::r#macro::ALLOWED_FILES.is_empty() || $crate::r#macro::ALLOWED_FILES.contains(&current_filename) {
                 let mut last_file_guard = $crate::r#macro::LAST_DEBUG_FILE.lock().unwrap();
                 let mut last_time_guard = $crate::r#macro::LAST_DEBUG_TIME.lock().unwrap();
+                let mut pending_guard = $crate::r#macro::PENDING_INCOMPLETE_LINE.lock().unwrap();
+
+                if *pending_guard {
+                    println!();
+                    *pending_guard = false;
+                }
                 let now = std::time::Instant::now();
 
                 let elapsed_str = if let Some(last_time) = *last_time_guard {
@@ -92,6 +101,62 @@ macro_rules! __debug_grouped_impl {
     }};
 }
 
+/// Internal implementation for the start of a debug span (debug_start!).
+/// Prints the message without a newline and sets the pending flag.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __debug_start_impl {
+    ($level:expr, $user_fmt:expr, $($user_args:tt)*) => {{
+        if $level <= $crate::r#macro::get_macro_debug_level() {
+            let current_file_path = std::path::Path::new(file!());
+            let current_filename = current_file_path.file_name()
+                .map_or("", |os_str| os_str.to_str().unwrap_or(""));
+
+            if $crate::r#macro::ALLOWED_FILES.is_empty() || $crate::r#macro::ALLOWED_FILES.contains(&current_filename) {
+                let mut last_file_guard = $crate::r#macro::LAST_DEBUG_FILE.lock().unwrap();
+                let mut last_time_guard = $crate::r#macro::LAST_DEBUG_TIME.lock().unwrap();
+                let mut pending_guard = $crate::r#macro::PENDING_INCOMPLETE_LINE.lock().unwrap();
+
+                if *pending_guard {
+                    println!();
+                    *pending_guard = false;
+                }
+                let now = std::time::Instant::now();
+
+                let elapsed_str = if let Some(last_time) = *last_time_guard {
+                    let diff = now.duration_since(last_time);
+                    if diff.as_millis() > 1 {
+                        format!("\x1b[35m+{:?}\x1b[0m ", diff)
+                    } else {
+                        String::new()
+                    }
+                } else {
+                    String::new()
+                };
+                *last_time_guard = Some(now);
+
+                let current_file_str = file!();
+
+                if *last_file_guard != current_file_str {
+                    println!("\x1b[1;36m{}\x1b[0m", current_file_str);
+                    *last_file_guard = current_file_str.to_string();
+                }
+
+                print!(
+                    concat!("{}\x1b[90m  {:>4}\x1b[0m  ", $user_fmt),
+                    elapsed_str,
+                    line!(),
+                    $($user_args)*
+                );
+                use std::io::Write;
+                let _ = std::io::stdout().flush();
+                *pending_guard = true;
+                Some(())
+            } else { None }
+        } else { None }
+    }};
+}
+
 /// Internal implementation for the old format (debug_line!).
 /// Uses ANSI colors: Bold Yellow for the tag.
 #[doc(hidden)]
@@ -104,6 +169,12 @@ macro_rules! __debug_line_impl {
                 .map_or("", |os_str| os_str.to_str().unwrap_or(""));
 
             if $crate::r#macro::ALLOWED_FILES.is_empty() || $crate::r#macro::ALLOWED_FILES.contains(&current_filename) {
+                let mut pending_guard = $crate::r#macro::PENDING_INCOMPLETE_LINE.lock().unwrap();
+                if *pending_guard {
+                    println!();
+                    *pending_guard = false;
+                }
+
                 // \x1b[1;33m = Bold Yellow
                 println!(
                     concat!("\x1b[1;33m[DEBUG] {}]\x1b[0m {}:{}: ", $user_fmt),
@@ -139,5 +210,38 @@ macro_rules! debug_line {
     };
     ($level:expr, $msg:expr) => {
         $crate::__debug_line_impl!($level, "{:?}", $msg);
+    };
+}
+
+/// Starts a debug message that will be completed later.
+/// Returns a token that must be passed to `debug_end!`.
+#[macro_export]
+macro_rules! debug_start {
+    ($level:expr, $fmt:literal $(, $($arg:tt)*)?) => {
+        $crate::__debug_start_impl!($level, $fmt, $($($arg)*)?)
+    };
+    ($level:expr, $msg:expr) => {
+        $crate::__debug_start_impl!($level, "{:?}", $msg)
+    };
+}
+
+/// Completes a debug message started with `debug_start!`.
+/// If no other debug messages were printed in between, it appends to the same line.
+/// Otherwise, it prints the message on a new line with a continuation marker.
+#[macro_export]
+macro_rules! debug_end {
+    ($token:expr, $fmt:literal $(, $($arg:tt)*)?) => {
+        if $token.is_some() {
+            let mut pending_guard = $crate::r#macro::PENDING_INCOMPLETE_LINE.lock().unwrap();
+            if *pending_guard {
+                println!($fmt $(, $($arg)*)?);
+                *pending_guard = false;
+            } else {
+                println!(concat!("... ", $fmt) $(, $($arg)*)?);
+            }
+        }
+    };
+    ($token:expr, $msg:expr) => {
+        $crate::debug_end!($token, "{:?}", $msg);
     };
 }
