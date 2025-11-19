@@ -5,7 +5,7 @@ use std::time::Instant;
 
 use chrono::Local;
 
-use crate::constraint::{LLMTokenBV, PrecomputeNode1Index, Trie1GodWrapper};
+use crate::constraint::{LLMTokenBV, PrecomputeNode1, PrecomputeNode1Index, PrecomputedNodeContents, Trie1GodWrapper};
 use crate::datastructures::trie::{Trie, Trie2Index};
 use crate::glr::parser::{ExpectElse, GLRParser};
 use crate::json_serialization::JSONConvertible;
@@ -14,7 +14,7 @@ use crate::precompute4::resolve_negatives::{apply_cancellations, apply_finality_
 use crate::precompute4::template_nwa::{build_epsilon_dwa, build_ignore_terminal_dwa, build_template_dwas};
 use crate::precompute4::weighted_automata::{DWA, NWA, NWABody, NWAStateID, NWAStates, Weight, StateID};
 use crate::r#macro::is_debug_level_enabled;
-use crate::glr::table::TerminalID;
+use crate::types::TerminalID as GrammarTokenID;
 use crate::tokenizer::TokenizerStateID;
 
 struct SimplifyRustfstConfig {
@@ -87,47 +87,104 @@ fn convert_node_to_nwa(
     sid
 }
 
+fn convert_precompute1_to_nwa(
+    precomputed1: &BTreeMap<TokenizerStateID, PrecomputeNode1Index>,
+    trie1_god: &Trie1GodWrapper,
+) -> NWA {
+    let mut nwa = NWA::new();
+    nwa.states.0.clear(); // Clear default start state
+    let start_state = nwa.states.add_state();
+    nwa.body.start_state = start_state;
+
+    let mut node_cache = HashMap::new();
+
+    for (sid, root_idx) in precomputed1 {
+        let root_state = convert_node_to_nwa(*root_idx, trie1_god, &mut nwa, &mut node_cache);
+        nwa.add_transition(start_state, sid.0 as i16, root_state, Weight::all()).unwrap();
+    }
+    nwa
+}
+
+fn convert_dwa_to_precompute1(
+    dwa: &DWA,
+) -> (BTreeMap<TokenizerStateID, PrecomputeNode1Index>, Trie1GodWrapper) {
+    let god = Trie1GodWrapper::new();
+    let mut result = BTreeMap::new();
+    let mut state_cache = HashMap::new();
+
+    let start_state = dwa.body.start_state;
+    if start_state >= dwa.states.len() {
+        return (result, god);
+    }
+
+    let start_node = &dwa.states[start_state];
+    for (label, target) in &start_node.transitions {
+        let sid = TokenizerStateID(*label as usize);
+        let root_idx = convert_dwa_state_to_trie_node(*target, dwa, &god, &mut state_cache);
+        result.insert(sid, root_idx);
+    }
+
+    (result, god)
+}
+
+fn convert_dwa_state_to_trie_node(
+    state_id: StateID,
+    dwa: &DWA,
+    god: &Trie1GodWrapper,
+    cache: &mut HashMap<StateID, PrecomputeNode1Index>,
+) -> PrecomputeNode1Index {
+    if let Some(&idx) = cache.get(&state_id) {
+        return idx;
+    }
+
+    let state = &dwa.states[state_id];
+    let mut live_tokens = LLMTokenBV::zeros();
+    if let Some(fw) = &state.final_weight {
+        for t in fw.iter() {
+            live_tokens.insert(t);
+        }
+    }
+
+    let contents = PrecomputedNodeContents { end: false, live_tokens };
+    let node = PrecomputeNode1::new(contents);
+    let idx = PrecomputeNode1Index::new(god.insert(node));
+    cache.insert(state_id, idx);
+
+    for (label, target) in &state.transitions {
+        let target_idx = convert_dwa_state_to_trie_node(*target, dwa, god, cache);
+        let weight = state.trans_weights.get(label).cloned().unwrap_or_else(Weight::all);
+        let mut edge_bv = LLMTokenBV::zeros();
+        for t in weight.iter() {
+            edge_bv.insert(t);
+        }
+        let term_id = GrammarTokenID(*label as u32);
+        god.insert_edge_simple(idx, target_idx, Some(term_id), edge_bv);
+    }
+
+    idx
+}
+
 /// Public API: precompute4 using an NWA-first approach, determinizing at the end.
 pub fn precompute4(
     parser: &GLRParser,
     precomputed1: &BTreeMap<TokenizerStateID, PrecomputeNode1Index>,
     trie1_god: &Trie1GodWrapper,
 ) -> DWA {
-    let mut state_to_dwa = BTreeMap::new();
-    let mut root_to_dwa_index: HashMap<PrecomputeNode1Index, usize> = HashMap::new();
-    let mut nwabig = NWA::new();
-    crate::debug!(4, "Converting precomputed1 to NWA...");
-    for (sid, root_idx) in precomputed1 {
-        if let Some(&idx) = root_to_dwa_index.get(root_idx) {
-            state_to_dwa.insert(*sid, idx);
-            continue;
-        }
-
-        // Build NWA from the Trie node
-        let mut nwa = NWA::new();
-        nwa.states.0.clear(); // Clear default start state
-        let mut node_cache = HashMap::new();
-        let start_state = convert_node_to_nwa(*root_idx, trie1_god, &mut nwa, &mut node_cache);
-        let actual_start_state = nwa.states.add_state();
-        nwa.add_transition(actual_start_state, sid.0 as i16, start_state, Weight::all()).unwrap();
-        nwa.body.start_state = actual_start_state;
-        nwa.minimize_with_rustfst();
-        nwabig.union(&nwa);
-    }
-    nwabig.simplify();
-    let mut dwa = nwabig.determinize();
+    crate::debug!(4, "Optimizing precomputed1 via NWA/DWA conversion...");
+    let mut nwa = convert_precompute1_to_nwa(precomputed1, trie1_god);
+    nwa.simplify();
+    let mut dwa = nwa.determinize();
     dwa.minimize_with_rustfst();
     crate::debug!(
         4,
-        "Built NWA with {} states, {} transitions, and {} epsilon transitions, and DWA with {} states, {} transitions.",
-        nwabig.states.len(),
-        nwabig.num_transitions(),
-        nwabig.num_epsilons(),
+        "Optimized precomputed1 DWA has {} states and {} transitions.",
         dwa.states.len(),
         dwa.num_transitions(),
     );
 
-
+    let (optimized_precomputed1, optimized_trie1_god) = convert_dwa_to_precompute1(&dwa);
+    let precomputed1 = &optimized_precomputed1;
+    let trie1_god = &optimized_trie1_god;
 
     let now_total = Instant::now();
     let now = Instant::now();
