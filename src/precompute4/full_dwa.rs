@@ -112,6 +112,7 @@ pub fn precompute4(
         nwa.add_transition(actual_start_state, sid.0 as i16, start_state, Weight::all()).unwrap();
         nwa.body.start_state = actual_start_state;
         nwa.minimize_with_rustfst();
+        nwa = NWA::from_dwa(&nwa.determinize_to_dwa_with_rustfst());
         nwabig.union(&nwa);
     }
     nwabig.simplify();
