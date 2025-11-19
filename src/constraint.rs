@@ -1726,8 +1726,18 @@ impl GrammarConstraint {
             }
         }
 
+        // Reduce internal_llm_token_map to representatives to speed up precomputation
+        let mut representative_llm_token_map: BTreeMap<Vec<u8>, LLMTokenID> = BTreeMap::new();
+        let mut seen_internal_ids = std::collections::HashSet::new();
+
+        for (bytes, id) in internal_llm_token_map {
+            if seen_internal_ids.insert(id.0) {
+                representative_llm_token_map.insert(bytes.clone(), *id);
+            }
+        }
+
         // Analyze tokenizer state equivalence to reduce precomputation work
-        let strings: Vec<Vec<u8>> = internal_llm_token_map.keys().cloned().collect();
+        let strings: Vec<Vec<u8>> = representative_llm_token_map.keys().cloned().collect();
         let states: Vec<usize> = tokenizer.iter_states().map(|s| s.0).collect();
 
         crate::debug!(2, "Analyzing tokenizer state equivalence...");
@@ -1754,7 +1764,7 @@ impl GrammarConstraint {
             tokenizer,
             parser,
             llm_vocab,
-            internal_llm_token_map,
+            &representative_llm_token_map,
             stage_vocab.internal_max_llm_token,
             original_to_dummy_map,
             state_mapping.clone(),
