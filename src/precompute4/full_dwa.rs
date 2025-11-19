@@ -107,7 +107,7 @@ fn convert_dwa_to_precompute1(
     let god = Trie1GodWrapper::new();
     let mut result = BTreeMap::new();
     let mut state_cache = HashMap::new();
-    let end_node_contents = PrecomputedNodeContents { end: true, live_tokens: LLMTokenBV::max_ones() };
+    let end_node_contents = PrecomputedNodeContents { end: true, live_tokens: LLMTokenBV::ones(max_llm_token_id + 1) };
     let end_node = PrecomputeNode1::new(end_node_contents);
     let end_node_idx = PrecomputeNode1Index::new(god.insert(end_node));
 
@@ -152,7 +152,7 @@ fn convert_dwa_state_to_trie_node(
     for (label, target) in &state.transitions {
         let target_idx = convert_dwa_state_to_trie_node(*target, dwa, god, cache, max_llm_token_id, end_node_idx);
         let weight = state.trans_weights.get(label).cloned().unwrap_or_else(Weight::all);
-        let edge_bv: LLMTokenBV = weight.into();
+        let edge_bv: LLMTokenBV = LLMTokenBV::from(weight) & LLMTokenBV::ones(max_llm_token_id + 1);
         let term_id = GrammarTokenID(*label as usize);
         god.insert_edge_simple(idx, target_idx, Some(term_id), edge_bv);
     }
@@ -169,8 +169,11 @@ pub fn precompute4(
 ) -> DWA {
     crate::debug!(4, "Optimizing precomputed1 via NWA/DWA conversion...");
     let mut nwa = convert_precompute1_to_nwa(precomputed1, trie1_god);
+    crate::debug!(4, "Optimizing precomputed1 via NWA/DWA conversion... done.");
     nwa.simplify();
+    crate::debug!(4, "Simplified precomputed1 NWA... done.");
     let mut dwa = nwa.determinize();
+    crate::debug!(4, "Determinized precomputed1 NWA... done.");
     dwa.minimize_with_rustfst();
     crate::debug!(
         4,
