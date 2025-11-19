@@ -154,7 +154,7 @@ pub struct GLRParser {
     pub productions: Vec<Production>,
     pub terminal_map: BiBTreeMap<Terminal, TerminalID>,
     pub non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>,
-    pub item_set_map: BiBTreeMap<BTreeSet<Item>, StateID>,
+    pub item_set_map: BiBTreeMap<Vec<Item>, StateID>,
     pub start_state_id: StateID,
     pub everything_state_id: StateID,
     pub ignore_terminal_id: Option<TerminalID>,
@@ -208,7 +208,7 @@ impl JSONConvertible for GLRParser {
                 let item_set_map = obj
                     .remove("item_set_map")
                     .ok_or_else(|| "Missing field item_set_map".to_string())
-                    .and_then(|n| BiBTreeMap::<BTreeSet<Item>, StateID>::from_json(n))?;
+                    .and_then(|n| BiBTreeMap::<Vec<Item>, StateID>::from_json(n))?;
                 let start_state_id = obj
                     .remove("start_state_id")
                     .ok_or_else(|| "Missing field start_state_id".to_string())
@@ -272,7 +272,7 @@ impl GLRParser {
         productions: Vec<Production>,
         terminal_map: BiBTreeMap<Terminal, TerminalID>,
         non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>,
-        item_set_map: BiBTreeMap<BTreeSet<Item>, StateID>,
+        item_set_map: BiBTreeMap<Vec<Item>, StateID>,
         start_state_id: StateID,
         everything_state_id: StateID,
         actions: BTreeMap<NonTerminal, ActionFn>,
