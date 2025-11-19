@@ -310,7 +310,7 @@ struct Stage7Row {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Row {
-    pub shifts_and_reduces_full: ShiftsAndReducesFull,
+    shifts_and_reduces_full: ShiftsAndReducesFull,
     pub gotos: BTreeMap<NonTerminalID, Goto>,
 }
 
