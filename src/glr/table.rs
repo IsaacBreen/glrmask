@@ -36,7 +36,8 @@ impl Hasher for FxHasher {
     fn write(&mut self, bytes: &[u8]) {
         // Simple FxHash-like implementation
         for &byte in bytes {
-            self.hash = (self.hash.rotate_left(5) ^ (byte as usize)).wrapping_mul(0x517cc1b727220a95);
+            self.hash = (self.hash.rotate_left(5) ^ (byte as usize))
+                .wrapping_mul(0x517cc1b727220a95);
         }
     }
 
@@ -68,7 +69,9 @@ impl BitSet {
 
     #[inline]
     fn insert(&mut self, idx: usize) -> bool {
-        if idx >= self.size { return false; }
+        if idx >= self.size {
+            return false;
+        }
         let word = idx / 64;
         let bit = idx % 64;
         let mask = 1 << bit;
@@ -82,7 +85,9 @@ impl BitSet {
 
     #[inline]
     fn contains(&self, idx: usize) -> bool {
-        if idx >= self.size { return false; }
+        if idx >= self.size {
+            return false;
+        }
         let word = idx / 64;
         let bit = idx % 64;
         (self.data[word] & (1 << bit)) != 0
@@ -127,7 +132,7 @@ impl<'a> Iterator for BitSetIter<'a> {
                 self.current_word &= !(1 << trailing);
                 return Some(self.word_idx * 64 + trailing as usize);
             }
-            
+
             self.word_idx += 1;
             if self.word_idx >= self.data.len() {
                 return None;
@@ -186,8 +191,7 @@ impl Stage7ShiftsAndReducesLookaheadValue {
                         reduces: BTreeMap::new(),
                     },
                 );
-                if let Stage7ShiftsAndReducesLookaheadValue::Split { mut reduces, .. } = temp_self
-                {
+                if let Stage7ShiftsAndReducesLookaheadValue::Split { mut reduces, .. } = temp_self {
                     let (len, mut nts) = reduces.into_iter().next().unwrap();
                     let (nt_id, pids) = nts.into_iter().next().unwrap();
                     *self = Stage7ShiftsAndReducesLookaheadValue::Reduce {
@@ -234,7 +238,8 @@ impl JSONConvertible for Stage7ShiftsAndReducesLookaheadValue {
                 let variant = obj
                     .remove("variant")
                     .ok_or_else(|| {
-                        "Missing field variant for Stage7ShiftsAndReducesLookaheadValue".to_string()
+                        "Missing field variant for Stage7ShiftsAndReducesLookaheadValue"
+                            .to_string()
                     })
                     .and_then(String::from_json)?;
                 match variant.as_str() {
@@ -248,7 +253,9 @@ impl JSONConvertible for Stage7ShiftsAndReducesLookaheadValue {
                     "Reduce" => {
                         let nonterminal_id = obj
                             .remove("nonterminal_id")
-                            .ok_or_else(|| "Missing field nonterminal_id for Reduce".to_string())
+                            .ok_or_else(|| {
+                                "Missing field nonterminal_id for Reduce".to_string()
+                            })
                             .and_then(NonTerminalID::from_json)?;
                         let len = obj
                             .remove("len")
@@ -256,7 +263,9 @@ impl JSONConvertible for Stage7ShiftsAndReducesLookaheadValue {
                             .and_then(usize::from_json)?;
                         let production_ids = obj
                             .remove("production_ids")
-                            .ok_or_else(|| "Missing field production_ids for Reduce".to_string())
+                            .ok_or_else(|| {
+                                "Missing field production_ids for Reduce".to_string()
+                            })
                             .and_then(|n| Vec::<ProductionID>::from_json(n))?;
                         Ok(Stage7ShiftsAndReducesLookaheadValue::Reduce {
                             nonterminal_id,
@@ -311,11 +320,19 @@ pub fn get_row(table: &Table, state_id: StateID) -> Option<&Row> {
 }
 
 impl Row {
-    pub fn get_shifts_and_reduces_for_terminal(&self, terminal_id: &TerminalID) -> Option<Stage7ShiftsAndReducesLookaheadValue> {
-        self.shifts_and_reduces_full.get(terminal_id).cloned().or_else(|| self.default_reduce.clone())
+    pub fn get_shifts_and_reduces_for_terminal(
+        &self,
+        terminal_id: &TerminalID,
+    ) -> Option<Stage7ShiftsAndReducesLookaheadValue> {
+        self.shifts_and_reduces_full
+            .get(terminal_id)
+            .cloned()
+            .or_else(|| self.default_reduce.clone())
     }
 
-    pub fn get_shifts_and_reduces_map(&self) -> BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue> {
+    pub fn get_shifts_and_reduces_map(
+        &self,
+    ) -> BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue> {
         self.shifts_and_reduces_full.clone()
     }
 
@@ -329,22 +346,29 @@ impl Row {
         shiftfn: impl FnOnce(&StateID),
         mut reducefn: impl FnMut(&NonTerminalID, &usize, &Vec<ProductionID>),
     ) {
-        let action = self.shifts_and_reduces_full.get(&terminal_id).or(self.default_reduce.as_ref());
-        
+        let action = self
+            .shifts_and_reduces_full
+            .get(&terminal_id)
+            .or(self.default_reduce.as_ref());
+
         if let Some(action) = action {
             match action {
                 Stage7ShiftsAndReducesLookaheadValue::Shift(state_id) => shiftfn(state_id),
-                Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids } => reducefn(&nonterminal_id, &len, &production_ids),
+                Stage7ShiftsAndReducesLookaheadValue::Reduce {
+                    nonterminal_id,
+                    len,
+                    production_ids,
+                } => reducefn(nonterminal_id, len, production_ids),
                 Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
                     if let Some(state_id) = shift {
                         shiftfn(state_id);
                     }
-                    for (_len, nts) in reduces {
+                    for (len, nts) in reduces {
                         for (&nt_id, pids) in nts {
-                            reducefn(&nt_id, &_len, &pids);
+                            reducefn(&nt_id, len, pids);
                         }
                     }
-                },
+                }
             }
         }
     }
@@ -370,7 +394,7 @@ impl JSONConvertible for Row {
                     })?,
                 )?,
                 default_reduce: Option::<Stage7ShiftsAndReducesLookaheadValue>::from_json(
-                    obj.remove("default_reduce").unwrap_or(JSONNode::Null)
+                    obj.remove("default_reduce").unwrap_or(JSONNode::Null),
                 )?,
                 gotos: BTreeMap::<NonTerminalID, Goto>::from_json(
                     obj.remove("gotos")
@@ -448,15 +472,6 @@ impl JSONConvertible for NonTerminalID {
     }
 }
 
-#[derive(Clone)]
-struct ClosureData {
-    /// Flat list of (symbol, item) transitions.
-    /// Sorted by symbol, then item.
-    flat_shifts: Vec<(usize, Item)>,
-    /// Items that are epsilon reductions (A -> .)
-    reduces: Vec<Item>,
-}
-
 #[time_it]
 fn stage_1(
     light_productions: &[Vec<usize>],
@@ -469,174 +484,140 @@ fn stage_1(
         production_id: start_production_id,
         dot_position: 0,
     };
-    let initial_item_set = vec![initial_item];
+    let initial_kernel = vec![initial_item];
 
-    // 1. Precompute Closure Data (Deep)
-    // First, build the "starts with" graph for NonTerminals
-    let mut starts_with_graph: Vec<Vec<usize>> = vec![Vec::new(); num_nonterminals];
-    for (pid, &lhs) in lhs_ids.iter().enumerate() {
-        if let Some(&first_sym) = light_productions[pid].first() {
-            if first_sym >= num_terminals {
-                let target_nt = first_sym - num_terminals;
-                starts_with_graph[lhs].push(target_nt);
-            }
-        }
-    }
-
-    // Compute transitive closure of reachable NTs
-    let mut reachable_nts: Vec<Vec<usize>> = vec![Vec::new(); num_nonterminals];
-    let mut visited = BitSet::new(num_nonterminals);
-    let mut stack = Vec::new();
-
-    for nt in 0..num_nonterminals {
-        visited.clear();
-        stack.clear();
-        
-        // We include the NT itself because we want closure(A) to include A's productions
-        visited.insert(nt);
-        stack.push(nt);
-
-        while let Some(curr) = stack.pop() {
-            for &next in &starts_with_graph[curr] {
-                if visited.insert(next) {
-                    stack.push(next);
-                }
-            }
-        }
-        
-        // Collect reachable NTs
-        reachable_nts[nt] = visited.iter().collect();
-    }
-
-    // Precompute prods_by_lhs
+    // Build index: for each non-terminal ID, which productions have it on the LHS.
     let mut prods_by_lhs: Vec<Vec<usize>> = vec![Vec::new(); num_nonterminals];
     for (pid, &lhs) in lhs_ids.iter().enumerate() {
         prods_by_lhs[lhs].push(pid);
     }
 
-    // Build the closure cache
-    let mut closure_cache: Vec<ClosureData> = Vec::with_capacity(num_nonterminals);
-    
-    for nt in 0..num_nonterminals {
-        let mut flat_shifts = Vec::new();
-        let mut reduces = Vec::new();
-
-        for &reachable in &reachable_nts[nt] {
-            for &pid in &prods_by_lhs[reachable] {
-                let rhs = &light_productions[pid];
-                if let Some(&first_sym) = rhs.first() {
-                    flat_shifts.push((first_sym, Item { production_id: pid, dot_position: 1 }));
-                } else {
-                    reduces.push(Item { production_id: pid, dot_position: 0 });
-                }
-            }
-        }
-        
-        flat_shifts.sort_unstable();
-        // No dedup needed for flat_shifts in closure cache?
-        // If multiple productions shift the same symbol, we want all of them.
-        // (sym, item) pairs are unique because (pid, dot) are unique.
-        // So sort is enough.
-        
-        closure_cache.push(ClosureData { flat_shifts, reduces });
+    // Precompute a dense index for every possible LR(0) item so we can store sets of items
+    // in a reusable BitSet during closure computation.
+    let mut item_base_offsets: Vec<usize> = Vec::with_capacity(light_productions.len());
+    let mut total_items = 0usize;
+    for rhs in light_productions {
+        item_base_offsets.push(total_items);
+        // For a production with RHS length L, there are L+1 LR(0) items (dot at 0..=L).
+        total_items += rhs.len() + 1;
     }
+    let mut used_items = BitSet::new(total_items);
 
+    let mut item_set_map_fast: HashMap<Vec<Item>, StateID, FxBuildHasher> =
+        HashMap::with_hasher(FxBuildHasher::default());
+    let mut next_state_id = 0usize;
 
-    // 2. State Generation Loop
-    let mut item_set_map_fast: HashMap<Vec<Item>, StateID, FxBuildHasher> = HashMap::with_hasher(FxBuildHasher::default());
-    let mut next_state_id = 0;
-
-    let mut worklist = VecDeque::new();
+    let mut worklist: VecDeque<Vec<Item>> = VecDeque::new();
     let mut table: Stage1Table = Vec::new();
 
-    item_set_map_fast.insert(initial_item_set.clone(), StateID(next_state_id));
+    item_set_map_fast.insert(initial_kernel.clone(), StateID(next_state_id));
     next_state_id += 1;
-    worklist.push_back(initial_item_set);
-
-    // Reusable structures for the loop
-    let mut transition_buffer: Vec<(usize, Item)> = Vec::with_capacity(1024);
-    let mut current_reduces: Vec<Item> = Vec::new();
-    let mut processed_nts = BitSet::new(num_nonterminals);
-    let mut needed_nts: Vec<usize> = Vec::new();
+    worklist.push_back(initial_kernel);
 
     while let Some(kernel_items) = worklist.pop_front() {
         let state_id = *item_set_map_fast.get(&kernel_items).unwrap();
-        
+
         if state_id.0 >= table.len() {
             table.resize(state_id.0 + 1, BTreeMap::new());
         }
 
-        transition_buffer.clear();
-        current_reduces.clear();
-        processed_nts.clear();
-        needed_nts.clear();
+        // --- Compute LR(0) closure for this kernel ---
+        used_items.clear();
+        let mut closure: Vec<Item> = Vec::new();
+        let mut queue: VecDeque<Item> = VecDeque::new();
 
-        // Process kernel items
+        // Seed closure with the kernel items.
         for &item in &kernel_items {
+            let idx = item_base_offsets[item.production_id] + item.dot_position;
+            if used_items.insert(idx) {
+                closure.push(item);
+                queue.push_back(item);
+            }
+        }
+
+        // Standard LR(0) closure:
+        // whenever the symbol after the dot is a non-terminal B,
+        // add all items B -> .γ and repeat.
+        while let Some(item) = queue.pop_front() {
             let rhs = &light_productions[item.production_id];
             if let Some(&sym) = rhs.get(item.dot_position) {
-                // Shift
-                let shifted = Item { production_id: item.production_id, dot_position: item.dot_position + 1 };
-                transition_buffer.push((sym, shifted));
-
                 if sym >= num_terminals {
-                    let nt = sym - num_terminals;
-                    if processed_nts.insert(nt) {
-                        needed_nts.push(nt);
+                    let nt_id = sym - num_terminals;
+                    for &prod_idx in &prods_by_lhs[nt_id] {
+                        let new_item = Item {
+                            production_id: prod_idx,
+                            dot_position: 0,
+                        };
+                        let idx =
+                            item_base_offsets[new_item.production_id] + new_item.dot_position;
+                        if used_items.insert(idx) {
+                            closure.push(new_item);
+                            queue.push_back(new_item);
+                        }
                     }
                 }
-            } else {
-                // Reduce (dot at end)
-                current_reduces.push(item);
             }
         }
 
-        // Process closure for needed NTs
-        for &nt in &needed_nts {
-            let cache = &closure_cache[nt];
-            current_reduces.extend_from_slice(&cache.reduces);
-            transition_buffer.extend_from_slice(&cache.flat_shifts);
+        // --- Split closure items by the symbol under the dot ---
+        let mut transitions: BTreeMap<Option<usize>, Vec<Item>> = BTreeMap::new();
+        for item in &closure {
+            let rhs = &light_productions[item.production_id];
+            if let Some(&sym) = rhs.get(item.dot_position) {
+                // Shift/goto on `sym`: kernel of the successor state has dot moved past `sym`.
+                transitions
+                    .entry(Some(sym))
+                    .or_default()
+                    .push(Item {
+                        production_id: item.production_id,
+                        dot_position: item.dot_position + 1,
+                    });
+            } else {
+                // Dot at end => potential reduction in this state.
+                transitions.entry(None).or_default().push(*item);
+            }
         }
 
+        // --- Build Stage 1 row for this state ---
         let mut row: Stage1Row = BTreeMap::new();
 
-        // Sort transitions to group by symbol
-        transition_buffer.sort_unstable();
+        for (sym_opt, mut items_vec) in transitions {
+            if let Some(sym) = sym_opt {
+                // Successor kernel for symbol `sym`.
+                items_vec.sort_unstable(); // make kernel canonical for hashing
+                // No dedup is necessary: each (prod_id, dot) pair is unique and shifting is injective.
 
-        // Iterate grouped transitions
-        let mut i = 0;
-        while i < transition_buffer.len() {
-            let sym = transition_buffer[i].0;
-            let start = i;
-            
-            // Find end of group
-            while i < transition_buffer.len() && transition_buffer[i].0 == sym {
-                i += 1;
-            }
-            
-            // Extract kernel for this symbol
-            // We create a new Vec for the map key.
-            let mut new_kernel: Vec<Item> = transition_buffer[start..i].iter().map(|x| x.1).collect();
-            new_kernel.dedup(); // Already sorted by Item because transition_buffer is sorted by (Symbol, Item)
+                let goto_id = if let Some(&existing) = item_set_map_fast.get(&items_vec) {
+                    existing
+                } else {
+                    let new_id = StateID(next_state_id);
+                    next_state_id += 1;
+                    item_set_map_fast.insert(items_vec.clone(), new_id);
+                    worklist.push_back(items_vec.clone());
+                    new_id
+                };
 
-            let goto_id = if let Some(&id) = item_set_map_fast.get(&new_kernel) {
-                id
+                row.insert(
+                    Some(sym),
+                    Stage1Entry {
+                        kernel: Vec::new(),
+                        goto_id: Some(goto_id),
+                    },
+                );
             } else {
-                let new_id = StateID(next_state_id);
-                next_state_id += 1;
-                item_set_map_fast.insert(new_kernel.clone(), new_id);
-                worklist.push_back(new_kernel);
-                new_id
-            };
-
-            row.insert(Some(sym), Stage1Entry { kernel: Vec::new(), goto_id: Some(goto_id) });
-        }
-
-        // Add reduces
-        if !current_reduces.is_empty() {
-            current_reduces.sort_unstable();
-            current_reduces.dedup();
-            row.insert(None, Stage1Entry { kernel: current_reduces.clone(), goto_id: None });
+                // Reductions (items with dot at the end).
+                items_vec.sort_unstable();
+                items_vec.dedup();
+                if !items_vec.is_empty() {
+                    row.insert(
+                        None,
+                        Stage1Entry {
+                            kernel: items_vec,
+                            goto_id: None,
+                        },
+                    );
+                }
+            }
         }
 
         table[state_id.0] = row;
@@ -671,72 +652,83 @@ fn compute_final_table(
 
     let mut final_table_map: Table = BTreeMap::new();
 
-    // Precompute production metadata
+    // Precompute production metadata: (RHS length, LHS non-terminal ID).
     let prod_meta: Vec<(usize, NonTerminalID)> = productions
         .iter()
         .enumerate()
         .map(|(i, p)| (p.rhs.len(), NonTerminalID(lhs_ids[i])))
         .collect();
 
-    // Convert Follow Sets to BitSets (over terminals)
-    // We also need to track EOF separately since BitSet is for usize indices
-    let mut follow_bits: Vec<BitSet> = Vec::with_capacity(follow_sets.len());
+    // Precompute FOLLOW terminals and EOF flags per non-terminal.
+    let mut follow_terminals: Vec<Vec<usize>> = Vec::with_capacity(follow_sets.len());
     let mut follow_eof: Vec<bool> = Vec::with_capacity(follow_sets.len());
 
     for set in follow_sets {
-        let mut bs = BitSet::new(num_terminals);
+        let mut terms = Vec::new();
         let mut has_eof = false;
         for opt in set {
             match opt {
-                Some(t) => { bs.insert(t.0); },
-                None => { has_eof = true; }
+                Some(t) => terms.push(t.0),
+                None => has_eof = true,
             }
         }
-        follow_bits.push(bs);
+        follow_terminals.push(terms);
         follow_eof.push(has_eof);
     }
 
     // Reusable structures
-    let mut row_builder: Vec<EntryBuilder> = vec![EntryBuilder { shift: None, reduces: Vec::new() }; num_terminals];
+    let mut row_builder: Vec<EntryBuilder> =
+        vec![EntryBuilder { shift: None, reduces: Vec::new() }; num_terminals];
     let mut dirty_terminals: Vec<usize> = Vec::with_capacity(num_terminals);
     let mut eof_reduces: Vec<ProductionID> = Vec::new();
 
     for (state_idx, row) in stage_1_table.into_iter().enumerate() {
-        // Clear reusable structures
+        // Clear reusable structures for this row.
         for &t_idx in &dirty_terminals {
             row_builder[t_idx].shift = None;
             row_builder[t_idx].reduces.clear();
         }
         dirty_terminals.clear();
         eof_reduces.clear();
-        
+
         let mut gotos: BTreeMap<NonTerminalID, Goto> = BTreeMap::new();
 
         // 1. Extract info from Stage 1 Row
         for (key, entry) in row {
             if let Some(goto_id) = entry.goto_id {
-                // Shift or Goto
                 if let Some(sym_id) = key {
                     if sym_id < num_terminals {
-                        // Shift
-                        row_builder[sym_id].shift = Some(goto_id);
-                        dirty_terminals.push(sym_id);
+                        // Shift on terminal
+                        let rb = &mut row_builder[sym_id];
+                        if rb.shift.is_none() && rb.reduces.is_empty() {
+                            dirty_terminals.push(sym_id);
+                        }
+                        rb.shift = Some(goto_id);
                     } else {
-                        // Goto
+                        // Goto on non-terminal
                         let nt_id = NonTerminalID(sym_id - num_terminals);
-                        gotos.insert(nt_id, Goto { state_id: Some(goto_id), accept: false });
+                        gotos.insert(
+                            nt_id,
+                            Goto {
+                                state_id: Some(goto_id),
+                                accept: false,
+                            },
+                        );
                     }
                 }
             } else {
-                // Reduce (Kernel items)
+                // Reduce (kernel items with dot at end)
                 for item in entry.kernel {
                     let prod_id = item.production_id;
                     let lhs = lhs_ids[prod_id];
-                    
-                    // Scatter reduces to terminals in Follow(LHS)
-                    for t_idx in follow_bits[lhs].iter() {
-                        row_builder[t_idx].reduces.push(ProductionID(prod_id));
-                        dirty_terminals.push(t_idx);
+
+                    // Scatter reduces to terminals in FOLLOW(lhs).
+                    for &t_idx in &follow_terminals[lhs] {
+                        let rb = &mut row_builder[t_idx];
+                        if rb.shift.is_none() && rb.reduces.is_empty() {
+                            dirty_terminals.push(t_idx);
+                        }
+                        rb.reduces.push(ProductionID(prod_id));
                     }
 
                     if follow_eof[lhs] {
@@ -746,84 +738,92 @@ fn compute_final_table(
             }
         }
 
-        // 2. Calculate Default Reduce
-        let default_reduce = if !eof_reduces.is_empty() {
+        // 2. Calculate default reduce (EOF) and flatten its production IDs once.
+        let (default_reduce, default_pids) = if !eof_reduces.is_empty() {
             eof_reduces.sort_unstable();
             eof_reduces.dedup();
 
-            let mut reduces_grouped: BTreeMap<usize, BTreeMap<NonTerminalID, Vec<ProductionID>>> = BTreeMap::new();
+            let mut reduces_grouped: BTreeMap<
+                usize,
+                BTreeMap<NonTerminalID, Vec<ProductionID>>,
+            > = BTreeMap::new();
             for pid in &eof_reduces {
                 let (len, nt) = prod_meta[pid.0];
-                reduces_grouped.entry(len).or_default().entry(nt).or_default().push(*pid);
+                reduces_grouped
+                    .entry(len)
+                    .or_default()
+                    .entry(nt)
+                    .or_default()
+                    .push(*pid);
             }
 
             let mut val = Stage7ShiftsAndReducesLookaheadValue::Split {
                 shift: None,
-                reduces: reduces_grouped
+                reduces: reduces_grouped,
             };
             val.simplify();
-            Some(val)
+
+            // `eof_reduces` is already sorted and deduped; reuse as flattened list.
+            (Some(val), eof_reduces.clone())
         } else {
-            None
+            (None, Vec::new())
         };
 
         // 3. Construct Final Row
         let mut shifts_and_reduces_full: ShiftsAndReducesFull = BTreeMap::new();
 
-        // Process dirty terminals
-        dirty_terminals.sort_unstable();
-        dirty_terminals.dedup();
-
         for &t_idx in &dirty_terminals {
             let entry = &mut row_builder[t_idx];
             let t = TerminalID(t_idx);
-            
-            // Merge default reduce PIDs if needed
-            if let Some(default) = &default_reduce {
-                let default_pids = match default {
-                    Stage7ShiftsAndReducesLookaheadValue::Reduce { production_ids, .. } => production_ids.clone(),
-                    Stage7ShiftsAndReducesLookaheadValue::Split { reduces, .. } => {
-                        let mut pids = Vec::new();
-                        for nts in reduces.values() {
-                            for ps in nts.values() {
-                                pids.extend(ps.iter().cloned());
-                            }
-                        }
-                        pids
-                    },
-                    _ => Vec::new(),
-                };
-                entry.reduces.extend(default_pids);
+
+            // Merge default reduce PIDs if needed.
+            if !default_pids.is_empty() {
+                entry.reduces.extend_from_slice(&default_pids);
             }
-            
+
             if entry.reduces.is_empty() && entry.shift.is_none() {
                 continue;
             }
-            
+
             entry.reduces.sort_unstable();
             entry.reduces.dedup();
 
-            // Group reduces
-            let mut reduces_grouped: BTreeMap<usize, BTreeMap<NonTerminalID, Vec<ProductionID>>> = BTreeMap::new();
+            // Group reduces.
+            let mut reduces_grouped: BTreeMap<
+                usize,
+                BTreeMap<NonTerminalID, Vec<ProductionID>>,
+            > = BTreeMap::new();
             for pid in entry.reduces.iter() {
                 let (len, nt) = prod_meta[pid.0];
-                reduces_grouped.entry(len).or_default().entry(nt).or_default().push(*pid);
+                reduces_grouped
+                    .entry(len)
+                    .or_default()
+                    .entry(nt)
+                    .or_default()
+                    .push(*pid);
             }
 
             let mut val = Stage7ShiftsAndReducesLookaheadValue::Split {
                 shift: entry.shift,
-                reduces: reduces_grouped
+                reduces: reduces_grouped,
             };
             val.simplify();
             shifts_and_reduces_full.insert(t, val);
         }
 
         if StateID(state_idx) == start_state_id {
-             let start_nt_id = NonTerminalID(lhs_ids[start_production_id]);
-             gotos.entry(start_nt_id).or_default().accept = true;
+            let start_nt_id = NonTerminalID(lhs_ids[start_production_id]);
+            gotos.entry(start_nt_id).or_default().accept = true;
         }
 
-        final_table_map.insert(StateID(state_idx), Row { shifts_and_reduces_full, default_reduce, gotos });
+        final_table_map.insert(
+            StateID(state_idx),
+            Row {
+                shifts_and_reduces_full,
+                default_reduce,
+                gotos,
+            },
+        );
     }
 
     (final_table_map, start_state_id, everything_state_id)
@@ -887,31 +887,56 @@ pub fn generate_glr_parser_with_maps(
     let num_terminals = terminal_map.len();
     let num_nonterminals = non_terminal_map.len();
 
-    let light_productions: Vec<Vec<usize>> = productions.iter().map(|p| {
-        p.rhs.iter().map(|s| match s {
-            Symbol::Terminal(t) => terminal_map.get_by_left(t).unwrap().0,
-            Symbol::NonTerminal(nt) => non_terminal_map.get_by_left(nt).unwrap().0 + num_terminals,
-        }).collect()
-    }).collect();
+    let light_productions: Vec<Vec<usize>> = productions
+        .iter()
+        .map(|p| {
+            p.rhs
+                .iter()
+                .map(|s| match s {
+                    Symbol::Terminal(t) => terminal_map.get_by_left(t).unwrap().0,
+                    Symbol::NonTerminal(nt) => {
+                        non_terminal_map.get_by_left(nt).unwrap().0 + num_terminals
+                    }
+                })
+                .collect()
+        })
+        .collect();
 
-    let lhs_ids: Vec<usize> = productions.iter().map(|p| {
-        non_terminal_map.get_by_left(&p.lhs).unwrap().0
-    }).collect();
+    let lhs_ids: Vec<usize> = productions
+        .iter()
+        .map(|p| non_terminal_map.get_by_left(&p.lhs).unwrap().0)
+        .collect();
 
     let nullable_nonterminals = compute_nullable_nonterminals(&productions);
-    let nullable_nts_ids: HashSet<usize> = nullable_nonterminals.iter().map(|nt| {
-        non_terminal_map.get_by_left(nt).unwrap().0
-    }).collect();
+    let nullable_nts_ids: HashSet<usize> = nullable_nonterminals
+        .iter()
+        .map(|nt| non_terminal_map.get_by_left(nt).unwrap().0)
+        .collect();
 
     let start_nt_id = lhs_ids[0];
 
     crate::debug!(2, "Stage 1 (LR(0) Automaton)");
-    let (stage_1_table, item_set_map) = stage_1(&light_productions, &lhs_ids, num_terminals, num_nonterminals);
+    let (stage_1_table, item_set_map) =
+        stage_1(&light_productions, &lhs_ids, num_terminals, num_nonterminals);
     print_memory_usage("After Stage 1");
 
     crate::debug!(2, "Computing First/Follow Sets");
-    let first_sets = compute_first_sets_ids_with_lhs(&light_productions, &lhs_ids, num_terminals, num_nonterminals, &nullable_nts_ids);
-    let follow_sets = compute_follow_sets_ids(&light_productions, &lhs_ids, &first_sets, &nullable_nts_ids, num_terminals, num_nonterminals, start_nt_id);
+    let first_sets = compute_first_sets_ids_with_lhs(
+        &light_productions,
+        &lhs_ids,
+        num_terminals,
+        num_nonterminals,
+        &nullable_nts_ids,
+    );
+    let follow_sets = compute_follow_sets_ids(
+        &light_productions,
+        &lhs_ids,
+        &first_sets,
+        &nullable_nts_ids,
+        num_terminals,
+        num_nonterminals,
+        start_nt_id,
+    );
     print_memory_usage("After First/Follow");
 
     crate::debug!(2, "Computing Final Table (Merging Stages 2-8)");
@@ -921,7 +946,7 @@ pub fn generate_glr_parser_with_maps(
         &productions,
         &lhs_ids,
         &follow_sets,
-        num_terminals
+        num_terminals,
     );
     print_memory_usage("After Final Table");
 
