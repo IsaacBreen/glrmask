@@ -273,8 +273,9 @@ impl<'a> EquivalenceAnalyzer<'a> {
         // On-demand analysis: dedupe suffixes globally; compute signatures lazily.
         crate::debug!(
             2,
-            "Starting LLM token equivalence analysis (on-demand) for {} strings and {} tokenizer states.",
+            "Starting LLM token equivalence analysis (on-demand) for {} strings (average length: {}) and {} tokenizer states.",
             self.strings.len(),
+            self.strings.iter().map(|s| s.len()).sum::<usize>() / self.strings.len(),
             self.initial_states.len(),
         );
         let pb = ProgressBar::new(self.strings.len() as u64);
