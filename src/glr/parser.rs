@@ -371,34 +371,14 @@ impl GLRParser {
         let mut shifted: Vec<ParserGSS> = Vec::new();
 
         while let Some((state_id, state_gss)) = heads_by_state.pop_first() {
-            let row = match self.table.get(&state_id) {
-                Some(r) => r,
-                None => continue,
-            };
-            let action = match row.shifts_and_reduces_full.get(&token) {
-                Some(a) => a,
-                None => continue,
-            };
-
-            match action {
-                Stage7ShiftsAndReducesLookaheadValue::Shift(to) => {
-                    let edge = ParseStateEdgeContent { state_id: *to };
-                    shifted.push(state_gss.push(edge));
-                }
-                Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, .. } => {
-                    self.apply_reduces(&state_gss, *len, *nonterminal_id, &mut heads_by_state);
-                }
-                Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
-                    if let Some(to) = shift {
-                        let edge = ParseStateEdgeContent { state_id: *to };
-                        shifted.push(state_gss.push(edge));
-                    }
-                    for (len, nts) in reduces {
-                        for (&nt_id, _pids) in nts.iter() {
-                            self.apply_reduces(&state_gss, *len, nt_id, &mut heads_by_state);
-                        }
-                    }
-                }
+            if let Some(row) = self.table.get(&state_id) {
+                row.handle_shifts_and_reduces_for_terminal(
+                    token,
+                    |to| shifted.push(state_gss.push(ParseStateEdgeContent { state_id: *to })),
+                    |nt_id, len, pids| {
+                        self.apply_reduces(&state_gss, *len, *nt_id, &mut heads_by_state);
+                    },
+                );
             }
         }
 

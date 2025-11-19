@@ -321,6 +321,34 @@ impl Row {
     pub fn get_shifts_and_reduces_map(&self) -> BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue> {
         self.shifts_and_reduces_full.clone()
     }
+
+    pub fn get_gotos(&self) -> &BTreeMap<NonTerminalID, Goto> {
+        &self.gotos
+    }
+
+    pub fn handle_shifts_and_reduces_for_terminal(
+        &self,
+        terminal_id: TerminalID,
+        shiftfn: impl FnOnce(&StateID),
+        mut reducefn: impl FnMut(&NonTerminalID, &usize, &BTreeSet<ProductionID>),
+    ) {
+        if let Some(action) = self.shifts_and_reduces_full.get(&terminal_id) {
+            match action {
+                Stage7ShiftsAndReducesLookaheadValue::Shift(state_id) => shiftfn(state_id),
+                Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids } => reducefn(&nonterminal_id, &len, &production_ids),
+                Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
+                    if let Some(state_id) = shift {
+                        shiftfn(state_id);
+                    }
+                    for (_len, nts) in reduces {
+                        for (&nt_id, pids) in nts {
+                            reducefn(&nt_id, &_len, &pids);
+                        }
+                    }
+                },
+            }
+        }
+    }
 }
 
 impl JSONConvertible for Row {
