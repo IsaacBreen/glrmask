@@ -117,6 +117,7 @@ pub fn precompute4(
     }
     nwabig.simplify();
     let mut dwa = nwabig.determinize_to_dwa_with_rustfst();
+    dwa.minimize_with_rustfst();
     crate::debug!(
         4,
         "Built DWA with {} states",
