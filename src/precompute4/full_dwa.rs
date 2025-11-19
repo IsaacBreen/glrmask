@@ -120,7 +120,19 @@ fn convert_dwa_to_precompute1(
     for (label, target) in &start_node.transitions {
         let sid = TokenizerStateID(*label as usize);
         let root_idx = convert_dwa_state_to_trie_node(*target, dwa, &god, &mut state_cache, max_llm_token_id, end_node_idx);
-        result.insert(sid, root_idx);
+
+        let weight = start_node.trans_weights.get(label).cloned().unwrap_or_else(Weight::all);
+        let edge_bv: LLMTokenBV = LLMTokenBV::from(weight) & LLMTokenBV::ones(max_llm_token_id + 1);
+
+        if edge_bv.len() < max_llm_token_id + 1 {
+            let contents = PrecomputedNodeContents { end: false, live_tokens: edge_bv.clone() };
+            let wrapper_node = PrecomputeNode1::new(contents);
+            let wrapper_idx = PrecomputeNode1Index::new(god.insert(wrapper_node));
+            god.insert_edge_simple(wrapper_idx, root_idx, None, edge_bv);
+            result.insert(sid, wrapper_idx);
+        } else {
+            result.insert(sid, root_idx);
+        }
     }
 
     (result, god)

@@ -10453,7 +10453,7 @@ local_system:
           }
 
 
-          let contents = PrecomputedNodeContents { end: false, live_tokens: LLMTokenBV::zeros() };
+          let contents = PrecomputedNodeContents { end: false, live_tokens: LLMTokenBV::ones(max_llm_token_id + 1) };
           let node = PrecomputeNode1::new(contents);
           let idx = PrecomputeNode1Index::new(god.insert(node));
           cache.insert(state_id, idx);
@@ -10482,7 +10482,9 @@ local_system:
           max_llm_token_id: usize,
       ) -> DWA {
           crate::debug!(4, "Optimizing precomputed1 via NWA/DWA conversion...");
+          crate::debug!(4, "Precompute1 trie before: {}", Trie::pretty_print(&trie1_god, &precomputed1.iter().map(|(k, v)| *v).collect::<Vec<_>>()));
           let mut nwa = convert_precompute1_to_nwa(precomputed1, trie1_god);
+          crate::debug!(4, "NWA after conversion: {}", nwa);
           crate::debug!(4, "Optimizing precomputed1 via NWA/DWA conversion... done.");
           nwa.simplify();
           crate::debug!(4, "Simplified precomputed1 NWA... done.");
@@ -10495,10 +10497,12 @@ local_system:
               dwa.states.len(),
               dwa.num_transitions(),
           );
+          crate::debug!(4, "Optimized precomputed1 DWA: {}", dwa);
 
           let (optimized_precomputed1, optimized_trie1_god) = convert_dwa_to_precompute1(&dwa, max_llm_token_id);
           let precomputed1 = &optimized_precomputed1;
           let trie1_god = &optimized_trie1_god;
+          crate::debug!(4, "Precompute1 trie after: {}", Trie::pretty_print(&trie1_god, &precomputed1.iter().map(|(k, v)| *v).collect::<Vec<_>>()));
 
           let now_total = Instant::now();
           let now = Instant::now();
@@ -21298,7 +21302,19 @@ local_system:
           for (label, target) in &start_node.transitions {
               let sid = TokenizerStateID(*label as usize);
               let root_idx = convert_dwa_state_to_trie_node(*target, dwa, &god, &mut state_cache, max_llm_token_id, end_node_idx);
-              result.insert(sid, root_idx);
+
+              let weight = start_node.trans_weights.get(label).cloned().unwrap_or_else(Weight::all);
+              let edge_bv: LLMTokenBV = LLMTokenBV::from(weight) & LLMTokenBV::ones(max_llm_token_id + 1);
+
+              if edge_bv.len() < max_llm_token_id + 1 {
+                  let contents = PrecomputedNodeContents { end: false, live_tokens: edge_bv.clone() };
+                  let wrapper_node = PrecomputeNode1::new(contents);
+                  let wrapper_idx = PrecomputeNode1Index::new(god.insert(wrapper_node));
+                  god.insert_edge_simple(wrapper_idx, root_idx, None, edge_bv);
+                  result.insert(sid, wrapper_idx);
+              } else {
+                  result.insert(sid, root_idx);
+              }
           }
 
           (result, god)
@@ -21346,7 +21362,9 @@ local_system:
           max_llm_token_id: usize,
       ) -> DWA {
           crate::debug!(4, "Optimizing precomputed1 via NWA/DWA conversion...");
+          crate::debug!(4, "Precompute1 trie before: {}", Trie::pretty_print(&trie1_god, &precomputed1.iter().map(|(k, v)| *v).collect::<Vec<_>>()));
           let mut nwa = convert_precompute1_to_nwa(precomputed1, trie1_god);
+          crate::debug!(4, "NWA after conversion: {}", nwa);
           crate::debug!(4, "Optimizing precomputed1 via NWA/DWA conversion... done.");
           nwa.simplify();
           crate::debug!(4, "Simplified precomputed1 NWA... done.");
@@ -21359,10 +21377,12 @@ local_system:
               dwa.states.len(),
               dwa.num_transitions(),
           );
+          crate::debug!(4, "Optimized precomputed1 DWA: {}", dwa);
 
           let (optimized_precomputed1, optimized_trie1_god) = convert_dwa_to_precompute1(&dwa, max_llm_token_id);
           let precomputed1 = &optimized_precomputed1;
           let trie1_god = &optimized_trie1_god;
+          crate::debug!(4, "Precompute1 trie after: {}", Trie::pretty_print(&trie1_god, &precomputed1.iter().map(|(k, v)| *v).collect::<Vec<_>>()));
 
           let now_total = Instant::now();
           let now = Instant::now();
@@ -32273,7 +32293,7 @@ messages:
           }
 
 
-          let contents = PrecomputedNodeContents { end: false, live_tokens: LLMTokenBV::zeros() };
+          let contents = PrecomputedNodeContents { end: false, live_tokens: LLMTokenBV::ones(max_llm_token_id + 1) };
           let node = PrecomputeNode1::new(contents);
           let idx = PrecomputeNode1Index::new(god.insert(node));
           cache.insert(state_id, idx);
@@ -32302,7 +32322,9 @@ messages:
           max_llm_token_id: usize,
       ) -> DWA {
           crate::debug!(4, "Optimizing precomputed1 via NWA/DWA conversion...");
+          crate::debug!(4, "Precompute1 trie before: {}", Trie::pretty_print(&trie1_god, &precomputed1.iter().map(|(k, v)| *v).collect::<Vec<_>>()));
           let mut nwa = convert_precompute1_to_nwa(precomputed1, trie1_god);
+          crate::debug!(4, "NWA after conversion: {}", nwa);
           crate::debug!(4, "Optimizing precomputed1 via NWA/DWA conversion... done.");
           nwa.simplify();
           crate::debug!(4, "Simplified precomputed1 NWA... done.");
@@ -32315,10 +32337,12 @@ messages:
               dwa.states.len(),
               dwa.num_transitions(),
           );
+          crate::debug!(4, "Optimized precomputed1 DWA: {}", dwa);
 
           let (optimized_precomputed1, optimized_trie1_god) = convert_dwa_to_precompute1(&dwa, max_llm_token_id);
           let precomputed1 = &optimized_precomputed1;
           let trie1_god = &optimized_trie1_god;
+          crate::debug!(4, "Precompute1 trie after: {}", Trie::pretty_print(&trie1_god, &precomputed1.iter().map(|(k, v)| *v).collect::<Vec<_>>()));
 
           let now_total = Instant::now();
           let now = Instant::now();
@@ -32701,6 +32725,566 @@ messages:
       ```
     metadata:
       filename: src/precompute4/full_dwa.rs
+  - user: |+
+      src/interface/interface.rs
+         756  Augmented start_production_name: "start'"
+      Removing always-null terminals: {}
+      Processing may-be-null terminals: {}
+      src/interface/interface.rs
+        1127  Building tokenizer from definition
+      src/finite_automata.rs
+         776  Memory usage at 'Start of Regex build': Physical: 26 MB
+         785  Building NFA...
+      src/finite_automata.rs
+         788  Built NFA in 9.50µs
+         776  Memory usage at 'After NFA build': Physical: 26 MB
+         790  Converting NFA to DFA...
+      src/finite_automata.rs
+         793  Converted NFA to DFA in 117.96µs
+      src/finite_automata.rs
+         776  Memory usage at 'After NFA to DFA conversion': Physical: 26 MB
+      src/finite_automata.rs
+         795  Minimizing DFA...
+      src/finite_automata.rs
+         798  Minimized DFA in 93.63µs
+         776  Memory usage at 'After DFA minimization': Physical: 26 MB
+         800  Done!
+      src/interface/interface.rs
+        1132  Building GLR parser from definition
+      src/glr/table.rs
+         781  Number of productions: 2
+         767  Memory usage at 'Start of parser generation': Physical: 26 MB
+         784  Validating initial grammar
+         187  Computing nullable non-terminals
+         195  Computed nullable non-terminals in 10.29µs
+         187  Computing nullable non-terminals
+         195  Computed nullable non-terminals in 7.83µs
+      src/glr/table.rs
+         787  Validated grammar in 130.92µs
+         767  Memory usage at 'After validation': Physical: 26 MB
+         793  Removing productions with undefined non-terminals
+      src/glr/table.rs
+         797  Removed undefined productions in 29.83µs
+      src/glr/table.rs
+         767  Memory usage at 'After removing undefined': Physical: 26 MB
+      src/glr/table.rs
+         767  Memory usage at 'After right recursion resolution': Physical: 26 MB
+      src/glr/table.rs
+         767  Memory usage at 'After inlining null productions': Physical: 26 MB
+         823  Number of productions: 2
+         767  Memory usage at 'Before Stage 1': Physical: 26 MB
+         826  Stage 1
+      src/glr/table.rs
+         829  Stage 1 done in 72.00µs
+         767  Memory usage at 'After Stage 1': Physical: 26 MB
+         831  Stage 2
+         834  Stage 2 done in 6.63µs
+      src/glr/table.rs
+         767  Memory usage at 'After Stage 2': Physical: 26 MB
+         836  Stage 3
+      src/glr/automaton.rs
+         187  Computing nullable non-terminals
+      src/glr/automaton.rs
+         195  Computed nullable non-terminals in 18.58µs
+         203  Computing first sets for non-terminals
+      src/glr/automaton.rs
+         281  Computed first sets in 15.83µs
+         290  Computing follow sets for non-terminals
+         388  Computed follow sets in 7.96µs
+      src/glr/table.rs
+         839  Stage 3 done in 57.46µs
+      src/glr/table.rs
+         767  Memory usage at 'After Stage 3': Physical: 26 MB
+         841  Stage 4
+      src/glr/table.rs
+         844  Stage 4 done in 9.08µs
+         767  Memory usage at 'After Stage 4': Physical: 26 MB
+      src/glr/table.rs
+         846  Stage 5
+      src/glr/table.rs
+         849  Stage 5 done in 25.71µs
+      src/glr/table.rs
+         767  Memory usage at 'After Stage 5': Physical: 26 MB
+      src/glr/table.rs
+         851  Stage 6
+         854  Stage 6 done in 24.33µs
+         767  Memory usage at 'After Stage 6': Physical: 26 MB
+         856  Stage 7
+      src/glr/table.rs
+         865  Stage 7 done in 137.29µs
+         767  Memory usage at 'After Stage 7': Physical: 26 MB
+         867  Stage 8
+      src/glr/table.rs
+         870  Stage 8 done in 2.92µs
+         767  Memory usage at 'After Stage 8 (final table)': Physical: 26 MB
+         873  Done generating GLR parser
+      src/constraint.rs
+        1245  Building vocab prefix tree for possible_matches computation
+      src/datastructures/vocab_prefix_tree.rs
+         179  Building vocab prefix tree (fast builder)
+         303  Computing reachable IDs (fast path)
+         307  Done computing reachable IDs in 4.25µs
+      src/constraint.rs
+        1249  Done building vocab prefix tree
+        1258  Computing possible_matches for all 4 tokenizer states
+      src/constraint.rs
+        1272  Finished computing possible_matches
+        1275  Building state_map_by_llm and terminal_map_by_llm
+      src/constraint.rs
+        1280  Computing terminal follow sets
+      src/glr/automaton.rs
+         187  Computing nullable non-terminals
+      src/glr/automaton.rs
+         195  Computed nullable non-terminals in 29.25µs
+      src/glr/automaton.rs
+         203  Computing first sets for non-terminals
+      src/glr/automaton.rs
+         281  Computed first sets in 76.13µs
+         290  Computing follow sets for non-terminals
+      src/glr/automaton.rs
+         388  Computed follow sets in 34.92µs
+      src/constraint.rs
+        1298  Computed terminal_follow_map_ids with 0 entries.
+        2110  Building vocab prefix tree
+      src/datastructures/vocab_prefix_tree.rs
+         179  Building vocab prefix tree (fast builder)
+      src/datastructures/vocab_prefix_tree.rs
+         303  Computing reachable IDs (fast path)
+         307  Done computing reachable IDs in 16µs
+      src/constraint.rs
+        2112  Done building vocab prefix tree
+        2126  Created trie1 roots for 4 representative tokenizer states
+        2132  Counting vocab nodes for progress bar...
+        2134  Counted 3 vocab nodes
+      src/constraint.rs
+        2151  Created trie1 leaf node
+        2395  Starting precompute DFS for 4 tokenizer states
+      src/constraint.rs
+        2404  Finished precompute DFS
+        2407  Precomputation complete
+      src/constraint_extra.rs
+         546  Calculating final precompute1 statistics...
+      src/constraint_extra.rs
+         657  Finished calculating final precompute1 statistics.
+      --- Precomputation 1 Statistics ---
+        Initial Root Nodes Created: 0
+
+      Node Counts Breakdown:
+        There are:
+        - 6 unique nodes, of which
+          - 4 are roots
+          - 2 are non-roots, of which
+              - 0 are internal (non-root, non-leaf)
+              - 2 are leaves (non-root)
+
+      Final Graph Structure (after sharing and deduplication):
+        Unique Nodes: 6
+        Total Edges: 4
+          Edges with None Key: 0
+          Edges with Some Key: 4
+        Nodes with Clean End: 1
+        Average edge occupancy for Some-key edges:    2.00
+        Average edge occupancy for None-key edges:    0.00
+        Total ranges in all HybridBitsets: 4
+      src/constraint_precompute1_utils.rs
+         611  Starting Trie1 size optimization...
+         613  Initial Trie1 stats:
+      src/constraint_extra.rs
+         546  Calculating final precompute1 statistics...
+      src/constraint_extra.rs
+         657  Finished calculating final precompute1 statistics.
+      --- Precomputation 1 Statistics ---
+        Initial Root Nodes Created: 0
+
+      Node Counts Breakdown:
+        There are:
+        - 6 unique nodes, of which
+          - 4 are roots
+          - 2 are non-roots, of which
+              - 0 are internal (non-root, non-leaf)
+              - 2 are leaves (non-root)
+
+      Final Graph Structure (after sharing and deduplication):
+        Unique Nodes: 6
+        Total Edges: 4
+          Edges with None Key: 0
+          Edges with Some Key: 4
+        Nodes with Clean End: 1
+        Average edge occupancy for Some-key edges:    2.00
+        Average edge occupancy for None-key edges:    0.00
+        Total ranges in all HybridBitsets: 4
+      src/constraint_precompute1_utils.rs
+         887  Simplifying None edges to former end nodes in Trie1...
+         956  Done simplifying None edges to former end nodes in Trie1.
+         970  Replacing ignore token edges with None edges in Trie1...
+      src/constraint_precompute1_utils.rs
+         988  Done replacing ignore token edges in Trie1.
+         114  Trie1: shortcutting (flattening) None-key chains where safe...
+      src/constraint_precompute1_utils.rs
+          83  Trie1: constraining LLM token bitvectors and removing empty edges...
+      src/constraint_precompute1_utils.rs
+        1056  Trie1: reducing Some-edges using post-key epsilon coverage (local greedy)...
+      src/constraint_precompute1_utils.rs
+        1645  Pruning Trie1 nodes that cannot reach any end node (reverse reachability)...
+      src/constraint_precompute1_utils.rs
+        1700  Trie1 end-reachability: total=6, productive=3, prunable=3
+        1736  Finished end-reachability pruning in Trie1.
+         229  Trie1: pruning dead paths (conservative, token-only)...
+      src/constraint_precompute1_utils.rs
+         305  Trie1: merging identical subgraphs by signature (partition refinement)...
+      src/constraint_precompute1_utils.rs
+         377  Trie1 merge iter 1: classes=3, changes=3
+      src/constraint_precompute1_utils.rs
+         377  Trie1 merge iter 2: classes=3, changes=0
+      src/constraint_precompute1_utils.rs
+         529  Trie1: canonicalizing end nodes...
+         438  Trie1: minimizing dummy terminal penalty by unrolling non-shared intermediates...
+      src/constraint_precompute1_utils.rs
+         495  Trie1: no dummy terminals to unroll.
+        1770  Flattening None edges in Trie1 via epsilon-closure (keyed-only rewrite)...
+      src/constraint_precompute1_utils.rs
+        1890  Done flattening None edges in Trie1.
+        1056  Trie1: reducing Some-edges using post-key epsilon coverage (local greedy)...
+      src/constraint_precompute1_utils.rs
+        1645  Pruning Trie1 nodes that cannot reach any end node (reverse reachability)...
+        1700  Trie1 end-reachability: total=3, productive=2, prunable=1
+      src/constraint_precompute1_utils.rs
+        1736  Finished end-reachability pruning in Trie1.
+         229  Trie1: pruning dead paths (conservative, token-only)...
+      src/constraint_precompute1_utils.rs
+        1299  Merging equivalent LLM tokens in Trie1...
+      src/constraint_precompute1_utils.rs
+        1383  Trie1: merged LLM tokens. Before: 2, After: 2. (0 merged)
+        1550  Done computing frequencies.
+      src/constraint_precompute1_utils.rs
+        1634  Trie1 reordering complete. Ranges reduced from 3 to 3. New max internal token ID: 1
+         305  Trie1: merging identical subgraphs by signature (partition refinement)...
+         377  Trie1 merge iter 1: classes=3, changes=2
+         377  Trie1 merge iter 2: classes=3, changes=0
+         529  Trie1: canonicalizing end nodes...
+      src/constraint_precompute1_utils.rs
+        1056  Trie1: reducing Some-edges using post-key epsilon coverage (local greedy)...
+        1645  Pruning Trie1 nodes that cannot reach any end node (reverse reachability)...
+        1700  Trie1 end-reachability: total=3, productive=2, prunable=1
+      src/constraint_precompute1_utils.rs
+        1736  Finished end-reachability pruning in Trie1.
+         229  Trie1: pruning dead paths (conservative, token-only)...
+      src/constraint_precompute1_utils.rs
+         693  Final Trie1 stats:
+      src/constraint_extra.rs
+         546  Calculating final precompute1 statistics...
+         657  Finished calculating final precompute1 statistics.
+      --- Precomputation 1 Statistics ---
+        Initial Root Nodes Created: 0
+
+      Node Counts Breakdown:
+        There are:
+        - 3 unique nodes, of which
+          - 2 are roots
+          - 1 are non-roots, of which
+              - 0 are internal (non-root, non-leaf)
+              - 1 are leaves (non-root)
+
+      Final Graph Structure (after sharing and deduplication):
+        Unique Nodes: 3
+        Total Edges: 1
+          Edges with None Key: 1
+          Edges with Some Key: 0
+        Nodes with Clean End: 1
+        Average edge occupancy for Some-key edges:    0.00
+        Average edge occupancy for None-key edges:    1.00
+        Total ranges in all HybridBitsets: 0
+      src/constraint.rs
+        1363  Remapping LLM token IDs in possible_matches due to Trie1 optimization.
+      src/constraint.rs
+        1386  Done
+      src/precompute4/full_dwa.rs
+         170  Optimizing precomputed1 via NWA/DWA conversion...
+         171  Precompute1 trie before: [Root 0]
+      └── [Node 0] (max_depth: 0, value: PrecomputedNodeContents { end: false, live_tokens: HybridBitset { inner: 0..=0 } })
+          └── Edge: None (value: HybridBitset { inner: 0..=0 })
+              └── [Node 2] (max_depth: 1, value: PrecomputedNodeContents { end: true, live_tokens: HybridBitset { inner: 0..=1 } })
+
+      [Root 1]
+      └── [Node 3] (max_depth: 0, value: PrecomputedNodeContents { end: false, live_tokens: HybridBitset { inner:  } })
+
+      [Root 2]
+      └── [Node 0] (max_depth: 0, value: PrecomputedNodeContents { end: false, live_tokens: HybridBitset { inner: 0..=0 } }) (Shared, already shown)
+
+      [Root 3]
+      └── [Node 3] (max_depth: 0, value: PrecomputedNodeContents { end: false, live_tokens: HybridBitset { inner:  } }) (Shared, already shown)
+
+         173  NWA after conversion: NWA (start: 0)
+        State 0:
+          0 -> 1 (weight: ALL)
+          1 -> 3 (weight: ALL)
+          2 -> 1 (weight: ALL)
+          3 -> 3 (weight: ALL)
+        State 1:
+          ε -> 2 (weight: [0])
+        State 2:
+          final_weight: ALL
+        State 3:
+
+         174  Optimizing precomputed1 via NWA/DWA conversion... done.
+      src/precompute4/full_dwa.rs
+         176  Simplified precomputed1 NWA... done.
+      src/precompute4/full_dwa.rs
+         178  Determinized precomputed1 NWA... done.
+      src/precompute4/weighted_automata/determinization_rustfst.rs
+         198  NWA to FST conversion done:
+      0	1	32769	32769	"ALL"
+      0	1	32771	32771	"ALL"
+      1	[0]
+
+      src/precompute4/full_dwa.rs
+         180  Optimized precomputed1 DWA has 2 states and 2 transitions.
+         186  Optimized precomputed1 DWA: DWA (start: 0)
+        State 0:
+          0 -> 1 (trans_weight: [0])
+          2 -> 1 (trans_weight: [0])
+        State 1:
+          final_weight: ALL
+
+      src/precompute4/full_dwa.rs
+         191  Precompute1 trie after: [Root 0]
+      └── [Node 1] (max_depth: 18446744073709551615, value: PrecomputedNodeContents { end: false, live_tokens: HybridBitset { inner: 0..=1 } })
+          └── Edge: None (value: HybridBitset { inner: 0..=usize::MAX })
+              └── [Node 0] (max_depth: 18446744073709551615, value: PrecomputedNodeContents { end: true, live_tokens: HybridBitset { inner: 0..=1 } })
+
+      [Root 1]
+      └── [Node 1] (max_depth: 18446744073709551615, value: PrecomputedNodeContents { end: false, live_tokens: HybridBitset { inner: 0..=1 } }) (Shared, already shown)
+
+         195  Starting precompute4...
+      src/precompute4/characterize.rs
+         114  Computed Below-Bottom Characterization for terminal 0:
+      Characterization for Terminal 0:
+        Initial Reduces:
+          - initial: 1, len: 0, nt: 1
+          - initial: 2, len: 0, nt: 0
+
+         114  Computed Below-Bottom Characterization for terminal 1:
+      Characterization for Terminal 1:
+        Initial Shifts:
+          - initial: 0, shift: 1
+        Initial Reduces:
+          - initial: 1, len: 0, nt: 1
+          - initial: 2, len: 0, nt: 0
+
+      src/precompute4/weighted_automata/simplification.rs
+         958  NWA simplification did not converge after 20 iterations. Still changing: [PruneDeadEnds]
+      src/precompute4/weighted_automata/determinization_rustfst.rs
+         198  NWA to FST conversion done:
+
+      src/precompute4/weighted_automata/simplification.rs
+         317  DWA simplification did not converge after 20 iterations. Still changing: [PruneDeadEnds]
+      src/precompute4/template_nwa.rs
+         131  Built template DWA for terminal TerminalID(0):
+         132  DWA (start: 0)
+        State 0:
+
+      src/precompute4/weighted_automata/determinization_rustfst.rs
+         198  NWA to FST conversion done:
+      0	1	0	0	"ALL"
+      1	2	32769	32769	"ALL"
+      2	3	1	1	"ALL"
+      3	4	2	2	"ALL"
+      4	"ALL"
+
+      src/precompute4/template_nwa.rs
+         131  Built template DWA for terminal TerminalID(1):
+         132  DWA (start: 0)
+        State 0:
+          0 -> 1 (trans_weight: ALL)
+        State 1:
+          neg(0) -> 2 (trans_weight: ALL)
+        State 2:
+          neg(1) -> 3 (trans_weight: ALL)
+        State 3:
+          final_weight: ALL
+
+      src/precompute4/full_dwa.rs
+         203  Built 2 template DWAs in 920.417µs
+         206  Stats for template DWA for terminal TerminalID(0):
+      DWA Stats:
+        - States: 1
+        - Transitions: 0
+        - Final States: 0
+        - Avg Transitions/State: 0.00
+
+         206  Stats for template DWA for terminal TerminalID(1):
+      DWA Stats:
+        - States: 4
+        - Transitions: 3
+        - Final States: 1
+        - Avg Transitions/State: 0.75
+
+      src/precompute4/full_dwa.rs
+         251  Built super DWA with 4 states in 190.292µs
+      src/precompute4/full_dwa.rs
+         296  Trie:
+      --- Root State ID: 0 ---
+      Root Node 1
+      └── Edge (None, HybridBitset { inner: 0..=usize::MAX }): -> Node 0
+
+      --- Root State ID: 1 ---
+      Root Node 1
+      └── Edge (None, HybridBitset { inner: 0..=usize::MAX }): -> Node 0 (Shared, already shown)
+
+         297  Reversed trie:
+      --- Root State ID: 0 ---
+      Root Node 0
+      └── Edge (None, HybridBitset { inner: 0..=usize::MAX }): -> Node 1
+
+      special_map_grouped finished in 131.917µs. Time in step: 2.709µs, merge: 2.625µs, process: 103.167µs
+      src/precompute4/full_dwa.rs
+         411  Reversed trie traversal (special_map_grouped) took: 136.083µs
+         425  Combined NWA has 8 states after merging all final bodies.
+         434  Starting resolve negatives and optimization and determinization of combined NWA...
+      src/precompute4/full_dwa.rs
+         436  Initial simplification took: 159.834µs. NWA now has 6 states.
+         439  Pruning continuations from final states...
+         442  Pruning and simplifying took: 41.167µs. NWA now has 2 states.
+         448  Stats for combined NWA after pruning:
+      NWA Stats:
+        - States: 2
+        - Final States: 1
+        - Epsilon Transitions: 0
+        - Labeled Transitions: 2
+        - Avg Epsilon/State: 0.00
+        - Avg Labeled/State: 1.00
+
+         451  Simplifying default transitions...
+         454  Default transition simplification took: 14.625µs. NWA now has 2 states.
+         460  Stats for combined NWA after default simplification:
+      NWA Stats:
+        - States: 2
+        - Final States: 1
+        - Epsilon Transitions: 0
+        - Labeled Transitions: 2
+        - Avg Epsilon/State: 0.00
+        - Avg Labeled/State: 1.00
+
+         462  Starting simplification before final determinization...
+      src/precompute4/full_dwa.rs
+         467  Simplification before final determinization took: 38.834µs. NWA now has 2 states.
+         473  Stats for combined NWA before final determinization:
+      NWA Stats:
+        - States: 2
+        - Final States: 1
+        - Epsilon Transitions: 0
+        - Labeled Transitions: 2
+        - Avg Epsilon/State: 0.00
+        - Avg Labeled/State: 1.00
+
+         491  Determinizing final combined NWA...
+         493  Stats after final NWA determinization:
+      NWA Stats:
+        - States: 2
+        - Final States: 1
+        - Epsilon Transitions: 0
+        - Labeled Transitions: 2
+        - Avg Epsilon/State: 0.00
+        - Avg Labeled/State: 1.00
+
+         495  Final NWA simplification took: 38.041µs. NWA now has 2 states.
+         501  Stats for final NWA before DWA determinization:
+      NWA Stats:
+        - States: 2
+        - Final States: 1
+        - Epsilon Transitions: 0
+        - Labeled Transitions: 2
+        - Avg Epsilon/State: 0.00
+        - Avg Labeled/State: 1.00
+
+         503  Final determinize & simplify took: 54.416µs. Final DWA has 2 states.
+         509  Stats for final DWA:
+      DWA Stats:
+        - States: 2
+        - Transitions: 2
+        - Final States: 1
+        - Avg Transitions/State: 1.00
+
+         428  Total precompute4 time: 1.698084ms
+      src/constraint_extra.rs
+         546  Calculating final precompute1 statistics...
+         657  Finished calculating final precompute1 statistics.
+      --- Precomputation 1 Statistics ---
+        Initial Root Nodes Created: 0
+
+      Node Counts Breakdown:
+        There are:
+        - 3 unique nodes, of which
+          - 2 are roots
+          - 1 are non-roots, of which
+              - 0 are internal (non-root, non-leaf)
+              - 1 are leaves (non-root)
+
+      Final Graph Structure (after sharing and deduplication):
+        Unique Nodes: 3
+        Total Edges: 1
+          Edges with None Key: 1
+          Edges with Some Key: 0
+        Nodes with Clean End: 1
+        Average edge occupancy for Some-key edges:    0.00
+        Average edge occupancy for None-key edges:    1.00
+        Total ranges in all HybridBitsets: 0
+      Parser: GLRParser:
+
+      Dumping Precomputed Trie 1 Structure (showing original LLM Token IDs):
+      ===================================
+
+      --- Tokenizer State ID: 0 ---
+      Root Node Trie2Index(0) (MaxDepth: 0) [Live: [1] (e.g., ["/*"])]
+      └── Edge ε: [1] (e.g., ["/*"]) -> Node Trie2Index(2) (MaxDepth: 1) [END] [Live: [0..=1] (e.g., [" =", "/*"])]
+
+      --- Tokenizer State ID: 1 ---
+      Root Node Trie2Index(3) (MaxDepth: 0) [Live: []]
+
+      --- Tokenizer State ID: 2 ---
+      Root Node Trie2Index(0) (MaxDepth: 0) [Live: [1] (e.g., ["/*"])]
+        (Root already visited)
+
+      --- Tokenizer State ID: 3 ---
+      Root Node Trie2Index(3) (MaxDepth: 0) [Live: []]
+        (Root already visited)
+
+      ===================================
+      Dump Complete.
+
+      --- Precomputed4 DWA ---
+      DWA (start: 0)
+        State 0:
+          0 -> 1 (trans_weight: ALL)
+          2 -> 1 (trans_weight: ALL)
+        State 1:
+          final_weight: ALL
+
+
+
+      thread 'test_constraint_basic::test_ebnf_ignore_directive_with_partial_match' (16946040) panicked at src/test_constraint_basic.rs:1617:5:
+      assertion `left == right` failed: Initial mask should allow '/*' and 'x', but not ' ='
+        left: HybridBitset { inner: 0..=1 }
+       right: HybridBitset { inner: 1..=1 }
+      stack backtrace:
+         0: __rustc::rust_begin_unwind
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/std/src/panicking.rs:698:5
+         1: core::panicking::panic_fmt
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/panicking.rs:75:14
+         2: core::panicking::assert_failed_inner
+         3: core::panicking::assert_failed
+                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/panicking.rs:394:5
+         4: sep1::test_constraint_basic::test_ebnf_ignore_directive_with_partial_match
+                   at ./src/test_constraint_basic.rs:1617:5
+         5: sep1::test_constraint_basic::test_ebnf_ignore_directive_with_partial_match::{{closure}}
+                   at ./src/test_constraint_basic.rs:1567:55
+         6: core::ops::function::FnOnce::call_once
+                   at /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:253:5
+         7: core::ops::function::FnOnce::call_once
+                   at /rustc/54c581243c977c7662c949b5795c31147f8a60ed/library/core/src/ops/function.rs:253:5
+      note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+    metadata:
   - user: It seems that the precompute1 -> nwa -> precompute1 conversion in full_dwa.rs
       isn't correct. We're getting mismatches. Fix it.
     metadata:
@@ -32721,39 +33305,50 @@ messages:
       kind: mode-guidance
       mode: git-llm
       phase: default
-  - assistant: |
-      To fix the issue where the precompute1 -> nwa -> precompute1 conversion produces incorrect live_tokens (initializing them to zeros instead of allowing all tokens), we need to update convert_dwa_state_to_trie_node in src/precompute4/full_dwa.rs.
+  - assistant: |-
+      To fix the issue where `precompute4` produces an overly permissive mask (allowing tokens it shouldn't), we need to correct the conversion from DWA back to `precomputed1` (the Trie structure).
 
-      Steps:
+      When converting the optimized DWA to `precomputed1` in `convert_dwa_to_precompute1`, the function currently ignores the weights on the transitions from the DWA's start state to the individual state roots. These weights often contain crucial restrictions (e.g., allowing only specific tokens for a specific tokenizer state). By ignoring them, the resulting Trie becomes too loose, which propagates to the final `precomputed4` DWA.
 
-      Open src/precompute4/full_dwa.rs.
-      Locate the convert_dwa_state_to_trie_node function.
-      Change the initialization of live_tokens in PrecomputedNodeContents from LLMTokenBV::zeros() to LLMTokenBV::ones(max_llm_token_id + 1). This ensures that the reconstructed trie nodes are considered valid for all tokens, preventing them from being treated as dead code in subsequent operations.
-      code
-      Diff
+      The fix is to capture these weights. If a transition from the start state has a restrictive weight (i.e., it doesn't allow all tokens), we must insert a wrapper node in the Trie with an epsilon edge that applies this restriction.
 
-      download
+      ### Steps
+      1.  Modify `convert_dwa_to_precompute1` in `src/precompute4/full_dwa.rs`.
+      2.  Inside the loop processing the start node's transitions, calculate the transition weight (`edge_bv`).
+      3.  Check if `edge_bv` restricts the token set (i.e., `len() < max_llm_token_id + 1`).
+      4.  If restricted, create a new `PrecomputeNode1` (wrapper) and link it to the target node with an epsilon edge containing the `edge_bv` restriction. Use this wrapper as the root for the tokenizer state.
+      5.  Otherwise, point directly to the target node as before.
 
-      content_copy
-
-      expand_less
+      ```diff src/precompute4/full_dwa.rs
       diff --git a/src/precompute4/full_dwa.rs b/src/precompute4/full_dwa.rs
+      index 33f0423..a64c8b8 100644
       --- a/src/precompute4/full_dwa.rs
       +++ b/src/precompute4/full_dwa.rs
-      @@ -139,7 +139,7 @@
+      @@ -117,7 +117,18 @@ fn convert_dwa_to_precompute1(
+           for (label, target) in &start_node.transitions {
+               let sid = TokenizerStateID(*label as usize);
+               let root_idx = convert_dwa_state_to_trie_node(*target, dwa, &god, &mut state_cache, max_llm_token_id, end_node_idx);
+      -        result.insert(sid, root_idx);
+      +
+      +        let weight = start_node.trans_weights.get(label).cloned().unwrap_or_else(Weight::all);
+      +        let edge_bv: LLMTokenBV = LLMTokenBV::from(weight) & LLMTokenBV::ones(max_llm_token_id + 1);
+      +
+      +        if edge_bv.len() < max_llm_token_id + 1 {
+      +            let contents = PrecomputedNodeContents { end: false, live_tokens: edge_bv.clone() };
+      +            let wrapper_node = PrecomputeNode1::new(contents);
+      +            let wrapper_idx = PrecomputeNode1Index::new(god.insert(wrapper_node));
+      +            god.insert_edge_simple(wrapper_idx, root_idx, None, edge_bv);
+      +            result.insert(sid, wrapper_idx);
+      +        } else {
+      +            result.insert(sid, root_idx);
+      +        }
            }
        
-       
-      -    let contents = PrecomputedNodeContents { end: false, live_tokens: LLMTokenBV::zeros() };
-      +    let contents = PrecomputedNodeContents { end: false, live_tokens: LLMTokenBV::ones(max_llm_token_id + 1) };
-           let node = PrecomputeNode1::new(contents);
-           let idx = PrecomputeNode1Index::new(god.insert(node));
-           cache.insert(state_id, idx);
+           (result, god)
+      ```
     metadata:
   - user: |
       Apply result (git-llm mode):
-      No ```diff blocks found. Scanning for raw, unfenced diffs...
-      Found 1 potential raw diff block(s).
       Found 1 diff block(s) to process using custom patcher.
 
       --- Processing Diff Block 1 ---
@@ -32761,7 +33356,7 @@ messages:
       Applying patch to 'src/precompute4/full_dwa.rs' using custom patcher...
       Successfully applied patch and wrote to src/precompute4/full_dwa.rs.
     metadata:
-  - user: 'Changes committed with message: "precompute4: Initialize live_tokens to
-      all tokens when converting DWA state to Trie node"'
+  - user: 'Changes committed with message: "Fix: Preserve token restrictions from
+      DWA start state transitions during Trie conversion in full_dwa"'
     metadata:
 ...
