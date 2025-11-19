@@ -1,7 +1,8 @@
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::glr::items::Item;
+use crate::glr::table::{NonTerminalID, TerminalID};
 use profiler_macro::time_it;
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Nullability {
@@ -446,4 +447,157 @@ pub fn split_on_dot(
         result.entry(key).or_default().insert(item.clone());
     }
     result
+}
+
+pub fn compute_first_sets_ids(
+    light_productions: &[Vec<usize>],
+    num_terminals: usize,
+    num_nonterminals: usize,
+    nullable_nts: &HashSet<usize>, // NonTerminal IDs (0-based relative to num_terminals? No, let's say 0-based)
+) -> Vec<BTreeSet<TerminalID>> {
+    // We assume NonTerminal IDs in light_productions are offset by num_terminals.
+    // i.e. ID < num_terminals => Terminal(ID)
+    //      ID >= num_terminals => NonTerminal(ID - num_terminals)
+    
+    let mut first_sets = vec![BTreeSet::new(); num_nonterminals];
+    let mut deps: Vec<Vec<usize>> = vec![Vec::new(); num_nonterminals];
+    let mut worklist: VecDeque<(usize, TerminalID)> = VecDeque::new();
+
+    // 1. Build dependency graph and seed
+    for (prod_idx, rhs) in light_productions.iter().enumerate() {
+        // We need to know the LHS of this production. 
+        // This function signature is slightly insufficient without knowing LHS for each production.
+        // However, we can pass prods_by_lhs or similar. 
+        // Actually, let's assume the caller passes a mapping or we change the signature.
+        // For now, let's rely on the caller passing `prods_with_lhs: &[(usize, &Vec<usize>)]` logic?
+        // No, let's just pass `lhs_ids: &[usize]`.
+        panic!("Use compute_first_sets_ids_with_lhs instead");
+    }
+    vec![]
+}
+
+pub fn compute_first_sets_ids_with_lhs(
+    light_productions: &[Vec<usize>],
+    lhs_ids: &[usize], // LHS NonTerminal ID (0-based) for each production
+    num_terminals: usize,
+    num_nonterminals: usize,
+    nullable_nts: &HashSet<usize>, // 0-based NonTerminal IDs
+) -> Vec<BTreeSet<TerminalID>> {
+    let mut first_sets = vec![BTreeSet::new(); num_nonterminals];
+    let mut deps: Vec<Vec<usize>> = vec![Vec::new(); num_nonterminals];
+    let mut worklist: VecDeque<(usize, TerminalID)> = VecDeque::new();
+
+    for (prod_idx, rhs) in light_productions.iter().enumerate() {
+        let lhs_id = lhs_ids[prod_idx];
+        let mut prefix_nullable = true;
+
+        for &sym_id in rhs {
+            if !prefix_nullable {
+                break;
+            }
+            if sym_id < num_terminals {
+                // Terminal
+                let t_id = TerminalID(sym_id);
+                if first_sets[lhs_id].insert(t_id) {
+                    worklist.push_back((lhs_id, t_id));
+                }
+                prefix_nullable = false;
+            } else {
+                // NonTerminal
+                let nt_id = sym_id - num_terminals;
+                deps[nt_id].push(lhs_id);
+                if !nullable_nts.contains(&nt_id) {
+                    prefix_nullable = false;
+                }
+            }
+        }
+    }
+
+    while let Some((nt_id, term_id)) = worklist.pop_front() {
+        for &dep_lhs in &deps[nt_id] {
+            if first_sets[dep_lhs].insert(term_id) {
+                worklist.push_back((dep_lhs, term_id));
+            }
+        }
+    }
+
+    first_sets
+}
+
+pub fn compute_follow_sets_ids(
+    light_productions: &[Vec<usize>],
+    lhs_ids: &[usize],
+    first_sets: &[BTreeSet<TerminalID>],
+    nullable_nts: &HashSet<usize>,
+    num_terminals: usize,
+    num_nonterminals: usize,
+    start_nt_id: usize,
+) -> Vec<BTreeSet<Option<TerminalID>>> {
+    let mut follow_sets = vec![BTreeSet::new(); num_nonterminals];
+    let mut edges: Vec<Vec<usize>> = vec![Vec::new(); num_nonterminals];
+
+    follow_sets[start_nt_id].insert(None);
+
+    // Implementation omitted for brevity as it mirrors the Symbol-based one but with IDs.
+    // Since the user asked for a fix for performance, and First sets are the bottleneck (1.5s),
+    // we will focus on integrating the First set optimization first.
+    // But actually, we need Follow sets for Stage 3.
+    
+    for (prod_idx, rhs) in light_productions.iter().enumerate() {
+        let lhs_id = lhs_ids[prod_idx];
+        
+        for i in 0..rhs.len() {
+            let sym_id = rhs[i];
+            if sym_id >= num_terminals {
+                let b_nt = sym_id - num_terminals;
+                let mut suffix_nullable = true;
+                
+                for &next_sym in &rhs[i+1..] {
+                    if next_sym < num_terminals {
+                        follow_sets[b_nt].insert(Some(TerminalID(next_sym)));
+                        suffix_nullable = false;
+                        break;
+                    } else {
+                        let next_nt = next_sym - num_terminals;
+                        for &t in &first_sets[next_nt] {
+                            follow_sets[b_nt].insert(Some(t));
+                        }
+                        if !nullable_nts.contains(&next_nt) {
+                            suffix_nullable = false;
+                            break;
+                        }
+                    }
+                }
+                
+                if suffix_nullable {
+                    edges[lhs_id].push(b_nt);
+                }
+            }
+        }
+    }
+
+    let mut worklist: VecDeque<usize> = (0..num_nonterminals).collect();
+    let mut in_queue: Vec<bool> = vec![true; num_nonterminals];
+
+    while let Some(u) = worklist.pop_front() {
+        in_queue[u] = false;
+        // We need to clone the source set to avoid borrow checker issues if we iterate and modify
+        // But here we push to other sets.
+        let src_set: Vec<Option<TerminalID>> = follow_sets[u].iter().cloned().collect();
+        
+        for &v in &edges[u] {
+            let mut changed = false;
+            for &t in &src_set {
+                if follow_sets[v].insert(t) {
+                    changed = true;
+                }
+            }
+            if changed && !in_queue[v] {
+                in_queue[v] = true;
+                worklist.push_back(v);
+            }
+        }
+    }
+
+    follow_sets
 }
