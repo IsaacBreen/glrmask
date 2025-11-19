@@ -314,7 +314,7 @@ impl DWA {
         }
 
         if !converged {
-            eprintln!(
+            crate::debug!(5, 
                 "DWA simplification did not converge after {} iterations. Still changing: {:?}",
                 MAX_OPTIMIZE_ITERATIONS, last_changing_passes
             );
@@ -949,7 +949,7 @@ impl NWA {
         }
 
         if !converged {
-            eprintln!(
+            crate::debug!(5, 
                 "NWA simplification did not converge after {} iterations. Still changing: {:?}",
                 MAX_OPTIMIZE_ITERATIONS, last_changing_passes
             );

@@ -323,7 +323,7 @@ impl NWA {
             const STATE_LIMIT: usize = usize::MAX;
             crate::debug!(
                 5,
-                "[DEBUG] Determinization: Using general-purpose subset construction (fast-path not taken)."
+                "Determinization: Using general-purpose subset construction (fast-path not taken)."
             );
 
             if self.states.0.is_empty() || self.body.start_state >= self.states.len() {
