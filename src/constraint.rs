@@ -1726,6 +1726,30 @@ impl GrammarConstraint {
             }
         }
 
+        // Analyze tokenizer state equivalence to reduce precomputation work
+        let strings: Vec<Vec<u8>> = internal_llm_token_map.keys().cloned().collect();
+        let states: Vec<usize> = tokenizer.iter_states().map(|s| s.0).collect();
+
+        crate::debug!(2, "Analyzing tokenizer state equivalence...");
+        let equivalence_classes = equivalence_analysis_finite_automata::find_state_equivalence_classes(
+            tokenizer,
+            &strings,
+            &states,
+        );
+
+        let mut state_mapping: BTreeMap<TokenizerStateID, TokenizerStateID> = BTreeMap::new();
+        let mut representative_states: Vec<TokenizerStateID> = Vec::new();
+
+        for group in equivalence_classes.values() {
+            if group.is_empty() { continue; }
+            let rep = TokenizerStateID(group[0]);
+            representative_states.push(rep);
+            for &s in group {
+                state_mapping.insert(TokenizerStateID(s), rep);
+            }
+        }
+        crate::debug!(2, "Reduced {} tokenizer states to {} equivalence classes", states.len(), representative_states.len());
+
         let mut helper = Precomputer1::new(
             tokenizer,
             parser,
@@ -1733,6 +1757,8 @@ impl GrammarConstraint {
             internal_llm_token_map,
             stage_vocab.internal_max_llm_token,
             original_to_dummy_map,
+            state_mapping.clone(),
+            representative_states,
         );
 
         helper.run_dfs();
@@ -1745,6 +1771,15 @@ impl GrammarConstraint {
 
         let (mut precomputed1, trie1_god) = helper.finish();
         let roots_after: Vec<_> = precomputed1.values().cloned().collect();
+
+        // Expand precomputed1 to cover all equivalent states
+        for (original, representative) in &state_mapping {
+            if original == representative { continue; }
+            if let Some(&idx) = precomputed1.get(representative) {
+                precomputed1.insert(*original, idx);
+            }
+        }
+
         Self::has_llm_compatible_cycle(
             &trie1_god,
             &roots_after,
@@ -2073,6 +2108,7 @@ pub(crate) struct Precomputer1<'r> {
     pub(crate) leaf_node: TempPrecomputeNode1Index,
     pub(crate) trie1_god: TempTrie1GodWrapper,
     pub(crate) original_to_dummy_map: BTreeMap<TerminalID, TerminalID>,
+    pub(crate) state_mapping: BTreeMap<TokenizerStateID, TokenizerStateID>,
 }
 
 impl<'r> Precomputer1<'r> {
@@ -2083,6 +2119,8 @@ impl<'r> Precomputer1<'r> {
         internal_llm_token_map: &BTreeMap<Vec<u8>, LLMTokenID>,
         internal_max_llm_token: usize,
         original_to_dummy_map: BTreeMap<TerminalID, TerminalID>,
+        state_mapping: BTreeMap<TokenizerStateID, TokenizerStateID>,
+        active_states: Vec<TokenizerStateID>,
     ) -> Self {
         let tokens: Vec<(usize, Vec<u8>)> = internal_llm_token_map
             .iter()
@@ -2095,7 +2133,7 @@ impl<'r> Precomputer1<'r> {
 
         let mut roots = BTreeMap::new();
         let trie1_god = TempTrie1GodWrapper::new();
-        for sid in tokenizer.iter_states() {
+        for sid in active_states {
             roots.insert(
                 sid,
                 TempPrecomputeNode1Index::new(trie1_god.insert(
@@ -2107,8 +2145,8 @@ impl<'r> Precomputer1<'r> {
         }
         crate::debug!(
             2,
-            "Created trie1 roots for {} tokenizer states",
-            tokenizer.iter_states().count()
+            "Created trie1 roots for {} representative tokenizer states",
+            roots.len()
         );
 
         crate::debug!(2, "Counting vocab nodes for progress bar...");
@@ -2145,6 +2183,7 @@ impl<'r> Precomputer1<'r> {
             leaf_node,
             trie1_god,
             original_to_dummy_map,
+            state_mapping,
         }
     }
 
@@ -2300,6 +2339,9 @@ impl<'r> Precomputer1<'r> {
         vocab_node: &VocabPrefixTreeNode,
         tokenizer_state_id: TokenizerStateID,
     ) -> BTreeMap<GrammarTokenID, LLMTokenBV> {
+        // Normalize state ID to representative
+        let tokenizer_state_id = self.state_mapping.get(&tokenizer_state_id).copied().unwrap_or(tokenizer_state_id);
+
         let cache_key_ptr = vocab_node as *const VocabPrefixTreeNode;
 
         if let Some(cached_for_vocab_node) =
@@ -2531,6 +2573,7 @@ impl<'r> Precomputer1<'r> {
 
                             let next_tokenizer_state =
                                 self.tokenizer.initial_state_id();
+                            let next_tokenizer_state = self.state_mapping.get(&next_tokenizer_state).copied().unwrap_or(next_tokenizer_state);
                             let dest_nodes_in_queue = work_queue
                                 .entry(next_pos)
                                 .or_default()
@@ -2638,6 +2681,7 @@ impl<'r> Precomputer1<'r> {
                     if let Some(end_state_val) = exec_result.end_state {
                         let final_tokenizer_state =
                             TokenizerStateID(end_state_val);
+                        let final_tokenizer_state = self.state_mapping.get(&final_tokenizer_state).copied().unwrap_or(final_tokenizer_state);
                         let accessible_terminals = self
                             .tokenizer
                             .tokens_accessible_from_state(final_tokenizer_state);
