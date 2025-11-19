@@ -466,6 +466,14 @@ impl NWA {
         let dwa = self.determinize_to_dwa2();
         *self = NWA::from_dwa(&dwa);
     }
+
+    pub fn num_transitions(&self) -> usize {
+        self.states.0.iter().map(|s| s.transitions.len()).sum()
+    }
+
+    pub fn num_epsilons(&self) -> usize {
+        self.states.0.iter().map(|s| s.epsilons.len()).sum()
+    }
 }
 
 impl Display for NWA {

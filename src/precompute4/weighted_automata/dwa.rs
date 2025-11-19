@@ -246,6 +246,10 @@ impl DWA {
         from_state.trans_weights.insert(on, weight);
         Ok(())
     }
+
+    pub fn num_transitions(&self) -> usize {
+        self.states.iter().map(|s| s.transitions.len()).sum()
+    }
 }
 
 #[derive(Debug, Clone)]

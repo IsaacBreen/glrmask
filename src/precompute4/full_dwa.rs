@@ -119,9 +119,12 @@ pub fn precompute4(
     dwa.minimize_with_rustfst();
     crate::debug!(
         4,
-        "Built DWA with {} states, NWA with {} states.",
+        "Built NWA with {} states, {} transitions, and {} epsilon transitions, and DWA with {} states, {} transitions.",
+        nwabig.states.len(),
+        nwabig.num_transitions(),
+        nwabig.num_epsilons(),
         dwa.states.len(),
-        nwabig.states.len()
+        dwa.num_transitions(),
     );
 
 
