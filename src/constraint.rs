@@ -1421,7 +1421,7 @@ impl GrammarConstraint {
 
         // Precompute4 (DWA). Even if config.run_precompute4 is false, we build it;
         // there is no longer a trie3-based fallback.
-        let max_internal_llm_token_id = vocab.max_original_llm_token_id;
+        let max_internal_llm_token_id = vocab.internal_max_llm_token;
         let precomputed4 = precompute4(&parser, &precomputed1, &trie1_god, max_internal_llm_token_id);
 
         // Stats for precompute1
