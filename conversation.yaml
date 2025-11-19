@@ -10,7 +10,7 @@ local_system:
     - src/glr/automaton.rs
     - src/glr/table.rs
     - /Users/isaacbreen/Projects2/obsidian/grammars25/log3.md
-  conversation_file:
+  conversation_file: conversation.yaml
   compile_command:
   initial_file_contents:
     src/macro.rs: |
@@ -12114,8 +12114,8 @@ local_system:
           remove_productions_with_undefined_nonterminals, simplify_grammar, validate,
       };
       use crate::glr::automaton::{
-          compute_first_sets_for_nonterminals, compute_follow_sets_for_nonterminals,
-          compute_goto, compute_nullable_nonterminals,
+          compute_closure, compute_first_sets_for_nonterminals, compute_follow_sets_for_nonterminals,
+          compute_goto, compute_nullable_nonterminals, split_on_dot,
       };
       use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
       use crate::interface::display_productions;
@@ -12536,66 +12536,6 @@ local_system:
       type Stage6Result = Stage6Table;
       type Stage7Result = (Stage7Table, StateID, StateID);
 
-      fn precompute_closure_cache(
-          productions: &[Production],
-          prods_by_lhs: &BTreeMap<NonTerminal, Vec<usize>>,
-      ) -> BTreeMap<NonTerminal, Vec<Item>> {
-          let mut cache = BTreeMap::new();
-          for lhs in prods_by_lhs.keys() {
-              let mut visited = HashSet::new();
-              let mut stack = vec![lhs];
-              visited.insert(lhs);
-
-              let mut items = Vec::new();
-
-              while let Some(curr) = stack.pop() {
-                  if let Some(indices) = prods_by_lhs.get(curr) {
-                      for &pid in indices {
-                          items.push(Item {
-                              production_id: pid,
-                              dot_position: 0,
-                          });
-                          if let Some(Symbol::NonTerminal(next_nt)) = productions[pid].rhs.first() {
-                              if visited.insert(next_nt) {
-                                  stack.push(next_nt);
-                              }
-                          }
-                      }
-                  }
-              }
-              cache.insert(lhs.clone(), items);
-          }
-          cache
-      }
-
-      fn split_closure_with_cache(
-          kernel: &BTreeSet<Item>,
-          closure_cache: &BTreeMap<NonTerminal, Vec<Item>>,
-          productions: &[Production],
-      ) -> BTreeMap<Option<Symbol>, BTreeSet<Item>> {
-          let mut buckets: BTreeMap<Option<Symbol>, BTreeSet<Item>> = BTreeMap::new();
-          let mut processed_nts = HashSet::new();
-
-          for item in kernel {
-              let prod = &productions[item.production_id];
-              let sym = prod.rhs.get(item.dot_position);
-              buckets.entry(sym.cloned()).or_default().insert(*item);
-
-              if let Some(Symbol::NonTerminal(nt)) = sym {
-                  if processed_nts.insert(nt) {
-                      if let Some(cached) = closure_cache.get(nt) {
-                          for cached_item in cached {
-                              let c_prod = &productions[cached_item.production_id];
-                              let c_sym = c_prod.rhs.get(0).cloned();
-                              buckets.entry(c_sym).or_default().insert(*cached_item);
-                          }
-                      }
-                  }
-              }
-          }
-          buckets
-      }
-
       #[time_it]
       fn stage_1(productions: &[Production]) -> (Stage1Result, BiBTreeMap<BTreeSet<Item>, StateID>) {
           let start_production_id = 0;
@@ -12605,14 +12545,64 @@ local_system:
           };
           let initial_item_set = BTreeSet::from([initial_item]);
 
-          // Map each non-terminal to the indices of its productions.
-          let mut prods_by_lhs: BTreeMap<NonTerminal, Vec<usize>> = BTreeMap::new();
-          for (idx, p) in productions.iter().enumerate() {
-              prods_by_lhs.entry(p.lhs.clone()).or_default().push(idx);
+          // 1. Intern Symbols
+          let mut symbol_to_id: HashMap<Symbol, usize> = HashMap::new();
+          let mut id_to_symbol: Vec<Symbol> = Vec::new();
+          
+          let mut get_id = |sym: &Symbol| -> usize {
+              if let Some(&id) = symbol_to_id.get(sym) {
+                  id
+              } else {
+                  let id = id_to_symbol.len();
+                  symbol_to_id.insert(sym.clone(), id);
+                  id_to_symbol.push(sym.clone());
+                  id
+              }
+          };
+
+          let rhs_light: Vec<Vec<usize>> = productions.iter().map(|p| {
+              p.rhs.iter().map(|s| get_id(s)).collect()
+          }).collect();
+          
+          let lhs_light: Vec<usize> = productions.iter().map(|p| {
+              get_id(&Symbol::NonTerminal(p.lhs.clone()))
+          }).collect();
+
+          let num_symbols = id_to_symbol.len();
+          let mut prods_by_lhs_id: Vec<Vec<usize>> = vec![Vec::new(); num_symbols];
+          for (idx, &lhs_id) in lhs_light.iter().enumerate() {
+              prods_by_lhs_id[lhs_id].push(idx);
           }
 
-          let closure_cache = precompute_closure_cache(productions, &prods_by_lhs);
+          // 2. Precompute Closure Cache (Light)
+          let mut closure_cache: Vec<Vec<Item>> = vec![Vec::new(); num_symbols];
+          
+          for (lhs_id, indices) in prods_by_lhs_id.iter().enumerate() {
+              if indices.is_empty() { continue; }
+              
+              let mut visited = vec![false; num_symbols];
+              let mut stack = vec![lhs_id];
+              visited[lhs_id] = true;
+              
+              let mut items = Vec::new();
+              
+              while let Some(curr_id) = stack.pop() {
+                  for &pid in &prods_by_lhs_id[curr_id] {
+                      items.push(Item { production_id: pid, dot_position: 0 });
+                      if let Some(&next_sym_id) = rhs_light[pid].first() {
+                          if !prods_by_lhs_id[next_sym_id].is_empty() {
+                              if !visited[next_sym_id] {
+                                  visited[next_sym_id] = true;
+                                  stack.push(next_sym_id);
+                              }
+                          }
+                      }
+                  }
+              }
+              closure_cache[lhs_id] = items;
+          }
 
+          // 3. State Generation Loop
           let mut item_set_map_fast: HashMap<BTreeSet<Item>, StateID> = HashMap::new();
           let mut next_state_id = 0;
 
@@ -12622,6 +12612,7 @@ local_system:
           item_set_map_fast.insert(initial_item_set.clone(), StateID(next_state_id));
           next_state_id += 1;
           worklist.push_back(initial_item_set);
+          
           if EVERYTHING {
               let mut everything_item_set = BTreeSet::new();
               for (prod_idx, prod) in productions.iter().enumerate() {
@@ -12640,14 +12631,37 @@ local_system:
               }
           }
 
+          let mut buckets: HashMap<Option<usize>, Vec<Item>> = HashMap::new();
+
           while let Some(item_set) = worklist.pop_front() {
               let state_id = *item_set_map_fast.get(&item_set).unwrap();
-              let splits = split_closure_with_cache(&item_set, &closure_cache, productions);
+              
+              buckets.clear();
+              let mut processed_nts_set = HashSet::new();
+
+              for item in &item_set {
+                  let sym_opt = rhs_light[item.production_id].get(item.dot_position).copied();
+                  buckets.entry(sym_opt).or_default().push(*item);
+
+                  if let Some(sym_id) = sym_opt {
+                      if !prods_by_lhs_id[sym_id].is_empty() {
+                          if processed_nts_set.insert(sym_id) {
+                              for &cached_item in &closure_cache[sym_id] {
+                                  let c_sym_opt = rhs_light[cached_item.production_id].get(0).copied();
+                                  buckets.entry(c_sym_opt).or_default().push(cached_item);
+                              }
+                          }
+                      }
+                  }
+              }
 
               let mut row: Stage1Row = BTreeMap::new();
-              for (symbol, items_in_split) in splits {
-                  let goto_id = if symbol.is_some() {
-                      let goto_set = compute_goto(&items_in_split, productions);
+              for (symbol_id_opt, items_in_split_vec) in buckets.drain() {
+                  let goto_id = if symbol_id_opt.is_some() {
+                      let goto_set: BTreeSet<Item> = items_in_split_vec.iter().map(|item| {
+                          Item { production_id: item.production_id, dot_position: item.dot_position + 1 }
+                      }).collect();
+
                       if let Some(id) = item_set_map_fast.get(&goto_set) {
                           Some(*id)
                       } else {
@@ -12660,7 +12674,15 @@ local_system:
                   } else {
                       None
                   };
-                  row.insert(symbol, Stage1Entry { kernel: items_in_split, goto_id });
+                  
+                  let symbol = symbol_id_opt.map(|id| id_to_symbol[id].clone());
+                  let kernel = if symbol.is_none() {
+                      items_in_split_vec.into_iter().collect()
+                  } else {
+                      BTreeSet::new()
+                  };
+                  
+                  row.insert(symbol, Stage1Entry { kernel, goto_id });
               }
               table.insert(state_id, row);
           }
@@ -21151,5 +21173,695 @@ messages:
   - user: 'Changes committed with message: "Optimize GLR table generation: Use HashMap
       for states, precompute closure cache, and cache production metadata for Stage
       7."'
+    metadata:
+  - user: |-
+      Diff of src/macro.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/finite_automata.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/mod.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/parser.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/items.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/analyze.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/grammar.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/automaton.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of src/glr/table.rs since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      Diff of /Users/isaacbreen/Projects2/obsidian/grammars25/log3.md since previous turn:
+      ```diff
+
+      ```
+    metadata:
+  - user: |-
+      src/glr/table.rs
+         850  Number of productions: 21250 +11ms
+         836  Memory usage at 'Start of parser generation': Physical: 236 MB
+         853  Validating initial grammar
+      src/glr/automaton.rs
+         187  Computing nullable non-terminals +23ms
+         195  Computed nullable non-terminals in 21.47ms +21ms
+         187  Computing nullable non-terminals +18ms
+         195  Computed nullable non-terminals in 20.99ms +21ms
+      src/glr/table.rs
+         856  Validated grammar in 85.32ms
+         836  Memory usage at 'After validation': Physical: 246 MB
+         862  Removing productions with undefined non-terminals
+         866  Removed undefined productions in 6.02ms +6ms
+         836  Memory usage at 'After removing undefined': Physical: 249 MB
+         836  Memory usage at 'After right recursion resolution': Physical: 255 MB +8ms
+         836  Memory usage at 'After inlining null productions': Physical: 268 MB +47ms
+         892  Number of productions: 36426 +2ms
+         836  Memory usage at 'Before Stage 1': Physical: 268 MB
+         895  Stage 1
+         898  Stage 1 done in 29.32s +29.32s
+         836  Memory usage at 'After Stage 1': Physical: 892 MB
+         900  Stage 2
+         903  Stage 2 done in 11.99s +11.99s
+         836  Memory usage at 'After Stage 2': Physical: 1799 MB
+         905  Stage 3
+      src/glr/automaton.rs
+         187  Computing nullable non-terminals
+         195  Computed nullable non-terminals in 52.89ms +52ms
+         203  Computing first sets for non-terminals
+         281  Computed first sets in 1.89s +1.89s
+         290  Computing follow sets for non-terminals +103ms
+         388  Computed follow sets in 33.00ms +33ms
+      src/glr/table.rs
+         908  Stage 3 done in 2.25s +171ms
+         836  Memory usage at 'After Stage 3': Physical: 1201 MB
+         910  Stage 4
+         913  Stage 4 done in 23.20ms +23ms
+         836  Memory usage at 'After Stage 4': Physical: 1213 MB
+         915  Stage 5
+         918  Stage 5 done in 19.18ms +19ms
+         836  Memory usage at 'After Stage 5': Physical: 1230 MB
+         920  Stage 6
+         923  Stage 6 done in 5.12s +5.12s
+         836  Memory usage at 'After Stage 6': Physical: 1285 MB
+         925  Stage 7
+         934  Stage 7 done in 9.52s +9.52s
+         836  Memory usage at 'After Stage 7': Physical: 1209 MB
+         936  Stage 8
+         939  Stage 8 done in 21.99ms +21ms
+         836  Memory usage at 'After Stage 8 (final table)': Physical: 1206 MB
+         942  Done generating GLR parser
+    metadata:
+  - assistant: |-
+      To optimize the GLR table generation, I will implement the following changes:
+
+      1.  **Derive `Hash` for `Item`**: This allows using `HashMap` and `HashSet` for item sets, which is significantly faster than `BTreeSet` for lookups during state generation.
+      2.  **Optimize Stage 1 (State Generation)**:
+          *   **Symbol Interning**: Map all `Symbol`s (Terminals and NonTerminals) to `usize` IDs at the start of Stage 1. This avoids expensive cloning of `Symbol` (which contains strings) during the hot loop.
+          *   **Lightweight Data Structures**: Use `Vec<Vec<usize>>` for production RHSs and `Vec<usize>` for LHSs, indexed by production ID.
+          *   **Precompute Closure Cache (Light)**: Precompute the transitive closure of left-corners using IDs.
+          *   **Optimized Split**: Implement the splitting logic inline using `HashMap<Option<usize>, Vec<Item>>` and `HashSet<usize>` for processed non-terminals.
+          *   **Memory Optimization**: In `Stage1Entry`, only store the `kernel` items for reductions (when `symbol` is `None`). For shifts and gotos, store an empty set, as Stage 2 does not use the kernel for these transitions. This saves significant memory and allocation time.
+          *   **Use `HashMap` for State Map**: Replace `BiBTreeMap` with `HashMap<BTreeSet<Item>, StateID>` during the generation loop.
+
+      Here are the step-by-step instructions:
+
+      1.  **`src/glr/items.rs`**: Add `Hash` to the `derive` macro for `Item`.
+      2.  **`src/glr/table.rs`**:
+          *   Update imports to include `HashMap`, `HashSet`, and `Hash`. Remove unused imports (`compute_closure`, `split_on_dot`, `compute_goto`).
+          *   Rewrite `stage_1` to implement the optimizations described above.
+          *   Remove the previously added helper functions `precompute_closure_cache` and `split_closure_with_cache` as they are replaced by the inline logic in `stage_1`.
+
+      ```diff "src/glr/items.rs"
+      diff --git a/src/glr/items.rs b/src/glr/items.rs
+      --- a/src/glr/items.rs
+      +++ b/src/glr/items.rs
+      @@ -5,7 +5,8 @@
+       use std::fmt::{Display, Formatter};
+      +use std::hash::Hash;
+       
+      -#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+      +#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+       pub struct Item {
+           /// Index into the `productions` array passed around the parser generator.
+           pub production_id: usize,
+      ```
+
+      ```diff "src/glr/table.rs"
+      diff --git a/src/glr/table.rs b/src/glr/table.rs
+      --- a/src/glr/table.rs
+      +++ b/src/glr/table.rs
+      @@ -5,9 +5,8 @@
+           remove_productions_with_undefined_nonterminals, simplify_grammar, validate,
+       };
+       use crate::glr::automaton::{
+      -    compute_closure, compute_first_sets_for_nonterminals, compute_follow_sets_for_nonterminals,
+      -    compute_goto, compute_nullable_nonterminals, split_on_dot,
+      +    compute_first_sets_for_nonterminals, compute_follow_sets_for_nonterminals,
+      +    compute_nullable_nonterminals,
+       };
+       use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
+       use crate::interface::display_productions;
+      @@ -16,7 +15,7 @@
+       use bimap::BiBTreeMap;
+       use profiler_macro::time_it;
+       use std::collections::BTreeMap as StdMap;
+      -use std::collections::{BTreeMap, BTreeSet, VecDeque};
+      +use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+       use std::fmt::Display;
+       use memory_stats::memory_stats;
+       use crate::glr::parser::{ActionFn, ExpectElse, GLRParser};
+      @@ -429,64 +428,4 @@
+       type Stage6Result = Stage6Table;
+       type Stage7Result = (Stage7Table, StateID, StateID);
+       
+      -fn precompute_closure_cache(
+      -    productions: &[Production],
+      -    prods_by_lhs: &BTreeMap<NonTerminal, Vec<usize>>,
+      -) -> BTreeMap<NonTerminal, Vec<Item>> {
+      -    let mut cache = BTreeMap::new();
+      -    for lhs in prods_by_lhs.keys() {
+      -        let mut visited = HashSet::new();
+      -        let mut stack = vec![lhs];
+      -        visited.insert(lhs);
+      -
+      -        let mut items = Vec::new();
+      -
+      -        while let Some(curr) = stack.pop() {
+      -            if let Some(indices) = prods_by_lhs.get(curr) {
+      -                for &pid in indices {
+      -                    items.push(Item {
+      -                        production_id: pid,
+      -                        dot_position: 0,
+      -                    });
+      -                    if let Some(Symbol::NonTerminal(next_nt)) = productions[pid].rhs.first() {
+      -                        if visited.insert(next_nt) {
+      -                            stack.push(next_nt);
+      -                        }
+      -                    }
+      -                }
+      -            }
+      -        }
+      -        cache.insert(lhs.clone(), items);
+      -    }
+      -    cache
+      -}
+      -
+      -fn split_closure_with_cache(
+      -    kernel: &BTreeSet<Item>,
+      -    closure_cache: &BTreeMap<NonTerminal, Vec<Item>>,
+      -    productions: &[Production],
+      -) -> BTreeMap<Option<Symbol>, BTreeSet<Item>> {
+      -    let mut buckets: BTreeMap<Option<Symbol>, BTreeSet<Item>> = BTreeMap::new();
+      -    let mut processed_nts = HashSet::new();
+      -
+      -    for item in kernel {
+      -        let prod = &productions[item.production_id];
+      -        let sym = prod.rhs.get(item.dot_position);
+      -        buckets.entry(sym.cloned()).or_default().insert(*item);
+      -
+      -        if let Some(Symbol::NonTerminal(nt)) = sym {
+      -            if processed_nts.insert(nt) {
+      -                if let Some(cached) = closure_cache.get(nt) {
+      -                    for cached_item in cached {
+      -                        let c_prod = &productions[cached_item.production_id];
+      -                        let c_sym = c_prod.rhs.get(0).cloned();
+      -                        buckets.entry(c_sym).or_default().insert(*cached_item);
+      -                    }
+      -                }
+      -            }
+      -        }
+      -    }
+      -    buckets
+      -}
+      -
+       #[time_it]
+       fn stage_1(productions: &[Production]) -> (Stage1Result, BiBTreeMap<BTreeSet<Item>, StateID>) {
+           let start_production_id = 0;
+           let initial_item = Item {
+               production_id: start_production_id,
+               dot_position: 0,
+           };
+           let initial_item_set = BTreeSet::from([initial_item]);
+       
+      -    // Map each non-terminal to the indices of its productions.
+      -    let mut prods_by_lhs: BTreeMap<NonTerminal, Vec<usize>> = BTreeMap::new();
+      -    for (idx, p) in productions.iter().enumerate() {
+      -        prods_by_lhs.entry(p.lhs.clone()).or_default().push(idx);
+      -    }
+      -
+      -    let closure_cache = precompute_closure_cache(productions, &prods_by_lhs);
+      -
+      -    let mut item_set_map_fast: HashMap<BTreeSet<Item>, StateID> = HashMap::new();
+      +    // 1. Intern Symbols
+      +    let mut symbol_to_id: HashMap<Symbol, usize> = HashMap::new();
+      +    let mut id_to_symbol: Vec<Symbol> = Vec::new();
+      +    
+      +    let mut get_id = |sym: &Symbol| -> usize {
+      +        if let Some(&id) = symbol_to_id.get(sym) {
+      +            id
+      +        } else {
+      +            let id = id_to_symbol.len();
+      +            symbol_to_id.insert(sym.clone(), id);
+      +            id_to_symbol.push(sym.clone());
+      +            id
+      +        }
+      +    };
+      +
+      +    let rhs_light: Vec<Vec<usize>> = productions.iter().map(|p| {
+      +        p.rhs.iter().map(|s| get_id(s)).collect()
+      +    }).collect();
+      +    
+      +    let lhs_light: Vec<usize> = productions.iter().map(|p| {
+      +        get_id(&Symbol::NonTerminal(p.lhs.clone()))
+      +    }).collect();
+      +
+      +    let num_symbols = id_to_symbol.len();
+      +    let mut prods_by_lhs_id: Vec<Vec<usize>> = vec![Vec::new(); num_symbols];
+      +    for (idx, &lhs_id) in lhs_light.iter().enumerate() {
+      +        prods_by_lhs_id[lhs_id].push(idx);
+      +    }
+      +
+      +    // 2. Precompute Closure Cache (Light)
+      +    let mut closure_cache: Vec<Vec<Item>> = vec![Vec::new(); num_symbols];
+      +    
+      +    for (lhs_id, indices) in prods_by_lhs_id.iter().enumerate() {
+      +        if indices.is_empty() { continue; }
+      +        
+      +        let mut visited = vec![false; num_symbols];
+      +        let mut stack = vec![lhs_id];
+      +        visited[lhs_id] = true;
+      +        
+      +        let mut items = Vec::new();
+      +        
+      +        while let Some(curr_id) = stack.pop() {
+      +            for &pid in &prods_by_lhs_id[curr_id] {
+      +                items.push(Item { production_id: pid, dot_position: 0 });
+      +                if let Some(&next_sym_id) = rhs_light[pid].first() {
+      +                    if !prods_by_lhs_id[next_sym_id].is_empty() {
+      +                        if !visited[next_sym_id] {
+      +                            visited[next_sym_id] = true;
+      +                            stack.push(next_sym_id);
+      +                        }
+      +                    }
+      +                }
+      +            }
+      +        }
+      +        closure_cache[lhs_id] = items;
+      +    }
+      +
+      +    // 3. State Generation Loop
+      +    let mut item_set_map_fast: HashMap<BTreeSet<Item>, StateID> = HashMap::new();
+           let mut next_state_id = 0;
+       
+           let mut worklist = VecDeque::new();
+           let mut table: Stage1Table = BTreeMap::new();
+       
+           item_set_map_fast.insert(initial_item_set.clone(), StateID(next_state_id));
+           next_state_id += 1;
+           worklist.push_back(initial_item_set);
+      +    
+           if EVERYTHING {
+               let mut everything_item_set = BTreeSet::new();
+               for (prod_idx, prod) in productions.iter().enumerate() {
+                   for dot_position in 0..=prod.rhs.len() {
+                       let item = Item {
+                           production_id: prod_idx,
+                           dot_position,
+                       };
+                       everything_item_set.insert(item);
+                   }
+               }
+               if !item_set_map_fast.contains_key(&everything_item_set) {
+                   item_set_map_fast.insert(everything_item_set.clone(), StateID(next_state_id));
+                   next_state_id += 1;
+                   worklist.push_back(everything_item_set);
+               }
+           }
+       
+      +    let mut buckets: HashMap<Option<usize>, Vec<Item>> = HashMap::new();
+      +
+           while let Some(item_set) = worklist.pop_front() {
+               let state_id = *item_set_map_fast.get(&item_set).unwrap();
+      -        let splits = split_closure_with_cache(&item_set, &closure_cache, productions);
+      +        
+      +        buckets.clear();
+      +        let mut processed_nts_set = HashSet::new();
+      +
+      +        for item in &item_set {
+      +            let sym_opt = rhs_light[item.production_id].get(item.dot_position).copied();
+      +            buckets.entry(sym_opt).or_default().push(*item);
+      +
+      +            if let Some(sym_id) = sym_opt {
+      +                if !prods_by_lhs_id[sym_id].is_empty() {
+      +                    if processed_nts_set.insert(sym_id) {
+      +                        for &cached_item in &closure_cache[sym_id] {
+      +                            let c_sym_opt = rhs_light[cached_item.production_id].get(0).copied();
+      +                            buckets.entry(c_sym_opt).or_default().push(cached_item);
+      +                        }
+      +                    }
+      +                }
+      +            }
+      +        }
+       
+               let mut row: Stage1Row = BTreeMap::new();
+      -        for (symbol, items_in_split) in splits {
+      -            let goto_id = if symbol.is_some() {
+      -                let goto_set = compute_goto(&items_in_split, productions);
+      -                if let Some(id) = item_set_map_fast.get(&goto_set) {
+      +        for (symbol_id_opt, items_in_split_vec) in buckets.drain() {
+      +            let goto_id = if symbol_id_opt.is_some() {
+      +                let goto_set: BTreeSet<Item> = items_in_split_vec.iter().map(|item| {
+      +                    Item { production_id: item.production_id, dot_position: item.dot_position + 1 }
+      +                }).collect();
+      +
+      +                if let Some(id) = item_set_map_fast.get(&goto_set) {
+                           Some(*id)
+                       } else {
+                           let new_id = StateID(next_state_id);
+                           next_state_id += 1;
+                           item_set_map_fast.insert(goto_set.clone(), new_id);
+                           worklist.push_back(goto_set);
+                           Some(new_id)
+                       }
+                   } else {
+                       None
+                   };
+      -            row.insert(symbol, Stage1Entry { kernel: items_in_split, goto_id });
+      +            
+      +            let symbol = symbol_id_opt.map(|id| id_to_symbol[id].clone());
+      +            let kernel = if symbol.is_none() {
+      +                items_in_split_vec.into_iter().collect()
+      +            } else {
+      +                BTreeSet::new()
+      +            };
+      +            
+      +            row.insert(symbol, Stage1Entry { kernel, goto_id });
+               }
+               table.insert(state_id, row);
+           }
+       
+           let mut item_set_map = BiBTreeMap::new();
+           for (k, v) in item_set_map_fast {
+               item_set_map.insert(k, v);
+           }
+       
+           (table, item_set_map)
+       }
+      ```
+    metadata:
+  - user: Git apply failed. A corrected patch was generated by model 'gf' and is being
+      applied now.
+    metadata:
+  - assistant: |-
+      ```diff
+      diff --git a/src/glr/table.rs b/src/glr/table.rs
+      --- a/src/glr/table.rs
+      +++ b/src/glr/table.rs
+      @@ -6,9 +6,9 @@
+           remove_productions_with_undefined_nonterminals, simplify_grammar, validate,
+       };
+       use crate::glr::automaton::{
+      -    compute_first_sets_for_nonterminals, compute_follow_sets_for_nonterminals,
+      -    compute_goto, compute_nullable_nonterminals,
+      +    compute_closure, compute_first_sets_for_nonterminals, compute_follow_sets_for_nonterminals,
+      +    compute_goto, compute_nullable_nonterminals, split_on_dot,
+       };
+       use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
+       use crate::interface::display_productions;
+      @@ -15,7 +15,7 @@
+       use bimap::BiBTreeMap;
+       use profiler_macro::time_it;
+       use std::collections::BTreeMap as StdMap;
+      -use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+      +use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+       use std::fmt::Display;
+       use memory_stats::memory_stats;
+       use crate::glr::parser::{ActionFn, ExpectElse, GLRParser};
+      @@ -429,64 +428,4 @@
+       type Stage6Result = Stage6Table;
+       type Stage7Result = (Stage7Table, StateID, StateID);
+       
+      -fn precompute_closure_cache(
+      -    productions: &[Production],
+      -    prods_by_lhs: &BTreeMap<NonTerminal, Vec<usize>>,
+      -) -> BTreeMap<NonTerminal, Vec<Item>> {
+      -    let mut cache = BTreeMap::new();
+      -    for lhs in prods_by_lhs.keys() {
+      -        let mut visited = HashSet::new();
+      -        let mut stack = vec![lhs];
+      -        visited.insert(lhs);
+      -
+      -        let mut items = Vec::new();
+      -
+      -        while let Some(curr) = stack.pop() {
+      -            if let Some(indices) = prods_by_lhs.get(curr) {
+      -                for &pid in indices {
+      -                    items.push(Item {
+      -                        production_id: pid,
+      -                        dot_position: 0,
+      -                    });
+      -                    if let Some(Symbol::NonTerminal(next_nt)) = productions[pid].rhs.first() {
+      -                        if visited.insert(next_nt) {
+      -                            stack.push(next_nt);
+      -                        }
+      -                    }
+      -                }
+      -            }
+      -        }
+      -        cache.insert(lhs.clone(), items);
+      -    }
+      -    cache
+      -}
+      -
+      -fn split_closure_with_cache(
+      -    kernel: &BTreeSet<Item>,
+      -    closure_cache: &BTreeMap<NonTerminal, Vec<Item>>,
+      -    productions: &[Production],
+      -) -> BTreeMap<Option<Symbol>, BTreeSet<Item>> {
+      -    let mut buckets: BTreeMap<Option<Symbol>, BTreeSet<Item>> = BTreeMap::new();
+      -    let mut processed_nts = HashSet::new();
+      -
+      -    for item in kernel {
+      -        let prod = &productions[item.production_id];
+      -        let sym = prod.rhs.get(item.dot_position);
+      -        buckets.entry(sym.cloned()).or_default().insert(*item);
+      -
+      -        if let Some(Symbol::NonTerminal(nt)) = sym {
+      -            if processed_nts.insert(nt) {
+      -                if let Some(cached) = closure_cache.get(nt) {
+      -                    for cached_item in cached {
+      -                        let c_prod = &productions[cached_item.production_id];
+      -                        let c_sym = c_prod.rhs.get(0).cloned();
+      -                        buckets.entry(c_sym).or_default().insert(*cached_item);
+      -                    }
+      -                }
+      -            }
+      -        }
+      -    }
+      -    buckets
+      -}
+      -
+       #[time_it]
+       fn stage_1(productions: &[Production]) -> (Stage1Result, BiBTreeMap<BTreeSet<Item>, StateID>) {
+           let start_production_id = 0;
+           let initial_item = Item {
+               production_id: start_production_id,
+               dot_position: 0,
+           };
+           let initial_item_set = BTreeSet::from([initial_item]);
+       
+      -    // Map each non-terminal to the indices of its productions.
+      -    let mut prods_by_lhs: BTreeMap<NonTerminal, Vec<usize>> = BTreeMap::new();
+      -    for (idx, p) in productions.iter().enumerate() {
+      -        prods_by_lhs.entry(p.lhs.clone()).or_default().push(idx);
+      -    }
+      -
+      -    let closure_cache = precompute_closure_cache(productions, &prods_by_lhs);
+      -
+      -    let mut item_set_map_fast: HashMap<BTreeSet<Item>, StateID> = HashMap::new();
+      +    // 1. Intern Symbols
+      +    let mut symbol_to_id: HashMap<Symbol, usize> = HashMap::new();
+      +    let mut id_to_symbol: Vec<Symbol> = Vec::new();
+      +    
+      +    let mut get_id = |sym: &Symbol| -> usize {
+      +        if let Some(&id) = symbol_to_id.get(sym) {
+      +            id
+      +        } else {
+      +            let id = id_to_symbol.len();
+      +            symbol_to_id.insert(sym.clone(), id);
+      +            id_to_symbol.push(sym.clone());
+      +            id
+      +        }
+      +    };
+      +
+      +    let rhs_light: Vec<Vec<usize>> = productions.iter().map(|p| {
+      +        p.rhs.iter().map(|s| get_id(s)).collect()
+      +    }).collect();
+      +    
+      +    let lhs_light: Vec<usize> = productions.iter().map(|p| {
+      +        get_id(&Symbol::NonTerminal(p.lhs.clone()))
+      +    }).collect();
+      +
+      +    let num_symbols = id_to_symbol.len();
+      +    let mut prods_by_lhs_id: Vec<Vec<usize>> = vec![Vec::new(); num_symbols];
+      +    for (idx, &lhs_id) in lhs_light.iter().enumerate() {
+      +        prods_by_lhs_id[lhs_id].push(idx);
+      +    }
+      +
+      +    // 2. Precompute Closure Cache (Light)
+      +    let mut closure_cache: Vec<Vec<Item>> = vec![Vec::new(); num_symbols];
+      +    
+      +    for (lhs_id, indices) in prods_by_lhs_id.iter().enumerate() {
+      +        if indices.is_empty() { continue; }
+      +        
+      +        let mut visited = vec![false; num_symbols];
+      +        let mut stack = vec![lhs_id];
+      +        visited[lhs_id] = true;
+      +        
+      +        let mut items = Vec::new();
+      +        
+      +        while let Some(curr_id) = stack.pop() {
+      +            for &pid in &prods_by_lhs_id[curr_id] {
+      +                items.push(Item { production_id: pid, dot_position: 0 });
+      +                if let Some(&next_sym_id) = rhs_light[pid].first() {
+      +                    if !prods_by_lhs_id[next_sym_id].is_empty() {
+      +                        if !visited[next_sym_id] {
+      +                            visited[next_sym_id] = true;
+      +                            stack.push(next_sym_id);
+      +                        }
+      +                    }
+      +                }
+      +            }
+      +        }
+      +        closure_cache[lhs_id] = items;
+      +    }
+      +
+      +    // 3. State Generation Loop
+      +    let mut item_set_map_fast: HashMap<BTreeSet<Item>, StateID> = HashMap::new();
+           let mut next_state_id = 0;
+       
+           let mut worklist = VecDeque::new();
+           let mut table: Stage1Table = BTreeMap::new();
+       
+           item_set_map_fast.insert(initial_item_set.clone(), StateID(next_state_id));
+           next_state_id += 1;
+           worklist.push_back(initial_item_set);
+      +    
+           if EVERYTHING {
+               let mut everything_item_set = BTreeSet::new();
+               for (prod_idx, prod) in productions.iter().enumerate() {
+                   for dot_position in 0..=prod.rhs.len() {
+                       let item = Item {
+                           production_id: prod_idx,
+                           dot_position,
+                       };
+                       everything_item_set.insert(item);
+                   }
+               }
+               if !item_set_map_fast.contains_key(&everything_item_set) {
+                   item_set_map_fast.insert(everything_item_set.clone(), StateID(next_state_id));
+                   next_state_id += 1;
+                   worklist.push_back(everything_item_set);
+               }
+           }
+       
+      +    let mut buckets: HashMap<Option<usize>, Vec<Item>> = HashMap::new();
+      +
+           while let Some(item_set) = worklist.pop_front() {
+               let state_id = *item_set_map_fast.get(&item_set).unwrap();
+      -        let splits = split_closure_with_cache(&item_set, &closure_cache, productions);
+      +        
+      +        buckets.clear();
+      +        let mut processed_nts_set = HashSet::new();
+      +
+      +        for item in &item_set {
+      +            let sym_opt = rhs_light[item.production_id].get(item.dot_position).copied();
+      +            buckets.entry(sym_opt).or_default().push(*item);
+      +
+      +            if let Some(sym_id) = sym_opt {
+      +                if !prods_by_lhs_id[sym_id].is_empty() {
+      +                    if processed_nts_set.insert(sym_id) {
+      +                        for &cached_item in &closure_cache[sym_id] {
+      +                            let c_sym_opt = rhs_light[cached_item.production_id].get(0).copied();
+      +                            buckets.entry(c_sym_opt).or_default().push(cached_item);
+      +                        }
+      +                    }
+      +                }
+      +            }
+      +        }
+       
+               let mut row: Stage1Row = BTreeMap::new();
+      -        for (symbol, items_in_split) in splits {
+      -            let goto_id = if symbol.is_some() {
+      -                let goto_set = compute_goto(&items_in_split, productions);
+      -                if let Some(id) = item_set_map_fast.get(&goto_set) {
+      +        for (symbol_id_opt, items_in_split_vec) in buckets.drain() {
+      +            let goto_id = if symbol_id_opt.is_some() {
+      +                let goto_set: BTreeSet<Item> = items_in_split_vec.iter().map(|item| {
+      +                    Item { production_id: item.production_id, dot_position: item.dot_position + 1 }
+      +                }).collect();
+      +
+      +                if let Some(id) = item_set_map_fast.get(&goto_set) {
+                           Some(*id)
+                       } else {
+                           let new_id = StateID(next_state_id);
+                           next_state_id += 1;
+                           item_set_map_fast.insert(goto_set.clone(), new_id);
+                           worklist.push_back(goto_set);
+                           Some(new_id)
+                       }
+                   } else {
+                       None
+                   };
+      -            row.insert(symbol, Stage1Entry { kernel: items_in_split, goto_id });
+      +            
+      +            let symbol = symbol_id_opt.map(|id| id_to_symbol[id].clone());
+      +            let kernel = if symbol.is_none() {
+      +                items_in_split_vec.into_iter().collect()
+      +            } else {
+      +                BTreeSet::new()
+      +            };
+      +            
+      +            row.insert(symbol, Stage1Entry { kernel, goto_id });
+               }
+               table.insert(state_id, row);
+           }
+       
+           let mut item_set_map = BiBTreeMap::new();
+           for (k, v) in item_set_map_fast {
+               item_set_map.insert(k, v);
+           }
+       
+           (table, item_set_map)
+       }
+      ```
+    metadata:
+  - user: |
+      Apply result (git-llm mode):
+      Found 1 diff block(s) to process using custom patcher.
+
+      --- Processing Diff Block 1 ---
+      Identified target file: src/glr/table.rs
+      Applying patch to 'src/glr/table.rs' using custom patcher...
+      Successfully applied patch and wrote to src/glr/table.rs.
+    metadata:
+  - user: 'Changes committed with message: "No changes in the provided diff."'
     metadata:
 ...
