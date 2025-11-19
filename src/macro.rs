@@ -91,9 +91,9 @@ macro_rules! __debug_grouped_impl {
                 // Print line number in Dark Gray, then the message
                 // \x1b[90m = Dark Gray (Bright Black)
                 println!(
-                    concat!("{}\x1b[90m  {:>4}\x1b[0m  ", $user_fmt),
-                    elapsed_str,
+                    concat!("\x1b[90m  {:>4}\x1b[0m{}  ", $user_fmt),
                     line!(),
+                    elapsed_str,
                     $($user_args)*
                 );
             }
@@ -143,9 +143,9 @@ macro_rules! __debug_start_impl {
                 }
 
                 print!(
-                    concat!("{}\x1b[90m  {:>4}\x1b[0m  ", $user_fmt),
-                    elapsed_str,
+                    concat!("\x1b[90m  {:>4}\x1b[0m{}  ", $user_fmt),
                     line!(),
+                    elapsed_str,
                     $($user_args)*
                 );
                 use std::io::Write;
@@ -225,9 +225,9 @@ macro_rules! __debug_timer_end_impl {
                 }
 
                 println!(
-                    concat!("{}\x1b[90m  {:>4}\x1b[0m  {} ... {} (\x1b[35m{}ms\x1b[0m)"),
-                    elapsed_str,
+                    concat!("\x1b[90m  {:>4}\x1b[0m{}  {} ... {} (\x1b[35m{}ms\x1b[0m)"),
                     start_line,
+                    elapsed_str,
                     start_msg,
                     format!($user_fmt, $($user_args)*),
                     elapsed.as_millis()
