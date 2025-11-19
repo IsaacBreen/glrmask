@@ -18,6 +18,7 @@ use std::collections::BTreeMap as StdMap;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt::Display;
 use crate::constraint::StateIDBV;
+use memory_stats::memory_stats;
 use crate::glr::parser::{ActionFn, ExpectElse, GLRParser};
 use crate::profiler::{print_summary, print_summary_flat};
 
@@ -844,6 +845,15 @@ pub fn stage_10(table: &Table) -> BTreeMap<NonTerminalID, BTreeMap<StateID, Stat
     reduce_goto_map
 }
 
+fn print_memory_usage(label: &str) {
+    if let Some(usage) = memory_stats() {
+        let physical_mem_mb = usage.physical_mem / 1024 / 1024;
+        crate::debug!(2, "Memory usage at '{}': Physical: {} MB", label, physical_mem_mb);
+    } else {
+        crate::debug!(2, "Couldn't get memory usage at '{}'", label);
+    }
+}
+
 #[time_it]
 pub fn generate_glr_parser_with_maps(
     productions: &[Production],
@@ -853,11 +863,13 @@ pub fn generate_glr_parser_with_maps(
     ignore_terminal_id: Option<TerminalID>,
 ) -> GLRParser {
     crate::debug!(2, "Number of productions: {}", productions.len());
+    print_memory_usage("Start of parser generation");
 
     crate::debug!(2, "Validating initial grammar");
     let start = std::time::Instant::now();
     validate(productions).expect("Initial grammar validation failed");
     crate::debug!(2, "Validated grammar in {:.2?}", start.elapsed());
+    print_memory_usage("After validation");
 
     let _original_productions = productions.to_vec();
     let start_production_id = 0;
@@ -867,6 +879,7 @@ pub fn generate_glr_parser_with_maps(
     let mut productions =
         remove_productions_with_undefined_nonterminals(&productions, &[start_production_id]);
     crate::debug!(2, "Removed undefined productions in {:.2?}", start.elapsed());
+    print_memory_usage("After removing undefined");
 
     let nonterminals: BTreeSet<_> = productions.iter().map(|p| p.lhs.clone()).collect();
     let mut unqiue_name_generator = create_unique_name_generator(&nonterminals);
@@ -875,8 +888,10 @@ pub fn generate_glr_parser_with_maps(
         &mut productions,
         &mut unqiue_name_generator,
     );
+    print_memory_usage("After right recursion resolution");
 
     productions = inline_null_productions(&productions);
+    print_memory_usage("After inlining null productions");
     if false {
         productions = inline_unit_productions(&productions);
     }
@@ -890,31 +905,38 @@ pub fn generate_glr_parser_with_maps(
     }
 
     crate::debug!(2, "Number of productions: {}", productions.len());
+    print_memory_usage("Before Stage 1");
 
     crate::debug!(2, "Stage 1");
     let start = std::time::Instant::now();
     let (stage_1_table, item_set_map) = stage_1(&productions);
     crate::debug!(2, "Stage 1 done in {:.2?}", start.elapsed());
+    print_memory_usage("After Stage 1");
     crate::debug!(2, "Stage 2");
     let start = std::time::Instant::now();
     let stage_2_table = stage_2(stage_1_table, &productions);
     crate::debug!(2, "Stage 2 done in {:.2?}", start.elapsed());
+    print_memory_usage("After Stage 2");
     crate::debug!(2, "Stage 3");
     let start = std::time::Instant::now();
     let stage_3_table = stage_3(stage_2_table, &productions);
     crate::debug!(2, "Stage 3 done in {:.2?}", start.elapsed());
+    print_memory_usage("After Stage 3");
     crate::debug!(2, "Stage 4");
     let start = std::time::Instant::now();
     let stage_4_table = stage_4(stage_3_table);
     crate::debug!(2, "Stage 4 done in {:.2?}", start.elapsed());
+    print_memory_usage("After Stage 4");
     crate::debug!(2, "Stage 5");
     let start = std::time::Instant::now();
     let stage_5_table = stage_5(stage_4_table, &terminal_map);
     crate::debug!(2, "Stage 5 done in {:.2?}", start.elapsed());
+    print_memory_usage("After Stage 5");
     crate::debug!(2, "Stage 6");
     let start = std::time::Instant::now();
     let stage_6_table = stage_6(stage_5_table);
     crate::debug!(2, "Stage 6 done in {:.2?}", start.elapsed());
+    print_memory_usage("After Stage 6");
     crate::debug!(2, "Stage 7");
     let start = std::time::Instant::now();
     let (stage_7_table, start_state_id, everything_state_id) = stage_7(
@@ -925,20 +947,24 @@ pub fn generate_glr_parser_with_maps(
         &non_terminal_map,
     );
     crate::debug!(2, "Stage 7 done in {:.2?}", start.elapsed());
+    print_memory_usage("After Stage 7");
     crate::debug!(2, "Stage 8");
     let start = std::time::Instant::now();
     let final_table = stage_8(stage_7_table);
     crate::debug!(2, "Stage 8 done in {:.2?}", start.elapsed());
+    print_memory_usage("After Stage 8 (final table)");
 
     crate::debug!(2, "Stage 9: Precomputing substring gotos");
     let start = std::time::Instant::now();
     let substring_gotos = stage_9(&final_table, &non_terminal_map);
     crate::debug!(2, "Stage 9 done in {:.2?}", start.elapsed());
+    print_memory_usage("After Stage 9 (substring gotos)");
 
     crate::debug!(2, "Stage 10: Precomputing reduce goto map");
     let start = std::time::Instant::now();
     let reduce_goto_map = stage_10(&final_table);
     crate::debug!(2, "Stage 10 done in {:.2?}", start.elapsed());
+    print_memory_usage("After Stage 10 (reduce goto map)");
 
     crate::debug!(2, "Done generating GLR parser");
     print_summary();

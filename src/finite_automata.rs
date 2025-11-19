@@ -7,6 +7,7 @@ use std::collections::BTreeMap as StdMap;
 use std::collections::HashMap;
 use std::fmt::{Debug, Display, Formatter};
 use std::sync::Arc;
+use memory_stats::memory_stats;
 
 pub type GroupID = usize;
 
@@ -769,20 +770,33 @@ impl NFAState {
     }
 }
 
+fn print_memory_usage(label: &str) {
+    if let Some(usage) = memory_stats() {
+        let physical_mem_mb = usage.physical_mem / 1024 / 1024;
+        crate::debug!(2, "Memory usage at '{}': Physical: {} MB", label, physical_mem_mb);
+    } else {
+        crate::debug!(2, "Couldn't get memory usage at '{}'", label);
+    }
+}
+
 impl ExprGroups {
     pub fn build(self) -> Regex {
+        print_memory_usage("Start of Regex build");
         crate::debug!(2, "Building NFA...");
         let start = std::time::Instant::now();
         let nfa = self.build_nfa();
         crate::debug!(2, "Built NFA in {:.2?}", start.elapsed());
+        print_memory_usage("After NFA build");
         crate::debug!(2, "Converting NFA to DFA...");
         let start = std::time::Instant::now();
         let mut dfa = nfa.to_dfa();
         crate::debug!(2, "Converted NFA to DFA in {:.2?}", start.elapsed());
+        print_memory_usage("After NFA to DFA conversion");
         crate::debug!(2, "Minimizing DFA...");
         let start = std::time::Instant::now();
         dfa.minimize();
         crate::debug!(2, "Minimized DFA in {:.2?}", start.elapsed());
+        print_memory_usage("After DFA minimization");
         crate::debug!(2, "Done!");
         Regex { dfa }
     }
