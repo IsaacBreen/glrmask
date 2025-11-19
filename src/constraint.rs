@@ -1877,36 +1877,50 @@ impl GrammarConstraint {
         for sid in tokenizer.iter_states() {
             initial_map.insert(sid, sid);
         }
-        let mut out = DedupValueMap::new();
+        let out = std::sync::Mutex::new(DedupValueMap::new());
 
         fn dfs(
             tokenizer: &Regex,
             node: &VocabPrefixTreeNode,
             current_map: &BTreeMap<TokenizerStateID, TokenizerStateID>,
-            out: &mut DedupValueMap<
-                LLMTokenID,
-                BTreeMap<TokenizerStateID, TokenizerStateID>,
-            >,
+            out: &std::sync::Mutex<DedupValueMap<LLMTokenID, BTreeMap<TokenizerStateID, TokenizerStateID>>>,
         ) {
-            for (segment_bytes, child) in node.iter_children() {
+            // Optimization: Group by current state to avoid redundant regex executions.
+            // Many start states map to the same current state.
+            let mut target_to_sources: HashMap<TokenizerStateID, Vec<TokenizerStateID>> = HashMap::new();
+            for (src, dst) in current_map {
+                target_to_sources.entry(*dst).or_default().push(*src);
+            }
+
+            let children: Vec<_> = node.iter_children().collect();
+
+            children.par_iter().for_each(|(segment_bytes, child)| {
                 let mut next_map: BTreeMap<TokenizerStateID, TokenizerStateID> =
                     BTreeMap::new();
-                for (start, cur) in current_map {
-                    let exec = tokenizer.execute_from_state(&segment_bytes, *cur);
+                
+                for (cur, sources) in &target_to_sources {
+                    let exec = tokenizer.execute_from_state(segment_bytes, *cur);
                     if let Some(end_state) = exec.end_state {
-                        next_map.insert(*start, TokenizerStateID(end_state));
+                        let end_sid = TokenizerStateID(end_state);
+                        for src in sources {
+                            next_map.insert(*src, end_sid);
+                        }
                     }
                 }
 
-                let tok_id = child.token_id();
-                out.insert(LLMTokenID(tok_id), next_map.clone());
-
-                dfs(tokenizer, child, &next_map, out);
-            }
+                if !next_map.is_empty() {
+                    let tok_id = child.token_id();
+                    {
+                        let mut guard = out.lock().unwrap();
+                        guard.insert(LLMTokenID(tok_id), next_map.clone());
+                    }
+                    dfs(tokenizer, child, &next_map, out);
+                }
+            });
         }
 
-        dfs(tokenizer, vocab_root, &initial_map, &mut out);
-        out
+        dfs(tokenizer, vocab_root, &initial_map, &out);
+        out.into_inner().unwrap()
     }
 
     /// Rearrange possible_matches: state -> terminal -> BV(tokens)
@@ -1914,26 +1928,32 @@ impl GrammarConstraint {
     pub fn rearrange_possible_matches(
         pm: &BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
     ) -> DedupValueMap<LLMTokenID, BTreeMap<TokenizerStateID, TerminalBV>> {
-        let mut tmp: BTreeMap<
-            LLMTokenID,
-            BTreeMap<TokenizerStateID, TerminalBV>,
-        > = BTreeMap::new();
-        for (sid, tmap) in pm {
-            for (term, bv) in tmap {
-                if bv.is_all() {
-                    // can't efficiently enumerate; skip; commit falls back for missing entries.
-                    continue;
+        let tmp = pm.iter().par_bridge()
+            .map(|(sid, tmap)| {
+                let mut local_map: BTreeMap<LLMTokenID, BTreeMap<TokenizerStateID, TerminalBV>> = BTreeMap::new();
+                for (term, bv) in tmap {
+                    if bv.is_all() { continue; }
+                    for tok in bv.iter() {
+                        local_map.entry(LLMTokenID(tok))
+                            .or_default()
+                            .entry(*sid)
+                            .or_default()
+                            .insert(term.0);
+                    }
                 }
-                for tok in bv.iter() {
-                    let tok_id = LLMTokenID(tok);
-                    let per_state = tmp.entry(tok_id).or_default();
-                    per_state
-                        .entry(*sid)
-                        .or_default()
-                        .insert(term.0);
+                local_map
+            })
+            .reduce(
+                BTreeMap::new,
+                |mut map_a, map_b| {
+                    for (tok, state_map_b) in map_b {
+                        let state_map_a = map_a.entry(tok).or_default();
+                        state_map_a.extend(state_map_b);
+                    }
+                    map_a
                 }
-            }
-        }
+            );
+
         let mut out = DedupValueMap::new();
         for (tok, m) in tmp {
             out.insert(tok, m);
