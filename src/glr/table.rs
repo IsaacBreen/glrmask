@@ -132,6 +132,15 @@ impl Stage7ShiftsAndReducesLookaheadValue {
             }
         }
     }
+
+    pub fn simplify_as_option(mut self) -> Option<Self> {
+        self.simplify();
+        if matches!(self, Stage7ShiftsAndReducesLookaheadValue::Split { shift: None, ref reduces } if reduces.is_empty()) {
+            None
+        } else {
+            Some(self)
+        }
+    }
 }
 
 impl JSONConvertible for Stage7ShiftsAndReducesLookaheadValue {
@@ -317,7 +326,7 @@ pub struct Row {
 }
 
 impl Row {
-    pub fn get_shifts_and_reduces(&self, terminal_id: &TerminalID) -> Some(Stage7ShiftsAndReducesLookaheadValue) {
+    pub fn get_shifts_and_reduces(&self, terminal_id: &TerminalID) -> Option<Stage7ShiftsAndReducesLookaheadValue> {
         let shift = self.shifts.get(terminal_id).copied();
         let terminal_index = terminal_id.0;
 
@@ -337,8 +346,7 @@ impl Row {
 
         let mut action = Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces: grouped_reduces };
 
-        action.simplify();
-        Some(action)
+        action.simplify_as_option()
     }
 }
 

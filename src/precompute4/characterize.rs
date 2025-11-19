@@ -125,24 +125,24 @@ fn collect_initial_actions(
     let mut initial_reduces = BTreeSet::new();
 
     for (&initial_state, row) in &parser.table {
-        if let Some(action) = row.shifts_and_reduces_full.get(&terminal_id) {
+        if let Some(action) = row.get_shifts_and_reduces(&terminal_id) {
             match action {
                 Shift(shift_state) => {
-                    initial_shifts.insert((initial_state, *shift_state));
+                    initial_shifts.insert((initial_state, shift_state));
                 }
                 Reduce { nonterminal_id, len, .. } => {
-                    if *len > 0 {
-                        initial_reduces.insert((initial_state, *len - 1, *nonterminal_id));
+                    if len > 0 {
+                        initial_reduces.insert((initial_state, len - 1, nonterminal_id));
                     }
                 }
                 Split { shift, reduces } => {
                     if let Some(shift_state) = shift {
-                        initial_shifts.insert((initial_state, *shift_state));
+                        initial_shifts.insert((initial_state, shift_state));
                     }
                     for (len, nts) in reduces {
-                        if *len > 0 {
+                        if len > 0 {
                             for (nt_id, _) in nts {
-                                initial_reduces.insert((initial_state, *len - 1, *nt_id));
+                                initial_reduces.insert((initial_state, len - 1, nt_id));
                             }
                         }
                     }
@@ -190,22 +190,22 @@ fn explore_from_goto(
 
     while let Some(current_state) = worklist.pop_front() {
         let Some(row) = parser.table.get(&current_state) else { continue };
-        let Some(action) = row.shifts_and_reduces_full.get(&terminal_id) else { continue };
+        let Some(action) = row.get_shifts_and_reduces(&terminal_id) else { continue };
 
         match action {
             Shift(shift_state) => {
-                reduce_char.reveal_goto_shift_escapes.insert((revealed_state, current_state, *shift_state));
+                reduce_char.reveal_goto_shift_escapes.insert((revealed_state, current_state, shift_state));
             }
             Reduce { nonterminal_id: reduce_nt, len, .. } => {
-                handle_reduce(parser, revealed_state, *len, *reduce_nt, &mut visited, &mut worklist, reduce_char);
+                handle_reduce(parser, revealed_state, len, reduce_nt, &mut visited, &mut worklist, reduce_char);
             }
             Split { shift, reduces } => {
                 if let Some(shift_state) = shift {
-                    reduce_char.reveal_goto_shift_escapes.insert((revealed_state, current_state, *shift_state));
+                    reduce_char.reveal_goto_shift_escapes.insert((revealed_state, current_state, shift_state));
                 }
                 for (len, nts) in reduces {
                     for (reduce_nt, _) in nts {
-                        handle_reduce(parser, revealed_state, *len, *reduce_nt, &mut visited, &mut worklist, reduce_char);
+                        handle_reduce(parser, revealed_state, len, reduce_nt, &mut visited, &mut worklist, reduce_char);
                     }
                 }
             }
