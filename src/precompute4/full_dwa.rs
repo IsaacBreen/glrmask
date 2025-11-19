@@ -159,7 +159,7 @@ fn convert_dwa_state_to_trie_node(
         for t in weight.iter_up_to(max_llm_token_id) {
             edge_bv.insert(t);
         }
-        let term_id = GrammarTokenID(*label as u32);
+        let term_id = GrammarTokenID(*label as usize);
         god.insert_edge_simple(idx, target_idx, Some(term_id), edge_bv);
     }
 
