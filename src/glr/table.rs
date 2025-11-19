@@ -154,30 +154,7 @@ impl JSONConvertible for Stage7ShiftsAndReducesLookaheadValue {
     }
 
     fn from_json(node: JSONNode) -> Result<Self, String> {
-        match node {
-            JSONNode::Object(mut obj) => {
-                let variant = obj.remove("variant").ok_or_else(|| "Missing variant".to_string())?.as_str().to_string();
-                 match variant.as_str() {
-                    "Shift" => {
-                         let state_id = StateID::from_json(obj.remove("state_id").unwrap())?;
-                         Ok(Self::Shift(state_id))
-                    },
-                    "Reduce" => {
-                        let nonterminal_id = NonTerminalID::from_json(obj.remove("nonterminal_id").unwrap())?;
-                        let len = usize::from_json(obj.remove("len").unwrap())?;
-                        let production_ids = Vec::from_json(obj.remove("production_ids").unwrap())?;
-                        Ok(Self::Reduce { nonterminal_id, len, production_ids })
-                    },
-                    "Split" => {
-                         let shift = Option::from_json(obj.remove("shift").unwrap())?;
-                         let reduces = BTreeMap::from_json(obj.remove("reduces").unwrap())?;
-                         Ok(Self::Split { shift, reduces })
-                    },
-                    _ => Err("Unknown variant".to_string())
-                 }
-            }
-            _ => Err("Expected Object".to_string())
-        }
+        todo!()
     }
 }
 
@@ -223,6 +200,9 @@ impl Row {
                 },
             }
         }
+    }
+    pub fn get_shifts_and_reduces_map(&self) -> BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue> {
+        self.shifts_and_reduces_full.clone()
     }
 }
 
@@ -485,7 +465,7 @@ fn finalize_table(
         // Process Reductions (SLR Logic)
         for item in state.reductions {
             let lhs = lhs_ids[item.production_id];
-            let len = prod_rhs_lens[item.production_id];
+            let len: usize = prod_rhs_lens[item.production_id];
             let pid = ProductionID(item.production_id);
             let nt_id = NonTerminalID(lhs);
 
@@ -503,7 +483,7 @@ fn finalize_table(
                             match e {
                                 Stage7ShiftsAndReducesLookaheadValue::Shift(sid) => {
                                     // Shift-Reduce conflict -> Split
-                                    let mut map = BTreeMap::new();
+                                    let mut map: BTreeMap<usize, BTreeMap<NonTerminalID, Vec<ProductionID>>> = BTreeMap::new();
                                     map.entry(len).or_default().entry(nt_id).or_default().push(pid);
                                     *e = Stage7ShiftsAndReducesLookaheadValue::Split {
                                         shift: Some(*sid),
@@ -512,7 +492,7 @@ fn finalize_table(
                                 }
                                 Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len: r_len, production_ids } => {
                                     // Reduce-Reduce conflict -> Split
-                                    let mut map = BTreeMap::new();
+                                    let mut map: BTreeMap<usize, BTreeMap<NonTerminalID, Vec<ProductionID>>> = BTreeMap::new();
                                     map.entry(*r_len).or_default().entry(*nonterminal_id).or_default().extend(production_ids.iter().cloned());
                                     map.entry(len).or_default().entry(nt_id).or_default().push(pid);
                                     
