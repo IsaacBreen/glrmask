@@ -50,7 +50,7 @@ pub const ALLOWED_FILES: &[&str] = &[
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __debug_grouped_impl {
-    ($level:expr, $user_fmt:expr $(, $($user_args:tt)*)?) => {{
+    ($level:expr, $user_fmt:expr, $($user_args:tt)*) => {{
         if $level <= $crate::r#macro::get_macro_debug_level() {
             let current_file_path = std::path::Path::new(file!());
             let current_filename = current_file_path.file_name()
@@ -91,9 +91,9 @@ macro_rules! __debug_grouped_impl {
                 // Print line number in Dark Gray, then the message
                 // \x1b[90m = Dark Gray (Bright Black)
                 println!(
-                    concat!("\x1b[90m  {:>4}\x1b[0m  ", $user_fmt, "{}"),
+                    concat!("\x1b[90m  {:>4}\x1b[0m  ", "{}", "{}"),
                     line!(),
-                    $($($user_args)*,)?
+                    format_args!($user_fmt, $($user_args)*),
                     elapsed_suffix
                 );
             }
@@ -106,7 +106,7 @@ macro_rules! __debug_grouped_impl {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __debug_start_impl {
-    ($level:expr, $user_fmt:expr $(, $($user_args:tt)*)?) => {{
+    ($level:expr, $user_fmt:expr, $($user_args:tt)*) => {{
         if $level <= $crate::r#macro::get_macro_debug_level() {
             let current_file_path = std::path::Path::new(file!());
             let current_filename = current_file_path.file_name()
@@ -143,9 +143,9 @@ macro_rules! __debug_start_impl {
                 }
 
                 print!(
-                    concat!("\x1b[90m  {:>4}\x1b[0m  ", $user_fmt, "{}"),
+                    concat!("\x1b[90m  {:>4}\x1b[0m  ", "{}", "{}"),
                     line!(),
-                    $($($user_args)*,)?
+                    format_args!($user_fmt, $($user_args)*),
                     elapsed_suffix
                 );
                 use std::io::Write;
@@ -192,7 +192,7 @@ macro_rules! __debug_line_impl {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __debug_timer_end_impl {
-    ($token:expr, $thresh:expr, $user_fmt:expr $(, $($user_args:tt)*)?) => {{
+    ($token:expr, $thresh:expr, $user_fmt:expr, $($user_args:tt)*) => {{
         if let Some((start_time, start_msg, start_file, start_line)) = $token {
             let now = std::time::Instant::now();
             let elapsed = now.duration_since(start_time);
@@ -228,7 +228,7 @@ macro_rules! __debug_timer_end_impl {
                     concat!("\x1b[90m  {:>4}\x1b[0m  {} ... {} (\x1b[35m{}ms\x1b[0m){}"),
                     start_line,
                     start_msg,
-                    format!($user_fmt $(, $($user_args)*)?),
+                    format!($user_fmt, $($user_args)*),
                     elapsed.as_millis(),
                     elapsed_suffix
                 );
@@ -243,7 +243,7 @@ macro_rules! __debug_timer_end_impl {
 #[macro_export]
 macro_rules! debug {
     ($level:expr, $fmt:literal $(, $($arg:tt)*)?) => {
-        $crate::__debug_grouped_impl!($level, $fmt $(, $($arg)*)?);
+        $crate::__debug_grouped_impl!($level, $fmt, $($($arg)*)?);
     };
     ($level:expr, $msg:expr) => {
         $crate::__debug_grouped_impl!($level, "{:?}", $msg);
@@ -267,7 +267,7 @@ macro_rules! debug_line {
 #[macro_export]
 macro_rules! debug_start {
     ($level:expr, $fmt:literal $(, $($arg:tt)*)?) => {
-        $crate::__debug_start_impl!($level, $fmt $(, $($arg)*)?)
+        $crate::__debug_start_impl!($level, $fmt, $($($arg)*)?)
     };
     ($level:expr, $msg:expr) => {
         $crate::__debug_start_impl!($level, "{:?}", $msg)
