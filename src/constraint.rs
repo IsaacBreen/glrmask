@@ -2505,13 +2505,6 @@ impl<'r> Precomputer1<'r> {
                 for (tokenizer_state_id, precompute_nodes_with_tokens) in
                     states_at_pos
                 {
-                    for (node_idx, _) in &precompute_nodes_with_tokens {
-                        if !node_cache.contains_key(node_idx) {
-                            let guard = node_idx.read(&self.trie1_god).unwrap();
-                            node_cache.insert(*node_idx, (guard.value.live_tokens.clone(), guard.value.end));
-                        }
-                    }
-
                     let exec_result = self
                         .tokenizer
                         .execute_from_state(&segment_bytes[pos..], tokenizer_state_id);
@@ -2587,443 +2580,53 @@ impl<'r> Precomputer1<'r> {
                                 .entry(next_tokenizer_state)
                                 .or_default();
 
-                            let mut dest_node_opt = None;
-
-                            // 1. Try to use an existing edge from the source node
-                            {
-                                let guard = src_node_idx.read(&self.trie1_god).unwrap();
-                                if let Some(dest_map) = guard.children().get(&Some(terminal_id)) {
-                                    for (child_idx, edge_tokens) in dest_map {
-                                        if edge_bv_for_inserter.is_subset(edge_tokens) {
-                                            dest_node_opt = Some(*child_idx);
-                                            break;
+                            let mut dest_node_opt = dest_nodes_in_queue
+                                .iter()
+                                .filter_map(
+                                    |(dest_node, dest_contextual_tokens)| {
+                                        let (dest_live_tokens, is_end) =
+                                            get_node_data(
+                                                &mut node_cache,
+                                                *dest_node,
+                                                &self.trie1_god,
+                                            );
+                                        if is_end {
+                                            return None;
                                         }
-                                    }
-                                }
-                            }
+
+                                        let risky_tokens =
+                                            &edge_bv_for_inserter - dest_contextual_tokens;
+                                        if risky_tokens.is_empty()
+                                            || (&risky_tokens
+                                                & &dest_live_tokens)
+                                                .is_empty()
+                                        {
+                                            Some(*dest_node)
+                                        } else {
+                                            None
+                                        }
+                                    },
+                                )
+                                .next();
 
                             if dest_node_opt.is_none() {
-                                // 2. Try to merge with an existing node in the queue
-                                for cand_idx in dest_nodes_in_queue.keys() {
-                                    let (cand_live, cand_end) = if let Some(d) = node_cache.get(cand_idx) {
-                                        d.clone()
-                                    } else {
-                                        let guard = cand_idx.read(&self.trie1_god).unwrap();
-                                        let d = (guard.value.live_tokens.clone(), guard.value.end);
-                                        node_cache.insert(*cand_idx, d.clone());
-                                        d
-                                    };
+                                let children_of_src: Vec<
+                                    TempPrecomputeNode1Index,
+                                > = {
+                                    let guard =
+                                        src_node_idx.read(&self.trie1_god).unwrap();
+                                    guard
+                                        .children()
+                                        .values()
+                                        .flat_map(|m| m.keys().cloned())
+                                        .collect()
+                                };
 
-                                    if !cand_end && edge_bv_for_inserter.is_subset(&cand_live) {
-                                        dest_node_opt = Some(*cand_idx);
-                                        break;
-                                    }
-                                }
-                            }
-
-                            if dest_node_opt.is_none() {
-                                // Ensure we have data for the new node if we create it (handled below)
-                            }
-
-                            let result_node = dest_node_opt.unwrap_or_else(|| {
-                                let new_node = TempPrecomputeNode1::new(
-                                    TempPrecomputedNodeContents::internal(),
-                                );
-                                let idx = TempPrecomputeNode1Index::new(
-                                    self.trie1_god.insert(new_node),
-                                );
-                                node_cache.insert(
-                                    idx,
-                                    (RangeSetBlaze::new(), false),
-                                );
-                                idx
-                            });
-
-                            pending_edges.push((
-                                src_node_idx,
-                                result_node,
-                                Some(terminal_id),
-                                edge_bv_for_inserter.clone(),
-                            ));
-                            pending_live_token_updates
-                                .entry(result_node)
-                                .or_insert_with(RangeSetBlaze::new)
-                                .bitor_assign(&edge_bv_for_inserter);
-
-                            node_cache
-                                .entry(result_node)
-                                .and_modify(|(live, _)| {
-                                    *live |= &edge_bv_for_inserter
-                                });
-
-                            dest_nodes_in_queue
-                                .entry(result_node)
-                                .or_insert_with(RangeSetBlaze::new)
-                                .bitor_assign(&edge_bv_for_inserter);
-                        }
-                    }
-
-                    if let Some(end_state_val) = exec_result.end_state {
-                        let final_tokenizer_state =
-                            TokenizerStateID(end_state_val);
-                        let final_tokenizer_state = self.state_mapping.get(&final_tokenizer_state).copied().unwrap_or(final_tokenizer_state);
-                        let accessible_terminals = self
-                            .tokenizer
-                            .tokens_accessible_from_state(final_tokenizer_state);
-
-                        for (src_node_wrapper, src_contextual_tokens) in
-                            &precompute_nodes_with_tokens
-                        {
-                            let mut edge_bv = RangeSetBlaze::new();
-                            edge_bv.insert(child_token_id);
-                            let edge_bv_for_inserter =
-                                &edge_bv & src_contextual_tokens;
-                            if edge_bv_for_inserter.is_empty() {
-                                continue;
-                            }
-
-                            let src_node_idx = *src_node_wrapper;
-                            let (src_live_tokens, _) =
-                                get_node_data(&mut node_cache, src_node_idx, &self.trie1_god);
-                            let final_edge_bv =
-                                &edge_bv_for_inserter & &src_live_tokens;
-
-                            if !final_edge_bv.is_empty() {
-                                let end_idx = self.get_leaf_node();
-                                for terminal_id in &accessible_terminals {
-                                    pending_edges.push((
-                                        src_node_idx,
-                                        end_idx,
-                                        Some(*terminal_id),
-                                        final_edge_bv.clone(),
-                                    ));
-                                    pending_live_token_updates
-                                        .entry(end_idx)
-                                        .or_insert_with(RangeSetBlaze::new)
-                                        .bitor_assign(&final_edge_bv);
-                                }
-                            }
-                        }
-
-                        let entry =
-                            next_level_assoc.entry(final_tokenizer_state).or_default();
-                        for (node, tokens) in precompute_nodes_with_tokens {
-                            entry
-                                .entry(node)
-                                .or_default()
-                                .bitor_assign(&tokens);
-                        }
-                    }
-                }
-            }
-
-            // Batch writes
-            for (src, dst, key, bv) in pending_edges {
-                self.trie1_god.insert_edge_simple(src, dst, key, bv);
-            }
-            for (node_idx, live_tokens) in pending_live_token_updates {
-                if let Some(mut guard) = node_idx.write(&self.trie1_god) {
-                    guard.value.live_tokens |= &live_tokens;
-                }
-            }
-
-            if !next_level_assoc.is_empty() {
-                self.dfs(child_vocab_node, next_level_assoc);
-            }
-        }
-    }
-}
-
-fn count_vocab_nodes(node: &VocabPrefixTreeNode) -> u64 {
-    1 + node
-        .children()
-        .values()
-        .map(|c| count_vocab_nodes(c))
-        .sum::<u64>()
-}
-
-// ---------------------------------------------------------------------------
-// Merge implementation for leveled GSS
-// ---------------------------------------------------------------------------
-
-impl Merge for RangeSetBlaze<usize> {
-    fn merge(&self, other: &Self) -> Self { self | other }
-}
-
-impl Merge for Arc<RangeSetBlaze<usize>> {
-    fn merge(&self, other: &Self) -> Self {
-        if Arc::ptr_eq(self, other) {
-            return self.clone();
-        }
-        let mut merged = self.as_ref().clone();
-        merged |= other.as_ref();
-        if merged == **self {
-            self.clone()
-        } else if merged == **other {
-            other.clone()
-        } else {
-            Arc::new(merged)
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// GrammarConstraintState
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone)]
-pub struct GrammarConstraintState<'a> {
-    pub parent: &'a GrammarConstraint,
-    pub state: BTreeMap<TokenizerStateID, GLRParserState<'a>>,
-}
-
-impl<'a> PartialEq for GrammarConstraintState<'a> {
-    fn eq(&self, other: &Self) -> bool {
-        std::ptr::eq(self.parent, other.parent) && self.state == other.state
-    }
-}
-
-impl<'a> Eq for GrammarConstraintState<'a> {}
-
-impl<'a> Display for GrammarConstraintState<'a> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        writeln!(f, "GrammarConstraintState ({} active tokenizer states):", self.state.len())?;
-        return Ok(());
-        // writeln!(
-        //     f,
-        //     "GrammarConstraintState ({} active tokenizer states):",
-        //     self.state.len()
-        // )?;
-        // if self.state.is_empty() { return Ok(()); }
-        //
-        // let mut gss_roots = Vec::new();
-        // let mut tokenizer_state_info = Vec::new();
-        //
-        // for (tokenizer_state_id, glr_state) in &self.state {
-        //     if !glr_state.stack.is_empty() {
-        //         gss_roots.push(glr_state.stack.clone());
-        //         tokenizer_state_info.push(format!(
-        //             "  - Tokenizer State {:>3}: GSS Root ({} predecessors)",
-        //             tokenizer_state_id.0,
-        //             glr_state.stack.num_predecessors()
-        //         ));
-        //     } else {
-        //         tokenizer_state_info.push(format!(
-        //             "  - Tokenizer State {:>3}: (Empty GSS)",
-        //             tokenizer_state_id.0
-        //         ));
-        //     }
-        // }
-        //
-        // for info in tokenizer_state_info {
-        //     writeln!(f, "{}", info)?;
-        // }
-        //
-        // if !gss_roots.is_empty() {
-        //     writeln!(f, "\nCombined GSS Forest (showing up to 50 nodes):")?;
-        //     let config = GSSPrintConfig {
-        //         labels: None,
-        //         max_edges: 50,
-        //         original_internal_bimap: None,
-        //         llm_token_map: Some(&self.parent.llm_vocab.llm_token_map),
-        //         verbose: false,
-        //     };
-        //     let (gss_str, _) =
-        //         print_gss_forest(&gss_roots, &self.parent.parser.terminal_map, &config);
-        //     write!(f, "{}", gss_str)?;
-        // }
-
-        Ok(())
-    }
-}
-
-impl<'a> GrammarConstraintState<'a> {
-    pub(crate) fn transform_gss_stacks<M, F>(&mut self, mut f: F)
-    where
-        M: Default,
-        F: FnMut(&mut Arc<GSSNode>, &mut M),
-    {
-        let mut memo = M::default();
-        for s in self.state.values_mut() {
-            f(&mut Arc::new(s.stack.clone()), &mut memo);
-        }
-    }
-
-    pub(crate) fn map_gss_stacks<M, F>(&mut self, mut f: F)
-    where
-        M: Default,
-        F: FnMut(&mut Arc<GSSNode>, &mut M) -> Arc<GSSNode>,
-    {
-        let mut memo = M::default();
-        for s in self.state.values_mut() {
-            s.stack = f(&mut Arc::new(s.stack.clone()), &mut memo).as_ref().clone();
-        }
-    }
-
-    pub fn compute_commit_maps(
-        &self,
-        llm_token_bytes: &[u8],
-    ) -> (
-        BTreeMap<TokenizerStateID, TokenizerStateID>,
-        BTreeMap<TokenizerStateID, TerminalBV>,
-    ) {
-        let mut state_map: BTreeMap<TokenizerStateID, TokenizerStateID> =
-            BTreeMap::new();
-        let mut terminals_map: BTreeMap<TokenizerStateID, TerminalBV> =
-            BTreeMap::new();
-        for (tokenizer_state_id, _state) in self.state.iter() {
-            let exec_result = self.parent.tokenizer.execute_from_state(
-                &llm_token_bytes,
-                *tokenizer_state_id,
-            );
-            if let Some(new_state) = exec_result.end_state {
-                state_map.insert(*tokenizer_state_id, TokenizerStateID(new_state));
-            }
-            let mut terminals = TerminalBV::zeros();
-            for token in exec_result.matches {
-                terminals.insert(token.id);
-            }
-            terminals_map.insert(*tokenizer_state_id, terminals);
-        }
-        (state_map, terminals_map)
-    }
-
-    pub fn get_mask(&self) -> LLMTokenBV {
-        // Trie3-based get_mask3 has been removed; we always use DWA now.
-        self.get_mask4().into()
-    }
-
-    pub fn print_gss_stats(&self) {
-        // println!("GrammarConstraintState Stats:");
-        // println!("  - Active tokenizer states: {}", self.state.len());
-        // if self.state.is_empty() {
-        //     println!("  - GSS is empty.");
-        //     return;
-        // }
-        // let stats = gather_gss_stats(
-        //     &self
-        //         .state
-        //         .values()
-        //         .map(|s| s.stack.as_ref())
-        //         .collect::<Vec<_>>(),
-        // );
-        // println!("  - GSS Stats: {:#?}", stats);
-        // todo!()
-    }
-
-    pub fn print_gss(&self) {
-        // let roots: Vec<_> = self
-        //     .state
-        //     .values()
-        //     .map(|s| s.stack.clone())
-        //     .collect();
-        // if roots.is_empty() {
-        //     println!("GSS is empty.");
-        //     return;
-        // }
-        // let labels: Vec<_> = self
-        //     .state
-        //     .keys()
-        //     .map(|k| format!("Tokenizer State {}", k.0))
-        //     .collect();
-        // self.parent.print_gss_nodes(&roots, Some(&labels));
-        // todo!()
-    }
-
-    pub fn explain_stack(&self) {
-        // todo!()
-        // for (state_id, state) in &self.state {
-        //     println!("\n--- State {} ---", state_id.0);
-        //     let mut seen = BTreeSet::new();
-        //     let num_to_sample = 10;
-        //     for i in 0..1000 {
-        //         if let Some(sampled_path_edges) =
-        //             sample_path(&[&state.stack], i)
-        //         {
-        //             let mut sampled_stack: Vec<usize> = sampled_path_edges
-        //                 .iter()
-        //                 .map(|edge| edge.state_id.0)
-        //                 .collect();
-        //             sampled_stack.reverse();
-        //             if seen.contains(&sampled_stack) {
-        //                 continue;
-        //             }
-        //             seen.insert(sampled_stack);
-        //             if seen.len() >= num_to_sample {
-        //                 break;
-        //             }
-        //         };
-        //     }
-        //     for sampled_stack in seen {
-        //         println!("  Sampled stack: {:?}", sampled_stack);
-        //     }
-        //     if let Some(sampled_path_edges) =
-        //         sample_path(&[&state.stack], 1)
-        //     {
-        //         let mut sampled_stack: Vec<_> = sampled_path_edges
-        //             .iter()
-        //             .map(|edge| edge.state_id)
-        //             .collect();
-        //         sampled_stack.reverse();
-        //         let explanation =
-        //             self.parent.parser.explain_stack(&sampled_stack);
-        //         for line in explanation.lines() {
-        //             println!("      {}", line);
-        //         }
-        //     };
-        // }
-    }
-
-    pub fn num_unique_nodes(&self) -> usize {
-        // gather_gss_stats(
-        //     &self
-        //         .state
-        //         .values()
-        //         .map(|s| s.stack.as_ref())
-        //         .collect::<Vec<_>>(),
-        // )
-        // .unique_nodes()
-        // todo!()
-        0
-    }
-
-    pub fn commit(&mut self, llm_token_id: LLMTokenID) {
-        self.commit_bytes(
-            &self
-                .parent
-                .llm_vocab
-                .llm_token_map
-                .get_by_right(&llm_token_id)
-                .unwrap()
-                .clone(),
-        );
-    }
-
-    pub fn is_active(&self) -> bool { !self.state.is_empty() }
-
-    pub fn is_valid(&self) -> bool {
-        if self.state.is_empty() {
-            return false;
-        }
-        if self.state.contains_key(&self.parent.tokenizer.initial_state_id()) {
-            return true;
-        }
-        for (tid, glr_state) in self.state.iter() {
-            for gtid in self.parent.tokenizer.tokens_accessible_from_state(TokenizerStateID(tid.0)) {
-                let mut glr_state = glr_state.clone();
-                glr_state.step(gtid);
-                if glr_state.is_ok() {
-                    return true;
-                }
-            }
-        }
-        false
-    }
-
-    pub fn state(&self) -> &BTreeMap<TokenizerStateID, GLRParserState<'a>> {
-        &self.state
-    }
-}
+                                dest_node_opt = children_of_src
+                                    .iter()
+                                    .filter(|child_arc| {
+                                        let (child_live_tokens, is_end) =
+                                            get_node_data(
                                                 &mut node_cache,
                                                 **child_arc,
                                                 &self.trie1_god,
