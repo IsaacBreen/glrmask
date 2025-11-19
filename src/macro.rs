@@ -33,6 +33,9 @@ pub fn is_debug_level_enabled(level: usize) -> bool {
 /// Tracks the last filename printed by the debug macro to avoid repetition.
 pub static LAST_DEBUG_FILE: Lazy<Mutex<String>> = Lazy::new(|| Mutex::new(String::new()));
 
+/// Tracks the last time a debug message was printed.
+pub static LAST_DEBUG_TIME: Lazy<Mutex<Option<std::time::Instant>>> = Lazy::new(|| Mutex::new(None));
+
 /// A list of filenames (not full paths) to allow debug messages from.
 pub const ALLOWED_FILES: &[&str] = &[
     // "parser.rs",
@@ -52,6 +55,21 @@ macro_rules! __debug_grouped_impl {
 
             if $crate::r#macro::ALLOWED_FILES.is_empty() || $crate::r#macro::ALLOWED_FILES.contains(&current_filename) {
                 let mut last_file_guard = $crate::r#macro::LAST_DEBUG_FILE.lock().unwrap();
+                let mut last_time_guard = $crate::r#macro::LAST_DEBUG_TIME.lock().unwrap();
+                let now = std::time::Instant::now();
+
+                let elapsed_str = if let Some(last_time) = *last_time_guard {
+                    let diff = now.duration_since(last_time);
+                    if diff.as_millis() > 1 {
+                        format!("\x1b[35m+{:?}\x1b[0m ", diff)
+                    } else {
+                        String::new()
+                    }
+                } else {
+                    String::new()
+                };
+                *last_time_guard = Some(now);
+
                 let current_file_str = file!();
 
                 // If filename changed, print it in Bold Cyan
@@ -64,7 +82,8 @@ macro_rules! __debug_grouped_impl {
                 // Print line number in Dark Gray, then the message
                 // \x1b[90m = Dark Gray (Bright Black)
                 println!(
-                    concat!("\x1b[90m  {:>4}\x1b[0m  ", $user_fmt),
+                    concat!("{}\x1b[90m  {:>4}\x1b[0m  ", $user_fmt),
+                    elapsed_str,
                     line!(),
                     $($user_args)*
                 );
