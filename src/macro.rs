@@ -70,7 +70,7 @@ macro_rules! __debug_grouped_impl {
                 let elapsed_str = if let Some(last_time) = *last_time_guard {
                     let diff = now.duration_since(last_time);
                     if diff.as_millis() > 1 {
-                        format!(" \x1b[35m+{}ms\x1b[0m", diff.as_millis())
+                        format!(" \x1b[35m+{:>5}ms\x1b[0m", diff.as_millis())
                     } else {
                         String::new()
                     }
@@ -126,7 +126,7 @@ macro_rules! __debug_start_impl {
                 let elapsed_str = if let Some(last_time) = *last_time_guard {
                     let diff = now.duration_since(last_time);
                     if diff.as_millis() > 1 {
-                        format!(" \x1b[35m+{}ms\x1b[0m", diff.as_millis())
+                        format!(" \x1b[35m+{:>5}ms\x1b[0m", diff.as_millis())
                     } else {
                         String::new()
                     }
@@ -209,7 +209,7 @@ macro_rules! __debug_timer_end_impl {
                 let elapsed_str = if let Some(last_time) = *last_time_guard {
                     let diff = now.duration_since(last_time);
                     if diff.as_millis() > 1 {
-                        format!(" \x1b[35m+{}ms\x1b[0m", diff.as_millis())
+                        format!(" \x1b[35m+{:>5}ms\x1b[0m", diff.as_millis())
                     } else {
                         String::new()
                     }
