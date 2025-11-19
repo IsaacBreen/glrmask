@@ -23,14 +23,14 @@ use crate::profiler::{print_summary, print_summary_flat};
 
 const EVERYTHING: bool = false;
 
-type Stage1Table = BTreeMap<StateID, Stage1Row>;
-type Stage2Table = BTreeMap<StateID, Stage2Row>;
-type Stage3Table = BTreeMap<StateID, Stage3Row>;
-type Stage4Table = BTreeMap<StateID, Stage4Row>;
-type Stage5Table = BTreeMap<StateID, Stage5Row>;
-pub(crate) type Stage6Table = BTreeMap<StateID, Stage6Row>;
-type Stage7Table = BTreeMap<StateID, Stage7Row>;
-type Stage8Table = BTreeMap<StateID, Row>;
+type Stage1Table = Vec<Stage1Row>;
+type Stage2Table = Vec<Stage2Row>;
+type Stage3Table = Vec<Stage3Row>;
+type Stage4Table = Vec<Stage4Row>;
+type Stage5Table = Vec<Stage5Row>;
+pub(crate) type Stage6Table = Vec<Stage6Row>;
+type Stage7Table = Vec<Stage7Row>;
+type Stage8Table = Vec<Row>;
 pub type Table = BTreeMap<StateID, Row>;
 
 #[derive(Debug, Clone)]
@@ -432,7 +432,7 @@ fn stage_1(
     lhs_ids: &[usize],
     num_terminals: usize,
     num_nonterminals: usize,
-) -> (Stage1Result, HashMap<Vec<Item>, StateID>) {
+) -> (Stage1Table, HashMap<Vec<Item>, StateID>) {
     let start_production_id = 0;
     let initial_item = Item {
         production_id: start_production_id,
@@ -487,7 +487,7 @@ fn stage_1(
     let mut next_state_id = 0;
 
     let mut worklist = VecDeque::new();
-    let mut table: Stage1Table = BTreeMap::new();
+    let mut table: Stage1Table = Vec::new();
 
     item_set_map_fast.insert(initial_item_set.clone(), StateID(next_state_id));
     next_state_id += 1;
@@ -497,33 +497,149 @@ fn stage_1(
         // Omitted for brevity/correctness in this optimization pass
     }
 
-    let mut buckets: HashMap<Option<usize>, Vec<Item>> = HashMap::new();
+    // Optimization: Use Vec for buckets instead of HashMap to avoid allocation/hashing overhead.
+    // We use a dense vector for all symbols (terminals + non-terminals).
+    let total_symbols = num_terminals + num_nonterminals;
+    let mut buckets: Vec<Vec<Item>> = vec![Vec::new(); total_symbols];
+    let mut bucket_none: Vec<Item> = Vec::new();
+    let mut active_symbols: Vec<usize> = Vec::with_capacity(128);
+    let mut processed_nts: Vec<bool> = vec![false; num_nonterminals];
+    let mut touched_nts: Vec<usize> = Vec::with_capacity(128);
 
     while let Some(item_set) = worklist.pop_front() {
         let state_id = *item_set_map_fast.get(&item_set).unwrap();
+        
+        // Ensure table has space for this state_id
+        if state_id.0 >= table.len() {
+            table.resize(state_id.0 + 1, BTreeMap::new());
+        }
 
-        buckets.clear();
-        let mut processed_nts_set = HashSet::new();
+        // Clear buckets and tracking structures from previous iteration
+        for &sym in &active_symbols {
+            buckets[sym].clear();
+        }
+        active_symbols.clear();
+        bucket_none.clear();
+        
+        for &nt in &touched_nts {
+            processed_nts[nt] = false;
+        }
+        touched_nts.clear();
 
         for item in &item_set {
             let sym_opt = light_productions[item.production_id].get(item.dot_position).copied();
-            buckets.entry(sym_opt).or_default().push(*item);
+            
+            match sym_opt {
+                Some(sym_id) => {
+                    if buckets[sym_id].is_empty() {
+                        active_symbols.push(sym_id);
+                    }
+                    buckets[sym_id].push(*item);
 
-            if let Some(sym_id) = sym_opt {
-                if sym_id >= num_terminals {
-                    let nt_id = sym_id - num_terminals;
-                    if processed_nts_set.insert(nt_id) {
-                        for (first_sym, items) in &closure_cache_grouped[nt_id] {
-                            buckets.entry(*first_sym).or_default().extend(items);
+                    if sym_id >= num_terminals {
+                        let nt_id = sym_id - num_terminals;
+                        if !processed_nts[nt_id] {
+                            processed_nts[nt_id] = true;
+                            touched_nts.push(nt_id);
+                            
+                            for (first_sym, items) in &closure_cache_grouped[nt_id] {
+                                match first_sym {
+                                    Some(fs) => {
+                                        if buckets[*fs].is_empty() {
+                                            active_symbols.push(*fs);
+                                        }
+                                        buckets[*fs].extend(items);
+                                    }
+                                    None => {
+                                        bucket_none.extend(items);
+                                    }
+                                }
+                            }
                         }
                     }
+                }
+                None => {
+                    bucket_none.push(*item);
                 }
             }
         }
 
         let mut row: Stage1Row = BTreeMap::new();
-        for (symbol_id_opt, items_in_split_vec) in buckets.drain() {
-            let goto_id = if symbol_id_opt.is_some() {
+        
+        // Process active buckets (Some(symbol))
+        for &sym_id in &active_symbols {
+            let items_in_split_vec = &buckets[sym_id];
+            
+            let mut goto_set: Vec<Item> = items_in_split_vec.iter().map(|item| {
+                Item { production_id: item.production_id, dot_position: item.dot_position + 1 }
+            }).collect();
+            goto_set.sort_unstable();
+            goto_set.dedup();
+
+            let goto_id = if let Some(id) = item_set_map_fast.get(&goto_set) {
+                *id
+            } else {
+                let new_id = StateID(next_state_id);
+                next_state_id += 1;
+                item_set_map_fast.insert(goto_set.clone(), new_id);
+                worklist.push_back(goto_set);
+                new_id
+            };
+
+            row.insert(Some(sym_id), Stage1Entry { kernel: Vec::new(), goto_id: Some(goto_id) });
+        }
+
+        // Process None bucket (reduces)
+        if !bucket_none.is_empty() {
+            row.insert(None, Stage1Entry { kernel: bucket_none.clone(), goto_id: None });
+        }
+
+        table[state_id.0] = row;
+    }
+
+    (table, item_set_map_fast)
+}
+
+fn stage_2(
+    stage_1_table: Stage1Table,
+    productions: &[Production],
+    num_terminals: usize,
+) -> Stage2Result {
+    let mut stage_2_table = Vec::with_capacity(stage_1_table.len());
+    for row in stage_1_table {
+        let mut shifts = BTreeMap::new();
+        let mut gotos = BTreeMap::new();
+        let mut reduces = Vec::new();
+
+        for (symbol_opt, Stage1Entry { kernel, goto_id }) in row {
+            match (symbol_opt, goto_id) {
+                (Some(sym_id), Some(id)) => {
+                    if sym_id < num_terminals {
+                        shifts.insert(TerminalID(sym_id), id);
+                    } else {
+                        gotos.insert(NonTerminalID(sym_id - num_terminals), id);
+                    }
+                }
+                (None, _) => {
+                    for item in &kernel {
+                        debug_assert_eq!(
+                            item.dot_position,
+                            productions[item.production_id].rhs.len(),
+                            "Reduce item must have dot at end"
+                        );
+                        reduces.push(*item);
+                    }
+                }
+                _ => {}
+            }
+        }
+        reduces.sort_unstable();
+        reduces.dedup();
+
+        stage_2_table.push(Stage2Row { shifts, gotos, reduces });
+    }
+    stage_2_table
+}
                 let mut goto_set: Vec<Item> = items_in_split_vec.iter().map(|item| {
                     Item { production_id: item.production_id, dot_position: item.dot_position + 1 }
                 }).collect();
