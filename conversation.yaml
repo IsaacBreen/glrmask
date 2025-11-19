@@ -33077,7 +33077,7 @@ messages:
       Applying patch to 'src/precompute4/full_dwa.rs' using custom patcher...
       Successfully applied patch and wrote to src/precompute4/full_dwa.rs.
     metadata:
-  - user: 'Changes committed with message: "feat: Implement DWA cycle unrolling via
-      state expansion and apply to precompute1"'
+  - user: 'Changes committed with message: "feat: Implement DWA cycle unrolling based
+      on weight termination and apply to precompute1 DWA"'
     metadata:
 ...

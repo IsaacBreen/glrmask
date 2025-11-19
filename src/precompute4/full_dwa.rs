@@ -183,6 +183,12 @@ pub fn precompute4(
     let mut dwa = nwa.determinize();
     crate::debug!(5, "Determinized precomputed1 NWA... done.");
     dwa.minimize_with_rustfst();
+
+    crate::debug!(4, "Unrolling cycles in precomputed1 DWA...");
+    let mut unrolled = dwa.unroll_cycles();
+    unrolled.minimize_with_rustfst();
+    dwa = unrolled;
+
     crate::debug!(
         5,
         "Optimized precomputed1 DWA has {} states and {} transitions.",

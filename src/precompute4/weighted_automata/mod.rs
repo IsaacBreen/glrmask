@@ -9,6 +9,7 @@ pub mod json;
 pub mod nwa;
 pub mod ops;
 pub mod simplification;
+pub mod unroll;
 mod test_determinization;
 
 pub use self::bitset::SimpleBitset;
