@@ -96,7 +96,7 @@ pub fn precompute4(
     let mut state_to_dwa = BTreeMap::new();
     let mut root_to_dwa_index: HashMap<PrecomputeNode1Index, usize> = HashMap::new();
     let mut nwabig = NWA::new();
-
+    crate::debug!(4, "Converting precomputed1 to NWA...");
     for (sid, root_idx) in precomputed1 {
         if let Some(&idx) = root_to_dwa_index.get(root_idx) {
             state_to_dwa.insert(*sid, idx);
@@ -113,6 +113,7 @@ pub fn precompute4(
         nwa.body.start_state = actual_start_state;
         nwa.minimize_with_rustfst();
         nwa = NWA::from_dwa(&nwa.determinize_to_dwa_with_rustfst());
+        crate::debug!(4, "Built NWA with {} states, {} transitions, and {} epsilon transitions.", nwa.states.len(), nwa.num_transitions(), nwa.num_epsilons());
         nwabig.union(&nwa);
     }
     nwabig.simplify();
