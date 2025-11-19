@@ -125,7 +125,7 @@ fn collect_initial_actions(
     let mut initial_reduces = BTreeSet::new();
 
     for (&initial_state, row) in &parser.table {
-        if let Some(action) = row.get_shifts_and_reduces(&terminal_id) {
+        if let Some(action) = row.get_shifts_and_reduces_for_terminal(&terminal_id) {
             match action {
                 Shift(shift_state) => {
                     initial_shifts.insert((initial_state, shift_state));
@@ -190,7 +190,7 @@ fn explore_from_goto(
 
     while let Some(current_state) = worklist.pop_front() {
         let Some(row) = parser.table.get(&current_state) else { continue };
-        let Some(action) = row.get_shifts_and_reduces(&terminal_id) else { continue };
+        let Some(action) = row.get_shifts_and_reduces_for_terminal(&terminal_id) else { continue };
 
         match action {
             Shift(shift_state) => {

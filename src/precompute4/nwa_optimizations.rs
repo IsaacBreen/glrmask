@@ -99,7 +99,7 @@ fn build_label_follower_map(parser: &GLRParser) -> BTreeMap<ParserStateID, State
 
     for (&from_sid, row) in &parser.table {
         for &to_sid in row
-            .shifts_and_reduces_full
+            .get_shifts_and_reduces_map()
             .values()
             .filter_map(|action| match action {
                 crate::glr::table::Stage7ShiftsAndReducesLookaheadValue::Shift(sid) => Some(sid),

@@ -326,7 +326,7 @@ pub struct Row {
 }
 
 impl Row {
-    pub fn get_shifts_and_reduces(&self, terminal_id: &TerminalID) -> Option<Stage7ShiftsAndReducesLookaheadValue> {
+    pub fn get_shifts_and_reduces_for_terminal(&self, terminal_id: &TerminalID) -> Option<Stage7ShiftsAndReducesLookaheadValue> {
         let shift = self.shifts.get(terminal_id).copied();
         let terminal_index = terminal_id.0;
 
@@ -347,6 +347,33 @@ impl Row {
         let mut action = Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces: grouped_reduces };
 
         action.simplify_as_option()
+    }
+
+    pub fn get_shifts_and_reduces_map(&self) -> BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue> {
+        let mut temp_map: BTreeMap<TerminalID, (Option<StateID>, BTreeMap<usize, BTreeMap<NonTerminalID, BTreeSet<ProductionID>>>)> = BTreeMap::new();
+
+        for (term, state) in &self.shifts {
+            temp_map.entry(*term).or_default().0 = Some(*state);
+        }
+
+        for (bv, reduce) in &self.reduces {
+            for term_idx in bv.iter() {
+                let term = TerminalID(term_idx);
+                let entry = temp_map.entry(term).or_default();
+                entry.1
+                    .entry(reduce.len)
+                    .or_default()
+                    .entry(reduce.nonterminal_id)
+                    .or_default()
+                    .extend(reduce.production_ids.iter().cloned());
+            }
+        }
+
+        temp_map.into_iter().map(|(term, (shift, reduces))| {
+            let mut action = Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces };
+            action.simplify();
+            (term, action)
+        }).collect()
     }
 }
 
