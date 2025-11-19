@@ -314,11 +314,15 @@ pub struct Row {
     pub gotos: BTreeMap<NonTerminalID, Goto>,
 }
 
-impl Row {
-    pub fn iter_rows(&self) -> impl IntoIterator<Item = (&StateID, &Row)> {
-        std::iter::empty()
-    }
+pub fn iter_rows(table: &Table) -> impl Iterator<Item = (StateID, &Row)> {
+    table.iter().enumerate().map(|(i, row)| (StateID(i), row))
+}
 
+pub fn get_row(table: &Table, state_id: StateID) -> Option<&Row> {
+    table.get(state_id.0)
+}
+
+impl Row {
     pub fn get_shifts_and_reduces_for_terminal(&self, terminal_id: &TerminalID) -> Option<Stage7ShiftsAndReducesLookaheadValue> {
         self.shifts_and_reduces_full.get(terminal_id).cloned()
     }

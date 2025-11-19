@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::constraint::StateIDBV;
 use crate::glr::parser::GLRParser;
-use crate::glr::table::StateID as ParserStateID;
+use crate::glr::table::{iter_rows, StateID as ParserStateID};
 use crate::precompute4::utils::{decode_symbol_i16, DEFAULT_TRANSITION_SYMBOL};
 use crate::precompute4::weighted_automata::{NWA, StateID, Weight};
 
@@ -97,7 +97,7 @@ fn build_label_follower_map(parser: &GLRParser) -> BTreeMap<ParserStateID, State
         follower_map.entry(from_sid).or_default().insert(to_sid.0);
     };
 
-    for (&from_sid, row) in &parser.table {
+    for (from_sid, row) in iter_rows(&parser.table) {
         for &to_sid in row
             .get_shifts_and_reduces_map()
             .values()

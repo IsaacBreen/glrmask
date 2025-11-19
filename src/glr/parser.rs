@@ -2,10 +2,7 @@ use crate::constraint::{LLMVocab, StateIDBV};
 use crate::datastructures::leveled_gss::{LeveledGSS, LeveledGSSStats};
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::glr::items::{Item};
-use crate::glr::table::{
-    Goto, NonTerminalID, Row, Stage7ShiftsAndReducesLookaheadValue, StateID, SubstringGoto, Table,
-    TerminalID,
-};
+use crate::glr::table::{get_row, Goto, NonTerminalID, Row, Stage7ShiftsAndReducesLookaheadValue, StateID, SubstringGoto, Table, TerminalID};
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use crate::profiler::GSS_LOGGING_ENABLED;
 use crate::{debug, hit};
@@ -380,7 +377,7 @@ impl GLRParser {
         let mut shifted: Vec<ParserGSS> = Vec::new();
 
         while let Some((state_id, state_gss)) = heads_by_state.pop_first() {
-            if let Some(row) = self.table.get(&state_id) {
+            if let Some(row) = get_row(&self.table, state_id) {
                 row.handle_shifts_and_reduces_for_terminal(
                     token,
                     |to| shifted.push(state_gss.push(ParseStateEdgeContent { state_id: *to })),
@@ -413,7 +410,7 @@ impl GLRParser {
 
         for edge in popped.peek() {
             let from_id = edge.state_id;
-            if let Some(goto) = self.table[&from_id].gotos.get(&nt) {
+            if let Some(goto) = get_row(&self.table, from_id).unwrap().gotos.get(&nt) {
                 if let Some(next_id) = goto.state_id {
                     let iso = popped.isolate(Some(edge));
                     let pushed = iso.push(ParseStateEdgeContent { state_id: next_id });

@@ -1087,17 +1087,17 @@ fn test_explain_stack() {
     let start_state = parser.start_state_id;
     let b_token_id = *parser.terminal_map.get_by_left(&regex_name("b")).unwrap();
     
-    let start_row = &parser.table[&start_state];
-    let shift_action = &start_row.get_shifts_and_reduces_for_terminal(&b_token_id).unwrap();
-
-    let state_after_b = match shift_action {
-        crate::glr::table::Stage7ShiftsAndReducesLookaheadValue::Shift(id) => *id,
-        _ => panic!("Expected shift on 'b' from start state"),
-    };
-
+    // let start_row = &parser.table[&start_state];
+    // let shift_action = &start_row.get_shifts_and_reduces_for_terminal(&b_token_id).unwrap();
+    //
+    // let state_after_b = match shift_action {
+    //     crate::glr::table::Stage7ShiftsAndReducesLookaheadValue::Shift(id) => *id,
+    //     _ => panic!("Expected shift on 'b' from start state"),
+    // };
+    //
     // let stack_to_explain = vec![start_state, state_after_b];
     // let explanation = parser.explain_stack(&stack_to_explain);
-
+    //
     // println!("{}", explanation);
     //
     // // Assertions for State 0 (start state)

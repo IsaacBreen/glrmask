@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt::{self, Display, Formatter};
 
 use crate::glr::parser::GLRParser;
-use crate::glr::table::{NonTerminalID, Stage7ShiftsAndReducesLookaheadValue, StateID, TerminalID};
+use crate::glr::table::{get_row, iter_rows, NonTerminalID, Stage7ShiftsAndReducesLookaheadValue, StateID, TerminalID};
 
 /// (initial_state, shift_state)
 type InitialShift = (StateID, StateID);
@@ -124,7 +124,7 @@ fn collect_initial_actions(
     let mut initial_shifts = BTreeSet::new();
     let mut initial_reduces = BTreeSet::new();
 
-    for (&initial_state, row) in &parser.table {
+    for (initial_state, row) in iter_rows(&parser.table) {
         if let Some(action) = row.get_shifts_and_reduces_for_terminal(&terminal_id) {
             match action {
                 Shift(shift_state) => {
@@ -160,7 +160,7 @@ fn collect_reduce_characterizations(
 ) -> BTreeMap<NonTerminalID, ReduceCharacterization> {
     let mut result: BTreeMap<NonTerminalID, ReduceCharacterization> = BTreeMap::new();
 
-    for (&revealed_state, row) in &parser.table {
+    for (revealed_state, row) in iter_rows(&parser.table) {
         for (&nt_id, goto) in &row.gotos {
             if let Some(goto_state) = goto.state_id {
                 let reduce_char = result.entry(nt_id).or_insert_with(|| ReduceCharacterization::new(terminal_id, nt_id));
@@ -189,7 +189,7 @@ fn explore_from_goto(
     worklist.push_back(start_state);
 
     while let Some(current_state) = worklist.pop_front() {
-        let Some(row) = parser.table.get(&current_state) else { continue };
+        let Some(row) = get_row(&parser.table, current_state) else { continue };
         let Some(action) = row.get_shifts_and_reduces_for_terminal(&terminal_id) else { continue };
 
         match action {
@@ -223,9 +223,7 @@ fn handle_reduce(
     reduce_char: &mut ReduceCharacterization,
 ) {
     if len == 1 {
-        if let Some(next_goto_state) = parser
-            .table
-            .get(&revealed_state)
+        if let Some(next_goto_state) = get_row(&parser.table, revealed_state)
             .and_then(|row| row.gotos.get(&reduce_nt))
             .and_then(|goto| goto.state_id)
         {

@@ -1,5 +1,5 @@
 use crate::glr::parser::GLRParser;
-use crate::glr::table::{Stage7ShiftsAndReducesLookaheadValue, StateID};
+use crate::glr::table::{iter_rows, Stage7ShiftsAndReducesLookaheadValue, StateID};
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -106,7 +106,7 @@ pub fn get_stats(parser: &GLRParser) -> GLRStats {
     let mut num_reduce_reduce_conflicts = 0;
     let mut all_state_stats: BTreeMap<StateID, StateStats> = BTreeMap::new();
 
-    for (state_id, row) in &parser.table {
+    for (state_id, row) in iter_rows(&parser.table) {
         let mut current_state_stats = StateStats::default();
         current_state_stats.num_gotos = row.gotos.len();
 
@@ -140,7 +140,7 @@ pub fn get_stats(parser: &GLRParser) -> GLRStats {
             }
         }
 
-        all_state_stats.insert(*state_id, current_state_stats);
+        all_state_stats.insert(state_id, current_state_stats);
     }
 
     GLRStats {
