@@ -1,6 +1,7 @@
 use super::common::{StateID, Weight};
 use super::dwa::DWA;
 use std::collections::{BTreeMap, HashMap, VecDeque};
+use indicatif::{ProgressBar, ProgressStyle};
 
 impl DWA {
     /// Unrolls cycles in the DWA by expanding states into (state, accumulated_weight) pairs.
@@ -45,7 +46,20 @@ impl DWA {
         visited[start_node] = Some(HashMap::from([(start_weight.clone(), new_start)]));
         queue.push_back((new_start, start_node, start_weight));
 
+        let pb = ProgressBar::new_spinner();
+        pb.set_style(
+            ProgressStyle::default_spinner()
+                .template("{spinner:.green} [{elapsed_precise}] Unrolled states: {pos}")
+                .unwrap(),
+        );
+
+        let mut processed_count: u64 = 0;
         while let Some((new_u, u, w_u)) = queue.pop_front() {
+            processed_count += 1;
+            if processed_count % 1000 == 0 {
+                pb.set_position(processed_count);
+            }
+
             let u_state = &self.states[u];
 
             // Collect transitions to bulk insert later, avoiding repeated re-borrows of new_dwa
@@ -98,6 +112,7 @@ impl DWA {
             src_st.trans_weights = new_trans_weights_vec.into_iter().collect();
         }
 
+        pb.finish_with_message(format!("Done ({} states)", new_dwa.states.len()));
         new_dwa
     }
 }
