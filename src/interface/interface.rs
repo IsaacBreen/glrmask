@@ -159,6 +159,16 @@ impl GrammarDefinition {
         }
         terminal_to_group_id
     }
+
+    pub fn optimize(&mut self) {
+        crate::glr::analyze::optimize_grammar(
+            &mut self.productions,
+            &mut self.regex_name_to_group_id,
+            &mut self.literal_to_group_id,
+            &mut self.group_id_to_expr,
+            self.ignore_terminal_id
+        );
+    }
 }
 
 impl JSONConvertible for GrammarDefinition {
@@ -1124,6 +1134,15 @@ impl JSONConvertible for CompiledGrammar {
 impl CompiledGrammar {
     /// Creates a `CompiledGrammar` from an `Arc<GrammarDefinition>`.
     pub fn from_definition(definition: Arc<GrammarDefinition>) -> Self {
+        // Optimize the grammar definition before building tokenizer and parser.
+        // Since we might modify it, we unwrap or clone.
+        let mut definition_mut = match Arc::try_unwrap(definition) {
+            Ok(d) => d,
+            Err(arc) => (*arc).clone(),
+        };
+        definition_mut.optimize();
+        let definition = Arc::new(definition_mut);
+
         debug!(3, "Building tokenizer from definition");
         let terminal_expr_groups = definition.get_terminal_expressions_for_tokenizer();
         let tokenizer_expr_groups_obj = groups(terminal_expr_groups);
