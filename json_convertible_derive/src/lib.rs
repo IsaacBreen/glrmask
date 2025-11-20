@@ -20,23 +20,29 @@ pub fn json_convertible_derive(input: TokenStream) -> TokenStream {
         // (from original generics, now in `where_clause.predicates`)
         // are not empty and don't already end with a comma, add one.
         if !where_clause.predicates.is_empty() && !where_clause.predicates.trailing_punct() {
-            where_clause.predicates.push_punct(syn::token::Comma::default());
+            where_clause
+                .predicates
+                .push_punct(syn::token::Comma::default());
         }
 
         for (i, param) in original_type_params.iter().enumerate() {
             let ident = &param.ident;
-            where_clause.predicates.push_value(syn::parse_quote!(#ident: crate::json_serialization::JSONConvertible));
+            where_clause.predicates.push_value(
+                syn::parse_quote!(#ident: crate::json_serialization::JSONConvertible),
+            );
             // Add a comma if this is not the last new predicate being added.
             if i < original_type_params.len() - 1 {
-                where_clause.predicates.push_punct(syn::token::Comma::default());
+                where_clause
+                    .predicates
+                    .push_punct(syn::token::Comma::default());
             }
         }
     }
 
     // Get the components for the impl block from the modified generics.
     // The `impl_generics` will now include the fully formed where clause.
-    let (impl_generics, ty_generics, _ /* where_clause is now part of impl_generics */) = new_generics.split_for_impl();
-
+    let (impl_generics, ty_generics, _ /* where_clause is now part of impl_generics */) =
+        new_generics.split_for_impl();
 
     let gen = match &ast.data {
         Data::Struct(data_struct) => match &data_struct.fields {
@@ -54,15 +60,18 @@ pub fn json_convertible_derive(input: TokenStream) -> TokenStream {
                     let field_name_str = field_name.to_string();
                     let field_ty = &f.ty;
                     quote! {
-                        let #field_name = obj.remove(#field_name_str)
-                            .ok_or_else(|| format!("Missing field '{}' for struct {}", #field_name_str, stringify!(#name)))
-                            .and_then(#field_ty::from_json)?;
+                        let #field_name = obj
+                            .remove(#field_name_str)
+                            .ok_or_else(|| format!(
+                                "Missing field '{}' for struct {}",
+                                #field_name_str,
+                                stringify!(#name)
+                            ))
+                            .and_then(|node| <#field_ty as crate::json_serialization::JSONConvertible>::from_json(node))?;
                     }
                 });
 
-                let field_names = fields.named.iter().map(|f| {
-                    f.ident.as_ref().unwrap()
-                });
+                let field_names = fields.named.iter().map(|f| f.ident.as_ref().unwrap());
 
                 quote! {
                     impl #impl_generics crate::json_serialization::JSONConvertible for #name #ty_generics {

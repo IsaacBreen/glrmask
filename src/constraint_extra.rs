@@ -117,7 +117,9 @@ pub fn dump_precompute_trie0_recursive(
     let children_to_visit;
 
     {
-        let node = node_arc.read(trie0_god).expect("RwLock poisoned during dump");
+        let node = node_arc
+            .read(trie0_god)
+            .expect("RwLock poisoned during dump");
         // Collect children information while holding the lock
         children_to_visit = node
             .children()
@@ -159,7 +161,8 @@ pub fn dump_precompute_trie0_recursive(
             None => "ε".to_string(),
         };
 
-        let internal_max_llm_token_id = *internal_to_original_map.unwrap().keys().max().unwrap_or(&0);
+        let internal_max_llm_token_id =
+            *internal_to_original_map.unwrap().keys().max().unwrap_or(&0);
         let tokens_display = format_bv_with_tokens(
             &edge_val_bv,
             internal_to_original_map,
@@ -244,7 +247,9 @@ pub fn dump_precompute_trie_recursive(
     let children_to_visit;
 
     {
-        let node = node_arc.read(trie1_god).expect("RwLock poisoned during dump");
+        let node = node_arc
+            .read(trie1_god)
+            .expect("RwLock poisoned during dump");
         // Collect children information while holding the lock
         children_to_visit = node
             .children()
@@ -280,7 +285,8 @@ pub fn dump_precompute_trie_recursive(
             None => "ε".to_string(),
         };
 
-        let internal_max_llm_token_id = *internal_to_original_map.unwrap().keys().max().unwrap_or(&0);
+        let internal_max_llm_token_id =
+            *internal_to_original_map.unwrap().keys().max().unwrap_or(&0);
         let tokens_display = format_bv_with_tokens(
             &edge_val_bv,
             internal_to_original_map,
@@ -339,7 +345,7 @@ pub fn dump_precompute_trie_recursive(
                     child_arc,
                     child_prefix,
                     visited,
-                    &internal_to_original_map,
+                    internal_to_original_map,
                     token_name_map,
                     llm_token_map,
                     trie1_god,
@@ -548,130 +554,130 @@ impl JSONConvertible for PrecomputeStats {
                     .remove("initial_root_nodes_created")
                     .ok_or_else(|| {
                         "Missing field initial_root_nodes_created for PrecomputeStats".to_string()
-                    })?
+                    })
                     .and_then(usize::from_json)?;
                 let final_unique_nodes_count = obj
                     .remove("final_unique_nodes_count")
                     .ok_or_else(|| {
                         "Missing field final_unique_nodes_count for PrecomputeStats".to_string()
-                    })?
+                    })
                     .and_then(usize::from_json)?;
                 let final_root_nodes_count = obj
                     .remove("final_root_nodes_count")
                     .ok_or_else(|| {
                         "Missing field final_root_nodes_count for PrecomputeStats".to_string()
-                    })?
+                    })
                     .and_then(usize::from_json)?;
                 let final_non_root_internal_nodes_count = obj
                     .remove("final_non_root_internal_nodes_count")
                     .ok_or_else(|| {
                         "Missing field final_non_root_internal_nodes_count for PrecomputeStats"
                             .to_string()
-                    })?
+                    })
                     .and_then(usize::from_json)?;
                 let final_leaf_nodes_count = obj
                     .remove("final_leaf_nodes_count")
                     .ok_or_else(|| {
                         "Missing field final_leaf_nodes_count for PrecomputeStats".to_string()
-                    })?
+                    })
                     .and_then(usize::from_json)?;
                 let final_edges_count = obj
                     .remove("final_edges_count")
                     .ok_or_else(|| {
                         "Missing field final_edges_count for PrecomputeStats".to_string()
-                    })?
+                    })
                     .and_then(usize::from_json)?;
                 let final_edges_with_none_key = obj
                     .remove("final_edges_with_none_key")
                     .ok_or_else(|| {
                         "Missing field final_edges_with_none_key for PrecomputeStats".to_string()
-                    })?
+                    })
                     .and_then(usize::from_json)?;
                 let final_edges_with_some_key = obj
                     .remove("final_edges_with_some_key")
                     .ok_or_else(|| {
                         "Missing field final_edges_with_some_key for PrecomputeStats".to_string()
-                    })?
+                    })
                     .and_then(usize::from_json)?;
                 let final_nodes_with_clean_end = obj
                     .remove("final_nodes_with_clean_end")
                     .ok_or_else(|| {
                         "Missing field final_nodes_with_clean_end for PrecomputeStats".to_string()
-                    })?
+                    })
                     .and_then(usize::from_json)?;
                 let final_total_occupancy_sum_for_some_keys = obj
                     .remove("final_total_occupancy_sum_for_some_keys")
                     .ok_or_else(|| {
                         "Missing field final_total_occupancy_sum_for_some_keys for PrecomputeStats"
                             .to_string()
-                    })?
+                    })
                     .and_then(usize::from_json)?;
                 let final_num_occupied_some_edge_keys = obj
                     .remove("final_num_occupied_some_edge_keys")
                     .ok_or_else(|| {
                         "Missing field final_num_occupied_some_edge_keys for PrecomputeStats"
                             .to_string()
-                    })?
+                    })
                     .and_then(usize::from_json)?;
                 let final_total_occupancy_sum_for_none_keys = obj
                     .remove("final_total_occupancy_sum_for_none_keys")
                     .ok_or_else(|| {
                         "Missing field final_total_occupancy_sum_for_none_keys for PrecomputeStats"
                             .to_string()
-                    })?
+                    })
                     .and_then(usize::from_json)?;
                 let final_num_occupied_none_edge_keys = obj
                     .remove("final_num_occupied_none_edge_keys")
                     .ok_or_else(|| {
                         "Missing field final_num_occupied_none_edge_keys for PrecomputeStats"
                             .to_string()
-                    })?
+                    })
                     .and_then(usize::from_json)?;
                 let final_grammar_token_edge_key_counts = obj
                     .remove("final_grammar_token_edge_key_counts")
                     .ok_or_else(|| {
                         "Missing field final_grammar_token_edge_key_counts for PrecomputeStats"
                             .to_string()
-                    })?
+                    })
                     .and_then(|n| BTreeMap::<GrammarTokenID, usize>::from_json(n))?;
                 let final_grammar_token_edge_fanouts_dist = obj
                     .remove("final_grammar_token_edge_fanouts_dist")
                     .ok_or_else(|| {
                         "Missing field final_grammar_token_edge_fanouts_dist for PrecomputeStats"
                             .to_string()
-                    })?
+                    })
                     .and_then(|n| BTreeMap::<GrammarTokenID, Vec<usize>>::from_json(n))?;
                 let final_grammar_token_edge_token_set_sizes_dist = obj
                     .remove("final_grammar_token_edge_token_set_sizes_dist")
                     .ok_or_else(|| {
                         "Missing field final_grammar_token_edge_token_set_sizes_dist for PrecomputeStats"
                             .to_string()
-                    })?
+                    })
                     .and_then(|n| BTreeMap::<GrammarTokenID, Vec<usize>>::from_json(n))?;
                 let final_edges_pruned_total = obj
                     .remove("final_edges_pruned_total")
                     .ok_or_else(|| {
                         "Missing field final_edges_pruned_total for PrecomputeStats".to_string()
-                    })?
+                    })
                     .and_then(usize::from_json)?;
                 let final_edges_pruned_by_token = obj
                     .remove("final_edges_pruned_by_token")
                     .ok_or_else(|| {
                         "Missing field final_edges_pruned_by_token for PrecomputeStats".to_string()
-                    })?
+                    })
                     .and_then(|n| BTreeMap::<GrammarTokenID, usize>::from_json(n))?;
                 let edges_pruned_by_terminal_sequence = obj
                     .remove("edges_pruned_by_terminal_sequence")
                     .ok_or_else(|| {
                         "Missing field edges_pruned_by_terminal_sequence for PrecomputeStats"
                             .to_string()
-                    })?
+                    })
                     .and_then(usize::from_json)?;
                 let final_total_ranges_in_bvs = obj
                     .remove("final_total_ranges_in_bvs")
                     .ok_or_else(|| {
                         "Missing field final_total_ranges_in_bvs for PrecomputeStats".to_string()
-                    })?
+                    })
                     .and_then(usize::from_json)?;
                 Ok(PrecomputeStats {
                     initial_root_nodes_created,
@@ -746,9 +752,7 @@ pub fn calculate_final_stats0(
             let children = node_guard
                 .children()
                 .values()
-                .flat_map(|dest_map| {
-                    dest_map.keys().map(|wrapper| wrapper.as_arc().clone())
-                })
+                .flat_map(|dest_map| dest_map.keys().map(|wrapper| wrapper.as_arc().clone()))
                 .collect::<Vec<_>>();
             (children, ptr)
         };
@@ -774,8 +778,9 @@ pub fn calculate_final_stats0(
     stats.final_root_nodes_count = root_node_pointers.len();
 
     for (node_ptr, node_arc) in &all_reachable_nodes {
-        let node_guard =
-            node_arc.read(trie0_god).expect("RwLock poisoned during final stats calculation");
+        let node_guard = node_arc
+            .read(trie0_god)
+            .expect("RwLock poisoned during final stats calculation");
 
         if !root_node_pointers.contains(node_ptr) {
             if node_guard.children().is_empty() {
@@ -807,8 +812,7 @@ pub fn calculate_final_stats0(
                         .entry(*gtid)
                         .or_default()
                         .push(llm_token_bv_on_edge.len());
-                    stats.final_total_ranges_in_bvs +=
-                        llm_token_bv_on_edge.inner().ranges_len();
+                    stats.final_total_ranges_in_bvs += llm_token_bv_on_edge.inner().ranges_len();
                 }
                 if num_edges_for_this_key_to_distinct_children > 0 {
                     stats.final_total_occupancy_sum_for_some_keys +=
@@ -816,8 +820,7 @@ pub fn calculate_final_stats0(
                     stats.final_num_occupied_some_edge_keys += 1;
                 }
             } else {
-                stats.final_edges_with_none_key +=
-                    num_edges_for_this_key_to_distinct_children;
+                stats.final_edges_with_none_key += num_edges_for_this_key_to_distinct_children;
                 if num_edges_for_this_key_to_distinct_children > 0 {
                     stats.final_total_occupancy_sum_for_none_keys +=
                         num_edges_for_this_key_to_distinct_children;
@@ -854,9 +857,7 @@ pub fn calculate_final_stats1(
             let children = node_guard
                 .children()
                 .values()
-                .flat_map(|dest_map| {
-                    dest_map.keys().map(|wrapper| wrapper.as_arc().clone())
-                })
+                .flat_map(|dest_map| dest_map.keys().map(|wrapper| wrapper.as_arc().clone()))
                 .collect::<Vec<_>>();
             (children, ptr)
         };
@@ -889,12 +890,8 @@ pub fn calculate_final_stats1(
     stats.final_edges_with_none_key = 0;
     stats.final_edges_with_some_key = 0;
     stats.final_nodes_with_clean_end = 0;
-    stats
-        .final_grammar_token_edge_key_counts
-        .clear();
-    stats
-        .final_grammar_token_edge_fanouts_dist
-        .clear();
+    stats.final_grammar_token_edge_key_counts.clear();
+    stats.final_grammar_token_edge_fanouts_dist.clear();
     stats
         .final_grammar_token_edge_token_set_sizes_dist
         .clear();
@@ -904,8 +901,9 @@ pub fn calculate_final_stats1(
     stats.final_total_ranges_in_bvs = 0;
 
     for (node_ptr, node_arc) in &all_reachable_nodes {
-        let node_guard =
-            node_arc.read(trie1_god).expect("RwLock poisoned during final stats calculation");
+        let node_guard = node_arc
+            .read(trie1_god)
+            .expect("RwLock poisoned during final stats calculation");
 
         // New logic for non-root internal and leaf nodes
         if !root_node_pointers.contains(node_ptr) {
@@ -922,8 +920,7 @@ pub fn calculate_final_stats1(
             stats.final_edges_count += num_edges_for_this_key_to_distinct_children;
 
             if let Some(gtid) = edge_key_opt {
-                stats.final_edges_with_some_key +=
-                    num_edges_for_this_key_to_distinct_children;
+                stats.final_edges_with_some_key += num_edges_for_this_key_to_distinct_children;
                 *stats
                     .final_grammar_token_edge_key_counts
                     .entry(*gtid)
@@ -940,8 +937,7 @@ pub fn calculate_final_stats1(
                         .entry(*gtid)
                         .or_default()
                         .push(llm_token_bv_on_edge.len());
-                    stats.final_total_ranges_in_bvs +=
-                        llm_token_bv_on_edge.inner().ranges_len();
+                    stats.final_total_ranges_in_bvs += llm_token_bv_on_edge.inner().ranges_len();
                 }
                 if num_edges_for_this_key_to_distinct_children > 0 {
                     stats.final_total_occupancy_sum_for_some_keys +=
@@ -949,8 +945,7 @@ pub fn calculate_final_stats1(
                     stats.final_num_occupied_some_edge_keys += 1;
                 }
             } else {
-                stats.final_edges_with_none_key +=
-                    num_edges_for_this_key_to_distinct_children;
+                stats.final_edges_with_none_key += num_edges_for_this_key_to_distinct_children;
                 if num_edges_for_this_key_to_distinct_children > 0 {
                     stats.final_total_occupancy_sum_for_none_keys +=
                         num_edges_for_this_key_to_distinct_children;
@@ -985,11 +980,17 @@ pub fn print_precompute_stats0(
     };
 
     println!("--- Precomputation 0 Statistics ---");
-    println!("  Initial Root Nodes Created: {}", stats.initial_root_nodes_created);
+    println!(
+        "  Initial Root Nodes Created: {}",
+        stats.initial_root_nodes_created
+    );
 
     println!("\nNode Counts Breakdown:");
     println!("  There are:");
-    println!("  - {} unique nodes, of which", stats.final_unique_nodes_count);
+    println!(
+        "  - {} unique nodes, of which",
+        stats.final_unique_nodes_count
+    );
     println!("    - {} are roots", stats.final_root_nodes_count);
     let non_root_count = stats
         .final_unique_nodes_count
@@ -1007,9 +1008,18 @@ pub fn print_precompute_stats0(
     println!("\nFinal Graph Structure (after sharing and deduplication):");
     println!("  Unique Nodes: {}", stats.final_unique_nodes_count);
     println!("  Total Edges: {}", stats.final_edges_count);
-    println!("    Edges with None Key: {}", stats.final_edges_with_none_key);
-    println!("    Edges with Some Key: {}", stats.final_edges_with_some_key);
-    println!("  Nodes with Clean End: {}", stats.final_nodes_with_clean_end);
+    println!(
+        "    Edges with None Key: {}",
+        stats.final_edges_with_none_key
+    );
+    println!(
+        "    Edges with Some Key: {}",
+        stats.final_edges_with_some_key
+    );
+    println!(
+        "  Nodes with Clean End: {}",
+        stats.final_nodes_with_clean_end
+    );
     println!(
         "  Average edge occupancy for Some-key edges:    {:.2}",
         avg_some
@@ -1043,11 +1053,17 @@ pub fn print_precompute_stats1(
     };
 
     println!("--- Precomputation 1 Statistics ---");
-    println!("  Initial Root Nodes Created: {}", stats.initial_root_nodes_created);
+    println!(
+        "  Initial Root Nodes Created: {}",
+        stats.initial_root_nodes_created
+    );
 
     println!("\nNode Counts Breakdown:");
     println!("  There are:");
-    println!("  - {} unique nodes, of which", stats.final_unique_nodes_count);
+    println!(
+        "  - {} unique nodes, of which",
+        stats.final_unique_nodes_count
+    );
     println!("    - {} are roots", stats.final_root_nodes_count);
     let non_root_count = stats
         .final_unique_nodes_count
@@ -1065,9 +1081,18 @@ pub fn print_precompute_stats1(
     println!("\nFinal Graph Structure (after sharing and deduplication):");
     println!("  Unique Nodes: {}", stats.final_unique_nodes_count);
     println!("  Total Edges: {}", stats.final_edges_count);
-    println!("    Edges with None Key: {}", stats.final_edges_with_none_key);
-    println!("    Edges with Some Key: {}", stats.final_edges_with_some_key);
-    println!("  Nodes with Clean End: {}", stats.final_nodes_with_clean_end);
+    println!(
+        "    Edges with None Key: {}",
+        stats.final_edges_with_none_key
+    );
+    println!(
+        "    Edges with Some Key: {}",
+        stats.final_edges_with_some_key
+    );
+    println!(
+        "  Nodes with Clean End: {}",
+        stats.final_nodes_with_clean_end
+    );
     println!(
         "  Average edge occupancy for Some-key edges:    {:.2}",
         avg_some
