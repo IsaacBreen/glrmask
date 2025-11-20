@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::collections::HashMap;
 use crate::glr::automaton::{
     compute_closure, compute_first_sets_for_nonterminals, compute_follow_sets_for_nonterminals,
@@ -1379,7 +1380,12 @@ fn convert_regular_nts_to_terminals(
                 let (new_term, created_new) = if let Some(&gid) = expr_to_group_id.get(&expr_for_terminal) {
                     // Reuse existing terminal
                     if let Some(term_name) = regex_name_to_group_id.get_by_right(&gid) {
-                    (Terminal::RegexName(term_name.clone()), false)
+                        (Terminal::RegexName(term_name.clone()), false)
+                    } else if let Some(bytes) = literal_to_group_id.get_by_right(&gid) {
+                        (Terminal::Literal(bytes.clone()), false)
+                    } else {
+                        panic!("Group ID {} found in expr map but missing from both regex and literal maps", gid);
+                    }
                 } else {
                     // Create new terminal
                     let shared_expr = Expr::Shared(Arc::new(expr_for_terminal.clone()));
