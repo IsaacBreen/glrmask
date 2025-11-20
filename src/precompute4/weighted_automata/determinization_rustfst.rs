@@ -25,35 +25,14 @@ use std::io::Write;
 use std::sync::{Arc, Mutex};
 
 fn _label_to_fst_label(label: i32) -> u32 {
-    if label > 0 {
-        label as u32
-    } else {
-        // Map 0 and negatives to upper half of u32 space
-        // 0 -> u32::MAX
-        // -1 -> u32::MAX - 1
-        // -2 -> u32::MAX - 2
-        // etc.
-        (label as u32).wrapping_add(u32::MAX)
-    }
+    label.wrapping_add(1) as u32
 }
 
 fn _fst_label_to_label(label: u32) -> i32 {
-    if label == 0 {
-        panic!("label cannot be 0");
-    }
-
-    if label <= i32::MAX as u32 {
-        // Positive range: 1..=i32::MAX maps directly
-        label as i32
-    } else {
-        // Upper range maps back to 0 and negatives
-        // u32::MAX -> 0
-        // u32::MAX - 1 -> -1
-        // etc.
-        label.wrapping_sub(u32::MAX) as i32
-    }
+    (label as i32).wrapping_sub(1)
 }
 fn fst_label_to_label(label: u32) -> i32 {
+    assert_ne!(label, 0);
     let result = _fst_label_to_label(label);
     let remapped = _label_to_fst_label(result);
     assert!(label == remapped, "label: {}, result: {}, remapped: {}", label, result, remapped);
@@ -61,6 +40,7 @@ fn fst_label_to_label(label: u32) -> i32 {
 }
 fn label_to_fst_label(label: i32) -> u32 {
     let result = _label_to_fst_label(label);
+    assert_ne!(result, 0);
     let remapped = _fst_label_to_label(result);
     assert!(label == remapped, "label: {}, result: {}, remapped: {}", label, result, remapped);
     result

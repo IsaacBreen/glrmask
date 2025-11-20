@@ -431,7 +431,10 @@ fn calculate_stats_from_vec_usize(numbers: &Vec<usize>) -> (usize, Option<f64>, 
     if numbers.is_empty() {
         return (0, None, None);
     }
-    let sum: usize = numbers.iter().sum();
+    let mut sum: usize = 0;
+    for &n in numbers {
+        sum = sum.saturating_add(n);
+    }
     let mean: Option<f64> = Some(sum as f64 / numbers.len() as f64);
 
     let mut sorted_numbers = numbers.clone();
