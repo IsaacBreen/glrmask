@@ -1090,6 +1090,20 @@ fn efficient_seq(exprs: Vec<Expr>) -> Expr {
     }
 }
 
+const MAX_REGEX_COMPLEXITY: usize = 20_000;
+
+fn get_expr_complexity(expr: &Expr) -> usize {
+    match expr {
+        Expr::U8Seq(bytes) => bytes.len(),
+        Expr::U8Class(_) => 1,
+        Expr::Shared(inner) => get_expr_complexity(inner),
+        Expr::Quantifier(inner, _) => get_expr_complexity(inner) + 1,
+        Expr::Choice(exprs) => exprs.iter().map(get_expr_complexity).sum::<usize>() + 1,
+        Expr::Seq(exprs) => exprs.iter().map(get_expr_complexity).sum::<usize>() + 1,
+        Expr::Epsilon => 0,
+    }
+}
+
 fn resolve_production_rhs(
     rhs: &[Symbol],
     nt: &NonTerminal,
@@ -1287,6 +1301,10 @@ fn convert_regular_nts_to_terminals(
                 if is_nullable(&final_expr) {
                     continue;
                 }
+                
+                if get_expr_complexity(&final_expr) > MAX_REGEX_COMPLEXITY {
+                    continue;
+                }
 
                 let new_term = create_new_terminal(final_expr, &nt.0, regex_name_to_group_id, group_id_to_expr);
                 nts_to_replace.insert(nt.clone(), new_term);
@@ -1374,6 +1392,10 @@ fn merge_adjacent_terminals(
                         } else {
                             Expr::Seq(vec![e1, e2])
                         };
+
+                        if get_expr_complexity(&combined_expr) > MAX_REGEX_COMPLEXITY {
+                            break;
+                        }
 
                         let new_term = create_new_terminal(
                             combined_expr, 
