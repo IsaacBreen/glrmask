@@ -400,6 +400,10 @@ impl<'r> Precomputer1<'r> {
         for (sid, root) in &self.roots {
             crate::debug!(6, "  {}: {}", sid.0, root);
         }
+        profiler::reset();
+        let vocab = std::mem::replace(&mut self.vocab, VocabPrefixTree::new());
+        self.dfs(&vocab.root, assoc);
+        self.vocab = vocab;
         crate::debug!(4, "Finished precompute DFS");
         self.pb.finish();
         profiler::print_summary();
