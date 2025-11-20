@@ -396,11 +396,24 @@ impl<'r> Precomputer1<'r> {
     fn dfs(
         &mut self,
         vocab_node: &VocabPrefixTreeNode,
-        assoc_by_state: BTreeMap<
+        mut assoc_by_state: BTreeMap<
             TokenizerStateID,
             HashMap<NWAStateID, RangeSetBlaze<usize>>,
         >,
     ) {
+        for (_, states_at_pos) in assoc_by_state.iter_mut() {
+            if states_at_pos.len() > 1 {
+                let merged_state = self.nwa.add_state();
+                let mut merged_tokens = RangeSetBlaze::new();
+                for (node, tokens) in &mut *states_at_pos {
+                    self.nwa.add_epsilon(merged_state, *node, tokens.clone().into());
+                    merged_tokens |= &*tokens;
+                }
+                states_at_pos.clear();
+                states_at_pos.insert(merged_state, merged_tokens);
+            }
+        }
+
         self.pb.inc(1);
         for (segment_bytes, child_vocab_node) in vocab_node.iter_children() {
             let mut next_level_assoc: BTreeMap<
@@ -512,17 +525,17 @@ impl<'r> Precomputer1<'r> {
 
                             // Reuse existing compatible node if possible
                             let mut dest_node = None;
-                            for (cand, cand_tokens) in dest_map.iter() {
-                                let (cand_live, is_end) = self.get_node_data_cached(&mut node_cache, *cand);
-                                let risky_tokens = &final_bv - cand_tokens;
-                                if !is_end
-                                    && (risky_tokens.is_empty()
-                                        || (&risky_tokens & &cand_live).is_empty())
-                                {
-                                    dest_node = Some(*cand);
-                                    break;
-                                }
-                            }
+                            // for (cand, cand_tokens) in dest_map.iter() {
+                            //     let (cand_live, is_end) = self.get_node_data_cached(&mut node_cache, *cand);
+                            //     let risky_tokens = &final_bv - cand_tokens;
+                            //     if !is_end
+                            //         && (risky_tokens.is_empty()
+                            //             || (&risky_tokens & &cand_live).is_empty())
+                            //     {
+                            //         dest_node = Some(*cand);
+                            //         break;
+                            //     }
+                            // }
 
                             let target = dest_node.unwrap_or_else(|| {
                                 let n = self.nwa.add_state();
