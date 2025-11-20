@@ -1,5 +1,3 @@
-use std::sync::Arc;
-use std::collections::HashMap;
 use crate::glr::automaton::{
     compute_closure, compute_first_sets_for_nonterminals, compute_follow_sets_for_nonterminals,
     compute_nonterminal_nullability, compute_null_nonterminals, compute_nullable_nonterminals,
@@ -10,8 +8,6 @@ use crate::glr::table::{Goto, NonTerminalID, StateID, Table};
 use bimap::BiBTreeMap;
 use kdam::{tqdm, BarExt};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use crate::finite_automata::{Expr, QuantifierType};
-use crate::glr::grammar::regex_name;
 
 /// Checks for non-terminals used in rule RHS but never defined in LHS.
 pub fn check_for_undefined_non_terminals(productions: &[Production]) -> Vec<String> {
@@ -355,47 +351,66 @@ pub fn remove_productions_with_undefined_nonterminals(
         .collect()
 }
 
-pub fn remove_unreachable_productions(productions: &[Production], start_production_id: usize) -> Vec<Production> {
-    if productions.is_empty() {
-        return Vec::new();
-    }
+// TODO: This function is marked as broken and is not modified by this request.
+pub fn drop_dead(productions: &[Production]) -> Vec<Production> {
+    // todo: this function is broken
+    let mut nt_reachables: BTreeMap<&NonTerminal, BTreeSet<&NonTerminal>> = BTreeMap::new();
 
-    let start_lhs = &productions[start_production_id].lhs;
-    let mut reachable_nts = BTreeSet::new();
-    let mut worklist = VecDeque::new();
-
-    reachable_nts.insert(start_lhs.clone());
-    worklist.push_back(start_lhs.clone());
-
-    // Index productions by LHS for faster lookup
-    let mut prods_by_lhs: BTreeMap<NonTerminal, Vec<&Production>> = BTreeMap::new();
     for prod in productions {
-        prods_by_lhs.entry(prod.lhs.clone()).or_default().push(prod);
+        let rhs_nonterms: BTreeSet<_> = prod
+            .rhs
+            .iter()
+            .filter_map(|symbol| {
+                if let Symbol::NonTerminal(nt) = symbol {
+                    Some(nt)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        nt_reachables.insert(&prod.lhs, rhs_nonterms);
     }
 
-    while let Some(nt) = worklist.pop_front() {
-        if let Some(prod_list) = prods_by_lhs.get(&nt) {
-            for prod in prod_list {
-                for sym in &prod.rhs {
-                    if let Symbol::NonTerminal(child_nt) = sym {
-                        if reachable_nts.insert(child_nt.clone()) {
-                            worklist.push_back(child_nt.clone());
-                        }
-                    }
+    loop {
+        let mut changed = false;
+        for (nt, reachables) in nt_reachables.clone() {
+            let old_len = nt_reachables[nt].len();
+            for reachable in reachables {
+                if let Some(reachable_reachables) = nt_reachables.get(reachable).cloned() {
+                    nt_reachables.get_mut(nt).unwrap().extend(reachable_reachables);
                 }
+            }
+            if nt_reachables[nt].len() != old_len {
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    let start_prod = &productions[0];
+    let mut reachable_from_start = BTreeSet::new();
+    for symbol in &start_prod.rhs {
+        if let Symbol::NonTerminal(nt) = symbol {
+            reachable_from_start.insert(nt);
+            if let Some(nt_reachables) = nt_reachables.get(nt).cloned() {
+                reachable_from_start.extend(nt_reachables);
             }
         }
     }
 
     let new_productions: Vec<_> = productions
         .iter()
-        .filter(|p| reachable_nts.contains(&p.lhs))
+        .filter(|prod| reachable_from_start.contains(&prod.lhs) || *prod == start_prod)
         .cloned()
         .collect();
 
-    if new_productions.len() < productions.len() {
-        crate::debug!(3, "Removed {} unreachable productions", productions.len() - new_productions.len());
-    }
+    crate::debug!(
+        2,
+        "Dropped {} productions",
+        productions.len() - new_productions.len()
+    );
 
     new_productions
 }
@@ -971,596 +986,4 @@ pub fn rewrite_productions_with_dummies(
     }
 
     (new_productions, new_dummy_terminals)
-}
-
-fn get_expr_for_terminal(
-    t: &Terminal,
-    literal_to_group_id: &BiBTreeMap<Vec<u8>, usize>,
-    regex_name_to_group_id: &BiBTreeMap<String, usize>,
-    group_id_to_expr: &BTreeMap<usize, Expr>,
-) -> Option<Expr> {
-    match t {
-        Terminal::Literal(bytes) => {
-            // Even if it's a literal, we prefer the group_id_to_expr version if available,
-            // as it might be optimized or shared. But Expr::U8Seq is safe fallback.
-            if let Some(gid) = literal_to_group_id.get_by_left(bytes) {
-                group_id_to_expr.get(gid).cloned()
-            } else {
-                Some(Expr::U8Seq(bytes.clone()))
-            }
-        }
-        Terminal::RegexName(name) => {
-            let gid = regex_name_to_group_id.get_by_left(name)?;
-            group_id_to_expr.get(gid).cloned()
-        }
-    }
-}
-
-fn create_new_terminal(
-    expr: Expr,
-    base_name: &str,
-    regex_name_to_group_id: &mut BiBTreeMap<String, usize>,
-    group_id_to_expr: &mut BTreeMap<usize, Expr>,
-) -> Terminal {
-    let mut counter = 0;
-    let name = loop {
-        let n = format!("__OPT_{}_{}", base_name, counter);
-        if !regex_name_to_group_id.contains_left(&n) {
-            break n;
-        }
-        counter += 1;
-    };
-
-    // Find next free group id
-    let new_gid = group_id_to_expr.keys().max().map_or(0, |k| k + 1);
-    
-    group_id_to_expr.insert(new_gid, expr);
-    regex_name_to_group_id.insert(name.clone(), new_gid);
-    
-    Terminal::RegexName(name)
-}
-
-fn is_nullable(expr: &Expr) -> bool {
-    match expr {
-        Expr::Epsilon => true,
-        Expr::U8Seq(s) => s.is_empty(),
-        Expr::U8Class(_) => false,
-        Expr::Choice(opts) => opts.iter().any(is_nullable),
-        Expr::Seq(seq) => seq.iter().all(is_nullable),
-        Expr::Quantifier(e, q) => match q {
-            QuantifierType::ZeroOrMore | QuantifierType::ZeroOrOne => true,
-            QuantifierType::OneOrMore => is_nullable(e),
-        },
-        Expr::Shared(e) => is_nullable(e),
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum ResolvedSymbol {
-    Expr(Expr),
-    SelfRef,
-}
-
-fn efficient_choice(exprs: Vec<Expr>) -> Expr {
-    let mut flat = Vec::with_capacity(exprs.len());
-    for e in exprs {
-        if let Expr::Choice(subs) = e {
-            flat.extend(subs);
-        } else {
-            flat.push(e);
-        }
-    }
-    if flat.len() == 1 {
-        flat.pop().unwrap()
-    } else {
-        Expr::Choice(flat)
-    }
-}
-
-fn efficient_seq(exprs: Vec<Expr>) -> Expr {
-    let mut flat = Vec::with_capacity(exprs.len());
-    for e in exprs {
-        if let Expr::Epsilon = e {
-            continue;
-        }
-    }
-    if flat.len() == 1 {
-        flat.pop().unwrap()
-    } else if flat.is_empty() {
-        Expr::Epsilon
-    } else {
-        Expr::Seq(flat)
-    }
-}
-
-const MAX_REGEX_COMPLEXITY: usize = 50_000_000;
-
-fn get_expr_complexity(expr: &Expr) -> usize {
-    match expr {
-        Expr::U8Seq(_) => 1,
-        Expr::U8Class(_) => 1,
-        Expr::Shared(_) => 1,
-        Expr::Quantifier(inner, _) => get_expr_complexity(inner) + 1,
-        Expr::Choice(exprs) => exprs.iter().map(get_expr_complexity).sum::<usize>() + 1,
-        Expr::Seq(exprs) => exprs.iter().map(get_expr_complexity).sum::<usize>() + 1,
-        Expr::Epsilon => 0,
-    }
-}
-
-fn resolve_production_rhs(
-    rhs: &[Symbol],
-    nt: &NonTerminal,
-    literal_to_group_id: &BiBTreeMap<Vec<u8>, usize>,
-    regex_name_to_group_id: &BiBTreeMap<String, usize>,
-    group_id_to_expr: &BTreeMap<usize, Expr>,
-    nts_to_replace: &BTreeMap<NonTerminal, (Terminal, bool)>,
-    ignore_expr: &Option<Expr>,
-) -> Option<Vec<ResolvedSymbol>> {
-    let mut seq = Vec::new();
-    for (i, sym) in rhs.iter().enumerate() {
-        if i > 0 {
-            if let Some(ref ie) = ignore_expr {
-                seq.push(ResolvedSymbol::Expr(Expr::Quantifier(
-                    Box::new(ie.clone()),
-                    QuantifierType::ZeroOrMore,
-                )));
-            }
-        }
-
-        match sym {
-            Symbol::Terminal(t) => {
-                let e = get_expr_for_terminal(
-                    t,
-                    literal_to_group_id,
-                    regex_name_to_group_id,
-                    group_id_to_expr,
-                )?;
-                seq.push(ResolvedSymbol::Expr(e));
-            }
-            Symbol::NonTerminal(n) => {
-                if n == nt {
-                    seq.push(ResolvedSymbol::SelfRef);
-                } else if let Some((t, nullable)) = nts_to_replace.get(n) {
-                    let e = get_expr_for_terminal(
-                        t,
-                        literal_to_group_id,
-                        regex_name_to_group_id,
-                        group_id_to_expr,
-                    )?;
-                    if *nullable {
-                        seq.push(ResolvedSymbol::Expr(Expr::Choice(vec![e, Expr::Epsilon])));
-                    } else {
-                        seq.push(ResolvedSymbol::Expr(e));
-                    }
-                } else {
-                    // Depends on unconverted NT
-                    return None;
-                }
-            }
-        }
-    }
-    if seq.is_empty() {
-        seq.push(ResolvedSymbol::Expr(Expr::Epsilon));
-    }
-    Some(seq)
-}
-
-fn get_non_null_part(expr: &Expr) -> Option<Expr> {
-    match expr {
-        Expr::Epsilon => None,
-        Expr::U8Seq(s) => if s.is_empty() { None } else { Some(expr.clone()) },
-        Expr::U8Class(_) => Some(expr.clone()),
-        Expr::Shared(inner) => get_non_null_part(inner),
-        Expr::Quantifier(inner, q) => match q {
-            QuantifierType::OneOrMore => Some(expr.clone()),
-            QuantifierType::ZeroOrMore | QuantifierType::ZeroOrOne => {
-                // Non-null part of A* or A? is A+ or A (simplification)
-                // Actually A* -> non-null is A+. A? -> non-null is A.
-                // Assuming inner is non-nullable for A+. If A is nullable, A+ is nullable.
-                let inner_non_null = get_non_null_part(inner)?;
-                match q {
-                    QuantifierType::ZeroOrMore => Some(Expr::Quantifier(Box::new(inner_non_null), QuantifierType::OneOrMore)),
-                    QuantifierType::ZeroOrOne => Some(inner_non_null),
-                    _ => unreachable!(),
-                }
-            }
-        },
-        Expr::Choice(opts) => {
-            let non_null_opts: Vec<Expr> = opts.iter().filter_map(get_non_null_part).collect();
-            if non_null_opts.is_empty() { None } else { Some(efficient_choice(non_null_opts)) }
-        },
-        Expr::Seq(seq) => {
-             if is_nullable(expr) { None } else { Some(expr.clone()) }
-        }
-    }
-}
-
-fn check_is_noop(prods: &[Production], term: &Terminal, nullable: bool) -> bool {
-    if nullable {
-        if prods.len() != 2 { return false; }
-        let has_term = prods.iter().any(|p| p.rhs.len() == 1 && p.rhs[0] == Symbol::Terminal(term.clone()));
-        let has_eps = prods.iter().any(|p| p.rhs.is_empty());
-        has_term && has_eps
-    } else {
-        if prods.len() != 1 { return false; }
-        prods[0].rhs.len() == 1 && prods[0].rhs[0] == Symbol::Terminal(term.clone())
-    }
-}
-
-pub fn optimize_grammar(
-    productions: &mut Vec<Production>,
-    regex_name_to_group_id: &mut BiBTreeMap<String, usize>,
-    literal_to_group_id: &mut BiBTreeMap<Vec<u8>, usize>,
-    group_id_to_expr: &mut BTreeMap<usize, Expr>,
-    ignore_terminal_id: Option<crate::types::TerminalID>,
-    start_symbol: &NonTerminal,
-) {
-    let mut changed = true;
-    while changed {
-        changed = false;
-        changed |= convert_regular_nts_to_terminals(
-            productions,
-            regex_name_to_group_id,
-            literal_to_group_id,
-            group_id_to_expr,
-            start_symbol,
-            ignore_terminal_id,
-        );
-        changed |= merge_adjacent_terminals(
-            productions,
-            regex_name_to_group_id,
-            literal_to_group_id,
-            group_id_to_expr,
-            ignore_terminal_id,
-        );
-    }
-}
-
-fn convert_regular_nts_to_terminals(
-    productions: &mut Vec<Production>,
-    regex_name_to_group_id: &mut BiBTreeMap<String, usize>,
-    literal_to_group_id: &mut BiBTreeMap<Vec<u8>, usize>,
-    group_id_to_expr: &mut BTreeMap<usize, Expr>,
-    start_symbol: &NonTerminal,
-    ignore_terminal_id: Option<crate::types::TerminalID>,
-) -> bool {
-    let mut prods_by_lhs: BTreeMap<NonTerminal, Vec<Production>> = BTreeMap::new();
-    for p in productions.iter() {
-        prods_by_lhs.entry(p.lhs.clone()).or_default().push(p.clone());
-    }
-
-    let mut nts_to_replace: BTreeMap<NonTerminal, (Terminal, bool)> = BTreeMap::new();
-
-    let ignore_expr = if let Some(tid) = ignore_terminal_id {
-        group_id_to_expr.get(&tid.0).cloned()
-    } else {
-        None
-    };
-
-    // We perform a fixed-point iteration here.
-    // This allows chains like A->B, B->C, C->Terminal to be fully resolved in one go.
-    let mut pending_nts: Vec<NonTerminal> = prods_by_lhs.keys().cloned().collect();
-    let mut loop_changed = true;
-    let mut any_conversion_happened = false;
-
-    // Reverse map for structural sharing of regexes
-    let mut expr_to_group_id: HashMap<Expr, usize> = group_id_to_expr.iter().map(|(k, v)| (v.clone(), *k)).collect();
-
-    // Perform topological sort on pending_nts to process dependencies first.
-    // This reduces the number of passes from O(N) to O(1) for deep dependency chains.
-    {
-        let mut adj: BTreeMap<&NonTerminal, BTreeSet<&NonTerminal>> = BTreeMap::new();
-        let pending_set: BTreeSet<&NonTerminal> = pending_nts.iter().collect();
-
-        for nt in &pending_nts {
-            let deps = adj.entry(nt).or_default();
-            if let Some(prods) = prods_by_lhs.get(nt) {
-                for prod in prods {
-                    for sym in &prod.rhs {
-                        if let Symbol::NonTerminal(dep_nt) = sym {
-                            if dep_nt != nt && pending_set.contains(dep_nt) {
-                                deps.insert(dep_nt);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        let mut visited = BTreeSet::new();
-        let mut sorted = Vec::with_capacity(pending_nts.len());
-        for nt in &pending_nts {
-             if !visited.contains(nt) {
-                 topo_visit(nt, &adj, &mut visited, &mut sorted);
-             }
-        }
-        pending_nts = sorted;
-    }
-
-    while loop_changed {
-        loop_changed = false;
-        let mut next_pending = Vec::with_capacity(pending_nts.len());
-
-        for nt in pending_nts {
-            let prods = &prods_by_lhs[&nt];
-
-            // Prevent infinite loop: if start symbol is already a single terminal, stop.
-            if nt == *start_symbol && prods.len() == 1 && prods[0].rhs.len() == 1 {
-                if let Symbol::Terminal(_) = &prods[0].rhs[0] {
-                    continue;
-                }
-            }
-
-            // Analyze productions
-            let mut base_exprs: Vec<Expr> = Vec::new();
-            let mut left_rec_exprs: Vec<Expr> = Vec::new();
-            let mut right_rec_exprs: Vec<Expr> = Vec::new();
-            let mut failed = false;
-
-            for p in prods {
-                if let Some(seq) = resolve_production_rhs(
-                    &p.rhs,
-                    &nt,
-                    literal_to_group_id,
-                    regex_name_to_group_id,
-                    group_id_to_expr,
-                    &nts_to_replace,
-                    &ignore_expr,
-                ) {
-                    let self_count = seq.iter().filter(|s| matches!(s, ResolvedSymbol::SelfRef)).count();
-                    if self_count > 1 {
-                        failed = true; // Multiple self-refs (e.g. center embedding or A -> A A) hard to convert simply
-                        break;
-                    }
-
-                    if self_count == 0 {
-                        // Base case
-                        let exprs: Vec<Expr> = seq.into_iter().map(|s| match s { ResolvedSymbol::Expr(e) => e, _ => unreachable!() }).collect();
-                        base_exprs.push(efficient_seq(exprs));
-                    } else {
-                        // Recursive case
-                        // Check position
-                        if let ResolvedSymbol::SelfRef = seq[0] {
-                             // Left recursive: [Self, Rest...]
-                             let exprs: Vec<Expr> = seq.into_iter().skip(1).map(|s| match s { ResolvedSymbol::Expr(e) => e, _ => unreachable!() }).collect();
-                             left_rec_exprs.push(efficient_seq(exprs));
-                        } else if let ResolvedSymbol::SelfRef = seq[seq.len()-1] {
-                             // Right recursive: [Prefix..., Self]
-                             let exprs: Vec<Expr> = seq.clone().into_iter().take(seq.len()-1).map(|s| match s { ResolvedSymbol::Expr(e) => e, _ => unreachable!() }).collect();
-                             right_rec_exprs.push(efficient_seq(exprs));
-                        } else {
-                            failed = true; // Center embedding
-                            break;
-                        }
-                    }
-                } else {
-                    failed = true; // Dependency not yet resolved
-                    // panic!("s0 failed: dependency not resolved"); 
-                    break;
-                }
-            }
-
-            if !failed {
-                // Valid structure found. Ensure recursion type consistency.
-                if !left_rec_exprs.is_empty() && !right_rec_exprs.is_empty() {
-                     // Mixed recursion is complex (e.g. Palindromes), skip.
-                     next_pending.push(nt);
-                     continue;
-                }
-
-                let base_choice = efficient_choice(base_exprs);
-                let final_expr = if !left_rec_exprs.is_empty() {
-                    let loop_choice = efficient_choice(left_rec_exprs);
-                    Expr::Seq(vec![base_choice, Expr::Quantifier(Box::new(loop_choice), QuantifierType::ZeroOrMore)])
-                } else if !right_rec_exprs.is_empty() {
-                    let loop_choice = efficient_choice(right_rec_exprs);
-                    Expr::Seq(vec![Expr::Quantifier(Box::new(loop_choice), QuantifierType::ZeroOrMore), base_choice])
-                } else {
-                    base_choice
-                };
-
-                let mut is_nt_nullable = false;
-                let mut expr_for_terminal = final_expr.clone();
-
-                if is_nullable(&final_expr) {
-                    if let Some(non_null) = get_non_null_part(&final_expr) {
-                         expr_for_terminal = non_null;
-                         is_nt_nullable = true;
-                    } else {
-                        // Purely nullable (e.g. empty string or epsilon), cannot convert to terminal
-                        continue;
-                    }
-                }
-                
-                if get_expr_complexity(&expr_for_terminal) > MAX_REGEX_COMPLEXITY {
-                    continue;
-                }
-
-                // Deduplicate: Check if this expression already has a terminal
-                let (new_term, created_new) = if let Some(&gid) = expr_to_group_id.get(&expr_for_terminal) {
-                    // Reuse existing terminal
-                    if let Some(term_name) = regex_name_to_group_id.get_by_right(&gid) {
-                        (Terminal::RegexName(term_name.clone()), false)
-                    } else if let Some(bytes) = literal_to_group_id.get_by_right(&gid) {
-                        (Terminal::Literal(bytes.clone()), false)
-                    } else {
-                        panic!("Group ID {} found in expr map but missing from both regex and literal maps", gid);
-                    }
-                } else {
-                    // Create new terminal
-                    let shared_expr = Expr::Shared(Arc::new(expr_for_terminal.clone()));
-                    let t = create_new_terminal(shared_expr.clone(), &nt.0, regex_name_to_group_id, group_id_to_expr);
-                    // Update reverse map
-                    if let Terminal::RegexName(ref name) = t {
-                        if let Some(&gid) = regex_name_to_group_id.get_by_left(name) {
-                             expr_to_group_id.insert(expr_for_terminal, gid);
-                        }
-                    }
-                    (t, true)
-                };
-
-                // If we reused a terminal, check if this replacement is actually a no-op (grammar already matches)
-                let is_noop = !created_new && check_is_noop(prods, &new_term, is_nt_nullable);
-
-                if !is_noop {
-                    nts_to_replace.insert(nt.clone(), (new_term, is_nt_nullable));
-                    loop_changed = true;
-                    any_conversion_happened = true;
-                }
-                // If no-op, we don't add to nts_to_replace, effectively skipping it for this pass.
-            } else {
-                next_pending.push(nt);
-            }
-        }
-        pending_nts = next_pending;
-    }
-
-    if !nts_to_replace.is_empty() {
-        crate::debug!(3, "Converted {} regular non-terminals to terminals", nts_to_replace.len());
-
-        // Remove productions defining replaced NTs
-        // If NT is nullable, we must KEEP it but redefine it as NT -> T | epsilon.
-        // If NT is not nullable, we remove it and replace usages.
-        
-        let mut new_prods = Vec::new();
-        for p in productions.iter() {
-            if let Some((term, nullable)) = nts_to_replace.get(&p.lhs) {
-                // This production is one of the old definitions of the replaced NT. Skip it.
-                // We will add the new definition later if needed.
-            } else {
-                // Keep productions for other NTs
-                let mut p_clone = p.clone();
-                for s in p_clone.rhs.iter_mut() {
-                    if let Symbol::NonTerminal(nt) = s {
-                        if let Some((t, nullable)) = nts_to_replace.get(nt) {
-                            if !*nullable {
-                                *s = Symbol::Terminal(t.clone());
-                            }
-                            // If nullable, we keep the NonTerminal symbol! 
-                            // The NonTerminal itself will be redefined below.
-                        }
-                    }
-                }
-                new_prods.push(p_clone);
-            }
-        }
-
-        // If start symbol was replaced (non-nullable case), add its new production to new_prods
-        if let Some((term, false)) = nts_to_replace.get(start_symbol) {
-            new_prods.push(Production {
-                lhs: start_symbol.clone(),
-                rhs: vec![Symbol::Terminal(term.clone())],
-            });
-        }
-
-        // Add new definitions for replaced NTs
-        for (nt, (term, nullable)) in &nts_to_replace {
-            if *nullable {
-                // NT -> T
-                new_prods.push(Production {
-                    lhs: nt.clone(),
-                    rhs: vec![Symbol::Terminal(term.clone())],
-                });
-                // NT -> epsilon
-                new_prods.push(Production {
-                    lhs: nt.clone(),
-                    rhs: vec![],
-                });
-            }
-        }
-
-        *productions = new_prods;
-        return true;
-    }
-
-    any_conversion_happened
-}
-
-fn topo_visit<'a>(
-    nt: &'a NonTerminal,
-    adj: &BTreeMap<&'a NonTerminal, BTreeSet<&'a NonTerminal>>,
-    visited: &mut BTreeSet<&'a NonTerminal>,
-    sorted: &mut Vec<NonTerminal>,
-) {
-    visited.insert(nt);
-    if let Some(deps) = adj.get(nt) {
-        for dep in deps {
-            if !visited.contains(dep) {
-                topo_visit(dep, adj, visited, sorted);
-            }
-        }
-    }
-    sorted.push(nt.clone());
-}
-
-fn merge_adjacent_terminals(
-    productions: &mut Vec<Production>,
-    regex_name_to_group_id: &mut BiBTreeMap<String, usize>,
-    literal_to_group_id: &mut BiBTreeMap<Vec<u8>, usize>,
-    group_id_to_expr: &mut BTreeMap<usize, Expr>,
-    ignore_terminal_id: Option<crate::types::TerminalID>,
-) -> bool {
-    let mut changed = false;
-    
-    // Resolve ignore expr
-    let ignore_expr = if let Some(tid) = ignore_terminal_id {
-        // Find gid for tid. tid.0 is the group_id (usually) or we need reverse lookup.
-        // TerminalID is just usize.
-        group_id_to_expr.get(&tid.0).cloned()
-    } else {
-        None
-    };
-
-    let ignore_seq = if let Some(ie) = ignore_expr {
-        Some(Expr::Quantifier(Box::new(ie), QuantifierType::ZeroOrMore))
-    } else {
-        None
-    };
-
-    for p in productions.iter_mut() {
-        if p.rhs.len() < 2 {
-            continue;
-        }
-
-        let mut new_rhs = Vec::new();
-        let mut i = 0;
-        while i < p.rhs.len() {
-            if i + 1 < p.rhs.len() {
-                if let (Symbol::Terminal(t1), Symbol::Terminal(t2)) = (&p.rhs[i], &p.rhs[i+1]) {
-                    // Merge t1 and t2
-                    let e1 = get_expr_for_terminal(t1, literal_to_group_id, regex_name_to_group_id, group_id_to_expr);
-                    let e2 = get_expr_for_terminal(t2, literal_to_group_id, regex_name_to_group_id, group_id_to_expr);
-
-                    if let (Some(e1), Some(e2)) = (e1, e2) {
-                        let combined_expr = if let Some(ref ie) = ignore_seq {
-                            Expr::Seq(vec![e1, ie.clone(), e2])
-                        } else {
-                            Expr::Seq(vec![e1, e2])
-                        };
-
-                        if get_expr_complexity(&combined_expr) > MAX_REGEX_COMPLEXITY {
-                            break;
-                        }
-
-                        let new_term = create_new_terminal(
-                            combined_expr, 
-                            "merged", 
-                            regex_name_to_group_id, 
-                            group_id_to_expr
-                        );
-
-                        new_rhs.push(Symbol::Terminal(new_term));
-                        i += 2;
-                        changed = true;
-                        continue;
-                    }
-                }
-            }
-            new_rhs.push(p.rhs[i].clone());
-            i += 1;
-        }
-        p.rhs = new_rhs;
-    }
-    
-    changed
 }

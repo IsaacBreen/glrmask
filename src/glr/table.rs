@@ -1,7 +1,7 @@
 use super::items::Item;
 use crate::glr::analyze::{
     create_unique_name_generator, inline_null_productions,
-    remove_productions_with_undefined_nonterminals, remove_unreachable_productions, validate,
+    remove_productions_with_undefined_nonterminals, validate,
 };
 use crate::glr::automaton::{
     compute_first_sets_ids_with_lhs, compute_follow_sets_ids, compute_nullable_nonterminals,
@@ -859,10 +859,6 @@ pub fn generate_glr_parser_with_maps(
     print_memory_usage("After removing undefined");
 
     let nonterminals: BTreeSet<_> = productions.iter().map(|p| p.lhs.clone()).collect();
-
-    productions = remove_unreachable_productions(&productions, start_production_id);
-    print_memory_usage("After removing unreachable");
-
     let mut unqiue_name_generator = create_unique_name_generator(&nonterminals);
 
     crate::glr::analyze::resolve_direct_right_recursion(
