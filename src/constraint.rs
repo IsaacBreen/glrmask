@@ -978,11 +978,14 @@ impl GrammarConstraint {
         tokenizer: &Regex,
         vocab_root: &VocabPrefixTreeNode,
     ) -> DedupValueMap<LLMTokenID, BTreeMap<TokenizerStateID, TokenizerStateID>> {
+        // Optimization: Pass an inverted map (current_state -> [source_states]) to avoid
+        // redundant regex executions for states that share the same current path endpoint.
         let mut initial_inverse: BTreeMap<TokenizerStateID, Vec<TokenizerStateID>> = BTreeMap::new();
         for sid in tokenizer.iter_states() {
             initial_inverse.entry(sid).or_default().push(sid);
         }
 
+        // Collect results in a flat vector under a mutex to avoid complex locking on DedupValueMap
         let results = std::sync::Mutex::new(Vec::new());
 
         fn dfs(
@@ -996,6 +999,7 @@ impl GrammarConstraint {
             children.par_iter().for_each(|(segment_bytes, child)| {
                 let mut next_inverse: BTreeMap<TokenizerStateID, Vec<TokenizerStateID>> = BTreeMap::new();
 
+                // Execute regex transition once per unique current state
                 for (cur, sources) in inverse_map {
                     let exec = tokenizer.execute_from_state(segment_bytes, *cur);
                     if let Some(end_state_val) = exec.end_state {
@@ -1005,6 +1009,7 @@ impl GrammarConstraint {
                 }
 
                 if !next_inverse.is_empty() {
+                    // Reconstruct the forward map for storage
                     let mut forward_map = BTreeMap::new();
                     for (end_sid, sources) in &next_inverse {
                         for src in sources {
@@ -1024,6 +1029,7 @@ impl GrammarConstraint {
 
         dfs(tokenizer, vocab_root, &initial_inverse, &results);
 
+        // Sort and insert into DedupValueMap sequentially
         let mut out = DedupValueMap::new();
         let mut collected = results.into_inner().unwrap();
         collected.sort_by_key(|(k, _)| *k);
@@ -1038,17 +1044,19 @@ impl GrammarConstraint {
     pub fn rearrange_possible_matches(
         pm: &BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
     ) -> DedupValueMap<LLMTokenID, BTreeMap<TokenizerStateID, TerminalBV>> {
+        // Flatten to triples: (token, state, terminal)
+        // collecting locally into a Vec satisfies Rayon's bounds without par_bridge overhead
         let mut triples: Vec<(u32, u32, u32)> = pm.par_iter()
             .flat_map(|(sid, tmap)| {
-                tmap.par_iter().flat_map(move |(term, bv)| {
-                    if bv.is_all() {
-                        rayon::iter::Either::Left(rayon::iter::empty())
-                    } else {
-                        rayon::iter::Either::Right(
-                            bv.iter_up_to(usize::MAX).map(move |tok| (tok as u32, sid.0 as u32, term.0 as u32))
-                        )
+                let mut local_triples = Vec::new();
+                for (term, bv) in tmap {
+                    if !bv.is_all() {
+                        for tok in bv.iter_up_to(usize::MAX) {
+                            local_triples.push((tok as u32, sid.0 as u32, term.0 as u32));
+                        }
                     }
-                })
+                }
+                local_triples
             })
             .collect();
 
