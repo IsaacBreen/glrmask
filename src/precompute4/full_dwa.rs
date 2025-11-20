@@ -874,7 +874,9 @@ pub fn precompute4(
         },
     };
 
-    resolve_negatives_and_optimize_and_determinize(parser, combined_nwa)
+    let final_dwa = resolve_negatives_and_optimize_and_determinize(parser, combined_nwa);
+    crate::debug!(3, "Precomputation complete");
+    final_dwa
 }
 
 fn precompute_token_bvs_and_signatures(
