@@ -1551,9 +1551,8 @@ mod tests {
         assert!(parser.is_valid());
         assert_eq!(parser.state.len(), 1, "Expected 1 state after feeding 'a'");
         // After a full token match ('a'), tokenizer should reset.
-        // NOTE: With grammar optimization, 'a' and 'b' might be merged into "ab".
-        // If merged, feeding 'a' leaves the tokenizer in a partial state (non-initial).
-        // So we can't assert initial_state_id here without disabling optimization.
+        // The key in `parser.state` should be the initial tokenizer state ID.
+        assert!(parser.state.contains_key(&grammar.tokenizer().initial_state_id()), "Expected tokenizer initial state after 'a'");
 
 
         let mut parser_ab = parser.clone();
