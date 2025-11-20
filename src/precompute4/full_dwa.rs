@@ -307,6 +307,8 @@ pub fn precompute4(
     crate::debug!(5, "Reversed trie:\n{}", Trie::pretty_print_with_options(&reversed_trie1_god, &[reversed_trie_root], &options));
 
     let mut final_bodies: BTreeMap<TokenizerStateID, NWABody> = BTreeMap::new();
+    let mut unique_bundle_maps: BTreeSet<BTreeMap<Option<TerminalID>, Weight>> = BTreeSet::new();
+    let mut unique_bundle_entries: BTreeSet<(Option<TerminalID>, Weight)> = BTreeSet::new();
 
     let now = Instant::now();
     Trie::special_map_grouped(
@@ -363,10 +365,12 @@ pub fn precompute4(
             crate::debug!(6, "{:?}", nwa_bodies_map);
 
             let unique_terminal_maps = nwa_bodies_map.iter().map(|(_, terminal_map)| terminal_map).collect::<BTreeSet<_>>();
+            unique_bundle_maps.insert(unique_terminal_maps.iter().next().unwrap().clone().clone());
             let mut unique_terminal_entries: BTreeSet<(Option<TerminalID>, Weight)> = BTreeSet::new();
             for terminal_map in &unique_terminal_maps {
                 for (terminal_id_opt, weight) in *terminal_map {
                     unique_terminal_entries.insert((*terminal_id_opt, weight.clone()));
+                    unique_bundle_entries.insert((*terminal_id_opt, weight.clone()));
                 }
             }
             println!("NWA Simplify with {} bodies, {} unique terminal maps, {} unique terminal entries", nwa_bodies_map.len(), unique_terminal_maps.len(), unique_terminal_entries.len());
@@ -436,6 +440,9 @@ pub fn precompute4(
         },
     );
     crate::debug!(4, "Reversed trie traversal (special_map_grouped) took: {:?}", now.elapsed());
+
+    println!("Number of unique bundles: {}", unique_bundle_maps.len());
+    println!("Number of unique bundle entries: {}", unique_bundle_entries.len());
 
     // Combine all final NWA bodies into a single NWA
     let mut combined_nwa_states = states_arena.into_inner();
