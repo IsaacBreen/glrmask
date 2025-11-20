@@ -689,32 +689,10 @@ impl GrammarConstraint {
         let vocab_tree = VocabPrefixTree::build(&internal_tokens_for_vocab);
         crate::debug!(2, "Done building vocab prefix tree");
 
-        // possible_matches: tokenizer_state -> terminal -> internal-token bitset
-        let mut computed_possible_matches =
-            BTreeMap::<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>::new();
-        let mut pm_cache: HashMap<
-            (*const VocabPrefixTreeNode, TokenizerStateID),
-            BTreeMap<GrammarTokenID, LLMTokenBV>,
-        > = HashMap::new();
-        crate::debug!(
-            2,
-            "Computing possible_matches for all {} tokenizer states",
-            tokenizer.iter_states().count()
-        );
-        for sid in tokenizer.iter_states() {
-            let matches_for_sid = Self::compute_possible_matches_for_vocab_node(
-                &tokenizer,
-                &vocab_tree.root,
-                sid,
-                &mut pm_cache,
-            );
-            computed_possible_matches.insert(sid, matches_for_sid);
-        }
-        crate::debug!(2, "Finished computing possible_matches");
-
-        // Build per-token maps.
-        crate::debug!(2, "Building state_map_by_llm and terminal_map_by_llm");
-        let state_map_by_llm = Self::build_state_map_by_llm(&tokenizer, &vocab_tree.root);
+        // Unified fast pass for maps and matches
+        crate::debug!(2, "Computing maps and possible_matches (fast parallel pass)");
+        let (state_map_by_llm, computed_possible_matches) =
+            Self::build_maps_and_matches(&tokenizer, &vocab_tree.root);
         let terminal_map_by_llm = Self::rearrange_possible_matches(&computed_possible_matches);
 
         // Compute terminal follow sets, then map to IDs.
@@ -972,71 +950,183 @@ impl GrammarConstraint {
     // Possible-matches-related helpers
     // -----------------------------------------------------------------------
 
-    /// Build per-token (internal id) mapping from initial tokenizer state to final tokenizer state
-    /// after consuming the entire token.
-    pub fn build_state_map_by_llm(
+    /// Computes `state_map_by_llm` and `possible_matches` in a single efficient parallel pass.
+    pub fn build_maps_and_matches(
         tokenizer: &Regex,
         vocab_root: &VocabPrefixTreeNode,
-    ) -> DedupValueMap<LLMTokenID, BTreeMap<TokenizerStateID, TokenizerStateID>> {
-        // Optimization: Pass an inverted map (current_state -> [source_states]) to avoid
-        // redundant regex executions for states that share the same current path endpoint.
-        let mut initial_inverse: BTreeMap<TokenizerStateID, Vec<TokenizerStateID>> = BTreeMap::new();
+    ) -> (
+        DedupValueMap<LLMTokenID, BTreeMap<TokenizerStateID, TokenizerStateID>>,
+        BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
+    ) {
+        let max_state_id = tokenizer.iter_states().map(|s| s.0).max().unwrap_or(0);
+
+        // Initial states: every state maps to itself at the root
+        let mut initial_states = Vec::with_capacity(max_state_id + 1);
         for sid in tokenizer.iter_states() {
-            initial_inverse.entry(sid).or_default().push(sid);
+            initial_states.push((sid, vec![sid]));
         }
 
-        // Collect results in a flat vector under a mutex to avoid complex locking on DedupValueMap
-        let results = std::sync::Mutex::new(Vec::new());
+        let (state_map_entries, match_events) = Self::dfs_maps_and_matches(
+            vocab_root,
+            initial_states,
+            tokenizer,
+        );
 
-        fn dfs(
-            tokenizer: &Regex,
-            node: &VocabPrefixTreeNode,
-            inverse_map: &BTreeMap<TokenizerStateID, Vec<TokenizerStateID>>,
-            results: &std::sync::Mutex<Vec<(LLMTokenID, BTreeMap<TokenizerStateID, TokenizerStateID>)>>,
-        ) {
-            let children: Vec<_> = node.iter_children().collect();
+        // --- Post-process State Map ---
+        let mut state_map_out = DedupValueMap::new();
+        let mut sorted_state_entries = state_map_entries;
+        // Sort by token ID
+        sorted_state_entries.par_sort_unstable_by_key(|(tid, _)| *tid);
+        
+        // Group by token ID
+        for (tid, map_vec) in sorted_state_entries {
+             let mut map = BTreeMap::new();
+             for (start, end) in map_vec {
+                 map.insert(start, end);
+             }
+             state_map_out.insert(tid, map);
+        }
 
-            children.par_iter().for_each(|(segment_bytes, child)| {
-                let mut next_inverse: BTreeMap<TokenizerStateID, Vec<TokenizerStateID>> = BTreeMap::new();
+        // --- Post-process Possible Matches ---
+        // match_events: Vec<(TokenizerStateID, TerminalID, &RangeSetBlaze<usize>)>
+        // We need to aggregate: for each (Start, Terminal), union all RangeSetBlazes.
+        let mut sorted_matches = match_events;
+        // Sort by StartState then TerminalID
+        sorted_matches.par_sort_unstable_by(|a, b| {
+            a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1))
+        });
 
-                // Execute regex transition once per unique current state
-                for (cur, sources) in inverse_map {
-                    let exec = tokenizer.execute_from_state(segment_bytes, *cur);
-                    if let Some(end_state_val) = exec.end_state {
-                        let end_sid = TokenizerStateID(end_state_val);
-                        next_inverse.entry(end_sid).or_default().extend(sources.iter().cloned());
+        let possible_matches: BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>> = 
+            sorted_matches
+                .into_par_iter()
+                .fold(
+                    || BTreeMap::new(),
+                    |mut acc: BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>, (sid, tid, rsb)| {
+                        acc.entry(sid)
+                           .or_default()
+                           .entry(tid)
+                           .or_default()
+                           .extend(rsb.iter());
+                        acc
                     }
-                }
+                )
+                .reduce(
+                    || BTreeMap::new(),
+                    |mut a, b| {
+                        for (sid, t_map) in b {
+                            let entry = a.entry(sid).or_default();
+                            for (tid, bv) in t_map {
+                                entry.entry(tid).or_default().union_with(&bv);
+                            }
+                        }
+                        a
+                    }
+                );
 
-                if !next_inverse.is_empty() {
-                    // Reconstruct the forward map for storage
-                    let mut forward_map = BTreeMap::new();
-                    for (end_sid, sources) in &next_inverse {
-                        for src in sources {
-                            forward_map.insert(*src, *end_sid);
+        (state_map_out, possible_matches)
+    }
+
+    /// Internal recursive function for parallel traversal
+    fn dfs_maps_and_matches<'a>(
+        node: &'a VocabPrefixTreeNode,
+        current_states: Vec<(TokenizerStateID, Vec<TokenizerStateID>)>,
+        tokenizer: &Regex,
+    ) -> (
+        Vec<(LLMTokenID, Vec<(TokenizerStateID, TokenizerStateID)>)>, // State map entries
+        Vec<(TokenizerStateID, TerminalID, &'a RangeSetBlaze<usize>)> // Match events
+    ) {
+        let children: Vec<_> = node.iter_children().collect();
+
+        // Process children in parallel
+        children.par_iter().map(|(edge_bytes, child)| {
+            let mut local_state_entries = Vec::new();
+            let mut local_matches = Vec::new();
+
+            // Group next states: TargetState -> Vec<OriginalState>
+            // We use a temporary vector of pairs then sort/group to avoid BTreeMap/HashMap overhead in inner loop
+            let mut next_states_raw: Vec<(TokenizerStateID, TokenizerStateID)> = Vec::with_capacity(current_states.len());
+
+            for (curr, sources) in &current_states {
+                let exec = tokenizer.execute_from_state(edge_bytes, *curr);
+                
+                // 1. Handle Matches (terminals triggered on this edge)
+                // If we matched terminal T, then for all `sources`, terminal T is valid for 
+                // all tokens in the child's subtree.
+                if !exec.matches.is_empty() {
+                    let reachable = child.reachable_token_ids();
+                    for m in &exec.matches {
+                        let tid = TerminalID(m.id);
+                        for &src in sources {
+                            local_matches.push((src, tid, reachable));
                         }
                     }
-
-                    let tok_id = child.token_id();
-                    {
-                        let mut guard = results.lock().unwrap();
-                        guard.push((LLMTokenID(tok_id), forward_map));
-                    }
-                    dfs(tokenizer, child, &next_inverse, results);
                 }
-            });
-        }
 
-        dfs(tokenizer, vocab_root, &initial_inverse, &results);
+                // 2. Handle Transitions
+                if let Some(end_val) = exec.end_state {
+                    let end_sid = TokenizerStateID(end_val);
+                    // Propagate all sources to this new state
+                    for &src in sources {
+                        next_states_raw.push((end_sid, src));
+                    }
+                }
+            }
 
-        // Sort and insert into DedupValueMap sequentially
-        let mut out = DedupValueMap::new();
-        let mut collected = results.into_inner().unwrap();
-        collected.sort_by_key(|(k, _)| *k);
-        for (k, v) in collected {
-            out.insert(k, v);
-        }
-        out
+            // If we have valid next states, group them for recursion
+            if !next_states_raw.is_empty() {
+                // Group by TargetState (end_sid)
+                next_states_raw.sort_unstable_by_key(|k| k.0);
+                
+                let mut next_grouped: Vec<(TokenizerStateID, Vec<TokenizerStateID>)> = Vec::new();
+                if !next_states_raw.is_empty() {
+                    let mut cur_target = next_states_raw[0].0;
+                    let mut cur_group = Vec::new();
+                    for (target, src) in next_states_raw {
+                        if target != cur_target {
+                            next_grouped.push((cur_target, cur_group));
+                            cur_group = Vec::new();
+                            cur_target = target;
+                        }
+                        cur_group.push(src);
+                    }
+                    next_grouped.push((cur_target, cur_group));
+                }
+
+                // If child is a valid token, record state mappings
+                // LLMTokenID -> (Original -> CurrentAtChild)
+                // Note: vocab tree nodes have a token_id (0 for root, usually >0 for others).
+                // We assume non-zero/valid tokens are what we care about, or we simply record all.
+                // The existing logic used `child.token_id()` and collected it.
+                let token_id = child.token_id();
+                // Only record if it's a meaningful token (convention: usually 0 is root, but sometimes valid)
+                // Logic from `build` suggests checking validity, but here we just map what's in the tree.
+                // However, we must construct the map entry: (Original -> Target)
+                // The `next_grouped` contains (Target -> [Originals]). We need to flatten to (Original -> Target).
+                
+                let mut state_map_vec = Vec::new();
+                for (target, sources) in &next_grouped {
+                    for &src in sources {
+                        state_map_vec.push((src, *target));
+                    }
+                }
+                local_state_entries.push((LLMTokenID(token_id), state_map_vec));
+
+                // Recurse
+                let (child_entries, child_matches) = Self::dfs_maps_and_matches(child, next_grouped, tokenizer);
+                local_state_entries.extend(child_entries);
+                local_matches.extend(child_matches);
+            }
+
+            (local_state_entries, local_matches)
+        })
+        .reduce(
+            || (Vec::new(), Vec::new()),
+            |mut a, b| {
+                a.0.extend(b.0);
+                a.1.extend(b.1);
+                a
+            }
+        )
     }
 
     /// Rearrange possible_matches: state -> terminal -> BV(tokens)
@@ -1081,75 +1171,6 @@ impl GrammarConstraint {
         out.insert(LLMTokenID(current_token as usize), current_map);
 
         out
-    }
-
-    fn compute_possible_matches_for_vocab_node(
-        tokenizer: &Regex,
-        vocab_node: &VocabPrefixTreeNode,
-        tokenizer_state_id: TokenizerStateID,
-        cache: &mut HashMap<
-            (*const VocabPrefixTreeNode, TokenizerStateID),
-            BTreeMap<GrammarTokenID, LLMTokenBV>,
-        >,
-    ) -> BTreeMap<GrammarTokenID, LLMTokenBV> {
-        let cache_key = (vocab_node as *const VocabPrefixTreeNode, tokenizer_state_id);
-        if let Some(cached_result) = cache.get(&cache_key) {
-            return cached_result.clone();
-        }
-
-        let mut result_map: BTreeMap<GrammarTokenID, LLMTokenBV> = BTreeMap::new();
-
-        for (segment_bytes, child_vocab_arc) in vocab_node.iter_children() {
-            let child_vocab_node_ref = child_vocab_arc;
-            let exec_result =
-                tokenizer.execute_from_state(&segment_bytes, tokenizer_state_id);
-
-            for token_match in &exec_result.matches {
-                let grammar_token_id = GrammarTokenID(token_match.id);
-                let applicable_tokens_rangeset =
-                    child_vocab_node_ref.reachable_token_ids();
-                result_map
-                    .entry(grammar_token_id)
-                    .or_insert_with(LLMTokenBV::zeros)
-                    .extend(applicable_tokens_rangeset.iter());
-            }
-
-            if let Some(final_state_val) = exec_result.end_state {
-                let final_tokenizer_state_id = TokenizerStateID(final_state_val);
-
-                let matches_possible_from_new_tokenizer_state: BTreeSet<_> =
-                    tokenizer
-                        .tokens_accessible_from_state(final_tokenizer_state_id)
-                        .into_iter()
-                        .collect();
-
-                let matches_from_current_segment: BTreeSet<_> = exec_result
-                    .matches
-                    .iter()
-                    .map(|m| GrammarTokenID(m.id))
-                    .collect();
-
-                let new_grammar_tokens_to_look_for =
-                    &matches_possible_from_new_tokenizer_state
-                        - &matches_from_current_segment;
-
-                if !new_grammar_tokens_to_look_for.is_empty() {
-                    let next_results = Self::compute_possible_matches_for_vocab_node(
-                        tokenizer,
-                        child_vocab_node_ref,
-                        final_tokenizer_state_id,
-                        cache,
-                    );
-                    for (token, bv) in next_results {
-                        *result_map
-                            .entry(token)
-                            .or_insert_with(LLMTokenBV::zeros) |= bv;
-                    }
-                }
-            }
-        }
-        cache.insert(cache_key, result_map.clone());
-        result_map
     }
 
     // -----------------------------------------------------------------------
