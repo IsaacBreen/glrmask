@@ -318,7 +318,7 @@ pub fn remove_productions_with_undefined_nonterminals(
             break;
         }
         crate::debug!(
-            2,
+            3,
             "Removing {} productions with undefined non-terminals.",
             removed_productions.len()
         );
@@ -337,11 +337,11 @@ pub fn remove_productions_with_undefined_nonterminals(
             all_rhs_nonterminals.len()
         );
         for nt in all_rhs_nonterminals.difference(&defined_lhs_nonterminals) {
-            crate::debug!(2, "  {}", nt.0);
+            crate::debug!(4, "  {}", nt.0);
         }
-        crate::debug!(2, "Removed productions:");
+        crate::debug!(5, "Removed productions:");
         for (i, prod) in removed_productions {
-            crate::debug!(2, "  {}", prod);
+            crate::debug!(5, "  {}", prod);
         }
     }
 
@@ -802,7 +802,7 @@ pub fn resolve_direct_right_recursion(
         // `recursive_rules` is guaranteed to be non-empty because `lhs` is in `recursive_nts`.
         let new_nt = NonTerminal(new_name_generator(&lhs.0));
         crate::debug!(
-            2,
+            4,
             "Resolving direct right-recursion for '{}', creating new non-terminal '{}'",
             lhs.0,
             new_nt.0
@@ -818,7 +818,7 @@ pub fn resolve_direct_right_recursion(
                 rhs: new_rhs,
             };
             crate::debug!(
-                2,
+                5,
                 "  Transforming non-recursive rule '{}' -> '{}'",
                 non_rec_rule,
                 new_prod
@@ -836,7 +836,7 @@ pub fn resolve_direct_right_recursion(
                 rhs: new_rhs,
             };
             crate::debug!(
-                2,
+                5,
                 "  Transforming recursive rule '{}' -> '{}'",
                 rec_rule,
                 new_prod
@@ -847,7 +847,7 @@ pub fn resolve_direct_right_recursion(
             lhs: new_nt.clone(),
             rhs: vec![],
         }; // A' -> ε
-        crate::debug!(2, "  Adding new epsilon rule: '{}'", epsilon_prod);
+        crate::debug!(5, "  Adding new epsilon rule: '{}'", epsilon_prod);
         new_productions.push(epsilon_prod);
     }
 

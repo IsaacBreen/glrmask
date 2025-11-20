@@ -832,9 +832,9 @@ fn compute_final_table(
 fn print_memory_usage(label: &str) {
     if let Some(usage) = memory_stats() {
         let physical_mem_mb = usage.physical_mem / 1024 / 1024;
-        crate::debug!(2, "Memory usage at '{}': Physical: {} MB", label, physical_mem_mb);
+        crate::debug!(4, "Memory usage at '{}': Physical: {} MB", label, physical_mem_mb);
     } else {
-        crate::debug!(2, "Couldn't get memory usage at '{}'", label);
+        crate::debug!(4, "Couldn't get memory usage at '{}'", label);
     }
 }
 
@@ -846,16 +846,16 @@ pub fn generate_glr_parser_with_maps(
     actions: BTreeMap<NonTerminal, ActionFn>,
     ignore_terminal_id: Option<TerminalID>,
 ) -> GLRParser {
-    crate::debug!(2, "Number of productions: {}", productions.len());
+    crate::debug!(3, "Number of productions: {}", productions.len());
     print_memory_usage("Start of parser generation");
 
-    crate::debug!(2, "Validating initial grammar");
+    crate::debug!(3, "Validating initial grammar");
     validate(productions).expect("Initial grammar validation failed");
     print_memory_usage("After validation");
 
     let start_production_id = 0;
 
-    crate::debug!(2, "Removing productions with undefined non-terminals");
+    crate::debug!(3, "Removing productions with undefined non-terminals");
     let mut productions =
         remove_productions_with_undefined_nonterminals(&productions, &[start_production_id]);
     print_memory_usage("After removing undefined");
@@ -880,7 +880,7 @@ pub fn generate_glr_parser_with_maps(
         }
     }
 
-    crate::debug!(2, "Number of productions: {}", productions.len());
+    crate::debug!(3, "Number of productions: {}", productions.len());
     print_memory_usage("Before Stage 1");
 
     // Prepare Light Productions (Global IDs)
@@ -915,12 +915,12 @@ pub fn generate_glr_parser_with_maps(
 
     let start_nt_id = lhs_ids[0];
 
-    crate::debug!(2, "Stage 1 (LR(0) Automaton)");
+    crate::debug!(3, "Stage 1 (LR(0) Automaton)");
     let (stage_1_table, item_set_map) =
         stage_1(&light_productions, &lhs_ids, num_terminals, num_nonterminals);
     print_memory_usage("After Stage 1");
 
-    crate::debug!(2, "Computing First/Follow Sets");
+    crate::debug!(3, "Computing First/Follow Sets");
     let first_sets = compute_first_sets_ids_with_lhs(
         &light_productions,
         &lhs_ids,
@@ -939,7 +939,7 @@ pub fn generate_glr_parser_with_maps(
     );
     print_memory_usage("After First/Follow");
 
-    crate::debug!(2, "Computing Final Table (Merging Stages 2-8)");
+    crate::debug!(3, "Computing Final Table (Merging Stages 2-8)");
     let (final_table_map, start_state_id, everything_state_id) = compute_final_table(
         stage_1_table,
         &item_set_map,

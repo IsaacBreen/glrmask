@@ -557,7 +557,7 @@ pub fn precompute4(
     // Argument kept for compatibility if needed, though unused in this version
     _max_llm_token_id: usize,
 ) -> DWA {
-    crate::debug!(4, "Starting precompute4 with NWA input...");
+    crate::debug!(3, "Starting precompute4 with NWA input...");
 
     // 1. Build template DWAs
     let now = Instant::now();
@@ -567,7 +567,7 @@ pub fn precompute4(
     };
     let ignore_dwa = build_ignore_terminal_dwa();
     crate::debug!(
-        4,
+        3,
         "Built {} template DWAs in {:?}",
         template_dwas.len(),
         now.elapsed()
@@ -596,7 +596,7 @@ pub fn precompute4(
         initial_values_bv,
     );
     crate::debug!(
-        4,
+        3,
         "Pass 1 (Token BVs & Signatures) took: {:?}. Found {} unique signatures.",
         start_pass1.elapsed(),
         unique_signatures.len()

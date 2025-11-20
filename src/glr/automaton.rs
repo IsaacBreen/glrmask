@@ -185,7 +185,7 @@ pub fn compute_null_nonterminals(productions: &[Production]) -> BTreeSet<NonTerm
 }
 
 pub fn compute_nullable_nonterminals(productions: &[Production]) -> BTreeSet<NonTerminal> {
-    crate::debug!(3, "Computing nullable non-terminals");
+    crate::debug!(4, "Computing nullable non-terminals");
     let start = std::time::Instant::now();
     let res = compute_nonterminal_nullability(productions)
         .into_iter()
@@ -193,7 +193,7 @@ pub fn compute_nullable_nonterminals(productions: &[Production]) -> BTreeSet<Non
             (status == Nullability::Nullable || status == Nullability::Null).then_some(nt)
         })
         .collect();
-    crate::debug!(3, "Computed nullable non-terminals in {:.2?}", start.elapsed());
+    crate::debug!(4, "Computed nullable non-terminals in {:.2?}", start.elapsed());
     res
 }
 
@@ -201,7 +201,7 @@ pub fn compute_first_sets_for_nonterminals(
     productions: &[Production],
     nullable_nonterminals: &BTreeSet<NonTerminal>,
 ) -> BTreeMap<NonTerminal, BTreeSet<Terminal>> {
-    crate::debug!(3, "Computing first sets for non-terminals");
+    crate::debug!(4, "Computing first sets for non-terminals");
     let start = std::time::Instant::now();
     use std::iter;
     use bimap::BiBTreeMap;
@@ -279,7 +279,7 @@ pub fn compute_first_sets_for_nonterminals(
             (nt, set)
         })
         .collect();
-    crate::debug!(3, "Computed first sets in {:.2?}", start.elapsed());
+    crate::debug!(4, "Computed first sets in {:.2?}", start.elapsed());
     res
 }
 
@@ -288,7 +288,7 @@ pub fn compute_follow_sets_for_nonterminals(
     first_sets: &BTreeMap<NonTerminal, BTreeSet<Terminal>>,
     nullable_nonterminals: &BTreeSet<NonTerminal>,
 ) -> BTreeMap<NonTerminal, BTreeSet<Option<Terminal>>> {
-    crate::debug!(3, "Computing follow sets for non-terminals");
+    crate::debug!(4, "Computing follow sets for non-terminals");
     let start = std::time::Instant::now();
 
     let mut follow_sets: BTreeMap<NonTerminal, BTreeSet<Option<Terminal>>> = BTreeMap::new();
@@ -386,7 +386,7 @@ pub fn compute_follow_sets_for_nonterminals(
         }
     }
 
-    crate::debug!(3, "Computed follow sets in {:.2?}", start.elapsed());
+    crate::debug!(4, "Computed follow sets in {:.2?}", start.elapsed());
     follow_sets
 }
 

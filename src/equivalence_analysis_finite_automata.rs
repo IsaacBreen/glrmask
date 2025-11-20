@@ -122,7 +122,7 @@ pub fn find_equivalence_classes(
     strings: &[Vec<u8>],
     initial_states: &[usize],
 ) -> BTreeMap<Vec<usize>, Vec<usize>> {
-    crate::debug!(2, "Analyzing string equivalence for {} strings.", strings.len());
+    crate::debug!(3, "Analyzing string equivalence for {} strings.", strings.len());
     let pb = create_pb(4);
 
     pb.set_message("Precomputing signatures...");

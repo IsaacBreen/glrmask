@@ -753,7 +753,7 @@ impl GrammarDefinition {
             start_production_name.push('\'');
         }
         all_names.insert(start_production_name.clone());
-        debug!(2, "Augmented start_production_name: {:?}", start_production_name);
+        debug!(4, "Augmented start_production_name: {:?}", start_production_name);
 
         let mut productions = vec![
             Production {
@@ -1124,12 +1124,12 @@ impl JSONConvertible for CompiledGrammar {
 impl CompiledGrammar {
     /// Creates a `CompiledGrammar` from an `Arc<GrammarDefinition>`.
     pub fn from_definition(definition: Arc<GrammarDefinition>) -> Self {
-        debug!(2, "Building tokenizer from definition");
+        debug!(3, "Building tokenizer from definition");
         let terminal_expr_groups = definition.get_terminal_expressions_for_tokenizer();
         let tokenizer_expr_groups_obj = groups(terminal_expr_groups);
         let tokenizer = tokenizer_expr_groups_obj.build();
 
-        debug!(2, "Building GLR parser from definition");
+        debug!(3, "Building GLR parser from definition");
         let mut terminal_map: BiBTreeMap<Terminal, TerminalID> = definition.regex_name_to_group_id.iter().map(|(name, group_id)| (Terminal::RegexName(name.clone()), TerminalID(*group_id))).collect();
         for (val_bytes, group_id) in &definition.literal_to_group_id {
             terminal_map.insert(Terminal::Literal(val_bytes.clone()), TerminalID(*group_id));

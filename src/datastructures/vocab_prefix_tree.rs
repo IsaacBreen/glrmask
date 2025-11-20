@@ -176,7 +176,7 @@ impl VocabPrefixTree {
         // Handle empty input gracefully.
         tree.max_token_id = tokens.iter().map(|(id, _)| *id).max().unwrap_or(0);
 
-        crate::debug!(2, "Building vocab prefix tree (fast builder)");
+        crate::debug!(3, "Building vocab prefix tree (fast builder)");
 
         // 1) Separate empty-string token (last one wins) and collect non-empty tokens.
         let mut nonempty: Vec<(usize, Box<[u8]>)> = Vec::with_capacity(tokens.len());
@@ -191,11 +191,11 @@ impl VocabPrefixTree {
 
         if nonempty.is_empty() {
             // Compute reachable IDs on the trivial tree.
-            crate::debug!(2, "Computing reachable IDs (fast path)");
+            crate::debug!(4, "Computing reachable IDs (fast path)");
             let t0 = std::time::Instant::now();
             tree.recompute_reachable_ids_via_paths();
             let t1 = std::time::Instant::now();
-            crate::debug!(2, "Done computing reachable IDs in {:?}", t1.duration_since(t0));
+            crate::debug!(4, "Done computing reachable IDs in {:?}", t1.duration_since(t0));
             if !tree.has_empty_string_token && tree.root.token_id == 0 && !tree.root.reachable_token_ids.is_empty() {
                 tree.root.reachable_token_ids.remove(0);
             }
@@ -300,11 +300,11 @@ impl VocabPrefixTree {
         tree.root = finalize(0, &mut nodes);
 
         // 6) Compute reachable token IDs for all nodes efficiently (existing fast path).
-        crate::debug!(2, "Computing reachable IDs (fast path)");
+        crate::debug!(4, "Computing reachable IDs (fast path)");
         let t0 = std::time::Instant::now();
         tree.recompute_reachable_ids_via_paths();
         let t1 = std::time::Instant::now();
-        crate::debug!(2, "Done computing reachable IDs in {:?}", t1.duration_since(t0));
+        crate::debug!(4, "Done computing reachable IDs in {:?}", t1.duration_since(t0));
 
         // 7) Adjust root's reachable IDs if its ID 0 is just the convention.
         if !tree.has_empty_string_token && tree.root.token_id == 0 && !tree.root.reachable_token_ids.is_empty() {

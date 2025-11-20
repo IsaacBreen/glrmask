@@ -555,12 +555,12 @@ impl GrammarConstraint {
                 &initial_states,
             );
 
-        if is_debug_level_enabled(2) {
+        if is_debug_level_enabled(3) {
             let num_original_tokens = llm_token_strings.len();
             let num_classes = equivalence_classes.len();
-            crate::debug!(2, "LLM Token Equivalence Analysis:");
-            crate::debug!(2, "  - Original LLM tokens: {}", num_original_tokens);
-            crate::debug!(2, "  - Equivalence classes: {}", num_classes);
+            crate::debug!(3, "LLM Token Equivalence Analysis:");
+            crate::debug!(3, "  - Original LLM tokens: {}", num_original_tokens);
+            crate::debug!(3, "  - Equivalence classes: {}", num_classes);
         }
 
         let mut original_to_internal_map = BTreeMap::new();
@@ -623,20 +623,20 @@ impl GrammarConstraint {
         }
 
         // Vocab tree for internal tokens.
-        crate::debug!(2, "Building vocab prefix tree for possible_matches computation");
+        crate::debug!(3, "Building vocab prefix tree for possible_matches computation");
         let internal_tokens_for_vocab: Vec<(usize, Vec<u8>)> =
             internal_llm_token_map.iter().map(|(b, id)| (id.0, b.clone())).collect();
         let vocab_tree = VocabPrefixTree::build(&internal_tokens_for_vocab);
-        crate::debug!(2, "Done building vocab prefix tree");
+        crate::debug!(3, "Done building vocab prefix tree");
 
         // Unified fast pass for maps and matches
-        crate::debug!(2, "Computing maps and possible_matches (fast parallel pass)");
+        crate::debug!(3, "Computing maps and possible_matches (fast parallel pass)");
         let (state_map_by_llm, computed_possible_matches) =
             Self::build_maps_and_matches(&tokenizer, &vocab_tree.root);
         let terminal_map_by_llm = Self::rearrange_possible_matches(&computed_possible_matches);
 
         // Compute terminal follow sets, then map to IDs.
-        crate::debug!(2, "Computing terminal follow sets");
+        crate::debug!(3, "Computing terminal follow sets");
         let terminal_follow_sets_named = compute_terminal_follow_sets(&parser.productions);
         let mut terminal_follow_map: BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>> =
             BTreeMap::new();
@@ -700,7 +700,7 @@ impl GrammarConstraint {
         let mut possible_matches_precompute1 = computed_possible_matches.clone();
         if precompute_vocab_before_p1.original_to_internal != vocab.original_to_internal {
             crate::debug!(
-                2,
+                3,
                 "Remapping LLM token IDs in possible_matches due to Trie1 optimization."
             );
             let mut old_to_new_map: BTreeMap<usize, usize> = BTreeMap::new();
@@ -759,7 +759,7 @@ impl GrammarConstraint {
         let max_internal_llm_token_id = vocab.internal_max_llm_token;
         
         // Instead of using trie based precompute4, we convert the output of run_precompute1 to NWA immediately
-        crate::debug!(4, "Converting precompute1 Trie to NWA...");
+        crate::debug!(3, "Converting precompute1 Trie to NWA...");
         let nwa = convert_precompute1_to_nwa(&precomputed1_trie_map, &trie1_god_wrapper);
         
         // Run precompute4 using the NWA
