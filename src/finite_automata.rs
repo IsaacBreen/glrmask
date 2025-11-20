@@ -980,13 +980,7 @@ impl NFA {
 
     fn compute_epsilon_closures(&self) -> Vec<Vec<usize>> {
         (0..self.states.len())
-            .map(|state| {
-                if self.states[state].epsilon_transitions.is_empty() {
-                    vec![state]
-                } else {
-                    self.epsilon_closure(state).into_iter().collect()
-                }
-            })
+            .map(|state| self.epsilon_closure(state).into_iter().collect())
             .collect()
     }
 
@@ -997,11 +991,6 @@ impl NFA {
         let mut worklist: Vec<FrozenSet<usize>> = Vec::new();
 
         let epsilon_closures = self.compute_epsilon_closures();
-
-        // Reusable buffers to avoid allocation in the loop
-        let mut transition_targets: Vec<Vec<usize>> = (0..256).map(|_| Vec::new()).collect();
-        let mut used_inputs: Vec<u8> = Vec::with_capacity(256);
-        let mut seen_input: [bool; 256] = [false; 256];
 
         // Compute epsilon-closure of the NFA start state and use it as the DFA start state.
         let start_closure = &epsilon_closures[self.start_state];
@@ -1029,12 +1018,12 @@ impl NFA {
                 .get(&current_set)
                 .expect("DFA state set not found in map");
 
-            // Clear reusable buffers
-            for &input in &used_inputs {
-                transition_targets[input as usize].clear();
-                seen_input[input as usize] = false;
-            }
-            used_inputs.clear();
+            // Fast per-byte aggregation of outgoing transitions:
+            // - transition_targets[c] = list of NFA target states reachable on byte c
+            // - used_inputs = list of bytes that actually occur (to avoid scanning all 0..=255)
+            let mut transition_targets: [Vec<usize>; 256] = std::array::from_fn(|_| Vec::new());
+            let mut used_inputs: Vec<u8> = Vec::new();
+            let mut seen_input: [bool; 256] = [false; 256];
 
             // For each NFA state in the current DFA state, collect outgoing transitions.
             for &state in current_set.iter() {
@@ -1049,18 +1038,21 @@ impl NFA {
             }
 
             // For each input symbol, compute the epsilon-closure of the resulting state set.
-            for &input_u8 in &used_inputs {
+            for input_u8 in used_inputs {
                 let next_states = &transition_targets[input_u8 as usize];
                 if next_states.is_empty() {
                     continue;
                 }
 
                 // epsilon-closure(move(S, input_u8))
-                let mut closure_vec = Vec::with_capacity(next_states.len());
+                let mut closure = BTreeSet::new();
                 for &next_state in next_states {
-                    closure_vec.extend_from_slice(&epsilon_closures[next_state]);
+                    for &s in &epsilon_closures[next_state] {
+                        closure.insert(s);
+                    }
                 }
-                let frozen_closure = FrozenSet::from_iter(closure_vec);
+                // Convert BTreeSet -> FrozenSet without re-sorting or deduping.
+                let frozen_closure: FrozenSet<usize> = FrozenSet::from(closure);
 
                 // If this set of states is new, add it as a new DFA state.
                 let next_dfa_state = if let Some(&existing_state) = dfa_state_map.get(&frozen_closure)
