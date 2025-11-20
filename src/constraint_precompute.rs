@@ -434,15 +434,10 @@ impl<'r> Precomputer1<'r> {
                     if nodes.len() > 1 {
                         let merged_state = self.nwa.add_state();
                         let mut merged_path_mask = RangeSetBlaze::new();
-                        // let mut merged_live = RangeSetBlaze::new();
                         for (node, path_mask) in &*nodes {
                             self.nwa.add_epsilon(merged_state, *node, path_mask.clone().into());
                             merged_path_mask |= path_mask;
-                            // if let Some(live) = self.live_tokens.get(node) {
-                            //     merged_live |= live;
-                            // }
                         }
-                        // self.live_tokens.insert(merged_state, merged_live);
                         nodes.clear();
                         nodes.insert(merged_state, merged_path_mask);
                     }
@@ -526,7 +521,6 @@ impl<'r> Precomputer1<'r> {
 
                             let target = {
                                 let n = self.nwa.add_state();
-                                // self.live_tokens.insert(n, RangeSetBlaze::new());
                                 node_cache.insert(n, (RangeSetBlaze::new(), false));
                                 n
                             };
@@ -598,12 +592,6 @@ impl<'r> Precomputer1<'r> {
                     let weight = SimpleBitset::from_rsb(bv);
                     let _ = self.nwa.add_transition(src, k.0 as i16, dst, weight);
                 }
-            }
-            for (node_idx, live_tokens) in pending_live_updates {
-                // self.live_tokens
-                //     .entry(node_idx)
-                //     .or_default()
-                //     .bitor_assign(&live_tokens);
             }
 
             if !next_level_assoc.is_empty() {
