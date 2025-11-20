@@ -585,6 +585,10 @@ impl DWA {
         }
 
         if self.body.start_state >= n || !live[self.body.start_state] {
+            if n == 1 && self.states[0] == DWAState::default() {
+                return false;
+            }
+
             let changed = n > 0;
             if changed {
                 self.states = DWAStates::default();
@@ -1363,6 +1367,10 @@ impl NWA {
         }
 
         if self.body.start_state >= n || !live[self.body.start_state] {
+            if n == 1 && self.states[0] == NWAState::default() {
+                return false;
+            }
+
             let changed = n > 0;
             if changed {
                 self.states = NWAStates::default();
