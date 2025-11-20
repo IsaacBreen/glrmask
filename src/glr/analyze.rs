@@ -1192,6 +1192,18 @@ fn get_non_null_part(expr: &Expr) -> Option<Expr> {
     }
 }
 
+fn check_is_noop(prods: &[Production], term: &Terminal, nullable: bool) -> bool {
+    if nullable {
+        if prods.len() != 2 { return false; }
+        let has_term = prods.iter().any(|p| p.rhs.len() == 1 && p.rhs[0] == Symbol::Terminal(term.clone()));
+        let has_eps = prods.iter().any(|p| p.rhs.is_empty());
+        has_term && has_eps
+    } else {
+        if prods.len() != 1 { return false; }
+        prods[0].rhs.len() == 1 && prods[0].rhs[0] == Symbol::Terminal(term.clone())
+    }
+}
+
 pub fn optimize_grammar(
     productions: &mut Vec<Production>,
     regex_name_to_group_id: &mut BiBTreeMap<String, usize>,
@@ -1247,6 +1259,9 @@ fn convert_regular_nts_to_terminals(
     let mut pending_nts: Vec<NonTerminal> = prods_by_lhs.keys().cloned().collect();
     let mut loop_changed = true;
     let mut any_conversion_happened = false;
+
+    // Reverse map for structural sharing of regexes
+    let mut expr_to_group_id: HashMap<Expr, usize> = group_id_to_expr.iter().map(|(k, v)| (v.clone(), *k)).collect();
 
     // Heuristic: Process in reverse alphabetical order. 
     // This often helps with generated grammars (like s0, s1, ...) where s(i) depends on s(i+1).
@@ -1350,10 +1365,32 @@ fn convert_regular_nts_to_terminals(
                     continue;
                 }
 
-                let new_term = create_new_terminal(expr_for_terminal, &nt.0, regex_name_to_group_id, group_id_to_expr);
-                nts_to_replace.insert(nt.clone(), (new_term, is_nt_nullable));
-                loop_changed = true;
-                any_conversion_happened = true;
+                // Deduplicate: Check if this expression already has a terminal
+                let (new_term, created_new) = if let Some(&gid) = expr_to_group_id.get(&expr_for_terminal) {
+                    // Reuse existing terminal
+                    let term_name = regex_name_to_group_id.get_by_right(&gid).expect("Group ID missing from name map").clone();
+                    (Terminal::RegexName(term_name), false)
+                } else {
+                    // Create new terminal
+                    let t = create_new_terminal(expr_for_terminal.clone(), &nt.0, regex_name_to_group_id, group_id_to_expr);
+                    // Update reverse map
+                    if let Terminal::RegexName(ref name) = t {
+                        if let Some(&gid) = regex_name_to_group_id.get_by_left(name) {
+                             expr_to_group_id.insert(expr_for_terminal, gid);
+                        }
+                    }
+                    (t, true)
+                };
+
+                // If we reused a terminal, check if this replacement is actually a no-op (grammar already matches)
+                let is_noop = !created_new && check_is_noop(prods, &new_term, is_nt_nullable);
+
+                if !is_noop {
+                    nts_to_replace.insert(nt.clone(), (new_term, is_nt_nullable));
+                    loop_changed = true;
+                    any_conversion_happened = true;
+                }
+                // If no-op, we don't add to nts_to_replace, effectively skipping it for this pass.
             } else {
                 next_pending.push(nt);
             }
