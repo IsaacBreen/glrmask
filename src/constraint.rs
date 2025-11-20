@@ -874,7 +874,7 @@ impl GrammarConstraint {
         );
         crate::constraint_extra::print_precompute_stats1(
             &stats,
-            token_name_map,
+            &token_name_map,
             &trie1_god,
         );
 
