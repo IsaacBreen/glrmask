@@ -848,6 +848,8 @@ pub fn precompute4(
         },
     );
 
+    crate::debug!(3, "Finished Pass 2");
+
     // Combine collected final bodies
     let final_bodies = Arc::try_unwrap(final_bodies_arc)
         .unwrap()
