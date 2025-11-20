@@ -844,56 +844,185 @@ impl GrammarConstraint {
         DedupValueMap<LLMTokenID, BTreeMap<TokenizerStateID, TokenizerStateID>>,
         BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
     ) {
-        let mut state_map_out = DedupValueMap::new();
-        let mut possible_matches: BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>> = BTreeMap::new();
-
-        let mut initial_states: BTreeMap<TokenizerStateID, Vec<TokenizerStateID>> = BTreeMap::new();
-        for sid in tokenizer.iter_states() {
-            initial_states.entry(sid).or_default().push(sid);
+        // Flatten DFA for fast access (u32::MAX represents None)
+        struct FastDFA {
+            transitions: Vec<u32>, // size = num_states * 256
+            finalizers: Vec<Vec<TerminalID>>, // size = num_states
         }
-
-        let mut stack = vec![(vocab_root, initial_states)];
-
-        while let Some((node, current_states)) = stack.pop() {
-            let token_id = node.token_id();
-            
-            if !current_states.is_empty() {
-                let mut map = BTreeMap::new();
-                for (target, sources) in &current_states {
-                    for &src in sources {
-                        map.insert(src, *target);
-                    }
-                }
-                state_map_out.insert(LLMTokenID(token_id), map);
-            }
-
+        
+        // Recursive DFS helper
+        fn process_vocab_node_dfs(
+            node: &VocabPrefixTreeNode,
+            current_states: Vec<(u32, Vec<u32>)>,
+            dfa: &FastDFA,
+            out_state_map: &mut Vec<(LLMTokenID, BTreeMap<TokenizerStateID, TokenizerStateID>)>,
+            out_matches: &mut BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
+        ) {
             for (edge_bytes, child) in node.iter_children() {
-                let mut next_grouped: BTreeMap<TokenizerStateID, Vec<TokenizerStateID>> = BTreeMap::new();
-                
-                for (target, sources) in &current_states {
-                    let exec = tokenizer.execute_from_state(edge_bytes, *target);
-                    
-                    if !exec.matches.is_empty() {
-                        let reachable = child.reachable_token_ids();
-                        for m in &exec.matches {
-                            let tid = TerminalID(m.id);
-                            for &src in sources {
-                                possible_matches
-                                    .entry(src).or_default()
-                                    .entry(tid).or_default()
-                                    .extend(reachable.iter());
+                let mut next_grouped_map: HashMap<u32, Vec<u32>> = HashMap::new();
+                let reachable_bv: LLMTokenBV = child.reachable_token_ids().into();
+
+                for (start, sources) in &current_states {
+                    let mut curr = *start;
+                    let mut valid = true;
+
+                    for &b in edge_bytes.iter() {
+                        let offset = (curr as usize) * 256 + (b as usize);
+                        let next = dfa.transitions[offset];
+                        if next == u32::MAX {
+                            valid = false;
+                            break;
+                        }
+                        curr = next;
+
+                        // If matched, record for all sources
+                        if !dfa.finalizers[curr as usize].is_empty() {
+                            for &tid in &dfa.finalizers[curr as usize] {
+                                for &src in sources {
+                                    out_matches
+                                        .entry(TokenizerStateID(src as usize))
+                                        .or_default()
+                                        .entry(tid)
+                                        .or_default()
+                                        .union_with(&reachable_bv);
+                                }
                             }
                         }
                     }
 
-                    if let Some(end_val) = exec.end_state {
-                        let end_sid = TokenizerStateID(end_val);
-                        next_grouped.entry(end_sid).or_default().extend(sources.iter().cloned());
+                    if valid {
+                        next_grouped_map.entry(curr).or_default().extend_from_slice(sources);
                     }
                 }
 
+                let next_grouped: Vec<(u32, Vec<u32>)> = next_grouped_map.into_iter().collect();
+                
                 if !next_grouped.is_empty() {
-                    stack.push((child, next_grouped));
+                    // Record state map
+                    let mut map = BTreeMap::new();
+                    for (target, sources) in &next_grouped {
+                        let tgt = TokenizerStateID(*target as usize);
+                        for &src in sources {
+                            map.insert(TokenizerStateID(src as usize), tgt);
+                        }
+                    }
+                    out_state_map.push((LLMTokenID(child.token_id()), map));
+
+                    // Recurse
+                    process_vocab_node_dfs(child, next_grouped, dfa, out_state_map, out_matches);
+                }
+            }
+        }
+
+        let dfa = &tokenizer.dfa;
+        let num_states = dfa.states.len();
+        let mut transitions = vec![u32::MAX; num_states * 256];
+        let mut finalizers = Vec::with_capacity(num_states);
+        
+        for (i, state) in dfa.states.iter().enumerate() {
+            for (byte, &next) in &state.transitions {
+                transitions[i * 256 + (byte as usize)] = next as u32;
+            }
+            finalizers.push(state.finalizers.iter().map(|&gid| TerminalID(gid)).collect());
+        }
+        
+        let fast_dfa = FastDFA {
+            transitions,
+            finalizers,
+        };
+
+        // Group initial states by current state (identity mapping at root)
+        let mut initial_states: Vec<(u32, Vec<u32>)> = Vec::with_capacity(num_states);
+        for i in 0..num_states {
+            initial_states.push((i as u32, vec![i as u32]));
+        }
+
+        // Parallel processing of root children
+        let root_children: Vec<_> = vocab_root.iter_children().collect();
+        let results: Vec<_> = root_children
+            .par_iter()
+            .map(|(edge_bytes, child_node)| {
+                let mut local_state_map_entries = Vec::new();
+                let mut local_possible_matches: BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>> = BTreeMap::new();
+                
+                // Manually process the first edge to bootstrap recursion
+                let mut next_grouped_map: HashMap<u32, Vec<u32>> = HashMap::new();
+                let reachable_bv: LLMTokenBV = child_node.reachable_token_ids().into();
+
+                for (start, sources) in &initial_states {
+                    let mut curr = *start;
+                    let mut valid = true;
+                    for &b in edge_bytes.iter() {
+                        let offset = (curr as usize) * 256 + (b as usize);
+                        let next = fast_dfa.transitions[offset];
+                        if next == u32::MAX {
+                            valid = false;
+                            break;
+                        }
+                        curr = next;
+                        if !fast_dfa.finalizers[curr as usize].is_empty() {
+                             for &tid in &fast_dfa.finalizers[curr as usize] {
+                                 for &src in sources {
+                                     local_possible_matches
+                                         .entry(TokenizerStateID(src as usize))
+                                         .or_default()
+                                         .entry(tid)
+                                         .or_default()
+                                         .union_with(&reachable_bv);
+                                 }
+                             }
+                        }
+                    }
+                    if valid {
+                        next_grouped_map.entry(curr).or_default().extend_from_slice(sources);
+                    }
+                }
+
+                let next_grouped: Vec<(u32, Vec<u32>)> = next_grouped_map.into_iter().collect();
+                if !next_grouped.is_empty() {
+                    let mut map = BTreeMap::new();
+                    for (target, sources) in &next_grouped {
+                        let tgt = TokenizerStateID(*target as usize);
+                        for &src in sources {
+                            map.insert(TokenizerStateID(src as usize), tgt);
+                        }
+                    }
+                    local_state_map_entries.push((LLMTokenID(child_node.token_id()), map));
+                    
+                    process_vocab_node_dfs(
+                        child_node, 
+                        next_grouped, 
+                        &fast_dfa, 
+                        &mut local_state_map_entries, 
+                        &mut local_possible_matches
+                    );
+                }
+
+                (local_state_map_entries, local_possible_matches)
+            })
+            .collect();
+
+        // Merge
+        let mut state_map_out = DedupValueMap::new();
+        // Root identity
+        {
+            let mut root_map = BTreeMap::new();
+            for i in 0..num_states {
+                let s = TokenizerStateID(i);
+                root_map.insert(s, s);
+            }
+            state_map_out.insert(LLMTokenID(vocab_root.token_id()), root_map);
+        }
+
+        let mut possible_matches: BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>> = BTreeMap::new();
+        for (entries, matches) in results {
+            for (tid, map) in entries {
+                state_map_out.insert(tid, map);
+            }
+            for (sid, term_map) in matches {
+                let target = possible_matches.entry(sid).or_default();
+                for (tid, bv) in term_map {
+                    target.entry(tid).or_default().union_with(&bv);
                 }
             }
         }
