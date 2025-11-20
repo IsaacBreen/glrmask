@@ -15,13 +15,6 @@ use crate::precompute4::weighted_automata::{DWA, NWA, NWABody, NWAStateID, NWASt
 use crate::r#macro::is_debug_level_enabled;
 use crate::types::{TerminalID as GrammarTokenID, TerminalID};
 use crate::tokenizer::TokenizerStateID;
-use crate::precompute4::weighted_automata::common::Label;
-use crate::precompute4::weighted_automata::determinization_rustfst::determinize_nwa_to_dwa;
-
-// Re-export for backward compatibility: `FullDWABuildError` used to be defined here.
-pub use crate::precompute4::template_nwa::FullDWABuildError;
-
-pub type Precomputed4 = DWA;
 
 struct SimplifyRustfstConfig {
     rm_epsilon: bool,
@@ -41,6 +34,13 @@ impl NWA {
     pub fn simplify_rustfst(&mut self) { self.simplify(); }
     pub fn simplify_rustfst_with_config(&mut self, _config: SimplifyRustfstConfig) { self.simplify(); }
 }
+
+// Re-export for backward compatibility: `FullDWABuildError` used to be defined here.
+pub use crate::precompute4::template_nwa::FullDWABuildError;
+use crate::precompute4::weighted_automata::common::Label;
+use crate::precompute4::weighted_automata::determinization_rustfst::determinize_nwa_to_dwa;
+
+pub type Precomputed4 = DWA;
 
 fn convert_node_to_nwa(
     node_idx: PrecomputeNode1Index,
@@ -145,7 +145,6 @@ fn convert_dwa_state_to_trie_node(
     if let Some(&idx) = cache.get(&state_id) {
         return idx;
     }
-
 
     let contents = PrecomputedNodeContents { end: false, live_tokens: LLMTokenBV::ones(max_llm_token_id + 1) };
     let node = PrecomputeNode1::new(contents);
@@ -308,8 +307,12 @@ pub fn precompute4(
 
     let mut final_bodies: BTreeMap<TokenizerStateID, NWABody> = BTreeMap::new();
 
-    // Initialize specializer for optimization
-    let mut specializer = DwaSpecializer::new(bit_to_term.clone());
+    // Cache for abstract templates:
+    // Key: Sorted list of (Option<TerminalID>) that are active in the bundle.
+    // Value: A simplified DWA where weights are indices into the key vector.
+    let mut template_cache: HashMap<Vec<Option<TerminalID>>, DWA> = HashMap::new();
+    let mut cache_hits = 0;
+    let mut cache_misses = 0;
 
     let now = Instant::now();
     Trie::special_map_grouped(
@@ -362,59 +365,60 @@ pub fn precompute4(
                 NWABody { start_state: start }
             };
 
-            crate::debug!(6, "NWA states:\n{}", states_arena.borrow());
-            crate::debug!(6, "{:?}", nwa_bodies_map);
-
             for (right_body, terminal_map) in nwa_bodies_map {
-                let mut effective_terminal_map = BTreeMap::new();
-                for (terminal_id_opt, weight) in terminal_map {
-                    effective_terminal_map.insert(terminal_id_opt, weight);
-                }
+                // 1. Identify the signature (Active Terminals)
+                let mut active_entries: Vec<(Option<TerminalID>, Weight)> = terminal_map
+                    .into_iter()
+                    .filter(|(_, w)| !w.is_empty())
+                    .collect();
 
-                if effective_terminal_map.is_empty() {
+                if active_entries.is_empty() {
                     continue;
                 }
 
-                crate::debug!(7, "[DWA Simplify] Specializing DWA");
-                let left_dwa = specializer.get_specialized_dwa(&super_dwa, &effective_terminal_map);
-                crate::debug!(7, "[DWA Simplify] DWA specialization done (using cache if available)");
+                // Sort by terminal ID to ensure canonical key for cache
+                active_entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+                let signature: Vec<Option<TerminalID>> = active_entries.iter().map(|(t, _)| *t).collect();
+                let concrete_weights: Vec<Weight> = active_entries.iter().map(|(_, w)| w.clone()).collect();
+
+                // 2. Get or Create Template
+                let left_dwa = if let Some(template) = template_cache.get(&signature) {
+                    cache_hits += 1;
+                    instantiate_dwa_template(template, &concrete_weights)
+                } else {
+                    cache_misses += 1;
+                    // Construct abstract bundle for specialization: Map terminal -> index-based weight
+                    let mut abstract_bundle = BTreeMap::new();
+                    for (idx, term) in signature.iter().enumerate() {
+                        abstract_bundle.insert(*term, Weight::from_item(idx));
+                    }
+
+                    let mut template = specialize_dwa(&super_dwa, &abstract_bundle, &bit_to_term);
+                    template.simplify();
+                    template_cache.insert(signature.clone(), template.clone());
+
+                    instantiate_dwa_template(&template, &concrete_weights)
+                };
 
                 let left_nwa = NWA::from_dwa(&left_dwa);
-                crate::debug!(7, "[DWA Simplify] NWA created");
-
                 let mut states = states_arena.borrow_mut();
                 let (left_body_start, remap) =
                     states.copy_subgraph_from(&left_nwa.states, left_nwa.body.start_state);
-                crate::debug!(7, "[DWA Simplify] Copied NWA subgraph");
 
                 let new_states_filter: HashSet<NWAStateID> = remap.values().cloned().collect();
-
                 let left_body = NWABody { start_state: left_body_start };
 
                 let composed_body = NWA::_concatenate_components(&mut states, &left_body, &right_body, &Weight::all());
 
                 if !new_states_filter.is_empty() {
-                    crate::debug!(7, "[DWA Simplify] Applying cancellations");
                     apply_cancellations(&mut states, &new_states_filter);
-                    crate::debug!(7, "[DWA Simplify] Applying finality fixpoint");
                     apply_finality_fixpoint(&mut states, &new_states_filter);
-                    crate::debug!(7, "[DWA Simplify] Removing negative transitions");
                     remove_negative_transitions(&mut states, &new_states_filter);
-                    crate::debug!(7, "[DWA Simplify] Cancellations, finality fixpoint, and negative transitions done");
                 }
 
                 nwa_body = NWA::union_components(&mut states, &nwa_body, &composed_body);
             }
-
-            crate::debug!(
-                6,
-                "At trie node {:?}, obtained NWA body with start state {} and {} states.",
-                node_idx,
-                nwa_body.start_state,
-                states_arena.borrow().len()
-            );
-            crate::debug!(6, "NWA body:\n{}", nwa_body);
-            crate::debug!(6, "NWA states:\n{}", states_arena.borrow());
 
             if !tokens.is_empty() {
                 if let Some(tokenizer_state_ids) = original_trie1_roots_map.get(&node_idx) {
@@ -429,6 +433,7 @@ pub fn precompute4(
         },
     );
     crate::debug!(4, "Reversed trie traversal (special_map_grouped) took: {:?}", now.elapsed());
+    println!("DWA Template Cache Stats: Hits={}, Misses={} (Unique signatures)", cache_hits, cache_misses);
 
     // Combine all final NWA bodies into a single NWA
     let mut combined_nwa_states = states_arena.into_inner();
@@ -584,102 +589,60 @@ fn specialize_weight(
     new_weight
 }
 
+/// Instantiates a template DWA (where weights are indices 0..N) with concrete weights.
+///
+/// `ordered_weights[i]` corresponds to the concrete weight for index `i`.
+fn instantiate_dwa_template(
+    template: &DWA,
+    ordered_weights: &[Weight],
+) -> DWA {
+    let mut instance = template.clone();
+    let mut union_cache: HashMap<Weight, Weight> = HashMap::new();
+
+    // Helper to map abstract weights to concrete unions
+    let mut map_weight = |w: &Weight| -> Weight {
+        if w.is_empty() {
+            return Weight::zeros();
+        }
+        if let Some(res) = union_cache.get(w) {
+            return res.clone();
+        }
+
+        let mut concrete = Weight::zeros();
+        // The template weights contain indices. We union the concrete weights at those indices.
+        for idx in w.iter_up_to(ordered_weights.len()) {
+            if let Some(concrete_w) = ordered_weights.get(idx) {
+                concrete |= concrete_w;
+            }
+        }
+        union_cache.insert(w.clone(), concrete.clone());
+        concrete
+    };
+
+    for state in &mut instance.states.0 {
+        if let Some(fw) = &mut state.final_weight {
+            *fw = map_weight(fw);
+            if fw.is_empty() {
+                state.final_weight = None;
+            }
+        }
+        if let Some(sw) = &mut state.state_weight {
+            *sw = map_weight(sw);
+            if sw.is_empty() {
+                state.state_weight = None;
+            }
+        }
+        for tw in state.trans_weights.values_mut() {
+            *tw = map_weight(tw);
+        }
+
+        state.trans_weights.retain(|_, w| !w.is_empty());
+        state.transitions.retain(|k, _| state.trans_weights.contains_key(k));
+    }
+
+    instance
+}
+
 fn simplify_remove_epsilon(nwa: &mut NWA) {
     nwa.simplify_rustfst_with_config(SimplifyRustfstConfig::default().with_rm_epsilon(true));
-}
-
-
-struct DwaSpecializer {
-    cache: HashMap<BTreeSet<Option<TerminalID>>, DWA>,
-    bit_to_term: Vec<Option<TerminalID>>,
-}
-
-impl DwaSpecializer {
-    fn new(bit_to_term: Vec<Option<TerminalID>>) -> Self {
-        Self {
-            cache: HashMap::new(),
-            bit_to_term,
-        }
-    }
-
-    fn get_specialized_dwa(
-        &mut self,
-        super_dwa: &DWA,
-        bundle: &BTreeMap<Option<TerminalID>, Weight>,
-    ) -> DWA {
-        if self.are_weights_disjoint(bundle) {
-            self.get_disjoint_specialized_dwa(super_dwa, bundle)
-        } else {
-            let mut dwa = specialize_dwa(super_dwa, bundle, &self.bit_to_term);
-            dwa.simplify();
-            dwa
-        }
-    }
-
-    fn are_weights_disjoint(&self, bundle: &BTreeMap<Option<TerminalID>, Weight>) -> bool {
-        let values: Vec<&Weight> = bundle.values().collect();
-        for i in 0..values.len() {
-            for j in (i + 1)..values.len() {
-                if !values[i].is_disjoint(values[j]) {
-                    return false;
-                }
-            }
-        }
-        true
-    }
-
-    fn get_disjoint_specialized_dwa(
-        &mut self,
-        super_dwa: &DWA,
-        bundle: &BTreeMap<Option<TerminalID>, Weight>,
-    ) -> DWA {
-        let keys: BTreeSet<Option<TerminalID>> = bundle.keys().cloned().collect();
-
-        if !self.cache.contains_key(&keys) {
-            let mut canonical_bundle = BTreeMap::new();
-            for (i, key) in keys.iter().enumerate() {
-                let mut w = Weight::zeros();
-                w.insert(i); 
-                canonical_bundle.insert(*key, w);
-            }
-
-            let mut canonical_dwa = specialize_dwa(super_dwa, &canonical_bundle, &self.bit_to_term);
-            canonical_dwa.simplify();
-            self.cache.insert(keys.clone(), canonical_dwa);
-        }
-
-        let canonical_dwa = self.cache.get(&keys).unwrap();
-        let sorted_keys: Vec<Option<TerminalID>> = keys.into_iter().collect();
-        let concrete_weights: Vec<Weight> = sorted_keys.iter().map(|k| bundle.get(k).unwrap().clone()).collect();
-
-        self.concretize_dwa(canonical_dwa, &concrete_weights)
-    }
-
-    fn concretize_dwa(&self, canonical_dwa: &DWA, concrete_weights: &[Weight]) -> DWA {
-        let mut dwa = canonical_dwa.clone();
-        let mut weight_cache: HashMap<Weight, Weight> = HashMap::new();
-
-        let mut map_weight = |w: &Weight| -> Weight {
-            if w.is_empty() { return Weight::zeros(); }
-            if let Some(cached) = weight_cache.get(w) { return cached.clone(); }
-            
-            let mut res = Weight::zeros();
-            if !concrete_weights.is_empty() {
-                for bit_idx in w.iter_up_to(concrete_weights.len() - 1) { 
-                    if let Some(concrete) = concrete_weights.get(bit_idx) {
-                        res |= concrete;
-                    }
-                }
-            }
-            weight_cache.insert(w.clone(), res.clone());
-            res
-        };
-
-        for state in &mut dwa.states.0 {
-             if let Some(fw) = &mut state.final_weight { *fw = map_weight(fw); }
-             if let Some(sw) = &mut state.state_weight { *sw = map_weight(sw); }
-             for tw in state.trans_weights.values_mut() { *tw = map_weight(tw); }
-        }
-        dwa
-    }
 }
