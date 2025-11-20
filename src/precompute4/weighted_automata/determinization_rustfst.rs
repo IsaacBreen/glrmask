@@ -3,7 +3,7 @@
 #![allow(dead_code)]
 #![allow(clippy::needless_borrow)]
 
-use super::common::{StateID, Weight};
+use super::common::{Label, StateID, Weight};
 use super::dwa::DWA;
 use super::nwa::NWA;
 use crate::precompute4::weighted_automata::NWAStateID;
@@ -14,22 +14,38 @@ use range_set_blaze::RangeSetBlaze;
 use rustfst::algorithms::determinize::{determinize_with_config, DeterminizeConfig, DeterminizeType};
 use rustfst::algorithms::rm_epsilon::rm_epsilon;
 use rustfst::fst_properties::FstProperties;
-use rustfst::prelude::*;
+use rustfst::prelude::{Tr, EPS_LABEL, StateId, VectorFst, MutableFst, CoreFst, ExpandedFst};
 use rustfst::semirings::{
     DivideType, ReverseBack, SemiringProperties, SerializableSemiring, WeaklyDivisibleSemiring, WeightQuantize,
 };
-use rustfst::NomCustomError;
+use rustfst::{NomCustomError, Semiring, Trs};
 use std::borrow::Borrow;
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::sync::{Arc, Mutex};
 
-fn i16_to_label(label: i16) -> u32 {
-    (label as i32 - i16::MIN as i32) as u32 + 1
-}
 
-fn label_to_i16(label: u32) -> i16 {
-    ((label - 1) as i32 + i16::MIN as i32) as i16
+fn _label_to_fst_label(label: Label) -> u32 {
+    // (((label as isize) - (Label::MIN as isize)) + 1) as u32
+    (label as Label - i16::MIN as Label) as u32 + 1
+}
+fn _fst_label_to_label(label: u32) -> Label {
+    // (label as isize + Label::MIN as isize - 1) as Label
+    ((label - 1) as Label + i16::MIN as Label) as i16
+}
+fn fst_label_to_label(label: u32) -> Label {
+    assert_ne!(label, 0);
+    let result = _fst_label_to_label(label);
+    let remapped = _label_to_fst_label(result);
+    assert!(label == remapped, "label: {}, result: {}, remapped: {}", label, result, remapped);
+    result
+}
+fn label_to_fst_label(label: Label) -> u32 {
+    let result = _label_to_fst_label(label);
+    assert_ne!(result, 0);
+    let remapped = _fst_label_to_label(result);
+    assert!(label == remapped, "label: {}, result: {}, remapped: {}", label, result, remapped);
+    result
 }
 
 static WEIGHT_INTERNER: Lazy<Mutex<HashSet<Arc<Weight>>>> =
@@ -176,8 +192,8 @@ pub fn nwa_to_vector_fst(nwa: &NWA) -> VectorFst<BitsetWeight> {
                     fst.add_tr(
                         fst_state_id,
                         Tr::new(
-                            i16_to_label(*label),
-                            i16_to_label(*label),
+                            label_to_fst_label(*label),
+                            label_to_fst_label(*label),
                             BitsetWeight::new(weight.clone()),
                             state_map[target],
                         ),
@@ -235,7 +251,7 @@ pub fn vector_fst_to_dwa(fst: &VectorFst<BitsetWeight>) -> DWA {
                 }
                 let res = dwa.add_transition(
                     dwa_state_id,
-                    label_to_i16(tr.ilabel),
+                    fst_label_to_label(tr.ilabel),
                     state_map[&tr.nextstate],
                     tr.weight.value().clone(),
                 );
@@ -290,7 +306,7 @@ pub fn vector_fst_to_nwa(fst: &VectorFst<BitsetWeight>) -> NWA {
                 if tr.ilabel == EPS_LABEL {
                     nwa.states.add_epsilon(nwa_state_id, target_nwa_id, weight);
                 } else {
-                    let label = label_to_i16(tr.ilabel);
+                    let label = fst_label_to_label(tr.ilabel);
                     nwa.states.add_transition(nwa_state_id, label, target_nwa_id, weight).unwrap();
                 }
             }

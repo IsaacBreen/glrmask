@@ -2,6 +2,7 @@ use crate::precompute4::resolve_negatives::{apply_finality_fixpoint, remove_nega
 use crate::precompute4::test_weighted_automata::stochastic_equivalence_test;
 use crate::precompute4::utils::DEFAULT_TRANSITION_SYMBOL;
 use crate::precompute4::weighted_automata::{DWA, NWA, Weight};
+use crate::precompute4::weighted_automata::common::Label;
 
 #[test]
 fn test_resolve_negatives_simple_cancellation() {
@@ -12,7 +13,7 @@ fn test_resolve_negatives_simple_cancellation() {
     let s2 = d.add_state();
 
     let code_a = 7;
-    let neg_code_a = i16::MIN + code_a;
+    let neg_code_a = Label::MIN + code_a;
 
     // 0 --a--> 1
     d.add_transition(d.body.start_state, code_a, s1, Weight::from_item(2)).unwrap();
@@ -84,23 +85,23 @@ fn test_resolve_negatives_from_large_nwa_log() {
     // State 7:
     nwa.add_transition(states[7], 32767, states[6], Weight::all());
     // State 8:
-    nwa.add_transition(states[8], i16::MIN + 422, states[15], Weight::all());
+    nwa.add_transition(states[8], Label::MIN + 422, states[15], Weight::all());
     // State 9:
-    nwa.add_transition(states[9], i16::MIN + 436, states[15], Weight::all());
+    nwa.add_transition(states[9], Label::MIN + 436, states[15], Weight::all());
     // State 10:
-    nwa.add_transition(states[10], i16::MIN + 437, states[15], Weight::all());
+    nwa.add_transition(states[10], Label::MIN + 437, states[15], Weight::all());
     // State 11:
     nwa.add_transition(states[11], 436, states[14], Weight::all());
     // State 12:
-    nwa.add_transition(states[12], i16::MIN + 458, states[16], Weight::all());
+    nwa.add_transition(states[12], Label::MIN + 458, states[16], Weight::all());
     // State 13:
-    nwa.add_transition(states[13], i16::MIN + 422, states[9], Weight::all());
+    nwa.add_transition(states[13], Label::MIN + 422, states[9], Weight::all());
     // State 14:
-    nwa.add_transition(states[14], i16::MIN + 436, states[10], Weight::all());
+    nwa.add_transition(states[14], Label::MIN + 436, states[10], Weight::all());
     // State 15:
-    nwa.add_transition(states[15], i16::MIN + 458, states[17], Weight::all());
+    nwa.add_transition(states[15], Label::MIN + 458, states[17], Weight::all());
     // State 16:
-    nwa.add_transition(states[16], i16::MIN + 459, states[17], Weight::all());
+    nwa.add_transition(states[16], Label::MIN + 459, states[17], Weight::all());
     // State 17:
     nwa.add_epsilon(states[17], states[2], Weight::from_item(1));
     // State 18:
@@ -143,23 +144,23 @@ fn test_resolve_negatives_from_large_nwa_log() {
     // State 24:
     nwa.add_transition(states[24], 32767, states[23], Weight::all());
     // State 25:
-    nwa.add_transition(states[25], i16::MIN + 422, states[32], Weight::all());
+    nwa.add_transition(states[25], Label::MIN + 422, states[32], Weight::all());
     // State 26:
-    nwa.add_transition(states[26], i16::MIN + 436, states[32], Weight::all());
+    nwa.add_transition(states[26], Label::MIN + 436, states[32], Weight::all());
     // State 27:
-    nwa.add_transition(states[27], i16::MIN + 437, states[32], Weight::all());
+    nwa.add_transition(states[27], Label::MIN + 437, states[32], Weight::all());
     // State 28:
     nwa.add_transition(states[28], 436, states[31], Weight::all());
     // State 29:
-    nwa.add_transition(states[29], i16::MIN + 458, states[33], Weight::all());
+    nwa.add_transition(states[29], Label::MIN + 458, states[33], Weight::all());
     // State 30:
-    nwa.add_transition(states[30], i16::MIN + 422, states[26], Weight::all());
+    nwa.add_transition(states[30], Label::MIN + 422, states[26], Weight::all());
     // State 31:
-    nwa.add_transition(states[31], i16::MIN + 436, states[27], Weight::all());
+    nwa.add_transition(states[31], Label::MIN + 436, states[27], Weight::all());
     // State 32:
-    nwa.add_transition(states[32], i16::MIN + 458, states[34], Weight::all());
+    nwa.add_transition(states[32], Label::MIN + 458, states[34], Weight::all());
     // State 33:
-    nwa.add_transition(states[33], i16::MIN + 459, states[34], Weight::all());
+    nwa.add_transition(states[33], Label::MIN + 459, states[34], Weight::all());
     // State 34:
     nwa.add_epsilon(states[34], states[18], Weight::from_item(1));
     // State 35:
@@ -200,23 +201,23 @@ fn test_resolve_negatives_from_large_nwa_log() {
     // State 40:
     nwa.add_transition(states[40], 32767, states[39], Weight::all());
     // State 41:
-    nwa.add_transition(states[41], i16::MIN + 422, states[48], Weight::all());
+    nwa.add_transition(states[41], Label::MIN + 422, states[48], Weight::all());
     // State 42:
-    nwa.add_transition(states[42], i16::MIN + 436, states[48], Weight::all());
+    nwa.add_transition(states[42], Label::MIN + 436, states[48], Weight::all());
     // State 43:
-    nwa.add_transition(states[43], i16::MIN + 437, states[48], Weight::all());
+    nwa.add_transition(states[43], Label::MIN + 437, states[48], Weight::all());
     // State 44:
     nwa.add_transition(states[44], 436, states[47], Weight::all());
     // State 45:
-    nwa.add_transition(states[45], i16::MIN + 458, states[49], Weight::all());
+    nwa.add_transition(states[45], Label::MIN + 458, states[49], Weight::all());
     // State 46:
-    nwa.add_transition(states[46], i16::MIN + 422, states[42], Weight::all());
+    nwa.add_transition(states[46], Label::MIN + 422, states[42], Weight::all());
     // State 47:
-    nwa.add_transition(states[47], i16::MIN + 436, states[43], Weight::all());
+    nwa.add_transition(states[47], Label::MIN + 436, states[43], Weight::all());
     // State 48:
-    nwa.add_transition(states[48], i16::MIN + 458, states[50], Weight::all());
+    nwa.add_transition(states[48], Label::MIN + 458, states[50], Weight::all());
     // State 49:
-    nwa.add_transition(states[49], i16::MIN + 459, states[50], Weight::all());
+    nwa.add_transition(states[49], Label::MIN + 459, states[50], Weight::all());
     // State 50:
     nwa.add_epsilon(states[50], states[35], Weight::from_item(1));
     // State 51:
@@ -258,23 +259,23 @@ fn test_resolve_negatives_from_large_nwa_log() {
     // State 56:
     nwa.add_transition(states[56], 32767, states[55], Weight::all());
     // State 57:
-    nwa.add_transition(states[57], i16::MIN + 422, states[64], Weight::all());
+    nwa.add_transition(states[57], Label::MIN + 422, states[64], Weight::all());
     // State 58:
-    nwa.add_transition(states[58], i16::MIN + 436, states[64], Weight::all());
+    nwa.add_transition(states[58], Label::MIN + 436, states[64], Weight::all());
     // State 59:
-    nwa.add_transition(states[59], i16::MIN + 437, states[64], Weight::all());
+    nwa.add_transition(states[59], Label::MIN + 437, states[64], Weight::all());
     // State 60:
     nwa.add_transition(states[60], 436, states[63], Weight::all());
     // State 61:
-    nwa.add_transition(states[61], i16::MIN + 458, states[65], Weight::all());
+    nwa.add_transition(states[61], Label::MIN + 458, states[65], Weight::all());
     // State 62:
-    nwa.add_transition(states[62], i16::MIN + 422, states[58], Weight::all());
+    nwa.add_transition(states[62], Label::MIN + 422, states[58], Weight::all());
     // State 63:
-    nwa.add_transition(states[63], i16::MIN + 436, states[59], Weight::all());
+    nwa.add_transition(states[63], Label::MIN + 436, states[59], Weight::all());
     // State 64:
-    nwa.add_transition(states[64], i16::MIN + 458, states[66], Weight::all());
+    nwa.add_transition(states[64], Label::MIN + 458, states[66], Weight::all());
     // State 65:
-    nwa.add_transition(states[65], i16::MIN + 459, states[66], Weight::all());
+    nwa.add_transition(states[65], Label::MIN + 459, states[66], Weight::all());
     // State 66:
     nwa.add_epsilon(states[66], states[51], Weight::from_item(1));
     // State 67:
@@ -289,7 +290,7 @@ fn test_resolve_negatives_from_large_nwa_log() {
     d.simplify();
     println!("DWA before negative resolution:\n{}", d);
     assert_eq!(
-        d.eval_word_weight(&[0, 422, i16::MIN + 422, i16::MIN + 458, 458, i16::MIN + 458, i16::MIN + 459, 459, DEFAULT_TRANSITION_SYMBOL, 422, i16::MIN + 422, i16::MIN + 436, i16::MIN + 458, 458, i16::MIN + 458, i16::MIN + 459]),
+        d.eval_word_weight(&[0, 422, Label::MIN + 422, Label::MIN + 458, 458, Label::MIN + 458, Label::MIN + 459, 459, DEFAULT_TRANSITION_SYMBOL, 422, Label::MIN + 422, Label::MIN + 436, Label::MIN + 458, 458, Label::MIN + 458, Label::MIN + 459]),
         Weight::from_item(1),
         "DWA did not accept [0, 422] with expected weight after resolving negatives."
     );
@@ -323,15 +324,15 @@ fn test_resolve_negatives_from_nwa_log_2() {
     // State 1: 422 -> 2 (weight: ALL)
     d.add_transition(states[1], 422, states[2], Weight::all()).unwrap();
     // State 2: neg(422) -> 3 (weight: ALL)
-    d.add_transition(states[2], i16::MIN + 422, states[3], Weight::all()).unwrap();
+    d.add_transition(states[2], Label::MIN + 422, states[3], Weight::all()).unwrap();
     // State 3: neg(458) -> 4 (weight: [1])
-    d.add_transition(states[3], i16::MIN + 458, states[4], Weight::from_item(1)).unwrap();
+    d.add_transition(states[3], Label::MIN + 458, states[4], Weight::from_item(1)).unwrap();
     // State 4: 458 -> 5 (weight: ALL)
     d.add_transition(states[4], 458, states[5], Weight::all()).unwrap();
     // State 5: neg(458) -> 6 (weight: ALL)
-    d.add_transition(states[5], i16::MIN + 458, states[6], Weight::all()).unwrap();
+    d.add_transition(states[5], Label::MIN + 458, states[6], Weight::all()).unwrap();
     // State 6: neg(459) -> 7 (weight: [1])
-    d.add_transition(states[6], i16::MIN + 459, states[7], Weight::from_item(1)).unwrap();
+    d.add_transition(states[6], Label::MIN + 459, states[7], Weight::from_item(1)).unwrap();
     // State 7: 459 -> 8 (weight: ALL)
     d.add_transition(states[7], 459, states[8], Weight::all()).unwrap();
     // State 8: 32767 -> 9 (weight: ALL)
@@ -339,17 +340,17 @@ fn test_resolve_negatives_from_nwa_log_2() {
     // State 9: 422 -> 10 (weight: ALL)
     d.add_transition(states[9], 422, states[10], Weight::all()).unwrap();
     // State 10: neg(422) -> 11 (weight: ALL)
-    d.add_transition(states[10], i16::MIN + 422, states[11], Weight::all()).unwrap();
+    d.add_transition(states[10], Label::MIN + 422, states[11], Weight::all()).unwrap();
     // State 11: neg(436) -> 12 (weight: ALL)
-    d.add_transition(states[11], i16::MIN + 436, states[12], Weight::all()).unwrap();
+    d.add_transition(states[11], Label::MIN + 436, states[12], Weight::all()).unwrap();
     // State 12: neg(458) -> 13 (weight: [1])
-    d.add_transition(states[12], i16::MIN + 458, states[13], Weight::from_item(1)).unwrap();
+    d.add_transition(states[12], Label::MIN + 458, states[13], Weight::from_item(1)).unwrap();
     // State 13: 458 -> 14 (weight: ALL)
     d.add_transition(states[13], 458, states[14], Weight::all()).unwrap();
     // State 14: neg(458) -> 15 (weight: ALL)
-    d.add_transition(states[14], i16::MIN + 458, states[15], Weight::all()).unwrap();
+    d.add_transition(states[14], Label::MIN + 458, states[15], Weight::all()).unwrap();
     // State 15: neg(459) -> 16 (weight: [1])
-    d.add_transition(states[15], i16::MIN + 459, states[16], Weight::from_item(1)).unwrap();
+    d.add_transition(states[15], Label::MIN + 459, states[16], Weight::from_item(1)).unwrap();
     // State 16: final_weight: ALL
     d.set_final_weight(states[16], Weight::all()).unwrap();
 
@@ -379,13 +380,13 @@ fn test_resolve_negatives_long_cancellation_chain() {
     let s30 = d.add_state();
 
     let code7 = 7;
-    let neg_code7 = i16::MIN + code7;
+    let neg_code7 = Label::MIN + code7;
     let code3 = 3;
-    let neg_code3 = i16::MIN + code3;
+    let neg_code3 = Label::MIN + code3;
     let code1 = 1;
-    let neg_code1 = i16::MIN + code1;
+    let neg_code1 = Label::MIN + code1;
     let code2 = 2;
-    let neg_code2 = i16::MIN + code2;
+    let neg_code2 = Label::MIN + code2;
 
     d.add_transition(d.body.start_state, code7, s5, Weight::all()).unwrap();
     d.add_transition(s5, neg_code7, s10, Weight::all()).unwrap();
@@ -418,10 +419,10 @@ fn test_resolve_negatives_from_debug_log() {
     let s6 = d.add_state();
 
     let code0 = 0;
-    let neg_code0 = i16::MIN + code0;
-    let neg_code1 = i16::MIN + 1;
+    let neg_code0 = Label::MIN + code0;
+    let neg_code1 = Label::MIN + 1;
     let code2 = 2;
-    let neg_code2 = i16::MIN + code2;
+    let neg_code2 = Label::MIN + code2;
 
     d.add_transition(d.body.start_state, code0, s1, Weight::all()).unwrap();
     d.add_transition(d.body.start_state, code2, s2, Weight::all()).unwrap();
@@ -456,8 +457,8 @@ fn test_resolve_negatives_from_intermediate_debug_log() {
     let s6 = d.add_state();
     let s7 = d.add_state();
 
-    let neg_code1 = i16::MIN + 1;
-    let neg_code7 = i16::MIN + 7;
+    let neg_code1 = Label::MIN + 1;
+    let neg_code7 = Label::MIN + 7;
 
     // State 0 (start)
     d.add_transition(d.body.start_state, 1, s1, Weight::all()).unwrap();
@@ -521,7 +522,7 @@ fn test_resolve_negatives_minimal_loop_with_default() {
     let s1 = d.add_state();
     let s2 = d.add_state();
 
-    let neg_code1 = i16::MIN + 1;
+    let neg_code1 = Label::MIN + 1;
 
     // 0 --neg(1)--> 1
     d.add_transition(d.body.start_state, neg_code1, s1, Weight::all()).unwrap();
