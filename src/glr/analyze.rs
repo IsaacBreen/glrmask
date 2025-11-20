@@ -1037,6 +1037,97 @@ fn create_new_terminal(
     Terminal::RegexName(name)
 }
 
+enum ResolvedSymbol {
+    Expr(Expr),
+    SelfRef,
+}
+
+fn efficient_choice(exprs: Vec<Expr>) -> Expr {
+    let mut flat = Vec::with_capacity(exprs.len());
+    for e in exprs {
+        if let Expr::Choice(subs) = e {
+            flat.extend(subs);
+        } else {
+            flat.push(e);
+        }
+    }
+    if flat.len() == 1 {
+        flat.pop().unwrap()
+    } else {
+        Expr::Choice(flat)
+    }
+}
+
+fn efficient_seq(exprs: Vec<Expr>) -> Expr {
+    let mut flat = Vec::with_capacity(exprs.len());
+    for e in exprs {
+        if let Expr::Seq(subs) = e {
+            flat.extend(subs);
+        } else {
+            flat.push(e);
+        }
+    }
+    if flat.len() == 1 {
+        flat.pop().unwrap()
+    } else {
+        Expr::Seq(flat)
+    }
+}
+
+fn resolve_production_rhs(
+    rhs: &[Symbol],
+    nt: &NonTerminal,
+    literal_to_group_id: &BiBTreeMap<Vec<u8>, usize>,
+    regex_name_to_group_id: &BiBTreeMap<String, usize>,
+    group_id_to_expr: &BTreeMap<usize, Expr>,
+    nts_to_replace: &BTreeMap<NonTerminal, Terminal>,
+    ignore_expr: &Option<Expr>,
+) -> Option<Vec<ResolvedSymbol>> {
+    let mut seq = Vec::new();
+    for (i, sym) in rhs.iter().enumerate() {
+        if i > 0 {
+            if let Some(ref ie) = ignore_expr {
+                seq.push(ResolvedSymbol::Expr(Expr::Quantifier(
+                    Box::new(ie.clone()),
+                    QuantifierType::ZeroOrMore,
+                )));
+            }
+        }
+
+        match sym {
+            Symbol::Terminal(t) => {
+                let e = get_expr_for_terminal(
+                    t,
+                    literal_to_group_id,
+                    regex_name_to_group_id,
+                    group_id_to_expr,
+                )?;
+                seq.push(ResolvedSymbol::Expr(e));
+            }
+            Symbol::NonTerminal(n) => {
+                if n == nt {
+                    seq.push(ResolvedSymbol::SelfRef);
+                } else if let Some(t) = nts_to_replace.get(n) {
+                    let e = get_expr_for_terminal(
+                        t,
+                        literal_to_group_id,
+                        regex_name_to_group_id,
+                        group_id_to_expr,
+                    )?;
+                    seq.push(ResolvedSymbol::Expr(e));
+                } else {
+                    // Depends on unconverted NT
+                    return None;
+                }
+            }
+        }
+    }
+    if seq.is_empty() {
+        seq.push(ResolvedSymbol::Expr(Expr::Epsilon));
+    }
+    Some(seq)
+}
+
 pub fn optimize_grammar(
     productions: &mut Vec<Production>,
     regex_name_to_group_id: &mut BiBTreeMap<String, usize>,
@@ -1074,171 +1165,115 @@ fn convert_regular_nts_to_terminals(
     start_symbol: &NonTerminal,
     ignore_terminal_id: Option<crate::types::TerminalID>,
 ) -> bool {
-    let mut changed = false;
     let mut prods_by_lhs: BTreeMap<NonTerminal, Vec<Production>> = BTreeMap::new();
     for p in productions.iter() {
         prods_by_lhs.entry(p.lhs.clone()).or_default().push(p.clone());
     }
 
     let mut nts_to_replace: BTreeMap<NonTerminal, Terminal> = BTreeMap::new();
-    let mut start_replacement: Option<Terminal> = None;
 
     let ignore_expr = if let Some(tid) = ignore_terminal_id {
         group_id_to_expr.get(&tid.0).cloned()
     } else {
         None
     };
-    let ignore_seq = if let Some(ie) = ignore_expr {
-        Some(Expr::Quantifier(Box::new(ie), QuantifierType::ZeroOrMore))
-    } else {
-        None
-    };
 
-    for (nt, prods) in &prods_by_lhs {
-        // Check 1: Is it a pure sequence/choice of terminals?
-        // e.g. A -> T1 T2 | T3
-        // Crucially, we MUST NOT optimize if any production is empty (epsilon), as that creates a nullable terminal.
-        let all_pure = prods.iter().all(|p| !p.rhs.is_empty() && p.rhs.iter().all(|s| matches!(s, Symbol::Terminal(_))));
-        
-        if all_pure {
-            let mut choices = Vec::new();
+    // We perform a fixed-point iteration here.
+    // This allows chains like A->B, B->C, C->Terminal to be fully resolved in one go.
+    let mut pending_nts: Vec<NonTerminal> = prods_by_lhs.keys().cloned().collect();
+    let mut loop_changed = true;
+    let mut any_conversion_happened = false;
+
+    while loop_changed {
+        loop_changed = false;
+        let mut next_pending = Vec::with_capacity(pending_nts.len());
+
+        for nt in pending_nts {
+            let prods = &prods_by_lhs[&nt];
+
+            // Analyze productions
+            let mut base_exprs: Vec<Expr> = Vec::new();
+            let mut left_rec_exprs: Vec<Expr> = Vec::new();
+            let mut right_rec_exprs: Vec<Expr> = Vec::new();
+            let mut failed = false;
+
             for p in prods {
-                let mut seq = Vec::new();
-                for (i, s) in p.rhs.iter().enumerate() {
-                    if let Symbol::Terminal(t) = s {
-                        if let Some(e) = get_expr_for_terminal(t, literal_to_group_id, regex_name_to_group_id, group_id_to_expr) {
-                            if i > 0 {
-                                if let Some(ref ie) = ignore_seq {
-                                    seq.push(ie.clone());
-                                }
-                            }
-                            seq.push(e);
-                        } else {
-                            // Should not happen if grammar is consistent
-                            seq.clear(); break;
-                        }
+                if let Some(seq) = resolve_production_rhs(
+                    &p.rhs,
+                    &nt,
+                    literal_to_group_id,
+                    regex_name_to_group_id,
+                    group_id_to_expr,
+                    &nts_to_replace,
+                    &ignore_expr,
+                ) {
+                    let self_count = seq.iter().filter(|s| matches!(s, ResolvedSymbol::SelfRef)).count();
+                    if self_count > 1 {
+                        failed = true; // Multiple self-refs (e.g. center embedding or A -> A A) hard to convert simply
+                        break;
                     }
-                }
-                if !seq.is_empty() || p.rhs.is_empty() { // Handle epsilon production as empty seq
-                    choices.push(if seq.len() == 1 { seq[0].clone() } else { Expr::Seq(seq) });
-                }
-            }
 
-            if !choices.is_empty() {
-                // Prevent infinite loop: if start symbol is already a single terminal, stop.
-                if nt == start_symbol && prods.len() == 1 && prods[0].rhs.len() == 1 {
-                    continue;
-                }
-                let expr = if choices.len() == 1 { choices[0].clone() } else { Expr::Choice(choices) };
-                let new_term = create_new_terminal(expr, &nt.0, regex_name_to_group_id, group_id_to_expr);
-                if nt == start_symbol {
-                    start_replacement = Some(new_term);
-                } else {
-                    nts_to_replace.insert(nt.clone(), new_term);
-                }
-                continue;
-            }
-        }
-
-        // Check 2: Is it a simple Recursion (A -> A T | Base, or A -> T A | Base)?
-        // We can only optimize this if 'Base' is NON-EMPTY (non-nullable).
-        if prods.len() == 2 {
-            let (recursive_prods, base_prods): (Vec<&Production>, Vec<&Production>) = 
-                prods.iter().partition(|p| p.rhs.contains(&Symbol::NonTerminal(nt.clone())));
-
-            if recursive_prods.len() == 1 && base_prods.len() == 1 {
-                let rec = recursive_prods[0];
-                let base = base_prods[0];
-
-                // Base must be non-empty and pure terminals
-                if base.rhs.is_empty() || !base.rhs.iter().all(|s| matches!(s, Symbol::Terminal(_))) {
-                    continue;
-                }
-
-                // Build Base Expr
-                let mut base_exprs = Vec::new();
-                let mut failed = false;
-                for s in &base.rhs {
-                    if let Symbol::Terminal(t) = s {
-                        if let Some(e) = get_expr_for_terminal(t, literal_to_group_id, regex_name_to_group_id, group_id_to_expr) {
-                            base_exprs.push(e);
+                    if self_count == 0 {
+                        // Base case
+                        let exprs: Vec<Expr> = seq.into_iter().map(|s| match s { ResolvedSymbol::Expr(e) => e, _ => unreachable!() }).collect();
+                        base_exprs.push(efficient_seq(exprs));
+                    } else {
+                        // Recursive case
+                        // Check position
+                        if let ResolvedSymbol::SelfRef = seq[0] {
+                             // Left recursive: [Self, Rest...]
+                             let exprs: Vec<Expr> = seq.into_iter().skip(1).map(|s| match s { ResolvedSymbol::Expr(e) => e, _ => unreachable!() }).collect();
+                             left_rec_exprs.push(efficient_seq(exprs));
+                        } else if let ResolvedSymbol::SelfRef = seq[seq.len()-1] {
+                             // Right recursive: [Prefix..., Self]
+                             let exprs: Vec<Expr> = seq.into_iter().take(seq.len()-1).map(|s| match s { ResolvedSymbol::Expr(e) => e, _ => unreachable!() }).collect();
+                             right_rec_exprs.push(efficient_seq(exprs));
                         } else {
-                            failed = true;
+                            failed = true; // Center embedding
                             break;
                         }
                     }
-                }
-                if failed {
-                    continue;
-                }
-                let base_expr = if base_exprs.len() == 1 { base_exprs[0].clone() } else { Expr::Seq(base_exprs) };
-
-                // Check for A -> A T
-                if rec.rhs.len() == 2 {
-                    let (s0, s1) = (&rec.rhs[0], &rec.rhs[1]);
-                    
-                    // Left recursive: A -> A T
-                    if s0 == &Symbol::NonTerminal(nt.clone()) {
-                        if let Symbol::Terminal(t) = s1 {
-                            if let Some(e) = get_expr_for_terminal(t, literal_to_group_id, regex_name_to_group_id, group_id_to_expr) {
-                                // Left recursion: A -> A T => loop (Ignore* T)*
-                                let inner = if let Some(ref ie) = ignore_seq { Expr::Seq(vec![ie.clone(), e]) } else { e };
-                                let loop_expr = Expr::Quantifier(Box::new(inner), QuantifierType::ZeroOrMore);
-                                
-                                // Result: Base Loop
-                                let full_expr = Expr::Seq(vec![base_expr, loop_expr]);
-
-                                let new_term = create_new_terminal(full_expr, &format!("{}_opt_rec", nt.0), regex_name_to_group_id, group_id_to_expr);
-                                if nt == start_symbol {
-                                    start_replacement = Some(new_term);
-                                } else {
-                                    nts_to_replace.insert(nt.clone(), new_term);
-                                }
-                                continue;
-                            }
-                        }
-                    }
-                    
-                    // Right recursive: A -> T A
-                    if s1 == &Symbol::NonTerminal(nt.clone()) {
-                        if let Symbol::Terminal(t) = s0 {
-                            if let Some(e) = get_expr_for_terminal(t, literal_to_group_id, regex_name_to_group_id, group_id_to_expr) {
-                                // Right recursion: A -> T A => loop (T Ignore*)*
-                                let inner = if let Some(ref ie) = ignore_seq { Expr::Seq(vec![e, ie.clone()]) } else { e };
-                                let loop_expr = Expr::Quantifier(Box::new(inner), QuantifierType::ZeroOrMore);
-
-                                // Result: Loop Base
-                                let full_expr = Expr::Seq(vec![loop_expr, base_expr]);
-
-                                let new_term = create_new_terminal(full_expr, &format!("{}_opt_rec", nt.0), regex_name_to_group_id, group_id_to_expr);
-                                if nt == start_symbol {
-                                    start_replacement = Some(new_term);
-                                } else {
-                                    nts_to_replace.insert(nt.clone(), new_term);
-                                }
-                                continue;
-                            }
-                        }
-                    }
+                } else {
+                    failed = true; // Dependency not yet resolved
+                    break;
                 }
             }
-        }
-    }
 
-    if let Some(term) = start_replacement {
-        // If start symbol was optimized, we replace its productions with a single one pointing to the new terminal.
-        // We DO NOT remove the start symbol itself (via nts_to_replace), but we clear its old rules.
-        productions.retain(|p| p.lhs != *start_symbol);
-        productions.push(Production {
-            lhs: start_symbol.clone(),
-            rhs: vec![Symbol::Terminal(term)],
-        });
-        changed = true;
+            if !failed {
+                // Valid structure found. Ensure recursion type consistency.
+                if !left_rec_exprs.is_empty() && !right_rec_exprs.is_empty() {
+                     // Mixed recursion is complex (e.g. Palindromes), skip.
+                     next_pending.push(nt);
+                     continue;
+                }
+
+                let base_choice = efficient_choice(base_exprs);
+                let final_expr = if !left_rec_exprs.is_empty() {
+                    let loop_choice = efficient_choice(left_rec_exprs);
+                    Expr::Seq(vec![base_choice, Expr::Quantifier(Box::new(loop_choice), QuantifierType::ZeroOrMore)])
+                } else if !right_rec_exprs.is_empty() {
+                    let loop_choice = efficient_choice(right_rec_exprs);
+                    Expr::Seq(vec![Expr::Quantifier(Box::new(loop_choice), QuantifierType::ZeroOrMore), base_choice])
+                } else {
+                    base_choice
+                };
+
+                let new_term = create_new_terminal(final_expr, &nt.0, regex_name_to_group_id, group_id_to_expr);
+                nts_to_replace.insert(nt.clone(), new_term);
+                loop_changed = true;
+                any_conversion_happened = true;
+            } else {
+                next_pending.push(nt);
+            }
+        }
+        pending_nts = next_pending;
     }
 
     if !nts_to_replace.is_empty() {
+        crate::debug!(3, "Converted {} regular non-terminals to terminals", nts_to_replace.len());
+
         // Remove productions defining replaced NTs
-        productions.retain(|p| !nts_to_replace.contains_key(&p.lhs));
+        productions.retain(|p| !nts_to_replace.contains_key(&p.lhs) || p.lhs == *start_symbol);
 
         // Update usages in other productions
         for p in productions.iter_mut() {
@@ -1251,14 +1286,19 @@ fn convert_regular_nts_to_terminals(
                 }
             }
         }
-        // Also update usages in `nts_to_replace` values? No, they are terminals now.
-        
-        // Re-run validation or simple check? Not strictly needed if logic is correct.
-        // But we might have created new adjacent terminals, so we return true.
+
+        // If start symbol was replaced, update its production to point to the new terminal
+        if let Some(term) = nts_to_replace.get(start_symbol) {
+            productions.retain(|p| p.lhs != *start_symbol);
+            productions.push(Production {
+                lhs: start_symbol.clone(),
+                rhs: vec![Symbol::Terminal(term.clone())],
+            });
+        }
         return true;
     }
 
-    changed
+    any_conversion_happened
 }
 
 fn merge_adjacent_terminals(
