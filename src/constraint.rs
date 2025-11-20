@@ -168,7 +168,7 @@ impl JSONConvertible for StageVocab {
         );
         let mut ito: Vec<(usize, Vec<usize>)> = Vec::new();
         for (k, bv) in &self.internal_to_original {
-            ito.push((*k, bv.iter().collect::<Vec<_>>()));
+            ito.push((*k, bv.iter_up_to(self.max_original_llm_token_id).collect::<Vec<_>>()));
         }
         m.insert("internal_to_original".to_string(), ito.to_json());
         m.insert(
@@ -253,7 +253,7 @@ impl StageVocab {
             }
 
             let mut temp_row = BTreeMap::<u16, Word>::new();
-            for original_id in original_bv.iter() {
+            for original_id in original_bv.iter_up_to(max_original_llm_token_id) {
                 if original_id > max_original_llm_token_id {
                     continue;
                 }
@@ -283,7 +283,7 @@ impl StageVocab {
         let num_internal_tokens = self.internal_max_llm_token + 1;
 
         let mut result_bitset_words = vec![0 as Word; original_vocab_size_words];
-        for internal_id in internal_bv.iter() {
+        for internal_id in internal_bv.iter_up_to(self.internal_max_llm_token) {
             if internal_id >= num_internal_tokens {
                 continue;
             }
@@ -303,6 +303,7 @@ impl StageVocab {
         GrammarConstraint::original_bv_to_internal_with_map(
             original_bv,
             &self.original_to_internal,
+            self.max_original_llm_token_id,
         )
     }
 }
@@ -1336,7 +1337,7 @@ impl GrammarConstraint {
             for terminal_map in possible_matches_precompute1.values_mut() {
                 for llm_token_bv in terminal_map.values_mut() {
                     let mut new_bv = LLMTokenBV::zeros();
-                    for old_id in llm_token_bv.iter() {
+                    for old_id in llm_token_bv.iter_up_to(usize::MAX) { // TODO: This is a hack
                         if let Some(new_id) = old_to_new_map.get(&old_id) {
                             new_bv.insert(*new_id);
                         }
@@ -1517,7 +1518,7 @@ impl GrammarConstraint {
         self.vocab
             .internal_to_original
             .get(&internal_id.0)
-            .and_then(|bv| bv.iter().next())
+            .and_then(|bv| bv.iter_up_to(self.vocab.internal_max_llm_token).next())
             .map(|v| LLMTokenID(v))
     }
 
@@ -1530,9 +1531,9 @@ impl GrammarConstraint {
     }
 
     fn original_bv_to_internal_with_map(
-        
         original_bv: &LLMTokenBV,
         original_to_internal: &BTreeMap<usize, usize>,
+        max_original_llm_token_id: usize,
     ) -> LLMTokenBV {
         let mut internal_bv = HybridBitset::zeros();
         if original_bv.is_all() {
@@ -1540,7 +1541,7 @@ impl GrammarConstraint {
                 internal_bv.insert(internal_id);
             }
         } else {
-            for i in original_bv.iter() {
+            for i in original_bv.iter_up_to(max_original_llm_token_id) {
                 if let Some(&internal_id) = original_to_internal.get(&i) {
                     internal_bv.insert(internal_id);
                 }
@@ -1620,7 +1621,7 @@ impl GrammarConstraint {
                 let mut local_map: BTreeMap<LLMTokenID, BTreeMap<TokenizerStateID, TerminalBV>> = BTreeMap::new();
                 for (term, bv) in tmap {
                     if bv.is_all() { continue; }
-                    for tok in bv.iter() {
+                    for tok in bv.iter_up_to(usize::MAX) {
                         local_map.entry(LLMTokenID(tok))
                             .or_default()
                             .entry(*sid)

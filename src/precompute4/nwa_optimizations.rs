@@ -172,7 +172,7 @@ pub(crate) fn propagate_and_prune_labels(parser: &GLRParser, nwa: &mut NWA) {
 
                 let process_propagation = |pw: &Weight, followers: &StateIDBV, state_info: &mut Vec<BTreeMap<ParserStateID, Weight>>| -> bool {
                     let mut any_change = false;
-                    for follower_id_val in followers.iter() {
+                    for follower_id_val in followers.iter_up_to(usize::MAX) {
                         let follower_id = ParserStateID(follower_id_val);
                         let entry = state_info[v].entry(follower_id).or_insert_with(Weight::zeros);
                         let old_len = entry.len();

@@ -202,13 +202,13 @@ impl HybridL2Bitset {
         self.inner.get(l1_index)
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (usize, usize)> + '_ {
+    pub fn iter_up_to(&self, max: usize) -> impl Iterator<Item = (usize, usize)> + '_ {
         const L2_FULL_ITER_WARNING_THRESHOLD: usize = 1_000_000;
         let is_all = self.is_all();
 
         self.inner
             .iter()
-            .flat_map(|(l1_index, bitset)| bitset.iter().map(move |l2_index| (l1_index, l2_index)))
+            .flat_map(move |(l1_index, bitset)| bitset.iter_up_to(max).map(move |l2_index| (l1_index, l2_index)))
             .enumerate()
             .map(move |(i, item)| {
                 if is_all && i == L2_FULL_ITER_WARNING_THRESHOLD {
@@ -624,11 +624,11 @@ mod tests {
             .into_iter()
             .collect();
 
-        let collected: BTreeSet<(usize, usize)> = set.iter().collect();
+        let collected: BTreeSet<(usize, usize)> = set.iter_up_to(200).collect();
         assert_eq!(collected, expected);
 
         let empty_set = HybridL2Bitset::new();
-        assert_eq!(empty_set.iter().count(), 0);
+        assert_eq!(empty_set.iter_up_to(200).count(), 0);
     }
 
     #[test]

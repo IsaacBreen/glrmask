@@ -56,7 +56,7 @@ fn format_bv_with_tokens(
 
     // Convert internal IDs to original LLM token IDs
     let mut original_tokens_bv = LLMTokenBV::zeros();
-    for internal_id in bv.iter() {
+    for internal_id in bv.iter_up_to(usize::MAX) {
         if let Some(original_ids_bv) = i2o_map.get(&internal_id) {
             original_tokens_bv.bitor_assign(original_ids_bv);
         }
@@ -70,7 +70,7 @@ fn format_bv_with_tokens(
     let mut token_samples = Vec::new();
     let total_original_tokens = original_tokens_bv.len();
 
-    for original_id in original_tokens_bv.iter().take(limit) {
+    for original_id in original_tokens_bv.iter_up_to(limit) {
         if let Some(token_bytes) = token_map.get_by_right(&LLMTokenID(original_id)) {
             token_samples.push(format!("{:?}", String::from_utf8_lossy(token_bytes)));
         }

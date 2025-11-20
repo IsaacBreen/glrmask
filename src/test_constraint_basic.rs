@@ -61,6 +61,7 @@ fn test_trivial() {
 
     println!("Initializing constraint state...");
     let mut state = constraint.init();
+    println!("Initialized constraint state.");
 
     // Initial mask should allow "a"
     let mask1 = state.get_mask();

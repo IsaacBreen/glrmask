@@ -1337,7 +1337,7 @@ pub fn merge_equivalent_llm_tokens_trie1(
         if *splitter_bv == LLMTokenBV::max_ones() { continue; }
 
         let mut members_in_splitter_by_class: HashMap<usize, Vec<usize>> = HashMap::new();
-        for token in splitter_bv.iter() {
+        for token in splitter_bv.iter_up_to(max_tok) {
             if token <= max_tok {
                 let class_id = token_to_class[token];
                 members_in_splitter_by_class.entry(class_id).or_default().push(token);
@@ -1486,7 +1486,7 @@ pub fn merge_equivalent_llm_tokens_trie1(
 		if let Some(moved) = stage_vocab.internal_to_original.remove(old) {
 			let entry = stage_vocab.internal_to_original.entry(*new_rep).or_default();
 			*entry |= &moved;
-			for o in moved.iter() {
+			for o in moved.iter_up_to(stage_vocab.internal_max_llm_token) {
 				stage_vocab.original_to_internal.insert(o, *new_rep);
 			}
 		}
@@ -1540,7 +1540,7 @@ pub fn reorder_llm_tokens_for_range_minimization_trie1(
                 freq[t] += count;
             }
         } else {
-            for t in bv.iter() {
+            for t in bv.iter_up_to(max_tok) {
                 if t <= max_tok {
                     freq[t] += count;
                 }

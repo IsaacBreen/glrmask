@@ -292,7 +292,7 @@ impl HybridBitset {
         }
     }
 
-    pub fn iter(&self) -> Iter<'_> {
+    pub fn iter_up_to(&self, max: usize) -> Iter<'_> {
         self.iter_indices()
     }
 
@@ -923,7 +923,7 @@ mod tests {
         let mut expected = indices;
         expected.sort_unstable();
         assert_eq!(collected, expected);
-        assert_eq!(set.iter().len(), expected.len()); // Check ExactSizeIterator impl
+        assert_eq!(set.iter_up_to(100).len(), expected.len()); // Check ExactSizeIterator impl
     }
 
     #[test]
