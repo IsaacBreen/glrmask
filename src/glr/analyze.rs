@@ -1308,7 +1308,7 @@ fn convert_regular_nts_to_terminals(
                 ) {
                     let self_count = seq.iter().filter(|s| matches!(s, ResolvedSymbol::SelfRef)).count();
                     if self_count > 1 {
-                        if nt.0 == "s0" { panic!("s0 failed: multiple self refs"); }
+                        eprintln!("NT {} failed: multiple self refs", nt.0);
                         failed = true; // Multiple self-refs (e.g. center embedding or A -> A A) hard to convert simply
                         break;
                     }
@@ -1330,15 +1330,14 @@ fn convert_regular_nts_to_terminals(
                              right_rec_exprs.push(efficient_seq(exprs));
                         } else {
                             failed = true; // Center embedding
-                            if nt.0 == "s0" { panic!("s0 failed: center embedding"); }
+                            eprintln!("NT {} failed: center embedding", nt.0);
                             break;
                         }
                     }
                 } else {
                     failed = true; // Dependency not yet resolved
-                    if nt.0 == "s0" { 
-                        // panic!("s0 failed: dependency not resolved"); 
-                    }
+                    eprintln!("NT {} failed: dependency not resolved (check topo sort)", nt.0);
+                    // panic!("s0 failed: dependency not resolved"); 
                     break;
                 }
             }
@@ -1371,13 +1370,13 @@ fn convert_regular_nts_to_terminals(
                          is_nt_nullable = true;
                     } else {
                         // Purely nullable (e.g. empty string or epsilon), cannot convert to terminal
-                        if nt.0 == "s0" { panic!("s0 failed: purely nullable"); }
+                        eprintln!("NT {} failed: purely nullable", nt.0);
                         continue;
                     }
                 }
                 
                 if get_expr_complexity(&expr_for_terminal) > MAX_REGEX_COMPLEXITY {
-                    if nt.0 == "s0" { panic!("s0 failed: complexity limit"); }
+                    eprintln!("NT {} failed: complexity limit", nt.0);
                     continue;
                 }
 
@@ -1473,7 +1472,7 @@ fn convert_regular_nts_to_terminals(
             }
         }
 
-        if regex_name_to_group_id.contains_left("s0") && !nts_to_replace.contains_key(&NonTerminal("s0".to_string())) {
+        if productions.iter().any(|p| p.lhs.0 == "s0") && !nts_to_replace.contains_key(&NonTerminal("s0".to_string())) {
             panic!("s0 was not converted!");
         }
 
