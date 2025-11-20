@@ -1090,11 +1090,11 @@ fn efficient_seq(exprs: Vec<Expr>) -> Expr {
     }
 }
 
-const MAX_REGEX_COMPLEXITY: usize = 20_000;
+const MAX_REGEX_COMPLEXITY: usize = 500_000;
 
 fn get_expr_complexity(expr: &Expr) -> usize {
     match expr {
-        Expr::U8Seq(bytes) => bytes.len(),
+        Expr::U8Seq(_) => 1,
         Expr::U8Class(_) => 1,
         Expr::Shared(inner) => get_expr_complexity(inner),
         Expr::Quantifier(inner, _) => get_expr_complexity(inner) + 1,
@@ -1213,6 +1213,10 @@ fn convert_regular_nts_to_terminals(
     let mut pending_nts: Vec<NonTerminal> = prods_by_lhs.keys().cloned().collect();
     let mut loop_changed = true;
     let mut any_conversion_happened = false;
+
+    // Heuristic: Process in reverse alphabetical order. 
+    // This often helps with generated grammars (like s0, s1, ...) where s(i) depends on s(i+1).
+    pending_nts.sort_by(|a, b| b.0.cmp(&a.0));
 
     while loop_changed {
         loop_changed = false;
