@@ -6,7 +6,7 @@ use super::nwa::{NWAState, NWAStates, NWA};
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use rustfst::algorithms::{minimize, minimize_with_config, MinimizeConfig};
 
-const MAX_OPTIMIZE_ITERATIONS: usize = 20;
+const MAX_OPTIMIZE_ITERATIONS: usize = 1000;
 
 #[derive(Clone, Debug)]
 struct Partition {
