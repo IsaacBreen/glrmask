@@ -9,7 +9,7 @@ use super::nwa::{NWABody, NWAStates, NWA};
 use std::collections::VecDeque;
 
 impl DWA {
-    pub fn eval_word_weight(&self, word: &mut [Label]) -> Weight {
+    pub fn eval_word_weight(&self, word: &[Label]) -> Weight {
         if self.states.0.is_empty() {
             return Weight::zeros();
         }
@@ -27,7 +27,7 @@ impl DWA {
             return Weight::zeros();
         }
 
-        for &ch in word {
+        for &ch in &*word {
             if s >= self.states.len() {
                 return Weight::zeros();
             }

@@ -3,7 +3,7 @@
 #![allow(dead_code)]
 #![allow(clippy::needless_borrow)]
 
-use super::common::{StateID, Weight};
+use super::common::{Label, StateID, Weight};
 use super::dwa::DWA;
 use super::nwa::NWA;
 use crate::precompute4::weighted_automata::NWAStateID;
@@ -14,11 +14,11 @@ use range_set_blaze::RangeSetBlaze;
 use rustfst::algorithms::determinize::{determinize_with_config, DeterminizeConfig, DeterminizeType};
 use rustfst::algorithms::rm_epsilon::rm_epsilon;
 use rustfst::fst_properties::FstProperties;
-use rustfst::prelude::*;
+use rustfst::prelude::{Tr, EPS_LABEL, StateId, VectorFst, MutableFst, CoreFst, ExpandedFst};
 use rustfst::semirings::{
     DivideType, ReverseBack, SemiringProperties, SerializableSemiring, WeaklyDivisibleSemiring, WeightQuantize,
 };
-use rustfst::NomCustomError;
+use rustfst::{NomCustomError, Semiring, Trs};
 use std::borrow::Borrow;
 use std::collections::{HashMap, HashSet};
 use std::io::Write;

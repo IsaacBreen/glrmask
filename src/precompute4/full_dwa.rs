@@ -4,7 +4,6 @@ use std::env;
 use std::time::Instant;
 
 use chrono::Local;
-use rustfst::Label;
 use crate::constraint::{LLMTokenBV, PrecomputeNode1, PrecomputeNode1Index, PrecomputedNodeContents, Trie1GodWrapper};
 use crate::datastructures::trie::{Trie, Trie2Index};
 use crate::glr::parser::{ExpectElse, GLRParser};
@@ -38,6 +37,7 @@ impl NWA {
 
 // Re-export for backward compatibility: `FullDWABuildError` used to be defined here.
 pub use crate::precompute4::template_nwa::FullDWABuildError;
+use crate::precompute4::weighted_automata::common::Label;
 use crate::precompute4::weighted_automata::determinization_rustfst::determinize_nwa_to_dwa;
 
 pub type Precomputed4 = DWA;
