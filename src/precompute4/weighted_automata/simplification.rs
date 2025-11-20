@@ -189,6 +189,34 @@ impl DWA {
         }
     }
 
+    /// Performs linear-time optimizations only (Pruning, Weight Pushing).
+    /// Skips the expensive O(N log N) or O(N^2) state minimization.
+    /// Useful for template generation where we just want a clean graph quickly.
+    pub fn simplify_lightweight(&mut self) {
+         // PruneDeadEnds, PushWeights, PruneUnreachable
+         let ordering = &[
+            DwaPass::PruneDeadEnds,
+            DwaPass::PushWeights,
+            DwaPass::PruneUnreachable,
+        ];
+
+        for _ in 0..10 { // Fewer iterations needed for lightweight
+            let mut changed_in_iteration = false;
+            for &pass in ordering {
+                let pass_changed = match pass {
+                    DwaPass::PruneUnreachable => self.prune_unreachable(),
+                    DwaPass::PruneDeadEnds => self.prune_dead_ends(),
+                    DwaPass::PushWeights => self.push_weights_into_transitions_and_finals(),
+                    DwaPass::Minimize => unreachable!(),
+                };
+                changed_in_iteration |= pass_changed;
+            }
+            if !changed_in_iteration {
+                break;
+            }
+        }
+    }
+
     pub fn minimize_with_rustfst(&mut self) {
         let mut fst = self.to_rustfst();
         minimize(&mut fst).unwrap();

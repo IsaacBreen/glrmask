@@ -301,10 +301,6 @@ pub fn precompute4(
         original_trie1_roots_map.entry(*v).or_default().push(*k);
     }
 
-    let options = crate::datastructures::trie::PrettyPrintOptions::default().omit_nodes().omit_depth();
-    crate::debug!(5, "Trie:\n{}", Trie::pretty_print_with_options(&trie1_god, &trie1_roots, &options));
-    crate::debug!(5, "Reversed trie:\n{}", Trie::pretty_print_with_options(&reversed_trie1_god, &[reversed_trie_root], &options));
-
     let mut final_bodies: BTreeMap<TokenizerStateID, NWABody> = BTreeMap::new();
 
     // Cache for abstract templates: NWA
@@ -325,7 +321,7 @@ pub fn precompute4(
     let mut traversal_calls = 0;
 
     let now_traversal = Instant::now();
-    
+
     Trie::special_map_grouped(
         &reversed_trie1_god,
         &traversal_data,
@@ -417,19 +413,24 @@ pub fn precompute4(
                     }
 
                     let mut template_dwa = specialize_dwa(&super_dwa, &abstract_bundle, &bit_to_term);
-                    template_dwa.simplify(); 
-                    
-                    // We create the NWA template but DO NOT run negative resolution optimizations on the abstract template.
-                    // Pre-optimizing the abstract template is unsafe because abstract weights (indices) are disjoint,
-                    // masking potential overlaps in concrete weights that require cancellation logic to trigger.
-                    let template_nwa = NWA::from_dwa(&template_dwa);
+                    // Use new lightweight simplify (PruneDeadEnds + PushWeights + PruneUnreachable)
+                    // This is fast and should fix correctness by ensuring weights are pushed.
+                    template_dwa.simplify_lightweight();
+
+                    let mut template_nwa = NWA::from_dwa(&template_dwa);
+
+                    // Optimization: Pre-resolve negatives on the Abstract NWA.
+                    let all_states: HashSet<StateID> = (0..template_nwa.states.len()).collect();
+                    apply_cancellations(&mut template_nwa.states, &all_states);
+                    apply_finality_fixpoint(&mut template_nwa.states, &all_states);
+                    remove_negative_transitions(&mut template_nwa.states, &all_states);
 
                     template_cache.insert(signature.clone(), template_nwa);
                     t_cache_creation += start_create.elapsed();
                 } else {
                     cache_hits += 1;
                 }
-                
+
                 let template_nwa = &template_cache[&signature];
                 t_cache_access += start_cache.elapsed();
 
@@ -442,7 +443,7 @@ pub fn precompute4(
                     &mut states
                 );
                 t_instantiation += start_inst.elapsed();
-                
+
                 let start_concat = Instant::now();
                 let new_states_filter: HashSet<NWAStateID> = remap.values().cloned().collect();
                 let left_body = NWABody { start_state: left_body_start };
@@ -450,9 +451,6 @@ pub fn precompute4(
                 t_concatenation += start_concat.elapsed();
 
                 let start_neg = Instant::now();
-                // We run negative resolution here on the instantiated (concrete) subgraph.
-                // This handles all cancellations, both internal to the template (which now has overlapping weights)
-                // and cross-boundary with the right body.
                 if !new_states_filter.is_empty() {
                     apply_cancellations(&mut states, &new_states_filter);
                     apply_finality_fixpoint(&mut states, &new_states_filter);
@@ -477,7 +475,7 @@ pub fn precompute4(
             }
         },
     );
-    
+
     println!("=== Traversal Statistics ===");
     println!("Total Duration: {:?}", now_traversal.elapsed());
     println!("Total Process Calls: {}", traversal_calls);
@@ -516,6 +514,7 @@ fn resolve_negatives_and_optimize_and_determinize(parser: &GLRParser, mut combin
     let start_total = Instant::now();
 
     let start = Instant::now();
+    // Restoration of initial simplify to fix correctness
     combined_nwa.simplify_rustfst();
     let t_initial = start.elapsed();
     println!("Initial Simplify: {:?}", t_initial);
