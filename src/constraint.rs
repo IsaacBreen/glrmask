@@ -52,7 +52,6 @@ use crate::datastructures::bitset::Bitset;
 use crate::datastructures::gss_acc::Acc;
 use crate::glr::parser::{ParseState, ParseStateEdgeContent};
 use crate::glr::table::StateID;
-use crate::precompute4::weighted_automata::{NWA, NWAStateID, Weight};
 use crate::precompute4::weighted_automata::bitset::SimpleBitset;
 // ---------------------------------------------------------------------------
 // Basic aliases
@@ -2107,7 +2106,7 @@ impl<'r> Precomputer1<'r> {
                 TerminalID,
                 Vec<(
                     Option<TerminalID>,
-                    OrderedHashMap<TempPrecomputeNode1Index, RangeSetBlaze<usize>>,
+                    OrderedHashMap<PrecomputeNode1Index, RangeSetBlaze<usize>>,
                 )>,
             > = BTreeMap::new();
 
@@ -2119,7 +2118,7 @@ impl<'r> Precomputer1<'r> {
                         injected_edges_by_dummy
                             .entry(*dummy_tid)
                             .or_default()
-                            .push((Some(tid), dest_map));
+                            .push((Some(tid), dest_map.into_iter().map(|(s, w)| (Trie2Index::from(s), w)).collect()));
                         continue;
                     }
                 }
@@ -2153,7 +2152,7 @@ impl<'r> Precomputer1<'r> {
                 for (original_ek, dest_map) in edges {
                     for (child_state_id, rs_blaze) in dest_map {
                         let final_child_idx = self.convert_nwa_to_trie(
-                            child_state_id,
+                            child_state_id.as_usize(),
                             final_god,
                             node_map,
                         );
