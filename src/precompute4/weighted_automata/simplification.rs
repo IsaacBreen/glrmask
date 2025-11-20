@@ -180,7 +180,7 @@ impl DWA {
                     std::cmp::Ordering::Greater => ">",
                 };
 
-                crate::debug!(5, "[DWA Simplify({})] Internal: t={:.2?}, s={} | RustFST: t={:.2?}, s={}. [s: {}, t: {}]", initial_states, internal_time, internal_states, rustfst_time, rustfst_states, state_cmp, time_cmp);
+                crate::debug!(6, "[DWA Simplify({})] Internal: t={:.2?}, s={} | RustFST: t={:.2?}, s={}. [s: {}, t: {}]", initial_states, internal_time, internal_states, rustfst_time, rustfst_states, state_cmp, time_cmp);
             }
 
             *self = internal;
@@ -298,7 +298,7 @@ impl DWA {
     }
 
     fn simplify_internal(&mut self) -> bool {
-        crate::debug!(5, "[DWA::simplify] Starting simplification. Initial stats: {}", self.stats());
+        crate::debug!(6, "[DWA::simplify] Starting simplification. Initial stats: {}", self.stats());
         let mut total_changed = false;
         let ordering = &[
             DwaPass::PruneDeadEnds,
@@ -340,7 +340,7 @@ impl DWA {
             );
         }
 
-        crate::debug!(5, "[DWA::simplify] Simplification finished. Total changed: {}. Final stats: {}", total_changed, self.stats());
+        crate::debug!(6, "[DWA::simplify] Simplification finished. Total changed: {}. Final stats: {}", total_changed, self.stats());
         total_changed
     }
 
@@ -882,7 +882,7 @@ impl NWA {
                     std::cmp::Ordering::Greater => ">",
                 };
 
-                crate::debug!(5, "[NWA Simplify({})] Internal: t={:.2?}, s={} | RustFST: t={:.2?}, s={}. [s: {}, t: {}]", initial_states, internal_time, internal_states, rustfst_time, rustfst_states, state_cmp, time_cmp);
+                crate::debug!(6, "[NWA Simplify({})] Internal: t={:.2?}, s={} | RustFST: t={:.2?}, s={}. [s: {}, t: {}]", initial_states, internal_time, internal_states, rustfst_time, rustfst_states, state_cmp, time_cmp);
             }
 
             *self = internal;
@@ -973,7 +973,7 @@ impl NWA {
     }
 
     pub fn simplify_internal(&mut self) -> bool {
-        crate::debug!(5, "[NWA::simplify] Starting simplification. Initial stats: {}", self.stats());
+        crate::debug!(6, "[NWA::simplify] Starting simplification. Initial stats: {}", self.stats());
         let mut total_changed = false;
         // PruneUnreachable, CompressTransitions, PushFinalWeights, PruneDeadEnds, Minimize
         let ordering = &[
@@ -1018,12 +1018,12 @@ impl NWA {
             );
         }
 
-        crate::debug!(5, "[NWA::simplify] Simplification finished. Total changed: {}. Final stats: {}", total_changed, self.stats());
+        crate::debug!(6, "[NWA::simplify] Simplification finished. Total changed: {}. Final stats: {}", total_changed, self.stats());
         total_changed
     }
 
     fn minimize_states(&mut self) -> bool {
-        crate::debug!(6, "[NWA] Minimizing states...");
+        crate::debug!(7, "[NWA] Minimizing states...");
         let n = self.states.len();
         if n <= 1 {
             return false;
@@ -1046,7 +1046,7 @@ impl NWA {
     /// for all bitsets w1, w2, x. Thus, multiple parallel transitions are semantically
     /// equivalent to a single transition with the union of their weights.
     fn compress_transitions(&mut self) -> bool {
-        crate::debug!(6, "[NWA] Compressing transitions...");
+        crate::debug!(7, "[NWA] Compressing transitions...");
         let mut changed = false;
 
         for st in &mut self.states.0 {
@@ -1107,7 +1107,7 @@ impl NWA {
     }
 
     fn push_final_weights_along_epsilons(&mut self) -> bool {
-        crate::debug!(6, "[NWA] Pushing final weights along epsilons...");
+        crate::debug!(7, "[NWA] Pushing final weights along epsilons...");
         let n = self.states.len();
         if n == 0 {
             return false;
@@ -1267,7 +1267,7 @@ impl NWA {
     }
 
     fn prune_unreachable(&mut self) -> bool {
-        crate::debug!(6, "[NWA] Pruning unreachable states...");
+        crate::debug!(7, "[NWA] Pruning unreachable states...");
         let n = self.states.len();
         if n == 0 {
             return false;
@@ -1350,7 +1350,7 @@ impl NWA {
     }
 
     fn prune_dead_ends(&mut self) -> bool {
-        crate::debug!(6, "[NWA] Pruning dead ends...");
+        crate::debug!(7, "[NWA] Pruning dead ends...");
         let n = self.states.len();
         if n == 0 {
             return false;
