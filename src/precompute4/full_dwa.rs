@@ -304,7 +304,7 @@ pub fn precompute4(
             }
         }
         let mut template_dwa = specialize_dwa(&super_dwa, &abstract_bundle, &bit_to_term);
-        template_dwa.simplify_lightweight();
+        template_dwa.simplify();
         template_cache.insert(signature, NWA::from_dwa(&template_dwa));
     }
     crate::debug!(4, "Precomputed {} templates in: {:?}", template_cache.len(), start_templates.elapsed());
