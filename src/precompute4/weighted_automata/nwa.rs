@@ -3,14 +3,15 @@
 #![allow(dead_code)]
 #![allow(clippy::needless_borrow)]
 
-use super::common::{format_i16_char, NWAStateID, Weight, BENCHMARK_DEBUG};
+use super::common::{format_i16_char, NWAStateID, Weight, BENCHMARK_DEBUG, StateID};
 use super::dwa::DWA;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt::{self, Display, Formatter};
 use std::ops::{Index, IndexMut};
+use kdam::{tqdm, BarExt};
+use crate::profiler::PROGRESS_BAR_ENABLED;
 use crate::precompute4::weighted_automata::determinization_rustfst::determinize_nwa_to_dwa;
-use crate::precompute4::weighted_automata::StateID;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NWABuildError {
@@ -282,6 +283,15 @@ pub struct NWA {
     pub body: NWABody,
 }
 
+#[derive(Debug, Clone)]
+pub struct NWATraversalData {
+    pub nodes: Vec<NWAStateID>,
+    pub pos_of_u: HashMap<NWAStateID, usize>,
+    pub comp_id: Vec<usize>,
+    pub sccs: Vec<Vec<usize>>,
+    pub topo: Vec<usize>,
+}
+
 impl NWA {
     pub fn new() -> Self {
         let mut states = NWAStates::default();
@@ -473,6 +483,245 @@ impl NWA {
 
     pub fn num_epsilons(&self) -> usize {
         self.states.0.iter().map(|s| s.epsilons.len()).sum()
+    }
+
+    pub fn reverse(&self) -> NWA {
+        let mut reversed = NWA::new();
+        reversed.states.0.clear();
+        for _ in 0..self.states.len() {
+            reversed.states.add_state();
+        }
+        for (u, state) in self.states.0.iter().enumerate() {
+            for (label, targets) in &state.transitions {
+                for (v, w) in targets {
+                    reversed.add_transition(*v, *label, u, w.clone()).unwrap();
+                }
+            }
+            for (v, w) in &state.epsilons {
+                reversed.add_epsilon(*v, u, w.clone());
+            }
+        }
+        reversed
+    }
+
+    pub fn compute_traversal_data(&self, roots: &[NWAStateID]) -> Option<NWATraversalData> {
+        let mut visited = HashSet::new();
+        let mut queue = VecDeque::new();
+        for &root in roots {
+            if visited.insert(root) {
+                queue.push_back(root);
+            }
+        }
+        let mut nodes = Vec::new();
+        while let Some(u) = queue.pop_front() {
+            nodes.push(u);
+            if u >= self.states.len() { continue; }
+            let state = &self.states[u];
+            for targets in state.transitions.values() {
+                for (v, _) in targets {
+                    if visited.insert(*v) {
+                        queue.push_back(*v);
+                    }
+                }
+            }
+            for (v, _) in &state.epsilons {
+                if visited.insert(*v) {
+                    queue.push_back(*v);
+                }
+            }
+        }
+
+        if nodes.is_empty() { return None; }
+
+        let n = nodes.len();
+        let mut pos_of_u = HashMap::new();
+        for (i, &u) in nodes.iter().enumerate() {
+            pos_of_u.insert(u, i);
+        }
+
+        let mut adj = vec![vec![]; n];
+        let mut radj = vec![vec![]; n];
+
+        for (i, &u) in nodes.iter().enumerate() {
+            if u >= self.states.len() { continue; }
+            let state = &self.states[u];
+            let mut neighbors = HashSet::new();
+            for targets in state.transitions.values() {
+                for (v, _) in targets {
+                    neighbors.insert(*v);
+                }
+            }
+            for (v, _) in &state.epsilons {
+                neighbors.insert(*v);
+            }
+            for &v in &neighbors {
+                if let Some(&j) = pos_of_u.get(&v) {
+                    adj[i].push(j);
+                    radj[j].push(i);
+                }
+            }
+        }
+
+        let mut visited_scc = vec![false; n];
+        let mut order = Vec::new();
+        for i in 0..n {
+            if !visited_scc[i] {
+                Self::dfs1(i, &adj, &mut visited_scc, &mut order);
+            }
+        }
+
+        let mut comp_id = vec![usize::MAX; n];
+        let mut sccs = Vec::new();
+        let mut cid = 0;
+        for &i in order.iter().rev() {
+            if comp_id[i] == usize::MAX {
+                let mut component = Vec::new();
+                Self::dfs2(i, &radj, &mut comp_id, cid, &mut component);
+                sccs.push(component);
+                cid += 1;
+            }
+        }
+
+        let scc_count = sccs.len();
+        let mut scc_adj = vec![HashSet::new(); scc_count];
+        let mut indeg = vec![0; scc_count];
+        for u in 0..n {
+            let cu = comp_id[u];
+            for &v in &adj[u] {
+                let cv = comp_id[v];
+                if cu != cv {
+                    if scc_adj[cu].insert(cv) {
+                        indeg[cv] += 1;
+                    }
+                }
+            }
+        }
+
+        let mut topo = Vec::new();
+        let mut q = VecDeque::new();
+        for i in 0..scc_count {
+            if indeg[i] == 0 {
+                q.push_back(i);
+            }
+        }
+        while let Some(u) = q.pop_front() {
+            topo.push(u);
+            for &v in &scc_adj[u] {
+                indeg[v] -= 1;
+                if indeg[v] == 0 {
+                    q.push_back(v);
+                }
+            }
+        }
+
+        Some(NWATraversalData { nodes, pos_of_u, comp_id, sccs, topo })
+    }
+
+    fn dfs1(u: usize, adj: &Vec<Vec<usize>>, visited: &mut Vec<bool>, order: &mut Vec<usize>) {
+        visited[u] = true;
+        for &v in &adj[u] {
+            if !visited[v] {
+                Self::dfs1(v, adj, visited, order);
+            }
+        }
+        order.push(u);
+    }
+
+    fn dfs2(u: usize, radj: &Vec<Vec<usize>>, comp_id: &mut Vec<usize>, cid: usize, component: &mut Vec<usize>) {
+        comp_id[u] = cid;
+        component.push(u);
+        for &v in &radj[u] {
+            if comp_id[v] == usize::MAX {
+                Self::dfs2(v, radj, comp_id, cid, component);
+            }
+        }
+    }
+
+    pub fn special_map_grouped<V, U, S, I>(
+        &self,
+        traversal_data: &NWATraversalData,
+        initial_nodes_and_values: Vec<(NWAStateID, V)>,
+        mut step: S,
+        mut merge: impl FnMut(&mut V, V),
+        mut process: impl FnMut(NWAStateID, V) -> Option<U>,
+    ) where
+        V: Clone,
+        S: FnMut(&U, i16, &Vec<(NWAStateID, Weight)>) -> I,
+        I: IntoIterator<Item = (NWAStateID, V)>,
+    {
+        let mut values: HashMap<NWAStateID, V> = HashMap::new();
+        let mut stopped_nodes: HashSet<NWAStateID> = HashSet::new();
+
+        for (node_idx, v0) in initial_nodes_and_values {
+            values.entry(node_idx).and_modify(|old| merge(old, v0.clone())).or_insert(v0);
+        }
+
+        let nodes = &traversal_data.nodes;
+        let pos_of_u = &traversal_data.pos_of_u;
+        let comp_id = &traversal_data.comp_id;
+        let sccs = &traversal_data.sccs;
+        let topo = &traversal_data.topo;
+
+        let mut in_queue: HashSet<NWAStateID> = HashSet::new();
+        let total_edges = self.num_transitions();
+        let mut pb = tqdm!(total = total_edges, desc = "Traversing NWA", disable = !PROGRESS_BAR_ENABLED, leave=false);
+
+        for &s in topo {
+            let mut local_queue: VecDeque<usize> = VecDeque::new();
+            for &pos in &sccs[s] {
+                let u = nodes[pos];
+                if values.contains_key(&u) && !stopped_nodes.contains(&u) {
+                    if in_queue.insert(u) {
+                        local_queue.push_back(pos);
+                    }
+                }
+            }
+
+            while let Some(pos) = local_queue.pop_front() {
+                let u = nodes[pos];
+                in_queue.remove(&u);
+
+                if stopped_nodes.contains(&u) { continue; }
+                let agg_v = match values.remove(&u) {
+                    Some(v) => v,
+                    None => continue,
+                };
+
+                let processed_value = process(u, agg_v);
+                let proceed_value = match processed_value {
+                    Some(val) => val,
+                    None => {
+                        stopped_nodes.insert(u);
+                        continue;
+                    }
+                };
+
+                if u >= self.states.len() { continue; }
+                let state = &self.states[u];
+
+                for (&label, targets) in &state.transitions {
+                    let _ = pb.update(targets.len());
+                    let new_values = step(&proceed_value, label, targets);
+                    for (child_u, new_v) in new_values {
+                        if stopped_nodes.contains(&child_u) { continue; }
+                        values.entry(child_u).and_modify(|old| merge(old, new_v.clone())).or_insert(new_v);
+                        if let Some(&child_pos) = pos_of_u.get(&child_u) {
+                            if comp_id[child_pos] == s {
+                                if in_queue.insert(child_u) {
+                                    local_queue.push_back(child_pos);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if values.contains_key(&u) && !stopped_nodes.contains(&u) {
+                    if in_queue.insert(u) {
+                        local_queue.push_back(pos);
+                    }
+                }
+            }
+        }
     }
 }
 
