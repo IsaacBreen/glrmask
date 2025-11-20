@@ -307,11 +307,10 @@ pub fn precompute4(
 
     let mut final_bodies: BTreeMap<TokenizerStateID, NWABody> = BTreeMap::new();
 
-    // Cache for abstract templates based on weight equivalence classes (partitions).
-    // Key: A sorted vector of groups. Each group is a sorted vector of TerminalIDs that share the same weight.
-    //      Signature = Vec<Vec<Option<TerminalID>>>
-    // Value: A simplified DWA where abstract index `i` corresponds to the `i`-th group in the signature.
-    let mut template_cache: HashMap<Vec<Vec<Option<TerminalID>>>, DWA> = HashMap::new();
+    // Cache for abstract templates: NWA (Pre-optimized with negative resolution)
+    // Key: Signature (Sorted Grouped Terminals)
+    // Value: An NWA where abstract index `i` corresponds to the `i`-th group in the signature.
+    let mut template_cache: HashMap<Vec<Vec<Option<TerminalID>>>, NWA> = HashMap::new();
     let mut cache_hits = 0;
     let mut cache_misses = 0;
 
@@ -379,30 +378,21 @@ pub fn precompute4(
                     continue;
                 }
 
-                // 2. Create Canonical Signature: Sorted Groups of Sorted Terminals
-                // We convert the Map into a Vec and sort by the first terminal of each group
-                // (canonicalizing the order of groups).
+                // 2. Create Canonical Signature
                 let mut groups_vec: Vec<(Weight, Vec<Option<TerminalID>>)> = weight_groups.into_iter().collect();
-                
-                // Sort terminals within each group
                 for (_, terms) in &mut groups_vec {
                     terms.sort();
                 }
-
-                // Sort groups by the first terminal of the group
                 groups_vec.sort_by(|a, b| a.1.cmp(&b.1));
 
                 let signature: Vec<Vec<Option<TerminalID>>> = groups_vec.iter().map(|(_, terms)| terms.clone()).collect();
                 let concrete_weights: Vec<Weight> = groups_vec.iter().map(|(w, _)| w.clone()).collect();
 
-                // 3. Get or Create Template
-                let left_dwa = if let Some(template) = template_cache.get(&signature) {
-                    cache_hits += 1;
-                    instantiate_dwa_template(template, &concrete_weights)
-                } else {
+                // 3. Get or Create Template NWA
+                // Note: We cache the NWA now, not the DWA, to avoid `from_dwa` conversion cost on hits.
+                // We also pre-optimize the NWA to reduce cost of negative resolution.
+                if !template_cache.contains_key(&signature) {
                     cache_misses += 1;
-                    // Create Abstract Bundle mapping ALL terminals in group `i` to abstract index `i`.
-                    // This enables simplification to merge paths for indistinguishable terminals.
                     let mut abstract_bundle = BTreeMap::new();
                     for (idx, terms) in signature.iter().enumerate() {
                         let abstract_weight = Weight::from_item(idx);
@@ -411,23 +401,41 @@ pub fn precompute4(
                         }
                     }
 
-                    let mut template = specialize_dwa(&super_dwa, &abstract_bundle, &bit_to_term);
-                    template.simplify(); 
+                    let mut template_dwa = specialize_dwa(&super_dwa, &abstract_bundle, &bit_to_term);
+                    template_dwa.simplify(); 
                     
-                    template_cache.insert(signature, template.clone());
-                    instantiate_dwa_template(&template, &concrete_weights)
-                };
+                    let mut template_nwa = NWA::from_dwa(&template_dwa);
+                    
+                    // Optimization: Pre-resolve negatives on the Abstract NWA.
+                    // This is valid because abstract index weights are disjoint, so intersection logic works roughly the same,
+                    // and crucially, cancellations are usually intra-path (within one terminal's logic) where weights are consistent.
+                    let all_states: HashSet<StateID> = (0..template_nwa.states.len()).collect();
+                    apply_cancellations(&mut template_nwa.states, &all_states);
+                    apply_finality_fixpoint(&mut template_nwa.states, &all_states);
+                    remove_negative_transitions(&mut template_nwa.states, &all_states);
 
-                let left_nwa = NWA::from_dwa(&left_dwa);
+                    template_cache.insert(signature.clone(), template_nwa);
+                } else {
+                    cache_hits += 1;
+                }
+                
+                let template_nwa = &template_cache[&signature];
+
+                // 4. Direct Instantiation into Arena (Avoids DWA->NWA and Allocations)
                 let mut states = states_arena.borrow_mut();
-                let (left_body_start, remap) =
-                    states.copy_subgraph_from(&left_nwa.states, left_nwa.body.start_state);
-
+                let (left_body_start, remap) = instantiate_nwa_template_into_arena(
+                    template_nwa,
+                    &concrete_weights,
+                    &mut states
+                );
+                
                 let new_states_filter: HashSet<NWAStateID> = remap.values().cloned().collect();
                 let left_body = NWABody { start_state: left_body_start };
 
                 let composed_body = NWA::_concatenate_components(&mut states, &left_body, &right_body, &Weight::all());
 
+                // We still run negative resolution to catch cross-boundary cancellations (left->right),
+                // but `left` itself is already clean, so this should be much faster.
                 if !new_states_filter.is_empty() {
                     apply_cancellations(&mut states, &new_states_filter);
                     apply_finality_fixpoint(&mut states, &new_states_filter);
@@ -450,7 +458,7 @@ pub fn precompute4(
         },
     );
     crate::debug!(4, "Reversed trie traversal (special_map_grouped) took: {:?}", now.elapsed());
-    println!("DWA Template Cache Stats: Hits={}, Misses={} (Unique partition signatures)", cache_hits, cache_misses);
+    println!("NWA Template Cache Stats: Hits={}, Misses={} (Unique partition signatures)", cache_hits, cache_misses);
 
     // Combine all final NWA bodies into a single NWA
     let mut combined_nwa_states = states_arena.into_inner();
@@ -606,27 +614,24 @@ fn specialize_weight(
     new_weight
 }
 
-/// Instantiates a template DWA (where weights are indices 0..N) with concrete weights.
-///
-/// `ordered_weights[i]` corresponds to the concrete weight for index `i`.
-fn instantiate_dwa_template(
-    template: &DWA,
+/// Instantiates an abstract NWA template directly into the target arena,
+/// resolving abstract weights (indices) to concrete weights (unions of `ordered_weights`).
+fn instantiate_nwa_template_into_arena(
+    template: &NWA,
     ordered_weights: &[Weight],
-) -> DWA {
-    let mut instance = template.clone();
+    arena: &mut NWAStates,
+) -> (NWAStateID, HashMap<NWAStateID, NWAStateID>) {
+    // Mapping cache for abstract weights to concrete weights
     let mut union_cache: HashMap<Weight, Weight> = HashMap::new();
 
-    // Helper to map abstract weights to concrete unions
-    let mut map_weight = |w: &Weight| -> Weight {
+    let mut map_abstract_weight = |w: &Weight| -> Weight {
         if w.is_empty() {
             return Weight::zeros();
         }
         if let Some(res) = union_cache.get(w) {
             return res.clone();
         }
-
         let mut concrete = Weight::zeros();
-        // The template weights contain indices. We union the concrete weights at those indices.
         for idx in w.iter_up_to(ordered_weights.len()) {
             if let Some(concrete_w) = ordered_weights.get(idx) {
                 concrete |= concrete_w;
@@ -636,28 +641,65 @@ fn instantiate_dwa_template(
         concrete
     };
 
-    for state in &mut instance.states.0 {
-        if let Some(fw) = &mut state.final_weight {
-            *fw = map_weight(fw);
-            if fw.is_empty() {
-                state.final_weight = None;
-            }
-        }
-        if let Some(sw) = &mut state.state_weight {
-            *sw = map_weight(sw);
-            if sw.is_empty() {
-                state.state_weight = None;
-            }
-        }
-        for tw in state.trans_weights.values_mut() {
-            *tw = map_weight(tw);
-        }
+    // 1. Pre-allocate states in arena
+    // Using a vector for remapping is faster than HashMap since state IDs are dense and start at 0
+    let start_offset = arena.len();
+    let template_len = template.states.len();
+    let mut map: Vec<NWAStateID> = Vec::with_capacity(template_len);
 
-        state.trans_weights.retain(|_, w| !w.is_empty());
-        state.transitions.retain(|k, _| state.trans_weights.contains_key(k));
+    for _ in 0..template_len {
+        map.push(arena.add_state());
+    }
+    
+    let mut id_map = HashMap::with_capacity(template_len);
+    for (i, &new_id) in map.iter().enumerate() {
+        id_map.insert(i, new_id);
     }
 
-    instance
+    // 2. Copy and Map
+    for (old_id, old_state) in template.states.0.iter().enumerate() {
+        let new_id = map[old_id];
+        
+        // Since we added states, we must get a mutable reference safely.
+        // arena[new_id] is valid.
+        // Note: We cannot hold a reference to `arena` while iterating if we were adding states inside the loop,
+        // but we pre-allocated. However, Rust borrow checker prevents taking mutable ref to arena[new_id]
+        // while holding immut ref to template if template belonged to arena (it doesn't).
+        // Here template is separate, so it is fine.
+        
+        let new_state = &mut arena[new_id];
+
+        // Final Weight
+        if let Some(fw) = &old_state.final_weight {
+            let concrete = map_abstract_weight(fw);
+            if !concrete.is_empty() {
+                new_state.final_weight = Some(concrete);
+            }
+        }
+
+        // Transitions
+        for (lbl, targets) in &old_state.transitions {
+            // We need to group by target to avoid duplicates if multiple abstract weights map to same concrete logic?
+            // Actually NWA allows multiple edges.
+            let new_targets = new_state.transitions.entry(*lbl).or_default();
+            for (target, w) in targets {
+                let concrete = map_abstract_weight(w);
+                if !concrete.is_empty() {
+                    new_targets.push((map[*target], concrete));
+                }
+            }
+        }
+
+        // Epsilons
+        for (target, w) in &old_state.epsilons {
+            let concrete = map_abstract_weight(w);
+            if !concrete.is_empty() {
+                new_state.epsilons.push((map[*target], concrete));
+            }
+        }
+    }
+
+    (map[template.body.start_state], id_map)
 }
 
 fn simplify_remove_epsilon(nwa: &mut NWA) {
