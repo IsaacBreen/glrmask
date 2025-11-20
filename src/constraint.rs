@@ -34,7 +34,7 @@ use crate::{
     },
     interface::{CompiledGrammar, GrammarDefinition},
     json_serialization::{JSONConvertible, JSONNode},
-    precompute4::full_dwa::{convert_precompute1_to_nwa, precompute4, Precomputed4},
+    precompute4::full_dwa::{precompute4, Precomputed4},
     r#macro::is_debug_level_enabled,
     tokenizer::{LLMTokenID, LLMTokenMap, TokenizerStateID},
     types::{TerminalID as GrammarTokenID, TerminalID},
@@ -47,6 +47,7 @@ use crate::glr::parser::ParseStateEdgeContent;
 pub use crate::constraint_vocab::*;
 pub use crate::constraint_trie::*;
 use crate::constraint_precompute::run_precompute1;
+use crate::precompute4::full_dwa::build_nwa_from_matches;
 
 type GSSNode = LeveledGSS<ParseStateEdgeContent, Acc>;
 

@@ -477,14 +477,14 @@ pub fn build_nwa_from_matches(
     nwa.body.start_state = start_state;
 
     for (sid, map) in possible_matches {
-        let root = nwa.states.add_state();
+        let root_state = nwa.states.add_state();
         nwa.add_transition(start_state, sid.0 as Label, root_state, Weight::all())
             .unwrap();
         for (tid, bv) in map {
             let leaf = nwa.states.add_state();
             nwa.states[leaf].final_weight = Some(Weight::all());
             let w = Weight::from(bv.clone());
-            nwa.add_transition(root, tid.0 as Label, leaf, w).unwrap();
+            nwa.add_transition(root_state, tid.0 as Label, leaf, w).unwrap();
         }
     }
     nwa
