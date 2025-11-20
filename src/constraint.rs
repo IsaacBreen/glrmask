@@ -958,175 +958,65 @@ impl GrammarConstraint {
         DedupValueMap<LLMTokenID, BTreeMap<TokenizerStateID, TokenizerStateID>>,
         BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
     ) {
-        let max_state_id = tokenizer.iter_states().map(|s| s.0).max().unwrap_or(0);
-
-        // Initial states: every state maps to itself at the root
-        let mut initial_states = Vec::with_capacity(max_state_id + 1);
-        for sid in tokenizer.iter_states() {
-            initial_states.push((sid, vec![sid]));
-        }
-
-        let (state_map_entries, match_events) = Self::dfs_maps_and_matches(
-            vocab_root,
-            initial_states,
-            tokenizer,
-        );
-
-        // --- Post-process State Map ---
         let mut state_map_out = DedupValueMap::new();
-        let mut sorted_state_entries = state_map_entries;
-        // Sort by token ID
-        sorted_state_entries.par_sort_unstable_by_key(|(tid, _)| *tid);
-        
-        // Group by token ID
-        for (tid, map_vec) in sorted_state_entries {
-             let mut map = BTreeMap::new();
-             for (start, end) in map_vec {
-                 map.insert(start, end);
-             }
-             state_map_out.insert(tid, map);
+        let mut possible_matches: BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>> = BTreeMap::new();
+
+        // Inverted map: TargetState -> Vec<SourceState>
+        let mut initial_states: BTreeMap<TokenizerStateID, Vec<TokenizerStateID>> = BTreeMap::new();
+        for sid in tokenizer.iter_states() {
+            initial_states.entry(sid).or_default().push(sid);
         }
 
-        // --- Post-process Possible Matches ---
-        // match_events: Vec<(TokenizerStateID, TerminalID, &RangeSetBlaze<usize>)>
-        // We need to aggregate: for each (Start, Terminal), union all RangeSetBlazes.
-        let mut sorted_matches = match_events;
-        // Sort by StartState then TerminalID
-        sorted_matches.par_sort_unstable_by(|a, b| {
-            a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1))
-        });
+        // Stack: (Node, Map<Target, Sources>)
+        // We use an explicit stack and iterative approach to avoid recursion/parallel-task explosion.
+        let mut stack = vec![(vocab_root, initial_states)];
 
-        let possible_matches: BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>> = 
-            sorted_matches
-                .into_par_iter()
-                .fold(
-                    || BTreeMap::new(),
-                    |mut acc: BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>, (sid, tid, rsb)| {
-                        acc.entry(sid)
-                           .or_default()
-                           .entry(tid)
-                           .or_default()
-                           .extend(rsb.iter());
-                        acc
+        while let Some((node, current_states)) = stack.pop() {
+            let token_id = node.token_id();
+            
+            // Record state map for this token node
+            if !current_states.is_empty() {
+                let mut map = BTreeMap::new();
+                for (target, sources) in &current_states {
+                    for &src in sources {
+                        map.insert(src, *target);
                     }
-                )
-                .reduce(
-                    || BTreeMap::new(),
-                    |mut a, b| {
-                        for (sid, t_map) in b {
-                            let entry = a.entry(sid).or_default();
-                            for (tid, bv) in t_map {
-                                entry.entry(tid).or_default().union_with(&bv);
+                }
+                state_map_out.insert(LLMTokenID(token_id), map);
+            }
+
+            for (edge_bytes, child) in node.iter_children() {
+                let mut next_grouped: BTreeMap<TokenizerStateID, Vec<TokenizerStateID>> = BTreeMap::new();
+                
+                for (target, sources) in &current_states {
+                    let exec = tokenizer.execute_from_state(edge_bytes, *target);
+                    
+                    if !exec.matches.is_empty() {
+                        let reachable = child.reachable_token_ids();
+                        for m in &exec.matches {
+                            let tid = TerminalID(m.id);
+                            for &src in sources {
+                                possible_matches
+                                    .entry(src).or_default()
+                                    .entry(tid).or_default()
+                                    .extend(reachable.iter());
                             }
                         }
-                        a
                     }
-                );
+
+                    if let Some(end_val) = exec.end_state {
+                        let end_sid = TokenizerStateID(end_val);
+                        next_grouped.entry(end_sid).or_default().extend(sources.iter().cloned());
+                    }
+                }
+
+                if !next_grouped.is_empty() {
+                    stack.push((child, next_grouped));
+                }
+            }
+        }
 
         (state_map_out, possible_matches)
-    }
-
-    /// Internal recursive function for parallel traversal
-    fn dfs_maps_and_matches<'a>(
-        node: &'a VocabPrefixTreeNode,
-        current_states: Vec<(TokenizerStateID, Vec<TokenizerStateID>)>,
-        tokenizer: &Regex,
-    ) -> (
-        Vec<(LLMTokenID, Vec<(TokenizerStateID, TokenizerStateID)>)>, // State map entries
-        Vec<(TokenizerStateID, TerminalID, &'a RangeSetBlaze<usize>)> // Match events
-    ) {
-        let children: Vec<_> = node.iter_children().collect();
-
-        // Process children in parallel
-        children.par_iter().map(|(edge_bytes, child)| {
-            let mut local_state_entries = Vec::new();
-            let mut local_matches = Vec::new();
-
-            // Group next states: TargetState -> Vec<OriginalState>
-            // We use a temporary vector of pairs then sort/group to avoid BTreeMap/HashMap overhead in inner loop
-            let mut next_states_raw: Vec<(TokenizerStateID, TokenizerStateID)> = Vec::with_capacity(current_states.len());
-
-            for (curr, sources) in &current_states {
-                let exec = tokenizer.execute_from_state(edge_bytes, *curr);
-                
-                // 1. Handle Matches (terminals triggered on this edge)
-                // If we matched terminal T, then for all `sources`, terminal T is valid for 
-                // all tokens in the child's subtree.
-                if !exec.matches.is_empty() {
-                    let reachable = child.reachable_token_ids();
-                    for m in &exec.matches {
-                        let tid = TerminalID(m.id);
-                        for &src in sources {
-                            local_matches.push((src, tid, reachable));
-                        }
-                    }
-                }
-
-                // 2. Handle Transitions
-                if let Some(end_val) = exec.end_state {
-                    let end_sid = TokenizerStateID(end_val);
-                    // Propagate all sources to this new state
-                    for &src in sources {
-                        next_states_raw.push((end_sid, src));
-                    }
-                }
-            }
-
-            // If we have valid next states, group them for recursion
-            if !next_states_raw.is_empty() {
-                // Group by TargetState (end_sid)
-                next_states_raw.sort_unstable_by_key(|k| k.0);
-                
-                let mut next_grouped: Vec<(TokenizerStateID, Vec<TokenizerStateID>)> = Vec::new();
-                if !next_states_raw.is_empty() {
-                    let mut cur_target = next_states_raw[0].0;
-                    let mut cur_group = Vec::new();
-                    for (target, src) in next_states_raw {
-                        if target != cur_target {
-                            next_grouped.push((cur_target, cur_group));
-                            cur_group = Vec::new();
-                            cur_target = target;
-                        }
-                        cur_group.push(src);
-                    }
-                    next_grouped.push((cur_target, cur_group));
-                }
-
-                // If child is a valid token, record state mappings
-                // LLMTokenID -> (Original -> CurrentAtChild)
-                // Note: vocab tree nodes have a token_id (0 for root, usually >0 for others).
-                // We assume non-zero/valid tokens are what we care about, or we simply record all.
-                // The existing logic used `child.token_id()` and collected it.
-                let token_id = child.token_id();
-                // Only record if it's a meaningful token (convention: usually 0 is root, but sometimes valid)
-                // Logic from `build` suggests checking validity, but here we just map what's in the tree.
-                // However, we must construct the map entry: (Original -> Target)
-                // The `next_grouped` contains (Target -> [Originals]). We need to flatten to (Original -> Target).
-                
-                let mut state_map_vec = Vec::new();
-                for (target, sources) in &next_grouped {
-                    for &src in sources {
-                        state_map_vec.push((src, *target));
-                    }
-                }
-                local_state_entries.push((LLMTokenID(token_id), state_map_vec));
-
-                // Recurse
-                let (child_entries, child_matches) = Self::dfs_maps_and_matches(child, next_grouped, tokenizer);
-                local_state_entries.extend(child_entries);
-                local_matches.extend(child_matches);
-            }
-
-            (local_state_entries, local_matches)
-        })
-        .reduce(
-            || (Vec::new(), Vec::new()),
-            |mut a, b| {
-                a.0.extend(b.0);
-                a.1.extend(b.1);
-                a
-            }
-        )
     }
 
     /// Rearrange possible_matches: state -> terminal -> BV(tokens)
