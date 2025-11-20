@@ -2,7 +2,7 @@ use crate::glr::table::StateID as ParserStateID;
 use crate::precompute4::full_dwa::FullDWABuildError;
 use crate::precompute4::weighted_automata::common::Label;
 
-pub const DEFAULT_TRANSITION_SYMBOL: Label = Label::MAX - 1;
+pub const DEFAULT_TRANSITION_SYMBOL: i16 = i16::MAX;
 
 pub fn encode_symbol_i16(id: ParserStateID) -> Result<Label, FullDWABuildError> {
     if id.0 > Label::MAX as usize {
