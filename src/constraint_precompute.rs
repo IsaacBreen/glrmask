@@ -394,18 +394,7 @@ impl<'r> Precomputer1<'r> {
     }
 
     fn run_dfs(&mut self) {
-        let mut assoc: BTreeMap<
-            TokenizerStateID,
-            Vec<NWAStateID>,
-        > = BTreeMap::new();
-
-        for (sid, arc) in &self.roots {
-            assoc
-                .entry(*sid)
-                .or_default()
-                .push(*arc);
-        }
-
+        let assoc = self.roots.clone();
         crate::debug!(2, "Starting precompute DFS for {} tokenizer states", self.roots.len());
         crate::debug!(6, "Roots for each tokenizer state:");
         for (sid, root) in &self.roots {
@@ -424,22 +413,17 @@ impl<'r> Precomputer1<'r> {
     fn dfs(
         &mut self,
         vocab_node: &VocabPrefixTreeNode,
-        assoc_by_state: BTreeMap<
-            TokenizerStateID,
-            Vec<NWAStateID>,
-        >,
+        assoc_by_state: BTreeMap<TokenizerStateID, NWAStateID>,
     ) {
         self.pb.inc(1);
         for (segment_bytes, child_vocab_node) in vocab_node.iter_children() {
-            let mut next_level_assoc: BTreeMap<
-                TokenizerStateID,
-                Vec<NWAStateID>,
-            > = BTreeMap::new();
+            let mut next_level_assoc_vec: BTreeMap<TokenizerStateID, Vec<NWAStateID>> =
+                BTreeMap::new();
 
             // Queue: pos -> TokenizerState -> (NWAState -> ContextTokens)
             let mut pending: BTreeMap<
                 usize,
-                BTreeMap<TokenizerStateID, Vec<NWAStateID>>,
+                BTreeMap<TokenizerStateID, NWAStateID>,
             > = BTreeMap::new();
             pending.insert(0, assoc_by_state.clone());
 
@@ -454,27 +438,16 @@ impl<'r> Precomputer1<'r> {
                 BTreeMap<GrammarTokenID, LLMTokenBV>,
             > = HashMap::new();
 
-            while let Some((pos, mut states_at_pos)) = pending.pop_first() {
-                for (_, nodes) in states_at_pos.iter_mut() {
-                    let merged_state = self.nwa.add_state();
-                    let weight = SimpleBitset::all();;
-                    for node in &*nodes {
-                        self.nwa.add_epsilon(*node, merged_state, weight.clone());
-                    }
-                    nodes.clear();
-                    nodes.push(merged_state);
-                }
-
+            while let Some((pos, states_at_pos)) = pending.pop_first() {
                 // If we reached the end of the segment, these states are ready for the next vocab node
                 if pos == segment_bytes.len() {
-                    for (tokenizer_state_id, nodes) in states_at_pos {
-                        let entry = next_level_assoc.entry(tokenizer_state_id).or_default();
-                        entry.extend(nodes);
+                    for (tokenizer_state_id, node) in states_at_pos {
+                        next_level_assoc_vec.entry(tokenizer_state_id).or_default().push(node);
                     }
                     continue;
                 }
 
-                for (tokenizer_state_id, nodes) in states_at_pos {
+                for (tokenizer_state_id, src_node) in states_at_pos {
                     let exec_result = self
                         .tokenizer
                         .execute_from_state(&segment_bytes[pos..], tokenizer_state_id);
@@ -496,57 +469,44 @@ impl<'r> Precomputer1<'r> {
                         let terminal_id = GrammarTokenID(match_info.id);
                         let next_pos = pos + match_info.width;
 
-                        for src_node in &nodes {
-                            // Leaf check: if match consumes remainder of segment
-                            if next_pos == segment_bytes.len() {
-                                let mut edge_bv = RangeSetBlaze::new();
-                                edge_bv.insert(child_token_id);
-                                let final_bv = edge_bv;
-                                if !final_bv.is_empty() {
-                                    let leaf = self.get_leaf_node();
-                                    pending_edges.push((
-                                        *src_node,
-                                        leaf,
-                                        Some(terminal_id),
-                                        final_bv.clone(),
-                                    ));
-                                }
-                            }
-
-                            // Continuation logic
-                            let mut edge_bv = child_reachable.clone();
-                            if next_pos == segment_bytes.len() {
-                                edge_bv.remove(child_token_id);
-                                if let Some(pm) = possible_matches_at_end.get(&terminal_id) {
-                                    edge_bv = &edge_bv - pm.inner.as_ref();
-                                }
-                            }
-
+                        // Leaf check: if match consumes remainder of segment
+                        if next_pos == segment_bytes.len() {
+                            let mut edge_bv = RangeSetBlaze::new();
+                            edge_bv.insert(child_token_id);
                             let final_bv = edge_bv;
-                            if final_bv.is_empty() {
-                                continue;
+                            if !final_bv.is_empty() {
+                                let leaf = self.get_leaf_node();
+                                pending_edges.push((
+                                    src_node,
+                                    leaf,
+                                    Some(terminal_id),
+                                    final_bv.clone(),
+                                ));
                             }
-
-                            let dest_map = pending
-                                .entry(next_pos)
-                                .or_default()
-                                .entry(self.tokenizer.initial_state_id())
-                                .or_default();
-
-                            let target = {
-                                let n = self.nwa.add_state();
-                                n
-                            };
-
-                            dest_map.push(target);
-
-                            pending_edges.push((
-                                *src_node,
-                                target,
-                                Some(terminal_id),
-                                final_bv,
-                            ));
                         }
+
+                        // Continuation logic
+                        let mut edge_bv = child_reachable.clone();
+                        if next_pos == segment_bytes.len() {
+                            edge_bv.remove(child_token_id);
+                            if let Some(pm) = possible_matches_at_end.get(&terminal_id) {
+                                edge_bv = &edge_bv - pm.inner.as_ref();
+                            }
+                        }
+
+                        let final_bv = edge_bv;
+                        if final_bv.is_empty() {
+                            continue;
+                        }
+
+                        let dest_map = pending.entry(next_pos).or_default();
+
+                        let initial_tsid = self.tokenizer.initial_state_id();
+                        let target = *dest_map
+                            .entry(initial_tsid)
+                            .or_insert_with(|| self.nwa.add_state());
+
+                        pending_edges.push((src_node, target, Some(terminal_id), final_bv));
                     }
 
                     // 2. Handle End State -> Continuation
@@ -556,28 +516,26 @@ impl<'r> Precomputer1<'r> {
                             .tokenizer
                             .tokens_accessible_from_state(final_tokenizer_state);
 
-                        for src_node in &nodes {
-                            let mut edge_bv = RangeSetBlaze::new();
-                            edge_bv.insert(child_token_id);
-                            let final_edge_bv = edge_bv;
+                        let mut edge_bv = RangeSetBlaze::new();
+                        edge_bv.insert(child_token_id);
+                        let final_edge_bv = edge_bv;
 
-                            if !final_edge_bv.is_empty() {
-                                let end_idx = self.get_leaf_node();
-                                for terminal_id in &accessible_terminals {
-                                    pending_edges.push((
-                                        *src_node,
-                                        end_idx,
-                                        Some(*terminal_id),
-                                        final_edge_bv.clone(),
-                                    ));
-                                }
+                        if !final_edge_bv.is_empty() {
+                            let end_idx = self.get_leaf_node();
+                            for terminal_id in &accessible_terminals {
+                                pending_edges.push((
+                                    src_node,
+                                    end_idx,
+                                    Some(*terminal_id),
+                                    final_edge_bv.clone(),
+                                ));
                             }
-
-                            next_level_assoc
-                                .entry(final_tokenizer_state)
-                                .or_default()
-                                .push(*src_node);
                         }
+
+                        next_level_assoc_vec
+                            .entry(final_tokenizer_state)
+                            .or_default()
+                            .push(src_node);
                     }
                 }
             }
@@ -590,10 +548,25 @@ impl<'r> Precomputer1<'r> {
                 }
             }
 
-            for nodes in next_level_assoc.values_mut() {
+            let mut next_level_assoc = BTreeMap::new();
+            for (tsid, mut nodes) in next_level_assoc_vec {
+                if nodes.is_empty() {
+                    continue;
+                }
                 nodes.sort_unstable();
                 nodes.dedup();
+                if nodes.len() == 1 {
+                    next_level_assoc.insert(tsid, nodes[0]);
+                } else {
+                    let merged_state = self.nwa.add_state();
+                    let weight = SimpleBitset::all();
+                    for node in nodes {
+                        self.nwa.add_epsilon(node, merged_state, weight.clone());
+                    }
+                    next_level_assoc.insert(tsid, merged_state);
+                }
             }
+
             if !next_level_assoc.is_empty() {
                 self.dfs(child_vocab_node, next_level_assoc);
             }
