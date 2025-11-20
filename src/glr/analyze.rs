@@ -1054,6 +1054,7 @@ pub fn optimize_grammar(
             literal_to_group_id,
             group_id_to_expr,
             start_symbol,
+            ignore_terminal_id,
         );
         changed |= merge_adjacent_terminals(
             productions,
@@ -1071,6 +1072,7 @@ fn convert_regular_nts_to_terminals(
     literal_to_group_id: &mut BiBTreeMap<Vec<u8>, usize>,
     group_id_to_expr: &mut BTreeMap<usize, Expr>,
     start_symbol: &NonTerminal,
+    ignore_terminal_id: Option<crate::types::TerminalID>,
 ) -> bool {
     let mut changed = false;
     let mut prods_by_lhs: BTreeMap<NonTerminal, Vec<Production>> = BTreeMap::new();
@@ -1081,6 +1083,17 @@ fn convert_regular_nts_to_terminals(
     let mut nts_to_replace: BTreeMap<NonTerminal, Terminal> = BTreeMap::new();
     let mut start_replacement: Option<Terminal> = None;
 
+    let ignore_expr = if let Some(tid) = ignore_terminal_id {
+        group_id_to_expr.get(&tid.0).cloned()
+    } else {
+        None
+    };
+    let ignore_seq = if let Some(ie) = ignore_expr {
+        Some(Expr::Quantifier(Box::new(ie), QuantifierType::ZeroOrMore))
+    } else {
+        None
+    };
+
     for (nt, prods) in &prods_by_lhs {
         // Check 1: Is it a pure sequence/choice of terminals?
         // e.g. A -> T1 T2 | T3
@@ -1090,9 +1103,14 @@ fn convert_regular_nts_to_terminals(
             let mut choices = Vec::new();
             for p in prods {
                 let mut seq = Vec::new();
-                for s in &p.rhs {
+                for (i, s) in p.rhs.iter().enumerate() {
                     if let Symbol::Terminal(t) = s {
                         if let Some(e) = get_expr_for_terminal(t, literal_to_group_id, regex_name_to_group_id, group_id_to_expr) {
+                            if i > 0 {
+                                if let Some(ref ie) = ignore_seq {
+                                    seq.push(ie.clone());
+                                }
+                            }
                             seq.push(e);
                         } else {
                             // Should not happen if grammar is consistent
@@ -1106,6 +1124,10 @@ fn convert_regular_nts_to_terminals(
             }
 
             if !choices.is_empty() {
+                // Prevent infinite loop: if start symbol is already a single terminal, stop.
+                if nt == start_symbol && prods.len() == 1 && prods[0].rhs.len() == 1 {
+                    continue;
+                }
                 let expr = if choices.len() == 1 { choices[0].clone() } else { Expr::Choice(choices) };
                 let new_term = create_new_terminal(expr, &nt.0, regex_name_to_group_id, group_id_to_expr);
                 if nt == start_symbol {
@@ -1131,7 +1153,9 @@ fn convert_regular_nts_to_terminals(
                     if s0 == &Symbol::NonTerminal(nt.clone()) {
                         if let Symbol::Terminal(t) = s1 {
                             if let Some(e) = get_expr_for_terminal(t, literal_to_group_id, regex_name_to_group_id, group_id_to_expr) {
-                                let expr = Expr::Quantifier(Box::new(e), QuantifierType::ZeroOrMore);
+                                // Left recursion: A -> A T => loop (Ignore* T)*
+                                let inner = if let Some(ref ie) = ignore_seq { Expr::Seq(vec![ie.clone(), e]) } else { e };
+                                let expr = Expr::Quantifier(Box::new(inner), QuantifierType::ZeroOrMore);
                                 let new_term = create_new_terminal(expr, &format!("{}_star", nt.0), regex_name_to_group_id, group_id_to_expr);
                                 if nt == start_symbol {
                                     start_replacement = Some(new_term);
@@ -1147,7 +1171,9 @@ fn convert_regular_nts_to_terminals(
                     if s1 == &Symbol::NonTerminal(nt.clone()) {
                         if let Symbol::Terminal(t) = s0 {
                             if let Some(e) = get_expr_for_terminal(t, literal_to_group_id, regex_name_to_group_id, group_id_to_expr) {
-                                let expr = Expr::Quantifier(Box::new(e), QuantifierType::ZeroOrMore);
+                                // Right recursion: A -> T A => loop (T Ignore*)*
+                                let inner = if let Some(ref ie) = ignore_seq { Expr::Seq(vec![e, ie.clone()]) } else { e };
+                                let expr = Expr::Quantifier(Box::new(inner), QuantifierType::ZeroOrMore);
                                 let new_term = create_new_terminal(expr, &format!("{}_star", nt.0), regex_name_to_group_id, group_id_to_expr);
                                 if nt == start_symbol {
                                     start_replacement = Some(new_term);
