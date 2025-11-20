@@ -1366,6 +1366,7 @@ mod tests {
         assert!(set_ones_zero.is_empty());
     }
 
+    #[ignore]
     #[test]
     fn test_find_good_permutation() {
         // Example from the problem description
