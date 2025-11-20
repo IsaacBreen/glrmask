@@ -289,11 +289,29 @@ impl HybridBitset {
             remaining: self.len(),
             is_all: self.is_all(),
             count: 0,
+            max_val: usize::MAX,
         }
     }
 
     pub fn iter_up_to(&self, max: usize) -> Iter<'_> {
-        self.iter_indices()
+        let mut count: u128 = 0;
+        for range in self.inner.ranges() {
+            let start = *range.start();
+            if start > max {
+                break;
+            }
+            let end = *range.end();
+            let effective_end = if end > max { max } else { end };
+            count += (effective_end as u128 - start as u128) + 1;
+        }
+
+        Iter {
+            iter_inner: self.inner.iter(),
+            remaining: count.try_into().unwrap_or(usize::MAX),
+            is_all: self.is_all(),
+            count: 0,
+            max_val: max,
+        }
     }
 
     /// Returns an iterator over the inclusive [start, end] ranges of the set.
@@ -450,12 +468,16 @@ pub struct Iter<'a> {
     remaining: usize,
     is_all: bool,
     count: usize,
+    max_val: usize,
 }
 
 impl<'a> Iterator for Iter<'a> {
     type Item = usize;
 
     fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining == 0 {
+            return None;
+        }
         if self.is_all {
             self.count += 1;
             if self.count == FULL_ITER_WARNING_THRESHOLD {
@@ -469,6 +491,10 @@ impl<'a> Iterator for Iter<'a> {
         }
         match self.iter_inner.next() {
             Some(item) => {
+                if item > self.max_val {
+                    self.remaining = 0;
+                    return None;
+                }
                 self.remaining -= 1;
                 Some(item)
             }
