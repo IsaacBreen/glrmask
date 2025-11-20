@@ -143,6 +143,18 @@ impl<'r> Precomputer1<'r> {
             final_roots.insert(*sid, final_root);
         }
 
+        // Compute live tokens as union of all edge masks
+        for node in Trie::all_nodes(&final_trie1_god, &final_roots.values().cloned().collect::<Vec<_>>()) {
+            let mut lt = LLMTokenBV::zeros();
+            let mut node = node.write(&final_trie1_god).unwrap();
+            for (_, edges) in node.children() {
+                for bv in edges.values() {
+                    lt |= bv;
+                }
+            }
+            node.value.live_tokens = lt;
+        }
+
         (final_roots, final_trie1_god)
     }
 
