@@ -125,8 +125,24 @@ impl<'r> Precomputer1<'r> {
         self.leaf_state
     }
 
-    fn finish(self) -> (BTreeMap<TokenizerStateID, PrecomputeNode1Index>, Trie1GodWrapper)
+    fn finish(mut self) -> (BTreeMap<TokenizerStateID, PrecomputeNode1Index>, Trie1GodWrapper)
     {
+        // TODO: make this simpler.
+        let new_start_state = self.nwa.add_state();
+        self.nwa.body.start_state = new_start_state;
+        for (tsid, state) in &self.roots {
+            self.nwa.add_transition(new_start_state, tsid.0 as i16, *state, Weight::all()).unwrap();
+        }
+        self.nwa.simplify();
+        let mut dwa = self.nwa.determinize();
+        self.nwa.simplify();
+        dwa = dwa.unroll_cycles();
+        for (tsid, state) in &mut self.roots {
+            let new_state = dwa.states[dwa.body.start_state].transitions[&(tsid.0 as i16)];
+            *state = new_state;
+        }
+        self.nwa = NWA::from_dwa(&dwa);
+
         let final_trie1_god = Trie1GodWrapper::new();
         let mut final_roots = BTreeMap::new();
         let mut node_map: HashMap<
