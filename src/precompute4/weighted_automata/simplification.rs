@@ -198,7 +198,7 @@ impl DWA {
     fn run_optimization_experiment(&mut self) {
         let initial_clone = self.clone();
         let initial_states = self.states.len();
-        crate::debug!(5, "[DWA Optimize] Starting experiment with {} states.", initial_states);
+        println!("[DWA Optimize] Starting experiment with {} states.", initial_states);
 
         let mut best_result: Option<(DWA, std::time::Duration, usize)> = None;
 
@@ -247,7 +247,7 @@ impl DWA {
             } else {
                 "".to_string()
             };
-            crate::debug!(5, "[DWA Optimize] Ordering #{}: {}, Time: {:.2?}, States: {}{}", i, ordering_str, elapsed, final_states, timeout_str);
+            println!("[DWA Optimize] Ordering #{}: {}, Time: {:.2?}, States: {}{}", i, ordering_str, elapsed, final_states, timeout_str);
 
             if !timed_out && best_result.as_ref().map_or(true, |(_, best_time, best_states)| {
                 final_states < *best_states || (final_states == *best_states && elapsed < *best_time)
@@ -868,7 +868,7 @@ impl NWA {
     fn run_optimization_experiment(&mut self) {
         let initial_clone = self.clone();
         let initial_states = self.states.len();
-        crate::debug!(5, "[NWA Optimize] Starting experiment with {} states.", initial_states);
+        println!("[NWA Optimize] Starting experiment with {} states.", initial_states);
 
         let mut best_result: Option<(NWA, std::time::Duration, usize)> = None;
 
@@ -918,7 +918,7 @@ impl NWA {
             } else {
                 "".to_string()
             };
-            crate::debug!(5, "[NWA Optimize] Ordering #{}: {}, Time: {:.2?}, States: {}{}", i, ordering_str, elapsed, final_states, timeout_str);
+            println!("[NWA Optimize] Ordering #{}: {}, Time: {:.2?}, States: {}{}", i, ordering_str, elapsed, final_states, timeout_str);
 
             if !timed_out && best_result.as_ref().map_or(true, |(_, best_time, best_states)| {
                 final_states < *best_states || (final_states == *best_states && elapsed < *best_time)
