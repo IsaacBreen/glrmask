@@ -1,38 +1,38 @@
 use crate::glr::automaton::{
-    compute_closure, compute_first_sets_for_nonterminals, compute_follow_sets_for_nonterminals,
-    compute_nonterminal_nullability, compute_null_nonterminals, compute_nullable_nonterminals,
+    compute_first_sets_for_nonterminals,
+    compute_follow_sets_for_nonterminals,
+    compute_nonterminal_nullability,
+    compute_nullable_nonterminals,
     Nullability,
 };
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
-use crate::glr::table::{Goto, NonTerminalID, StateID, Table};
-use bimap::BiBTreeMap;
-use kdam::{tqdm, BarExt};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 /// Checks for non-terminals used in rule RHS but never defined in LHS.
 pub fn check_for_undefined_non_terminals(productions: &[Production]) -> Vec<String> {
-    let mut lhs_nonterms: BTreeSet<NonTerminal> = BTreeSet::new();
-    let mut rhs_nonterms: BTreeSet<NonTerminal> = BTreeSet::new();
+    let mut lhs_nonterms = BTreeSet::new();
+    let mut rhs_nonterms = BTreeSet::new();
 
     for prod in productions {
         lhs_nonterms.insert(prod.lhs.clone());
-        for symbol in &prod.rhs {
-            if let Symbol::NonTerminal(nt) = symbol {
-                rhs_nonterms.insert(nt.clone());
-            }
-        }
+        rhs_nonterms.extend(prod.rhs.iter().filter_map(|s| match s {
+            Symbol::NonTerminal(nt) => Some(nt.clone()),
+            _ => None,
+        }));
     }
 
-    let missing_nonterms: BTreeSet<_> = rhs_nonterms.difference(&lhs_nonterms).collect();
-    if !missing_nonterms.is_empty() {
-        let missing_nonterm_strings: BTreeSet<_> =
-            missing_nonterms.into_iter().map(|nt| nt.0.clone()).collect();
+    let missing: Vec<_> = rhs_nonterms
+        .difference(&lhs_nonterms)
+        .map(|nt| nt.0.clone())
+        .collect();
+
+    if missing.is_empty() {
+        Vec::new()
+    } else {
         vec![format!(
             "Non-terminal(s) used in rule RHS but never defined in LHS: {:?}",
-            missing_nonterm_strings
+            missing
         )]
-    } else {
-        Vec::new()
     }
 }
 
@@ -40,10 +40,10 @@ pub fn check_for_undefined_non_terminals(productions: &[Production]) -> Vec<Stri
 fn detect_all_cycles_recursive(
     nt: &NonTerminal,
     graph: &BTreeMap<NonTerminal, BTreeSet<NonTerminal>>,
-    visiting: &mut BTreeSet<NonTerminal>, // Nodes currently in the recursion stack for the current path
-    visited: &mut BTreeSet<NonTerminal>,  // Nodes that have been fully explored
-    path: &mut Vec<NonTerminal>,          // Current path for cycle detection
-    cycles: &mut BTreeSet<Vec<NonTerminal>>, // Set to store unique, canonicalized cycles
+    visiting: &mut BTreeSet<NonTerminal>,
+    visited: &mut BTreeSet<NonTerminal>,
+    path: &mut Vec<NonTerminal>,
+    cycles: &mut BTreeSet<Vec<NonTerminal>>,
 ) {
     visiting.insert(nt.clone());
     path.push(nt.clone());
@@ -51,23 +51,20 @@ fn detect_all_cycles_recursive(
     if let Some(neighbors) = graph.get(nt) {
         for neighbor in neighbors {
             if visiting.contains(neighbor) {
-                // Cycle detected. Extract it from the current path.
-                let cycle_start_index = path.iter().position(|n| n == neighbor).unwrap_or(0);
-                let mut cycle: Vec<_> = path[cycle_start_index..].to_vec();
-
-                // Canonicalize the cycle by rotating it to start with the lexicographically smallest element.
-                // This ensures that A -> B -> A and B -> A -> B are treated as the same cycle.
-                if !cycle.is_empty() {
-                    let min_node_pos = cycle
-                        .iter()
-                        .enumerate()
-                        .min_by_key(|&(_, n)| n)
-                        .map(|(i, _)| i)
-                        .unwrap_or(0);
-                    cycle.rotate_left(min_node_pos);
+                if let Some(start) = path.iter().position(|n| n == neighbor) {
+                    let mut cycle: Vec<_> = path[start..].to_vec();
+                    if !cycle.is_empty() {
+                        let min_pos = cycle
+                            .iter()
+                            .enumerate()
+                            .min_by_key(|(_, n)| *n)
+                            .map(|(i, _)| i)
+                            .unwrap_or(0);
+                        cycle.rotate_left(min_pos);
+                    }
+                    cycles.insert(cycle);
                 }
-                cycles.insert(cycle);
-                continue; // Continue to find other cycles from this node.
+                continue;
             }
 
             if !visited.contains(neighbor) {
@@ -87,27 +84,26 @@ pub fn check_for_length_1_recursion(productions: &[Production]) -> Vec<String> {
     let all_nonterminals: BTreeSet<NonTerminal> = productions
         .iter()
         .flat_map(|p| {
-            let mut nts = vec![p.lhs.clone()];
-            for s in &p.rhs {
-                if let Symbol::NonTerminal(nt) = s {
-                    nts.push(nt.clone());
-                }
-            }
-            nts
+            std::iter::once(p.lhs.clone()).chain(
+                p.rhs
+                    .iter()
+                    .filter_map(|s| match s {
+                        Symbol::NonTerminal(nt) => Some(nt.clone()),
+                        _ => None,
+                    }),
+            )
         })
         .collect();
 
-    // Build a graph where an edge A -> B exists if a rule A ::= Nullable* B Nullable* exists.
+    // Build a graph where there is an edge A -> B if a rule A ::= Nullable* B Nullable* exists.
     let mut unit_graph: BTreeMap<NonTerminal, BTreeSet<NonTerminal>> = BTreeMap::new();
     for nt in &all_nonterminals {
         unit_graph.entry(nt.clone()).or_default();
     }
 
     for prod in productions {
-        let lhs = &prod.lhs;
-        let rhs = &prod.rhs;
-
-        let non_nullable_symbols: Vec<&Symbol> = rhs
+        let non_nullable_symbols: Vec<&Symbol> = prod
+            .rhs
             .iter()
             .filter(|symbol| match symbol {
                 Symbol::Terminal(_) => true,
@@ -118,22 +114,20 @@ pub fn check_for_length_1_recursion(productions: &[Production]) -> Vec<String> {
         if non_nullable_symbols.len() == 1 {
             if let Symbol::NonTerminal(target_nt) = non_nullable_symbols[0] {
                 unit_graph
-                    .entry(lhs.clone())
+                    .entry(prod.lhs.clone())
                     .or_default()
                     .insert(target_nt.clone());
             }
         }
     }
 
-    // Detect all unique cycles in the unit graph using DFS.
     let mut visiting = BTreeSet::new();
     let mut visited = BTreeSet::new();
     let mut cycles = BTreeSet::new();
-    let sorted_nonterminals: Vec<_> = all_nonterminals.iter().collect();
+    let mut path = Vec::new();
 
-    for nt in sorted_nonterminals {
+    for nt in &all_nonterminals {
         if !visited.contains(nt) {
-            let mut path = Vec::new();
             detect_all_cycles_recursive(
                 nt,
                 &unit_graph,
@@ -145,21 +139,16 @@ pub fn check_for_length_1_recursion(productions: &[Production]) -> Vec<String> {
         }
     }
 
-    // Format errors for each unique cycle found.
     cycles
         .into_iter()
         .map(|cycle| {
-            let mut cycle_nodes_for_display: Vec<_> = cycle.iter().map(|n| n.0.as_str()).collect();
-            cycle_nodes_for_display.push(cycle[0].0.as_str()); // Close the loop for display.
-
-            let cycle_path_str = cycle_nodes_for_display.join(" -> ");
-            let recursion_type = if cycle.len() == 1 {
-                "Direct"
-            } else {
-                "Indirect"
-            };
-
-            format!("{recursion_type} length-1 recursion cycle detected: {cycle_path_str}")
+            let mut names: Vec<_> = cycle.iter().map(|n| n.0.as_str()).collect();
+            names.push(cycle[0].0.as_str());
+            let recursion_type = if cycle.len() == 1 { "Direct" } else { "Indirect" };
+            format!(
+                "{recursion_type} length-1 recursion cycle detected: {}",
+                names.join(" -> ")
+            )
         })
         .collect()
 }
@@ -173,26 +162,25 @@ pub fn check_for_left_nullable_left_recursion(productions: &[Production]) -> Vec
         let lhs = &prod.lhs;
         let rhs = &prod.rhs;
 
-        // Iterate through RHS symbols to find the recursive non-terminal A
         for (i, symbol) in rhs.iter().enumerate() {
             if let Symbol::NonTerminal(nt) = symbol {
                 if nt == lhs {
-                    // Found potential left recursion: A ::= ... A ...
-                    // Check if all preceding symbols (if any) are nullable non-terminals
                     let prefix = &rhs[0..i];
                     if !prefix.is_empty() {
-                        // Only check if there's a prefix
                         let prefix_is_nullable = prefix.iter().all(|sym| match sym {
-                            Symbol::NonTerminal(prefix_nt) =>
-                                nullable_nonterminals.contains(prefix_nt),
-                            Symbol::Terminal(_) => false, // Terminals are not nullable
+                            Symbol::NonTerminal(prefix_nt) => {
+                                nullable_nonterminals.contains(prefix_nt)
+                            }
+                            Symbol::Terminal(_) => false,
                         });
-
                         if prefix_is_nullable {
-                            errors.push(format!("Left-nullable left recursion detected in rule '{} ::= {:?}'. The prefix '{:?}' before the recursive non-terminal '{}' is nullable.", lhs.0, rhs, prefix, lhs.0));
+                            errors.push(format!(
+                                "Left-nullable left recursion detected in rule '{} ::= {:?}'. \
+                                 The prefix '{:?}' before the recursive non-terminal '{}' is nullable.",
+                                lhs.0, rhs, prefix, lhs.0
+                            ));
                         }
                     }
-                    // We only care about the first instance of recursion in a rule.
                     break;
                 }
             }
@@ -213,17 +201,13 @@ fn compute_productive_non_terminals(productions: &[Production]) -> BTreeSet<NonT
                 continue;
             }
 
-            // A rule's RHS is productive if all its symbols are productive.
-            // Terminals are inherently productive. Non-terminals are productive if they are in our set.
             let rhs_is_productive = prod.rhs.iter().all(|symbol| match symbol {
                 Symbol::Terminal(_) => true,
                 Symbol::NonTerminal(nt) => productive_nts.contains(nt),
             });
 
-            if rhs_is_productive {
-                if productive_nts.insert(prod.lhs.clone()) {
-                    changed = true;
-                }
+            if rhs_is_productive && productive_nts.insert(prod.lhs.clone()) {
+                changed = true;
             }
         }
     }
@@ -232,24 +216,22 @@ fn compute_productive_non_terminals(productions: &[Production]) -> BTreeSet<NonT
 
 /// Checks for non-terminals that cannot derive any terminal string.
 pub fn check_for_non_productive_non_terminals(productions: &[Production]) -> Vec<String> {
-    // Collect all non-terminals defined on the LHS. If a non-terminal is only used on the RHS,
-    // `check_for_undefined_non_terminals` will have already caught it.
     let all_nonterminals: BTreeSet<NonTerminal> =
         productions.iter().map(|p| p.lhs.clone()).collect();
     let productive_nts = compute_productive_non_terminals(productions);
 
-    let non_productive_nts: BTreeSet<_> = all_nonterminals.difference(&productive_nts).collect();
+    let non_productive: Vec<_> = all_nonterminals
+        .difference(&productive_nts)
+        .map(|nt| nt.0.clone())
+        .collect();
 
-    if !non_productive_nts.is_empty() {
-        let mut non_productive_strings: Vec<_> =
-            non_productive_nts.into_iter().map(|nt| nt.0.clone()).collect();
-        non_productive_strings.sort(); // For deterministic error messages
+    if non_productive.is_empty() {
+        Vec::new()
+    } else {
         vec![format!(
             "Non-terminal(s) are non-productive (cannot derive a terminal string): {:?}",
-            non_productive_strings
+            non_productive
         )]
-    } else {
-        Vec::new()
     }
 }
 
@@ -281,77 +263,77 @@ pub fn validate(productions: &[Production]) -> Result<(), String> {
 
 /// Removes productions that use non-terminals on their RHS which are never defined on the LHS
 /// of any *remaining* production. This process is repeated until no more productions can be removed.
-///
-/// This is useful for cleaning up grammars before further analysis or parser generation,
-/// especially if the grammar might contain references to non-terminals that have no rules.
 pub fn remove_productions_with_undefined_nonterminals(
     initial_productions: &[Production],
     exempt: &[usize],
 ) -> Vec<Production> {
-    let mut current_productions: Vec<(usize, Production)> =
+    let mut current: Vec<(usize, Production)> =
         initial_productions.iter().cloned().enumerate().collect();
 
     loop {
-        let mut defined_lhs_nonterminals: BTreeSet<NonTerminal> = BTreeSet::new();
-        for (i, prod) in &current_productions {
-            defined_lhs_nonterminals.insert(prod.lhs.clone());
-        }
-        let mut removed_productions: Vec<(usize, Production)> = Vec::new();
-        let mut kept_productions: Vec<(usize, Production)> = Vec::new();
-        for (i, prod) in current_productions {
-            let keep = prod
-                .rhs
-                .iter()
-                .all(|symbol| match symbol {
-                    Symbol::Terminal(_) => true, // Terminals are always defined
-                    Symbol::NonTerminal(nt) => defined_lhs_nonterminals.contains(nt),
-                })
-                || exempt.contains(&i);
+        let defined_lhs: BTreeSet<NonTerminal> = current
+            .iter()
+            .map(|(_, prod)| prod.lhs.clone())
+            .collect();
+
+        let mut removed = Vec::new();
+        let mut kept = Vec::new();
+
+        for (i, prod) in current {
+            let keep = exempt.contains(&i)
+                || prod.rhs.iter().all(|symbol| match symbol {
+                    Symbol::Terminal(_) => true,
+                    Symbol::NonTerminal(nt) => defined_lhs.contains(nt),
+                });
             if keep {
-                kept_productions.push((i, prod));
+                kept.push((i, prod));
             } else {
-                removed_productions.push((i, prod));
+                removed.push((i, prod));
             }
         }
-        current_productions = kept_productions;
-        if removed_productions.is_empty() {
+
+        if removed.is_empty() {
+            current = kept;
             break;
         }
+
         crate::debug!(
             3,
             "Removing {} productions with undefined non-terminals.",
-            removed_productions.len()
+            removed.len()
         );
-        let all_rhs_nonterminals: BTreeSet<NonTerminal> = removed_productions
+
+        let all_rhs_nonterminals: BTreeSet<NonTerminal> = removed
             .iter()
-            .flat_map(|(_i, prod)| {
+            .flat_map(|(_, prod)| {
                 prod.rhs.iter().filter_map(|symbol| match symbol {
                     Symbol::NonTerminal(nt) => Some(nt.clone()),
                     _ => None,
                 })
             })
             .collect();
+
         crate::debug!(
             2,
             "Missing non-terminals ({}) in productions:",
             all_rhs_nonterminals.len()
         );
-        for nt in all_rhs_nonterminals.difference(&defined_lhs_nonterminals) {
+        for nt in all_rhs_nonterminals.difference(&defined_lhs) {
             crate::debug!(4, "  {}", nt.0);
         }
+
         crate::debug!(5, "Removed productions:");
-        for (i, prod) in removed_productions {
+        for (_, prod) in &removed {
             crate::debug!(5, "  {}", prod);
         }
+
+        current = kept;
     }
 
-    current_productions
-        .into_iter()
-        .map(|(_, prod)| prod)
-        .collect()
+    current.into_iter().map(|(_, prod)| prod).collect()
 }
 
-// TODO: This function is marked as broken and is not modified by this request.
+// TODO: This function is known to be incomplete; kept here for compatibility.
 pub fn drop_dead(productions: &[Production]) -> Vec<Production> {
     // todo: this function is broken
     let mut nt_reachables: BTreeMap<&NonTerminal, BTreeSet<&NonTerminal>> = BTreeMap::new();
@@ -430,32 +412,15 @@ fn compute_can_derive_interesting(
                 continue;
             }
 
-            let mut rhs_can_lead_to_interesting = false;
-            for symbol_in_rhs in &production.rhs {
-                match symbol_in_rhs {
-                    Symbol::Terminal(_) => {
-                        if interesting_symbols.contains(symbol_in_rhs) {
-                            rhs_can_lead_to_interesting = true;
-                            break;
-                        }
-                    }
-                    Symbol::NonTerminal(nt_in_rhs) => {
-                        // An RHS non-terminal leads to interesting if it IS an interesting symbol itself,
-                        // OR it can derive an interesting symbol.
-                        if interesting_symbols.contains(symbol_in_rhs)
-                            || can_derive_interesting.contains(nt_in_rhs)
-                        {
-                            rhs_can_lead_to_interesting = true;
-                            break;
-                        }
-                    }
+            let rhs_can_lead = production.rhs.iter().any(|symbol| match symbol {
+                Symbol::Terminal(_) => interesting_symbols.contains(symbol),
+                Symbol::NonTerminal(nt) => {
+                    interesting_symbols.contains(symbol) || can_derive_interesting.contains(nt)
                 }
-            }
+            });
 
-            if rhs_can_lead_to_interesting {
-                if can_derive_interesting.insert(production.lhs.clone()) {
-                    changed = true;
-                }
+            if rhs_can_lead && can_derive_interesting.insert(production.lhs.clone()) {
+                changed = true;
             }
         }
     }
@@ -468,12 +433,13 @@ fn compute_reachable_from_interesting_nts(
     productions: &[Production],
     interesting_symbols: &BTreeSet<Symbol>,
 ) -> BTreeSet<NonTerminal> {
-    let mut seed_interesting_nts = BTreeSet::new();
-    for s in interesting_symbols {
-        if let Symbol::NonTerminal(nt) = s {
-            seed_interesting_nts.insert(nt.clone());
-        }
-    }
+    let seed_interesting_nts: BTreeSet<NonTerminal> = interesting_symbols
+        .iter()
+        .filter_map(|s| match s {
+            Symbol::NonTerminal(nt) => Some(nt.clone()),
+            _ => None,
+        })
+        .collect();
 
     if seed_interesting_nts.is_empty() {
         return BTreeSet::new();
@@ -483,17 +449,11 @@ fn compute_reachable_from_interesting_nts(
     let mut worklist: VecDeque<NonTerminal> = seed_interesting_nts.into_iter().collect();
 
     while let Some(nt_lhs_from_worklist) = worklist.pop_front() {
-        // Find productions where nt_lhs_from_worklist is the LHS
-        for production in productions {
-            if production.lhs == nt_lhs_from_worklist {
-                for symbol_in_rhs in &production.rhs {
-                    if let Symbol::NonTerminal(nt_in_rhs) = symbol_in_rhs {
-                        if !reachable_set.contains(nt_in_rhs) {
-                            if reachable_set.insert(nt_in_rhs.clone()) {
-                                // Check insert result
-                                worklist.push_back(nt_in_rhs.clone());
-                            }
-                        }
+        for production in productions.iter().filter(|p| p.lhs == nt_lhs_from_worklist) {
+            for symbol_in_rhs in &production.rhs {
+                if let Symbol::NonTerminal(nt_in_rhs) = symbol_in_rhs {
+                    if reachable_set.insert(nt_in_rhs.clone()) {
+                        worklist.push_back(nt_in_rhs.clone());
                     }
                 }
             }
@@ -503,17 +463,6 @@ fn compute_reachable_from_interesting_nts(
 }
 
 /// Filters productions to keep only those relevant to deriving specified "interesting" symbols.
-///
-/// A production `P: L -> R` is kept if:
-/// 1. Its LHS (`L`) can derive an interesting symbol (i.e., `L` is in `can_derive_set`).
-/// AND
-/// 2. Its RHS (`R`), for this specific production, can also derive an interesting symbol.
-///
-/// The RHS `R` "can derive an interesting symbol" if:
-/// 1. `R` directly contains an interesting symbol (terminal or non-terminal).
-/// 2. `R` contains a non-terminal `N` that is itself in `can_derive_set`.
-///
-/// If `interesting_symbols` is empty, no productions will be kept.
 pub fn filter_productions_by_reachability(
     initial_productions: &[Production],
     interesting_symbols: &BTreeSet<Symbol>,
@@ -526,47 +475,29 @@ pub fn filter_productions_by_reachability(
         return Vec::new();
     }
 
-    // --- Pre-computation ---
-    // 1. Non-terminals that can derive an interesting symbol.
     let can_derive_set =
         compute_can_derive_interesting(initial_productions, interesting_symbols);
     crate::debug!(
         3,
         "filter_productions_by_reachability: CanDeriveInteresting set: {:?}",
-        can_derive_set.iter().map(|nt| &nt.0).collect::<Vec<_>>()
+        can_derive_set
+            .iter()
+            .map(|nt| &nt.0)
+            .collect::<Vec<_>>()
     );
 
-    // --- Filtering Loop ---
     let mut kept_productions = Vec::new();
     for production in initial_productions {
-        let lhs = &production.lhs;
+        let lhs_can_derive_interesting = can_derive_set.contains(&production.lhs);
 
-        // Condition A: LHS can derive an interesting symbol.
-        let lhs_can_derive_interesting = can_derive_set.contains(lhs);
-
-        // Condition B: RHS of *this specific* production can derive an interesting symbol.
-        let mut rhs_can_derive_interesting_for_this_rule = false;
-        for symbol_in_rhs in &production.rhs {
-            match symbol_in_rhs {
-                Symbol::Terminal(_) => {
-                    if interesting_symbols.contains(symbol_in_rhs) {
-                        rhs_can_derive_interesting_for_this_rule = true;
-                        break;
-                    }
-                }
+        let rhs_can_derive_interesting_for_this_rule =
+            production.rhs.iter().any(|symbol_in_rhs| match symbol_in_rhs {
+                Symbol::Terminal(_) => interesting_symbols.contains(symbol_in_rhs),
                 Symbol::NonTerminal(nt_in_rhs) => {
-                    // An RHS non-terminal leads to interesting if:
-                    // 1. It IS an interesting symbol itself (e.g. if interesting_symbols can contain NTs)
-                    // 2. OR it can derive an interesting symbol (i.e., nt_in_rhs is in can_derive_set)
-                    if interesting_symbols.contains(symbol_in_rhs)
+                    interesting_symbols.contains(symbol_in_rhs)
                         || can_derive_set.contains(nt_in_rhs)
-                    {
-                        rhs_can_derive_interesting_for_this_rule = true;
-                        break;
-                    }
                 }
-            }
-        }
+            });
 
         if lhs_can_derive_interesting && rhs_can_derive_interesting_for_this_rule {
             kept_productions.push(production.clone());
@@ -589,7 +520,6 @@ pub fn simplify_grammar(initial_productions: &[Production]) -> Vec<Production> {
 }
 
 /// Helper function to find the last symbol in a rule's RHS that is not a nullable non-terminal.
-/// Returns the index and the symbol if found.
 fn find_last_non_nullable_symbol<'a>(
     rhs: &'a [Symbol],
     nullable_set: &BTreeSet<NonTerminal>,
@@ -623,30 +553,25 @@ pub fn compute_terminal_follow_sets(
 
         for (i, symbol) in rhs.iter().enumerate() {
             if let Symbol::Terminal(t) = symbol {
-                // We found a terminal 't'. Now, find what can follow it in this rule.
                 let mut all_following_are_nullable = true;
 
-                // Look at the rest of the production's RHS (the suffix)
                 for next_symbol in &rhs[i + 1..] {
                     match next_symbol {
                         Symbol::Terminal(next_t) => {
-                            // The next symbol is a terminal. It's in the follow set.
                             terminal_follows
                                 .entry(t.clone())
                                 .or_default()
                                 .insert(next_t.clone());
                             all_following_are_nullable = false;
-                            break; // Found a non-nullable symbol, so we're done with this suffix.
+                            break;
                         }
                         Symbol::NonTerminal(next_nt) => {
-                            // The next symbol is a non-terminal. Add its FIRST set.
                             if let Some(first_set_for_next_nt) = first_sets.get(next_nt) {
                                 terminal_follows
                                     .entry(t.clone())
                                     .or_default()
                                     .extend(first_set_for_next_nt.iter().cloned());
                             }
-                            // If the non-terminal is not nullable, we stop looking further.
                             if !nullable_nonterminals.contains(next_nt) {
                                 all_following_are_nullable = false;
                                 break;
@@ -655,14 +580,11 @@ pub fn compute_terminal_follow_sets(
                     }
                 }
 
-                // If the rest of the RHS was empty or consisted entirely of nullable non-terminals,
-                // then FOLLOW(t) must also include FOLLOW(lhs).
                 if all_following_are_nullable {
                     if let Some(follow_set_for_lhs) = nonterminal_follow_sets.get(lhs) {
                         terminal_follows
                             .entry(t.clone())
                             .or_default()
-                            // filter_map removes None (EOF) and unwraps Some(T) to T
                             .extend(follow_set_for_lhs.iter().filter_map(|opt_t| opt_t.clone()));
                     }
                 }
@@ -674,16 +596,6 @@ pub fn compute_terminal_follow_sets(
 }
 
 /// Creates a closure that generates unique non-terminal names, suitable for `resolve_right_recursion`.
-///
-/// The generator ensures that new names do not conflict with existing non-terminal names
-/// or with names it has generated previously. A typical generated name for a non-terminal `A`
-/// would be `A_rr`, `A_rr_2`, etc., to avoid collisions.
-///
-/// # Arguments
-/// * `all_nonterminals` - A set of all non-terminal names currently in the grammar.
-///
-/// # Returns
-/// A closure `FnMut(&str) -> String` that can be passed to `resolve_right_recursion`.
 pub fn create_unique_name_generator(
     all_nonterminals: &BTreeSet<NonTerminal>,
 ) -> impl FnMut(&str) -> String {
@@ -691,17 +603,14 @@ pub fn create_unique_name_generator(
         all_nonterminals.iter().map(|nt| nt.0.clone()).collect();
 
     move |base_name: &str| {
-        // First attempt: base_name + "_rr" (for right-recursion elimination)
         let mut new_name = format!("{base_name}_rr");
         let mut counter = 1;
 
-        // Check for collisions and increment a suffix if needed
         while existing_names.contains(&new_name) {
             counter += 1;
             new_name = format!("{base_name}_rr_{counter}");
         }
 
-        // Reserve the new name to avoid future collisions within the generator.
         existing_names.insert(new_name.clone());
         new_name
     }
@@ -714,56 +623,38 @@ pub fn resolve_right_recursion(
     todo!("resolve_right_recursion");
 }
 
+fn is_simple_direct_right_recursive(prod: &Production) -> bool {
+    if prod.rhs.len() < 2 {
+        return false;
+    }
+    match prod.rhs.last() {
+        Some(Symbol::NonTerminal(nt)) if nt == &prod.lhs => {
+            let prefix = &prod.rhs[..prod.rhs.len() - 1];
+            !prefix.contains(&Symbol::NonTerminal(prod.lhs.clone()))
+        }
+        _ => false,
+    }
+}
+
 pub fn resolve_direct_right_recursion(
     productions: &mut Vec<Production>,
     mut new_name_generator: impl FnMut(&str) -> String,
 ) {
-    // This function transforms direct right-recursion into left-recursion while preserving
-    // the original order of productions as much as possible.
-    //
-    // The transformation for a non-terminal `A` with rules:
-    //   A -> α₁ A | ... | αₘ A  (right-recursive rules, where αᵢ is a prefix)
-    //   A -> β₁ | ... | βₙ      (non-recursive rules)
-    // is to replace them with:
-    //   A  -> A' β₁ | ... | A' βₙ
-    //   A' -> A' α₁ | ... | A' αₘ | ε
-    // where `A'` is a new non-terminal. This generates the same language `(α₁|...|αₘ)* (β₁|...|βₙ)`
-    // using left-recursion.
-    //
-    // The implementation preserves order by iterating through the original production list.
-    // When it first encounters a rule for a right-recursive non-terminal, it replaces all
-    // rules for that non-terminal with the new, transformed set of rules at that position.
-
-    // 1. Group productions by LHS to easily access all rules for a given non-terminal.
-    // The BTreeMap is just for efficient lookup; we don't iterate over its keys for ordering.
+    // Group productions by LHS to easily access all rules for a given non-terminal.
     let mut prods_by_lhs: BTreeMap<NonTerminal, Vec<Production>> = BTreeMap::new();
     for prod in productions.iter().cloned() {
         prods_by_lhs.entry(prod.lhs.clone()).or_default().push(prod);
     }
 
-    // 2. Identify all non-terminals that have simple direct right-recursive rules.
+    // Identify all non-terminals that have simple direct right-recursive rules.
     let mut recursive_nts = BTreeSet::new();
     for (nt, prods_for_nt) in &prods_by_lhs {
-        let is_recursive = prods_for_nt.iter().any(|p| {
-            // A rule `A -> α A` is simple direct right-recursive if:
-            // a) `α` is not empty (i.e., rule is not `A -> A`).
-            if p.rhs.len() < 2 {
-                return false;
-            }
-            // b) The last symbol is `A`.
-            if p.rhs.last() != Some(&Symbol::NonTerminal(p.lhs.clone())) {
-                return false;
-            }
-            // c) `α` (the prefix) does not contain `A`.
-            let alpha = &p.rhs[..p.rhs.len() - 1];
-            !alpha.contains(&Symbol::NonTerminal(p.lhs.clone()))
-        });
-        if is_recursive {
+        if prods_for_nt.iter().any(is_simple_direct_right_recursive) {
             recursive_nts.insert(nt.clone());
         }
     }
 
-    // 3. Build the new production list, preserving order.
+    // Build the new production list, preserving order as much as possible.
     let mut new_productions = Vec::new();
     let mut processed_recursive_nts = BTreeSet::new();
 
@@ -771,35 +662,19 @@ pub fn resolve_direct_right_recursion(
         let lhs = &prod.lhs;
 
         if !recursive_nts.contains(lhs) {
-            // This production's LHS is not right-recursive, so we can keep the production as is.
             new_productions.push(prod);
             continue;
         }
 
-        // The LHS is right-recursive. We need to process all of its rules at once.
-        // We do this only the first time we encounter a rule for this LHS.
         if processed_recursive_nts.contains(lhs) {
-            // We've already handled this NT and its rules, so we skip this and subsequent productions for it.
             continue;
         }
         processed_recursive_nts.insert(lhs.clone());
 
-        // --- Perform the transformation for `lhs` ---
-        let prods_for_nt = prods_by_lhs.get(lhs).unwrap();
-
+        let prods_for_nt = prods_by_lhs.get(lhs).expect("LHS group missing");
         let (recursive_rules, other_rules): (Vec<_>, Vec<_>) =
-            prods_for_nt.iter().cloned().partition(|p| {
-                if p.rhs.len() < 2 {
-                    return false;
-                }
-                if p.rhs.last() != Some(&Symbol::NonTerminal(p.lhs.clone())) {
-                    return false;
-                }
-                let alpha = &p.rhs[..p.rhs.len() - 1];
-                !alpha.contains(&Symbol::NonTerminal(p.lhs.clone()))
-            });
+            prods_for_nt.iter().cloned().partition(is_simple_direct_right_recursive);
 
-        // `recursive_rules` is guaranteed to be non-empty because `lhs` is in `recursive_nts`.
         let new_nt = NonTerminal(new_name_generator(&lhs.0));
         crate::debug!(
             5,
@@ -808,10 +683,10 @@ pub fn resolve_direct_right_recursion(
             new_nt.0
         );
 
-        // Create new rules for the original non-terminal `A`: `A -> A' βⱼ`.
-        // The order of these new rules is based on the original order of the `β` rules.
+        // A -> A' βⱼ
         for non_rec_rule in &other_rules {
-            let mut new_rhs = vec![Symbol::NonTerminal(new_nt.clone())];
+            let mut new_rhs = Vec::with_capacity(non_rec_rule.rhs.len() + 1);
+            new_rhs.push(Symbol::NonTerminal(new_nt.clone()));
             new_rhs.extend_from_slice(&non_rec_rule.rhs);
             let new_prod = Production {
                 lhs: lhs.clone(),
@@ -826,10 +701,11 @@ pub fn resolve_direct_right_recursion(
             new_productions.push(new_prod);
         }
 
-        // Create rules for the new non-terminal `A'`: `A' -> A' αᵢ` and `A' -> ε`.
+        // A' -> A' αᵢ
         for rec_rule in &recursive_rules {
             let alpha = &rec_rule.rhs[..rec_rule.rhs.len() - 1];
-            let mut new_rhs = vec![Symbol::NonTerminal(new_nt.clone())];
+            let mut new_rhs = Vec::with_capacity(alpha.len() + 1);
+            new_rhs.push(Symbol::NonTerminal(new_nt.clone()));
             new_rhs.extend_from_slice(alpha);
             let new_prod = Production {
                 lhs: new_nt.clone(),
@@ -843,15 +719,16 @@ pub fn resolve_direct_right_recursion(
             );
             new_productions.push(new_prod);
         }
+
+        // A' -> ε
         let epsilon_prod = Production {
             lhs: new_nt.clone(),
-            rhs: vec![],
-        }; // A' -> ε
+            rhs: Vec::new(),
+        };
         crate::debug!(5, "  Adding new epsilon rule: '{}'", epsilon_prod);
         new_productions.push(epsilon_prod);
     }
 
-    // 4. Replace the original productions with the new set.
     productions.clear();
     productions.extend(new_productions);
 }
@@ -883,29 +760,29 @@ pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {
     out.push(start_prod);
 
     for prod in &productions[1..] {
-        // Generate all RHS variants by taking the Cartesian product of options for each symbol.
-        let rhs_variants: Vec<Vec<Symbol>> = prod.rhs.iter().fold(vec![vec![]], |acc, sym| {
-            let sym_options = match sym {
-                Symbol::Terminal(_) => vec![Some(sym.clone())],
-                Symbol::NonTerminal(nt) => match nullability.get(nt) {
-                    Some(Nullability::Null) => vec![None], // Must be removed
-                    Some(Nullability::Nullable) => vec![Some(sym.clone()), None], // Optional
-                    _ => vec![Some(sym.clone())], // Must be kept
-                },
-            };
+        let rhs_variants: Vec<Vec<Symbol>> =
+            prod.rhs.iter().fold(vec![vec![]], |acc, sym| {
+                let sym_options = match sym {
+                    Symbol::Terminal(_) => vec![Some(sym.clone())],
+                    Symbol::NonTerminal(nt) => match nullability.get(nt) {
+                        Some(Nullability::Null) => vec![None],
+                        Some(Nullability::Nullable) => vec![Some(sym.clone()), None],
+                        _ => vec![Some(sym.clone())],
+                    },
+                };
 
-            acc.into_iter()
-                .flat_map(|variant| {
-                    sym_options.iter().map(move |opt| {
-                        let mut new_variant = variant.clone();
-                        if let Some(s) = opt {
-                            new_variant.push(s.clone());
-                        }
-                        new_variant
+                acc.into_iter()
+                    .flat_map(|variant| {
+                        sym_options.iter().map(move |opt| {
+                            let mut new_variant = variant.clone();
+                            if let Some(s) = opt {
+                                new_variant.push(s.clone());
+                            }
+                            new_variant
+                        })
                     })
-                })
-                .collect()
-        });
+                    .collect()
+            });
 
         for rhs in rhs_variants {
             let new_prod = Production {
@@ -935,8 +812,6 @@ pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {
             if !p.rhs.is_empty() {
                 true
             } else {
-                // Epsilon production. Keep if its LHS is in start_rhs_nts,
-                // or if it's an epsilon production for a nullable start symbol.
                 start_rhs_nts.contains(&p.lhs)
                     || (p.lhs == *start_symbol && start_symbol_is_nullable)
             }

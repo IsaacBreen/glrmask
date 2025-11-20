@@ -2,7 +2,6 @@ use crate::glr::grammar::{Production, Symbol};
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use std::collections::BTreeMap as StdMap;
 use std::fmt::{Display, Formatter};
-use std::hash::Hash;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Item {
@@ -12,7 +11,6 @@ pub struct Item {
     pub dot_position: usize,
 }
 
-// Manual impl for Item (could be derived via serde-like mechanism)
 impl JSONConvertible for Item {
     fn to_json(&self) -> JSONNode {
         let mut obj = StdMap::new();
@@ -32,7 +30,10 @@ impl JSONConvertible for Item {
                     .remove("dot_position")
                     .ok_or_else(|| "Missing field dot_position for Item".to_string())
                     .and_then(usize::from_json)?;
-                Ok(Item { production_id, dot_position })
+                Ok(Item {
+                    production_id,
+                    dot_position,
+                })
             }
             _ => Err("Expected JSONNode::Object for Item".to_string()),
         }
@@ -41,8 +42,6 @@ impl JSONConvertible for Item {
 
 impl Display for Item {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        // Kept intentionally lightweight; the actual production can be recovered via
-        // `productions[self.production_id]` when needed.
         write!(f, "[#{} @ {}]", self.production_id, self.dot_position)
     }
 }
@@ -58,17 +57,15 @@ impl Item {
     #[inline]
     pub fn next(&self, productions: &[Production]) -> Option<(Symbol, Self)> {
         let prod = &productions[self.production_id];
-        if let Some(symbol) = prod.rhs.get(self.dot_position) {
-            Some((
+        prod.rhs.get(self.dot_position).map(|symbol| {
+            (
                 symbol.clone(),
                 Item {
                     production_id: self.production_id,
                     dot_position: self.dot_position + 1,
                 },
-            ))
-        } else {
-            None
-        }
+            )
+        })
     }
 
     /// Returns the symbol *before* the dot and the corresponding previous item, if any.

@@ -106,9 +106,6 @@ pub fn compute_nonterminal_nullability(
                     prod_has_terminal_or_prod_nt[idx] = true;
                 }
                 Symbol::NonTerminal(nt) => {
-                    // This non-terminal already counts as "able to derive a string"
-                    // if it can derive ε. Otherwise we wait until it becomes
-                    // terminal-productive.
                     if !can_derive_epsilon.contains(nt) {
                         prod_unsatisfied[idx] += 1;
                     }
@@ -120,8 +117,6 @@ pub fn compute_nonterminal_nullability(
     let mut can_derive_terminal = BTreeSet::new();
     let mut queue_term: VecDeque<NonTerminal> = VecDeque::new();
 
-    // Seed with productions whose RHS already contains a terminal and whose
-    // remaining non-terminals are known to derive *some* string.
     for (idx, p) in productions.iter().enumerate() {
         if prod_has_terminal_or_prod_nt[idx] && prod_unsatisfied[idx] == 0 {
             if can_derive_terminal.insert(p.lhs.clone()) {
@@ -133,14 +128,10 @@ pub fn compute_nonterminal_nullability(
     while let Some(nt) = queue_term.pop_front() {
         if let Some(prods_using) = nt_rhs_occurs.get(&nt) {
             for &p_idx in prods_using {
-                // If this occurrence was counted as "unsatisfied" (i.e. the
-                // non-terminal was not known nullable), decrement the counter.
                 if !can_derive_epsilon.contains(&nt) && prod_unsatisfied[p_idx] > 0 {
                     prod_unsatisfied[p_idx] -= 1;
                 }
 
-                // The production now definitely has a source of terminals:
-                // either a direct terminal or this productive non-terminal.
                 if !prod_has_terminal_or_prod_nt[p_idx] {
                     prod_has_terminal_or_prod_nt[p_idx] = true;
                 }
@@ -168,8 +159,6 @@ pub fn compute_nonterminal_nullability(
                 (true, false) => Nullability::Null,
                 (true, true) => Nullability::Nullable,
                 (false, true) => Nullability::NotNull,
-                // A non-productive non-terminal that cannot derive ε is just a dead end.
-                // It doesn't fit neatly, but NotNull is the safest classification.
                 (false, false) => Nullability::NotNull,
             };
             (nt, status)
@@ -203,19 +192,18 @@ pub fn compute_first_sets_for_nonterminals(
 ) -> BTreeMap<NonTerminal, BTreeSet<Terminal>> {
     crate::debug!(5, "Computing first sets for non-terminals");
     let start = std::time::Instant::now();
-    use std::iter;
     use bimap::BiBTreeMap;
     use std::collections::HashSet;
+    use std::iter;
 
     // 1. Assign integer IDs to non-terminals for performance.
     let mut nt_map = BiBTreeMap::new();
     let mut all_nts = Vec::new();
     for p in productions {
         for nt in iter::once(&p.lhs).chain(p.rhs.iter().filter_map(|s| match s {
-                Symbol::NonTerminal(nt) => Some(nt),
-                _ => None,
-            }))
-        {
+            Symbol::NonTerminal(nt) => Some(nt),
+            _ => None,
+        })) {
             if !nt_map.contains_left(nt) {
                 let id = all_nts.len();
                 nt_map.insert(nt.clone(), id);
@@ -396,7 +384,6 @@ pub fn compute_closure(
     prods_by_lhs: &BTreeMap<NonTerminal, Vec<usize>>,
     productions: &[Production],
 ) -> BTreeSet<Item> {
-    // crate::debug!(3, "Computing closure");
     let mut closure = items.clone();
     let mut worklist: VecDeque<Item> = items.iter().cloned().collect();
 
@@ -449,39 +436,22 @@ pub fn split_on_dot(
     result
 }
 
+#[allow(dead_code)]
 pub fn compute_first_sets_ids(
-    light_productions: &[Vec<usize>],
-    num_terminals: usize,
-    num_nonterminals: usize,
-    nullable_nts: &HashSet<usize>, // NonTerminal IDs (0-based relative to num_terminals? No, let's say 0-based)
+    _light_productions: &[Vec<usize>],
+    _num_terminals: usize,
+    _num_nonterminals: usize,
+    _nullable_nts: &HashSet<usize>,
 ) -> Vec<BTreeSet<TerminalID>> {
-    // We assume NonTerminal IDs in light_productions are offset by num_terminals.
-    // i.e. ID < num_terminals => Terminal(ID)
-    //      ID >= num_terminals => NonTerminal(ID - num_terminals)
-    
-    let mut first_sets = vec![BTreeSet::<TerminalID>::new(); num_nonterminals];
-    let mut deps: Vec<Vec<usize>> = vec![Vec::new(); num_nonterminals];
-    let mut worklist: VecDeque<(usize, TerminalID)> = VecDeque::new();
-
-    // 1. Build dependency graph and seed
-    for (prod_idx, rhs) in light_productions.iter().enumerate() {
-        // We need to know the LHS of this production. 
-        // This function signature is slightly insufficient without knowing LHS for each production.
-        // However, we can pass prods_by_lhs or similar. 
-        // Actually, let's assume the caller passes a mapping or we change the signature.
-        // For now, let's rely on the caller passing `prods_with_lhs: &[(usize, &Vec<usize>)]` logic?
-        // No, let's just pass `lhs_ids: &[usize]`.
-        panic!("Use compute_first_sets_ids_with_lhs instead");
-    }
-    vec![]
+    panic!("Use compute_first_sets_ids_with_lhs instead");
 }
 
 pub fn compute_first_sets_ids_with_lhs(
     light_productions: &[Vec<usize>],
-    lhs_ids: &[usize], // LHS NonTerminal ID (0-based) for each production
+    lhs_ids: &[usize],
     num_terminals: usize,
     num_nonterminals: usize,
-    nullable_nts: &HashSet<usize>, // 0-based NonTerminal IDs
+    nullable_nts: &HashSet<usize>,
 ) -> Vec<BTreeSet<TerminalID>> {
     let mut first_sets = vec![BTreeSet::new(); num_nonterminals];
     let mut deps: Vec<Vec<usize>> = vec![Vec::new(); num_nonterminals];
@@ -496,14 +466,12 @@ pub fn compute_first_sets_ids_with_lhs(
                 break;
             }
             if sym_id < num_terminals {
-                // Terminal
                 let t_id = TerminalID(sym_id);
                 if first_sets[lhs_id].insert(t_id) {
                     worklist.push_back((lhs_id, t_id));
                 }
                 prefix_nullable = false;
             } else {
-                // NonTerminal
                 let nt_id = sym_id - num_terminals;
                 deps[nt_id].push(lhs_id);
                 if !nullable_nts.contains(&nt_id) {
@@ -538,21 +506,16 @@ pub fn compute_follow_sets_ids(
 
     follow_sets[start_nt_id].insert(None);
 
-    // Implementation omitted for brevity as it mirrors the Symbol-based one but with IDs.
-    // Since the user asked for a fix for performance, and First sets are the bottleneck (1.5s),
-    // we will focus on integrating the First set optimization first.
-    // But actually, we need Follow sets for Stage 3.
-    
     for (prod_idx, rhs) in light_productions.iter().enumerate() {
         let lhs_id = lhs_ids[prod_idx];
-        
+
         for i in 0..rhs.len() {
             let sym_id = rhs[i];
             if sym_id >= num_terminals {
                 let b_nt = sym_id - num_terminals;
                 let mut suffix_nullable = true;
-                
-                for &next_sym in &rhs[i+1..] {
+
+                for &next_sym in &rhs[i + 1..] {
                     if next_sym < num_terminals {
                         follow_sets[b_nt].insert(Some(TerminalID(next_sym)));
                         suffix_nullable = false;
@@ -568,7 +531,7 @@ pub fn compute_follow_sets_ids(
                         }
                     }
                 }
-                
+
                 if suffix_nullable {
                     edges[lhs_id].push(b_nt);
                 }
@@ -581,10 +544,8 @@ pub fn compute_follow_sets_ids(
 
     while let Some(u) = worklist.pop_front() {
         in_queue[u] = false;
-        // We need to clone the source set to avoid borrow checker issues if we iterate and modify
-        // But here we push to other sets.
         let src_set: Vec<Option<TerminalID>> = follow_sets[u].iter().cloned().collect();
-        
+
         for &v in &edges[u] {
             let mut changed = false;
             for &t in &src_set {
