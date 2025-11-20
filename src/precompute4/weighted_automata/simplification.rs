@@ -4,7 +4,6 @@ use super::common::{BENCHMARK_DEBUG, OPTIMIZE_DEBUG, NWAStateID, StateID, Weight
 use super::dwa::{DWAState, DWAStates, DWA};
 use super::nwa::{NWAState, NWAStates, NWA};
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
-use std::hash::{DefaultHasher, Hash, Hasher};
 use rustfst::algorithms::{minimize, minimize_with_config, MinimizeConfig};
 
 const MAX_OPTIMIZE_ITERATIONS: usize = 1000;
@@ -23,12 +22,6 @@ impl Partition {
         }
     }
     fn num_classes(&self) -> usize { self.num_classes }
-}
-
-fn hash_value<T: Hash>(value: &T) -> u64 {
-    let mut h = DefaultHasher::new();
-    value.hash(&mut h);
-    h.finish()
 }
 
 // ---------------- DWA minimization ----------------
@@ -658,7 +651,13 @@ struct NwaTransitionSig {
 }
 
 impl NwaTransitionSig {
-    fn sort_key(&self) -> (u8, Label, usize, u64) {
+    /// Key used to sort transitions into a canonical order.
+    ///
+    /// Only the label and destination class matter for the language
+    /// semantics; the weight is later aggregated (unioned) for runs
+    /// sharing the same (label, dest_class). Therefore the sort key
+    /// ignores the weight.
+    fn sort_key(&self) -> (u8, Label, usize) {
         let label_tag = match self.label {
             ArcLabel::Eps => 0,
             ArcLabel::Label(_) => 1,
@@ -667,8 +666,7 @@ impl NwaTransitionSig {
             ArcLabel::Eps => 0,
             ArcLabel::Label(v) => v,
         };
-        let w_hash = hash_value(&self.weight);
-        (label_tag, label_val, self.dest_class, w_hash)
+        (label_tag, label_val, self.dest_class)
     }
 }
 
@@ -681,23 +679,33 @@ struct NwaStateSignature {
 impl NwaStateSignature {
     fn from_state(state_id: NWAStateID, states: &NWAStates, classes: &[usize]) -> Self {
         let st = &states[state_id];
-        // Aggregate transitions by (label, dest_class), summing (unioning) their weights.
-        // This matches the semantic equation:
-        //   L_s(a v) = ⋁_C ( W_s(a, C) & L_C(v) )
-        // where W_s(a, C) is the union of weights of all transitions s -a,w-> t with t in class C.
-        // Using aggregated weights per (label, dest_class) gives a right-invariant equivalence
-        // that is exactly language-preserving for the bitset-weight semantics.
-        let mut temp: BTreeMap<(ArcLabel, usize), Weight> = BTreeMap::new();
+
+        // Fast aggregation:
+        //  1. Materialize one NwaTransitionSig per outgoing transition (ε and labeled),
+        //     annotated with the current destination class.
+        //  2. Sort by (label, dest_class).
+        //  3. Linearly merge runs with the same (label, dest_class) by OR-ing their weights.
+        //
+        // The result is exactly the same as aggregating with a BTreeMap keyed by
+        // (label, dest_class) and then iterating that map in key order.
+
+        // Estimate the number of outgoing transitions to reserve capacity.
+        let mut num_out = st.epsilons.len();
+        for targets in st.transitions.values() {
+            num_out += targets.len();
+        }
+        let mut tmp: Vec<NwaTransitionSig> = Vec::with_capacity(num_out);
 
         // Epsilon transitions
         for &(dest, ref w) in &st.epsilons {
             if w.is_empty() {
                 continue;
             }
-            let key = (ArcLabel::Eps, classes[dest]);
-            temp.entry(key)
-                .and_modify(|acc| *acc |= w)
-                .or_insert(w.clone());
+            tmp.push(NwaTransitionSig {
+                label: ArcLabel::Eps,
+                dest_class: classes[dest],
+                weight: w.clone(),
+            });
         }
 
         // Labeled transitions
@@ -707,26 +715,43 @@ impl NwaStateSignature {
                 if w.is_empty() {
                     continue;
                 }
-                let key = (label, classes[dest]);
-                temp.entry(key)
-                    .and_modify(|acc| *acc |= w)
-                    .or_insert(w.clone());
-            }
-        }
-
-        let mut outgoing = Vec::with_capacity(temp.len());
-        for ((label, dest_class), weight) in temp {
-            if !weight.is_empty() {
-                outgoing.push(NwaTransitionSig {
+                tmp.push(NwaTransitionSig {
                     label,
-                    dest_class,
-                    weight,
+                    dest_class: classes[dest],
+                    weight: w.clone(),
                 });
             }
         }
-        // The `temp` BTreeMap is keyed by `(ArcLabel, dest_class)` and is
-        // iterated in sorted key order, so `outgoing` is already in a
-        // canonical order. No extra sorting is needed.
+
+        if tmp.is_empty() {
+            return NwaStateSignature {
+                final_weight: st.final_weight.clone(),
+                outgoing: Vec::new(),
+            };
+        }
+
+        // Sort by (label, dest_class) to make equal-keys contiguous.
+        tmp.sort_by_key(|sig| sig.sort_key());
+
+        // Compress runs with the same (label, dest_class) by OR-ing the weights.
+        let mut outgoing: Vec<NwaTransitionSig> = Vec::new();
+        let mut iter = tmp.into_iter();
+        if let Some(mut cur) = iter.next() {
+            for sig in iter {
+                if cur.label == sig.label && cur.dest_class == sig.dest_class {
+                    cur.weight |= &sig.weight;
+                } else {
+                    if !cur.weight.is_empty() {
+                        outgoing.push(cur);
+                    }
+                    cur = sig;
+                }
+            }
+            if !cur.weight.is_empty() {
+                outgoing.push(cur);
+            }
+        }
+
         NwaStateSignature {
             final_weight: st.final_weight.clone(),
             outgoing,
