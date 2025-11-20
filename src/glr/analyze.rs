@@ -1396,8 +1396,13 @@ fn convert_regular_nts_to_terminals(
                 // Deduplicate: Check if this expression already has a terminal
                 let (new_term, created_new) = if let Some(&gid) = expr_to_group_id.get(&expr_for_terminal) {
                     // Reuse existing terminal
-                    let term_name = regex_name_to_group_id.get_by_right(&gid).expect("Group ID missing from name map").clone();
-                    (Terminal::RegexName(term_name), false)
+                    if let Some(term_name) = regex_name_to_group_id.get_by_right(&gid) {
+                         (Terminal::RegexName(term_name.clone()), false)
+                    } else if let Some(bytes) = literal_to_group_id.get_by_right(&gid) {
+                         (Terminal::Literal(bytes.clone()), false)
+                    } else {
+                        panic!("Group ID {} found in expr map but missing from both regex and literal maps", gid);
+                    }
                 } else {
                     // Create new terminal
                     let t = create_new_terminal(expr_for_terminal.clone(), &nt.0, regex_name_to_group_id, group_id_to_expr);
