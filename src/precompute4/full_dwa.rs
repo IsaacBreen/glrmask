@@ -853,9 +853,10 @@ fn precompute_token_bvs_and_signatures(
     traversal_data: &NwaTraversalData,
     initial_values: Vec<(StateID, LLMTokenBV)>,
 ) -> (HashMap<StateID, LLMTokenBV>, HashSet<Signature>) {
-    let node_tokens: Arc<Mutex<HashMap<StateID, LLMTokenBV>>> =
-        Arc::new(Mutex::new(HashMap::new()));
-    let signatures: Arc<Mutex<HashSet<Signature>>> = Arc::new(Mutex::new(HashSet::new()));
+    let initial_nodes: HashSet<StateID> = initial_values.iter().map(|(id, _)| *id).collect();
+    let mut node_tokens = HashMap::new();
+    let mut signatures = HashSet::new();
+    let mut initial_body_bundles: HashMap<StateID, BTreeMap<Option<TerminalID>, Weight>> = HashMap::new();
 
     nwa_special_map(
         reversed_nwa,
@@ -879,7 +880,7 @@ fn precompute_token_bvs_and_signatures(
         },
         // process
         |node_id, tokens| {
-            node_tokens.lock().unwrap().insert(node_id, tokens.clone());
+            node_tokens.insert(node_id, tokens.clone());
 
             // Collect signatures from outgoing edges in reversed nwa
             let mut bundles_by_dest: HashMap<
@@ -914,25 +915,30 @@ fn precompute_token_bvs_and_signatures(
                 }
             }
 
-            let mut sigs = signatures.lock().unwrap();
-            for (_, bundle) in bundles_by_dest {
-                let (sig, _) = canonicalize_bundle(bundle);
-                sigs.insert(sig);
+            for (_, bundle) in &bundles_by_dest {
+                let (sig, _) = canonicalize_bundle(bundle.clone());
+                signatures.insert(sig);
+            }
+
+            if initial_nodes.contains(&node_id) {
+                for (dest, bundle) in bundles_by_dest {
+                    let global_bundle = initial_body_bundles.entry(dest).or_default();
+                    for (term, w) in bundle {
+                        *global_bundle.entry(term).or_insert_with(Weight::zeros) |= &w;
+                    }
+                }
             }
 
             Some(tokens)
         },
     );
 
-    let final_tokens = Arc::try_unwrap(node_tokens)
-        .unwrap()
-        .into_inner()
-        .unwrap();
-    let final_sigs = Arc::try_unwrap(signatures)
-        .unwrap()
-        .into_inner()
-        .unwrap();
-    (final_tokens, final_sigs)
+    for bundle in initial_body_bundles.values() {
+        let (sig, _) = canonicalize_bundle(bundle.clone());
+        signatures.insert(sig);
+    }
+
+    (node_tokens, signatures)
 }
 
 fn resolve_negatives_and_optimize_and_determinize(
