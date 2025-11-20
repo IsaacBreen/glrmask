@@ -11,7 +11,7 @@ pub(crate) const OPTIMIZE_DEBUG: bool = false;
 pub type StateID = usize;
 pub type Weight = SimpleBitset;
 pub type NWAStateID = usize;
-pub type Label = i16;
+pub type Label = i32;
 
 pub fn format_pos_code(code: Label) -> String { code.to_string() }
 
