@@ -9,7 +9,7 @@ use std::{
     sync::Arc,
 };
 use std::cmp::Reverse;
-
+ 
 use bimap::BiBTreeMap;
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use ordered_hash_map::OrderedHashMap;
@@ -958,154 +958,65 @@ impl GrammarConstraint {
         DedupValueMap<LLMTokenID, BTreeMap<TokenizerStateID, TokenizerStateID>>,
         BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
     ) {
-        // Initial states: group by target (which is same as source at root)
-        // We use a Vec of (Target, Vec<Source>)
-        let mut initial_states = Vec::new();
-        for sid in tokenizer.iter_states() {
-            initial_states.push((sid, vec![sid]));
-        }
-
-        // Run parallel DFS
-        // Returns flat vectors to avoid merge overhead:
-        // 1. State Entries: (TokenID, SourceState, TargetState)
-        // 2. Match Events: (SourceState, TerminalID, PointerToReachableSet as usize)
-        let (raw_states, raw_matches) = Self::solve_recursive(vocab_root, initial_states, tokenizer);
-
-        // --- Post-process State Map ---
         let mut state_map_out = DedupValueMap::new();
-        let mut sorted_states = raw_states;
-        // Sort by token ID
-        sorted_states.par_sort_unstable_by_key(|(t, _, _)| *t);
+        let mut possible_matches: BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>> = BTreeMap::new();
 
-        if !sorted_states.is_empty() {
-            let mut cur_token = sorted_states[0].0;
-            let mut cur_map = BTreeMap::new();
-            
-            for (tok, src, dst) in sorted_states {
-                if tok != cur_token {
-                    state_map_out.insert(LLMTokenID(cur_token as usize), cur_map);
-                    cur_map = BTreeMap::new();
-                    cur_token = tok;
-                }
-                cur_map.insert(TokenizerStateID(src as usize), TokenizerStateID(dst as usize));
-            }
-            state_map_out.insert(LLMTokenID(cur_token as usize), cur_map);
+        // Inverted map: TargetState -> Vec<SourceState>
+        let mut initial_states: BTreeMap<TokenizerStateID, Vec<TokenizerStateID>> = BTreeMap::new();
+        for sid in tokenizer.iter_states() {
+            initial_states.entry(sid).or_default().push(sid);
         }
 
-        // --- Post-process Possible Matches ---
-        let mut sorted_matches = raw_matches;
-        // Sort by Source, then Terminal
-        sorted_matches.par_sort_unstable_by(|a, b| {
-            a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1))
-        });
-        
-        let possible_matches = sorted_matches
-            .par_chunks(2048) // Parallel reduction in chunks
-            .fold(
-                || BTreeMap::<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>::new(),
-                |mut acc, chunk| {
-                    for (src_raw, term_raw, rsb_ptr_val) in chunk {
-                        let src = TokenizerStateID(*src_raw as usize);
-                        let term = TerminalID(*term_raw as usize);
-                        // Safety: Pointer is valid because vocab_root outlives this function
-                        let rsb = unsafe { &*(*rsb_ptr_val as *const RangeSetBlaze<usize>) };
-                        
-                        acc.entry(src).or_default()
-                           .entry(term).or_default()
-                           .extend(rsb.iter());
+        // Stack: (Node, Map<Target, Sources>)
+        // We use an explicit stack and iterative approach to avoid recursion/parallel-task explosion.
+        let mut stack = vec![(vocab_root, initial_states)];
+
+        while let Some((node, current_states)) = stack.pop() {
+            let token_id = node.token_id();
+            
+            // Record state map for this token node
+            if !current_states.is_empty() {
+                let mut map = BTreeMap::new();
+                for (target, sources) in &current_states {
+                    for &src in sources {
+                        map.insert(src, *target);
                     }
-                    acc
                 }
-            )
-            .reduce(
-                || BTreeMap::new(),
-                |mut a, b| {
-                    for (src, t_map) in b {
-                        let entry = a.entry(src).or_default();
-                        for (term, bv) in t_map {
-                            entry.entry(term).or_default().union_with(&bv);
+                state_map_out.insert(LLMTokenID(token_id), map);
+            }
+
+            for (edge_bytes, child) in node.iter_children() {
+                let mut next_grouped: BTreeMap<TokenizerStateID, Vec<TokenizerStateID>> = BTreeMap::new();
+                
+                for (target, sources) in &current_states {
+                    let exec = tokenizer.execute_from_state(edge_bytes, *target);
+                    
+                    if !exec.matches.is_empty() {
+                        let reachable = child.reachable_token_ids();
+                        for m in &exec.matches {
+                            let tid = TerminalID(m.id);
+                            for &src in sources {
+                                possible_matches
+                                    .entry(src).or_default()
+                                    .entry(tid).or_default()
+                                    .extend(reachable.iter());
+                            }
                         }
                     }
-                    a
+
+                    if let Some(end_val) = exec.end_state {
+                        let end_sid = TokenizerStateID(end_val);
+                        next_grouped.entry(end_sid).or_default().extend(sources.iter().cloned());
+                    }
                 }
-            );
+
+                if !next_grouped.is_empty() {
+                    stack.push((child, next_grouped));
+                }
+            }
+        }
 
         (state_map_out, possible_matches)
-    }
-
-    /// Recursive helper using flat vectors and manual grouping to minimize allocation.
-    fn solve_recursive(
-        node: &VocabPrefixTreeNode,
-        current_states: Vec<(TokenizerStateID, Vec<TokenizerStateID>)>,
-        tokenizer: &Regex,
-    ) -> (Vec<(u32, u32, u32)>, Vec<(u32, u32, usize)>) {
-        let children: Vec<_> = node.iter_children().collect();
-
-        children.par_iter().map(|(edge_bytes, child)| {
-            let mut local_states = Vec::with_capacity(current_states.len());
-            let mut local_matches = Vec::new();
-            let mut next_states_raw = Vec::with_capacity(current_states.len());
-
-            for (target, sources) in &current_states {
-                let exec = tokenizer.execute_from_state(edge_bytes, *target);
-
-                if !exec.matches.is_empty() {
-                    let rsb_ptr = child.reachable_token_ids() as *const RangeSetBlaze<usize> as usize;
-                    for m in &exec.matches {
-                        let tid = m.id as u32;
-                        for &src in sources {
-                            local_matches.push((src.0 as u32, tid, rsb_ptr));
-                        }
-                    }
-                }
-
-                if let Some(end_val) = exec.end_state {
-                    let end_sid = TokenizerStateID(end_val);
-                    for &src in sources {
-                        next_states_raw.push((end_sid, src));
-                    }
-                }
-            }
-
-            if !next_states_raw.is_empty() {
-                // Sort and group by target
-                next_states_raw.sort_unstable_by_key(|k| k.0);
-                
-                let mut next_grouped = Vec::with_capacity(next_states_raw.len());
-                let mut cur_target = next_states_raw[0].0;
-                let mut cur_group: Vec<TokenizerStateID> = Vec::new();
-                
-                for (t, s) in next_states_raw {
-                    if t != cur_target {
-                        for &src in &cur_group {
-                            local_states.push((child.token_id() as u32, src.0 as u32, cur_target.0 as u32));
-                        }
-                        next_grouped.push((cur_target, cur_group));
-                        cur_group = Vec::new();
-                        cur_target = t;
-                    }
-                    cur_group.push(s);
-                }
-                for &src in &cur_group {
-                    local_states.push((child.token_id() as u32, src.0 as u32, cur_target.0 as u32));
-                }
-                next_grouped.push((cur_target, cur_group));
-
-                let (child_s, child_m) = Self::solve_recursive(child, next_grouped, tokenizer);
-                local_states.extend(child_s);
-                local_matches.extend(child_m);
-            }
-
-            (local_states, local_matches)
-        })
-        .reduce(
-            || (Vec::new(), Vec::new()),
-            |mut a, b| {
-                a.0.extend(b.0);
-                a.1.extend(b.1);
-                a
-            }
-        )
     }
 
     /// Rearrange possible_matches: state -> terminal -> BV(tokens)
