@@ -44,6 +44,9 @@ impl DwaStateSignature {
         let st = &states[state_id];
 
         // For a DWA, there is at most one transition per (state, label).
+        // This means we never have to aggregate multiple transitions with the
+        // same (label, dest_class): each label contributes at most one
+        // (label, dest_class, weight) triple to the signature.
         let mut outgoing = Vec::with_capacity(st.transitions.len());
         for (&label, &dest) in &st.transitions {
             let w = st
@@ -186,14 +189,18 @@ impl DWA {
         }
     }
 
+    /// Performs linear-time optimizations only (Pruning, Weight Pushing).
+    /// Skips the expensive O(N log N) or O(N^2) state minimization.
+    /// Useful for template generation where we just want a clean graph quickly.
     pub fn simplify_lightweight(&mut self) {
+         // PruneDeadEnds, PushWeights, PruneUnreachable
          let ordering = &[
             DwaPass::PruneDeadEnds,
             DwaPass::PushWeights,
             DwaPass::PruneUnreachable,
         ];
 
-        for _ in 0..10 {
+        for _ in 0..10 { // Fewer iterations needed for lightweight
             let mut changed_in_iteration = false;
             for &pass in ordering {
                 let pass_changed = match pass {
@@ -672,6 +679,12 @@ struct NwaTransitionSig {
 }
 
 impl NwaTransitionSig {
+    /// Key used to sort transitions into a canonical order.
+    ///
+    /// Only the label and destination class matter for the language
+    /// semantics; the weight is later aggregated (unioned) for runs
+    /// sharing the same (label, dest_class). Therefore the sort key
+    /// ignores the weight.
     fn sort_key(&self) -> (u8, Label, usize) {
         let label_tag = match self.label {
             ArcLabel::Eps => 0,
@@ -695,6 +708,16 @@ impl NwaStateSignature {
     fn from_state(state_id: NWAStateID, states: &NWAStates, classes: &[usize]) -> Self {
         let st = &states[state_id];
 
+        // Fast aggregation:
+        //  1. Materialize one NwaTransitionSig per outgoing transition (ε and labeled),
+        //     annotated with the current destination class.
+        //  2. Sort by (label, dest_class).
+        //  3. Linearly merge runs with the same (label, dest_class) by OR-ing their weights.
+        //
+        // The result is exactly the same as aggregating with a BTreeMap keyed by
+        // (label, dest_class) and then iterating that map in key order.
+
+        // Estimate the number of outgoing transitions to reserve capacity.
         let mut num_out = st.epsilons.len();
         for targets in st.transitions.values() {
             num_out += targets.len();
@@ -799,9 +822,8 @@ fn minimize_nwa_partition(states: &NWAStates) -> Partition {
 #[derive(Clone, Debug, Default)]
 struct NwaStateBuilder {
     final_weight: Option<Weight>,
-    // Use flat Vectors instead of BTreeMap for fast accumulation and bulk sort/merge
-    eps: Vec<(NWAStateID, Weight)>,
-    trans: Vec<(Label, NWAStateID, Weight)>,
+    eps: BTreeMap<NWAStateID, Weight>,
+    trans: BTreeMap<Label, BTreeMap<NWAStateID, Weight>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1014,122 +1036,70 @@ impl NWA {
         true
     }
 
-    /// Canonicalize NWA transitions by merging parallel transitions via in-place sort-and-scan.
-    /// This avoids allocating BTreeMaps for aggregation, providing a significant speedup.
+    /// Canonicalize NWA transitions by merging parallel transitions:
+    ///  - For each state and epsilon edge, merge multiple (to, w) by unioning weights per `to`.
+    ///  - For each state, label, and destination, merge multiple (label, to, w) by unioning weights.
+    /// Transitions with empty weight are removed.
+    ///
+    /// This is sound because the weight semiring is (bitset, |, &, ∅, U), so:
+    ///   (w1 & x) | (w2 & x) = (w1 | w2) & x
+    /// for all bitsets w1, w2, x. Thus, multiple parallel transitions are semantically
+    /// equivalent to a single transition with the union of their weights.
     fn compress_transitions(&mut self) -> bool {
         crate::debug!(6, "[NWA] Compressing transitions...");
         let mut changed = false;
 
         for st in &mut self.states.0 {
-            // Compress epsilons
+            // Compress epsilons: (to, w) -> union of weights per `to`.
             if !st.epsilons.is_empty() {
-                st.epsilons.sort_by(|a, b| a.0.cmp(&b.0));
-                
-                let len = st.epsilons.len();
-                // Scan to remove empty and merge duplicates
-                let mut w = 0;
-                let mut r = 0;
-
-                // Skip initial empty weights
-                while r < len && st.epsilons[r].1.is_empty() {
-                    r += 1;
+                let mut eps_map: BTreeMap<NWAStateID, Weight> = BTreeMap::new();
+                for &(to, ref w) in &st.epsilons {
+                    if w.is_empty() {
+                        continue;
+                    }
+                    eps_map
+                        .entry(to)
+                        .and_modify(|acc| *acc |= w)
+                        .or_insert(w.clone());
                 }
-
-                if r < len {
-                    if r != w {
-                        st.epsilons.swap(r, w);
-                    }
-                    // Current tail is at w. Scan from next.
-                    r += 1;
-                    
-                    while r < len {
-                        if st.epsilons[r].1.is_empty() {
-                            r += 1;
-                            continue;
-                        }
-                        
-                        if st.epsilons[r].0 == st.epsilons[w].0 {
-                            // Merge into w
-                            let weight = std::mem::take(&mut st.epsilons[r].1);
-                            st.epsilons[w].1 |= &weight;
-                        } else {
-                            // New distinct dest
-                            w += 1;
-                            if r != w {
-                                st.epsilons.swap(r, w);
-                            }
-                        }
-                        r += 1;
-                    }
-                    
-                    let new_len = w + 1;
-                    if new_len < len {
-                        st.epsilons.truncate(new_len);
-                        changed = true;
-                    }
-                } else {
-                    // All were empty
-                    st.epsilons.clear();
+                if eps_map.len() != st.epsilons.len() {
                     changed = true;
                 }
+                st.epsilons = eps_map
+                    .into_iter()
+                    .filter(|(_, w)| !w.is_empty())
+                    .collect();
             }
 
-            // Compress labeled transitions
+            // Compress labeled transitions: per (label, to) aggregate weights by union.
             if !st.transitions.is_empty() {
-                for targets in st.transitions.values_mut() {
-                    if targets.is_empty() { continue; }
-
-                    targets.sort_by(|a, b| a.0.cmp(&b.0));
-
-                    let len = targets.len();
-                    let mut w = 0;
-                    let mut r = 0;
-
-                    while r < len && targets[r].1.is_empty() {
-                        r += 1;
+                let mut new_transitions: BTreeMap<Label, Vec<(NWAStateID, Weight)>> = BTreeMap::new();
+                for (&lbl, targets) in &st.transitions {
+                    let mut per_dest: BTreeMap<NWAStateID, Weight> = BTreeMap::new();
+                    for &(to, ref w) in targets {
+                        if w.is_empty() {
+                            continue;
+                        }
+                        per_dest
+                            .entry(to)
+                            .and_modify(|acc| *acc |= w)
+                            .or_insert(w.clone());
                     }
-
-                    if r < len {
-                        if r != w {
-                            targets.swap(r, w);
-                        }
-                        r += 1;
-
-                        while r < len {
-                            if targets[r].1.is_empty() {
-                                r += 1;
-                                continue;
-                            }
-
-                            if targets[r].0 == targets[w].0 {
-                                let weight = std::mem::take(&mut targets[r].1);
-                                targets[w].1 |= &weight;
-                            } else {
-                                w += 1;
-                                if r != w {
-                                    targets.swap(r, w);
-                                }
-                            }
-                            r += 1;
-                        }
-
-                        let new_len = w + 1;
-                        if new_len < len {
-                            targets.truncate(new_len);
-                            changed = true;
-                        }
-                    } else {
-                        targets.clear();
+                    if per_dest.len() != targets.len() {
                         changed = true;
                     }
+                    let merged: Vec<(NWAStateID, Weight)> = per_dest
+                        .into_iter()
+                        .filter(|(_, w)| !w.is_empty())
+                        .collect();
+                    if !merged.is_empty() {
+                        new_transitions.insert(lbl, merged);
+                    }
                 }
-                
-                // Clean up empty keys (rare, but possible if all targets were empty weights)
-                let old_len = st.transitions.len();
-                st.transitions.retain(|_, v| !v.is_empty());
-                if st.transitions.len() != old_len {
+                if new_transitions.len() != st.transitions.len() {
                     changed = true;
                 }
+                st.transitions = new_transitions;
             }
         }
 
@@ -1223,7 +1193,6 @@ impl NWA {
             });
         }
 
-        // Phase 1: Accumulate transitions into flat vectors
         for old_s in 0..n {
             let c = partition.class_of[old_s];
             let new_id = class_to_new[&c];
@@ -1240,20 +1209,25 @@ impl NWA {
             }
 
             for &(dest, ref w) in &st.epsilons {
-                if !w.is_empty() {
-                    let dest_class = partition.class_of[dest];
-                    let new_dest = class_to_new[&dest_class];
-                    builder.eps.push((new_dest, w.clone()));
+                if w.is_empty() {
+                    continue;
                 }
+                let dest_class = partition.class_of[dest];
+                let new_dest = class_to_new[&dest_class];
+                let entry = builder.eps.entry(new_dest).or_insert_with(Weight::zeros);
+                *entry |= w;
             }
 
             for (&lbl, targets) in &st.transitions {
                 for &(dest, ref w) in targets {
-                    if !w.is_empty() {
-                        let dest_class = partition.class_of[dest];
-                        let new_dest = class_to_new[&dest_class];
-                        builder.trans.push((lbl, new_dest, w.clone()));
+                    if w.is_empty() {
+                        continue;
                     }
+                    let dest_class = partition.class_of[dest];
+                    let new_dest = class_to_new[&dest_class];
+                    let per_label = builder.trans.entry(lbl).or_insert_with(BTreeMap::new);
+                    let entry = per_label.entry(new_dest).or_insert_with(Weight::zeros);
+                    *entry |= w;
                 }
             }
         }
@@ -1263,78 +1237,25 @@ impl NWA {
             new_states.add_state();
         }
 
-        // Phase 2: Sort, merge, and build final states
-        for (new_id, mut builder) in builders.into_iter().enumerate() {
+        for (new_id, builder) in builders.into_iter().enumerate() {
             let st = &mut new_states[new_id];
             st.final_weight = builder.final_weight;
-
-            // --- Epsilons ---
-            if !builder.eps.is_empty() {
-                builder.eps.sort_by(|a, b| a.0.cmp(&b.0));
-                
-                let len = builder.eps.len();
-                let mut w = 0;
-                let mut r = 1;
-                
-                // In-place merge
-                while r < len {
-                    if builder.eps[r].0 == builder.eps[w].0 {
-                         // Merge
-                         let weight = std::mem::take(&mut builder.eps[r].1);
-                         builder.eps[w].1 |= &weight;
-                    } else {
-                        w += 1;
-                        if r != w {
-                            builder.eps.swap(r, w);
-                        }
-                    }
-                    r += 1;
+            st.epsilons.clear();
+            for (dest_new, w) in builder.eps {
+                if !w.is_empty() {
+                    st.epsilons.push((dest_new, w));
                 }
-                builder.eps.truncate(w + 1);
-                st.epsilons = builder.eps;
             }
-
-            // --- Transitions ---
-            if !builder.trans.is_empty() {
-                // Sort by (Label, Dest)
-                builder.trans.sort_by(|a, b| {
-                    match a.0.cmp(&b.0) {
-                        std::cmp::Ordering::Equal => a.1.cmp(&b.1),
-                        other => other,
+            st.transitions.clear();
+            for (lbl, dests_map) in builder.trans {
+                let mut dests_vec: Vec<(NWAStateID, Weight)> = Vec::new();
+                for (dest_new, w) in dests_map {
+                    if !w.is_empty() {
+                        dests_vec.push((dest_new, w));
                     }
-                });
-
-                // In-place merge duplicates
-                let len = builder.trans.len();
-                let mut w = 0;
-                let mut r = 1;
-
-                while r < len {
-                    if builder.trans[r].0 == builder.trans[w].0 && builder.trans[r].1 == builder.trans[w].1 {
-                        let weight = std::mem::take(&mut builder.trans[r].2);
-                        builder.trans[w].2 |= &weight;
-                    } else {
-                        w += 1;
-                        if r != w {
-                            builder.trans.swap(r, w);
-                        }
-                    }
-                    r += 1;
                 }
-                builder.trans.truncate(w + 1);
-
-                // Group by Label into BTreeMap
-                st.transitions.clear();
-                let mut i = 0;
-                while i < builder.trans.len() {
-                    let current_lbl = builder.trans[i].0;
-                    let mut vec = Vec::new();
-                    
-                    while i < builder.trans.len() && builder.trans[i].0 == current_lbl {
-                        vec.push((builder.trans[i].1, builder.trans[i].2.clone()));
-                        i += 1;
-                    }
-                    st.transitions.insert(current_lbl, vec);
+                if !dests_vec.is_empty() {
+                    st.transitions.insert(lbl, dests_vec);
                 }
             }
         }
