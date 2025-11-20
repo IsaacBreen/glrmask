@@ -43,11 +43,11 @@ pub fn check_for_undefined_non_terminals(productions: &[Production]) -> Vec<Stri
 /// Helper for check_for_length_1_recursion. Detects all elementary cycles in a graph.
 fn detect_all_cycles_recursive(
     nt: &NonTerminal,
-    graph: &FxHashMap<NonTerminal, FxHashSet<NonTerminal>>,
-    visiting: &mut FxHashSet<NonTerminal>, // Nodes currently in the recursion stack for the current path
-    visited: &mut FxHashSet<NonTerminal>,  // Nodes that have been fully explored
-    path: &mut Vec<NonTerminal>,          // Current path for cycle detection
-    cycles: &mut BTreeSet<Vec<NonTerminal>>, // Set to store unique, canonicalized cycles
+    graph: &FxHashMap<NonTerminal, BTreeSet<NonTerminal>>, // Deterministic adjacency list
+    visiting: &mut FxHashSet<NonTerminal>, 
+    visited: &mut FxHashSet<NonTerminal>,
+    path: &mut Vec<NonTerminal>,          
+    cycles: &mut BTreeSet<Vec<NonTerminal>>, 
 ) {
     visiting.insert(nt.clone());
     path.push(nt.clone());
@@ -60,7 +60,6 @@ fn detect_all_cycles_recursive(
                 let mut cycle: Vec<_> = path[cycle_start_index..].to_vec();
 
                 // Canonicalize the cycle by rotating it to start with the lexicographically smallest element.
-                // This ensures that A -> B -> A and B -> A -> B are treated as the same cycle.
                 if !cycle.is_empty() {
                     let min_node_pos = cycle
                         .iter()
@@ -100,7 +99,8 @@ pub fn check_for_length_1_recursion(productions: &[Production]) -> Vec<String> {
     }
 
     // Build a graph where an edge A -> B exists if a rule A ::= Nullable* B Nullable* exists.
-    let mut unit_graph: FxHashMap<NonTerminal, FxHashSet<NonTerminal>> = FxHashMap::default();
+    // Values are BTreeSet to ensure deterministic traversal order.
+    let mut unit_graph: FxHashMap<NonTerminal, BTreeSet<NonTerminal>> = FxHashMap::default();
     for nt in &all_nonterminals_set {
         unit_graph.entry(nt.clone()).or_default();
     }
@@ -809,9 +809,11 @@ pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {
     let start_symbol = &productions[0].lhs;
     let start_symbol_is_nullable = nullable_nonterminals.contains(start_symbol);
 
+    let mut seen = FxHashSet::default();
     let mut out = Vec::<Production>::new();
 
     let start_prod = productions[0].clone();
+    seen.insert(start_prod.clone());
     out.push(start_prod);
 
     for prod in &productions[1..] {
@@ -844,13 +846,11 @@ pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {
                 lhs: prod.lhs.clone(),
                 rhs,
             };
-            out.push(new_prod);
+            if seen.insert(new_prod.clone()) {
+                out.push(new_prod);
+            }
         }
     }
-
-    // Dedup logic using sort_unstable (faster than building a large BTreeSet/HashSet for unique constraint on large inputs)
-    out.sort_unstable();
-    out.dedup();
 
     let start_rhs_nts: FxHashSet<_> = productions[0]
         .rhs
