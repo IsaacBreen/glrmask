@@ -1,21 +1,20 @@
-use crate::constraint::{LLMVocab};
+use crate::constraint::LLMVocab;
+use crate::datastructures::gss_acc::Acc;
 use crate::datastructures::leveled_gss::{LeveledGSS, LeveledGSSStats};
-use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
-use crate::glr::items::{Item};
-use crate::glr::table::{get_row, Goto, NonTerminalID, Row, Stage7ShiftsAndReducesLookaheadValue, StateID, Table, TerminalID};
+use crate::glr::grammar::{NonTerminal, Production};
+use crate::glr::items::Item;
+use crate::glr::table::{get_row, NonTerminalID, StateID, Table, TerminalID};
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use crate::profiler::GSS_LOGGING_ENABLED;
-use crate::{debug, hit};
+use crate::debug;
 use bimap::BiBTreeMap;
 use profiler_macro::time_it;
 use std::any::Any;
 use std::cmp::Ordering;
 use std::collections::BTreeMap as StdMap;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
-use std::fmt::{self, Debug, Display, Formatter, Write};
-use std::hash::{Hash, Hasher};
+use std::collections::BTreeMap;
+use std::fmt::{self, Debug, Display, Formatter};
 use std::sync::Arc;
-use crate::datastructures::gss_acc::Acc;
 
 /// A trait to provide a lazily-evaluated `expect`.
 pub trait ExpectElse<T> {
@@ -67,31 +66,9 @@ impl UserDataTrait for () {}
 
 pub type ActionFn = Arc<dyn Fn(&mut Arc<dyn UserDataTrait>) -> bool + Send + Sync>;
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ParseStateEdgeContent {
     pub state_id: StateID,
-}
-
-impl PartialEq for ParseStateEdgeContent {
-    fn eq(&self, other: &Self) -> bool {
-        self.state_id == other.state_id
-    }
-}
-impl Eq for ParseStateEdgeContent {}
-impl PartialOrd for ParseStateEdgeContent {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        self.state_id.partial_cmp(&other.state_id)
-    }
-}
-impl Ord for ParseStateEdgeContent {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.state_id.cmp(&other.state_id)
-    }
-}
-impl Hash for ParseStateEdgeContent {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.state_id.hash(state);
-    }
 }
 
 impl JSONConvertible for ParseStateEdgeContent {
@@ -124,15 +101,13 @@ pub struct ParseState {
 
 impl Debug for ParseState {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ParseState")
-            // .field("stack", &self.stack)
-            .finish()
+        f.debug_struct("ParseState").finish()
     }
 }
 
 impl PartialEq for ParseState {
     fn eq(&self, other: &Self) -> bool {
-        todo!()
+        self.stack.to_stacks() == other.stack.to_stacks()
     }
 }
 
@@ -140,7 +115,9 @@ impl Eq for ParseState {}
 
 impl ParseState {
     pub fn new() -> Self {
-        ParseState { stack: LeveledGSS::empty() }
+        ParseState {
+            stack: LeveledGSS::empty(),
+        }
     }
 
     pub(crate) fn with_stack(stack: ParserGSS) -> Self {
@@ -152,20 +129,25 @@ impl ParseState {
 pub struct GLRParser {
     pub table: Table,
     pub productions: Vec<Production>,
-    pub terminal_map: BiBTreeMap<Terminal, TerminalID>,
-    pub non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>,
+    pub terminal_map: BiBTreeMap<crate::glr::grammar::Terminal, TerminalID>,
+    pub non_terminal_map: BiBTreeMap<NonTerminal, crate::glr::table::NonTerminalID>,
     pub item_set_map: BiBTreeMap<Vec<Item>, StateID>,
     pub start_state_id: StateID,
     pub everything_state_id: StateID,
     pub ignore_terminal_id: Option<TerminalID>,
-    pub actions: BTreeMap<NonTerminalID, ActionFn>,
+    pub actions: BTreeMap<crate::glr::table::NonTerminalID, ActionFn>,
 }
 
 impl Display for GLRParser {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        writeln!(f, "GLRParser:")?;
-        eprintln!("TODO:");
-        return Ok(());
+        write!(
+            f,
+            "GLRParser(states: {}, prods: {}, terminals: {}, non_terminals: {})",
+            self.table.len(),
+            self.productions.len(),
+            self.terminal_map.len(),
+            self.non_terminal_map.len()
+        )
     }
 }
 
@@ -178,8 +160,14 @@ impl JSONConvertible for GLRParser {
         obj.insert("non_terminal_map".to_string(), self.non_terminal_map.to_json());
         obj.insert("item_set_map".to_string(), self.item_set_map.to_json());
         obj.insert("start_state_id".to_string(), self.start_state_id.to_json());
-        obj.insert("everything_state_id".to_string(), self.everything_state_id.to_json());
-        obj.insert("ignore_terminal_id".to_string(), self.ignore_terminal_id.to_json());
+        obj.insert(
+            "everything_state_id".to_string(),
+            self.everything_state_id.to_json(),
+        );
+        obj.insert(
+            "ignore_terminal_id".to_string(),
+            self.ignore_terminal_id.to_json(),
+        );
         // actions are provided at runtime.
         JSONNode::Object(obj)
     }
@@ -200,11 +188,11 @@ impl JSONConvertible for GLRParser {
                 let terminal_map = obj
                     .remove("terminal_map")
                     .ok_or_else(|| "Missing field terminal_map".to_string())
-                    .and_then(|n| BiBTreeMap::<Terminal, TerminalID>::from_json(n))?;
+                    .and_then(|n| BiBTreeMap::<crate::glr::grammar::Terminal, TerminalID>::from_json(n))?;
                 let non_terminal_map = obj
                     .remove("non_terminal_map")
                     .ok_or_else(|| "Missing field non_terminal_map".to_string())
-                    .and_then(|n| BiBTreeMap::<NonTerminal, NonTerminalID>::from_json(n))?;
+                    .and_then(|n| BiBTreeMap::<NonTerminal, crate::glr::table::NonTerminalID>::from_json(n))?;
                 let item_set_map = obj
                     .remove("item_set_map")
                     .ok_or_else(|| "Missing field item_set_map".to_string())
@@ -270,15 +258,15 @@ impl GLRParser {
     pub fn new(
         table: Table,
         productions: Vec<Production>,
-        terminal_map: BiBTreeMap<Terminal, TerminalID>,
-        non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>,
+        terminal_map: BiBTreeMap<crate::glr::grammar::Terminal, TerminalID>,
+        non_terminal_map: BiBTreeMap<NonTerminal, crate::glr::table::NonTerminalID>,
         item_set_map: BiBTreeMap<Vec<Item>, StateID>,
         start_state_id: StateID,
         everything_state_id: StateID,
         actions: BTreeMap<NonTerminal, ActionFn>,
         ignore_terminal_id: Option<TerminalID>,
     ) -> Self {
-        let converted_actions: BTreeMap<NonTerminalID, ActionFn> = actions
+        let converted_actions: BTreeMap<crate::glr::table::NonTerminalID, ActionFn> = actions
             .into_iter()
             .map(|(nt, func)| {
                 let nt_id = non_terminal_map.get_by_left(&nt).unwrap_or_else(|| {
@@ -310,23 +298,27 @@ impl GLRParser {
 
     pub fn init_glr_parser_with_acc(&self) -> GLRParserState {
         let initial_parse_state = self.init_parse_state_with_acc();
-        GLRParserState { parser: self, stack: initial_parse_state.stack }
+        GLRParserState {
+            parser: self,
+            stack: initial_parse_state.stack,
+        }
     }
 
     pub fn init_parse_state_with_acc(&self) -> ParseState {
-        let initial_edge = ParseStateEdgeContent { state_id: self.start_state_id };
+        let initial_edge = ParseStateEdgeContent {
+            state_id: self.start_state_id,
+        };
         let acc = Acc::new_fresh();
         let gss = LeveledGSS::from_stacks(&[(vec![], acc)]).push(initial_edge);
         ParseState::with_stack(gss)
     }
 
-    pub fn init_parse_state_with_gss(&self, gss: LeveledGSS<ParseStateEdgeContent, Acc>) -> GLRParserState {
+    pub fn init_parse_state_with_gss(&self, gss: ParserGSS) -> GLRParserState {
         GLRParserState { parser: self, stack: gss }
     }
 
-    pub fn init_glr_parser_null(&self, llm_vocab: Option<Arc<LLMVocab>>) -> GLRParserState {
-        let initial_parse_state = self.init_parse_state_with_acc();
-        GLRParserState { parser: self, stack: initial_parse_state.stack }
+    pub fn init_glr_parser_null(&self, _llm_vocab: Option<Arc<LLMVocab>>) -> GLRParserState {
+        self.init_glr_parser_with_acc()
     }
 
     pub fn parse(&self, input: &[TerminalID], llm_vocab: Option<Arc<LLMVocab>>) -> GLRParserState {
@@ -348,7 +340,10 @@ impl GLRParser {
         for edge in gss.peek() {
             let sid = edge.state_id;
             let iso = gss.isolate(Some(edge));
-            heads_by_state.entry(sid).and_modify(|acc| *acc = acc.merge(&iso)).or_insert(iso);
+            heads_by_state
+                .entry(sid)
+                .and_modify(|acc| *acc = acc.merge(&iso))
+                .or_insert(iso);
         }
 
         let mut shifted: Vec<ParserGSS> = Vec::new();
@@ -358,7 +353,7 @@ impl GLRParser {
                 row.handle_shifts_and_reduces_for_terminal(
                     token,
                     |to| shifted.push(state_gss.push(ParseStateEdgeContent { state_id: *to })),
-                    |nt_id, len, pids| {
+                    |nt_id, len, _pids| {
                         self.apply_reduces(&state_gss, *len, *nt_id, &mut heads_by_state);
                     },
                 );
@@ -387,14 +382,16 @@ impl GLRParser {
 
         for edge in popped.peek() {
             let from_id = edge.state_id;
-            if let Some(goto) = get_row(&self.table, from_id).unwrap().gotos.get(&nt) {
-                if let Some(next_id) = goto.state_id {
-                    let iso = popped.isolate(Some(edge));
-                    let pushed = iso.push(ParseStateEdgeContent { state_id: next_id });
-                    heads_by_state
-                        .entry(next_id)
-                        .and_modify(|acc| *acc = acc.merge(&pushed))
-                        .or_insert(pushed);
+            if let Some(row) = get_row(&self.table, from_id) {
+                if let Some(goto) = row.gotos.get(&nt) {
+                    if let Some(next_id) = goto.state_id {
+                        let iso = popped.isolate(Some(edge));
+                        let pushed = iso.push(ParseStateEdgeContent { state_id: next_id });
+                        heads_by_state
+                            .entry(next_id)
+                            .and_modify(|acc| *acc = acc.merge(&pushed))
+                            .or_insert(pushed);
+                    }
                 }
             }
         }
@@ -411,7 +408,6 @@ impl Debug for GLRParserState<'_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.debug_struct("GLRParserState")
             .field("parser", &self.parser)
-            // .field("stack", &self.stack)
             .finish()
     }
 }

@@ -15,10 +15,7 @@ use memory_stats::memory_stats;
 use profiler_macro::time_it;
 use std::collections::BTreeMap as StdMap;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
-use std::fmt::Display;
 use std::hash::{BuildHasherDefault, Hasher};
-
-const EVERYTHING: bool = false;
 
 // --- Fast Hasher & BitSet ---
 
@@ -330,10 +327,8 @@ impl Row {
             .or_else(|| self.default_reduce.clone())
     }
 
-    pub fn get_shifts_and_reduces_map(
-        &self,
-    ) -> BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue> {
-        self.shifts_and_reduces_full.clone()
+    pub fn shifts_and_reduces(&self) -> &ShiftsAndReducesFull {
+        &self.shifts_and_reduces_full
     }
 
     pub fn get_gotos(&self) -> &BTreeMap<NonTerminalID, Goto> {

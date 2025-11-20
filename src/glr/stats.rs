@@ -41,9 +41,16 @@ pub struct GLRStats {
 
 impl fmt::Display for GLRStats {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "--- GLR Parser Stats ---")?;
-        writeln!(f, "Grammar: {} productions, {} terminals, {} non-terminals", self.num_productions, self.num_terminals, self.num_non_terminals)?;
-        writeln!(f, "Parse Table: {} states, {} S/R conflicts, {} R/R conflicts", self.num_states, self.num_shift_reduce_conflicts, self.num_reduce_reduce_conflicts)?;
+        writeln!(
+            f,
+            "--- GLR Parser Stats ---\nGrammar: {} productions, {} terminals, {} non-terminals",
+            self.num_productions, self.num_terminals, self.num_non_terminals
+        )?;
+        writeln!(
+            f,
+            "Parse Table: {} states, {} S/R conflicts, {} R/R conflicts",
+            self.num_states, self.num_shift_reduce_conflicts, self.num_reduce_reduce_conflicts
+        )?;
 
         writeln!(f, "\n--- State Details ---")?;
         for (state_id, stats) in &self.state_stats {
@@ -60,16 +67,34 @@ impl fmt::Display for GLRStats {
             )?;
 
             const MAX_UNIQUE_TO_DISPLAY: usize = 5;
-            if !stats.unique_actions.is_empty() && stats.unique_actions.len() <= MAX_UNIQUE_TO_DISPLAY {
+            if !stats.unique_actions.is_empty()
+                && stats.unique_actions.len() <= MAX_UNIQUE_TO_DISPLAY
+            {
                 for (action, count) in &stats.unique_actions {
                     let compact_action = match action {
-                        Stage7ShiftsAndReducesLookaheadValue::Shift(s) => format!("S→{}", s.0),
-                        Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids } => {
-                            format!("R(NT:{},len:{},#p:{})", nonterminal_id.0, len, production_ids.len())
+                        Stage7ShiftsAndReducesLookaheadValue::Shift(s) => {
+                            format!("S→{}", s.0)
                         }
+                        Stage7ShiftsAndReducesLookaheadValue::Reduce {
+                            nonterminal_id,
+                            len,
+                            production_ids,
+                        } => format!(
+                            "R(NT:{},len:{},#p:{})",
+                            nonterminal_id.0,
+                            len,
+                            production_ids.len()
+                        ),
                         Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
                             let has_shift = shift.is_some();
-                            let num_reduces: usize = reduces.values().map(|nts| nts.values().map(|pids| pids.len()).sum::<usize>()).sum();
+                            let num_reduces: usize = reduces
+                                .values()
+                                .map(|nts| {
+                                    nts.values()
+                                        .map(|pids| pids.len())
+                                        .sum::<usize>()
+                                })
+                                .sum();
                             let conflict_type = if has_shift && num_reduces > 0 {
                                 "S/R"
                             } else if !has_shift && num_reduces > 1 {
@@ -77,17 +102,28 @@ impl fmt::Display for GLRStats {
                             } else {
                                 "Split"
                             };
-                            let s_part = shift.map_or("".to_string(), |s| format!("S→{}", s.0));
-                            let r_parts: Vec<String> = reduces.iter().map(|(len, nts)| {
-                                let nt_count = nts.len();
-                                let p_count: usize = nts.values().map(|pids| pids.len()).sum();
-                                format!("R(len:{},#nt:{},#p:{})", len, nt_count, p_count)
-                            }).collect();
+                            let s_part = shift.map_or(String::new(), |s| format!("S→{}", s.0));
+                            let r_parts: Vec<String> = reduces
+                                .iter()
+                                .map(|(len, nts)| {
+                                    let nt_count = nts.len();
+                                    let p_count: usize = nts
+                                        .values()
+                                        .map(|pids| pids.len())
+                                        .sum();
+                                    format!("R(len:{},#nt:{},#p:{})", len, nt_count, p_count)
+                                })
+                                .collect();
 
                             if s_part.is_empty() {
                                 format!("{}[{}]", conflict_type, r_parts.join(", "))
                             } else {
-                                format!("{}[{}, {}]", conflict_type, s_part, r_parts.join(", "))
+                                format!(
+                                    "{}[{}, {}]",
+                                    conflict_type,
+                                    s_part,
+                                    r_parts.join(", ")
+                                )
                             }
                         }
                     };
@@ -110,12 +146,15 @@ pub fn get_stats(parser: &GLRParser) -> GLRStats {
         let mut current_state_stats = StateStats::default();
         current_state_stats.num_gotos = row.gotos.len();
 
-        // Stats are based on phase 2, which contains the full set of actions.
-        let actions = &row.get_shifts_and_reduces_map();
+        // Stats are based on the full set of actions in the row.
+        let actions = row.shifts_and_reduces();
         current_state_stats.total_actions = actions.len();
 
-        for (_, action) in actions {
-            *current_state_stats.unique_actions.entry(action.clone()).or_insert(0) += 1;
+        for action in actions.values() {
+            *current_state_stats
+                .unique_actions
+                .entry(action.clone())
+                .or_insert(0) += 1;
 
             match action {
                 Stage7ShiftsAndReducesLookaheadValue::Shift(_) => {
@@ -132,7 +171,11 @@ pub fn get_stats(parser: &GLRParser) -> GLRStats {
                     if shift.is_some() {
                         num_shift_reduce_conflicts += 1;
                     }
-                    let total_reduce_productions = reduces.values().flat_map(|nts| nts.values()).map(|pids| pids.len()).sum::<usize>();
+                    let total_reduce_productions = reduces
+                        .values()
+                        .flat_map(|nts| nts.values())
+                        .map(|pids| pids.len())
+                        .sum::<usize>();
                     if total_reduce_productions > 1 {
                         num_reduce_reduce_conflicts += 1;
                     }
