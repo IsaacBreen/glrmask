@@ -211,7 +211,6 @@ pub fn nwa_to_vector_fst(nwa: &NWA) -> VectorFst<BitsetWeight> {
         }
     }
 
-    crate::debug!(5, "NWA to FST conversion done:\n{}", fst);
     fst
 }
 
