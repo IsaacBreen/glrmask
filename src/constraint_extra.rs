@@ -48,6 +48,7 @@ fn format_bv_with_tokens(
     internal_to_original_map: Option<&BTreeMap<usize, LLMTokenBV>>,
     llm_token_map: Option<&BiBTreeMap<Vec<u8>, LLMTokenID>>,
     limit: usize,
+    internal_max_llm_token_id: usize,
 ) -> String {
     let (i2o_map, token_map) = match (internal_to_original_map, llm_token_map) {
         (Some(i), Some(t)) => (i, t),
@@ -56,7 +57,7 @@ fn format_bv_with_tokens(
 
     // Convert internal IDs to original LLM token IDs
     let mut original_tokens_bv = LLMTokenBV::zeros();
-    for internal_id in bv.iter_up_to(usize::MAX) {
+    for internal_id in bv.iter_up_to(internal_max_llm_token_id) {
         if let Some(original_ids_bv) = i2o_map.get(&internal_id) {
             original_tokens_bv.bitor_assign(original_ids_bv);
         }
@@ -136,7 +137,8 @@ pub fn dump_precompute_trie0_recursive(
             None => "ε".to_string(),
         };
 
-        let tokens_display = format_bv_with_tokens(&edge_val_bv, internal_to_original_map, llm_token_map, 5);
+        let internal_max_llm_token_id = *internal_to_original_map.unwrap().keys().max().unwrap_or(&0);
+        let tokens_display = format_bv_with_tokens(&edge_val_bv, internal_to_original_map, llm_token_map, 5, internal_max_llm_token_id);
 
         let child_ptr;
         let child_info;
@@ -147,7 +149,7 @@ pub fn dump_precompute_trie0_recursive(
             child_ptr = child_arc;
             is_visited = visited.contains(&child_ptr);
             is_end_node = child_node.value.final_tokenizer_state.is_some();
-            let live_tokens_str = format_bv_with_tokens(&child_node.value.live_tokens, internal_to_original_map, llm_token_map, 5);
+            let live_tokens_str = format_bv_with_tokens(&child_node.value.live_tokens, internal_to_original_map, llm_token_map, 5, internal_max_llm_token_id);
             let end_str = if is_end_node {
                 if let Some(sid) = child_node.value.final_tokenizer_state {
                     format!(" [END -> S{}]", sid.0)
@@ -222,7 +224,8 @@ pub fn dump_precompute_trie_recursive(
             None => "ε".to_string(),
         };
 
-        let tokens_display = format_bv_with_tokens(&edge_val_bv, internal_to_original_map, llm_token_map, 5);
+        let internal_max_llm_token_id = *internal_to_original_map.unwrap().keys().max().unwrap_or(&0);
+        let tokens_display = format_bv_with_tokens(&edge_val_bv, internal_to_original_map, llm_token_map, 5, internal_max_llm_token_id);
 
         let child_ptr;
         let child_info;
@@ -233,7 +236,7 @@ pub fn dump_precompute_trie_recursive(
             child_ptr = child_arc;
             is_visited = visited.contains(&child_ptr);
             is_end_node = child_node.value.end;
-            let live_tokens_str = format_bv_with_tokens(&child_node.value.live_tokens, internal_to_original_map, llm_token_map, 5);
+            let live_tokens_str = format_bv_with_tokens(&child_node.value.live_tokens, internal_to_original_map, llm_token_map, 5, internal_max_llm_token_id);
             child_info = format!("Node {} (MaxDepth: {}){} [Live: {}]", child_ptr, child_node.max_depth, if is_end_node { " [END]" } else { "" }, live_tokens_str);
         }
 
@@ -291,7 +294,8 @@ impl GrammarConstraint {
             {
                 let root_node = root_node_trie.read(trie1_god).unwrap();
                 root_ptr = root_node_trie;
-                let live_tokens_str = format_bv_with_tokens(&root_node.value.live_tokens, Some(internal_to_original_map), Some(llm_token_map), 5);
+                let internal_max_llm_token_id = *internal_to_original_map.keys().max().unwrap_or(&0);
+                let live_tokens_str = format_bv_with_tokens(&root_node.value.live_tokens, Some(internal_to_original_map), Some(llm_token_map), 5, internal_max_llm_token_id);
                 root_info = format!("Root Node {} (MaxDepth: {}){} [Live: {}]", root_ptr, root_node.max_depth, if root_node.value.end { " [END]" } else { "" }, live_tokens_str);
             }
             println!("{}", root_info);
