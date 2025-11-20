@@ -47,17 +47,20 @@ type Signature = Vec<Vec<Option<TerminalID>>>;
 /// Helper to index a signature for fast compatibility checks.
 struct SignatureIndex {
     term_to_group: HashMap<Option<TerminalID>, usize>,
+    total_terms: usize,
 }
 
 impl SignatureIndex {
     fn new(sig: &Signature) -> Self {
         let mut map = HashMap::new();
+        let mut count = 0;
         for (g_idx, group) in sig.iter().enumerate() {
             for term in group {
                 map.insert(*term, g_idx);
+                count += 1;
             }
         }
-        Self { term_to_group: map }
+        Self { term_to_group: map, total_terms: count }
     }
 
     fn get_group(&self, term: &Option<TerminalID>) -> Option<usize> {
@@ -72,28 +75,35 @@ fn can_derive(
     child_index: &SignatureIndex,
 ) -> Option<Vec<Weight>> {
     let mut mapping = Vec::with_capacity(parent.len());
+    let mut matched_terms = 0;
 
     for group in parent {
-        let mut target_group: Option<usize> = None;
-        // All terminals in a parent group must map to the SAME child group (or be missing from child).
-        for term in group {
-            if let Some(g) = child_index.get_group(term) {
-                if let Some(existing) = target_group {
-                    if existing != g {
-                        return None; // Conflict
-                    }
-                } else {
-                    target_group = Some(g);
-                }
+        if group.is_empty() {
+            mapping.push(Weight::zeros());
+            continue;
+        }
+
+        let first_term = &group[0];
+        let expected_g = child_index.get_group(first_term);
+
+        for term in &group[1..] {
+            let g = child_index.get_group(term);
+            if g != expected_g {
+                return None; // Parent group splits across child groups or mixing present/missing
             }
         }
-        
-        let w = if let Some(g) = target_group {
-            Weight::from_item(g)
+
+        if let Some(g) = expected_g {
+            mapping.push(Weight::from_item(g));
+            matched_terms += group.len();
         } else {
-            Weight::zeros()
-        };
-        mapping.push(w);
+            mapping.push(Weight::zeros());
+        }
+    }
+
+    // Ensure parent covers all terminals in child
+    if matched_terms != child_index.total_terms {
+        return None;
     }
 
     Some(mapping)
@@ -106,7 +116,7 @@ fn specialize_dwa_relative(
 ) -> DWA {
     let mut specialized_dwa = parent_dwa.clone();
     let mut cache: HashMap<Weight, SimpleBitset> = HashMap::new();
-    
+
     // Helper to map a bitset of parent indices to a bitset of child indices
     let mut map_weight = |w: &Weight| -> Weight {
         if let Some(cw) = cache.get(w) {
@@ -138,7 +148,7 @@ fn specialize_dwa_relative(
         state.trans_weights.retain(|_, w| !w.is_empty());
         state.transitions.retain(|k, _| state.trans_weights.contains_key(k));
     }
-    
+
     specialized_dwa
 }
 
@@ -377,7 +387,7 @@ pub fn precompute4(
     // Traversal Data
     let traversal_data =
         Trie::compute_traversal_data(&reversed_trie1_god, &[reversed_trie_root]).expect("Failed to compute traversal data for reversed trie1");
-    
+
     let initial_tokens = LLMTokenBV::max_ones();
     let initial_values_bv: Vec<(Trie2Index, LLMTokenBV)> = vec![(reversed_trie_root, initial_tokens.clone())];
 
@@ -393,7 +403,7 @@ pub fn precompute4(
     // Precompute Templates via waterfall derivation
     let start_templates = Instant::now();
     let mut template_cache = HashMap::new();
-    
+
     // 1. Construct explicit super signature and put super_dwa in the pool.
     // Super signature maps index i -> {bit_to_term[i]}.
     let super_signature: Signature = bit_to_term.iter().map(|t| vec![*t]).collect();
@@ -419,14 +429,13 @@ pub fn precompute4(
     // 3. Greedy derivation
     for target_sig in signatures_vec {
         let target_idx = SignatureIndex::new(&target_sig);
-        
+
         // Find best parent in pool
         let mut best_parent: Option<(usize, Vec<Weight>)> = None; // (pool_index, mapping)
         let mut best_score = usize::MAX; // Minimize parent groups
 
         for (p_idx, (p_sig, _)) in pool.iter().enumerate() {
-            // If we found a parent with same complexity as current best, maybe skip?
-            // But strict derivation check is needed.
+            // Strict check: Parent must derive child exactly (merge only, no splitting/guessing)
             if let Some(mapping) = can_derive(p_sig, &target_idx) {
                 let score = p_sig.len();
                 if score < best_score {
@@ -438,11 +447,11 @@ pub fn precompute4(
 
         let (parent_idx, mapping) = best_parent.expect("Super signature should always be a valid parent");
         let parent_dwa = &pool[parent_idx].1;
-        
+
         // Derive
         let mut derived_dwa = specialize_dwa_relative(parent_dwa, &mapping);
         derived_dwa.simplify(); // Crucial step: reduce the DWA for the pool
-        
+
         template_cache.insert(target_sig.clone(), NWA::from_dwa(&derived_dwa));
         pool.push((target_sig, derived_dwa));
     }
@@ -457,7 +466,7 @@ pub fn precompute4(
         states[start].final_weight = Some(Weight::all());
         NWABody { start_state: start }
     };
-    
+
     let initial_term_map: BTreeMap<Option<TerminalID>, Weight> = BTreeMap::from([(None, Weight::all())]);
     let initial_body_map_full = BTreeMap::from([(initial_nwa_body, initial_term_map)]);
     let initial_values_full: Vec<(Trie2Index, (BTreeMap<NWABody, BTreeMap<Option<TerminalID>, Weight>>, LLMTokenBV))> =
