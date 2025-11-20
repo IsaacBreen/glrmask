@@ -339,7 +339,7 @@ pub fn dump_precompute_trie_recursive(
                     child_arc,
                     child_prefix,
                     visited,
-                    Some(internal_to_original_map),
+                    &internal_to_original_map,
                     token_name_map,
                     llm_token_map,
                     trie1_god,

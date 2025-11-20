@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use super::common::{BENCHMARK_DEBUG, Label, NWAStateID, StateID, Weight};
+use super::common::{BENCHMARK_DEBUG, Label, NWAStateID, StateID, Weight, OPTIMIZE_DEBUG};
 use super::dwa::{DWAState, DWAStates, DWA};
 use super::nwa::{NWAState, NWAStates, NWA};
 use rustfst::algorithms::{minimize, minimize_with_config, MinimizeConfig};

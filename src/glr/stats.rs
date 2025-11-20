@@ -147,7 +147,7 @@ pub fn get_stats(parser: &GLRParser) -> GLRStats {
         current_state_stats.num_gotos = row.gotos.len();
 
         // Stats are based on the full set of actions in the row.
-        let actions = row.shifts_and_reduces();
+        let actions = row.get_shifts_and_reduces_map();
         current_state_stats.total_actions = actions.len();
 
         for action in actions.values() {
