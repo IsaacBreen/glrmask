@@ -557,7 +557,7 @@ pub fn precompute4(
     // Argument kept for compatibility if needed, though unused in this version
     _max_llm_token_id: usize,
 ) -> DWA {
-    crate::debug!(3, "Starting precompute4 with NWA input...");
+    crate::debug!(3, "Starting precompute4 (DWA construction)");
 
     // 1. Build template DWAs
     let now = Instant::now();
@@ -597,10 +597,12 @@ pub fn precompute4(
     );
     crate::debug!(
         3,
-        "Pass 1 (Token BVs & Signatures) took: {:?}. Found {} unique signatures.",
-        start_pass1.elapsed(),
-        unique_signatures.len()
+        "Pass 1: Tokens & Signatures ({} sigs, {:.2?})",
+        unique_signatures.len(),
+        start_pass1.elapsed()
     );
+
+    // 3. Build Super DWA / Template Derivation Pool
 
     // 3. Build Super DWA / Template Derivation Pool
     let mut used_terminals: BTreeSet<TerminalID> = BTreeSet::new();

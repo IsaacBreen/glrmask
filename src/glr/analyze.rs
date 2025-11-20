@@ -802,8 +802,8 @@ pub fn resolve_direct_right_recursion(
         // `recursive_rules` is guaranteed to be non-empty because `lhs` is in `recursive_nts`.
         let new_nt = NonTerminal(new_name_generator(&lhs.0));
         crate::debug!(
-            4,
-            "Resolving direct right-recursion for '{}', creating new non-terminal '{}'",
+            5,
+            "Resolving direct right-recursion for '{}' -> '{}'",
             lhs.0,
             new_nt.0
         );

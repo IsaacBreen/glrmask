@@ -773,29 +773,27 @@ impl NFAState {
 fn print_memory_usage(label: &str) {
     if let Some(usage) = memory_stats() {
         let physical_mem_mb = usage.physical_mem / 1024 / 1024;
-        crate::debug!(4, "Memory usage at '{}': Physical: {} MB", label, physical_mem_mb);
-    } else {
-        crate::debug!(4, "Couldn't get memory usage at '{}'", label);
+        crate::debug!(4, "Mem: {} MB ({})", physical_mem_mb, label);
     }
 }
 
 impl ExprGroups {
     pub fn build(self) -> Regex {
         print_memory_usage("Start of Regex build");
-        crate::debug!(3, "Building NFA...");
+        crate::debug!(3, "Building NFA");
         let start = std::time::Instant::now();
         let nfa = self.build_nfa();
-        crate::debug!(3, "Built NFA in {:.2?}", start.elapsed());
+        crate::debug!(4, "Built NFA in {:.2?}", start.elapsed());
         print_memory_usage("After NFA build");
-        crate::debug!(3, "Converting NFA to DFA...");
+        crate::debug!(3, "Converting NFA to DFA");
         let start = std::time::Instant::now();
         let mut dfa = nfa.to_dfa();
-        crate::debug!(3, "Converted NFA to DFA in {:.2?}", start.elapsed());
+        crate::debug!(4, "Converted NFA to DFA in {:.2?}", start.elapsed());
         print_memory_usage("After NFA to DFA conversion");
-        crate::debug!(3, "Minimizing DFA...");
+        crate::debug!(3, "Minimizing DFA");
         let start = std::time::Instant::now();
         dfa.minimize();
-        crate::debug!(3, "Minimized DFA in {:.2?}", start.elapsed());
+        crate::debug!(4, "Minimized DFA in {:.2?}", start.elapsed());
         print_memory_usage("After DFA minimization");
         // crate::debug!(3, "Done!");
         Regex { dfa }

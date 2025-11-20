@@ -832,9 +832,7 @@ fn compute_final_table(
 fn print_memory_usage(label: &str) {
     if let Some(usage) = memory_stats() {
         let physical_mem_mb = usage.physical_mem / 1024 / 1024;
-        crate::debug!(4, "Memory usage at '{}': Physical: {} MB", label, physical_mem_mb);
-    } else {
-        crate::debug!(4, "Couldn't get memory usage at '{}'", label);
+        crate::debug!(4, "Mem: {} MB ({})", physical_mem_mb, label);
     }
 }
 
@@ -846,7 +844,7 @@ pub fn generate_glr_parser_with_maps(
     actions: BTreeMap<NonTerminal, ActionFn>,
     ignore_terminal_id: Option<TerminalID>,
 ) -> GLRParser {
-    crate::debug!(3, "Number of productions: {}", productions.len());
+    crate::debug!(4, "Number of productions: {}", productions.len());
     print_memory_usage("Start of parser generation");
 
     crate::debug!(3, "Validating initial grammar");
@@ -880,7 +878,7 @@ pub fn generate_glr_parser_with_maps(
         }
     }
 
-    crate::debug!(3, "Number of productions: {}", productions.len());
+    crate::debug!(4, "Number of productions: {}", productions.len());
     print_memory_usage("Before Stage 1");
 
     // Prepare Light Productions (Global IDs)

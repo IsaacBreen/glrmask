@@ -67,9 +67,9 @@ impl<'r> Precomputer1<'r> {
             .map(|(bytes, id)| (id.0 as usize, bytes.clone()))
             .collect();
 
-        crate::debug!(3, "Building vocab prefix tree");
+        crate::debug!(5, "Building vocab prefix tree");
         let vocab = VocabPrefixTree::build(&tokens);
-        crate::debug!(3, "Done building vocab prefix tree");
+        crate::debug!(5, "Done building vocab prefix tree");
 
         let mut nwa = NWA::new();
         nwa.states.0.clear(); // Clear default start state
@@ -80,14 +80,14 @@ impl<'r> Precomputer1<'r> {
             roots.insert(sid, root_state);
         }
         crate::debug!(
-            3,
-            "Created trie1 roots for {} representative tokenizer states",
+            4,
+            "Created trie1 roots ({} states)",
             roots.len()
         );
 
-        crate::debug!(4, "Counting vocab nodes for progress bar...");
+        crate::debug!(5, "Counting vocab nodes for progress bar...");
         let total_nodes = count_vocab_nodes(&vocab.root);
-        crate::debug!(4, "Counted {} vocab nodes", total_nodes);
+        crate::debug!(5, "Counted {} vocab nodes", total_nodes);
         let pb = ProgressBar::new(total_nodes);
         pb.set_style(
             ProgressStyle::default_bar()
@@ -103,7 +103,7 @@ impl<'r> Precomputer1<'r> {
 
         let leaf_state = nwa.add_state();
         nwa.states[leaf_state].final_weight = Some(Weight::all());
-        crate::debug!(4, "Created trie1 leaf state");
+        crate::debug!(5, "Created trie1 leaf state");
 
         Self {
             tokenizer,
@@ -148,7 +148,7 @@ impl<'r> Precomputer1<'r> {
         }
         crate::debug!(3, "Converting DWA to NWA with {} states...", dwa.states.len());
         self.nwa = NWA::from_dwa(&dwa);
-        crate::debug!(3, "Done converting DWA to NWA with {} states...", dwa.states.len());
+        crate::debug!(4, "Done converting DWA to NWA with {} states...", dwa.states.len());
 
         let final_trie1_god = Trie1GodWrapper::new();
         let mut final_roots = BTreeMap::new();
@@ -396,15 +396,11 @@ impl<'r> Precomputer1<'r> {
     fn run_dfs(&mut self) {
         let assoc = self.roots.clone();
         crate::debug!(3, "Starting precompute DFS for {} tokenizer states", self.roots.len());
-        crate::debug!(6, "Roots for each tokenizer state:");
+        // crate::debug!(6, "Roots for each tokenizer state:");
         for (sid, root) in &self.roots {
             crate::debug!(6, "  {}: {}", sid.0, root);
         }
-        profiler::reset();
-        let vocab = std::mem::replace(&mut self.vocab, VocabPrefixTree::new());
-        self.dfs(&vocab.root, assoc);
-        self.vocab = vocab;
-        crate::debug!(3, "Finished precompute DFS");
+        crate::debug!(4, "Finished precompute DFS");
         self.pb.finish();
         profiler::print_summary();
         crate::debug!(3, "Precomputation complete");

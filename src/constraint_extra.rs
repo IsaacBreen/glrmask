@@ -456,7 +456,7 @@ pub fn calculate_final_stats0(
     stats: &mut PrecomputeStats,
     trie0_god: &Trie0GodWrapper,
 ) {
-    crate::debug!(3, "Calculating final precompute0 statistics...");
+    crate::debug!(4, "Calculating final precompute0 statistics...");
 
     let mut all_reachable_nodes: BTreeMap<PrecomputeNode0Index, PrecomputeNode0Index> = BTreeMap::new();
     let mut queue: VecDeque<PrecomputeNode0Index> = precomputed_roots.values().cloned().collect();
@@ -542,7 +542,7 @@ pub fn calculate_final_stats0(
             stats.final_nodes_with_clean_end += 1;
         }
     }
-    crate::debug!(3, "Finished calculating final precompute0 statistics.");
+    crate::debug!(4, "Finished calculating final precompute0 statistics.");
 }
 
 pub fn calculate_final_stats1(
@@ -550,7 +550,7 @@ pub fn calculate_final_stats1(
     stats: &mut PrecomputeStats,
     trie1_god: &Trie1GodWrapper,
 ) {
-    crate::debug!(3, "Calculating final precompute1 statistics...");
+    crate::debug!(4, "Calculating final precompute1 statistics...");
 
     // Custom implementation of all_nodes using PrecomputeNodeIndex for visited set
     let mut all_reachable_nodes: BTreeMap<PrecomputeNode1Index, PrecomputeNode1Index> = BTreeMap::new();
@@ -661,7 +661,7 @@ pub fn calculate_final_stats1(
             stats.final_nodes_with_clean_end += 1;
         }
     }
-    crate::debug!(3, "Finished calculating final precompute1 statistics.");
+    crate::debug!(4, "Finished calculating final precompute1 statistics.");
 }
 
 

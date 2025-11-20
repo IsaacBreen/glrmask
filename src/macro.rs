@@ -47,18 +47,16 @@ pub const ALLOWED_FILES: &[&str] = &[
 
 /// Formats a duration as seconds if >= 1000ms, otherwise milliseconds.
 pub fn format_duration(d: std::time::Duration) -> String {
-    let millis = d.as_millis();
-    if millis >= 1000 {
-        format!("{:.2}s", millis as f64 / 1000.0)
+    let secs = d.as_secs_f64();
+    if secs >= 1.0 {
+        format!("{:.2}s", secs)
     } else {
-        format!("{}ms", millis)
+        format!("{:.0}ms", secs * 1000.0)
     }
 }
 
 /// Internal implementation for the new grouped format (debug!).
-/// Uses ANSI colors: Bold Cyan for files, Dark Gray for line numbers.
-#[doc(hidden)]
-#[macro_export]
+/// Uses ANSI colors: Bold Cyan for files.
 macro_rules! __debug_grouped_impl {
     ($level:expr, $user_fmt:expr, $($user_args:tt)*) => {{
         if $level <= $crate::r#macro::get_macro_debug_level() {
@@ -80,7 +78,7 @@ macro_rules! __debug_grouped_impl {
                 let elapsed_suffix = if let Some(last_time) = *last_time_guard {
                     let diff = now.duration_since(last_time);
                     if diff.as_millis() > 1 {
-                        format!(" \x1b[35m+{}\x1b[0m", $crate::r#macro::format_duration(diff))
+                        format!(" \x1b[90m+{}\x1b[0m", $crate::r#macro::format_duration(diff))
                     } else {
                         String::new()
                     }
@@ -90,19 +88,14 @@ macro_rules! __debug_grouped_impl {
                 *last_time_guard = Some(now);
 
                 let current_file_str = file!();
-
-                // If filename changed, print it in Bold Cyan
-                if *last_file_guard != current_file_str {
-                    // \x1b[1;36m = Bold Cyan, \x1b[0m = Reset
-                    println!("\x1b[1;36m{}\x1b[0m", current_file_str);
-                    *last_file_guard = current_file_str.to_string();
-                }
-
-                // Print line number in Dark Gray, then the message
-                // \x1b[90m = Dark Gray (Bright Black)
+                let current_line = line!();
+                
+                // Clean one-line format: [file:line] message (+time)
+                // \x1b[1;36m = Bold Cyan for location
                 println!(
-                    concat!("\x1b[90m  {:>4}\x1b[0m  ", "{}", "{}"),
-                    line!(),
+                    concat!("\x1b[1;36m[{}:{}]\x1b[0m ", "{}", "{}"),
+                    current_file_str,
+                    current_line,
                     format_args!($user_fmt, $($user_args)*),
                     elapsed_suffix
                 );

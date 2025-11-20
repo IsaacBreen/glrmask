@@ -558,9 +558,7 @@ impl GrammarConstraint {
         if is_debug_level_enabled(3) {
             let num_original_tokens = llm_token_strings.len();
             let num_classes = equivalence_classes.len();
-            crate::debug!(3, "LLM Token Equivalence Analysis:");
-            crate::debug!(3, "  - Original LLM tokens: {}", num_original_tokens);
-            crate::debug!(3, "  - Equivalence classes: {}", num_classes);
+            crate::debug!(3, "Equivalence Analysis: {} original tokens -> {} classes", num_original_tokens, num_classes);
         }
 
         let mut original_to_internal_map = BTreeMap::new();
@@ -623,11 +621,11 @@ impl GrammarConstraint {
         }
 
         // Vocab tree for internal tokens.
-        crate::debug!(3, "Building vocab prefix tree for possible_matches computation");
+        crate::debug!(3, "Building internal vocab prefix tree");
         let internal_tokens_for_vocab: Vec<(usize, Vec<u8>)> =
             internal_llm_token_map.iter().map(|(b, id)| (id.0, b.clone())).collect();
         let vocab_tree = VocabPrefixTree::build(&internal_tokens_for_vocab);
-        crate::debug!(3, "Done building vocab prefix tree");
+        crate::debug!(4, "Done building internal vocab prefix tree");
 
         // Unified fast pass for maps and matches
         crate::debug!(3, "Computing maps and possible_matches (fast parallel pass)");
@@ -700,7 +698,7 @@ impl GrammarConstraint {
         let mut possible_matches_precompute1 = computed_possible_matches.clone();
         if precompute_vocab_before_p1.original_to_internal != vocab.original_to_internal {
             crate::debug!(
-                3,
+                4,
                 "Remapping LLM token IDs in possible_matches due to Trie1 optimization."
             );
             let mut old_to_new_map: BTreeMap<usize, usize> = BTreeMap::new();
@@ -759,7 +757,7 @@ impl GrammarConstraint {
         let max_internal_llm_token_id = vocab.internal_max_llm_token;
         
         // Instead of using trie based precompute4, we convert the output of run_precompute1 to NWA immediately
-        crate::debug!(3, "Converting precompute1 Trie to NWA...");
+        crate::debug!(3, "Converting precompute1 Trie to NWA");
         let nwa = convert_precompute1_to_nwa(&precomputed1_trie_map, &trie1_god_wrapper);
         
         // Run precompute4 using the NWA
