@@ -3,14 +3,14 @@
 #![allow(dead_code)]
 #![allow(clippy::needless_borrow)]
 
-use super::common::{format_pos_code, StateID, Weight};
+use super::common::{format_pos_code, Label, StateID, Weight};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fmt::{self, Display, Formatter};
 use std::ops::{Deref, Index, IndexMut};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DWABuildError {
-    TransitionAlreadyExists { from: StateID, on: i16 },
+    TransitionAlreadyExists { from: StateID, on: Label },
     StateOutOfBounds { state: StateID },
 }
 
@@ -27,18 +27,18 @@ impl Display for DWABuildError {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DWAState {
-    pub transitions: BTreeMap<i16, StateID>,
+    pub transitions: BTreeMap<Label, StateID>,
     pub final_weight: Option<Weight>,
-    pub trans_weights: BTreeMap<i16, Weight>,
+    pub trans_weights: BTreeMap<Label, Weight>,
     pub state_weight: Option<Weight>,
 }
 
 impl DWAState {
-    pub fn get_transition(&self, ch: i16) -> Option<(StateID, &Weight)> {
+    pub fn get_transition(&self, ch: Label) -> Option<(StateID, &Weight)> {
         self.transitions.get(&ch).and_then(|to| self.trans_weights.get(&ch).map(|w| (*to, w)))
     }
 
-    pub fn get_weight(&self, ch: i16) -> Option<&Weight> { self.trans_weights.get(&ch) }
+    pub fn get_weight(&self, ch: Label) -> Option<&Weight> { self.trans_weights.get(&ch) }
 
     pub fn apply_weight(&mut self, weight: &Weight) {
         if let Some(sw) = &mut self.state_weight {
@@ -77,7 +77,7 @@ impl DWAState {
     }
 
     #[inline]
-    pub fn iter_edges(&self) -> impl Iterator<Item = (i16, StateID, &Weight)> {
+    pub fn iter_edges(&self) -> impl Iterator<Item = (Label, StateID, &Weight)> {
         self.transitions
             .iter()
             .filter_map(move |(ch, to)| self.trans_weights.get(ch).map(|w| (*ch, *to, w)))
@@ -228,7 +228,7 @@ impl DWA {
     pub fn add_transition(
         &mut self,
         from: StateID,
-        on: i16,
+        on: Label,
         to: StateID,
         weight: Weight,
     ) -> Result<(), DWABuildError> {
@@ -318,7 +318,7 @@ impl Display for DWA {
                 let char_repr = if *on >= 0 {
                     format_pos_code(*on)
                 } else {
-                    let decoded_id = on.wrapping_sub(i16::MIN);
+                    let decoded_id = on.wrapping_sub(Label::MIN);
                     format!("neg({})", decoded_id)
                 };
                 if let Some(w) = state.trans_weights.get(on) {

@@ -3,7 +3,7 @@
 #![allow(dead_code)]
 #![allow(clippy::needless_borrow)]
 
-use super::common::{format_i16_char, NWAStateID, Weight, BENCHMARK_DEBUG};
+use super::common::{format_i16_char, Label, NWAStateID, Weight, BENCHMARK_DEBUG};
 use super::dwa::DWA;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
@@ -28,7 +28,7 @@ impl Display for NWABuildError {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NWAState {
     pub final_weight: Option<Weight>,
-    pub transitions: BTreeMap<i16, Vec<(NWAStateID, Weight)>>,
+    pub transitions: BTreeMap<Label, Vec<(NWAStateID, Weight)>>,
     pub epsilons: Vec<(NWAStateID, Weight)>,
 }
 
@@ -59,7 +59,7 @@ impl NWAStates {
     pub fn add_transition(
         &mut self,
         from: NWAStateID,
-        on: i16,
+        on: Label,
         to: NWAStateID,
         w: Weight,
     ) -> Result<(), NWABuildError> {
@@ -294,7 +294,7 @@ impl NWA {
     pub fn add_transition(
         &mut self,
         from: NWAStateID,
-        on: i16,
+        on: Label,
         to: NWAStateID,
         w: Weight,
     ) -> Result<(), NWABuildError> {
@@ -366,7 +366,7 @@ impl NWA {
                 dwa.states[from_dwa_id].final_weight = Some(final_weight);
             }
 
-            let mut transitions: BTreeMap<i16, BTreeMap<NWAStateID, Weight>> = BTreeMap::new();
+            let mut transitions: BTreeMap<Label, BTreeMap<NWAStateID, Weight>> = BTreeMap::new();
             for (nwa_id, path_weight) in &subset {
                 for (label, targets) in &self.states[*nwa_id].transitions {
                     for (target_nwa_id, trans_weight) in targets {

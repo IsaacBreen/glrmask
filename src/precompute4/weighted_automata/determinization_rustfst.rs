@@ -24,12 +24,12 @@ use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::sync::{Arc, Mutex};
 
-fn i16_to_label(label: i16) -> u32 {
-    (label as i32 - i16::MIN as i32) as u32 + 1
+fn i16_to_label(label: Label) -> u32 {
+    (label as i32 - Label::MIN as i32) as u32 + 1
 }
 
-fn label_to_i16(label: u32) -> i16 {
-    ((label - 1) as i32 + i16::MIN as i32) as i16
+fn label_to_i16(label: u32) -> Label {
+    ((label - 1) as i32 + Label::MIN as i32) as Label
 }
 
 static WEIGHT_INTERNER: Lazy<Mutex<HashSet<Arc<Weight>>>> =

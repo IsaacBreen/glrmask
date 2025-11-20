@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use super::common::{BENCHMARK_DEBUG, OPTIMIZE_DEBUG, NWAStateID, StateID, Weight};
+use super::common::{BENCHMARK_DEBUG, OPTIMIZE_DEBUG, NWAStateID, StateID, Weight, Label};
 use super::dwa::{DWAState, DWAStates, DWA};
 use super::nwa::{NWAState, NWAStates, NWA};
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
@@ -36,7 +36,7 @@ fn hash_value<T: Hash>(value: &T) -> u64 {
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct DwaTransitionSig {
-    label: i16,
+    label: Label,
     dest_class: usize,
     weight: Weight,
 }
@@ -117,7 +117,7 @@ fn minimize_dwa_partition(states: &DWAStates) -> Partition {
 #[derive(Clone, Debug, Default)]
 struct DwaStateBuilder {
     final_weight: Option<Weight>,
-    trans: BTreeMap<i16, (StateID, Weight)>,
+    trans: BTreeMap<Label, (StateID, Weight)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -335,7 +335,7 @@ impl DWA {
         }
 
         let mut changed = false;
-        let mut preds: Vec<Vec<(StateID, i16)>> = vec![Vec::new(); n];
+        let mut preds: Vec<Vec<(StateID, Label)>> = vec![Vec::new(); n];
         for (u, st) in self.states.0.iter().enumerate() {
             for (&label, &v) in &st.transitions {
                 if v < n {
@@ -533,8 +533,8 @@ impl DWA {
         }
 
         for st in &mut new_states.0 {
-            let mut new_transitions: BTreeMap<i16, StateID> = BTreeMap::new();
-            let mut new_trans_weights: BTreeMap<i16, Weight> = BTreeMap::new();
+            let mut new_transitions: BTreeMap<Label, StateID> = BTreeMap::new();
+            let mut new_trans_weights: BTreeMap<Label, Weight> = BTreeMap::new();
             for (&label, &old_dest) in &st.transitions {
                 if old_dest < n && visited[old_dest] {
                     let new_dest = map[old_dest];
@@ -618,8 +618,8 @@ impl DWA {
         }
 
         for st in &mut new_states.0 {
-            let mut new_transitions: BTreeMap<i16, StateID> = BTreeMap::new();
-            let mut new_trans_weights: BTreeMap<i16, Weight> = BTreeMap::new();
+            let mut new_transitions: BTreeMap<Label, StateID> = BTreeMap::new();
+            let mut new_trans_weights: BTreeMap<Label, Weight> = BTreeMap::new();
             for (&label, &old_dest) in &st.transitions {
                 if old_dest < n && live[old_dest] {
                     let new_dest = map[old_dest];
@@ -644,7 +644,7 @@ impl DWA {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 enum ArcLabel {
     Eps,
-    Label(i16),
+    Label(Label),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -655,7 +655,7 @@ struct NwaTransitionSig {
 }
 
 impl NwaTransitionSig {
-    fn sort_key(&self) -> (u8, i16, usize, u64) {
+    fn sort_key(&self) -> (u8, Label, usize, u64) {
         let label_tag = match self.label {
             ArcLabel::Eps => 0,
             ArcLabel::Label(_) => 1,
@@ -767,7 +767,7 @@ fn minimize_nwa_partition(states: &NWAStates) -> Partition {
 struct NwaStateBuilder {
     final_weight: Option<Weight>,
     eps: BTreeMap<NWAStateID, Weight>,
-    trans: BTreeMap<i16, BTreeMap<NWAStateID, Weight>>,
+    trans: BTreeMap<Label, BTreeMap<NWAStateID, Weight>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1014,7 +1014,7 @@ impl NWA {
 
             // Compress labeled transitions: per (label, to) aggregate weights by union.
             if !st.transitions.is_empty() {
-                let mut new_transitions: BTreeMap<i16, Vec<(NWAStateID, Weight)>> = BTreeMap::new();
+                let mut new_transitions: BTreeMap<Label, Vec<(NWAStateID, Weight)>> = BTreeMap::new();
                 for (&lbl, targets) in &st.transitions {
                     let mut per_dest: BTreeMap<NWAStateID, Weight> = BTreeMap::new();
                     for &(to, ref w) in targets {
@@ -1268,7 +1268,7 @@ impl NWA {
                 *v = map[*v];
             }
 
-            let mut new_transitions: BTreeMap<i16, Vec<(NWAStateID, Weight)>> = BTreeMap::new();
+            let mut new_transitions: BTreeMap<Label, Vec<(NWAStateID, Weight)>> = BTreeMap::new();
             for (&lbl, targets) in &st.transitions {
                 let mut new_targets = Vec::new();
                 for &(v, ref w) in targets {
@@ -1363,7 +1363,7 @@ impl NWA {
                 *v = map[*v];
             }
 
-            let mut new_transitions: BTreeMap<i16, Vec<(NWAStateID, Weight)>> = BTreeMap::new();
+            let mut new_transitions: BTreeMap<Label, Vec<(NWAStateID, Weight)>> = BTreeMap::new();
             for (&lbl, targets) in &st.transitions {
                 let mut new_targets = Vec::new();
                 for &(v, ref w) in targets {

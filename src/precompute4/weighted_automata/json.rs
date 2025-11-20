@@ -4,7 +4,7 @@
 #![allow(clippy::needless_borrow)]
 
 use super::bitset::SimpleBitset;
-use super::common::{StateID, Weight};
+use super::common::{Label, StateID, Weight};
 use super::dwa::{DWABody, DWAState, DWAStates, DWA};
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use range_set_blaze::RangeSetBlaze;
@@ -48,9 +48,9 @@ impl JSONConvertible for DWAState {
 
     fn from_json(node: JSONNode) -> Result<Self, String> {
         let mut obj = node.into_object()?;
-        let transitions = BTreeMap::<i16, StateID>::from_json(obj.remove("transitions").ok_or("Missing 'transitions' field")?)?;
+        let transitions = BTreeMap::<Label, StateID>::from_json(obj.remove("transitions").ok_or("Missing 'transitions' field")?)?;
         let final_weight = Option::<Weight>::from_json(obj.remove("final_weight").ok_or("Missing 'final_weight' field")?)?;
-        let trans_weights = BTreeMap::<i16, Weight>::from_json(obj.remove("trans_weights").ok_or("Missing 'trans_weights' field")?)?;
+        let trans_weights = BTreeMap::<Label, Weight>::from_json(obj.remove("trans_weights").ok_or("Missing 'trans_weights' field")?)?;
         let state_weight = Option::<Weight>::from_json(obj.remove("state_weight").ok_or("Missing 'state_weight' field")?)?;
         Ok(DWAState {
             transitions,

@@ -4,7 +4,7 @@ use std::env;
 use std::time::Instant;
 
 use chrono::Local;
-
+use rustfst::Label;
 use crate::constraint::{LLMTokenBV, PrecomputeNode1, PrecomputeNode1Index, PrecomputedNodeContents, Trie1GodWrapper};
 use crate::datastructures::trie::{Trie, Trie2Index};
 use crate::glr::parser::{ExpectElse, GLRParser};
@@ -73,7 +73,7 @@ fn convert_node_to_nwa(
 
             // Add transition (NWA allows multiple transitions for same label)
             if let Some(label) = edge_key {
-                nwa.add_transition(sid, label.0 as i16, child_sid, trans_w).unwrap();
+                nwa.add_transition(sid, label.0 as Label, child_sid, trans_w).unwrap();
             } else {
                 nwa.add_epsilon(sid, child_sid, trans_w);
             }
@@ -95,7 +95,7 @@ fn convert_precompute1_to_nwa(
 
     for (sid, root_idx) in precomputed1 {
         let root_state = convert_node_to_nwa(*root_idx, trie1_god, &mut nwa, &mut node_cache);
-        nwa.add_transition(start_state, sid.0 as i16, root_state, Weight::all()).unwrap();
+        nwa.add_transition(start_state, sid.0 as Label, root_state, Weight::all()).unwrap();
     }
     nwa
 }
@@ -425,7 +425,7 @@ pub fn precompute4(
     let combined_start_state = combined_nwa_states.add_state();
 
     for (tok_id, body) in final_bodies {
-        let label = tok_id.0 as i16;
+        let label = tok_id.0 as Label;
         combined_nwa_states
             .add_transition(combined_start_state, label, body.start_state, Weight::all())
             .unwrap();

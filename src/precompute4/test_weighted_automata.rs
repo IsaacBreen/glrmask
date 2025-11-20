@@ -2,6 +2,7 @@ use crate::precompute4::weighted_automata::{DWAState, SimpleBitset, DWA, DWABuil
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::time::{SystemTime, UNIX_EPOCH};
 use crate::precompute4::resolve_negatives::resolve_negative_codes_in_dwa;
+use crate::precompute4::weighted_automata::common::Label;
 
 // --- Stochastic validation controls and RNG ---
 const VALIDATION_SAMPLES: usize = 32;
@@ -42,16 +43,16 @@ impl SimpleRng {
 
 // Small fixed alphabet used for default-edge sampling and variety.
 // Includes ASCII letters/digits, some small integers, and negative-coded inputs used in tests.
-const BASE_ALPHABET: &[i16] = &[
-    b'a' as i16, b'b' as i16, b'c' as i16, b'd' as i16, b'e' as i16, b'f' as i16, b'g' as i16,
-    b'h' as i16, b'i' as i16, b'j' as i16, b'k' as i16, b'l' as i16, b'm' as i16, b'n' as i16,
-    b'o' as i16, b'p' as i16, b'q' as i16, b'r' as i16, b's' as i16, b't' as i16, b'u' as i16,
-    b'v' as i16, b'w' as i16, b'x' as i16, b'y' as i16, b'z' as i16, b' ' as i16,
-    b'0' as i16, b'1' as i16, b'2' as i16, b'3' as i16, b'4' as i16, b'5' as i16,
-    b'6' as i16, b'7' as i16, b'8' as i16, b'9' as i16,
+const BASE_ALPHABET: &[Label] = &[
+    b'a' as Label, b'b' as Label, b'c' as Label, b'd' as Label, b'e' as Label, b'f' as Label, b'g' as Label,
+    b'h' as Label, b'i' as Label, b'j' as Label, b'k' as Label, b'l' as Label, b'm' as Label, b'n' as Label,
+    b'o' as Label, b'p' as Label, b'q' as Label, b'r' as Label, b's' as Label, b't' as Label, b'u' as Label,
+    b'v' as Label, b'w' as Label, b'x' as Label, b'y' as Label, b'z' as Label, b' ' as Label,
+    b'0' as Label, b'1' as Label, b'2' as Label, b'3' as Label, b'4' as Label, b'5' as Label,
+    b'6' as Label, b'7' as Label, b'8' as Label, b'9' as Label,
     0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
-    i16::MIN + 0, i16::MIN + 1, i16::MIN + 2, i16::MIN + 3, i16::MIN + 4,
-    i16::MIN + 5, i16::MIN + 6, i16::MIN + 7, i16::MIN + 8, i16::MIN + 9, i16::MIN + 10,
+    Label::MIN + 0, Label::MIN + 1, Label::MIN + 2, Label::MIN + 3, Label::MIN + 4,
+    Label::MIN + 5, Label::MIN + 6, Label::MIN + 7, Label::MIN + 8, Label::MIN + 9, Label::MIN + 10,
 ];
 
 fn weight_subset(sub: &Weight, sup: &Weight) -> bool {
@@ -61,24 +62,24 @@ fn weight_subset(sub: &Weight, sup: &Weight) -> bool {
 impl DWA {
     /// Sample an accepted path (word and weight) using a time-based seed.
     /// Returns None if no accepted path was found within the attempt budget.
-    pub fn sample_accepted_path(&self, max_steps: usize) -> Option<(Vec<i16>, Weight)> {
+    pub fn sample_accepted_path(&self, max_steps: usize) -> Option<(Vec<Label>, Weight)> {
         let mut rng = SimpleRng::from_time();
         self.sample_accepted_path_with_rng(&mut rng, max_steps)
     }
 
     /// Sample an accepted path (word and weight) with a fixed seed (deterministic).
-    pub fn sample_accepted_path_with_seed(&self, seed: u64, max_steps: usize) -> Option<(Vec<i16>, Weight)> {
+    pub fn sample_accepted_path_with_seed(&self, seed: u64, max_steps: usize) -> Option<(Vec<Label>, Weight)> {
         let mut rng = SimpleRng::new(seed);
         self.sample_accepted_path_with_rng(&mut rng, max_steps)
     }
 
     /// Core sampler with a provided RNG. Tries multiple attempts to find an accepted word.
-    pub fn sample_accepted_path_with_rng(&self, rng: &mut SimpleRng, max_steps: usize) -> Option<(Vec<i16>, Weight)> {
+    pub fn sample_accepted_path_with_rng(&self, rng: &mut SimpleRng, max_steps: usize) -> Option<(Vec<Label>, Weight)> {
         if self.states.0.is_empty() {
             return None;
         }
         for _attempt in 0..SAMPLING_TRIES {
-            let mut word: Vec<i16> = Vec::new();
+            let mut word: Vec<Label> = Vec::new();
             let mut s = self.body.start_state;
             let mut acc = Weight::all();
 
@@ -95,7 +96,7 @@ impl DWA {
 
                 // Choose next character: one of the exception keys or a default-character if default exists.
                 let st = &self.states[s];
-                let choices: Vec<i16> = st.transitions.keys().copied().collect();
+                let choices: Vec<Label> = st.transitions.keys().copied().collect();
                 let total = choices.len();
                 if total == 0 {
                     // Dead-end; try to finalize or abort attempt.
@@ -140,7 +141,7 @@ impl DWA {
         None
     }
 
-    fn expected_union_weight(a: &DWA, b: &DWA, word: &[i16]) -> Weight {
+    fn expected_union_weight(a: &DWA, b: &DWA, word: &[Label]) -> Weight {
         let wa = a.eval_word_weight(word);
         let wb = b.eval_word_weight(word);
         &wa | &wb
@@ -148,7 +149,7 @@ impl DWA {
 
     /// Expected concatenation weight:
     /// union over all split points i of (A(word[..i]) ∧ B(word[i..])).
-    fn expected_concat_weight(a: &DWA, b: &DWA, word: &[i16], eps_weight: &Weight) -> Weight {
+    fn expected_concat_weight(a: &DWA, b: &DWA, word: &[Label], eps_weight: &Weight) -> Weight {
         let mut acc = Weight::zeros();
         for i in 0..=word.len() {
             let wa = a.eval_word_weight(&word[..i]);
@@ -279,12 +280,12 @@ fn test_dwa_builder() {
 
     assert_eq!(dwa.states[1].final_weight, Some(SimpleBitset::from_item(20)));
 
-    dwa.add_transition(0, b'a' as i16, 1, SimpleBitset::from_item(30)).unwrap();
-    assert_eq!(*dwa.states[0].transitions.get(&(b'a' as i16)).unwrap(), 1);
-    assert_eq!(*dwa.states[0].trans_weights.get(&(b'a' as i16)).unwrap(), SimpleBitset::from_item(30));
+    dwa.add_transition(0, b'a' as Label, 1, SimpleBitset::from_item(30)).unwrap();
+    assert_eq!(*dwa.states[0].transitions.get(&(b'a' as Label)).unwrap(), 1);
+    assert_eq!(*dwa.states[0].trans_weights.get(&(b'a' as Label)).unwrap(), SimpleBitset::from_item(30));
 
     // Test error cases
-    let res = dwa.add_transition(0, b'a' as i16, 1, SimpleBitset::zeros());
+    let res = dwa.add_transition(0, b'a' as Label, 1, SimpleBitset::zeros());
     assert!(matches!(res, Err(DWABuildError::TransitionAlreadyExists { from: 0, on: 97 })));
 
     let res = dwa.set_final_weight(10, SimpleBitset::zeros());
@@ -297,7 +298,7 @@ fn test_dwa_builder() {
 fn dwa_accepts_char(ch: char, final_weight: Weight) -> DWA {
     let mut dwa = DWA::new();
     let final_state = dwa.add_state();
-    dwa.add_transition(dwa.body.start_state, ch as i16, final_state, Weight::all()).unwrap();
+    dwa.add_transition(dwa.body.start_state, ch as Label, final_state, Weight::all()).unwrap();
     dwa.set_final_weight(final_state, final_weight).unwrap();
     dwa
 }
@@ -308,7 +309,7 @@ fn dwa_from_str(s: &str, final_weight: Weight) -> DWA {
     let mut current_state = dwa.body.start_state;
     for ch in s.chars() {
         let next_state = dwa.add_state();
-        dwa.add_transition(current_state, ch as i16, next_state, Weight::all()).unwrap();
+        dwa.add_transition(current_state, ch as Label, next_state, Weight::all()).unwrap();
         current_state = next_state;
     }
     dwa.set_final_weight(current_state, final_weight).unwrap();
@@ -324,12 +325,12 @@ fn test_simplify_redundant_states() {
     let s4 = d.add_state(); // Final state
     let s5 = d.add_state(); // Unreachable
 
-    d.add_transition(0, 'a' as i16, s1, Weight::all()).unwrap();
-    d.add_transition(0, 'b' as i16, s2, Weight::all()).unwrap();
-    d.add_transition(0, 'c' as i16, s3, Weight::all()).unwrap();
-    d.add_transition(s1, 'x' as i16, s4, Weight::all()).unwrap();
-    d.add_transition(s2, 'y' as i16, s4, Weight::all()).unwrap();
-    d.add_transition(s3, 'y' as i16, s4, Weight::all()).unwrap(); // Same behavior as s2
+    d.add_transition(0, 'a' as Label, s1, Weight::all()).unwrap();
+    d.add_transition(0, 'b' as Label, s2, Weight::all()).unwrap();
+    d.add_transition(0, 'c' as Label, s3, Weight::all()).unwrap();
+    d.add_transition(s1, 'x' as Label, s4, Weight::all()).unwrap();
+    d.add_transition(s2, 'y' as Label, s4, Weight::all()).unwrap();
+    d.add_transition(s3, 'y' as Label, s4, Weight::all()).unwrap(); // Same behavior as s2
     d.set_final_weight(s4, Weight::from_item(1)).unwrap();
 
     assert_eq!(d.states.len(), 6);
@@ -349,8 +350,8 @@ fn test_union_simple() {
     let mut expected = DWA::new();
     let s_a = expected.add_state();
     let s_b = expected.add_state();
-    expected.add_transition(0, 'a' as i16, s_a, Weight::all()).unwrap();
-    expected.add_transition(0, 'b' as i16, s_b, Weight::all()).unwrap();
+    expected.add_transition(0, 'a' as Label, s_a, Weight::all()).unwrap();
+    expected.add_transition(0, 'b' as Label, s_b, Weight::all()).unwrap();
     expected.set_final_weight(s_a, Weight::from_item(1)).unwrap();
     expected.set_final_weight(s_b, Weight::from_item(2)).unwrap();
 
@@ -363,14 +364,14 @@ fn test_union_overlapping() {
     let d1 = dwa_accepts_char('a', Weight::from_item(1));
     let mut d2 = dwa_accepts_char('b', Weight::from_item(3));
     let s_a2 = d2.add_state();
-    d2.add_transition(d2.body.start_state, 'a' as i16, s_a2, Weight::all()).unwrap();
+    d2.add_transition(d2.body.start_state, 'a' as Label, s_a2, Weight::all()).unwrap();
     d2.set_final_weight(s_a2, Weight::from_item(2)).unwrap();
 
     let mut expected = DWA::new();
     let s_a = expected.add_state();
     let s_b = expected.add_state();
-    expected.add_transition(0, 'a' as i16, s_a, Weight::all()).unwrap();
-    expected.add_transition(0, 'b' as i16, s_b, Weight::all()).unwrap();
+    expected.add_transition(0, 'a' as Label, s_a, Weight::all()).unwrap();
+    expected.add_transition(0, 'b' as Label, s_b, Weight::all()).unwrap();
     expected.set_final_weight(s_a, Weight::from_iter(vec![1, 2])).unwrap();
     expected.set_final_weight(s_b, Weight::from_item(3)).unwrap();
 
@@ -392,8 +393,8 @@ fn test_apply_weight() {
     let mut d = DWA::new();
     let s1 = d.add_state();
     d.set_final_weight(0, Weight::from_iter(vec![5, 6])).unwrap();
-    d.add_transition(0, 'a' as i16, s1, Weight::from_iter(vec![100, 101])).unwrap();
-    d.add_transition(0, 'b' as i16, 0, Weight::from_iter(vec![200, 201])).unwrap();
+    d.add_transition(0, 'a' as Label, s1, Weight::from_iter(vec![100, 101])).unwrap();
+    d.add_transition(0, 'b' as Label, 0, Weight::from_iter(vec![200, 201])).unwrap();
 
     let gate = Weight::from_iter(vec![6, 11, 101, 201]);
     let new_start = d.apply_weight(&gate);
@@ -401,10 +402,10 @@ fn test_apply_weight() {
     assert_eq!(d.body.start_state, new_start);
     let new_start_state = &d.states[new_start];
     assert_eq!(new_start_state.final_weight, Some(Weight::from_item(6)));
-    assert_eq!(new_start_state.trans_weights.get(&('a' as i16)), Some(&Weight::from_item(101)));
-    assert_eq!(new_start_state.trans_weights.get(&('b' as i16)), Some(&Weight::from_item(201)));
-    assert_eq!(new_start_state.transitions.get(&('a' as i16)), Some(&s1));
-    assert_eq!(new_start_state.transitions.get(&('b' as i16)), Some(&0));
+    assert_eq!(new_start_state.trans_weights.get(&('a' as Label)), Some(&Weight::from_item(101)));
+    assert_eq!(new_start_state.trans_weights.get(&('b' as Label)), Some(&Weight::from_item(201)));
+    assert_eq!(new_start_state.transitions.get(&('a' as Label)), Some(&s1));
+    assert_eq!(new_start_state.transitions.get(&('b' as Label)), Some(&0));
 }
 
 /// Helper that creates a DWA with a single transition on `ch` with a given
@@ -412,7 +413,7 @@ fn test_apply_weight() {
 fn dwa_with_char_and_weights(ch: char, edge_weight: Weight, final_weight: Weight) -> DWA {
     let mut d = DWA::new();
     let s = d.add_state();
-    d.add_transition(d.body.start_state, ch as i16, s, edge_weight).unwrap();
+    d.add_transition(d.body.start_state, ch as Label, s, edge_weight).unwrap();
     d.set_final_weight(s, final_weight).unwrap();
     d
 }
@@ -437,7 +438,7 @@ fn test_union_transition_weight_union() {
     let mut expected = DWA::new();
     let s = expected.add_state();
     expected
-        .add_transition(0, 'x' as i16, s, Weight::from_iter(vec![10, 20]))
+        .add_transition(0, 'x' as Label, s, Weight::from_iter(vec![10, 20]))
         .unwrap();
     expected
         .set_final_weight(s, Weight::from_iter(vec![1, 2]))
@@ -453,8 +454,8 @@ fn test_json_roundtrip_complex() {
     let mut d = DWA::new();
     let s1 = d.add_state();
     let s2 = d.add_state();
-    d.add_transition(d.body.start_state, 'y' as i16, s1, Weight::from_iter(vec![1, 2, 3])).unwrap();
-    d.add_transition(d.body.start_state, 'x' as i16, s2, Weight::from_item(99))
+    d.add_transition(d.body.start_state, 'y' as Label, s1, Weight::from_iter(vec![1, 2, 3])).unwrap();
+    d.add_transition(d.body.start_state, 'x' as Label, s2, Weight::from_item(99))
         .unwrap();
     d.set_final_weight(s2, Weight::from_iter(vec![5, 7])).unwrap();
 
@@ -466,10 +467,10 @@ fn test_json_roundtrip_complex() {
 #[test]
 fn test_add_transition_out_of_bounds() {
     let mut d = DWA::new();
-    let res = d.add_transition(5, 'a' as i16, 0, Weight::zeros());
+    let res = d.add_transition(5, 'a' as Label, 0, Weight::zeros());
     assert!(matches!(res, Err(DWABuildError::StateOutOfBounds { state: 5 })));
 
-    let res2 = d.add_transition(0, 'a' as i16, 99, Weight::zeros());
+    let res2 = d.add_transition(0, 'a' as Label, 99, Weight::zeros());
     assert!(matches!(res2, Err(DWABuildError::StateOutOfBounds { state: 99 })));
 }
 
@@ -478,13 +479,13 @@ fn test_prune_unreachable_with_default_chain() {
     let mut d = DWA::new();
     let s1 = d.add_state();
     let _s2 = d.add_state(); // Unused, unreachable
-    d.add_transition(d.body.start_state, 'y' as i16, s1, Weight::all()).unwrap();
+    d.add_transition(d.body.start_state, 'y' as Label, s1, Weight::all()).unwrap();
     d.set_final_weight(s1, Weight::from_item(1)).unwrap();
-    d.add_transition(s1, 'x' as i16, s1, Weight::all()).unwrap();
+    d.add_transition(s1, 'x' as Label, s1, Weight::all()).unwrap();
 
     // Completely unreachable component
     let s_unreach = d.add_state();
-    d.add_transition(s_unreach, 'z' as i16, s_unreach, Weight::all())
+    d.add_transition(s_unreach, 'z' as Label, s_unreach, Weight::all())
         .unwrap();
 
     let before = d.states.len();
@@ -552,8 +553,8 @@ fn test_simplify_propagates_future_weights() {
     let mut a = DWA::new();
     let s1 = a.add_state();
     let s2 = a.add_state();
-    a.add_transition(0, 'a' as i16, s1, Weight::all()).unwrap();
-    a.add_transition(s1, 'b' as i16, s2, Weight::from_iter([1..=2])).unwrap();
+    a.add_transition(0, 'a' as Label, s1, Weight::all()).unwrap();
+    a.add_transition(s1, 'b' as Label, s2, Weight::from_iter([1..=2])).unwrap();
     a.set_final_weight(s2, Weight::from_item(2)).unwrap();
 
     // DWA B is the expected simplified form. The transition 1 -> 2 has its
@@ -563,8 +564,8 @@ fn test_simplify_propagates_future_weights() {
     let mut b = DWA::new();
     let s1_b = b.add_state();
     let s2_b = b.add_state();
-    b.add_transition(0, 'a' as i16, s1_b, Weight::all()).unwrap();
-    b.add_transition(s1_b, 'b' as i16, s2_b, Weight::all()).unwrap();
+    b.add_transition(0, 'a' as Label, s1_b, Weight::all()).unwrap();
+    b.add_transition(s1_b, 'b' as Label, s2_b, Weight::all()).unwrap();
     b.set_final_weight(s2_b, Weight::from_item(2)).unwrap();
 
     println!("Before simplification A:\n{}", a);
@@ -576,8 +577,8 @@ fn test_simplify_propagates_future_weights() {
 
 #[test]
 fn test_union_complex_from_attachment() {
-    fn neg(x: i16) -> i16 {
-        i16::MIN + x
+    fn neg(x: Label) -> Label {
+        Label::MIN + x
     }
 
     // --- Build LEFT DWA ---
@@ -755,8 +756,8 @@ fn test_union_complex_from_attachment() {
 
 #[test]
 fn test_union_complex_from_attachment_simpified() {
-    fn neg(val: i16) -> i16 {
-        val.wrapping_add(i16::MIN)
+    fn neg(val: Label) -> Label {
+        val.wrapping_add(Label::MIN)
     }
 
     // Build left DWA
@@ -898,8 +899,8 @@ fn test_union_complex_from_attachment_simpified() {
 
 #[test]
 fn test_concatenate_complex_from_attachment() {
-    fn neg(x: i16) -> i16 {
-        i16::MIN + x
+    fn neg(x: Label) -> Label {
+        Label::MIN + x
     }
 
     // --- Build LEFT DWA ---
@@ -989,8 +990,8 @@ fn test_concatenate_complex_from_attachment() {
 
 #[test]
 fn test_union_from_debug_log() {
-    fn neg(x: i16) -> i16 {
-        i16::MIN + x
+    fn neg(x: Label) -> Label {
+        Label::MIN + x
     }
 
     // --- Build LEFT DWA ---
@@ -1153,7 +1154,7 @@ fn test_union_from_debug_log_simplified3() {
 fn test_union_identical_cyclic() {
     // DWA that accepts a* with final weight [1].
     let mut d1 = DWA::new();
-    d1.add_transition(d1.body.start_state, 'a' as i16, d1.body.start_state, Weight::all()).unwrap();
+    d1.add_transition(d1.body.start_state, 'a' as Label, d1.body.start_state, Weight::all()).unwrap();
     d1.set_final_weight(d1.body.start_state, Weight::from_item(1)).unwrap();
 
     let d2 = d1.clone();
@@ -1166,8 +1167,8 @@ fn test_union_identical_cyclic() {
 
 #[test]
 fn test_concatenate_disjoint_weights() {
-    fn neg(x: i16) -> i16 {
-        i16::MIN + x
+    fn neg(x: Label) -> Label {
+        Label::MIN + x
     }
 
     let word_a = vec![10, 5, 3, neg(3), neg(0), neg(9)];
@@ -1215,8 +1216,8 @@ fn test_concatenate_disjoint_weights() {
 
 #[test]
 fn test_simplify_complex_dwa_from_attachment() {
-    fn neg(x: i16) -> i16 {
-        i16::MIN + x
+    fn neg(x: Label) -> Label {
+        Label::MIN + x
     }
 
     // --- Build LEFT DWA from test_concatenate_complex_from_attachment ---
@@ -1303,8 +1304,8 @@ fn test_simplify_complex_dwa_from_attachment() {
 
 #[test]
 fn test_concatenate_from_debug_log() {
-    fn neg(x: i16) -> i16 {
-        i16::MIN + x
+    fn neg(x: Label) -> Label {
+        Label::MIN + x
     }
 
     let mut base_dwa = DWA::new();
@@ -1359,8 +1360,8 @@ fn test_concatenate_from_debug_log() {
 
 #[test]
 fn test_union_from_panicked_log() {
-    fn neg(x: i16) -> i16 {
-        i16::MIN + x
+    fn neg(x: Label) -> Label {
+        Label::MIN + x
     }
 
     // --- Build LEFT DWA (A) ---
@@ -1449,22 +1450,22 @@ fn test_union_from_panicked_log() {
 fn test_concatenate_default_path_to_final() {
     let mut a = DWA::new();
     let s1a = a.add_state();
-    a.add_transition(a.body.start_state, 'a' as i16, s1a, Weight::all()).unwrap();
+    a.add_transition(a.body.start_state, 'a' as Label, s1a, Weight::all()).unwrap();
     a.set_final_weight(s1a, Weight::from_item(1)).unwrap();
 
     let mut b = DWA::new();
     let s1b = b.add_state();
-    b.add_transition(b.body.start_state, 'x' as i16, s1b, Weight::all()).unwrap();
+    b.add_transition(b.body.start_state, 'x' as Label, s1b, Weight::all()).unwrap();
     b.set_final_weight(s1b, Weight::from_item(1)).unwrap();
 
     let c = a.concatenate(&b);
 
     // Word "ax" should be accepted. 'a' uses the default transition in A.
-    let weight = c.eval_word_weight(&['a' as i16, 'x' as i16]);
+    let weight = c.eval_word_weight(&['a' as Label, 'x' as Label]);
     assert_eq!(weight, Weight::from_item(1));
 
     // Word "x" should not be accepted by C.
-    let weight_x = c.eval_word_weight(&['x' as i16]);
+    let weight_x = c.eval_word_weight(&['x' as Label]);
     assert_eq!(weight_x, Weight::zeros());
 }
 
@@ -1554,8 +1555,8 @@ fn test_simplify() {
 
 #[test]
 fn test_dwa_to_nwa_to_dwa_roundtrip() {
-    fn neg(x: i16) -> i16 {
-        i16::MIN + x
+    fn neg(x: Label) -> Label {
+        Label::MIN + x
     }
 
     // --- Build DWA A ---
@@ -1672,7 +1673,7 @@ mod determinization_tests {
     fn nwa_accepts_char(ch: char, weight: Weight) -> NWA {
         let mut nwa = NWA::new();
         let final_state = nwa.states.add_state();
-        nwa.add_transition(nwa.body.start_state, ch as i16, final_state, Weight::all()).unwrap();
+        nwa.add_transition(nwa.body.start_state, ch as Label, final_state, Weight::all()).unwrap();
         nwa.states[final_state].final_weight = Some(weight);
         nwa
     }
@@ -1695,8 +1696,8 @@ mod determinization_tests {
         let final_b = nwa.states.add_state();
         nwa.add_epsilon(nwa.body.start_state, s_a, Weight::all());
         nwa.add_epsilon(nwa.body.start_state, s_b, Weight::all());
-        nwa.add_transition(s_a, 'a' as i16, final_a, Weight::all()).unwrap();
-        nwa.add_transition(s_b, 'b' as i16, final_b, Weight::all()).unwrap();
+        nwa.add_transition(s_a, 'a' as Label, final_a, Weight::all()).unwrap();
+        nwa.add_transition(s_b, 'b' as Label, final_b, Weight::all()).unwrap();
         nwa.states[final_a].final_weight = Some(Weight::from_item(1));
         nwa.states[final_b].final_weight = Some(Weight::from_item(2));
 
@@ -1705,8 +1706,8 @@ mod determinization_tests {
         let mut expected = DWA::new();
         let final_a_dwa = expected.add_state();
         let final_b_dwa = expected.add_state();
-        expected.add_transition(expected.body.start_state, 'a' as i16, final_a_dwa, Weight::all()).unwrap();
-        expected.add_transition(expected.body.start_state, 'b' as i16, final_b_dwa, Weight::all()).unwrap();
+        expected.add_transition(expected.body.start_state, 'a' as Label, final_a_dwa, Weight::all()).unwrap();
+        expected.add_transition(expected.body.start_state, 'b' as Label, final_b_dwa, Weight::all()).unwrap();
         expected.set_final_weight(final_a_dwa, Weight::from_item(1)).unwrap();
         expected.set_final_weight(final_b_dwa, Weight::from_item(2)).unwrap();
 
@@ -1719,8 +1720,8 @@ mod determinization_tests {
         let mut nwa = NWA::new();
         let f1 = nwa.states.add_state();
         let f2 = nwa.states.add_state();
-        nwa.add_transition(nwa.body.start_state, 'a' as i16, f1, Weight::from_item(1)).unwrap();
-        nwa.add_transition(nwa.body.start_state, 'a' as i16, f2, Weight::from_item(2)).unwrap();
+        nwa.add_transition(nwa.body.start_state, 'a' as Label, f1, Weight::from_item(1)).unwrap();
+        nwa.add_transition(nwa.body.start_state, 'a' as Label, f2, Weight::from_item(2)).unwrap();
         nwa.states[f1].final_weight = Some(Weight::all());
         nwa.states[f2].final_weight = Some(Weight::all());
 
@@ -1729,7 +1730,7 @@ mod determinization_tests {
         // Expected DWA accepts 'a' with weight [1, 2]
         let mut expected = DWA::new();
         let final_state = expected.add_state();
-        expected.add_transition(expected.body.start_state, 'a' as i16, final_state, Weight::from_iter([1, 2])).unwrap();
+        expected.add_transition(expected.body.start_state, 'a' as Label, final_state, Weight::from_iter([1, 2])).unwrap();
         expected.set_final_weight(final_state, Weight::all()).unwrap();
 
         stochastic_equivalence_test(dwa, expected);
@@ -1742,8 +1743,8 @@ mod determinization_tests {
         let f1 = nwa.states.add_state();
         let f2 = nwa.states.add_state();
         // 'a' can lead to f1 with weight [0,1] or f2 with weight [1,2]
-        nwa.add_transition(nwa.body.start_state, 'a' as i16, f1, Weight::from_iter(0..=1)).unwrap();
-        nwa.add_transition(nwa.body.start_state, 'a' as i16, f2, Weight::from_iter(1..=2)).unwrap();
+        nwa.add_transition(nwa.body.start_state, 'a' as Label, f1, Weight::from_iter(0..=1)).unwrap();
+        nwa.add_transition(nwa.body.start_state, 'a' as Label, f2, Weight::from_iter(1..=2)).unwrap();
         // f1 is final for its path, f2 is final for its path
         nwa.states[f1].final_weight = Some(Weight::all());
         nwa.states[f2].final_weight = Some(Weight::all());
@@ -1759,7 +1760,7 @@ mod determinization_tests {
         // The edge weight should also be [0,1,2]
         let mut expected = DWA::new();
         let final_state = expected.add_state();
-        expected.add_transition(expected.body.start_state, 'a' as i16, final_state, Weight::from_iter(0..=2)).unwrap();
+        expected.add_transition(expected.body.start_state, 'a' as Label, final_state, Weight::from_iter(0..=2)).unwrap();
         expected.set_final_weight(final_state, Weight::from_iter(0..=2)).unwrap();
 
         stochastic_equivalence_test(dwa, expected);
@@ -1795,8 +1796,8 @@ mod determinization_tests {
 
     #[test]
     fn test_determinize_complex_nwa_from_template() {
-        fn neg(x: i16) -> i16 {
-            i16::MIN + x
+        fn neg(x: Label) -> Label {
+            Label::MIN + x
         }
 
         let mut nwa = NWA::new();
@@ -1895,8 +1896,8 @@ mod determinization_tests {
 
     #[test]
     fn test_determinize_minimal_failing_nwa_repro() {
-        fn neg(x: i16) -> i16 {
-            i16::MIN + x
+        fn neg(x: Label) -> Label {
+            Label::MIN + x
         }
 
         let mut nwa = NWA::new();
@@ -1961,14 +1962,14 @@ mod determinization_tests {
     #[test]
     #[ignore] // This test is for finding the minimal repro, it's slow and prints a lot.
     fn test_minimize_failing_nwa() {
-        fn neg(x: i16) -> i16 {
-            i16::MIN + x
+        fn neg(x: Label) -> Label {
+            Label::MIN + x
         }
 
         #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
         enum NwaComponent {
             Epsilon { from: usize, to: usize },
-            Transition { from: usize, on: i16, to: usize },
+            Transition { from: usize, on: Label, to: usize },
             FinalWeight { state: usize },
         }
 
@@ -2064,8 +2065,8 @@ mod determinization_tests {
 
     #[test]
     fn test_determinize_minimal_failing_nwa() {
-        fn neg(x: i16) -> i16 {
-            i16::MIN + x
+        fn neg(x: Label) -> Label {
+            Label::MIN + x
         }
 
         let mut nwa = NWA::new();
@@ -2104,8 +2105,8 @@ mod determinization_tests {
         let final_b = nwa.states.add_state();
         nwa.add_epsilon(nwa.body.start_state, s_a, Weight::all());
         nwa.add_epsilon(nwa.body.start_state, s_b, Weight::all());
-        nwa.add_transition(s_a, 'a' as i16, final_a, Weight::all()).unwrap();
-        nwa.add_transition(s_b, 'b' as i16, final_b, Weight::all()).unwrap();
+        nwa.add_transition(s_a, 'a' as Label, final_a, Weight::all()).unwrap();
+        nwa.add_transition(s_b, 'b' as Label, final_b, Weight::all()).unwrap();
         nwa.states[final_a].final_weight = Some(Weight::from_item(1));
         nwa.states[final_b].final_weight = Some(Weight::from_item(2));
 
@@ -2114,8 +2115,8 @@ mod determinization_tests {
         let mut expected = DWA::new();
         let final_a_dwa = expected.add_state();
         let final_b_dwa = expected.add_state();
-        expected.add_transition(expected.body.start_state, 'a' as i16, final_a_dwa, Weight::all()).unwrap();
-        expected.add_transition(expected.body.start_state, 'b' as i16, final_b_dwa, Weight::all()).unwrap();
+        expected.add_transition(expected.body.start_state, 'a' as Label, final_a_dwa, Weight::all()).unwrap();
+        expected.add_transition(expected.body.start_state, 'b' as Label, final_b_dwa, Weight::all()).unwrap();
         expected.set_final_weight(final_a_dwa, Weight::from_item(1)).unwrap();
         expected.set_final_weight(final_b_dwa, Weight::from_item(2)).unwrap();
 
@@ -2128,8 +2129,8 @@ mod determinization_tests {
         let mut nwa = NWA::new();
         let f1 = nwa.states.add_state();
         let f2 = nwa.states.add_state();
-        nwa.add_transition(nwa.body.start_state, 'a' as i16, f1, Weight::from_item(1)).unwrap();
-        nwa.add_transition(nwa.body.start_state, 'a' as i16, f2, Weight::from_item(2)).unwrap();
+        nwa.add_transition(nwa.body.start_state, 'a' as Label, f1, Weight::from_item(1)).unwrap();
+        nwa.add_transition(nwa.body.start_state, 'a' as Label, f2, Weight::from_item(2)).unwrap();
         nwa.states[f1].final_weight = Some(Weight::all());
         nwa.states[f2].final_weight = Some(Weight::all());
 
@@ -2138,7 +2139,7 @@ mod determinization_tests {
         // Expected DWA accepts 'a' with weight [1, 2]
         let mut expected = DWA::new();
         let final_state = expected.add_state();
-        expected.add_transition(expected.body.start_state, 'a' as i16, final_state, Weight::from_iter([1, 2])).unwrap();
+        expected.add_transition(expected.body.start_state, 'a' as Label, final_state, Weight::from_iter([1, 2])).unwrap();
         expected.set_final_weight(final_state, Weight::all()).unwrap();
 
         stochastic_equivalence_test(dwa, expected);
@@ -2151,8 +2152,8 @@ mod determinization_tests {
         let f1 = nwa.states.add_state();
         let f2 = nwa.states.add_state();
         // 'a' can lead to f1 with weight [0,1] or f2 with weight [1,2]
-        nwa.add_transition(nwa.body.start_state, 'a' as i16, f1, Weight::from_iter(0..=1)).unwrap();
-        nwa.add_transition(nwa.body.start_state, 'a' as i16, f2, Weight::from_iter(1..=2)).unwrap();
+        nwa.add_transition(nwa.body.start_state, 'a' as Label, f1, Weight::from_iter(0..=1)).unwrap();
+        nwa.add_transition(nwa.body.start_state, 'a' as Label, f2, Weight::from_iter(1..=2)).unwrap();
         // f1 is final for its path, f2 is final for its path
         nwa.states[f1].final_weight = Some(Weight::all());
         nwa.states[f2].final_weight = Some(Weight::all());
@@ -2168,7 +2169,7 @@ mod determinization_tests {
         // The edge weight should also be [0,1,2]
         let mut expected = DWA::new();
         let final_state = expected.add_state();
-        expected.add_transition(expected.body.start_state, 'a' as i16, final_state, Weight::from_iter(0..=2)).unwrap();
+        expected.add_transition(expected.body.start_state, 'a' as Label, final_state, Weight::from_iter(0..=2)).unwrap();
         expected.set_final_weight(final_state, Weight::from_iter(0..=2)).unwrap();
 
         stochastic_equivalence_test(dwa, expected);
@@ -2204,8 +2205,8 @@ mod determinization_tests {
 
     #[test]
     fn test_determinize_complex_nwa_from_template_rustfst() {
-        fn neg(x: i16) -> i16 {
-            i16::MIN + x
+        fn neg(x: Label) -> Label {
+            Label::MIN + x
         }
 
         let mut nwa = NWA::new();
@@ -2304,8 +2305,8 @@ mod determinization_tests {
 
     #[test]
     fn test_determinize_minimal_failing_nwa_repro_rustfst() {
-        fn neg(x: i16) -> i16 {
-            i16::MIN + x
+        fn neg(x: Label) -> Label {
+            Label::MIN + x
         }
 
         let mut nwa = NWA::new();
@@ -2369,8 +2370,8 @@ mod determinization_tests {
 
     #[test]
     fn test_determinize_minimal_failing_nwa_rustfst() {
-        fn neg(x: i16) -> i16 {
-            i16::MIN + x
+        fn neg(x: Label) -> Label {
+            Label::MIN + x
         }
 
         let mut nwa = NWA::new();

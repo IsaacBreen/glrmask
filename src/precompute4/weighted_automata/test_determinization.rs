@@ -1,5 +1,6 @@
 #![cfg(test)]
 
+use crate::precompute4::weighted_automata::common::Label;
 use super::*;
 
 #[should_panic]
@@ -11,15 +12,15 @@ fn test_determinize_simple_divergence() {
     let s0 = nwa.states.add_state();
     let s1 = nwa.states.add_state();
     let s2 = nwa.states.add_state();
-    nwa.add_transition(s0, 'a' as i16, s1, Weight::all()).unwrap();
-    nwa.add_transition(s1, 'c' as i16, s2, Weight::all()).unwrap();
+    nwa.add_transition(s0, 'a' as Label, s1, Weight::all()).unwrap();
+    nwa.add_transition(s1, 'c' as Label, s2, Weight::all()).unwrap();
     nwa.states[s2].final_weight = Some(Weight::from_item(0));
 
     let s3 = nwa.states.add_state();
     let s4 = nwa.states.add_state();
     let s5 = nwa.states.add_state();
-    nwa.add_transition(s3, 'b' as i16, s4, Weight::all()).unwrap();
-    nwa.add_transition(s4, 'c' as i16, s5, Weight::all()).unwrap();
+    nwa.add_transition(s3, 'b' as Label, s4, Weight::all()).unwrap();
+    nwa.add_transition(s4, 'c' as Label, s5, Weight::all()).unwrap();
     nwa.states[s5].final_weight = Some(Weight::from_item(1));
 
     let start = nwa.states.add_state();
@@ -31,10 +32,10 @@ fn test_determinize_simple_divergence() {
     println!("{}", nwa);
     println!("{}", dwa);
 
-    assert_eq!(dwa.eval_word_weight(&['a' as i16, 'c' as i16]), Weight::from_item(0));
-    assert_eq!(dwa.eval_word_weight(&['b' as i16, 'c' as i16]), Weight::from_item(1));
-    assert!(dwa.eval_word_weight(&['a' as i16, 'b' as i16]).is_empty());
-    assert!(dwa.eval_word_weight(&['c' as i16]).is_empty());
+    assert_eq!(dwa.eval_word_weight(&['a' as Label, 'c' as Label]), Weight::from_item(0));
+    assert_eq!(dwa.eval_word_weight(&['b' as Label, 'c' as Label]), Weight::from_item(1));
+    assert!(dwa.eval_word_weight(&['a' as Label, 'b' as Label]).is_empty());
+    assert!(dwa.eval_word_weight(&['c' as Label]).is_empty());
     assert!(dwa.eval_word_weight(&[]).is_empty());
 
     assert!(
@@ -48,7 +49,7 @@ fn test_determinize_simple_divergence() {
 #[test]
 fn test_determinize_hypercube_catastrophe() {
     const N: usize = 4;
-    let alphabet: Vec<i16> = (0..N as i16).map(|i| i + 'a' as i16).collect();
+    let alphabet: Vec<Label> = (0..N as Label).map(|i| i + 'a' as Label).collect();
     let atoms: Vec<Weight> = (0..N).map(Weight::from_item).collect();
 
     let mut nwa = NWA::new();
