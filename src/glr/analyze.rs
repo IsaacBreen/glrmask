@@ -1391,10 +1391,9 @@ fn convert_regular_nts_to_terminals(
             }
         }
 
-        // If start symbol was replaced (non-nullable case), update its production
+        // If start symbol was replaced (non-nullable case), add its new production to new_prods
         if let Some((term, false)) = nts_to_replace.get(start_symbol) {
-            productions.retain(|p| p.lhs != *start_symbol);
-            productions.push(Production {
+            new_prods.push(Production {
                 lhs: start_symbol.clone(),
                 rhs: vec![Symbol::Terminal(term.clone())],
             });
