@@ -1562,23 +1562,13 @@ impl GrammarConstraint {
             }
         }
 
-        // Reduce internal_llm_token_map to representatives to speed up precomputation
-        let mut representative_llm_token_map: BTreeMap<Vec<u8>, LLMTokenID> = BTreeMap::new();
-        let mut seen_internal_ids = std::collections::HashSet::new();
-
-        for (bytes, id) in internal_llm_token_map {
-            if seen_internal_ids.insert(id.0) {
-                representative_llm_token_map.insert(bytes.clone(), *id);
-            }
-        }
-
         let representative_states: Vec<TokenizerStateID> = tokenizer.iter_states().collect();
 
         let mut helper = Precomputer1::new(
             tokenizer,
             parser,
             llm_vocab,
-            &representative_llm_token_map,
+            internal_llm_token_map,
             stage_vocab.internal_max_llm_token,
             original_to_dummy_map,
             representative_states,
