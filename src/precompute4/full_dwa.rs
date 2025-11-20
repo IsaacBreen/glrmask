@@ -362,7 +362,15 @@ pub fn precompute4(
             crate::debug!(6, "NWA states:\n{}", states_arena.borrow());
             crate::debug!(6, "{:?}", nwa_bodies_map);
 
-            let mut now_step = Instant::now();
+            let unique_terminal_maps = nwa_bodies_map.iter().map(|(_, terminal_map)| terminal_map).collect::<BTreeSet<_>>();
+            let mut unique_terminal_entries: BTreeSet<(Option<TerminalID>, Weight)> = BTreeSet::new();
+            for terminal_map in &unique_terminal_maps {
+                for (terminal_id_opt, weight) in *terminal_map {
+                    unique_terminal_entries.insert((*terminal_id_opt, weight.clone()));
+                }
+            }
+            println!("NWA Simplify with {} bodies, {} unique terminal maps, {} unique terminal entries", nwa_bodies_map.len(), unique_terminal_maps.len(), unique_terminal_entries.len());
+
             for (right_body, terminal_map) in nwa_bodies_map {
                 let mut effective_terminal_map = BTreeMap::new();
                 for (terminal_id_opt, weight) in terminal_map {
