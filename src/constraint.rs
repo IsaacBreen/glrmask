@@ -2340,30 +2340,38 @@ impl<'r> Precomputer1<'r> {
                             let is_end = self.nwa.states[src].final_weight.as_ref().map_or(false, |w| !w.is_empty());
                             node_data_cache.insert(src, (live, is_end));
                         }
-                        let (src_live, _) = node_data_cache.get(&src).unwrap();
 
                         // 1. Process Matches (Transitions)
                         for m in &exec.matches {
                             let tid = GrammarTokenID(m.id);
                             let next_pos = pos + m.width;
 
-                            // Calculate edge mask (which LLM tokens allow this transition?)
-                            let mut mask = child_reachable.clone();
-                            if next_pos == segment_bytes.len() {
-                                mask.remove(child_token_id);
-                            }
-                            if let Some(bad) = current_pm.get(&tid) {
-                                mask = &mask - bad.inner.as_ref();
-                            }
+                            // Calculate edge masks in a short borrow scope
+                            let (final_mask, leaf_mask_opt) = {
+                                let (src_live, _) = node_data_cache.get(&src).unwrap();
+                                
+                                let mut mask = child_reachable.clone();
+                                if next_pos == segment_bytes.len() {
+                                    mask.remove(child_token_id);
+                                }
+                                if let Some(bad) = current_pm.get(&tid) {
+                                    mask = &mask - bad.inner.as_ref();
+                                }
 
-                            // Intersect with context and source live tokens
-                            let final_mask = &(&mask & &src_tokens) & src_live;
+                                let fm = &(&mask & &src_tokens) & src_live;
+                                let lm = if next_pos == segment_bytes.len() {
+                                    let mut lm = RangeSetBlaze::from_iter([child_token_id]);
+                                    Some(&(&lm & &src_tokens) & src_live)
+                                } else {
+                                    None
+                                };
+                                (fm, lm)
+                            };
+
                             if final_mask.is_empty() { continue; }
 
                             // A. Transition to Leaf (if match ends segment)
-                            if next_pos == segment_bytes.len() {
-                                let mut leaf_mask = RangeSetBlaze::from_iter([child_token_id]);
-                                leaf_mask = &(&leaf_mask & &src_tokens) & src_live;
+                            if let Some(leaf_mask) = leaf_mask_opt {
                                 if !leaf_mask.is_empty() {
                                     let dst = self.get_leaf_node();
                                     edges.push(PendingEdge { src, dst, key: Some(tid), bv: leaf_mask.clone() });
@@ -2431,11 +2439,12 @@ impl<'r> Precomputer1<'r> {
                         // 2. Handle End State (Leaf transitions for next token)
                         if let Some(end) = exec.end_state {
                             let end_ts = TokenizerStateID(end);
-
+                            
                             // Check for valid leaf transitions
+                            let (src_live, _) = node_data_cache.get(&src).unwrap();
                             let mut leaf_bv = RangeSetBlaze::from_iter([child_token_id]);
                             leaf_bv = &(&leaf_bv & &src_tokens) & src_live;
-
+                            
                             if !leaf_bv.is_empty() {
                                 for t in self.tokenizer.tokens_accessible_from_state(end_ts) {
                                     let dst = self.get_leaf_node();
