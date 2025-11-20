@@ -36,7 +36,8 @@ use crate::{
     interface::{CompiledGrammar, GrammarDefinition},
     json_serialization::{JSONConvertible, JSONNode},
     precompute4::full_dwa::{precompute4, Precomputed4},
-    precompute4::weighted_automata::common::StateID as WAStateID,
+    precompute4::weighted_automata::common::{StateID as WAStateID},
+    precompute4::weighted_automata::{NWA, NWAStateID, Weight},
     profiler::{self, PROGRESS_BAR_ENABLED},
     r#macro::is_debug_level_enabled,
     tokenizer::{LLMTokenID, LLMTokenMap, TokenizerStateID},
@@ -52,6 +53,7 @@ use crate::datastructures::gss_acc::Acc;
 use crate::glr::parser::{ParseState, ParseStateEdgeContent};
 use crate::glr::table::StateID;
 use crate::precompute4::weighted_automata::{NWA, NWAStateID, Weight};
+use crate::precompute4::weighted_automata::bitset::SimpleBitset;
 // ---------------------------------------------------------------------------
 // Basic aliases
 // ---------------------------------------------------------------------------
@@ -593,45 +595,6 @@ impl JSONConvertible for PrecomputedNodeContents0 {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Temporary trie for building precompute1
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct TempPrecomputedNodeContents {
-    pub(crate) end: bool,
-    pub(crate) live_tokens: RangeSetBlaze<usize>,
-}
-
-impl TempPrecomputedNodeContents {
-    pub(crate) fn root(internal_max_llm_token_id: usize) -> Self {
-        Self {
-            end: false,
-            live_tokens: RangeSetBlaze::from_iter(0..=internal_max_llm_token_id),
-        }
-    }
-
-    pub(crate) fn internal() -> Self {
-        Self {
-            end: false,
-            live_tokens: RangeSetBlaze::new(),
-        }
-    }
-
-    pub(crate) fn leaf() -> Self {
-        Self {
-            end: true,
-            live_tokens: RangeSetBlaze::new(),
-        }
-    }
-}
-
-type TempPrecomputeNode1 =
-    Trie<Option<GrammarTokenID>, RangeSetBlaze<usize>, TempPrecomputedNodeContents>;
-type TempPrecomputeNode1Index = Trie2Index;
-type TempTrie1GodWrapper =
-    GodWrapper<Option<GrammarTokenID>, RangeSetBlaze<usize>, TempPrecomputedNodeContents>;
 
 // Final precompute1 types
 pub type PrecomputeNode1 =
@@ -1470,124 +1433,6 @@ impl GrammarConstraint {
     // Precompute1
     // -----------------------------------------------------------------------
 
-    fn has_llm_compatible_cycle_temp(
-        arena: &TempTrie1GodWrapper,
-        roots: &[TempPrecomputeNode1Index],
-        internal_max_llm_token: usize,
-    ) {
-        let mut visited: HashMap<TempPrecomputeNode1Index, RangeSetBlaze<usize>> =
-            HashMap::new();
-        let initial_tokens = RangeSetBlaze::from_iter(0..=internal_max_llm_token);
-
-        for &root in roots {
-            if let Some((cycle_path, llm_token_id)) = Self::detect_cycle_recursive_temp(
-                root,
-                None,
-                initial_tokens.clone(),
-                arena,
-                &mut HashMap::new(),
-                &mut visited,
-                &mut Vec::new(),
-            ) {
-                let mut report = format!(
-                    "LLM-compatible cycle detected in precompute1 temp trie for internal LLM \
-                     token ID {}.\nCycle path:\n",
-                    llm_token_id.0
-                );
-                for i in 0..cycle_path.len() {
-                    let (node_idx, _) = cycle_path[i];
-                    let next_i = (i + 1) % cycle_path.len();
-                    let (next_node_idx, edge_to_next_opt) = &cycle_path[next_i];
-                    let edge_str = edge_to_next_opt.as_ref().map_or_else(
-                        || " (root edge)".to_string(),
-                        |ek| format!("{:?}", ek),
-                    );
-                    report.push_str(&format!(
-                        "  {} --[{}]--> {}\n",
-                        node_idx, edge_str, next_node_idx
-                    ));
-                }
-                panic!("{}", report);
-            }
-        }
-    }
-
-    fn detect_cycle_recursive_temp(
-        node_idx: TempPrecomputeNode1Index,
-        edge_key_opt: Option<Option<GrammarTokenID>>,
-        current_tokens: RangeSetBlaze<usize>,
-        arena: &TempTrie1GodWrapper,
-        recursion_stack: &mut HashMap<
-            TempPrecomputeNode1Index,
-            (RangeSetBlaze<usize>, usize),
-        >,
-        visited: &mut HashMap<TempPrecomputeNode1Index, RangeSetBlaze<usize>>,
-        path: &mut Vec<(TempPrecomputeNode1Index, Option<Option<GrammarTokenID>>)>,
-    ) -> Option<(Vec<(TempPrecomputeNode1Index, Option<Option<GrammarTokenID>>)>, LLMTokenID)>
-    {
-        path.push((node_idx, edge_key_opt));
-
-        if let Some((tokens_on_stack, path_start_idx)) = recursion_stack.get(&node_idx) {
-            let intersection = &current_tokens & tokens_on_stack;
-            if !intersection.is_empty() {
-                let cycle_llm_token = intersection.iter().next().unwrap();
-                let cycle_path = path[*path_start_idx..].to_vec();
-                path.pop();
-                return Some((cycle_path, LLMTokenID(cycle_llm_token)));
-            }
-        }
-
-        let new_tokens_to_process = match visited.entry(node_idx) {
-            std::collections::hash_map::Entry::Occupied(mut entry) => {
-                let previously_visited_tokens = entry.get_mut();
-                let new_unseen_tokens = &current_tokens - &*previously_visited_tokens;
-                if new_unseen_tokens.is_empty() {
-                    path.pop();
-                    return None;
-                }
-                *previously_visited_tokens |= &current_tokens;
-                new_unseen_tokens
-            }
-            std::collections::hash_map::Entry::Vacant(entry) => {
-                entry.insert(current_tokens.clone());
-                current_tokens.clone()
-            }
-        };
-
-        recursion_stack.insert(node_idx, (current_tokens, path.len() - 1));
-
-        let children_to_visit = if let Some(guard) = node_idx.read(arena) {
-            guard.children().clone()
-        } else {
-            recursion_stack.remove(&node_idx);
-            path.pop();
-            return None;
-        };
-
-        for (edge_key, dest_map) in children_to_visit.iter() {
-            for (child_idx, edge_tokens) in dest_map.iter() {
-                let next_tokens = &new_tokens_to_process & edge_tokens;
-                if !next_tokens.is_empty() {
-                    if let Some(report) = Self::detect_cycle_recursive_temp(
-                        *child_idx,
-                        Some(edge_key.clone()),
-                        next_tokens,
-                        arena,
-                        recursion_stack,
-                        visited,
-                        path,
-                    ) {
-                        return Some(report);
-                    }
-                }
-            }
-        }
-
-        recursion_stack.remove(&node_idx);
-        path.pop();
-        None
-    }
-
     fn has_llm_compatible_cycle(
         arena: &Trie1GodWrapper,
         roots: &[PrecomputeNode1Index],
@@ -1754,12 +1599,6 @@ impl GrammarConstraint {
         );
 
         helper.run_dfs();
-        let roots_before: Vec<_> = helper.roots.values().cloned().collect();
-        Self::has_llm_compatible_cycle_temp(
-            &helper.trie1_god,
-            &roots_before,
-            stage_vocab.internal_max_llm_token,
-        );
 
         let (mut precomputed1, trie1_god) = helper.finish();
         let roots_after: Vec<_> = precomputed1.values().cloned().collect();
@@ -2099,7 +1938,7 @@ pub(crate) struct Precomputer1<'r> {
     pub(crate) parser: Option<&'r GLRParser>,
     pub(crate) llm_vocab: Option<Arc<LLMVocab>>,
     pub(crate) vocab: VocabPrefixTree,
-    pub(crate) roots: BTreeMap<TokenizerStateID, TempPrecomputeNode1Index>,
+    pub(crate) roots: BTreeMap<TokenizerStateID, NWAStateID>,
     pub(crate) possible_matches: RefCell<
         BTreeMap<
             *const VocabPrefixTreeNode,
@@ -2109,8 +1948,9 @@ pub(crate) struct Precomputer1<'r> {
     pub(crate) all_llm_tokens: RangeSetBlaze<usize>,
     pub(crate) pb: ProgressBar,
     pub(crate) stats: PrecomputeStats,
-    pub(crate) leaf_node: TempPrecomputeNode1Index,
-    pub(crate) trie1_god: TempTrie1GodWrapper,
+    pub(crate) leaf_state: NWAStateID,
+    pub(crate) nwa: NWA,
+    pub(crate) live_tokens: HashMap<NWAStateID, RangeSetBlaze<usize>>,
     pub(crate) original_to_dummy_map: BTreeMap<TerminalID, TerminalID>,
 }
 
@@ -2133,17 +1973,15 @@ impl<'r> Precomputer1<'r> {
         let vocab = VocabPrefixTree::build(&tokens);
         crate::debug!(2, "Done building vocab prefix tree");
 
+        let mut nwa = NWA::new();
+        nwa.states.0.clear(); // Clear default start state
+        let mut live_tokens = HashMap::new();
+
         let mut roots = BTreeMap::new();
-        let trie1_god = TempTrie1GodWrapper::new();
         for sid in active_states {
-            roots.insert(
-                sid,
-                TempPrecomputeNode1Index::new(trie1_god.insert(
-                    TempPrecomputeNode1::new(
-                        TempPrecomputedNodeContents::root(internal_max_llm_token),
-                    ),
-                )),
-            );
+            let root_state = nwa.add_state();
+            live_tokens.insert(root_state, RangeSetBlaze::from_iter(0..=internal_max_llm_token));
+            roots.insert(sid, root_state);
         }
         crate::debug!(
             2,
@@ -2167,10 +2005,10 @@ impl<'r> Precomputer1<'r> {
             pb.set_draw_target(ProgressDrawTarget::hidden());
         }
 
-        let leaf_node = TempPrecomputeNode1Index::new(trie1_god.insert(
-            TempPrecomputeNode1::new(TempPrecomputedNodeContents::leaf()),
-        ));
-        crate::debug!(2, "Created trie1 leaf node");
+        let leaf_state = nwa.add_state();
+        nwa.states[leaf_state].final_weight = Some(Weight::all());
+        live_tokens.insert(leaf_state, RangeSetBlaze::new());
+        crate::debug!(2, "Created trie1 leaf state");
 
         Self {
             tokenizer,
@@ -2182,14 +2020,15 @@ impl<'r> Precomputer1<'r> {
             all_llm_tokens: RangeSetBlaze::from_iter(0..=internal_max_llm_token),
             pb,
             stats: PrecomputeStats::default(),
-            leaf_node,
-            trie1_god,
+            leaf_state,
+            nwa,
+            live_tokens,
             original_to_dummy_map,
         }
     }
 
-    fn get_leaf_node(&self) -> TempPrecomputeNode1Index {
-        self.leaf_node.clone()
+    fn get_leaf_node(&self) -> NWAStateID {
+        self.leaf_state
     }
 
     fn finish(self) -> (BTreeMap<TokenizerStateID, PrecomputeNode1Index>, Trie1GodWrapper)
@@ -2197,14 +2036,13 @@ impl<'r> Precomputer1<'r> {
         let final_trie1_god = Trie1GodWrapper::new();
         let mut final_roots = BTreeMap::new();
         let mut node_map: HashMap<
-            TempPrecomputeNode1Index,
+            NWAStateID,
             PrecomputeNode1Index,
         > = HashMap::new();
 
         for (sid, temp_root) in &self.roots {
-            let final_root = self.convert_trie1_recursive(
+            let final_root = self.convert_nwa_to_trie(
                 *temp_root,
-                &self.trie1_god,
                 &final_trie1_god,
                 &mut node_map,
             );
@@ -2214,35 +2052,43 @@ impl<'r> Precomputer1<'r> {
         (final_roots, final_trie1_god)
     }
 
-    fn convert_trie1_recursive(
+    fn convert_nwa_to_trie(
         &self,
-        temp_idx: TempPrecomputeNode1Index,
-        temp_god: &TempTrie1GodWrapper,
+        state_id: NWAStateID,
         final_god: &Trie1GodWrapper,
-        node_map: &mut HashMap<TempPrecomputeNode1Index, PrecomputeNode1Index>,
+        node_map: &mut HashMap<NWAStateID, PrecomputeNode1Index>,
     ) -> PrecomputeNode1Index {
-        if let Some(final_idx) = node_map.get(&temp_idx) {
+        if let Some(final_idx) = node_map.get(&state_id) {
             return *final_idx;
         }
 
-        let temp_guard = temp_idx.read(temp_god).unwrap();
+        let live = self.live_tokens.get(&state_id).cloned().unwrap_or_else(RangeSetBlaze::new);
+        let is_end = self.nwa.states[state_id].final_weight.as_ref().map_or(false, |w| !w.is_empty());
+        
         let final_node_contents = PrecomputedNodeContents {
-            end: temp_guard.value.end,
-            live_tokens: HybridBitset::from(temp_guard.value.live_tokens.clone()),
+            end: is_end,
+            live_tokens: HybridBitset::from(live),
         };
         let new_node = PrecomputeNode1::new(final_node_contents);
         let final_idx = PrecomputeNode1Index::new(final_god.insert(new_node));
-        node_map.insert(temp_idx, final_idx);
+        node_map.insert(state_id, final_idx);
 
-        let children_to_copy = temp_guard.children().clone();
-        drop(temp_guard);
+        // Group transitions by label
+        let mut children_to_copy: BTreeMap<Option<GrammarTokenID>, Vec<(NWAStateID, RangeSetBlaze<usize>)>> = BTreeMap::new();
+        for (label, targets) in &self.nwa.states[state_id].transitions {
+            let grammar_token_id = GrammarTokenID(*label as usize);
+            for (target, weight) in targets {
+                // Convert SimpleBitset weight back to RangeSetBlaze
+                let rsb = weight.rsb.clone();
+                children_to_copy.entry(Some(grammar_token_id)).or_default().push((*target, rsb));
+            }
+        }
 
         if self.original_to_dummy_map.is_empty() {
             for (ek, dest_map) in children_to_copy {
-                for (temp_child_idx, rs_blaze) in dest_map {
-                    let final_child_idx = self.convert_trie1_recursive(
-                        temp_child_idx,
-                        temp_god,
+                for (child_state_id, rs_blaze) in dest_map {
+                    let final_child_idx = self.convert_nwa_to_trie(
+                        child_state_id,
                         final_god,
                         node_map,
                     );
@@ -2281,10 +2127,9 @@ impl<'r> Precomputer1<'r> {
             }
 
             for (ek, dest_map) in direct_edges {
-                for (temp_child_idx, rs_blaze) in dest_map {
-                    let final_child_idx = self.convert_trie1_recursive(
-                        temp_child_idx,
-                        temp_god,
+                for (child_state_id, rs_blaze) in dest_map {
+                    let final_child_idx = self.convert_nwa_to_trie(
+                        child_state_id,
                         final_god,
                         node_map,
                     );
@@ -2306,10 +2151,9 @@ impl<'r> Precomputer1<'r> {
                 let mut total_inter_bitset = HybridBitset::zeros();
 
                 for (original_ek, dest_map) in edges {
-                    for (temp_child_idx, rs_blaze) in dest_map {
-                        let final_child_idx = self.convert_trie1_recursive(
-                            temp_child_idx,
-                            temp_god,
+                    for (child_state_id, rs_blaze) in dest_map {
+                        let final_child_idx = self.convert_nwa_to_trie(
+                            child_state_id,
                             final_god,
                             node_map,
                         );
@@ -2404,7 +2248,7 @@ impl<'r> Precomputer1<'r> {
     fn run_dfs(&mut self) {
         let mut assoc: BTreeMap<
             TokenizerStateID,
-            HashMap<TempPrecomputeNode1Index, RangeSetBlaze<usize>>,
+            HashMap<NWAStateID, RangeSetBlaze<usize>>,
         > = BTreeMap::new();
 
         for (sid, arc) in &self.roots {
@@ -2434,7 +2278,7 @@ impl<'r> Precomputer1<'r> {
         vocab_node: &VocabPrefixTreeNode,
         assoc_by_state: BTreeMap<
             TokenizerStateID,
-            HashMap<TempPrecomputeNode1Index, RangeSetBlaze<usize>>,
+            HashMap<NWAStateID, RangeSetBlaze<usize>>,
         >,
     ) {
         self.pb.inc(1);
@@ -2443,7 +2287,7 @@ impl<'r> Precomputer1<'r> {
                 usize,
                 BTreeMap<
                     TokenizerStateID,
-                    HashMap<TempPrecomputeNode1Index, RangeSetBlaze<usize>>,
+                    HashMap<NWAStateID, RangeSetBlaze<usize>>,
                 >,
             > = BTreeMap::new();
             work_queue.insert(0, assoc_by_state.clone());
@@ -2451,29 +2295,31 @@ impl<'r> Precomputer1<'r> {
             let mut next_level_assoc: BTreeMap<_, HashMap<_, _>> = BTreeMap::new();
 
             let mut node_cache: HashMap<
-                TempPrecomputeNode1Index,
+                NWAStateID,
                 (RangeSetBlaze<usize>, bool),
             > = HashMap::new();
             let get_node_data = |cache: &mut HashMap<_, _>,
-                                 idx: TempPrecomputeNode1Index,
-                                 god: &TempTrie1GodWrapper| {
+                                 idx: NWAStateID,
+                                 nwa: &NWA,
+                                 live_tokens: &HashMap<NWAStateID, RangeSetBlaze<usize>>| {
                 cache
                     .entry(idx)
                     .or_insert_with(|| {
-                        let guard = idx.read(god).unwrap();
-                        (guard.value.live_tokens.clone(), guard.value.end)
+                        let live = live_tokens.get(&idx).cloned().unwrap_or_else(RangeSetBlaze::new);
+                        let is_end = nwa.states[idx].final_weight.as_ref().map_or(false, |w| !w.is_empty());
+                        (live, is_end)
                     })
                     .clone()
             };
 
             let mut pending_edges: Vec<(
-                TempPrecomputeNode1Index,
-                TempPrecomputeNode1Index,
+                NWAStateID,
+                NWAStateID,
                 Option<GrammarTokenID>,
                 RangeSetBlaze<usize>,
             )> = Vec::new();
             let mut pending_live_token_updates: HashMap<
-                TempPrecomputeNode1Index,
+                NWAStateID,
                 RangeSetBlaze<usize>,
             > = HashMap::new();
 
@@ -2529,7 +2375,7 @@ impl<'r> Precomputer1<'r> {
                             let src_node_idx = *src_node_wrapper;
 
                             let (src_live_tokens, _) =
-                                get_node_data(&mut node_cache, src_node_idx, &self.trie1_god);
+                                get_node_data(&mut node_cache, src_node_idx, &self.nwa, &self.live_tokens);
 
                             if next_pos == segment_bytes.len() {
                                 let mut edge_bv = RangeSetBlaze::new();
@@ -2585,7 +2431,8 @@ impl<'r> Precomputer1<'r> {
                                             get_node_data(
                                                 &mut node_cache,
                                                 *dest_node,
-                                                &self.trie1_god,
+                                                &self.nwa,
+                                                &self.live_tokens,
                                             );
                                         if is_end {
                                             return None;
@@ -2607,15 +2454,10 @@ impl<'r> Precomputer1<'r> {
                                 .next();
 
                             if dest_node_opt.is_none() {
-                                let children_of_src: Vec<
-                                    TempPrecomputeNode1Index,
-                                > = {
-                                    let guard =
-                                        src_node_idx.read(&self.trie1_god).unwrap();
-                                    guard
-                                        .children()
+                                let children_of_src: Vec<NWAStateID> = {
+                                    self.nwa.states[src_node_idx].transitions
                                         .values()
-                                        .flat_map(|m| m.keys().cloned())
+                                        .flat_map(|v| v.iter().map(|(t, _)| *t))
                                         .collect()
                                 };
 
@@ -2626,7 +2468,8 @@ impl<'r> Precomputer1<'r> {
                                             get_node_data(
                                                 &mut node_cache,
                                                 **child_arc,
-                                                &self.trie1_god,
+                                                &self.nwa,
+                                                &self.live_tokens,
                                             );
                                         !is_end
                                             && (&child_live_tokens
@@ -2638,12 +2481,8 @@ impl<'r> Precomputer1<'r> {
                             }
 
                             let result_node = dest_node_opt.unwrap_or_else(|| {
-                                let new_node = TempPrecomputeNode1::new(
-                                    TempPrecomputedNodeContents::internal(),
-                                );
-                                let idx = TempPrecomputeNode1Index::new(
-                                    self.trie1_god.insert(new_node),
-                                );
+                                let idx = self.nwa.add_state();
+                                self.live_tokens.insert(idx, RangeSetBlaze::new());
                                 node_cache.insert(
                                     idx,
                                     (RangeSetBlaze::new(), false),
@@ -2695,7 +2534,7 @@ impl<'r> Precomputer1<'r> {
 
                             let src_node_idx = *src_node_wrapper;
                             let (src_live_tokens, _) =
-                                get_node_data(&mut node_cache, src_node_idx, &self.trie1_god);
+                                get_node_data(&mut node_cache, src_node_idx, &self.nwa, &self.live_tokens);
                             let final_edge_bv =
                                 &edge_bv_for_inserter & &src_live_tokens;
 
@@ -2730,12 +2569,13 @@ impl<'r> Precomputer1<'r> {
 
             // Batch writes
             for (src, dst, key, bv) in pending_edges {
-                self.trie1_god.insert_edge_simple(src, dst, key, bv);
+                if let Some(k) = key {
+                    let weight = SimpleBitset::from_rsb(bv);
+                    self.nwa.add_transition(src, k.0 as i16, dst, weight).unwrap();
+                }
             }
             for (node_idx, live_tokens) in pending_live_token_updates {
-                if let Some(mut guard) = node_idx.write(&self.trie1_god) {
-                    guard.value.live_tokens |= &live_tokens;
-                }
+                self.live_tokens.entry(node_idx).or_default().bitor_assign(&live_tokens);
             }
 
             if !next_level_assoc.is_empty() {
