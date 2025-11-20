@@ -8,8 +8,9 @@ use chrono::Local;
 use kdam::{tqdm, BarExt};
 
 use crate::constraint::{
-    LLMTokenBV,
+    LLMTokenBV, PrecomputeNode1Index, Trie1GodWrapper,
 };
+use crate::datastructures::trie::Trie2Index;
 use crate::glr::parser::GLRParser;
 use crate::precompute4::nwa_optimizations::{
     prune_continuations_from_final_states, simplify_default_transitions,
@@ -468,24 +469,56 @@ fn specialize_dwa_relative(parent_dwa: &DWA, mapping: &[Weight]) -> DWA {
 // Conversion Helpers (Precompute1 -> NWA)
 // ---------------------------------------------------------------------------
 
-pub fn build_nwa_from_matches(
-    possible_matches: &BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
+fn convert_node_to_nwa(
+    node_idx: PrecomputeNode1Index,
+    god: &Trie1GodWrapper,
+    nwa: &mut NWA,
+    cache: &mut HashMap<PrecomputeNode1Index, StateID>,
+) -> StateID {
+    if let Some(&sid) = cache.get(&node_idx) {
+        return sid;
+    }
+
+    let sid = nwa.add_state();
+    cache.insert(node_idx, sid);
+
+    let guard = node_idx.read(god).unwrap();
+    if guard.value.end {
+        nwa.states[sid].final_weight = Some(Weight::all());
+    }
+    let children = guard.children().clone();
+    drop(guard);
+
+    for (edge_key, child_map) in children {
+        for (child_idx, edge_bv) in child_map {
+            let child_sid = convert_node_to_nwa(child_idx, god, nwa, cache);
+            let trans_w: Weight = edge_bv.into();
+            if let Some(label) = edge_key {
+                nwa.add_transition(sid, label.0 as Label, child_sid, trans_w)
+                    .unwrap();
+            } else {
+                nwa.add_epsilon(sid, child_sid, trans_w);
+            }
+        }
+    }
+    sid
+}
+
+pub fn convert_precompute1_to_nwa(
+    precomputed1: &BTreeMap<TokenizerStateID, PrecomputeNode1Index>,
+    trie1_god: &Trie1GodWrapper,
 ) -> NWA {
     let mut nwa = NWA::new();
     nwa.states.0.clear();
     let start_state = nwa.states.add_state();
     nwa.body.start_state = start_state;
 
-    for (sid, map) in possible_matches {
-        let root_state = nwa.states.add_state();
+    let mut node_cache = HashMap::new();
+
+    for (sid, root_idx) in precomputed1 {
+        let root_state = convert_node_to_nwa(*root_idx, trie1_god, &mut nwa, &mut node_cache);
         nwa.add_transition(start_state, sid.0 as Label, root_state, Weight::all())
             .unwrap();
-        for (tid, bv) in map {
-            let leaf = nwa.states.add_state();
-            nwa.states[leaf].final_weight = Some(Weight::all());
-            let w = Weight::from(bv.clone());
-            nwa.add_transition(root_state, tid.0 as Label, leaf, w).unwrap();
-        }
     }
     nwa
 }
@@ -853,10 +886,9 @@ fn precompute_token_bvs_and_signatures(
     traversal_data: &NwaTraversalData,
     initial_values: Vec<(StateID, LLMTokenBV)>,
 ) -> (HashMap<StateID, LLMTokenBV>, HashSet<Signature>) {
-    let initial_nodes: HashSet<StateID> = initial_values.iter().map(|(id, _)| *id).collect();
-    let mut node_tokens = HashMap::new();
-    let mut signatures = HashSet::new();
-    let mut initial_body_bundles: HashMap<StateID, BTreeMap<Option<TerminalID>, Weight>> = HashMap::new();
+    let node_tokens: Arc<Mutex<HashMap<StateID, LLMTokenBV>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+    let signatures: Arc<Mutex<HashSet<Signature>>> = Arc::new(Mutex::new(HashSet::new()));
 
     nwa_special_map(
         reversed_nwa,
@@ -880,7 +912,7 @@ fn precompute_token_bvs_and_signatures(
         },
         // process
         |node_id, tokens| {
-            node_tokens.insert(node_id, tokens.clone());
+            node_tokens.lock().unwrap().insert(node_id, tokens.clone());
 
             // Collect signatures from outgoing edges in reversed nwa
             let mut bundles_by_dest: HashMap<
@@ -915,30 +947,25 @@ fn precompute_token_bvs_and_signatures(
                 }
             }
 
-            for (_, bundle) in &bundles_by_dest {
-                let (sig, _) = canonicalize_bundle(bundle.clone());
-                signatures.insert(sig);
-            }
-
-            if initial_nodes.contains(&node_id) {
-                for (dest, bundle) in bundles_by_dest {
-                    let global_bundle = initial_body_bundles.entry(dest).or_default();
-                    for (term, w) in bundle {
-                        *global_bundle.entry(term).or_insert_with(Weight::zeros) |= &w;
-                    }
-                }
+            let mut sigs = signatures.lock().unwrap();
+            for (_, bundle) in bundles_by_dest {
+                let (sig, _) = canonicalize_bundle(bundle);
+                sigs.insert(sig);
             }
 
             Some(tokens)
         },
     );
 
-    for bundle in initial_body_bundles.values() {
-        let (sig, _) = canonicalize_bundle(bundle.clone());
-        signatures.insert(sig);
-    }
-
-    (node_tokens, signatures)
+    let final_tokens = Arc::try_unwrap(node_tokens)
+        .unwrap()
+        .into_inner()
+        .unwrap();
+    let final_sigs = Arc::try_unwrap(signatures)
+        .unwrap()
+        .into_inner()
+        .unwrap();
+    (final_tokens, final_sigs)
 }
 
 fn resolve_negatives_and_optimize_and_determinize(

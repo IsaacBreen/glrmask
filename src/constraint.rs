@@ -34,7 +34,7 @@ use crate::{
     },
     interface::{CompiledGrammar, GrammarDefinition},
     json_serialization::{JSONConvertible, JSONNode},
-    precompute4::full_dwa::{precompute4, Precomputed4},
+    precompute4::full_dwa::{convert_precompute1_to_nwa, precompute4, Precomputed4},
     r#macro::is_debug_level_enabled,
     tokenizer::{LLMTokenID, LLMTokenMap, TokenizerStateID},
     types::{TerminalID as GrammarTokenID, TerminalID},
@@ -47,7 +47,6 @@ use crate::glr::parser::ParseStateEdgeContent;
 pub use crate::constraint_vocab::*;
 pub use crate::constraint_trie::*;
 use crate::constraint_precompute::run_precompute1;
-use crate::precompute4::full_dwa::build_nwa_from_matches;
 
 type GSSNode = LeveledGSS<ParseStateEdgeContent, Acc>;
 
@@ -682,15 +681,84 @@ impl GrammarConstraint {
             }
         }
 
-        // Precompute1 is removed; use empty containers for compatibility.
-        let possible_matches_precompute1 = computed_possible_matches.clone();
+        // Precompute1 - Generate Trie, convert to NWA immediately, then discard
+        let precompute_vocab_before_p1 = vocab.clone();
+        let (precomputed1_trie_map, trie1_god_wrapper) = run_precompute1(
+            &tokenizer,
+            Some(&parser),
+            Some(llm_vocab.clone()),
+            &internal_llm_token_map,
+            &token_name_map,
+            &mut vocab,
+            &terminal_follow_map,
+            config,
+            original_to_dummy_map.clone(),
+        );
+
+        let mut possible_matches_precompute1 = computed_possible_matches.clone();
+        if precompute_vocab_before_p1.original_to_internal != vocab.original_to_internal {
+            crate::debug!(
+                4,
+                "Remapping LLM token IDs in possible_matches due to Trie1 optimization."
+            );
+            let mut old_to_new_map: BTreeMap<usize, usize> = BTreeMap::new();
+            for (original_id, old_internal_id) in &precompute_vocab_before_p1.original_to_internal {
+                if let Some(new_internal_id) = vocab.original_to_internal.get(original_id) {
+                    old_to_new_map.insert(*old_internal_id, *new_internal_id);
+                }
+            }
+
+            for terminal_map in possible_matches_precompute1.values_mut() {
+                for llm_token_bv in terminal_map.values_mut() {
+                    let mut new_bv = LLMTokenBV::zeros();
+                    for old_id in llm_token_bv.iter_up_to(usize::MAX) {
+                        if let Some(new_id) = old_to_new_map.get(&old_id) {
+                            new_bv.insert(*new_id);
+                        }
+                    }
+                    *llm_token_bv = new_bv;
+                }
+            }
+        }
+
+        let (state_map_by_llm, terminal_map_by_llm) = if precompute_vocab_before_p1
+            .original_to_internal
+            != vocab.original_to_internal
+        {
+            let mut old_to_new_map: BTreeMap<usize, usize> = BTreeMap::new();
+            for (original_id, old_internal_id) in
+                &precompute_vocab_before_p1.original_to_internal
+            {
+                if let Some(new_internal_id) = vocab.original_to_internal.get(original_id) {
+                    old_to_new_map.insert(*old_internal_id, *new_internal_id);
+                }
+            }
+
+            let mut new_state_map_by_llm = DedupValueMap::new();
+            for (old_llm_id, value) in state_map_by_llm.iter() {
+                if let Some(new_id) = old_to_new_map.get(&old_llm_id.0) {
+                    new_state_map_by_llm.insert(LLMTokenID(*new_id), value.clone());
+                }
+            }
+
+            let mut new_terminal_map_by_llm = DedupValueMap::new();
+            for (old_llm_id, value) in terminal_map_by_llm.iter() {
+                if let Some(new_id) = old_to_new_map.get(&old_llm_id.0) {
+                    new_terminal_map_by_llm.insert(LLMTokenID(*new_id), value.clone());
+                }
+            }
+
+            (new_state_map_by_llm, new_terminal_map_by_llm)
+        } else {
+            (state_map_by_llm, terminal_map_by_llm)
+        };
 
         // Precompute4 (DWA)
         let max_internal_llm_token_id = vocab.internal_max_llm_token;
         
-        // Instead of using trie based precompute4, we build NWA directly from matches
-        crate::debug!(3, "Building NWA from matches");
-        let nwa = build_nwa_from_matches(&possible_matches_precompute1);
+        // Instead of using trie based precompute4, we convert the output of run_precompute1 to NWA immediately
+        crate::debug!(3, "Converting precompute1 Trie to NWA");
+        let nwa = convert_precompute1_to_nwa(&precomputed1_trie_map, &trie1_god_wrapper);
         
         // Run precompute4 using the NWA
         let precomputed4 = precompute4(&parser, &nwa, max_internal_llm_token_id);
