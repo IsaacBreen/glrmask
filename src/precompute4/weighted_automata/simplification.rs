@@ -180,7 +180,7 @@ impl DWA {
                     std::cmp::Ordering::Greater => ">",
                 };
 
-                crate::debug!(4, "[DWA Simplify({})] Internal: t={:.2?}, s={} | RustFST: t={:.2?}, s={}. [s: {}, t: {}]", initial_states, internal_time, internal_states, rustfst_time, rustfst_states, state_cmp, time_cmp);
+                crate::debug!(5, "[DWA Simplify({})] Internal: t={:.2?}, s={} | RustFST: t={:.2?}, s={}. [s: {}, t: {}]", initial_states, internal_time, internal_states, rustfst_time, rustfst_states, state_cmp, time_cmp);
             }
 
             *self = internal;
@@ -198,7 +198,7 @@ impl DWA {
     fn run_optimization_experiment(&mut self) {
         let initial_clone = self.clone();
         let initial_states = self.states.len();
-        crate::debug!(4, "[DWA Optimize] Starting experiment with {} states.", initial_states);
+        crate::debug!(5, "[DWA Optimize] Starting experiment with {} states.", initial_states);
 
         let mut best_result: Option<(DWA, std::time::Duration, usize)> = None;
 
@@ -247,7 +247,7 @@ impl DWA {
             } else {
                 "".to_string()
             };
-            crate::debug!(4, "[DWA Optimize] Ordering #{}: {}, Time: {:.2?}, States: {}{}", i, ordering_str, elapsed, final_states, timeout_str);
+            crate::debug!(5, "[DWA Optimize] Ordering #{}: {}, Time: {:.2?}, States: {}{}", i, ordering_str, elapsed, final_states, timeout_str);
 
             if !timed_out && best_result.as_ref().map_or(true, |(_, best_time, best_states)| {
                 final_states < *best_states || (final_states == *best_states && elapsed < *best_time)
@@ -270,7 +270,7 @@ impl DWA {
     }
 
     fn simplify_internal(&mut self) -> bool {
-        crate::debug!(4, "[DWA::simplify] Starting simplification. Initial stats: {}", self.stats());
+        crate::debug!(5, "[DWA::simplify] Starting simplification. Initial stats: {}", self.stats());
         let mut total_changed = false;
         let ordering = &[
             DwaPass::PruneDeadEnds,
@@ -306,13 +306,13 @@ impl DWA {
         }
 
         if !converged {
-            crate::debug!(3, 
+            crate::debug!(3,
                 "DWA simplification did not converge after {} iterations. Still changing: {:?}",
                 MAX_OPTIMIZE_ITERATIONS, last_changing_passes
             );
         }
 
-        crate::debug!(4, "[DWA::simplify] Simplification finished. Total changed: {}. Final stats: {}", total_changed, self.stats());
+        crate::debug!(5, "[DWA::simplify] Simplification finished. Total changed: {}. Final stats: {}", total_changed, self.stats());
         total_changed
     }
 
@@ -850,7 +850,7 @@ impl NWA {
                     std::cmp::Ordering::Greater => ">",
                 };
 
-                crate::debug!(4, "[NWA Simplify({})] Internal: t={:.2?}, s={} | RustFST: t={:.2?}, s={}. [s: {}, t: {}]", initial_states, internal_time, internal_states, rustfst_time, rustfst_states, state_cmp, time_cmp);
+                crate::debug!(5, "[NWA Simplify({})] Internal: t={:.2?}, s={} | RustFST: t={:.2?}, s={}. [s: {}, t: {}]", initial_states, internal_time, internal_states, rustfst_time, rustfst_states, state_cmp, time_cmp);
             }
 
             *self = internal;
@@ -868,7 +868,7 @@ impl NWA {
     fn run_optimization_experiment(&mut self) {
         let initial_clone = self.clone();
         let initial_states = self.states.len();
-        crate::debug!(4, "[NWA Optimize] Starting experiment with {} states.", initial_states);
+        crate::debug!(5, "[NWA Optimize] Starting experiment with {} states.", initial_states);
 
         let mut best_result: Option<(NWA, std::time::Duration, usize)> = None;
 
@@ -918,7 +918,7 @@ impl NWA {
             } else {
                 "".to_string()
             };
-            crate::debug!(4, "[NWA Optimize] Ordering #{}: {}, Time: {:.2?}, States: {}{}", i, ordering_str, elapsed, final_states, timeout_str);
+            crate::debug!(5, "[NWA Optimize] Ordering #{}: {}, Time: {:.2?}, States: {}{}", i, ordering_str, elapsed, final_states, timeout_str);
 
             if !timed_out && best_result.as_ref().map_or(true, |(_, best_time, best_states)| {
                 final_states < *best_states || (final_states == *best_states && elapsed < *best_time)
@@ -941,7 +941,7 @@ impl NWA {
     }
 
     pub fn simplify_internal(&mut self) -> bool {
-        crate::debug!(4, "[NWA::simplify] Starting simplification. Initial stats: {}", self.stats());
+        crate::debug!(5, "[NWA::simplify] Starting simplification. Initial stats: {}", self.stats());
         let mut total_changed = false;
         let ordering = &[
             NwaPass::Minimize,
@@ -979,13 +979,13 @@ impl NWA {
         }
 
         if !converged {
-            crate::debug!(3, 
+            crate::debug!(3,
                 "NWA simplification did not converge after {} iterations. Still changing: {:?}",
                 MAX_OPTIMIZE_ITERATIONS, last_changing_passes
             );
         }
 
-        crate::debug!(4, "[NWA::simplify] Simplification finished. Total changed: {}. Final stats: {}", total_changed, self.stats());
+        crate::debug!(5, "[NWA::simplify] Simplification finished. Total changed: {}. Final stats: {}", total_changed, self.stats());
         total_changed
     }
 
