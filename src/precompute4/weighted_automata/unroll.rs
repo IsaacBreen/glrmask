@@ -58,6 +58,7 @@ impl DWA {
             processed_count += 1;
             if processed_count % 1000 == 0 {
                 pb.set_position(processed_count);
+                pb.set_length(self.states.len() as u64);
             }
 
             let u_state = &self.states[u];

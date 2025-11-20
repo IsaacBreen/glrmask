@@ -121,6 +121,10 @@ fn complement_rsb(rsb: &RangeSetBlaze<usize>) -> RangeSetBlaze<usize> { &univers
 impl SimpleBitset {
     pub fn zeros() -> Self { ZEROS.clone() }
 
+    pub fn ones(len: usize) -> Self {
+        intern(RangeSetBlaze::from_iter([0..=len - 1]))
+    }
+
     pub fn all() -> Self { ALL.clone() }
 
     pub fn from_item(item: usize) -> Self { intern(RangeSetBlaze::from_iter([item])) }
