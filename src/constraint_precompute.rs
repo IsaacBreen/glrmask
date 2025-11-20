@@ -133,15 +133,12 @@ impl<'r> Precomputer1<'r> {
             self.nwa.add_transition(new_start_state, tsid.0 as Label, *state, Weight::all()).unwrap();
         }
         self.nwa.body.start_state = new_start_state;
-        println!("Trie1: after adding start state: {}", self.nwa);
         self.nwa.simplify();
         let mut dwa = self.nwa.determinize();
         self.nwa.simplify();
         dwa = dwa.unroll_cycles();
-        println!("Trie1: after unrolling: {}", dwa);
         let sink_state = dwa.add_state();
         for (tsid, state) in &mut self.roots {
-            // let new_state = dwa.states[dwa.body.start_state].transitions[&(tsid.0 as Label)];
             let new_state = *dwa.states[dwa.body.start_state].transitions.get(&(tsid.0 as Label)).unwrap_or(&sink_state);
             *state = new_state;
         }
