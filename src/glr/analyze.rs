@@ -1097,7 +1097,8 @@ fn convert_regular_nts_to_terminals(
     for (nt, prods) in &prods_by_lhs {
         // Check 1: Is it a pure sequence/choice of terminals?
         // e.g. A -> T1 T2 | T3
-        let all_pure = prods.iter().all(|p| p.rhs.iter().all(|s| matches!(s, Symbol::Terminal(_))));
+        // Crucially, we MUST NOT optimize if any production is empty (epsilon), as that creates a nullable terminal.
+        let all_pure = prods.iter().all(|p| !p.rhs.is_empty() && p.rhs.iter().all(|s| matches!(s, Symbol::Terminal(_))));
         
         if all_pure {
             let mut choices = Vec::new();
@@ -1139,12 +1140,30 @@ fn convert_regular_nts_to_terminals(
             }
         }
 
-        // Check 2: Is it a simple Kleene Star (A -> A T | epsilon, or A -> T A | epsilon)?
+        // Check 2: Is it a simple Recursion (A -> A T | Base, or A -> T A | Base)?
+        // We can only optimize this if 'Base' is NON-EMPTY (non-nullable).
         if prods.len() == 2 {
-            let epsilon_prod = prods.iter().find(|p| p.rhs.is_empty());
-            let recursive_prod = prods.iter().find(|p| !p.rhs.is_empty());
+            let (recursive_prods, base_prods): (Vec<&Production>, Vec<&Production>) = 
+                prods.iter().partition(|p| p.rhs.contains(&Symbol::NonTerminal(nt.clone())));
 
-            if let (Some(_), Some(rec)) = (epsilon_prod, recursive_prod) {
+            if recursive_prods.len() == 1 && base_prods.len() == 1 {
+                let rec = recursive_prods[0];
+                let base = base_prods[0];
+
+                // Base must be non-empty and pure terminals
+                if base.rhs.is_empty() || !base.rhs.iter().all(|s| matches!(s, Symbol::Terminal(_))) {
+                    continue;
+                }
+
+                // Build Base Expr
+                let mut base_exprs = Vec::new();
+                for s in &base.rhs {
+                    if let Symbol::Terminal(t) = s {
+                        base_exprs.push(get_expr_for_terminal(t, literal_to_group_id, regex_name_to_group_id, group_id_to_expr)?);
+                    }
+                }
+                let base_expr = if base_exprs.len() == 1 { base_exprs[0].clone() } else { Expr::Seq(base_exprs) };
+
                 // Check for A -> A T
                 if rec.rhs.len() == 2 {
                     let (s0, s1) = (&rec.rhs[0], &rec.rhs[1]);
@@ -1155,8 +1174,12 @@ fn convert_regular_nts_to_terminals(
                             if let Some(e) = get_expr_for_terminal(t, literal_to_group_id, regex_name_to_group_id, group_id_to_expr) {
                                 // Left recursion: A -> A T => loop (Ignore* T)*
                                 let inner = if let Some(ref ie) = ignore_seq { Expr::Seq(vec![ie.clone(), e]) } else { e };
-                                let expr = Expr::Quantifier(Box::new(inner), QuantifierType::ZeroOrMore);
-                                let new_term = create_new_terminal(expr, &format!("{}_star", nt.0), regex_name_to_group_id, group_id_to_expr);
+                                let loop_expr = Expr::Quantifier(Box::new(inner), QuantifierType::ZeroOrMore);
+                                
+                                // Result: Base Loop
+                                let full_expr = Expr::Seq(vec![base_expr, loop_expr]);
+
+                                let new_term = create_new_terminal(full_expr, &format!("{}_opt_rec", nt.0), regex_name_to_group_id, group_id_to_expr);
                                 if nt == start_symbol {
                                     start_replacement = Some(new_term);
                                 } else {
@@ -1173,8 +1196,12 @@ fn convert_regular_nts_to_terminals(
                             if let Some(e) = get_expr_for_terminal(t, literal_to_group_id, regex_name_to_group_id, group_id_to_expr) {
                                 // Right recursion: A -> T A => loop (T Ignore*)*
                                 let inner = if let Some(ref ie) = ignore_seq { Expr::Seq(vec![e, ie.clone()]) } else { e };
-                                let expr = Expr::Quantifier(Box::new(inner), QuantifierType::ZeroOrMore);
-                                let new_term = create_new_terminal(expr, &format!("{}_star", nt.0), regex_name_to_group_id, group_id_to_expr);
+                                let loop_expr = Expr::Quantifier(Box::new(inner), QuantifierType::ZeroOrMore);
+
+                                // Result: Loop Base
+                                let full_expr = Expr::Seq(vec![loop_expr, base_expr]);
+
+                                let new_term = create_new_terminal(full_expr, &format!("{}_opt_rec", nt.0), regex_name_to_group_id, group_id_to_expr);
                                 if nt == start_symbol {
                                     start_replacement = Some(new_term);
                                 } else {
