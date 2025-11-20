@@ -919,12 +919,13 @@ impl NWA {
     pub fn simplify_internal(&mut self) -> bool {
         crate::debug!(4, "[NWA::simplify] Starting simplification. Initial stats: {}", self.stats());
         let mut total_changed = false;
+        // PruneUnreachable, PushFinalWeights, Minimize, CompressTransitions, PruneDeadEnds
         let ordering = &[
+            NwaPass::PruneUnreachable,
+            NwaPass::PushFinalWeights,
+            NwaPass::PruneDeadEnds,
             NwaPass::Minimize,
             NwaPass::CompressTransitions,
-            NwaPass::PushFinalWeights,
-            NwaPass::PruneUnreachable,
-            NwaPass::PruneDeadEnds,
         ];
         let mut last_changing_passes: Vec<NwaPass> = vec![];
         let mut converged = false;
