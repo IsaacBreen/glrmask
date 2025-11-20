@@ -1370,7 +1370,7 @@ fn convert_regular_nts_to_terminals(
                          is_nt_nullable = true;
                     } else {
                         // Purely nullable (e.g. empty string or epsilon), cannot convert to terminal
-                        eprintln!("NT {} failed: purely nullable", nt.0);
+                        eprintln!("NT {} failed: purely nullable. Expr: {:?}", nt.0, final_expr);
                         continue;
                     }
                 }
