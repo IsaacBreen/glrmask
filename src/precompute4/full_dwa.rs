@@ -321,54 +321,6 @@ pub fn precompute4(
     let ignore_dwa = build_ignore_terminal_dwa();
     crate::debug!(4, "Built {} template DWAs in {:?}", template_dwas.len(), now.elapsed());
 
-    // Build a "super DWA" that contains all templates, distinguished by weights.
-    let mut term_to_bit = BTreeMap::new();
-    let mut bit_to_term: Vec<Option<TerminalID>> = Vec::new();
-
-    let mut all_terminals: BTreeSet<TerminalID> = template_dwas.keys().cloned().collect();
-    if let Some(ignore_term) = parser.ignore_terminal_id {
-        all_terminals.insert(ignore_term);
-    }
-
-    term_to_bit.insert(None, 0);
-    bit_to_term.push(None);
-    for (i, term_id) in all_terminals.iter().enumerate() {
-        term_to_bit.insert(Some(*term_id), i + 1);
-        bit_to_term.push(Some(*term_id));
-    }
-
-    let now_super_dwa = Instant::now();
-    let mut super_nwa_states = NWAStates::default();
-    let super_nwa_start = super_nwa_states.add_state();
-
-    for (term_id_opt, bit) in &term_to_bit {
-        let mut weight = Weight::zeros();
-        weight.set(*bit, true);
-
-        let template_dwa = match term_id_opt {
-            Some(term_id) if Some(*term_id) != parser.ignore_terminal_id => template_dwas.get(term_id).unwrap(),
-            _ => &ignore_dwa,
-        };
-
-        let mut weighted_dwa = template_dwa.clone();
-        weighted_dwa.apply_weight_inplace(&weight);
-
-        let nwa = NWA::from_dwa(&weighted_dwa);
-        let (start, _) = super_nwa_states.copy_subgraph_from(&nwa.states, nwa.body.start_state);
-        super_nwa_states.add_epsilon(super_nwa_start, start, Weight::all());
-    }
-
-    let mut super_nwa = NWA { states: super_nwa_states, body: NWABody { start_state: super_nwa_start } };
-    super_nwa.simplify();
-    let mut super_dwa = super_nwa.determinize_to_dwa();
-    super_dwa.simplify();
-    crate::debug!(
-        4,
-        "Built super DWA with {} states in {:?}",
-        super_dwa.states.len(),
-        now_super_dwa.elapsed()
-    );
-
     // 2. Shared NWA state arena.
     let states_arena = RefCell::new(NWAStates::default());
 
@@ -399,6 +351,73 @@ pub fn precompute4(
         initial_values_bv,
     );
     crate::debug!(4, "Pass 1 (Token BVs & Signatures) took: {:?}. Found {} unique signatures.", start_pass1.elapsed(), unique_signatures.len());
+
+    // Collect all terminals actually used in signatures (some might be uncharacterized in grammar but present in trie)
+    let mut used_terminals: BTreeSet<TerminalID> = BTreeSet::new();
+    for sig in &unique_signatures {
+        for group in sig {
+            for term_opt in group {
+                if let Some(term) = term_opt {
+                    used_terminals.insert(*term);
+                }
+            }
+        }
+    }
+
+    // Build a "super DWA" that contains all templates, distinguished by weights.
+    let mut term_to_bit = BTreeMap::new();
+    let mut bit_to_term: Vec<Option<TerminalID>> = Vec::new();
+
+    let mut all_terminals: BTreeSet<TerminalID> = template_dwas.keys().cloned().collect();
+    if let Some(ignore_term) = parser.ignore_terminal_id {
+        all_terminals.insert(ignore_term);
+    }
+    all_terminals.extend(used_terminals);
+
+    term_to_bit.insert(None, 0);
+    bit_to_term.push(None);
+    for (i, term_id) in all_terminals.iter().enumerate() {
+        term_to_bit.insert(Some(*term_id), i + 1);
+        bit_to_term.push(Some(*term_id));
+    }
+
+    let now_super_dwa = Instant::now();
+    let mut super_nwa_states = NWAStates::default();
+    let super_nwa_start = super_nwa_states.add_state();
+
+    for (term_id_opt, bit) in &term_to_bit {
+        let mut weight = Weight::zeros();
+        weight.set(*bit, true);
+
+        let template_dwa = match term_id_opt {
+            Some(term_id) => {
+                 if Some(*term_id) == parser.ignore_terminal_id {
+                     &ignore_dwa
+                 } else {
+                     template_dwas.get(term_id).unwrap_or(&ignore_dwa)
+                 }
+            },
+            None => &ignore_dwa,
+        };
+
+        let mut weighted_dwa = template_dwa.clone();
+        weighted_dwa.apply_weight_inplace(&weight);
+
+        let nwa = NWA::from_dwa(&weighted_dwa);
+        let (start, _) = super_nwa_states.copy_subgraph_from(&nwa.states, nwa.body.start_state);
+        super_nwa_states.add_epsilon(super_nwa_start, start, Weight::all());
+    }
+
+    let mut super_nwa = NWA { states: super_nwa_states, body: NWABody { start_state: super_nwa_start } };
+    super_nwa.simplify();
+    let mut super_dwa = super_nwa.determinize_to_dwa();
+    super_dwa.simplify();
+    crate::debug!(
+        4,
+        "Built super DWA with {} states in {:?}",
+        super_dwa.states.len(),
+        now_super_dwa.elapsed()
+    );
 
     // Precompute Templates via waterfall derivation
     let start_templates = Instant::now();
