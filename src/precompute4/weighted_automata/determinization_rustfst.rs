@@ -27,11 +27,11 @@ use std::sync::{Arc, Mutex};
 
 fn _label_to_fst_label(label: Label) -> u32 {
     // (((label as isize) - (Label::MIN as isize)) + 1) as u32
-    (label as Label - i16::MIN as Label) as u32 + 1
+    (label as Label - Label::MIN as Label) as u32 + 1
 }
 fn _fst_label_to_label(label: u32) -> Label {
     // (label as isize + Label::MIN as isize - 1) as Label
-    ((label - 1) as Label + i16::MIN as Label) as i16
+    ((label - 1) as Label + Label::MIN as Label) as Label
 }
 fn fst_label_to_label(label: u32) -> Label {
     assert_ne!(label, 0);
