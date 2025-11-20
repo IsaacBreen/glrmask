@@ -161,13 +161,26 @@ impl GrammarDefinition {
     }
 
     pub fn optimize(&mut self) {
+        let start_symbol = self.productions[self.start_production_id].lhs.clone();
+
         crate::glr::analyze::optimize_grammar(
             &mut self.productions,
             &mut self.regex_name_to_group_id,
             &mut self.literal_to_group_id,
             &mut self.group_id_to_expr,
-            self.ignore_terminal_id
+            self.ignore_terminal_id,
+            &start_symbol,
         );
+
+        // Ensure start production is at index 0 for the parser generator
+        if let Some(idx) = self.productions.iter().position(|p| p.lhs == start_symbol) {
+            if idx != 0 {
+                self.productions.swap(0, idx);
+            }
+            self.start_production_id = 0;
+        } else {
+            panic!("Start symbol {} lost during optimization", start_symbol.0);
+        }
     }
 }
 

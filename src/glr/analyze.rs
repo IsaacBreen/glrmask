@@ -1043,22 +1043,24 @@ pub fn optimize_grammar(
     literal_to_group_id: &mut BiBTreeMap<Vec<u8>, usize>,
     group_id_to_expr: &mut BTreeMap<usize, Expr>,
     ignore_terminal_id: Option<crate::types::TerminalID>,
+    start_symbol: &NonTerminal,
 ) {
     let mut changed = true;
     while changed {
         changed = false;
         changed |= convert_regular_nts_to_terminals(
-            productions, 
-            regex_name_to_group_id, 
-            literal_to_group_id, 
-            group_id_to_expr
+            productions,
+            regex_name_to_group_id,
+            literal_to_group_id,
+            group_id_to_expr,
+            start_symbol,
         );
         changed |= merge_adjacent_terminals(
-            productions, 
-            regex_name_to_group_id, 
-            literal_to_group_id, 
+            productions,
+            regex_name_to_group_id,
+            literal_to_group_id,
             group_id_to_expr,
-            ignore_terminal_id
+            ignore_terminal_id,
         );
     }
 }
@@ -1068,6 +1070,7 @@ fn convert_regular_nts_to_terminals(
     regex_name_to_group_id: &mut BiBTreeMap<String, usize>,
     literal_to_group_id: &mut BiBTreeMap<Vec<u8>, usize>,
     group_id_to_expr: &mut BTreeMap<usize, Expr>,
+    start_symbol: &NonTerminal,
 ) -> bool {
     let mut changed = false;
     let mut prods_by_lhs: BTreeMap<NonTerminal, Vec<Production>> = BTreeMap::new();
@@ -1076,6 +1079,7 @@ fn convert_regular_nts_to_terminals(
     }
 
     let mut nts_to_replace: BTreeMap<NonTerminal, Terminal> = BTreeMap::new();
+    let mut start_replacement: Option<Terminal> = None;
 
     for (nt, prods) in &prods_by_lhs {
         // Check 1: Is it a pure sequence/choice of terminals?
@@ -1104,7 +1108,11 @@ fn convert_regular_nts_to_terminals(
             if !choices.is_empty() {
                 let expr = if choices.len() == 1 { choices[0].clone() } else { Expr::Choice(choices) };
                 let new_term = create_new_terminal(expr, &nt.0, regex_name_to_group_id, group_id_to_expr);
-                nts_to_replace.insert(nt.clone(), new_term);
+                if nt == start_symbol {
+                    start_replacement = Some(new_term);
+                } else {
+                    nts_to_replace.insert(nt.clone(), new_term);
+                }
                 continue;
             }
         }
@@ -1125,7 +1133,11 @@ fn convert_regular_nts_to_terminals(
                             if let Some(e) = get_expr_for_terminal(t, literal_to_group_id, regex_name_to_group_id, group_id_to_expr) {
                                 let expr = Expr::Quantifier(Box::new(e), QuantifierType::ZeroOrMore);
                                 let new_term = create_new_terminal(expr, &format!("{}_star", nt.0), regex_name_to_group_id, group_id_to_expr);
-                                nts_to_replace.insert(nt.clone(), new_term);
+                                if nt == start_symbol {
+                                    start_replacement = Some(new_term);
+                                } else {
+                                    nts_to_replace.insert(nt.clone(), new_term);
+                                }
                                 continue;
                             }
                         }
@@ -1137,7 +1149,11 @@ fn convert_regular_nts_to_terminals(
                             if let Some(e) = get_expr_for_terminal(t, literal_to_group_id, regex_name_to_group_id, group_id_to_expr) {
                                 let expr = Expr::Quantifier(Box::new(e), QuantifierType::ZeroOrMore);
                                 let new_term = create_new_terminal(expr, &format!("{}_star", nt.0), regex_name_to_group_id, group_id_to_expr);
-                                nts_to_replace.insert(nt.clone(), new_term);
+                                if nt == start_symbol {
+                                    start_replacement = Some(new_term);
+                                } else {
+                                    nts_to_replace.insert(nt.clone(), new_term);
+                                }
                                 continue;
                             }
                         }
@@ -1145,6 +1161,17 @@ fn convert_regular_nts_to_terminals(
                 }
             }
         }
+    }
+
+    if let Some(term) = start_replacement {
+        // If start symbol was optimized, we replace its productions with a single one pointing to the new terminal.
+        // We DO NOT remove the start symbol itself (via nts_to_replace), but we clear its old rules.
+        productions.retain(|p| p.lhs != *start_symbol);
+        productions.push(Production {
+            lhs: start_symbol.clone(),
+            rhs: vec![Symbol::Terminal(term)],
+        });
+        changed = true;
     }
 
     if !nts_to_replace.is_empty() {
