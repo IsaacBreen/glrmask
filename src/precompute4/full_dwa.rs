@@ -329,7 +329,7 @@ pub fn precompute4(
     use crate::glr::table::TerminalID;
     let initial_body_map: BTreeMap<NWABody, ()> = BTreeMap::from([(initial_nwa_body, ())]); // We don't need to carry the bundle in the map anymore
     let initial_values_pass2: Vec<(Trie2Index, (BTreeMap<NWABody, ()>, LLMTokenBV))> =
-        vec![(reversed_trie_root, (initial_body_map, initial_tokens))];
+        vec![(reversed_trie_root, (initial_body_map, initial_tokens.clone()))];
     
     let mut original_trie1_roots_map: BTreeMap<PrecomputeNode1Index, Vec<TokenizerStateID>> = BTreeMap::new();
     for (k, v) in precomputed1.iter() {
@@ -499,7 +499,11 @@ pub fn precompute4(
                         final_bodies.insert(*tokenizer_state_id, nwa_body.clone());
                     }
                 }
-                Some((nwa_body, tokens))
+
+                // Fix: Wrap nwa_body in the expected BTreeMap type.
+                let mut next_body_map = BTreeMap::new();
+                next_body_map.insert(nwa_body, BTreeMap::new());
+                Some((next_body_map, tokens))
             } else {
                 None
             }
