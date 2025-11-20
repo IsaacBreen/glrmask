@@ -19,3 +19,7 @@ mod constraint_precompute1_utils;
 // New lightweight pass framework for Trie3 optimization
 mod precompute4;
 mod constraint_fns;
+
+pub mod constraint_vocab;
+pub mod constraint_trie;
+pub mod constraint_precompute;
