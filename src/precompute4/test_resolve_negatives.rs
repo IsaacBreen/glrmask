@@ -83,7 +83,7 @@ fn test_resolve_negatives_from_large_nwa_log() {
     nwa.add_transition(states[6], 436, states[14], Weight::all());
     nwa.add_transition(states[6], 437, states[11], Weight::all());
     // State 7:
-    nwa.add_transition(states[7], 32767, states[6], Weight::all());
+    nwa.add_transition(states[7], DEFAULT_TRANSITION_SYMBOL, states[6], Weight::all());
     // State 8:
     nwa.add_transition(states[8], Label::MIN + 422, states[15], Weight::all());
     // State 9:
@@ -142,7 +142,7 @@ fn test_resolve_negatives_from_large_nwa_log() {
     nwa.add_transition(states[23], 436, states[31], Weight::all());
     nwa.add_transition(states[23], 437, states[28], Weight::all());
     // State 24:
-    nwa.add_transition(states[24], 32767, states[23], Weight::all());
+    nwa.add_transition(states[24], DEFAULT_TRANSITION_SYMBOL, states[23], Weight::all());
     // State 25:
     nwa.add_transition(states[25], Label::MIN + 422, states[32], Weight::all());
     // State 26:
@@ -199,7 +199,7 @@ fn test_resolve_negatives_from_large_nwa_log() {
     nwa.add_transition(states[39], 436, states[47], Weight::all());
     nwa.add_transition(states[39], 437, states[44], Weight::all());
     // State 40:
-    nwa.add_transition(states[40], 32767, states[39], Weight::all());
+    nwa.add_transition(states[40], DEFAULT_TRANSITION_SYMBOL, states[39], Weight::all());
     // State 41:
     nwa.add_transition(states[41], Label::MIN + 422, states[48], Weight::all());
     // State 42:
@@ -257,7 +257,7 @@ fn test_resolve_negatives_from_large_nwa_log() {
     nwa.add_transition(states[55], 436, states[63], Weight::all());
     nwa.add_transition(states[55], 437, states[60], Weight::all());
     // State 56:
-    nwa.add_transition(states[56], 32767, states[55], Weight::all());
+    nwa.add_transition(states[56], DEFAULT_TRANSITION_SYMBOL, states[55], Weight::all());
     // State 57:
     nwa.add_transition(states[57], Label::MIN + 422, states[64], Weight::all());
     // State 58:
@@ -335,7 +335,7 @@ fn test_resolve_negatives_from_nwa_log_2() {
     d.add_transition(states[6], Label::MIN + 459, states[7], Weight::from_item(1)).unwrap();
     // State 7: 459 -> 8 (weight: ALL)
     d.add_transition(states[7], 459, states[8], Weight::all()).unwrap();
-    // State 8: 32767 -> 9 (weight: ALL)
+    // State 8: DEFAULT_TRANSITION_SYMBOL -> 9 (weight: ALL)
     d.add_transition(states[8], DEFAULT_TRANSITION_SYMBOL, states[9], Weight::all()).unwrap();
     // State 9: 422 -> 10 (weight: ALL)
     d.add_transition(states[9], 422, states[10], Weight::all()).unwrap();
