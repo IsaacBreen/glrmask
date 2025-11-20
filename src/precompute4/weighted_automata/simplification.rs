@@ -991,7 +991,7 @@ impl NWA {
     }
 
     fn minimize_states(&mut self) -> bool {
-        crate::debug!(4, "[NWA] Minimizing states...");
+        crate::debug!(6, "[NWA] Minimizing states...");
         let n = self.states.len();
         if n <= 1 {
             return false;
@@ -1014,7 +1014,7 @@ impl NWA {
     /// for all bitsets w1, w2, x. Thus, multiple parallel transitions are semantically
     /// equivalent to a single transition with the union of their weights.
     fn compress_transitions(&mut self) -> bool {
-        crate::debug!(4, "[NWA] Compressing transitions...");
+        crate::debug!(6, "[NWA] Compressing transitions...");
         let mut changed = false;
 
         for st in &mut self.states.0 {
@@ -1075,7 +1075,7 @@ impl NWA {
     }
 
     fn push_final_weights_along_epsilons(&mut self) -> bool {
-        crate::debug!(4, "[NWA] Pushing final weights along epsilons...");
+        crate::debug!(6, "[NWA] Pushing final weights along epsilons...");
         let n = self.states.len();
         if n == 0 {
             return false;
@@ -1235,7 +1235,7 @@ impl NWA {
     }
 
     fn prune_unreachable(&mut self) -> bool {
-        crate::debug!(4, "[NWA] Pruning unreachable states...");
+        crate::debug!(6, "[NWA] Pruning unreachable states...");
         let n = self.states.len();
         if n == 0 {
             return false;
@@ -1318,7 +1318,7 @@ impl NWA {
     }
 
     fn prune_dead_ends(&mut self) -> bool {
-        crate::debug!(4, "[NWA] Pruning dead ends...");
+        crate::debug!(6, "[NWA] Pruning dead ends...");
         let n = self.states.len();
         if n == 0 {
             return false;
