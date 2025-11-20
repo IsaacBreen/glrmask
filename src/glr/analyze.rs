@@ -1110,7 +1110,7 @@ fn resolve_production_rhs(
     literal_to_group_id: &BiBTreeMap<Vec<u8>, usize>,
     regex_name_to_group_id: &BiBTreeMap<String, usize>,
     group_id_to_expr: &BTreeMap<usize, Expr>,
-    nts_to_replace: &BTreeMap<NonTerminal, Terminal>,
+    nts_to_replace: &BTreeMap<NonTerminal, (Terminal, bool)>,
     ignore_expr: &Option<Expr>,
 ) -> Option<Vec<ResolvedSymbol>> {
     let mut seq = Vec::new();
@@ -1137,14 +1137,18 @@ fn resolve_production_rhs(
             Symbol::NonTerminal(n) => {
                 if n == nt {
                     seq.push(ResolvedSymbol::SelfRef);
-                } else if let Some(t) = nts_to_replace.get(n) {
+                } else if let Some((t, nullable)) = nts_to_replace.get(n) {
                     let e = get_expr_for_terminal(
                         t,
                         literal_to_group_id,
                         regex_name_to_group_id,
                         group_id_to_expr,
                     )?;
-                    seq.push(ResolvedSymbol::Expr(e));
+                    if *nullable {
+                        seq.push(ResolvedSymbol::Expr(Expr::Choice(vec![e, Expr::Epsilon])));
+                    } else {
+                        seq.push(ResolvedSymbol::Expr(e));
+                    }
                 } else {
                     // Depends on unconverted NT
                     return None;
@@ -1156,6 +1160,36 @@ fn resolve_production_rhs(
         seq.push(ResolvedSymbol::Expr(Expr::Epsilon));
     }
     Some(seq)
+}
+
+fn get_non_null_part(expr: &Expr) -> Option<Expr> {
+    match expr {
+        Expr::Epsilon => None,
+        Expr::U8Seq(s) => if s.is_empty() { None } else { Some(expr.clone()) },
+        Expr::U8Class(_) => Some(expr.clone()),
+        Expr::Shared(inner) => get_non_null_part(inner),
+        Expr::Quantifier(inner, q) => match q {
+            QuantifierType::OneOrMore => Some(expr.clone()),
+            QuantifierType::ZeroOrMore | QuantifierType::ZeroOrOne => {
+                // Non-null part of A* or A? is A+ or A (simplification)
+                // Actually A* -> non-null is A+. A? -> non-null is A.
+                // Assuming inner is non-nullable for A+. If A is nullable, A+ is nullable.
+                let inner_non_null = get_non_null_part(inner)?;
+                match q {
+                    QuantifierType::ZeroOrMore => Some(Expr::Quantifier(Box::new(inner_non_null), QuantifierType::OneOrMore)),
+                    QuantifierType::ZeroOrOne => Some(inner_non_null),
+                    _ => unreachable!(),
+                }
+            }
+        },
+        Expr::Choice(opts) => {
+            let non_null_opts: Vec<Expr> = opts.iter().filter_map(get_non_null_part).collect();
+            if non_null_opts.is_empty() { None } else { Some(efficient_choice(non_null_opts)) }
+        },
+        Expr::Seq(seq) => {
+             if is_nullable(expr) { None } else { Some(expr.clone()) }
+        }
+    }
 }
 
 pub fn optimize_grammar(
@@ -1200,7 +1234,7 @@ fn convert_regular_nts_to_terminals(
         prods_by_lhs.entry(p.lhs.clone()).or_default().push(p.clone());
     }
 
-    let mut nts_to_replace: BTreeMap<NonTerminal, Terminal> = BTreeMap::new();
+    let mut nts_to_replace: BTreeMap<NonTerminal, (Terminal, bool)> = BTreeMap::new();
 
     let ignore_expr = if let Some(tid) = ignore_terminal_id {
         group_id_to_expr.get(&tid.0).cloned()
@@ -1299,19 +1333,25 @@ fn convert_regular_nts_to_terminals(
                     base_choice
                 };
 
-                // IMPORTANT: We must not convert a non-terminal to a terminal if the resulting
-                // expression is nullable (matches epsilon). The constraint engine requires terminals
-                // to consume at least one byte (epsilon tokens are not supported).
+                let mut is_nt_nullable = false;
+                let mut expr_for_terminal = final_expr.clone();
+
                 if is_nullable(&final_expr) {
-                    continue;
+                    if let Some(non_null) = get_non_null_part(&final_expr) {
+                         expr_for_terminal = non_null;
+                         is_nt_nullable = true;
+                    } else {
+                        // Purely nullable (e.g. empty string or epsilon), cannot convert to terminal
+                        continue;
+                    }
                 }
                 
-                if get_expr_complexity(&final_expr) > MAX_REGEX_COMPLEXITY {
+                if get_expr_complexity(&expr_for_terminal) > MAX_REGEX_COMPLEXITY {
                     continue;
                 }
 
-                let new_term = create_new_terminal(final_expr, &nt.0, regex_name_to_group_id, group_id_to_expr);
-                nts_to_replace.insert(nt.clone(), new_term);
+                let new_term = create_new_terminal(expr_for_terminal, &nt.0, regex_name_to_group_id, group_id_to_expr);
+                nts_to_replace.insert(nt.clone(), (new_term, is_nt_nullable));
                 loop_changed = true;
                 any_conversion_happened = true;
             } else {
@@ -1325,27 +1365,58 @@ fn convert_regular_nts_to_terminals(
         crate::debug!(3, "Converted {} regular non-terminals to terminals", nts_to_replace.len());
 
         // Remove productions defining replaced NTs
-        productions.retain(|p| !nts_to_replace.contains_key(&p.lhs) || p.lhs == *start_symbol);
-
-        // Update usages in other productions
-        for p in productions.iter_mut() {
-            for s in p.rhs.iter_mut() {
-                if let Symbol::NonTerminal(nt) = s {
-                    if let Some(t) = nts_to_replace.get(nt) {
-                        *s = Symbol::Terminal(t.clone());
+        // If NT is nullable, we must KEEP it but redefine it as NT -> T | epsilon.
+        // If NT is not nullable, we remove it and replace usages.
+        
+        let mut new_prods = Vec::new();
+        for p in productions.iter() {
+            if let Some((term, nullable)) = nts_to_replace.get(&p.lhs) {
+                // This production is one of the old definitions of the replaced NT. Skip it.
+                // We will add the new definition later if needed.
+            } else {
+                // Keep productions for other NTs
+                let mut p_clone = p.clone();
+                for s in p_clone.rhs.iter_mut() {
+                    if let Symbol::NonTerminal(nt) = s {
+                        if let Some((t, nullable)) = nts_to_replace.get(nt) {
+                            if !*nullable {
+                                *s = Symbol::Terminal(t.clone());
+                            }
+                            // If nullable, we keep the NonTerminal symbol! 
+                            // The NonTerminal itself will be redefined below.
+                        }
                     }
                 }
+                new_prods.push(p_clone);
             }
         }
 
-        // If start symbol was replaced, update its production to point to the new terminal
-        if let Some(term) = nts_to_replace.get(start_symbol) {
+        // If start symbol was replaced (non-nullable case), update its production
+        if let Some((term, false)) = nts_to_replace.get(start_symbol) {
             productions.retain(|p| p.lhs != *start_symbol);
             productions.push(Production {
                 lhs: start_symbol.clone(),
                 rhs: vec![Symbol::Terminal(term.clone())],
             });
         }
+
+        // Add new definitions for replaced NTs
+        for (nt, (term, nullable)) in &nts_to_replace {
+            if *nullable {
+                // NT -> T
+                new_prods.push(Production {
+                    lhs: nt.clone(),
+                    rhs: vec![Symbol::Terminal(term.clone())],
+                });
+                // NT -> epsilon
+                new_prods.push(Production {
+                    lhs: nt.clone(),
+                    rhs: vec![],
+                });
+            }
+        }
+
+        *productions = new_prods;
         return true;
     }
 
