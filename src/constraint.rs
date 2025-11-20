@@ -53,7 +53,6 @@ use crate::datastructures::gss_acc::Acc;
 use crate::glr::parser::{ParseState, ParseStateEdgeContent};
 use crate::glr::table::StateID;
 use crate::precompute4::weighted_automata::bitset::SimpleBitset;
-
 // ---------------------------------------------------------------------------
 // Basic aliases
 // ---------------------------------------------------------------------------
@@ -1738,7 +1737,7 @@ impl GrammarConstraint {
             children.par_iter().for_each(|(segment_bytes, child)| {
                 let mut next_map: BTreeMap<TokenizerStateID, TokenizerStateID> =
                     BTreeMap::new();
-
+                
                 for (cur, sources) in &target_to_sources {
                     let exec = tokenizer.execute_from_state(segment_bytes, *cur);
                     if let Some(end_state) = exec.end_state {
@@ -2027,6 +2026,27 @@ impl<'r> Precomputer1<'r> {
         }
     }
 
+    fn get_node_data_cached(
+        &self,
+        cache: &mut HashMap<NWAStateID, (RangeSetBlaze<usize>, bool)>,
+        id: NWAStateID,
+    ) -> (RangeSetBlaze<usize>, bool) {
+        if let Some(data) = cache.get(&id) {
+            return data.clone();
+        }
+        let live = self
+            .live_tokens
+            .get(&id)
+            .cloned()
+            .unwrap_or_else(RangeSetBlaze::new);
+        let is_end = self.nwa.states[id]
+            .final_weight
+            .as_ref()
+            .map_or(false, |w| !w.is_empty());
+        cache.insert(id, (live.clone(), is_end));
+        (live, is_end)
+    }
+
     fn get_leaf_node(&self) -> NWAStateID {
         self.leaf_state
     }
@@ -2064,7 +2084,7 @@ impl<'r> Precomputer1<'r> {
 
         let live = self.live_tokens.get(&state_id).cloned().unwrap_or_else(RangeSetBlaze::new);
         let is_end = self.nwa.states[state_id].final_weight.as_ref().map_or(false, |w| !w.is_empty());
-
+        
         let final_node_contents = PrecomputedNodeContents {
             end: is_end,
             live_tokens: HybridBitset::from(live),
@@ -2282,36 +2302,42 @@ impl<'r> Precomputer1<'r> {
         >,
     ) {
         self.pb.inc(1);
-
-        // Structures for batching updates to avoid mutable borrow conflicts
-        struct PendingEdge {
-            src: NWAStateID,
-            dst: NWAStateID,
-            key: Option<GrammarTokenID>,
-            bv: RangeSetBlaze<usize>,
-        }
-        let mut edges = Vec::new();
-        let mut live_updates: HashMap<NWAStateID, RangeSetBlaze<usize>> = HashMap::new();
-
-        // Local cache for node properties to avoid repeated lookups
-        let mut node_data_cache: HashMap<NWAStateID, (RangeSetBlaze<usize>, bool)> = HashMap::new();
-
         for (segment_bytes, child_vocab_node) in vocab_node.iter_children() {
-            let child_token_id = child_vocab_node.token_id();
+            let mut next_level_assoc: BTreeMap<
+                TokenizerStateID,
+                HashMap<NWAStateID, RangeSetBlaze<usize>>,
+            > = BTreeMap::new();
+
+            // Queue: pos -> TokenizerState -> (NWAState -> ContextTokens)
+            let mut pending: BTreeMap<
+                usize,
+                BTreeMap<TokenizerStateID, HashMap<NWAStateID, RangeSetBlaze<usize>>>,
+            > = BTreeMap::new();
+            pending.insert(0, assoc_by_state.clone());
+
+            let mut node_cache: HashMap<
+                NWAStateID,
+                (RangeSetBlaze<usize>, bool),
+            > = HashMap::new();
+
+            let mut pending_edges = Vec::new();
+            let mut pending_live_updates: HashMap<NWAStateID, RangeSetBlaze<usize>> =
+                HashMap::new();
+
             let child_reachable = child_vocab_node.reachable_token_ids();
+            let child_token_id = child_vocab_node.token_id();
 
-            let mut queue = BTreeMap::new();
-            queue.insert(0, assoc_by_state.clone());
-            let mut next_assoc = BTreeMap::new();
+            // Caches possible matches for end states to prune edge_bv
+            let mut possible_matches_at_end_cache: HashMap<
+                TokenizerStateID,
+                BTreeMap<GrammarTokenID, LLMTokenBV>,
+            > = HashMap::new();
 
-            // Cache possible_matches results for this child to avoid re-computation
-            let mut pm_cache = HashMap::new();
-
-            while let Some((pos, states)) = queue.pop_first() {
-                // If we've consumed the whole segment, propagate states to the next vocab level
+            while let Some((pos, states_at_pos)) = pending.pop_first() {
+                // If we reached the end of the segment, these states are ready for the next vocab node
                 if pos == segment_bytes.len() {
-                    for (sid, nodes) in states {
-                        let entry: &mut HashMap<NWAStateID, RangeSetBlaze<usize>> = next_assoc.entry(sid).or_default();
+                    for (tokenizer_state_id, nodes) in states_at_pos {
+                        let entry = next_level_assoc.entry(tokenizer_state_id).or_default();
                         for (node, tokens) in nodes {
                             entry.entry(node).or_default().bitor_assign(&tokens);
                         }
@@ -2319,158 +2345,169 @@ impl<'r> Precomputer1<'r> {
                     continue;
                 }
 
-                // Execute tokenizer on the rest of the segment
-                let rest = &segment_bytes[pos..];
-                for (sid, nodes) in states {
-                    let exec = self.tokenizer.execute_from_state(rest, sid);
+                for (tokenizer_state_id, nodes) in states_at_pos {
+                    let exec_result = self
+                        .tokenizer
+                        .execute_from_state(&segment_bytes[pos..], tokenizer_state_id);
 
-                    // Pre-calculate possible matches if end_state is reached
-                    // (Used for masking out tokens that are valid continuations)
-                    let empty_pm = BTreeMap::new();
-                    let current_pm = if let Some(end) = exec.end_state {
-                        let ts = TokenizerStateID(end);
-                        pm_cache.entry(ts).or_insert_with(|| self.possible_matches(child_vocab_node, ts))
+                    let possible_matches_at_end = if let Some(end_val) = exec_result.end_state {
+                        let ts = TokenizerStateID(end_val);
+                        possible_matches_at_end_cache
+                            .entry(ts)
+                            .or_insert_with(|| self.possible_matches(child_vocab_node, ts))
                     } else {
-                        &empty_pm
+                        // Dummy empty map
+                        possible_matches_at_end_cache
+                            .entry(TokenizerStateID(usize::MAX)) // Arbitrary key that won't be hit
+                            .or_default()
                     };
 
-                    for (src, src_tokens) in nodes {
-                        if !node_data_cache.contains_key(&src) {
-                            let live = self.live_tokens.get(&src).cloned().unwrap_or_else(RangeSetBlaze::new);
-                            let is_end = self.nwa.states[src].final_weight.as_ref().map_or(false, |w| !w.is_empty());
-                            node_data_cache.insert(src, (live, is_end));
-                        }
+                    // 1. Handle Matches -> Transitions to Initial State
+                    for match_info in &exec_result.matches {
+                        let terminal_id = GrammarTokenID(match_info.id);
+                        let next_pos = pos + match_info.width;
 
-                        // 1. Process Matches (Transitions)
-                        for m in &exec.matches {
-                            let tid = GrammarTokenID(m.id);
-                            let next_pos = pos + m.width;
+                        for (src_node, src_tokens) in &nodes {
+                            let (src_live, _) = self.get_node_data_cached(&mut node_cache, *src_node);
 
-                            // Calculate edge masks in a short borrow scope
-                            let (final_mask, leaf_mask_opt) = {
-                                let (src_live, _) = node_data_cache.get(&src).unwrap();
-                                
-                                let mut mask = child_reachable.clone();
-                                if next_pos == segment_bytes.len() {
-                                    mask.remove(child_token_id);
-                                }
-                                if let Some(bad) = current_pm.get(&tid) {
-                                    mask = &mask - bad.inner.as_ref();
-                                }
-
-                                let fm = &(&mask & &src_tokens) & src_live;
-                                let lm = if next_pos == segment_bytes.len() {
-                                    let mut lm = RangeSetBlaze::from_iter([child_token_id]);
-                                    Some(&(&lm & &src_tokens) & src_live)
-                                } else {
-                                    None
-                                };
-                                (fm, lm)
-                            };
-
-                            if final_mask.is_empty() { continue; }
-
-                            // A. Transition to Leaf (if match ends segment)
-                            if let Some(leaf_mask) = leaf_mask_opt {
-                                if !leaf_mask.is_empty() {
-                                    let dst = self.get_leaf_node();
-                                    edges.push(PendingEdge { src, dst, key: Some(tid), bv: leaf_mask.clone() });
-                                    live_updates.entry(dst).or_default().bitor_assign(&leaf_mask);
+                            // Leaf check: if match consumes remainder of segment
+                            if next_pos == segment_bytes.len() {
+                                let mut edge_bv = RangeSetBlaze::new();
+                                edge_bv.insert(child_token_id);
+                                let final_bv = &(&edge_bv & src_tokens) & &src_live;
+                                if !final_bv.is_empty() {
+                                    let leaf = self.get_leaf_node();
+                                    pending_edges.push((
+                                        *src_node,
+                                        leaf,
+                                        Some(terminal_id),
+                                        final_bv.clone(),
+                                    ));
+                                    pending_live_updates
+                                        .entry(leaf)
+                                        .or_default()
+                                        .bitor_assign(&final_bv);
                                 }
                             }
 
-                            // B. Transition to Next NWA Node
-                            let next_sid = self.tokenizer.initial_state_id();
-                            let dest_queue = queue.entry(next_pos).or_default().entry(next_sid).or_default();
-
-                            // Attempt to merge into an existing destination node
-                            let mut dst = None;
-
-                            // Check candidates in queue
-                            for (cand, cand_tokens) in dest_queue.iter() {
-                                if !node_data_cache.contains_key(cand) {
-                                    let live = self.live_tokens.get(cand).cloned().unwrap_or_else(RangeSetBlaze::new);
-                                    let is_end = self.nwa.states[*cand].final_weight.as_ref().map_or(false, |w| !w.is_empty());
-                                    node_data_cache.insert(*cand, (live, is_end));
+                            // Continuation logic
+                            let mut edge_bv = child_reachable.clone();
+                            if next_pos == segment_bytes.len() {
+                                edge_bv.remove(child_token_id);
+                                if let Some(pm) = possible_matches_at_end.get(&terminal_id) {
+                                    edge_bv = &edge_bv - pm.inner.as_ref();
                                 }
-                                let (cand_live, cand_end) = node_data_cache.get(cand).unwrap();
-                                if *cand_end { continue; }
-                                let risky = &final_mask - cand_tokens;
-                                if risky.is_empty() || (&risky & cand_live).is_empty() {
-                                    dst = Some(*cand);
+                            }
+
+                            let final_bv = &(&edge_bv & src_tokens) & &src_live;
+                            if final_bv.is_empty() {
+                                continue;
+                            }
+
+                            let dest_map = pending
+                                .entry(next_pos)
+                                .or_default()
+                                .entry(self.tokenizer.initial_state_id())
+                                .or_default();
+
+                            // Reuse existing compatible node if possible
+                            let mut dest_node = None;
+                            for (cand, cand_tokens) in dest_map.iter() {
+                                let (cand_live, is_end) = self.get_node_data_cached(&mut node_cache, *cand);
+                                let risky_tokens = &final_bv - cand_tokens;
+                                if !is_end
+                                    && (risky_tokens.is_empty()
+                                        || (&risky_tokens & &cand_live).is_empty())
+                                {
+                                    dest_node = Some(*cand);
                                     break;
                                 }
                             }
 
-                            // Check existing transitions from src
-                            if dst.is_none() {
-                                if let Some(targets) = self.nwa.states[src].transitions.get(&(tid.0 as i16)) {
-                                    for (cand, _) in targets {
-                                        if !node_data_cache.contains_key(cand) {
-                                            let live = self.live_tokens.get(cand).cloned().unwrap_or_else(RangeSetBlaze::new);
-                                            let is_end = self.nwa.states[*cand].final_weight.as_ref().map_or(false, |w| !w.is_empty());
-                                            node_data_cache.insert(*cand, (live, is_end));
-                                        }
-                                        let (cand_live, cand_end) = node_data_cache.get(cand).unwrap();
-                                        if !*cand_end && (cand_live & &final_mask).is_empty() {
-                                            dst = Some(*cand);
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
-
-                            // Create new node if no merge possible
-                            let dst = dst.unwrap_or_else(|| {
-                                let idx = self.nwa.add_state();
-                                live_updates.insert(idx, RangeSetBlaze::new());
-                                node_data_cache.insert(idx, (RangeSetBlaze::new(), false));
-                                idx
+                            let target = dest_node.unwrap_or_else(|| {
+                                let n = self.nwa.add_state();
+                                self.live_tokens.insert(n, RangeSetBlaze::new());
+                                node_cache.insert(n, (RangeSetBlaze::new(), false));
+                                n
                             });
 
-                            edges.push(PendingEdge { src, dst, key: Some(tid), bv: final_mask.clone() });
+                            // Update live tokens and queue
+                            pending_live_updates
+                                .entry(target)
+                                .or_default()
+                                .bitor_assign(&final_bv);
+                            node_cache
+                                .get_mut(&target)
+                                .unwrap()
+                                .0
+                                .bitor_assign(&final_bv);
+                            dest_map.entry(target).or_default().bitor_assign(&final_bv);
 
-                            // Update tracking for destination
-                            live_updates.entry(dst).or_default().bitor_assign(&final_mask);
-                            if let Some(d) = node_data_cache.get_mut(&dst) { d.0 |= &final_mask; }
-                            dest_queue.entry(dst).or_default().bitor_assign(&final_mask);
+                            pending_edges.push((
+                                *src_node,
+                                target,
+                                Some(terminal_id),
+                                final_bv,
+                            ));
                         }
+                    }
 
-                        // 2. Handle End State (Leaf transitions for next token)
-                        if let Some(end) = exec.end_state {
-                            let end_ts = TokenizerStateID(end);
-                            
-                            // Check for valid leaf transitions
-                            let (src_live, _) = node_data_cache.get(&src).unwrap();
-                            let mut leaf_bv = RangeSetBlaze::from_iter([child_token_id]);
-                            leaf_bv = &(&leaf_bv & &src_tokens) & src_live;
-                            
-                            if !leaf_bv.is_empty() {
-                                for t in self.tokenizer.tokens_accessible_from_state(end_ts) {
-                                    let dst = self.get_leaf_node();
-                                    edges.push(PendingEdge { src, dst, key: Some(t), bv: leaf_bv.clone() });
-                                    live_updates.entry(dst).or_default().bitor_assign(&leaf_bv);
+                    // 2. Handle End State -> Continuation
+                    if let Some(end_state_val) = exec_result.end_state {
+                        let final_tokenizer_state = TokenizerStateID(end_state_val);
+                        let accessible_terminals = self
+                            .tokenizer
+                            .tokens_accessible_from_state(final_tokenizer_state);
+
+                        for (src_node, src_tokens) in &nodes {
+                            let mut edge_bv = RangeSetBlaze::new();
+                            edge_bv.insert(child_token_id);
+                            let final_edge_bv = &(&edge_bv & src_tokens)
+                                & &self.get_node_data_cached(&mut node_cache, *src_node).0;
+
+                            if !final_edge_bv.is_empty() {
+                                let end_idx = self.get_leaf_node();
+                                for terminal_id in &accessible_terminals {
+                                    pending_edges.push((
+                                        *src_node,
+                                        end_idx,
+                                        Some(*terminal_id),
+                                        final_edge_bv.clone(),
+                                    ));
+                                    pending_live_updates
+                                        .entry(end_idx)
+                                        .or_insert_with(RangeSetBlaze::new)
+                                        .bitor_assign(&final_edge_bv);
                                 }
                             }
 
-                            // Propagate to next level via next_assoc
-                            next_assoc.entry(end_ts).or_default().entry(src).or_default().bitor_assign(&src_tokens);
+                            next_level_assoc
+                                .entry(final_tokenizer_state)
+                                .or_default()
+                                .entry(*src_node)
+                                .or_default()
+                                .bitor_assign(src_tokens);
                         }
                     }
                 }
             }
 
-            // Apply batched updates
-            for e in edges.drain(..) {
-                let w = SimpleBitset::from_rsb(e.bv);
-                self.nwa.add_transition(e.src, e.key.unwrap().0 as i16, e.dst, w).unwrap();
+            // Apply all batched writes
+            for (src, dst, key, bv) in pending_edges {
+                if let Some(k) = key {
+                    let weight = SimpleBitset::from_rsb(bv);
+                    let _ = self.nwa.add_transition(src, k.0 as i16, dst, weight);
+                }
             }
-            for (n, bv) in live_updates.drain() {
-                self.live_tokens.entry(n).or_default().bitor_assign(&bv);
+            for (node_idx, live_tokens) in pending_live_updates {
+                self.live_tokens
+                    .entry(node_idx)
+                    .or_default()
+                    .bitor_assign(&live_tokens);
             }
 
-            if !next_assoc.is_empty() {
-                self.dfs(child_vocab_node, next_assoc);
+            if !next_level_assoc.is_empty() {
+                self.dfs(child_vocab_node, next_level_assoc);
             }
         }
     }
