@@ -1017,6 +1017,7 @@ impl NFA {
         });
 
         let mut max_subset_size = 0;
+        let mut next_log_threshold = 20_000;
         // Reuse buffers to avoid millions of small allocations
         let mut transition_targets: Vec<Vec<usize>> = vec![Vec::with_capacity(16); 256];
         let mut used_inputs: Vec<u8> = Vec::with_capacity(256);
@@ -1027,7 +1028,7 @@ impl NFA {
             if current_subset_len > max_subset_size {
                 max_subset_size = current_subset_len;
             }
-            if dfa_states.len() % 20000 == 0 {
+            if dfa_states.len() >= next_log_threshold {
                 crate::debug!(
                     4,
                     "DFA progress: {} states, worklist {}, subset size {} (max {}), elapsed {:.2?}",
@@ -1037,6 +1038,7 @@ impl NFA {
                     max_subset_size,
                     start_time.elapsed()
                 );
+                next_log_threshold += 20_000;
             }
 
             let current_dfa_state = *dfa_state_map
