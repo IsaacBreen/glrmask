@@ -27,7 +27,7 @@ impl DWA {
             return Weight::zeros();
         }
 
-        for &ch in &*word {
+        for &ch in word {
             if s >= self.states.len() {
                 return Weight::zeros();
             }
