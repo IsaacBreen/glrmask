@@ -1091,7 +1091,7 @@ fn efficient_seq(exprs: Vec<Expr>) -> Expr {
     }
 }
 
-const MAX_REGEX_COMPLEXITY: usize = 500_000;
+const MAX_REGEX_COMPLEXITY: usize = 50_000_000;
 
 fn get_expr_complexity(expr: &Expr) -> usize {
     match expr {
