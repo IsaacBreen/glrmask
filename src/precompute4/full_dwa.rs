@@ -417,7 +417,7 @@ pub fn precompute4(
                     }
 
                     let mut template_dwa = specialize_dwa(&super_dwa, &abstract_bundle, &bit_to_term);
-                    template_dwa.simplify(); 
+                    template_dwa.simplify_lightweight();
                     
                     // We create the NWA template but DO NOT run negative resolution optimizations on the abstract template.
                     // Pre-optimizing the abstract template is unsafe because abstract weights (indices) are disjoint,
