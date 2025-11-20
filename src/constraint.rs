@@ -958,65 +958,152 @@ impl GrammarConstraint {
         DedupValueMap<LLMTokenID, BTreeMap<TokenizerStateID, TokenizerStateID>>,
         BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
     ) {
-        let mut state_map_out = DedupValueMap::new();
-        let mut possible_matches: BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>> = BTreeMap::new();
-
-        // Inverted map: TargetState -> Vec<SourceState>
+        // 1. Initial states (Identity map for root)
         let mut initial_states: BTreeMap<TokenizerStateID, Vec<TokenizerStateID>> = BTreeMap::new();
         for sid in tokenizer.iter_states() {
             initial_states.entry(sid).or_default().push(sid);
         }
 
-        // Stack: (Node, Map<Target, Sources>)
-        // We use an explicit stack and iterative approach to avoid recursion/parallel-task explosion.
-        let mut stack = vec![(vocab_root, initial_states)];
+        // 2. Parallel processing of children
+        // We collect children first to allow parallel iteration.
+        // The root node itself is handled separately after the reduction to keep the parallel part clean.
+        let root_children: Vec<_> = vocab_root.iter_children().collect();
 
-        while let Some((node, current_states)) = stack.pop() {
-            let token_id = node.token_id();
-            
-            // Record state map for this token node
-            if !current_states.is_empty() {
-                let mut map = BTreeMap::new();
-                for (target, sources) in &current_states {
-                    for &src in sources {
-                        map.insert(src, *target);
-                    }
-                }
-                state_map_out.insert(LLMTokenID(token_id), map);
-            }
+        let (all_entries, all_matches) = root_children
+            .into_par_iter()
+            .map(|(edge_bytes, child_node)| {
+                let mut local_entries = Vec::new();
+                let mut local_matches: BTreeMap<
+                    TokenizerStateID,
+                    BTreeMap<TerminalID, LLMTokenBV>,
+                > = BTreeMap::new();
 
-            for (edge_bytes, child) in node.iter_children() {
-                let mut next_grouped: BTreeMap<TokenizerStateID, Vec<TokenizerStateID>> = BTreeMap::new();
-                
-                for (target, sources) in &current_states {
+                // Compute transition from root to this child
+                let mut start_grouped: BTreeMap<TokenizerStateID, Vec<TokenizerStateID>> =
+                    BTreeMap::new();
+
+                for (target, sources) in &initial_states {
                     let exec = tokenizer.execute_from_state(edge_bytes, *target);
-                    
+
                     if !exec.matches.is_empty() {
-                        let reachable = child.reachable_token_ids();
+                        let reachable = child_node.reachable_token_ids();
                         for m in &exec.matches {
                             let tid = TerminalID(m.id);
                             for &src in sources {
-                                possible_matches
-                                    .entry(src).or_default()
-                                    .entry(tid).or_default()
-                                    .extend(reachable.iter());
+                                let bv = local_matches
+                                    .entry(src)
+                                    .or_default()
+                                    .entry(tid)
+                                    .or_default();
+                                for t in reachable {
+                                    bv.insert(t);
+                                }
                             }
                         }
                     }
 
                     if let Some(end_val) = exec.end_state {
                         let end_sid = TokenizerStateID(end_val);
-                        next_grouped.entry(end_sid).or_default().extend(sources.iter().cloned());
+                        start_grouped
+                            .entry(end_sid)
+                            .or_default()
+                            .extend(sources.iter().cloned());
                     }
                 }
 
-                if !next_grouped.is_empty() {
-                    stack.push((child, next_grouped));
+                if !start_grouped.is_empty() {
+                    // Stack for DFS: (Node, Target->Sources)
+                    let mut stack = vec![(child_node, start_grouped)];
+
+                    while let Some((node, current_states)) = stack.pop() {
+                        let token_id = node.token_id();
+
+                        // Record state map for this node
+                        let mut map = BTreeMap::new();
+                        for (target, sources) in &current_states {
+                            for &src in sources {
+                                map.insert(src, *target);
+                            }
+                        }
+                        local_entries.push((LLMTokenID(token_id), map));
+
+                        for (edge_bytes, child) in node.iter_children() {
+                            let mut next_grouped: BTreeMap<
+                                TokenizerStateID,
+                                Vec<TokenizerStateID>,
+                            > = BTreeMap::new();
+
+                            for (target, sources) in &current_states {
+                                let exec = tokenizer.execute_from_state(edge_bytes, *target);
+
+                                if !exec.matches.is_empty() {
+                                    let reachable = child.reachable_token_ids();
+                                    for m in &exec.matches {
+                                        let tid = TerminalID(m.id);
+                                        for &src in sources {
+                                            let bv = local_matches
+                                                .entry(src)
+                                                .or_default()
+                                                .entry(tid)
+                                                .or_default();
+                                            for t in reachable {
+                                                bv.insert(t);
+                                            }
+                                        }
+                                    }
+                                }
+
+                                if let Some(end_val) = exec.end_state {
+                                    let end_sid = TokenizerStateID(end_val);
+                                    next_grouped
+                                        .entry(end_sid)
+                                        .or_default()
+                                        .extend(sources.iter().cloned());
+                                }
+                            }
+
+                            if !next_grouped.is_empty() {
+                                stack.push((child, next_grouped));
+                            }
+                        }
+                    }
+                }
+                (local_entries, local_matches)
+            })
+            .reduce(
+                || (Vec::new(), BTreeMap::new()),
+                |(mut e1, mut m1), (e2, m2)| {
+                    e1.extend(e2);
+                    for (sid, tmap) in m2 {
+                        let entry = m1.entry(sid).or_default();
+                        for (tid, bv) in tmap {
+                            *entry.entry(tid).or_default() |= bv;
+                        }
+                    }
+                    (e1, m1)
+                },
+            );
+
+        // 3. Build final DedupValueMap
+        let mut state_map_out = DedupValueMap::new();
+
+        // Root node entry
+        if !initial_states.is_empty() {
+            let mut map = BTreeMap::new();
+            for (target, sources) in &initial_states {
+                for &src in sources {
+                    map.insert(src, *target);
                 }
             }
+            state_map_out.insert(LLMTokenID(vocab_root.token_id()), map);
         }
 
-        (state_map_out, possible_matches)
+        // All other entries
+        for (k, v) in all_entries {
+            state_map_out.insert(k, v);
+        }
+
+        (state_map_out, all_matches)
     }
 
     /// Rearrange possible_matches: state -> terminal -> BV(tokens)
