@@ -57,6 +57,8 @@ pub fn format_duration(d: std::time::Duration) -> String {
 
 /// Internal implementation for the new grouped format (debug!).
 /// Uses ANSI colors: Bold Cyan for files.
+#[doc(hidden)]
+#[macro_export]
 macro_rules! __debug_grouped_impl {
     ($level:expr, $user_fmt:expr, $($user_args:tt)*) => {{
         if $level <= $crate::r#macro::get_macro_debug_level() {
@@ -139,15 +141,12 @@ macro_rules! __debug_start_impl {
                 *last_time_guard = Some(now);
 
                 let current_file_str = file!();
-
-                if *last_file_guard != current_file_str {
-                    println!("\x1b[1;36m{}\x1b[0m", current_file_str);
-                    *last_file_guard = current_file_str.to_string();
-                }
+                let current_line = line!();
 
                 print!(
-                    concat!("\x1b[90m  {:>4}\x1b[0m  ", "{}", "{}"),
-                    line!(),
+                    concat!("\x1b[1;36m[{}:{}]\x1b[0m ", "{}", "{}"),
+                    current_file_str,
+                    current_line,
                     format_args!($user_fmt, $($user_args)*),
                     elapsed_suffix
                 );
@@ -221,14 +220,9 @@ macro_rules! __debug_timer_end_impl {
                 };
                 *last_time_guard = Some(now);
 
-                let current_file_str = start_file;
-                if *last_file_guard != current_file_str {
-                    println!("\x1b[1;36m{}\x1b[0m", current_file_str);
-                    *last_file_guard = current_file_str.to_string();
-                }
-
                 println!(
-                    concat!("\x1b[90m  {:>4}\x1b[0m  {} ... {} (\x1b[35m{}\x1b[0m){}"),
+                    concat!("\x1b[1;36m[{}:{}]\x1b[0m {} ... {} (\x1b[90m{}\x1b[0m){}"),
+                    start_file,
                     start_line,
                     start_msg,
                     format!($user_fmt, $($user_args)*),
