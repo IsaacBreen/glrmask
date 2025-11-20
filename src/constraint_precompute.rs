@@ -425,7 +425,7 @@ impl<'r> Precomputer1<'r> {
                 for (_, nodes) in states_at_pos.iter_mut() {
                     if nodes.len() > 1 {
                         let merged_state = self.nwa.add_state();
-                        let weight = SimpleBitset::from_rsb(child_vocab_node.reachable_token_ids());
+                        let weight = SimpleBitset::from_rsb(child_vocab_node.reachable_token_ids().clone());
                         for node in &*nodes {
                             self.nwa.add_epsilon(merged_state, *node, weight.clone());
                         }
@@ -508,7 +508,7 @@ impl<'r> Precomputer1<'r> {
                                 n
                             };
 
-                            dest_map.entry(target).or_default().push(target);
+                            dest_map.push(target);
 
                             pending_edges.push((
                                 *src_node,
@@ -526,11 +526,10 @@ impl<'r> Precomputer1<'r> {
                             .tokenizer
                             .tokens_accessible_from_state(final_tokenizer_state);
 
-                        for (src_node, src_tokens) in &nodes {
+                        for src_node in &nodes {
                             let mut edge_bv = RangeSetBlaze::new();
                             edge_bv.insert(child_token_id);
-                            let final_edge_bv = &(&edge_bv & src_tokens)
-                                & &self.get_node_data_cached(&mut node_cache, *src_node).0;
+                            let final_edge_bv = edge_bv;
 
                             if !final_edge_bv.is_empty() {
                                 let end_idx = self.get_leaf_node();
