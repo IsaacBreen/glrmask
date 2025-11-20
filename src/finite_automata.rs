@@ -1027,7 +1027,7 @@ impl NFA {
             if current_subset_len > max_subset_size {
                 max_subset_size = current_subset_len;
             }
-            if dfa_states.len() % 1000 == 0 {
+            if dfa_states.len() % 20000 == 0 {
                 crate::debug!(
                     4,
                     "DFA progress: {} states, worklist {}, subset size {} (max {}), elapsed {:.2?}",
@@ -1291,18 +1291,27 @@ impl DFA {
         for state in &self.states {
             let mut group_id_to_u8set: BTreeMap<GroupID, U8Set> = BTreeMap::new();
 
+            // Optimization: Group transitions by target state to minimize map lookups.
+            // Many transitions (e.g. ranges a-z) point to the same next state.
+            // Instead of iterating 26 times updating the map, we iterate once with a combined U8Set.
+            let mut target_to_inputs: HashMap<usize, U8Set> = HashMap::new();
             for (input_u8, &next_state_index) in &state.transitions {
+                target_to_inputs.entry(next_state_index)
+                    .and_modify(|set| { set.insert(input_u8); })
+                    .or_insert_with(|| U8Set::from_u8(input_u8));
+            }
+
+            for (next_state_index, inputs) in target_to_inputs {
                 let next_state = &self.states[next_state_index];
                 
                 // Union of next state's finalizers and future groups
-                // We iterate both iterators to avoid allocating a new set
                 let chain = next_state.possible_future_group_ids.iter().chain(next_state.finalizers.iter());
 
                 for &group_id in chain {
                     group_id_to_u8set
                         .entry(group_id)
                         .or_insert_with(U8Set::none)
-                        .insert(input_u8);
+                        .update(&inputs); // Bitwise union is fast
                 }
             }
             all_maps.push(group_id_to_u8set);

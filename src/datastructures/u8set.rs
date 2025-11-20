@@ -169,7 +169,7 @@ impl U8Set {
     }
 
     #[inline]
-    fn update(&mut self, other: &Self) {
+    pub(crate) fn update(&mut self, other: &Self) {
         self.x |= other.x;
         self.y |= other.y;
     }
