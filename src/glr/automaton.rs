@@ -1,8 +1,13 @@
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::glr::items::Item;
-use crate::glr::table::{NonTerminalID, TerminalID};
+use crate::glr::table::{NonTerminalID, TerminalID, FxHasher};
 use profiler_macro::time_it;
-use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque, HashMap};
+use std::hash::BuildHasherDefault;
+
+// Use Fast Hasher for internal computations
+type FxHashSet<T> = HashSet<T, BuildHasherDefault<FxHasher>>;
+type FxHashMap<K, V> = HashMap<K, V, BuildHasherDefault<FxHasher>>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Nullability {
@@ -23,9 +28,9 @@ pub fn compute_nonterminal_nullability(
     }
 
     // Collect all non-terminals and record where they appear on the RHS.
-    let mut all_nonterminals = BTreeSet::new();
+    let mut all_nonterminals = FxHashSet::default();
     let n_prods = productions.len();
-    let mut nt_rhs_occurs: BTreeMap<NonTerminal, Vec<usize>> = BTreeMap::new();
+    let mut nt_rhs_occurs: FxHashMap<NonTerminal, Vec<usize>> = FxHashMap::default();
 
     // For ε computation: only productions whose RHS contains no terminals matter.
     let mut eps_relevant = vec![true; n_prods];
@@ -61,7 +66,7 @@ pub fn compute_nonterminal_nullability(
     // ---------------------------------------------------------------------
     // Phase 1: compute the set of non-terminals that can derive ε.
     // ---------------------------------------------------------------------
-    let mut can_derive_epsilon = BTreeSet::new();
+    let mut can_derive_epsilon = FxHashSet::default();
     let mut queue_eps: VecDeque<NonTerminal> = VecDeque::new();
 
     for (idx, p) in productions.iter().enumerate() {
@@ -117,7 +122,7 @@ pub fn compute_nonterminal_nullability(
         }
     }
 
-    let mut can_derive_terminal = BTreeSet::new();
+    let mut can_derive_terminal = FxHashSet::default();
     let mut queue_term: VecDeque<NonTerminal> = VecDeque::new();
 
     // Seed with productions whose RHS already contains a terminal and whose
@@ -357,7 +362,7 @@ pub fn compute_follow_sets_for_nonterminals(
 
     // Worklist algorithm to propagate FOLLOW sets along the edges A -> B.
     let mut worklist: VecDeque<NonTerminal> = VecDeque::new();
-    let mut in_queue: BTreeSet<NonTerminal> = BTreeSet::new();
+    let mut in_queue: FxHashSet<NonTerminal> = FxHashSet::default();
 
     for (nt, set) in &follow_sets {
         if !set.is_empty() {
@@ -453,27 +458,9 @@ pub fn compute_first_sets_ids(
     light_productions: &[Vec<usize>],
     num_terminals: usize,
     num_nonterminals: usize,
-    nullable_nts: &HashSet<usize>, // NonTerminal IDs (0-based relative to num_terminals? No, let's say 0-based)
+    nullable_nts: &HashSet<usize>, 
 ) -> Vec<BTreeSet<TerminalID>> {
-    // We assume NonTerminal IDs in light_productions are offset by num_terminals.
-    // i.e. ID < num_terminals => Terminal(ID)
-    //      ID >= num_terminals => NonTerminal(ID - num_terminals)
-    
-    let mut first_sets = vec![BTreeSet::<TerminalID>::new(); num_nonterminals];
-    let mut deps: Vec<Vec<usize>> = vec![Vec::new(); num_nonterminals];
-    let mut worklist: VecDeque<(usize, TerminalID)> = VecDeque::new();
-
-    // 1. Build dependency graph and seed
-    for (prod_idx, rhs) in light_productions.iter().enumerate() {
-        // We need to know the LHS of this production. 
-        // This function signature is slightly insufficient without knowing LHS for each production.
-        // However, we can pass prods_by_lhs or similar. 
-        // Actually, let's assume the caller passes a mapping or we change the signature.
-        // For now, let's rely on the caller passing `prods_with_lhs: &[(usize, &Vec<usize>)]` logic?
-        // No, let's just pass `lhs_ids: &[usize]`.
-        panic!("Use compute_first_sets_ids_with_lhs instead");
-    }
-    vec![]
+    panic!("Use compute_first_sets_ids_with_lhs instead");
 }
 
 pub fn compute_first_sets_ids_with_lhs(
@@ -537,11 +524,6 @@ pub fn compute_follow_sets_ids(
     let mut edges: Vec<Vec<usize>> = vec![Vec::new(); num_nonterminals];
 
     follow_sets[start_nt_id].insert(None);
-
-    // Implementation omitted for brevity as it mirrors the Symbol-based one but with IDs.
-    // Since the user asked for a fix for performance, and First sets are the bottleneck (1.5s),
-    // we will focus on integrating the First set optimization first.
-    // But actually, we need Follow sets for Stage 3.
     
     for (prod_idx, rhs) in light_productions.iter().enumerate() {
         let lhs_id = lhs_ids[prod_idx];
@@ -581,8 +563,6 @@ pub fn compute_follow_sets_ids(
 
     while let Some(u) = worklist.pop_front() {
         in_queue[u] = false;
-        // We need to clone the source set to avoid borrow checker issues if we iterate and modify
-        // But here we push to other sets.
         let src_set: Vec<Option<TerminalID>> = follow_sets[u].iter().cloned().collect();
         
         for &v in &edges[u] {

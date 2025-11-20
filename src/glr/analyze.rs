@@ -1,18 +1,22 @@
 use crate::glr::automaton::{
-    compute_closure, compute_first_sets_for_nonterminals, compute_follow_sets_for_nonterminals,
-    compute_nonterminal_nullability, compute_null_nonterminals, compute_nullable_nonterminals,
+    compute_first_sets_for_nonterminals, compute_follow_sets_for_nonterminals,
+    compute_nonterminal_nullability, compute_nullable_nonterminals,
     Nullability,
 };
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
-use crate::glr::table::{Goto, NonTerminalID, StateID, Table};
-use bimap::BiBTreeMap;
+use crate::glr::table::{Goto, NonTerminalID, StateID, Table, FxHasher};
+use std::collections::{BTreeMap, BTreeSet, VecDeque, HashSet, HashMap};
+use std::hash::BuildHasherDefault;
 use kdam::{tqdm, BarExt};
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+
+// Use Fast Hasher for internal analysis sets to speed up large grammars
+type FxHashSet<T> = HashSet<T, BuildHasherDefault<FxHasher>>;
+type FxHashMap<K, V> = HashMap<K, V, BuildHasherDefault<FxHasher>>;
 
 /// Checks for non-terminals used in rule RHS but never defined in LHS.
 pub fn check_for_undefined_non_terminals(productions: &[Production]) -> Vec<String> {
-    let mut lhs_nonterms: BTreeSet<NonTerminal> = BTreeSet::new();
-    let mut rhs_nonterms: BTreeSet<NonTerminal> = BTreeSet::new();
+    let mut lhs_nonterms: FxHashSet<NonTerminal> = FxHashSet::default();
+    let mut rhs_nonterms: FxHashSet<NonTerminal> = FxHashSet::default();
 
     for prod in productions {
         lhs_nonterms.insert(prod.lhs.clone());
@@ -39,9 +43,9 @@ pub fn check_for_undefined_non_terminals(productions: &[Production]) -> Vec<Stri
 /// Helper for check_for_length_1_recursion. Detects all elementary cycles in a graph.
 fn detect_all_cycles_recursive(
     nt: &NonTerminal,
-    graph: &BTreeMap<NonTerminal, BTreeSet<NonTerminal>>,
-    visiting: &mut BTreeSet<NonTerminal>, // Nodes currently in the recursion stack for the current path
-    visited: &mut BTreeSet<NonTerminal>,  // Nodes that have been fully explored
+    graph: &FxHashMap<NonTerminal, FxHashSet<NonTerminal>>,
+    visiting: &mut FxHashSet<NonTerminal>, // Nodes currently in the recursion stack for the current path
+    visited: &mut FxHashSet<NonTerminal>,  // Nodes that have been fully explored
     path: &mut Vec<NonTerminal>,          // Current path for cycle detection
     cycles: &mut BTreeSet<Vec<NonTerminal>>, // Set to store unique, canonicalized cycles
 ) {
@@ -84,22 +88,20 @@ fn detect_all_cycles_recursive(
 /// Checks for length-1 recursion (e.g., A ::= A, A ::= B; B ::= A), considering nullable prefixes.
 pub fn check_for_length_1_recursion(productions: &[Production]) -> Vec<String> {
     let nullable_nonterminals = compute_nullable_nonterminals(productions);
-    let all_nonterminals: BTreeSet<NonTerminal> = productions
-        .iter()
-        .flat_map(|p| {
-            let mut nts = vec![p.lhs.clone()];
-            for s in &p.rhs {
-                if let Symbol::NonTerminal(nt) = s {
-                    nts.push(nt.clone());
-                }
+    // Collect all non-terminals
+    let mut all_nonterminals_set: FxHashSet<NonTerminal> = FxHashSet::default();
+    for p in productions {
+        all_nonterminals_set.insert(p.lhs.clone());
+        for s in &p.rhs {
+            if let Symbol::NonTerminal(nt) = s {
+                all_nonterminals_set.insert(nt.clone());
             }
-            nts
-        })
-        .collect();
+        }
+    }
 
     // Build a graph where an edge A -> B exists if a rule A ::= Nullable* B Nullable* exists.
-    let mut unit_graph: BTreeMap<NonTerminal, BTreeSet<NonTerminal>> = BTreeMap::new();
-    for nt in &all_nonterminals {
+    let mut unit_graph: FxHashMap<NonTerminal, FxHashSet<NonTerminal>> = FxHashMap::default();
+    for nt in &all_nonterminals_set {
         unit_graph.entry(nt.clone()).or_default();
     }
 
@@ -126,16 +128,19 @@ pub fn check_for_length_1_recursion(productions: &[Production]) -> Vec<String> {
     }
 
     // Detect all unique cycles in the unit graph using DFS.
-    let mut visiting = BTreeSet::new();
-    let mut visited = BTreeSet::new();
+    let mut visiting = FxHashSet::default();
+    let mut visited = FxHashSet::default();
     let mut cycles = BTreeSet::new();
-    let sorted_nonterminals: Vec<_> = all_nonterminals.iter().collect();
+    
+    // Sort for deterministic processing order
+    let mut sorted_nonterminals: Vec<_> = all_nonterminals_set.into_iter().collect();
+    sorted_nonterminals.sort();
 
     for nt in sorted_nonterminals {
-        if !visited.contains(nt) {
+        if !visited.contains(&nt) {
             let mut path = Vec::new();
             detect_all_cycles_recursive(
-                nt,
+                &nt,
                 &unit_graph,
                 &mut visiting,
                 &mut visited,
@@ -202,8 +207,8 @@ pub fn check_for_left_nullable_left_recursion(productions: &[Production]) -> Vec
 }
 
 /// Computes the set of productive non-terminals (those that can derive a terminal string).
-fn compute_productive_non_terminals(productions: &[Production]) -> BTreeSet<NonTerminal> {
-    let mut productive_nts = BTreeSet::new();
+fn compute_productive_non_terminals(productions: &[Production]) -> FxHashSet<NonTerminal> {
+    let mut productive_nts = FxHashSet::default();
     let mut changed = true;
 
     while changed {
@@ -234,7 +239,7 @@ fn compute_productive_non_terminals(productions: &[Production]) -> BTreeSet<NonT
 pub fn check_for_non_productive_non_terminals(productions: &[Production]) -> Vec<String> {
     // Collect all non-terminals defined on the LHS. If a non-terminal is only used on the RHS,
     // `check_for_undefined_non_terminals` will have already caught it.
-    let all_nonterminals: BTreeSet<NonTerminal> =
+    let all_nonterminals: FxHashSet<NonTerminal> =
         productions.iter().map(|p| p.lhs.clone()).collect();
     let productive_nts = compute_productive_non_terminals(productions);
 
@@ -254,12 +259,6 @@ pub fn check_for_non_productive_non_terminals(productions: &[Production]) -> Vec
 }
 
 /// Validates the grammar for common issues, collecting all errors.
-///
-/// Checks for:
-/// 1. Undefined non-terminals.
-/// 2. Non-productive non-terminals.
-/// 3. Length-1 recursion (direct or indirect).
-/// 4. Left-nullable left recursion.
 pub fn validate(productions: &[Production]) -> Result<(), String> {
     let mut errors = Vec::new();
 
@@ -280,10 +279,7 @@ pub fn validate(productions: &[Production]) -> Result<(), String> {
 }
 
 /// Removes productions that use non-terminals on their RHS which are never defined on the LHS
-/// of any *remaining* production. This process is repeated until no more productions can be removed.
-///
-/// This is useful for cleaning up grammars before further analysis or parser generation,
-/// especially if the grammar might contain references to non-terminals that have no rules.
+/// of any *remaining* production.
 pub fn remove_productions_with_undefined_nonterminals(
     initial_productions: &[Production],
     exempt: &[usize],
@@ -292,7 +288,7 @@ pub fn remove_productions_with_undefined_nonterminals(
         initial_productions.iter().cloned().enumerate().collect();
 
     loop {
-        let mut defined_lhs_nonterminals: BTreeSet<NonTerminal> = BTreeSet::new();
+        let mut defined_lhs_nonterminals: FxHashSet<NonTerminal> = FxHashSet::default();
         for (i, prod) in &current_productions {
             defined_lhs_nonterminals.insert(prod.lhs.clone());
         }
@@ -322,7 +318,7 @@ pub fn remove_productions_with_undefined_nonterminals(
             "Removing {} productions with undefined non-terminals.",
             removed_productions.len()
         );
-        let all_rhs_nonterminals: BTreeSet<NonTerminal> = removed_productions
+        let all_rhs_nonterminals: FxHashSet<NonTerminal> = removed_productions
             .iter()
             .flat_map(|(_i, prod)| {
                 prod.rhs.iter().filter_map(|symbol| match symbol {
@@ -336,7 +332,9 @@ pub fn remove_productions_with_undefined_nonterminals(
             "Missing non-terminals ({}) in productions:",
             all_rhs_nonterminals.len()
         );
-        for nt in all_rhs_nonterminals.difference(&defined_lhs_nonterminals) {
+        let mut missing_sorted: Vec<_> = all_rhs_nonterminals.difference(&defined_lhs_nonterminals).collect();
+        missing_sorted.sort();
+        for nt in missing_sorted {
             crate::debug!(4, "  {}", nt.0);
         }
         crate::debug!(5, "Removed productions:");
@@ -351,7 +349,6 @@ pub fn remove_productions_with_undefined_nonterminals(
         .collect()
 }
 
-// TODO: This function is marked as broken and is not modified by this request.
 pub fn drop_dead(productions: &[Production]) -> Vec<Production> {
     // todo: this function is broken
     let mut nt_reachables: BTreeMap<&NonTerminal, BTreeSet<&NonTerminal>> = BTreeMap::new();
@@ -419,8 +416,8 @@ pub fn drop_dead(productions: &[Production]) -> Vec<Production> {
 fn compute_can_derive_interesting(
     productions: &[Production],
     interesting_symbols: &BTreeSet<Symbol>,
-) -> BTreeSet<NonTerminal> {
-    let mut can_derive_interesting = BTreeSet::new();
+) -> FxHashSet<NonTerminal> {
+    let mut can_derive_interesting = FxHashSet::default();
     let mut changed = true;
 
     while changed {
@@ -463,12 +460,11 @@ fn compute_can_derive_interesting(
 }
 
 /// Computes the set of non-terminals that are reachable by derivation from any non-terminal in interesting_symbols.
-/// If interesting_symbols contains no non-terminals, this returns an empty set.
 fn compute_reachable_from_interesting_nts(
     productions: &[Production],
     interesting_symbols: &BTreeSet<Symbol>,
-) -> BTreeSet<NonTerminal> {
-    let mut seed_interesting_nts = BTreeSet::new();
+) -> FxHashSet<NonTerminal> {
+    let mut seed_interesting_nts = FxHashSet::default();
     for s in interesting_symbols {
         if let Symbol::NonTerminal(nt) = s {
             seed_interesting_nts.insert(nt.clone());
@@ -476,7 +472,7 @@ fn compute_reachable_from_interesting_nts(
     }
 
     if seed_interesting_nts.is_empty() {
-        return BTreeSet::new();
+        return FxHashSet::default();
     }
 
     let mut reachable_set = seed_interesting_nts.clone();
@@ -502,18 +498,6 @@ fn compute_reachable_from_interesting_nts(
     reachable_set
 }
 
-/// Filters productions to keep only those relevant to deriving specified "interesting" symbols.
-///
-/// A production `P: L -> R` is kept if:
-/// 1. Its LHS (`L`) can derive an interesting symbol (i.e., `L` is in `can_derive_set`).
-/// AND
-/// 2. Its RHS (`R`), for this specific production, can also derive an interesting symbol.
-///
-/// The RHS `R` "can derive an interesting symbol" if:
-/// 1. `R` directly contains an interesting symbol (terminal or non-terminal).
-/// 2. `R` contains a non-terminal `N` that is itself in `can_derive_set`.
-///
-/// If `interesting_symbols` is empty, no productions will be kept.
 pub fn filter_productions_by_reachability(
     initial_productions: &[Production],
     interesting_symbols: &BTreeSet<Symbol>,
@@ -673,35 +657,20 @@ pub fn compute_terminal_follow_sets(
     terminal_follows
 }
 
-/// Creates a closure that generates unique non-terminal names, suitable for `resolve_right_recursion`.
-///
-/// The generator ensures that new names do not conflict with existing non-terminal names
-/// or with names it has generated previously. A typical generated name for a non-terminal `A`
-/// would be `A_rr`, `A_rr_2`, etc., to avoid collisions.
-///
-/// # Arguments
-/// * `all_nonterminals` - A set of all non-terminal names currently in the grammar.
-///
-/// # Returns
-/// A closure `FnMut(&str) -> String` that can be passed to `resolve_right_recursion`.
 pub fn create_unique_name_generator(
     all_nonterminals: &BTreeSet<NonTerminal>,
 ) -> impl FnMut(&str) -> String {
-    let mut existing_names: BTreeSet<String> =
+    let mut existing_names: FxHashSet<String> =
         all_nonterminals.iter().map(|nt| nt.0.clone()).collect();
 
     move |base_name: &str| {
-        // First attempt: base_name + "_rr" (for right-recursion elimination)
         let mut new_name = format!("{base_name}_rr");
         let mut counter = 1;
 
-        // Check for collisions and increment a suffix if needed
         while existing_names.contains(&new_name) {
             counter += 1;
             new_name = format!("{base_name}_rr_{counter}");
         }
-
-        // Reserve the new name to avoid future collisions within the generator.
         existing_names.insert(new_name.clone());
         new_name
     }
@@ -718,43 +687,20 @@ pub fn resolve_direct_right_recursion(
     productions: &mut Vec<Production>,
     mut new_name_generator: impl FnMut(&str) -> String,
 ) {
-    // This function transforms direct right-recursion into left-recursion while preserving
-    // the original order of productions as much as possible.
-    //
-    // The transformation for a non-terminal `A` with rules:
-    //   A -> α₁ A | ... | αₘ A  (right-recursive rules, where αᵢ is a prefix)
-    //   A -> β₁ | ... | βₙ      (non-recursive rules)
-    // is to replace them with:
-    //   A  -> A' β₁ | ... | A' βₙ
-    //   A' -> A' α₁ | ... | A' αₘ | ε
-    // where `A'` is a new non-terminal. This generates the same language `(α₁|...|αₘ)* (β₁|...|βₙ)`
-    // using left-recursion.
-    //
-    // The implementation preserves order by iterating through the original production list.
-    // When it first encounters a rule for a right-recursive non-terminal, it replaces all
-    // rules for that non-terminal with the new, transformed set of rules at that position.
-
-    // 1. Group productions by LHS to easily access all rules for a given non-terminal.
-    // The BTreeMap is just for efficient lookup; we don't iterate over its keys for ordering.
-    let mut prods_by_lhs: BTreeMap<NonTerminal, Vec<Production>> = BTreeMap::new();
+    let mut prods_by_lhs: FxHashMap<NonTerminal, Vec<Production>> = FxHashMap::default();
     for prod in productions.iter().cloned() {
         prods_by_lhs.entry(prod.lhs.clone()).or_default().push(prod);
     }
 
-    // 2. Identify all non-terminals that have simple direct right-recursive rules.
-    let mut recursive_nts = BTreeSet::new();
+    let mut recursive_nts = FxHashSet::default();
     for (nt, prods_for_nt) in &prods_by_lhs {
         let is_recursive = prods_for_nt.iter().any(|p| {
-            // A rule `A -> α A` is simple direct right-recursive if:
-            // a) `α` is not empty (i.e., rule is not `A -> A`).
             if p.rhs.len() < 2 {
                 return false;
             }
-            // b) The last symbol is `A`.
             if p.rhs.last() != Some(&Symbol::NonTerminal(p.lhs.clone())) {
                 return false;
             }
-            // c) `α` (the prefix) does not contain `A`.
             let alpha = &p.rhs[..p.rhs.len() - 1];
             !alpha.contains(&Symbol::NonTerminal(p.lhs.clone()))
         });
@@ -763,30 +709,23 @@ pub fn resolve_direct_right_recursion(
         }
     }
 
-    // 3. Build the new production list, preserving order.
     let mut new_productions = Vec::new();
-    let mut processed_recursive_nts = BTreeSet::new();
+    let mut processed_recursive_nts = FxHashSet::default();
 
     for prod in productions.iter().cloned() {
         let lhs = &prod.lhs;
 
         if !recursive_nts.contains(lhs) {
-            // This production's LHS is not right-recursive, so we can keep the production as is.
             new_productions.push(prod);
             continue;
         }
 
-        // The LHS is right-recursive. We need to process all of its rules at once.
-        // We do this only the first time we encounter a rule for this LHS.
         if processed_recursive_nts.contains(lhs) {
-            // We've already handled this NT and its rules, so we skip this and subsequent productions for it.
             continue;
         }
         processed_recursive_nts.insert(lhs.clone());
 
-        // --- Perform the transformation for `lhs` ---
         let prods_for_nt = prods_by_lhs.get(lhs).unwrap();
-
         let (recursive_rules, other_rules): (Vec<_>, Vec<_>) =
             prods_for_nt.iter().cloned().partition(|p| {
                 if p.rhs.len() < 2 {
@@ -799,7 +738,6 @@ pub fn resolve_direct_right_recursion(
                 !alpha.contains(&Symbol::NonTerminal(p.lhs.clone()))
             });
 
-        // `recursive_rules` is guaranteed to be non-empty because `lhs` is in `recursive_nts`.
         let new_nt = NonTerminal(new_name_generator(&lhs.0));
         crate::debug!(
             5,
@@ -808,8 +746,6 @@ pub fn resolve_direct_right_recursion(
             new_nt.0
         );
 
-        // Create new rules for the original non-terminal `A`: `A -> A' βⱼ`.
-        // The order of these new rules is based on the original order of the `β` rules.
         for non_rec_rule in &other_rules {
             let mut new_rhs = vec![Symbol::NonTerminal(new_nt.clone())];
             new_rhs.extend_from_slice(&non_rec_rule.rhs);
@@ -826,7 +762,6 @@ pub fn resolve_direct_right_recursion(
             new_productions.push(new_prod);
         }
 
-        // Create rules for the new non-terminal `A'`: `A' -> A' αᵢ` and `A' -> ε`.
         for rec_rule in &recursive_rules {
             let alpha = &rec_rule.rhs[..rec_rule.rhs.len() - 1];
             let mut new_rhs = vec![Symbol::NonTerminal(new_nt.clone())];
@@ -846,12 +781,11 @@ pub fn resolve_direct_right_recursion(
         let epsilon_prod = Production {
             lhs: new_nt.clone(),
             rhs: vec![],
-        }; // A' -> ε
+        };
         crate::debug!(5, "  Adding new epsilon rule: '{}'", epsilon_prod);
         new_productions.push(epsilon_prod);
     }
 
-    // 4. Replace the original productions with the new set.
     productions.clear();
     productions.extend(new_productions);
 }
@@ -862,7 +796,7 @@ pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {
     }
 
     let nullability = compute_nonterminal_nullability(productions);
-    let nullable_nonterminals: BTreeSet<_> = nullability
+    let nullable_nonterminals: FxHashSet<_> = nullability
         .iter()
         .filter_map(|(nt, status)| {
             if *status == Nullability::Nullable || *status == Nullability::Null {
@@ -875,11 +809,9 @@ pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {
     let start_symbol = &productions[0].lhs;
     let start_symbol_is_nullable = nullable_nonterminals.contains(start_symbol);
 
-    let mut seen = BTreeSet::<Production>::new();
     let mut out = Vec::<Production>::new();
 
     let start_prod = productions[0].clone();
-    seen.insert(start_prod.clone());
     out.push(start_prod);
 
     for prod in &productions[1..] {
@@ -912,13 +844,15 @@ pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {
                 lhs: prod.lhs.clone(),
                 rhs,
             };
-            if seen.insert(new_prod.clone()) {
-                out.push(new_prod);
-            }
+            out.push(new_prod);
         }
     }
 
-    let start_rhs_nts: BTreeSet<_> = productions[0]
+    // Dedup logic using sort_unstable (faster than building a large BTreeSet/HashSet for unique constraint on large inputs)
+    out.sort_unstable();
+    out.dedup();
+
+    let start_rhs_nts: FxHashSet<_> = productions[0]
         .rhs
         .iter()
         .filter_map(|s| {
@@ -935,8 +869,6 @@ pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {
             if !p.rhs.is_empty() {
                 true
             } else {
-                // Epsilon production. Keep if its LHS is in start_rhs_nts,
-                // or if it's an epsilon production for a nullable start symbol.
                 start_rhs_nts.contains(&p.lhs)
                     || (p.lhs == *start_symbol && start_symbol_is_nullable)
             }
@@ -948,7 +880,6 @@ pub fn inline_unit_productions(productions: &[Production]) -> Vec<Production> {
     todo!()
 }
 
-/// Rewrites productions by inserting dummy terminals before their grouped original terminals.
 pub fn rewrite_productions_with_dummies(
     original_productions: &[Production],
     dummy_map: &BTreeMap<String, BTreeSet<Terminal>>,
@@ -957,7 +888,7 @@ pub fn rewrite_productions_with_dummies(
         return (original_productions.to_vec(), BTreeSet::new());
     }
 
-    let mut original_to_dummy: BTreeMap<Terminal, String> = BTreeMap::new();
+    let mut original_to_dummy: FxHashMap<Terminal, String> = FxHashMap::default();
     for (dummy_name, originals) in dummy_map {
         for original_terminal in originals {
             original_to_dummy.insert(original_terminal.clone(), dummy_name.clone());
