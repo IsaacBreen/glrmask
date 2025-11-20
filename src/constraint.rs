@@ -2026,6 +2026,27 @@ impl<'r> Precomputer1<'r> {
         }
     }
 
+    fn get_node_data_cached(
+        &self,
+        cache: &mut HashMap<NWAStateID, (RangeSetBlaze<usize>, bool)>,
+        id: NWAStateID,
+    ) -> (RangeSetBlaze<usize>, bool) {
+        if let Some(data) = cache.get(&id) {
+            return data.clone();
+        }
+        let live = self
+            .live_tokens
+            .get(&id)
+            .cloned()
+            .unwrap_or_else(RangeSetBlaze::new);
+        let is_end = self.nwa.states[id]
+            .final_weight
+            .as_ref()
+            .map_or(false, |w| !w.is_empty());
+        cache.insert(id, (live.clone(), is_end));
+        (live, is_end)
+    }
+
     fn get_leaf_node(&self) -> NWAStateID {
         self.leaf_state
     }
@@ -2299,23 +2320,6 @@ impl<'r> Precomputer1<'r> {
                 (RangeSetBlaze<usize>, bool),
             > = HashMap::new();
 
-            let mut get_node_data = |id: NWAStateID| -> (RangeSetBlaze<usize>, bool) {
-                if let Some(data) = node_cache.get(&id) {
-                    return data.clone();
-                }
-                let live = self
-                    .live_tokens
-                    .get(&id)
-                    .cloned()
-                    .unwrap_or_else(RangeSetBlaze::new);
-                let is_end = self.nwa.states[id]
-                    .final_weight
-                    .as_ref()
-                    .map_or(false, |w| !w.is_empty());
-                node_cache.insert(id, (live.clone(), is_end));
-                (live, is_end)
-            };
-
             let mut pending_edges = Vec::new();
             let mut pending_live_updates: HashMap<NWAStateID, RangeSetBlaze<usize>> =
                 HashMap::new();
@@ -2364,7 +2368,7 @@ impl<'r> Precomputer1<'r> {
                         let next_pos = pos + match_info.width;
 
                         for (src_node, src_tokens) in &nodes {
-                            let (src_live, _) = get_node_data(*src_node);
+                            let (src_live, _) = self.get_node_data_cached(&mut node_cache, *src_node);
 
                             // Leaf check: if match consumes remainder of segment
                             if next_pos == segment_bytes.len() {
@@ -2409,7 +2413,7 @@ impl<'r> Precomputer1<'r> {
                             // Reuse existing compatible node if possible
                             let mut dest_node = None;
                             for (cand, cand_tokens) in dest_map.iter() {
-                                let (cand_live, is_end) = get_node_data(*cand);
+                                let (cand_live, is_end) = self.get_node_data_cached(&mut node_cache, *cand);
                                 let risky_tokens = &final_bv - cand_tokens;
                                 if !is_end
                                     && (risky_tokens.is_empty()
@@ -2459,7 +2463,7 @@ impl<'r> Precomputer1<'r> {
                             let mut edge_bv = RangeSetBlaze::new();
                             edge_bv.insert(child_token_id);
                             let final_edge_bv = &(&edge_bv & src_tokens)
-                                & &get_node_data(*src_node).0;
+                                & &self.get_node_data_cached(&mut node_cache, *src_node).0;
 
                             if !final_edge_bv.is_empty() {
                                 let end_idx = self.get_leaf_node();
