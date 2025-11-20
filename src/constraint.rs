@@ -118,7 +118,7 @@ pub struct GrammarConstraintConfig {
 impl Default for GrammarConstraintConfig {
     fn default() -> Self {
         Self {
-            trie1: Trie1Config::off(),
+            trie1: Trie1Config::default(),
             run_precompute4: true,
             use_dummy_terminals: false,
             dummy_terminal_map: BTreeMap::new(),
