@@ -358,14 +358,14 @@ impl<'r> Precomputer1<'r> {
     fn run_dfs(&mut self) {
         let mut assoc: BTreeMap<
             TokenizerStateID,
-            HashMap<NWAStateID, RangeSetBlaze<usize>>,
+            Vec<NWAStateID>,
         > = BTreeMap::new();
 
         for (sid, arc) in &self.roots {
             assoc
                 .entry(*sid)
                 .or_default()
-                .insert(arc.clone(), self.all_llm_tokens.clone());
+                .push(*arc);
         }
 
         crate::debug!(2, "Starting precompute DFS for {} tokenizer states", self.roots.len());
@@ -388,20 +388,20 @@ impl<'r> Precomputer1<'r> {
         vocab_node: &VocabPrefixTreeNode,
         assoc_by_state: BTreeMap<
             TokenizerStateID,
-            HashMap<NWAStateID, RangeSetBlaze<usize>>,
+            Vec<NWAStateID>,
         >,
     ) {
         self.pb.inc(1);
         for (segment_bytes, child_vocab_node) in vocab_node.iter_children() {
             let mut next_level_assoc: BTreeMap<
                 TokenizerStateID,
-                HashMap<NWAStateID, RangeSetBlaze<usize>>,
+                Vec<NWAStateID>,
             > = BTreeMap::new();
 
             // Queue: pos -> TokenizerState -> (NWAState -> ContextTokens)
             let mut pending: BTreeMap<
                 usize,
-                BTreeMap<TokenizerStateID, HashMap<NWAStateID, RangeSetBlaze<usize>>>,
+                BTreeMap<TokenizerStateID, Vec<NWAStateID>>,
             > = BTreeMap::new();
             pending.insert(0, assoc_by_state.clone());
 
@@ -425,13 +425,12 @@ impl<'r> Precomputer1<'r> {
                 for (_, nodes) in states_at_pos.iter_mut() {
                     if nodes.len() > 1 {
                         let merged_state = self.nwa.add_state();
-                        let mut merged_path_mask = RangeSetBlaze::new();
-                        for (node, path_mask) in &*nodes {
-                            self.nwa.add_epsilon(merged_state, *node, path_mask.clone().into());
-                            merged_path_mask |= path_mask;
+                        let weight = SimpleBitset::from_rsb(child_vocab_node.reachable_token_ids());
+                        for node in &*nodes {
+                            self.nwa.add_epsilon(merged_state, *node, weight.clone());
                         }
                         nodes.clear();
-                        nodes.insert(merged_state, merged_path_mask);
+                        nodes.push(merged_state);
                     }
                 }
 
@@ -439,9 +438,7 @@ impl<'r> Precomputer1<'r> {
                 if pos == segment_bytes.len() {
                     for (tokenizer_state_id, nodes) in states_at_pos {
                         let entry = next_level_assoc.entry(tokenizer_state_id).or_default();
-                        for (node, tokens) in nodes {
-                            entry.entry(node).or_default().bitor_assign(&tokens);
-                        }
+                        entry.extend(nodes);
                     }
                     continue;
                 }
@@ -468,12 +465,12 @@ impl<'r> Precomputer1<'r> {
                         let terminal_id = GrammarTokenID(match_info.id);
                         let next_pos = pos + match_info.width;
 
-                        for (src_node, src_tokens) in &nodes {
+                        for src_node in &nodes {
                             // Leaf check: if match consumes remainder of segment
                             if next_pos == segment_bytes.len() {
                                 let mut edge_bv = RangeSetBlaze::new();
                                 edge_bv.insert(child_token_id);
-                                let final_bv = &edge_bv & src_tokens;
+                                let final_bv = edge_bv;
                                 if !final_bv.is_empty() {
                                     let leaf = self.get_leaf_node();
                                     pending_edges.push((
@@ -494,7 +491,7 @@ impl<'r> Precomputer1<'r> {
                                 }
                             }
 
-                            let final_bv = &edge_bv & src_tokens;
+                            let final_bv = edge_bv;
                             if final_bv.is_empty() {
                                 continue;
                             }
@@ -511,7 +508,7 @@ impl<'r> Precomputer1<'r> {
                                 n
                             };
 
-                            dest_map.entry(target).or_default().bitor_assign(&final_bv);
+                            dest_map.entry(target).or_default().push(target);
 
                             pending_edges.push((
                                 *src_node,
@@ -532,7 +529,8 @@ impl<'r> Precomputer1<'r> {
                         for (src_node, src_tokens) in &nodes {
                             let mut edge_bv = RangeSetBlaze::new();
                             edge_bv.insert(child_token_id);
-                            let final_edge_bv = &edge_bv & src_tokens;
+                            let final_edge_bv = &(&edge_bv & src_tokens)
+                                & &self.get_node_data_cached(&mut node_cache, *src_node).0;
 
                             if !final_edge_bv.is_empty() {
                                 let end_idx = self.get_leaf_node();
@@ -549,9 +547,7 @@ impl<'r> Precomputer1<'r> {
                             next_level_assoc
                                 .entry(final_tokenizer_state)
                                 .or_default()
-                                .entry(*src_node)
-                                .or_default()
-                                .bitor_assign(src_tokens);
+                                .push(*src_node);
                         }
                     }
                 }
@@ -565,6 +561,10 @@ impl<'r> Precomputer1<'r> {
                 }
             }
 
+            for nodes in next_level_assoc.values_mut() {
+                nodes.sort_unstable();
+                nodes.dedup();
+            }
             if !next_level_assoc.is_empty() {
                 self.dfs(child_vocab_node, next_level_assoc);
             }
