@@ -4,9 +4,8 @@ use crate::profiler::PROGRESS_BAR_ENABLED;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Instant;
-use crate::precompute4::weighted_automata::common::Label;
 
-type Code = Label;
+type Code = i16;
 type QueryKey = (NWAStateID, Code);
 
 #[inline]

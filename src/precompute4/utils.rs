@@ -1,35 +1,32 @@
 use crate::glr::table::StateID as ParserStateID;
 use crate::precompute4::full_dwa::FullDWABuildError;
-use crate::precompute4::weighted_automata::common::Label;
 
-pub const DEFAULT_TRANSITION_SYMBOL: Label = Label::MAX - 1;
+pub const DEFAULT_TRANSITION_SYMBOL: i16 = i16::MAX;
 
-pub fn encode_symbol_i16(id: ParserStateID) -> Result<Label, FullDWABuildError> {
-    if id.0 > Label::MAX as usize {
-        panic!("Transition symbol out of range: {:?}", id);
+pub fn encode_symbol_i16(id: ParserStateID) -> Result<i16, FullDWABuildError> {
+    if id.0 > i16::MAX as usize {
         Err(FullDWABuildError::ParserStateIdOutOfRange { state_id: id })
     } else {
-        Ok(id.0 as Label)
+        Ok(id.0 as i16)
     }
 }
 
-// Negative codes for stack-hitching: Label::MIN + id. Requires parser state IDs to fit in Label.
-pub fn encode_negative_i16(id: ParserStateID) -> Result<Label, FullDWABuildError> {
-    if id.0 > Label::MAX as usize {
-        panic!("Negative transition symbol out of range: {:?}", id);
+// Negative codes for stack-hitching: i16::MIN + id. Requires parser state IDs to fit in i16.
+pub fn encode_negative_i16(id: ParserStateID) -> Result<i16, FullDWABuildError> {
+    if id.0 > i16::MAX as usize {
         Err(FullDWABuildError::ParserStateIdOutOfRange { state_id: id })
     } else {
-        Ok(Label::MIN + id.0 as Label)
+        Ok(i16::MIN + id.0 as i16)
     }
 }
 
 // Returns (is_positive_label, parser_state_id).
-pub fn decode_symbol_i16(code: Label) -> Result<(bool, ParserStateID), ()> {
+pub fn decode_symbol_i16(code: i16) -> Result<(bool, ParserStateID), ()> {
     if code >= 0 {
         Ok((true, ParserStateID(code as usize)))
     } else {
-        Ok((false, ParserStateID(code.wrapping_sub(Label::MIN) as usize)))
+        Ok((false, ParserStateID(code.wrapping_sub(i16::MIN) as usize)))
     }
 }
 
-pub fn is_default_transition(code: Label) -> bool { code == DEFAULT_TRANSITION_SYMBOL }
+pub fn is_default_transition(code: i16) -> bool { code == DEFAULT_TRANSITION_SYMBOL }
