@@ -55,8 +55,8 @@ use crate::glr::table::StateID;
 use crate::precompute4::weighted_automata::bitset::SimpleBitset;
 
 // Import from new modules
-use crate::constraint_vocab::*;
-use crate::constraint_trie::*;
+pub use crate::constraint_vocab::*;
+pub use crate::constraint_trie::*;
 use crate::constraint_precompute::run_precompute1;
 
 type GSSNode = LeveledGSS<ParseStateEdgeContent, Acc>;

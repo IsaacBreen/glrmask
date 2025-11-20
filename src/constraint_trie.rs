@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::collections::BTreeMap as StdMap;
 
 use crate::constraint_vocab::LLMTokenBV;
-use crate::datastructures::trie::{God, GodWrapper, Trie, Trie2Index};
+pub use crate::datastructures::trie::{God, GodWrapper, Trie, Trie2Index};
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use crate::tokenizer::TokenizerStateID;
 use crate::types::TerminalID as GrammarTokenID;
