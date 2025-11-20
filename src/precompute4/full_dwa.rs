@@ -307,10 +307,11 @@ pub fn precompute4(
 
     let mut final_bodies: BTreeMap<TokenizerStateID, NWABody> = BTreeMap::new();
 
-    // Cache for abstract templates:
-    // Key: Sorted list of (Option<TerminalID>) that are active in the bundle.
-    // Value: A simplified DWA where weights are indices into the key vector.
-    let mut template_cache: HashMap<Vec<Option<TerminalID>>, DWA> = HashMap::new();
+    // Cache for abstract templates based on weight equivalence classes (partitions).
+    // Key: A sorted vector of groups. Each group is a sorted vector of TerminalIDs that share the same weight.
+    //      Signature = Vec<Vec<Option<TerminalID>>>
+    // Value: A simplified DWA where abstract index `i` corresponds to the `i`-th group in the signature.
+    let mut template_cache: HashMap<Vec<Vec<Option<TerminalID>>>, DWA> = HashMap::new();
     let mut cache_hits = 0;
     let mut cache_misses = 0;
 
@@ -366,38 +367,54 @@ pub fn precompute4(
             };
 
             for (right_body, terminal_map) in nwa_bodies_map {
-                // 1. Identify the signature (Active Terminals)
-                let mut active_entries: Vec<(Option<TerminalID>, Weight)> = terminal_map
-                    .into_iter()
-                    .filter(|(_, w)| !w.is_empty())
-                    .collect();
+                // 1. Group terminals by concrete Weight to find aliases
+                let mut weight_groups: HashMap<Weight, Vec<Option<TerminalID>>> = HashMap::new();
+                for (term, weight) in terminal_map {
+                    if !weight.is_empty() {
+                        weight_groups.entry(weight).or_default().push(term);
+                    }
+                }
 
-                if active_entries.is_empty() {
+                if weight_groups.is_empty() {
                     continue;
                 }
 
-                // Sort by terminal ID to ensure canonical key for cache
-                active_entries.sort_by(|a, b| a.0.cmp(&b.0));
+                // 2. Create Canonical Signature: Sorted Groups of Sorted Terminals
+                // We convert the Map into a Vec and sort by the first terminal of each group
+                // (canonicalizing the order of groups).
+                let mut groups_vec: Vec<(Weight, Vec<Option<TerminalID>>)> = weight_groups.into_iter().collect();
+                
+                // Sort terminals within each group
+                for (_, terms) in &mut groups_vec {
+                    terms.sort();
+                }
 
-                let signature: Vec<Option<TerminalID>> = active_entries.iter().map(|(t, _)| *t).collect();
-                let concrete_weights: Vec<Weight> = active_entries.iter().map(|(_, w)| w.clone()).collect();
+                // Sort groups by the first terminal of the group
+                groups_vec.sort_by(|a, b| a.1.cmp(&b.1));
 
-                // 2. Get or Create Template
+                let signature: Vec<Vec<Option<TerminalID>>> = groups_vec.iter().map(|(_, terms)| terms.clone()).collect();
+                let concrete_weights: Vec<Weight> = groups_vec.iter().map(|(w, _)| w.clone()).collect();
+
+                // 3. Get or Create Template
                 let left_dwa = if let Some(template) = template_cache.get(&signature) {
                     cache_hits += 1;
                     instantiate_dwa_template(template, &concrete_weights)
                 } else {
                     cache_misses += 1;
-                    // Construct abstract bundle for specialization: Map terminal -> index-based weight
+                    // Create Abstract Bundle mapping ALL terminals in group `i` to abstract index `i`.
+                    // This enables simplification to merge paths for indistinguishable terminals.
                     let mut abstract_bundle = BTreeMap::new();
-                    for (idx, term) in signature.iter().enumerate() {
-                        abstract_bundle.insert(*term, Weight::from_item(idx));
+                    for (idx, terms) in signature.iter().enumerate() {
+                        let abstract_weight = Weight::from_item(idx);
+                        for term in terms {
+                            abstract_bundle.insert(*term, abstract_weight.clone());
+                        }
                     }
 
                     let mut template = specialize_dwa(&super_dwa, &abstract_bundle, &bit_to_term);
-                    template.simplify();
-                    template_cache.insert(signature.clone(), template.clone());
-
+                    template.simplify(); 
+                    
+                    template_cache.insert(signature, template.clone());
                     instantiate_dwa_template(&template, &concrete_weights)
                 };
 
@@ -433,7 +450,7 @@ pub fn precompute4(
         },
     );
     crate::debug!(4, "Reversed trie traversal (special_map_grouped) took: {:?}", now.elapsed());
-    println!("DWA Template Cache Stats: Hits={}, Misses={} (Unique signatures)", cache_hits, cache_misses);
+    println!("DWA Template Cache Stats: Hits={}, Misses={} (Unique partition signatures)", cache_hits, cache_misses);
 
     // Combine all final NWA bodies into a single NWA
     let mut combined_nwa_states = states_arena.into_inner();
