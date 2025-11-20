@@ -28,6 +28,7 @@ use crate::tokenizer::{LLMTokenID, TokenizerStateID};
 use crate::types::{TerminalID as GrammarTokenID, TerminalID};
 use crate::constraint::GrammarConstraintConfig;
 use crate::precompute4::weighted_automata::common::Label;
+
 // ---------------------------------------------------------------------------
 // Precomputer1
 // ---------------------------------------------------------------------------
@@ -79,11 +80,7 @@ impl<'r> Precomputer1<'r> {
             let root_state = nwa.add_state();
             roots.insert(sid, root_state);
         }
-        crate::debug!(
-            4,
-            "Created trie1 roots ({} states)",
-            roots.len()
-        );
+        crate::debug!(4, "Created trie1 roots ({} states)", roots.len());
 
         crate::debug!(5, "Counting vocab nodes for progress bar...");
         let total_nodes = count_vocab_nodes(&vocab.root);
@@ -396,7 +393,6 @@ impl<'r> Precomputer1<'r> {
     fn run_dfs(&mut self) {
         let assoc = self.roots.clone();
         crate::debug!(3, "Starting precompute DFS for {} tokenizer states", self.roots.len());
-        // crate::debug!(6, "Roots for each tokenizer state:");
         for (sid, root) in &self.roots {
             crate::debug!(6, "  {}: {}", sid.0, root);
         }
