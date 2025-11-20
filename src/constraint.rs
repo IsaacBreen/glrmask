@@ -1483,8 +1483,8 @@ impl GrammarConstraint {
         );
 
         helper.run_dfs();
-        let nwa = helper.finish();
-        (nwa, BTreeMap::new(), Trie1GodWrapper::new())
+        let (nwa, precomputed1, trie1_god) = helper.convert_to_trie();
+        (nwa, precomputed1, trie1_god)
     }
 
     // -----------------------------------------------------------------------
@@ -1878,14 +1878,56 @@ impl<'r> Precomputer1<'r> {
         self.leaf_state
     }
 
-    fn finish(mut self) -> NWA {
-        // Add transitions from a new start state to the roots
+    fn convert_to_trie(mut self) -> (NWA, Precomputed, Trie1GodWrapper) {
+        let god = Trie1GodWrapper::new();
+        let mut node_map: HashMap<NWAStateID, PrecomputeNode1Index> = HashMap::new();
+        let mut result_map: Precomputed = BTreeMap::new();
+
+        let num_states = self.nwa.states.len();
+        for i in 0..num_states {
+            let state_id = i;
+            let live = self.live_tokens.get(&state_id).cloned().unwrap_or_else(RangeSetBlaze::new);
+            let is_end = self.nwa.states[state_id].final_weight.is_some();
+            
+            let contents = PrecomputedNodeContents {
+                end: is_end,
+                live_tokens: LLMTokenBV::from(live),
+            };
+            let node = PrecomputeNode1::new(contents);
+            let idx = PrecomputeNode1Index::new(god.insert(node));
+            node_map.insert(state_id, idx);
+        }
+
+        for (state_id, state) in self.nwa.states.0.iter().enumerate() {
+            let src_idx = node_map[&state_id];
+            for (&label, targets) in &state.transitions {
+                let term_id = GrammarTokenID(label as usize);
+                for (target, weight) in targets {
+                    let dst_idx = node_map[target];
+                    let edge_bv = LLMTokenBV::from(weight.clone());
+                    god.insert_edge_simple(src_idx, dst_idx, Some(term_id), edge_bv);
+                }
+            }
+            for (target, weight) in &state.epsilons {
+                let dst_idx = node_map[target];
+                let edge_bv = LLMTokenBV::from(weight.clone());
+                god.insert_edge_simple(src_idx, dst_idx, None, edge_bv);
+            }
+        }
+
+        for (sid, root_nwa_id) in &self.roots {
+            if let Some(&idx) = node_map.get(root_nwa_id) {
+                result_map.insert(*sid, idx);
+            }
+        }
+
         let start_state = self.nwa.add_state();
         self.nwa.body.start_state = start_state;
-        for (sid, root) in self.roots {
-            self.nwa.add_transition(start_state, sid.0 as i16, root, Weight::all()).unwrap();
+        for (sid, root) in &self.roots {
+            self.nwa.add_transition(start_state, sid.0 as i16, *root, Weight::all()).unwrap();
         }
-        self.nwa
+
+        (self.nwa, result_map, god)
     }
 
     fn possible_matches(
@@ -2272,26 +2314,22 @@ impl<'r> Precomputer1<'r> {
             }
 
             // Batch writes
+
+            // Batch writes
             for (src, dst, key, bv) in pending_edges {
-                let weight = Weight::from_rsb(bv);
                 if let Some(tid) = key {
-                    // Handle dummy terminals if needed
                     if let Some(dummy_tid) = self.original_to_dummy_map.get(&tid) {
-                        // Create intermediate node: src --dummy--> inter --original--> dst
-                        // Note: This logic was previously in convert_trie1_recursive.
-                        // Here we do it on the fly.
-                        // To avoid creating too many intermediate nodes, we could cache them,
-                        // but for now let's just create one per edge.
-                        // Optimization: We should group by (src, dummy_tid).
-                        // However, since we are processing edges one by one here, let's just add them.
-                        // The NWA simplification/determinization later will merge them.
                         let inter = self.nwa.add_state();
+                        self.live_tokens.entry(inter).or_insert_with(RangeSetBlaze::new).bitor_assign(&bv);
+                        let weight = Weight::from_rsb(bv);
                         self.nwa.add_transition(src, dummy_tid.0 as i16, inter, weight.clone()).unwrap();
                         self.nwa.add_transition(inter, tid.0 as i16, dst, weight).unwrap();
                     } else {
+                        let weight = Weight::from_rsb(bv);
                         self.nwa.add_transition(src, tid.0 as i16, dst, weight).unwrap();
                     }
                 } else {
+                    let weight = Weight::from_rsb(bv);
                     self.nwa.add_epsilon(src, dst, weight);
                 }
             }
