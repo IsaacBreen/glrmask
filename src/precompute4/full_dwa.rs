@@ -307,7 +307,7 @@ pub fn precompute4(
 
     let mut final_bodies: BTreeMap<TokenizerStateID, NWABody> = BTreeMap::new();
 
-    // Cache for abstract templates: NWA (Pre-optimized with negative resolution)
+    // Cache for abstract templates: NWA
     // Key: Signature (Sorted Grouped Terminals)
     // Value: An NWA where abstract index `i` corresponds to the `i`-th group in the signature.
     let mut template_cache: HashMap<Vec<Vec<Option<TerminalID>>>, NWA> = HashMap::new();
@@ -419,13 +419,10 @@ pub fn precompute4(
                     let mut template_dwa = specialize_dwa(&super_dwa, &abstract_bundle, &bit_to_term);
                     template_dwa.simplify(); 
                     
-                    let mut template_nwa = NWA::from_dwa(&template_dwa);
-                    
-                    // Optimization: Pre-resolve negatives on the Abstract NWA.
-                    let all_states: HashSet<StateID> = (0..template_nwa.states.len()).collect();
-                    apply_cancellations(&mut template_nwa.states, &all_states);
-                    apply_finality_fixpoint(&mut template_nwa.states, &all_states);
-                    remove_negative_transitions(&mut template_nwa.states, &all_states);
+                    // We create the NWA template but DO NOT run negative resolution optimizations on the abstract template.
+                    // Pre-optimizing the abstract template is unsafe because abstract weights (indices) are disjoint,
+                    // masking potential overlaps in concrete weights that require cancellation logic to trigger.
+                    let template_nwa = NWA::from_dwa(&template_dwa);
 
                     template_cache.insert(signature.clone(), template_nwa);
                     t_cache_creation += start_create.elapsed();
@@ -453,6 +450,9 @@ pub fn precompute4(
                 t_concatenation += start_concat.elapsed();
 
                 let start_neg = Instant::now();
+                // We run negative resolution here on the instantiated (concrete) subgraph.
+                // This handles all cancellations, both internal to the template (which now has overlapping weights)
+                // and cross-boundary with the right body.
                 if !new_states_filter.is_empty() {
                     apply_cancellations(&mut states, &new_states_filter);
                     apply_finality_fixpoint(&mut states, &new_states_filter);
