@@ -129,16 +129,20 @@ impl<'r> Precomputer1<'r> {
     {
         // TODO: make this simpler.
         let new_start_state = self.nwa.add_state();
-        self.nwa.body.start_state = new_start_state;
         for (tsid, state) in &self.roots {
             self.nwa.add_transition(new_start_state, tsid.0 as i16, *state, Weight::all()).unwrap();
         }
+        self.nwa.body.start_state = new_start_state;
+        println!("Trie1: after adding start state: {}", self.nwa);
         self.nwa.simplify();
         let mut dwa = self.nwa.determinize();
         self.nwa.simplify();
         dwa = dwa.unroll_cycles();
+        println!("Trie1: after unrolling: {}", dwa);
+        let sink_state = dwa.add_state();
         for (tsid, state) in &mut self.roots {
-            let new_state = dwa.states[dwa.body.start_state].transitions[&(tsid.0 as i16)];
+            // let new_state = dwa.states[dwa.body.start_state].transitions[&(tsid.0 as i16)];
+            let new_state = *dwa.states[dwa.body.start_state].transitions.get(&(tsid.0 as i16)).unwrap_or(&sink_state);
             *state = new_state;
         }
         self.nwa = NWA::from_dwa(&dwa);
@@ -150,11 +154,15 @@ impl<'r> Precomputer1<'r> {
             PrecomputeNode1Index,
         > = HashMap::new();
 
+        let end_node_contents = PrecomputedNodeContents { end: true, live_tokens: HybridBitset::max_ones() };
+        let end_node_idx = PrecomputeNode1Index::new(final_trie1_god.insert(PrecomputeNode1::new(end_node_contents)));
+
         for (sid, temp_root) in &self.roots {
             let final_root = self.convert_nwa_to_trie(
                 *temp_root,
                 &final_trie1_god,
                 &mut node_map,
+                end_node_idx,
             );
             final_roots.insert(*sid, final_root);
         }
@@ -179,21 +187,28 @@ impl<'r> Precomputer1<'r> {
         state_id: NWAStateID,
         final_god: &Trie1GodWrapper,
         node_map: &mut HashMap<NWAStateID, PrecomputeNode1Index>,
+        end_node: PrecomputeNode1Index,
     ) -> PrecomputeNode1Index {
         if let Some(final_idx) = node_map.get(&state_id) {
             return *final_idx;
         }
 
         let live = RangeSetBlaze::new();
-        let is_end = self.nwa.states[state_id].final_weight.as_ref().map_or(false, |w| !w.is_empty());
-        
+
         let final_node_contents = PrecomputedNodeContents {
-            end: is_end,
+            end: false,
             live_tokens: HybridBitset::from(live),
         };
         let new_node = PrecomputeNode1::new(final_node_contents);
         let final_idx = PrecomputeNode1Index::new(final_god.insert(new_node));
         node_map.insert(state_id, final_idx);
+
+        let is_end = self.nwa.states[state_id].final_weight.as_ref().map_or(false, |w| !w.is_empty());
+        if is_end {
+            // Add an edge to the end node
+            let rsb = HybridBitset::from(self.nwa.states[state_id].final_weight.as_ref().unwrap().rsb.clone());
+            final_god.insert_edge_simple(final_idx, end_node, None, rsb);
+        }
 
         // Group transitions by label
         let mut children_to_copy: BTreeMap<Option<GrammarTokenID>, Vec<(NWAStateID, RangeSetBlaze<usize>)>> = BTreeMap::new();
@@ -218,6 +233,7 @@ impl<'r> Precomputer1<'r> {
                         child_state_id,
                         final_god,
                         node_map,
+                        end_node,
                     );
                     let hybrid_bitset = HybridBitset::from(rs_blaze);
                     final_god.insert_edge_simple(
@@ -259,6 +275,7 @@ impl<'r> Precomputer1<'r> {
                         child_state_id,
                         final_god,
                         node_map,
+                        end_node,
                     );
                     let hybrid_bitset = HybridBitset::from(rs_blaze);
                     final_god.insert_edge_simple(
@@ -283,6 +300,7 @@ impl<'r> Precomputer1<'r> {
                             child_state_id.as_usize(),
                             final_god,
                             node_map,
+                            end_node,
                         );
                         let hybrid_bitset = HybridBitset::from(rs_blaze);
                         total_inter_bitset |= &hybrid_bitset;
