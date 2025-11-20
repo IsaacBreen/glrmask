@@ -396,24 +396,11 @@ impl<'r> Precomputer1<'r> {
     fn dfs(
         &mut self,
         vocab_node: &VocabPrefixTreeNode,
-        mut assoc_by_state: BTreeMap<
+        assoc_by_state: BTreeMap<
             TokenizerStateID,
             HashMap<NWAStateID, RangeSetBlaze<usize>>,
         >,
     ) {
-        for (_, states_at_pos) in assoc_by_state.iter_mut() {
-            if states_at_pos.len() > 1 {
-                let merged_state = self.nwa.add_state();
-                let mut merged_tokens = RangeSetBlaze::new();
-                for (node, tokens) in &mut *states_at_pos {
-                    self.nwa.add_epsilon(merged_state, *node, tokens.clone().into());
-                    merged_tokens |= &*tokens;
-                }
-                states_at_pos.clear();
-                states_at_pos.insert(merged_state, merged_tokens);
-            }
-        }
-
         self.pb.inc(1);
         for (segment_bytes, child_vocab_node) in vocab_node.iter_children() {
             let mut next_level_assoc: BTreeMap<
@@ -446,7 +433,25 @@ impl<'r> Precomputer1<'r> {
                 BTreeMap<GrammarTokenID, LLMTokenBV>,
             > = HashMap::new();
 
-            while let Some((pos, states_at_pos)) = pending.pop_first() {
+            while let Some((pos, mut states_at_pos)) = pending.pop_first() {
+                for (_, nodes) in states_at_pos.iter_mut() {
+                    if nodes.len() > 1 {
+                        let merged_state = self.nwa.add_state();
+                        let mut merged_path_mask = RangeSetBlaze::new();
+                        let mut merged_live = RangeSetBlaze::new();
+                        for (node, path_mask) in &*nodes {
+                            self.nwa.add_epsilon(merged_state, *node, path_mask.clone().into());
+                            merged_path_mask |= path_mask;
+                            if let Some(live) = self.live_tokens.get(node) {
+                                merged_live |= live;
+                            }
+                        }
+                        self.live_tokens.insert(merged_state, merged_live);
+                        nodes.clear();
+                        nodes.insert(merged_state, merged_path_mask);
+                    }
+                }
+
                 // If we reached the end of the segment, these states are ready for the next vocab node
                 if pos == segment_bytes.len() {
                     for (tokenizer_state_id, nodes) in states_at_pos {
@@ -523,26 +528,12 @@ impl<'r> Precomputer1<'r> {
                                 .entry(self.tokenizer.initial_state_id())
                                 .or_default();
 
-                            // Reuse existing compatible node if possible
-                            let mut dest_node = None;
-                            // for (cand, cand_tokens) in dest_map.iter() {
-                            //     let (cand_live, is_end) = self.get_node_data_cached(&mut node_cache, *cand);
-                            //     let risky_tokens = &final_bv - cand_tokens;
-                            //     if !is_end
-                            //         && (risky_tokens.is_empty()
-                            //             || (&risky_tokens & &cand_live).is_empty())
-                            //     {
-                            //         dest_node = Some(*cand);
-                            //         break;
-                            //     }
-                            // }
-
-                            let target = dest_node.unwrap_or_else(|| {
+                            let target = {
                                 let n = self.nwa.add_state();
                                 self.live_tokens.insert(n, RangeSetBlaze::new());
                                 node_cache.insert(n, (RangeSetBlaze::new(), false));
                                 n
-                            });
+                            };
 
                             // Update live tokens and queue
                             pending_live_updates
