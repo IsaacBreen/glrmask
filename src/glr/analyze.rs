@@ -393,7 +393,7 @@ pub fn remove_unreachable_productions(productions: &[Production], start_producti
         .collect();
 
     if new_productions.len() < productions.len() {
-        eprintln!("Removed {} unreachable productions", productions.len() - new_productions.len());
+        crate::debug!(3, "Removed {} unreachable productions", productions.len() - new_productions.len());
     }
 
     new_productions
@@ -1059,14 +1059,14 @@ fn efficient_choice(exprs: Vec<Expr>) -> Expr {
 fn efficient_seq(exprs: Vec<Expr>) -> Expr {
     let mut flat = Vec::with_capacity(exprs.len());
     for e in exprs {
-        if let Expr::Seq(subs) = e {
-            flat.extend(subs);
-        } else {
-            flat.push(e);
+        if let Expr::Epsilon = e {
+            continue;
         }
     }
     if flat.len() == 1 {
         flat.pop().unwrap()
+    } else if flat.is_empty() {
+        Expr::Epsilon
     } else {
         Expr::Seq(flat)
     }
@@ -1308,7 +1308,6 @@ fn convert_regular_nts_to_terminals(
                 ) {
                     let self_count = seq.iter().filter(|s| matches!(s, ResolvedSymbol::SelfRef)).count();
                     if self_count > 1 {
-                        eprintln!("NT {} failed: multiple self refs", nt.0);
                         failed = true; // Multiple self-refs (e.g. center embedding or A -> A A) hard to convert simply
                         break;
                     }
@@ -1330,13 +1329,11 @@ fn convert_regular_nts_to_terminals(
                              right_rec_exprs.push(efficient_seq(exprs));
                         } else {
                             failed = true; // Center embedding
-                            eprintln!("NT {} failed: center embedding", nt.0);
                             break;
                         }
                     }
                 } else {
                     failed = true; // Dependency not yet resolved
-                    eprintln!("NT {} failed: dependency not resolved (check topo sort)", nt.0);
                     // panic!("s0 failed: dependency not resolved"); 
                     break;
                 }
@@ -1370,13 +1367,11 @@ fn convert_regular_nts_to_terminals(
                          is_nt_nullable = true;
                     } else {
                         // Purely nullable (e.g. empty string or epsilon), cannot convert to terminal
-                        eprintln!("NT {} failed: purely nullable. Expr: {:?}", nt.0, final_expr);
                         continue;
                     }
                 }
                 
                 if get_expr_complexity(&expr_for_terminal) > MAX_REGEX_COMPLEXITY {
-                    eprintln!("NT {} failed: complexity limit", nt.0);
                     continue;
                 }
 
@@ -1470,10 +1465,6 @@ fn convert_regular_nts_to_terminals(
                     rhs: vec![],
                 });
             }
-        }
-
-        if productions.iter().any(|p| p.lhs.0 == "s0") && !nts_to_replace.contains_key(&NonTerminal("s0".to_string())) {
-            panic!("s0 was not converted!");
         }
 
         *productions = new_prods;
