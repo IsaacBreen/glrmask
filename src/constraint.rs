@@ -1309,7 +1309,7 @@ impl GrammarConstraint {
 
         // Precompute1
         let precompute_vocab_before_p1 = vocab.clone();
-        let (precomputed1_nwa, precomputed1_roots) = Self::precompute1(
+        let (precomputed1, trie1_god) = Self::precompute1(
             &tokenizer,
             Some(&parser),
             Some(llm_vocab.clone()),
@@ -1386,7 +1386,20 @@ impl GrammarConstraint {
         // Precompute4 (DWA). Even if config.run_precompute4 is false, we build it;
         // there is no longer a trie3-based fallback.
         let max_internal_llm_token_id = vocab.internal_max_llm_token;
-        let precomputed4 = precompute4(&parser, precomputed1_nwa, precomputed1_roots, max_internal_llm_token_id);
+        let precomputed4 = precompute4(&parser, &precomputed1, &trie1_god, max_internal_llm_token_id);
+
+        // Stats for precompute1
+        let mut stats = PrecomputeStats::default();
+        crate::constraint_extra::calculate_final_stats1(
+            &precomputed1,
+            &mut stats,
+            &trie1_god,
+        );
+        crate::constraint_extra::print_precompute_stats1(
+            &stats,
+            &token_name_map,
+            &trie1_god,
+        );
 
         let internal_to_original_sparse_matrix = StageVocab::build_internal_to_original_sparse_matrix(
             &vocab.internal_to_original,
@@ -1399,14 +1412,14 @@ impl GrammarConstraint {
         let gc = GrammarConstraint {
             tokenizer,
             parser,
-            precomputed1: BTreeMap::new(),
+            precomputed1,
             precomputed4,
             llm_vocab,
             token_name_map,
             possible_matches: possible_matches_precompute1,
             state_map_by_llm,
             terminal_map_by_llm,
-            trie1_god: Trie1GodWrapper::new(),
+            trie1_god,
             run_precompute4: config.run_precompute4,
             post_commit_allow_check_mode: TerminalAllowanceCheckMode::default(),
             vocab,
@@ -1543,7 +1556,7 @@ impl GrammarConstraint {
         terminal_follow_map: &BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>>,
         config: &GrammarConstraintConfig,
         original_to_dummy_map: BTreeMap<TerminalID, TerminalID>,
-    ) -> (NWA, BTreeMap<TokenizerStateID, NWAStateID>)
+    ) -> (BTreeMap<TokenizerStateID, PrecomputeNode1Index>, Trie1GodWrapper)
     {
         let mut dummy_terminal_penalties: BTreeMap<TerminalID, usize> =
             BTreeMap::new();
@@ -1562,13 +1575,23 @@ impl GrammarConstraint {
             }
         }
 
+        // Reduce internal_llm_token_map to representatives to speed up precomputation
+        let mut representative_llm_token_map: BTreeMap<Vec<u8>, LLMTokenID> = BTreeMap::new();
+        let mut seen_internal_ids = std::collections::HashSet::new();
+
+        for (bytes, id) in internal_llm_token_map {
+            if seen_internal_ids.insert(id.0) {
+                representative_llm_token_map.insert(bytes.clone(), *id);
+            }
+        }
+
         let representative_states: Vec<TokenizerStateID> = tokenizer.iter_states().collect();
 
         let mut helper = Precomputer1::new(
             tokenizer,
             parser,
             llm_vocab,
-            internal_llm_token_map,
+            &representative_llm_token_map,
             stage_vocab.internal_max_llm_token,
             original_to_dummy_map,
             representative_states,
@@ -1576,7 +1599,44 @@ impl GrammarConstraint {
 
         helper.run_dfs();
 
-        helper.finish()
+        let (mut precomputed1, trie1_god) = helper.finish();
+        let roots_after: Vec<_> = precomputed1.values().cloned().collect();
+
+        Self::has_llm_compatible_cycle(
+            &trie1_god,
+            &roots_after,
+            stage_vocab.internal_max_llm_token,
+        );
+
+        let mut stats = PrecomputeStats::default();
+        crate::constraint_extra::calculate_final_stats1(
+            &precomputed1,
+            &mut stats,
+            &trie1_god,
+        );
+        crate::constraint_extra::print_precompute_stats1(
+            &stats,
+            token_name_map,
+            &trie1_god,
+        );
+
+        // Trie1 optimization (size, vocab compression)
+        constraint_precompute1_utils::optimize_trie1_size(
+            &mut precomputed1,
+            &trie1_god,
+            // Dummy values for Trie0-dependent params (we no longer build Trie0).
+            &Trie0GodWrapper::new(),
+            &HashMap::new(),
+            parser.and_then(|p| p.ignore_terminal_id),
+            stage_vocab.internal_max_llm_token,
+            terminal_follow_map,
+            &config.trie1,
+            stage_vocab,
+            token_name_map,
+            &dummy_terminal_penalties,
+        );
+
+        (precomputed1, trie1_god)
     }
 
     // -----------------------------------------------------------------------
@@ -1970,9 +2030,152 @@ impl<'r> Precomputer1<'r> {
         self.leaf_state
     }
 
-    fn finish(self) -> (NWA, BTreeMap<TokenizerStateID, NWAStateID>)
+    fn finish(self) -> (BTreeMap<TokenizerStateID, PrecomputeNode1Index>, Trie1GodWrapper)
     {
-        (self.nwa, self.roots)
+        let final_trie1_god = Trie1GodWrapper::new();
+        let mut final_roots = BTreeMap::new();
+        let mut node_map: HashMap<
+            NWAStateID,
+            PrecomputeNode1Index,
+        > = HashMap::new();
+
+        for (sid, temp_root) in &self.roots {
+            let final_root = self.convert_nwa_to_trie(
+                *temp_root,
+                &final_trie1_god,
+                &mut node_map,
+            );
+            final_roots.insert(*sid, final_root);
+        }
+
+        (final_roots, final_trie1_god)
+    }
+
+    fn convert_nwa_to_trie(
+        &self,
+        state_id: NWAStateID,
+        final_god: &Trie1GodWrapper,
+        node_map: &mut HashMap<NWAStateID, PrecomputeNode1Index>,
+    ) -> PrecomputeNode1Index {
+        if let Some(final_idx) = node_map.get(&state_id) {
+            return *final_idx;
+        }
+
+        let live = self.live_tokens.get(&state_id).cloned().unwrap_or_else(RangeSetBlaze::new);
+        let is_end = self.nwa.states[state_id].final_weight.as_ref().map_or(false, |w| !w.is_empty());
+        
+        let final_node_contents = PrecomputedNodeContents {
+            end: is_end,
+            live_tokens: HybridBitset::from(live),
+        };
+        let new_node = PrecomputeNode1::new(final_node_contents);
+        let final_idx = PrecomputeNode1Index::new(final_god.insert(new_node));
+        node_map.insert(state_id, final_idx);
+
+        // Group transitions by label
+        let mut children_to_copy: BTreeMap<Option<GrammarTokenID>, Vec<(NWAStateID, RangeSetBlaze<usize>)>> = BTreeMap::new();
+        for (label, targets) in &self.nwa.states[state_id].transitions {
+            let grammar_token_id = GrammarTokenID(*label as usize);
+            for (target, weight) in targets {
+                // Convert SimpleBitset weight back to RangeSetBlaze
+                let rsb = weight.rsb.clone();
+                children_to_copy.entry(Some(grammar_token_id)).or_default().push((*target, rsb));
+            }
+        }
+
+        if self.original_to_dummy_map.is_empty() {
+            for (ek, dest_map) in children_to_copy {
+                for (child_state_id, rs_blaze) in dest_map {
+                    let final_child_idx = self.convert_nwa_to_trie(
+                        child_state_id,
+                        final_god,
+                        node_map,
+                    );
+                    let hybrid_bitset = HybridBitset::from(rs_blaze);
+                    final_god.insert_edge_simple(
+                        final_idx,
+                        final_child_idx,
+                        ek.clone(),
+                        hybrid_bitset,
+                    );
+                }
+            }
+        } else {
+            let mut direct_edges = Vec::new();
+            let mut injected_edges_by_dummy: BTreeMap<
+                TerminalID,
+                Vec<(
+                    Option<TerminalID>,
+                    OrderedHashMap<PrecomputeNode1Index, RangeSetBlaze<usize>>,
+                )>,
+            > = BTreeMap::new();
+
+            for (ek, dest_map) in children_to_copy {
+                if let Some(tid) = ek {
+                    if let Some(dummy_tid) =
+                        self.original_to_dummy_map.get(&tid)
+                    {
+                        injected_edges_by_dummy
+                            .entry(*dummy_tid)
+                            .or_default()
+                            .push((Some(tid), dest_map.into_iter().map(|(s, w)| (Trie2Index::from(s), w)).collect()));
+                        continue;
+                    }
+                }
+                direct_edges.push((ek, dest_map));
+            }
+
+            for (ek, dest_map) in direct_edges {
+                for (child_state_id, rs_blaze) in dest_map {
+                    let final_child_idx = self.convert_nwa_to_trie(
+                        child_state_id,
+                        final_god,
+                        node_map,
+                    );
+                    let hybrid_bitset = HybridBitset::from(rs_blaze);
+                    final_god.insert_edge_simple(
+                        final_idx,
+                        final_child_idx,
+                        ek.clone(),
+                        hybrid_bitset,
+                    );
+                }
+            }
+
+            for (dummy_tid, edges) in injected_edges_by_dummy {
+                let inter_node =
+                    PrecomputeNode1::new(PrecomputedNodeContents::internal());
+                let inter_idx =
+                    PrecomputeNode1Index::new(final_god.insert(inter_node));
+                let mut total_inter_bitset = HybridBitset::zeros();
+
+                for (original_ek, dest_map) in edges {
+                    for (child_state_id, rs_blaze) in dest_map {
+                        let final_child_idx = self.convert_nwa_to_trie(
+                            child_state_id.as_usize(),
+                            final_god,
+                            node_map,
+                        );
+                        let hybrid_bitset = HybridBitset::from(rs_blaze);
+                        total_inter_bitset |= &hybrid_bitset;
+                        final_god.insert_edge_simple(
+                            inter_idx,
+                            final_child_idx,
+                            original_ek,
+                            hybrid_bitset,
+                        );
+                    }
+                }
+                final_god.insert_edge_simple(
+                    final_idx,
+                    inter_idx,
+                    Some(dummy_tid),
+                    total_inter_bitset,
+                );
+            }
+        }
+
+        final_idx
     }
 
     fn possible_matches(
