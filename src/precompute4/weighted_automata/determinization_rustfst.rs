@@ -24,11 +24,11 @@ use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::sync::{Arc, Mutex};
 
-fn i16_to_label(label: Label) -> u32 {
+fn label_to_fst_label(label: Label) -> u32 {
     (label as i32 - Label::MIN as i32) as u32 + 1
 }
 
-fn label_to_i16(label: u32) -> Label {
+fn fst_label_to_label(label: u32) -> Label {
     ((label - 1) as i32 + Label::MIN as i32) as Label
 }
 
@@ -176,8 +176,8 @@ pub fn nwa_to_vector_fst(nwa: &NWA) -> VectorFst<BitsetWeight> {
                     fst.add_tr(
                         fst_state_id,
                         Tr::new(
-                            i16_to_label(*label),
-                            i16_to_label(*label),
+                            label_to_fst_label(*label),
+                            label_to_fst_label(*label),
                             BitsetWeight::new(weight.clone()),
                             state_map[target],
                         ),
@@ -235,7 +235,7 @@ pub fn vector_fst_to_dwa(fst: &VectorFst<BitsetWeight>) -> DWA {
                 }
                 let res = dwa.add_transition(
                     dwa_state_id,
-                    label_to_i16(tr.ilabel),
+                    fst_label_to_label(tr.ilabel),
                     state_map[&tr.nextstate],
                     tr.weight.value().clone(),
                 );
@@ -290,7 +290,7 @@ pub fn vector_fst_to_nwa(fst: &VectorFst<BitsetWeight>) -> NWA {
                 if tr.ilabel == EPS_LABEL {
                     nwa.states.add_epsilon(nwa_state_id, target_nwa_id, weight);
                 } else {
-                    let label = label_to_i16(tr.ilabel);
+                    let label = fst_label_to_label(tr.ilabel);
                     nwa.states.add_transition(nwa_state_id, label, target_nwa_id, weight).unwrap();
                 }
             }
