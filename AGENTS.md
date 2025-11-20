@@ -18,7 +18,7 @@ REPEAT=3 AGG_METHOD="min" SKIP_CPP_BUILD=1 SKIP_RUST_BUILD=1 MACRO_DEBUG_LEVEL=2
 
 ```bash
 # Build a grammar constraint representing a valid git diff of some file (choosing src/constraint.rs here but could be anything).anything).
-python scripts/generate_diff_grammar.py src/constraint.rs -o .cache/test_vocabs/example_diff_constraint.ebnf
+python scripts/generate_diff_grammar.py .cache/test_vocabs/constraint.rs.old -o .cache/test_vocabs/example_diff_constraint.ebnf
 MACRO_DEBUG_LEVEL=4 python scripts/compile.py \
     --grammar .cache/test_vocabs/example_diff_constraint.ebnf \
     --output .cache/test_vocabs/example_diff_constraint.json.gz \

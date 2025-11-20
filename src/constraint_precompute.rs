@@ -133,16 +133,22 @@ impl<'r> Precomputer1<'r> {
             self.nwa.add_transition(new_start_state, tsid.0 as Label, *state, Weight::all()).unwrap();
         }
         self.nwa.body.start_state = new_start_state;
+        crate::debug!(4, "Simplifying NWA...");
         self.nwa.simplify();
+        crate::debug!(4, "Determinizing NWA...");
         let mut dwa = self.nwa.determinize();
+        crate::debug!(4, "Simplifying DWA...");
         self.nwa.simplify();
+        crate::debug!(4, "Unrolling DWA...");
         dwa = dwa.unroll_cycles();
         let sink_state = dwa.add_state();
         for (tsid, state) in &mut self.roots {
             let new_state = *dwa.states[dwa.body.start_state].transitions.get(&(tsid.0 as Label)).unwrap_or(&sink_state);
             *state = new_state;
         }
+        crate::debug!(4, "Converting DWA to NWA...");
         self.nwa = NWA::from_dwa(&dwa);
+        crate::debug!(4, "Done.");
 
         let final_trie1_god = Trie1GodWrapper::new();
         let mut final_roots = BTreeMap::new();
