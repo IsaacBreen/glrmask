@@ -47,11 +47,11 @@ pub const ALLOWED_FILES: &[&str] = &[
 
 /// Formats a duration as seconds if >= 1000ms, otherwise milliseconds.
 pub fn format_duration(d: std::time::Duration) -> String {
-    let secs = d.as_secs_f64();
-    if secs >= 1.0 {
-        format!("{:.2}s", secs)
+    let millis = d.as_millis();
+    if millis >= 1000 {
+        format!("{:.2}s", millis as f64 / 1000.0)
     } else {
-        format!("{:.0}ms", secs * 1000.0)
+        format!("{}ms", millis)
     }
 }
 
@@ -80,7 +80,7 @@ macro_rules! __debug_grouped_impl {
                 let elapsed_suffix = if let Some(last_time) = *last_time_guard {
                     let diff = now.duration_since(last_time);
                     if diff.as_millis() > 1 {
-                        format!(" \x1b[90m+{}\x1b[0m", $crate::r#macro::format_duration(diff))
+                        format!(" \x1b[35m+{}\x1b[0m", $crate::r#macro::format_duration(diff))
                     } else {
                         String::new()
                     }
@@ -90,14 +90,19 @@ macro_rules! __debug_grouped_impl {
                 *last_time_guard = Some(now);
 
                 let current_file_str = file!();
-                let current_line = line!();
                 
-                // Clean one-line format: [file:line] message (+time)
-                // \x1b[1;36m = Bold Cyan for location
+                // If filename changed, print it in Bold Cyan
+                if *last_file_guard != current_file_str {
+                    // \x1b[1;36m = Bold Cyan, \x1b[0m = Reset
+                    println!("\x1b[1;36m{}\x1b[0m", current_file_str);
+                    *last_file_guard = current_file_str.to_string();
+                }
+
+                // Print line number in Dark Gray, then the message
+                // \x1b[90m = Dark Gray (Bright Black)
                 println!(
-                    concat!("\x1b[1;36m[{}:{}]\x1b[0m ", "{}", "{}"),
-                    current_file_str,
-                    current_line,
+                    concat!("\x1b[90m  {:>4}\x1b[0m  ", "{}", "{}"),
+                    line!(),
                     format_args!($user_fmt, $($user_args)*),
                     elapsed_suffix
                 );
@@ -141,12 +146,15 @@ macro_rules! __debug_start_impl {
                 *last_time_guard = Some(now);
 
                 let current_file_str = file!();
-                let current_line = line!();
+
+                if *last_file_guard != current_file_str {
+                    println!("\x1b[1;36m{}\x1b[0m", current_file_str);
+                    *last_file_guard = current_file_str.to_string();
+                }
 
                 print!(
-                    concat!("\x1b[1;36m[{}:{}]\x1b[0m ", "{}", "{}"),
-                    current_file_str,
-                    current_line,
+                    concat!("\x1b[90m  {:>4}\x1b[0m  ", "{}", "{}"),
+                    line!(),
                     format_args!($user_fmt, $($user_args)*),
                     elapsed_suffix
                 );
@@ -220,9 +228,14 @@ macro_rules! __debug_timer_end_impl {
                 };
                 *last_time_guard = Some(now);
 
+                let current_file_str = start_file;
+                if *last_file_guard != current_file_str {
+                    println!("\x1b[1;36m{}\x1b[0m", current_file_str);
+                    *last_file_guard = current_file_str.to_string();
+                }
+
                 println!(
-                    concat!("\x1b[1;36m[{}:{}]\x1b[0m {} ... {} (\x1b[90m{}\x1b[0m){}"),
-                    start_file,
+                    concat!("\x1b[90m  {:>4}\x1b[0m  {} ... {} (\x1b[35m{}\x1b[0m){}"),
                     start_line,
                     start_msg,
                     format!($user_fmt, $($user_args)*),
