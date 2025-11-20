@@ -1,10 +1,10 @@
 #![allow(dead_code)]
 
-use super::common::{BENCHMARK_DEBUG, OPTIMIZE_DEBUG, NWAStateID, StateID, Weight, Label};
+use super::common::{BENCHMARK_DEBUG, Label, NWAStateID, StateID, Weight};
 use super::dwa::{DWAState, DWAStates, DWA};
 use super::nwa::{NWAState, NWAStates, NWA};
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use rustfst::algorithms::{minimize, minimize_with_config, MinimizeConfig};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 const MAX_OPTIMIZE_ITERATIONS: usize = 1000;
 
@@ -49,11 +49,7 @@ impl DwaStateSignature {
         // (label, dest_class, weight) triple to the signature.
         let mut outgoing = Vec::with_capacity(st.transitions.len());
         for (&label, &dest) in &st.transitions {
-            let w = st
-                .trans_weights
-                .get(&label)
-                .cloned()
-                .unwrap_or_else(Weight::all);
+            let w = st.trans_weights.get(&label).cloned().unwrap_or_else(Weight::all);
             if w.is_empty() {
                 continue;
             }
@@ -127,7 +123,6 @@ const DWA_PASS_ORDERINGS: &[&[DwaPass]] = &[
     &[DwaPass::PushWeights, DwaPass::Minimize, DwaPass::PruneUnreachable, DwaPass::PruneDeadEnds],
     &[DwaPass::PruneUnreachable, DwaPass::PushWeights, DwaPass::Minimize, DwaPass::PruneDeadEnds],
     &[DwaPass::PruneDeadEnds, DwaPass::PushWeights, DwaPass::Minimize, DwaPass::PruneUnreachable],
-
     &[DwaPass::PruneUnreachable, DwaPass::PruneDeadEnds, DwaPass::Minimize, DwaPass::PushWeights],
     &[DwaPass::PruneUnreachable, DwaPass::PushWeights, DwaPass::PruneDeadEnds, DwaPass::Minimize],
     &[DwaPass::PruneUnreachable, DwaPass::Minimize, DwaPass::PruneDeadEnds, DwaPass::PushWeights],
@@ -193,14 +188,14 @@ impl DWA {
     /// Skips the expensive O(N log N) or O(N^2) state minimization.
     /// Useful for template generation where we just want a clean graph quickly.
     pub fn simplify_lightweight(&mut self) {
-         // PruneDeadEnds, PushWeights, PruneUnreachable
-         let ordering = &[
+        // PruneDeadEnds, PushWeights, PruneUnreachable
+        let ordering = &[
             DwaPass::PruneDeadEnds,
             DwaPass::PushWeights,
             DwaPass::PruneUnreachable,
         ];
 
-        for _ in 0..10 { // Fewer iterations needed for lightweight
+        for _ in 0..10 {
             let mut changed_in_iteration = false;
             for &pass in ordering {
                 let pass_changed = match pass {
@@ -334,10 +329,7 @@ impl DWA {
         }
 
         if !converged {
-            crate::debug!(3,
-                "DWA simplification did not converge after {} iterations. Still changing: {:?}",
-                MAX_OPTIMIZE_ITERATIONS, last_changing_passes
-            );
+            crate::debug!(3, "DWA simplification did not converge after {} iterations. Still changing: {:?}", MAX_OPTIMIZE_ITERATIONS, last_changing_passes);
         }
 
         crate::debug!(6, "[DWA::simplify] Simplification finished. Total changed: {}. Final stats: {}", total_changed, self.stats());
@@ -1012,10 +1004,7 @@ impl NWA {
         }
 
         if !converged {
-            crate::debug!(3,
-                "NWA simplification did not converge after {} iterations. Still changing: {:?}",
-                MAX_OPTIMIZE_ITERATIONS, last_changing_passes
-            );
+            crate::debug!(3, "NWA simplification did not converge after {} iterations. Still changing: {:?}", MAX_OPTIMIZE_ITERATIONS, last_changing_passes);
         }
 
         crate::debug!(6, "[NWA::simplify] Simplification finished. Total changed: {}. Final stats: {}", total_changed, self.stats());
@@ -1057,18 +1046,12 @@ impl NWA {
                     if w.is_empty() {
                         continue;
                     }
-                    eps_map
-                        .entry(to)
-                        .and_modify(|acc| *acc |= w)
-                        .or_insert(w.clone());
+                    eps_map.entry(to).and_modify(|acc| *acc |= w).or_insert(w.clone());
                 }
                 if eps_map.len() != st.epsilons.len() {
                     changed = true;
                 }
-                st.epsilons = eps_map
-                    .into_iter()
-                    .filter(|(_, w)| !w.is_empty())
-                    .collect();
+                st.epsilons = eps_map.into_iter().filter(|(_, w)| !w.is_empty()).collect();
             }
 
             // Compress labeled transitions: per (label, to) aggregate weights by union.
@@ -1080,18 +1063,13 @@ impl NWA {
                         if w.is_empty() {
                             continue;
                         }
-                        per_dest
-                            .entry(to)
-                            .and_modify(|acc| *acc |= w)
-                            .or_insert(w.clone());
+                        per_dest.entry(to).and_modify(|acc| *acc |= w).or_insert(w.clone());
                     }
                     if per_dest.len() != targets.len() {
                         changed = true;
                     }
-                    let merged: Vec<(NWAStateID, Weight)> = per_dest
-                        .into_iter()
-                        .filter(|(_, w)| !w.is_empty())
-                        .collect();
+                    let merged: Vec<(NWAStateID, Weight)> =
+                        per_dest.into_iter().filter(|(_, w)| !w.is_empty()).collect();
                     if !merged.is_empty() {
                         new_transitions.insert(lbl, merged);
                     }
@@ -1127,10 +1105,7 @@ impl NWA {
         let mut final_weights: Vec<Weight> = Vec::with_capacity(n);
         let mut queue: VecDeque<NWAStateID> = VecDeque::new();
         for i in 0..n {
-            let w = self.states.0[i]
-                .final_weight
-                .clone()
-                .unwrap_or_else(Weight::zeros);
+            let w = self.states.0[i].final_weight.clone().unwrap_or_else(Weight::zeros);
             if !w.is_empty() {
                 queue.push_back(i);
             }
@@ -1161,11 +1136,7 @@ impl NWA {
 
         for i in 0..n {
             let new_w = &final_weights[i];
-            let new_final = if new_w.is_empty() {
-                None
-            } else {
-                Some(new_w.clone())
-            };
+            let new_final = if new_w.is_empty() { None } else { Some(new_w.clone()) };
             if self.states.0[i].final_weight != new_final {
                 self.states.0[i].final_weight = new_final;
                 changed = true;

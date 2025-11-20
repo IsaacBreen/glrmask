@@ -14,25 +14,27 @@ use range_set_blaze::RangeSetBlaze;
 use rustfst::algorithms::determinize::{determinize_with_config, DeterminizeConfig, DeterminizeType};
 use rustfst::algorithms::rm_epsilon::rm_epsilon;
 use rustfst::fst_properties::FstProperties;
-use rustfst::prelude::{Tr, EPS_LABEL, StateId, VectorFst, MutableFst, CoreFst, ExpandedFst};
+use rustfst::prelude::{CoreFst, ExpandedFst, MutableFst, StateId, Tr, Trs, VectorFst, EPS_LABEL};
 use rustfst::semirings::{
     DivideType, ReverseBack, SemiringProperties, SerializableSemiring, WeaklyDivisibleSemiring, WeightQuantize,
 };
-use rustfst::{NomCustomError, Semiring, Trs};
+use rustfst::{NomCustomError, Semiring};
 use std::borrow::Borrow;
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::sync::{Arc, Mutex};
 
-
+#[inline]
 fn _label_to_fst_label(label: Label) -> u32 {
     (label as isize - Label::MIN as isize + 1) as u32
-    // (label as Label - Label::MIN as Label) as u32 + 1
 }
+
+#[inline]
 fn _fst_label_to_label(label: u32) -> Label {
     (label as isize + Label::MIN as isize - 1) as Label
-    // ((label - 1) as Label + Label::MIN as Label) as Label
 }
+
+#[inline]
 fn fst_label_to_label(label: u32) -> Label {
     assert_ne!(label, 0);
     let result = _fst_label_to_label(label);
@@ -40,6 +42,8 @@ fn fst_label_to_label(label: u32) -> Label {
     assert!(label == remapped, "label: {}, result: {}, remapped: {}", label, result, remapped);
     result
 }
+
+#[inline]
 fn label_to_fst_label(label: Label) -> u32 {
     let result = _label_to_fst_label(label);
     assert_ne!(result, 0);
@@ -48,8 +52,7 @@ fn label_to_fst_label(label: Label) -> u32 {
     result
 }
 
-static WEIGHT_INTERNER: Lazy<Mutex<HashSet<Arc<Weight>>>> =
-    Lazy::new(|| Mutex::new(HashSet::new()));
+static WEIGHT_INTERNER: Lazy<Mutex<HashSet<Arc<Weight>>>> = Lazy::new(|| Mutex::new(HashSet::new()));
 
 fn intern_weight(weight: Weight) -> Arc<Weight> {
     let mut interner = WEIGHT_INTERNER.lock().unwrap();

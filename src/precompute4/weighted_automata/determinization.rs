@@ -7,10 +7,10 @@ use chrono::Local;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
-use crate::precompute4::test_weighted_automata;
-use super::common::{DETERMINIZE_DEBUG, NWAStateID, Weight, Label};
+use super::common::{DETERMINIZE_DEBUG, Label, NWAStateID, Weight};
 use super::dwa::DWA;
 use super::nwa::{NWA, NWAStates};
+use crate::precompute4::test_weighted_automata;
 
 type WeightedSubset = BTreeMap<NWAStateID, Weight>;
 type ClosureMap = BTreeMap<NWAStateID, Weight>;
@@ -321,10 +321,7 @@ impl NWA {
             dwa
         } else {
             const STATE_LIMIT: usize = usize::MAX;
-            crate::debug!(
-                5,
-                "Determinization: Using general-purpose subset construction (fast-path not taken)."
-            );
+            crate::debug!(5, "Determinization: Using general-purpose subset construction (fast-path not taken).");
 
             if self.states.0.is_empty() || self.body.start_state >= self.states.len() {
                 DWA::new()
@@ -357,12 +354,7 @@ impl NWA {
                     if det.seen.len() > STATE_LIMIT {
                         let timestamp = Local::now().format("%Y%m%d-%H%M%S");
                         let filename = format!("nwa_dump_{}.json", timestamp);
-                        crate::debug!(
-                            5,
-                            "Determinization state limit ({}) exceeded. Dumping NWA to {} and panicking.",
-                            STATE_LIMIT,
-                            filename
-                        );
+                        crate::debug!(5, "Determinization state limit ({}) exceeded. Dumping NWA to {} and panicking.", STATE_LIMIT, filename);
                         let f = std::fs::File::create(&filename).expect("Unable to create dump file");
                         serde_json::to_writer(f, self).expect("Unable to write NWA to file");
                         panic!("Determinization aborted after reaching {} states.", STATE_LIMIT);

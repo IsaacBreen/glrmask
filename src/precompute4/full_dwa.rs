@@ -1,29 +1,20 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
-use std::env;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use chrono::Local;
 use kdam::{tqdm, BarExt};
 
-use crate::constraint::{
-    LLMTokenBV, PrecomputeNode1Index, Trie1GodWrapper,
-};
+use crate::constraint::{LLMTokenBV, PrecomputeNode1Index, Trie1GodWrapper};
 use crate::datastructures::trie::Trie2Index;
 use crate::glr::parser::GLRParser;
-use crate::precompute4::nwa_optimizations::{
-    prune_continuations_from_final_states, simplify_default_transitions,
-};
-use crate::precompute4::resolve_negatives::{
-    apply_cancellations, apply_finality_fixpoint, remove_negative_transitions,
-};
-use crate::precompute4::template_nwa::{
-    build_ignore_terminal_dwa, build_template_dwas,
-};
+use crate::precompute4::nwa_optimizations::{prune_continuations_from_final_states, simplify_default_transitions};
+use crate::precompute4::resolve_negatives::{apply_cancellations, apply_finality_fixpoint, remove_negative_transitions};
+use crate::precompute4::template_nwa::{build_ignore_terminal_dwa, build_template_dwas};
 use crate::precompute4::weighted_automata::{
-    common::Label, determinization_rustfst::determinize_nwa_to_dwa, DWA, NWA, NWABody,
-    NWAStateID, NWAStates, SimpleBitset, StateID, Weight,
+    common::Label, determinization_rustfst::determinize_nwa_to_dwa, DWA, NWA, NWABody, NWAStateID, NWAStates, SimpleBitset,
+    StateID, Weight,
 };
 use crate::tokenizer::TokenizerStateID;
 use crate::types::{TerminalID, TerminalID as GrammarTokenID};
@@ -36,10 +27,7 @@ struct SimplifyRustfstConfig {
 
 impl SimplifyRustfstConfig {
     fn default() -> Self {
-        Self {
-            rm_epsilon: false,
-            determinize: false,
-        }
+        Self { rm_epsilon: false, determinize: false }
     }
     fn with_rm_epsilon(mut self, val: bool) -> Self {
         self.rm_epsilon = val;
@@ -48,15 +36,9 @@ impl SimplifyRustfstConfig {
 }
 
 impl NWA {
-    pub fn determinize_to_dwa_with_rustfst(&self) -> DWA {
-        determinize_nwa_to_dwa(self)
-    }
-    pub fn simplify_rustfst(&mut self) {
-        self.simplify();
-    }
-    pub fn simplify_rustfst_with_config(&mut self, _config: SimplifyRustfstConfig) {
-        self.simplify();
-    }
+    pub fn determinize_to_dwa_with_rustfst(&self) -> DWA { determinize_nwa_to_dwa(self) }
+    pub fn simplify_rustfst(&mut self) { self.simplify(); }
+    pub fn simplify_rustfst_with_config(&mut self, _config: SimplifyRustfstConfig) { self.simplify(); }
 }
 
 // Re-export for backward compatibility
@@ -89,9 +71,7 @@ impl NWA {
             // Reverse labeled transitions: u -> v becomes v -> u
             for (label, targets) in &state.transitions {
                 for (v, w) in targets {
-                    reversed
-                        .add_transition(*v, *label, u, w.clone())
-                        .unwrap();
+                    reversed.add_transition(*v, *label, u, w.clone()).unwrap();
                 }
             }
             // Reverse epsilon transitions
@@ -151,11 +131,7 @@ impl NWA {
             }
         }
 
-        NwaTraversalData {
-            comp_id,
-            sccs,
-            topo,
-        }
+        NwaTraversalData { comp_id, sccs, topo }
     }
 }
 
@@ -251,10 +227,7 @@ pub fn nwa_special_map<V, U, I>(
     let mut stopped_nodes: HashSet<StateID> = HashSet::new();
 
     for (state, v) in initial_values {
-        values
-            .entry(state)
-            .and_modify(|old| merge(old, v.clone()))
-            .or_insert(v);
+        values.entry(state).and_modify(|old| merge(old, v.clone())).or_insert(v);
     }
 
     let mut in_queue = HashSet::new();
@@ -311,16 +284,11 @@ pub fn nwa_special_map<V, U, I>(
                     if stopped_nodes.contains(&v) {
                         continue;
                     }
-                    values
-                        .entry(v)
-                        .and_modify(|old| merge(old, new_v.clone()))
-                        .or_insert(new_v);
+                    values.entry(v).and_modify(|old| merge(old, new_v.clone())).or_insert(new_v);
 
-                    if traversal_data.comp_id[v] == scc_idx {
-                        if !in_queue.contains(&v) {
-                            local_queue.push_back(v);
-                            in_queue.insert(v);
-                        }
+                    if traversal_data.comp_id[v] == scc_idx && !in_queue.contains(&v) {
+                        local_queue.push_back(v);
+                        in_queue.insert(v);
                     }
                 }
             }
@@ -332,26 +300,19 @@ pub fn nwa_special_map<V, U, I>(
                     if stopped_nodes.contains(&v) {
                         continue;
                     }
-                    values
-                        .entry(v)
-                        .and_modify(|old| merge(old, new_v.clone()))
-                        .or_insert(new_v);
+                    values.entry(v).and_modify(|old| merge(old, new_v.clone())).or_insert(new_v);
 
-                    if traversal_data.comp_id[v] == scc_idx {
-                        if !in_queue.contains(&v) {
-                            local_queue.push_back(v);
-                            in_queue.insert(v);
-                        }
+                    if traversal_data.comp_id[v] == scc_idx && !in_queue.contains(&v) {
+                        local_queue.push_back(v);
+                        in_queue.insert(v);
                     }
                 }
             }
 
             // Fixpoint check: if new values arrived at u while processing
-            if values.contains_key(&u) && !stopped_nodes.contains(&u) {
-                if !in_queue.contains(&u) {
-                    local_queue.push_back(u);
-                    in_queue.insert(u);
-                }
+            if values.contains_key(&u) && !stopped_nodes.contains(&u) && !in_queue.contains(&u) {
+                local_queue.push_back(u);
+                in_queue.insert(u);
             }
         }
     }
@@ -376,10 +337,7 @@ impl SignatureIndex {
                 count += 1;
             }
         }
-        Self {
-            term_to_group: map,
-            total_terms: count,
-        }
+        Self { term_to_group: map, total_terms: count }
     }
 
     fn get_group(&self, term: &Option<TerminalID>) -> Option<usize> {
@@ -457,9 +415,7 @@ fn specialize_dwa_relative(parent_dwa: &DWA, mapping: &[Weight]) -> DWA {
             *tw = map_weight(tw);
         }
         state.trans_weights.retain(|_, w| !w.is_empty());
-        state
-            .transitions
-            .retain(|k, _| state.trans_weights.contains_key(k));
+        state.transitions.retain(|k, _| state.trans_weights.contains_key(k));
     }
 
     specialized_dwa
@@ -494,8 +450,7 @@ fn convert_node_to_nwa(
             let child_sid = convert_node_to_nwa(child_idx, god, nwa, cache);
             let trans_w: Weight = edge_bv.into();
             if let Some(label) = edge_key {
-                nwa.add_transition(sid, label.0 as Label, child_sid, trans_w)
-                    .unwrap();
+                nwa.add_transition(sid, label.0 as Label, child_sid, trans_w).unwrap();
             } else {
                 nwa.add_epsilon(sid, child_sid, trans_w);
             }
@@ -517,32 +472,25 @@ pub fn convert_precompute1_to_nwa(
 
     for (sid, root_idx) in precomputed1 {
         let root_state = convert_node_to_nwa(*root_idx, trie1_god, &mut nwa, &mut node_cache);
-        nwa.add_transition(start_state, sid.0 as Label, root_state, Weight::all())
-            .unwrap();
+        nwa.add_transition(start_state, sid.0 as Label, root_state, Weight::all()).unwrap();
     }
     nwa
 }
 
-fn canonicalize_bundle(
-    terminal_map: BTreeMap<Option<TerminalID>, Weight>,
-) -> (Signature, Vec<Weight>) {
+fn canonicalize_bundle(terminal_map: BTreeMap<Option<TerminalID>, Weight>) -> (Signature, Vec<Weight>) {
     let mut weight_groups: HashMap<Weight, Vec<Option<TerminalID>>> = HashMap::new();
     for (term, weight) in terminal_map {
         if !weight.is_empty() {
             weight_groups.entry(weight).or_default().push(term);
         }
     }
-    let mut groups_vec: Vec<(Weight, Vec<Option<TerminalID>>)> =
-        weight_groups.into_iter().collect();
+    let mut groups_vec: Vec<(Weight, Vec<Option<TerminalID>>)> = weight_groups.into_iter().collect();
     for (_, terms) in &mut groups_vec {
         terms.sort();
     }
     groups_vec.sort_by(|a, b| a.1.cmp(&b.1));
 
-    let signature: Vec<Vec<Option<TerminalID>>> = groups_vec
-        .iter()
-        .map(|(_, terms)| terms.clone())
-        .collect();
+    let signature: Vec<Vec<Option<TerminalID>>> = groups_vec.iter().map(|(_, terms)| terms.clone()).collect();
     let concrete_weights: Vec<Weight> = groups_vec.into_iter().map(|(w, _)| w).collect();
     (signature, concrete_weights)
 }
@@ -554,7 +502,6 @@ fn canonicalize_bundle(
 pub fn precompute4(
     parser: &GLRParser,
     input_nwa: &NWA,
-    // Argument kept for compatibility if needed, though unused in this version
     _max_llm_token_id: usize,
 ) -> DWA {
     crate::debug!(3, "Starting precompute4 (DWA construction)");
@@ -566,16 +513,9 @@ pub fn precompute4(
         Err(e) => panic!("Failed to build template DWAs: {:?}", e),
     };
     let ignore_dwa = build_ignore_terminal_dwa();
-    crate::debug!(
-        3,
-        "Built {} template DWAs in {:?}",
-        template_dwas.len(),
-        now.elapsed()
-    );
+    crate::debug!(3, "Built {} template DWAs in {:?}", template_dwas.len(), now.elapsed());
 
     // 2. Reverse NWA for backward propagation
-    // In the original logic, we propagated from "End" (leaf of Trie) backwards.
-    // In NWA, states with `final_weight` are the "End".
     let reversed_nwa = input_nwa.reverse();
     let traversal_data = reversed_nwa.compute_traversal_data();
 
@@ -590,26 +530,17 @@ pub fn precompute4(
 
     // Pass 1: Token propagation and Signature collection
     let start_pass1 = Instant::now();
-    let (node_tokens, unique_signatures) = precompute_token_bvs_and_signatures(
-        &reversed_nwa,
-        &traversal_data,
-        initial_values_bv,
-    );
-    crate::debug!(
-        3,
-        "Pass 1: Tokens & Signatures ({} sigs, {:.2?})",
-        unique_signatures.len(),
-        start_pass1.elapsed()
-    );
+    let (node_tokens, unique_signatures) =
+        precompute_token_bvs_and_signatures(&reversed_nwa, &traversal_data, initial_values_bv);
+    crate::debug!(3, "Pass 1: Tokens & Signatures ({} sigs, {:.2?})", unique_signatures.len(), start_pass1.elapsed());
 
     // 3. Build Super DWA / Template Derivation Pool
 
-    // 3. Build Super DWA / Template Derivation Pool
     let mut used_terminals: BTreeSet<TerminalID> = BTreeSet::new();
     for sig in &unique_signatures {
         for group in sig {
-            for term_opt in group {
-                if let Some(term) = term_opt {
+            for term in group {
+                if let Some(term) = term {
                     used_terminals.insert(*term);
                 }
             }
@@ -654,12 +585,7 @@ pub fn precompute4(
         super_nwa_states.add_epsilon(super_nwa_start, start, Weight::all());
     }
 
-    let mut super_nwa = NWA {
-        states: super_nwa_states,
-        body: NWABody {
-            start_state: super_nwa_start,
-        },
-    };
+    let mut super_nwa = NWA { states: super_nwa_states, body: NWABody { start_state: super_nwa_start } };
     super_nwa.simplify();
     let mut super_dwa = super_nwa.determinize_to_dwa();
     super_dwa.simplify();
@@ -693,8 +619,7 @@ pub fn precompute4(
                 }
             }
         }
-        let (parent_idx, mapping) = best_parent
-            .expect("Super signature should always be a valid parent");
+        let (parent_idx, mapping) = best_parent.expect("Super signature should always be a valid parent");
         let parent_dwa = &pool[parent_idx].1;
         let mut derived_dwa = specialize_dwa_relative(parent_dwa, &mapping);
         derived_dwa.simplify();
@@ -712,18 +637,14 @@ pub fn precompute4(
         states[start].final_weight = Some(Weight::all());
         NWABody { start_state: start }
     };
-    let initial_term_map: BTreeMap<Option<TerminalID>, Weight> =
-        BTreeMap::from([(None, Weight::all())]);
+    let initial_term_map: BTreeMap<Option<TerminalID>, Weight> = BTreeMap::from([(None, Weight::all())]);
     let initial_body_map_full = BTreeMap::from([(initial_nwa_body, initial_term_map)]);
 
     let mut initial_values_full = Vec::new();
     for (id, state) in input_nwa.states.0.iter().enumerate() {
         if state.final_weight.is_some() {
             if let Some(tokens) = node_tokens.get(&id) {
-                initial_values_full.push((
-                    id,
-                    (initial_body_map_full.clone(), tokens.clone()),
-                ));
+                initial_values_full.push((id, (initial_body_map_full.clone(), tokens.clone())));
             }
         }
     }
@@ -749,17 +670,14 @@ pub fn precompute4(
         &traversal_data,
         initial_values_full,
         // step
-        |current_val: &(BTreeMap<NWABody, BTreeMap<Option<TerminalID>, Weight>>, LLMTokenBV), edge_label, transitions| {
+        |current_val: &(BTreeMap<NWABody, BTreeMap<Option<TerminalID>, Weight>>, LLMTokenBV),
+         edge_label,
+         transitions| {
             let (current_bodies, current_tokens) = current_val;
-            // Convert i32 label back to TerminalID
             let terminal_id = edge_label.map(|l| TerminalID(l as usize));
             let mut results = Vec::new();
 
-            // In reversed NWA, transitions are (source, weight) but variable name is dest_id.
-            // Meaning edge u->v in original is v->u in reversed.
-            // transitions contains the 'u's.
             for (dest_id, weight) in transitions {
-                // weight corresponds to edge_bv
                 let edge_bv_tokens: LLMTokenBV = weight.clone().into();
                 let next_tokens = current_tokens & &edge_bv_tokens;
                 if next_tokens.is_empty() {
@@ -783,9 +701,7 @@ pub fn precompute4(
             for (right_body, term_map2) in bodies2 {
                 let term_map1 = bodies1.entry(right_body).or_default();
                 for (term, weight2) in term_map2 {
-                    *term_map1
-                        .entry(term)
-                        .or_insert_with(Weight::zeros) |= &weight2;
+                    *term_map1.entry(term).or_insert_with(Weight::zeros) |= &weight2;
                 }
             }
             *tokens1 |= &tokens2;
@@ -801,26 +717,15 @@ pub fn precompute4(
 
             for (right_body, terminal_map) in nwa_bodies_map {
                 let (signature, concrete_weights) = canonicalize_bundle(terminal_map);
-                let template_nwa = template_cache
-                    .get(&signature)
-                    .expect("Template must exist");
+                let template_nwa = template_cache.get(&signature).expect("Template must exist");
 
                 let mut states = states_arena.borrow_mut();
-                let (left_body_start, remap) = instantiate_nwa_template_into_arena(
-                    template_nwa,
-                    &concrete_weights,
-                    &mut states,
-                );
+                let (left_body_start, remap) =
+                    instantiate_nwa_template_into_arena(template_nwa, &concrete_weights, &mut states);
                 let new_states_filter: HashSet<NWAStateID> = remap.values().cloned().collect();
-                let left_body = NWABody {
-                    start_state: left_body_start,
-                };
-                let composed_body = NWA::_concatenate_components(
-                    &mut states,
-                    &left_body,
-                    &right_body,
-                    &Weight::all(),
-                );
+                let left_body = NWABody { start_state: left_body_start };
+                let composed_body =
+                    NWA::_concatenate_components(&mut states, &left_body, &right_body, &Weight::all());
 
                 if !new_states_filter.is_empty() {
                     apply_cancellations(&mut states, &new_states_filter);
@@ -830,7 +735,6 @@ pub fn precompute4(
                 nwa_body = NWA::union_components(&mut states, &nwa_body, &composed_body);
             }
 
-            // Capture results if this node is a root for a tokenizer state
             if !tokens.is_empty() {
                 if let Some(tok_ids) = root_to_tok.get(&node_idx) {
                     let mut fb = final_bodies_arc.lock().unwrap();
@@ -851,30 +755,17 @@ pub fn precompute4(
     crate::debug!(3, "Finished Pass 2");
 
     // Combine collected final bodies
-    let final_bodies = Arc::try_unwrap(final_bodies_arc)
-        .unwrap()
-        .into_inner()
-        .unwrap();
+    let final_bodies = Arc::try_unwrap(final_bodies_arc).unwrap().into_inner().unwrap();
 
     let mut combined_nwa_states = states_arena.into_inner();
     let combined_start_state = combined_nwa_states.add_state();
     for (tok_id, body) in final_bodies {
         let label = tok_id.0 as Label;
         combined_nwa_states
-            .add_transition(
-                combined_start_state,
-                label,
-                body.start_state,
-                Weight::all(),
-            )
+            .add_transition(combined_start_state, label, body.start_state, Weight::all())
             .unwrap();
     }
-    let combined_nwa = NWA {
-        states: combined_nwa_states,
-        body: NWABody {
-            start_state: combined_start_state,
-        },
-    };
+    let combined_nwa = NWA { states: combined_nwa_states, body: NWABody { start_state: combined_start_state } };
 
     let final_dwa = resolve_negatives_and_optimize_and_determinize(parser, combined_nwa);
     crate::debug!(3, "Precomputation complete");
@@ -886,8 +777,7 @@ fn precompute_token_bvs_and_signatures(
     traversal_data: &NwaTraversalData,
     initial_values: Vec<(StateID, LLMTokenBV)>,
 ) -> (HashMap<StateID, LLMTokenBV>, HashSet<Signature>) {
-    let node_tokens: Arc<Mutex<HashMap<StateID, LLMTokenBV>>> =
-        Arc::new(Mutex::new(HashMap::new()));
+    let node_tokens: Arc<Mutex<HashMap<StateID, LLMTokenBV>>> = Arc::new(Mutex::new(HashMap::new()));
     let signatures: Arc<Mutex<HashSet<Signature>>> = Arc::new(Mutex::new(HashSet::new()));
 
     nwa_special_map(
@@ -915,10 +805,7 @@ fn precompute_token_bvs_and_signatures(
             node_tokens.lock().unwrap().insert(node_id, tokens.clone());
 
             // Collect signatures from outgoing edges in reversed nwa
-            let mut bundles_by_dest: HashMap<
-                StateID,
-                BTreeMap<Option<TerminalID>, Weight>,
-            > = HashMap::new();
+            let mut bundles_by_dest: HashMap<StateID, BTreeMap<Option<TerminalID>, Weight>> = HashMap::new();
             let state = &reversed_nwa.states[node_id];
 
             for (label, targets) in &state.transitions {
@@ -928,10 +815,7 @@ fn precompute_token_bvs_and_signatures(
                     let combined = &tokens & &edge_bv;
                     if !combined.is_empty() {
                         let w_weight = Weight::from_rsb(edge_bv.inner.as_ref().clone());
-                        bundles_by_dest
-                            .entry(*v)
-                            .or_default()
-                            .insert(term, w_weight);
+                        bundles_by_dest.entry(*v).or_default().insert(term, w_weight);
                     }
                 }
             }
@@ -940,10 +824,7 @@ fn precompute_token_bvs_and_signatures(
                 let combined = &tokens & &edge_bv;
                 if !combined.is_empty() {
                     let w_weight = Weight::from_rsb(edge_bv.inner.as_ref().clone());
-                    bundles_by_dest
-                        .entry(*v)
-                        .or_default()
-                        .insert(None, w_weight);
+                    bundles_by_dest.entry(*v).or_default().insert(None, w_weight);
                 }
             }
 
@@ -957,14 +838,8 @@ fn precompute_token_bvs_and_signatures(
         },
     );
 
-    let final_tokens = Arc::try_unwrap(node_tokens)
-        .unwrap()
-        .into_inner()
-        .unwrap();
-    let final_sigs = Arc::try_unwrap(signatures)
-        .unwrap()
-        .into_inner()
-        .unwrap();
+    let final_tokens = Arc::try_unwrap(node_tokens).unwrap().into_inner().unwrap();
+    let final_sigs = Arc::try_unwrap(signatures).unwrap().into_inner().unwrap();
     (final_tokens, final_sigs)
 }
 

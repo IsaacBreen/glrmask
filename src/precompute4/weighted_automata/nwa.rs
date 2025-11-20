@@ -5,12 +5,12 @@
 
 use super::common::{format_i16_char, Label, NWAStateID, Weight, BENCHMARK_DEBUG};
 use super::dwa::DWA;
+use crate::precompute4::weighted_automata::determinization_rustfst::determinize_nwa_to_dwa;
+use crate::precompute4::weighted_automata::StateID;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fmt::{self, Display, Formatter};
 use std::ops::{Index, IndexMut};
-use crate::precompute4::weighted_automata::determinization_rustfst::determinize_nwa_to_dwa;
-use crate::precompute4::weighted_automata::StateID;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NWABuildError {
@@ -446,14 +446,7 @@ impl NWA {
             let t3_marker = if t3 == best_t { "*" } else { " " };
 
             if t1 + t2 + t3 > std::time::Duration::from_secs(1) {
-                crate::debug!(
-                    4,
-                    "[Determinize NWA({})] Internal: t={:.2?}{}, s={}->{}{}| Rust: t={:.2?}{}, s={}->{}{}| RustFST: t={:.2?}{}, s={}->{}{}",
-                    initial_states,
-                    t1, t1_marker, internal_states_before_simp, s1, s1_marker,
-                    t2, t2_marker, rust_states_before_simp, s2, s2_marker,
-                    t3, t3_marker, rustfst_states_before_simp, s3, s3_marker
-                );
+                crate::debug!(4, "[Determinize NWA({})] Internal: t={:.2?}{}, s={}->{}{}| Rust: t={:.2?}{}, s={}->{}{}| RustFST: t={:.2?}{}, s={}->{}{}", initial_states, t1, t1_marker, internal_states_before_simp, s1, s1_marker, t2, t2_marker, rust_states_before_simp, s2, s2_marker, t3, t3_marker, rustfst_states_before_simp, s3, s3_marker);
             }
 
             internal_dwa
