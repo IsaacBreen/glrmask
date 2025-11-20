@@ -479,7 +479,7 @@ impl DWA {
         self.body.start_state = new_start;
     }
 
-    fn prune_unreachable(&mut self) -> bool {
+    pub fn prune_unreachable(&mut self) -> bool {
         let n = self.states.len();
         if n == 0 {
             return false;
@@ -545,7 +545,7 @@ impl DWA {
         true
     }
 
-    fn prune_dead_ends(&mut self) -> bool {
+    pub fn prune_dead_ends(&mut self) -> bool {
         let n = self.states.len();
         if n == 0 {
             return false;
