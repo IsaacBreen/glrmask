@@ -26,12 +26,26 @@ use std::sync::{Arc, Mutex};
 
 
 fn _label_to_fst_label(label: Label) -> u32 {
-    // (((label as isize) - (Label::MIN as isize)) + 1) as u32
-    (label as Label - Label::MIN as Label) as u32 + 1
+    let label = label as isize;
+    if label < 0 {
+        assert_ne!(label, -1);
+        (Label::MAX as isize + label + 1) as u32
+    } else if label == Label::MAX as isize {
+        u32::MAX
+    } else {
+        (label + 1) as u32
+    }
 }
 fn _fst_label_to_label(label: u32) -> Label {
-    // (label as isize + Label::MIN as isize - 1) as Label
-    ((label - 1) as Label + Label::MIN as Label) as Label
+    if label == u32::MAX {
+        return Label::MAX;
+    }
+    assert_ne!(label, 0);
+    if label <= Label::MAX as u32 {
+        return (label as i32) - 1;
+    }
+    let original = label as i64 - (Label::MAX as i64 + 1);
+    original as Label
 }
 fn fst_label_to_label(label: u32) -> Label {
     assert_ne!(label, 0);
