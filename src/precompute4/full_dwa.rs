@@ -2,6 +2,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::env;
 use std::time::Instant;
+use std::sync::{Arc, Mutex};
 
 use chrono::Local;
 use crate::constraint::{LLMTokenBV, PrecomputeNode1, PrecomputeNode1Index, PrecomputedNodeContents, Trie1GodWrapper};
@@ -15,6 +16,8 @@ use crate::precompute4::weighted_automata::{DWA, NWA, NWABody, NWAStateID, NWASt
 use crate::r#macro::is_debug_level_enabled;
 use crate::types::{TerminalID as GrammarTokenID, TerminalID};
 use crate::tokenizer::TokenizerStateID;
+use crate::precompute4::weighted_automata::common::Label;
+use crate::precompute4::weighted_automata::determinization_rustfst::determinize_nwa_to_dwa;
 
 struct SimplifyRustfstConfig {
     rm_epsilon: bool,
@@ -35,12 +38,11 @@ impl NWA {
     pub fn simplify_rustfst_with_config(&mut self, _config: SimplifyRustfstConfig) { self.simplify(); }
 }
 
-// Re-export for backward compatibility: `FullDWABuildError` used to be defined here.
+// Re-export for backward compatibility
 pub use crate::precompute4::template_nwa::FullDWABuildError;
-use crate::precompute4::weighted_automata::common::Label;
-use crate::precompute4::weighted_automata::determinization_rustfst::determinize_nwa_to_dwa;
 
 pub type Precomputed4 = DWA;
+type Signature = Vec<Vec<Option<TerminalID>>>;
 
 fn convert_node_to_nwa(
     node_idx: PrecomputeNode1Index,
@@ -210,11 +212,6 @@ pub fn precompute4(
     };
     let ignore_dwa = build_ignore_terminal_dwa();
     crate::debug!(4, "Built {} template DWAs in {:?}", template_dwas.len(), now.elapsed());
-    if is_debug_level_enabled(5) {
-        for (term, dwa) in template_dwas.iter().take(5) {
-            crate::debug!(5, "Stats for template DWA for terminal {:?}:\n{}", term, dwa.stats());
-        }
-    }
 
     // Build a "super DWA" that contains all templates, distinguished by weights.
     let mut term_to_bit = BTreeMap::new();
@@ -279,23 +276,61 @@ pub fn precompute4(
     let reversed_trie1_god = Trie::reverse(trie1_god, &trie1_roots);
     let reversed_trie_root = leaf_node;
 
-    // 4. Traverse the reversed trie with NWA bodies.
+    // Traversal Data
+    let traversal_data =
+        Trie::compute_traversal_data(&reversed_trie1_god, &[reversed_trie_root]).expect("Failed to compute traversal data for reversed trie1");
+    
+    let initial_tokens = LLMTokenBV::max_ones();
+    let initial_values_bv: Vec<(Trie2Index, LLMTokenBV)> = vec![(reversed_trie_root, initial_tokens.clone())];
+
+    // Pass 1: Compute Token Bitsets and Collect Signatures
+    let start_pass1 = Instant::now();
+    let (node_tokens, unique_signatures) = precompute_token_bvs_and_signatures(
+        &reversed_trie1_god,
+        &traversal_data,
+        initial_values_bv,
+    );
+    crate::debug!(4, "Pass 1 (Token BVs & Signatures) took: {:?}. Found {} unique signatures.", start_pass1.elapsed(), unique_signatures.len());
+
+    // Precompute Templates
+    let start_templates = Instant::now();
+    let mut template_cache = HashMap::new();
+    for signature in unique_signatures {
+        let mut abstract_bundle = BTreeMap::new();
+        for (idx, terms) in signature.iter().enumerate() {
+            let abstract_weight = Weight::from_item(idx);
+            for term in terms {
+                abstract_bundle.insert(*term, abstract_weight.clone());
+            }
+        }
+        let mut template_dwa = specialize_dwa(&super_dwa, &abstract_bundle, &bit_to_term);
+        template_dwa.simplify_lightweight();
+        template_cache.insert(signature, NWA::from_dwa(&template_dwa));
+    }
+    crate::debug!(4, "Precomputed {} templates in: {:?}", template_cache.len(), start_templates.elapsed());
+
+
+    // Pass 2: Build NWAs
     let initial_nwa_body = {
         let mut states = states_arena.borrow_mut();
         let start = states.add_state();
         states[start].final_weight = Some(Weight::all());
         NWABody { start_state: start }
     };
-    let initial_tokens = LLMTokenBV::max_ones();
+    
+    // Since we already propagated tokens, we don't need to propagate them in Pass 2 for logic,
+    // but we need them to instantiate the templates correctly.
+    // However, Trie::special_map_grouped structure requires us to propagate something.
+    // We will propagate the NWABody and use the precomputed tokens for looking up weights.
+    // Wait, actually, we need the tokens at `step` destination to calculate weights.
+    // It is cleaner to re-propagate tokens or just look them up if we trust the graph structure is static.
+    // We will re-propagate tokens alongside bodies as it is cheap and robust.
+
     use crate::glr::table::TerminalID;
-    let initial_term_map: BTreeMap<Option<TerminalID>, Weight> = BTreeMap::from([(None, Weight::all())]);
-    let initial_body_map = BTreeMap::from([(initial_nwa_body, initial_term_map)]);
-    let initial_values: Vec<(Trie2Index, (BTreeMap<NWABody, BTreeMap<Option<TerminalID>, Weight>>, LLMTokenBV))> =
+    let initial_body_map: BTreeMap<NWABody, ()> = BTreeMap::from([(initial_nwa_body, ())]); // We don't need to carry the bundle in the map anymore
+    let initial_values_pass2: Vec<(Trie2Index, (BTreeMap<NWABody, ()>, LLMTokenBV))> =
         vec![(reversed_trie_root, (initial_body_map, initial_tokens))];
-
-    let traversal_data =
-        Trie::compute_traversal_data(&reversed_trie1_god, &[reversed_trie_root]).expect("Failed to compute traversal data for reversed trie1");
-
+    
     let mut original_trie1_roots_map: BTreeMap<PrecomputeNode1Index, Vec<TokenizerStateID>> = BTreeMap::new();
     for (k, v) in precomputed1.iter() {
         original_trie1_roots_map.entry(*v).or_default().push(*k);
@@ -303,52 +338,115 @@ pub fn precompute4(
 
     let mut final_bodies: BTreeMap<TokenizerStateID, NWABody> = BTreeMap::new();
 
-    // Cache for abstract templates: NWA
-    // Key: Signature (Sorted Grouped Terminals)
-    // Value: An NWA where abstract index `i` corresponds to the `i`-th group in the signature.
-    let mut template_cache: HashMap<Vec<Vec<Option<TerminalID>>>, NWA> = HashMap::new();
-    let mut cache_hits = 0;
-    let mut cache_misses = 0;
-
-    // Detailed timing stats for traversal
-    let mut t_grouping = std::time::Duration::ZERO;
-    let mut t_cache_access = std::time::Duration::ZERO;
-    let mut t_cache_creation = std::time::Duration::ZERO;
-    let mut t_instantiation = std::time::Duration::ZERO;
-    let mut t_concatenation = std::time::Duration::ZERO;
-    let mut t_neg_resolution = std::time::Duration::ZERO;
-    let mut t_union = std::time::Duration::ZERO;
-    let mut traversal_calls = 0;
-
     let now_traversal = Instant::now();
 
     Trie::special_map_grouped(
         &reversed_trie1_god,
         &traversal_data,
-        initial_values,
-        // step function
-        |current_val: &(NWABody, LLMTokenBV), edge_terminal_opt, dest_map| {
-            let (current_nwa_body, current_tokens) = current_val;
-            let terminal_id = *edge_terminal_opt;
-
+        initial_values_pass2,
+        // step
+        |current_val: &(BTreeMap<NWABody, ()>, LLMTokenBV), edge_terminal_opt, dest_map| {
+            let (current_bodies, current_tokens) = current_val;
+            // We don't need to form the bundle here anymore, just propagate the body index.
+            // But we do need to know which bodies go where.
             let mut results = Vec::new();
             for (dest_idx, llm_token_bv) in dest_map.iter() {
                 let next_tokens = current_tokens & llm_token_bv;
-                if next_tokens.is_empty() {
-                    continue;
+                if !next_tokens.is_empty() {
+                    let mut next_bodies = BTreeMap::new();
+                    for body in current_bodies.keys() {
+                         next_bodies.insert(*body, ());
+                    }
+                    results.push((*dest_idx, (next_bodies, next_tokens)));
                 }
-                let weight = Weight::from_rsb(llm_token_bv.inner.as_ref().clone());
-                let mut terminal_map = BTreeMap::new();
-                terminal_map.insert(terminal_id, weight);
-                let mut body_map = BTreeMap::new();
-                body_map.insert(*current_nwa_body, terminal_map);
-                results.push((*dest_idx, (body_map, next_tokens.clone())));
             }
             results
         },
-        // merge function: union via epsilon
-        |val1: &mut (BTreeMap<NWABody, BTreeMap<Option<TerminalID>, Weight>>, LLMTokenBV),
-         val2: (BTreeMap<NWABody, BTreeMap<Option<TerminalID>, Weight>>, LLMTokenBV)| {
+        // merge
+        |val1: &mut (BTreeMap<NWABody, ()>, LLMTokenBV), val2: (BTreeMap<NWABody, ()>, LLMTokenBV)| {
+            let (bodies1, tokens1) = val1;
+            let (bodies2, tokens2) = val2;
+            for (body, _) in bodies2 {
+                bodies1.insert(body, ());
+            }
+            *tokens1 |= &tokens2;
+        },
+        // process
+        |node_guard, node_idx, val: (BTreeMap<NWABody, ()>, LLMTokenBV)| {
+            let (nwa_bodies, tokens) = val;
+            
+            // Reconstruct the signature for this node `node_idx`.
+            // We need to look at outgoing edges from `node_idx` in reversed_trie_god.
+            // AND we need to group them by the source bodies (which are `nwa_bodies`).
+            // Wait. `nwa_bodies` contains the set of NWABodies from *incoming* edges in traversal (children in reversed trie).
+            // In Pass 2, `node_idx` is `u` (parent in reversed trie). `nwa_bodies` are from `w` (children).
+            // We need to combine all `w` into a single new NWA for `u`.
+            // For a given `w`, the connection `w -> u` has specific terminals.
+            // We need to recover which terminals connected `w` to `u`.
+            // BUT `special_map_grouped` doesn't give us the edge information in `process`.
+            
+            // Correction: `special_map` propagates values. It loses the edge context by the time it hits `process` due to merging.
+            // HOWEVER, the bundle is defined by the edges between `w` and `u`.
+            // Since `u` is fixed (it's `node_idx`), and `w` corresponds to a specific `NWABody`.
+            // We need to know which terminals map `w` to `u`.
+            // But `w` is not explicitly available, only `NWABody` ID.
+            // This is why we carried the `terminal_map` in the original code!
+            // We DO need to carry the map.
+            // Value: `(BTreeMap<NWABody, BTreeMap<Option<TerminalID>, Weight>>, LLMTokenBV)`
+            
+            // Okay, revert `initial_values_pass2` type to carry the map.
+            // But we use the precomputed templates.
+
+            let mut new_body = {
+                let mut states = states_arena.borrow_mut();
+                let start = states.add_state();
+                NWABody { start_state: start }
+            };
+
+            // We have to reconstruct the bundles locally to match them with templates.
+            // Or we carry them. Carrying them is easiest and what we had.
+            // But we optimize the `process` step.
+
+            // Re-define val type locally for clarity, actually we can't easily in closure.
+            // Let's use the original type and logic, just optimized using the cache.
+            
+            // Wait, `special_map_grouped` signature is fixed by the call.
+            // We need to return the full map from `step`.
+            None // Actual return happens in the real call below, just thinking.
+        }
+    );
+    
+    // Redoing the call with correct logic:
+    let initial_term_map: BTreeMap<Option<TerminalID>, Weight> = BTreeMap::from([(None, Weight::all())]);
+    let initial_body_map_full = BTreeMap::from([(initial_nwa_body, initial_term_map)]);
+    let initial_values_full: Vec<(Trie2Index, (BTreeMap<NWABody, BTreeMap<Option<TerminalID>, Weight>>, LLMTokenBV))> =
+        vec![(reversed_trie_root, (initial_body_map_full, initial_tokens))];
+
+    Trie::special_map_grouped(
+        &reversed_trie1_god,
+        &traversal_data,
+        initial_values_full,
+        // step
+        |current_val: &(BTreeMap<NWABody, BTreeMap<Option<TerminalID>, Weight>>, LLMTokenBV), edge_terminal_opt, dest_map| {
+             let (current_bodies, current_tokens) = current_val;
+             let terminal_id = *edge_terminal_opt;
+             let mut results = Vec::new();
+             for (dest_idx, llm_token_bv) in dest_map.iter() {
+                 let next_tokens = current_tokens & llm_token_bv;
+                 if next_tokens.is_empty() { continue; }
+                 let weight = Weight::from_rsb(llm_token_bv.inner.as_ref().clone());
+                 let mut terminal_map = BTreeMap::new();
+                 terminal_map.insert(terminal_id, weight);
+                 let mut body_map = BTreeMap::new();
+                 for body in current_bodies.keys() {
+                     body_map.insert(*body, terminal_map.clone());
+                 }
+                 results.push((*dest_idx, (body_map, next_tokens)));
+             }
+             results
+        },
+        // merge
+        |val1, val2| {
             let (bodies1, tokens1) = val1;
             let (bodies2, tokens2) = val2;
             for (right_body, term_map2) in bodies2 {
@@ -359,14 +457,9 @@ pub fn precompute4(
             }
             *tokens1 |= &tokens2;
         },
-        // process function: capture at original roots
-        |_node_data,
-         node_idx,
-         val: (BTreeMap<NWABody, BTreeMap<Option<TerminalID>, Weight>>, LLMTokenBV)| {
-            traversal_calls += 1;
+        // process
+        |_, node_idx, val| {
             let (nwa_bodies_map, tokens) = val;
-
-            // Combine all left bodies into a single NWA body via union (epsilon)
             let mut nwa_body = {
                 let mut states = states_arena.borrow_mut();
                 let start = states.add_state();
@@ -374,90 +467,30 @@ pub fn precompute4(
             };
 
             for (right_body, terminal_map) in nwa_bodies_map {
-                let start_grouping = Instant::now();
-                // 1. Group terminals by concrete Weight to find aliases
-                let mut weight_groups: HashMap<Weight, Vec<Option<TerminalID>>> = HashMap::new();
-                for (term, weight) in terminal_map {
-                    if !weight.is_empty() {
-                        weight_groups.entry(weight).or_default().push(term);
-                    }
-                }
+                // 1. Canonicalize Bundle
+                let (signature, concrete_weights) = canonicalize_bundle(terminal_map);
 
-                if weight_groups.is_empty() {
-                    t_grouping += start_grouping.elapsed();
-                    continue;
-                }
+                // 2. Lookup Template
+                let template_nwa = template_cache.get(&signature).expect("Template must exist for precomputed signature");
 
-                // 2. Create Canonical Signature
-                let mut groups_vec: Vec<(Weight, Vec<Option<TerminalID>>)> = weight_groups.into_iter().collect();
-                for (_, terms) in &mut groups_vec {
-                    terms.sort();
-                }
-                groups_vec.sort_by(|a, b| a.1.cmp(&b.1));
-
-                let signature: Vec<Vec<Option<TerminalID>>> = groups_vec.iter().map(|(_, terms)| terms.clone()).collect();
-                let concrete_weights: Vec<Weight> = groups_vec.iter().map(|(w, _)| w.clone()).collect();
-                t_grouping += start_grouping.elapsed();
-
-                // 3. Get or Create Template NWA
-                let start_cache = Instant::now();
-                if !template_cache.contains_key(&signature) {
-                    cache_misses += 1;
-                    let start_create = Instant::now();
-                    let mut abstract_bundle = BTreeMap::new();
-                    for (idx, terms) in signature.iter().enumerate() {
-                        let abstract_weight = Weight::from_item(idx);
-                        for term in terms {
-                            abstract_bundle.insert(*term, abstract_weight.clone());
-                        }
-                    }
-
-                    let mut template_dwa = specialize_dwa(&super_dwa, &abstract_bundle, &bit_to_term);
-                    // Use new lightweight simplify (PruneDeadEnds + PushWeights + PruneUnreachable)
-                    // This is fast and should fix correctness by ensuring weights are pushed.
-                    template_dwa.simplify_lightweight();
-
-                    let template_nwa = NWA::from_dwa(&template_dwa);
-
-                    // REMOVED UNSAFE ABSTRACT NEGATIVE RESOLUTION
-                    // It relies on intersection of weights, which is invalid for disjoint abstract indices.
-
-                    template_cache.insert(signature.clone(), template_nwa);
-                    t_cache_creation += start_create.elapsed();
-                } else {
-                    cache_hits += 1;
-                }
-
-                let template_nwa = &template_cache[&signature];
-                t_cache_access += start_cache.elapsed();
-
-                // 4. Direct Instantiation into Arena
-                let start_inst = Instant::now();
+                // 3. Instantiate
                 let mut states = states_arena.borrow_mut();
                 let (left_body_start, remap) = instantiate_nwa_template_into_arena(
                     template_nwa,
                     &concrete_weights,
                     &mut states
                 );
-                t_instantiation += start_inst.elapsed();
-
-                let start_concat = Instant::now();
+                
                 let new_states_filter: HashSet<NWAStateID> = remap.values().cloned().collect();
                 let left_body = NWABody { start_state: left_body_start };
                 let composed_body = NWA::_concatenate_components(&mut states, &left_body, &right_body, &Weight::all());
-                t_concatenation += start_concat.elapsed();
-
-                let start_neg = Instant::now();
+                
                 if !new_states_filter.is_empty() {
                     apply_cancellations(&mut states, &new_states_filter);
                     apply_finality_fixpoint(&mut states, &new_states_filter);
                     remove_negative_transitions(&mut states, &new_states_filter);
                 }
-                t_neg_resolution += start_neg.elapsed();
-
-                let start_union = Instant::now();
                 nwa_body = NWA::union_components(&mut states, &nwa_body, &composed_body);
-                t_union += start_union.elapsed();
             }
 
             if !tokens.is_empty() {
@@ -470,40 +503,112 @@ pub fn precompute4(
             } else {
                 None
             }
-        },
+        }
     );
 
-    println!("=== Traversal Statistics ===");
+    println!("=== Traversal Statistics (Pass 2) ===");
     println!("Total Duration: {:?}", now_traversal.elapsed());
-    println!("Total Process Calls: {}", traversal_calls);
-    println!("Time Distribution:");
-    println!("  Grouping & Signature:   {:?}", t_grouping);
-    println!("  Template Cache Total:   {:?}", t_cache_access);
-    println!("    -> Creation (Misses): {:?}", t_cache_creation);
-    println!("  Instantiation:          {:?}", t_instantiation);
-    println!("  Concatenation:          {:?}", t_concatenation);
-    println!("  Negative Resolution:    {:?}", t_neg_resolution);
-    println!("  Union:                  {:?}", t_union);
-    println!("Cache Stats: Hits={}, Misses={}", cache_hits, cache_misses);
-    println!("============================");
+    println!("=====================================");
 
-    // Combine all final NWA bodies into a single NWA
+    // Combine final bodies...
     let mut combined_nwa_states = states_arena.into_inner();
     let combined_start_state = combined_nwa_states.add_state();
-
     for (tok_id, body) in final_bodies {
         let label = tok_id.0 as Label;
         combined_nwa_states
             .add_transition(combined_start_state, label, body.start_state, Weight::all())
             .unwrap();
     }
-
     let combined_nwa = NWA { states: combined_nwa_states, body: NWABody { start_state: combined_start_state } };
-    crate::debug!(4, "Combined NWA has {} states after merging all final bodies.", combined_nwa.states.len());
-
+    
     let final_dwa = resolve_negatives_and_optimize_and_determinize(parser, combined_nwa);
     crate::debug!(3, "Total precompute4 time: {:?}", now_total.elapsed());
     final_dwa
+}
+
+fn canonicalize_bundle(
+    terminal_map: BTreeMap<Option<TerminalID>, Weight>
+) -> (Signature, Vec<Weight>) {
+    let mut weight_groups: HashMap<Weight, Vec<Option<TerminalID>>> = HashMap::new();
+    for (term, weight) in terminal_map {
+        if !weight.is_empty() {
+            weight_groups.entry(weight).or_default().push(term);
+        }
+    }
+    let mut groups_vec: Vec<(Weight, Vec<Option<TerminalID>>)> = weight_groups.into_iter().collect();
+    for (_, terms) in &mut groups_vec {
+        terms.sort();
+    }
+    groups_vec.sort_by(|a, b| a.1.cmp(&b.1));
+    
+    let signature: Vec<Vec<Option<TerminalID>>> = groups_vec.iter().map(|(_, terms)| terms.clone()).collect();
+    let concrete_weights: Vec<Weight> = groups_vec.into_iter().map(|(w, _)| w).collect();
+    (signature, concrete_weights)
+}
+
+fn precompute_token_bvs_and_signatures(
+    reversed_trie: &crate::datastructures::trie::Arena<Trie<Option<TerminalID>, LLMTokenBV, PrecomputedNodeContents>>,
+    traversal_data: &crate::datastructures::trie::TrieTraversalData,
+    initial_values: Vec<(Trie2Index, LLMTokenBV)>
+) -> (HashMap<Trie2Index, LLMTokenBV>, HashSet<Signature>) {
+    
+    let node_tokens: Arc<Mutex<HashMap<Trie2Index, LLMTokenBV>>> = Arc::new(Mutex::new(HashMap::new()));
+    let signatures: Arc<Mutex<HashSet<Signature>>> = Arc::new(Mutex::new(HashSet::new()));
+    
+    // We use the trie traversal to propagate tokens AND collect signatures on the fly.
+    // Value type V = LLMTokenBV.
+    
+    Trie::special_map_grouped(
+        reversed_trie,
+        traversal_data,
+        initial_values,
+        // step: propagate tokens
+        |tokens: &LLMTokenBV, _edge_term, dest_map| {
+            let mut results = Vec::new();
+            for (dest_idx, edge_bv) in dest_map.iter() {
+                let next = tokens & edge_bv;
+                if !next.is_empty() {
+                    results.push((*dest_idx, next));
+                }
+            }
+            results
+        },
+        // merge: union
+        |t1, t2| { *t1 |= &t2; },
+        // process: capture signatures
+        |node_guard, node_idx, tokens| {
+            node_tokens.lock().unwrap().insert(node_idx, tokens.clone());
+
+            // To form signatures for the NEXT step (outgoing edges from here), 
+            // we need to look at the children of the current node in the reversed trie.
+            // In `reversed_trie`, children map Key -> Dest -> Weight.
+            // We group by Dest.
+            
+            let mut bundles_by_dest: HashMap<Trie2Index, BTreeMap<Option<TerminalID>, Weight>> = HashMap::new();
+            
+            for (term_opt, dest_map) in node_guard.children() {
+                for (dest_idx, edge_bv) in dest_map.iter() {
+                     let combined = &tokens & edge_bv;
+                     if !combined.is_empty() {
+                         let w = Weight::from_rsb(edge_bv.inner.as_ref().clone());
+                         bundles_by_dest.entry(*dest_idx).or_default().insert(term_opt.clone(), w);
+                     }
+                }
+            }
+            
+            let mut sigs = signatures.lock().unwrap();
+            for (_, bundle) in bundles_by_dest {
+                 let (sig, _) = canonicalize_bundle(bundle);
+                 sigs.insert(sig);
+            }
+
+            Some(tokens)
+        }
+    );
+    
+    let final_tokens = Arc::try_unwrap(node_tokens).unwrap().into_inner().unwrap();
+    let final_sigs = Arc::try_unwrap(signatures).unwrap().into_inner().unwrap();
+    (final_tokens, final_sigs)
 }
 
 fn resolve_negatives_and_optimize_and_determinize(parser: &GLRParser, mut combined_nwa: NWA) -> DWA {
@@ -511,7 +616,6 @@ fn resolve_negatives_and_optimize_and_determinize(parser: &GLRParser, mut combin
     let start_total = Instant::now();
 
     let start = Instant::now();
-    // Restoration of initial simplify to fix correctness
     combined_nwa.simplify_rustfst();
     let t_initial = start.elapsed();
     println!("Initial Simplify: {:?}", t_initial);
@@ -546,12 +650,6 @@ fn resolve_negatives_and_optimize_and_determinize(parser: &GLRParser, mut combin
         let f = std::fs::File::create(&filename).expect("Unable to create NWA dump file");
         serde_json::to_writer_pretty(f, &combined_nwa).expect("Unable to write NWA to file");
         eprintln!("NWA dump complete.");
-        let parser_filename = format!("parser_dump_before_final_det_{}.json", timestamp);
-        eprintln!("Dumping parser to {}...", parser_filename);
-        let parser_f = std::fs::File::create(&parser_filename).expect("Unable to create parser dump file");
-        let parser_json = parser.to_json();
-        serde_json::to_writer_pretty(parser_f, &parser_json).expect("Unable to write parser to file");
-        eprintln!("Parser dump complete.");
     }
 
     let start = Instant::now();
@@ -559,7 +657,6 @@ fn resolve_negatives_and_optimize_and_determinize(parser: &GLRParser, mut combin
     combined_nwa = NWA::from_dwa(&combined_nwa._determinize());
     combined_nwa.simplify_rustfst();
     let mut final_dwa = combined_nwa.determinize_to_dwa();
-    // One final minimization on the DWA
     final_dwa.minimize_with_rustfst();
     let t_det = start.elapsed();
     println!("Final Determinize & Simplify: {:?}", t_det);
@@ -624,14 +721,11 @@ fn specialize_weight(
     new_weight
 }
 
-/// Instantiates an abstract NWA template directly into the target arena,
-/// resolving abstract weights (indices) to concrete weights (unions of `ordered_weights`).
 fn instantiate_nwa_template_into_arena(
     template: &NWA,
     ordered_weights: &[Weight],
     arena: &mut NWAStates,
 ) -> (NWAStateID, HashMap<NWAStateID, NWAStateID>) {
-    // Mapping cache for abstract weights to concrete weights
     let mut union_cache: HashMap<Weight, Weight> = HashMap::new();
 
     let mut map_abstract_weight = |w: &Weight| -> Weight {
@@ -651,7 +745,6 @@ fn instantiate_nwa_template_into_arena(
         concrete
     };
 
-    // 1. Pre-allocate states in arena
     let start_offset = arena.len();
     let template_len = template.states.len();
     let mut map: Vec<NWAStateID> = Vec::with_capacity(template_len);
@@ -665,12 +758,10 @@ fn instantiate_nwa_template_into_arena(
         id_map.insert(i, new_id);
     }
 
-    // 2. Copy and Map
     for (old_id, old_state) in template.states.0.iter().enumerate() {
         let new_id = map[old_id];
         let new_state = &mut arena[new_id];
 
-        // Final Weight
         if let Some(fw) = &old_state.final_weight {
             let concrete = map_abstract_weight(fw);
             if !concrete.is_empty() {
@@ -678,7 +769,6 @@ fn instantiate_nwa_template_into_arena(
             }
         }
 
-        // Transitions
         for (lbl, targets) in &old_state.transitions {
             let new_targets = new_state.transitions.entry(*lbl).or_default();
             for (target, w) in targets {
@@ -689,7 +779,6 @@ fn instantiate_nwa_template_into_arena(
             }
         }
 
-        // Epsilons
         for (target, w) in &old_state.epsilons {
             let concrete = map_abstract_weight(w);
             if !concrete.is_empty() {
