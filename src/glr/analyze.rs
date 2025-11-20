@@ -1157,10 +1157,19 @@ fn convert_regular_nts_to_terminals(
 
                 // Build Base Expr
                 let mut base_exprs = Vec::new();
+                let mut failed = false;
                 for s in &base.rhs {
                     if let Symbol::Terminal(t) = s {
-                        base_exprs.push(get_expr_for_terminal(t, literal_to_group_id, regex_name_to_group_id, group_id_to_expr)?);
+                        if let Some(e) = get_expr_for_terminal(t, literal_to_group_id, regex_name_to_group_id, group_id_to_expr) {
+                            base_exprs.push(e);
+                        } else {
+                            failed = true;
+                            break;
+                        }
                     }
+                }
+                if failed {
+                    continue;
                 }
                 let base_expr = if base_exprs.len() == 1 { base_exprs[0].clone() } else { Expr::Seq(base_exprs) };
 
