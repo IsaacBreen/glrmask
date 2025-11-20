@@ -795,7 +795,6 @@ impl ExprGroups {
         dfa.minimize();
         crate::debug!(4, "Minimized DFA in {:.2?}", start.elapsed());
         print_memory_usage("After DFA minimization");
-        // crate::debug!(3, "Done!");
         Regex { dfa }
     }
 
@@ -813,7 +812,6 @@ impl ExprGroups {
                 Expr::handle_expr_cached(expr, &mut nfa, group_start_state, &mut cache);
             if is_non_greedy {
                 nfa.states[end_state].finalizers.insert(group);
-                // Additionally, track that this finalizer is non-greedy
                 nfa.states[end_state]
                     .non_greedy_finalizers
                     .insert(group);
@@ -863,11 +861,9 @@ impl Expr {
             Expr::Shared(inner) => {
                 let key = Arc::as_ptr(&inner) as usize;
                 if let Some(&(entry, end)) = cache.get(&key) {
-                    // Reuse compiled subgraph by epsilon to entry
                     nfa.add_epsilon_transition(current_state, entry);
                     end
                 } else {
-                    // Create a dedicated entry for this shared fragment
                     let entry = nfa.add_state();
                     let end = Self::handle_expr_cached((*inner).clone(), nfa, entry, cache);
                     cache.insert(key, (entry, end));
@@ -881,41 +877,36 @@ impl Expr {
                     nfa.add_epsilon_transition(current_state, entry_state);
                     let body_end_state = Self::handle_expr_cached(*expr, nfa, entry_state, cache);
                     let exit_state = nfa.add_state();
-                    nfa.add_epsilon_transition(entry_state, exit_state); // 0 times
-                    nfa.add_epsilon_transition(body_end_state, entry_state); // loop
-                    nfa.add_epsilon_transition(body_end_state, exit_state); // exit loop
+                    nfa.add_epsilon_transition(entry_state, exit_state);
+                    nfa.add_epsilon_transition(body_end_state, entry_state);
+                    nfa.add_epsilon_transition(body_end_state, exit_state);
                     exit_state
                 }
                 QuantifierType::OneOrMore => {
                     let entry_state = current_state;
                     let body_end_state = Self::handle_expr_cached(*expr, nfa, entry_state, cache);
                     let exit_state = nfa.add_state();
-                    nfa.add_epsilon_transition(body_end_state, entry_state); // loop
-                    nfa.add_epsilon_transition(body_end_state, exit_state); // exit loop
+                    nfa.add_epsilon_transition(body_end_state, entry_state);
+                    nfa.add_epsilon_transition(body_end_state, exit_state);
                     exit_state
                 }
                 QuantifierType::ZeroOrOne => {
                     let body_end_state =
                         Self::handle_expr_cached(*expr, nfa, current_state, cache);
                     let exit_state = nfa.add_state();
-                    nfa.add_epsilon_transition(current_state, exit_state); // skip
-                    nfa.add_epsilon_transition(body_end_state, exit_state); // take
+                    nfa.add_epsilon_transition(current_state, exit_state);
+                    nfa.add_epsilon_transition(body_end_state, exit_state);
                     exit_state
                 }
             },
             Expr::Choice(exprs) => {
-                // New end state for choice
                 let choice_end_state = nfa.add_state();
 
                 for expr in exprs {
-                    // Process the expr and get its end state
                     let expr_end_state = Self::handle_expr_cached(expr, nfa, current_state, cache);
-
-                    // Connect the end state of the expr to the end state of the choice
                     nfa.add_epsilon_transition(expr_end_state, choice_end_state);
                 }
 
-                // The end state of the choice becomes the new current state
                 choice_end_state
             }
             Expr::Seq(exprs) => {
@@ -987,7 +978,6 @@ impl NFA {
     pub fn to_dfa(self) -> DFA {
         let start_time = std::time::Instant::now();
         let mut dfa_states: Vec<DFAState> = Vec::new();
-        // Use a HashMap here for much faster lookups on large DFAs.
         let mut dfa_state_map: HashMap<FrozenSet<usize>, usize> = HashMap::new();
         let mut worklist: Vec<FrozenSet<usize>> = Vec::new();
 
@@ -995,13 +985,11 @@ impl NFA {
         let epsilon_closures = self.compute_epsilon_closures();
         crate::debug!(5, "Computed epsilon closures in {:.2?}", closure_start.elapsed());
 
-        // Compute epsilon-closure of the NFA start state and use it as the DFA start state.
         let start_closure = &epsilon_closures[self.start_state];
         let start_state_set = FrozenSet::from_iter(start_closure.iter().cloned());
         worklist.push(start_state_set.clone());
         dfa_state_map.insert(start_state_set.clone(), 0);
 
-        // Initialize the first DFA state.
         let mut finalizers = BTreeSet::new();
         let mut non_greedy_finalizers = BTreeSet::new();
         for &state in start_state_set.iter() {
@@ -1012,13 +1000,12 @@ impl NFA {
         dfa_states.push(DFAState {
             transitions: CharTransitions::new(),
             finalizers,
-            possible_future_group_ids: BTreeSet::new(), // Will be computed later
-            group_id_to_u8set: BTreeMap::new(),         // Will be computed later
+            possible_future_group_ids: BTreeSet::new(),
+            group_id_to_u8set: BTreeMap::new(),
         });
 
         let mut max_subset_size = 0;
         let mut next_log_threshold = 20_000;
-        // Reuse buffers to avoid millions of small allocations
         let mut transition_targets: Vec<Vec<usize>> = vec![Vec::with_capacity(16); 256];
         let mut used_inputs: Vec<u8> = Vec::with_capacity(256);
         let mut seen_input: [bool; 256] = [false; 256];
@@ -1029,15 +1016,7 @@ impl NFA {
                 max_subset_size = current_subset_len;
             }
             if dfa_states.len() >= next_log_threshold {
-                crate::debug!(
-                    6,
-                    "DFA progress: {} states, worklist {}, subset size {} (max {}), elapsed {:.2?}",
-                    dfa_states.len(),
-                    worklist.len(),
-                    current_subset_len,
-                    max_subset_size,
-                    start_time.elapsed()
-                );
+                crate::debug!(6, "DFA progress: {} states, worklist {}, subset size {} (max {}), elapsed {:.2?}", dfa_states.len(), worklist.len(), current_subset_len, max_subset_size, start_time.elapsed());
                 next_log_threshold += 20_000;
             }
 
@@ -1045,7 +1024,6 @@ impl NFA {
                 .get(&current_set)
                 .expect("DFA state set not found in map");
 
-            // For each NFA state in the current DFA state, collect outgoing transitions.
             for &state in current_set.iter() {
                 for &(input, next_state) in &self.states[state].transitions {
                     let idx = input as usize;
@@ -1057,58 +1035,51 @@ impl NFA {
                 }
             }
 
-            // For each input symbol, compute the epsilon-closure of the resulting state set.
             for &input_u8 in &used_inputs {
                 let next_states = &transition_targets[input_u8 as usize];
                 if next_states.is_empty() {
                     continue;
                 }
 
-                // epsilon-closure(move(S, input_u8))
                 let mut closure = BTreeSet::new();
                 for &next_state in next_states {
                     for &s in &epsilon_closures[next_state] {
                         closure.insert(s);
                     }
                 }
-                // Convert BTreeSet -> FrozenSet without re-sorting or deduping.
                 let frozen_closure: FrozenSet<usize> = FrozenSet::from(closure);
 
-                // If this set of states is new, add it as a new DFA state.
-                let next_dfa_state = if let Some(&existing_state) = dfa_state_map.get(&frozen_closure)
-                {
-                    existing_state
-                } else {
-                    let new_state_index = dfa_states.len();
-                    dfa_state_map.insert(frozen_closure.clone(), new_state_index);
-                    worklist.push(frozen_closure.clone());
+                let next_dfa_state =
+                    if let Some(&existing_state) = dfa_state_map.get(&frozen_closure) {
+                        existing_state
+                    } else {
+                        let new_state_index = dfa_states.len();
+                        dfa_state_map.insert(frozen_closure.clone(), new_state_index);
+                        worklist.push(frozen_closure.clone());
 
-                    // Compute finalizers for the new DFA state
-                    let mut new_finalizers = BTreeSet::new();
-                    let mut new_non_greedy_finalizers = BTreeSet::new();
-                    for &state in frozen_closure.iter() {
-                        new_finalizers.extend(self.states[state].finalizers.iter().cloned());
-                        new_non_greedy_finalizers
-                            .extend(self.states[state].non_greedy_finalizers.iter().cloned());
-                    }
+                        let mut new_finalizers = BTreeSet::new();
+                        let mut new_non_greedy_finalizers = BTreeSet::new();
+                        for &state in frozen_closure.iter() {
+                            new_finalizers.extend(self.states[state].finalizers.iter().cloned());
+                            new_non_greedy_finalizers
+                                .extend(self.states[state].non_greedy_finalizers.iter().cloned());
+                        }
 
-                    dfa_states.push(DFAState {
-                        transitions: CharTransitions::new(),
-                        finalizers: new_finalizers,
-                        possible_future_group_ids: BTreeSet::new(), // Will be computed later
-                        group_id_to_u8set: BTreeMap::new(), // Will be computed later
-                    });
+                        dfa_states.push(DFAState {
+                            transitions: CharTransitions::new(),
+                            finalizers: new_finalizers,
+                            possible_future_group_ids: BTreeSet::new(),
+                            group_id_to_u8set: BTreeMap::new(),
+                        });
 
-                    new_state_index
-                };
+                        new_state_index
+                    };
 
-                // Insert the transition into the DFA state
                 dfa_states[current_dfa_state]
                     .transitions
                     .insert(input_u8, next_dfa_state);
             }
 
-            // Clean up buffers for next iteration
             for &input in &used_inputs {
                 let idx = input as usize;
                 seen_input[idx] = false;
@@ -1117,13 +1088,7 @@ impl NFA {
             used_inputs.clear();
         }
 
-        crate::debug!(
-            5,
-            "DFA main loop complete. Total states: {}, Max subset size: {}, Time: {:.2?}",
-            dfa_states.len(),
-            max_subset_size,
-            start_time.elapsed()
-        );
+        crate::debug!(5, "DFA main loop complete. Total states: {}, Max subset size: {}, Time: {:.2?}", dfa_states.len(), max_subset_size, start_time.elapsed());
 
         let mut dfa = DFA {
             states: dfa_states,
@@ -1132,17 +1097,12 @@ impl NFA {
         };
 
         for state in &self.states {
-            dfa.non_greedy_finalizers
-                .extend(state.non_greedy_finalizers.iter().cloned());
+            dfa.non_greedy_finalizers.extend(state.non_greedy_finalizers.iter().cloned());
         }
 
         let meta_start = std::time::Instant::now();
-        dfa.compute_possible_future_group_ids();
-        crate::debug!(5, "Computed possible future group IDs in {:.2?}", meta_start.elapsed());
-
-        let meta_group = std::time::Instant::now();
-        dfa.compute_group_id_to_u8set();
-        crate::debug!(5, "Computed group ID to u8set in {:.2?}", meta_group.elapsed());
+        dfa.recompute_metadata();
+        crate::debug!(5, "Computed DFA metadata in {:.2?}", meta_start.elapsed());
 
         dfa
     }
@@ -1150,19 +1110,12 @@ impl NFA {
 
 impl DFA {
     pub fn compute_possible_future_group_ids(&mut self) {
-        // Optimized worklist algorithm using reverse graph and BitSets.
-        // Using BTreeSet for propagation is too slow (clone/merge overhead).
-        // Since GroupIDs are dense and relatively small (e.g. ~3000), a dense bitset is vastly more efficient.
-
-        // Initialize possible_future_group_ids as empty. We only want to include
-        // group IDs reachable via *future* transitions.
         for state in &mut self.states {
             state.possible_future_group_ids = BTreeSet::new();
         }
 
         let num_states = self.states.len();
-        
-        // 1. Build reverse graph (predecessors)
+
         let mut predecessors: Vec<Vec<usize>> = vec![Vec::new(); num_states];
         for (idx, state) in self.states.iter().enumerate() {
             for &target in state.transitions.values() {
@@ -1170,34 +1123,26 @@ impl DFA {
             }
         }
 
-        // 2. Setup BitSet storage
-        // Determine max group ID to size the bitsets
-        let max_group_id = self.states.iter()
-            .flat_map(|s| s.finalizers.last()) // BTreeSet is sorted, last is max
+        let max_group_id = self
+            .states
+            .iter()
+            .flat_map(|s| s.finalizers.last())
             .max()
             .copied()
             .unwrap_or(0);
-        
+
         let u64_per_state = (max_group_id / 64) + 1;
-        // Flat buffer for cache locality: [state0_word0, state0_word1, ..., state1_word0, ...]
         let mut future_bits: Vec<u64> = vec![0; num_states * u64_per_state];
 
-        // Worklist for states whose possible_future_group_ids have changed (or need initial propagation).
-        // We use a Queue for BFS-like propagation.
         let mut worklist: std::collections::VecDeque<usize> = std::collections::VecDeque::new();
         let mut in_worklist: Vec<bool> = vec![false; num_states];
 
-        // 3. Initial seed: Propagate static finalizers to predecessors
         for target_idx in 0..num_states {
-            // We need to access finalizers. Since we can't borrow self.states while modifying future_bits 
-            // if we iterate strictly, but here we just read.
-            // Actually, we can iterate indices.
             if !self.states[target_idx].finalizers.is_empty() {
                 for &pred_idx in &predecessors[target_idx] {
                     let pred_offset = pred_idx * u64_per_state;
                     let mut changed = false;
-                    
-                    // Merge target_idx's finalizers into pred_idx's future bits
+
                     for &gid in &self.states[target_idx].finalizers {
                         let word_idx = gid / 64;
                         let bit_mask = 1u64 << (gid % 64);
@@ -1215,10 +1160,9 @@ impl DFA {
             }
         }
 
-        // 4. Propagate future groups (BitSet OR operations)
         while let Some(idx) = worklist.pop_front() {
             in_worklist[idx] = false;
-            
+
             let idx_offset = idx * u64_per_state;
 
             for &pred_idx in &predecessors[idx] {
@@ -1236,7 +1180,7 @@ impl DFA {
                         }
                     }
                 }
-                
+
                 if changed && !in_worklist[pred_idx] {
                     worklist.push_back(pred_idx);
                     in_worklist[pred_idx] = true;
@@ -1244,11 +1188,10 @@ impl DFA {
             }
         }
 
-        // 5. Convert BitSets back to BTreeSets
         for (idx, state) in self.states.iter_mut().enumerate() {
             let offset = idx * u64_per_state;
             let mut set = BTreeSet::new();
-            
+
             for w in 0..u64_per_state {
                 let mut word = future_bits[offset + w];
                 if word != 0 {
@@ -1256,7 +1199,6 @@ impl DFA {
                     while word != 0 {
                         let trailing = word.trailing_zeros();
                         set.insert(base_gid + trailing as usize);
-                        // Clear the least significant bit set
                         word &= !(1u64 << trailing);
                     }
                 }
@@ -1266,66 +1208,51 @@ impl DFA {
     }
 
     pub fn compute_group_id_to_u8set(&mut self) {
-        // Optimization: Avoid allocating the massive intermediate vector.
-        // We can just access the necessary data by index.
-        // However, we need mutable access to `state` to write `group_id_to_u8set`,
-        // and immutable access to `other_state` to read `possible_future_group_ids`.
-        // We can split the state into parts or use a read-only view for the second part.
-        
-        // Let's extract the read-only data we need (finalizers + future groups) into a separate Vec.
-        // This involves some cloning, but BTreeSet clone is effectively a bunch of Arc increments 
-        // if we used Arc, but here they are owned.
-        // Actually, iterating and building the map doesn't require simultaneous mutable access 
-        // to ALL states, just one at a time. But we need to read random other states.
-        
-        // Fastest way: extract (finalizers | future) into a simpler structure if possible, 
-        // or just clone the sets. Since we need the union, let's just precompute the unions efficiently.
-        // But wait, the previous code did exactly that and it was slow due to cloning.
-        
-        // Let's just create a reference-based lookup if possible. 
-        // We can't easily have a ref to the vec while iterating it mutably.
-        // We CAN separate the `group_id_to_u8set` field from the rest of the state temporarily,
-        // or build the maps into a separate Vec and then assign them.
-        
         let num_states = self.states.len();
         let mut all_maps: Vec<BTreeMap<GroupID, U8Set>> = Vec::with_capacity(num_states);
 
         for state in &self.states {
             let mut group_id_to_u8set: BTreeMap<GroupID, U8Set> = BTreeMap::new();
 
-            // Optimization: Group transitions by target state to minimize map lookups.
-            // Many transitions (e.g. ranges a-z) point to the same next state.
-            // Instead of iterating 26 times updating the map, we iterate once with a combined U8Set.
             let mut target_to_inputs: HashMap<usize, U8Set> = HashMap::new();
             for (input_u8, &next_state_index) in &state.transitions {
-                target_to_inputs.entry(next_state_index)
-                    .and_modify(|set| { set.insert(input_u8); })
+                target_to_inputs
+                    .entry(next_state_index)
+                    .and_modify(|set| {
+                        set.insert(input_u8);
+                    })
                     .or_insert_with(|| U8Set::from_u8(input_u8));
             }
 
             for (next_state_index, inputs) in target_to_inputs {
                 let next_state = &self.states[next_state_index];
-                
-                // Union of next state's finalizers and future groups
-                let chain = next_state.possible_future_group_ids.iter().chain(next_state.finalizers.iter());
+
+                let chain = next_state
+                    .possible_future_group_ids
+                    .iter()
+                    .chain(next_state.finalizers.iter());
 
                 for &group_id in chain {
                     group_id_to_u8set
                         .entry(group_id)
                         .or_insert_with(U8Set::none)
-                        .update(&inputs); // Bitwise union is fast
+                        .update(&inputs);
                 }
             }
             all_maps.push(group_id_to_u8set);
         }
-        
+
         for (i, map) in all_maps.into_iter().enumerate() {
             self.states[i].group_id_to_u8set = map;
         }
     }
 
+    fn recompute_metadata(&mut self) {
+        self.compute_possible_future_group_ids();
+        self.compute_group_id_to_u8set();
+    }
+
     fn remove_unreachable_states(&mut self) {
-        // Find reachable states using BFS
         let mut reachable = vec![false; self.states.len()];
         let mut queue = vec![self.start_state];
         reachable[self.start_state] = true;
@@ -1339,7 +1266,6 @@ impl DFA {
             }
         }
 
-        // Create mapping from old indices to new indices
         let mut state_mapping = vec![0; self.states.len()];
         let mut new_index = 0;
         for (old_index, &is_reachable) in reachable.iter().enumerate() {
@@ -1349,12 +1275,10 @@ impl DFA {
             }
         }
 
-        // Keep only reachable states and update transitions
         let mut new_states = Vec::new();
         for (old_index, state) in self.states.iter().enumerate() {
             if reachable[old_index] {
                 let mut new_state = state.clone();
-                // Update transitions to use new state indices
                 new_state.transitions = new_state
                     .transitions
                     .iter()
@@ -1364,9 +1288,7 @@ impl DFA {
             }
         }
 
-        // Update the DFA
         self.states = new_states;
-        // Start state remains at 0 since it's always reachable
         self.start_state = 0;
     }
 
@@ -1375,15 +1297,6 @@ impl DFA {
             return;
         }
 
-        // DFA minimization via partition refinement is roughly O(n^2 * |Σ|).
-        // For very large DFAs (e.g. tens of millions of states from huge literal
-        // strings), running it is infeasible and would exhaust memory. In that
-        // regime, skipping minimization is a semantics-preserving optimization.
-        //
-        // Use a conservative threshold so that real-world, very large DFAs built
-        // from complex regexes skip minimization entirely (avoiding seconds of
-        // extra work), while small DFAs used in tests and simple patterns still
-        // get minimized for compactness.
         const MAX_MINIMIZATION_STATES: usize = 10_000;
         if self.states.len() > MAX_MINIMIZATION_STATES {
             return;
@@ -1391,7 +1304,6 @@ impl DFA {
 
         self.remove_unreachable_states();
 
-        // Step 1: Initial partition based on finalizers.
         let mut partitions_map: BTreeMap<BTreeSet<GroupID>, BTreeSet<usize>> = BTreeMap::new();
         for (state_idx, state) in self.states.iter().enumerate() {
             partitions_map
@@ -1401,7 +1313,6 @@ impl DFA {
         }
         let mut partition_list: Vec<BTreeSet<usize>> = partitions_map.into_values().collect();
 
-        // state_to_partition map for O(1) lookups.
         let mut state_to_partition = vec![0; self.states.len()];
         for (part_idx, partition) in partition_list.iter().enumerate() {
             for &state_idx in partition {
@@ -1409,7 +1320,6 @@ impl DFA {
             }
         }
 
-        // Step 2: Refine partitions until a fixed point is reached.
         loop {
             let mut changed = false;
             let mut new_partition_list: Vec<BTreeSet<usize>> = Vec::new();
@@ -1420,8 +1330,6 @@ impl DFA {
                     continue;
                 }
 
-                // Split this partition based on transition signatures.
-                // A signature maps a character to the partition index of the target state.
                 let mut refined_partitions: BTreeMap<Vec<(u8, usize)>, BTreeSet<usize>> =
                     BTreeMap::new();
                 for &state_idx in partition {
@@ -1445,7 +1353,6 @@ impl DFA {
                 break;
             }
 
-            // Rebuild state_to_partition map for the next iteration.
             for (part_idx, partition) in partition_list.iter().enumerate() {
                 for &state_idx in partition {
                     state_to_partition[state_idx] = part_idx;
@@ -1453,15 +1360,12 @@ impl DFA {
             }
         }
 
-        // Step 3: Build the minimized DFA from the final partitions.
         let (state_mapping, new_states) = self.rebuild_from_partitions(partition_list);
 
         self.states = new_states;
         self.start_state = state_mapping[self.start_state];
 
-        // Recompute metadata as the structure has changed.
-        self.compute_possible_future_group_ids();
-        self.compute_group_id_to_u8set();
+        self.recompute_metadata();
     }
 
     fn rebuild_from_partitions(
@@ -1470,7 +1374,6 @@ impl DFA {
     ) -> (Vec<usize>, Vec<DFAState>) {
         let mut state_mapping = vec![0; self.states.len()];
 
-        // Ensure the start state's partition is at index 0.
         if let Some(start_part_idx) = partition_list
             .iter()
             .position(|p| p.contains(&self.start_state))
@@ -1478,7 +1381,6 @@ impl DFA {
             partition_list.swap(0, start_part_idx);
         }
 
-        // Build the mapping from old state index to new state index (which is the partition index).
         for (new_idx, partition) in partition_list.iter().enumerate() {
             for &old_idx in partition {
                 state_mapping[old_idx] = new_idx;
@@ -1487,11 +1389,9 @@ impl DFA {
 
         let mut new_states = Vec::with_capacity(partition_list.len());
         for partition in &partition_list {
-            // All states in a partition are equivalent, so we can pick any one as a representative.
             let representative_old_idx = *partition.iter().next().unwrap();
             let mut new_state = self.states[representative_old_idx].clone();
 
-            // Update transitions to point to the new partition indices.
             new_state.transitions = new_state
                 .transitions
                 .iter()
@@ -1505,28 +1405,14 @@ impl DFA {
     }
 }
 
-/// Early termination condition used by both `RegexState::execute` and the
-/// fast `Regex::execute_from_state_fast`.
-///
-/// Returns true iff every group ID in `possible_future_group_ids` is a
-/// non-greedy group that has already been matched.
 fn should_terminate_early(
     possible_future_group_ids: &BTreeSet<GroupID>,
     non_greedy_finalizers: &BTreeSet<GroupID>,
     matched_groups: &BTreeSet<GroupID>,
 ) -> bool {
-    for group_id in possible_future_group_ids {
-        if non_greedy_finalizers.contains(group_id) {
-            if !matched_groups.contains(group_id) {
-                // Non-greedy group not yet matched; keep running.
-                return false;
-            }
-        } else {
-            // Greedy group still possible; keep running.
-            return false;
-        }
-    }
-    true
+    possible_future_group_ids
+        .iter()
+        .all(|group_id| non_greedy_finalizers.contains(group_id) && matched_groups.contains(group_id))
 }
 
 impl RegexState<'_> {
@@ -1544,7 +1430,6 @@ impl RegexState<'_> {
             if let Some(&next_state) = state_data.transitions.get(next_u8) {
                 self.current_state = next_state;
                 local_position += 1;
-                // Handle greedy finalizers and collect all matches
                 for &group_id in &dfa.states[self.current_state].finalizers {
                     all_matches.push(Match {
                         group_id,
@@ -1556,15 +1441,11 @@ impl RegexState<'_> {
                             .entry(group_id)
                             .or_insert(self.position + local_position);
                     } else {
-                        // Overwrite existing match for greedy groups
                         self.matches
                             .insert(group_id, self.position + local_position);
                     }
                 }
 
-                // Check for early termination. Only continue if it's possible to match either:
-                // - a greedy group, or
-                // - a non-greedy group that has not been matched yet
                 let matched: BTreeSet<GroupID> = self.matches.keys().cloned().collect();
                 let should_terminate = should_terminate_early(
                     &dfa.states[self.current_state].possible_future_group_ids,
@@ -1578,13 +1459,11 @@ impl RegexState<'_> {
                     return all_matches;
                 }
             } else {
-                // No matching transition, we're done
                 self.position += text.len();
                 self.done = true;
                 return all_matches;
             }
         }
-        // Reached the end of input, mark as done if no further transitions
         self.position += text.len();
         if dfa.states[self.current_state].transitions.is_empty() {
             self.done = true;
@@ -1607,10 +1486,6 @@ impl RegexState<'_> {
         self.done = false;
     }
 
-    /// Matches repeatedly, resolving ambiguity in the following way:
-    /// 1. If it's still possible to match something, stop. Don't return a result for the final match, since we can't rule out the possibility of a longer match.
-    /// 2. Otherwise, if there is more than one match, return the longest match.
-    /// 3. If there is more than one match of this length, return the one with the lowest group ID.
     pub fn greedy_find_all(&mut self, text: &[u8], terminate: bool) -> Vec<Match> {
         let mut matches: Vec<Match> = Vec::new();
         let start_position = self.position;
@@ -1620,51 +1495,34 @@ impl RegexState<'_> {
             self.execute(&text[local_position..]);
             if self.ended() {
                 if let Some(m) = self.get_greedy_match() {
-                    // Advance the local position to the end of the match.
                     local_position += m.position;
-
-                    // Add the match to the list of successful matches.
                     matches.push(m);
-
-                    // Reset the state and advance the internal position.
                     self.reset();
                 } else {
-                    // Ended but no match. This indicates a tokenization error.
-                    // Return the successful matches.
                     self.position = start_position + local_position;
                     return matches;
                 }
             } else {
-                // Didn't end. We must have run out of input.
-                // If we're supposed to terminate, add the final match (if any) and terminate.
                 if terminate {
                     if let Some(m) = self.get_greedy_match() {
-                        // Add the final match to the list of successful matches.
                         matches.push(m);
                     }
                     self.end();
                     return matches;
                 }
-                // Return the successful matches.
                 self.position = start_position + local_position;
                 return matches;
             }
         }
     }
 
-    /// Returns a single match as follows:
-    ///
-    /// 1. If there is more than one match, return the longest match.
-    /// 2. If there is more than one match of this length, return the one with the lowest group ID.
-    ///
-    /// If there is no match, returns None.
     pub fn get_greedy_match(&self) -> Option<Match> {
         self.matches
             .iter()
-            .filter(|(_, &pos)| pos > 0) // Tokenizers must consume input to avoid infinite loops.
+            .filter(|(_, &pos)| pos > 0)
             .max_by(|(&g1, &p1), (&g2, &p2)| p1
                 .cmp(&p2)
-                .then_with(|| g2.cmp(&g1))) // Longest match (p1 vs p2), then smallest group_id (g2 vs g1).
+                .then_with(|| g2.cmp(&g1)))
             .map(|(&group_id, &position)| Match { group_id, position })
     }
 
@@ -1678,12 +1536,10 @@ impl RegexState<'_> {
     pub fn get_u8set(&self) -> U8Set {
         let dfa = &self.regex.dfa;
         let state_data = &dfa.states[self.current_state];
-        // Get all possible u8s that can match next
         state_data.transitions.keys_as_u8set()
     }
 
     pub fn get_terminal_u8set(&self) -> U8Set {
-        // Get u8s that could take the regex to a terminal state (a state with a finalizer)
         let mut u8set = U8Set::none();
         let dfa = &self.regex.dfa;
         let state_data = &dfa.states[self.current_state];
@@ -1716,12 +1572,10 @@ impl RegexState<'_> {
     pub fn fully_matches(&self) -> Option<bool> {
         if let Some(max_position) = self.matches.values().max() {
             Some(*max_position == self.position)
+        } else if self.done {
+            Some(false)
         } else {
-            if self.done {
-                Some(false)
-            } else {
-                None
-            }
+            None
         }
     }
 
@@ -1738,12 +1592,10 @@ impl RegexState<'_> {
     }
 
     pub fn done(&self) -> bool {
-        // Returns true if the regex has matched and cannot possibly match anymore
         self.done
     }
 
     pub fn failed(&self) -> bool {
-        // Returns true if the regex has failed to match and cannot possibly match
         !self.could_match()
     }
 
@@ -1778,15 +1630,9 @@ impl Regex {
     }
 
     pub fn execute_from_state2(&self, text: &[u8], state: usize) -> ExecutionResult {
-        // For backward compatibility, this is a thin wrapper around the optimized fast path.
         self.execute_from_state_fast(text, state)
     }
 
-    /// Optimized execution from an arbitrary DFA state.
-    ///
-    /// This is functionally equivalent to `execute_from_state2`'s previous
-    /// implementation (which used `RegexState`), but avoids allocating a full
-    /// `RegexState` and repeatedly rebuilding set operations during the run.
     pub fn execute_from_state_fast(&self, text: &[u8], state: usize) -> ExecutionResult {
         let dfa = &self.dfa;
         let mut all_matches: Vec<Match> = Vec::new();
@@ -1794,8 +1640,6 @@ impl Regex {
         let mut current_state = state;
         let mut matched_groups: BTreeSet<GroupID> = dfa.states[state].finalizers.clone();
 
-        // Match behavior of RegexState::execute when starting from a "done" state:
-        // if there are no outgoing transitions, we cannot consume input.
         if dfa.states[state].transitions.is_empty() {
             return ExecutionResult {
                 matches: all_matches,
@@ -1811,8 +1655,6 @@ impl Regex {
             let next_byte = text[local_position];
 
             let Some(&next_state) = state_data.transitions.get(next_byte) else {
-                // No matching transition: the engine would mark itself as done
-                // and stop immediately.
                 return ExecutionResult {
                     matches: all_matches,
                     end_state: None,
@@ -1824,7 +1666,6 @@ impl Regex {
 
             let state_data = &dfa.states[current_state];
 
-            // Collect matches at this position.
             if !state_data.finalizers.is_empty() {
                 for &group_id in &state_data.finalizers {
                     all_matches.push(Match {
@@ -1835,9 +1676,6 @@ impl Regex {
                 }
             }
 
-            // Early termination: only continue while there exists either
-            // - a greedy group that could still be matched, or
-            // - a non-greedy group that has not yet been matched.
             if should_terminate_early(
                 &state_data.possible_future_group_ids,
                 &dfa.non_greedy_finalizers,
@@ -1850,7 +1688,6 @@ impl Regex {
             }
         }
 
-        // End of input: return a continuation state only if further transitions are possible.
         let end_state = if dfa.states[current_state].transitions.is_empty() {
             None
         } else {
@@ -1944,10 +1781,10 @@ mod tests {
         assert!(regex.definitely_fully_matches(b"a"));
         assert!(!regex.could_match(b"b"));
 
-        assert!(!regex.definitely_matches(b"")); // Incomplete match not allowed
-        assert!(regex.could_match(b"")); // Incomplete match allowed
-        assert!(regex.definitely_matches(b"ab")); // Prefix match allowed
-        assert!(regex.definitely_matches(b"aa")); // Prefix match allowed
+        assert!(!regex.definitely_matches(b""));
+        assert!(regex.could_match(b""));
+        assert!(regex.definitely_matches(b"ab"));
+        assert!(regex.definitely_matches(b"aa"));
     }
 
     #[test]
@@ -1965,7 +1802,7 @@ mod tests {
         let mut state = regex.init();
         state.execute(b"aa");
         assert_eq!(state.matches, BTreeMap::from([(0, 2)]));
-        assert!(!state.done()); // Could match more 'a's
+        assert!(!state.done());
     }
 
     #[test]
@@ -2002,10 +1839,10 @@ mod tests {
         let regex = expr.build();
         dbg!(&regex);
 
-        assert!(regex.definitely_fully_matches(b"")); // Optional 'a' can be absent
-        assert!(regex.definitely_fully_matches(b"a")); // Optional 'a' can be present
-        assert!(!regex.could_fully_match(b"aa")); // Should not match more than one 'a'
-        assert!(regex.could_match(b"b")); // Can still match the empty string in "b"
+        assert!(regex.definitely_fully_matches(b""));
+        assert!(regex.definitely_fully_matches(b"a"));
+        assert!(!regex.could_fully_match(b"aa"));
+        assert!(regex.could_match(b"b"));
     }
 
     #[test]
@@ -2027,7 +1864,7 @@ mod tests {
         dbg!(&regex);
 
         assert!(regex.definitely_fully_matches(b""));
-        assert!(regex.definitely_matches(b"a")); // Epsilon matches the empty string at the beginning
+        assert!(regex.definitely_matches(b"a"));
         assert!(!regex.definitely_fully_matches(b"a"));
     }
 
@@ -2175,7 +2012,7 @@ mod even_more_complex_tests {
         let regex = expr.build();
 
         assert!(regex.definitely_fully_matches(b"a"));
-        assert!(regex.definitely_fully_matches(b"")); // Should match the empty option
+        assert!(regex.definitely_fully_matches(b""));
     }
 
     #[test]
@@ -2250,11 +2087,7 @@ mod even_more_complex_tests {
             words
                 .iter()
                 .map(|word| {
-                    Expr::Seq(
-                        word.bytes()
-                            .map(|c| Expr::U8Seq(vec![c]))
-                            .collect(),
-                    )
+                    Expr::Seq(word.bytes().map(|c| Expr::U8Seq(vec![c])).collect())
                 })
                 .collect(),
         );
@@ -2301,55 +2134,43 @@ mod even_more_complex_tests {
         let mut state = regex.init();
 
         state.execute(b"aa");
-        // group 0 should have the later match
         assert_eq!(state.matches, BTreeMap::from([(0, 2), (1, 1)]));
     }
 
     #[test]
     fn test_non_greedy_matching() {
-        // Define regex: (a*)?a where group 0 is non-greedy and group 1 is greedy
         let expr = groups![
-            non_greedy_group(rep(eat_u8(b'a'))), // Group 0: non-greedy
-            eat_u8(b'a'),                         // Group 1: greedy
+            non_greedy_group(rep(eat_u8(b'a'))),
+            eat_u8(b'a'),
         ];
 
         let regex = expr.build();
 
-        // Input: "aaa"
         let mut regex_state = regex.init();
         regex_state.execute(b"aaa");
 
-        // Expected:
-        // Group 0 (non-greedy) should match "" (empty string)
-        // Group 1 (greedy) should match "aaa"
         assert_eq!(regex_state.matches.get(&0), Some(&0));
         assert_eq!(regex_state.matches.get(&1), Some(&1));
     }
 
     #[test]
     fn test_greedy_matching() {
-        // Define regex: (a*)a where group 0 is greedy and group 1 is greedy
         let expr = groups![
-            rep(eat_u8(b'a')), // Group 0: greedy
-            eat_u8(b'a'),      // Group 1: greedy
+            rep(eat_u8(b'a')),
+            eat_u8(b'a'),
         ];
 
         let regex = expr.build();
 
-        // Input: "aaa"
         let mut regex_state = regex.init();
         regex_state.execute(b"aaa");
 
-        // Expected:
-        // Group 0 (greedy) should match "aaa"
-        // Group 1 (greedy) should match "a"
         assert_eq!(regex_state.matches.get(&0), Some(&3));
         assert_eq!(regex_state.matches.get(&1), Some(&1));
     }
 
     #[test]
     fn test_triple_quoted_string() {
-        // Regex: """.*?""" (non-greedy)
         let non_greedy_expr = groups![
             non_greedy_group(seq![
                 Expr::U8Seq(b"\"\"\"".to_vec()),
@@ -2359,7 +2180,6 @@ mod even_more_complex_tests {
         ];
         let non_greedy_regex = non_greedy_expr.build();
 
-        // Regex: """.*""" (greedy)
         let greedy_expr = groups![
             seq![
                 Expr::U8Seq(b"\"\"\"".to_vec()),
@@ -2371,18 +2191,16 @@ mod even_more_complex_tests {
 
         let input = b"\"\"\"hello\"\"\"world\"\"\"";
 
-        // Non-greedy should match correctly
         let mut non_greedy_state = non_greedy_regex.init();
         non_greedy_state.execute(input);
         assert_eq!(
             non_greedy_state.matches.get(&0),
             Some(&b"\"\"\"hello\"\"\"".len())
-        ); // Matches up to the second """
+        );
 
-        // Greedy should match incorrectly (matching the entire string)
         let mut greedy_state = greedy_regex.init();
         greedy_state.execute(input);
-        assert_eq!(greedy_state.matches.get(&0), Some(&input.len())); // Matches the whole input
+        assert_eq!(greedy_state.matches.get(&0), Some(&input.len()));
     }
 }
 
@@ -2430,20 +2248,14 @@ mod possible_future_group_ids_tests {
 
     #[test]
     fn test_possible_future_group_ids_excludes_current_state() {
-        // Define a regex where the start state is final, but also has transitions
-        // groups![eps(), eat_u8(b'a')]
-        // Group 0: eps() -> makes start state final for group 0
-        // Group 1: eat_u8(b'a') -> transition 'a' from start to a state final for group 1
         let expr = groups![
-            eps(),        // Group 0
-            eat_u8(b'a'), // Group 1
+            eps(),
+            eat_u8(b'a'),
         ];
         let regex = expr.build();
         let start_state_index = regex.dfa.start_state;
         let start_state_data = &regex.dfa.states[start_state_index];
 
-        // possible_future_group_ids should only contain group 1, as it's reachable via a transition ('a').
-        // It should *not* contain group 0, which is final *at* the current state.
         assert_eq!(
             start_state_data.possible_future_group_ids,
             BTreeSet::from([1])
@@ -2455,7 +2267,6 @@ mod possible_future_group_ids_tests {
 mod group_id_to_u8set_tests {
     use super::*;
 
-    /// Helper function to create a DFA from an expression with multiple groups.
     fn build_dfa_with_groups(exprs: Vec<Expr>) -> Regex {
         let expr_groups = ExprGroups {
             groups: exprs.into_iter().map(ExprGroup::from).collect(),
@@ -2465,14 +2276,11 @@ mod group_id_to_u8set_tests {
 
     #[test]
     fn test_compute_group_id_to_u8set_single_group() {
-        // Regex: "a"
         let expr = groups![
-            eat_u8(b'a') // Group 0
+            eat_u8(b'a')
         ];
         let regex = expr.build();
 
-        // State 0 transitions to state 1 on 'a'
-        // group_id_to_u8set for state 0 should map group 0 to {'a'}
         let group_id_to_u8set = &regex.dfa.states[0].group_id_to_u8set;
         assert_eq!(group_id_to_u8set.len(), 1);
         assert!(group_id_to_u8set.contains_key(&0));
@@ -2483,17 +2291,11 @@ mod group_id_to_u8set_tests {
 
     #[test]
     fn test_compute_group_id_to_u8set_multiple_groups() {
-        // Regex: "a" or "b"
         let expr = groups![
-            eat_u8(b'a'), // Group 0
-            eat_u8(b'b'), // Group 1
+            eat_u8(b'a'),
+            eat_u8(b'b'),
         ];
         let regex = expr.build();
-
-        // State 0 transitions on 'a' to state 1 and on 'b' to state 2
-        // group_id_to_u8set for state 0 should map:
-        // - Group 0 to {'a'}
-        // - Group 1 to {'b'}
 
         let group_id_to_u8set = &regex.dfa.states[0].group_id_to_u8set;
         assert_eq!(group_id_to_u8set.len(), 2);
@@ -2511,17 +2313,11 @@ mod group_id_to_u8set_tests {
 
     #[test]
     fn test_compute_group_id_to_u8set_overlapping_groups() {
-        // Regex: "a" or "a"
         let expr = groups![
-            eat_u8(b'a'), // Group 0
-            eat_u8(b'a'), // Group 1
+            eat_u8(b'a'),
+            eat_u8(b'a'),
         ];
         let regex = expr.build();
-
-        // State 0 transitions on 'a' to state 1 and state 2
-        // group_id_to_u8set for state 0 should map:
-        // - Group 0 to {'a'}
-        // - Group 1 to {'a'}
 
         let group_id_to_u8set = &regex.dfa.states[0].group_id_to_u8set;
         assert_eq!(group_id_to_u8set.len(), 2);
@@ -2539,21 +2335,18 @@ mod group_id_to_u8set_tests {
 
     #[test]
     fn test_get_u8set_for_group_existing_group() {
-        // Regex: "a" or "b"
         let expr = groups![
-            eat_u8(b'a'), // Group 0
-            eat_u8(b'b'), // Group 1
+            eat_u8(b'a'),
+            eat_u8(b'b'),
         ];
         let regex = expr.build();
 
         let regex_state = regex.init();
 
-        // For Group 0, U8Set should contain 'a'
         let u8set_group0 = regex_state.get_u8set_for_group(0);
         assert!(u8set_group0.contains(b'a'));
         assert_eq!(u8set_group0.iter().collect::<Vec<u8>>(), vec![b'a']);
 
-        // For Group 1, U8Set should contain 'b'
         let u8set_group1 = regex_state.get_u8set_for_group(1);
         assert!(u8set_group1.contains(b'b'));
         assert_eq!(u8set_group1.iter().collect::<Vec<u8>>(), vec![b'b']);
@@ -2561,32 +2354,24 @@ mod group_id_to_u8set_tests {
 
     #[test]
     fn test_get_u8set_for_group_nonexistent_group() {
-        // Regex: "a"
         let expr = groups![
-            eat_u8(b'a') // Group 0
+            eat_u8(b'a')
         ];
         let regex = expr.build();
 
         let regex_state = regex.init();
 
-        // For non-existent Group 1, U8Set should be empty
         let u8set_group1 = regex_state.get_u8set_for_group(1);
         assert_eq!(u8set_group1.iter().collect::<Vec<u8>>(), Vec::<u8>::new());
     }
 
     #[test]
     fn test_group_id_to_u8set_nested_groups() {
-        // Regex: (a|b)*c
         let expr = groups![
-            rep(choice![eat_u8(b'a'), eat_u8(b'b')]), // Group 0
-            eat_u8(b'c'),                           // Group 1
+            rep(choice![eat_u8(b'a'), eat_u8(b'b')]),
+            eat_u8(b'c'),
         ];
         let regex = expr.build();
-
-        // Start state (state 0)
-        // group_id_to_u8set for state 0:
-        // - Group 0: {'a', 'b'}
-        // - Group 1: {'c'}
 
         let group_id_to_u8set = &regex.dfa.states[0].group_id_to_u8set;
         dbg!(&regex);
@@ -2606,13 +2391,11 @@ mod group_id_to_u8set_tests {
 
     #[test]
     fn test_group_id_to_u8set_nonexistent_group() {
-        // Regex: "a"
         let expr = groups![
-            eat_u8(b'a') // Group 0
+            eat_u8(b'a')
         ];
         let regex = expr.build();
 
-        // Attempt to get U8Set for non-existent Group 1
         let regex_state = regex.init();
         let u8set_group1 = regex_state.get_u8set_for_group(1);
         assert_eq!(u8set_group1.iter().collect::<Vec<u8>>(), Vec::<u8>::new());
@@ -2620,17 +2403,11 @@ mod group_id_to_u8set_tests {
 
     #[test]
     fn test_group_id_to_u8set_overlapping_groups() {
-        // Regex: "a" or "a"
         let expr = groups![
-            eat_u8(b'a'), // Group 0
-            eat_u8(b'a'), // Group 1
+            eat_u8(b'a'),
+            eat_u8(b'a'),
         ];
         let regex = expr.build();
-
-        // Start state (state 0)
-        // group_id_to_u8set for state 0:
-        // - Group 0: {'a'}
-        // - Group 1: {'a'}
 
         let group_id_to_u8set = &regex.dfa.states[0].group_id_to_u8set;
         assert_eq!(group_id_to_u8set.len(), 2);
@@ -2646,17 +2423,11 @@ mod group_id_to_u8set_tests {
 
     #[test]
     fn test_get_u8set_for_group_after_transition() {
-        // Regex: "ab" or "ac"
         let expr = groups![
-            seq![eat_u8(b'a'), eat_u8(b'b')], // Group 0
-            seq![eat_u8(b'a'), eat_u8(b'c')], // Group 1
+            seq![eat_u8(b'a'), eat_u8(b'b')],
+            seq![eat_u8(b'a'), eat_u8(b'c')],
         ];
         let regex = expr.build();
-
-        // Start state (state 0)
-        // group_id_to_u8set for state 0 should map:
-        // - Group 0: {'a'}
-        // - Group 1: {'a'}
 
         let group_id_to_u8set_0 = &regex.dfa.states[0].group_id_to_u8set;
         assert_eq!(group_id_to_u8set_0.len(), 2);
@@ -2667,17 +2438,14 @@ mod group_id_to_u8set_tests {
         assert!(u8set_0_group0.contains(b'a'));
         assert!(u8set_0_group1.contains(b'a'));
 
-        // After consuming 'a', move to state(s) corresponding to 'ab' and 'ac'
         let mut regex_state = regex.init();
         regex_state.execute(b"a");
 
-        // Now, current_state should be one of the states after 'a'
         assert_eq!(
             regex.dfa.states[regex_state.current_state].possible_future_group_ids,
             BTreeSet::from([0, 1])
         );
 
-        // Verify group_id_to_u8set for the new state
         let group_id_to_u8set_new =
             &regex.dfa.states[regex_state.current_state].group_id_to_u8set;
         assert_eq!(group_id_to_u8set_new.len(), 2);
@@ -2693,19 +2461,12 @@ mod group_id_to_u8set_tests {
 
     #[test]
     fn test_group_id_to_u8set_after_multiple_transitions() {
-        // Regex: "abc" or "abd" or "abe"
         let expr = groups![
-            seq![eat_u8(b'a'), eat_u8(b'b'), eat_u8(b'c')], // Group 0
-            seq![eat_u8(b'a'), eat_u8(b'b'), eat_u8(b'd')], // Group 1
-            seq![eat_u8(b'a'), eat_u8(b'b'), eat_u8(b'e')], // Group 2
+            seq![eat_u8(b'a'), eat_u8(b'b'), eat_u8(b'c')],
+            seq![eat_u8(b'a'), eat_u8(b'b'), eat_u8(b'd')],
+            seq![eat_u8(b'a'), eat_u8(b'b'), eat_u8(b'e')],
         ];
         let regex = expr.build();
-
-        // Start state (state 0)
-        // group_id_to_u8set for state 0:
-        // - Group 0: {'a'}
-        // - Group 1: {'a'}
-        // - Group 2: {'a'}
 
         let group_id_to_u8set_0 = &regex.dfa.states[0].group_id_to_u8set;
         assert_eq!(group_id_to_u8set_0.len(), 3);
@@ -2721,20 +2482,13 @@ mod group_id_to_u8set_tests {
         assert!(u8set_0_group1.contains(b'a'));
         assert!(u8set_0_group2.contains(b'a'));
 
-        // After consuming 'a', move to state after 'a'
         let mut regex_state_a = regex.init();
         regex_state_a.execute(b"a");
 
-        // possible_future_group_ids should still include {0,1,2}
         assert_eq!(
             regex.dfa.states[regex_state_a.current_state].possible_future_group_ids,
             BTreeSet::from([0, 1, 2])
         );
-
-        // group_id_to_u8set should map:
-        // - Group 0: 'b'
-        // - Group 1: 'b'
-        // - Group 2: 'b'
 
         let group_id_to_u8set_a =
             &regex.dfa.states[regex_state_a.current_state].group_id_to_u8set;
@@ -2751,20 +2505,13 @@ mod group_id_to_u8set_tests {
         assert!(u8set_a_group1.contains(b'b'));
         assert!(u8set_a_group2.contains(b'b'));
 
-        // After consuming 'a' and 'b', move to state after 'a' and 'b'
         let mut regex_state_ab = regex.init();
         regex_state_ab.execute(b"ab");
 
-        // possible_future_group_ids should still include {0,1,2}
         assert_eq!(
             regex.dfa.states[regex_state_ab.current_state].possible_future_group_ids,
             BTreeSet::from([0, 1, 2])
         );
-
-        // group_id_to_u8set should map:
-        // - Group 0: 'c'
-        // - Group 1: 'd'
-        // - Group 2: 'e'
 
         let group_id_to_u8set_ab =
             &regex.dfa.states[regex_state_ab.current_state].group_id_to_u8set;
@@ -2784,15 +2531,10 @@ mod group_id_to_u8set_tests {
 
     #[test]
     fn test_group_id_to_u8set_after_consuming_all() {
-        // Regex: "ab"
         let expr = groups![
-            seq![eat_u8(b'a'), eat_u8(b'b')] // Group 0
+            seq![eat_u8(b'a'), eat_u8(b'b')]
         ];
         let regex = expr.build();
-
-        // Start state (state 0)
-        // group_id_to_u8set for state 0:
-        // - Group 0: {'a'}
 
         let group_id_to_u8set_0 = &regex.dfa.states[0].group_id_to_u8set;
         assert_eq!(group_id_to_u8set_0.len(), 1);
@@ -2802,7 +2544,6 @@ mod group_id_to_u8set_tests {
         assert!(u8set_0_group0.contains(b'a'));
         assert_eq!(u8set_0_group0.iter().collect::<Vec<u8>>(), vec![b'a']);
 
-        // After consuming 'a', move to state after 'a'
         let mut regex_state_a = regex.init();
         regex_state_a.execute(b"a");
         assert_eq!(
@@ -2810,8 +2551,6 @@ mod group_id_to_u8set_tests {
             BTreeSet::from([0])
         );
 
-        // group_id_to_u8set for state after 'a':
-        // - Group 0: {'b'}
         let group_id_to_u8set_a =
             &regex.dfa.states[regex_state_a.current_state].group_id_to_u8set;
         assert_eq!(group_id_to_u8set_a.len(), 1);
@@ -2824,17 +2563,11 @@ mod group_id_to_u8set_tests {
 
     #[test]
     fn test_get_u8set_for_group_multiple_transitions() {
-        // Regex: "a" followed by "b" or "c"
         let expr = groups![
-            seq![eat_u8(b'a'), eat_u8(b'b')], // Group 0
-            seq![eat_u8(b'a'), eat_u8(b'c')], // Group 1
+            seq![eat_u8(b'a'), eat_u8(b'b')],
+            seq![eat_u8(b'a'), eat_u8(b'c')],
         ];
         let regex = expr.build();
-
-        // Start state (state 0)
-        // group_id_to_u8set for state 0
-        // - Group 0: {'a'}
-        // - Group 1: {'a'}
 
         let group_id_to_u8set_0 = &regex.dfa.states[0].group_id_to_u8set;
         assert_eq!(group_id_to_u8set_0.len(), 2);
@@ -2849,9 +2582,6 @@ mod group_id_to_u8set_tests {
         assert_eq!(u8set_0_group0.iter().collect::<Vec<u8>>(), vec![b'a']);
         assert_eq!(u8set_0_group1.iter().collect::<Vec<u8>>(), vec![b'a']);
 
-        // After consuming 'a', current_state should have group_id_to_u8set:
-        // - Group 0: {'b'}
-        // - Group 1: {'c'}
         let mut regex_state_a = regex.init();
         regex_state_a.execute(b"a");
 
@@ -2877,41 +2607,12 @@ mod group_u8set_tests {
 
     #[test]
     fn test_get_u8set_for_group() {
-        // Construct DFA manually with known states and transitions.
-        //
-        // States:
-        // 0: start state
-        // 1: after 'a'
-        // 2: after 'ab' (accepting state for group 0)
-        // 3: after 'ac' (accepting state for group 1)
-        //
-        // Transitions:
-        // 0 -- 'a' --> 1
-        // 1 -- 'b' --> 2
-        // 1 -- 'c' --> 3
-        //
-        // Group IDs:
-        // State 2: group 0 (accepts "ab")
-        // State 3: group 1 (accepts "ac")
-        //
-        // The DFA recognizes the tokens "ab" and "ac".
-
-        // Initialize the DFA with empty states.
         let mut dfa = DFA {
             states: Vec::new(),
             start_state: 0,
-            non_greedy_finalizers: BTreeSet::new(), // Initialize here
+            non_greedy_finalizers: BTreeSet::new(),
         };
 
-        // State 0: Start state
-        dfa.states.push(DFAState {
-            transitions: CharTransitions::new(),
-            finalizers: BTreeSet::new(),
-            possible_future_group_ids: BTreeSet::new(), // Will be computed
-            group_id_to_u8set: BTreeMap::new(),         // Will be computed
-        });
-
-        // State 1: After reading 'a'
         dfa.states.push(DFAState {
             transitions: CharTransitions::new(),
             finalizers: BTreeSet::new(),
@@ -2919,7 +2620,13 @@ mod group_u8set_tests {
             group_id_to_u8set: BTreeMap::new(),
         });
 
-        // State 2: Accepting state for group 0 ("ab")
+        dfa.states.push(DFAState {
+            transitions: CharTransitions::new(),
+            finalizers: BTreeSet::new(),
+            possible_future_group_ids: BTreeSet::new(),
+            group_id_to_u8set: BTreeMap::new(),
+        });
+
         dfa.states.push(DFAState {
             transitions: CharTransitions::new(),
             finalizers: BTreeSet::from([0]),
@@ -2927,7 +2634,6 @@ mod group_u8set_tests {
             group_id_to_u8set: BTreeMap::new(),
         });
 
-        // State 3: Accepting state for group 1 ("ac")
         dfa.states.push(DFAState {
             transitions: CharTransitions::new(),
             finalizers: BTreeSet::from([1]),
@@ -2935,64 +2641,38 @@ mod group_u8set_tests {
             group_id_to_u8set: BTreeMap::new(),
         });
 
-        // Add transitions:
-        // State 0 -- 'a' --> State 1
         dfa.states[0].transitions.insert(b'a', 1);
-
-        // State 1 -- 'b' --> State 2
         dfa.states[1].transitions.insert(b'b', 2);
-
-        // State 1 -- 'c' --> State 3
         dfa.states[1].transitions.insert(b'c', 3);
 
-        // Compute possible_future_group_ids and group_id_to_u8set for the DFA
         dfa.compute_possible_future_group_ids();
         dfa.compute_group_id_to_u8set();
 
-        // Create a Regex instance with the constructed DFA
         let regex = Regex { dfa };
 
-        // Test get_u8set_for_group at State 0 (start state)
         let state0 = regex.init_to_state(0);
         let u8set_group0_state0 = state0.get_u8set_for_group(0);
         let u8set_group1_state0 = state0.get_u8set_for_group(1);
-
-        // At State 0, possible inputs leading to group 0 or group 1 are 'a' (which can lead to 'ab' or 'ac')
-        // Therefore, both group 0 and group 1 should have 'a' in their U8Set at State 0
         assert!(u8set_group0_state0.contains(b'a'));
         assert!(u8set_group1_state0.contains(b'a'));
 
-        // Test get_u8set_for_group at State 1
         let state1 = regex.init_to_state(1);
         let u8set_group0_state1 = state1.get_u8set_for_group(0);
         let u8set_group1_state1 = state1.get_u8set_for_group(1);
-
-        // At State 1:
-        // - For group 0 ("ab"), the next input must be 'b'
-        // - For group 1 ("ac"), the next input must be 'c'
-        // So group 0's U8Set should contain 'b', and group 1's U8Set should contain 'c'
         assert!(u8set_group0_state1.contains(b'b'));
         assert!(!u8set_group0_state1.contains(b'c'));
         assert!(u8set_group1_state1.contains(b'c'));
         assert!(!u8set_group1_state1.contains(b'b'));
 
-        // Test get_u8set_for_group at State 2 (accepting state for group 0)
         let state2 = regex.init_to_state(2);
         let u8set_group0_state2 = state2.get_u8set_for_group(0);
         let u8set_group1_state2 = state2.get_u8set_for_group(1);
-
-        // At State 2, there are no outgoing transitions
-        // So both group 0 and group 1 should have empty U8Sets
         assert!(u8set_group0_state2.iter().next().is_none());
         assert!(u8set_group1_state2.iter().next().is_none());
 
-        // Test get_u8set_for_group at State 3 (accepting state for group 1)
         let state3 = regex.init_to_state(3);
         let u8set_group0_state3 = state3.get_u8set_for_group(0);
         let u8set_group1_state3 = state3.get_u8set_for_group(1);
-
-        // At State 3, there are no outgoing transitions
-        // So both group 0 and group 1 should have empty U8Sets
         assert!(u8set_group0_state3.iter().next().is_none());
         assert!(u8set_group1_state3.iter().next().is_none());
     }
@@ -3022,9 +2702,6 @@ mod tests_nov_24 {
 
     #[test]
     fn test_reasonable_number_of_states() {
-        // The following expression should yield a DFA with 2 states:
-        // - one to match 'a' or 'b'
-        // - one to hold the finalizer
         let expr = choice![eat_u8(b'a'), eat_u8(b'b'),];
         let regex = expr.build();
         dbg!(&regex);
@@ -3036,56 +2713,41 @@ mod tests_nov_24 {
 mod test_python {
     use super::*;
     use crate::datastructures::u8set::U8Set;
-    // Added for U8Set usage in new test
     use crate::{choice, seq};
 
     #[ignore]
     #[test]
     fn test_full_python_tokenizer_recognizes_name() {
-        // --- Define basic character sets ---
         let digit = Expr::U8Class(U8Set::from_range(b'0', b'9'));
         let alph_lower = Expr::U8Class(U8Set::from_range(b'a', b'z'));
         let alph_upper = Expr::U8Class(U8Set::from_range(b'A', b'Z'));
         let name_start = choice![alph_lower.clone(), alph_upper.clone(), eat_u8(b'_')];
         let name_middle = choice![name_start.clone(), digit.clone()];
 
-        // --- Define the ignore pattern ---
-        // Simplified ignore for testing: just space
-        // let ignore = rep(eat_u8(b' '));
-        // More complete ignore: space or # comment
         let ignore = rep(choice![
              eat_u8(b' '),
-             // Basic comment handling for the test
              seq![eat_u8(b'#'), rep(Expr::U8Class(U8Set::all().without(b'\n'))), opt(eat_u8(b'\n'))],
-             // Note: Real Python tokenizer handles more complex whitespace and line continuations
          ]);
 
-        // --- Define token expressions (core logic) ---
-        // Based on python_grammar.py and python.gram literals
         let tokens_core: BTreeMap<&str, Expr> = BTreeMap::from([
-            // Core Types
             ("NAME", seq![name_start, rep(name_middle)]),
             ("NUMBER", choice![
-                rep1(digit.clone()), // Integer
-                seq![rep1(digit.clone()), eat_u8(b'.'), rep(digit.clone())], // Float with digits before .
-                seq![eat_u8(b'.'), rep1(digit.clone())], // Float starting with .
-                // Simplified: Not including hex, oct, bin, complex for this test focus
+                rep1(digit.clone()),
+                seq![rep1(digit.clone()), eat_u8(b'.'), rep(digit.clone())],
+                seq![eat_u8(b'.'), rep1(digit.clone())],
             ]),
             ("STRING", choice![
                 seq![eat_u8(b'"'), rep(Expr::U8Class(U8Set::all().without(b'"'))), eat_u8(b'"')],
                 seq![eat_u8(b'\''), rep(Expr::U8Class(U8Set::all().without(b'\''))), eat_u8(b'\'')],
-                // Simplified: Not including triple quotes, prefixes like r"", f"", etc.
             ]),
-            ("FSTRING_START", Expr::U8Seq(b"f'".to_vec())), // Example, needs more variants
-            ("FSTRING_END", Expr::U8Seq(b"'".to_vec())),    // Example
-            ("FSTRING_MIDDLE", rep1(Expr::U8Class(U8Set::all().difference(&U8Set::from_slice(&[b'{', b'}']))))), // Simplified
-            // Special Tokens (often handled by parser state, represented as eps here for DFA structure)
+            ("FSTRING_START", Expr::U8Seq(b"f'".to_vec())),
+            ("FSTRING_END", Expr::U8Seq(b"'".to_vec())),
+            ("FSTRING_MIDDLE", rep1(Expr::U8Class(U8Set::all().difference(&U8Set::from_slice(&[b'{', b'}']))))),
             ("NEWLINE", eps()),
             ("INDENT", eps()),
             ("DEDENT", eps()),
             ("TYPE_COMMENT", eps()),
             ("ENDMARKER", eps()),
-            // Operators and Delimiters from python.gram
             ("LPAREN", eat_u8(b'(')),
             ("RPAREN", eat_u8(b')')),
             ("LSQB", eat_u8(b'[')),
@@ -3109,8 +2771,7 @@ mod test_python {
             ("CIRCUMFLEX", eat_u8(b'^')),
             ("TILDE", eat_u8(b'~')),
             ("AT", eat_u8(b'@')),
-            ("EXCLAMATION", eat_u8(b'!')), // For f-string conversion
-            // Compound Operators
+            ("EXCLAMATION", eat_u8(b'!')),
             ("DOUBLESTAR", Expr::U8Seq(b"**".to_vec())),
             ("DOUBLESLASH", Expr::U8Seq(b"//".to_vec())),
             ("LEFTSHIFT", Expr::U8Seq(b"<<".to_vec())),
@@ -3137,13 +2798,11 @@ mod test_python {
             ("COLONEQUAL", Expr::U8Seq(b":=".to_vec())),
         ]);
 
-        // --- Combine with ignore and create groups ---
         let mut token_groups: Vec<ExprGroup> = Vec::new();
         let mut token_name_to_id: BTreeMap<&str, GroupID> = BTreeMap::new();
         for (name, core_expr) in tokens_core {
             let group_id = token_groups.len();
             token_name_to_id.insert(name, group_id);
-            // Use greedy groups by default for tokenizer behavior
             token_groups.push(greedy_group(seq![ignore.clone(), core_expr]));
         }
 
@@ -3154,7 +2813,6 @@ mod test_python {
         state.execute(b"hello");
 
         assert!(state.definitely_matches(), "Tokenizer should match 'hello'");
-        // Ensure there is a match for the NAME token and that it's at the correct position
         assert_eq!(
             state.matches.get(&token_name_to_id["NAME"]),
             Some(&5),
