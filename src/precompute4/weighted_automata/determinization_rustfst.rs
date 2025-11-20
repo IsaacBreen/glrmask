@@ -24,12 +24,44 @@ use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::sync::{Arc, Mutex};
 
-fn label_to_fst_label(label: Label) -> u32 {
-    (label as i32 - Label::MIN as i32) as u32 + 1
+fn _label_to_fst_label(label: i32) -> u32 {
+    if label > 0 {
+        label as u32
+    } else {
+        // Map 0 and negatives to upper half of u32 space
+        // 0 -> u32::MAX
+        // -1 -> u32::MAX - 1
+        // -2 -> u32::MAX - 2
+        // etc.
+        (label as u32).wrapping_add(u32::MAX)
+    }
 }
 
-fn fst_label_to_label(label: u32) -> Label {
-    ((label - 1) as i32 + Label::MIN as i32) as Label
+fn _fst_label_to_label(label: u32) -> i32 {
+    if label == 0 {
+        panic!("label cannot be 0");
+    }
+
+    if label <= i32::MAX as u32 {
+        // Positive range: 1..=i32::MAX maps directly
+        label as i32
+    } else {
+        // Upper range maps back to 0 and negatives
+        // u32::MAX -> 0
+        // u32::MAX - 1 -> -1
+        // etc.
+        label.wrapping_sub(u32::MAX) as i32
+    }
+}
+fn fst_label_to_label(label: u32) -> i32 {
+    let result = _fst_label_to_label(label);
+    assert!(label == _label_to_fst_label(result));
+    result
+}
+fn label_to_fst_label(label: i32) -> u32 {
+    let result = _label_to_fst_label(label);
+    assert!(label == _fst_label_to_label(result));
+    result
 }
 
 static WEIGHT_INTERNER: Lazy<Mutex<HashSet<Arc<Weight>>>> =
