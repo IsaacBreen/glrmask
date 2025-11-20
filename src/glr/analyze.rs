@@ -1052,6 +1052,7 @@ fn is_nullable(expr: &Expr) -> bool {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum ResolvedSymbol {
     Expr(Expr),
     SelfRef,
