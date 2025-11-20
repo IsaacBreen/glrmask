@@ -12,7 +12,7 @@ use crate::json_serialization::JSONConvertible;
 use crate::precompute4::nwa_optimizations::{prune_continuations_from_final_states, simplify_default_transitions};
 use crate::precompute4::resolve_negatives::{apply_cancellations, apply_finality_fixpoint, remove_negative_transitions};
 use crate::precompute4::template_nwa::{build_epsilon_dwa, build_ignore_terminal_dwa, build_template_dwas};
-use crate::precompute4::weighted_automata::{DWA, NWA, NWABody, NWAStateID, NWAStates, Weight, StateID};
+use crate::precompute4::weighted_automata::{DWA, NWA, NWABody, NWAStateID, NWAStates, Weight, StateID, SimpleBitset};
 use crate::r#macro::is_debug_level_enabled;
 use crate::types::{TerminalID as GrammarTokenID, TerminalID};
 use crate::tokenizer::TokenizerStateID;
@@ -43,6 +43,104 @@ pub use crate::precompute4::template_nwa::FullDWABuildError;
 
 pub type Precomputed4 = DWA;
 type Signature = Vec<Vec<Option<TerminalID>>>;
+
+/// Helper to index a signature for fast compatibility checks.
+struct SignatureIndex {
+    term_to_group: HashMap<Option<TerminalID>, usize>,
+}
+
+impl SignatureIndex {
+    fn new(sig: &Signature) -> Self {
+        let mut map = HashMap::new();
+        for (g_idx, group) in sig.iter().enumerate() {
+            for term in group {
+                map.insert(*term, g_idx);
+            }
+        }
+        Self { term_to_group: map }
+    }
+
+    fn get_group(&self, term: &Option<TerminalID>) -> Option<usize> {
+        self.term_to_group.get(term).cloned()
+    }
+}
+
+/// Checks if `parent` signature can derive `child`, returning the weight mapping if so.
+/// Mapping[i] = Weight to replace bit `i` with.
+fn can_derive(
+    parent: &Signature,
+    child_index: &SignatureIndex,
+) -> Option<Vec<Weight>> {
+    let mut mapping = Vec::with_capacity(parent.len());
+
+    for group in parent {
+        let mut target_group: Option<usize> = None;
+        // All terminals in a parent group must map to the SAME child group (or be missing from child).
+        for term in group {
+            if let Some(g) = child_index.get_group(term) {
+                if let Some(existing) = target_group {
+                    if existing != g {
+                        return None; // Conflict
+                    }
+                } else {
+                    target_group = Some(g);
+                }
+            }
+        }
+        
+        let w = if let Some(g) = target_group {
+            Weight::from_item(g)
+        } else {
+            Weight::zeros()
+        };
+        mapping.push(w);
+    }
+
+    Some(mapping)
+}
+
+/// Creates a new DWA from a parent DWA by remapping its abstract weights according to `mapping`.
+fn specialize_dwa_relative(
+    parent_dwa: &DWA,
+    mapping: &[Weight],
+) -> DWA {
+    let mut specialized_dwa = parent_dwa.clone();
+    let mut cache: HashMap<Weight, SimpleBitset> = HashMap::new();
+    
+    // Helper to map a bitset of parent indices to a bitset of child indices
+    let mut map_weight = |w: &Weight| -> Weight {
+        if let Some(cw) = cache.get(w) {
+            return cw.clone();
+        }
+        let mut new_w = Weight::zeros();
+        for bit in w.iter_up_to(mapping.len()) {
+            if let Some(target_w) = mapping.get(bit) {
+                new_w |= target_w;
+            }
+        }
+        cache.insert(w.clone(), new_w.clone());
+        new_w
+    };
+
+    for state in &mut specialized_dwa.states.0 {
+        if let Some(fw) = &mut state.final_weight {
+            *fw = map_weight(fw);
+            if fw.is_empty() { state.final_weight = None; }
+        }
+        if let Some(sw) = &mut state.state_weight {
+            *sw = map_weight(sw);
+            if sw.is_empty() { state.state_weight = None; }
+        }
+        for tw in state.trans_weights.values_mut() {
+            *tw = map_weight(tw);
+        }
+        // Prune now-empty transitions
+        state.trans_weights.retain(|_, w| !w.is_empty());
+        state.transitions.retain(|k, _| state.trans_weights.contains_key(k));
+    }
+    
+    specialized_dwa
+}
 
 fn convert_node_to_nwa(
     node_idx: PrecomputeNode1Index,
@@ -292,21 +390,63 @@ pub fn precompute4(
     );
     crate::debug!(4, "Pass 1 (Token BVs & Signatures) took: {:?}. Found {} unique signatures.", start_pass1.elapsed(), unique_signatures.len());
 
-    // Precompute Templates
+    // Precompute Templates via waterfall derivation
     let start_templates = Instant::now();
     let mut template_cache = HashMap::new();
-    for signature in unique_signatures {
-        let mut abstract_bundle = BTreeMap::new();
-        for (idx, terms) in signature.iter().enumerate() {
-            let abstract_weight = Weight::from_item(idx);
-            for term in terms {
-                abstract_bundle.insert(*term, abstract_weight.clone());
+    
+    // 1. Construct explicit super signature and put super_dwa in the pool.
+    // Super signature maps index i -> {bit_to_term[i]}.
+    let super_signature: Signature = bit_to_term.iter().map(|t| vec![*t]).collect();
+    let mut pool: Vec<(Signature, DWA)> = Vec::new();
+    pool.push((super_signature, super_dwa.clone()));
+
+    // 2. Sort target signatures by complexity (groups, terminals) descending.
+    // This ensures we build larger/more-complex templates first, which can then serve as parents for smaller ones.
+    let mut signatures_vec: Vec<Signature> = unique_signatures.into_iter().collect();
+    signatures_vec.sort_by(|a, b| {
+        // Heuristic: Larger number of groups ~ more granularity.
+        let groups_a = a.len();
+        let groups_b = b.len();
+        if groups_a != groups_b {
+            return groups_b.cmp(&groups_a);
+        }
+        // Tie-break: number of terminals
+        let terms_a: usize = a.iter().map(|g| g.len()).sum();
+        let terms_b: usize = b.iter().map(|g| g.len()).sum();
+        terms_b.cmp(&terms_a)
+    });
+
+    // 3. Greedy derivation
+    for target_sig in signatures_vec {
+        let target_idx = SignatureIndex::new(&target_sig);
+        
+        // Find best parent in pool
+        let mut best_parent: Option<(usize, Vec<Weight>)> = None; // (pool_index, mapping)
+        let mut best_score = usize::MAX; // Minimize parent groups
+
+        for (p_idx, (p_sig, _)) in pool.iter().enumerate() {
+            // If we found a parent with same complexity as current best, maybe skip?
+            // But strict derivation check is needed.
+            if let Some(mapping) = can_derive(p_sig, &target_idx) {
+                let score = p_sig.len();
+                if score < best_score {
+                    best_score = score;
+                    best_parent = Some((p_idx, mapping));
+                }
             }
         }
-        let mut template_dwa = specialize_dwa(&super_dwa, &abstract_bundle, &bit_to_term);
-        template_dwa.simplify();
-        template_cache.insert(signature, NWA::from_dwa(&template_dwa));
+
+        let (parent_idx, mapping) = best_parent.expect("Super signature should always be a valid parent");
+        let parent_dwa = &pool[parent_idx].1;
+        
+        // Derive
+        let mut derived_dwa = specialize_dwa_relative(parent_dwa, &mapping);
+        derived_dwa.simplify(); // Crucial step: reduce the DWA for the pool
+        
+        template_cache.insert(target_sig.clone(), NWA::from_dwa(&derived_dwa));
+        pool.push((target_sig, derived_dwa));
     }
+
     crate::debug!(4, "Precomputed {} templates in: {:?}", template_cache.len(), start_templates.elapsed());
 
 
@@ -318,7 +458,6 @@ pub fn precompute4(
         NWABody { start_state: start }
     };
     
-    // Redoing the call with correct logic:
     let initial_term_map: BTreeMap<Option<TerminalID>, Weight> = BTreeMap::from([(None, Weight::all())]);
     let initial_body_map_full = BTreeMap::from([(initial_nwa_body, initial_term_map)]);
     let initial_values_full: Vec<(Trie2Index, (BTreeMap<NWABody, BTreeMap<Option<TerminalID>, Weight>>, LLMTokenBV))> =
@@ -580,59 +719,6 @@ fn resolve_negatives_and_optimize_and_determinize(parser: &GLRParser, mut combin
     println!("================================");
 
     final_dwa
-}
-
-fn specialize_dwa(
-    super_dwa: &DWA,
-    bundle: &BTreeMap<Option<TerminalID>, Weight>,
-    bit_to_term: &[Option<TerminalID>],
-) -> DWA {
-    let mut specialized_dwa = super_dwa.clone();
-    let mut weight_cache: HashMap<Weight, Weight> = HashMap::new();
-
-    for state in &mut specialized_dwa.states.0 {
-        if let Some(fw) = &mut state.final_weight {
-            *fw = specialize_weight(fw, bundle, bit_to_term, &mut weight_cache);
-            if fw.is_empty() {
-                state.final_weight = None;
-            }
-        }
-        if let Some(sw) = &mut state.state_weight {
-            *sw = specialize_weight(sw, bundle, bit_to_term, &mut weight_cache);
-            if sw.is_empty() {
-                state.state_weight = None;
-            }
-        }
-        for tw in state.trans_weights.values_mut() {
-            *tw = specialize_weight(tw, bundle, bit_to_term, &mut weight_cache);
-        }
-        state.trans_weights.retain(|_, w| !w.is_empty());
-        state.transitions.retain(|k, _| state.trans_weights.contains_key(k));
-    }
-    specialized_dwa
-}
-
-fn specialize_weight(
-    weight: &Weight,
-    bundle: &BTreeMap<Option<TerminalID>, Weight>,
-    bit_to_term: &[Option<TerminalID>],
-    cache: &mut HashMap<Weight, Weight>,
-) -> Weight {
-    if let Some(cached) = cache.get(weight) {
-        return cached.clone();
-    }
-
-    let mut new_weight = Weight::zeros();
-    for bit_idx in weight.iter_up_to(bit_to_term.len()) {
-        if let Some(term_id_opt) = bit_to_term.get(bit_idx) {
-            if let Some(bundle_weight) = bundle.get(term_id_opt) {
-                new_weight |= bundle_weight;
-            }
-        }
-    }
-
-    cache.insert(weight.clone(), new_weight.clone());
-    new_weight
 }
 
 fn instantiate_nwa_template_into_arena(
