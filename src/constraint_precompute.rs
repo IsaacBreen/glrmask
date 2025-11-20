@@ -27,7 +27,7 @@ use crate::profiler::{self, PROGRESS_BAR_ENABLED};
 use crate::tokenizer::{LLMTokenID, TokenizerStateID};
 use crate::types::{TerminalID as GrammarTokenID, TerminalID};
 use crate::constraint::GrammarConstraintConfig;
-
+use crate::precompute4::weighted_automata::common::Label;
 // ---------------------------------------------------------------------------
 // Precomputer1
 // ---------------------------------------------------------------------------
@@ -130,7 +130,7 @@ impl<'r> Precomputer1<'r> {
         // TODO: make this simpler.
         let new_start_state = self.nwa.add_state();
         for (tsid, state) in &self.roots {
-            self.nwa.add_transition(new_start_state, tsid.0 as i16, *state, Weight::all()).unwrap();
+            self.nwa.add_transition(new_start_state, tsid.0 as Label, *state, Weight::all()).unwrap();
         }
         self.nwa.body.start_state = new_start_state;
         println!("Trie1: after adding start state: {}", self.nwa);
@@ -141,8 +141,8 @@ impl<'r> Precomputer1<'r> {
         println!("Trie1: after unrolling: {}", dwa);
         let sink_state = dwa.add_state();
         for (tsid, state) in &mut self.roots {
-            // let new_state = dwa.states[dwa.body.start_state].transitions[&(tsid.0 as i16)];
-            let new_state = *dwa.states[dwa.body.start_state].transitions.get(&(tsid.0 as i16)).unwrap_or(&sink_state);
+            // let new_state = dwa.states[dwa.body.start_state].transitions[&(tsid.0 as Label)];
+            let new_state = *dwa.states[dwa.body.start_state].transitions.get(&(tsid.0 as Label)).unwrap_or(&sink_state);
             *state = new_state;
         }
         self.nwa = NWA::from_dwa(&dwa);
@@ -583,7 +583,7 @@ impl<'r> Precomputer1<'r> {
             for (src, dst, key, bv) in pending_edges {
                 if let Some(k) = key {
                     let weight = SimpleBitset::from_rsb(bv);
-                    let _ = self.nwa.add_transition(src, k.0 as i16, dst, weight);
+                    let _ = self.nwa.add_transition(src, k.0 as Label, dst, weight);
                 }
             }
 

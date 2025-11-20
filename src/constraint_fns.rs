@@ -3,7 +3,7 @@ use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::datastructures::leveled_gss::LeveledGSS;
 use crate::glr::parser::{GLRParserState, ParseStateEdgeContent};
 use crate::glr::table::TerminalID;
-use crate::precompute4::weighted_automata::common::StateID as WAStateID;
+use crate::precompute4::weighted_automata::common::{Label, StateID as WAStateID};
 use crate::tokenizer::TokenizerStateID;
 use profiler_macro::time_it;
 use range_set_blaze::RangeSetBlaze;
@@ -63,7 +63,7 @@ impl<'a> GrammarConstraintState<'a> {
                 continue;
             }
 
-            if let Some((target_wa_state_id, weight)) = dwa_start_state.get_transition(tokenizer_state_id.0 as i16) {
+            if let Some((target_wa_state_id, weight)) = dwa_start_state.get_transition(tokenizer_state_id.0 as Label) {
                 let f = |acc: &Acc| {
                     let new_rsb = acc.llm_tokens_union.inner.as_ref() & &weight.rsb;
                     if new_rsb.is_empty() { None } else { Some(new_rsb) }
@@ -98,7 +98,7 @@ impl<'a> GrammarConstraintState<'a> {
 
                 // Process transitions
                 for peeked_edge in gss.peek() {
-                    let parser_state_id = peeked_edge.state_id.0 as i16;
+                    let parser_state_id = peeked_edge.state_id.0 as Label;
                     if let Some((target_wa_state_id, trans_weight)) = dwa_state.get_transition(parser_state_id) {
                         let isolated_gss = gss.isolate(Some(peeked_edge));
                         let popped_gss = isolated_gss.pop();
