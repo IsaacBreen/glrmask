@@ -7,7 +7,6 @@ use crate::glr::table::StateID;
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use crate::tokenizer::{LLMTokenID, TokenizerStateID};
 use crate::types::TerminalID as GrammarTokenID;
-use crate::r#macro::get_macro_debug_level;
 use bimap::BiBTreeMap;
 use bitvec::prelude::BitVec;
 use std::collections::BTreeMap as StdMap;
@@ -671,12 +670,6 @@ pub fn print_precompute_stats0(
     token_name_map: &BiBTreeMap<Terminal, usize>,
     trie_god: &Trie0GodWrapper,
 ) {
-    if get_macro_debug_level() < 5 {
-        println!("Constraint Graph (Stage 0): {} nodes, {} edges.", 
-            stats.final_unique_nodes_count, stats.final_edges_count);
-        return;
-    }
-
     let avg_some = if stats.final_num_occupied_some_edge_keys > 0 {
         stats.final_total_occupancy_sum_for_some_keys as f64 / stats.final_num_occupied_some_edge_keys as f64
     } else { 0.0 };
@@ -784,14 +777,6 @@ pub fn print_precompute_stats1(
     token_name_map: &BiBTreeMap<Terminal, usize>, // Used to get token names from GrammarTokenID
     trie_god: &Trie1GodWrapper,
 ) {
-    if get_macro_debug_level() < 5 {
-        println!("Constraint Graph (Stage 1): {} nodes, {} edges ({} unique paths).", 
-            stats.final_unique_nodes_count, 
-            stats.final_edges_count,
-            stats.final_total_ranges_in_bvs);
-        return;
-    }
-
     let avg_some = if stats.final_num_occupied_some_edge_keys > 0 {
         stats.final_total_occupancy_sum_for_some_keys as f64 / stats.final_num_occupied_some_edge_keys as f64
     } else { 0.0 };

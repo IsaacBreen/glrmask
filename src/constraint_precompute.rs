@@ -80,7 +80,7 @@ impl<'r> Precomputer1<'r> {
             roots.insert(sid, root_state);
         }
         crate::debug!(
-            5,
+            4,
             "Created trie1 roots ({} states)",
             roots.len()
         );
@@ -133,22 +133,22 @@ impl<'r> Precomputer1<'r> {
             self.nwa.add_transition(new_start_state, tsid.0 as Label, *state, Weight::all()).unwrap();
         }
         self.nwa.body.start_state = new_start_state;
-        crate::debug!(4, "Optimizing NWA structure ({} states)...", self.nwa.states.len());
+        crate::debug!(3, "Simplifying NWA with {} states...", self.nwa.states.len());
         self.nwa.simplify();
-        crate::debug!(5, "Determinizing NWA with {} states...", self.nwa.states.len());
+        crate::debug!(3, "Determinizing NWA with {} states...", self.nwa.states.len());
         let mut dwa = self.nwa.determinize();
-        crate::debug!(5, "Simplifying DWA with {} states...", dwa.states.len());
+        crate::debug!(3, "Simplifying DWA with {} states...", dwa.states.len());
         self.nwa.simplify();
-        crate::debug!(5, "Unrolling DWA with {} states...", dwa.states.len());
+        crate::debug!(3, "Unrolling DWA with {} states...", dwa.states.len());
         dwa = dwa.unroll_cycles();
         let sink_state = dwa.add_state();
         for (tsid, state) in &mut self.roots {
             let new_state = *dwa.states[dwa.body.start_state].transitions.get(&(tsid.0 as Label)).unwrap_or(&sink_state);
             *state = new_state;
         }
-        crate::debug!(5, "Converting DWA to NWA with {} states...", dwa.states.len());
+        crate::debug!(3, "Converting DWA to NWA with {} states...", dwa.states.len());
         self.nwa = NWA::from_dwa(&dwa);
-        crate::debug!(5, "Done converting DWA to NWA with {} states...", dwa.states.len());
+        crate::debug!(4, "Done converting DWA to NWA with {} states...", dwa.states.len());
 
         let final_trie1_god = Trie1GodWrapper::new();
         let mut final_roots = BTreeMap::new();
@@ -395,7 +395,7 @@ impl<'r> Precomputer1<'r> {
 
     fn run_dfs(&mut self) {
         let assoc = self.roots.clone();
-        crate::debug!(4, "Precomputing constraint graph (DFS over {} states)...", self.roots.len());
+        crate::debug!(3, "Starting precompute DFS for {} tokenizer states", self.roots.len());
         // crate::debug!(6, "Roots for each tokenizer state:");
         for (sid, root) in &self.roots {
             crate::debug!(6, "  {}: {}", sid.0, root);
@@ -404,10 +404,10 @@ impl<'r> Precomputer1<'r> {
         let vocab = std::mem::replace(&mut self.vocab, VocabPrefixTree::new());
         self.dfs(&vocab.root, assoc);
         self.vocab = vocab;
-        crate::debug!(5, "Finished precompute DFS");
+        crate::debug!(4, "Finished precompute DFS");
         self.pb.finish();
         profiler::print_summary();
-        crate::debug!(5, "Precomputation complete");
+        crate::debug!(3, "Precomputation complete");
     }
 
     fn dfs(

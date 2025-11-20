@@ -89,33 +89,23 @@ macro_rules! __debug_grouped_impl {
                 };
                 *last_time_guard = Some(now);
 
-                if $level < 5 {
-                    // Compact/Clean mode for Level 4 and below:
-                    // No file name, no line number, just the message + elapsed if significant.
-                    // ANSI colors can still be used in the message if needed.
-                    println!(
-                        concat!("{}","{}"),
-                        format_args!($user_fmt, $($user_args)*),
-                        elapsed_suffix
-                    );
-                } else {
-                    // Detailed/Dev mode for Level 5+:
-                    let current_file_str = file!();
-                    if *last_file_guard != current_file_str {
-                        // \x1b[1;36m = Bold Cyan, \x1b[0m = Reset
-                        println!("\x1b[1;36m{}\x1b[0m", current_file_str);
-                        *last_file_guard = current_file_str.to_string();
-                    }
-
-                    // Print line number in Dark Gray, then the message
-                    // \x1b[90m = Dark Gray (Bright Black)
-                    println!(
-                        concat!("\x1b[90m  {:>4}\x1b[0m  ", "{}", "{}"),
-                        line!(),
-                        format_args!($user_fmt, $($user_args)*),
-                        elapsed_suffix
-                    );
+                let current_file_str = file!();
+                
+                // If filename changed, print it in Bold Cyan
+                if *last_file_guard != current_file_str {
+                    // \x1b[1;36m = Bold Cyan, \x1b[0m = Reset
+                    println!("\x1b[1;36m{}\x1b[0m", current_file_str);
+                    *last_file_guard = current_file_str.to_string();
                 }
+
+                // Print line number in Dark Gray, then the message
+                // \x1b[90m = Dark Gray (Bright Black)
+                println!(
+                    concat!("\x1b[90m  {:>4}\x1b[0m  ", "{}", "{}"),
+                    line!(),
+                    format_args!($user_fmt, $($user_args)*),
+                    elapsed_suffix
+                );
             }
         }
     }};
