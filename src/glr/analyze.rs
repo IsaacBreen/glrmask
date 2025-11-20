@@ -1037,7 +1037,21 @@ fn create_new_terminal(
     Terminal::RegexName(name)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+fn is_nullable(expr: &Expr) -> bool {
+    match expr {
+        Expr::Epsilon => true,
+        Expr::U8Seq(s) => s.is_empty(),
+        Expr::U8Class(_) => false,
+        Expr::Choice(opts) => opts.iter().any(is_nullable),
+        Expr::Seq(seq) => seq.iter().all(is_nullable),
+        Expr::Quantifier(e, q) => match q {
+            QuantifierType::ZeroOrMore | QuantifierType::ZeroOrOne => true,
+            QuantifierType::OneOrMore => is_nullable(e),
+        },
+        Expr::Shared(e) => is_nullable(e),
+    }
+}
+
 enum ResolvedSymbol {
     Expr(Expr),
     SelfRef,
@@ -1265,6 +1279,13 @@ fn convert_regular_nts_to_terminals(
                 } else {
                     base_choice
                 };
+
+                // IMPORTANT: We must not convert a non-terminal to a terminal if the resulting
+                // expression is nullable (matches epsilon). The constraint engine requires terminals
+                // to consume at least one byte (epsilon tokens are not supported).
+                if is_nullable(&final_expr) {
+                    continue;
+                }
 
                 let new_term = create_new_terminal(final_expr, &nt.0, regex_name_to_group_id, group_id_to_expr);
                 nts_to_replace.insert(nt.clone(), new_term);
