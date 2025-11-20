@@ -1037,6 +1037,7 @@ fn create_new_terminal(
     Terminal::RegexName(name)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum ResolvedSymbol {
     Expr(Expr),
     SelfRef,
@@ -1226,7 +1227,7 @@ fn convert_regular_nts_to_terminals(
                              left_rec_exprs.push(efficient_seq(exprs));
                         } else if let ResolvedSymbol::SelfRef = seq[seq.len()-1] {
                              // Right recursive: [Prefix..., Self]
-                             let exprs: Vec<Expr> = seq.into_iter().take(seq.len()-1).map(|s| match s { ResolvedSymbol::Expr(e) => e, _ => unreachable!() }).collect();
+                             let exprs: Vec<Expr> = seq.clone().into_iter().take(seq.len()-1).map(|s| match s { ResolvedSymbol::Expr(e) => e, _ => unreachable!() }).collect();
                              right_rec_exprs.push(efficient_seq(exprs));
                         } else {
                             failed = true; // Center embedding
@@ -1281,7 +1282,6 @@ fn convert_regular_nts_to_terminals(
                 if let Symbol::NonTerminal(nt) = s {
                     if let Some(t) = nts_to_replace.get(nt) {
                         *s = Symbol::Terminal(t.clone());
-                        changed = true;
                     }
                 }
             }
