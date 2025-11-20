@@ -393,7 +393,7 @@ pub fn remove_unreachable_productions(productions: &[Production], start_producti
         .collect();
 
     if new_productions.len() < productions.len() {
-        crate::debug!(3, "Removed {} unreachable productions", productions.len() - new_productions.len());
+        eprintln!("Removed {} unreachable productions", productions.len() - new_productions.len());
     }
 
     new_productions
@@ -1308,7 +1308,7 @@ fn convert_regular_nts_to_terminals(
                 ) {
                     let self_count = seq.iter().filter(|s| matches!(s, ResolvedSymbol::SelfRef)).count();
                     if self_count > 1 {
-                        // println!("NT {} failed: multiple self refs", nt.0);
+                        if nt.0 == "s0" { panic!("s0 failed: multiple self refs"); }
                         failed = true; // Multiple self-refs (e.g. center embedding or A -> A A) hard to convert simply
                         break;
                     }
@@ -1330,12 +1330,15 @@ fn convert_regular_nts_to_terminals(
                              right_rec_exprs.push(efficient_seq(exprs));
                         } else {
                             failed = true; // Center embedding
-                            // println!("NT {} failed: center embedding", nt.0);
+                            if nt.0 == "s0" { panic!("s0 failed: center embedding"); }
                             break;
                         }
                     }
                 } else {
                     failed = true; // Dependency not yet resolved
+                    if nt.0 == "s0" { 
+                        // panic!("s0 failed: dependency not resolved"); 
+                    }
                     break;
                 }
             }
@@ -1368,13 +1371,13 @@ fn convert_regular_nts_to_terminals(
                          is_nt_nullable = true;
                     } else {
                         // Purely nullable (e.g. empty string or epsilon), cannot convert to terminal
-                        // println!("NT {} failed: purely nullable", nt.0);
+                        if nt.0 == "s0" { panic!("s0 failed: purely nullable"); }
                         continue;
                     }
                 }
                 
                 if get_expr_complexity(&expr_for_terminal) > MAX_REGEX_COMPLEXITY {
-                    // println!("NT {} failed: complexity limit", nt.0);
+                    if nt.0 == "s0" { panic!("s0 failed: complexity limit"); }
                     continue;
                 }
 
@@ -1468,6 +1471,10 @@ fn convert_regular_nts_to_terminals(
                     rhs: vec![],
                 });
             }
+        }
+
+        if regex_name_to_group_id.contains_left("s0") && !nts_to_replace.contains_key(&NonTerminal("s0".to_string())) {
+            panic!("s0 was not converted!");
         }
 
         *productions = new_prods;
