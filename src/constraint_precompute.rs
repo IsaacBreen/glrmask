@@ -417,7 +417,7 @@ impl<'r> Precomputer1<'r> {
     ) {
         self.pb.inc(1);
         for (segment_bytes, child_vocab_node) in vocab_node.iter_children() {
-            let mut next_level_assoc_vec: BTreeMap<TokenizerStateID, Vec<NWAStateID>> =
+            let mut next_level_assoc: BTreeMap<TokenizerStateID, NWAStateID> =
                 BTreeMap::new();
 
             // Queue: pos -> TokenizerState -> (NWAState -> ContextTokens)
@@ -442,7 +442,8 @@ impl<'r> Precomputer1<'r> {
                 // If we reached the end of the segment, these states are ready for the next vocab node
                 if pos == segment_bytes.len() {
                     for (tokenizer_state_id, node) in states_at_pos {
-                        next_level_assoc_vec.entry(tokenizer_state_id).or_default().push(node);
+                        let next = *next_level_assoc.entry(tokenizer_state_id).or_insert_with(|| self.nwa.add_state());
+                        self.nwa.add_epsilon(node, next, SimpleBitset::all());
                     }
                     continue;
                 }
@@ -532,10 +533,8 @@ impl<'r> Precomputer1<'r> {
                             }
                         }
 
-                        next_level_assoc_vec
-                            .entry(final_tokenizer_state)
-                            .or_default()
-                            .push(src_node);
+                        let next = *next_level_assoc.entry(final_tokenizer_state).or_insert_with(|| self.nwa.add_state());
+                        self.nwa.add_epsilon(src_node, next, Weight::all());
                     }
                 }
             }
@@ -545,25 +544,6 @@ impl<'r> Precomputer1<'r> {
                 if let Some(k) = key {
                     let weight = SimpleBitset::from_rsb(bv);
                     let _ = self.nwa.add_transition(src, k.0 as Label, dst, weight);
-                }
-            }
-
-            let mut next_level_assoc = BTreeMap::new();
-            for (tsid, mut nodes) in next_level_assoc_vec {
-                if nodes.is_empty() {
-                    continue;
-                }
-                nodes.sort_unstable();
-                nodes.dedup();
-                if nodes.len() == 1 {
-                    next_level_assoc.insert(tsid, nodes[0]);
-                } else {
-                    let merged_state = self.nwa.add_state();
-                    let weight = SimpleBitset::all();
-                    for node in nodes {
-                        self.nwa.add_epsilon(node, merged_state, weight.clone());
-                    }
-                    next_level_assoc.insert(tsid, merged_state);
                 }
             }
 
