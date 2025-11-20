@@ -314,7 +314,18 @@ pub fn precompute4(
     let mut cache_hits = 0;
     let mut cache_misses = 0;
 
-    let now = Instant::now();
+    // Detailed timing stats for traversal
+    let mut t_grouping = std::time::Duration::ZERO;
+    let mut t_cache_access = std::time::Duration::ZERO;
+    let mut t_cache_creation = std::time::Duration::ZERO;
+    let mut t_instantiation = std::time::Duration::ZERO;
+    let mut t_concatenation = std::time::Duration::ZERO;
+    let mut t_neg_resolution = std::time::Duration::ZERO;
+    let mut t_union = std::time::Duration::ZERO;
+    let mut traversal_calls = 0;
+
+    let now_traversal = Instant::now();
+    
     Trie::special_map_grouped(
         &reversed_trie1_god,
         &traversal_data,
@@ -356,6 +367,7 @@ pub fn precompute4(
         |_node_data,
          node_idx,
          val: (BTreeMap<NWABody, BTreeMap<Option<TerminalID>, Weight>>, LLMTokenBV)| {
+            traversal_calls += 1;
             let (nwa_bodies_map, tokens) = val;
 
             // Combine all left bodies into a single NWA body via union (epsilon)
@@ -366,6 +378,7 @@ pub fn precompute4(
             };
 
             for (right_body, terminal_map) in nwa_bodies_map {
+                let start_grouping = Instant::now();
                 // 1. Group terminals by concrete Weight to find aliases
                 let mut weight_groups: HashMap<Weight, Vec<Option<TerminalID>>> = HashMap::new();
                 for (term, weight) in terminal_map {
@@ -375,6 +388,7 @@ pub fn precompute4(
                 }
 
                 if weight_groups.is_empty() {
+                    t_grouping += start_grouping.elapsed();
                     continue;
                 }
 
@@ -387,12 +401,13 @@ pub fn precompute4(
 
                 let signature: Vec<Vec<Option<TerminalID>>> = groups_vec.iter().map(|(_, terms)| terms.clone()).collect();
                 let concrete_weights: Vec<Weight> = groups_vec.iter().map(|(w, _)| w.clone()).collect();
+                t_grouping += start_grouping.elapsed();
 
                 // 3. Get or Create Template NWA
-                // Note: We cache the NWA now, not the DWA, to avoid `from_dwa` conversion cost on hits.
-                // We also pre-optimize the NWA to reduce cost of negative resolution.
+                let start_cache = Instant::now();
                 if !template_cache.contains_key(&signature) {
                     cache_misses += 1;
+                    let start_create = Instant::now();
                     let mut abstract_bundle = BTreeMap::new();
                     for (idx, terms) in signature.iter().enumerate() {
                         let abstract_weight = Weight::from_item(idx);
@@ -407,42 +422,47 @@ pub fn precompute4(
                     let mut template_nwa = NWA::from_dwa(&template_dwa);
                     
                     // Optimization: Pre-resolve negatives on the Abstract NWA.
-                    // This is valid because abstract index weights are disjoint, so intersection logic works roughly the same,
-                    // and crucially, cancellations are usually intra-path (within one terminal's logic) where weights are consistent.
                     let all_states: HashSet<StateID> = (0..template_nwa.states.len()).collect();
                     apply_cancellations(&mut template_nwa.states, &all_states);
                     apply_finality_fixpoint(&mut template_nwa.states, &all_states);
                     remove_negative_transitions(&mut template_nwa.states, &all_states);
 
                     template_cache.insert(signature.clone(), template_nwa);
+                    t_cache_creation += start_create.elapsed();
                 } else {
                     cache_hits += 1;
                 }
                 
                 let template_nwa = &template_cache[&signature];
+                t_cache_access += start_cache.elapsed();
 
-                // 4. Direct Instantiation into Arena (Avoids DWA->NWA and Allocations)
+                // 4. Direct Instantiation into Arena
+                let start_inst = Instant::now();
                 let mut states = states_arena.borrow_mut();
                 let (left_body_start, remap) = instantiate_nwa_template_into_arena(
                     template_nwa,
                     &concrete_weights,
                     &mut states
                 );
+                t_instantiation += start_inst.elapsed();
                 
+                let start_concat = Instant::now();
                 let new_states_filter: HashSet<NWAStateID> = remap.values().cloned().collect();
                 let left_body = NWABody { start_state: left_body_start };
-
                 let composed_body = NWA::_concatenate_components(&mut states, &left_body, &right_body, &Weight::all());
+                t_concatenation += start_concat.elapsed();
 
-                // We still run negative resolution to catch cross-boundary cancellations (left->right),
-                // but `left` itself is already clean, so this should be much faster.
+                let start_neg = Instant::now();
                 if !new_states_filter.is_empty() {
                     apply_cancellations(&mut states, &new_states_filter);
                     apply_finality_fixpoint(&mut states, &new_states_filter);
                     remove_negative_transitions(&mut states, &new_states_filter);
                 }
+                t_neg_resolution += start_neg.elapsed();
 
+                let start_union = Instant::now();
                 nwa_body = NWA::union_components(&mut states, &nwa_body, &composed_body);
+                t_union += start_union.elapsed();
             }
 
             if !tokens.is_empty() {
@@ -457,8 +477,20 @@ pub fn precompute4(
             }
         },
     );
-    crate::debug!(4, "Reversed trie traversal (special_map_grouped) took: {:?}", now.elapsed());
-    println!("NWA Template Cache Stats: Hits={}, Misses={} (Unique partition signatures)", cache_hits, cache_misses);
+    
+    println!("=== Traversal Statistics ===");
+    println!("Total Duration: {:?}", now_traversal.elapsed());
+    println!("Total Process Calls: {}", traversal_calls);
+    println!("Time Distribution:");
+    println!("  Grouping & Signature:   {:?}", t_grouping);
+    println!("  Template Cache Total:   {:?}", t_cache_access);
+    println!("    -> Creation (Misses): {:?}", t_cache_creation);
+    println!("  Instantiation:          {:?}", t_instantiation);
+    println!("  Concatenation:          {:?}", t_concatenation);
+    println!("  Negative Resolution:    {:?}", t_neg_resolution);
+    println!("  Union:                  {:?}", t_union);
+    println!("Cache Stats: Hits={}, Misses={}", cache_hits, cache_misses);
+    println!("============================");
 
     // Combine all final NWA bodies into a single NWA
     let mut combined_nwa_states = states_arena.into_inner();
@@ -480,47 +512,36 @@ pub fn precompute4(
 }
 
 fn resolve_negatives_and_optimize_and_determinize(parser: &GLRParser, mut combined_nwa: NWA) -> DWA {
-    let now = Instant::now();
-    crate::debug!(4, "Starting resolve negatives and optimization and determinization of combined NWA...");
-    combined_nwa.simplify_rustfst();
-    crate::debug!(4, "Initial simplification took: {:?}. NWA now has {} states.", now.elapsed(), combined_nwa.states.len());
+    println!("=== Post-Processing Statistics ===");
+    let start_total = Instant::now();
 
-    let now = Instant::now();
-    crate::debug!(4, "Pruning continuations from final states...");
+    let start = Instant::now();
+    combined_nwa.simplify_rustfst();
+    let t_initial = start.elapsed();
+    println!("Initial Simplify: {:?}", t_initial);
+    crate::debug!(4, "Initial simplification took: {:?}. NWA now has {} states.", t_initial, combined_nwa.states.len());
+
+    let start = Instant::now();
     prune_continuations_from_final_states(&mut combined_nwa);
     simplify_remove_epsilon(&mut combined_nwa);
-    crate::debug!(
-        4,
-        "Pruning and simplifying took: {:?}. NWA now has {} states.",
-        now.elapsed(),
-        combined_nwa.states.len()
-    );
-    crate::debug!(4, "Stats for combined NWA after pruning:\n{}", combined_nwa.stats());
+    let t_prune = start.elapsed();
+    println!("Prune Continuations: {:?}", t_prune);
+    crate::debug!(4, "Pruning took: {:?}. NWA now has {} states.", t_prune, combined_nwa.states.len());
 
-    let now = Instant::now();
-    crate::debug!(4, "Simplifying default transitions...");
+    let start = Instant::now();
     simplify_default_transitions(&mut combined_nwa);
     simplify_remove_epsilon(&mut combined_nwa);
-    crate::debug!(
-        4,
-        "Default transition simplification took: {:?}. NWA now has {} states.",
-        now.elapsed(),
-        combined_nwa.states.len()
-    );
-    crate::debug!(4, "Stats for combined NWA after default simplification:\n{}", combined_nwa.stats());
+    let t_defaults = start.elapsed();
+    println!("Simplify Defaults: {:?}", t_defaults);
+    crate::debug!(4, "Simplify defaults took: {:?}. NWA now has {} states.", t_defaults, combined_nwa.states.len());
 
-    crate::debug!(4, "Starting simplification before final determinization...");
-    let now = Instant::now();
+    let start = Instant::now();
     simplify_remove_epsilon(&mut combined_nwa);
     combined_nwa.simplify();
     simplify_remove_epsilon(&mut combined_nwa);
-    crate::debug!(
-        4,
-        "Simplification before final determinization took: {:?}. NWA now has {} states.",
-        now.elapsed(),
-        combined_nwa.states.len()
-    );
-    crate::debug!(4, "Stats for combined NWA before final determinization:\n{}", combined_nwa.stats());
+    let t_pre_det = start.elapsed();
+    println!("Pre-Determinization Simplify: {:?}", t_pre_det);
+    crate::debug!(4, "Pre-det simplify took: {:?}. NWA now has {} states.", t_pre_det, combined_nwa.states.len());
 
     if env::var("RLLM_DUMP_NWA").is_ok() {
         let timestamp = Local::now().format("%Y%m%d-%H%M%S");
@@ -537,26 +558,17 @@ fn resolve_negatives_and_optimize_and_determinize(parser: &GLRParser, mut combin
         eprintln!("Parser dump complete.");
     }
 
-    let now = Instant::now();
+    let start = Instant::now();
     crate::debug!(4, "Determinizing final combined NWA...");
     combined_nwa = NWA::from_dwa(&combined_nwa._determinize());
-    crate::debug!(4, "Stats after final NWA determinization:\n{}", combined_nwa.stats());
     combined_nwa.simplify_rustfst();
-    crate::debug!(
-        4,
-        "Final NWA simplification took: {:?}. NWA now has {} states.",
-        now.elapsed(),
-        combined_nwa.states.len()
-    );
-    crate::debug!(4, "Stats for final NWA before DWA determinization:\n{}", combined_nwa.stats());
     let mut final_dwa = combined_nwa.determinize_to_dwa();
-    crate::debug!(
-        4,
-        "Final determinize & simplify took: {:?}. Final DWA has {} states.",
-        now.elapsed(),
-        final_dwa.states.len()
-    );
-    crate::debug!(4, "Stats for final DWA:\n{}", final_dwa.stats());
+    let t_det = start.elapsed();
+    println!("Final Determinize & Simplify: {:?}", t_det);
+    crate::debug!(4, "Final determinize took: {:?}. Final DWA has {} states.", t_det, final_dwa.states.len());
+
+    println!("Total Post-Processing: {:?}", start_total.elapsed());
+    println!("================================");
 
     final_dwa
 }
@@ -642,7 +654,6 @@ fn instantiate_nwa_template_into_arena(
     };
 
     // 1. Pre-allocate states in arena
-    // Using a vector for remapping is faster than HashMap since state IDs are dense and start at 0
     let start_offset = arena.len();
     let template_len = template.states.len();
     let mut map: Vec<NWAStateID> = Vec::with_capacity(template_len);
@@ -659,14 +670,6 @@ fn instantiate_nwa_template_into_arena(
     // 2. Copy and Map
     for (old_id, old_state) in template.states.0.iter().enumerate() {
         let new_id = map[old_id];
-        
-        // Since we added states, we must get a mutable reference safely.
-        // arena[new_id] is valid.
-        // Note: We cannot hold a reference to `arena` while iterating if we were adding states inside the loop,
-        // but we pre-allocated. However, Rust borrow checker prevents taking mutable ref to arena[new_id]
-        // while holding immut ref to template if template belonged to arena (it doesn't).
-        // Here template is separate, so it is fine.
-        
         let new_state = &mut arena[new_id];
 
         // Final Weight
@@ -679,8 +682,6 @@ fn instantiate_nwa_template_into_arena(
 
         // Transitions
         for (lbl, targets) in &old_state.transitions {
-            // We need to group by target to avoid duplicates if multiple abstract weights map to same concrete logic?
-            // Actually NWA allows multiple edges.
             let new_targets = new_state.transitions.entry(*lbl).or_default();
             for (target, w) in targets {
                 let concrete = map_abstract_weight(w);
