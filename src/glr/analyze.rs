@@ -354,66 +354,47 @@ pub fn remove_productions_with_undefined_nonterminals(
         .collect()
 }
 
-// TODO: This function is marked as broken and is not modified by this request.
-pub fn drop_dead(productions: &[Production]) -> Vec<Production> {
-    // todo: this function is broken
-    let mut nt_reachables: BTreeMap<&NonTerminal, BTreeSet<&NonTerminal>> = BTreeMap::new();
+pub fn remove_unreachable_productions(productions: &[Production], start_production_id: usize) -> Vec<Production> {
+    if productions.is_empty() {
+        return Vec::new();
+    }
 
+    let start_lhs = &productions[start_production_id].lhs;
+    let mut reachable_nts = BTreeSet::new();
+    let mut worklist = VecDeque::new();
+
+    reachable_nts.insert(start_lhs.clone());
+    worklist.push_back(start_lhs.clone());
+
+    // Index productions by LHS for faster lookup
+    let mut prods_by_lhs: BTreeMap<NonTerminal, Vec<&Production>> = BTreeMap::new();
     for prod in productions {
-        let rhs_nonterms: BTreeSet<_> = prod
-            .rhs
-            .iter()
-            .filter_map(|symbol| {
-                if let Symbol::NonTerminal(nt) = symbol {
-                    Some(nt)
-                } else {
-                    None
-                }
-            })
-            .collect();
-        nt_reachables.insert(&prod.lhs, rhs_nonterms);
+        prods_by_lhs.entry(prod.lhs.clone()).or_default().push(prod);
     }
 
-    loop {
-        let mut changed = false;
-        for (nt, reachables) in nt_reachables.clone() {
-            let old_len = nt_reachables[nt].len();
-            for reachable in reachables {
-                if let Some(reachable_reachables) = nt_reachables.get(reachable).cloned() {
-                    nt_reachables.get_mut(nt).unwrap().extend(reachable_reachables);
+    while let Some(nt) = worklist.pop_front() {
+        if let Some(prod_list) = prods_by_lhs.get(&nt) {
+            for prod in prod_list {
+                for sym in &prod.rhs {
+                    if let Symbol::NonTerminal(child_nt) = sym {
+                        if reachable_nts.insert(child_nt.clone()) {
+                            worklist.push_back(child_nt.clone());
+                        }
+                    }
                 }
-            }
-            if nt_reachables[nt].len() != old_len {
-                changed = true;
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
-
-    let start_prod = &productions[0];
-    let mut reachable_from_start = BTreeSet::new();
-    for symbol in &start_prod.rhs {
-        if let Symbol::NonTerminal(nt) = symbol {
-            reachable_from_start.insert(nt);
-            if let Some(nt_reachables) = nt_reachables.get(nt).cloned() {
-                reachable_from_start.extend(nt_reachables);
             }
         }
     }
 
     let new_productions: Vec<_> = productions
         .iter()
-        .filter(|prod| reachable_from_start.contains(&prod.lhs) || *prod == start_prod)
+        .filter(|p| reachable_nts.contains(&p.lhs))
         .cloned()
         .collect();
 
-    crate::debug!(
-        2,
-        "Dropped {} productions",
-        productions.len() - new_productions.len()
-    );
+    if new_productions.len() < productions.len() {
+        crate::debug!(3, "Removed {} unreachable productions", productions.len() - new_productions.len());
+    }
 
     new_productions
 }
