@@ -405,11 +405,6 @@ impl<'r> Precomputer1<'r> {
             > = BTreeMap::new();
             pending.insert(0, assoc_by_state.clone());
 
-            let mut node_cache: HashMap<
-                NWAStateID,
-                bool,
-            > = HashMap::new();
-
             let mut pending_edges = Vec::new();
 
             let child_reachable = child_vocab_node.reachable_token_ids();
@@ -504,7 +499,6 @@ impl<'r> Precomputer1<'r> {
 
                             let target = {
                                 let n = self.nwa.add_state();
-                                node_cache.insert(n, false);
                                 n
                             };
 
