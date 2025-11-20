@@ -1264,9 +1264,36 @@ fn convert_regular_nts_to_terminals(
     // Reverse map for structural sharing of regexes
     let mut expr_to_group_id: HashMap<Expr, usize> = group_id_to_expr.iter().map(|(k, v)| (v.clone(), *k)).collect();
 
-    // Heuristic: Process in reverse alphabetical order. 
-    // This often helps with generated grammars (like s0, s1, ...) where s(i) depends on s(i+1).
-    pending_nts.sort_by(|a, b| b.0.cmp(&a.0));
+    // Perform topological sort on pending_nts to process dependencies first.
+    // This reduces the number of passes from O(N) to O(1) for deep dependency chains.
+    {
+        let mut adj: BTreeMap<&NonTerminal, BTreeSet<&NonTerminal>> = BTreeMap::new();
+        let pending_set: BTreeSet<&NonTerminal> = pending_nts.iter().collect();
+
+        for nt in &pending_nts {
+            let deps = adj.entry(nt).or_default();
+            if let Some(prods) = prods_by_lhs.get(nt) {
+                for prod in prods {
+                    for sym in &prod.rhs {
+                        if let Symbol::NonTerminal(dep_nt) = sym {
+                            if dep_nt != nt && pending_set.contains(dep_nt) {
+                                deps.insert(dep_nt);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut visited = BTreeSet::new();
+        let mut sorted = Vec::with_capacity(pending_nts.len());
+        for nt in &pending_nts {
+             if !visited.contains(nt) {
+                 topo_visit(nt, &adj, &mut visited, &mut sorted);
+             }
+        }
+        pending_nts = sorted;
+    }
 
     while loop_changed {
         loop_changed = false;
@@ -1458,6 +1485,23 @@ fn convert_regular_nts_to_terminals(
     }
 
     any_conversion_happened
+}
+
+fn topo_visit<'a>(
+    nt: &'a NonTerminal,
+    adj: &BTreeMap<&'a NonTerminal, BTreeSet<&'a NonTerminal>>,
+    visited: &mut BTreeSet<&'a NonTerminal>,
+    sorted: &mut Vec<NonTerminal>,
+) {
+    visited.insert(nt);
+    if let Some(deps) = adj.get(nt) {
+        for dep in deps {
+            if !visited.contains(dep) {
+                topo_visit(dep, adj, visited, sorted);
+            }
+        }
+    }
+    sorted.push(nt.clone());
 }
 
 fn merge_adjacent_terminals(
