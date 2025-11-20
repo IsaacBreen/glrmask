@@ -8,7 +8,7 @@ use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 use crate::precompute4::test_weighted_automata;
-use super::common::{DETERMINIZE_DEBUG, NWAStateID, Weight};
+use super::common::{DETERMINIZE_DEBUG, NWAStateID, Weight, Label};
 use super::dwa::DWA;
 use super::nwa::{NWA, NWAStates};
 
@@ -57,8 +57,8 @@ fn epsilon_closure(nwa_states: &NWAStates, seed: &WeightedSubset) -> ClosureMap 
     closure
 }
 
-fn collect_labels(nwa_states: &NWAStates, closure: &ClosureMap) -> BTreeSet<i16> {
-    let mut labels: BTreeSet<i16> = BTreeSet::new();
+fn collect_labels(nwa_states: &NWAStates, closure: &ClosureMap) -> BTreeSet<Label> {
+    let mut labels: BTreeSet<Label> = BTreeSet::new();
     for (sid, cw) in closure {
         if is_zero(cw) {
             continue;
@@ -68,7 +68,7 @@ fn collect_labels(nwa_states: &NWAStates, closure: &ClosureMap) -> BTreeSet<i16>
     labels
 }
 
-fn next_subset_for_label(nwa_states: &NWAStates, closure: &ClosureMap, ch: i16) -> WeightedSubset {
+fn next_subset_for_label(nwa_states: &NWAStates, closure: &ClosureMap, ch: Label) -> WeightedSubset {
     let mut next: WeightedSubset = WeightedSubset::new();
     for (sid, cw) in closure {
         if is_zero(cw) {
@@ -194,7 +194,7 @@ impl<'a> Determinizer<'a> {
             pb.set_length(labels.len() as u64);
         }
 
-        let mut transition_data: BTreeMap<i16, (WeightedSubset, Weight)> = BTreeMap::new();
+        let mut transition_data: BTreeMap<Label, (WeightedSubset, Weight)> = BTreeMap::new();
         for ch in &labels {
             let sub_ch = next_subset_for_label(&self.nwa.states, closure, *ch);
             let w_ch = union_over_values(&sub_ch);
@@ -278,7 +278,7 @@ fn try_build_singleton_loop_union(nwa: &NWA) -> Option<DWA> {
         }
     }
 
-    let mut label_to_weight: BTreeMap<i16, Weight> = BTreeMap::new();
+    let mut label_to_weight: BTreeMap<Label, Weight> = BTreeMap::new();
     for (sid, base) in &comps {
         let st = &nwa.states[*sid];
         for (lbl, vec_targets) in st.transitions.iter() {

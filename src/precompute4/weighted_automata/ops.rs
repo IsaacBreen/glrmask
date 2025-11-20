@@ -3,13 +3,13 @@
 #![allow(dead_code)]
 #![allow(clippy::needless_borrow)]
 
-use super::common::{StateID, Weight, STOCHASTIC_DEBUG};
+use super::common::{Label, StateID, Weight, STOCHASTIC_DEBUG};
 use super::dwa::DWA;
 use super::nwa::{NWABody, NWAStates, NWA};
 use std::collections::VecDeque;
 
 impl DWA {
-    pub fn eval_word_weight(&self, word: &[i16]) -> Weight {
+    pub fn eval_word_weight(&self, word: &[Label]) -> Weight {
         if self.states.0.is_empty() {
             return Weight::zeros();
         }
