@@ -258,7 +258,7 @@ pub fn nwa_special_map<V, U, I>(
     }
 
     let mut in_queue = HashSet::new();
-    let pb = tqdm!(
+    let mut pb = tqdm!(
         total = nwa.states.len(),
         desc = "NWA Traversal",
         disable = !crate::profiler::PROGRESS_BAR_ENABLED,
@@ -747,10 +747,10 @@ pub fn precompute4(
         &traversal_data,
         initial_values_full,
         // step
-        |current_val, edge_label, transitions| {
+        |current_val: &(BTreeMap<NWABody, BTreeMap<Option<TerminalID>, Weight>>, LLMTokenBV), edge_label, transitions| {
             let (current_bodies, current_tokens) = current_val;
             // Convert i32 label back to TerminalID
-            let terminal_id = edge_label.map(|l| TerminalID(l as u32));
+            let terminal_id = edge_label.map(|l| TerminalID(l as usize));
             let mut results = Vec::new();
 
             // In reversed NWA, transitions are (source, weight) but variable name is dest_id.
@@ -837,7 +837,7 @@ pub fn precompute4(
                     }
                 }
 
-                let mut next_body_map = BTreeMap::new();
+                let mut next_body_map: BTreeMap<NWABody, BTreeMap<Option<TerminalID>, Weight>> = BTreeMap::new();
                 next_body_map.insert(nwa_body, BTreeMap::new());
                 Some((next_body_map, tokens))
             } else {
@@ -916,7 +916,7 @@ fn precompute_token_bvs_and_signatures(
             let state = &reversed_nwa.states[node_id];
 
             for (label, targets) in &state.transitions {
-                let term = Some(TerminalID(*label as u32));
+                let term = Some(TerminalID(*label as usize));
                 for (v, w) in targets {
                     let edge_bv: LLMTokenBV = w.clone().into();
                     let combined = &tokens & &edge_bv;

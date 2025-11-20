@@ -641,7 +641,7 @@ impl GrammarConstraint {
         let mut terminal_follow_map: BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>> =
             BTreeMap::new();
         for (terminal1, following_terminals) in terminal_follow_sets_named {
-            let t1_id = *parser
+            let t1_id = parser
                 .terminal_map
                 .get_by_left(&terminal1)
                 .unwrap()
