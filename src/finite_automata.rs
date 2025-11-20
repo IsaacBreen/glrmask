@@ -985,12 +985,15 @@ impl NFA {
     }
 
     pub fn to_dfa(self) -> DFA {
+        let start_time = std::time::Instant::now();
         let mut dfa_states: Vec<DFAState> = Vec::new();
         // Use a HashMap here for much faster lookups on large DFAs.
         let mut dfa_state_map: HashMap<FrozenSet<usize>, usize> = HashMap::new();
         let mut worklist: Vec<FrozenSet<usize>> = Vec::new();
 
+        let closure_start = std::time::Instant::now();
         let epsilon_closures = self.compute_epsilon_closures();
+        crate::debug!(4, "Computed epsilon closures in {:.2?}", closure_start.elapsed());
 
         // Compute epsilon-closure of the NFA start state and use it as the DFA start state.
         let start_closure = &epsilon_closures[self.start_state];
@@ -1013,7 +1016,24 @@ impl NFA {
             group_id_to_u8set: BTreeMap::new(),         // Will be computed later
         });
 
+        let mut max_subset_size = 0;
         while let Some(current_set) = worklist.pop() {
+            let current_subset_len = current_set.len();
+            if current_subset_len > max_subset_size {
+                max_subset_size = current_subset_len;
+            }
+            if dfa_states.len() % 1000 == 0 {
+                crate::debug!(
+                    4,
+                    "DFA progress: {} states, worklist {}, subset size {} (max {}), elapsed {:.2?}",
+                    dfa_states.len(),
+                    worklist.len(),
+                    current_subset_len,
+                    max_subset_size,
+                    start_time.elapsed()
+                );
+            }
+
             let current_dfa_state = *dfa_state_map
                 .get(&current_set)
                 .expect("DFA state set not found in map");
@@ -1088,6 +1108,14 @@ impl NFA {
                     .insert(input_u8, next_dfa_state);
             }
         }
+
+        crate::debug!(
+            4,
+            "DFA main loop complete. Total states: {}, Max subset size: {}, Time: {:.2?}",
+            dfa_states.len(),
+            max_subset_size,
+            start_time.elapsed()
+        );
 
         let mut dfa = DFA {
             states: dfa_states,
