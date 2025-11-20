@@ -1,7 +1,7 @@
 use super::common::{StateID, Weight};
 use super::dwa::DWA;
 use std::collections::{BTreeMap, HashMap, VecDeque};
-use indicatif::{ProgressBar, ProgressStyle};
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 
 impl DWA {
     /// Unrolls cycles in the DWA by expanding states into (state, accumulated_weight) pairs.
@@ -46,7 +46,8 @@ impl DWA {
         visited[start_node] = Some(HashMap::from([(start_weight.clone(), new_start)]));
         queue.push_back((new_start, start_node, start_weight));
 
-        let pb = ProgressBar::new_spinner();
+        let m = MultiProgress::new();
+        let pb = m.add(ProgressBar::new_spinner());
         pb.set_style(
             ProgressStyle::default_spinner()
                 .template("{spinner:.green} [{elapsed_precise}] Unrolled states: {pos}")
@@ -64,11 +65,20 @@ impl DWA {
             // Collect transitions to bulk insert later, avoiding repeated re-borrows of new_dwa
             // Pre-allocate vectors for bulk BTreeMap construction
             let capacity = u_state.transitions.len();
+
+            let inner_pb = m.add(ProgressBar::new(capacity as u64));
+            inner_pb.set_style(
+                ProgressStyle::default_bar()
+                    .template("  {bar:20.cyan/blue} {pos}/{len} transitions")
+                    .unwrap(),
+            );
+
             let mut new_transitions_vec = Vec::with_capacity(capacity);
             let mut new_trans_weights_vec = Vec::with_capacity(capacity);
 
             // Iterate transitions and weights in lockstep to avoid O(log N) lookups
             for ((&label, &v), (_, trans_w)) in u_state.transitions.iter().zip(u_state.trans_weights.iter()) {
+                inner_pb.inc(1);
                 if v >= self.states.len() {
                     continue;
                 }
@@ -105,6 +115,7 @@ impl DWA {
                 new_transitions_vec.push((label, new_v));
                 new_trans_weights_vec.push((label, trans_w.clone()));
             }
+            inner_pb.finish_and_clear();
 
             let src_st = &mut new_dwa.states[new_u];
             src_st.transitions = new_transitions_vec.into_iter().collect();
@@ -112,6 +123,7 @@ impl DWA {
         }
 
         pb.finish_with_message(format!("Done ({} states)", new_dwa.states.len()));
+        crate::debug!(5, "Unrolling complete. {} states", new_dwa.states.len());
         new_dwa
     }
 }
