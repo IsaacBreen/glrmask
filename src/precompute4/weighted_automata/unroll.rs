@@ -56,10 +56,8 @@ impl DWA {
         let mut processed_count: u64 = 0;
         while let Some((new_u, u, w_u)) = queue.pop_front() {
             processed_count += 1;
-            if processed_count % 1000 == 0 {
-                pb.set_position(processed_count);
-                pb.set_length(self.states.len() as u64);
-            }
+            pb.set_position(processed_count);
+            pb.set_length(self.states.len() as u64);
 
             let u_state = &self.states[u];
 
