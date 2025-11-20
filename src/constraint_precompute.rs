@@ -182,7 +182,7 @@ impl<'r> Precomputer1<'r> {
             return *final_idx;
         }
 
-        let live = self.live_tokens.get(&state_id).cloned().unwrap_or_else(RangeSetBlaze::new);
+        let live = RangeSetBlaze::new();
         let is_end = self.nwa.states[state_id].final_weight.as_ref().map_or(false, |w| !w.is_empty());
         
         let final_node_contents = PrecomputedNodeContents {
