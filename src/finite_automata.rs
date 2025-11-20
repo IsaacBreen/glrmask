@@ -1017,6 +1017,11 @@ impl NFA {
         });
 
         let mut max_subset_size = 0;
+        // Reuse buffers to avoid millions of small allocations
+        let mut transition_targets: Vec<Vec<usize>> = vec![Vec::with_capacity(16); 256];
+        let mut used_inputs: Vec<u8> = Vec::with_capacity(256);
+        let mut seen_input: [bool; 256] = [false; 256];
+
         while let Some(current_set) = worklist.pop() {
             let current_subset_len = current_set.len();
             if current_subset_len > max_subset_size {
@@ -1038,13 +1043,6 @@ impl NFA {
                 .get(&current_set)
                 .expect("DFA state set not found in map");
 
-            // Fast per-byte aggregation of outgoing transitions:
-            // - transition_targets[c] = list of NFA target states reachable on byte c
-            // - used_inputs = list of bytes that actually occur (to avoid scanning all 0..=255)
-            let mut transition_targets: [Vec<usize>; 256] = std::array::from_fn(|_| Vec::new());
-            let mut used_inputs: Vec<u8> = Vec::new();
-            let mut seen_input: [bool; 256] = [false; 256];
-
             // For each NFA state in the current DFA state, collect outgoing transitions.
             for &state in current_set.iter() {
                 for &(input, next_state) in &self.states[state].transitions {
@@ -1058,7 +1056,7 @@ impl NFA {
             }
 
             // For each input symbol, compute the epsilon-closure of the resulting state set.
-            for input_u8 in used_inputs {
+            for &input_u8 in &used_inputs {
                 let next_states = &transition_targets[input_u8 as usize];
                 if next_states.is_empty() {
                     continue;
@@ -1107,6 +1105,14 @@ impl NFA {
                     .transitions
                     .insert(input_u8, next_dfa_state);
             }
+
+            // Clean up buffers for next iteration
+            for &input in &used_inputs {
+                let idx = input as usize;
+                seen_input[idx] = false;
+                transition_targets[idx].clear();
+            }
+            used_inputs.clear();
         }
 
         crate::debug!(
@@ -1142,7 +1148,10 @@ impl NFA {
 
 impl DFA {
     pub fn compute_possible_future_group_ids(&mut self) {
-        // Optimized worklist algorithm using reverse graph.
+        // Optimized worklist algorithm using reverse graph and BitSets.
+        // Using BTreeSet for propagation is too slow (clone/merge overhead).
+        // Since GroupIDs are dense and relatively small (e.g. ~3000), a dense bitset is vastly more efficient.
+
         // Initialize possible_future_group_ids as empty. We only want to include
         // group IDs reachable via *future* transitions.
         for state in &mut self.states {
@@ -1150,35 +1159,53 @@ impl DFA {
         }
 
         let num_states = self.states.len();
-        let mut predecessors: Vec<Vec<usize>> = vec![Vec::new(); num_states];
-        // We also cache the finalizers separately to avoid borrowing self.states mutably later
-        // while reading finalizers.
-        let finalizers: Vec<BTreeSet<GroupID>> = self.states.iter().map(|s| s.finalizers.clone()).collect();
         
-        // Build reverse graph
+        // 1. Build reverse graph (predecessors)
+        let mut predecessors: Vec<Vec<usize>> = vec![Vec::new(); num_states];
         for (idx, state) in self.states.iter().enumerate() {
             for &target in state.transitions.values() {
                 predecessors[target].push(idx);
             }
         }
 
+        // 2. Setup BitSet storage
+        // Determine max group ID to size the bitsets
+        let max_group_id = self.states.iter()
+            .flat_map(|s| s.finalizers.last()) // BTreeSet is sorted, last is max
+            .max()
+            .copied()
+            .unwrap_or(0);
+        
+        let u64_per_state = (max_group_id / 64) + 1;
+        // Flat buffer for cache locality: [state0_word0, state0_word1, ..., state1_word0, ...]
+        let mut future_bits: Vec<u64> = vec![0; num_states * u64_per_state];
+
         // Worklist for states whose possible_future_group_ids have changed (or need initial propagation).
         // We use a Queue for BFS-like propagation.
         let mut worklist: std::collections::VecDeque<usize> = std::collections::VecDeque::new();
         let mut in_worklist: Vec<bool> = vec![false; num_states];
 
-        // Separate storage for the sets to avoid borrowing self.states
-        let mut future_groups: Vec<BTreeSet<GroupID>> = vec![BTreeSet::new(); num_states];
-
-        // Initial seed: For every state T, if T has finalizers, any predecessor S needs to know.
-        // Technically, S.future += T.finalizers. This is static info (T.finalizers never change).
-        // So we can just do one pass to add T.finalizers to S.future for all S->T.
-        for (target_idx, target_finalizers) in finalizers.iter().enumerate() {
-            if !target_finalizers.is_empty() {
+        // 3. Initial seed: Propagate static finalizers to predecessors
+        for target_idx in 0..num_states {
+            // We need to access finalizers. Since we can't borrow self.states while modifying future_bits 
+            // if we iterate strictly, but here we just read.
+            // Actually, we can iterate indices.
+            if !self.states[target_idx].finalizers.is_empty() {
                 for &pred_idx in &predecessors[target_idx] {
-                    let old_len = future_groups[pred_idx].len();
-                    future_groups[pred_idx].extend(target_finalizers.iter().cloned());
-                    if future_groups[pred_idx].len() > old_len && !in_worklist[pred_idx] {
+                    let pred_offset = pred_idx * u64_per_state;
+                    let mut changed = false;
+                    
+                    // Merge target_idx's finalizers into pred_idx's future bits
+                    for &gid in &self.states[target_idx].finalizers {
+                        let word_idx = gid / 64;
+                        let bit_mask = 1u64 << (gid % 64);
+                        if (future_bits[pred_offset + word_idx] & bit_mask) == 0 {
+                            future_bits[pred_offset + word_idx] |= bit_mask;
+                            changed = true;
+                        }
+                    }
+
+                    if changed && !in_worklist[pred_idx] {
                         worklist.push_back(pred_idx);
                         in_worklist[pred_idx] = true;
                     }
@@ -1186,31 +1213,53 @@ impl DFA {
             }
         }
 
-        // Propagate future groups
+        // 4. Propagate future groups (BitSet OR operations)
         while let Some(idx) = worklist.pop_front() {
             in_worklist[idx] = false;
             
-            // We need to clone the current set to propagate it.
-            // Note: We can't hold a reference to future_groups[idx] while modifying future_groups[pred].
-            let current_groups = future_groups[idx].clone();
-            if current_groups.is_empty() {
-                continue;
-            }
+            let idx_offset = idx * u64_per_state;
 
             for &pred_idx in &predecessors[idx] {
-                let old_len = future_groups[pred_idx].len();
-                future_groups[pred_idx].extend(current_groups.iter().cloned());
+                let pred_offset = pred_idx * u64_per_state;
+                let mut changed = false;
+
+                for w in 0..u64_per_state {
+                    let incoming = future_bits[idx_offset + w];
+                    if incoming != 0 {
+                        let old_val = future_bits[pred_offset + w];
+                        let new_val = old_val | incoming;
+                        if old_val != new_val {
+                            future_bits[pred_offset + w] = new_val;
+                            changed = true;
+                        }
+                    }
+                }
                 
-                if future_groups[pred_idx].len() > old_len && !in_worklist[pred_idx] {
+                if changed && !in_worklist[pred_idx] {
                     worklist.push_back(pred_idx);
                     in_worklist[pred_idx] = true;
                 }
             }
         }
 
-        // Write back to states
-        for (idx, groups) in future_groups.into_iter().enumerate() {
-            self.states[idx].possible_future_group_ids = groups;
+        // 5. Convert BitSets back to BTreeSets
+        for (idx, state) in self.states.iter_mut().enumerate() {
+            let offset = idx * u64_per_state;
+            let mut set = BTreeSet::new();
+            
+            for w in 0..u64_per_state {
+                let mut word = future_bits[offset + w];
+                if word != 0 {
+                    let base_gid = w * 64;
+                    while word != 0 {
+                        let trailing = word.trailing_zeros();
+                        set.insert(base_gid + trailing as usize);
+                        // Clear the least significant bit set
+                        word &= !(1u64 << trailing);
+                    }
+                }
+            }
+            state.possible_future_group_ids = set;
         }
     }
 
