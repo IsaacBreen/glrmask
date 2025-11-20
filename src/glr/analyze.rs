@@ -1078,7 +1078,7 @@ fn get_expr_complexity(expr: &Expr) -> usize {
     match expr {
         Expr::U8Seq(_) => 1,
         Expr::U8Class(_) => 1,
-        Expr::Shared(inner) => get_expr_complexity(inner),
+        Expr::Shared(_) => 1,
         Expr::Quantifier(inner, _) => get_expr_complexity(inner) + 1,
         Expr::Choice(exprs) => exprs.iter().map(get_expr_complexity).sum::<usize>() + 1,
         Expr::Seq(exprs) => exprs.iter().map(get_expr_complexity).sum::<usize>() + 1,
@@ -1379,15 +1379,11 @@ fn convert_regular_nts_to_terminals(
                 let (new_term, created_new) = if let Some(&gid) = expr_to_group_id.get(&expr_for_terminal) {
                     // Reuse existing terminal
                     if let Some(term_name) = regex_name_to_group_id.get_by_right(&gid) {
-                         (Terminal::RegexName(term_name.clone()), false)
-                    } else if let Some(bytes) = literal_to_group_id.get_by_right(&gid) {
-                         (Terminal::Literal(bytes.clone()), false)
-                    } else {
-                        panic!("Group ID {} found in expr map but missing from both regex and literal maps", gid);
-                    }
+                    (Terminal::RegexName(term_name.clone()), false)
                 } else {
                     // Create new terminal
-                    let t = create_new_terminal(expr_for_terminal.clone(), &nt.0, regex_name_to_group_id, group_id_to_expr);
+                    let shared_expr = Expr::Shared(Arc::new(expr_for_terminal.clone()));
+                    let t = create_new_terminal(shared_expr.clone(), &nt.0, regex_name_to_group_id, group_id_to_expr);
                     // Update reverse map
                     if let Terminal::RegexName(ref name) = t {
                         if let Some(&gid) = regex_name_to_group_id.get_by_left(name) {
