@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use crate::glr::automaton::{
     compute_closure, compute_first_sets_for_nonterminals, compute_follow_sets_for_nonterminals,
     compute_nonterminal_nullability, compute_null_nonterminals, compute_nullable_nonterminals,

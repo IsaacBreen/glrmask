@@ -161,6 +161,7 @@ impl GrammarDefinition {
     }
 
     pub fn optimize(&mut self) {
+        crate::debug!(3, "Optimizing grammar...");
         let start_symbol = self.productions[self.start_production_id].lhs.clone();
 
         crate::glr::analyze::optimize_grammar(
