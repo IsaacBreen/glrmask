@@ -1192,6 +1192,13 @@ fn convert_regular_nts_to_terminals(
         for nt in pending_nts {
             let prods = &prods_by_lhs[&nt];
 
+            // Prevent infinite loop: if start symbol is already a single terminal, stop.
+            if nt == *start_symbol && prods.len() == 1 && prods[0].rhs.len() == 1 {
+                if let Symbol::Terminal(_) = &prods[0].rhs[0] {
+                    continue;
+                }
+            }
+
             // Analyze productions
             let mut base_exprs: Vec<Expr> = Vec::new();
             let mut left_rec_exprs: Vec<Expr> = Vec::new();
