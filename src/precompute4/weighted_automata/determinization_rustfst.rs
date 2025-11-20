@@ -55,12 +55,14 @@ fn _fst_label_to_label(label: u32) -> i32 {
 }
 fn fst_label_to_label(label: u32) -> i32 {
     let result = _fst_label_to_label(label);
-    assert!(label == _label_to_fst_label(result));
+    let remapped = _label_to_fst_label(result);
+    assert!(label == remapped, "label: {}, result: {}, remapped: {}", label, result, remapped);
     result
 }
 fn label_to_fst_label(label: i32) -> u32 {
     let result = _label_to_fst_label(label);
-    assert!(label == _fst_label_to_label(result));
+    let remapped = _fst_label_to_label(result);
+    assert!(label == remapped, "label: {}, result: {}, remapped: {}", label, result, remapped);
     result
 }
 
