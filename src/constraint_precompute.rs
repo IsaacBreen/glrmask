@@ -190,6 +190,11 @@ impl<'r> Precomputer1<'r> {
             }
         }
 
+        for (target, weight) in &self.nwa.states[state_id].epsilons {
+            let rsb = weight.rsb.clone();
+            children_to_copy.entry(None).or_default().push((*target, rsb));
+        }
+
         if self.original_to_dummy_map.is_empty() {
             for (ek, dest_map) in children_to_copy {
                 for (child_state_id, rs_blaze) in dest_map {
