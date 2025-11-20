@@ -49,7 +49,6 @@ pub(crate) struct Precomputer1<'r> {
     pub(crate) stats: PrecomputeStats,
     pub(crate) leaf_state: NWAStateID,
     pub(crate) nwa: NWA,
-    pub(crate) live_tokens: HashMap<NWAStateID, RangeSetBlaze<usize>>,
     pub(crate) original_to_dummy_map: BTreeMap<TerminalID, TerminalID>,
 }
 
@@ -74,12 +73,10 @@ impl<'r> Precomputer1<'r> {
 
         let mut nwa = NWA::new();
         nwa.states.0.clear(); // Clear default start state
-        let mut live_tokens = HashMap::new();
 
         let mut roots = BTreeMap::new();
         for sid in active_states {
             let root_state = nwa.add_state();
-            live_tokens.insert(root_state, RangeSetBlaze::from_iter(0..=internal_max_llm_token));
             roots.insert(sid, root_state);
         }
         crate::debug!(
@@ -106,7 +103,6 @@ impl<'r> Precomputer1<'r> {
 
         let leaf_state = nwa.add_state();
         nwa.states[leaf_state].final_weight = Some(Weight::all());
-        live_tokens.insert(leaf_state, RangeSetBlaze::new());
         crate::debug!(2, "Created trie1 leaf state");
 
         Self {
@@ -121,26 +117,24 @@ impl<'r> Precomputer1<'r> {
             stats: PrecomputeStats::default(),
             leaf_state,
             nwa,
-            live_tokens,
             original_to_dummy_map,
         }
     }
 
     fn get_node_data_cached(
         &self,
-        cache: &mut HashMap<NWAStateID, (RangeSetBlaze<usize>, bool)>,
+        cache: &mut HashMap<NWAStateID, bool>,
         id: NWAStateID,
-    ) -> (RangeSetBlaze<usize>, bool) {
-        if let Some(data) = cache.get(&id) {
-            return data.clone();
+    ) -> bool {
+        if let Some(&is_end) = cache.get(&id) {
+            return is_end;
         }
-        let live = self.all_llm_tokens.clone();
         let is_end = self.nwa.states[id]
             .final_weight
             .as_ref()
             .map_or(false, |w| !w.is_empty());
-        cache.insert(id, (live.clone(), is_end));
-        (live, is_end)
+        cache.insert(id, is_end);
+        is_end
     }
 
     fn get_leaf_node(&self) -> NWAStateID {
@@ -413,12 +407,10 @@ impl<'r> Precomputer1<'r> {
 
             let mut node_cache: HashMap<
                 NWAStateID,
-                (RangeSetBlaze<usize>, bool),
+                bool,
             > = HashMap::new();
 
             let mut pending_edges = Vec::new();
-            let mut pending_live_updates: HashMap<NWAStateID, RangeSetBlaze<usize>> =
-                HashMap::new();
 
             let child_reachable = child_vocab_node.reachable_token_ids();
             let child_token_id = child_vocab_node.token_id();
@@ -477,13 +469,11 @@ impl<'r> Precomputer1<'r> {
                         let next_pos = pos + match_info.width;
 
                         for (src_node, src_tokens) in &nodes {
-                            let (src_live, _) = self.get_node_data_cached(&mut node_cache, *src_node);
-
                             // Leaf check: if match consumes remainder of segment
                             if next_pos == segment_bytes.len() {
                                 let mut edge_bv = RangeSetBlaze::new();
                                 edge_bv.insert(child_token_id);
-                                let final_bv = &(&edge_bv & src_tokens) & &src_live;
+                                let final_bv = &edge_bv & src_tokens;
                                 if !final_bv.is_empty() {
                                     let leaf = self.get_leaf_node();
                                     pending_edges.push((
@@ -492,10 +482,6 @@ impl<'r> Precomputer1<'r> {
                                         Some(terminal_id),
                                         final_bv.clone(),
                                     ));
-                                    pending_live_updates
-                                        .entry(leaf)
-                                        .or_default()
-                                        .bitor_assign(&final_bv);
                                 }
                             }
 
@@ -508,7 +494,7 @@ impl<'r> Precomputer1<'r> {
                                 }
                             }
 
-                            let final_bv = &(&edge_bv & src_tokens) & &src_live;
+                            let final_bv = &edge_bv & src_tokens;
                             if final_bv.is_empty() {
                                 continue;
                             }
@@ -521,20 +507,10 @@ impl<'r> Precomputer1<'r> {
 
                             let target = {
                                 let n = self.nwa.add_state();
-                                node_cache.insert(n, (RangeSetBlaze::new(), false));
+                                node_cache.insert(n, false);
                                 n
                             };
 
-                            // Update live tokens and queue
-                            pending_live_updates
-                                .entry(target)
-                                .or_default()
-                                .bitor_assign(&final_bv);
-                            node_cache
-                                .get_mut(&target)
-                                .unwrap()
-                                .0
-                                .bitor_assign(&final_bv);
                             dest_map.entry(target).or_default().bitor_assign(&final_bv);
 
                             pending_edges.push((
@@ -556,8 +532,7 @@ impl<'r> Precomputer1<'r> {
                         for (src_node, src_tokens) in &nodes {
                             let mut edge_bv = RangeSetBlaze::new();
                             edge_bv.insert(child_token_id);
-                            let final_edge_bv = &(&edge_bv & src_tokens)
-                                & &self.get_node_data_cached(&mut node_cache, *src_node).0;
+                            let final_edge_bv = &edge_bv & src_tokens;
 
                             if !final_edge_bv.is_empty() {
                                 let end_idx = self.get_leaf_node();
@@ -568,10 +543,6 @@ impl<'r> Precomputer1<'r> {
                                         Some(*terminal_id),
                                         final_edge_bv.clone(),
                                     ));
-                                    pending_live_updates
-                                        .entry(end_idx)
-                                        .or_insert_with(RangeSetBlaze::new)
-                                        .bitor_assign(&final_edge_bv);
                                 }
                             }
 
