@@ -373,13 +373,18 @@ pub fn precompute4(
                     continue;
                 }
 
+                crate::debug!(1, "[DWA Simplify] Specializing DWA");
                 let mut left_dwa = specialize_dwa(&super_dwa, &effective_terminal_map, &bit_to_term);
+                crate::debug!(1, "[DWA Simplify] DWA specialization done");
                 left_dwa.simplify();
+                crate::debug!(1, "[DWA Simplify] DWA simplified");
                 let left_nwa = NWA::from_dwa(&left_dwa);
+                crate::debug!(1, "[DWA Simplify] NWA created");
 
                 let mut states = states_arena.borrow_mut();
                 let (left_body_start, remap) =
                     states.copy_subgraph_from(&left_nwa.states, left_nwa.body.start_state);
+                crate::debug!(1, "[DWA Simplify] Copied NWA subgraph");
 
                 let new_states_filter: HashSet<NWAStateID> = remap.values().cloned().collect();
 
@@ -388,9 +393,13 @@ pub fn precompute4(
                 let composed_body = NWA::_concatenate_components(&mut states, &left_body, &right_body, &Weight::all());
 
                 if !new_states_filter.is_empty() {
+                    crate::debug!(1, "[DWA Simplify] Applying cancellations");
                     apply_cancellations(&mut states, &new_states_filter);
+                    crate::debug!(1, "[DWA Simplify] Applying finality fixpoint");
                     apply_finality_fixpoint(&mut states, &new_states_filter);
+                    crate::debug!(1, "[DWA Simplify] Removing negative transitions");
                     remove_negative_transitions(&mut states, &new_states_filter);
+                    crate::debug!(1, "[DWA Simplify] Cancellations, finality fixpoint, and negative transitions done");
                 }
 
                 nwa_body = NWA::union_components(&mut states, &nwa_body, &composed_body);
