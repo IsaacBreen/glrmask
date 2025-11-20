@@ -318,19 +318,12 @@ pub fn precompute4(
         NWABody { start_state: start }
     };
     
-    // Since we already propagated tokens, we don't need to propagate them in Pass 2 for logic,
-    // but we need them to instantiate the templates correctly.
-    // However, Trie::special_map_grouped structure requires us to propagate something.
-    // We will propagate the NWABody and use the precomputed tokens for looking up weights.
-    // Wait, actually, we need the tokens at `step` destination to calculate weights.
-    // It is cleaner to re-propagate tokens or just look them up if we trust the graph structure is static.
-    // We will re-propagate tokens alongside bodies as it is cheap and robust.
+    // Redoing the call with correct logic:
+    let initial_term_map: BTreeMap<Option<TerminalID>, Weight> = BTreeMap::from([(None, Weight::all())]);
+    let initial_body_map_full = BTreeMap::from([(initial_nwa_body, initial_term_map)]);
+    let initial_values_full: Vec<(Trie2Index, (BTreeMap<NWABody, BTreeMap<Option<TerminalID>, Weight>>, LLMTokenBV))> =
+        vec![(reversed_trie_root, (initial_body_map_full, initial_tokens))];
 
-    use crate::glr::table::TerminalID;
-    let initial_body_map: BTreeMap<NWABody, ()> = BTreeMap::from([(initial_nwa_body, ())]); // We don't need to carry the bundle in the map anymore
-    let initial_values_pass2: Vec<(Trie2Index, (BTreeMap<NWABody, ()>, LLMTokenBV))> =
-        vec![(reversed_trie_root, (initial_body_map, initial_tokens.clone()))];
-    
     let mut original_trie1_roots_map: BTreeMap<PrecomputeNode1Index, Vec<TokenizerStateID>> = BTreeMap::new();
     for (k, v) in precomputed1.iter() {
         original_trie1_roots_map.entry(*v).or_default().push(*k);
@@ -339,88 +332,6 @@ pub fn precompute4(
     let mut final_bodies: BTreeMap<TokenizerStateID, NWABody> = BTreeMap::new();
 
     let now_traversal = Instant::now();
-
-    Trie::special_map_grouped(
-        &reversed_trie1_god,
-        &traversal_data,
-        initial_values_pass2,
-        // step
-        |current_val: &(BTreeMap<NWABody, ()>, LLMTokenBV), edge_terminal_opt, dest_map| {
-            let (current_bodies, current_tokens) = current_val;
-            // We don't need to form the bundle here anymore, just propagate the body index.
-            // But we do need to know which bodies go where.
-            let mut results = Vec::new();
-            for (dest_idx, llm_token_bv) in dest_map.iter() {
-                let next_tokens = current_tokens & llm_token_bv;
-                if !next_tokens.is_empty() {
-                    let mut next_bodies = BTreeMap::new();
-                    for body in current_bodies.keys() {
-                         next_bodies.insert(*body, ());
-                    }
-                    results.push((*dest_idx, (next_bodies, next_tokens)));
-                }
-            }
-            results
-        },
-        // merge
-        |val1: &mut (BTreeMap<NWABody, ()>, LLMTokenBV), val2: (BTreeMap<NWABody, ()>, LLMTokenBV)| {
-            let (bodies1, tokens1) = val1;
-            let (bodies2, tokens2) = val2;
-            for (body, _) in bodies2 {
-                bodies1.insert(body, ());
-            }
-            *tokens1 |= &tokens2;
-        },
-        // process
-        |node_guard, node_idx, val: (BTreeMap<NWABody, ()>, LLMTokenBV)| {
-            let (nwa_bodies, tokens) = val;
-            
-            // Reconstruct the signature for this node `node_idx`.
-            // We need to look at outgoing edges from `node_idx` in reversed_trie_god.
-            // AND we need to group them by the source bodies (which are `nwa_bodies`).
-            // Wait. `nwa_bodies` contains the set of NWABodies from *incoming* edges in traversal (children in reversed trie).
-            // In Pass 2, `node_idx` is `u` (parent in reversed trie). `nwa_bodies` are from `w` (children).
-            // We need to combine all `w` into a single new NWA for `u`.
-            // For a given `w`, the connection `w -> u` has specific terminals.
-            // We need to recover which terminals connected `w` to `u`.
-            // BUT `special_map_grouped` doesn't give us the edge information in `process`.
-            
-            // Correction: `special_map` propagates values. It loses the edge context by the time it hits `process` due to merging.
-            // HOWEVER, the bundle is defined by the edges between `w` and `u`.
-            // Since `u` is fixed (it's `node_idx`), and `w` corresponds to a specific `NWABody`.
-            // We need to know which terminals map `w` to `u`.
-            // But `w` is not explicitly available, only `NWABody` ID.
-            // This is why we carried the `terminal_map` in the original code!
-            // We DO need to carry the map.
-            // Value: `(BTreeMap<NWABody, BTreeMap<Option<TerminalID>, Weight>>, LLMTokenBV)`
-            
-            // Okay, revert `initial_values_pass2` type to carry the map.
-            // But we use the precomputed templates.
-
-            let mut new_body = {
-                let mut states = states_arena.borrow_mut();
-                let start = states.add_state();
-                NWABody { start_state: start }
-            };
-
-            // We have to reconstruct the bundles locally to match them with templates.
-            // Or we carry them. Carrying them is easiest and what we had.
-            // But we optimize the `process` step.
-
-            // Re-define val type locally for clarity, actually we can't easily in closure.
-            // Let's use the original type and logic, just optimized using the cache.
-            
-            // Wait, `special_map_grouped` signature is fixed by the call.
-            // We need to return the full map from `step`.
-            None // Actual return happens in the real call below, just thinking.
-        }
-    );
-    
-    // Redoing the call with correct logic:
-    let initial_term_map: BTreeMap<Option<TerminalID>, Weight> = BTreeMap::from([(None, Weight::all())]);
-    let initial_body_map_full = BTreeMap::from([(initial_nwa_body, initial_term_map)]);
-    let initial_values_full: Vec<(Trie2Index, (BTreeMap<NWABody, BTreeMap<Option<TerminalID>, Weight>>, LLMTokenBV))> =
-        vec![(reversed_trie_root, (initial_body_map_full, initial_tokens))];
 
     Trie::special_map_grouped(
         &reversed_trie1_god,
@@ -480,11 +391,11 @@ pub fn precompute4(
                     &concrete_weights,
                     &mut states
                 );
-                
+
                 let new_states_filter: HashSet<NWAStateID> = remap.values().cloned().collect();
                 let left_body = NWABody { start_state: left_body_start };
                 let composed_body = NWA::_concatenate_components(&mut states, &left_body, &right_body, &Weight::all());
-                
+
                 if !new_states_filter.is_empty() {
                     apply_cancellations(&mut states, &new_states_filter);
                     apply_finality_fixpoint(&mut states, &new_states_filter);
@@ -500,7 +411,6 @@ pub fn precompute4(
                     }
                 }
 
-                // Fix: Wrap nwa_body in the expected BTreeMap type.
                 let mut next_body_map = BTreeMap::new();
                 next_body_map.insert(nwa_body, BTreeMap::new());
                 Some((next_body_map, tokens))
@@ -524,7 +434,7 @@ pub fn precompute4(
             .unwrap();
     }
     let combined_nwa = NWA { states: combined_nwa_states, body: NWABody { start_state: combined_start_state } };
-    
+
     let final_dwa = resolve_negatives_and_optimize_and_determinize(parser, combined_nwa);
     crate::debug!(3, "Total precompute4 time: {:?}", now_total.elapsed());
     final_dwa
@@ -544,7 +454,7 @@ fn canonicalize_bundle(
         terms.sort();
     }
     groups_vec.sort_by(|a, b| a.1.cmp(&b.1));
-    
+
     let signature: Vec<Vec<Option<TerminalID>>> = groups_vec.iter().map(|(_, terms)| terms.clone()).collect();
     let concrete_weights: Vec<Weight> = groups_vec.into_iter().map(|(w, _)| w).collect();
     (signature, concrete_weights)
@@ -555,13 +465,13 @@ fn precompute_token_bvs_and_signatures(
     traversal_data: &crate::datastructures::trie::TrieTraversalData,
     initial_values: Vec<(Trie2Index, LLMTokenBV)>
 ) -> (HashMap<Trie2Index, LLMTokenBV>, HashSet<Signature>) {
-    
+
     let node_tokens: Arc<Mutex<HashMap<Trie2Index, LLMTokenBV>>> = Arc::new(Mutex::new(HashMap::new()));
     let signatures: Arc<Mutex<HashSet<Signature>>> = Arc::new(Mutex::new(HashSet::new()));
-    
+
     // We use the trie traversal to propagate tokens AND collect signatures on the fly.
     // Value type V = LLMTokenBV.
-    
+
     Trie::special_map_grouped(
         reversed_trie,
         traversal_data,
@@ -583,13 +493,13 @@ fn precompute_token_bvs_and_signatures(
         |node_guard, node_idx, tokens| {
             node_tokens.lock().unwrap().insert(node_idx, tokens.clone());
 
-            // To form signatures for the NEXT step (outgoing edges from here), 
+            // To form signatures for the NEXT step (outgoing edges from here),
             // we need to look at the children of the current node in the reversed trie.
             // In `reversed_trie`, children map Key -> Dest -> Weight.
             // We group by Dest.
-            
+
             let mut bundles_by_dest: HashMap<Trie2Index, BTreeMap<Option<TerminalID>, Weight>> = HashMap::new();
-            
+
             for (term_opt, dest_map) in node_guard.children() {
                 for (dest_idx, edge_bv) in dest_map.iter() {
                      let combined = &tokens & edge_bv;
@@ -599,7 +509,7 @@ fn precompute_token_bvs_and_signatures(
                      }
                 }
             }
-            
+
             let mut sigs = signatures.lock().unwrap();
             for (_, bundle) in bundles_by_dest {
                  let (sig, _) = canonicalize_bundle(bundle);
@@ -609,7 +519,7 @@ fn precompute_token_bvs_and_signatures(
             Some(tokens)
         }
     );
-    
+
     let final_tokens = Arc::try_unwrap(node_tokens).unwrap().into_inner().unwrap();
     let final_sigs = Arc::try_unwrap(signatures).unwrap().into_inner().unwrap();
     (final_tokens, final_sigs)
@@ -756,7 +666,7 @@ fn instantiate_nwa_template_into_arena(
     for _ in 0..template_len {
         map.push(arena.add_state());
     }
-    
+
     let mut id_map = HashMap::with_capacity(template_len);
     for (i, &new_id) in map.iter().enumerate() {
         id_map.insert(i, new_id);
