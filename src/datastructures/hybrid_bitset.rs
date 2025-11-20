@@ -282,6 +282,14 @@ impl HybridBitset {
         &Self::max_ones() - self
     }
 
+    pub fn union_with(&mut self, other: &Self) {
+        *Arc::make_mut(&mut self.inner) |= &*other.inner;
+    }
+
+    pub fn intersection_with(&mut self, other: &Self) {
+        *Arc::make_mut(&mut self.inner) = &*self.inner & &*other.inner;
+    }
+
     /// Returns an iterator over the indices of the set bits.
     pub fn iter_indices(&self) -> Iter<'_> {
         Iter {
