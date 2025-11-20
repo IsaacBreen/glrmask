@@ -24,20 +24,20 @@ use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::sync::{Arc, Mutex};
 
-fn _label_to_fst_label(label: i32) -> u32 {
-    (((label as isize) - (i32::MIN as isize)) + 1) as u32
+fn _label_to_fst_label(label: Label) -> u32 {
+    (((label as isize) - (Label::MIN as isize)) + 1) as u32
 }
-fn _fst_label_to_label(label: u32) -> i32 {
-    (label as isize + i32::MIN as isize - 1) as i32
+fn _fst_label_to_label(label: u32) -> Label {
+    (label as isize + Label::MIN as isize - 1) as Label
 }
-fn fst_label_to_label(label: u32) -> i32 {
+fn fst_label_to_label(label: u32) -> Label {
     assert_ne!(label, 0);
     let result = _fst_label_to_label(label);
     let remapped = _label_to_fst_label(result);
     assert!(label == remapped, "label: {}, result: {}, remapped: {}", label, result, remapped);
     result
 }
-fn label_to_fst_label(label: i32) -> u32 {
+fn label_to_fst_label(label: Label) -> u32 {
     let result = _label_to_fst_label(label);
     assert_ne!(result, 0);
     let remapped = _fst_label_to_label(result);
