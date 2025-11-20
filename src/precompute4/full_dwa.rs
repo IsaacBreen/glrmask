@@ -310,6 +310,7 @@ pub fn precompute4(
     let mut unique_bundle_maps: BTreeSet<BTreeMap<Option<TerminalID>, Weight>> = BTreeSet::new();
     let mut unique_bundle_entries: BTreeSet<(Option<TerminalID>, Weight)> = BTreeSet::new();
 
+    let mut specialization_cache: HashMap<BTreeMap<Option<TerminalID>, Weight>, NWA> = HashMap::new();
     let now = Instant::now();
     Trie::special_map_grouped(
         &reversed_trie1_god,
@@ -385,13 +386,17 @@ pub fn precompute4(
                     continue;
                 }
 
-                crate::debug!(7, "[DWA Simplify] Specializing DWA");
-                let mut left_dwa = specialize_dwa(&super_dwa, &effective_terminal_map, &bit_to_term);
-                crate::debug!(7, "[DWA Simplify] DWA specialization done");
-                left_dwa.simplify();
-                crate::debug!(7, "[DWA Simplify] DWA simplified");
-                let left_nwa = NWA::from_dwa(&left_dwa);
-                crate::debug!(7, "[DWA Simplify] NWA created");
+                if !specialization_cache.contains_key(&effective_terminal_map) {
+                    crate::debug!(7, "[DWA Simplify] Specializing DWA (cache miss)");
+                    let mut left_dwa =
+                        specialize_dwa(&super_dwa, &effective_terminal_map, &bit_to_term);
+                    crate::debug!(7, "[DWA Simplify] DWA specialization done");
+                    left_dwa.simplify();
+                    crate::debug!(7, "[DWA Simplify] DWA simplified");
+                    let left_nwa = NWA::from_dwa(&left_dwa);
+                    specialization_cache.insert(effective_terminal_map.clone(), left_nwa);
+                }
+                let left_nwa = specialization_cache.get(&effective_terminal_map).unwrap();
 
                 let mut states = states_arena.borrow_mut();
                 let (left_body_start, remap) =
