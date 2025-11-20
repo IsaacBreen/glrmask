@@ -1308,6 +1308,7 @@ fn convert_regular_nts_to_terminals(
                 ) {
                     let self_count = seq.iter().filter(|s| matches!(s, ResolvedSymbol::SelfRef)).count();
                     if self_count > 1 {
+                        // println!("NT {} failed: multiple self refs", nt.0);
                         failed = true; // Multiple self-refs (e.g. center embedding or A -> A A) hard to convert simply
                         break;
                     }
@@ -1329,6 +1330,7 @@ fn convert_regular_nts_to_terminals(
                              right_rec_exprs.push(efficient_seq(exprs));
                         } else {
                             failed = true; // Center embedding
+                            // println!("NT {} failed: center embedding", nt.0);
                             break;
                         }
                     }
@@ -1366,11 +1368,13 @@ fn convert_regular_nts_to_terminals(
                          is_nt_nullable = true;
                     } else {
                         // Purely nullable (e.g. empty string or epsilon), cannot convert to terminal
+                        // println!("NT {} failed: purely nullable", nt.0);
                         continue;
                     }
                 }
                 
                 if get_expr_complexity(&expr_for_terminal) > MAX_REGEX_COMPLEXITY {
+                    // println!("NT {} failed: complexity limit", nt.0);
                     continue;
                 }
 
