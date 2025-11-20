@@ -126,7 +126,9 @@ pub fn precompute4(
 
     crate::debug!(4, "Unrolling cycles in precomputed1 DWA...");
     let mut unrolled = dwa.unroll_cycles();
+    crate::debug!(5, "Minimizing unrolled DWA...");
     unrolled.minimize_with_rustfst();
+    crate::debug!(5, "Unrolling complete. {} states", unrolled.states.len());
     dwa = unrolled;
 
     crate::debug!(
