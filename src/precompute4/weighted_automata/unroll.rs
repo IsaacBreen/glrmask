@@ -123,7 +123,7 @@ impl DWA {
         }
 
         pb.finish_with_message(format!("Done ({} states)", new_dwa.states.len()));
-        crate::debug!(5, "Unrolling complete. {} states", new_dwa.states.len());
+        crate::debug!(4, "Unrolling complete. {} states", new_dwa.states.len());
         new_dwa
     }
 }
