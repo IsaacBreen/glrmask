@@ -121,22 +121,6 @@ impl<'r> Precomputer1<'r> {
         }
     }
 
-    fn get_node_data_cached(
-        &self,
-        cache: &mut HashMap<NWAStateID, bool>,
-        id: NWAStateID,
-    ) -> bool {
-        if let Some(&is_end) = cache.get(&id) {
-            return is_end;
-        }
-        let is_end = self.nwa.states[id]
-            .final_weight
-            .as_ref()
-            .map_or(false, |w| !w.is_empty());
-        cache.insert(id, is_end);
-        is_end
-    }
-
     fn get_leaf_node(&self) -> NWAStateID {
         self.leaf_state
     }
@@ -418,15 +402,13 @@ impl<'r> Precomputer1<'r> {
 
             while let Some((pos, mut states_at_pos)) = pending.pop_first() {
                 for (_, nodes) in states_at_pos.iter_mut() {
-                    if nodes.len() > 1 {
-                        let merged_state = self.nwa.add_state();
-                        let weight = SimpleBitset::from_rsb(child_vocab_node.reachable_token_ids().clone());
-                        for node in &*nodes {
-                            self.nwa.add_epsilon(merged_state, *node, weight.clone());
-                        }
-                        nodes.clear();
-                        nodes.push(merged_state);
+                    let merged_state = self.nwa.add_state();
+                    let weight = SimpleBitset::all();;
+                    for node in &*nodes {
+                        self.nwa.add_epsilon(*node, merged_state, weight.clone());
                     }
+                    nodes.clear();
+                    nodes.push(merged_state);
                 }
 
                 // If we reached the end of the segment, these states are ready for the next vocab node
