@@ -773,7 +773,7 @@ impl NFAState {
 fn print_memory_usage(label: &str) {
     if let Some(usage) = memory_stats() {
         let physical_mem_mb = usage.physical_mem / 1024 / 1024;
-        crate::debug!(4, "Mem: {} MB ({})", physical_mem_mb, label);
+        crate::debug!(5, "Mem: {} MB ({})", physical_mem_mb, label);
     }
 }
 
@@ -993,7 +993,7 @@ impl NFA {
 
         let closure_start = std::time::Instant::now();
         let epsilon_closures = self.compute_epsilon_closures();
-        crate::debug!(4, "Computed epsilon closures in {:.2?}", closure_start.elapsed());
+        crate::debug!(5, "Computed epsilon closures in {:.2?}", closure_start.elapsed());
 
         // Compute epsilon-closure of the NFA start state and use it as the DFA start state.
         let start_closure = &epsilon_closures[self.start_state];
@@ -1030,7 +1030,7 @@ impl NFA {
             }
             if dfa_states.len() >= next_log_threshold {
                 crate::debug!(
-                    4,
+                    6,
                     "DFA progress: {} states, worklist {}, subset size {} (max {}), elapsed {:.2?}",
                     dfa_states.len(),
                     worklist.len(),
@@ -1118,7 +1118,7 @@ impl NFA {
         }
 
         crate::debug!(
-            4,
+            5,
             "DFA main loop complete. Total states: {}, Max subset size: {}, Time: {:.2?}",
             dfa_states.len(),
             max_subset_size,
@@ -1138,11 +1138,11 @@ impl NFA {
 
         let meta_start = std::time::Instant::now();
         dfa.compute_possible_future_group_ids();
-        crate::debug!(4, "Computed possible future group IDs in {:.2?}", meta_start.elapsed());
+        crate::debug!(5, "Computed possible future group IDs in {:.2?}", meta_start.elapsed());
 
         let meta_group = std::time::Instant::now();
         dfa.compute_group_id_to_u8set();
-        crate::debug!(4, "Computed group ID to u8set in {:.2?}", meta_group.elapsed());
+        crate::debug!(5, "Computed group ID to u8set in {:.2?}", meta_group.elapsed());
 
         dfa
     }
