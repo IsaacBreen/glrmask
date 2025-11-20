@@ -1128,8 +1128,13 @@ impl NFA {
                 .extend(state.non_greedy_finalizers.iter().cloned());
         }
 
+        let meta_start = std::time::Instant::now();
         dfa.compute_possible_future_group_ids();
+        crate::debug!(4, "Computed possible future group IDs in {:.2?}", meta_start.elapsed());
+
+        let meta_group = std::time::Instant::now();
         dfa.compute_group_id_to_u8set();
+        crate::debug!(4, "Computed group ID to u8set in {:.2?}", meta_group.elapsed());
 
         dfa
     }
@@ -1137,64 +1142,125 @@ impl NFA {
 
 impl DFA {
     pub fn compute_possible_future_group_ids(&mut self) {
+        // Optimized worklist algorithm using reverse graph.
         // Initialize possible_future_group_ids as empty. We only want to include
         // group IDs reachable via *future* transitions.
         for state in &mut self.states {
             state.possible_future_group_ids = BTreeSet::new();
         }
 
-        loop {
-            let mut changed = false;
-            for state_index in 0..self.states.len() {
-                let state = self.states[state_index].clone(); // Clone to avoid borrow checker issues
-                for (_input, &next_state_index) in &state.transitions {
-                    let next_possible_future_groups =
-                        self.states[next_state_index].possible_future_group_ids.clone();
-                    let next_finalizers = self.states[next_state_index].finalizers.clone();
-                    let state_possible_future_groups =
-                        &mut self.states[state_index].possible_future_group_ids;
+        let num_states = self.states.len();
+        let mut predecessors: Vec<Vec<usize>> = vec![Vec::new(); num_states];
+        // We also cache the finalizers separately to avoid borrowing self.states mutably later
+        // while reading finalizers.
+        let finalizers: Vec<BTreeSet<GroupID>> = self.states.iter().map(|s| s.finalizers.clone()).collect();
+        
+        // Build reverse graph
+        for (idx, state) in self.states.iter().enumerate() {
+            for &target in state.transitions.values() {
+                predecessors[target].push(idx);
+            }
+        }
 
-                    let old_len = state_possible_future_groups.len();
-                    state_possible_future_groups.extend(next_finalizers.iter()); // Add finalizers of the *next* state
-                    state_possible_future_groups.extend(next_possible_future_groups.iter());
+        // Worklist for states whose possible_future_group_ids have changed (or need initial propagation).
+        // We use a Queue for BFS-like propagation.
+        let mut worklist: std::collections::VecDeque<usize> = std::collections::VecDeque::new();
+        let mut in_worklist: Vec<bool> = vec![false; num_states];
 
-                    if state_possible_future_groups.len() > old_len {
-                        changed = true;
+        // Separate storage for the sets to avoid borrowing self.states
+        let mut future_groups: Vec<BTreeSet<GroupID>> = vec![BTreeSet::new(); num_states];
+
+        // Initial seed: For every state T, if T has finalizers, any predecessor S needs to know.
+        // Technically, S.future += T.finalizers. This is static info (T.finalizers never change).
+        // So we can just do one pass to add T.finalizers to S.future for all S->T.
+        for (target_idx, target_finalizers) in finalizers.iter().enumerate() {
+            if !target_finalizers.is_empty() {
+                for &pred_idx in &predecessors[target_idx] {
+                    let old_len = future_groups[pred_idx].len();
+                    future_groups[pred_idx].extend(target_finalizers.iter().cloned());
+                    if future_groups[pred_idx].len() > old_len && !in_worklist[pred_idx] {
+                        worklist.push_back(pred_idx);
+                        in_worklist[pred_idx] = true;
                     }
                 }
             }
-            if !changed {
-                break;
+        }
+
+        // Propagate future groups
+        while let Some(idx) = worklist.pop_front() {
+            in_worklist[idx] = false;
+            
+            // We need to clone the current set to propagate it.
+            // Note: We can't hold a reference to future_groups[idx] while modifying future_groups[pred].
+            let current_groups = future_groups[idx].clone();
+            if current_groups.is_empty() {
+                continue;
             }
+
+            for &pred_idx in &predecessors[idx] {
+                let old_len = future_groups[pred_idx].len();
+                future_groups[pred_idx].extend(current_groups.iter().cloned());
+                
+                if future_groups[pred_idx].len() > old_len && !in_worklist[pred_idx] {
+                    worklist.push_back(pred_idx);
+                    in_worklist[pred_idx] = true;
+                }
+            }
+        }
+
+        // Write back to states
+        for (idx, groups) in future_groups.into_iter().enumerate() {
+            self.states[idx].possible_future_group_ids = groups;
         }
     }
 
     pub fn compute_group_id_to_u8set(&mut self) {
-        // Create the vector of possible future group IDs within a block scope, cloning the data
-        let possible_current_or_future_group_ids: Vec<BTreeSet<GroupID>> = {
-            self.states
-                .iter()
-                .map(|state| &state.possible_future_group_ids | &state.finalizers)
-                .collect()
-        };
+        // Optimization: Avoid allocating the massive intermediate vector.
+        // We can just access the necessary data by index.
+        // However, we need mutable access to `state` to write `group_id_to_u8set`,
+        // and immutable access to `other_state` to read `possible_future_group_ids`.
+        // We can split the state into parts or use a read-only view for the second part.
+        
+        // Let's extract the read-only data we need (finalizers + future groups) into a separate Vec.
+        // This involves some cloning, but BTreeSet clone is effectively a bunch of Arc increments 
+        // if we used Arc, but here they are owned.
+        // Actually, iterating and building the map doesn't require simultaneous mutable access 
+        // to ALL states, just one at a time. But we need to read random other states.
+        
+        // Fastest way: extract (finalizers | future) into a simpler structure if possible, 
+        // or just clone the sets. Since we need the union, let's just precompute the unions efficiently.
+        // But wait, the previous code did exactly that and it was slow due to cloning.
+        
+        // Let's just create a reference-based lookup if possible. 
+        // We can't easily have a ref to the vec while iterating it mutably.
+        // We CAN separate the `group_id_to_u8set` field from the rest of the state temporarily,
+        // or build the maps into a separate Vec and then assign them.
+        
+        let num_states = self.states.len();
+        let mut all_maps: Vec<BTreeMap<GroupID, U8Set>> = Vec::with_capacity(num_states);
 
-        // Now that the block has ended, there are no borrows of self.states
-        for state in self.states.iter_mut() {
+        for state in &self.states {
             let mut group_id_to_u8set: BTreeMap<GroupID, U8Set> = BTreeMap::new();
 
             for (input_u8, &next_state_index) in &state.transitions {
-                let next_possible_current_or_future_group_ids =
-                    &possible_current_or_future_group_ids[next_state_index];
+                let next_state = &self.states[next_state_index];
+                
+                // Union of next state's finalizers and future groups
+                // We iterate both iterators to avoid allocating a new set
+                let chain = next_state.possible_future_group_ids.iter().chain(next_state.finalizers.iter());
 
-                for &group_id in next_possible_current_or_future_group_ids {
+                for &group_id in chain {
                     group_id_to_u8set
                         .entry(group_id)
                         .or_insert_with(U8Set::none)
                         .insert(input_u8);
                 }
             }
-
-            state.group_id_to_u8set = group_id_to_u8set;
+            all_maps.push(group_id_to_u8set);
+        }
+        
+        for (i, map) in all_maps.into_iter().enumerate() {
+            self.states[i].group_id_to_u8set = map;
         }
     }
 
