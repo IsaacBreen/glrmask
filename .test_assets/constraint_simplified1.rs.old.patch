@@ -1,2 +1,6 @@
-@@
--aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+@@ -1,4326 +1,1078 @@
+-// src/constraint.rs
+ #![allow(clippy::too_many_arguments)]
++#![allow(dead_code)] // Allow unused items in internal modules
+
+-use crate::datastructures::ordered_hash_map::Retain;
