@@ -26,6 +26,7 @@ pub fn optimize_terminals(
     grammar_exprs: Vec<(String, GrammarExpr)>,
     regex_exprs: Vec<(String, Expr)>,
 ) -> (Vec<(String, GrammarExpr)>, Vec<(String, Expr)>) {
+    crate::debug!(3, "Optimizing terminals");
     if grammar_exprs.is_empty() || regex_exprs.is_empty() {
         return (grammar_exprs, regex_exprs);
     }

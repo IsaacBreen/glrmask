@@ -51,7 +51,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Load and compile the grammar.
     println!("Loading grammar from: {:?}", args.grammar);
     let grammar_path_str = args.grammar.to_str().ok_or_else(|| format!("Path is not valid UTF-8: {:?}", args.grammar))?;
-    let grammar_definition = GrammarDefinition::from_ebnf_file(grammar_path_str)?;
+    let mut grammar_definition = GrammarDefinition::from_ebnf_file(grammar_path_str)?;
+    grammar_definition.optimize();
     println!("Grammar loaded successfully.");
 
     // 2. Load the vocabulary.

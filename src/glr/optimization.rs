@@ -155,6 +155,12 @@ fn get_expr_for_terminal(t: &Terminal, grammar: &GrammarDefinition) -> Expr {
     }
 }
 
+impl GrammarDefinition {
+    pub fn optimize(&mut self) {
+        optimize_grammar(self);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
