@@ -147,4 +147,90 @@ mod tests {
 
         assert_eq!(grammar.terminal_to_group_id().len(), 1);
     }
+
+    #[test]
+    fn test_fuzz_regex_to_grammar_optimization() {
+        struct Rng(u64);
+        impl Rng {
+            fn next(&mut self) -> u64 {
+                let mut x = self.0;
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                self.0 = x;
+                x
+            }
+            fn range(&mut self, min: usize, max: usize) -> usize {
+                if min >= max { return min; }
+                (self.next() as usize % (max - min)) + min
+            }
+            fn bool(&mut self) -> bool { self.next() % 2 == 0 }
+        }
+
+        use crate::finite_automata::{Expr, QuantifierType};
+        use crate::datastructures::u8set::U8Set;
+        use crate::interface::{GrammarExpr, GrammarDefinition};
+
+        fn gen_expr(rng: &mut Rng, depth: usize, term_defs: &mut Vec<(String, Expr)>, term_counter: &mut usize) -> GrammarExpr {
+            if depth == 0 || (rng.bool() && rng.bool()) {
+                let is_class = rng.bool();
+                let expr = if is_class {
+                    let b = (rng.next() % 256) as u8;
+                    Expr::U8Class(U8Set::from_u8(b))
+                } else {
+                    let len = rng.range(1, 4);
+                    let bytes: Vec<u8> = (0..len).map(|_| (rng.next() % 256) as u8).collect();
+                    Expr::U8Seq(bytes)
+                };
+
+                let name = format!("T{}", term_counter);
+                *term_counter += 1;
+                term_defs.push((name.clone(), expr));
+                return GrammarExpr::Ref(name);
+            }
+
+            match rng.range(0, 3) {
+                0 => {
+                    let len = rng.range(2, 4);
+                    let exprs = (0..len).map(|_| gen_expr(rng, depth - 1, term_defs, term_counter)).collect();
+                    GrammarExpr::Sequence(exprs)
+                }
+                1 => {
+                    let len = rng.range(2, 4);
+                    let exprs = (0..len).map(|_| gen_expr(rng, depth - 1, term_defs, term_counter)).collect();
+                    GrammarExpr::Choice(exprs)
+                }
+                2 => {
+                    let child = gen_expr(rng, depth - 1, term_defs, term_counter);
+                    match rng.range(0, 3) {
+                        0 => GrammarExpr::Optional(Box::new(child)),
+                        1 => GrammarExpr::Repeat(Box::new(child)),
+                        _ => {
+                             let child_clone = child.clone();
+                             GrammarExpr::Sequence(vec![child, GrammarExpr::Repeat(Box::new(child_clone))])
+                        }
+                    }
+                }
+                _ => unreachable!(),
+            }
+        }
+
+        let mut rng = Rng(12345);
+        for i in 0..20 {
+            let mut regex_exprs = Vec::new();
+            let mut term_counter = 0;
+            let root = gen_expr(&mut rng, 4, &mut regex_exprs, &mut term_counter);
+
+            let grammar_exprs = vec![("start".to_string(), root)];
+            let mut grammar = GrammarDefinition::from_exprs(grammar_exprs, regex_exprs).unwrap();
+
+            let initial_count = grammar.terminal_to_group_id().len();
+            // println!("Iteration {}: Initial terminals: {}", i, initial_count);
+
+            optimize_grammar(&mut grammar);
+
+            // println!("{grammar}");
+            assert_eq!(grammar.terminal_to_group_id().len(), 1, "Failed to collapse grammar on iteration {} (started with {} terminals)", i, initial_count);
+        }
+    }
 }
