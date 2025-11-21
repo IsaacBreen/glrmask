@@ -233,4 +233,82 @@ mod tests {
             assert_eq!(grammar.terminal_to_group_id().len(), 1, "Failed to collapse grammar on iteration {} (started with {} terminals)", i, initial_count);
         }
     }
+
+    #[test]
+    fn test_diff_grammar_structure() {
+        // Simulates a structure similar to what generate_diff_grammar.py produces:
+        // Line1 ::= ( " " | "-" ) "foo" "\n"
+        // Line2 ::= ( " " | "-" ) "bar" "\n"
+        // Block ::= Line1 | Line2
+        // This should ideally be optimized into a single regular expression terminal.
+        
+        let grammar_exprs = vec![
+            ("start".to_string(), GrammarExpr::Ref("Block".to_string())),
+            ("Block".to_string(), GrammarExpr::Choice(vec![
+                GrammarExpr::Ref("Line1".to_string()),
+                GrammarExpr::Ref("Line2".to_string()),
+            ])),
+            ("Line1".to_string(), GrammarExpr::Sequence(vec![
+                 GrammarExpr::Choice(vec![
+                     GrammarExpr::Literal(b" ".to_vec()),
+                     GrammarExpr::Literal(b"-".to_vec()),
+                 ]),
+                 GrammarExpr::Literal(b"foo".to_vec()),
+                 GrammarExpr::Literal(b"\n".to_vec()),
+            ])),
+            ("Line2".to_string(), GrammarExpr::Sequence(vec![
+                 GrammarExpr::Choice(vec![
+                     GrammarExpr::Literal(b" ".to_vec()),
+                     GrammarExpr::Literal(b"-".to_vec()),
+                 ]),
+                 GrammarExpr::Literal(b"bar".to_vec()),
+                 GrammarExpr::Literal(b"\n".to_vec()),
+            ])),
+        ];
+        let regex_exprs = vec![];
+
+        let mut grammar = GrammarDefinition::from_exprs(grammar_exprs, regex_exprs).unwrap();
+        let initial_terminals = grammar.terminal_to_group_id().len();
+        println!("Initial terminals: {}", initial_terminals);
+        
+        optimize_grammar(&mut grammar);
+        println!("{grammar}");
+
+        // We expect significant reduction. Ideally to 1 terminal representing the whole block regex.
+        // Even moderate optimization should inline Line1 and Line2 into Block and merge terminals.
+        // The initial count is 5 unique literals: " ", "-", "\n", "foo", "bar".
+        // If fully optimized, it's 1.
+        assert!(grammar.terminal_to_group_id().len() < initial_terminals);
+        assert_eq!(grammar.terminal_to_group_id().len(), 1);
+    }
+
+    #[test]
+    fn test_complex_nesting() {
+        // A -> ( "a" | "b" ) "c" ( "d" | "e" )
+        // This tests mixing Sequence and Choice at different levels.
+        let grammar_exprs = vec![
+            ("start".to_string(), GrammarExpr::Ref("A".to_string())),
+            ("A".to_string(), GrammarExpr::Sequence(vec![
+                GrammarExpr::Choice(vec![
+                    GrammarExpr::Literal(b"a".to_vec()),
+                    GrammarExpr::Literal(b"b".to_vec()),
+                ]),
+                GrammarExpr::Literal(b"c".to_vec()),
+                GrammarExpr::Choice(vec![
+                    GrammarExpr::Literal(b"d".to_vec()),
+                    GrammarExpr::Literal(b"e".to_vec()),
+                ]),
+            ])),
+        ];
+        
+        let mut grammar = GrammarDefinition::from_exprs(grammar_exprs, vec![]).unwrap();
+        let initial = grammar.terminal_to_group_id().len();
+        println!("Initial terminals: {}", initial); // a, b, c, d, e = 5
+        
+        optimize_grammar(&mut grammar);
+        println!("{grammar}");
+        
+        // Should collapse to 1 terminal: [ab]c[de]
+        assert_eq!(grammar.terminal_to_group_id().len(), 1);
+    }
 }
