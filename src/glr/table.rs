@@ -854,10 +854,15 @@ pub fn generate_glr_parser_with_maps(
             p.rhs
                 .iter()
                 .map(|s| match s {
-                    Symbol::Terminal(t) => terminal_map.get_by_left(t).unwrap().0,
-                    Symbol::NonTerminal(nt) => {
-                        non_terminal_map.get_by_left(nt).unwrap().0 + num_terminals
-                    }
+                    Symbol::Terminal(t) => terminal_map
+                        .get_by_left(t)
+                        .unwrap_or_else(|| panic!("Terminal not found in map: {:?}", t))
+                        .0,
+                    Symbol::NonTerminal(nt) => non_terminal_map
+                        .get_by_left(nt)
+                        .unwrap_or_else(|| panic!("NonTerminal not found in map: {:?}", nt))
+                        .0
+                        + num_terminals,
                 })
                 .collect()
         })
@@ -865,13 +870,23 @@ pub fn generate_glr_parser_with_maps(
 
     let lhs_ids: Vec<usize> = productions
         .iter()
-        .map(|p| non_terminal_map.get_by_left(&p.lhs).unwrap().0)
+        .map(|p| {
+            non_terminal_map
+                .get_by_left(&p.lhs)
+                .unwrap_or_else(|| panic!("LHS NonTerminal not found in map: {:?}", p.lhs))
+                .0
+        })
         .collect();
 
     let nullable_nonterminals = compute_nullable_nonterminals(&productions);
     let nullable_nts_ids: HashSet<usize> = nullable_nonterminals
         .iter()
-        .map(|nt| non_terminal_map.get_by_left(nt).unwrap().0)
+        .map(|nt| {
+            non_terminal_map
+                .get_by_left(nt)
+                .unwrap_or_else(|| panic!("Nullable NonTerminal not found in map: {:?}", nt))
+                .0
+        })
         .collect();
 
     let start_nt_id = lhs_ids[0];
