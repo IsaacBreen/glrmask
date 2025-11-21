@@ -188,7 +188,7 @@ impl<'a> GrammarOptimizer<'a> {
         let solved = self.solve_regular_system(scc_nts.len(), transitions, finals);
         let mut result = HashMap::new();
         for (i, expr) in solved.into_iter().enumerate() {
-            result.insert(scc_nts[i].clone(), expr);
+            result.insert(scc_nts[i].clone(), Expr::Shared(Arc::new(expr)));
         }
         Some(result)
     }
@@ -228,7 +228,8 @@ impl<'a> GrammarOptimizer<'a> {
                 }
                 
                 let suffix_expr = ExprBuilder::seq(suffix_exprs);
-                let reversed_suffix = Self::reverse_expr(&suffix_expr);
+                let mut cache = HashMap::new();
+                let reversed_suffix = Self::reverse_expr(&suffix_expr, &mut cache);
 
                 if let Some(target) = target_scc_idx {
                     // A -> B suffix.  Edge B --suffix--> A.
@@ -244,13 +245,14 @@ impl<'a> GrammarOptimizer<'a> {
         
         let solved = self.solve_regular_system(scc_nts.len(), transitions, finals);
         let mut result = HashMap::new();
+        let mut cache = HashMap::new();
         for (i, expr) in solved.into_iter().enumerate() {
-            result.insert(scc_nts[i].clone(), Self::reverse_expr(&expr));
+            result.insert(scc_nts[i].clone(), Expr::Shared(Arc::new(Self::reverse_expr(&expr, &mut cache))));
         }
         Some(result)
     }
 
-    fn reverse_expr(expr: &Expr) -> Expr {
+    fn reverse_expr(expr: &Expr, cache: &mut HashMap<usize, Expr>) -> Expr {
         match expr {
             Expr::U8Seq(bytes) => {
                 let mut b = bytes.clone();
@@ -260,15 +262,23 @@ impl<'a> GrammarOptimizer<'a> {
             Expr::Seq(exprs) => {
                 let mut e = exprs.clone();
                 e.reverse();
-                let reversed_sub: Vec<Expr> = e.into_iter().map(|x| Self::reverse_expr(&x)).collect();
+                let reversed_sub: Vec<Expr> = e.into_iter().map(|x| Self::reverse_expr(&x, cache)).collect();
                 Expr::Seq(reversed_sub)
             },
             Expr::Choice(exprs) => {
-                let reversed_sub: Vec<Expr> = exprs.iter().map(|x| Self::reverse_expr(x)).collect();
+                let reversed_sub: Vec<Expr> = exprs.iter().map(|x| Self::reverse_expr(x, cache)).collect();
                 Expr::Choice(reversed_sub)
             },
-            Expr::Quantifier(inner, q) => Expr::Quantifier(Box::new(Self::reverse_expr(inner)), q.clone()),
-            Expr::Shared(inner) => Expr::Shared(Arc::new(Self::reverse_expr(inner))),
+            Expr::Quantifier(inner, q) => Expr::Quantifier(Box::new(Self::reverse_expr(inner, cache)), q.clone()),
+            Expr::Shared(inner) => {
+                let key = Arc::as_ptr(inner) as usize;
+                if let Some(cached) = cache.get(&key) {
+                    return cached.clone();
+                }
+                let reversed = Expr::Shared(Arc::new(Self::reverse_expr(inner, cache)));
+                cache.insert(key, reversed.clone());
+                reversed
+            },
             _ => expr.clone(),
         }
     }
