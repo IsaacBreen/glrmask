@@ -136,7 +136,9 @@ impl<'a> GrammarOptimizer<'a> {
     }
 
     fn try_convert_scc(&self, scc_nts: &[NonTerminal]) -> Option<HashMap<NonTerminal, Expr>> {
-        // Skip single-node SCCs with no self-recursion, they're just pass-through rules
+        // Skip single-node SCCs with no self-recursion if they only reference other unresolved NTs
+        // (they're just pass-through rules). But if they reference terminals or resolved NTs,
+        // we should still optimize them to regex.
         if scc_nts.len() == 1 {
             let nt = &scc_nts[0];
             let productions: Vec<&Production> = self.grammar.productions.iter().filter(|p| &p.lhs == nt).collect();
@@ -149,8 +151,27 @@ impl<'a> GrammarOptimizer<'a> {
             });
             
             if !has_self_recursion {
-                println!("Skipping non-recursive single-node SCC: {}", nt);
-                return None;
+                // Check if all references are to unresolved non-terminals
+                let only_unresolved_nt_refs = productions.iter().all(|prod| {
+                    prod.rhs.iter().all(|sym| {
+                        match sym {
+                            Symbol::Terminal(_) => false, // Has terminals, should optimize
+                            Symbol::NonTerminal(ref other) => {
+                                // If it's resolved or is self, we can optimize
+                                !self.resolved_nts.contains_key(other) && other != nt
+                            }
+                        }
+                    })
+                });
+                
+                if only_unresolved_nt_refs {
+                    println!("Skipping {} - only unresolved NT refs", nt);
+                    return None;
+                } else {
+                    println!("Processing {} - has terminals or resolved NTs", nt);
+                }
+            } else {
+                println!("Processing {} - has self-recursion", nt);
             }
         }
         
@@ -182,7 +203,6 @@ impl<'a> GrammarOptimizer<'a> {
                         Symbol::NonTerminal(ref other_nt) => {
                             if let Some(&local_idx) = nt_to_local_idx.get(other_nt) {
                                 if idx != prod.rhs.len() - 1 { 
-                                    println!("Right-linear check failed: NT {} is not last in production for {}", other_nt, nt);
                                     return None; 
                                 }
                                 target_scc_idx = Some(local_idx);
@@ -190,7 +210,6 @@ impl<'a> GrammarOptimizer<'a> {
                                 if let Some(expr) = self.resolved_nts.get(other_nt) {
                                     prefix_exprs.push(expr.clone());
                                 } else {
-                                    println!("Right-linear check failed: Unresolved dependency {} in production for {}", other_nt, nt);
                                     return None;
                                 }
                             }
@@ -372,15 +391,13 @@ impl<'a> GrammarOptimizer<'a> {
         // Allocate group IDs and create Terminals
         let mut next_group_id = self.grammar.group_id_to_expr.keys().max().map(|&x| x + 1).unwrap_or(0);
         
-        println!("Rewriting grammar. Resolved NTs: {:?}", self.resolved_nts.keys());
-        
         for (nt, expr) in &self.resolved_nts {
             let mut final_name = nt.0.clone();
             while self.grammar.regex_name_to_group_id.contains_left(&final_name) {
                 final_name.push('_');
             }
             
-            println!("Creating new terminal for {}: {}", nt, final_name);
+            println!("Adding terminal {} (gid {}) for NT {}", final_name, next_group_id, nt);
             self.grammar.regex_name_to_group_id.insert(final_name.clone(), next_group_id);
             self.grammar.group_id_to_expr.insert(next_group_id, expr.clone());
             
@@ -451,7 +468,6 @@ impl<'a> GrammarOptimizer<'a> {
             for sym in &prod.rhs {
                 if let Symbol::Terminal(t) = sym {
                     let gid = self.get_group_id(t);
-                    println!("Found used terminal {:?} with gid {}", t, gid);
                     used_groups.insert(gid);
                 }
             }
@@ -460,8 +476,6 @@ impl<'a> GrammarOptimizer<'a> {
         if let Some(gid) = self.grammar.ignore_terminal_id {
              used_groups.insert(gid.0);
         }
-
-        println!("Used groups before cleanup: {:?}", used_groups);
 
         // Create mapping from old_gid -> new_gid
         let mut old_to_new = HashMap::new();
