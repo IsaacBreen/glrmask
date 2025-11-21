@@ -6,7 +6,6 @@ use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::interface::{GrammarDefinition, GrammarExpr};
 
 pub fn optimize_grammar(grammar: &mut GrammarDefinition) {
-    crate::debug!(3, "Optimizing grammar...");
     let mut optimizer = GrammarOptimizer::new(grammar);
     optimizer.optimize();
 }
@@ -754,5 +753,94 @@ mod tests {
         
         // Should collapse to 1 terminal: [ab]c[de]
         assert_eq!(grammar.terminal_to_group_id().len(), 1);
+    }
+
+    #[test]
+    fn test_large_diff_grammar_optimization() {
+        // Replicates the structure of generate_diff_grammar.py for a large file (1000 lines)
+        // to ensure optimization doesn't hang or explode in memory.
+        
+        let num_lines = 1000;
+        let mut grammar_exprs = Vec::new();
+        let mut regex_exprs = Vec::new();
+
+        // Terminals
+        regex_exprs.push(("HUNK_HEADER".to_string(), Expr::U8Seq(b"@@".to_vec())));
+        regex_exprs.push(("PLUS_LINE".to_string(), Expr::U8Seq(b"+".to_vec())));
+        regex_exprs.push(("EOF".to_string(), Expr::U8Seq(b"EOF".to_vec())));
+        
+        for i in 0..num_lines {
+            regex_exprs.push((format!("L{}", i), Expr::U8Seq(format!("line{}", i).as_bytes().to_vec())));
+        }
+
+        // diff ::= ( HUNK_HEADER s0 )? EOF;
+        grammar_exprs.push(("start".to_string(), GrammarExpr::Sequence(vec![
+            GrammarExpr::Optional(Box::new(GrammarExpr::Sequence(vec![
+                GrammarExpr::Ref("HUNK_HEADER".to_string()),
+                GrammarExpr::Ref("s0".to_string())
+            ]))),
+            GrammarExpr::Ref("EOF".to_string())
+        ])));
+
+        // s{i} rules
+        for i in 0..num_lines {
+            grammar_exprs.push((
+                format!("s{}", i),
+                GrammarExpr::Choice(vec![
+                    GrammarExpr::Ref(format!("l{}", i)),
+                    if i < num_lines - 1 {
+                        GrammarExpr::Ref(format!("s{}", i + 1))
+                    } else {
+                        GrammarExpr::Ref(format!("s{}", num_lines)) // s{N}
+                    }
+                ])
+            ));
+        }
+        // s{N} ::= PLUS_LINE*;
+        grammar_exprs.push((
+            format!("s{}", num_lines),
+            GrammarExpr::Repeat(Box::new(GrammarExpr::Ref("PLUS_LINE".to_string())))
+        ));
+
+        // l{i} rules
+        for i in 0..num_lines {
+            let continuation = if i < num_lines - 1 {
+                // ( l{i+1} | PLUS_LINE* HUNK_HEADER s{i+1} )?
+                GrammarExpr::Optional(Box::new(GrammarExpr::Choice(vec![
+                    GrammarExpr::Ref(format!("l{}", i + 1)),
+                    GrammarExpr::Sequence(vec![
+                        GrammarExpr::Repeat(Box::new(GrammarExpr::Ref("PLUS_LINE".to_string()))),
+                        GrammarExpr::Ref("HUNK_HEADER".to_string()),
+                        GrammarExpr::Ref(format!("s{}", i + 1))
+                    ])
+                ])))
+            } else {
+                // ( PLUS_LINE* HUNK_HEADER s{N} )?
+                GrammarExpr::Optional(Box::new(GrammarExpr::Sequence(vec![
+                    GrammarExpr::Repeat(Box::new(GrammarExpr::Ref("PLUS_LINE".to_string()))),
+                    GrammarExpr::Ref("HUNK_HEADER".to_string()),
+                    GrammarExpr::Ref(format!("s{}", num_lines))
+                ])))
+            };
+
+            // l{i} ::= PLUS_LINE* L{i} continuation
+            grammar_exprs.push((
+                format!("l{}", i),
+                GrammarExpr::Sequence(vec![
+                    GrammarExpr::Repeat(Box::new(GrammarExpr::Ref("PLUS_LINE".to_string()))),
+                    GrammarExpr::Ref(format!("L{}", i)),
+                    continuation
+                ])
+            ));
+        }
+
+        let mut grammar = GrammarDefinition::from_exprs(grammar_exprs, regex_exprs).unwrap();
+        
+        let start = std::time::Instant::now();
+        optimize_grammar(&mut grammar);
+        let duration = start.elapsed();
+        
+        println!("Optimization took: {:?}", duration);
+        println!("Final terminal count: {}", grammar.terminal_to_group_id().len());
     }
 }
