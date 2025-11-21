@@ -605,8 +605,8 @@ impl ExprInterner {
         for e in exprs {
             match e {
                 Expr::Seq(sub) => flat.extend(sub),
-                Expr::Shared(inner) => {
-                    match &*inner {
+                Expr::Shared(ref inner) => {
+                    match &**inner {
                         Expr::Seq(sub) => flat.extend(sub.iter().cloned()),
                         Expr::Epsilon => {},
                         _ => flat.push(e),
@@ -630,8 +630,8 @@ impl ExprInterner {
         for e in exprs {
             match e {
                 Expr::Choice(sub) => flat.extend(sub),
-                Expr::Shared(inner) => {
-                    match &*inner {
+                Expr::Shared(ref inner) => {
+                    match &**inner {
                         Expr::Choice(sub) => flat.extend(sub.iter().cloned()),
                         _ => flat.push(e),
                     }
@@ -662,8 +662,8 @@ impl ExprInterner {
             Expr::Quantifier(inner, QuantifierType::ZeroOrMore) => {
                 self.intern(Expr::Quantifier(inner, QuantifierType::ZeroOrMore))
             }
-            Expr::Shared(inner) => {
-                if let Expr::Quantifier(_, QuantifierType::ZeroOrMore) = &*inner {
+            Expr::Shared(ref inner) => {
+                if let Expr::Quantifier(_, QuantifierType::ZeroOrMore) = &**inner {
                     expr.clone()
                 } else {
                     self.intern(Expr::Quantifier(Box::new(expr), QuantifierType::ZeroOrMore))
