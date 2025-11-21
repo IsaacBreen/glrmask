@@ -50,7 +50,7 @@ impl BitSet {
 
     pub fn iter(&mut self) -> impl Iterator<Item = usize> + '_ {
         self.dirty_words.sort_unstable();
-        self.dirty_words.iter().flat_map(move |&w| {
+        self.dirty_words.iter().flat_map(|&w| {
             let word = self.data[w];
             let base = w * 64;
             (0..64).filter(move |&b| (word & (1 << b)) != 0).map(move |b| base + b)
