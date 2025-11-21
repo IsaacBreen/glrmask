@@ -25,7 +25,8 @@ def generate_diff_grammar(source_path: str, grammar_path: str):
     # --- 1. Preamble and Top-Level Rules ---
     grammar_parts.append("#![ignore(IGNORE)]")
     grammar_parts.append("")
-    grammar_parts.append("diff ::= ( HUNK_HEADER s0 )? EOF;")
+    grammar_parts.append("diff ::= FILE_HEADER? ( HUNK_HEADER s0 )? EOF;")
+    grammar_parts.append("FILE_HEADER ::= GIT_LINE INDEX_LINE? MINUS_LINE PLUS_FILE_LINE;")
     grammar_parts.append("EOF  ::= '<|EOF|>';")
     grammar_parts.append("")
 
@@ -51,6 +52,12 @@ def generate_diff_grammar(source_path: str, grammar_path: str):
     # --- 4. Terminal Definitions ---
     grammar_parts.append("// --- TERMINALS ---")
 
+    grammar_parts.append(r"GIT_LINE         ::= 'diff --git' [^\n\r]* NEWLINE;")
+    grammar_parts.append(r"INDEX_LINE       ::= 'index' [^\n\r]* NEWLINE;")
+    grammar_parts.append(r"MINUS_LINE       ::= '---' [^\n\r]* NEWLINE;")
+    grammar_parts.append(r"PLUS_FILE_LINE   ::= '+++' [^\n\r]* NEWLINE;")
+    grammar_parts.append("")
+
     # Use raw strings (r"...") to prevent Python from interpreting \n and \r.
     grammar_parts.append(r"HUNK_HEADER ::= '@@' [^\n\r]* NEWLINE;")
     grammar_parts.append(r"PLUS_LINE   ::= '+' [^\n\r]* NEWLINE;")
@@ -70,12 +77,15 @@ def generate_diff_grammar(source_path: str, grammar_path: str):
     for i, line in enumerate(lines):
         content = line.rstrip('\r\n')
 
-        # This logic for escaping the file's content remains correct.
-        # It handles backslashes and quotes that might be in the source file.
-        escaped_content = content.replace('\\', '\\\\')
-        escaped_content = escaped_content.replace("'", "\\'")
+        if not content:
+            grammar_parts.append(f"L{i} ::= ( ' ' | '-' )? NEWLINE;")
+        else:
+            # This logic for escaping the file's content remains correct.
+            # It handles backslashes and quotes that might be in the source file.
+            escaped_content = content.replace('\\', '\\\\')
+            escaped_content = escaped_content.replace("'", "\\'")
 
-        grammar_parts.append(f"L{i} ::= ( ' ' | '-' ) '{escaped_content}' NEWLINE;")
+            grammar_parts.append(f"L{i} ::= ( ' ' | '-' ) '{escaped_content}' NEWLINE;")
 
     # --- 5. Write the grammar to the output file ---
     try:
