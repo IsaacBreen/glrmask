@@ -844,11 +844,6 @@ impl GrammarDefinition {
             return Err("Grammar expressions list cannot be empty.".to_string());
         }
 
-        // Apply grammar-level terminal merging before building the internal
-        // GrammarDefinition representation.
-        let (grammar_exprs, regex_exprs) =
-            crate::interface::optimization::optimize_terminals(grammar_exprs, regex_exprs);
-
         let mut literal_to_group_id: BiBTreeMap<Vec<u8>, usize> = BiBTreeMap::new();
         let mut regex_name_to_group_id: BiBTreeMap<String, usize> = BiBTreeMap::new();
         let mut group_id_to_expr: BTreeMap<usize, Expr> = BTreeMap::new();
