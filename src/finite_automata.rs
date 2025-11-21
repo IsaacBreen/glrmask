@@ -1240,6 +1240,9 @@ impl NFA {
         crate::debug!(5, "Computing epsilon closures ({} states)...", self.states.len());
         let epsilon_closures = self.compute_epsilon_closures();
         crate::debug!(5, "Computed epsilon closures in {:.2?}", closure_start.elapsed());
+        let total_epsilon_closure_sizes = epsilon_closures.iter().map(|closure| closure.len()).sum::<usize>();
+        crate::debug!(5, "Total epsilon closure size: {}", total_epsilon_closure_sizes);
+        crate::debug!(5, "Average epsilon closure size: {}", total_epsilon_closure_sizes as f64 / epsilon_closures.len() as f64);
 
         let start_closure = &epsilon_closures[self.start_state];
         let start_state_set = FrozenSet::from_iter(start_closure.iter().cloned());
