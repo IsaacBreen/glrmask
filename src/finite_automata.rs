@@ -1,4 +1,5 @@
 use crate::datastructures::char_transitions::CharTransitions;
+use crate::datastructures::bitset::BitSet;
 use crate::datastructures::frozenset::FrozenSet;
 use crate::datastructures::u8set::U8Set;
 use crate::json_serialization::{JSONConvertible, JSONNode};
@@ -1300,31 +1301,23 @@ impl NFA {
 
         // Shared buffers for on-the-fly closure computation
         let num_nfa_states = self.states.len();
-        let mut visited = vec![0u32; num_nfa_states];
-        let mut visited_gen = 0u32;
         let mut stack = Vec::with_capacity(1024);
+        let mut closure_bitset = BitSet::new(num_nfa_states);
 
         // Compute start state closure
-        visited_gen = visited_gen.wrapping_add(1);
-        if visited_gen == 0 { visited.fill(0); visited_gen = 1; }
-        
-        let mut start_closure_vec = Vec::new();
         stack.push(self.start_state);
-        visited[self.start_state] = visited_gen;
-        start_closure_vec.push(self.start_state);
+        closure_bitset.insert(self.start_state);
 
         while let Some(u) = stack.pop() {
             for &v in &self.states[u].epsilon_transitions {
-                if visited[v] != visited_gen {
-                    visited[v] = visited_gen;
+                if closure_bitset.insert(v) {
                     stack.push(v);
-                    start_closure_vec.push(v);
                 }
             }
         }
-        start_closure_vec.sort_unstable();
 
-        let start_state_set = FrozenSet::from_iter(start_closure_vec.into_iter());
+        let start_closure_vec: Vec<usize> = closure_bitset.iter().collect();
+        let start_state_set = FrozenSet::new_unchecked(start_closure_vec);
         worklist.push(start_state_set.clone());
         dfa_state_map.insert(start_state_set.clone(), 0);
 
@@ -1379,33 +1372,26 @@ impl NFA {
                     continue;
                 }
 
-                // Compute epsilon closure on-the-fly
-                visited_gen = visited_gen.wrapping_add(1);
-                if visited_gen == 0 { visited.fill(0); visited_gen = 1; }
+                closure_bitset.clear();
 
-                let mut closure_vec = Vec::new();
                 // Initialize BFS with direct transition targets
                 for &next_state in next_states {
-                    if visited[next_state] != visited_gen {
-                        visited[next_state] = visited_gen;
+                    if closure_bitset.insert(next_state) {
                         stack.push(next_state);
-                        closure_vec.push(next_state);
                     }
                 }
 
                 while let Some(u) = stack.pop() {
                     for &v in &self.states[u].epsilon_transitions {
-                        if visited[v] != visited_gen {
-                            visited[v] = visited_gen;
+                        if closure_bitset.insert(v) {
                             stack.push(v);
-                            closure_vec.push(v);
                         }
                     }
                 }
 
-                // Note: FrozenSet::from_iter sorts and dedups, so we don't need to do it here,
-                // though visited logic ensures uniqueness already.
-                let frozen_closure: FrozenSet<usize> = FrozenSet::from_iter(closure_vec.into_iter());
+                // BitSet iter returns sorted elements
+                let closure_vec: Vec<usize> = closure_bitset.iter().collect();
+                let frozen_closure: FrozenSet<usize> = FrozenSet::new_unchecked(closure_vec);
 
                 let next_dfa_state =
                     if let Some(&existing_state) = dfa_state_map.get(&frozen_closure) {
