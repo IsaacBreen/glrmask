@@ -313,8 +313,8 @@ impl PyGrammarDefinition {
         Ok(PyGrammarDefinition { inner: grammar_def })
     }
 
-    fn simplify(&mut self) {
-        self.inner.simplify();
+    fn optimize(&mut self) {
+        self.inner.optimize();
     }
 
     fn compile(&self) -> PyResult<PyCompiledGrammar> {
