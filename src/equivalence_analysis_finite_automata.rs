@@ -33,17 +33,10 @@ fn get_init_weight(idx: usize) -> u128 {
 }
 
 #[inline(always)]
-fn hash_outcome(
-    is_match: bool,
-    match_group: u32,
-    match_pos: u32,
-    remainder_sig: u64,
-) -> u128 {
-    let flags = if is_match { 1 } else { 0 };
-    let packed = ((match_pos as u128) << 96)
-        | ((match_group as u128) << 64)
-        | ((flags as u128) << 32);
-    mix_u128(packed ^ (remainder_sig as u128))
+fn mix_hash(h: u128, val: u64) -> u128 {
+    // Order-dependent mixing (rotation) but position-independent
+    // (not dependent on depth).
+    h.rotate_left(3) ^ (val as u128)
 }
 
 // -----------------------------------------------------------------------------
@@ -124,10 +117,6 @@ pub fn find_equivalence_classes(
     crate::debug!(3, "Analyzing string equivalence for {} strings.", strings.len());
     let pb = create_pb(4);
 
-    pb.set_message("Precomputing signatures...");
-    let remainder_hashes = precompute_remainder_hashes(regex, strings);
-    pb.inc(1);
-
     pb.set_message("Building Trie...");
     let mut trie = Trie::new();
     for (i, s) in strings.iter().enumerate() {
@@ -140,16 +129,16 @@ pub fn find_equivalence_classes(
     let mut accumulators = vec![0u128; strings.len()];
     let mut diffs = vec![0u128; strings.len() + 1];
 
-    let mut root_states_map: HashMap<u32, u128> = HashMap::new();
+    // (state, path_hash) -> weight
+    let mut root_states_map: HashMap<(u32, u128), u128> = HashMap::new();
     for (idx, &state) in initial_states.iter().enumerate() {
-        *root_states_map.entry(state as u32).or_default() += get_init_weight(idx);
+        *root_states_map.entry((state as u32, 0)).or_default() += get_init_weight(idx);
     }
-    let mut root_active = root_states_map.into_iter().collect::<Vec<_>>();
+    let mut root_active = root_states_map.into_iter().map(|((s, ph), w)| (s, ph, w)).collect::<Vec<_>>();
     root_active.sort_unstable_by_key(|k| k.0);
 
     process_string_node(
-        regex, &trie, 0, root_active, &remainder_hashes,
-        &linearized_mapping, &mut accumulators, &mut diffs, 0
+        regex, &trie, 0, root_active, &linearized_mapping, &mut accumulators, &mut diffs
     );
     pb.inc(1);
 
@@ -176,56 +165,53 @@ fn process_string_node(
     regex: &Regex,
     trie: &Trie,
     node_idx: usize,
-    active_states: Vec<(u32, u128)>,
-    remainder_hashes: &[Vec<u64>],
+    active_states: Vec<(u32, u128, u128)>, // state, path_hash, weight
     linearized_mapping: &[usize],
     accumulators: &mut Vec<u128>,
     diffs: &mut Vec<u128>,
-    depth: u32,
 ) {
     let node = &trie.nodes[node_idx];
 
-    // 1. Terminals
-    if let Some(_orig_idx) = node.terminal_string_idx {
-        let lin_idx = node.range_start as usize;
-        for &(dfa_state, weight) in &active_states {
-            let sig = hash_future_groups(regex, dfa_state as usize);
-            let h = hash_outcome(false, 0, 0, sig);
-            let contrib = weight.wrapping_mul(h);
-            diffs[lin_idx] = diffs[lin_idx].wrapping_add(contrib);
-            diffs[lin_idx + 1] = diffs[lin_idx + 1].wrapping_sub(contrib);
+    // 1. Terminals: Add final hash to specific strings terminating here
+    if let Some(orig_idx) = node.terminal_string_idx {
+        for &(dfa_state, path_hash, weight) in &active_states {
+            let future_sig = hash_future_groups(regex, dfa_state as usize);
+            // Mix future groups into the path hash
+            let final_h = mix_hash(path_hash, future_sig);
+            let contrib = weight.wrapping_mul(final_h);
+            accumulators[orig_idx as usize] = accumulators[orig_idx as usize].wrapping_add(contrib);
         }
     }
 
     if node.transitions.is_empty() { return; }
 
-    // 2. Transitions
-    let mut next_batch: Vec<(u32, u32, u128)> = Vec::with_capacity(active_states.len());
+    // 2. Transitions: Propagate or Dead-End
+    let mut next_batch: Vec<(u32, u32, u128, u128)> = Vec::with_capacity(active_states.len());
 
-    for &(dfa_state, weight) in &active_states {
+    for &(dfa_state, path_hash, weight) in &active_states {
         let dfa_node = &regex.dfa.states[dfa_state as usize];
+        
         for &(byte, child_idx) in &node.transitions {
             if let Some(&next_state) = dfa_node.transitions.get(byte) {
+                // Alive: update path hash with matches (if any)
+                let mut new_ph = path_hash;
                 let next_data = &regex.dfa.states[next_state];
+                
                 if !next_data.finalizers.is_empty() {
-                    let child = &trie.nodes[child_idx as usize];
                     for &gid in &next_data.finalizers {
-                        for lin_idx in (child.range_start as usize)..(child.range_end as usize) {
-                            let orig = linearized_mapping[lin_idx];
-                            let rem = remainder_hashes[orig][(depth + 1) as usize];
-                            let h = hash_outcome(true, gid as u32, depth + 1, rem);
-                            accumulators[orig] = accumulators[orig].wrapping_add(weight.wrapping_mul(h));
-                        }
+                        new_ph = mix_hash(new_ph, gid as u64);
                     }
                 }
-                next_batch.push((child_idx, next_state as u32, weight));
+                next_batch.push((child_idx, next_state as u32, new_ph, weight));
             } else {
-                // Dead End
-                let h = hash_outcome(false, 0, 0, 0);
-                let contrib = weight.wrapping_mul(h);
+                // Dead End: Apply difference array to subtree
+                // Use a constant to signify "dead" so it differs from valid paths
+                let dead_ph = mix_hash(path_hash, 0xDEAD_BEEF);
+                let contrib = weight.wrapping_mul(dead_ph);
                 let child = &trie.nodes[child_idx as usize];
                 let r_start = child.range_start as usize;
                 let r_end = child.range_end as usize;
+                
                 diffs[r_start] = diffs[r_start].wrapping_add(contrib);
                 diffs[r_end] = diffs[r_end].wrapping_sub(contrib);
             }
@@ -243,20 +229,22 @@ fn process_string_node(
         while i < next_batch.len() && next_batch[i].0 == child { i += 1; }
 
         let mut temp: SmallVec<[(u32, u128); 16]> = SmallVec::new();
-        for &(_, s, w) in &next_batch[start..i] { temp.push((s, w)); }
-        temp.sort_unstable_by_key(|k| k.0);
+        // next_batch item: (child_idx, next_state, new_ph, weight)
+        // We group by (next_state, new_ph)
+        let mut slice = next_batch[start..i].iter().map(|&(_, s, p, w)| (s, p, w)).collect::<Vec<_>>();
+        slice.sort_unstable_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
 
-        let mut merged = Vec::with_capacity(temp.len());
-        if !temp.is_empty() {
-            let (mut cs, mut cw) = (temp[0].0, temp[0].1);
-            for &(s, w) in &temp[1..] {
-                if s == cs { cw = cw.wrapping_add(w); }
-                else { merged.push((cs, cw)); cs = s; cw = w; }
+        let mut merged = Vec::with_capacity(slice.len());
+        if !slice.is_empty() {
+            let (mut cs, mut cp, mut cw) = (slice[0].0, slice[0].1, slice[0].2);
+            for &(s, p, w) in &slice[1..] {
+                if s == cs && p == cp { cw = cw.wrapping_add(w); }
+                else { merged.push((cs, cp, cw)); cs = s; cp = p; cw = w; }
             }
-            merged.push((cs, cw));
+            merged.push((cs, cp, cw));
         }
 
-        process_string_node(regex, trie, child as usize, merged, remainder_hashes, linearized_mapping, accumulators, diffs, depth + 1);
+        process_string_node(regex, trie, child as usize, merged, linearized_mapping, accumulators, diffs);
     }
 }
 
@@ -271,21 +259,6 @@ fn hash_future_groups(regex: &Regex, state_idx: usize) -> u64 {
         h = h.rotate_left(3).bitxor(k);
     }
     h
-}
-
-fn precompute_remainder_hashes(regex: &Regex, strings: &[Vec<u8>]) -> Vec<Vec<u64>> {
-    strings.iter().map(|s| {
-        (0..=s.len()).map(|i| {
-            let exec = regex.execute_from_state_fast(&s[i..], regex.dfa.start_state);
-            let mut h = 0u64;
-            for m in exec.matches {
-                let k = (m.group_id as u64).wrapping_mul(0x9E3779B97F4A7C15) ^ ((m.position as u64).rotate_left(32));
-                h = h.wrapping_mul(0xC6A4A7935BD1E995).wrapping_add(k);
-            }
-            let end_val = if let Some(fs) = exec.end_state { hash_future_groups(regex, fs) } else { 0 };
-            h ^ end_val.rotate_left(17)
-        }).collect()
-    }).collect()
 }
 
 fn group_by_hash(accumulators: &[u128]) -> BTreeMap<Vec<usize>, Vec<usize>> {
