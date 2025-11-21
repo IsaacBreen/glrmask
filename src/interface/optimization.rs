@@ -6,6 +6,7 @@ use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::interface::{GrammarDefinition, GrammarExpr};
 
 pub fn optimize_grammar(grammar: &mut GrammarDefinition) {
+    crate::debug!(3, "Optimizing grammar...");
     let mut optimizer = GrammarOptimizer::new(grammar);
     optimizer.optimize();
 }
