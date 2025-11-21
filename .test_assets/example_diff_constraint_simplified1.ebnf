@@ -1,0 +1,28 @@
+diff ::= ( '@@' 'a' 'a' s0 )? EOF;
+EOF  ::= '<|EOF|>';
+
+// 's' rules: Allow starting a context block at a given line or skipping.
+s0 ::= l0 | s1;
+s1 ::= l1 | s2;
+s2 ::= l2 | s3;
+s3 ::= l3 | s4;
+s4 ::= PLUS_LINE*;
+
+// 'l' rules: Match a specific context line and continue or start a new hunk.
+l0 ::= PLUS_LINE* L0 ( l1 | PLUS_LINE* HUNK_HEADER s1 )?;
+l1 ::= PLUS_LINE* L1 ( l2 | PLUS_LINE* HUNK_HEADER s2 )?;
+l2 ::= PLUS_LINE* L2 ( l3 | PLUS_LINE* HUNK_HEADER s3 )?;
+l3 ::= PLUS_LINE* L3 ( l4 | PLUS_LINE* HUNK_HEADER s4 )?;
+
+// --- TERMINALS ---
+HUNK_HEADER ::= '@@' [^\n\r]* NEWLINE;
+PLUS_LINE   ::= '+' [^\n\r]* NEWLINE;
+NEWLINE     ::= ( '\r'? '\n' );
+
+IGNORE ::= ( [ \t]+ | '//'[^\n\r]* | '/*'( [^*] | '*'[^/] )*'*/' )+ ;
+
+// Context-line terminals (one for each line in the source file)
+L0 ::= ( ' ' | '-' ) '// src/constraint.rs' NEWLINE;
+L1 ::= ( ' ' | '-' ) '#![allow(clippy::too_many_arguments)]' NEWLINE;
+L2 ::= ( ' ' | '-' ) '' NEWLINE;
+L3 ::= ( ' ' | '-' ) 'use crate::datastructures::ordered_hash_map::Retain;' NEWLINE;
