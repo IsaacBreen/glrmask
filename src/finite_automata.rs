@@ -1153,7 +1153,7 @@ impl NFA {
         let mut worklist: Vec<FrozenSet<usize>> = Vec::new();
 
         let closure_start = std::time::Instant::now();
-        crate::debug!(5, "Computing epsilon closures");
+        crate::debug!(5, "Computing epsilon closures ({} states)...", self.states.len());
         let epsilon_closures = self.compute_epsilon_closures();
         crate::debug!(5, "Computed epsilon closures in {:.2?}", closure_start.elapsed());
 
