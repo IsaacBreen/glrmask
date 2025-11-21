@@ -277,91 +277,165 @@ fn generate_merged_name(
 // PART 2: From src/glr/optimization.rs
 //======================================================================================
 
-/// Optimizes the grammar by merging adjacent terminals that appear only once.
 pub fn optimize_grammar(grammar: &mut GrammarDefinition) {
-    let mut changed = true;
-    while changed {
-        changed = false;
-        // 1. Count occurrences of each terminal
-        let mut terminal_counts = HashMap::new();
-        for prod in &grammar.productions {
-            for symbol in &prod.rhs {
-                if let Symbol::Terminal(t) = symbol {
-                    *terminal_counts.entry(t.clone()).or_insert(0) += 1;
-                }
-            }
-        }
+    // Fixed-point iteration for optimizations.
+    for _ in 0..8 { // Limit passes to avoid infinite loops on tricky cases.
+        let mut changed = false;
+        changed |= convert_leaf_nts_to_terminals(grammar);
+        changed |= merge_adjacent_terminals(grammar);
 
-        // 2. Identify mergeable pairs and merge them
-        // We'll do this by iterating over productions and modifying them in place if possible,
-        // or building a new list of productions.
-        // Since we need to update the grammar's terminal definitions as well, we might need to be careful.
-
-        let mut new_productions = Vec::new();
-        let mut merged_any_in_pass = false;
-        let productions = std::mem::take(&mut grammar.productions);
-
-        for prod in &productions {
-            let mut new_rhs = Vec::new();
-            let mut i = 0;
-            while i < prod.rhs.len() {
-                let symbol = &prod.rhs[i];
-                
-                // Check if we can merge current symbol with the next one
-                if i + 1 < prod.rhs.len() {
-                    let next_symbol = &prod.rhs[i+1];
-                    
-                    if let (Symbol::Terminal(t1), Symbol::Terminal(t2)) = (symbol, next_symbol) {
-                        if terminal_counts.get(&t1) == Some(&1) && terminal_counts.get(&t2) == Some(&1) {
-                            // Merge t1 and t2
-                            let new_terminal = merge_terminals(&t1, &t2, grammar);
-                            new_rhs.push(Symbol::Terminal(new_terminal));
-                            i += 2; // Skip next symbol
-                            merged_any_in_pass = true;
-                            changed = true;
-                            continue;
-                        }
-                    }
-                }
-                
-                new_rhs.push(symbol.clone());
-                i += 1;
-            }
-            new_productions.push(Production {
-                lhs: prod.lhs.clone(),
-                rhs: new_rhs,
-            });
-        }
-        
-        grammar.productions = new_productions;
-        
-        if merged_any_in_pass {
-            // We might want to clean up unused terminals from the grammar definitions here,
-            // but it's not strictly necessary for correctness, just for cleanliness.
-            // The loop will continue until no more merges are possible.
+        if !changed {
+            break;
         }
     }
 }
 
-fn merge_terminals(t1: &Terminal, t2: &Terminal, grammar: &mut GrammarDefinition) -> Terminal {
-    // 1. Get Exprs for t1 and t2
+/// Converts non-terminals whose productions are all sequences of terminals
+/// into a single new terminal. Repeats until no such non-terminals are found.
+fn convert_leaf_nts_to_terminals(grammar: &mut GrammarDefinition) -> bool {
+    let mut changed_in_pass = false;
+
+    loop {
+        let mut changed_this_iteration = false;
+        let non_terminals: BTreeSet<_> = grammar.productions.iter().map(|p| p.lhs.clone()).collect();
+        let mut convertible_nts = BTreeSet::new();
+
+        for nt in &non_terminals {
+            let prods_for_nt: Vec<_> = grammar.productions.iter().filter(|p| &p.lhs == nt).collect();
+            if prods_for_nt.is_empty() { continue; }
+            if prods_for_nt.iter().all(|p| p.rhs.iter().all(|s| matches!(s, Symbol::Terminal(_)))) {
+                convertible_nts.insert(nt.clone());
+            }
+        }
+
+        if convertible_nts.is_empty() {
+            break;
+        }
+
+        for nt in convertible_nts {
+            let prods_for_nt: Vec<_> = grammar.productions.iter().filter(|p| p.lhs == nt).cloned().collect();
+
+            let choice_of_seqs: Vec<Expr> = prods_for_nt.iter().map(|p| {
+                let term_exprs: Vec<Expr> = p.rhs.iter().map(|s| {
+                    if let Symbol::Terminal(t) = s {
+                        get_expr_for_terminal(t, grammar)
+                    } else {
+                        unreachable!("Expected only terminals at this stage for {}", nt.0);
+                    }
+                }).collect();
+
+                if term_exprs.len() == 1 {
+                    term_exprs.into_iter().next().unwrap()
+                } else if term_exprs.is_empty() {
+                    Expr::Epsilon
+                } else {
+                    Expr::Seq(term_exprs)
+                }
+            }).collect();
+
+            let nt_expr = if choice_of_seqs.len() == 1 {
+                choice_of_seqs.into_iter().next().unwrap()
+            } else {
+                Expr::Choice(choice_of_seqs)
+            };
+
+            let new_terminal_name = nt.0.clone();
+            let new_terminal = Terminal::RegexName(new_terminal_name.clone());
+            
+            let new_group_id = grammar.group_id_to_expr.keys().max().map(|id| id + 1).unwrap_or(0);
+            
+            grammar.regex_name_to_group_id.insert(new_terminal_name, new_group_id);
+            grammar.group_id_to_expr.insert(new_group_id, nt_expr);
+
+            grammar.productions.retain(|p| p.lhs != nt);
+
+            for prod in &mut grammar.productions {
+                for symbol in &mut prod.rhs {
+                    if let Symbol::NonTerminal(rhs_nt) = symbol {
+                        if rhs_nt == &nt {
+                            *symbol = Symbol::Terminal(new_terminal.clone());
+                        }
+                    }
+                }
+            }
+            changed_this_iteration = true;
+        }
+        
+        if changed_this_iteration {
+            changed_in_pass = true;
+        } else {
+            break;
+        }
+    }
+
+    changed_in_pass
+}
+
+fn merge_adjacent_terminals(grammar: &mut GrammarDefinition) -> bool {
+    let mut changed = false;
+    let mut terminal_counts = HashMap::new();
+    for prod in &grammar.productions {
+        for symbol in &prod.rhs {
+            if let Symbol::Terminal(t) = symbol {
+                *terminal_counts.entry(t.clone()).or_insert(0) += 1;
+            }
+        }
+    }
+
+    let productions = std::mem::take(&mut grammar.productions);
+    let mut new_productions = Vec::with_capacity(productions.len());
+
+    for prod in &productions {
+        let mut new_rhs = Vec::new();
+        let mut i = 0;
+        while i < prod.rhs.len() {
+            if i + 1 < prod.rhs.len() {
+                if let (Symbol::Terminal(t1), Symbol::Terminal(t2)) = (&prod.rhs[i], &prod.rhs[i+1]) {
+                    // Only merge if they appear together and nowhere else. This is a simple heuristic.
+                    if *terminal_counts.get(t1).unwrap_or(&0) == 1 && *terminal_counts.get(t2).unwrap_or(&0) == 1 {
+                        let new_terminal = merge_terminals_internal(t1, t2, grammar);
+                        new_rhs.push(Symbol::Terminal(new_terminal));
+                        i += 2;
+                        changed = true;
+                        continue;
+                    }
+                }
+            }
+            new_rhs.push(prod.rhs[i].clone());
+            i += 1;
+        }
+        new_productions.push(Production {
+            lhs: prod.lhs.clone(),
+            rhs: new_rhs,
+        });
+    }
+
+    grammar.productions = new_productions;
+    changed
+}
+
+fn get_expr_for_terminal(t: &Terminal, grammar: &GrammarDefinition) -> Expr {
+    let group_id_opt = match t {
+        Terminal::Literal(bytes) => grammar.literal_to_group_id.get_by_left(bytes),
+        Terminal::RegexName(name) => grammar.regex_name_to_group_id.get_by_left(name),
+    };
+
+    let group_id = group_id_opt.unwrap_or_else(|| panic!("Terminal {:?} not found in grammar terminal maps", t));
+    grammar.group_id_to_expr.get(group_id).cloned().unwrap_or_else(|| panic!("No expr for terminal {:?}", t))
+}
+
+fn merge_terminals_internal(t1: &Terminal, t2: &Terminal, grammar: &mut GrammarDefinition) -> Terminal {
     let expr1 = get_expr_for_terminal(t1, grammar);
     let expr2 = get_expr_for_terminal(t2, grammar);
-    
-    // 2. Create new Expr
-    let new_expr = match (expr1.clone(), expr2.clone()) {
+
+    let new_expr = match (expr1, expr2) {
         (Expr::U8Seq(mut v1), Expr::U8Seq(v2)) => {
             v1.extend(v2);
             Expr::U8Seq(v1)
         },
-        (e1, e2) => {
-             Expr::Seq(vec![e1, e2])
-        }
+        (e1, e2) => Expr::Seq(vec![e1, e2])
     };
-    
-    // 3. Create new Terminal
-    // If both are literals, we might make a new literal terminal.
-    // Otherwise, it's a regex terminal.
+
     let new_terminal = match (t1, t2) {
         (Terminal::Literal(l1), Terminal::Literal(l2)) => {
             let mut new_bytes = l1.clone();
@@ -369,165 +443,139 @@ fn merge_terminals(t1: &Terminal, t2: &Terminal, grammar: &mut GrammarDefinition
             Terminal::Literal(new_bytes)
         },
         _ => {
-             // Generate a new name
-             let name1 = match t1 { Terminal::RegexName(n) => n.clone(), Terminal::Literal(l) => format!("{:?}", l) }; // Simplified name generation
-             let name2 = match t2 { Terminal::RegexName(n) => n.clone(), Terminal::Literal(l) => format!("{:?}", l) };
-             let new_name = format!("{}_{}", name1, name2); 
-             // Ensure uniqueness? The grammar usually handles unique names, but here we are synthesizing.
-             // Let's use a simpler approach or ensure uniqueness if needed.
-             // For now, let's just use a combined name.
-             Terminal::RegexName(new_name)
+            let name1 = match t1 { Terminal::RegexName(n) => n.clone(), Terminal::Literal(l) => String::from_utf8_lossy(l).to_string() };
+            let name2 = match t2 { Terminal::RegexName(n) => n.clone(), Terminal::Literal(l) => String::from_utf8_lossy(l).to_string() };
+            let new_name = format!("({}+{})", name1, name2);
+            Terminal::RegexName(new_name)
         }
     };
     
-    // 4. Register new terminal in grammar
-    // We need a new group_id
-    let new_group_id = grammar.group_id_to_expr.keys().max().cloned().unwrap_or(0) + 1;
-    
-    match &new_terminal {
+    let new_group_id = grammar.group_id_to_expr.keys().max().map(|id| id + 1).unwrap_or(0);
+
+    let final_terminal = match new_terminal {
         Terminal::Literal(bytes) => {
             grammar.literal_to_group_id.insert(bytes.clone(), new_group_id);
+            Terminal::Literal(bytes)
         },
         Terminal::RegexName(name) => {
-            // Check if name exists, if so, append index
             let mut final_name = name.clone();
             let mut idx = 1;
             while grammar.regex_name_to_group_id.contains_left(&final_name) {
                 final_name = format!("{}_{}", name, idx);
                 idx += 1;
             }
-            let new_terminal_fixed = Terminal::RegexName(final_name.clone());
-             grammar.regex_name_to_group_id.insert(final_name, new_group_id);
-             // Update return value if name changed
-             if let Terminal::RegexName(_) = new_terminal {
-                 // This is a bit messy because we return 'new_terminal' which might have the old name.
-                 // Let's just return the fixed one.
-                 grammar.group_id_to_expr.insert(new_group_id, new_expr);
-                 return new_terminal_fixed;
-             }
+            grammar.regex_name_to_group_id.insert(final_name.clone(), new_group_id);
+            Terminal::RegexName(final_name)
         }
-    }
-    
-    grammar.group_id_to_expr.insert(new_group_id, new_expr);
-    
-    new_terminal
-}
-
-fn get_expr_for_terminal(t: &Terminal, grammar: &GrammarDefinition) -> Expr {
-    let group_id = match t {
-        Terminal::Literal(bytes) => grammar.literal_to_group_id.get_by_left(bytes),
-        Terminal::RegexName(name) => grammar.regex_name_to_group_id.get_by_left(name),
     };
-    
-    if let Some(gid) = group_id {
-        grammar.group_id_to_expr.get(gid).cloned().unwrap_or(Expr::Epsilon) // Should not happen
-    } else {
-        // Fallback or error? 
-        Expr::Epsilon
-    }
-}
 
-impl GrammarDefinition {
-    pub fn optimize(&mut self) {
-        optimize_grammar(self);
-    }
+    grammar.group_id_to_expr.insert(new_group_id, new_expr);
+    final_terminal
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
-    use crate::datastructures::u8set::U8Set;
 
-    fn create_dummy_grammar() -> GrammarDefinition {
-        // S -> A B
-        // A -> "a"
-        // B -> "b"
-        let mut grammar = GrammarDefinition {
-            productions: vec![
-                Production {
-                    lhs: NonTerminal("S".to_string()),
-                    rhs: vec![
-                        Symbol::Terminal(Terminal::literal(b"a".to_vec())),
-                        Symbol::Terminal(Terminal::literal(b"b".to_vec())),
-                    ],
-                }
+    #[test]
+    fn test_converts_leaf_nt_to_terminal() {
+        let (grammar_exprs, regex_exprs) = (
+            vec![
+                ("start".to_string(), GrammarExpr::Ref("A".to_string())),
+                ("A".to_string(), GrammarExpr::Choice(vec![GrammarExpr::Ref("B".to_string()), GrammarExpr::Ref("C".to_string())])),
             ],
-            start_production_id: 0,
-            literal_to_group_id: BiBTreeMap::new(),
-            regex_name_to_group_id: BiBTreeMap::new(),
-            group_id_to_expr: BTreeMap::new(),
-            ignore_terminal_id: None,
-            external_name_to_group_id: BiBTreeMap::new(),
+            vec![
+                ("B".to_string(), Expr::U8Seq(b"b".to_vec())),
+                ("C".to_string(), Expr::U8Seq(b"c".to_vec())),
+            ]
+        );
+        let mut grammar = GrammarDefinition::from_exprs(grammar_exprs, regex_exprs).unwrap();
+        optimize_grammar(&mut grammar);
+
+        // The NT 'A' should be converted to a terminal, and start should now reference it.
+        let start_prod = grammar.productions.iter().find(|p| p.lhs.0 == "start'").unwrap(); // Augmented start
+        let root_prod = grammar.productions.iter().find(|p| p.lhs.0 == "start").unwrap();
+        assert_eq!(root_prod.rhs.len(), 1);
+        assert!(matches!(&root_prod.rhs[0], Symbol::Terminal(Terminal::RegexName(name)) if name == "A"));
+        
+        // Productions for A should be gone.
+        assert!(grammar.productions.iter().find(|p| p.lhs.0 == "A").is_none());
+
+        // A new terminal "A" should exist.
+        assert!(grammar.regex_name_to_group_id.contains_left("A"));
+        let group_id = grammar.regex_name_to_group_id.get_by_left("A").unwrap();
+        let expr = grammar.group_id_to_expr.get(group_id).unwrap();
+        assert!(matches!(expr, Expr::Choice(_)));
+    }
+
+    #[test]
+    fn test_merge_adjacent_terminals() {
+        let (grammar_exprs, regex_exprs) = (
+            vec![
+                ("start".to_string(), GrammarExpr::Sequence(vec![GrammarExpr::Ref("A".to_string()), GrammarExpr::Ref("B".to_string())])),
+            ],
+            vec![
+                ("A".to_string(), Expr::U8Seq(b"a".to_vec())),
+                ("B".to_string(), Expr::U8Seq(b"b".to_vec())),
+            ]
+        );
+        let mut grammar = GrammarDefinition::from_exprs(grammar_exprs, regex_exprs).unwrap();
+        optimize_grammar(&mut grammar);
+
+        let prod = grammar.productions.iter().find(|p| p.lhs.0 == "start").unwrap();
+        assert_eq!(prod.rhs.len(), 1);
+        let merged_terminal = prod.rhs[0].clone();
+
+        assert!(matches!(merged_terminal, Symbol::Terminal(Terminal::RegexName(_))));
+        if let Symbol::Terminal(t) = merged_terminal {
+             let expr = get_expr_for_terminal(&t, &grammar);
+             assert_eq!(expr, Expr::Seq(vec![Expr::U8Seq(b"a".to_vec()), Expr::U8Seq(b"b".to_vec())]));
+        }
+    }
+
+    #[test]
+    fn test_rolls_up_chain_of_regular_rules() {
+        let mut grammar_exprs = vec![("start".to_string(), GrammarExpr::Ref("s0".to_string()))];
+        let mut regex_exprs = vec![("C".to_string(), Expr::U8Seq(b"c".to_vec()))];
+
+        let chain_len = 20;
+
+        for i in 0..chain_len {
+             let char_val = (b'a' + i as u8) as char;
+             let term_name = format!("T{}", i);
+             regex_exprs.push((term_name.clone(), Expr::U8Seq(vec![char_val as u8])));
+
+            let next_s = if i < chain_len -1 {
+                GrammarExpr::Ref(format!("s{}", i + 1))
+            } else {
+                GrammarExpr::Ref("C".to_string())
+            };
+
+            grammar_exprs.push((
+                format!("s{}", i),
+                GrammarExpr::Sequence(vec![
+                    GrammarExpr::Ref(term_name),
+                    next_s
+                ])
+            ));
+        }
+
+        let mut grammar = GrammarDefinition::from_exprs(grammar_exprs, regex_exprs).unwrap();
+        optimize_grammar(&mut grammar);
+
+        assert_eq!(grammar.productions.len(), 2); // start' -> start, and start -> <rolled_up_terminal>
+        let prod = grammar.productions.iter().find(|p| p.lhs.0 == "start").unwrap();
+        assert_eq!(prod.rhs.len(), 1);
+
+        let final_terminal = match &prod.rhs[0] {
+            Symbol::Terminal(t) => t,
+            _ => panic!("Expected terminal"),
         };
 
-        // Register terminals
-        grammar.literal_to_group_id.insert(b"a".to_vec(), 1);
-        grammar.group_id_to_expr.insert(1, Expr::U8Seq(b"a".to_vec()));
+        let final_expr = get_expr_for_terminal(final_terminal, &grammar);
 
-        grammar.literal_to_group_id.insert(b"b".to_vec(), 2);
-        grammar.group_id_to_expr.insert(2, Expr::U8Seq(b"b".to_vec()));
-
-        grammar
-    }
-
-    #[test]
-    fn test_optimize_grammar_merges_literals() {
-        let mut grammar = create_dummy_grammar();
-        optimize_grammar(&mut grammar);
-
-        // Should now be S -> "ab"
-        assert_eq!(grammar.productions.len(), 1);
-        let prod = &grammar.productions[0];
-        assert_eq!(prod.rhs.len(), 1);
-        
-        if let Symbol::Terminal(Terminal::Literal(bytes)) = &prod.rhs[0] {
-            assert_eq!(*bytes, b"ab".to_vec());
-        } else {
-            panic!("Expected merged literal terminal, got {:?}", prod.rhs[0]);
-        }
-        
-        // Check if new terminal is registered
-        assert!(grammar.literal_to_group_id.contains_left(&b"ab".to_vec()));
-    }
-
-    #[test]
-    fn test_optimize_grammar_merges_regex() {
-        let mut grammar = create_dummy_grammar();
-        // Add a regex terminal
-        // S -> R1 R2
-        // R1 -> [a-z] (appears once)
-        // R2 -> [0-9] (appears once)
-        
-        let r1_name = "R1".to_string();
-        let r2_name = "R2".to_string();
-        
-        grammar.productions.push(Production {
-            lhs: NonTerminal("S2".to_string()),
-            rhs: vec![
-                Symbol::Terminal(Terminal::RegexName(r1_name.clone())),
-                Symbol::Terminal(Terminal::RegexName(r2_name.clone())),
-            ],
-        });
-        
-        grammar.regex_name_to_group_id.insert(r1_name.clone(), 3);
-        grammar.group_id_to_expr.insert(3, Expr::U8Class(U8Set::from_u8(b'a'))); // Simplified regex
-        
-        grammar.regex_name_to_group_id.insert(r2_name.clone(), 4);
-        grammar.group_id_to_expr.insert(4, Expr::U8Class(U8Set::from_u8(b'0'))); // Simplified regex
-        
-        optimize_grammar(&mut grammar);
-        
-        // Find S2 production
-        let prod = grammar.productions.iter().find(|p| p.lhs.0 == "S2").expect("S2 production not found");
-        assert_eq!(prod.rhs.len(), 1);
-        
-        if let Symbol::Terminal(Terminal::RegexName(name)) = &prod.rhs[0] {
-            assert!(name.contains("R1"));
-            assert!(name.contains("R2"));
-            assert!(grammar.regex_name_to_group_id.contains_left(name));
-        } else {
-            panic!("Expected merged regex terminal, got {:?}", prod.rhs[0]);
-        }
+        let expected_bytes: Vec<u8> = (0..chain_len).map(|i| b'a' + i).chain(std::iter::once(b'c')).collect();
+        assert_eq!(final_expr, Expr::Seq(vec![Expr::U8Seq(expected_bytes)]));
     }
 }

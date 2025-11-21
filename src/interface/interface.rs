@@ -457,8 +457,8 @@ impl GrammarDefinition {
 }
 
 impl GrammarDefinition {
-    pub fn simplify(&mut self) {
-        self.productions = simplify_grammar(&self.productions);
+    pub fn optimize(&mut self) {
+        crate::interface::optimization::optimize_grammar(self);
     }
 }
 
