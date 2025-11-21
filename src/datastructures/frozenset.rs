@@ -41,13 +41,6 @@ impl<T: Eq + Ord> FrozenSet<T> {
         }
     }
 
-    /// Constructs a `FrozenSet` from a vector that is already sorted and deduplicated.
-    pub fn from_sorted_deduped_vec(vec: Vec<T>) -> Self {
-        FrozenSet {
-            inner: vec.into_boxed_slice(),
-        }
-    }
-
     /// Checks if the set contains a value.
     pub fn contains(&self, value: &T) -> bool {
         self.inner.binary_search(value).is_ok()
