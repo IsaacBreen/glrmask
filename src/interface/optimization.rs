@@ -492,6 +492,7 @@ mod tests {
         );
         let mut grammar = GrammarDefinition::from_exprs(grammar_exprs, regex_exprs).unwrap();
         optimize_grammar(&mut grammar);
+        println!("{grammar}");
 
         // The NT 'A' should be converted to a terminal, and start should now reference it.
         let start_prod = grammar.productions.iter().find(|p| p.lhs.0 == "start'").unwrap(); // Augmented start
@@ -522,6 +523,7 @@ mod tests {
         );
         let mut grammar = GrammarDefinition::from_exprs(grammar_exprs, regex_exprs).unwrap();
         optimize_grammar(&mut grammar);
+        println!("{grammar}");
 
         let prod = grammar.productions.iter().find(|p| p.lhs.0 == "start").unwrap();
         assert_eq!(prod.rhs.len(), 1);
@@ -563,6 +565,7 @@ mod tests {
 
         let mut grammar = GrammarDefinition::from_exprs(grammar_exprs, regex_exprs).unwrap();
         optimize_grammar(&mut grammar);
+        println!("{grammar}");
 
         assert_eq!(grammar.productions.len(), 2); // start' -> start, and start -> <rolled_up_terminal>
         let prod = grammar.productions.iter().find(|p| p.lhs.0 == "start").unwrap();
