@@ -1,4 +1,4 @@
-diff ::= ( HUNK_HEADER s0 )? EOF;
+diff ::= ( ('@@' [^\n\r]* NEWLINE) (( ' ' | '-' ) '// src/constraint.rs' NEWLINE) ) EOF;
 EOF  ::= '<|EOF|>';
 
 // 's' rules: Allow starting a context block at a given line or skipping.
