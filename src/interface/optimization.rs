@@ -465,9 +465,11 @@ impl<'a> GrammarOptimizer<'a> {
         let mut used_groups = BTreeSet::new();
         
         for prod in &self.grammar.productions {
+            println!("Production: {} -> {:?}", prod.lhs, prod.rhs);
             for sym in &prod.rhs {
                 if let Symbol::Terminal(t) = sym {
                     let gid = self.get_group_id(t);
+                    println!("  Found terminal {:?} with gid {}", t, gid);
                     used_groups.insert(gid);
                 }
             }
@@ -476,6 +478,8 @@ impl<'a> GrammarOptimizer<'a> {
         if let Some(gid) = self.grammar.ignore_terminal_id {
              used_groups.insert(gid.0);
         }
+
+        println!("Used groups before renumbering: {:?}", used_groups);
 
         // Create mapping from old_gid -> new_gid
         let mut old_to_new = HashMap::new();
