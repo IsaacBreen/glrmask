@@ -785,6 +785,7 @@ impl ExprGroups {
         let nfa = self.build_nfa();
         crate::debug!(4, "Built NFA in {:.2?}", start.elapsed());
         print_memory_usage("After NFA build");
+        nfa.print_stats();
         crate::debug!(3, "Converting NFA to DFA");
         let start = std::time::Instant::now();
         let mut dfa = nfa.to_dfa();
@@ -1109,6 +1110,91 @@ impl NFA {
 
     pub fn add_epsilon_transition(&mut self, from: usize, to: usize) {
         self.states[from].epsilon_transitions.push(to);
+    }
+
+    pub fn print_stats(&self) {
+        let num_states = self.states.len();
+        let state_size = std::mem::size_of::<NFAState>();
+        let total_base_size = num_states * state_size;
+
+        let mut transitions_capacity_bytes = 0;
+        let mut epsilon_capacity_bytes = 0;
+        let mut finalizers_est_bytes = 0;
+        let mut non_greedy_est_bytes = 0;
+
+        let mut total_transitions_count = 0;
+        let mut total_epsilon_count = 0;
+
+        let mut max_group_id = 0;
+        let mut compacted_transitions_count = 0;
+
+        for state in &self.states {
+            transitions_capacity_bytes += state.transitions.capacity() * std::mem::size_of::<(u8, usize)>();
+            epsilon_capacity_bytes += state.epsilon_transitions.capacity() * std::mem::size_of::<usize>();
+
+            // Estimate BTreeSet size: ~4 words per element is a reasonable loose approximation for sparse trees
+            // This accounts for node pointers and overhead (node header + pointers + data).
+            finalizers_est_bytes += state.finalizers.len() * 4 * std::mem::size_of::<usize>();
+            non_greedy_est_bytes += state.non_greedy_finalizers.len() * 4 * std::mem::size_of::<usize>();
+
+            total_transitions_count += state.transitions.len();
+            total_epsilon_count += state.epsilon_transitions.len();
+
+            if let Some(&m) = state.finalizers.iter().max() {
+                if m > max_group_id { max_group_id = m; }
+            }
+            if let Some(&m) = state.non_greedy_finalizers.iter().max() {
+                if m > max_group_id { max_group_id = m; }
+            }
+
+            // Count unique targets for compaction estimation
+            let mut unique_targets = std::collections::HashSet::new();
+            for &(_, target) in &state.transitions {
+                unique_targets.insert(target);
+            }
+            compacted_transitions_count += unique_targets.len();
+        }
+
+        let total_estimated_bytes = total_base_size + transitions_capacity_bytes + epsilon_capacity_bytes + finalizers_est_bytes + non_greedy_est_bytes;
+        let to_mb = |bytes: usize| bytes as f64 / 1024.0 / 1024.0;
+
+        println!("--- NFA Stats ---");
+        println!("States: {}", num_states);
+        println!("Estimated Size: {:.2} MB", to_mb(total_estimated_bytes));
+        println!("  Base (Vec headers, etc): {:.2} MB", to_mb(total_base_size));
+        println!("  Transitions Data: {:.2} MB", to_mb(transitions_capacity_bytes));
+        println!("  Epsilon Data: {:.2} MB", to_mb(epsilon_capacity_bytes));
+        println!("  Finalizers (est): {:.2} MB", to_mb(finalizers_est_bytes + non_greedy_est_bytes));
+
+        // 1. Finalizer Sets -> Bitsets
+        // Cost of Bitset: (max_group_id bits / 8) per set. Two sets per state.
+        let words_per_set = (max_group_id / 64) + 1;
+        let bytes_per_set = words_per_set * 8;
+        // Overhead of Vec<u64> is 24 bytes.
+        let bitset_overhead = 24;
+        let total_bitset_cost = num_states * 2 * (bytes_per_set + bitset_overhead);
+        let current_finalizer_cost = finalizers_est_bytes + non_greedy_est_bytes;
+        let savings_bitsets = (current_finalizer_cost as isize) - (total_bitset_cost as isize);
+        println!("  [Savings] Finalizers -> Bitsets: {:.2} MB (current est: {:.2} MB, bitset: {:.2} MB)",
+            to_mb(savings_bitsets.max(0) as usize), to_mb(current_finalizer_cost), to_mb(total_bitset_cost));
+
+        // 2. State IDs u32
+        // (u8, usize) [16 bytes] -> (u8, u32) [8 bytes]. usize [8 bytes] -> u32 [4 bytes].
+        let current_trans_data_used = total_transitions_count * std::mem::size_of::<(u8, usize)>();
+        let u32_trans_data_used = total_transitions_count * 8; 
+        let current_eps_data_used = total_epsilon_count * std::mem::size_of::<usize>();
+        let u32_eps_data_used = total_epsilon_count * 4;
+        let savings_u32 = (current_trans_data_used + current_eps_data_used) - (u32_trans_data_used + u32_eps_data_used);
+        println!("  [Savings] State IDs -> u32: {:.2} MB", to_mb(savings_u32));
+
+        // 3. Compact Transitions
+        // Vec<(u8, usize)> [16 bytes] -> Vec<(U8Set, usize)> [48 bytes: 32(set) + 8(usize) + 8(pad)]
+        let compact_item_size = 48; 
+        let compact_total_size = compacted_transitions_count * compact_item_size;
+        let savings_compact = (current_trans_data_used as isize) - (compact_total_size as isize);
+        println!("  [Savings] Compact Transitions: {:.2} MB (current: {:.2} MB, compacted: {:.2} MB)",
+            savings_compact as f64 / 1024.0 / 1024.0, to_mb(current_trans_data_used), to_mb(compact_total_size));
+        println!("-----------------");
     }
 
     fn compute_epsilon_closures(&self) -> Vec<Vec<usize>> {
