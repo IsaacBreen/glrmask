@@ -8,6 +8,11 @@ use crate::interface::{GrammarDefinition, GrammarExpr};
 pub fn optimize_grammar(grammar: &mut GrammarDefinition) {
     let mut optimizer = GrammarOptimizer::new(grammar);
     optimizer.optimize();
+    crate::debug!(3, "Grammar optimization complete.");
+    crate::debug!(3, "Final terminal count: {}", grammar.terminal_to_group_id().len());
+    crate::debug!(3, "Final group count: {}", grammar.group_id_to_expr.len());
+    crate::debug!(3, "Final production count: {}", grammar.productions.len());
+    std::process::exit(0);
 }
 
 impl GrammarDefinition {
