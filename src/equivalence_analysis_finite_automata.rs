@@ -4,7 +4,7 @@ use hashbrown::HashMap;
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use smallvec::SmallVec;
 use std::collections::BTreeMap;
-
+use std::ops::BitXor;
 // -----------------------------------------------------------------------------
 // Configuration
 // -----------------------------------------------------------------------------
@@ -38,9 +38,8 @@ fn hash_outcome(
     match_group: u32,
     match_pos: u32,
     remainder_sig: u64,
-    final_state: u32,
 ) -> u128 {
-    let flags = (if is_match { 1 } else { 0 }) | (final_state << 1);
+    let flags = if is_match { 1 } else { 0 };
     let packed = ((match_pos as u128) << 96)
         | ((match_group as u128) << 64)
         | ((flags as u128) << 32);
@@ -190,8 +189,8 @@ fn process_string_node(
     if let Some(_orig_idx) = node.terminal_string_idx {
         let lin_idx = node.range_start as usize;
         for &(dfa_state, weight) in &active_states {
-            let end_val = if regex.dfa.states[dfa_state as usize].transitions.is_empty() { 0 } else { dfa_state + 1 };
-            let h = hash_outcome(false, 0, 0, 0, end_val);
+            let sig = hash_future_groups(regex, dfa_state as usize);
+            let h = hash_outcome(false, 0, 0, sig);
             let contrib = weight.wrapping_mul(h);
             diffs[lin_idx] = diffs[lin_idx].wrapping_add(contrib);
             diffs[lin_idx + 1] = diffs[lin_idx + 1].wrapping_sub(contrib);
@@ -214,7 +213,7 @@ fn process_string_node(
                         for lin_idx in (child.range_start as usize)..(child.range_end as usize) {
                             let orig = linearized_mapping[lin_idx];
                             let rem = remainder_hashes[orig][(depth + 1) as usize];
-                            let h = hash_outcome(true, gid as u32, depth + 1, rem, 0);
+                            let h = hash_outcome(true, gid as u32, depth + 1, rem);
                             accumulators[orig] = accumulators[orig].wrapping_add(weight.wrapping_mul(h));
                         }
                     }
@@ -222,7 +221,7 @@ fn process_string_node(
                 next_batch.push((child_idx, next_state as u32, weight));
             } else {
                 // Dead End
-                let h = hash_outcome(false, 0, 0, 0, 0);
+                let h = hash_outcome(false, 0, 0, 0);
                 let contrib = weight.wrapping_mul(h);
                 let child = &trie.nodes[child_idx as usize];
                 let r_start = child.range_start as usize;
@@ -265,6 +264,15 @@ fn process_string_node(
 // Helpers & Verification
 // -----------------------------------------------------------------------------
 
+fn hash_future_groups(regex: &Regex, state_idx: usize) -> u64 {
+    let mut h = 0u64;
+    for &gid in &regex.dfa.states[state_idx].possible_future_group_ids {
+        let k = (gid as u64).wrapping_mul(0x9E3779B97F4A7C15);
+        h = h.rotate_left(3).bitxor(k);
+    }
+    h
+}
+
 fn precompute_remainder_hashes(regex: &Regex, strings: &[Vec<u8>]) -> Vec<Vec<u64>> {
     strings.iter().map(|s| {
         (0..=s.len()).map(|i| {
@@ -274,7 +282,7 @@ fn precompute_remainder_hashes(regex: &Regex, strings: &[Vec<u8>]) -> Vec<Vec<u6
                 let k = (m.group_id as u64).wrapping_mul(0x9E3779B97F4A7C15) ^ ((m.position as u64).rotate_left(32));
                 h = h.wrapping_mul(0xC6A4A7935BD1E995).wrapping_add(k);
             }
-            let end_val = if let Some(fs) = exec.end_state { (fs as u64).wrapping_add(1) } else { 0 };
+            let end_val = if let Some(fs) = exec.end_state { hash_future_groups(regex, fs) } else { 0 };
             h ^ end_val.rotate_left(17)
         }).collect()
     }).collect()
