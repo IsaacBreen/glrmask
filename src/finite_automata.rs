@@ -1292,55 +1292,39 @@ impl NFA {
         println!("-----------------");
     }
 
-    fn compute_epsilon_closures(&self) -> Vec<Vec<usize>> {
-        let num_states = self.states.len();
-        let mut closures = Vec::with_capacity(num_states);
-        let mut visited = vec![false; num_states];
-        let mut stack = Vec::new();
-        let mut closure_vec = Vec::new();
-
-        for i in 0..num_states {
-            stack.push(i);
-            visited[i] = true;
-            closure_vec.push(i);
-
-            while let Some(u) = stack.pop() {
-                for &v in &self.states[u].epsilon_transitions {
-                    if !visited[v] {
-                        visited[v] = true;
-                        stack.push(v);
-                        closure_vec.push(v);
-                    }
-                }
-            }
-
-            closure_vec.sort_unstable();
-            closures.push(closure_vec.clone());
-
-            for &v in &closure_vec {
-                visited[v] = false;
-            }
-            closure_vec.clear();
-        }
-        closures
-    }
-
     pub fn to_dfa(self) -> DFA {
         let start_time = std::time::Instant::now();
         let mut dfa_states: Vec<DFAState> = Vec::new();
         let mut dfa_state_map: HashMap<FrozenSet<usize>, usize> = HashMap::new();
         let mut worklist: Vec<FrozenSet<usize>> = Vec::new();
 
-        let closure_start = std::time::Instant::now();
-        crate::debug!(5, "Computing epsilon closures ({} states)...", self.states.len());
-        let epsilon_closures = self.compute_epsilon_closures();
-        crate::debug!(5, "Computed epsilon closures in {:.2?}", closure_start.elapsed());
-        let total_epsilon_closure_sizes = epsilon_closures.iter().map(|closure| closure.len()).sum::<usize>();
-        crate::debug!(5, "Total epsilon closure size: {}", total_epsilon_closure_sizes);
-        crate::debug!(5, "Average epsilon closure size: {}", total_epsilon_closure_sizes as f64 / epsilon_closures.len() as f64);
+        // Shared buffers for on-the-fly closure computation
+        let num_nfa_states = self.states.len();
+        let mut visited = vec![0u32; num_nfa_states];
+        let mut visited_gen = 0u32;
+        let mut stack = Vec::with_capacity(1024);
 
-        let start_closure = &epsilon_closures[self.start_state];
-        let start_state_set = FrozenSet::from_iter(start_closure.iter().cloned());
+        // Compute start state closure
+        visited_gen = visited_gen.wrapping_add(1);
+        if visited_gen == 0 { visited.fill(0); visited_gen = 1; }
+        
+        let mut start_closure_vec = Vec::new();
+        stack.push(self.start_state);
+        visited[self.start_state] = visited_gen;
+        start_closure_vec.push(self.start_state);
+
+        while let Some(u) = stack.pop() {
+            for &v in &self.states[u].epsilon_transitions {
+                if visited[v] != visited_gen {
+                    visited[v] = visited_gen;
+                    stack.push(v);
+                    start_closure_vec.push(v);
+                }
+            }
+        }
+        start_closure_vec.sort_unstable();
+
+        let start_state_set = FrozenSet::from_iter(start_closure_vec.into_iter());
         worklist.push(start_state_set.clone());
         dfa_state_map.insert(start_state_set.clone(), 0);
 
@@ -1395,13 +1379,33 @@ impl NFA {
                     continue;
                 }
 
+                // Compute epsilon closure on-the-fly
+                visited_gen = visited_gen.wrapping_add(1);
+                if visited_gen == 0 { visited.fill(0); visited_gen = 1; }
+
                 let mut closure_vec = Vec::new();
+                // Initialize BFS with direct transition targets
                 for &next_state in next_states {
-                    closure_vec.extend_from_slice(&epsilon_closures[next_state]);
+                    if visited[next_state] != visited_gen {
+                        visited[next_state] = visited_gen;
+                        stack.push(next_state);
+                        closure_vec.push(next_state);
+                    }
                 }
-                closure_vec.sort_unstable();
-                closure_vec.dedup();
-                let frozen_closure: FrozenSet<usize> = FrozenSet::from_iter(closure_vec);
+
+                while let Some(u) = stack.pop() {
+                    for &v in &self.states[u].epsilon_transitions {
+                        if visited[v] != visited_gen {
+                            visited[v] = visited_gen;
+                            stack.push(v);
+                            closure_vec.push(v);
+                        }
+                    }
+                }
+
+                // Note: FrozenSet::from_iter sorts and dedups, so we don't need to do it here,
+                // though visited logic ensures uniqueness already.
+                let frozen_closure: FrozenSet<usize> = FrozenSet::from_iter(closure_vec.into_iter());
 
                 let next_dfa_state =
                     if let Some(&existing_state) = dfa_state_map.get(&frozen_closure) {
