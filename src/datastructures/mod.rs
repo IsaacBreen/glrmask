@@ -12,5 +12,6 @@ pub mod entry_api;
 pub mod trie;
 pub mod leveled_gss;
 pub mod gss_acc;
+pub mod bitset2;
 
 pub use entry_api::{EntryApi, OrderedMapEntry};
