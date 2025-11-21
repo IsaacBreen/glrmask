@@ -205,10 +205,11 @@ def run_benchmark(args, model, tokens_with_pos, load_time, run_index: int = 0):
     get_mask_timings: list[float] = []
     commit_timings: list[float] = []
     masks_ranges: list[list[list[int]]] = []  # list of [[s,e], ...] per step
+    early_termination_index: int | None = None
 
     # 5. Run benchmark loop
 
-    print(f"\n--- Running benchmark ({len(token_ids)} steps) ---")
+    print(f"\n--- Running benchmark ({len(token_ids)} tokens) ---")
     progress_bar = tqdm(enumerate(token_ids), total=len(token_ids), desc="Benchmarking steps", disable=os.environ.get("DISABLE_TQDM") == "1")
     for i, token_id in progress_bar:
         if not os.environ.get("NO_GET_MASK") == '1':
@@ -229,12 +230,20 @@ def run_benchmark(args, model, tokens_with_pos, load_time, run_index: int = 0):
                 else:
                     raise ValueError("Model returned timed_output dict for get_mask without 'output' or 'time_sec'.")
 
+            # Check if the mask is empty, indicating the model has rejected valid input
+            ranges = mask_rs.to_ranges()
+            if not ranges:
+                print(f"\n[WARNING] Model returned empty mask at step {i} (token_id={token_id}). Stopping benchmark for this model.")
+                early_termination_index = i
+                break
+
             get_mask_timings.append(timing)
             # Export the mask for later cross-model comparison during analysis
-            masks_ranges.append(mask_rs.to_ranges())
+            masks_ranges.append(ranges)
 
         # Advance the state
         gc.disable()
+        # Note: if get_mask() wasn't called or wasn't empty, we proceed to commit.
         t_start_commit = time.perf_counter()
         result = model.commit(token_id)
         t_end_commit = time.perf_counter()
@@ -278,6 +287,8 @@ def run_benchmark(args, model, tokens_with_pos, load_time, run_index: int = 0):
             "code_file": str(args.code),
         },
         "results": {
+            "total_input_tokens": len(token_ids),
+            "early_termination_index": early_termination_index,
             "load_time_seconds": load_time,
             "get_mask_timings_seconds": get_mask_timings,
             "commit_timings_seconds": commit_timings,

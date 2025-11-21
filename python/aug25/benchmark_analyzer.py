@@ -281,7 +281,7 @@ def _print_mask_diff(
         print(f"  - Current ONLY (numeric):  {numeric_str}")
         print(f"  - Current ONLY (tokens):   {token_str}")
 
-def _generate_and_print_summary(df: pd.DataFrame, title: str, equivalence_info: Optional[Dict[str, bool]] = None, mismatch_counts: Optional[Dict[str, List[int]]] = None):
+def _generate_and_print_summary(df: pd.DataFrame, title: str, equivalence_info: Optional[Dict[str, bool]] = None, mismatch_counts: Optional[Dict[str, List[int]]] = None, total_tokens_map: Optional[Dict[str, int]] = None):
     """Calculates, formats, and prints a summary statistics table for a given DataFrame."""
     print(f"\n--- {title} ---")
     if df.empty:
@@ -297,20 +297,36 @@ def _generate_and_print_summary(df: pd.DataFrame, title: str, equivalence_info: 
     percentiles.columns = [f'p{int(c*100)}' for c in percentiles.columns]
     summary = summary.join(percentiles)
 
+    # Add completion info
+    if total_tokens_map:
+        def format_completion(row):
+            model_name = row.name
+            count = row['count']
+            total = total_tokens_map.get(model_name)
+            if total is None or total == 0:
+                return "-"
+            pct = (count / total) * 100
+            if count < total:
+                return f"{pct:.1f}% ⚠️"
+            return "100%"
+        
+        summary['completion'] = summary.apply(format_completion, axis=1)
+    else:
+        summary['completion'] = '-'
+
     # Add equivalence info if provided (only for get_mask)
     if equivalence_info and mismatch_counts:
         eq_series = pd.Series({k: ('✅' if v else '❌') for k, v in equivalence_info.items()}, name='equivalent')
         mm_series = pd.Series({k: len(v) for k, v in mismatch_counts.items()}, name='mask_mismatch_count')
         summary = summary.join(eq_series).join(mm_series)
-        # Reorder columns for display
-        summary = summary[['equivalent', 'mask_mismatch_count', 'count', 'mean', 'std', 'min', 'p50', 'p90', 'p99', 'max']]
     else:
         summary['equivalent'] = '-'
         summary['mask_mismatch_count'] = '-'
-        summary = summary[['equivalent', 'mask_mismatch_count', 'count', 'mean', 'std', 'min', 'p50', 'p90', 'p99', 'max']]
 
-
-    # Format for printing
+    # Select and Reorder columns
+    cols = ['equivalent', 'mask_mismatch_count', 'completion', 'count', 'mean', 'std', 'min', 'p50', 'p90', 'p99', 'max']
+    summary = summary[cols]
+    
     numeric_cols = ['mean', 'std', 'min', 'p50', 'p90', 'p99', 'max']
     summary[numeric_cols] *= 1000  # convert to ms
     summary = summary.rename(columns=lambda c: c + ' (ms)' if c in numeric_cols else c)
@@ -338,6 +354,7 @@ def analyze_results(result_files: List[Path], output_dir: Path, baseline_key: Op
     id_to_token_by_model: Dict[str, Dict[int, bytes]] = {}
     token_positions_by_model: Dict[str, List[List[Tuple[int, int]]]] = {}
     code_content_by_model: Dict[str, bytes] = {}
+    total_tokens_by_model: Dict[str, int] = {}
 
     model_order: List[str] = []
 
@@ -410,6 +427,9 @@ def analyze_results(result_files: List[Path], output_dir: Path, baseline_key: Op
         token_positions = data["results"].get("token_positions", [])
         token_positions_by_model[model_name].append(token_positions)
 
+        total_tokens = data["results"].get("total_input_tokens")
+        total_tokens_by_model[model_name] = total_tokens
+
     if not get_mask_timings_by_model:
         print("No data to analyze.")
         return
@@ -419,6 +439,7 @@ def analyze_results(result_files: List[Path], output_dir: Path, baseline_key: Op
     final_commit_timings: Dict[str, List[float]] = {}
     final_masks_by_model: Dict[str, List[Tuple[Tuple[int, int], ...]]] = {}
     final_token_positions_by_model: Dict[str, List[Tuple[int, int]]] = {}
+    final_total_tokens_by_model: Dict[str, int] = {}
     final_model_order: List[str] = []
 
     if agg_method:
@@ -461,6 +482,7 @@ def analyze_results(result_files: List[Path], output_dir: Path, baseline_key: Op
             else:
                 final_token_positions_by_model[model_name] = []
 
+            final_total_tokens_by_model[model_name] = total_tokens_by_model.get(model_name)
             final_model_order.append(model_name)
     else:  # No aggregation, unpack runs
         for model_name in model_order:
@@ -473,18 +495,21 @@ def analyze_results(result_files: List[Path], output_dir: Path, baseline_key: Op
                     final_masks_by_model[run_name] = masks_by_model[model_name][i]
                     final_token_positions_by_model[run_name] = token_positions_by_model[model_name][i]
                     if model_name in id_to_token_by_model:
-                        id_to_token_by_model[run_name] = id_to_token_by_model[model_name]
+                        id_to_token_by_model[run_name] = id_to_token_by_model[model_name] 
+                    final_total_tokens_by_model[run_name] = total_tokens_by_model.get(model_name)
                     final_model_order.append(run_name)
             elif num_runs == 1:
                 final_get_mask_timings[model_name] = get_mask_timings_by_model[model_name][0]
                 final_commit_timings[model_name] = commit_timings_by_model[model_name][0]
                 final_masks_by_model[model_name] = masks_by_model[model_name][0]
                 final_token_positions_by_model[model_name] = token_positions_by_model[model_name][0]
+                final_total_tokens_by_model[model_name] = total_tokens_by_model.get(model_name)
                 final_model_order.append(model_name)
 
     # Replace original data structures with the processed ones
     get_mask_timings_by_model = final_get_mask_timings
     commit_timings_by_model = final_commit_timings
+    total_tokens_by_model = final_total_tokens_by_model
     masks_by_model = final_masks_by_model
     token_positions_by_model = final_token_positions_by_model
     model_order = final_model_order
@@ -605,12 +630,14 @@ def analyze_results(result_files: List[Path], output_dir: Path, baseline_key: Op
         df,
         "get_mask() Timings",
         equivalence_info=equivalent_by_model,
-        mismatch_counts=mismatch_indices_by_model
+        mismatch_counts=mismatch_indices_by_model,
+        total_tokens_map=total_tokens_by_model
     )
 
     _generate_and_print_summary(
         df_commit,
-        "commit() Timings"
+        "commit() Timings",
+        total_tokens_map=total_tokens_by_model
     )
 
     print(f"\nBaseline for equivalence check: {baseline_name}")
