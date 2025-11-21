@@ -21,6 +21,7 @@ struct GrammarOptimizer<'a> {
     grammar: &'a mut GrammarDefinition,
     // Map from NonTerminal to its resolved Expr (if it has been converted)
     resolved_nts: HashMap<NonTerminal, Expr>,
+    interner: ExprInterner,
 }
 
 impl<'a> GrammarOptimizer<'a> {
@@ -28,6 +29,7 @@ impl<'a> GrammarOptimizer<'a> {
         Self {
             grammar,
             resolved_nts: HashMap::new(),
+            interner: ExprInterner::new(),
         }
     }
 
@@ -212,16 +214,16 @@ impl<'a> GrammarOptimizer<'a> {
                     }
                 }
                 
-                let prefix_expr = ExprBuilder::seq(prefix_exprs);
+                let prefix_expr = self.interner.seq(prefix_exprs);
                 if let Some(target) = target_scc_idx {
                     transitions[i].push((target, prefix_expr));
                 } else {
-                    finals[i] = ExprBuilder::choice(vec![finals[i].clone(), prefix_expr]);
+                    finals[i] = self.interner.choice(vec![finals[i].clone(), prefix_expr]);
                 }
             }
         }
         
-        let solved = self.solve_regular_system(scc_nts.len(), transitions, finals);
+        let solved = self.solve_regular_system(scc_nts.len(), &transitions, &finals);
         let mut result = HashMap::new();
         for (i, expr) in solved.into_iter().enumerate() {
             result.insert(scc_nts[i].clone(), Expr::Shared(Arc::new(expr)));
@@ -263,9 +265,9 @@ impl<'a> GrammarOptimizer<'a> {
                     }
                 }
                 
-                let suffix_expr = ExprBuilder::seq(suffix_exprs);
+                let suffix_expr = self.interner.seq(suffix_exprs);
                 let mut cache = HashMap::new();
-                let reversed_suffix = Self::reverse_expr(&suffix_expr, &mut cache);
+                let reversed_suffix = self.reverse_expr(&suffix_expr, &mut cache);
 
                 if let Some(target) = target_scc_idx {
                     // A -> B suffix.  Edge B --suffix--> A.
@@ -274,44 +276,46 @@ impl<'a> GrammarOptimizer<'a> {
                 } else {
                     // A -> suffix. Edge Start --suffix--> A.
                     // Map to Right-Linear: A --rev(suffix)--> Final.
-                    finals[i] = ExprBuilder::choice(vec![finals[i].clone(), reversed_suffix]);
+                    finals[i] = self.interner.choice(vec![finals[i].clone(), reversed_suffix]);
                 }
             }
         }
         
-        let solved = self.solve_regular_system(scc_nts.len(), transitions, finals);
+        let solved = self.solve_regular_system(scc_nts.len(), &transitions, &finals);
         let mut result = HashMap::new();
         let mut cache = HashMap::new();
         for (i, expr) in solved.into_iter().enumerate() {
-            result.insert(scc_nts[i].clone(), Expr::Shared(Arc::new(Self::reverse_expr(&expr, &mut cache))));
+            result.insert(scc_nts[i].clone(), Expr::Shared(Arc::new(self.reverse_expr(&expr, &mut cache))));
         }
         Some(result)
     }
 
-    fn reverse_expr(expr: &Expr, cache: &mut HashMap<usize, Expr>) -> Expr {
+    fn reverse_expr(&mut self, expr: &Expr, cache: &mut HashMap<usize, Expr>) -> Expr {
         match expr {
             Expr::U8Seq(bytes) => {
                 let mut b = bytes.clone();
                 b.reverse();
-                Expr::U8Seq(b)
+                self.interner.intern(Expr::U8Seq(b))
             },
             Expr::Seq(exprs) => {
                 let mut e = exprs.clone();
                 e.reverse();
-                let reversed_sub: Vec<Expr> = e.into_iter().map(|x| Self::reverse_expr(&x, cache)).collect();
-                Expr::Seq(reversed_sub)
+                let reversed_sub: Vec<Expr> = e.into_iter().map(|x| self.reverse_expr(&x, cache)).collect();
+                self.interner.seq(reversed_sub)
             },
             Expr::Choice(exprs) => {
-                let reversed_sub: Vec<Expr> = exprs.iter().map(|x| Self::reverse_expr(x, cache)).collect();
-                Expr::Choice(reversed_sub)
+                let reversed_sub: Vec<Expr> = exprs.iter().map(|x| self.reverse_expr(x, cache)).collect();
+                self.interner.choice(reversed_sub)
             },
-            Expr::Quantifier(inner, q) => Expr::Quantifier(Box::new(Self::reverse_expr(inner, cache)), q.clone()),
+            Expr::Quantifier(inner, q) => {
+                self.interner.intern(Expr::Quantifier(Box::new(self.reverse_expr(inner, cache)), q.clone()))
+            },
             Expr::Shared(inner) => {
                 let key = Arc::as_ptr(inner) as usize;
                 if let Some(cached) = cache.get(&key) {
                     return cached.clone();
                 }
-                let reversed = Expr::Shared(Arc::new(Self::reverse_expr(inner, cache)));
+                let reversed = Expr::Shared(Arc::new(self.reverse_expr(inner, cache)));
                 cache.insert(key, reversed.clone());
                 reversed
             },
@@ -319,16 +323,17 @@ impl<'a> GrammarOptimizer<'a> {
         }
     }
     
-    fn get_expr_for_terminal(&self, t: &Terminal) -> Expr {
+    fn get_expr_for_terminal(&mut self, t: &Terminal) -> Expr {
         let group_id = match t {
             Terminal::Literal(bytes) => self.grammar.literal_to_group_id.get_by_left(bytes),
             Terminal::RegexName(name) => self.grammar.regex_name_to_group_id.get_by_left(name),
         };
         let group_id = group_id.expect("Terminal not found in grammar");
-        self.grammar.group_id_to_expr.get(group_id).cloned().expect("Expr not found for group_id")
+        let expr = self.grammar.group_id_to_expr.get(group_id).cloned().expect("Expr not found for group_id");
+        self.interner.intern(expr)
     }
 
-    fn solve_regular_system(&self, n: usize, transitions: Vec<Vec<(usize, Expr)>>, finals: Vec<Expr>) -> Vec<Expr> {
+    fn solve_regular_system(&mut self, n: usize, transitions: &Vec<Vec<(usize, Expr)>>, finals: &Vec<Expr>) -> Vec<Expr> {
         // Kleene's algorithm / Floyd-Warshall for Regex
         // R[k][i][j] = paths from i to j using only intermediate nodes < k
         
@@ -336,17 +341,17 @@ impl<'a> GrammarOptimizer<'a> {
         
         for i in 0..n {
             // Initialize diagonal with Epsilon to allow zero-length paths (essential for correct loop optimization)
-            r[i][i] = ExprBuilder::choice(vec![r[i][i].clone(), Expr::Epsilon]);
+            r[i][i] = self.interner.choice(vec![r[i][i].clone(), Expr::Epsilon]);
             
-            for &(target, ref expr) in &transitions[i] {
-                r[i][target] = ExprBuilder::choice(vec![r[i][target].clone(), expr.clone()]);
+            for (target, expr) in &transitions[i] {
+                r[i][*target] = self.interner.choice(vec![r[i][*target].clone(), expr.clone()]);
             }
         }
         
         // Iterate k from 0 to n-1 (node being eliminated/considered as intermediate)
         for k in 0..n {
             let r_kk = r[k][k].clone();
-            let r_kk_star = ExprBuilder::star(r_kk);
+            let r_kk_star = self.interner.star(r_kk);
             
             let mut next_r = r.clone();
             
@@ -355,13 +360,13 @@ impl<'a> GrammarOptimizer<'a> {
                     let r_ik = &r[i][k];
                     let r_kj = &r[k][j];
                     
-                    let path_through_k = ExprBuilder::seq(vec![
+                    let path_through_k = self.interner.seq(vec![
                         r_ik.clone(),
                         r_kk_star.clone(),
                         r_kj.clone()
                     ]);
                     
-                    next_r[i][j] = ExprBuilder::choice(vec![r[i][j].clone(), path_through_k]);
+                    next_r[i][j] = self.interner.choice(vec![r[i][j].clone(), path_through_k]);
                 }
             }
             r = next_r;
@@ -372,10 +377,10 @@ impl<'a> GrammarOptimizer<'a> {
         for i in 0..n {
             let mut choices = Vec::new();
             for j in 0..n {
-                let path = ExprBuilder::seq(vec![r[i][j].clone(), finals[j].clone()]);
+                let path = self.interner.seq(vec![r[i][j].clone(), finals[j].clone()]);
                 choices.push(path);
             }
-            results.push(ExprBuilder::choice(choices));
+            results.push(self.interner.choice(choices));
         }
         results
     }
@@ -527,15 +532,37 @@ impl<'a> GrammarOptimizer<'a> {
     }
 }
 
-struct ExprBuilder;
+struct ExprInterner {
+    cache: HashMap<Expr, Expr>,
+}
 
-impl ExprBuilder {
-    fn seq(exprs: Vec<Expr>) -> Expr {
+impl ExprInterner {
+    fn new() -> Self {
+        Self {
+            cache: HashMap::new(),
+        }
+    }
+
+    fn intern(&mut self, expr: Expr) -> Expr {
+        if let Expr::Shared(_) = expr {
+            return expr;
+        }
+
+        if let Some(cached) = self.cache.get(&expr) {
+            return cached.clone();
+        }
+
+        let shared = Expr::Shared(Arc::new(expr.clone()));
+        self.cache.insert(expr, shared.clone());
+        shared
+    }
+
+    fn seq(&mut self, exprs: Vec<Expr>) -> Expr {
         let mut flat = Vec::new();
         for e in exprs {
             match e {
                 Expr::Seq(sub) => flat.extend(sub),
-                Expr::Epsilon => {},
+                Expr::Epsilon => {}
                 _ => flat.push(e),
             }
         }
@@ -544,11 +571,11 @@ impl ExprBuilder {
         } else if flat.len() == 1 {
             flat.into_iter().next().unwrap()
         } else {
-            Expr::Seq(flat)
+            self.intern(Expr::Seq(flat))
         }
     }
-    
-    fn choice(exprs: Vec<Expr>) -> Expr {
+
+    fn choice(&mut self, exprs: Vec<Expr>) -> Expr {
         let mut flat = Vec::new();
         for e in exprs {
             match e {
@@ -556,22 +583,30 @@ impl ExprBuilder {
                 _ => flat.push(e),
             }
         }
-        
+
         if flat.is_empty() {
-            Expr::Choice(vec![])
+            self.intern(Expr::Choice(vec![]))
         } else if flat.len() == 1 {
             flat.into_iter().next().unwrap()
         } else {
-            Expr::Choice(flat)
+            flat.sort();
+            flat.dedup();
+            if flat.len() == 1 {
+                flat.into_iter().next().unwrap()
+            } else {
+                self.intern(Expr::Choice(flat))
+            }
         }
     }
-    
-    fn star(expr: Expr) -> Expr {
+
+    fn star(&mut self, expr: Expr) -> Expr {
         match expr {
             Expr::Epsilon => Expr::Epsilon,
-            Expr::Quantifier(inner, QuantifierType::ZeroOrMore) => Expr::Quantifier(inner, QuantifierType::ZeroOrMore),
+            Expr::Quantifier(inner, QuantifierType::ZeroOrMore) => {
+                self.intern(Expr::Quantifier(inner, QuantifierType::ZeroOrMore))
+            }
             Expr::Choice(v) if v.is_empty() => Expr::Epsilon,
-            _ => Expr::Quantifier(Box::new(expr), QuantifierType::ZeroOrMore),
+            _ => self.intern(Expr::Quantifier(Box::new(expr), QuantifierType::ZeroOrMore)),
         }
     }
 }
