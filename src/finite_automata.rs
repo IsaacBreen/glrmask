@@ -838,85 +838,256 @@ impl Expr {
     fn handle_expr_cached(
         expr: Expr,
         nfa: &mut NFA,
-        mut current_state: usize,
+        current_state: usize,
         cache: &mut HashMap<usize, (usize, usize)>,
     ) -> usize {
-        match expr {
-            Expr::U8Seq(u8s) => {
-                let mut next_state = current_state;
-                for c in u8s {
-                    let new_state = nfa.add_state();
-                    nfa.add_transition(next_state, c, new_state);
-                    next_state = new_state;
-                }
-                next_state
-            }
-            Expr::U8Class(u8s) => {
-                let new_state = nfa.add_state();
-                for ch in u8s.iter() {
-                    nfa.add_transition(current_state, ch, new_state);
-                }
-                new_state
-            }
-            Expr::Shared(inner) => {
-                let key = Arc::as_ptr(&inner) as usize;
-                if let Some(&(entry, end)) = cache.get(&key) {
-                    nfa.add_epsilon_transition(current_state, entry);
-                    end
-                } else {
-                    let entry = nfa.add_state();
-                    let end = Self::handle_expr_cached((*inner).clone(), nfa, entry, cache);
-                    cache.insert(key, (entry, end));
-                    nfa.add_epsilon_transition(current_state, entry);
-                    end
-                }
-            }
-            Expr::Quantifier(expr, quantifier_type) => match quantifier_type {
-                QuantifierType::ZeroOrMore => {
-                    let entry_state = nfa.add_state();
-                    nfa.add_epsilon_transition(current_state, entry_state);
-                    let body_end_state = Self::handle_expr_cached(*expr, nfa, entry_state, cache);
-                    let exit_state = nfa.add_state();
-                    nfa.add_epsilon_transition(entry_state, exit_state);
-                    nfa.add_epsilon_transition(body_end_state, entry_state);
-                    nfa.add_epsilon_transition(body_end_state, exit_state);
-                    exit_state
-                }
-                QuantifierType::OneOrMore => {
-                    let entry_state = current_state;
-                    let body_end_state = Self::handle_expr_cached(*expr, nfa, entry_state, cache);
-                    let exit_state = nfa.add_state();
-                    nfa.add_epsilon_transition(body_end_state, entry_state);
-                    nfa.add_epsilon_transition(body_end_state, exit_state);
-                    exit_state
-                }
-                QuantifierType::ZeroOrOne => {
-                    let body_end_state =
-                        Self::handle_expr_cached(*expr, nfa, current_state, cache);
-                    let exit_state = nfa.add_state();
-                    nfa.add_epsilon_transition(current_state, exit_state);
-                    nfa.add_epsilon_transition(body_end_state, exit_state);
-                    exit_state
-                }
-            },
-            Expr::Choice(exprs) => {
-                let choice_end_state = nfa.add_state();
-
-                for expr in exprs {
-                    let expr_end_state = Self::handle_expr_cached(expr, nfa, current_state, cache);
-                    nfa.add_epsilon_transition(expr_end_state, choice_end_state);
-                }
-
-                choice_end_state
-            }
-            Expr::Seq(exprs) => {
-                for expr in exprs {
-                    current_state = Self::handle_expr_cached(expr, nfa, current_state, cache);
-                }
-                current_state
-            }
-            Expr::Epsilon => current_state,
+        enum FrameState {
+            Start,
+            Seq { current_state: usize },
+            Choice { end_state: usize },
+            Shared { key: usize, entry: usize },
+            Quantifier { q_type: QuantifierType, entry: usize },
         }
+
+        struct Frame {
+            expr: Expr,
+            start_state: usize,
+            state: FrameState,
+        }
+
+        let mut stack = vec![Frame {
+            expr,
+            start_state: current_state,
+            state: FrameState::Start,
+        }];
+        let mut return_value: Option<usize> = None;
+
+        while let Some(frame) = stack.pop() {
+            let Frame {
+                mut expr,
+                start_state,
+                mut state,
+            } = frame;
+            match state {
+                FrameState::Start => match expr {
+                    Expr::U8Seq(ref bytes) => {
+                        let mut next = start_state;
+                        for &b in bytes {
+                            let new = nfa.add_state();
+                            nfa.add_transition(next, b, new);
+                            next = new;
+                        }
+                        return_value = Some(next);
+                    }
+                    Expr::U8Class(ref set) => {
+                        let new = nfa.add_state();
+                        for b in set.iter() {
+                            nfa.add_transition(start_state, b, new);
+                        }
+                        return_value = Some(new);
+                    }
+                    Expr::Epsilon => {
+                        return_value = Some(start_state);
+                    }
+                    Expr::Shared(ref inner) => {
+                        let key = Arc::as_ptr(inner) as usize;
+                        if let Some(&(entry, end)) = cache.get(&key) {
+                            nfa.add_epsilon_transition(start_state, entry);
+                            return_value = Some(end);
+                        } else {
+                            let entry = nfa.add_state();
+                            nfa.add_epsilon_transition(start_state, entry);
+                            state = FrameState::Shared { key, entry };
+                            stack.push(Frame {
+                                expr: Expr::Epsilon, // Placeholder
+                                start_state,
+                                state,
+                            });
+                            stack.push(Frame {
+                                expr: (**inner).clone(),
+                                start_state: entry,
+                                state: FrameState::Start,
+                            });
+                        }
+                    }
+                    Expr::Seq(mut exprs) => {
+                        if exprs.is_empty() {
+                            return_value = Some(start_state);
+                        } else {
+                            exprs.reverse();
+                            let first = exprs.pop().unwrap();
+                            state = FrameState::Seq {
+                                current_state: start_state,
+                            };
+                            stack.push(Frame {
+                                expr: Expr::Seq(exprs),
+                                start_state,
+                                state,
+                            });
+                            stack.push(Frame {
+                                expr: first,
+                                start_state,
+                                state: FrameState::Start,
+                            });
+                        }
+                    }
+                    Expr::Choice(mut exprs) => {
+                        let end_state = nfa.add_state();
+                        if exprs.is_empty() {
+                            return_value = Some(end_state);
+                        } else {
+                            exprs.reverse();
+                            let first = exprs.pop().unwrap();
+                            state = FrameState::Choice { end_state };
+                            stack.push(Frame {
+                                expr: Expr::Choice(exprs),
+                                start_state,
+                                state,
+                            });
+                            stack.push(Frame {
+                                expr: first,
+                                start_state,
+                                state: FrameState::Start,
+                            });
+                        }
+                    }
+                    Expr::Quantifier(inner, q_type) => match q_type {
+                        QuantifierType::ZeroOrMore => {
+                            let entry = nfa.add_state();
+                            nfa.add_epsilon_transition(start_state, entry);
+                            state = FrameState::Quantifier {
+                                q_type: QuantifierType::ZeroOrMore,
+                                entry,
+                            };
+                            stack.push(Frame {
+                                expr: Expr::Epsilon,
+                                start_state,
+                                state,
+                            });
+                            stack.push(Frame {
+                                expr: *inner,
+                                start_state: entry,
+                                state: FrameState::Start,
+                            });
+                        }
+                        QuantifierType::OneOrMore => {
+                            let entry = start_state;
+                            state = FrameState::Quantifier {
+                                q_type: QuantifierType::OneOrMore,
+                                entry,
+                            };
+                            stack.push(Frame {
+                                expr: Expr::Epsilon,
+                                start_state,
+                                state,
+                            });
+                            stack.push(Frame {
+                                expr: *inner,
+                                start_state: entry,
+                                state: FrameState::Start,
+                            });
+                        }
+                        QuantifierType::ZeroOrOne => {
+                            state = FrameState::Quantifier {
+                                q_type: QuantifierType::ZeroOrOne,
+                                entry: start_state,
+                            };
+                            stack.push(Frame {
+                                expr: Expr::Epsilon,
+                                start_state,
+                                state,
+                            });
+                            stack.push(Frame {
+                                expr: *inner,
+                                start_state,
+                                state: FrameState::Start,
+                            });
+                        }
+                    },
+                },
+                FrameState::Seq { current_state } => {
+                    let ret = return_value.take().expect("Seq child must return value");
+                    let next_state = ret;
+                    if let Expr::Seq(mut exprs) = expr {
+                        if let Some(next_expr) = exprs.pop() {
+                            state = FrameState::Seq {
+                                current_state: next_state,
+                            };
+                            stack.push(Frame {
+                                expr: Expr::Seq(exprs),
+                                start_state,
+                                state,
+                            });
+                            stack.push(Frame {
+                                expr: next_expr,
+                                start_state: next_state,
+                                state: FrameState::Start,
+                            });
+                        } else {
+                            return_value = Some(next_state);
+                        }
+                    } else {
+                        panic!("FrameState::Seq but expr is not Seq")
+                    }
+                }
+                FrameState::Choice { end_state } => {
+                    let ret = return_value.take().expect("Choice child must return value");
+                    nfa.add_epsilon_transition(ret, end_state);
+
+                    if let Expr::Choice(mut exprs) = expr {
+                        if let Some(next_expr) = exprs.pop() {
+                            state = FrameState::Choice { end_state };
+                            stack.push(Frame {
+                                expr: Expr::Choice(exprs),
+                                start_state,
+                                state,
+                            });
+                            stack.push(Frame {
+                                expr: next_expr,
+                                start_state,
+                                state: FrameState::Start,
+                            });
+                        } else {
+                            return_value = Some(end_state);
+                        }
+                    } else {
+                        panic!("FrameState::Choice but expr is not Choice")
+                    }
+                }
+                FrameState::Shared { key, entry } => {
+                    let ret = return_value.take().expect("Shared child must return value");
+                    cache.insert(key, (entry, ret));
+                    return_value = Some(ret);
+                }
+                FrameState::Quantifier { q_type, entry } => {
+                    let body_end = return_value
+                        .take()
+                        .expect("Quantifier child must return value");
+                    match q_type {
+                        QuantifierType::ZeroOrMore => {
+                            let exit = nfa.add_state();
+                            nfa.add_epsilon_transition(entry, exit);
+                            nfa.add_epsilon_transition(body_end, entry);
+                            nfa.add_epsilon_transition(body_end, exit);
+                            return_value = Some(exit);
+                        }
+                        QuantifierType::OneOrMore => {
+                            let exit = nfa.add_state();
+                            nfa.add_epsilon_transition(body_end, entry);
+                            nfa.add_epsilon_transition(body_end, exit);
+                            return_value = Some(exit);
+                        }
+                        QuantifierType::ZeroOrOne => {
+                            let exit = nfa.add_state();
+                            nfa.add_epsilon_transition(start_state, exit);
+                            nfa.add_epsilon_transition(body_end, exit);
+                            return_value = Some(exit);
+                        }
+                    }
+                }
+            }
+        }
+        return_value.expect("Stack empty but no return value")
     }
 
     fn handle_expr(expr: Expr, nfa: &mut NFA, mut current_state: usize) -> usize {
