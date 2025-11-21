@@ -868,4 +868,53 @@ mod tests {
         use crate::interface::CompiledGrammar;
         let _ = CompiledGrammar::from_definition(std::sync::Arc::new(grammar));
     }
+
+    #[test]
+    fn test_simple_recursion_optimization() {
+        // S ::= "a" S | "b"
+        // Should optimize to S ::= "a"* "b"
+        // If the bug exists, it might optimize to S ::= "a"+ "b" (missing the zero-loop case)
+        
+        let grammar_exprs = vec![
+            ("start".to_string(), GrammarExpr::Ref("S".to_string())),
+            ("S".to_string(), GrammarExpr::Choice(vec![
+                GrammarExpr::Sequence(vec![
+                    GrammarExpr::Literal(b"a".to_vec()),
+                    GrammarExpr::Ref("S".to_string()),
+                ]),
+                GrammarExpr::Literal(b"b".to_vec()),
+            ])),
+        ];
+        
+        let mut grammar = GrammarDefinition::from_exprs(grammar_exprs, vec![]).unwrap();
+        optimize_grammar(&mut grammar);
+        
+        // Check the generated regex for S
+        let gid = grammar.regex_name_to_group_id.get_by_left("S").expect("S should be optimized");
+        let expr = grammar.group_id_to_expr.get(gid).unwrap();
+        
+        println!("Optimized Expr: {:?}", expr);
+        
+        // We expect the structure to allow matching "b" (zero "a"s).
+        use crate::finite_automata::ExprGroups;
+        let regex = ExprGroups {
+            groups: vec![crate::finite_automata::ExprGroup {
+                expr: expr.clone(),
+                is_non_greedy: false,
+            }],
+        }.build();
+        
+        let dfa = &regex.dfa;
+        let mut current_state = dfa.start_state;
+        let input = b"b";
+        for &byte in input {
+            if let Some(&next) = dfa.states[current_state].transitions.get(byte) {
+                current_state = next;
+            } else {
+                panic!("DFA rejected input 'b' at byte {}", byte);
+            }
+        }
+        
+        assert!(dfa.states[current_state].finalizers.contains(&0), "DFA did not accept 'b'");
+    }
 }
