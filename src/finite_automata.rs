@@ -2,7 +2,7 @@ use crate::datastructures::char_transitions::CharTransitions;
 use crate::datastructures::frozenset::FrozenSet;
 use crate::datastructures::u8set::U8Set;
 use crate::json_serialization::{JSONConvertible, JSONNode};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::collections::BTreeMap as StdMap;
 use std::collections::HashMap;
 use std::fmt::{Debug, Display, Formatter};
@@ -1198,36 +1198,56 @@ impl NFA {
     }
 
     fn compute_epsilon_closures(&self) -> Vec<Vec<usize>> {
-        let num_states = self.states.len();
-        let mut closures = Vec::with_capacity(num_states);
-        let mut visited = vec![false; num_states];
-        let mut stack = Vec::new();
-        let mut closure_vec = Vec::new();
+        let n = self.states.len();
 
-        for i in 0..num_states {
-            stack.push(i);
-            visited[i] = true;
-            closure_vec.push(i);
+        // None = not computed yet
+        let mut memo: Vec<Option<Vec<usize>>> = vec![None; n];
 
-            while let Some(u) = stack.pop() {
-                for &v in &self.states[u].epsilon_transitions {
-                    if !visited[v] {
+        fn compute_for(
+            s: usize,
+            states: &[NFAState],
+            memo: &mut Vec<Option<Vec<usize>>>
+        ) -> Vec<usize> {
+
+            if let Some(cached) = &memo[s] {
+                return cached.clone();
+            }
+
+            let mut stack = VecDeque::new();
+            let mut visited = vec![false; states.len()];
+            let mut closure = Vec::new();
+
+            stack.push_back(s);
+            visited[s] = true;
+
+            while let Some(u) = stack.pop_front() {
+                closure.push(u);
+
+                for &v in &states[u].epsilon_transitions {
+                    // ⚡ If closure(v) computed, union it directly
+                    if let Some(ref sub) = memo[v] {
+                        for &x in sub {
+                            if !visited[x] {
+                                visited[x] = true;
+                                stack.push_back(x);
+                            }
+                        }
+                    } else if !visited[v] {
                         visited[v] = true;
-                        stack.push(v);
-                        closure_vec.push(v);
+                        stack.push_back(v);
                     }
                 }
             }
 
-            closure_vec.sort_unstable();
-            closures.push(closure_vec.clone());
-
-            for &v in &closure_vec {
-                visited[v] = false;
-            }
-            closure_vec.clear();
+            closure.sort_unstable();
+            memo[s] = Some(closure.clone());
+            closure
         }
-        closures
+
+        // Compute all closures using memoized recursion
+        (0..n)
+            .map(|i| compute_for(i, &self.states, &mut memo))
+            .collect()
     }
 
     pub fn to_dfa(self) -> DFA {
