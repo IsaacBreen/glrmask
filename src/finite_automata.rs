@@ -1194,6 +1194,101 @@ impl NFA {
         let savings_compact = (current_trans_data_used as isize) - (compact_total_size as isize);
         println!("  [Savings] Compact Transitions: {:.2} MB (current: {:.2} MB, compacted: {:.2} MB)",
             savings_compact as f64 / 1024.0 / 1024.0, to_mb(current_trans_data_used), to_mb(compact_total_size));
+
+        if num_states > 0 {
+            let mut disc = vec![-1i32; num_states];
+            let mut low = vec![-1i32; num_states];
+            let mut on_stack = vec![false; num_states];
+            let mut scc_stack: Vec<usize> = Vec::new();
+            let mut time = 0i32;
+            let mut sccs: Vec<Vec<usize>> = Vec::new();
+
+            // Stack for iterative DFS: (node, neighbor_iterator)
+            let mut dfs_stack: Vec<(usize, std::vec::IntoIter<usize>)> = Vec::new();
+
+            for i in 0..num_states {
+                if disc[i] == -1 {
+                    // Start DFS from this unvisited node
+                    let mut neighbors: Vec<usize> = self.states[i].epsilon_transitions.clone();
+                    neighbors
+                        .extend(self.states[i].transitions.iter().map(|&(_, target)| target));
+                    dfs_stack.push((i, neighbors.into_iter()));
+
+                    while let Some((u, mut neighbors_iter)) = dfs_stack.pop() {
+                        // First time we see this node on the current DFS path
+                        if disc[u] == -1 {
+                            disc[u] = time;
+                            low[u] = time;
+                            time += 1;
+                            scc_stack.push(u);
+                            on_stack[u] = true;
+                        }
+
+                        let mut found_unvisited_neighbor = false;
+                        while let Some(v) = neighbors_iter.next() {
+                            if disc[v] == -1 {
+                                // Found an unvisited neighbor, descend into it.
+                                // First, push the current node `u` back onto the stack with its remaining neighbors.
+                                dfs_stack.push((u, neighbors_iter));
+
+                                // Then, push the new node `v` to be processed next.
+                                let mut v_neighbors: Vec<usize> =
+                                    self.states[v].epsilon_transitions.clone();
+                                v_neighbors.extend(
+                                    self.states[v].transitions.iter().map(|&(_, target)| target),
+                                );
+                                dfs_stack.push((v, v_neighbors.into_iter()));
+
+                                found_unvisited_neighbor = true;
+                                break;
+                            } else if on_stack[v] {
+                                // Found a back edge to a node on the current DFS stack.
+                                low[u] = low[u].min(disc[v]);
+                            }
+                        }
+
+                        if found_unvisited_neighbor {
+                            // The loop will continue with the new node `v`.
+                            continue;
+                        }
+
+                        // If we get here, all of `u`'s neighbors have been visited.
+                        // We are backtracking from `u`.
+                        if low[u] == disc[u] {
+                            // `u` is the root of an SCC. Pop the SCC from the scc_stack.
+                            let mut scc = Vec::new();
+                            while let Some(w) = scc_stack.pop() {
+                                on_stack[w] = false;
+                                scc.push(w);
+                                if u == w {
+                                    break;
+                                }
+                            }
+                            sccs.push(scc);
+                        }
+
+                        // After finishing with `u`, update its parent's low-link value.
+                        // The parent is the node now at the top of the dfs_stack.
+                        if let Some((parent, _)) = dfs_stack.last() {
+                            low[*parent] = low[*parent].min(low[u]);
+                        }
+                    }
+                }
+            }
+
+            let num_sccs = sccs.len();
+            let non_trivial_sccs: Vec<_> = sccs.iter().filter(|scc| scc.len() > 1).collect();
+            let num_non_trivial_sccs = non_trivial_sccs.len();
+            let total_states_in_non_trivial_sccs: usize =
+                non_trivial_sccs.iter().map(|scc| scc.len()).sum();
+            let avg_non_trivial_scc_size = if num_non_trivial_sccs > 0 {
+                total_states_in_non_trivial_sccs as f64 / num_non_trivial_sccs as f64
+            } else {
+                0.0
+            };
+            println!("  SCCs: {}, Non-trivial (size>1): {} ({} states, avg size {:.2})",
+                num_sccs, num_non_trivial_sccs, total_states_in_non_trivial_sccs, avg_non_trivial_scc_size);
+        }
         println!("-----------------");
     }
 
@@ -1243,111 +1338,6 @@ impl NFA {
         let total_epsilon_closure_sizes = epsilon_closures.iter().map(|closure| closure.len()).sum::<usize>();
         crate::debug!(5, "Total epsilon closure size: {}", total_epsilon_closure_sizes);
         crate::debug!(5, "Average epsilon closure size: {}", total_epsilon_closure_sizes as f64 / epsilon_closures.len() as f64);
-        {
-            // Compute Strongly Connected Components (SCCs) for the NFA graph for analysis.
-            let scc_start = std::time::Instant::now();
-            crate::debug!(5, "Computing NFA SCCs...");
-            let num_states = self.states.len();
-            if num_states > 0 {
-                let mut disc = vec![-1i32; num_states];
-                let mut low = vec![-1i32; num_states];
-                let mut on_stack = vec![false; num_states];
-                let mut scc_stack: Vec<usize> = Vec::new();
-                let mut time = 0i32;
-                let mut sccs: Vec<Vec<usize>> = Vec::new();
-
-                // Stack for iterative DFS: (node, neighbor_iterator)
-                let mut dfs_stack: Vec<(usize, std::vec::IntoIter<usize>)> = Vec::new();
-
-                for i in 0..num_states {
-                    if disc[i] == -1 {
-                        // Start DFS from this unvisited node
-                        let mut neighbors: Vec<usize> = self.states[i].epsilon_transitions.clone();
-                        neighbors
-                            .extend(self.states[i].transitions.iter().map(|&(_, target)| target));
-                        dfs_stack.push((i, neighbors.into_iter()));
-
-                        while let Some((u, mut neighbors_iter)) = dfs_stack.pop() {
-                            // First time we see this node on the current DFS path
-                            if disc[u] == -1 {
-                                disc[u] = time;
-                                low[u] = time;
-                                time += 1;
-                                scc_stack.push(u);
-                                on_stack[u] = true;
-                            }
-
-                            let mut found_unvisited_neighbor = false;
-                            while let Some(v) = neighbors_iter.next() {
-                                if disc[v] == -1 {
-                                    // Found an unvisited neighbor, descend into it.
-                                    // First, push the current node `u` back onto the stack with its remaining neighbors.
-                                    dfs_stack.push((u, neighbors_iter));
-
-                                    // Then, push the new node `v` to be processed next.
-                                    let mut v_neighbors: Vec<usize> =
-                                        self.states[v].epsilon_transitions.clone();
-                                    v_neighbors.extend(
-                                        self.states[v].transitions.iter().map(|&(_, target)| target),
-                                    );
-                                    dfs_stack.push((v, v_neighbors.into_iter()));
-
-                                    found_unvisited_neighbor = true;
-                                    break;
-                                } else if on_stack[v] {
-                                    // Found a back edge to a node on the current DFS stack.
-                                    low[u] = low[u].min(disc[v]);
-                                }
-                            }
-
-                            if found_unvisited_neighbor {
-                                // The loop will continue with the new node `v`.
-                                continue;
-                            }
-
-                            // If we get here, all of `u`'s neighbors have been visited.
-                            // We are backtracking from `u`.
-                            if low[u] == disc[u] {
-                                // `u` is the root of an SCC. Pop the SCC from the scc_stack.
-                                let mut scc = Vec::new();
-                                while let Some(w) = scc_stack.pop() {
-                                    on_stack[w] = false;
-                                    scc.push(w);
-                                    if u == w {
-                                        break;
-                                    }
-                                }
-                                sccs.push(scc);
-                            }
-
-                            // After finishing with `u`, update its parent's low-link value.
-                            // The parent is the node now at the top of the dfs_stack.
-                            if let Some((parent, _)) = dfs_stack.last() {
-                                low[*parent] = low[*parent].min(low[u]);
-                            }
-                        }
-                    }
-                }
-
-                // Calculate and print statistics
-                let num_sccs = sccs.len();
-                let non_trivial_sccs: Vec<_> = sccs.iter().filter(|scc| scc.len() > 1).collect();
-                let num_non_trivial_sccs = non_trivial_sccs.len();
-                let total_states_in_non_trivial_sccs: usize =
-                    non_trivial_sccs.iter().map(|scc| scc.len()).sum();
-                let avg_non_trivial_scc_size = if num_non_trivial_sccs > 0 {
-                    total_states_in_non_trivial_sccs as f64 / num_non_trivial_sccs as f64
-                } else {
-                    0.0
-                };
-
-                crate::debug!(5, "Computed NFA SCCs in {:.2?}", scc_start.elapsed());
-                crate::debug!(5, "NFA Total SCCs: {}", num_sccs);
-                crate::debug!(5, "NFA Non-trivial SCCs (size > 1): {}", num_non_trivial_sccs);
-                crate::debug!(5, "NFA Total states in non-trivial SCCs: {}", total_states_in_non_trivial_sccs);
-                crate::debug!(5, "NFA Average non-trivial SCC size: {:.2}", avg_non_trivial_scc_size);
-            }
-        }
 
         let start_closure = &epsilon_closures[self.start_state];
         let start_state_set = FrozenSet::from_iter(start_closure.iter().cloned());
