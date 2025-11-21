@@ -1097,6 +1097,63 @@ impl Expr {
     }
 }
 
+#[derive(Clone, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
+struct SCCBitSet {
+    words: Vec<u64>,
+}
+
+impl SCCBitSet {
+    fn new(capacity: usize) -> Self {
+        let n_words = (capacity + 63) / 64;
+        Self {
+            words: vec![0; n_words],
+        }
+    }
+
+    fn set(&mut self, idx: usize) {
+        let word_idx = idx / 64;
+        let bit_idx = idx % 64;
+        if word_idx < self.words.len() {
+            self.words[word_idx] |= 1 << bit_idx;
+        }
+    }
+
+    fn union_with(&mut self, other: &SCCBitSet) {
+        for (w_self, w_other) in self.words.iter_mut().zip(&other.words) {
+            *w_self |= *w_other;
+        }
+    }
+
+    fn iter_ones(&self) -> impl Iterator<Item = usize> + '_ {
+        self.words.iter().enumerate().flat_map(|(i, &w)| {
+            let mut word = w;
+            let base = i * 64;
+            std::iter::from_fn(move || {
+                if word == 0 {
+                    None
+                } else {
+                    let trailing = word.trailing_zeros();
+                    word &= !(1 << trailing);
+                    Some(base + trailing as usize)
+                }
+            })
+        })
+    }
+}
+
+struct SCCSystem {
+    start_scc: usize,
+    // Maps NFA state index -> SCC index
+    // state_to_scc: Vec<usize>, // Not strictly needed for DFA build after setup
+    // Transitive closure of epsilon reachability for each SCC
+    scc_reachability: Vec<SCCBitSet>,
+    // Aggregated non-epsilon transitions: scc_id -> list of (char, target_scc_id)
+    scc_transitions: Vec<Vec<(u8, usize)>>,
+    // Aggregated finalizers per SCC
+    scc_finalizers: Vec<BTreeSet<GroupID>>,
+    scc_non_greedy: Vec<BTreeSet<GroupID>>,
+}
+
 impl NFA {
     pub fn add_state(&mut self) -> usize {
         let new_index = self.states.len();
@@ -1292,69 +1349,183 @@ impl NFA {
         println!("-----------------");
     }
 
-    pub fn to_dfa(self) -> DFA {
-        let start_time = std::time::Instant::now();
-        let mut dfa_states: Vec<DFAState> = Vec::new();
-        let mut dfa_state_map: HashMap<FrozenSet<usize>, usize> = HashMap::new();
-        let mut worklist: Vec<FrozenSet<usize>> = Vec::new();
-
-        // Shared buffers for on-the-fly closure computation
-        let num_nfa_states = self.states.len();
-        let mut visited = vec![0u32; num_nfa_states];
-        let mut visited_gen = 0u32;
-        let mut stack = Vec::with_capacity(1024);
-
-        // Compute start state closure
-        visited_gen = visited_gen.wrapping_add(1);
-        if visited_gen == 0 { visited.fill(0); visited_gen = 1; }
+    fn compute_scc_system(&self) -> SCCSystem {
+        let num_states = self.states.len();
+        let mut disc = vec![-1i32; num_states];
+        let mut low = vec![-1i32; num_states];
+        let mut on_stack = vec![false; num_states];
+        let mut stack = Vec::new();
+        let mut time = 0;
         
-        let mut start_closure_vec = Vec::new();
-        stack.push(self.start_state);
-        visited[self.start_state] = visited_gen;
-        start_closure_vec.push(self.start_state);
+        // SCC accumulation
+        let mut sccs = Vec::new();
 
-        while let Some(u) = stack.pop() {
-            for &v in &self.states[u].epsilon_transitions {
-                if visited[v] != visited_gen {
-                    visited[v] = visited_gen;
-                    stack.push(v);
-                    start_closure_vec.push(v);
+        // Iterative Tarjan's
+        let mut call_stack = Vec::new();
+
+        for i in 0..num_states {
+            if disc[i] == -1 {
+                call_stack.push((i, 0)); // (node, neighbor_index)
+                
+                while let Some((u, next_neighbor_idx)) = call_stack.pop() {
+                    if next_neighbor_idx == 0 {
+                        // First visit
+                        disc[u] = time;
+                        low[u] = time;
+                        time += 1;
+                        stack.push(u);
+                        on_stack[u] = true;
+                    }
+
+                    let neighbors = &self.states[u].epsilon_transitions;
+                    if next_neighbor_idx < neighbors.len() {
+                        // Process next neighbor
+                        let v = neighbors[next_neighbor_idx];
+                        call_stack.push((u, next_neighbor_idx + 1)); // Resume u later
+                        
+                        if disc[v] == -1 {
+                            call_stack.push((v, 0)); // Recurse on v
+                        } else if on_stack[v] {
+                            low[u] = low[u].min(disc[v]);
+                        }
+                    } else {
+                        // All neighbors processed
+                        if let Some(&(parent, parent_neighbor_idx)) = call_stack.last() {
+                            // We are returning to parent, check low link
+                            // The parent pushed (parent, idx+1), so we are the child corresponding to idx.
+                            // Wait, simpler: if we just finished u, we look at the stack top *after* popping u.
+                            // But we just popped u. The new top is the parent.
+                            low[parent] = low[parent].min(low[u]);
+                        }
+
+                        if low[u] == disc[u] {
+                            let mut component = Vec::new();
+                            loop {
+                                let w = stack.pop().unwrap();
+                                on_stack[w] = false;
+                                component.push(w);
+                                if w == u { break; }
+                            }
+                            sccs.push(component);
+                        }
+                    }
                 }
             }
         }
-        start_closure_vec.sort_unstable();
 
-        let start_state_set = FrozenSet::from_iter(start_closure_vec.into_iter());
-        worklist.push(start_state_set.clone());
-        dfa_state_map.insert(start_state_set.clone(), 0);
-
-        let mut finalizers = BTreeSet::new();
-        let mut non_greedy_finalizers = BTreeSet::new();
-        for &state in start_state_set.iter() {
-            finalizers.extend(self.states[state].finalizers.iter().cloned());
-            non_greedy_finalizers.extend(self.states[state].non_greedy_finalizers.iter().cloned());
+        // Tarjan's outputs SCCs in reverse topological order (children before parents).
+        // For reachability (R[u] = {u} U R[v]), we can iterate simply in this order.
+        
+        let num_sccs = sccs.len();
+        let mut state_to_scc = vec![0; num_states];
+        for (idx, component) in sccs.iter().enumerate() {
+            for &state in component {
+                state_to_scc[state] = idx;
+            }
         }
 
-        dfa_states.push(DFAState {
-            transitions: CharTransitions::new(),
-            finalizers,
-            possible_future_group_ids: BTreeSet::new(),
-            group_id_to_u8set: BTreeMap::new(),
-        });
+        let mut scc_reachability = vec![SCCBitSet::new(num_sccs); num_sccs];
+        let mut scc_transitions = vec![Vec::new(); num_sccs];
+        let mut scc_finalizers = vec![BTreeSet::new(); num_sccs];
+        let mut scc_non_greedy = vec![BTreeSet::new(); num_sccs];
 
-        let mut max_subset_size = 0;
+        // Precompute properties for each SCC
+        for (scc_idx, component) in sccs.iter().enumerate() {
+            // 1. Self-reachability
+            scc_reachability[scc_idx].set(scc_idx);
+
+            // 2. Transitions & Finalizers
+            // Use a set to dedup transitions for this SCC
+            let mut transitions_set = BTreeSet::new(); 
+            
+            for &state_idx in component {
+                let state = &self.states[state_idx];
+                // Aggregate finalizers
+                scc_finalizers[scc_idx].extend(state.finalizers.iter().cloned());
+                scc_non_greedy[scc_idx].extend(state.non_greedy_finalizers.iter().cloned());
+
+                // Aggregate transitions
+                for &(byte, target_state) in &state.transitions {
+                    let target_scc = state_to_scc[target_state];
+                    transitions_set.insert((byte, target_scc));
+                }
+
+                // Accumulate reachability from epsilon edges leaving the SCC
+                for &target_state in &state.epsilon_transitions {
+                    let target_scc = state_to_scc[target_state];
+                    if target_scc != scc_idx {
+                        // Since we iterate in reverse topological order (leaves first), 
+                        // target_scc (child) has already been processed.
+                        // However, Tarjan's returns leaves first (bottom-up).
+                        // If A -> B, B is returned before A. 
+                        // So when processing A, B is already done.
+                        // We can union A's reachability with B's.
+                        // Clone is necessary as we can't borrow mutably and immutably from vec.
+                        let target_reach = scc_reachability[target_scc].clone();
+                        scc_reachability[scc_idx].union_with(&target_reach);
+                    }
+                }
+            }
+            scc_transitions[scc_idx] = transitions_set.into_iter().collect();
+        }
+
+        SCCSystem {
+            start_scc: state_to_scc[self.start_state],
+            scc_reachability,
+            scc_transitions,
+            scc_finalizers,
+            scc_non_greedy,
+        }
+    }
+
+    pub fn to_dfa(self) -> DFA {
+        let start_time = std::time::Instant::now();
+        
+        crate::debug!(5, "Computing SCC system...");
+        let scc_system = self.compute_scc_system();
+        crate::debug!(5, "Computed SCC system in {:.2?}", start_time.elapsed());
+
+        let mut dfa_states: Vec<DFAState> = Vec::new();
+        let mut dfa_state_map: HashMap<SCCBitSet, usize> = HashMap::new();
+        let mut worklist: Vec<SCCBitSet> = Vec::new();
+
+        // Initial state: Closure of start_scc
+        let start_set = scc_system.scc_reachability[scc_system.start_scc].clone();
+        
+        // Helper to create DFA state from SCC set
+        let create_dfa_state = |scc_set: &SCCBitSet| -> DFAState {
+            let mut finalizers = BTreeSet::new();
+            // We won't populate non_greedy_finalizers here as DFA struct doesn't store them per state
+            // But we use them to calculate behavior if needed. 
+            // Actually DFAState has `finalizers` and `possible_future...`.
+            // The DFA itself has `non_greedy_finalizers`.
+            
+            for scc_idx in scc_set.iter_ones() {
+                finalizers.extend(scc_system.scc_finalizers[scc_idx].iter().cloned());
+            }
+            DFAState {
+                transitions: CharTransitions::new(),
+                finalizers,
+                possible_future_group_ids: BTreeSet::new(),
+                group_id_to_u8set: BTreeMap::new(),
+            }
+        };
+
+        dfa_states.push(create_dfa_state(&start_set));
+        dfa_state_map.insert(start_set.clone(), 0);
+        worklist.push(start_set);
+
         let mut next_log_threshold = 20_000;
-        let mut transition_targets: Vec<Vec<usize>> = vec![Vec::with_capacity(16); 256];
+        // Using 256 buckets for transitions
+        let mut transition_targets: Vec<Vec<usize>> = vec![Vec::new(); 256];
         let mut used_inputs: Vec<u8> = Vec::with_capacity(256);
         let mut seen_input: [bool; 256] = [false; 256];
 
+        let scc_count = scc_system.scc_reachability.len();
+
         while let Some(current_set) = worklist.pop() {
-            let current_subset_len = current_set.len();
-            if current_subset_len > max_subset_size {
-                max_subset_size = current_subset_len;
-            }
             if dfa_states.len() >= next_log_threshold {
-                crate::debug!(6, "DFA progress: {} states, worklist {}, subset size {} (max {}), elapsed {:.2?}", dfa_states.len(), worklist.len(), current_subset_len, max_subset_size, start_time.elapsed());
+                crate::debug!(6, "DFA progress: {} states, worklist {}, elapsed {:.2?}", dfa_states.len(), worklist.len(), start_time.elapsed());
                 next_log_threshold += 20_000;
             }
 
@@ -1362,74 +1533,35 @@ impl NFA {
                 .get(&current_set)
                 .expect("DFA state set not found in map");
 
-            for &state in current_set.iter() {
-                for &(input, next_state) in &self.states[state].transitions {
+            // Iterate active SCCs
+            for scc_idx in current_set.iter_ones() {
+                for &(input, next_scc) in &scc_system.scc_transitions[scc_idx] {
                     let idx = input as usize;
                     if !seen_input[idx] {
                         seen_input[idx] = true;
                         used_inputs.push(input);
                     }
-                    transition_targets[idx].push(next_state);
+                    transition_targets[idx].push(next_scc);
                 }
             }
 
             for &input_u8 in &used_inputs {
-                let next_states = &transition_targets[input_u8 as usize];
-                if next_states.is_empty() {
-                    continue;
+                let next_scc_seeds = &transition_targets[input_u8 as usize];
+                
+                // Compute union of reachabilities
+                let mut next_set = SCCBitSet::new(scc_count);
+                for &seed_scc in next_scc_seeds {
+                    next_set.union_with(&scc_system.scc_reachability[seed_scc]);
                 }
-
-                // Compute epsilon closure on-the-fly
-                visited_gen = visited_gen.wrapping_add(1);
-                if visited_gen == 0 { visited.fill(0); visited_gen = 1; }
-
-                let mut closure_vec = Vec::new();
-                // Initialize BFS with direct transition targets
-                for &next_state in next_states {
-                    if visited[next_state] != visited_gen {
-                        visited[next_state] = visited_gen;
-                        stack.push(next_state);
-                        closure_vec.push(next_state);
-                    }
-                }
-
-                while let Some(u) = stack.pop() {
-                    for &v in &self.states[u].epsilon_transitions {
-                        if visited[v] != visited_gen {
-                            visited[v] = visited_gen;
-                            stack.push(v);
-                            closure_vec.push(v);
-                        }
-                    }
-                }
-
-                // Note: FrozenSet::from_iter sorts and dedups, so we don't need to do it here,
-                // though visited logic ensures uniqueness already.
-                let frozen_closure: FrozenSet<usize> = FrozenSet::from_iter(closure_vec.into_iter());
 
                 let next_dfa_state =
-                    if let Some(&existing_state) = dfa_state_map.get(&frozen_closure) {
+                    if let Some(&existing_state) = dfa_state_map.get(&next_set) {
                         existing_state
                     } else {
                         let new_state_index = dfa_states.len();
-                        dfa_state_map.insert(frozen_closure.clone(), new_state_index);
-                        worklist.push(frozen_closure.clone());
-
-                        let mut new_finalizers = BTreeSet::new();
-                        let mut new_non_greedy_finalizers = BTreeSet::new();
-                        for &state in frozen_closure.iter() {
-                            new_finalizers.extend(self.states[state].finalizers.iter().cloned());
-                            new_non_greedy_finalizers
-                                .extend(self.states[state].non_greedy_finalizers.iter().cloned());
-                        }
-
-                        dfa_states.push(DFAState {
-                            transitions: CharTransitions::new(),
-                            finalizers: new_finalizers,
-                            possible_future_group_ids: BTreeSet::new(),
-                            group_id_to_u8set: BTreeMap::new(),
-                        });
-
+                        dfa_states.push(create_dfa_state(&next_set));
+                        dfa_state_map.insert(next_set.clone(), new_state_index);
+                        worklist.push(next_set);
                         new_state_index
                     };
 
@@ -1446,7 +1578,7 @@ impl NFA {
             used_inputs.clear();
         }
 
-        crate::debug!(5, "DFA main loop complete. Total states: {}, Max subset size: {}, Time: {:.2?}", dfa_states.len(), max_subset_size, start_time.elapsed());
+        crate::debug!(5, "DFA main loop complete. Total states: {}, Time: {:.2?}", dfa_states.len(), start_time.elapsed());
 
         let mut dfa = DFA {
             states: dfa_states,
