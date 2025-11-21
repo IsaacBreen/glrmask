@@ -1111,39 +1111,37 @@ impl NFA {
         self.states[from].epsilon_transitions.push(to);
     }
 
-    /// Epsilon-closure of a set of NFA states.
-    fn epsilon_closure_set<I>(&self, states: I) -> BTreeSet<usize>
-    where
-        I: IntoIterator<Item = usize>,
-    {
-        let mut closure = BTreeSet::new();
+    fn compute_epsilon_closures(&self) -> Vec<Vec<usize>> {
+        let num_states = self.states.len();
+        let mut closures = Vec::with_capacity(num_states);
+        let mut visited = vec![false; num_states];
         let mut stack = Vec::new();
+        let mut closure_vec = Vec::new();
 
-        for s in states {
-            if closure.insert(s) {
-                stack.push(s);
-            }
-        }
+        for i in 0..num_states {
+            stack.push(i);
+            visited[i] = true;
+            closure_vec.push(i);
 
-        while let Some(state) = stack.pop() {
-            for &next in &self.states[state].epsilon_transitions {
-                if closure.insert(next) {
-                    stack.push(next);
+            while let Some(u) = stack.pop() {
+                for &v in &self.states[u].epsilon_transitions {
+                    if !visited[v] {
+                        visited[v] = true;
+                        stack.push(v);
+                        closure_vec.push(v);
+                    }
                 }
             }
+
+            closure_vec.sort_unstable();
+            closures.push(closure_vec.clone());
+
+            for &v in &closure_vec {
+                visited[v] = false;
+            }
+            closure_vec.clear();
         }
-
-        closure
-    }
-
-    fn epsilon_closure(&self, state: usize) -> BTreeSet<usize> {
-        self.epsilon_closure_set(std::iter::once(state))
-    }
-
-    fn compute_epsilon_closures(&self) -> Vec<Vec<usize>> {
-        (0..self.states.len())
-            .map(|state| self.epsilon_closure(state).into_iter().collect())
-            .collect()
+        closures
     }
 
     pub fn to_dfa(self) -> DFA {
@@ -1213,13 +1211,13 @@ impl NFA {
                     continue;
                 }
 
-                let mut closure = BTreeSet::new();
+                let mut closure_vec = Vec::new();
                 for &next_state in next_states {
-                    for &s in &epsilon_closures[next_state] {
-                        closure.insert(s);
-                    }
+                    closure_vec.extend_from_slice(&epsilon_closures[next_state]);
                 }
-                let frozen_closure: FrozenSet<usize> = FrozenSet::from(closure);
+                closure_vec.sort_unstable();
+                closure_vec.dedup();
+                let frozen_closure: FrozenSet<usize> = FrozenSet::from_iter(closure_vec);
 
                 let next_dfa_state =
                     if let Some(&existing_state) = dfa_state_map.get(&frozen_closure) {
