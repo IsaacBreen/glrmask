@@ -136,6 +136,24 @@ impl<'a> GrammarOptimizer<'a> {
     }
 
     fn try_convert_scc(&self, scc_nts: &[NonTerminal]) -> Option<HashMap<NonTerminal, Expr>> {
+        // Skip single-node SCCs with no self-recursion, they're just pass-through rules
+        if scc_nts.len() == 1 {
+            let nt = &scc_nts[0];
+            let productions: Vec<&Production> = self.grammar.productions.iter().filter(|p| &p.lhs == nt).collect();
+            
+            // Check if any production has self-recursion
+            let has_self_recursion = productions.iter().any(|prod| {
+                prod.rhs.iter().any(|sym| {
+                    matches!(sym, Symbol::NonTerminal(ref other) if other == nt)
+                })
+            });
+            
+            if !has_self_recursion {
+                println!("Skipping non-recursive single-node SCC: {}", nt);
+                return None;
+            }
+        }
+        
         if let Some(res) = self.try_convert_scc_right_linear(scc_nts) {
             return Some(res);
         }
@@ -433,6 +451,7 @@ impl<'a> GrammarOptimizer<'a> {
             for sym in &prod.rhs {
                 if let Symbol::Terminal(t) = sym {
                     let gid = self.get_group_id(t);
+                    println!("Found used terminal {:?} with gid {}", t, gid);
                     used_groups.insert(gid);
                 }
             }
@@ -441,6 +460,8 @@ impl<'a> GrammarOptimizer<'a> {
         if let Some(gid) = self.grammar.ignore_terminal_id {
              used_groups.insert(gid.0);
         }
+
+        println!("Used groups before cleanup: {:?}", used_groups);
 
         // Create mapping from old_gid -> new_gid
         let mut old_to_new = HashMap::new();
