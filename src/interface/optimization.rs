@@ -163,12 +163,16 @@ impl<'a> GrammarOptimizer<'a> {
                         }
                         Symbol::NonTerminal(ref other_nt) => {
                             if let Some(&local_idx) = nt_to_local_idx.get(other_nt) {
-                                if idx != prod.rhs.len() - 1 { return None; }
+                                if idx != prod.rhs.len() - 1 { 
+                                    println!("Right-linear check failed: NT {} is not last in production for {}", other_nt, nt);
+                                    return None; 
+                                }
                                 target_scc_idx = Some(local_idx);
                             } else {
                                 if let Some(expr) = self.resolved_nts.get(other_nt) {
                                     prefix_exprs.push(expr.clone());
                                 } else {
+                                    println!("Right-linear check failed: Unresolved dependency {} in production for {}", other_nt, nt);
                                     return None;
                                 }
                             }
@@ -299,6 +303,9 @@ impl<'a> GrammarOptimizer<'a> {
         let mut r: Vec<Vec<Expr>> = vec![vec![Expr::Choice(vec![]); n]; n];
         
         for i in 0..n {
+            // Initialize diagonal with Epsilon to allow zero-length paths (essential for correct loop optimization)
+            r[i][i] = ExprBuilder::choice(vec![r[i][i].clone(), Expr::Epsilon]);
+            
             for &(target, ref expr) in &transitions[i] {
                 r[i][target] = ExprBuilder::choice(vec![r[i][target].clone(), expr.clone()]);
             }
@@ -347,12 +354,15 @@ impl<'a> GrammarOptimizer<'a> {
         // Allocate group IDs and create Terminals
         let mut next_group_id = self.grammar.group_id_to_expr.keys().max().map(|&x| x + 1).unwrap_or(0);
         
+        println!("Rewriting grammar. Resolved NTs: {:?}", self.resolved_nts.keys());
+        
         for (nt, expr) in &self.resolved_nts {
             let mut final_name = nt.0.clone();
             while self.grammar.regex_name_to_group_id.contains_left(&final_name) {
                 final_name.push('_');
             }
             
+            println!("Creating new terminal for {}: {}", nt, final_name);
             self.grammar.regex_name_to_group_id.insert(final_name.clone(), next_group_id);
             self.grammar.group_id_to_expr.insert(next_group_id, expr.clone());
             
