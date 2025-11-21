@@ -457,12 +457,6 @@ impl GrammarDefinition {
 }
 
 impl GrammarDefinition {
-    pub fn optimize(&mut self) {
-        crate::interface::optimization::optimize_grammar(self);
-    }
-}
-
-impl GrammarDefinition {
     /// Generates a unique indexed name (e.g., Base[0], Base[1]) avoiding collisions.
     fn generate_unique_indexed_name(
         base_name: &str,

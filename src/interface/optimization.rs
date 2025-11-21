@@ -6,6 +6,12 @@ use crate::interface::{GrammarDefinition, GrammarExpr};
 
 pub fn optimize_grammar(grammar: &mut GrammarDefinition) {}
 
+impl GrammarDefinition {
+    pub fn optimize(&mut self) {
+        optimize_grammar(self);
+    }
+}
+
 fn get_expr_for_terminal(t: &Terminal, grammar: &GrammarDefinition) -> Expr {
     let group_id_opt = match t {
         Terminal::Literal(bytes) => grammar.literal_to_group_id.get_by_left(bytes),
