@@ -4,6 +4,7 @@ use bimap::BiBTreeMap;
 use crate::finite_automata::{Expr, QuantifierType};
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::interface::{GrammarDefinition, GrammarExpr};
+use crate::types::TerminalID;
 
 pub fn optimize_grammar(grammar: &mut GrammarDefinition) {
     let mut optimizer = GrammarOptimizer::new(grammar);
@@ -416,7 +417,7 @@ impl<'a> GrammarOptimizer<'a> {
     }
 
     fn cleanup_terminals(&mut self) {
-        let mut used_groups = HashSet::new();
+        let mut used_groups = BTreeSet::new();
         
         for prod in &self.grammar.productions {
             for sym in &prod.rhs {
@@ -431,33 +432,52 @@ impl<'a> GrammarOptimizer<'a> {
              used_groups.insert(gid.0);
         }
 
-        // Filter group_id_to_expr
-        self.grammar.group_id_to_expr.retain(|k, _| used_groups.contains(k));
+        // Create mapping from old_gid -> new_gid
+        let mut old_to_new = HashMap::new();
+        for (new_id, old_id) in used_groups.iter().enumerate() {
+            old_to_new.insert(*old_id, new_id);
+        }
+
+        // Update group_id_to_expr
+        let mut new_group_id_to_expr = BTreeMap::new();
+        for (old_id, expr) in &self.grammar.group_id_to_expr {
+            if let Some(&new_id) = old_to_new.get(old_id) {
+                new_group_id_to_expr.insert(new_id, expr.clone());
+            }
+        }
+        self.grammar.group_id_to_expr = new_group_id_to_expr;
         
-        // Filter maps
+        // Update maps
         let mut new_literal = BiBTreeMap::new();
         for (k, v) in &self.grammar.literal_to_group_id {
-            if used_groups.contains(v) {
-                new_literal.insert(k.clone(), *v);
+            if let Some(&new_id) = old_to_new.get(v) {
+                new_literal.insert(k.clone(), new_id);
             }
         }
         self.grammar.literal_to_group_id = new_literal;
         
         let mut new_regex = BiBTreeMap::new();
         for (k, v) in &self.grammar.regex_name_to_group_id {
-            if used_groups.contains(v) {
-                new_regex.insert(k.clone(), *v);
+            if let Some(&new_id) = old_to_new.get(v) {
+                new_regex.insert(k.clone(), new_id);
             }
         }
         self.grammar.regex_name_to_group_id = new_regex;
         
         let mut new_external = BiBTreeMap::new();
         for (k, v) in &self.grammar.external_name_to_group_id {
-             if used_groups.contains(v) {
-                new_external.insert(k.clone(), *v);
+             if let Some(&new_id) = old_to_new.get(v) {
+                new_external.insert(k.clone(), new_id);
             }
         }
         self.grammar.external_name_to_group_id = new_external;
+
+        // Update ignore_terminal_id
+        if let Some(gid) = self.grammar.ignore_terminal_id {
+            if let Some(&new_id) = old_to_new.get(&gid.0) {
+                self.grammar.ignore_terminal_id = Some(TerminalID(new_id));
+            }
+        }
     }
     
     fn get_group_id(&self, t: &Terminal) -> usize {
@@ -842,5 +862,10 @@ mod tests {
         
         println!("Optimization took: {:?}", duration);
         println!("Final terminal count: {}", grammar.terminal_to_group_id().len());
+
+        // Verify that we can compile the optimized grammar without panicking (e.g. index out of bounds)
+        // This checks that terminal IDs are correctly renumbered and consistent.
+        use crate::interface::CompiledGrammar;
+        let _ = CompiledGrammar::from_definition(std::sync::Arc::new(grammar));
     }
 }
