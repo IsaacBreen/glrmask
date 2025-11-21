@@ -1,4 +1,7 @@
-diff ::= ( HUNK_HEADER s0 )? EOF;
+#![ignore(IGNORE)]
+
+diff ::= FILE_HEADER? ( HUNK_HEADER s0 )? EOF;
+FILE_HEADER ::= GIT_LINE INDEX_LINE? MINUS_LINE PLUS_FILE_LINE;
 EOF  ::= '<|EOF|>';
 
 // 's' rules: Allow starting a context block at a given line or skipping.
@@ -6,16 +9,28 @@ s0 ::= l0 | s1;
 s1 ::= l1 | s2;
 s2 ::= l2 | s3;
 s3 ::= l3 | s4;
-s4 ::= PLUS_LINE*;
+s4 ::= l4 | s5;
+s5 ::= l5 | s6;
+s6 ::= l6 | s7;
+s7 ::= l7 | s8;
+s8 ::= PLUS_LINE*;
 
 // 'l' rules: Match a specific context line and continue or start a new hunk.
 l0 ::= PLUS_LINE* L0 ( l1 | PLUS_LINE* HUNK_HEADER s1 )?;
 l1 ::= PLUS_LINE* L1 ( l2 | PLUS_LINE* HUNK_HEADER s2 )?;
 l2 ::= PLUS_LINE* L2 ( l3 | PLUS_LINE* HUNK_HEADER s3 )?;
 l3 ::= PLUS_LINE* L3 ( l4 | PLUS_LINE* HUNK_HEADER s4 )?;
-l4 ::= PLUS_LINE*;
+l4 ::= PLUS_LINE* L4 ( l5 | PLUS_LINE* HUNK_HEADER s5 )?;
+l5 ::= PLUS_LINE* L5 ( l6 | PLUS_LINE* HUNK_HEADER s6 )?;
+l6 ::= PLUS_LINE* L6 ( l7 | PLUS_LINE* HUNK_HEADER s7 )?;
+l7 ::= PLUS_LINE* L7 ( PLUS_LINE* HUNK_HEADER s8 )?;
 
 // --- TERMINALS ---
+GIT_LINE         ::= 'diff --git' [^\n\r]* NEWLINE;
+INDEX_LINE       ::= 'index' [^\n\r]* NEWLINE;
+MINUS_LINE       ::= '---' [^\n\r]* NEWLINE;
+PLUS_FILE_LINE   ::= '+++' [^\n\r]* NEWLINE;
+
 HUNK_HEADER ::= '@@' [^\n\r]* NEWLINE;
 PLUS_LINE   ::= '+' [^\n\r]* NEWLINE;
 NEWLINE     ::= ( '\r'? '\n' );
@@ -25,5 +40,9 @@ IGNORE ::= ( [ \t]+ | '//'[^\n\r]* | '/*'( [^*] | '*'[^/] )*'*/' )+ ;
 // Context-line terminals (one for each line in the source file)
 L0 ::= ( ' ' | '-' ) '// src/constraint.rs' NEWLINE;
 L1 ::= ( ' ' | '-' ) '#![allow(clippy::too_many_arguments)]' NEWLINE;
-L2 ::= ( ' ' | '-' ) '' NEWLINE;
+L2 ::= ( ' ' | '-' )? NEWLINE;
 L3 ::= ( ' ' | '-' ) 'use crate::datastructures::ordered_hash_map::Retain;' NEWLINE;
+L4 ::= ( ' ' | '-' ) 'use crate::r#macro::is_debug_level_enabled;' NEWLINE;
+L5 ::= ( ' ' | '-' ) 'use std::cell::RefCell;' NEWLINE;
+L6 ::= ( ' ' | '-' ) 'use std::cmp::Ordering;' NEWLINE;
+L7 ::= ( ' ' | '-' ) 'use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};' NEWLINE;
