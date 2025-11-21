@@ -51,6 +51,9 @@ impl<'a> GrammarOptimizer<'a> {
         
         // 4. Rewrite grammar
         self.rewrite_grammar();
+        
+        // 5. Cleanup unused terminals
+        self.cleanup_terminals();
     }
 
     fn build_dependency_graph(&self) -> (Vec<Vec<usize>>, Vec<NonTerminal>) {
@@ -287,6 +290,14 @@ impl<'a> GrammarOptimizer<'a> {
             next_group_id += 1;
         }
         
+        // Identify start symbol
+        let start_nt = if self.grammar.productions.len() > self.grammar.start_production_id {
+            self.grammar.productions[self.grammar.start_production_id].lhs.clone()
+        } else {
+            // Should not happen in valid grammar
+            NonTerminal("".to_string())
+        };
+
         // Rewrite productions
         let mut new_productions = Vec::new();
         
@@ -316,7 +327,75 @@ impl<'a> GrammarOptimizer<'a> {
             });
         }
         
+        // If start symbol was resolved, add a production for it
+        if self.resolved_nts.contains_key(&start_nt) {
+            if let Some(term) = new_terminals.get(&start_nt) {
+                new_productions.insert(0, Production {
+                    lhs: start_nt.clone(),
+                    rhs: vec![Symbol::Terminal(term.clone())],
+                });
+            }
+        }
+        
+        // Update start_production_id
+        // Find the production with start_nt as lhs
+        if let Some(idx) = new_productions.iter().position(|p| p.lhs == start_nt) {
+            self.grammar.start_production_id = idx;
+        }
+        
         self.grammar.productions = new_productions;
+    }
+
+    fn cleanup_terminals(&mut self) {
+        let mut used_groups = HashSet::new();
+        
+        for prod in &self.grammar.productions {
+            for sym in &prod.rhs {
+                if let Symbol::Terminal(t) = sym {
+                    let gid = self.get_group_id(t);
+                    used_groups.insert(gid);
+                }
+            }
+        }
+        
+        if let Some(gid) = self.grammar.ignore_terminal_id {
+             used_groups.insert(gid);
+        }
+
+        // Filter group_id_to_expr
+        self.grammar.group_id_to_expr.retain(|k, _| used_groups.contains(k));
+        
+        // Filter maps
+        let mut new_literal = BiBTreeMap::new();
+        for (k, v) in &self.grammar.literal_to_group_id {
+            if used_groups.contains(v) {
+                new_literal.insert(k.clone(), *v);
+            }
+        }
+        self.grammar.literal_to_group_id = new_literal;
+        
+        let mut new_regex = BiBTreeMap::new();
+        for (k, v) in &self.grammar.regex_name_to_group_id {
+            if used_groups.contains(v) {
+                new_regex.insert(k.clone(), *v);
+            }
+        }
+        self.grammar.regex_name_to_group_id = new_regex;
+        
+        let mut new_external = BiBTreeMap::new();
+        for (k, v) in &self.grammar.external_name_to_group_id {
+             if used_groups.contains(v) {
+                new_external.insert(k.clone(), *v);
+            }
+        }
+        self.grammar.external_name_to_group_id = new_external;
+    }
+    
+    fn get_group_id(&self, t: &Terminal) -> usize {
+         match t {
+            Terminal::Literal(bytes) => *self.grammar.literal_to_group_id.get_by_left(bytes).expect("Terminal missing"),
+            Terminal::RegexName(name) => *self.grammar.regex_name_to_group_id.get_by_left(name).expect("Terminal missing"),
+        }
     }
 }
 
@@ -363,7 +442,7 @@ impl ExprBuilder {
         match expr {
             Expr::Epsilon => Expr::Epsilon,
             Expr::Quantifier(inner, QuantifierType::ZeroOrMore) => Expr::Quantifier(inner, QuantifierType::ZeroOrMore),
-            Expr::Choice(v) if v.is_empty() => Expr::Epsilon, // Choice([])* = Epsilon
+            Expr::Choice(v) if v.is_empty() => Expr::Epsilon,
             _ => Expr::Quantifier(Box::new(expr), QuantifierType::ZeroOrMore),
         }
     }
@@ -391,38 +470,7 @@ mod tests {
         optimize_grammar(&mut grammar);
         println!("{grammar}");
 
-        // There should only be one terminal (plus maybe external ones if any, but here B and C are regexes)
-        // Wait, B and C are regexes. A is optimized to Choice(B, C).
-        // Start -> A. A is optimized.
-        // Start -> Terminal(A).
-        // B and C are still in the grammar maps?
-        // The optimizer creates NEW terminals for resolved NTs.
-        // It doesn't delete old terminals if they are not used?
-        // GrammarDefinition::terminal_to_group_id returns all terminals in the maps.
-        // But we only care that A is now a terminal.
-        
-        // Actually, if B and C are not used anymore, they might still be in the maps.
-        // But the test checks `terminal_to_group_id().len()`.
-        // If A becomes a terminal, and B and C are terminals.
-        // If A absorbs B and C, does it remove B and C?
-        // My implementation does NOT remove unused terminals from the maps (literal_to_group_id, etc).
-        // So the count might not decrease if we just count all defined terminals.
-        // However, the previous implementation of `merge_terminals` (which I replaced) seemed to try to merge.
-        // My implementation creates *new* terminals.
-        
-        // Let's adjust the expectation or the implementation.
-        // If we want to clean up unused terminals, we need a garbage collection step.
-        // But the prompt didn't explicitly ask for GC, just optimization of the grammar structure.
-        // However, the test `assert_eq!(grammar.terminal_to_group_id().len(), 1);` implies GC or that B and C are not terminals anymore?
-        // In `from_exprs`, B and C are regex terminals.
-        // If A becomes a regex terminal, we have A, B, C.
-        // Unless A *is* B|C.
-        // If we want to pass the test, we should probably clean up.
-        // But `terminal_to_group_id` iterates over `regex_name_to_group_id`.
-        
-        // Ideally, I should remove unused terminals.
-        // But that requires checking usage in the *new* productions.
-        // I'll add a cleanup step to `rewrite_grammar`.
+        assert_eq!(grammar.terminal_to_group_id().len(), 1);
     }
 
     #[test]
@@ -438,15 +486,203 @@ mod tests {
         );
         let mut grammar = GrammarDefinition::from_exprs(grammar_exprs, regex_exprs).unwrap();
         optimize_grammar(&mut grammar);
-        // start -> A B.
-        // A and B are terminals.
-        // start is a DAG (trivial).
-        // start -> Terminal(A) Terminal(B).
-        // Can `start` be converted?
-        // Yes, `start` depends on A and B (terminals).
-        // So `start` becomes `Seq(A, B)`.
-        // `start` becomes a terminal.
-        // So we have `start`, A, B.
-        // If we GC, we have `start`.
+        println!("{grammar}");
+
+        assert_eq!(grammar.terminal_to_group_id().len(), 1);
+    }
+
+    #[test]
+    fn test_rolls_up_chain_of_regular_rules() {
+        let mut grammar_exprs = vec![("start".to_string(), GrammarExpr::Ref("s0".to_string()))];
+        let mut regex_exprs = vec![("C".to_string(), Expr::U8Seq(b"c".to_vec()))];
+
+        let chain_len = 20;
+
+        for i in 0..chain_len {
+             let char_val = (b'a' + i as u8) as char;
+             let term_name = format!("T{}", i);
+             regex_exprs.push((term_name.clone(), Expr::U8Seq(vec![char_val as u8])));
+
+            let next_s = if i < chain_len -1 {
+                GrammarExpr::Ref(format!("s{}", i + 1))
+            } else {
+                GrammarExpr::Ref("C".to_string())
+            };
+
+            grammar_exprs.push((
+                format!("s{}", i),
+                GrammarExpr::Sequence(vec![
+                    GrammarExpr::Ref(term_name),
+                    next_s
+                ])
+            ));
+        }
+
+        let mut grammar = GrammarDefinition::from_exprs(grammar_exprs, regex_exprs).unwrap();
+        optimize_grammar(&mut grammar);
+        println!("{grammar}");
+
+        assert_eq!(grammar.terminal_to_group_id().len(), 1);
+    }
+
+    #[test]
+    fn test_fuzz_regex_to_grammar_optimization() {
+        struct Rng(u64);
+        impl Rng {
+            fn next(&mut self) -> u64 {
+                let mut x = self.0;
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                self.0 = x;
+                x
+            }
+            fn range(&mut self, min: usize, max: usize) -> usize {
+                if min >= max { return min; }
+                (self.next() as usize % (max - min)) + min
+            }
+            fn bool(&mut self) -> bool { self.next() % 2 == 0 }
+        }
+
+        use crate::finite_automata::{Expr, QuantifierType};
+        use crate::datastructures::u8set::U8Set;
+        use crate::interface::{GrammarExpr, GrammarDefinition};
+
+        fn gen_expr(rng: &mut Rng, depth: usize, term_defs: &mut Vec<(String, Expr)>, term_counter: &mut usize) -> GrammarExpr {
+            if depth == 0 || (rng.bool() && rng.bool()) {
+                let is_class = rng.bool();
+                let expr = if is_class {
+                    let b = (rng.next() % 256) as u8;
+                    Expr::U8Class(U8Set::from_u8(b))
+                } else {
+                    let len = rng.range(1, 4);
+                    let bytes: Vec<u8> = (0..len).map(|_| (rng.next() % 256) as u8).collect();
+                    Expr::U8Seq(bytes)
+                };
+
+                let name = format!("T{}", term_counter);
+                *term_counter += 1;
+                term_defs.push((name.clone(), expr));
+                return GrammarExpr::Ref(name);
+            }
+
+            match rng.range(0, 3) {
+                0 => {
+                    let len = rng.range(2, 4);
+                    let exprs = (0..len).map(|_| gen_expr(rng, depth - 1, term_defs, term_counter)).collect();
+                    GrammarExpr::Sequence(exprs)
+                }
+                1 => {
+                    let len = rng.range(2, 4);
+                    let exprs = (0..len).map(|_| gen_expr(rng, depth - 1, term_defs, term_counter)).collect();
+                    GrammarExpr::Choice(exprs)
+                }
+                2 => {
+                    let child = gen_expr(rng, depth - 1, term_defs, term_counter);
+                    match rng.range(0, 3) {
+                        0 => GrammarExpr::Optional(Box::new(child)),
+                        1 => GrammarExpr::Repeat(Box::new(child)),
+                        _ => {
+                             let child_clone = child.clone();
+                             GrammarExpr::Sequence(vec![child, GrammarExpr::Repeat(Box::new(child_clone))])
+                        }
+                    }
+                }
+                _ => unreachable!(),
+            }
+        }
+
+        let mut rng = Rng(12345);
+        for i in 0..20 {
+            let mut regex_exprs = Vec::new();
+            let mut term_counter = 0;
+            let root = gen_expr(&mut rng, 4, &mut regex_exprs, &mut term_counter);
+
+            let grammar_exprs = vec![("start".to_string(), root)];
+            let mut grammar = GrammarDefinition::from_exprs(grammar_exprs, regex_exprs).unwrap();
+
+            let initial_count = grammar.terminal_to_group_id().len();
+            // println!("Iteration {}: Initial terminals: {}", i, initial_count);
+
+            optimize_grammar(&mut grammar);
+
+            // println!("{grammar}");
+            assert_eq!(grammar.terminal_to_group_id().len(), 1, "Failed to collapse grammar on iteration {} (started with {} terminals)", i, initial_count);
+        }
+    }
+
+    #[test]
+    fn test_diff_grammar_structure() {
+        // Simulates a structure similar to what generate_diff_grammar.py produces:
+        // Line1 ::= ( " " | "-" ) "foo" "\n"
+        // Line2 ::= ( " " | "-" ) "bar" "\n"
+        // Block ::= Line1 | Line2
+        // This should ideally be optimized into a single regular expression terminal.
+        
+        let grammar_exprs = vec![
+            ("start".to_string(), GrammarExpr::Ref("Block".to_string())),
+            ("Block".to_string(), GrammarExpr::Choice(vec![
+                GrammarExpr::Ref("Line1".to_string()),
+                GrammarExpr::Ref("Line2".to_string()),
+            ])),
+            ("Line1".to_string(), GrammarExpr::Sequence(vec![
+                 GrammarExpr::Choice(vec![
+                     GrammarExpr::Literal(b" ".to_vec()),
+                     GrammarExpr::Literal(b"-".to_vec()),
+                 ]),
+                 GrammarExpr::Literal(b"foo".to_vec()),
+                 GrammarExpr::Literal(b"\n".to_vec()),
+            ])),
+            ("Line2".to_string(), GrammarExpr::Sequence(vec![
+                 GrammarExpr::Choice(vec![
+                     GrammarExpr::Literal(b" ".to_vec()),
+                     GrammarExpr::Literal(b"-".to_vec()),
+                 ]),
+                 GrammarExpr::Literal(b"bar".to_vec()),
+                 GrammarExpr::Literal(b"\n".to_vec()),
+            ])),
+        ];
+        let regex_exprs = vec![];
+
+        let mut grammar = GrammarDefinition::from_exprs(grammar_exprs, regex_exprs).unwrap();
+        let initial_terminals = grammar.terminal_to_group_id().len();
+        println!("Initial terminals: {}", initial_terminals);
+        
+        optimize_grammar(&mut grammar);
+        println!("{grammar}");
+
+        // We expect significant reduction. Ideally to 1 terminal representing the whole block regex.
+        assert!(grammar.terminal_to_group_id().len() < initial_terminals);
+        assert_eq!(grammar.terminal_to_group_id().len(), 1);
+    }
+
+    #[test]
+    fn test_complex_nesting() {
+        // A -> ( "a" | "b" ) "c" ( "d" | "e" )
+        // This tests mixing Sequence and Choice at different levels.
+        let grammar_exprs = vec![
+            ("start".to_string(), GrammarExpr::Ref("A".to_string())),
+            ("A".to_string(), GrammarExpr::Sequence(vec![
+                GrammarExpr::Choice(vec![
+                    GrammarExpr::Literal(b"a".to_vec()),
+                    GrammarExpr::Literal(b"b".to_vec()),
+                ]),
+                GrammarExpr::Literal(b"c".to_vec()),
+                GrammarExpr::Choice(vec![
+                    GrammarExpr::Literal(b"d".to_vec()),
+                    GrammarExpr::Literal(b"e".to_vec()),
+                ]),
+            ])),
+        ];
+        
+        let mut grammar = GrammarDefinition::from_exprs(grammar_exprs, vec![]).unwrap();
+        let initial = grammar.terminal_to_group_id().len();
+        println!("Initial terminals: {}", initial); // a, b, c, d, e = 5
+        
+        optimize_grammar(&mut grammar);
+        println!("{grammar}");
+        
+        // Should collapse to 1 terminal: [ab]c[de]
+        assert_eq!(grammar.terminal_to_group_id().len(), 1);
     }
 }
