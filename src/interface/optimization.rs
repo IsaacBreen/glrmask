@@ -338,7 +338,7 @@ impl<'a> GrammarOptimizer<'a> {
         // Kleene's algorithm / Floyd-Warshall for Regex
         // R[k][i][j] = paths from i to j using only intermediate nodes < k
         
-        let mut r: Vec<Vec<Expr>> = vec![vec![Expr::Choice(vec![]); n]; n];
+        let mut r: Vec<Vec<Expr>> = vec![vec![self.interner.choice(vec![]); n]; n];
         
         for i in 0..n {
             // Initialize diagonal with Epsilon to allow zero-length paths (essential for correct loop optimization)
@@ -563,7 +563,14 @@ impl ExprInterner {
         for e in exprs {
             match e {
                 Expr::Seq(sub) => flat.extend(sub),
-                Expr::Epsilon => {}
+                Expr::Shared(inner) => {
+                    match &*inner {
+                        Expr::Seq(sub) => flat.extend(sub.iter().cloned()),
+                        Expr::Epsilon => {},
+                        _ => flat.push(e),
+                    }
+                }
+                Expr::Epsilon => {},
                 _ => flat.push(e),
             }
         }
@@ -581,10 +588,16 @@ impl ExprInterner {
         for e in exprs {
             match e {
                 Expr::Choice(sub) => flat.extend(sub),
+                Expr::Shared(inner) => {
+                    match &*inner {
+                        Expr::Choice(sub) => flat.extend(sub.iter().cloned()),
+                        _ => flat.push(e),
+                    }
+                }
                 _ => flat.push(e),
             }
         }
-
+        
         if flat.is_empty() {
             self.intern(Expr::Choice(vec![]))
         } else if flat.len() == 1 {
@@ -603,8 +616,16 @@ impl ExprInterner {
     fn star(&mut self, expr: Expr) -> Expr {
         match expr {
             Expr::Epsilon => Expr::Epsilon,
+            Expr::Shared(inner) if matches!(&*inner, Expr::Epsilon) => Expr::Epsilon,
             Expr::Quantifier(inner, QuantifierType::ZeroOrMore) => {
                 self.intern(Expr::Quantifier(inner, QuantifierType::ZeroOrMore))
+            }
+            Expr::Shared(inner) => {
+                if let Expr::Quantifier(_, QuantifierType::ZeroOrMore) = &*inner {
+                    expr.clone()
+                } else {
+                    self.intern(Expr::Quantifier(Box::new(expr), QuantifierType::ZeroOrMore))
+                }
             }
             Expr::Choice(v) if v.is_empty() => Expr::Epsilon,
             _ => self.intern(Expr::Quantifier(Box::new(expr), QuantifierType::ZeroOrMore)),
