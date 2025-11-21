@@ -19,9 +19,6 @@ use std::fmt::{Debug, Display, Formatter};
 use std::sync::Arc;
 use std::fs;
 
-#[path = "terminal_merge_opt.rs"]
-mod terminal_merge_opt;
-
 type LLMToken<'a> = &'a [u8];
 type LLMTokenMap = BiBTreeMap<Vec<u8>, LLMTokenID>;
 
@@ -850,7 +847,7 @@ impl GrammarDefinition {
         // Apply grammar-level terminal merging before building the internal
         // GrammarDefinition representation.
         let (grammar_exprs, regex_exprs) =
-            terminal_merge_opt::optimize_terminals(grammar_exprs, regex_exprs);
+            crate::interface::optimization::optimize_terminals(grammar_exprs, regex_exprs);
 
         let mut literal_to_group_id: BiBTreeMap<Vec<u8>, usize> = BiBTreeMap::new();
         let mut regex_name_to_group_id: BiBTreeMap<String, usize> = BiBTreeMap::new();
