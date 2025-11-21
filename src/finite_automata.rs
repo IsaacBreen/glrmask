@@ -1113,33 +1113,95 @@ impl NFA {
 
     fn compute_epsilon_closures(&self) -> Vec<Vec<usize>> {
         let num_states = self.states.len();
-        let mut closures = Vec::with_capacity(num_states);
+        
+        // 1. Build reverse adjacency for Kosaraju's second pass
+        let mut rev_adj = vec![Vec::new(); num_states];
+        for (u, state) in self.states.iter().enumerate() {
+            for &v in &state.epsilon_transitions {
+                rev_adj[v].push(u);
+            }
+        }
+
+        // 2. Kosaraju Pass 1: Compute post-order (finish times)
         let mut visited = vec![false; num_states];
+        let mut order = Vec::with_capacity(num_states);
         let mut stack = Vec::new();
-        let mut closure_vec = Vec::new();
 
         for i in 0..num_states {
-            stack.push(i);
+            if visited[i] { continue; }
+            stack.push((i, 0));
             visited[i] = true;
-            closure_vec.push(i);
-
-            while let Some(u) = stack.pop() {
-                for &v in &self.states[u].epsilon_transitions {
+            while let Some((u, idx)) = stack.pop() {
+                let children = &self.states[u].epsilon_transitions;
+                if idx < children.len() {
+                    stack.push((u, idx + 1));
+                    let v = children[idx];
                     if !visited[v] {
                         visited[v] = true;
-                        stack.push(v);
-                        closure_vec.push(v);
+                        stack.push((v, 0));
+                    }
+                } else {
+                    order.push(u);
+                }
+            }
+        }
+
+        // 3. Kosaraju Pass 2: Find SCCs
+        // Process in reverse finish order
+        let mut sccs = Vec::new();
+        let mut state_to_scc = vec![usize::MAX; num_states];
+        visited.fill(false);
+
+        while let Some(root) = order.pop() {
+            if visited[root] { continue; }
+            
+            let mut component = Vec::new();
+            let mut dfs_stack = vec![root];
+            visited[root] = true;
+            
+            while let Some(u) = dfs_stack.pop() {
+                component.push(u);
+                state_to_scc[u] = sccs.len();
+                for &v in &rev_adj[u] {
+                    if !visited[v] {
+                        visited[v] = true;
+                        dfs_stack.push(v);
                     }
                 }
             }
-
-            closure_vec.sort_unstable();
-            closures.push(closure_vec.clone());
-
-            for &v in &closure_vec {
-                visited[v] = false;
+            component.sort_unstable();
+            sccs.push(component);
+        }
+        
+        // 4. Build DAG of SCCs
+        let num_sccs = sccs.len();
+        let mut scc_adj = vec![BTreeSet::new(); num_sccs];
+        for u in 0..num_states {
+            let u_scc = state_to_scc[u];
+            for &v in &self.states[u].epsilon_transitions {
+                let v_scc = state_to_scc[v];
+                if u_scc != v_scc {
+                    scc_adj[u_scc].insert(v_scc);
+                }
             }
-            closure_vec.clear();
+        }
+
+        // 5. Compute reachability in SCC DAG (Sink to Source)
+        let mut scc_closures = vec![Vec::new(); num_sccs];
+        for i in (0..num_sccs).rev() {
+            let mut closure = sccs[i].clone();
+            for &neighbor in &scc_adj[i] {
+                closure.extend_from_slice(&scc_closures[neighbor]);
+            }
+            closure.sort_unstable();
+            closure.dedup();
+            scc_closures[i] = closure;
+        }
+
+        // 6. Expand to all states
+        let mut closures = Vec::with_capacity(num_states);
+        for i in 0..num_states {
+            closures.push(scc_closures[state_to_scc[i]].clone());
         }
         closures
     }
@@ -1217,7 +1279,7 @@ impl NFA {
                 }
                 closure_vec.sort_unstable();
                 closure_vec.dedup();
-                let frozen_closure: FrozenSet<usize> = FrozenSet::from_iter(closure_vec);
+                let frozen_closure: FrozenSet<usize> = FrozenSet::from_sorted_deduped_vec(closure_vec);
 
                 let next_dfa_state =
                     if let Some(&existing_state) = dfa_state_map.get(&frozen_closure) {
