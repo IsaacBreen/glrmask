@@ -143,7 +143,7 @@ impl<'a> GrammarOptimizer<'a> {
         // we should still optimize them to regex.
         if scc_nts.len() == 1 {
             let nt = &scc_nts[0];
-            let productions: Vec<&Production> = self.grammar.productions.iter().filter(|p| &p.lhs == nt).collect();
+            let productions: Vec<Production> = self.grammar.productions.iter().filter(|p| &p.lhs == nt).cloned().collect();
             
             // Check if any production has self-recursion
             let has_self_recursion = productions.iter().any(|prod| {
@@ -185,7 +185,7 @@ impl<'a> GrammarOptimizer<'a> {
         let nt_to_local_idx: HashMap<&NonTerminal, usize> = scc_nts.iter().enumerate().map(|(i, nt)| (nt, i)).collect();
 
         for (i, nt) in scc_nts.iter().enumerate() {
-            let productions: Vec<&Production> = self.grammar.productions.iter().filter(|p| &p.lhs == nt).collect();
+            let productions: Vec<Production> = self.grammar.productions.iter().filter(|p| &p.lhs == nt).cloned().collect();
             if productions.is_empty() { continue; }
 
             for prod in productions {
@@ -238,7 +238,7 @@ impl<'a> GrammarOptimizer<'a> {
         let nt_to_local_idx: HashMap<&NonTerminal, usize> = scc_nts.iter().enumerate().map(|(i, nt)| (nt, i)).collect();
 
         for (i, nt) in scc_nts.iter().enumerate() {
-            let productions: Vec<&Production> = self.grammar.productions.iter().filter(|p| &p.lhs == nt).collect();
+            let productions: Vec<Production> = self.grammar.productions.iter().filter(|p| &p.lhs == nt).cloned().collect();
             if productions.is_empty() { continue; }
 
             for prod in productions {
@@ -308,7 +308,8 @@ impl<'a> GrammarOptimizer<'a> {
                 self.interner.choice(reversed_sub)
             },
             Expr::Quantifier(inner, q) => {
-                self.interner.intern(Expr::Quantifier(Box::new(self.reverse_expr(inner, cache)), q.clone()))
+                let reversed_inner = self.reverse_expr(inner, cache);
+                self.interner.intern(Expr::Quantifier(Box::new(reversed_inner), q.clone()))
             },
             Expr::Shared(inner) => {
                 let key = Arc::as_ptr(inner) as usize;
