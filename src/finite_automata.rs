@@ -1096,21 +1096,27 @@ impl Expr {
     }
 }
 
-struct EpsilonAnalyzer<'a> {
-    nfa: &'a NFA,
-    state_to_scc: Vec<usize>,
-    sccs: Vec<Vec<usize>>,
-    scc_adj: Vec<Vec<usize>>,
-    cache: Vec<Option<Arc<Vec<usize>>>>,
-}
+impl NFA {
+    pub fn add_state(&mut self) -> usize {
+        let new_index = self.states.len();
+        self.states.push(NFAState::new());
+        new_index
+    }
 
-impl<'a> EpsilonAnalyzer<'a> {
-    fn new(nfa: &'a NFA) -> Self {
-        let num_states = nfa.states.len();
+    pub fn add_transition(&mut self, from: usize, on_u8: u8, to: usize) {
+        self.states[from].transitions.push((on_u8, to));
+    }
 
+    pub fn add_epsilon_transition(&mut self, from: usize, to: usize) {
+        self.states[from].epsilon_transitions.push(to);
+    }
+
+    fn compute_epsilon_closures(&self) -> Vec<Vec<usize>> {
+        let num_states = self.states.len();
+        
         // 1. Build reverse adjacency for Kosaraju's second pass
         let mut rev_adj = vec![Vec::new(); num_states];
-        for (u, state) in nfa.states.iter().enumerate() {
+        for (u, state) in self.states.iter().enumerate() {
             for &v in &state.epsilon_transitions {
                 rev_adj[v].push(u);
             }
@@ -1126,7 +1132,7 @@ impl<'a> EpsilonAnalyzer<'a> {
             stack.push((i, 0));
             visited[i] = true;
             while let Some((u, idx)) = stack.pop() {
-                let children = &nfa.states[u].epsilon_transitions;
+                let children = &self.states[u].epsilon_transitions;
                 if idx < children.len() {
                     stack.push((u, idx + 1));
                     let v = children[idx];
@@ -1141,6 +1147,7 @@ impl<'a> EpsilonAnalyzer<'a> {
         }
 
         // 3. Kosaraju Pass 2: Find SCCs
+        // Process in reverse finish order
         let mut sccs = Vec::new();
         let mut state_to_scc = vec![usize::MAX; num_states];
         visited.fill(false);
@@ -1168,74 +1175,35 @@ impl<'a> EpsilonAnalyzer<'a> {
         
         // 4. Build DAG of SCCs
         let num_sccs = sccs.len();
-        let mut scc_adj = vec![Vec::new(); num_sccs];
-        let mut seen_targets = std::collections::HashSet::new();
-
-        for (u_scc, component) in sccs.iter().enumerate() {
-            seen_targets.clear();
-            for &u in component {
-                for &v in &nfa.states[u].epsilon_transitions {
-                    let v_scc = state_to_scc[v];
-                    if u_scc != v_scc && seen_targets.insert(v_scc) {
-                        scc_adj[u_scc].push(v_scc);
-                    }
+        let mut scc_adj = vec![BTreeSet::new(); num_sccs];
+        for u in 0..num_states {
+            let u_scc = state_to_scc[u];
+            for &v in &self.states[u].epsilon_transitions {
+                let v_scc = state_to_scc[v];
+                if u_scc != v_scc {
+                    scc_adj[u_scc].insert(v_scc);
                 }
             }
         }
 
-        EpsilonAnalyzer {
-            nfa,
-            state_to_scc,
-            sccs,
-            scc_adj,
-            cache: vec![None; num_sccs],
-        }
-    }
-
-    fn get_scc_closure(&mut self, scc_idx: usize) -> Arc<Vec<usize>> {
-        if let Some(c) = &self.cache[scc_idx] {
-            return c.clone();
+        // 5. Compute reachability in SCC DAG (Sink to Source)
+        let mut scc_closures = vec![Vec::new(); num_sccs];
+        for i in (0..num_sccs).rev() {
+            let mut closure = sccs[i].clone();
+            for &neighbor in &scc_adj[i] {
+                closure.extend_from_slice(&scc_closures[neighbor]);
+            }
+            closure.sort_unstable();
+            closure.dedup();
+            scc_closures[i] = closure;
         }
 
-        let mut closure = self.sccs[scc_idx].clone();
-        // Clone neighbors to avoid double borrow of self
-        let neighbors = self.scc_adj[scc_idx].clone();
-        for neighbor in neighbors {
-            let neighbor_closure = self.get_scc_closure(neighbor);
-            closure.extend_from_slice(&neighbor_closure);
+        // 6. Expand to all states
+        let mut closures = Vec::with_capacity(num_states);
+        for i in 0..num_states {
+            closures.push(scc_closures[state_to_scc[i]].clone());
         }
-        closure.sort_unstable();
-        closure.dedup();
-        
-        let res = Arc::new(closure);
-        self.cache[scc_idx] = Some(res.clone());
-        res
-    }
-
-    fn fill_closure(&mut self, state: usize, out: &mut Vec<usize>) {
-        if self.nfa.states[state].epsilon_transitions.is_empty() {
-            out.push(state);
-        } else {
-            let scc_idx = self.state_to_scc[state];
-            let closure = self.get_scc_closure(scc_idx);
-            out.extend_from_slice(&closure);
-        }
-    }
-}
-
-impl NFA {
-    pub fn add_state(&mut self) -> usize {
-        let new_index = self.states.len();
-        self.states.push(NFAState::new());
-        new_index
-    }
-
-    pub fn add_transition(&mut self, from: usize, on_u8: u8, to: usize) {
-        self.states[from].transitions.push((on_u8, to));
-    }
-
-    pub fn add_epsilon_transition(&mut self, from: usize, to: usize) {
-        self.states[from].epsilon_transitions.push(to);
+        closures
     }
 
     pub fn to_dfa(self) -> DFA {
@@ -1245,17 +1213,12 @@ impl NFA {
         let mut worklist: Vec<FrozenSet<usize>> = Vec::new();
 
         let closure_start = std::time::Instant::now();
-        crate::debug!(5, "Initializing epsilon analyzer ({} states)...", self.states.len());
-        let mut analyzer = EpsilonAnalyzer::new(&self);
-        crate::debug!(5, "Initialized analyzer in {:.2?}", closure_start.elapsed());
+        crate::debug!(5, "Computing epsilon closures ({} states)...", self.states.len());
+        let epsilon_closures = self.compute_epsilon_closures();
+        crate::debug!(5, "Computed epsilon closures in {:.2?}", closure_start.elapsed());
 
-        let mut start_closure = Vec::new();
-        analyzer.fill_closure(self.start_state, &mut start_closure);
-        // Ensure sorted/deduped (fill_closure provides sorted if from SCC, or single item)
-        start_closure.sort_unstable();
-        start_closure.dedup();
-        
-        let start_state_set = FrozenSet::from_sorted_deduped_vec(start_closure);
+        let start_closure = &epsilon_closures[self.start_state];
+        let start_state_set = FrozenSet::from_iter(start_closure.iter().cloned());
         worklist.push(start_state_set.clone());
         dfa_state_map.insert(start_state_set.clone(), 0);
 
@@ -1312,7 +1275,7 @@ impl NFA {
 
                 let mut closure_vec = Vec::new();
                 for &next_state in next_states {
-                    analyzer.fill_closure(next_state, &mut closure_vec);
+                    closure_vec.extend_from_slice(&epsilon_closures[next_state]);
                 }
                 closure_vec.sort_unstable();
                 closure_vec.dedup();
