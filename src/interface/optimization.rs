@@ -135,7 +135,7 @@ impl<'a> GrammarOptimizer<'a> {
         }
     }
 
-    fn try_convert_scc(&self, scc_nts: &[NonTerminal]) -> Option<HashMap<NonTerminal, Expr>> {
+    fn try_convert_scc(&mut self, scc_nts: &[NonTerminal]) -> Option<HashMap<NonTerminal, Expr>> {
         // Skip single-node SCCs with no self-recursion if they only reference other unresolved NTs
         // (they're just pass-through rules). But if they reference terminals or resolved NTs,
         // we should still optimize them to regex.
@@ -176,7 +176,7 @@ impl<'a> GrammarOptimizer<'a> {
         self.try_convert_scc_left_linear(scc_nts)
     }
 
-    fn try_convert_scc_right_linear(&self, scc_nts: &[NonTerminal]) -> Option<HashMap<NonTerminal, Expr>> {
+    fn try_convert_scc_right_linear(&mut self, scc_nts: &[NonTerminal]) -> Option<HashMap<NonTerminal, Expr>> {
         let scc_set: HashSet<&NonTerminal> = scc_nts.iter().collect();
         let mut transitions: Vec<Vec<(usize, Expr)>> = vec![Vec::new(); scc_nts.len()];
         let mut finals: Vec<Expr> = vec![Expr::Choice(vec![]); scc_nts.len()];
@@ -229,7 +229,7 @@ impl<'a> GrammarOptimizer<'a> {
         Some(result)
     }
 
-    fn try_convert_scc_left_linear(&self, scc_nts: &[NonTerminal]) -> Option<HashMap<NonTerminal, Expr>> {
+    fn try_convert_scc_left_linear(&mut self, scc_nts: &[NonTerminal]) -> Option<HashMap<NonTerminal, Expr>> {
         let scc_set: HashSet<&NonTerminal> = scc_nts.iter().collect();
         let mut transitions: Vec<Vec<(usize, Expr)>> = vec![Vec::new(); scc_nts.len()];
         let mut finals: Vec<Expr> = vec![Expr::Choice(vec![]); scc_nts.len()];
