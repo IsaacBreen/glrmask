@@ -135,34 +135,23 @@ impl<'a> GrammarOptimizer<'a> {
     }
 
     fn try_convert_scc(&self, scc_nts: &[NonTerminal]) -> Option<HashMap<NonTerminal, Expr>> {
-        // Check if SCC is Right-Linear with respect to itself.
-        // And all external NonTerminals must be already resolved.
-        
+        if let Some(res) = self.try_convert_scc_right_linear(scc_nts) {
+            return Some(res);
+        }
+        self.try_convert_scc_left_linear(scc_nts)
+    }
+
+    fn try_convert_scc_right_linear(&self, scc_nts: &[NonTerminal]) -> Option<HashMap<NonTerminal, Expr>> {
         let scc_set: HashSet<&NonTerminal> = scc_nts.iter().collect();
-        
-        // Build the internal graph for the SCC
-        // Nodes: 0..scc_nts.len()
-        // Edges: i -> j labeled with Expr
-        // Edges: i -> Final labeled with Expr
-        
         let mut transitions: Vec<Vec<(usize, Expr)>> = vec![Vec::new(); scc_nts.len()];
         let mut finals: Vec<Expr> = vec![Expr::Choice(vec![]); scc_nts.len()];
-        
         let nt_to_local_idx: HashMap<&NonTerminal, usize> = scc_nts.iter().enumerate().map(|(i, nt)| (nt, i)).collect();
 
         for (i, nt) in scc_nts.iter().enumerate() {
-            // Get all productions for this NT
             let productions: Vec<&Production> = self.grammar.productions.iter().filter(|p| &p.lhs == nt).collect();
-            
-            if productions.is_empty() {
-                // If an NT has no productions, it matches nothing.
-                continue;
-            }
+            if productions.is_empty() { continue; }
 
             for prod in productions {
-                // Analyze RHS
-                // Must be: [Resolved/Terminal]* [SCC_NT]?
-                
                 let mut prefix_exprs = Vec::new();
                 let mut target_scc_idx = None;
                 
@@ -173,18 +162,12 @@ impl<'a> GrammarOptimizer<'a> {
                         }
                         Symbol::NonTerminal(ref other_nt) => {
                             if let Some(&local_idx) = nt_to_local_idx.get(other_nt) {
-                                // It's a reference to the SCC
-                                if idx != prod.rhs.len() - 1 {
-                                    // Not the last symbol -> Not Right-Linear
-                                    return None;
-                                }
+                                if idx != prod.rhs.len() - 1 { return None; }
                                 target_scc_idx = Some(local_idx);
                             } else {
-                                // External NT
                                 if let Some(expr) = self.resolved_nts.get(other_nt) {
                                     prefix_exprs.push(expr.clone());
                                 } else {
-                                    // Depends on unresolved external NT -> Cannot convert
                                     return None;
                                 }
                             }
@@ -193,24 +176,100 @@ impl<'a> GrammarOptimizer<'a> {
                 }
                 
                 let prefix_expr = ExprBuilder::seq(prefix_exprs);
-                
                 if let Some(target) = target_scc_idx {
                     transitions[i].push((target, prefix_expr));
                 } else {
-                    // Transition to Final
                     finals[i] = ExprBuilder::choice(vec![finals[i].clone(), prefix_expr]);
                 }
             }
         }
         
-        // Solve the system
         let solved = self.solve_regular_system(scc_nts.len(), transitions, finals);
-        
         let mut result = HashMap::new();
         for (i, expr) in solved.into_iter().enumerate() {
             result.insert(scc_nts[i].clone(), expr);
         }
         Some(result)
+    }
+
+    fn try_convert_scc_left_linear(&self, scc_nts: &[NonTerminal]) -> Option<HashMap<NonTerminal, Expr>> {
+        let scc_set: HashSet<&NonTerminal> = scc_nts.iter().collect();
+        let mut transitions: Vec<Vec<(usize, Expr)>> = vec![Vec::new(); scc_nts.len()];
+        let mut finals: Vec<Expr> = vec![Expr::Choice(vec![]); scc_nts.len()];
+        let nt_to_local_idx: HashMap<&NonTerminal, usize> = scc_nts.iter().enumerate().map(|(i, nt)| (nt, i)).collect();
+
+        for (i, nt) in scc_nts.iter().enumerate() {
+            let productions: Vec<&Production> = self.grammar.productions.iter().filter(|p| &p.lhs == nt).collect();
+            if productions.is_empty() { continue; }
+
+            for prod in productions {
+                let mut suffix_exprs = Vec::new();
+                let mut target_scc_idx = None;
+                
+                for (idx, symbol) in prod.rhs.iter().enumerate() {
+                    match symbol {
+                        Symbol::Terminal(t) => {
+                            suffix_exprs.push(self.get_expr_for_terminal(t));
+                        }
+                        Symbol::NonTerminal(ref other_nt) => {
+                            if let Some(&local_idx) = nt_to_local_idx.get(other_nt) {
+                                if idx != 0 { return None; } // Must be first symbol for Left-Linear
+                                target_scc_idx = Some(local_idx);
+                            } else {
+                                if let Some(expr) = self.resolved_nts.get(other_nt) {
+                                    suffix_exprs.push(expr.clone());
+                                } else {
+                                    return None;
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                let suffix_expr = ExprBuilder::seq(suffix_exprs);
+                let reversed_suffix = Self::reverse_expr(&suffix_expr);
+
+                if let Some(target) = target_scc_idx {
+                    // A -> B suffix.  Edge B --suffix--> A.
+                    // We map this to Right-Linear: A --rev(suffix)--> B.
+                    transitions[i].push((target, reversed_suffix));
+                } else {
+                    // A -> suffix. Edge Start --suffix--> A.
+                    // Map to Right-Linear: A --rev(suffix)--> Final.
+                    finals[i] = ExprBuilder::choice(vec![finals[i].clone(), reversed_suffix]);
+                }
+            }
+        }
+        
+        let solved = self.solve_regular_system(scc_nts.len(), transitions, finals);
+        let mut result = HashMap::new();
+        for (i, expr) in solved.into_iter().enumerate() {
+            result.insert(scc_nts[i].clone(), Self::reverse_expr(&expr));
+        }
+        Some(result)
+    }
+
+    fn reverse_expr(expr: &Expr) -> Expr {
+        match expr {
+            Expr::U8Seq(bytes) => {
+                let mut b = bytes.clone();
+                b.reverse();
+                Expr::U8Seq(b)
+            },
+            Expr::Seq(exprs) => {
+                let mut e = exprs.clone();
+                e.reverse();
+                let reversed_sub: Vec<Expr> = e.into_iter().map(|x| Self::reverse_expr(&x)).collect();
+                Expr::Seq(reversed_sub)
+            },
+            Expr::Choice(exprs) => {
+                let reversed_sub: Vec<Expr> = exprs.iter().map(|x| Self::reverse_expr(x)).collect();
+                Expr::Choice(reversed_sub)
+            },
+            Expr::Quantifier(inner, q) => Expr::Quantifier(Box::new(Self::reverse_expr(inner)), q.clone()),
+            Expr::Shared(inner) => Expr::Shared(Arc::new(Self::reverse_expr(inner))),
+            _ => expr.clone(),
+        }
     }
     
     fn get_expr_for_terminal(&self, t: &Terminal) -> Expr {
@@ -359,7 +418,7 @@ impl<'a> GrammarOptimizer<'a> {
         }
         
         if let Some(gid) = self.grammar.ignore_terminal_id {
-             used_groups.insert(gid);
+             used_groups.insert(gid.0);
         }
 
         // Filter group_id_to_expr
