@@ -1,4 +1,4 @@
-diff ::= '@@' '-' 'a'+ EOF;
+diff ::= ( ('@@' NEWLINE) (( ' ' | '-' ) '// src/constraint.rs' NEWLINE) ) EOF;
 EOF  ::= '<|EOF|>';
 
 // 's' rules: Allow starting a context block at a given line or skipping.
