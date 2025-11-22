@@ -222,8 +222,6 @@ impl<'r> Precomputer1<'r> {
             > = BTreeMap::new();
             pending.insert(0, assoc_by_state.clone());
 
-            let mut pending_edges = Vec::new();
-
             let child_reachable = child_vocab_node.reachable_token_ids();
             let child_token_id = child_vocab_node.token_id();
 
@@ -272,12 +270,10 @@ impl<'r> Precomputer1<'r> {
                             let final_bv = edge_bv;
                             if !final_bv.is_empty() {
                                 let leaf = self.leaf_state;
-                                pending_edges.push((
-                                    src_node,
-                                    leaf,
-                                    Some(terminal_id),
-                                    final_bv.clone(),
-                                ));
+                                let weight = SimpleBitset::from_rsb(final_bv);
+                                self.nwa
+                                    .add_transition(src_node, terminal_id.0 as Label, leaf, weight)
+                                    .unwrap();
                             }
                         }
 
@@ -302,7 +298,10 @@ impl<'r> Precomputer1<'r> {
                             .entry(initial_tsid)
                             .or_insert_with(|| self.nwa.add_state());
 
-                        pending_edges.push((src_node, target, Some(terminal_id), final_bv));
+                        let weight = SimpleBitset::from_rsb(final_bv);
+                        self.nwa
+                            .add_transition(src_node, terminal_id.0 as Label, target, weight)
+                            .unwrap();
                     }
 
                     // 2. Handle End State -> Continuation
@@ -319,26 +318,21 @@ impl<'r> Precomputer1<'r> {
                         if !final_edge_bv.is_empty() {
                             let end_idx = self.leaf_state;
                             for terminal_id in &accessible_terminals {
-                                pending_edges.push((
-                                    src_node,
-                                    end_idx,
-                                    Some(*terminal_id),
-                                    final_edge_bv.clone(),
-                                ));
+                                let weight = SimpleBitset::from_rsb(final_edge_bv.clone());
+                                self.nwa
+                                    .add_transition(
+                                        src_node,
+                                        terminal_id.0 as Label,
+                                        end_idx,
+                                        weight,
+                                    )
+                                    .unwrap();
                             }
                         }
 
                         let next = *next_level_assoc.entry(final_tokenizer_state).or_insert_with(|| self.nwa.add_state());
                         self.nwa.add_epsilon(src_node, next, Weight::all());
                     }
-                }
-            }
-
-            // Apply all batched writes
-            for (src, dst, key, bv) in pending_edges {
-                if let Some(k) = key {
-                    let weight = SimpleBitset::from_rsb(bv);
-                    let _ = self.nwa.add_transition(src, k.0 as Label, dst, weight);
                 }
             }
 
