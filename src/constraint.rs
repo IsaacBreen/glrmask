@@ -657,7 +657,7 @@ impl GrammarConstraint {
         // Convert the precompute1 Trie to NWA and run precompute4.
         crate::debug!(3, "Running Precompute4");
         let nwa = NWA::from_dwa(&skeleton_dwa);
-        let precomputed4 = precompute4(&parser, &nwa, max_internal_llm_token_id);
+        let precomputed4 = precompute4(&parser, &nwa);
 
         let internal_to_original_sparse_matrix =
             StageVocab::build_internal_to_original_sparse_matrix(

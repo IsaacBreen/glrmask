@@ -6,31 +6,23 @@
 use super::bitset::SimpleBitset;
 use super::common::{Label, StateID, Weight};
 use super::dwa::{DWABody, DWAState, DWAStates, DWA};
+use super::nwa::{NWABody, NWAState, NWAStates, NWA};
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use range_set_blaze::RangeSetBlaze;
 use std::collections::BTreeMap;
 use std::iter::FromIterator;
-use crate::precompute4::weighted_automata::{NWABody, NWAState, NWAStateID, NWAStates, NWA};
 
 impl JSONConvertible for SimpleBitset {
     fn to_json(&self) -> JSONNode {
-        let ranges_vec: Vec<Vec<usize>> = self
-            .rsb
-            .ranges()
-            .map(|ri| vec![*ri.start(), *ri.end()])
-            .collect();
+        let ranges_vec: Vec<Vec<usize>> = self.rsb.ranges().map(|ri| vec![*ri.start(), *ri.end()]).collect();
         ranges_vec.to_json()
     }
-
     fn from_json(node: JSONNode) -> Result<Self, String> {
         let ranges_vec: Vec<Vec<usize>> = Vec::from_json(node)?;
         let mut ranges = Vec::new();
         for mut v in ranges_vec {
-            if v.len() != 2 {
-                return Err(format!("Expected 2-element array for SimpleBitset range, got {:?}", v));
-            }
-            let end = v.pop().unwrap();
-            let start = v.pop().unwrap();
+            if v.len() != 2 { return Err(format!("Expected 2-element array, got {:?}", v)); }
+            let end = v.pop().unwrap(); let start = v.pop().unwrap();
             ranges.push(start..=end);
         }
         Ok(SimpleBitset::from_rsb(RangeSetBlaze::from_iter(ranges)))
@@ -45,36 +37,28 @@ impl JSONConvertible for NWAState {
         obj.insert("transitions".to_string(), self.transitions.to_json());
         JSONNode::Object(obj)
     }
-
     fn from_json(node: JSONNode) -> Result<Self, String> {
         let mut obj = node.into_object()?;
-        let final_weight = Option::<Weight>::from_json(obj.remove("final_weight").ok_or("Missing 'final_weight' field")?)?;
-        let epsilons = Vec::<(NWAStateID, Weight)>::from_json(obj.remove("epsilons").ok_or("Missing 'epsilons' field")?)?;
-        let transitions = BTreeMap::<Label, Vec<(NWAStateID, Weight)>>::from_json(obj.remove("transitions").ok_or("Missing 'transitions' field")?)?;
         Ok(NWAState {
-            final_weight,
-            epsilons,
-            transitions,
+            final_weight: Option::<Weight>::from_json(obj.remove("final_weight").ok_or("Missing final_weight")?)?,
+            epsilons: Vec::<(StateID, Weight)>::from_json(obj.remove("epsilons").ok_or("Missing epsilons")?)?,
+            transitions: BTreeMap::<Label, Vec<(StateID, Weight)>>::from_json(obj.remove("transitions").ok_or("Missing transitions")?)?,
         })
     }
 }
-
 
 impl JSONConvertible for NWA {
     fn to_json(&self) -> JSONNode {
         let mut obj = BTreeMap::new();
         obj.insert("states".to_string(), self.states.0.to_json());
-        obj.insert("start_state".to_string(), self.body.start_state.to_json());
+        obj.insert("start_states".to_string(), self.body.start_states.to_json());
         JSONNode::Object(obj)
     }
-
     fn from_json(node: JSONNode) -> Result<Self, String> {
         let mut obj = node.into_object()?;
-        let states = Vec::<NWAState>::from_json(obj.remove("states").ok_or("Missing 'states' field")?)?;
-        let start_state = StateID::from_json(obj.remove("start_state").ok_or("Missing 'start_state' field")?)?;
         Ok(NWA {
-            states: NWAStates(states),
-            body: NWABody { start_state },
+            states: NWAStates(Vec::<NWAState>::from_json(obj.remove("states").ok_or("Missing states")?)?),
+            body: NWABody { start_states: Vec::<StateID>::from_json(obj.remove("start_states").ok_or("Missing start_states")?)? },
         })
     }
 }
@@ -88,18 +72,13 @@ impl JSONConvertible for DWAState {
         obj.insert("state_weight".to_string(), self.state_weight.to_json());
         JSONNode::Object(obj)
     }
-
     fn from_json(node: JSONNode) -> Result<Self, String> {
         let mut obj = node.into_object()?;
-        let transitions = BTreeMap::<Label, StateID>::from_json(obj.remove("transitions").ok_or("Missing 'transitions' field")?)?;
-        let final_weight = Option::<Weight>::from_json(obj.remove("final_weight").ok_or("Missing 'final_weight' field")?)?;
-        let trans_weights = BTreeMap::<Label, Weight>::from_json(obj.remove("trans_weights").ok_or("Missing 'trans_weights' field")?)?;
-        let state_weight = Option::<Weight>::from_json(obj.remove("state_weight").ok_or("Missing 'state_weight' field")?)?;
         Ok(DWAState {
-            transitions,
-            final_weight,
-            trans_weights,
-            state_weight,
+            transitions: BTreeMap::<Label, StateID>::from_json(obj.remove("transitions").ok_or("Missing transitions")?)?,
+            final_weight: Option::<Weight>::from_json(obj.remove("final_weight").ok_or("Missing final_weight")?)?,
+            trans_weights: BTreeMap::<Label, Weight>::from_json(obj.remove("trans_weights").ok_or("Missing trans_weights")?)?,
+            state_weight: Option::<Weight>::from_json(obj.remove("state_weight").ok_or("Missing state_weight")?)?,
         })
     }
 }
@@ -111,14 +90,11 @@ impl JSONConvertible for DWA {
         obj.insert("start_state".to_string(), self.body.start_state.to_json());
         JSONNode::Object(obj)
     }
-
     fn from_json(node: JSONNode) -> Result<Self, String> {
         let mut obj = node.into_object()?;
-        let states = Vec::<DWAState>::from_json(obj.remove("states").ok_or("Missing 'states' field")?)?;
-        let start_state = StateID::from_json(obj.remove("start_state").ok_or("Missing 'start_state' field")?)?;
         Ok(DWA {
-            states: DWAStates(states),
-            body: DWABody { start_state },
+            states: DWAStates(Vec::<DWAState>::from_json(obj.remove("states").ok_or("Missing states")?)?),
+            body: DWABody { start_state: StateID::from_json(obj.remove("start_state").ok_or("Missing start_state")?)? },
         })
     }
 }

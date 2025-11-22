@@ -127,7 +127,6 @@ fn build_label_follower_map(parser: &GLRParser) -> BTreeMap<ParserStateID, State
 }
 
 /// Propagate label weights along the NWA and prune transitions whose labels are never reachable.
-/// Currently unused in the main `precompute4` pipeline but kept here as an optional optimization pass.
 pub(crate) fn propagate_and_prune_labels(parser: &GLRParser, nwa: &mut NWA) {
     crate::debug!(4, "Starting label propagation and pruning...");
     let now = std::time::Instant::now();
@@ -137,23 +136,31 @@ pub(crate) fn propagate_and_prune_labels(parser: &GLRParser, nwa: &mut NWA) {
     let mut state_info: Vec<BTreeMap<ParserStateID, Weight>> = vec![BTreeMap::new(); nwa.states.len()];
     let mut worklist: VecDeque<StateID> = VecDeque::new();
     let mut in_worklist: BTreeSet<StateID> = BTreeSet::new();
-
-    let start_state = &nwa.states[nwa.body.start_state];
     let mut initial_states: BTreeSet<StateID> = BTreeSet::new();
-    for (_, targets) in &start_state.transitions {
-        for (target_state, w) in targets {
-            initial_states.insert(*target_state);
-            let s_init = *target_state;
-            for (label, _) in &nwa.states[s_init].transitions {
-                if let Ok((is_pos, p_id)) = decode_symbol_i16(*label) {
-                    if is_pos {
-                        let entry = state_info[s_init].entry(p_id).or_insert_with(Weight::zeros);
-                        *entry |= w;
+
+    // Initialize from all start states
+    for &start_node in &nwa.body.start_states {
+        if start_node >= nwa.states.len() { continue; }
+        let start_state = &nwa.states[start_node];
+        
+        // Propagate to immediate neighbors of start states
+        for (_, targets) in &start_state.transitions {
+            for (target_state, w) in targets {
+                initial_states.insert(*target_state);
+                let s_init = *target_state;
+                
+                // Look at outgoing transitions of the neighbor to determine initial valid labels
+                for (label, _) in &nwa.states[s_init].transitions {
+                    if let Ok((is_pos, p_id)) = decode_symbol_i16(*label) {
+                        if is_pos {
+                            let entry = state_info[s_init].entry(p_id).or_insert_with(Weight::zeros);
+                            *entry |= w;
+                        }
                     }
                 }
-            }
-            if !state_info[s_init].is_empty() && in_worklist.insert(s_init) {
-                worklist.push_back(s_init);
+                if !state_info[s_init].is_empty() && in_worklist.insert(s_init) {
+                    worklist.push_back(s_init);
+                }
             }
         }
     }
@@ -215,8 +222,10 @@ pub(crate) fn propagate_and_prune_labels(parser: &GLRParser, nwa: &mut NWA) {
 
     let now_prune = std::time::Instant::now();
     let mut changed_count = 0;
+    let start_states_set: BTreeSet<StateID> = nwa.body.start_states.iter().cloned().collect();
+
     for u in 0..nwa.states.len() {
-        if initial_states.contains(&u) || u == nwa.body.start_state {
+        if initial_states.contains(&u) || start_states_set.contains(&u) {
             continue;
         }
 

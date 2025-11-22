@@ -112,11 +112,11 @@ impl<'r> Precomputer1<'r> {
             let label = (tsid.0 + self.terminals_count) as Label;
             self.nwa.add_transition(new_start_state, label, *state, Weight::all()).unwrap();
         }
-        self.nwa.body.start_state = new_start_state;
+        self.nwa.body.start_states = vec![new_start_state];
         crate::debug!(3, "Simplifying NWA with {} states...", self.nwa.states.len());
         self.nwa.simplify();
         crate::debug!(3, "Determinizing NWA with {} states...", self.nwa.states.len());
-        let mut dwa = self.nwa.determinize();
+        let mut dwa = self.nwa.determinize_to_dwa();
         crate::debug!(3, "Simplifying DWA with {} states...", dwa.states.len());
         self.nwa.simplify();
         crate::debug!(3, "Unrolling DWA with {} states...", dwa.states.len());
