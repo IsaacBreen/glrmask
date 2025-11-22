@@ -384,6 +384,8 @@ pub fn precompute4(parser: &GLRParser, input_nwa: &NWA) -> DWA {
     let offset = parser.terminal_map.len() as Label;
     let final_bodies_arc = Arc::new(Mutex::new(BTreeMap::new()));
 
+    crate::debug!(3, "Beginning NWA traversal.");
+
     nwa_special_map(
         &reversed_nwa, &traversal_data, initial_values_full,
         |current_val: &(BTreeMap<NWABody, BTreeMap<Option<TerminalID>, Weight>>, LLMTokenBV), edge_label, transitions| {
