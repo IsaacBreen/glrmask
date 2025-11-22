@@ -1226,16 +1226,9 @@ impl NWA {
             }
         }
 
-        let mut new_start_states = Vec::new();
-        for &old_start in &self.body.start_states {
-            let start_class = partition.class_of[old_start];
-            let new_start = class_to_new[&start_class];
-            if !new_start_states.contains(&new_start) {
-                new_start_states.push(new_start);
-            }
-        }
+        let start_class = partition.class_of[self.body.start_state];
+        self.body.start_state = class_to_new[&start_class];
         self.states = new_states;
-        self.body.start_states = new_start_states;
     }
 
     fn prune_unreachable(&mut self) -> bool {
@@ -1245,23 +1238,17 @@ impl NWA {
             return false;
         }
 
-        if self.body.start_states.is_empty() {
-            let changed = n > 0;
-            if changed {
-                self.states = NWAStates::default();
-                self.body.start_states.clear();
-            }
-            return changed;
-        }
-
         let mut reachable = vec![false; n];
         let mut q: VecDeque<NWAStateID> = VecDeque::new();
 
-        for &start in &self.body.start_states {
-            if start < n && !reachable[start] {
-                reachable[start] = true;
-                q.push_back(start);
-            }
+        let start = self.body.start_state;
+        if start < n {
+            reachable[start] = true;
+            q.push_back(start);
+        } else {
+            // If start is out of bounds, reset to empty default
+            *self = NWA::new();
+            return true;
         }
 
         while let Some(u) = q.pop_front() {
@@ -1320,13 +1307,7 @@ impl NWA {
             st.transitions = new_transitions;
         }
 
-        let mut new_start_states = Vec::new();
-        for &s in &self.body.start_states {
-            if s < n && reachable[s] {
-                new_start_states.push(map[s]);
-            }
-        }
-        self.body.start_states = new_start_states;
+        self.body.start_state = map[self.body.start_state];
         self.states = new_states;
         true
     }
@@ -1381,13 +1362,9 @@ impl NWA {
         }
         
         // Check if start states survive
-        let any_start_live = self.body.start_states.iter().any(|&s| s < n && live[s]);
-        if !any_start_live {
-             // If all start states are dead, the NWA accepts empty language.
-             // Collapse to empty.
-             if n == 0 { return false; }
-             self.states = NWAStates::default();
-             self.body.start_states.clear();
+        if !live[self.body.start_state] {
+             // If start state is dead, the NWA accepts empty language.
+             *self = NWA::new();
              return true;
         }
 
@@ -1423,13 +1400,7 @@ impl NWA {
             st.transitions = new_transitions;
         }
 
-        let mut new_start_states = Vec::new();
-        for &s in &self.body.start_states {
-            if s < n && live[s] {
-                new_start_states.push(map[s]);
-            }
-        }
-        self.body.start_states = new_start_states;
+        self.body.start_state = map[self.body.start_state];
         self.states = new_states;
         true
     }

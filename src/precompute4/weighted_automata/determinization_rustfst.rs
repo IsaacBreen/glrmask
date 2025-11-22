@@ -176,19 +176,7 @@ pub fn nwa_to_vector_fst(nwa: &NWA) -> VectorFst<BitsetWeight> {
         state_map.insert(i, s);
     }
 
-    if !nwa.body.start_states.is_empty() {
-        if nwa.body.start_states.len() == 1 {
-            fst.set_start(state_map[&nwa.body.start_states[0]]).unwrap();
-        } else {
-            let super_start = fst.add_state();
-            fst.set_start(super_start).unwrap();
-            for &s_idx in &nwa.body.start_states {
-                if let Some(&target) = state_map.get(&s_idx) {
-                    fst.add_tr(super_start, Tr::new(EPS_LABEL, EPS_LABEL, BitsetWeight::one(), target)).unwrap();
-                }
-            }
-        }
-    }
+    fst.set_start(state_map[&nwa.body.start_state]).unwrap();
 
     for (i, nwa_state) in nwa.states.0.iter().enumerate() {
         let fst_state_id = state_map[&i];
@@ -295,9 +283,7 @@ pub fn vector_fst_to_nwa(fst: &VectorFst<BitsetWeight>) -> NWA {
     }
 
     if let Some(fst_start) = fst.start() {
-        nwa.body.start_states = vec![state_map[&fst_start]];
-    } else {
-        nwa.body.start_states.clear();
+        nwa.body.start_state = state_map[&fst_start];
     }
 
     for i in 0..fst.num_states() {
@@ -352,11 +338,11 @@ impl DWA {
 }
 
 impl NWA {
-    pub fn to_rustfst(&self) -> VectorFst<BitsetWeight> {
-        nwa_to_vector_fst(self)
+    pub fn determinize_to_dwa_with_rustfst(&self) -> DWA {
+        determinize_nwa_to_dwa(self)
     }
 
-    pub fn from_rustfst(fst: &VectorFst<BitsetWeight>) -> NWA {
-        vector_fst_to_nwa(fst)
+    pub fn to_rustfst(&self) -> VectorFst<BitsetWeight> {
+        nwa_to_vector_fst(self)
     }
 }

@@ -31,7 +31,7 @@ pub(crate) fn build_template_nwa_from_characterization(bb: &BelowBottomCharacter
     }
 
     // NWA::new() initializes a single start state.
-    let start = nwa.body.start_states[0];
+    let start = nwa.body.start_state;
 
     // Initial shifts from start.
     for &(initial_state, shift_state) in &bb.initial_shifts {
@@ -127,7 +127,7 @@ pub(crate) fn build_template_dwas(parser: &GLRParser) -> Result<BTreeMap<Termina
     for (term, bb) in all {
         let mut nwa = build_template_nwa_from_characterization(&bb)?;
         nwa.simplify();
-        let mut dwa = nwa.determinize_to_dwa_with_rustfst();
+        let mut dwa = nwa.determinize_to_dwa();
         dwa.simplify();
         crate::debug!(5, "Built template DWA for terminal {:?}:", term);
         out.insert(term, dwa);
