@@ -450,7 +450,7 @@ pub fn precompute4(parser: &GLRParser, input_nwa: &NWA) -> DWA {
     }
     let combined_nwa = NWA { states: combined_nwa_states, body: NWABody { start_states: vec![combined_start_state] } };
     let final_dwa = resolve_negatives_and_optimize_and_determinize(parser, combined_nwa);
-    crate::debug!(3, "Precomputation complete. Final DWA stats:\n{}", final_dwa.stats());
+    crate::debug!(3, "Precomputation complete. Final DWA stats: {}", final_dwa.stats());
     final_dwa
 }
 
