@@ -31,7 +31,7 @@ pub(crate) fn build_template_nwa_from_characterization(bb: &BelowBottomCharacter
     }
 
     // NWA::new() initializes a single start state.
-    let start = nwa.body.start_state;
+    let start = nwa.body.start_states[0];
 
     // Initial shifts from start.
     for &(initial_state, shift_state) in &bb.initial_shifts {

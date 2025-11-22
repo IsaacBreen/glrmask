@@ -227,11 +227,11 @@ impl<'a> Determinizer<'a> {
 }
 
 fn try_build_singleton_loop_union(nwa: &NWA) -> Option<DWA> {
-    if nwa.states.0.is_empty() {
+    if nwa.states.0.is_empty() || nwa.body.start_states.len() != 1 {
         return None;
     }
 
-    let start = nwa.body.start_state;
+    let start = nwa.body.start_states[0];
     if start >= nwa.states.len() { return None; }
 
     if !nwa.states[start].transitions.is_empty() {
@@ -347,7 +347,9 @@ impl NWA {
 
                 let mut det = Determinizer::new(self, mp);
                 let mut start_subset: WeightedSubset = WeightedSubset::new();
-                start_subset.insert(self.body.start_state, Weight::all());
+                for &s in &self.body.start_states {
+                    start_subset.insert(s, Weight::all());
+                }
                 
                 let start_id = det.register_state(start_subset);
                 det.dwa.body.start_state = start_id;
