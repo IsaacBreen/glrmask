@@ -474,11 +474,6 @@ pub fn precompute4(
     // Identify 'roots' for reverse traversal (states with final weights in original NWA)
     let initial_tokens = LLMTokenBV::max_ones();
     let mut initial_values_bv = Vec::new();
-    for (id, state) in input_nwa.states.0.iter().enumerate() {
-        if state.final_weight.is_some() {
-            initial_values_bv.push((id, initial_tokens.clone()));
-        }
-    }
 
     // Pass 1: Token propagation and Signature collection
     let start_pass1 = Instant::now();
@@ -593,14 +588,7 @@ pub fn precompute4(
     let initial_term_map: BTreeMap<Option<TerminalID>, Weight> = BTreeMap::from([(None, Weight::all())]);
     let initial_body_map_full = BTreeMap::from([(initial_nwa_body, initial_term_map)]);
 
-    let mut initial_values_full = Vec::new();
-    for (id, state) in input_nwa.states.0.iter().enumerate() {
-        if state.final_weight.is_some() {
-            if let Some(tokens) = node_tokens.get(&id) {
-                initial_values_full.push((id, (initial_body_map_full.clone(), tokens.clone())));
-            }
-        }
-    }
+    let mut initial_values_full = vec![(reversed_nwa.body.start_state, (initial_term_map, LLMTokenBV::max_ones()))];
 
     // We need to capture the final bodies computed at the "root states" of the original input NWA.
     let offset = parser.terminal_map.len() as Label;
