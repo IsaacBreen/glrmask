@@ -109,31 +109,60 @@ impl<'a> GrammarOptimizer<'a> {
         sccs
     }
 
-    fn dfs(&self, at: usize, graph: &Vec<Vec<usize>>, ids: &mut Vec<i32>, low: &mut Vec<i32>, 
+    fn dfs(&self, start: usize, graph: &Vec<Vec<usize>>, ids: &mut Vec<i32>, low: &mut Vec<i32>, 
            on_stack: &mut Vec<bool>, stack: &mut Vec<usize>, id_counter: &mut i32, sccs: &mut Vec<Vec<usize>>) {
-        stack.push(at);
-        on_stack[at] = true;
-        ids[at] = *id_counter;
-        low[at] = *id_counter;
-        *id_counter += 1;
-
-        for &to in &graph[at] {
-            if ids[to] == -1 {
-                self.dfs(to, graph, ids, low, on_stack, stack, id_counter, sccs);
-                low[at] = std::cmp::min(low[at], low[to]);
-            } else if on_stack[to] {
-                low[at] = std::cmp::min(low[at], ids[to]);
+        // Iterative DFS using explicit call stack
+        let mut call_stack: Vec<(usize, usize, bool)> = vec![(start, 0, false)]; // (node, neighbor_idx, returning)
+        
+        while let Some((at, mut neighbor_idx, returning)) = call_stack.pop() {
+            if !returning {
+                // First visit
+                if ids[at] != -1 {
+                    continue; // Already visited
+                }
+                
+                stack.push(at);
+                on_stack[at] = true;
+                ids[at] = *id_counter;
+                low[at] = *id_counter;
+                *id_counter += 1;
             }
-        }
-
-        if ids[at] == low[at] {
-            let mut scc = Vec::new();
-            while let Some(node) = stack.pop() {
-                on_stack[node] = false;
-                scc.push(node);
-                if node == at { break; }
+            
+            // Process neighbors
+            let neighbors = &graph[at];
+            while neighbor_idx < neighbors.len() {
+                let to = neighbors[neighbor_idx];
+                
+                if ids[to] == -1 {
+                    // Need to visit this neighbor first
+                    call_stack.push((at, neighbor_idx + 1, true));
+                    call_stack.push((to, 0, false));
+                    neighbor_idx = neighbors.len(); // Break the loop
+                } else {
+                    if on_stack[to] {
+                        low[at] = std::cmp::min(low[at], ids[to]);
+                    }
+                    neighbor_idx += 1;
+                }
             }
-            sccs.push(scc);
+            
+            if neighbor_idx >= neighbors.len() {
+                // All neighbors processed, check for SCC
+                if ids[at] == low[at] {
+                    let mut scc = Vec::new();
+                    while let Some(node) = stack.pop() {
+                        on_stack[node] = false;
+                        scc.push(node);
+                        if node == at { break; }
+                    }
+                    sccs.push(scc);
+                }
+                
+                // Update parent's low value if we're returning
+                if let Some((parent, _, _)) = call_stack.last() {
+                    low[*parent] = std::cmp::min(low[*parent], low[at]);
+                }
+            }
         }
     }
 

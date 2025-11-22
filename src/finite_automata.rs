@@ -10,6 +10,7 @@ use std::fmt::{Debug, Display, Formatter};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use memory_stats::memory_stats;
+use rustc_hash::{FxHashMap, FxHasher};
 
 pub type GroupID = usize;
 
@@ -47,33 +48,51 @@ impl std::hash::Hash for CompressedStateSet {
 }
 
 impl CompressedStateSet {
+    fn new(_num_bits: usize) -> Self {
+        // Compute hash of empty set
+        let mut hasher = FxHasher::default();
+        0usize.hash(&mut hasher); // Length 0
+        let hash = hasher.finish();
+
+        Self {
+            words: Vec::new(),
+            hash,
+        }
+    }
+
     fn from_sparse(sparse: &SparseStateSet) -> Self {
         let mut words = Vec::with_capacity(sparse.dirty_words.len());
-        // dirty_words are not sorted, so we must sort them to ensure canonical representation
+        Self::fill_words_from_sparse(sparse, &mut words);
+        let hash = Self::compute_hash(&words);
+        Self { words, hash }
+    }
+
+    fn reuse_from_sparse(sparse: &SparseStateSet, buffer: &mut Self) {
+        buffer.words.clear();
+        Self::fill_words_from_sparse(sparse, &mut buffer.words);
+        buffer.hash = Self::compute_hash(&buffer.words);
+    }
+
+    fn fill_words_from_sparse(sparse: &SparseStateSet, words: &mut Vec<(u32, u64)>) {
         let mut indices = sparse.dirty_words.clone();
         indices.sort_unstable();
 
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        indices.len().hash(&mut hasher);
-
         for &idx in &indices {
             let w = sparse.dense.words[idx];
-            // sparse.dense.words[idx] *should* be non-zero if it's in dirty_words.
-            // But SparseStateSet::clear resets words to 0 but keeps dirty_words until cleared.
-            // Here we assume from_sparse is called on a valid set.
-            // Note: SparseStateSet::insert pushes to dirty_words when word becomes non-zero.
-            // It does NOT remove from dirty_words if word becomes zero (e.g. by bit manipulation).
-            // But we only add bits in closure. We never remove bits.
-            // So words in dirty_words are non-zero.
             if w != 0 {
                 words.push((idx as u32, w));
-                idx.hash(&mut hasher);
-                w.hash(&mut hasher);
             }
         }
-        let hash = hasher.finish();
+    }
 
-        Self { words, hash }
+    fn compute_hash(words: &Vec<(u32, u64)>) -> u64 {
+        let mut hasher = FxHasher::default();
+        words.len().hash(&mut hasher);
+        for &(idx, w) in words {
+            idx.hash(&mut hasher);
+            w.hash(&mut hasher);
+        }
+        hasher.finish()
     }
 
     fn iter(&self) -> CompressedStateSetIter {
@@ -934,11 +953,16 @@ impl ExprGroups {
         print_memory_usage("Start of Regex build");
         crate::debug!(3, "Building NFA");
         let start = std::time::Instant::now();
-        let nfa = self.build_nfa();
+        let mut nfa = self.build_nfa();
         crate::debug!(4, "Built NFA in {:.2?}", start.elapsed());
-        print_memory_usage("After NFA build");
-        nfa.print_stats();
-        crate::debug!(3, "Converting NFA to DFA");
+    print_memory_usage("After NFA build");
+    
+    let start_condense = std::time::Instant::now();
+    nfa.condense_epsilon_sccs();
+    crate::debug!(4, "Condensed NFA in {:.2?}", start_condense.elapsed());
+    
+    // nfa.print_stats(); // Skip stats for speed
+    crate::debug!(3, "Converting NFA to DFA");
         let start = std::time::Instant::now();
         let mut dfa = nfa.to_dfa();
         crate::debug!(4, "Converted NFA to DFA in {:.2?}", start.elapsed());
@@ -1446,6 +1470,102 @@ impl NFA {
         println!("-----------------");
     }
 
+    fn condense_epsilon_sccs(&mut self) {
+        let num_states = self.states.len();
+        let mut disc = vec![-1i32; num_states];
+        let mut low = vec![-1i32; num_states];
+        let mut on_stack = vec![false; num_states];
+        let mut stack: Vec<usize> = Vec::new();
+        let mut time = 0i32;
+        let mut scc_map = vec![0usize; num_states];
+        let mut scc_count = 0;
+
+        let mut work_stack: Vec<(usize, usize)> = Vec::new();
+
+        for i in 0..num_states {
+            if disc[i] != -1 {
+                continue;
+            }
+
+            work_stack.push((i, 0));
+            while let Some((u, idx)) = work_stack.pop() {
+                if idx == 0 {
+                    disc[u] = time;
+                    low[u] = time;
+                    time += 1;
+                    stack.push(u);
+                    on_stack[u] = true;
+                }
+
+                let neighbors = &self.states[u].epsilon_transitions;
+                if idx < neighbors.len() {
+                    let v = neighbors[idx];
+                    work_stack.push((u, idx + 1));
+                    if disc[v] == -1 {
+                        work_stack.push((v, 0));
+                    } else if on_stack[v] {
+                        low[u] = low[u].min(disc[v]);
+                    }
+                } else {
+                    if low[u] == disc[u] {
+                        loop {
+                            let v = stack.pop().unwrap();
+                            on_stack[v] = false;
+                            scc_map[v] = scc_count;
+                            if u == v {
+                                break;
+                            }
+                        }
+                        scc_count += 1;
+                    }
+
+                    if let Some((parent, _)) = work_stack.last() {
+                        low[*parent] = low[*parent].min(low[u]);
+                    }
+                }
+            }
+        }
+
+        if scc_count == num_states {
+            return;
+        }
+
+        crate::debug!(3, "Condensing NFA: {} states -> {} states ({} SCCs)", num_states, scc_count, scc_count);
+
+        let mut new_states = Vec::with_capacity(scc_count);
+        for _ in 0..scc_count {
+            new_states.push(NFAState::new());
+        }
+
+        for (old_id, state) in self.states.iter().enumerate() {
+            let new_id = scc_map[old_id];
+            let new_state = &mut new_states[new_id];
+
+            new_state.finalizers.extend(state.finalizers.iter().cloned());
+            new_state.non_greedy_finalizers.extend(state.non_greedy_finalizers.iter().cloned());
+
+            for (u8set, target) in &state.transitions {
+                let new_target = scc_map[*target];
+                new_state.transitions.push((u8set.clone(), new_target));
+            }
+
+            for &target in &state.epsilon_transitions {
+                let new_target = scc_map[target];
+                if new_target != new_id {
+                    new_state.epsilon_transitions.push(new_target);
+                }
+            }
+        }
+
+        for state in &mut new_states {
+            state.epsilon_transitions.sort_unstable();
+            state.epsilon_transitions.dedup();
+        }
+
+        self.states = new_states;
+        self.start_state = scc_map[self.start_state];
+    }
+
     fn build_compact_nfa(&self) -> CompactNFA {
         let mut epsilon_offsets = Vec::with_capacity(self.states.len() + 1);
         let mut epsilon_targets = Vec::new();
@@ -1504,7 +1624,7 @@ impl NFA {
         let start_time = std::time::Instant::now();
         let mut dfa_states: Vec<DFAState> = Vec::new();
         // Use CompressedStateSet for memory efficiency
-        let mut dfa_state_map: HashMap<CompressedStateSet, usize> = HashMap::new();
+        let mut dfa_state_map: FxHashMap<CompressedStateSet, usize> = FxHashMap::default();
         let mut worklist: Vec<CompressedStateSet> = Vec::new();
 
         // Instrumentation
@@ -1608,14 +1728,18 @@ impl NFA {
             let start_collect = std::time::Instant::now();
             for state in current_set.iter() {
                 // Use remapped transitions
-                for (class_set, next_state) in &remapped_transitions[state] {
+                // Unsafe access to remapped_transitions? No, state is valid.
+                for (class_set, next_state) in unsafe { remapped_transitions.get_unchecked(state) } {
                     for class_id in class_set.iter() {
                         let idx = class_id as usize;
-                        if !seen_class[idx] {
-                            seen_class[idx] = true;
-                            used_classes.push(idx);
+                        // Unsafe access to seen_class and transition_targets
+                        unsafe {
+                            if !*seen_class.get_unchecked(idx) {
+                                *seen_class.get_unchecked_mut(idx) = true;
+                                used_classes.push(idx);
+                            }
+                            transition_targets.get_unchecked_mut(idx).insert(*next_state);
                         }
-                        transition_targets[idx].insert(*next_state);
                     }
                 }
             }
@@ -1623,22 +1747,25 @@ impl NFA {
 
             // 2. Process inputs (PROCESS PHASE)
             let start_process = std::time::Instant::now();
-            let mut local_cache: HashMap<CompressedStateSet, usize> = HashMap::new();
+            let mut local_cache: FxHashMap<CompressedStateSet, usize> = FxHashMap::default();
+            let mut scratch_target = CompressedStateSet::new(0);
+            let mut scratch_closure = CompressedStateSet::new(0);
             
             // Collect all transitions for this state to bulk insert later
             let mut dfa_transitions_vec: Vec<(u8, usize)> = Vec::new();
 
             for &class_id in &used_classes {
-                let target_set = &transition_targets[class_id];
+                let target_set = unsafe { transition_targets.get_unchecked(class_id) };
                 
-                // We can't easily check local_cache with CompressedStateSet unless we construct it.
-                // But constructing it is cheap enough? Or we can use a temporary key?
-                // Actually, local_cache should map CompressedStateSet to usize.
-                // But target_set is SparseStateSet.
-                // We can construct CompressedStateSet for lookup.
-                let compressed_target = CompressedStateSet::from_sparse(target_set);
+                // Empty set check
+                if target_set.dirty_words.is_empty() {
+                    scratch_target.words.clear();
+                    scratch_target.hash = CompressedStateSet::compute_hash(&scratch_target.words);
+                } else {
+                    CompressedStateSet::reuse_from_sparse(target_set, &mut scratch_target);
+                }
 
-                let next_dfa_state_idx = if let Some(&idx) = local_cache.get(&compressed_target) {
+                let next_dfa_state_idx = if let Some(&idx) = local_cache.get(&scratch_target) {
                     idx
                 } else {
                     // Compute closure
@@ -1667,9 +1794,9 @@ impl NFA {
                     // TIMING: BFS Closure
                     let start_bfs = std::time::Instant::now();
                     while let Some(u) = stack.pop() {
-                        let start = compact_nfa.epsilon_offsets[u] as usize;
-                        let end = compact_nfa.epsilon_offsets[u + 1] as usize;
-                        for &v in &compact_nfa.epsilon_targets[start..end] {
+                        let start = unsafe { *compact_nfa.epsilon_offsets.get_unchecked(u) } as usize;
+                        let end = unsafe { *compact_nfa.epsilon_offsets.get_unchecked(u + 1) } as usize;
+                        for &v in unsafe { compact_nfa.epsilon_targets.get_unchecked(start..end) } {
                             let v = v as usize;
                             if closure_set.insert(v) {
                                 stack.push(v);
@@ -1680,14 +1807,14 @@ impl NFA {
 
                     // Get/Create DFA state
                     let start_map = std::time::Instant::now();
-                    let compressed_key = CompressedStateSet::from_sparse(&closure_set);
+                    CompressedStateSet::reuse_from_sparse(&closure_set, &mut scratch_closure);
                     
-                    let next_state_idx = if let Some(&existing_state) = dfa_state_map.get(&compressed_key) {
+                    let next_state_idx = if let Some(&existing_state) = dfa_state_map.get(&scratch_closure) {
                         existing_state
                     } else {
                         let new_state_index = dfa_states.len();
-                        dfa_state_map.insert(compressed_key.clone(), new_state_index);
-                        worklist.push(compressed_key);
+                        dfa_state_map.insert(scratch_closure.clone(), new_state_index);
+                        worklist.push(scratch_closure.clone());
 
                         let mut new_finalizers = BTreeSet::new();
                         let mut new_non_greedy_finalizers = BTreeSet::new();
@@ -1715,7 +1842,7 @@ impl NFA {
                     };
                     t_map_lookup += start_map.elapsed();
                     
-                    local_cache.insert(compressed_target, next_state_idx);
+                    local_cache.insert(scratch_target.clone(), next_state_idx);
                     next_state_idx
                 };
 
