@@ -369,6 +369,7 @@ pub fn precompute4(parser: &GLRParser, input_nwa: &NWA) -> DWA {
         template_cache.insert(target_sig.clone(), NWA::from_dwa(&derived_dwa));
         pool.push((target_sig, derived_dwa));
     }
+    crate::debug!(3, "Finished DWA specialization.");
 
     let states_arena = RefCell::new(NWAStates::default());
     let initial_body = {
