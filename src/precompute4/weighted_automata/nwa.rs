@@ -261,7 +261,6 @@ impl NWA {
         self._determinize()
     }
 
-
     fn epsilon_closure(&self, subset: &BTreeMap<NWAStateID, Weight>) -> BTreeMap<NWAStateID, Weight> {
         let mut closure = subset.clone();
         let mut worklist: VecDeque<NWAStateID> = subset.keys().copied().collect();
@@ -294,20 +293,22 @@ impl NWA {
         let mut worklist: VecDeque<BTreeMap<NWAStateID, Weight>> = VecDeque::new();
 
         let mut start_subset = BTreeMap::new();
-        if self.body.start_state < self.states.len() {
-            start_subset.insert(self.body.start_state, Weight::all());
-            let initial_subset = self.epsilon_closure(&start_subset);
-
-            if !initial_subset.is_empty() {
-                let start_id = dwa.add_state();
-                dwa.body.start_state = start_id;
-                subset_map.insert(initial_subset.clone(), start_id);
-                worklist.push_back(initial_subset);
-            } else {
-                dwa.body.start_state = dwa.add_state();
+        for &s in &self.body.start_states {
+            if s < self.states.len() {
+                start_subset.insert(s, Weight::all());
             }
+        }
+
+        let initial_subset = self.epsilon_closure(&start_subset);
+
+        if !initial_subset.is_empty() {
+            let start_id = dwa.add_state();
+            dwa.body.start_state = start_id;
+            subset_map.insert(initial_subset.clone(), start_id);
+            worklist.push_back(initial_subset);
         } else {
-            dwa.body.start_state = dwa.add_state();
+            let start_id = dwa.add_state();
+            dwa.body.start_state = start_id;
         }
 
         while let Some(subset) = worklist.pop_front() {
