@@ -94,7 +94,8 @@ impl DWA {
         self.states[state].final_weight = Some(weight); Ok(())
     }
     pub fn add_transition(&mut self, from: StateID, on: Label, to: StateID, weight: Weight) -> Result<(), DWABuildError> {
-        if from >= self.states.len() || to >= self.states.len() { return Err(DWABuildError::StateOutOfBounds { state: from }); }
+        if from >= self.states.len() { return Err(DWABuildError::StateOutOfBounds { state: from }); }
+        if to >= self.states.len() { return Err(DWABuildError::StateOutOfBounds { state: to }); }
         if self.states[from].transitions.contains_key(&on) { return Err(DWABuildError::TransitionAlreadyExists { from, on }); }
         self.states[from].transitions.insert(on, to);
         self.states[from].trans_weights.insert(on, weight); Ok(())

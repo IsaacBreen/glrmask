@@ -496,10 +496,10 @@ fn test_json_roundtrip_complex() {
 fn test_add_transition_out_of_bounds() {
     let mut d = DWA::new();
     let res = d.add_transition(5, 'a' as Label, 0, Weight::zeros());
-    assert!(matches!(res, Err(DWABuildError::StateOutOfBounds { state: 5 })));
+    assert_eq!(res, Err(DWABuildError::StateOutOfBounds { state: 5 }));
 
     let res2 = d.add_transition(0, 'a' as Label, 99, Weight::zeros());
-    assert!(matches!(res2, Err(DWABuildError::StateOutOfBounds { state: 99 })));
+    assert_eq!(res2, Err(DWABuildError::StateOutOfBounds { state: 99 }));
 }
 
 #[test]
