@@ -28,22 +28,22 @@ pub fn eat_u8_fast(byte: u8) -> Expr {
 
 /// Matches any byte except the specified one
 pub fn eat_u8_negation_fast(byte: u8) -> Expr {
-    Expr::U8Class(U8Set::from_u8(byte).complement())
+    Expr::U8Class(U8Set::from_byte(byte).complement())
 }
 
 /// Matches any of the specified bytes
 pub fn eat_u8_choice_fast(bytes: &[u8]) -> Expr {
-    Expr::U8Class(U8Set::from_slice(bytes))
+    Expr::U8Class(U8Set::from_bytes(bytes))
 }
 
 /// Matches any byte not in the specified set
 pub fn eat_u8_negation_choice_fast(bytes: &[u8]) -> Expr {
-    Expr::U8Class(U8Set::from_slice(bytes).complement())
+    Expr::U8Class(U8Set::from_bytes(bytes).complement())
 }
 
 /// Matches a byte within a specified range
 pub fn eat_u8_range_fast(start: u8, end: u8) -> Expr {
-    Expr::U8Class(U8Set::from_range(start, end))
+    Expr::U8Class(U8Set::from_byte_range(start..=end))
 }
 
 /// Matches a specific character
@@ -51,21 +51,19 @@ pub fn eat_char_fast(c: char) -> Expr {
     Expr::U8Seq(vec![c as u8])
 }
 
-impl U8Set {}
-
 /// Matches any character except the specified one
 pub fn eat_char_negation_fast(c: char) -> Expr {
-    Expr::U8Class(U8Set::from_u8(c as u8).complement())
+    Expr::U8Class(U8Set::from_char(c).complement())
 }
 
 /// Matches any of the specified characters
 pub fn eat_char_choice_fast(s: &str) -> Expr {
-    Expr::U8Class(U8Set::from_slice(s.as_bytes()))
+    Expr::U8Class(U8Set::from_chars(s))
 }
 
 /// Matches any character not in the specified set
 pub fn eat_char_negation_choice_fast(s: &str) -> Expr {
-    Expr::U8Class(U8Set::from_slice(s.as_bytes()).complement())
+    Expr::U8Class(U8Set::from_chars(s).complement())
 }
 
 /// Matches a specific string
@@ -75,7 +73,7 @@ pub fn eat_string_fast(s: &str) -> Expr {
 
 /// Matches a byte within a specified range
 pub fn eat_byte_range_fast(start: u8, end: u8) -> Expr {
-    Expr::U8Class(U8Set::from_range(start, end))
+    Expr::U8Class(U8Set::from_byte_range(start..=end))
 }
 
 /// Creates a choice of byte strings

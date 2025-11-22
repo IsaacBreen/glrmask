@@ -23,9 +23,76 @@ pub struct NFAState {
     non_greedy_finalizers: BTreeSet<GroupID>,
 }
 
-// Removed StateSet and StateSetIter.
-// We will use FrozenSet<usize> for storage (sorted vec) and 
-// BitSet for fast closure/deduplication.
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct StateSet {
+    words: Vec<u64>,
+}
+
+impl StateSet {
+    fn new(num_bits: usize) -> Self {
+        let num_words = (num_bits + 63) / 64;
+        Self {
+            words: vec![0; num_words],
+        }
+    }
+
+    fn insert(&mut self, bit: usize) -> bool {
+        let word_idx = bit / 64;
+        let bit_mask = 1u64 << (bit % 64);
+        if (self.words[word_idx] & bit_mask) == 0 {
+            self.words[word_idx] |= bit_mask;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn clear(&mut self) {
+        self.words.fill(0);
+    }
+
+    fn iter(&self) -> StateSetIter {
+        let current_word = if self.words.is_empty() { 0 } else { self.words[0] };
+        StateSetIter {
+            set: self,
+            word_idx: 0,
+            current_word,
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.words.iter().map(|w| w.count_ones() as usize).sum()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.words.iter().all(|&w| w == 0)
+    }
+}
+
+struct StateSetIter<'a> {
+    set: &'a StateSet,
+    word_idx: usize,
+    current_word: u64,
+}
+
+impl<'a> Iterator for StateSetIter<'a> {
+    type Item = usize;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if self.current_word != 0 {
+                let trailing = self.current_word.trailing_zeros();
+                self.current_word &= !(1u64 << trailing);
+                return Some(self.word_idx * 64 + trailing as usize);
+            }
+            self.word_idx += 1;
+            if self.word_idx >= self.set.words.len() {
+                return None;
+            }
+            self.current_word = self.set.words[self.word_idx];
+        }
+    }
+}
 
 // Manual impl for NFAState
 impl JSONConvertible for NFAState {
@@ -1304,34 +1371,43 @@ impl NFA {
     pub fn to_dfa(self) -> DFA {
         let start_time = std::time::Instant::now();
         let mut dfa_states: Vec<DFAState> = Vec::new();
-        let mut dfa_state_map: HashMap<FrozenSet<usize>, usize> = HashMap::new();
-        let mut worklist: Vec<FrozenSet<usize>> = Vec::new();
+        let mut dfa_state_map: HashMap<StateSet, usize> = HashMap::new();
+        let mut worklist: Vec<StateSet> = Vec::new();
 
-        // Shared buffers for on-the-fly closure computation
+        // Instrumentation
+        let mut t_collect = std::time::Duration::ZERO;
+        let mut t_process_inputs = std::time::Duration::ZERO;
+        let mut t_iter_bitset = std::time::Duration::ZERO; // Time spent finding bits in StateSet
+        let mut t_closure_bfs = std::time::Duration::ZERO; // Time spent traversing epsilons
+        let mut t_map_lookup = std::time::Duration::ZERO;  // Time spent in HashMap
+        let mut total_words_scanned: u64 = 0;
+        let mut total_useful_words: u64 = 0;
+
+        // Shared buffers for an-the-fly closure computation
         let num_nfa_states = self.states.len();
         let mut stack = Vec::with_capacity(1024);
-        let mut closure_bitset = BitSet::new(num_nfa_states);
+        // Use StateSet as a reusable bitset for closure computation
+        let mut closure_set = StateSet::new(num_nfa_states);
 
         // Compute start state closure
         stack.push(self.start_state);
-        closure_bitset.insert(self.start_state);
+        closure_set.insert(self.start_state);
 
         while let Some(u) = stack.pop() {
             for &v in &self.states[u].epsilon_transitions {
-                if closure_bitset.insert(v) {
+                if closure_set.insert(v) {
                     stack.push(v);
                 }
             }
         }
 
-        let start_closure_vec: Vec<usize> = closure_bitset.iter().collect();
-        let start_state_set = FrozenSet::new_unchecked(start_closure_vec);
+        let start_state_set = closure_set.clone();
         dfa_state_map.insert(start_state_set.clone(), 0);
         worklist.push(start_state_set.clone());
 
         let mut finalizers = BTreeSet::new();
         let mut non_greedy_finalizers = BTreeSet::new();
-        for &state in start_state_set.iter() {
+        for state in start_state_set.iter() {
             finalizers.extend(self.states[state].finalizers.iter().cloned());
             non_greedy_finalizers.extend(self.states[state].non_greedy_finalizers.iter().cloned());
         }
@@ -1347,7 +1423,7 @@ impl NFA {
         let mut next_log_threshold = 20_000;
         
         // Reuseable structures for DFA construction
-        let mut transition_targets: Vec<Vec<usize>> = vec![Vec::with_capacity(16); 256];
+        let mut transition_targets: Vec<StateSet> = (0..256).map(|_| StateSet::new(num_nfa_states)).collect();
         let mut used_inputs: Vec<usize> = Vec::with_capacity(256);
         let mut seen_input = [false; 256];
 
@@ -1365,70 +1441,88 @@ impl NFA {
                 .get(&current_set)
                 .expect("DFA state set not found in map");
 
-            for &state in current_set.iter() {
+            // 1. Populate transition_targets for all inputs (COLLECT PHASE)
+            let start_collect = std::time::Instant::now();
+            for state in current_set.iter() {
                 for (u8set, next_state) in &self.states[state].transitions {
-                    // Optimized U8Set iter
-                    for b in u8set.iter() { 
+                    for b in u8set.iter() {
                         let idx = b as usize;
                         if !seen_input[idx] {
                             seen_input[idx] = true;
                             used_inputs.push(idx);
                         }
-                        transition_targets[idx].push(*next_state);
+                        transition_targets[idx].insert(*next_state);
                     }
                 }
             }
+            t_collect += start_collect.elapsed();
 
-            // Local cache for this DFA state to map (Target Set) -> (Next DFA State ID)
-            // The key is sorted vector of targets.
-            let mut local_cache: HashMap<Vec<usize>, usize> = HashMap::new();
+            // 2. Process inputs (PROCESS PHASE)
+            let start_process = std::time::Instant::now();
+            let mut local_cache: HashMap<&StateSet, usize> = HashMap::new();
 
             for &idx in &used_inputs {
-                let target_list = &mut transition_targets[idx];
-                
-                // Often multiple inputs lead to the exact same list of NFA states.
-                // We sort/dedup purely for the local cache key.
-                // Note: target_list comes from pushes, so it's not sorted.
-                target_list.sort_unstable();
-                target_list.dedup();
-
-                if let Some(&next_state_idx) = local_cache.get(target_list) {
-                    dfa_states[current_dfa_state].transitions.insert(idx as u8, next_state_idx);
-                    continue;
+                let target_set = &transition_targets[idx];
+                if let Some(&next_state_idx) = local_cache.get(target_set) {
+                     dfa_states[current_dfa_state].transitions.insert(idx as u8, next_state_idx);
+                     continue;
                 }
+
 
                 // Compute closure
-                closure_bitset.clear();
-                for &next_state in target_list.iter() {
-                    if closure_bitset.insert(next_state) {
-                        stack.push(next_state);
+                closure_set.clear(); // Reusing global closure_set
+                
+                // TIMING: Bitset Iteration
+                let start_iter = std::time::Instant::now();
+                // Inline the iter logic to measure sparsity stats
+                {
+                    let mut w_idx = 0;
+                    let words = &target_set.words;
+                    while w_idx < words.len() {
+                        let mut w = words[w_idx];
+                        total_words_scanned += 1;
+                        if w != 0 {
+                            total_useful_words += 1;
+                            while w != 0 {
+                                let t = w.trailing_zeros();
+                                w &= !(1u64 << t);
+                                let next_state = w_idx * 64 + t as usize;
+                                
+                                if closure_set.insert(next_state) {
+                                    stack.push(next_state);
+                                }
+                            }
+                        }
+                        w_idx += 1;
                     }
                 }
+                t_iter_bitset += start_iter.elapsed();
 
+                // TIMING: BFS Closure
+                let start_bfs = std::time::Instant::now();
                 while let Some(u) = stack.pop() {
                     for &v in &self.states[u].epsilon_transitions {
-                        if closure_bitset.insert(v) {
+                        if closure_set.insert(v) {
                             stack.push(v);
                         }
                     }
                 }
+                t_closure_bfs += start_bfs.elapsed();
 
-                // BitSet iter returns sorted elements
-                let closure_vec: Vec<usize> = closure_bitset.iter().collect();
-                let frozen_closure = FrozenSet::new_unchecked(closure_vec);
-                
                 // Get/Create DFA state
+                let start_map = std::time::Instant::now();
                 let next_dfa_state =
-                    if let Some(&existing_state) = dfa_state_map.get(&frozen_closure) {
+                    if let Some(&existing_state) = dfa_state_map.get(&closure_set) { // closure_set is StateSet
                         existing_state
                     } else {
                         let new_state_index = dfa_states.len();
-                        dfa_state_map.insert(frozen_closure.clone(), new_state_index);
-                        worklist.push(frozen_closure.clone());
+                        let stored_set = closure_set.clone();
+                        dfa_state_map.insert(stored_set.clone(), new_state_index);
+                        worklist.push(stored_set);
 
                         let mut new_finalizers = BTreeSet::new();
                         let mut new_non_greedy_finalizers = BTreeSet::new();
-                        for &state in frozen_closure.iter() {
+                        for state in closure_set.iter() { // closure_set is StateSet
                             new_finalizers.extend(self.states[state].finalizers.iter().cloned());
                             new_non_greedy_finalizers
                                 .extend(self.states[state].non_greedy_finalizers.iter().cloned());
@@ -1443,11 +1537,16 @@ impl NFA {
 
                         new_state_index
                     };
+                t_map_lookup += start_map.elapsed();
 
-                // Cache using the vector we already sorted
-                local_cache.insert(target_list.clone(), next_dfa_state);
+                // Since we cannot store reference to transition_targets[idx] in local_cache easily 
+                // (borrow checker issues if we iterate used_inputs), we can just re-lookup or clone.
+                // To keep local_cache valid, we need owned keys or keys that live long enough.
+                // transition_targets lives outside the loop.
+                local_cache.insert(&transition_targets[idx], next_dfa_state);
                 dfa_states[current_dfa_state].transitions.insert(idx as u8, next_dfa_state);
             }
+            t_process_inputs += start_process.elapsed();
 
             for &idx in &used_inputs {
                  seen_input[idx] = false;
@@ -1456,7 +1555,23 @@ impl NFA {
             used_inputs.clear();
         }
 
-        crate::debug!(5, "DFA main loop complete. Total states: {}, Max subset size: {}, Time: {:.2?}", dfa_states.len(), max_subset_size, start_time.elapsed());
+        println!("DFA main loop complete. Total states: {}, Max subset size: {}, Time: {:.2?}", dfa_states.len(), max_subset_size, start_time.elapsed());
+        println!("Detailed Timing breakdown:");
+        println!("  Collect Transitions: {:.2?}", t_collect);
+        println!("  Process Inputs Loop: {:.2?}", t_process_inputs);
+        println!("    - BitSet Iteration: {:.2?}", t_iter_bitset);
+        println!("    - Closure BFS:      {:.2?}", t_closure_bfs);
+        println!("    - Map Lookup/Ins:   {:.2?}", t_map_lookup);
+        println!("    - Remainder:        {:.2?}", t_process_inputs - t_iter_bitset - t_closure_bfs - t_map_lookup);
+        
+        let sparsity_ratio = if total_words_scanned > 0 {
+            total_useful_words as f64 / total_words_scanned as f64
+        } else {
+            0.0
+        };
+        println!("BitSet Sparsity Stats:");
+        println!("  Total Words Scanned: {}", total_words_scanned);
+        println!("  Words with bits:     {} ({:.4}% useful)", total_useful_words, sparsity_ratio * 100.0);
 
         let mut dfa = DFA {
             states: dfa_states,
