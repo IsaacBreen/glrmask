@@ -351,6 +351,7 @@ pub fn precompute4(parser: &GLRParser, input_nwa: &NWA) -> DWA {
         let terms_b: usize = b.iter().map(|g| g.len()).sum();
         terms_b.cmp(&terms_a)
     });
+    crate::debug!(3, "Setup signatures_vec.");
 
     for target_sig in signatures_vec {
         let target_idx = SignatureIndex::new(&target_sig);
