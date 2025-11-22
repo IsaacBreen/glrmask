@@ -16,15 +16,94 @@ type WeightedSubset = Vec<(NWAStateID, Weight)>;
 
 fn is_zero(w: &Weight) -> bool { w.is_empty() }
 
+// Standalone core function to solve borrow checker issues in expand_state
+// Takes explicit disjoint borrows instead of &mut self
+fn compute_closure_core(
+    nwa: &NWA,
+    local_weight_map: &mut [Option<Weight>],
+    dirty_indices: &mut Vec<usize>,
+    bfs_queue: &mut VecDeque<NWAStateID>,
+    reach_buffer: &mut WeightedSubset,
+    seed: impl Iterator<Item = (NWAStateID, Weight)>
+) {
+    // 1. Initialize BFS with seed
+    for (u, w) in seed {
+        if w.is_empty() { continue; }
+        if u >= local_weight_map.len() { continue; }
+
+        match &mut local_weight_map[u] {
+            Some(existing) => {
+                if !w.is_subset_of(existing) {
+                    *existing |= &w;
+                    bfs_queue.push_back(u);
+                }
+            },
+            None => {
+                local_weight_map[u] = Some(w);
+                dirty_indices.push(u);
+                bfs_queue.push_back(u);
+            }
+        }
+    }
+
+    // 2. Run BFS
+    while let Some(u) = bfs_queue.pop_front() {
+        // Clone weight to avoid borrowing issues
+        let w_u = match &local_weight_map[u] {
+            Some(w) => w.clone(),
+            None => continue,
+        };
+
+        if u >= nwa.states.len() { continue; }
+
+        for (v, w_eps) in &nwa.states[u].epsilons {
+            if *v >= local_weight_map.len() { continue; }
+
+            let w_new = &w_u & w_eps;
+            if w_new.is_empty() { continue; }
+
+            match &mut local_weight_map[*v] {
+                Some(existing) => {
+                    if !w_new.is_subset_of(existing) {
+                        *existing |= &w_new;
+                        bfs_queue.push_back(*v);
+                    }
+                },
+                None => {
+                    local_weight_map[*v] = Some(w_new);
+                    dirty_indices.push(*v);
+                    bfs_queue.push_back(*v);
+                }
+            }
+        }
+    }
+
+    // 3. Collect results
+    reach_buffer.clear();
+    for &idx in dirty_indices.iter() {
+        if let Some(w) = local_weight_map[idx].take() {
+            reach_buffer.push((idx, w));
+        }
+    }
+
+    // 4. Cleanup
+    // local_weight_map entries were taken (set to None) above.
+    // Just clear the dirty list.
+    dirty_indices.clear();
+
+    // 5. Sort
+    reach_buffer.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+}
+
 struct Determinizer<'a> {
     nwa: &'a NWA,
-    
+
     // Map from canonical closure (Sorted Vec) to DWA State ID
     seen: HashMap<WeightedSubset, usize>,
     queue: VecDeque<usize>,
     // Store the closure for each DWA state
     closures: Vec<WeightedSubset>,
-    
+
     dwa: DWA,
 
     // Reusable buffers to avoid allocations
@@ -40,7 +119,7 @@ impl<'a> Determinizer<'a> {
         let mut dwa = DWA::new();
         dwa.states.0.clear();
         dwa.body.start_state = 0;
-        
+
         let num_states = nwa.states.len();
 
         Determinizer {
@@ -84,84 +163,22 @@ impl<'a> Determinizer<'a> {
         id
     }
 
-    /// Computes the epsilon closure of the given (state, weight) pairs.
-    /// Result is stored in self.reach_buffer (sorted).
+    /// Helper wrapper for external calls (like start state init)
     fn compute_closure_into_buffer(&mut self, seed: impl Iterator<Item = (NWAStateID, Weight)>) {
-        // 1. Initialize BFS with seed
-        for (u, w) in seed {
-            if w.is_empty() { continue; }
-            if u >= self.local_weight_map.len() { continue; }
-
-            match &mut self.local_weight_map[u] {
-                Some(existing) => {
-                    if !w.is_subset_of(existing) {
-                        *existing |= &w;
-                        self.bfs_queue.push_back(u);
-                    }
-                },
-                None => {
-                    self.local_weight_map[u] = Some(w);
-                    self.dirty_indices.push(u);
-                    self.bfs_queue.push_back(u);
-                }
-            }
-        }
-
-        // 2. Run BFS
-        while let Some(u) = self.bfs_queue.pop_front() {
-            // Clone weight to avoid borrowing issues
-            let w_u = match &self.local_weight_map[u] {
-                Some(w) => w.clone(),
-                None => continue,
-            };
-
-            if u >= self.nwa.states.len() { continue; }
-
-            for (v, w_eps) in &self.nwa.states[u].epsilons {
-                if *v >= self.local_weight_map.len() { continue; }
-
-                let w_new = &w_u & w_eps;
-                if w_new.is_empty() { continue; }
-
-                match &mut self.local_weight_map[*v] {
-                    Some(existing) => {
-                        if !w_new.is_subset_of(existing) {
-                            *existing |= &w_new;
-                            self.bfs_queue.push_back(*v);
-                        }
-                    },
-                    None => {
-                        self.local_weight_map[*v] = Some(w_new);
-                        self.dirty_indices.push(*v);
-                        self.bfs_queue.push_back(*v);
-                    }
-                }
-            }
-        }
-
-        // 3. Collect results
-        self.reach_buffer.clear();
-        for &idx in &self.dirty_indices {
-            if let Some(w) = self.local_weight_map[idx].take() {
-                self.reach_buffer.push((idx, w));
-            }
-        }
-        
-        // 4. Cleanup
-        // local_weight_map entries were taken (set to None) above.
-        // Just clear the dirty list.
-        self.dirty_indices.clear();
-
-        // 5. Sort
-        self.reach_buffer.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        compute_closure_core(
+            self.nwa,
+            &mut self.local_weight_map,
+            &mut self.dirty_indices,
+            &mut self.bfs_queue,
+            &mut self.reach_buffer,
+            seed
+        );
     }
 
     fn expand_state(&mut self, sid: usize) {
         let closure_idx = sid;
-        // We can't hold a reference to closures[sid] while mutating self.
-        // But closures are append-only and we only need to read *this* one.
-        // To be safe with Rust borrow checker, clone it or index carefully.
-        // Cloning the closure (Vec) is relatively cheap compared to the work.
+        // We clone the closure to avoid holding a borrow on self.closures while mutating other fields.
+        // Since closures are small on average, this is acceptable and safe.
         let closure = self.closures[closure_idx].clone();
 
         if closure.is_empty() {
@@ -173,7 +190,7 @@ impl<'a> Determinizer<'a> {
         for (u, w_u) in &closure {
             if *u >= self.nwa.states.len() { continue; }
             let st = &self.nwa.states[*u];
-            
+
             for (lbl, targets) in &st.transitions {
                 for (v, w_trans) in targets {
                     let w_comb = w_u & w_trans;
@@ -196,22 +213,30 @@ impl<'a> Determinizer<'a> {
         while i < self.trans_buffer.len() {
             let lbl = self.trans_buffer[i].0;
             let mut j = i;
-            
+
             let mut edge_weight = Weight::zeros();
-            
+
             // Identify range for this label
             while j < self.trans_buffer.len() && self.trans_buffer[j].0 == lbl {
                 edge_weight |= &self.trans_buffer[j].2;
                 j += 1;
             }
 
-            // Compute closure for the targets in this range
-            // We pass an iterator of (v, w)
+            // Compute closure for the targets in this range.
+            // IMPORTANT: targets_iter borrows self.trans_buffer.
+            // compute_closure_core takes disjoint borrows of other fields, satisfying borrow checker.
             let targets_iter = self.trans_buffer[i..j].iter().map(|(_, v, w)| (*v, w.clone()));
-            self.compute_closure_into_buffer(targets_iter);
+
+            compute_closure_core(
+                self.nwa,
+                &mut self.local_weight_map,
+                &mut self.dirty_indices,
+                &mut self.bfs_queue,
+                &mut self.reach_buffer,
+                targets_iter
+            );
 
             // Register the result (reach_buffer has the canonical subset)
-            // Clone reach_buffer because register_closure needs to store it
             let dest_subset = self.reach_buffer.clone();
             let dest_id = self.register_closure(dest_subset);
 
@@ -237,13 +262,12 @@ fn try_build_singleton_loop_union(nwa: &NWA) -> Option<DWA> {
 
     // Manual minimal closure for the heuristic
     let mut start_closure = Vec::new();
-    // Just BFS locally
     let mut q = VecDeque::new();
     let mut visited = HashMap::new();
-    
+
     visited.insert(start, Weight::all());
     q.push_back(start);
-    
+
     while let Some(u) = q.pop_front() {
         let w_u = visited[&u].clone();
         if u < nwa.states.len() {
@@ -344,14 +368,14 @@ impl NWA {
             return dwa;
         }
 
-        const STATE_LIMIT: usize = 250_000; 
-        
+        const STATE_LIMIT: usize = 250_000;
+
         if self.states.0.is_empty() {
             return DWA::new();
         }
 
         crate::debug!(5, "Determinization: Starting...");
-        
+
         let show_pbar = self.states.len() > 10000;
         let mp = if show_pbar { Some(MultiProgress::new()) } else { None };
         let main_pb = mp.as_ref().map(|mp_instance| {
@@ -376,7 +400,7 @@ impl NWA {
         let initial_iter = self.body.start_states.iter().map(|&s| (s, Weight::all()));
         det.compute_closure_into_buffer(initial_iter);
         let start_subset = det.reach_buffer.clone();
-        
+
         let start_id = det.register_closure(start_subset);
         det.dwa.body.start_state = start_id;
 
@@ -416,13 +440,10 @@ impl NWA {
         det.dwa
     }
 
-    // Main entry point
     pub fn determinize(&self) -> DWA {
         self.determinize_to_dwa2()
     }
-    
-    // Backward compatibility / alternative implementation
-    // (Currently pointing to the main implementation, can be removed if desired)
+
     pub fn _determinize(&self) -> DWA {
         self.determinize_to_dwa2()
     }
