@@ -41,20 +41,30 @@ impl SimpleRng {
     }
 }
 
+// FOR COMPATIBILITY:
 impl DWAState {
-    pub fn get_weight(&self, x: Label) -> Option<&Weight> {
-        todo!()
+    fn get_weight(&self, x: Label) -> Option<&Weight> {
+        self.trans_weights.get(&x)
     }
 }
 impl DWA {
-    pub fn union(&self, other: &DWA) -> DWA {
-        todo!()
+    fn union(&self, other: &DWA) -> DWA {
+        let self_nwa = NWA::from_dwa(self);
+        let other_nwa = NWA::from_dwa(other);
+        let union_nwa = NWA::union(&self_nwa, &other_nwa);
+        union_nwa.determinize_to_dwa()
     }
-    pub fn concatenate(&self, other: &DWA) -> DWA {
-        todo!()
+    fn concatenate(&self, other: &DWA) -> DWA {
+        let self_nwa = NWA::from_dwa(self);
+        let other_nwa = NWA::from_dwa(other);
+        let concat_nwa = NWA::concatenate(&self_nwa, &other_nwa);
+        concat_nwa.determinize_to_dwa()
     }
-    pub fn apply_weight(&self, w: &Weight) -> StateID {
-        todo!()
+    fn apply_weight(&mut self, w: &Weight) -> StateID {
+        let s = self.states[self.body.start_state].clone();
+        let state_id = self.states.add_existing_state(s);
+        self.states[state_id].apply_weight(w);
+        state_id
     }
 }
 
@@ -1689,6 +1699,8 @@ mod determinization_tests {
     // Helper to build a simple NWA for testing.
     fn nwa_accepts_char(ch: char, weight: Weight) -> NWA {
         let mut nwa = NWA::new();
+        let start_state = nwa.add_state();
+        nwa.body.start_states.push(start_state);
         let final_state = nwa.states.add_state();
         nwa.add_transition(nwa.body.start_states[0], ch as Label, final_state, Weight::all()).unwrap();
         nwa.states[final_state].final_weight = Some(weight);
