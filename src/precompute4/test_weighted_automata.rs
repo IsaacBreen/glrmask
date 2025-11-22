@@ -64,6 +64,7 @@ impl DWA {
         let s = self.states[self.body.start_state].clone();
         let state_id = self.states.add_existing_state(s);
         self.states[state_id].apply_weight(w);
+        self.body.start_state = state_id;
         state_id
     }
 }
