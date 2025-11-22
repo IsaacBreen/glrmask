@@ -686,11 +686,12 @@ pub fn precompute4(
                 if let Some(tok_ids) = root_to_tok.get(&node_idx) {
                     let mut fb = final_bodies_arc.lock().unwrap();
                     for (tid, start_weight) in tok_ids {
+                        let mut states = states_arena.borrow_mut();
                         let mut restricted_body = nwa_body.clone();
                         if *start_weight != Weight::all() {
-                            let new_start = restricted_body.states.add_state();
-                            restricted_body.states.add_epsilon(new_start, restricted_body.body.start_state, start_weight.clone());
-                            restricted_body.body.start_state = new_start;
+                            let new_start = states.add_state();
+                            states.add_epsilon(new_start, restricted_body.start_state, start_weight.clone());
+                            restricted_body.start_state = new_start;
                         }
                         fb.insert(*tid, restricted_body);
                     }
