@@ -279,7 +279,7 @@ fn test_resolve_negatives_from_large_nwa_log() {
     nwa.simplify();
     println!("Before negative resolution:\n{}", nwa);
 
-    let mut d = nwa.determinize_to_dwa();
+    let mut d = nwa.determinize();
     d.simplify();
     println!("DWA before negative resolution:\n{}", d);
     assert_eq!(
@@ -293,7 +293,7 @@ fn test_resolve_negatives_from_large_nwa_log() {
 
     resolve_negative_codes_in_nwa(&mut nwa);
     println!("After negative resolution (from NWA):\n{}", nwa);
-    let mut d = nwa.determinize_to_dwa();
+    let mut d = nwa.determinize();
     println!("DWA after negative resolution:\n{}", d);
 
     // Assert [0, 422] is accepted with weight in [1].

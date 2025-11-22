@@ -127,7 +127,7 @@ pub(crate) fn build_template_dwas(parser: &GLRParser) -> Result<BTreeMap<Termina
     for (term, bb) in all {
         let mut nwa = build_template_nwa_from_characterization(&bb)?;
         nwa.simplify();
-        let mut dwa = nwa.determinize_to_dwa();
+        let mut dwa = nwa.determinize();
         dwa.simplify();
         crate::debug!(5, "Built template DWA for terminal {:?}:", term);
         out.insert(term, dwa);

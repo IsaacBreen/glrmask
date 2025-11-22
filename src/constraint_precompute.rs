@@ -116,7 +116,7 @@ impl<'r> Precomputer1<'r> {
         crate::debug!(3, "Simplifying NWA with {} states...", self.nwa.states.len());
         self.nwa.simplify();
         crate::debug!(3, "Determinizing NWA with {} states...", self.nwa.states.len());
-        let mut dwa = self.nwa.determinize_to_dwa();
+        let mut dwa = self.nwa.determinize();
         crate::debug!(3, "Simplifying DWA with {} states...", dwa.states.len());
         self.nwa.simplify();
         crate::debug!(3, "Unrolling DWA with {} states...", dwa.states.len());

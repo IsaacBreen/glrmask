@@ -26,7 +26,7 @@ fn test_determinize_simple_divergence() {
     nwa.add_epsilon(start, s3, Weight::all());
     nwa.body.start_states = vec![start];
 
-    let dwa = nwa.determinize_to_dwa();
+    let dwa = nwa.determinize();
     assert_eq!(dwa.eval_word_weight(&['a' as Label, 'c' as Label]), Weight::from_item(0));
     assert_eq!(dwa.eval_word_weight(&['b' as Label, 'c' as Label]), Weight::from_item(1));
     assert!(dwa.states.len() <= 4);
@@ -49,7 +49,7 @@ fn test_determinize_hypercube_catastrophe() {
     let start = nwa.states.add_state();
     for &s_comp in &component_starts { nwa.add_epsilon(start, s_comp, Weight::all()); }
     nwa.body.start_states = vec![start];
-    let dwa = nwa.determinize_to_dwa();
+    let dwa = nwa.determinize();
     assert!(dwa.states.len() <= 2);
     let word_ac = vec![alphabet[0], alphabet[2]];
     let expected_weight_ac = &atoms[1] | &atoms[3];

@@ -331,7 +331,7 @@ pub fn precompute4(parser: &GLRParser, input_nwa: &NWA) -> DWA {
         super_nwa = NWA::union(&super_nwa, &NWA::from_dwa(&weighted_dwa));
     }
     super_nwa.simplify();
-    let mut super_dwa = super_nwa.determinize_to_dwa();
+    let mut super_dwa = super_nwa.determinize();
     super_dwa.simplify();
 
     let mut template_cache = HashMap::new();
@@ -514,7 +514,7 @@ fn resolve_negatives_and_optimize_and_determinize(parser: &GLRParser, mut combin
     simplify_remove_epsilon(&mut combined_nwa);
     combined_nwa = NWA::from_dwa(&combined_nwa.determinize_to_dwa2());
     combined_nwa.simplify();
-    let mut final_dwa = combined_nwa.determinize_to_dwa();
+    let mut final_dwa = combined_nwa.determinize();
     final_dwa.minimize_with_rustfst();
     final_dwa
 }

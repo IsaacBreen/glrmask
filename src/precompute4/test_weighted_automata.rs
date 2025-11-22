@@ -52,13 +52,13 @@ impl DWA {
         let self_nwa = NWA::from_dwa(self);
         let other_nwa = NWA::from_dwa(other);
         let union_nwa = NWA::union(&self_nwa, &other_nwa);
-        union_nwa.determinize_to_dwa()
+        union_nwa.determinize()
     }
     fn concatenate(&self, other: &DWA) -> DWA {
         let self_nwa = NWA::from_dwa(self);
         let other_nwa = NWA::from_dwa(other);
         let concat_nwa = NWA::concatenate(&self_nwa, &other_nwa);
-        concat_nwa.determinize_to_dwa()
+        concat_nwa.determinize()
     }
     fn apply_weight(&mut self, w: &Weight) -> StateID {
         let s = self.states[self.body.start_state].clone();
@@ -1684,7 +1684,7 @@ fn test_dwa_to_nwa_to_dwa_roundtrip() {
     let nwa = NWA::from_dwa(&a);
     println!("Converted NWA:\n{}", nwa);
 
-    let mut roundtrip_dwa = nwa.determinize_to_dwa();
+    let mut roundtrip_dwa = nwa.determinize();
     roundtrip_dwa.simplify();
 
     println!("Roundtrip DWA:\n{}", roundtrip_dwa);
@@ -1711,7 +1711,7 @@ mod determinization_tests {
     #[test]
     fn test_det_simple_char() {
         let nwa = nwa_accepts_char('a', Weight::from_item(1));
-        let dwa = nwa.determinize_to_dwa();
+        let dwa = nwa.determinize();
         let expected = dwa_accepts_char('a', Weight::from_item(1));
         stochastic_equivalence_test(dwa, expected);
     }
@@ -1731,7 +1731,7 @@ mod determinization_tests {
         nwa.states[final_a].final_weight = Some(Weight::from_item(1));
         nwa.states[final_b].final_weight = Some(Weight::from_item(2));
 
-        let dwa = nwa.determinize_to_dwa();
+        let dwa = nwa.determinize();
 
         let mut expected = DWA::new();
         let final_a_dwa = expected.add_state();
@@ -1755,7 +1755,7 @@ mod determinization_tests {
         nwa.states[f1].final_weight = Some(Weight::all());
         nwa.states[f2].final_weight = Some(Weight::all());
 
-        let dwa = nwa.determinize_to_dwa();
+        let dwa = nwa.determinize();
 
         // Expected DWA accepts 'a' with weight [1, 2]
         let mut expected = DWA::new();
@@ -1779,7 +1779,7 @@ mod determinization_tests {
         nwa.states[f1].final_weight = Some(Weight::all());
         nwa.states[f2].final_weight = Some(Weight::all());
 
-        let dwa = nwa.determinize_to_dwa();
+        let dwa = nwa.determinize();
 
         // Expected DWA:
         // On 'a', we get a state. The final weight of this state should be:
@@ -1800,7 +1800,7 @@ mod determinization_tests {
     fn test_det_empty_nwa() {
         let mut nwa = NWA::new();
         nwa.states.0.clear(); // Truly empty
-        let dwa = nwa.determinize_to_dwa();
+        let dwa = nwa.determinize();
         assert_eq!(dwa.states.len(), 1);
         assert!(dwa.states[dwa.body.start_state].final_weight.is_none());
         assert!(dwa.states[dwa.body.start_state].transitions.is_empty());
@@ -1809,7 +1809,7 @@ mod determinization_tests {
     #[test]
     fn test_det_accepts_nothing() {
         let nwa = NWA::new(); // start state, but no transitions and not final
-        let dwa = nwa.determinize_to_dwa();
+        let dwa = nwa.determinize();
         let expected = DWA::new();
         stochastic_equivalence_test(dwa, expected);
     }
@@ -1818,7 +1818,7 @@ mod determinization_tests {
     fn test_det_accepts_empty_word() {
         let mut nwa = NWA::new();
         nwa.states[nwa.body.start_states[0]].final_weight = Some(Weight::from_item(42));
-        let dwa = nwa.determinize_to_dwa();
+        let dwa = nwa.determinize();
         let mut expected = DWA::new();
         expected.set_final_weight(expected.body.start_state, Weight::from_item(42)).unwrap();
         stochastic_equivalence_test(dwa, expected);
@@ -1916,7 +1916,7 @@ mod determinization_tests {
         // State 38
         nwa.add_transition(38, 5, 3, Weight::all()).unwrap();
 
-        let dwa = nwa.determinize_to_dwa();
+        let dwa = nwa.determinize();
 
         let word = vec![9, 3, neg(3), neg(5), neg(10)];
         let weight = dwa.eval_word_weight(&word);
@@ -1980,7 +1980,7 @@ mod determinization_tests {
 
         println!("Constructed NWA:\n{}", nwa);
 
-        let dwa = nwa.determinize_to_dwa();
+        let dwa = nwa.determinize();
         println!("Determinized DWA:\n{}", dwa);
 
         let word = vec![9, 3, neg(3), neg(5), neg(10)];
@@ -2019,7 +2019,7 @@ mod determinization_tests {
         }
 
         fn check(nwa: &NWA) -> bool {
-            let dwa = nwa.determinize_to_dwa();
+            let dwa = nwa.determinize();
             let word = vec![9, 3, neg(3), neg(5), neg(10)];
             let weight = dwa.eval_word_weight(&word);
             weight.is_empty() // returns true if it fails (weight is empty)
@@ -2111,7 +2111,7 @@ mod determinization_tests {
         nwa.add_transition(31, neg(10), 32, Weight::all()).unwrap();
         nwa.states[32].final_weight = Some(Weight::all());
 
-        let dwa = nwa.determinize_to_dwa();
+        let dwa = nwa.determinize();
         let word = vec![9, 3, neg(3), neg(5), neg(10)];
         let weight = dwa.eval_word_weight(&word);
         assert!(!weight.is_empty(), "Path should be valid after determinization. Word: {}", format_word(&word));

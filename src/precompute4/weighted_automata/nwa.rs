@@ -257,7 +257,7 @@ impl NWA {
         nwa
     }
 
-    pub fn determinize_to_dwa(&self) -> DWA {
+    pub fn determinize(&self) -> DWA {
         if BENCHMARK_DEBUG {
             // Simple passthrough to standard determinization for now, ignoring benchmark logic for brevity
             self.determinize_to_dwa2()
