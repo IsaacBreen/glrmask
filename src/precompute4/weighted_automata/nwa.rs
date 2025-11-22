@@ -99,6 +99,15 @@ impl NWAStates {
             start_states: left.body.start_states.iter().map(|s| s + offset).collect()
         }
     }
+
+    pub fn union_in_place(&mut self, other: &NWA, existing_body: &NWABody) -> NWABody {
+        let offset = self.append(&other.states);
+        let mut new_starts = existing_body.start_states.clone();
+        new_starts.extend(other.body.start_states.iter().map(|s| s + offset));
+        NWABody {
+            start_states: new_starts
+        }
+    }
 }
 
 impl Index<NWAStateID> for NWAStates {
