@@ -1,42 +1,129 @@
 use super::common::{StateID, Weight};
 use super::dwa::DWA;
-use std::collections::{HashMap, VecDeque};
-use indicatif::{ProgressBar, ProgressStyle};
+use std::collections::{BTreeMap, HashMap, VecDeque};
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 
 impl DWA {
+    /// Unrolls cycles in the DWA by expanding states into (state, accumulated_weight) pairs.
+    /// This relies on the property that cycles are finite because weights (bitsets)
+    /// strictly decrease (via intersection) until they become empty.
     pub fn unroll_cycles(&self) -> DWA {
-        let start = self.body.start_state;
-        if start >= self.states.len() { return DWA::new(); }
-        let mut dwa = DWA::new(); dwa.states.0.clear();
-        let new_start = dwa.add_state(); dwa.body.start_state = new_start;
+        let mut new_dwa = DWA::new();
+        new_dwa.states.0.clear(); // Remove default start state
 
-        let mut q = VecDeque::from([(new_start, start, Weight::all())]);
-        // visited[orig_state] -> {weight: new_state}
-        let mut visited = vec![HashMap::new(); self.states.len()];
-        visited[start].insert(Weight::all(), new_start);
-
-        let pb = ProgressBar::new_spinner();
-        pb.set_style(ProgressStyle::default_spinner().template("{spinner} Unrolling {pos} states").unwrap());
-
-        while let Some((nu, u, w)) = q.pop_front() {
-            pb.inc(1);
-            let st = &self.states[u];
-            dwa.states[nu].final_weight = st.final_weight.clone(); // Final weight is just copied, effectively
-            // Real intersection for transitions
-            for (&l, &v) in &st.transitions {
-                if v >= self.states.len() { continue; }
-                let edge_w = &st.trans_weights[&l] & &w;
-                if edge_w.is_empty() { continue; }
-                
-                let nv = *visited[v].entry(edge_w.clone()).or_insert_with(|| {
-                    let id = dwa.add_state();
-                    q.push_back((id, v, edge_w.clone()));
-                    id
-                });
-                let _ = dwa.add_transition(nu, l, nv, st.trans_weights[&l].clone());
-            }
+        let start_node = self.body.start_state;
+        if start_node >= self.states.len() {
+            return new_dwa;
         }
-        pb.finish_with_message(format!("Done: {} states", dwa.states.len()));
-        dwa
+
+        let mut start_weight = Weight::all();
+        if let Some(sw) = &self.states[start_node].state_weight {
+            start_weight &= sw;
+        }
+
+        if start_weight.is_empty() {
+            return new_dwa;
+        }
+
+        // visited[original_state_id] -> HashMap<Weight, new_state_id>
+        // Use Option to lazy initialize HashMaps to save memory/time for sparse traversals
+        let mut visited: Vec<Option<HashMap<Weight, StateID>>> = vec![None; self.states.len()];
+        
+        // Queue stores (new_state_id, original_state_id, accumulated_weight)
+        let mut queue: VecDeque<(StateID, StateID, Weight)> = VecDeque::new();
+
+        let new_start = new_dwa.add_state();
+        new_dwa.body.start_state = new_start;
+
+        // Copy properties for start state
+        {
+            let start_state_ref = &self.states[start_node];
+            let new_state_ref = &mut new_dwa.states[new_start];
+            new_state_ref.state_weight = start_state_ref.state_weight.clone();
+            new_state_ref.final_weight = start_state_ref.final_weight.clone();
+        }
+
+        visited[start_node] = Some(HashMap::from([(start_weight.clone(), new_start)]));
+        queue.push_back((new_start, start_node, start_weight));
+
+        let m = MultiProgress::new();
+        let pb = m.add(ProgressBar::new_spinner());
+        pb.set_style(
+            ProgressStyle::default_spinner()
+                .template("{spinner:.green} [{elapsed_precise}] Unrolled states: {pos}")
+                .unwrap(),
+        );
+
+        let mut processed_count: u64 = 0;
+        while let Some((new_u, u, w_u)) = queue.pop_front() {
+            processed_count += 1;
+            pb.set_position(processed_count);
+            pb.set_length(self.states.len() as u64);
+
+            let u_state = &self.states[u];
+
+            // Collect transitions to bulk insert later, avoiding repeated re-borrows of new_dwa
+            // Pre-allocate vectors for bulk BTreeMap construction
+            let capacity = u_state.transitions.len();
+
+            let inner_pb = m.add(ProgressBar::new(capacity as u64));
+            inner_pb.set_style(
+                ProgressStyle::default_bar()
+                    .template("  {bar:20.cyan/blue} {pos}/{len} transitions")
+                    .unwrap(),
+            );
+
+            let mut new_transitions_vec = Vec::with_capacity(capacity);
+            let mut new_trans_weights_vec = Vec::with_capacity(capacity);
+
+            // Iterate transitions and weights in lockstep to avoid O(log N) lookups
+            for ((&label, &v), (_, trans_w)) in u_state.transitions.iter().zip(u_state.trans_weights.iter()) {
+                inner_pb.inc(1);
+                if v >= self.states.len() {
+                    continue;
+                }
+
+                let mut next_w = &w_u & trans_w;
+                if next_w.is_empty() {
+                    continue;
+                }
+
+                let v_state = &self.states[v];
+                if let Some(sw) = &v_state.state_weight {
+                    next_w &= sw;
+                    if next_w.is_empty() {
+                        continue;
+                    }
+                }
+
+                let v_visited = visited[v].get_or_insert_with(HashMap::new);
+
+                let new_v = if let Some(&id) = v_visited.get(&next_w) {
+                    id
+                } else {
+                    let id = new_dwa.add_state();
+                    // Initialize new state
+                    let new_st = &mut new_dwa.states[id];
+                    new_st.state_weight = v_state.state_weight.clone();
+                    new_st.final_weight = v_state.final_weight.clone();
+                    
+                    v_visited.insert(next_w.clone(), id);
+                    queue.push_back((id, v, next_w));
+                    id
+                };
+
+                new_transitions_vec.push((label, new_v));
+                new_trans_weights_vec.push((label, trans_w.clone()));
+            }
+            inner_pb.finish_and_clear();
+
+            let src_st = &mut new_dwa.states[new_u];
+            src_st.transitions = new_transitions_vec.into_iter().collect();
+            src_st.trans_weights = new_trans_weights_vec.into_iter().collect();
+        }
+
+        pb.finish_with_message(format!("Done ({} states)", new_dwa.states.len()));
+        crate::debug!(3, "Unrolling complete. {} states", new_dwa.states.len());
+        new_dwa
     }
 }
