@@ -55,48 +55,6 @@ fn epsilon_closure(nwa_states: &NWAStates, seed: &WeightedSubset) -> ClosureMap 
     closure
 }
 
-fn collect_labels(nwa_states: &NWAStates, closure: &ClosureMap) -> BTreeSet<Label> {
-    let mut labels: BTreeSet<Label> = BTreeSet::new();
-    for (sid, cw) in closure {
-        if is_zero(cw) {
-            continue;
-        }
-        labels.extend(nwa_states[*sid].transitions.keys());
-    }
-    labels
-}
-
-fn next_subset_for_label(nwa_states: &NWAStates, closure: &ClosureMap, ch: Label) -> WeightedSubset {
-    let mut next: WeightedSubset = WeightedSubset::new();
-    for (sid, cw) in closure {
-        if is_zero(cw) {
-            continue;
-        }
-        let st = &nwa_states[*sid];
-        if let Some(targets) = st.transitions.get(&ch) {
-            for (to, w_edge) in targets {
-                let cand = weight_intersection(cw, w_edge);
-                if is_zero(&cand) {
-                    continue;
-                }
-                next.entry(*to)
-                    .and_modify(|w| weight_union_in_place(w, &cand))
-                    .or_insert(cand);
-            }
-        }
-    }
-    next.retain(|_, w| !is_zero(w));
-    next
-}
-
-fn union_over_values(map: &WeightedSubset) -> Weight {
-    let mut acc = Weight::zeros();
-    for w in map.values() {
-        acc = acc | w.clone();
-    }
-    acc
-}
-
 fn compute_state_and_final_weights(nwa: &NWA, closure: &ClosureMap) -> (Option<Weight>, Option<Weight>) {
     let entry_opt = None;
     let mut finalw = Weight::zeros();
@@ -170,56 +128,42 @@ impl<'a> Determinizer<'a> {
             return;
         }
 
-        let labels_pb = if let Some(mp) = &self.mp {
-            let pb = mp.add(ProgressBar::new(0));
-            pb.set_style(
-                ProgressStyle::default_bar()
-                    .template(
-                        "  {spinner:.green} [{elapsed_precise}] Labels: \
-                         [{bar:40.cyan/blue}] {pos}/{len} {msg}",
-                    )
-                    .unwrap()
-                    .progress_chars("#>-"),
-            );
-            pb.set_message(format!("State {}", sid));
-            Some(pb)
-        } else {
-            None
-        };
+        // Accumulate transitions by label in a single pass over the closure.
+        // transition_subsets: Label -> (TargetStateID -> AccumulatedWeight)
+        let mut transition_subsets: BTreeMap<Label, WeightedSubset> = BTreeMap::new();
+        // transition_edge_weights: Label -> AccumulatedWeight (for the DWA edge itself)
+        let mut transition_edge_weights: BTreeMap<Label, Weight> = BTreeMap::new();
 
-        let labels = collect_labels(&self.nwa.states, closure);
-        if let Some(pb) = &labels_pb {
-            pb.set_length(labels.len() as u64);
-        }
-
-        let mut transition_data: BTreeMap<Label, (WeightedSubset, Weight)> = BTreeMap::new();
-        for ch in &labels {
-            let sub_ch = next_subset_for_label(&self.nwa.states, closure, *ch);
-            let w_ch = union_over_values(&sub_ch);
-            if !sub_ch.is_empty() && !is_zero(&w_ch) {
-                transition_data.insert(*ch, (sub_ch, w_ch));
-            }
-            if let Some(pb) = &labels_pb {
-                pb.inc(1);
+        for (nwa_id, cw) in closure {
+            if is_zero(cw) { continue; }
+            
+            let st = &self.nwa.states[*nwa_id];
+            for (label, targets) in &st.transitions {
+                for (target_id, w_trans) in targets {
+                    let combined = weight_intersection(cw, w_trans);
+                    if !is_zero(&combined) {
+                        // Update the edge weight for this label
+                        transition_edge_weights.entry(*label)
+                            .and_modify(|w| weight_union_in_place(w, &combined))
+                            .or_insert_with(|| combined.clone());
+                        
+                        // Update the target subset for this label
+                        transition_subsets.entry(*label)
+                            .or_default()
+                            .entry(*target_id)
+                            .and_modify(|w| weight_union_in_place(w, &combined))
+                            .or_insert_with(|| combined.clone());
+                    }
+                }
             }
         }
 
-        if let Some(pb) = &labels_pb {
-            pb.set_message(format!("State {}: installing transitions", sid));
-            pb.set_length(transition_data.len() as u64);
-            pb.set_position(0);
-        }
-
-        for (ch, (sub_ch, w_ch)) in transition_data {
-            let to_ch_id = self.register_state(sub_ch);
-            let _ = self.dwa.add_transition(sid, ch, to_ch_id, w_ch.clone()).ok();
-            if let Some(pb) = &labels_pb {
-                pb.inc(1);
-            }
-        }
-
-        if let Some(pb) = labels_pb {
-            pb.finish_and_clear();
+        // Register new states and add transitions
+        for (label, subset) in transition_subsets {
+            // The edge weight must exist if the subset exists
+            let w_edge = transition_edge_weights.remove(&label).unwrap();
+            let to_dwa_id = self.register_state(subset);
+            let _ = self.dwa.add_transition(sid, label, to_dwa_id, w_edge);
         }
     }
 }
@@ -392,103 +336,8 @@ impl NWA {
 
         custom_dwa
     }
-}
 
-
-impl NWA {
     pub fn determinize(&self) -> DWA {
-        self._determinize()
-    }
-
-    fn epsilon_closure(&self, subset: &BTreeMap<NWAStateID, Weight>) -> BTreeMap<NWAStateID, Weight> {
-        let mut closure = subset.clone();
-        let mut worklist: VecDeque<NWAStateID> = subset.keys().copied().collect();
-
-        while let Some(u) = worklist.pop_front() {
-            let u_weight = closure.get(&u).unwrap().clone();
-            if u >= self.states.len() {
-                continue;
-            }
-            for (v, eps_weight) in &self.states[u].epsilons {
-                let v_new_weight = &u_weight & eps_weight;
-                if !v_new_weight.is_empty() {
-                    let v_current_weight = closure.entry(*v).or_insert_with(Weight::zeros);
-                    let combined = &*v_current_weight | &v_new_weight;
-                    if combined != *v_current_weight {
-                        *v_current_weight = combined;
-                        worklist.push_back(*v);
-                    }
-                }
-            }
-        }
-        closure
-    }
-
-    pub fn _determinize(&self) -> DWA {
-        let mut dwa = DWA::new();
-        dwa.states.0.clear();
-
-        let mut subset_map: HashMap<BTreeMap<NWAStateID, Weight>, NWAStateID> = HashMap::new();
-        let mut worklist: VecDeque<BTreeMap<NWAStateID, Weight>> = VecDeque::new();
-
-        let mut start_subset = BTreeMap::new();
-        for &s in &self.body.start_states {
-            if s < self.states.len() {
-                start_subset.insert(s, Weight::all());
-            }
-        }
-
-        let initial_subset = self.epsilon_closure(&start_subset);
-
-        if !initial_subset.is_empty() {
-            let start_id = dwa.add_state();
-            dwa.body.start_state = start_id;
-            subset_map.insert(initial_subset.clone(), start_id);
-            worklist.push_back(initial_subset);
-        } else {
-            let start_id = dwa.add_state();
-            dwa.body.start_state = start_id;
-        }
-
-        while let Some(subset) = worklist.pop_front() {
-            let from_dwa_id = *subset_map.get(&subset).unwrap();
-
-            let mut final_weight = Weight::zeros();
-            for (nwa_id, path_weight) in &subset {
-                if let Some(fw) = &self.states[*nwa_id].final_weight {
-                    final_weight |= &(path_weight & fw);
-                }
-            }
-            if !final_weight.is_empty() {
-                dwa.states[from_dwa_id].final_weight = Some(final_weight);
-            }
-
-            let mut transitions: BTreeMap<Label, BTreeMap<NWAStateID, Weight>> = BTreeMap::new();
-            for (nwa_id, path_weight) in &subset {
-                for (label, targets) in &self.states[*nwa_id].transitions {
-                    for (target_nwa_id, trans_weight) in targets {
-                        let next_path_weight = path_weight & trans_weight;
-                        if !next_path_weight.is_empty() {
-                            let entry = transitions.entry(*label).or_default();
-                            *entry.entry(*target_nwa_id).or_insert_with(Weight::zeros) |= &next_path_weight;
-                        }
-                    }
-                }
-            }
-
-            for (label, next_subset_pre_closure) in transitions {
-                let next_subset = self.epsilon_closure(&next_subset_pre_closure);
-                if next_subset.is_empty() {
-                    continue;
-                }
-                let to_dwa_id = *subset_map.entry(next_subset.clone()).or_insert_with(|| {
-                    let new_id = dwa.add_state();
-                    worklist.push_back(next_subset);
-                    new_id
-                });
-                dwa.add_transition(from_dwa_id, label, to_dwa_id, Weight::all()).unwrap();
-            }
-        }
-        dwa
+        self.determinize_to_dwa2()
     }
 }
