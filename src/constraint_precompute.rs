@@ -122,7 +122,7 @@ impl<'r> Precomputer1<'r> {
         self.leaf_state
     }
 
-    fn finish(mut self) -> (BTreeMap<TokenizerStateID, PrecomputeNode1Index>, Trie1GodWrapper)
+    fn finish(mut self) -> (BTreeMap<TokenizerStateID, PrecomputeNode1Index>, Trie1GodWrapper, NWA)
     {
         // TODO: make this simpler.
         let new_start_state = self.nwa.add_state();
@@ -150,7 +150,7 @@ impl<'r> Precomputer1<'r> {
         let final_trie1_god = Trie1GodWrapper::new();
         let mut final_roots = BTreeMap::new();
 
-        (final_roots, final_trie1_god)
+        (final_roots, final_trie1_god, self.nwa)
     }
 
     fn possible_matches(
@@ -397,7 +397,7 @@ pub fn run_precompute1(
     terminal_follow_map: &BTreeMap<GrammarTokenID, std::collections::BTreeSet<GrammarTokenID>>,
     config: &GrammarConstraintConfig,
     original_to_dummy_map: BTreeMap<TerminalID, TerminalID>,
-) -> (BTreeMap<TokenizerStateID, PrecomputeNode1Index>, Trie1GodWrapper) {
+) -> (BTreeMap<TokenizerStateID, PrecomputeNode1Index>, Trie1GodWrapper, NWA) {
     let mut dummy_terminal_penalties: BTreeMap<TerminalID, usize> = BTreeMap::new();
     if !config.dummy_terminal_penalties.is_empty() {
         if let Some(p) = parser {
@@ -438,23 +438,7 @@ pub fn run_precompute1(
 
     helper.run_dfs();
 
-    let (mut precomputed1, trie1_god) = helper.finish();
+    let (mut precomputed1, trie1_god, nwa) = helper.finish();
 
-    // Trie1 optimization (size, vocab compression)
-    constraint_precompute1_utils::optimize_trie1_size(
-        &mut precomputed1,
-        &trie1_god,
-        // Dummy values for Trie0-dependent params (we no longer build Trie0).
-        &Trie0GodWrapper::new(),
-        &HashMap::new(),
-        parser.and_then(|p| p.ignore_terminal_id),
-        stage_vocab.internal_max_llm_token,
-        terminal_follow_map,
-        &config.trie1,
-        stage_vocab,
-        token_name_map,
-        &dummy_terminal_penalties,
-    );
-
-    (precomputed1, trie1_god)
+    (precomputed1, trie1_god, nwa)
 }
