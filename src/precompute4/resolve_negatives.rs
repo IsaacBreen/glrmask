@@ -54,7 +54,7 @@ pub fn resolve_negative_codes_in_nwa(nwa: &mut NWA) {
 
 pub fn apply_cancellations(states: &mut NWAStates, source_states_filter: &HashSet<NWAStateID>) {
     let epsilons_to_add = compute_cancellations(states, source_states_filter);
-    crate::debug!(6, "Computed {} new epsilon transitions from cancellations.", epsilons_to_add.len());
+    crate::debug!(8, "Computed {} new epsilon transitions from cancellations.", epsilons_to_add.len());
     for (from, to, w) in epsilons_to_add {
         states.add_epsilon(from, to, w);
     }
