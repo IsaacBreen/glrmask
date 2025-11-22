@@ -7,6 +7,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::collections::BTreeMap as StdMap;
 use std::collections::HashMap;
 use std::fmt::{Debug, Display, Formatter};
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use memory_stats::memory_stats;
 
@@ -23,71 +24,80 @@ pub struct NFAState {
     non_greedy_finalizers: BTreeSet<GroupID>,
 }
 
-#[derive(Clone, PartialEq, Eq)]
-struct StateSet {
-    words: Vec<u64>,
+#[derive(Clone, Eq)]
+struct CompressedStateSet {
+    // Sorted by word index. (word_index, word_value)
+    words: Vec<(u32, u64)>,
+    hash: u64,
 }
 
-impl std::hash::Hash for StateSet {
+impl PartialEq for CompressedStateSet {
+    fn eq(&self, other: &Self) -> bool {
+        if self.hash != other.hash {
+            return false;
+        }
+        self.words == other.words
+    }
+}
+
+impl std::hash::Hash for CompressedStateSet {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.words.len().hash(state);
-        for (i, &w) in self.words.iter().enumerate() {
+        self.hash.hash(state);
+    }
+}
+
+impl CompressedStateSet {
+    fn from_sparse(sparse: &SparseStateSet) -> Self {
+        let mut words = Vec::with_capacity(sparse.dirty_words.len());
+        // dirty_words are not sorted, so we must sort them to ensure canonical representation
+        let mut indices = sparse.dirty_words.clone();
+        indices.sort_unstable();
+
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        indices.len().hash(&mut hasher);
+
+        for &idx in &indices {
+            let w = sparse.dense.words[idx];
+            // sparse.dense.words[idx] *should* be non-zero if it's in dirty_words.
+            // But SparseStateSet::clear resets words to 0 but keeps dirty_words until cleared.
+            // Here we assume from_sparse is called on a valid set.
+            // Note: SparseStateSet::insert pushes to dirty_words when word becomes non-zero.
+            // It does NOT remove from dirty_words if word becomes zero (e.g. by bit manipulation).
+            // But we only add bits in closure. We never remove bits.
+            // So words in dirty_words are non-zero.
             if w != 0 {
-                i.hash(state);
-                w.hash(state);
+                words.push((idx as u32, w));
+                idx.hash(&mut hasher);
+                w.hash(&mut hasher);
             }
         }
-    }
-}
+        let hash = hasher.finish();
 
-impl StateSet {
-    fn new(num_bits: usize) -> Self {
-        let num_words = (num_bits + 63) / 64;
-        Self {
-            words: vec![0; num_words],
-        }
+        Self { words, hash }
     }
 
-    fn insert(&mut self, bit: usize) -> bool {
-        let word_idx = bit / 64;
-        let bit_mask = 1u64 << (bit % 64);
-        if (self.words[word_idx] & bit_mask) == 0 {
-            self.words[word_idx] |= bit_mask;
-            true
-        } else {
-            false
-        }
-    }
-
-    fn clear(&mut self) {
-        self.words.fill(0);
-    }
-
-    fn iter(&self) -> StateSetIter {
-        let current_word = if self.words.is_empty() { 0 } else { self.words[0] };
-        StateSetIter {
+    fn iter(&self) -> CompressedStateSetIter {
+        CompressedStateSetIter {
             set: self,
-            word_idx: 0,
-            current_word,
+            idx: 0,
+            current_word: 0,
+            current_word_idx: 0,
         }
     }
 
     fn len(&self) -> usize {
-        self.words.iter().map(|w| w.count_ones() as usize).sum()
-    }
-
-    fn is_empty(&self) -> bool {
-        self.words.iter().all(|&w| w == 0)
+        self.words.iter().map(|(_, w)| w.count_ones() as usize).sum()
     }
 }
 
-struct StateSetIter<'a> {
-    set: &'a StateSet,
-    word_idx: usize,
+struct CompressedStateSetIter<'a> {
+    set: &'a CompressedStateSet,
+    idx: usize,
     current_word: u64,
+    current_word_idx: u32,
 }
 
-impl<'a> Iterator for StateSetIter<'a> {
+impl<'a> Iterator for CompressedStateSetIter<'a> {
     type Item = usize;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -95,15 +105,71 @@ impl<'a> Iterator for StateSetIter<'a> {
             if self.current_word != 0 {
                 let trailing = self.current_word.trailing_zeros();
                 self.current_word &= !(1u64 << trailing);
-                return Some(self.word_idx * 64 + trailing as usize);
+                return Some(self.current_word_idx as usize * 64 + trailing as usize);
             }
-            self.word_idx += 1;
-            if self.word_idx >= self.set.words.len() {
+            if self.idx >= self.set.words.len() {
                 return None;
             }
-            self.current_word = self.set.words[self.word_idx];
+            let (w_idx, w) = self.set.words[self.idx];
+            self.current_word = w;
+            self.current_word_idx = w_idx;
+            self.idx += 1;
         }
     }
+}
+
+struct SparseStateSet {
+    dense: DenseStateSet,
+    dirty_words: Vec<usize>,
+}
+
+#[derive(Clone)]
+struct DenseStateSet {
+    words: Vec<u64>,
+}
+
+impl DenseStateSet {
+    fn new(num_bits: usize) -> Self {
+        let num_words = (num_bits + 63) / 64;
+        Self {
+            words: vec![0; num_words],
+        }
+    }
+}
+
+impl SparseStateSet {
+    fn new(num_bits: usize) -> Self {
+        Self {
+            dense: DenseStateSet::new(num_bits),
+            dirty_words: Vec::new(),
+        }
+    }
+
+    fn insert(&mut self, bit: usize) -> bool {
+        let word_idx = bit / 64;
+        let bit_mask = 1u64 << (bit % 64);
+        if (self.dense.words[word_idx] & bit_mask) == 0 {
+            if self.dense.words[word_idx] == 0 {
+                self.dirty_words.push(word_idx);
+            }
+            self.dense.words[word_idx] |= bit_mask;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn clear(&mut self) {
+        for &idx in &self.dirty_words {
+            self.dense.words[idx] = 0;
+        }
+        self.dirty_words.clear();
+    }
+}
+
+struct CompactNFA {
+    epsilon_offsets: Vec<u32>,
+    epsilon_targets: Vec<u32>,
 }
 
 // Manual impl for NFAState
@@ -1380,6 +1446,24 @@ impl NFA {
         println!("-----------------");
     }
 
+    fn build_compact_nfa(&self) -> CompactNFA {
+        let mut epsilon_offsets = Vec::with_capacity(self.states.len() + 1);
+        let mut epsilon_targets = Vec::new();
+
+        for state in &self.states {
+            epsilon_offsets.push(epsilon_targets.len() as u32);
+            for &target in &state.epsilon_transitions {
+                epsilon_targets.push(target as u32);
+            }
+        }
+        epsilon_offsets.push(epsilon_targets.len() as u32);
+
+        CompactNFA {
+            epsilon_offsets,
+            epsilon_targets,
+        }
+    }
+
     fn compute_equivalence_classes(&self) -> (Vec<u8>, usize, Vec<Vec<u8>>) {
         let mut partitions = vec![U8Set::all()];
         let mut seen_sets = HashSet::new();
@@ -1419,9 +1503,9 @@ impl NFA {
     pub fn to_dfa(self) -> DFA {
         let start_time = std::time::Instant::now();
         let mut dfa_states: Vec<DFAState> = Vec::new();
-        // Use StateSet with sparse hashing
-        let mut dfa_state_map: HashMap<StateSet, usize> = HashMap::new();
-        let mut worklist: Vec<StateSet> = Vec::new();
+        // Use CompressedStateSet for memory efficiency
+        let mut dfa_state_map: HashMap<CompressedStateSet, usize> = HashMap::new();
+        let mut worklist: Vec<CompressedStateSet> = Vec::new();
 
         // Instrumentation
         let mut t_collect = std::time::Duration::ZERO;
@@ -1459,21 +1543,27 @@ impl NFA {
         // Shared buffers
         let num_nfa_states = self.states.len();
         let mut stack = Vec::with_capacity(1024);
-        let mut closure_set = StateSet::new(num_nfa_states);
+        let mut closure_set = SparseStateSet::new(num_nfa_states);
+
+        // Compact NFA for faster BFS
+        let compact_nfa = self.build_compact_nfa();
 
         // Compute start state closure
         stack.push(self.start_state);
         closure_set.insert(self.start_state);
 
         while let Some(u) = stack.pop() {
-            for &v in &self.states[u].epsilon_transitions {
+            let start = compact_nfa.epsilon_offsets[u] as usize;
+            let end = compact_nfa.epsilon_offsets[u + 1] as usize;
+            for &v in &compact_nfa.epsilon_targets[start..end] {
+                let v = v as usize;
                 if closure_set.insert(v) {
                     stack.push(v);
                 }
             }
         }
 
-        let start_state_set = closure_set.clone();
+        let start_state_set = CompressedStateSet::from_sparse(&closure_set);
         dfa_state_map.insert(start_state_set.clone(), 0);
         worklist.push(start_state_set.clone());
 
@@ -1496,7 +1586,7 @@ impl NFA {
 
         // Reusable structures
         // transition_targets is indexed by CLASS ID now
-        let mut transition_targets: Vec<StateSet> = (0..num_classes).map(|_| StateSet::new(num_nfa_states)).collect();
+        let mut transition_targets: Vec<SparseStateSet> = (0..num_classes).map(|_| SparseStateSet::new(num_nfa_states)).collect();
         let mut used_classes: Vec<usize> = Vec::with_capacity(num_classes);
         let mut seen_class = vec![false; num_classes];
 
@@ -1533,7 +1623,7 @@ impl NFA {
 
             // 2. Process inputs (PROCESS PHASE)
             let start_process = std::time::Instant::now();
-            let mut local_cache: HashMap<&StateSet, usize> = HashMap::new();
+            let mut local_cache: HashMap<CompressedStateSet, usize> = HashMap::new();
             
             // Collect all transitions for this state to bulk insert later
             let mut dfa_transitions_vec: Vec<(u8, usize)> = Vec::new();
@@ -1541,7 +1631,14 @@ impl NFA {
             for &class_id in &used_classes {
                 let target_set = &transition_targets[class_id];
                 
-                let next_dfa_state_idx = if let Some(&idx) = local_cache.get(target_set) {
+                // We can't easily check local_cache with CompressedStateSet unless we construct it.
+                // But constructing it is cheap enough? Or we can use a temporary key?
+                // Actually, local_cache should map CompressedStateSet to usize.
+                // But target_set is SparseStateSet.
+                // We can construct CompressedStateSet for lookup.
+                let compressed_target = CompressedStateSet::from_sparse(target_set);
+
+                let next_dfa_state_idx = if let Some(&idx) = local_cache.get(&compressed_target) {
                     idx
                 } else {
                     // Compute closure
@@ -1550,24 +1647,19 @@ impl NFA {
                     // TIMING: Bitset Iteration
                     let start_iter = std::time::Instant::now();
                     {
-                        let mut w_idx = 0;
-                        let words = &target_set.words;
-                        while w_idx < words.len() {
-                            let mut w = words[w_idx];
-                            total_words_scanned += 1;
-                            if w != 0 {
-                                total_useful_words += 1;
-                                while w != 0 {
-                                    let t = w.trailing_zeros();
-                                    w &= !(1u64 << t);
-                                    let next_state = w_idx * 64 + t as usize;
-                                    
-                                    if closure_set.insert(next_state) {
-                                        stack.push(next_state);
-                                    }
+                        // Iterate using dirty_words for speed
+                        for &w_idx in &target_set.dirty_words {
+                            let mut w = target_set.dense.words[w_idx];
+                            total_useful_words += w.count_ones() as u64;
+                            while w != 0 {
+                                let t = w.trailing_zeros();
+                                w &= !(1u64 << t);
+                                let next_state = w_idx * 64 + t as usize;
+                                
+                                if closure_set.insert(next_state) {
+                                    stack.push(next_state);
                                 }
                             }
-                            w_idx += 1;
                         }
                     }
                     t_iter_bitset += start_iter.elapsed();
@@ -1575,7 +1667,10 @@ impl NFA {
                     // TIMING: BFS Closure
                     let start_bfs = std::time::Instant::now();
                     while let Some(u) = stack.pop() {
-                        for &v in &self.states[u].epsilon_transitions {
+                        let start = compact_nfa.epsilon_offsets[u] as usize;
+                        let end = compact_nfa.epsilon_offsets[u + 1] as usize;
+                        for &v in &compact_nfa.epsilon_targets[start..end] {
+                            let v = v as usize;
                             if closure_set.insert(v) {
                                 stack.push(v);
                             }
@@ -1585,20 +1680,28 @@ impl NFA {
 
                     // Get/Create DFA state
                     let start_map = std::time::Instant::now();
+                    let compressed_key = CompressedStateSet::from_sparse(&closure_set);
                     
-                    let next_state_idx = if let Some(&existing_state) = dfa_state_map.get(&closure_set) {
+                    let next_state_idx = if let Some(&existing_state) = dfa_state_map.get(&compressed_key) {
                         existing_state
                     } else {
                         let new_state_index = dfa_states.len();
-                        dfa_state_map.insert(closure_set.clone(), new_state_index);
-                        worklist.push(closure_set.clone());
+                        dfa_state_map.insert(compressed_key.clone(), new_state_index);
+                        worklist.push(compressed_key);
 
                         let mut new_finalizers = BTreeSet::new();
                         let mut new_non_greedy_finalizers = BTreeSet::new();
-                        for state in closure_set.iter() {
-                            new_finalizers.extend(self.states[state].finalizers.iter().cloned());
-                            new_non_greedy_finalizers
-                                .extend(self.states[state].non_greedy_finalizers.iter().cloned());
+                        // Sparse iteration for finalizers
+                        for &w_idx in &closure_set.dirty_words {
+                             let mut w = closure_set.dense.words[w_idx];
+                             while w != 0 {
+                                 let t = w.trailing_zeros();
+                                 w &= !(1u64 << t);
+                                 let state = w_idx * 64 + t as usize;
+                                 new_finalizers.extend(self.states[state].finalizers.iter().cloned());
+                                 new_non_greedy_finalizers
+                                     .extend(self.states[state].non_greedy_finalizers.iter().cloned());
+                             }
                         }
 
                         dfa_states.push(DFAState {
@@ -1612,7 +1715,7 @@ impl NFA {
                     };
                     t_map_lookup += start_map.elapsed();
                     
-                    local_cache.insert(&transition_targets[class_id], next_state_idx);
+                    local_cache.insert(compressed_target, next_state_idx);
                     next_state_idx
                 };
 
