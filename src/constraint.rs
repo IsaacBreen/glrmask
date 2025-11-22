@@ -26,7 +26,7 @@ use crate::{
     },
     interface::{CompiledGrammar, GrammarDefinition},
     json_serialization::{JSONConvertible, JSONNode},
-    precompute4::full_dwa::{precompute4, Precomputed4},
+    precompute4::full_dwa::{convert_precompute1_to_nwa, precompute4, Precomputed4},
     r#macro::is_debug_level_enabled,
     tokenizer::{LLMTokenID, LLMTokenMap, TokenizerStateID},
     types::{TerminalID as GrammarTokenID, TerminalID},
@@ -39,7 +39,6 @@ use crate::glr::parser::ParseStateEdgeContent;
 pub use crate::constraint_vocab::*;
 pub use crate::constraint_trie::*;
 use crate::constraint_precompute::run_precompute1;
-use crate::precompute4::weighted_automata::NWA;
 
 type GSSNode = LeveledGSS<ParseStateEdgeContent, Acc>;
 
@@ -140,7 +139,6 @@ pub struct GrammarConstraint {
         DedupValueMap<LLMTokenID, BTreeMap<TokenizerStateID, TerminalBV>>,
 
     pub(crate) trie1_god: Trie1GodWrapper,
-    pub(crate) nwa: NWA,
 
     pub run_precompute4: bool,
     pub post_commit_allow_check_mode: TerminalAllowanceCheckMode,
@@ -263,11 +261,6 @@ impl JSONConvertible for GrammarConstraint {
                     .ok_or_else(|| "Missing field trie1_god".to_string())
                     .and_then(Trie1GodWrapper::from_json)?;
 
-                let nwa = obj
-                    .remove("nwa")
-                    .ok_or_else(|| "Missing field nwa".to_string())
-                    .and_then(NWA::from_json)?;
-
                 let run_precompute4 = obj
                     .remove("run_precompute4")
                     .map(bool::from_json)
@@ -357,7 +350,6 @@ impl JSONConvertible for GrammarConstraint {
                     state_map_by_llm,
                     terminal_map_by_llm,
                     trie1_god,
-                    nwa,
                     run_precompute4,
                     post_commit_allow_check_mode,
                     vocab,
@@ -646,7 +638,7 @@ impl GrammarConstraint {
 
         // Precompute1 - generate Trie, convert to NWA immediately, then discard.
         let precompute_vocab_before_p1 = vocab.clone();
-        let (precomputed1_trie_map, trie1_god_wrapper, nwa) = run_precompute1(
+        let (precomputed1_trie_map, trie1_god_wrapper) = run_precompute1(
             &tokenizer,
             Some(&parser),
             Some(llm_vocab.clone()),
@@ -717,6 +709,7 @@ impl GrammarConstraint {
 
         // Convert the precompute1 Trie to NWA and run precompute4.
         crate::debug!(3, "Converting precompute1 Trie to NWA");
+        let nwa = convert_precompute1_to_nwa(&precomputed1_trie_map, &trie1_god_wrapper);
         let precomputed4 = precompute4(&parser, &nwa, max_internal_llm_token_id);
 
         let internal_to_original_sparse_matrix =
@@ -740,7 +733,6 @@ impl GrammarConstraint {
             state_map_by_llm,
             terminal_map_by_llm,
             trie1_god: Trie1GodWrapper::new(),
-            nwa,
             run_precompute4: config.run_precompute4,
             post_commit_allow_check_mode: TerminalAllowanceCheckMode::default(),
             vocab,
