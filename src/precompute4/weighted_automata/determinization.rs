@@ -11,92 +11,245 @@ use super::dwa::DWA;
 use super::nwa::{NWA, NWAStates};
 use crate::precompute4::test_weighted_automata;
 
+// ============================================================================
+// Common Types & Helpers
+// ============================================================================
+
 // Invariants: strictly sorted by NWAStateID, no duplicate IDs, no empty Weights.
 type WeightedSubset = Vec<(NWAStateID, Weight)>;
 
 fn is_zero(w: &Weight) -> bool { w.is_empty() }
 
-/// Computes epsilon closure for a specific subset on the fly.
-/// Used by the heuristic singleton check.
-fn epsilon_closure_optimized(nwa_states: &NWAStates, seed: &WeightedSubset) -> WeightedSubset {
-    let mut closure_map: HashMap<NWAStateID, Weight> = HashMap::with_capacity(seed.len() * 2);
-    let mut queue: VecDeque<NWAStateID> = VecDeque::with_capacity(seed.len());
+// ============================================================================
+// NWA Determinization Interface
+// ============================================================================
 
-    for (sid, w) in seed {
-        if !is_zero(w) {
-            closure_map.insert(*sid, w.clone());
-            queue.push_back(*sid);
-        }
+impl NWA {
+    /// The primary entry point for determinization.
+    ///
+    /// This defaults to the **Robust** strategy (Precomputed), which handles epsilon
+    /// closures upfront and includes safeguards against state explosion.
+    pub fn determinize(&self) -> DWA {
+        self.determinize_robust()
     }
 
-    while let Some(u) = queue.pop_front() {
-        // Snapshot the weight of u to propagate
-        let uw = if let Some(w) = closure_map.get(&u) {
-            w.clone()
-        } else {
-            continue;
-        };
+    /// Determinizes the NWA using a robust strategy with precomputed epsilon closures.
+    ///
+    /// **Characteristics:**
+    /// - Precomputes epsilon reachability to handle complex epsilon graphs.
+    /// - Less prone to state explosion in complex topologies.
+    /// - Includes a "singleton loop" heuristic optimization.
+    /// - Enforces a hard state limit (250,000) to prevent OOM, dumping the NWA if exceeded.
+    /// - Displays a progress bar for large automata.
+    /// - **Formerly:** `determinize_to_dwa2`
+    pub fn determinize_robust(&self) -> DWA {
+        // 1. Try Heuristic Optimization
+        if let Some(dwa) = try_build_singleton_loop_union(self) {
+            return dwa;
+        }
 
-        if u >= nwa_states.len() { continue; }
+        // 2. Setup Limits and Progress
+        const STATE_LIMIT: usize = 250_000; 
+        if self.states.0.is_empty() {
+            return DWA::new();
+        }
+
+        crate::debug!(5, "Determinization: Precomputing epsilon closures...");
         
-        for (v, w_eps) in &nwa_states[u].epsilons {
-            let cand = &uw & w_eps;
-            if cand.is_empty() { continue; }
+        // 3. Precompute Reachability
+        let eps_reach = precompute_all_epsilon_closures(&self.states);
 
-            let entry = closure_map.entry(*v).or_insert_with(Weight::zeros);
-            
-            // If the candidate adds new info (is not subset of existing), propagate
-            if !cand.is_subset_of(entry) {
-                *entry |= &cand;
-                queue.push_back(*v);
+        // 4. Configure Progress Bar
+        let show_pbar = self.states.len() > 10000;
+        let mp = if show_pbar { Some(MultiProgress::new()) } else { None };
+        let main_pb = mp.as_ref().map(|mp_instance| {
+            let pb = mp_instance.add(ProgressBar::new(1));
+            pb.set_style(
+                ProgressStyle::default_bar()
+                    .template("{spinner:.green} [{elapsed_precise}] States: [{bar:40.cyan/blue}] {pos}/{len} ({eta}) {msg}")
+                    .unwrap()
+                    .progress_chars("#>-"),
+            );
+            pb.set_message("Determinizing NWA");
+            pb
+        });
+
+        // 5. Initialize Determinizer
+        let mut det = Determinizer::new(self, &eps_reach, mp);
+
+        // 6. Initial State Construction
+        let mut start_map: HashMap<NWAStateID, Weight> = HashMap::new();
+        for &s in &self.body.start_states {
+            if s < eps_reach.len() {
+                for (v, w_reach) in &eps_reach[s] {
+                    start_map.entry(*v)
+                        .and_modify(|acc| *acc |= w_reach)
+                        .or_insert_with(|| w_reach.clone());
+                }
             }
         }
+        
+        let mut start_subset: WeightedSubset = start_map.into_iter().collect();
+        start_subset.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+
+        let start_id = det.register_closure(start_subset);
+        det.dwa.body.start_state = start_id;
+
+        // 7. Main Expansion Loop
+        let mut processed_count = 0;
+        while let Some(sid) = det.queue.pop_front() {
+            // Safety Guard
+            if det.seen.len() > STATE_LIMIT {
+                let timestamp = Local::now().format("%Y%m%d-%H%M%S");
+                let filename = format!("nwa_dump_{}.json", timestamp);
+                crate::debug!(5, "Determinization state limit ({}) exceeded. Dumping NWA to {} and panicking.", STATE_LIMIT, filename);
+                let f = std::fs::File::create(&filename).expect("Unable to create dump file");
+                serde_json::to_writer(f, self).expect("Unable to write NWA to file");
+                panic!("Determinization aborted after reaching {} states.", STATE_LIMIT);
+            }
+
+            // Progress Update
+            if let Some(pb) = &main_pb {
+                if processed_count % 100 == 0 {
+                    let total_states = det.seen.len();
+                    pb.set_length(total_states as u64);
+                    pb.set_position(processed_count as u64);
+                    pb.set_message(format!("Expanding state {}/{}", processed_count + 1, total_states));
+                }
+            }
+
+            det.expand_state(sid);
+            processed_count += 1;
+        }
+        
+        if let Some(pb) = main_pb {
+            pb.finish_with_message("Determinization complete");
+        }
+
+        // 8. Debug Verification
+        if DETERMINIZE_DEBUG {
+            let rustfst_dwa = self.determinize_with_rustfst_shim();
+            crate::debug!(5, "[DETERMINIZE_DEBUG] Comparing custom determinization with rustfst...");
+            test_weighted_automata::stochastic_equivalence_test(det.dwa.clone(), rustfst_dwa);
+        }
+
+        det.dwa
     }
 
-    let mut result: Vec<(NWAStateID, Weight)> = closure_map.into_iter().collect();
-    result.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-    result
-}
+    /// Determinizes the NWA using a simple on-the-fly strategy.
+    ///
+    /// **Characteristics:**
+    /// - Performs epsilon closure dynamically during expansion.
+    /// - Faster initialization (no precomputation).
+    /// - More prone to state explosion if epsilon chains are deep.
+    /// - **Formerly:** `_determinize`
+    pub fn determinize_simple(&self) -> DWA {
+        let mut dwa = DWA::new();
+        dwa.states.0.clear();
 
-/// Precomputes the epsilon closure for every state in the NWA.
-/// Returns a vector where index `i` contains the reachable states and weights from state `i` via epsilon transitions.
-/// The result for each state includes the state itself with Weight::all() (identity).
-fn precompute_all_epsilon_closures(states: &NWAStates) -> Vec<WeightedSubset> {
-    let n = states.len();
-    let mut reachability = Vec::with_capacity(n);
+        let mut subset_map: HashMap<BTreeMap<NWAStateID, Weight>, NWAStateID> = HashMap::new();
+        let mut worklist: VecDeque<BTreeMap<NWAStateID, Weight>> = VecDeque::new();
 
-    for start_node in 0..n {
-        let mut dists: HashMap<NWAStateID, Weight> = HashMap::new();
-        let mut queue: VecDeque<NWAStateID> = VecDeque::new();
+        // Initial States
+        let mut start_subset = BTreeMap::new();
+        for &s in &self.body.start_states {
+            if s < self.states.len() {
+                start_subset.insert(s, Weight::all());
+            }
+        }
 
-        // Self-reachability is identity
-        dists.insert(start_node, Weight::all());
-        queue.push_back(start_node);
+        let initial_subset = self.epsilon_closure_simple(&start_subset);
 
-        while let Some(u) = queue.pop_front() {
-            let w_u = dists.get(&u).unwrap().clone();
-            
-            if u < n {
-                for (v, w_eps) in &states[u].epsilons {
-                    let new_w = &w_u & w_eps;
-                    if new_w.is_empty() { continue; }
+        if !initial_subset.is_empty() {
+            let start_id = dwa.add_state();
+            dwa.body.start_state = start_id;
+            subset_map.insert(initial_subset.clone(), start_id);
+            worklist.push_back(initial_subset);
+        } else {
+            let start_id = dwa.add_state();
+            dwa.body.start_state = start_id;
+        }
 
-                    let entry = dists.entry(*v).or_insert_with(Weight::zeros);
-                    if !new_w.is_subset_of(entry) {
-                        *entry |= &new_w;
-                        queue.push_back(*v);
+        // Expansion Loop
+        while let Some(subset) = worklist.pop_front() {
+            let from_dwa_id = *subset_map.get(&subset).unwrap();
+
+            // Compute Final Weights
+            let mut final_weight = Weight::zeros();
+            for (nwa_id, path_weight) in &subset {
+                if let Some(fw) = &self.states[*nwa_id].final_weight {
+                    final_weight |= &(path_weight & fw);
+                }
+            }
+            if !final_weight.is_empty() {
+                dwa.states[from_dwa_id].final_weight = Some(final_weight);
+            }
+
+            // Collect Transitions
+            let mut transitions: BTreeMap<Label, BTreeMap<NWAStateID, Weight>> = BTreeMap::new();
+            for (nwa_id, path_weight) in &subset {
+                for (label, targets) in &self.states[*nwa_id].transitions {
+                    for (target_nwa_id, trans_weight) in targets {
+                        let next_path_weight = path_weight & trans_weight;
+                        if !next_path_weight.is_empty() {
+                            let entry = transitions.entry(*label).or_default();
+                            *entry.entry(*target_nwa_id).or_insert_with(Weight::zeros) |= &next_path_weight;
+                        }
+                    }
+                }
+            }
+
+            // Build Edges
+            for (label, next_subset_pre_closure) in transitions {
+                let next_subset = self.epsilon_closure_simple(&next_subset_pre_closure);
+                if next_subset.is_empty() {
+                    continue;
+                }
+                let to_dwa_id = *subset_map.entry(next_subset.clone()).or_insert_with(|| {
+                    let new_id = dwa.add_state();
+                    worklist.push_back(next_subset);
+                    new_id
+                });
+                dwa.add_transition(from_dwa_id, label, to_dwa_id, Weight::all()).unwrap();
+            }
+        }
+        dwa
+    }
+    
+    // Helper for debug shim, assuming it exists or was meant by the original code's call
+    fn determinize_with_rustfst_shim(&self) -> DWA {
+        self.determinize_to_dwa_with_rustfst()
+    }
+
+    // Helper specific to the 'Simple' strategy
+    fn epsilon_closure_simple(&self, subset: &BTreeMap<NWAStateID, Weight>) -> BTreeMap<NWAStateID, Weight> {
+        let mut closure = subset.clone();
+        let mut worklist: VecDeque<NWAStateID> = subset.keys().copied().collect();
+
+        while let Some(u) = worklist.pop_front() {
+            let u_weight = closure.get(&u).unwrap().clone();
+            if u >= self.states.len() {
+                continue;
+            }
+            for (v, eps_weight) in &self.states[u].epsilons {
+                let v_new_weight = &u_weight & eps_weight;
+                if !v_new_weight.is_empty() {
+                    let v_current_weight = closure.entry(*v).or_insert_with(Weight::zeros);
+                    let combined = &*v_current_weight | &v_new_weight;
+                    if combined != *v_current_weight {
+                        *v_current_weight = combined;
+                        worklist.push_back(*v);
                     }
                 }
             }
         }
-
-        let mut sub: WeightedSubset = dists.into_iter().collect();
-        sub.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-        reachability.push(sub);
+        closure
     }
-
-    reachability
 }
+
+// ============================================================================
+// Strategy: Robust / Precomputed Implementation Details
+// ============================================================================
 
 struct Determinizer<'a> {
     nwa: &'a NWA,
@@ -167,7 +320,6 @@ impl<'a> Determinizer<'a> {
         let mut edge_weights: HashMap<Label, Weight> = HashMap::new();
 
         // 1. Collect outgoing labeled transitions from the subset.
-        //    We perform intersection (w_u & w_trans) here.
         for (u, w_u) in &closure {
             let st = &self.nwa.states[*u];
             for (lbl, targets) in &st.transitions {
@@ -190,13 +342,12 @@ impl<'a> Determinizer<'a> {
         }
 
         // 2. For each label, compute the epsilon-closed destination subset.
-        //    We use the precomputed `eps_reach` to avoid traversing the NWA graph again.
+        //    We use the precomputed `eps_reach` here.
         for (lbl, raw_targets) in transitions {
             let w_edge = edge_weights.remove(&lbl).unwrap();
 
             let mut dest_map: HashMap<NWAStateID, Weight> = HashMap::new();
 
-            // Apply epsilon closure: 
             // Destination = Union_{ t in raw_targets } ( eps_reach[t] intersected with weight(t) )
             for (t, w_t) in raw_targets {
                 if t < self.eps_reach.len() {
@@ -220,6 +371,84 @@ impl<'a> Determinizer<'a> {
     }
 }
 
+/// Precomputes the epsilon closure for every state in the NWA.
+fn precompute_all_epsilon_closures(states: &NWAStates) -> Vec<WeightedSubset> {
+    let n = states.len();
+    let mut reachability = Vec::with_capacity(n);
+
+    for start_node in 0..n {
+        let mut dists: HashMap<NWAStateID, Weight> = HashMap::new();
+        let mut queue: VecDeque<NWAStateID> = VecDeque::new();
+
+        // Self-reachability is identity
+        dists.insert(start_node, Weight::all());
+        queue.push_back(start_node);
+
+        while let Some(u) = queue.pop_front() {
+            let w_u = dists.get(&u).unwrap().clone();
+            
+            if u < n {
+                for (v, w_eps) in &states[u].epsilons {
+                    let new_w = &w_u & w_eps;
+                    if new_w.is_empty() { continue; }
+
+                    let entry = dists.entry(*v).or_insert_with(Weight::zeros);
+                    if !new_w.is_subset_of(entry) {
+                        *entry |= &new_w;
+                        queue.push_back(*v);
+                    }
+                }
+            }
+        }
+
+        let mut sub: WeightedSubset = dists.into_iter().collect();
+        sub.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        reachability.push(sub);
+    }
+
+    reachability
+}
+
+/// Computes epsilon closure for a specific subset on the fly.
+/// Used by the heuristic singleton check.
+fn epsilon_closure_optimized(nwa_states: &NWAStates, seed: &WeightedSubset) -> WeightedSubset {
+    let mut closure_map: HashMap<NWAStateID, Weight> = HashMap::with_capacity(seed.len() * 2);
+    let mut queue: VecDeque<NWAStateID> = VecDeque::with_capacity(seed.len());
+
+    for (sid, w) in seed {
+        if !is_zero(w) {
+            closure_map.insert(*sid, w.clone());
+            queue.push_back(*sid);
+        }
+    }
+
+    while let Some(u) = queue.pop_front() {
+        let uw = if let Some(w) = closure_map.get(&u) {
+            w.clone()
+        } else {
+            continue;
+        };
+
+        if u >= nwa_states.len() { continue; }
+        
+        for (v, w_eps) in &nwa_states[u].epsilons {
+            let cand = &uw & w_eps;
+            if cand.is_empty() { continue; }
+
+            let entry = closure_map.entry(*v).or_insert_with(Weight::zeros);
+            if !cand.is_subset_of(entry) {
+                *entry |= &cand;
+                queue.push_back(*v);
+            }
+        }
+    }
+
+    let mut result: Vec<(NWAStateID, Weight)> = closure_map.into_iter().collect();
+    result.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+    result
+}
+
+/// Heuristic optimization for single-state loop unions.
 fn try_build_singleton_loop_union(nwa: &NWA) -> Option<DWA> {
     if nwa.states.0.is_empty() || nwa.body.start_states.len() != 1 {
         return None;
@@ -310,194 +539,4 @@ fn try_build_singleton_loop_union(nwa: &NWA) -> Option<DWA> {
     }
 
     Some(dwa)
-}
-
-impl NWA {
-    pub fn determinize_to_dwa2(&self) -> DWA {
-        if let Some(dwa) = try_build_singleton_loop_union(self) {
-            return dwa;
-        }
-
-        const STATE_LIMIT: usize = 250_000; 
-        
-        if self.states.0.is_empty() {
-            return DWA::new();
-        }
-
-        crate::debug!(5, "Determinization: Precomputing epsilon closures...");
-        let eps_reach = precompute_all_epsilon_closures(&self.states);
-
-        let show_pbar = self.states.len() > 10000;
-        let mp = if show_pbar { Some(MultiProgress::new()) } else { None };
-        let main_pb = mp.as_ref().map(|mp_instance| {
-            let pb = mp_instance.add(ProgressBar::new(1));
-            pb.set_style(
-                ProgressStyle::default_bar()
-                    .template(
-                        "{spinner:.green} [{elapsed_precise}] States: \
-                         [{bar:40.cyan/blue}] {pos}/{len} ({eta}) {msg}",
-                    )
-                    .unwrap()
-                    .progress_chars("#>-"),
-            );
-            pb.set_message("Determinizing NWA");
-            pb
-        });
-
-        let mut det = Determinizer::new(self, &eps_reach, mp);
-
-        // Construct start subset by applying epsilon closure to start states
-        let mut start_map: HashMap<NWAStateID, Weight> = HashMap::new();
-        for &s in &self.body.start_states {
-            if s < eps_reach.len() {
-                // Start states have weight ALL initially, so we just take the epsilon closure directly.
-                // eps_reach[s] contains pairs (v, path_weight). 
-                // Since initial weight is ALL, combined weight is just path_weight.
-                for (v, w_reach) in &eps_reach[s] {
-                    start_map.entry(*v)
-                        .and_modify(|acc| *acc |= w_reach)
-                        .or_insert_with(|| w_reach.clone());
-                }
-            }
-        }
-        
-        let mut start_subset: WeightedSubset = start_map.into_iter().collect();
-        start_subset.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-
-        let start_id = det.register_closure(start_subset);
-        det.dwa.body.start_state = start_id;
-
-        let mut processed_count = 0;
-        while let Some(sid) = det.queue.pop_front() {
-            if det.seen.len() > STATE_LIMIT {
-                let timestamp = Local::now().format("%Y%m%d-%H%M%S");
-                let filename = format!("nwa_dump_{}.json", timestamp);
-                crate::debug!(5, "Determinization state limit ({}) exceeded. Dumping NWA to {} and panicking.", STATE_LIMIT, filename);
-                let f = std::fs::File::create(&filename).expect("Unable to create dump file");
-                serde_json::to_writer(f, self).expect("Unable to write NWA to file");
-                panic!("Determinization aborted after reaching {} states.", STATE_LIMIT);
-            }
-
-            if let Some(pb) = &main_pb {
-                if processed_count % 100 == 0 {
-                    let total_states = det.seen.len();
-                    pb.set_length(total_states as u64);
-                    pb.set_position(processed_count as u64);
-                    pb.set_message(format!("Expanding state {}/{}", processed_count + 1, total_states));
-                }
-            }
-
-            det.expand_state(sid);
-            processed_count += 1;
-        }
-        if let Some(pb) = main_pb {
-            pb.finish_with_message("Determinization complete");
-        }
-
-        if DETERMINIZE_DEBUG {
-            let rustfst_dwa = self.determinize_to_dwa_with_rustfst();
-            crate::debug!(5, "[DETERMINIZE_DEBUG] Comparing custom determinization with rustfst...");
-            test_weighted_automata::stochastic_equivalence_test(det.dwa.clone(), rustfst_dwa);
-        }
-
-        det.dwa
-    }
-}
-
-impl NWA {
-    pub fn determinize(&self) -> DWA {
-        self._determinize()
-    }
-
-    fn epsilon_closure(&self, subset: &BTreeMap<NWAStateID, Weight>) -> BTreeMap<NWAStateID, Weight> {
-        let mut closure = subset.clone();
-        let mut worklist: VecDeque<NWAStateID> = subset.keys().copied().collect();
-
-        while let Some(u) = worklist.pop_front() {
-            let u_weight = closure.get(&u).unwrap().clone();
-            if u >= self.states.len() {
-                continue;
-            }
-            for (v, eps_weight) in &self.states[u].epsilons {
-                let v_new_weight = &u_weight & eps_weight;
-                if !v_new_weight.is_empty() {
-                    let v_current_weight = closure.entry(*v).or_insert_with(Weight::zeros);
-                    let combined = &*v_current_weight | &v_new_weight;
-                    if combined != *v_current_weight {
-                        *v_current_weight = combined;
-                        worklist.push_back(*v);
-                    }
-                }
-            }
-        }
-        closure
-    }
-
-    pub fn _determinize(&self) -> DWA {
-        let mut dwa = DWA::new();
-        dwa.states.0.clear();
-
-        let mut subset_map: HashMap<BTreeMap<NWAStateID, Weight>, NWAStateID> = HashMap::new();
-        let mut worklist: VecDeque<BTreeMap<NWAStateID, Weight>> = VecDeque::new();
-
-        let mut start_subset = BTreeMap::new();
-        for &s in &self.body.start_states {
-            if s < self.states.len() {
-                start_subset.insert(s, Weight::all());
-            }
-        }
-
-        let initial_subset = self.epsilon_closure(&start_subset);
-
-        if !initial_subset.is_empty() {
-            let start_id = dwa.add_state();
-            dwa.body.start_state = start_id;
-            subset_map.insert(initial_subset.clone(), start_id);
-            worklist.push_back(initial_subset);
-        } else {
-            let start_id = dwa.add_state();
-            dwa.body.start_state = start_id;
-        }
-
-        while let Some(subset) = worklist.pop_front() {
-            let from_dwa_id = *subset_map.get(&subset).unwrap();
-
-            let mut final_weight = Weight::zeros();
-            for (nwa_id, path_weight) in &subset {
-                if let Some(fw) = &self.states[*nwa_id].final_weight {
-                    final_weight |= &(path_weight & fw);
-                }
-            }
-            if !final_weight.is_empty() {
-                dwa.states[from_dwa_id].final_weight = Some(final_weight);
-            }
-
-            let mut transitions: BTreeMap<Label, BTreeMap<NWAStateID, Weight>> = BTreeMap::new();
-            for (nwa_id, path_weight) in &subset {
-                for (label, targets) in &self.states[*nwa_id].transitions {
-                    for (target_nwa_id, trans_weight) in targets {
-                        let next_path_weight = path_weight & trans_weight;
-                        if !next_path_weight.is_empty() {
-                            let entry = transitions.entry(*label).or_default();
-                            *entry.entry(*target_nwa_id).or_insert_with(Weight::zeros) |= &next_path_weight;
-                        }
-                    }
-                }
-            }
-
-            for (label, next_subset_pre_closure) in transitions {
-                let next_subset = self.epsilon_closure(&next_subset_pre_closure);
-                if next_subset.is_empty() {
-                    continue;
-                }
-                let to_dwa_id = *subset_map.entry(next_subset.clone()).or_insert_with(|| {
-                    let new_id = dwa.add_state();
-                    worklist.push_back(next_subset);
-                    new_id
-                });
-                dwa.add_transition(from_dwa_id, label, to_dwa_id, Weight::all()).unwrap();
-            }
-        }
-        dwa
-    }
 }
