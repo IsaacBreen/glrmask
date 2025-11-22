@@ -750,8 +750,9 @@ impl GrammarConstraint {
             node: &VocabPrefixTreeNode,
             current_states: Vec<(u32, Vec<u32>)>,
             dfa: &FastDFA,
+            num_terminals: usize,
             out_state_map: &mut Vec<(LLMTokenID, BTreeMap<TokenizerStateID, TokenizerStateID>)>,
-            out_matches: &mut BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
+            out_matches_vec: &mut [Option<LLMTokenBV>],
         ) {
             for (edge_bytes, child) in node.iter_children() {
                 let reachable_bv: LLMTokenBV = child.reachable_token_ids().into();
@@ -784,10 +785,13 @@ impl GrammarConstraint {
                             triggered_terminals.sort_unstable();
                             triggered_terminals.dedup();
                             for &src in sources {
-                                let src_id = TokenizerStateID(src as usize);
-                                let inner_map = out_matches.entry(src_id).or_default();
+                                let base_idx = (src as usize) * num_terminals;
                                 for &tid in &triggered_terminals {
-                                    inner_map.entry(tid).or_default().union_with(&reachable_bv);
+                                    let idx = base_idx + (tid.0 as usize);
+                                    match &mut out_matches_vec[idx] {
+                                        Some(existing) => existing.union_with(&reachable_bv),
+                                        None => out_matches_vec[idx] = Some(reachable_bv.clone()),
+                                    }
                                 }
                             }
                         }
@@ -814,8 +818,9 @@ impl GrammarConstraint {
                         child,
                         next_grouped,
                         dfa,
+                        num_terminals,
                         out_state_map,
-                        out_matches,
+                        out_matches_vec,
                     );
                 }
             }
@@ -826,23 +831,26 @@ impl GrammarConstraint {
         let mut transitions = vec![u32::MAX; num_states * 256];
         let mut finalizers = Vec::with_capacity(num_states);
 
+        let mut max_terminal_val = 0;
         for (i, state) in dfa.states.iter().enumerate() {
             for (byte, &next) in &state.transitions {
                 transitions[i * 256 + (byte as usize)] = next as u32;
             }
-            finalizers.push(
-                state
-                    .finalizers
-                    .iter()
-                    .map(|&gid| TerminalID(gid))
-                    .collect(),
-            );
+            let mut state_fins = Vec::new();
+            for &gid in &state.finalizers {
+                if gid > max_terminal_val { max_terminal_val = gid; }
+                state_fins.push(TerminalID(gid));
+            }
+            finalizers.push(state_fins);
         }
 
         let fast_dfa = FastDFA {
             transitions,
             finalizers,
         };
+
+        let num_terminals = max_terminal_val + 1;
+        let matches_vec_len = num_states * num_terminals;
 
         // Group initial states by current state (identity mapping at root)
         let mut initial_states: Vec<(u32, Vec<u32>)> = Vec::with_capacity(num_states);
@@ -852,14 +860,11 @@ impl GrammarConstraint {
 
         // Parallel processing of root children
         let root_children: Vec<_> = vocab_root.iter_children().collect();
-        let (state_map_entries, possible_matches) = root_children
+        let (state_map_entries, final_matches_vec) = root_children
             .par_iter()
             .map(|(edge_bytes, child_node)| {
                 let mut local_state_map_entries = Vec::new();
-                let mut local_possible_matches: BTreeMap<
-                    TokenizerStateID,
-                    BTreeMap<TerminalID, LLMTokenBV>,
-                > = BTreeMap::new();
+                let mut local_matches_vec: Vec<Option<LLMTokenBV>> = vec![None; matches_vec_len];
 
                 // Manually process the first edge to bootstrap recursion
                 let mut next_grouped_map: HashMap<u32, Vec<u32>> = HashMap::new();
@@ -888,10 +893,13 @@ impl GrammarConstraint {
                             triggered_terminals.sort_unstable();
                             triggered_terminals.dedup();
                             for &src in sources {
-                                let src_id = TokenizerStateID(src as usize);
-                                let inner = local_possible_matches.entry(src_id).or_default();
+                                let base_idx = (src as usize) * num_terminals;
                                 for &tid in &triggered_terminals {
-                                    inner.entry(tid).or_default().union_with(&reachable_bv);
+                                    let idx = base_idx + (tid.0 as usize);
+                                    match &mut local_matches_vec[idx] {
+                                        Some(existing) => existing.union_with(&reachable_bv),
+                                        None => local_matches_vec[idx] = Some(reachable_bv.clone()),
+                                    }
                                 }
                             }
                         }
@@ -916,21 +924,23 @@ impl GrammarConstraint {
                         child_node,
                         next_grouped,
                         &fast_dfa,
+                        num_terminals,
                         &mut local_state_map_entries,
-                        &mut local_possible_matches,
+                        &mut local_matches_vec,
                     );
                 }
 
-                (local_state_map_entries, local_possible_matches)
+                (local_state_map_entries, local_matches_vec)
             })
             .reduce(
-                || (Vec::new(), BTreeMap::new()),
+                || (Vec::new(), vec![None; matches_vec_len]),
                 |mut a, b| {
                     a.0.extend(b.0);
-                    for (sid, b_map) in b.1 {
-                        let a_map = a.1.entry(sid).or_default();
-                        for (tid, bv) in b_map {
-                            a_map.entry(tid).or_default().union_with(&bv);
+                    for (acc, val) in a.1.iter_mut().zip(b.1.into_iter()) {
+                        match (acc, val) {
+                            (Some(acc_bv), Some(val_bv)) => acc_bv.union_with(&val_bv),
+                            (acc@None, Some(val_bv)) => *acc = Some(val_bv),
+                            _ => {}
                         }
                     }
                     a
@@ -951,6 +961,22 @@ impl GrammarConstraint {
 
         for (tid, map) in state_map_entries {
             state_map_out.insert(tid, map);
+        }
+
+        let mut possible_matches: BTreeMap<
+            TokenizerStateID,
+            BTreeMap<TerminalID, LLMTokenBV>,
+        > = BTreeMap::new();
+
+        for (idx, opt_bv) in final_matches_vec.into_iter().enumerate() {
+            if let Some(bv) = opt_bv {
+                let src = TokenizerStateID(idx / num_terminals);
+                let tid = TerminalID(idx % num_terminals);
+                possible_matches
+                    .entry(src)
+                    .or_default()
+                    .insert(tid, bv);
+            }
         }
 
         (state_map_out, possible_matches)
