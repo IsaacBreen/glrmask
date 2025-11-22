@@ -337,8 +337,8 @@ pub fn precompute4(parser: &GLRParser, input_nwa: &NWA) -> DWA {
     crate::debug!(3, "Super DWA constructed. {} states remaining.", super_dwa.states.len());
     super_dwa.simplify();
     crate::debug!(3, "Super DWA constructed. {} states remaining.", super_dwa.states.len());
-    super_dwa.minimize_with_rustfst();
-    crate::debug!(3, "Super DWA minimized. {} states remaining.", super_dwa.states.len());
+    // super_dwa.minimize_with_rustfst();
+    // crate::debug!(3, "Super DWA minimized. {} states remaining.", super_dwa.states.len());
 
     let mut template_cache = HashMap::new();
     let super_signature: Signature = bit_to_term.iter().map(|t| vec![*t]).collect();
