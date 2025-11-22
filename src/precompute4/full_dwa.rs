@@ -448,6 +448,7 @@ pub fn precompute4(parser: &GLRParser, input_nwa: &NWA) -> DWA {
             combined_nwa_states.add_transition(combined_start_state, label, s, Weight::all()).unwrap();
         }
     }
+
     let combined_nwa = NWA { states: combined_nwa_states, body: NWABody { start_states: vec![combined_start_state] } };
     let final_dwa = resolve_negatives_and_optimize_and_determinize(parser, combined_nwa);
     crate::debug!(3, "Precomputation complete. Final DWA stats: {}", final_dwa.stats());
@@ -504,19 +505,18 @@ fn precompute_token_bvs_and_signatures(reversed_nwa: &NWA, traversal_data: &NwaT
 }
 
 fn resolve_negatives_and_optimize_and_determinize(parser: &GLRParser, mut combined_nwa: NWA) -> DWA {
-    combined_nwa.simplify();
+    crate::debug!(3, "Resolving negatives and optimizing...");
     prune_continuations_from_final_states(&mut combined_nwa);
-    simplify_remove_epsilon(&mut combined_nwa);
-    simplify_default_transitions(&mut combined_nwa);
-    simplify_remove_epsilon(&mut combined_nwa);
-    simplify_remove_epsilon(&mut combined_nwa);
+    crate::debug!(3, "Pruned continuations from final states. {} states remaining.", combined_nwa.states.len());
     combined_nwa.simplify();
-    simplify_remove_epsilon(&mut combined_nwa);
-    combined_nwa = NWA::from_dwa(&combined_nwa.determinize());
-    combined_nwa.simplify();
-    let mut final_dwa = combined_nwa.determinize();
-    final_dwa.minimize_with_rustfst();
-    final_dwa
+    crate::debug!(3, "Simplified NWA. {} states remaining.", combined_nwa.states.len());
+    let mut dwa = combined_nwa.determinize();
+    crate::debug!(3, "Determinized NWA. {} states remaining.", dwa.states.len());
+    dwa.simplify();
+    crate::debug!(3, "Simplified DWA. {} states remaining.", dwa.states.len());
+    dwa.minimize_with_rustfst();
+    crate::debug!(3, "Minimized DWA. {} states remaining.", dwa.states.len());
+    dwa
 }
 
 fn instantiate_nwa_template(template: &NWA, ordered_weights: &[Weight]) -> NWA {
