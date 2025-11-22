@@ -448,6 +448,7 @@ pub fn precompute4(
     _max_llm_token_id: usize,
 ) -> DWA {
     crate::debug!(3, "Starting precompute4 (DWA construction)");
+    println!("NWA:\n{}", input_nwa);
 
     // 1. Build template DWAs
     let now = Instant::now();
@@ -461,6 +462,9 @@ pub fn precompute4(
     // 2. Reverse NWA for backward propagation
     let reversed_nwa = input_nwa.reverse();
     let traversal_data = reversed_nwa.compute_traversal_data();
+
+    println!("Reversed NWA:\n{}", reversed_nwa);
+    // println!("Traversal Data:\n{:?}", traversal_data);
 
     // Identify 'roots' for reverse traversal (states with final weights in original NWA)
     let initial_tokens = LLMTokenBV::max_ones();
@@ -476,6 +480,8 @@ pub fn precompute4(
     let (node_tokens, unique_signatures) =
         precompute_token_bvs_and_signatures(&reversed_nwa, &traversal_data, initial_values_bv);
     crate::debug!(3, "Pass 1: Tokens & Signatures ({} sigs, {:.2?})", unique_signatures.len(), start_pass1.elapsed());
+    println!("Tokens: {:?}", node_tokens);
+    println!("Signatures: {:?}", unique_signatures);
 
     // 3. Build Super DWA / Template Derivation Pool
 
@@ -608,6 +614,8 @@ pub fn precompute4(
     let root_to_tok = Arc::new(root_to_tokenizer_ids);
     let final_bodies_arc = Arc::new(Mutex::new(BTreeMap::new()));
 
+    println!("Initial Values: {:?}", initial_values_full);
+
     nwa_special_map(
         &reversed_nwa,
         &traversal_data,
@@ -659,6 +667,8 @@ pub fn precompute4(
             };
 
             for (right_body, terminal_map) in nwa_bodies_map {
+                println!("right_body: {:?}", right_body);
+                println!("terminal_map: {:?}", terminal_map);
                 let (signature, concrete_weights) = canonicalize_bundle(terminal_map);
                 let template_nwa = template_cache.get(&signature).expect("Template must exist");
 
