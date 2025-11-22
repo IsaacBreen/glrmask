@@ -32,7 +32,6 @@ fn test_determinize_simple_divergence() {
     assert!(dwa.states.len() <= 4);
 }
 
-#[should_panic]
 #[test]
 fn test_determinize_hypercube_catastrophe() {
     const N: usize = 4;
