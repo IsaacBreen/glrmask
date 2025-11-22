@@ -2209,6 +2209,7 @@ mod determinization_tests {
     fn test_det_empty_nwa_rustfst() {
         let mut nwa = NWA::new();
         nwa.states.0.clear(); // Truly empty
+        nwa.body.start_states.clear();
         let dwa = nwa.determinize_to_dwa_with_rustfst();
         assert_eq!(dwa.states.len(), 1);
         assert!(dwa.states[dwa.body.start_state].final_weight.is_none());
