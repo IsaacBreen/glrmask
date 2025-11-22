@@ -16,7 +16,7 @@ pub type GroupID = usize;
 pub struct NFAState {
     /// Non-epsilon transitions: list of (input byte, target state).
     /// There may be multiple entries with the same input byte (non-determinism).
-    transitions: Vec<(u8, usize)>,
+    transitions: Vec<(U8Set, usize)>,
     /// Epsilon transitions: target states reachable without consuming input.
     epsilon_transitions: Vec<usize>,
     finalizers: BTreeSet<GroupID>,
@@ -63,6 +63,10 @@ impl StateSet {
     fn len(&self) -> usize {
         self.words.iter().map(|w| w.count_ones() as usize).sum()
     }
+
+    fn is_empty(&self) -> bool {
+        self.words.iter().all(|&w| w == 0)
+    }
 }
 
 struct StateSetIter<'a> {
@@ -99,8 +103,10 @@ impl JSONConvertible for NFAState {
         // matching the previous TrieMap<Vec<usize>> representation.
         let mut transitions_map: StdMap<String, JSONNode> = StdMap::new();
         let mut grouped: BTreeMap<u8, Vec<usize>> = BTreeMap::new();
-        for &(byte, target) in &self.transitions {
-            grouped.entry(byte).or_default().push(target);
+        for (set, target) in &self.transitions {
+            for byte in set.iter() {
+                grouped.entry(byte).or_default().push(*target);
+            }
         }
         for (byte, targets) in grouped {
             transitions_map.insert(byte.to_string(), targets.to_json());
@@ -128,7 +134,7 @@ impl JSONConvertible for NFAState {
                     .remove("transitions")
                     .ok_or_else(|| "Missing field transitions for NFAState".to_string())?;
 
-                let mut transitions: Vec<(u8, usize)> = Vec::new();
+                let mut transitions: Vec<(U8Set, usize)> = Vec::new();
                 match transitions_node {
                     JSONNode::Object(map) => {
                         for (key_str, val_node) in map {
@@ -140,7 +146,7 @@ impl JSONConvertible for NFAState {
                             })?;
                             let targets = Vec::<usize>::from_json(val_node)?;
                             for target in targets {
-                                transitions.push((byte, target));
+                                transitions.push((U8Set::from_u8(byte), target));
                             }
                         }
                     }
@@ -757,10 +763,10 @@ impl Display for NFA {
         for (state_index, state) in self.states.iter().enumerate() {
             f.write_str(&format!("State {}:\n", state_index))?;
 
-            for &(transition_u8, next_state) in &state.transitions {
+            for (transition_set, next_state) in &state.transitions {
                 f.write_str(&format!(
-                    "  - '{}': {}\n",
-                    transition_u8 as char, next_state
+                    "  - {:?}: {}\n",
+                    transition_set, next_state
                 ))?;
             }
 
@@ -950,9 +956,7 @@ impl Expr {
                     }
                     Expr::U8Class(ref set) => {
                         let new = nfa.add_state();
-                        for b in set.iter() {
-                            nfa.add_transition(start_state, b, new);
-                        }
+                        nfa.add_u8set_transition(start_state, set.clone(), new);
                         return_value = Some(new);
                     }
                     Expr::Epsilon => {
@@ -1173,7 +1177,11 @@ impl NFA {
     }
 
     pub fn add_transition(&mut self, from: usize, on_u8: u8, to: usize) {
-        self.states[from].transitions.push((on_u8, to));
+        self.states[from].transitions.push((U8Set::from_u8(on_u8), to));
+    }
+
+    pub fn add_u8set_transition(&mut self, from: usize, on_set: U8Set, to: usize) {
+        self.states[from].transitions.push((on_set, to));
     }
 
     pub fn add_epsilon_transition(&mut self, from: usize, to: usize) {
@@ -1197,7 +1205,7 @@ impl NFA {
         let mut compacted_transitions_count = 0;
 
         for state in &self.states {
-            transitions_capacity_bytes += state.transitions.capacity() * std::mem::size_of::<(u8, usize)>();
+            transitions_capacity_bytes += state.transitions.capacity() * std::mem::size_of::<(U8Set, usize)>();
             epsilon_capacity_bytes += state.epsilon_transitions.capacity() * std::mem::size_of::<usize>();
 
             // Estimate BTreeSet size: ~4 words per element is a reasonable loose approximation for sparse trees
@@ -1257,7 +1265,7 @@ impl NFA {
 
         // 3. Compact Transitions
         // Vec<(u8, usize)> [16 bytes] -> Vec<(U8Set, usize)> [48 bytes: 32(set) + 8(usize) + 8(pad)]
-        let compact_item_size = 48; 
+        let compact_item_size = 48;
         let compact_total_size = compacted_transitions_count * compact_item_size;
         let savings_compact = (current_trans_data_used as isize) - (compact_total_size as isize);
         println!("  [Savings] Compact Transitions: {:.2} MB (current: {:.2} MB, compacted: {:.2} MB)",
@@ -1404,9 +1412,11 @@ impl NFA {
 
         let mut max_subset_size = 0;
         let mut next_log_threshold = 20_000;
-        let mut transition_targets: Vec<Vec<usize>> = vec![Vec::with_capacity(16); 256];
-        let mut used_inputs: Vec<u8> = Vec::with_capacity(256);
-        let mut seen_input: [bool; 256] = [false; 256];
+        
+        // Reuseable structures for DFA construction
+        let mut transition_targets: Vec<StateSet> = (0..256).map(|_| StateSet::new(num_nfa_states)).collect();
+        let mut used_inputs: Vec<usize> = Vec::with_capacity(256);
+        let mut seen_input = [false; 256];
 
         while let Some(current_set) = worklist.pop() {
             let current_subset_len = current_set.len();
@@ -1422,29 +1432,35 @@ impl NFA {
                 .get(&current_set)
                 .expect("DFA state set not found in map");
 
+            // 1. Populate transition_targets for all inputs
             for state in current_set.iter() {
-                for &(input, next_state) in &self.states[state].transitions {
-                    let idx = input as usize;
-                    if !seen_input[idx] {
-                        seen_input[idx] = true;
-                        used_inputs.push(input);
+                for (u8set, next_state) in &self.states[state].transitions {
+                    for b in u8set.iter() {
+                        let idx = b as usize;
+                        if !seen_input[idx] {
+                            seen_input[idx] = true;
+                            used_inputs.push(idx);
+                        }
+                        transition_targets[idx].insert(*next_state);
                     }
-                    transition_targets[idx].push(next_state);
                 }
             }
 
-            for &input_u8 in &used_inputs {
-                let next_states = &transition_targets[input_u8 as usize];
-                if next_states.is_empty() {
-                    continue;
+            // 2. For each unique transition set, compute closure and get/create DFA state
+            let mut local_cache: HashMap<&StateSet, usize> = HashMap::new();
+
+            for &idx in &used_inputs {
+                let target_set = &transition_targets[idx];
+                if let Some(&next_state_idx) = local_cache.get(target_set) {
+                     dfa_states[current_dfa_state].transitions.insert(idx as u8, next_state_idx);
+                     continue;
                 }
 
-                closure_set.clear();
-
-                // Initialize BFS with direct transition targets
-                for &next_state in next_states {
-                    if closure_set.insert(next_state) {
-                        stack.push(next_state);
+                // Compute closure
+                closure_set.clear(); // Reusing global closure_set
+                for next_state in target_set.iter() {
+                    if closure_set.insert(*next_state) { // StateSet::insert returns true if new
+                         stack.push(*next_state);
                     }
                 }
 
@@ -1456,18 +1472,19 @@ impl NFA {
                     }
                 }
 
+                // Get/Create DFA state
                 let next_dfa_state =
-                    if let Some(&existing_state) = dfa_state_map.get(&closure_set) {
+                    if let Some(&existing_state) = dfa_state_map.get(&closure_set) { // closure_set is StateSet
                         existing_state
                     } else {
                         let new_state_index = dfa_states.len();
-                        let new_set = closure_set.clone();
-                        dfa_state_map.insert(new_set.clone(), new_state_index);
-                        worklist.push(new_set);
+                        let stored_set = closure_set.clone();
+                        dfa_state_map.insert(stored_set.clone(), new_state_index);
+                        worklist.push(stored_set);
 
                         let mut new_finalizers = BTreeSet::new();
                         let mut new_non_greedy_finalizers = BTreeSet::new();
-                        for state in closure_set.iter() {
+                        for state in closure_set.iter() { // closure_set is StateSet
                             new_finalizers.extend(self.states[state].finalizers.iter().cloned());
                             new_non_greedy_finalizers
                                 .extend(self.states[state].non_greedy_finalizers.iter().cloned());
@@ -1483,15 +1500,17 @@ impl NFA {
                         new_state_index
                     };
 
-                dfa_states[current_dfa_state]
-                    .transitions
-                    .insert(input_u8, next_dfa_state);
+                // Since we cannot store reference to transition_targets[idx] in local_cache easily 
+                // (borrow checker issues if we iterate used_inputs), we can just re-lookup or clone.
+                // To keep local_cache valid, we need owned keys or keys that live long enough.
+                // transition_targets lives outside the loop.
+                local_cache.insert(&transition_targets[idx], next_dfa_state);
+                dfa_states[current_dfa_state].transitions.insert(idx as u8, next_dfa_state);
             }
 
-            for &input in &used_inputs {
-                let idx = input as usize;
-                seen_input[idx] = false;
-                transition_targets[idx].clear();
+            for &idx in &used_inputs {
+                 seen_input[idx] = false;
+                 transition_targets[idx].clear();
             }
             used_inputs.clear();
         }
