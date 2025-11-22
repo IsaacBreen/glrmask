@@ -474,6 +474,11 @@ pub fn precompute4(
     // Identify 'roots' for reverse traversal (states with final weights in original NWA)
     let initial_tokens = LLMTokenBV::max_ones();
     let mut initial_values_bv = Vec::new();
+    for (id, state) in input_nwa.states.0.iter().enumerate() {
+        if state.final_weight.is_some() {
+            initial_values_bv.push((id, initial_tokens.clone()));
+        }
+    }
 
     // Pass 1: Token propagation and Signature collection
     let start_pass1 = Instant::now();
