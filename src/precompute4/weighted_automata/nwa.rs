@@ -252,23 +252,11 @@ impl NWA {
     }
 
     pub fn union_assign(&mut self, other: &NWA) {
-        let offset = self.states.append(&other.states);
-        self.body.start_states.extend(other.body.start_states.iter().map(|s| s + offset));
+        NWAStates::union_in_place(&mut self.states, &other, &self.body);
     }
 
     pub fn concatenate_assign(&mut self, other: &NWA) {
-        let offset = self.states.append(&other.states);
-        let right_starts: Vec<_> = other.body.start_states.iter().map(|s| s + offset).collect();
-        
-        for i in 0..offset {
-            if let Some(fw) = self.states[i].final_weight.take() {
-                if !fw.is_empty() {
-                    for &r_start in &right_starts {
-                        self.add_epsilon(i, r_start, fw.clone());
-                    }
-                }
-            }
-        }
+        NWAStates::concatenate_in_place(&mut self.states, &other, &self.body);
     }
 
     pub fn from_dwa(dwa: &DWA) -> Self {
