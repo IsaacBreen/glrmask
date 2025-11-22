@@ -5,9 +5,10 @@
 
 use super::common::{format_i16_char, Label, NWAStateID, Weight, BENCHMARK_DEBUG};
 use super::dwa::DWA;
-use crate::precompute4::weighted_automata::{DWAState, StateID};
+use crate::precompute4::weighted_automata::determinization_rustfst::determinize_nwa_to_dwa;
+use crate::precompute4::weighted_automata::StateID;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fmt::{self, Display, Formatter};
 use std::ops::{Index, IndexMut};
 
@@ -43,61 +44,133 @@ impl NWAStates {
         id
     }
 
-    pub fn add_existing_state(&mut self, state: NWAState) -> NWAStateID {
-        let id = self.0.len(); self.0.push(state); id
+    pub fn copy_state(&mut self, state_id: NWAStateID) -> NWAStateID {
+        assert!(state_id < self.len(), "copy_state: state_id out of bounds");
+        let new_id = self.add_state();
+        self.0[new_id] = self.0[state_id].clone();
+        new_id
     }
 
     pub fn add_epsilon(&mut self, from: NWAStateID, to: NWAStateID, w: Weight) {
-        if from < self.len() && to < self.len() {
-            self.0[from].epsilons.push((to, w));
-        }
+        assert!(from < self.len() && to < self.len(), "add_epsilon: state id out of bounds");
+        self.0[from].epsilons.push((to, w));
     }
 
-    pub fn add_transition(&mut self, from: NWAStateID, on: Label, to: NWAStateID, w: Weight) -> Result<(), NWABuildError> {
-        if from >= self.len() { return Err(NWABuildError::StateOutOfBounds { state: from }); }
-        if to >= self.len() { return Err(NWABuildError::StateOutOfBounds { state: to }); }
+    pub fn add_transition(
+        &mut self,
+        from: NWAStateID,
+        on: Label,
+        to: NWAStateID,
+        w: Weight,
+    ) -> Result<(), NWABuildError> {
+        if from >= self.len() {
+            return Err(NWABuildError::StateOutOfBounds { state: from });
+        }
+        if to >= self.len() {
+            return Err(NWABuildError::StateOutOfBounds { state: to });
+        }
         self.0[from].transitions.entry(on).or_default().push((to, w));
         Ok(())
     }
 
-    /// Appends all states from `other` into `self`, shifting their IDs.
-    /// Returns the offset (ID of the first appended state).
-    pub fn append(&mut self, other: &NWAStates) -> usize {
-        let offset = self.len();
-        self.0.reserve(other.len());
-        for state in &other.0 {
-            let mut new_state = state.clone();
-            for targets in new_state.transitions.values_mut() {
-                for (to, _) in targets { *to += offset; }
-            }
-            for (to, _) in &mut new_state.epsilons { *to += offset; }
-            self.0.push(new_state);
-        }
-        offset
+    pub fn copy_subgraph_from_and_return_body(&mut self, other: &NWAStates, body: NWABody) -> NWABody {
+        let (new_start, _remap) = self.copy_subgraph_from(other, body.start_state);
+        NWABody { start_state: new_start }
     }
 
-    /// Concatenates `left` NWA onto `right_body` *in place*.
-    /// `left` is appended to `self`. Then, for every final state in the appended `left`,
-    /// epsilon transitions are added to all of `right_body`'s start states.
-    /// Returns a new `NWABody` representing the starts of the concatenated structure (i.e., left's starts).
-    pub fn concatenate_in_place(&mut self, left: &NWA, right_body: &NWABody) -> NWABody {
-        let offset = self.append(&left.states);
-        
-        // Connect left's finals to right's starts
-        for i in 0..left.states.len() {
-            let abs_id = i + offset;
-            if let Some(fw) = self.0[abs_id].final_weight.take() {
-                if !fw.is_empty() {
-                    for &r_start in &right_body.start_states {
-                        self.add_epsilon(abs_id, r_start, fw.clone());
-                    }
+    pub fn copy_subgraph_in_place_and_return_body(&mut self, body: NWABody) -> NWABody {
+        let (new_start, _remap) = self.copy_subgraph_in_place(body.start_state);
+        NWABody { start_state: new_start }
+    }
+
+    pub fn copy_subgraph_in_place(&mut self, start_id: NWAStateID) -> (NWAStateID, HashMap<NWAStateID, NWAStateID>) {
+        let mut remap: HashMap<NWAStateID, NWAStateID> = HashMap::new();
+        if start_id >= self.len() {
+            let new_start = self.add_state();
+            return (new_start, remap);
+        }
+        let new_start = self.add_state();
+        self.0[new_start] = self.0[start_id].clone();
+        remap.insert(start_id, new_start);
+
+        let mut q = VecDeque::new();
+        q.push_back((start_id, new_start));
+
+        while let Some((old, new)) = q.pop_front() {
+            let eps = self.0[old].epsilons.clone();
+            self.0[new].epsilons.clear();
+            for (to_old, w) in eps {
+                let to_new = *remap.entry(to_old).or_insert_with(|| {
+                    let n = self.add_state();
+                    self.0[n] = self.0[to_old].clone();
+                    q.push_back((to_old, n));
+                    n
+                });
+                self.0[new].epsilons.push((to_new, w.clone()));
+            }
+            let trans = self.0[old].transitions.clone();
+            self.0[new].transitions.clear();
+            for (lbl, targets) in trans {
+                for (to_old, w) in targets {
+                    let to_new = *remap.entry(to_old).or_insert_with(|| {
+                        let n = self.add_state();
+                        self.0[n] = self.0[to_old].clone();
+                        q.push_back((to_old, n));
+                        n
+                    });
+                    self.0[new].transitions.entry(lbl).or_default().push((to_new, w.clone()));
                 }
             }
         }
 
-        NWABody {
-            start_states: left.body.start_states.iter().map(|s| s + offset).collect()
+        (new_start, remap)
+    }
+
+    pub fn copy_subgraph_from(
+        &mut self,
+        other: &NWAStates,
+        start_id: NWAStateID,
+    ) -> (NWAStateID, HashMap<NWAStateID, NWAStateID>) {
+        let mut remap: HashMap<NWAStateID, NWAStateID> = HashMap::new();
+        if start_id >= other.len() {
+            let new_start = self.add_state();
+            return (new_start, remap);
         }
+        let new_start = self.add_state();
+        self.0[new_start] = other.0[start_id].clone();
+        remap.insert(start_id, new_start);
+
+        let mut q = VecDeque::new();
+        q.push_back((start_id, new_start));
+
+        while let Some((old, new)) = q.pop_front() {
+            let eps = other.0[old].epsilons.clone();
+            self.0[new].epsilons.clear();
+            for (to_old, w) in eps {
+                let to_new = *remap.entry(to_old).or_insert_with(|| {
+                    let n = self.add_state();
+                    self.0[n] = other.0[to_old].clone();
+                    q.push_back((to_old, n));
+                    n
+                });
+                self.0[new].epsilons.push((to_new, w.clone()));
+            }
+            let trans = other.0[old].transitions.clone();
+            self.0[new].transitions.clear();
+            for (lbl, targets) in trans {
+                for (to_old, w) in targets {
+                    let to_new = *remap.entry(to_old).or_insert_with(|| {
+                        let n = self.add_state();
+                        self.0[n] = other.0[to_old].clone();
+                        q.push_back((to_old, n));
+                        n
+                    });
+                    self.0[new].transitions.entry(lbl).or_default().push((to_new, w.clone()));
+                }
+            }
+        }
+
+        (new_start, remap)
     }
 }
 
@@ -115,34 +188,20 @@ impl Display for NWAStates {
         writeln!(f, "NWAStates ({} states):", self.0.len())?;
         for (id, state) in self.0.iter().enumerate() {
             writeln!(f, "  State {}:", id)?;
-            if let Some(w) = &state.final_weight { writeln!(f, "    final_weight: {}", w)?; }
+            if let Some(w) = &state.final_weight {
+                writeln!(f, "    final_weight: {}", w)?;
+            }
             for (on, targets) in &state.transitions {
                 for (to, w) in targets {
-                    writeln!(f, "    {} -> {} (weight: {})", format_i16_char(*on), to, w)?;
+                    let char_repr = format_i16_char(*on);
+                    writeln!(f, "    {} -> {} (weight: {})", char_repr, to, w)?;
                 }
             }
-            for (to, w) in &state.epsilons { writeln!(f, "    ε -> {} (weight: {})", to, w)?; }
+            for (to, w) in &state.epsilons {
+                writeln!(f, "    ε -> {} (weight: {})", to, w)?;
+            }
         }
         Ok(())
-    }
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct NWABody {
-    pub start_states: Vec<NWAStateID>,
-}
-
-impl NWABody {
-    pub fn union(a: &NWABody, b: &NWABody) -> NWABody {
-        let mut s = a.start_states.clone();
-        s.extend(&b.start_states);
-        NWABody { start_states: s }
-    }
-}
-
-impl Display for NWABody {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result { 
-        write!(f, "NWABody (starts: {:?})", self.start_states) 
     }
 }
 
@@ -150,15 +209,71 @@ impl Display for NWABody {
 pub struct NWAStats {
     pub num_states: usize,
     pub num_final_states: usize,
-    pub total_epsilon: usize,
-    pub total_labeled: usize,
+    pub total_epsilon_transitions: usize,
+    pub total_labeled_transitions: usize,
+    pub avg_epsilon_per_state: f64,
+    pub avg_labeled_per_state: f64,
 }
 
 impl Display for NWAStats {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        writeln!(f, "States: {}, Finals: {}, Eps: {}, Labeled: {}", 
-            self.num_states, self.num_final_states, self.total_epsilon, self.total_labeled)
+        writeln!(f, "NWA Stats:")?;
+        writeln!(f, "  - States: {}", self.num_states)?;
+        writeln!(f, "  - Final States: {}", self.num_final_states)?;
+        writeln!(f, "  - Epsilon Transitions: {}", self.total_epsilon_transitions)?;
+        writeln!(f, "  - Labeled Transitions: {}", self.total_labeled_transitions)?;
+        writeln!(f, "  - Avg Epsilon/State: {:.2}", self.avg_epsilon_per_state)?;
+        writeln!(f, "  - Avg Labeled/State: {:.2}", self.avg_labeled_per_state)
     }
+}
+
+impl NWA {
+    pub fn stats(&self) -> NWAStats {
+        let num_states = self.states.len();
+        if num_states == 0 {
+            return NWAStats {
+                num_states: 0,
+                num_final_states: 0,
+                total_epsilon_transitions: 0,
+                total_labeled_transitions: 0,
+                avg_epsilon_per_state: 0.0,
+                avg_labeled_per_state: 0.0,
+            };
+        }
+
+        let mut num_final_states = 0;
+        let mut total_epsilon_transitions = 0;
+        let mut total_labeled_transitions = 0;
+
+        for state in &self.states.0 {
+            if state.final_weight.is_some() {
+                num_final_states += 1;
+            }
+            total_epsilon_transitions += state.epsilons.len();
+            total_labeled_transitions += state.transitions.values().map(|v| v.len()).sum::<usize>();
+        }
+
+        let avg_epsilon_per_state = total_epsilon_transitions as f64 / num_states as f64;
+        let avg_labeled_per_state = total_labeled_transitions as f64 / num_states as f64;
+
+        NWAStats {
+            num_states,
+            num_final_states,
+            total_epsilon_transitions,
+            total_labeled_transitions,
+            avg_epsilon_per_state,
+            avg_labeled_per_state,
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct NWABody {
+    pub start_state: NWAStateID,
+}
+
+impl Display for NWABody {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result { write!(f, "NWABody (start: {})", self.start_state) }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -168,118 +283,210 @@ pub struct NWA {
 }
 
 impl NWA {
-    pub fn new_empty() -> Self {
-        Self { states: NWAStates::default(), body: NWABody::default() }
-    }
     pub fn new() -> Self {
-        let mut nwa = Self::new_empty();
-        let start = nwa.add_state();
-        nwa.body.start_states.push(start);
-        nwa
-    }
-    pub fn add_state(&mut self) -> NWAStateID { self.states.add_state() }
-    pub fn add_epsilon(&mut self, u: NWAStateID, v: NWAStateID, w: Weight) { self.states.add_epsilon(u, v, w); }
-    pub fn add_transition(&mut self, u: NWAStateID, l: Label, v: NWAStateID, w: Weight) -> Result<(), NWABuildError> {
-        self.states.add_transition(u, l, v, w)
+        let mut states = NWAStates::default();
+        let start = states.add_state();
+        Self { states, body: NWABody { start_state: start } }
     }
 
-    pub fn reverse(&self) -> NWA {
-        let mut rev = NWA::new_empty();
-        // Pre-allocate states
-        for _ in 0..self.states.len() { rev.add_state(); }
+    pub fn add_state(&mut self) -> StateID { self.states.add_state() }
 
-        // Create a super-start for the reversed NWA that connects to all old final states
-        let super_start = rev.add_state();
-        rev.body.start_states = vec![super_start];
+    pub fn add_transition(
+        &mut self,
+        from: NWAStateID,
+        on: Label,
+        to: NWAStateID,
+        w: Weight,
+    ) -> Result<(), NWABuildError> {
+        self.states.add_transition(from, on, to, w)
+    }
 
-        for (u, state) in self.states.0.iter().enumerate() {
-            // Reverse transitions: u -> v becomes v -> u
-            for (lbl, targets) in &state.transitions {
-                for (v, w) in targets { rev.add_transition(*v, *lbl, u, w.clone()).unwrap(); }
+    pub fn add_epsilon(&mut self, from: NWAStateID, to: NWAStateID, w: Weight) { self.states.add_epsilon(from, to, w); }
+
+    pub fn determinize_to_dwa(&self) -> DWA { self.determinize() }
+
+    fn epsilon_closure(&self, subset: &BTreeMap<NWAStateID, Weight>) -> BTreeMap<NWAStateID, Weight> {
+        let mut closure = subset.clone();
+        let mut worklist: VecDeque<NWAStateID> = subset.keys().copied().collect();
+
+        while let Some(u) = worklist.pop_front() {
+            let u_weight = closure.get(&u).unwrap().clone();
+            if u >= self.states.len() {
+                continue;
             }
-            // Reverse epsilons
-            for (v, w) in &state.epsilons { rev.add_epsilon(*v, u, w.clone()); }
-            
-            // Old finals become reachable from new super-start via epsilon
-            if let Some(fw) = &state.final_weight {
-                if !fw.is_empty() {
-                    rev.add_epsilon(super_start, u, fw.clone());
+            for (v, eps_weight) in &self.states[u].epsilons {
+                let v_new_weight = &u_weight & eps_weight;
+                if !v_new_weight.is_empty() {
+                    let v_current_weight = closure.entry(*v).or_insert_with(Weight::zeros);
+                    let combined = &*v_current_weight | &v_new_weight;
+                    if combined != *v_current_weight {
+                        *v_current_weight = combined;
+                        worklist.push_back(*v);
+                    }
                 }
             }
         }
+        closure
+    }
 
-        // Old start states become final in the reversed NWA with Weight::all()
-        for &s in &self.body.start_states {
-            if s < rev.states.len() {
-                let old = rev.states[s].final_weight.clone().unwrap_or_else(Weight::zeros);
-                rev.states[s].final_weight = Some(old | Weight::all());
+    pub fn _determinize(&self) -> DWA {
+        let mut dwa = DWA::new();
+        dwa.states.0.clear();
+
+        let mut subset_map: HashMap<BTreeMap<NWAStateID, Weight>, NWAStateID> = HashMap::new();
+        let mut worklist: VecDeque<BTreeMap<NWAStateID, Weight>> = VecDeque::new();
+
+        let mut start_subset = BTreeMap::new();
+        if self.body.start_state < self.states.len() {
+            start_subset.insert(self.body.start_state, Weight::all());
+            let initial_subset = self.epsilon_closure(&start_subset);
+
+            if !initial_subset.is_empty() {
+                let start_id = dwa.add_state();
+                dwa.body.start_state = start_id;
+                subset_map.insert(initial_subset.clone(), start_id);
+                worklist.push_back(initial_subset);
+            } else {
+                dwa.body.start_state = dwa.add_state();
             }
-        }
-        
-        rev
-    }
-
-    pub fn concatenate(left: &NWA, right: &NWA) -> NWA {
-        let mut res = NWA::new_empty();
-        let _ = res.states.append(&right.states); // Right is at offset 0
-        // Construct a body for the right segment
-        let right_body = right.body.clone(); // indices are 0-based, valid
-        
-        // Concatenate left into place (appends left states and links finals -> right starts)
-        res.body = res.states.concatenate_in_place(left, &right_body);
-        res
-    }
-
-    pub fn union(a: &NWA, b: &NWA) -> NWA {
-        let mut res = NWA::new_empty();
-        let off_a = res.states.append(&a.states);
-        let off_b = res.states.append(&b.states);
-        
-        let mut starts = Vec::new();
-        starts.extend(a.body.start_states.iter().map(|s| s + off_a));
-        starts.extend(b.body.start_states.iter().map(|s| s + off_b));
-        res.body.start_states = starts;
-        res
-    }
-
-    pub fn from_dwa(dwa: &DWA) -> Self {
-        let mut nwa = NWA::new_empty();
-        for _ in 0..dwa.states.len() { nwa.add_state(); }
-        nwa.body.start_states = vec![dwa.body.start_state];
-
-        for (i, st) in dwa.states.0.iter().enumerate() {
-            nwa.states[i].final_weight = st.final_weight.clone();
-            for (lbl, to) in &st.transitions {
-                let w = st.trans_weights.get(lbl).cloned().unwrap_or_else(Weight::all);
-                nwa.add_transition(i, *lbl, *to, w).unwrap();
-            }
-        }
-        nwa
-    }
-
-    pub fn determinize_to_dwa(&self) -> DWA {
-        if BENCHMARK_DEBUG {
-            // Simple passthrough to standard determinization for now, ignoring benchmark logic for brevity
-            self.determinize_to_dwa2()
         } else {
-            self.determinize_to_dwa2()
+            dwa.body.start_state = dwa.add_state();
+        }
+
+        while let Some(subset) = worklist.pop_front() {
+            let from_dwa_id = *subset_map.get(&subset).unwrap();
+
+            let mut final_weight = Weight::zeros();
+            for (nwa_id, path_weight) in &subset {
+                if let Some(fw) = &self.states[*nwa_id].final_weight {
+                    final_weight |= &(path_weight & fw);
+                }
+            }
+            if !final_weight.is_empty() {
+                dwa.states[from_dwa_id].final_weight = Some(final_weight);
+            }
+
+            let mut transitions: BTreeMap<Label, BTreeMap<NWAStateID, Weight>> = BTreeMap::new();
+            for (nwa_id, path_weight) in &subset {
+                for (label, targets) in &self.states[*nwa_id].transitions {
+                    for (target_nwa_id, trans_weight) in targets {
+                        let next_path_weight = path_weight & trans_weight;
+                        if !next_path_weight.is_empty() {
+                            let entry = transitions.entry(*label).or_default();
+                            *entry.entry(*target_nwa_id).or_insert_with(Weight::zeros) |= &next_path_weight;
+                        }
+                    }
+                }
+            }
+
+            for (label, next_subset_pre_closure) in transitions {
+                let next_subset = self.epsilon_closure(&next_subset_pre_closure);
+                if next_subset.is_empty() {
+                    continue;
+                }
+                let to_dwa_id = *subset_map.entry(next_subset.clone()).or_insert_with(|| {
+                    let new_id = dwa.add_state();
+                    worklist.push_back(next_subset);
+                    new_id
+                });
+                dwa.add_transition(from_dwa_id, label, to_dwa_id, Weight::all()).unwrap();
+            }
+        }
+        dwa
+    }
+
+    pub fn determinize(&self) -> DWA {
+        if BENCHMARK_DEBUG {
+            let initial_states = self.states.len();
+
+            // 1. Internal (_determinize)
+            let internal_start = std::time::Instant::now();
+            let mut internal_dwa = self._determinize();
+            let internal_states_before_simp = internal_dwa.states.len();
+            internal_dwa.simplify();
+            let internal_time_total = internal_start.elapsed();
+            let internal_states_after_simp = internal_dwa.states.len();
+
+            // 2. Rust (determinize_to_dwa2)
+            let rust_start = std::time::Instant::now();
+            let mut rust_dwa = self.determinize_to_dwa2();
+            let rust_states_before_simp = rust_dwa.states.len();
+            rust_dwa.simplify();
+            let rust_time_total = rust_start.elapsed();
+            let rust_states_after_simp = rust_dwa.states.len();
+
+            // 3. RustFST (determinize_to_dwa_with_rustfst)
+            if self.states.len() > 10000 {
+                println!("WARNING: Trying to determinize with rustfst with more than 10k states.")
+            }
+            let rustfst_start = std::time::Instant::now();
+            let mut rustfst_dwa = self.determinize_to_dwa_with_rustfst();
+            let rustfst_states_before_simp = rustfst_dwa.states.len();
+            rustfst_dwa.simplify();
+            let rustfst_time_total = rustfst_start.elapsed();
+            let rustfst_states_after_simp = rustfst_dwa.states.len();
+
+            // Comparisons
+            let s1 = internal_states_after_simp;
+            let s2 = rust_states_after_simp;
+            let s3 = rustfst_states_after_simp;
+            let t1 = internal_time_total;
+            let t2 = rust_time_total;
+            let t3 = rustfst_time_total;
+
+            let best_s = s1.min(s2).min(s3);
+            let best_t = t1.min(t2).min(t3);
+
+            let s1_marker = if s1 == best_s { "*" } else { " " };
+            let s2_marker = if s2 == best_s { "*" } else { " " };
+            let s3_marker = if s3 == best_s { "*" } else { " " };
+
+            let t1_marker = if t1 == best_t { "*" } else { " " };
+            let t2_marker = if t2 == best_t { "*" } else { " " };
+            let t3_marker = if t3 == best_t { "*" } else { " " };
+
+            if t1 + t2 + t3 > std::time::Duration::from_secs(1) {
+                crate::debug!(4, "[Determinize NWA({})] Internal: t={:.2?}{}, s={}->{}{}| Rust: t={:.2?}{}, s={}->{}{}| RustFST: t={:.2?}{}, s={}->{}{}", initial_states, t1, t1_marker, internal_states_before_simp, s1, s1_marker, t2, t2_marker, rust_states_before_simp, s2, s2_marker, t3, t3_marker, rustfst_states_before_simp, s3, s3_marker);
+            }
+
+            internal_dwa
+        } else {
+            self._determinize()
         }
     }
 
-    pub fn stats(&self) -> NWAStats {
-        let mut st = NWAStats { num_states: self.states.len(), num_final_states: 0, total_epsilon: 0, total_labeled: 0 };
-        for s in &self.states.0 {
-            if s.final_weight.is_some() { st.num_final_states += 1; }
-            st.total_epsilon += s.epsilons.len();
-            st.total_labeled += s.transitions.values().map(|v| v.len()).sum::<usize>();
-        }
-        st
+    pub fn determinize_inplace(&mut self) {
+        let dwa = self.determinize_to_dwa2();
+        *self = NWA::from_dwa(&dwa);
+    }
+
+    pub fn num_transitions(&self) -> usize {
+        self.states.0.iter().map(|s| s.transitions.len()).sum()
+    }
+
+    pub fn num_epsilons(&self) -> usize {
+        self.states.0.iter().map(|s| s.epsilons.len()).sum()
     }
 }
 
 impl Display for NWA {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        writeln!(f, "NWA {}", self.body)?;
-        write!(f, "{}", self.states)
+        writeln!(f, "NWA (start: {})", self.body.start_state)?;
+        for (id, state) in self.states.0.iter().enumerate() {
+            writeln!(f, "  State {}:", id)?;
+            if let Some(w) = &state.final_weight {
+                writeln!(f, "    final_weight: {}", w)?;
+            }
+            for (on, targets) in &state.transitions {
+                for (to, w) in targets {
+                    let char_repr = format_i16_char(*on);
+                    writeln!(f, "    {} -> {} (weight: {})", char_repr, to, w)?;
+                }
+            }
+            for (to, w) in &state.epsilons {
+                writeln!(f, "    ε -> {} (weight: {})", to, w)?;
+            }
+        }
+        Ok(())
     }
 }
