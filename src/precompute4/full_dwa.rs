@@ -448,7 +448,6 @@ pub fn precompute4(
     _max_llm_token_id: usize,
 ) -> DWA {
     crate::debug!(3, "Starting precompute4 (DWA construction)");
-    println!("NWA:\n{}", input_nwa);
 
     // 1. Build template DWAs
     let now = Instant::now();
@@ -462,9 +461,6 @@ pub fn precompute4(
     // 2. Reverse NWA for backward propagation
     let reversed_nwa = input_nwa.reverse();
     let traversal_data = reversed_nwa.compute_traversal_data();
-
-    println!("Reversed NWA:\n{}", reversed_nwa);
-    // println!("Traversal Data:\n{:?}", traversal_data);
 
     // Identify 'roots' for reverse traversal (states with final weights in original NWA)
     let initial_tokens = LLMTokenBV::max_ones();
@@ -484,8 +480,6 @@ pub fn precompute4(
         unique_signatures.insert(vec![vec![None]]);
     }
     crate::debug!(3, "Pass 1: Tokens & Signatures ({} sigs, {:.2?})", unique_signatures.len(), start_pass1.elapsed());
-    println!("Tokens: {:?}", node_tokens);
-    println!("Signatures: {:?}", unique_signatures);
 
     // 3. Build Super DWA / Template Derivation Pool
 
@@ -605,20 +599,18 @@ pub fn precompute4(
     // We need to capture the final bodies computed at the "root states" of the original input NWA.
     // The `input_nwa.body.start_state` transitions point to these roots.
     let start_state_id = input_nwa.body.start_state;
-    let mut root_to_tokenizer_ids: HashMap<NWAStateID, Vec<TokenizerStateID>> = HashMap::new();
+    let mut root_to_tokenizer_ids: HashMap<NWAStateID, Vec<(TokenizerStateID, Weight)>> = HashMap::new();
     for (label, targets) in &input_nwa.states[start_state_id].transitions {
-        for (root_state_id, _) in targets {
+        for (root_state_id, weight) in targets {
             root_to_tokenizer_ids
                 .entry(*root_state_id)
                 .or_default()
-                .push(TokenizerStateID(*label as usize));
+                .push((TokenizerStateID(*label as usize), weight.clone()));
         }
     }
 
     let root_to_tok = Arc::new(root_to_tokenizer_ids);
     let final_bodies_arc = Arc::new(Mutex::new(BTreeMap::new()));
-
-    println!("Initial Values: {:?}", initial_values_full);
 
     nwa_special_map(
         &reversed_nwa,
@@ -671,8 +663,6 @@ pub fn precompute4(
             };
 
             for (right_body, terminal_map) in nwa_bodies_map {
-                println!("right_body: {:?}", right_body);
-                println!("terminal_map: {:?}", terminal_map);
                 let (signature, concrete_weights) = canonicalize_bundle(terminal_map);
                 let template_nwa = template_cache.get(&signature).expect("Template must exist");
 
@@ -695,8 +685,14 @@ pub fn precompute4(
             if !tokens.is_empty() {
                 if let Some(tok_ids) = root_to_tok.get(&node_idx) {
                     let mut fb = final_bodies_arc.lock().unwrap();
-                    for tid in tok_ids {
-                        fb.insert(*tid, nwa_body.clone());
+                    for (tid, start_weight) in tok_ids {
+                        let mut restricted_body = nwa_body.clone();
+                        if *start_weight != Weight::all() {
+                            let new_start = restricted_body.states.add_state();
+                            restricted_body.states.add_epsilon(new_start, restricted_body.body.start_state, start_weight.clone());
+                            restricted_body.body.start_state = new_start;
+                        }
+                        fb.insert(*tid, restricted_body);
                     }
                 }
 
