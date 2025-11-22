@@ -23,6 +23,73 @@ pub struct NFAState {
     non_greedy_finalizers: BTreeSet<GroupID>,
 }
 
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct StateSet {
+    words: Vec<u64>,
+}
+
+impl StateSet {
+    fn new(num_bits: usize) -> Self {
+        let num_words = (num_bits + 63) / 64;
+        Self {
+            words: vec![0; num_words],
+        }
+    }
+
+    fn insert(&mut self, bit: usize) -> bool {
+        let word_idx = bit / 64;
+        let bit_mask = 1u64 << (bit % 64);
+        if (self.words[word_idx] & bit_mask) == 0 {
+            self.words[word_idx] |= bit_mask;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn clear(&mut self) {
+        self.words.fill(0);
+    }
+
+    fn iter(&self) -> StateSetIter {
+        let current_word = if self.words.is_empty() { 0 } else { self.words[0] };
+        StateSetIter {
+            set: self,
+            word_idx: 0,
+            current_word,
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.words.iter().map(|w| w.count_ones() as usize).sum()
+    }
+}
+
+struct StateSetIter<'a> {
+    set: &'a StateSet,
+    word_idx: usize,
+    current_word: u64,
+}
+
+impl<'a> Iterator for StateSetIter<'a> {
+    type Item = usize;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if self.current_word != 0 {
+                let trailing = self.current_word.trailing_zeros();
+                self.current_word &= !(1u64 << trailing);
+                return Some(self.word_idx * 64 + trailing as usize);
+            }
+            self.word_idx += 1;
+            if self.word_idx >= self.set.words.len() {
+                return None;
+            }
+            self.current_word = self.set.words[self.word_idx];
+        }
+    }
+}
+
 // Manual impl for NFAState
 impl JSONConvertible for NFAState {
     fn to_json(&self) -> JSONNode {
@@ -1296,34 +1363,34 @@ impl NFA {
     pub fn to_dfa(self) -> DFA {
         let start_time = std::time::Instant::now();
         let mut dfa_states: Vec<DFAState> = Vec::new();
-        let mut dfa_state_map: HashMap<FrozenSet<usize>, usize> = HashMap::new();
-        let mut worklist: Vec<FrozenSet<usize>> = Vec::new();
+        let mut dfa_state_map: HashMap<StateSet, usize> = HashMap::new();
+        let mut worklist: Vec<StateSet> = Vec::new();
 
         // Shared buffers for on-the-fly closure computation
         let num_nfa_states = self.states.len();
         let mut stack = Vec::with_capacity(1024);
-        let mut closure_bitset = BitSet::new(num_nfa_states);
+        // Use StateSet as a reusable bitset for closure computation
+        let mut closure_set = StateSet::new(num_nfa_states);
 
         // Compute start state closure
         stack.push(self.start_state);
-        closure_bitset.insert(self.start_state);
+        closure_set.insert(self.start_state);
 
         while let Some(u) = stack.pop() {
             for &v in &self.states[u].epsilon_transitions {
-                if closure_bitset.insert(v) {
+                if closure_set.insert(v) {
                     stack.push(v);
                 }
             }
         }
 
-        let start_closure_vec: Vec<usize> = closure_bitset.iter().collect();
-        let start_state_set = FrozenSet::new_unchecked(start_closure_vec);
-        worklist.push(start_state_set.clone());
+        let start_state_set = closure_set.clone();
         dfa_state_map.insert(start_state_set.clone(), 0);
+        worklist.push(start_state_set.clone());
 
         let mut finalizers = BTreeSet::new();
         let mut non_greedy_finalizers = BTreeSet::new();
-        for &state in start_state_set.iter() {
+        for state in start_state_set.iter() {
             finalizers.extend(self.states[state].finalizers.iter().cloned());
             non_greedy_finalizers.extend(self.states[state].non_greedy_finalizers.iter().cloned());
         }
@@ -1355,7 +1422,7 @@ impl NFA {
                 .get(&current_set)
                 .expect("DFA state set not found in map");
 
-            for &state in current_set.iter() {
+            for state in current_set.iter() {
                 for &(input, next_state) in &self.states[state].transitions {
                     let idx = input as usize;
                     if !seen_input[idx] {
@@ -1372,38 +1439,35 @@ impl NFA {
                     continue;
                 }
 
-                closure_bitset.clear();
+                closure_set.clear();
 
                 // Initialize BFS with direct transition targets
                 for &next_state in next_states {
-                    if closure_bitset.insert(next_state) {
+                    if closure_set.insert(next_state) {
                         stack.push(next_state);
                     }
                 }
 
                 while let Some(u) = stack.pop() {
                     for &v in &self.states[u].epsilon_transitions {
-                        if closure_bitset.insert(v) {
+                        if closure_set.insert(v) {
                             stack.push(v);
                         }
                     }
                 }
 
-                // BitSet iter returns sorted elements
-                let closure_vec: Vec<usize> = closure_bitset.iter().collect();
-                let frozen_closure: FrozenSet<usize> = FrozenSet::new_unchecked(closure_vec);
-
                 let next_dfa_state =
-                    if let Some(&existing_state) = dfa_state_map.get(&frozen_closure) {
+                    if let Some(&existing_state) = dfa_state_map.get(&closure_set) {
                         existing_state
                     } else {
                         let new_state_index = dfa_states.len();
-                        dfa_state_map.insert(frozen_closure.clone(), new_state_index);
-                        worklist.push(frozen_closure.clone());
+                        let new_set = closure_set.clone();
+                        dfa_state_map.insert(new_set.clone(), new_state_index);
+                        worklist.push(new_set);
 
                         let mut new_finalizers = BTreeSet::new();
                         let mut new_non_greedy_finalizers = BTreeSet::new();
-                        for &state in frozen_closure.iter() {
+                        for state in closure_set.iter() {
                             new_finalizers.extend(self.states[state].finalizers.iter().cloned());
                             new_non_greedy_finalizers
                                 .extend(self.states[state].non_greedy_finalizers.iter().cloned());
