@@ -330,9 +330,15 @@ pub fn precompute4(parser: &GLRParser, input_nwa: &NWA) -> DWA {
         weighted_dwa.apply_weight_inplace(&weight);
         super_nwa = NWA::union(&super_nwa, &NWA::from_dwa(&weighted_dwa));
     }
+    crate::debug!(3, "Super NWA constructed. {} states remaining.", super_nwa.states.len());
     super_nwa.simplify();
+    crate::debug!(3, "Super NWA simplified. {} states remaining.", super_nwa.states.len());
     let mut super_dwa = super_nwa.determinize();
+    crate::debug!(3, "Super DWA constructed. {} states remaining.", super_dwa.states.len());
     super_dwa.simplify();
+    crate::debug!(3, "Super DWA constructed. {} states remaining.", super_dwa.states.len());
+    super_dwa.minimize_with_rustfst();
+    crate::debug!(3, "Super DWA minimized. {} states remaining.", super_dwa.states.len());
 
     let mut template_cache = HashMap::new();
     let super_signature: Signature = bit_to_term.iter().map(|t| vec![*t]).collect();
