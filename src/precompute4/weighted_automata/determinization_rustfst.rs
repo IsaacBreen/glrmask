@@ -114,9 +114,33 @@ pub fn vector_fst_to_dwa(fst: &VectorFst<BitsetWeight>) -> DWA {
     dwa
 }
 
+pub fn vector_fst_to_nwa(fst: &VectorFst<BitsetWeight>) -> NWA {
+    let mut nwa = NWA::new(); nwa.states.0.clear(); nwa.body.start_states.clear();
+    let map: HashMap<StateId, NWAStateID> = (0..fst.num_states()).map(|i| (i as StateId, nwa.add_state())).collect();
+    if let Some(s) = fst.start() { nwa.body.start_states.push(map[&s]); }
+
+    for i in 0..fst.num_states() {
+        let sid = i as StateId;
+        if !map.contains_key(&sid) { continue; }
+        let nid = map[&sid];
+        if let Some(w) = fst.final_weight(sid).unwrap() { if !w.0.is_empty() { nwa.states[nid].final_weight = Some(w.value().clone()); } }
+        for tr in fst.get_trs(sid).unwrap().trs() {
+            if !tr.weight.0.is_empty() && map.contains_key(&tr.nextstate) {
+                let (next, w) = (map[&tr.nextstate], tr.weight.value().clone());
+                if tr.ilabel == EPS_LABEL { nwa.states.add_epsilon(nid, next, w); }
+                else { let _ = nwa.add_transition(nid, fst_to_label(tr.ilabel), next, w); }
+            }
+        }
+    }
+    nwa
+}
+
 pub fn determinize_nwa_to_dwa(nwa: &NWA) -> DWA {
     let mut fst = nwa_to_vector_fst(nwa);
     rm_epsilon(&mut fst).unwrap();
     let det: VectorFst<BitsetWeight> = determinize_with_config(&fst, DeterminizeConfig::default().with_det_type(DeterminizeType::DeterminizeFunctional)).unwrap();
     vector_fst_to_dwa(&det)
 }
+
+impl DWA { pub fn to_rustfst(&self) -> VectorFst<BitsetWeight> { nwa_to_vector_fst(&NWA::from_dwa(self)) } pub fn from_rustfst(f: &VectorFst<BitsetWeight>) -> Self { vector_fst_to_dwa(f) } }
+impl NWA { pub fn to_rustfst(&self) -> VectorFst<BitsetWeight> { nwa_to_vector_fst(self) } pub fn from_rustfst(f: &VectorFst<BitsetWeight>) -> Self { vector_fst_to_nwa(f) } }

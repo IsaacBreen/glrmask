@@ -105,7 +105,7 @@ fn compute_cancellations(states: &NWAStates, filter: &HashSet<NWAStateID>) -> Ve
             if *eps_val != old {
                 // Epsilon grew: a --eps--> t. Propagate existing queries at 'a' across this new epsilon.
                 if let Some(qs_a) = queries.get(&a) {
-                    for (&(a_p, c_p), w_pa) in qs_a.clone() {
+                    for ((a_p, c_p), w_pa) in qs_a.clone() {
                         let prop = w_pa & &*eps_val;
                         if prop.is_empty() { continue; }
                         let qw = queries.entry(t).or_default().entry((a_p, c_p)).or_default();

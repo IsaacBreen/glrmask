@@ -67,12 +67,12 @@ impl<'a> Determinizer<'a> {
     }
 
     fn expand(&mut self, id: usize) {
-        let closure = &self.closures[id];
+        let closure = self.closures[id].clone();
         let labels: BTreeSet<Label> = closure.keys().flat_map(|sid| self.nwa.states[*sid].transitions.keys().cloned()).collect();
         if let Some(pb) = &self.pb { pb.set_message(format!("St: {}, Tr: {}", id, labels.len())); }
 
         for l in labels {
-            let sub = next_subset(&self.nwa.states, closure, l);
+            let sub = next_subset(&self.nwa.states, &closure, l);
             let w_union = sub.values().fold(Weight::zeros(), |acc, w| acc | w);
             if !sub.is_empty() && !w_union.is_empty() {
                 let target = self.register(sub);

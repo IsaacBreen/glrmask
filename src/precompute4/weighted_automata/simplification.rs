@@ -215,7 +215,7 @@ impl NWA {
             for (v, _) in &mut st.epsilons { *v = map[*v]; }
             st.transitions.retain(|_, ts| {
                 ts.retain(|(v, w)| *v < n && live[*v] && !w.is_empty());
-                for (v, _) in ts { *v = map[*v]; }
+                for (v, _) in &mut *ts { *v = map[*v]; }
                 !ts.is_empty()
             });
         }
