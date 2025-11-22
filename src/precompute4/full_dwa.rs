@@ -603,23 +603,7 @@ pub fn precompute4(
     }
 
     // We need to capture the final bodies computed at the "root states" of the original input NWA.
-    // The `input_nwa.body.start_state` transitions point to these roots.
-    let start_state_id = input_nwa.body.start_state;
-    let mut root_to_tokenizer_ids: HashMap<NWAStateID, Vec<TokenizerStateID>> = HashMap::new();
     let offset = parser.terminal_map.len() as Label;
-    for (label, targets) in &input_nwa.states[start_state_id].transitions {
-        if *label >= offset {
-            let tsid = (*label - offset) as usize;
-            for (root_state_id, _) in targets {
-                root_to_tokenizer_ids
-                    .entry(*root_state_id)
-                    .or_default()
-                    .push(TokenizerStateID(tsid));
-            }
-        }
-    }
-
-    let root_to_tok = Arc::new(root_to_tokenizer_ids);
     let final_bodies_arc = Arc::new(Mutex::new(BTreeMap::new()));
 
     nwa_special_map(
@@ -631,6 +615,18 @@ pub fn precompute4(
          edge_label,
          transitions| {
             let (current_bodies, current_tokens) = current_val;
+
+            if let Some(lbl) = edge_label {
+                if lbl >= offset {
+                    let tsid = TokenizerStateID((lbl - offset) as usize);
+                    let mut fb = final_bodies_arc.lock().unwrap();
+                    for body in current_bodies.keys() {
+                        fb.insert(tsid, body.clone());
+                    }
+                    return Vec::new();
+                }
+            }
+
             let terminal_id = edge_label.map(|l| TerminalID(l as usize));
             let mut results = Vec::new();
 
@@ -693,13 +689,6 @@ pub fn precompute4(
             }
 
             if !tokens.is_empty() {
-                if let Some(tok_ids) = root_to_tok.get(&node_idx) {
-                    let mut fb = final_bodies_arc.lock().unwrap();
-                    for tid in tok_ids {
-                        fb.insert(*tid, nwa_body.clone());
-                    }
-                }
-
                 let mut next_body_map: BTreeMap<NWABody, BTreeMap<Option<TerminalID>, Weight>> = BTreeMap::new();
                 next_body_map.insert(nwa_body, BTreeMap::new());
                 Some((next_body_map, tokens))
