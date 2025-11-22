@@ -353,6 +353,14 @@ pub fn precompute4(parser: &GLRParser, input_nwa: &NWA) -> DWA {
     });
     crate::debug!(3, "Setup signatures_vec.");
 
+    let mut sig_lens: BTreeMap<usize, BTreeMap<usize, usize>> = BTreeMap::new();
+    for sig in &signatures_vec {
+        for g in sig {
+            *sig_lens.entry(sig.len()).or_default().entry(g.len()).or_default() += 1;
+        }
+    }
+    println!("sig_lens: {:?}", sig_lens);
+
     for target_sig in signatures_vec {
         let target_idx = SignatureIndex::new(&target_sig);
         let mut best_parent: Option<(usize, Vec<Weight>)> = None;
