@@ -6,8 +6,7 @@ use std::time::Instant;
 use chrono::Local;
 use kdam::{tqdm, BarExt};
 
-use crate::constraint::{LLMTokenBV, PrecomputeNode1Index, Trie1GodWrapper};
-use crate::datastructures::trie::Trie2Index;
+use crate::constraint::LLMTokenBV;
 use crate::glr::parser::GLRParser;
 use crate::precompute4::nwa_optimizations::{prune_continuations_from_final_states, simplify_default_transitions};
 use crate::precompute4::resolve_negatives::{apply_cancellations, apply_finality_fixpoint, remove_negative_transitions};
@@ -419,62 +418,6 @@ fn specialize_dwa_relative(parent_dwa: &DWA, mapping: &[Weight]) -> DWA {
     }
 
     specialized_dwa
-}
-
-// ---------------------------------------------------------------------------
-// Conversion Helpers (Precompute1 -> NWA)
-// ---------------------------------------------------------------------------
-
-fn convert_node_to_nwa(
-    node_idx: PrecomputeNode1Index,
-    god: &Trie1GodWrapper,
-    nwa: &mut NWA,
-    cache: &mut HashMap<PrecomputeNode1Index, StateID>,
-) -> StateID {
-    if let Some(&sid) = cache.get(&node_idx) {
-        return sid;
-    }
-
-    let sid = nwa.add_state();
-    cache.insert(node_idx, sid);
-
-    let guard = node_idx.read(god).unwrap();
-    if guard.value.end {
-        nwa.states[sid].final_weight = Some(Weight::all());
-    }
-    let children = guard.children().clone();
-    drop(guard);
-
-    for (edge_key, child_map) in children {
-        for (child_idx, edge_bv) in child_map {
-            let child_sid = convert_node_to_nwa(child_idx, god, nwa, cache);
-            let trans_w: Weight = edge_bv.into();
-            if let Some(label) = edge_key {
-                nwa.add_transition(sid, label.0 as Label, child_sid, trans_w).unwrap();
-            } else {
-                nwa.add_epsilon(sid, child_sid, trans_w);
-            }
-        }
-    }
-    sid
-}
-
-pub fn convert_precompute1_to_nwa(
-    precomputed1: &BTreeMap<TokenizerStateID, PrecomputeNode1Index>,
-    trie1_god: &Trie1GodWrapper,
-) -> NWA {
-    let mut nwa = NWA::new();
-    nwa.states.0.clear();
-    let start_state = nwa.states.add_state();
-    nwa.body.start_state = start_state;
-
-    let mut node_cache = HashMap::new();
-
-    for (sid, root_idx) in precomputed1 {
-        let root_state = convert_node_to_nwa(*root_idx, trie1_god, &mut nwa, &mut node_cache);
-        nwa.add_transition(start_state, sid.0 as Label, root_state, Weight::all()).unwrap();
-    }
-    nwa
 }
 
 fn canonicalize_bundle(terminal_map: BTreeMap<Option<TerminalID>, Weight>) -> (Signature, Vec<Weight>) {
