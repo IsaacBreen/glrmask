@@ -1374,7 +1374,16 @@ impl NFA {
         let mut dfa_state_map: HashMap<StateSet, usize> = HashMap::new();
         let mut worklist: Vec<StateSet> = Vec::new();
 
-        // Shared buffers for on-the-fly closure computation
+        // Instrumentation
+        let mut t_collect = std::time::Duration::ZERO;
+        let mut t_process_inputs = std::time::Duration::ZERO;
+        let mut t_iter_bitset = std::time::Duration::ZERO; // Time spent finding bits in StateSet
+        let mut t_closure_bfs = std::time::Duration::ZERO; // Time spent traversing epsilons
+        let mut t_map_lookup = std::time::Duration::ZERO;  // Time spent in HashMap
+        let mut total_words_scanned: u64 = 0;
+        let mut total_useful_words: u64 = 0;
+
+        // Shared buffers for an-the-fly closure computation
         let num_nfa_states = self.states.len();
         let mut stack = Vec::with_capacity(1024);
         // Use StateSet as a reusable bitset for closure computation
@@ -1432,7 +1441,8 @@ impl NFA {
                 .get(&current_set)
                 .expect("DFA state set not found in map");
 
-            // 1. Populate transition_targets for all inputs
+            // 1. Populate transition_targets for all inputs (COLLECT PHASE)
+            let start_collect = std::time::Instant::now();
             for state in current_set.iter() {
                 for (u8set, next_state) in &self.states[state].transitions {
                     for b in u8set.iter() {
@@ -1445,8 +1455,10 @@ impl NFA {
                     }
                 }
             }
+            t_collect += start_collect.elapsed();
 
-            // 2. For each unique transition set, compute closure and get/create DFA state
+            // 2. Process inputs (PROCESS PHASE)
+            let start_process = std::time::Instant::now();
             let mut local_cache: HashMap<&StateSet, usize> = HashMap::new();
 
             for &idx in &used_inputs {
@@ -1456,14 +1468,38 @@ impl NFA {
                      continue;
                 }
 
+
                 // Compute closure
                 closure_set.clear(); // Reusing global closure_set
-                for next_state in target_set.iter() {
-                    if closure_set.insert(next_state) { // StateSet::insert returns true if new
-                         stack.push(next_state);
+                
+                // TIMING: Bitset Iteration
+                let start_iter = std::time::Instant::now();
+                // Inline the iter logic to measure sparsity stats
+                {
+                    let mut w_idx = 0;
+                    let words = &target_set.words;
+                    while w_idx < words.len() {
+                        let mut w = words[w_idx];
+                        total_words_scanned += 1;
+                        if w != 0 {
+                            total_useful_words += 1;
+                            while w != 0 {
+                                let t = w.trailing_zeros();
+                                w &= !(1u64 << t);
+                                let next_state = w_idx * 64 + t as usize;
+                                
+                                if closure_set.insert(next_state) {
+                                    stack.push(next_state);
+                                }
+                            }
+                        }
+                        w_idx += 1;
                     }
                 }
+                t_iter_bitset += start_iter.elapsed();
 
+                // TIMING: BFS Closure
+                let start_bfs = std::time::Instant::now();
                 while let Some(u) = stack.pop() {
                     for &v in &self.states[u].epsilon_transitions {
                         if closure_set.insert(v) {
@@ -1471,8 +1507,10 @@ impl NFA {
                         }
                     }
                 }
+                t_closure_bfs += start_bfs.elapsed();
 
                 // Get/Create DFA state
+                let start_map = std::time::Instant::now();
                 let next_dfa_state =
                     if let Some(&existing_state) = dfa_state_map.get(&closure_set) { // closure_set is StateSet
                         existing_state
@@ -1499,6 +1537,7 @@ impl NFA {
 
                         new_state_index
                     };
+                t_map_lookup += start_map.elapsed();
 
                 // Since we cannot store reference to transition_targets[idx] in local_cache easily 
                 // (borrow checker issues if we iterate used_inputs), we can just re-lookup or clone.
@@ -1507,6 +1546,7 @@ impl NFA {
                 local_cache.insert(&transition_targets[idx], next_dfa_state);
                 dfa_states[current_dfa_state].transitions.insert(idx as u8, next_dfa_state);
             }
+            t_process_inputs += start_process.elapsed();
 
             for &idx in &used_inputs {
                  seen_input[idx] = false;
@@ -1515,7 +1555,23 @@ impl NFA {
             used_inputs.clear();
         }
 
-        crate::debug!(5, "DFA main loop complete. Total states: {}, Max subset size: {}, Time: {:.2?}", dfa_states.len(), max_subset_size, start_time.elapsed());
+        println!("DFA main loop complete. Total states: {}, Max subset size: {}, Time: {:.2?}", dfa_states.len(), max_subset_size, start_time.elapsed());
+        println!("Detailed Timing breakdown:");
+        println!("  Collect Transitions: {:.2?}", t_collect);
+        println!("  Process Inputs Loop: {:.2?}", t_process_inputs);
+        println!("    - BitSet Iteration: {:.2?}", t_iter_bitset);
+        println!("    - Closure BFS:      {:.2?}", t_closure_bfs);
+        println!("    - Map Lookup/Ins:   {:.2?}", t_map_lookup);
+        println!("    - Remainder:        {:.2?}", t_process_inputs - t_iter_bitset - t_closure_bfs - t_map_lookup);
+        
+        let sparsity_ratio = if total_words_scanned > 0 {
+            total_useful_words as f64 / total_words_scanned as f64
+        } else {
+            0.0
+        };
+        println!("BitSet Sparsity Stats:");
+        println!("  Total Words Scanned: {}", total_words_scanned);
+        println!("  Words with bits:     {} ({:.4}% useful)", total_useful_words, sparsity_ratio * 100.0);
 
         let mut dfa = DFA {
             states: dfa_states,
