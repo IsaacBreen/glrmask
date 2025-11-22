@@ -328,7 +328,7 @@ pub fn precompute4(parser: &GLRParser, input_nwa: &NWA) -> DWA {
         };
         let mut weighted_dwa = template_dwa.clone();
         weighted_dwa.apply_weight_inplace(&weight);
-        super_nwa = NWA::union(&super_nwa, &NWA::from_dwa(&weighted_dwa));
+        super_nwa = NWA::union_assign(&mut super_nwa, &weighted_dwa);
     }
     crate::debug!(3, "Super NWA constructed. {} states remaining.", super_nwa.states.len());
     super_nwa.simplify();
