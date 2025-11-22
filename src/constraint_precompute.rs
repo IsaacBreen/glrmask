@@ -193,9 +193,6 @@ impl<'r> Precomputer1<'r> {
     fn run_dfs(&mut self) {
         let assoc = self.roots.clone();
         crate::debug!(3, "Starting precompute DFS for {} tokenizer states", self.roots.len());
-        for (sid, root) in &self.roots {
-            crate::debug!(6, "  {}: {}", sid.0, root);
-        }
         profiler::reset();
         let vocab = std::mem::replace(&mut self.vocab, VocabPrefixTree::new());
         self.dfs(&vocab.root, assoc);

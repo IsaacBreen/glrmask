@@ -293,7 +293,9 @@ impl DWA {
     }
 
     fn simplify_internal(&mut self) -> bool {
-        crate::debug!(6, "[DWA::simplify] Starting simplification. Initial stats: {}", self.stats());
+        if self.states.len() > 1000 {
+            crate::debug!(6, "[DWA::simplify] Starting simplification. Initial stats: {}", self.stats());
+        }
         let mut total_changed = false;
         let ordering = &[
             DwaPass::PruneDeadEnds,
@@ -332,7 +334,9 @@ impl DWA {
             crate::debug!(3, "DWA simplification did not converge after {} iterations. Still changing: {:?}", MAX_OPTIMIZE_ITERATIONS, last_changing_passes);
         }
 
-        crate::debug!(6, "[DWA::simplify] Simplification finished. Total changed: {}. Final stats: {}", total_changed, self.stats());
+        if self.states.len() > 1000 {
+            crate::debug!(6, "[DWA::simplify] Simplification finished. Total changed: {}. Final stats: {}", total_changed, self.stats());
+        }
         total_changed
     }
 
