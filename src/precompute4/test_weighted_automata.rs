@@ -1,4 +1,4 @@
-use crate::precompute4::weighted_automata::{DWAState, SimpleBitset, DWA, DWABuildError, NWA, NWABuildError, Weight, format_word};
+use crate::precompute4::weighted_automata::{DWAState, SimpleBitset, DWA, DWABuildError, NWA, NWABuildError, Weight, format_word, DWAStates, StateID};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::time::{SystemTime, UNIX_EPOCH};
 use crate::precompute4::resolve_negatives::resolve_negative_codes_in_dwa;
@@ -38,6 +38,23 @@ impl SimpleRng {
         } else {
             (self.next_u64() % (den as u64)) < (num as u64)
         }
+    }
+}
+
+impl DWAState {
+    pub fn get_weight(&self, x: Label) -> Option<&Weight> {
+        todo!()
+    }
+}
+impl DWA {
+    pub fn union(&self, other: &DWA) -> DWA {
+        todo!()
+    }
+    pub fn concatenate(&self, other: &DWA) -> DWA {
+        todo!()
+    }
+    pub fn apply_weight(&self, w: &Weight) -> StateID {
+        todo!()
     }
 }
 
@@ -1673,7 +1690,7 @@ mod determinization_tests {
     fn nwa_accepts_char(ch: char, weight: Weight) -> NWA {
         let mut nwa = NWA::new();
         let final_state = nwa.states.add_state();
-        nwa.add_transition(nwa.body.start_state, ch as Label, final_state, Weight::all()).unwrap();
+        nwa.add_transition(nwa.body.start_states[0], ch as Label, final_state, Weight::all()).unwrap();
         nwa.states[final_state].final_weight = Some(weight);
         nwa
     }
@@ -1694,8 +1711,8 @@ mod determinization_tests {
         let s_b = nwa.states.add_state();
         let final_a = nwa.states.add_state();
         let final_b = nwa.states.add_state();
-        nwa.add_epsilon(nwa.body.start_state, s_a, Weight::all());
-        nwa.add_epsilon(nwa.body.start_state, s_b, Weight::all());
+        nwa.add_epsilon(nwa.body.start_states[0], s_a, Weight::all());
+        nwa.add_epsilon(nwa.body.start_states[0], s_b, Weight::all());
         nwa.add_transition(s_a, 'a' as Label, final_a, Weight::all()).unwrap();
         nwa.add_transition(s_b, 'b' as Label, final_b, Weight::all()).unwrap();
         nwa.states[final_a].final_weight = Some(Weight::from_item(1));
@@ -1720,8 +1737,8 @@ mod determinization_tests {
         let mut nwa = NWA::new();
         let f1 = nwa.states.add_state();
         let f2 = nwa.states.add_state();
-        nwa.add_transition(nwa.body.start_state, 'a' as Label, f1, Weight::from_item(1)).unwrap();
-        nwa.add_transition(nwa.body.start_state, 'a' as Label, f2, Weight::from_item(2)).unwrap();
+        nwa.add_transition(nwa.body.start_states[0], 'a' as Label, f1, Weight::from_item(1)).unwrap();
+        nwa.add_transition(nwa.body.start_states[0], 'a' as Label, f2, Weight::from_item(2)).unwrap();
         nwa.states[f1].final_weight = Some(Weight::all());
         nwa.states[f2].final_weight = Some(Weight::all());
 
@@ -1743,8 +1760,8 @@ mod determinization_tests {
         let f1 = nwa.states.add_state();
         let f2 = nwa.states.add_state();
         // 'a' can lead to f1 with weight [0,1] or f2 with weight [1,2]
-        nwa.add_transition(nwa.body.start_state, 'a' as Label, f1, Weight::from_iter(0..=1)).unwrap();
-        nwa.add_transition(nwa.body.start_state, 'a' as Label, f2, Weight::from_iter(1..=2)).unwrap();
+        nwa.add_transition(nwa.body.start_states[0], 'a' as Label, f1, Weight::from_iter(0..=1)).unwrap();
+        nwa.add_transition(nwa.body.start_states[0], 'a' as Label, f2, Weight::from_iter(1..=2)).unwrap();
         // f1 is final for its path, f2 is final for its path
         nwa.states[f1].final_weight = Some(Weight::all());
         nwa.states[f2].final_weight = Some(Weight::all());
@@ -1787,7 +1804,7 @@ mod determinization_tests {
     #[test]
     fn test_det_accepts_empty_word() {
         let mut nwa = NWA::new();
-        nwa.states[nwa.body.start_state].final_weight = Some(Weight::from_item(42));
+        nwa.states[nwa.body.start_states[0]].final_weight = Some(Weight::from_item(42));
         let dwa = nwa.determinize_to_dwa();
         let mut expected = DWA::new();
         expected.set_final_weight(expected.body.start_state, Weight::from_item(42)).unwrap();
@@ -2103,8 +2120,8 @@ mod determinization_tests {
         let s_b = nwa.states.add_state();
         let final_a = nwa.states.add_state();
         let final_b = nwa.states.add_state();
-        nwa.add_epsilon(nwa.body.start_state, s_a, Weight::all());
-        nwa.add_epsilon(nwa.body.start_state, s_b, Weight::all());
+        nwa.add_epsilon(nwa.body.start_states[0], s_a, Weight::all());
+        nwa.add_epsilon(nwa.body.start_states[0], s_b, Weight::all());
         nwa.add_transition(s_a, 'a' as Label, final_a, Weight::all()).unwrap();
         nwa.add_transition(s_b, 'b' as Label, final_b, Weight::all()).unwrap();
         nwa.states[final_a].final_weight = Some(Weight::from_item(1));
@@ -2129,8 +2146,8 @@ mod determinization_tests {
         let mut nwa = NWA::new();
         let f1 = nwa.states.add_state();
         let f2 = nwa.states.add_state();
-        nwa.add_transition(nwa.body.start_state, 'a' as Label, f1, Weight::from_item(1)).unwrap();
-        nwa.add_transition(nwa.body.start_state, 'a' as Label, f2, Weight::from_item(2)).unwrap();
+        nwa.add_transition(nwa.body.start_states[0], 'a' as Label, f1, Weight::from_item(1)).unwrap();
+        nwa.add_transition(nwa.body.start_states[0], 'a' as Label, f2, Weight::from_item(2)).unwrap();
         nwa.states[f1].final_weight = Some(Weight::all());
         nwa.states[f2].final_weight = Some(Weight::all());
 
@@ -2152,8 +2169,8 @@ mod determinization_tests {
         let f1 = nwa.states.add_state();
         let f2 = nwa.states.add_state();
         // 'a' can lead to f1 with weight [0,1] or f2 with weight [1,2]
-        nwa.add_transition(nwa.body.start_state, 'a' as Label, f1, Weight::from_iter(0..=1)).unwrap();
-        nwa.add_transition(nwa.body.start_state, 'a' as Label, f2, Weight::from_iter(1..=2)).unwrap();
+        nwa.add_transition(nwa.body.start_states[0], 'a' as Label, f1, Weight::from_iter(0..=1)).unwrap();
+        nwa.add_transition(nwa.body.start_states[0], 'a' as Label, f2, Weight::from_iter(1..=2)).unwrap();
         // f1 is final for its path, f2 is final for its path
         nwa.states[f1].final_weight = Some(Weight::all());
         nwa.states[f2].final_weight = Some(Weight::all());
@@ -2196,7 +2213,7 @@ mod determinization_tests {
     #[test]
     fn test_det_accepts_empty_word_rustfst() {
         let mut nwa = NWA::new();
-        nwa.states[nwa.body.start_state].final_weight = Some(Weight::from_item(42));
+        nwa.states[nwa.body.start_states[0]].final_weight = Some(Weight::from_item(42));
         let dwa = nwa.determinize_to_dwa_with_rustfst();
         let mut expected = DWA::new();
         expected.set_final_weight(expected.body.start_state, Weight::from_item(42)).unwrap();
