@@ -30,7 +30,7 @@ impl NWA {
     /// This defaults to the **Robust** strategy (Precomputed), which handles epsilon
     /// closures upfront and includes safeguards against state explosion.
     pub fn determinize(&self) -> DWA {
-        self.determinize_robust()
+        self.determinize_simple()
     }
 
     /// Determinizes the NWA using a robust strategy with precomputed epsilon closures.
@@ -128,7 +128,7 @@ impl NWA {
 
         // 8. Debug Verification
         if DETERMINIZE_DEBUG {
-            let rustfst_dwa = self.determinize_with_rustfst_shim();
+            let rustfst_dwa = self.determinize_to_dwa_with_rustfst();
             crate::debug!(5, "[DETERMINIZE_DEBUG] Comparing custom determinization with rustfst...");
             test_weighted_automata::stochastic_equivalence_test(det.dwa.clone(), rustfst_dwa);
         }
@@ -214,11 +214,6 @@ impl NWA {
             }
         }
         dwa
-    }
-    
-    // Helper for debug shim, assuming it exists or was meant by the original code's call
-    fn determinize_with_rustfst_shim(&self) -> DWA {
-        self.determinize_to_dwa_with_rustfst()
     }
 
     // Helper specific to the 'Simple' strategy
