@@ -558,5 +558,5 @@ fn instantiate_nwa_template(template: &NWA, ordered_weights: &[Weight]) -> NWA {
 }
 
 fn simplify_remove_epsilon(nwa: &mut NWA) {
-    nwa.simplify_with_config(SimplifyRustfstConfig::default().with_rm_epsilon(true));
+    nwa.simplify();
 }
