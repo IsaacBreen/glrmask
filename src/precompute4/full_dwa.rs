@@ -512,7 +512,7 @@ fn resolve_negatives_and_optimize_and_determinize(parser: &GLRParser, mut combin
     simplify_remove_epsilon(&mut combined_nwa);
     combined_nwa.simplify();
     simplify_remove_epsilon(&mut combined_nwa);
-    combined_nwa = NWA::from_dwa(&combined_nwa.determinize_to_dwa2());
+    combined_nwa = NWA::from_dwa(&combined_nwa.determinize());
     combined_nwa.simplify();
     let mut final_dwa = combined_nwa.determinize();
     final_dwa.minimize_with_rustfst();
