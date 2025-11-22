@@ -1459,8 +1459,8 @@ impl NFA {
                 // Compute closure
                 closure_set.clear(); // Reusing global closure_set
                 for next_state in target_set.iter() {
-                    if closure_set.insert(*next_state) { // StateSet::insert returns true if new
-                         stack.push(*next_state);
+                    if closure_set.insert(next_state) { // StateSet::insert returns true if new
+                         stack.push(next_state);
                     }
                 }
 

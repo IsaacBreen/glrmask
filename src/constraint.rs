@@ -939,7 +939,7 @@ impl GrammarConstraint {
                     for (acc, val) in a.1.iter_mut().zip(b.1.into_iter()) {
                         match (acc, val) {
                             (Some(acc_bv), Some(val_bv)) => acc_bv.union_with(&val_bv),
-                            (None, Some(val_bv)) => *acc = Some(val_bv),
+                            (acc@None, Some(val_bv)) => *acc = Some(val_bv),
                             _ => {}
                         }
                     }
