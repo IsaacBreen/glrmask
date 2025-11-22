@@ -240,15 +240,9 @@ impl NWA {
     }
 
     pub fn union(a: &NWA, b: &NWA) -> NWA {
-        let mut res = NWA::new_empty();
-        let off_a = res.states.append(&a.states);
-        let off_b = res.states.append(&b.states);
-        
-        let mut starts = Vec::new();
-        starts.extend(a.body.start_states.iter().map(|s| s + off_a));
-        starts.extend(b.body.start_states.iter().map(|s| s + off_b));
-        res.body.start_states = starts;
-        res
+        let mut a = a.clone();
+        NWAStates::union_in_place(&mut a.states, &b, &a.body);
+        a
     }
 
     pub fn union_assign(&mut self, other: &NWA) {
