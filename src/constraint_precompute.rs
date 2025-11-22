@@ -2,6 +2,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::ops::BitOrAssign;
 use std::sync::Arc;
+use std::collections::BTreeMap as StdMap;
 
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use range_set_blaze::RangeSetBlaze;
@@ -101,7 +102,7 @@ impl<'r> Precomputer1<'r> {
             nwa,
         }
     }
-
+    
     fn finish(mut self) -> DWA {
         let new_start_state = self.nwa.add_state();
         for (tsid, state) in &self.roots {
@@ -118,270 +119,270 @@ impl<'r> Precomputer1<'r> {
         dwa = dwa.unroll_cycles();
         dwa
     }
-
+    
     fn possible_matches(
         &self,
         vocab_node: &VocabPrefixTreeNode,
         tokenizer_state_id: TokenizerStateID,
     ) -> BTreeMap<GrammarTokenID, LLMTokenBV> {
         let cache_key_ptr = vocab_node as *const VocabPrefixTreeNode;
-
-        if let Some(cached_for_vocab_node) =
-            self.possible_matches.borrow().get(&cache_key_ptr)
-        {
-            if let Some(cached_result) =
-                cached_for_vocab_node.get(&tokenizer_state_id)
-            {
-                return cached_result.clone();
-            }
-        }
-
-        let mut result_map: BTreeMap<GrammarTokenID, LLMTokenBV> = BTreeMap::new();
-
-        for (segment_bytes, child_vocab_node) in vocab_node.iter_children() {
-            let exec_result =
-                self.tokenizer.execute_from_state(&segment_bytes, tokenizer_state_id);
-            for token in &exec_result.matches {
-                let grammar_token_id = GrammarTokenID(token.id);
-                let applicable_tokens = child_vocab_node.reachable_token_ids();
-                *result_map
-                    .entry(grammar_token_id)
-                    .or_insert_with(LLMTokenBV::zeros) |=
-                    HybridBitset::from(applicable_tokens);
-            }
-            if let Some(final_state_val) = exec_result.end_state {
-                let matches_possible_from_tokenizer_state: std::collections::BTreeSet<_> = self
-                    .tokenizer
-                    .tokens_accessible_from_state(TokenizerStateID(final_state_val))
-                    .into_iter()
-                    .collect();
-                let matches_here: std::collections::BTreeSet<_> = exec_result
-                    .matches
-                    .iter()
-                    .map(|m| GrammarTokenID(m.id))
-                    .collect();
-                let possible_new_matches =
-                    &matches_possible_from_tokenizer_state - &matches_here;
-                if !possible_new_matches.is_empty() {
-                    let next_results = self.possible_matches(
-                        child_vocab_node,
-                        TokenizerStateID(final_state_val),
-                    );
-                    for (token, bv) in next_results {
-                        *result_map
-                            .entry(token)
-                            .or_insert_with(LLMTokenBV::zeros) |= bv;
-                    }
-                }
-            }
-        }
-
-        self.possible_matches
-            .borrow_mut()
-            .entry(cache_key_ptr)
-            .or_default()
-            .insert(tokenizer_state_id, result_map.clone());
-
-        result_map
-    }
-
-    fn run_dfs(&mut self) {
-        let assoc = self.roots.clone();
-        crate::debug!(3, "Starting precompute DFS for {} tokenizer states", self.roots.len());
-        for (sid, root) in &self.roots {
-            crate::debug!(6, "  {}: {}", sid.0, root);
-        }
-        profiler::reset();
-        let vocab = std::mem::replace(&mut self.vocab, VocabPrefixTree::new());
-        self.dfs(&vocab.root, assoc);
-        self.vocab = vocab;
-        self.pb.finish();
-        profiler::print_summary();
-        crate::debug!(3, "Precomputation complete");
-    }
-
-    fn dfs(
-        &mut self,
-        vocab_node: &VocabPrefixTreeNode,
-        assoc_by_state: BTreeMap<TokenizerStateID, NWAStateID>,
-    ) {
-        self.pb.inc(1);
-        for (segment_bytes, child_vocab_node) in vocab_node.iter_children() {
-            let mut next_level_assoc: BTreeMap<TokenizerStateID, NWAStateID> =
-                BTreeMap::new();
-
-            // Queue: pos -> TokenizerState -> (NWAState -> ContextTokens)
-            let mut pending: BTreeMap<
-                usize,
-                BTreeMap<TokenizerStateID, NWAStateID>,
-            > = BTreeMap::new();
-            pending.insert(0, assoc_by_state.clone());
-
-            let mut pending_edges = Vec::new();
-
-            let child_reachable = child_vocab_node.reachable_token_ids();
-            let child_token_id = child_vocab_node.token_id();
-
-            // Caches possible matches for end states to prune edge_bv
-            let mut possible_matches_at_end_cache: HashMap<
-                TokenizerStateID,
-                BTreeMap<GrammarTokenID, LLMTokenBV>,
-            > = HashMap::new();
-
-            while let Some((pos, states_at_pos)) = pending.pop_first() {
-                // If we reached the end of the segment, these states are ready for the next vocab node
-                if pos == segment_bytes.len() {
-                    for (tokenizer_state_id, node) in states_at_pos {
-                        let next = *next_level_assoc.entry(tokenizer_state_id).or_insert_with(|| self.nwa.add_state());
-                        self.nwa.add_epsilon(node, next, SimpleBitset::all());
-                    }
-                    continue;
-                }
-
-                for (tokenizer_state_id, src_node) in states_at_pos {
-                    let exec_result = self
-                        .tokenizer
-                        .execute_from_state(&segment_bytes[pos..], tokenizer_state_id);
-
-                    let possible_matches_at_end = if let Some(end_val) = exec_result.end_state {
-                        let ts = TokenizerStateID(end_val);
-                        possible_matches_at_end_cache
-                            .entry(ts)
-                            .or_insert_with(|| self.possible_matches(child_vocab_node, ts))
-                    } else {
-                        // Dummy empty map
-                        possible_matches_at_end_cache
-                            .entry(TokenizerStateID(usize::MAX)) // Arbitrary key that won't be hit
-                            .or_default()
-                    };
-
-                    // 1. Handle Matches -> Transitions to Initial State
-                    for match_info in &exec_result.matches {
-                        let terminal_id = GrammarTokenID(match_info.id);
-                        let next_pos = pos + match_info.width;
-
-                        // Leaf check: if match consumes remainder of segment
-                        if next_pos == segment_bytes.len() {
-                            let mut edge_bv = RangeSetBlaze::new();
-                            edge_bv.insert(child_token_id);
-                            let final_bv = edge_bv;
-                            if !final_bv.is_empty() {
-                                let leaf = self.leaf_state;
-                                pending_edges.push((
-                                    src_node,
-                                    leaf,
-                                    Some(terminal_id),
-                                    final_bv.clone(),
-                                ));
-                            }
-                        }
-
-                        // Continuation logic
-                        let mut edge_bv = child_reachable.clone();
-                        if next_pos == segment_bytes.len() {
-                            edge_bv.remove(child_token_id);
-                            if let Some(pm) = possible_matches_at_end.get(&terminal_id) {
-                                edge_bv = &edge_bv - pm.inner.as_ref();
-                            }
-                        }
-
-                        let final_bv = edge_bv;
-                        if final_bv.is_empty() {
-                            continue;
-                        }
-
-                        let dest_map = pending.entry(next_pos).or_default();
-
-                        let initial_tsid = self.tokenizer.initial_state_id();
-                        let target = *dest_map
-                            .entry(initial_tsid)
-                            .or_insert_with(|| self.nwa.add_state());
-
-                        pending_edges.push((src_node, target, Some(terminal_id), final_bv));
-                    }
-
-                    // 2. Handle End State -> Continuation
-                    if let Some(end_state_val) = exec_result.end_state {
-                        let final_tokenizer_state = TokenizerStateID(end_state_val);
-                        let accessible_terminals = self
-                            .tokenizer
-                            .tokens_accessible_from_state(final_tokenizer_state);
-
-                        let mut edge_bv = RangeSetBlaze::new();
-                        edge_bv.insert(child_token_id);
-                        let final_edge_bv = edge_bv;
-
-                        if !final_edge_bv.is_empty() {
-                            let end_idx = self.leaf_state;
-                            for terminal_id in &accessible_terminals {
-                                pending_edges.push((
-                                    src_node,
-                                    end_idx,
-                                    Some(*terminal_id),
-                                    final_edge_bv.clone(),
-                                ));
-                            }
-                        }
-
-                        let next = *next_level_assoc.entry(final_tokenizer_state).or_insert_with(|| self.nwa.add_state());
-                        self.nwa.add_epsilon(src_node, next, Weight::all());
-                    }
-                }
-            }
-
-            // Apply all batched writes
-            for (src, dst, key, bv) in pending_edges {
-                if let Some(k) = key {
-                    let weight = SimpleBitset::from_rsb(bv);
-                    let _ = self.nwa.add_transition(src, k.0 as Label, dst, weight);
-                }
-            }
-
-            if !next_level_assoc.is_empty() {
-                self.dfs(child_vocab_node, next_level_assoc);
-            }
-        }
-    }
-}
-
-pub(crate) fn count_vocab_nodes(node: &VocabPrefixTreeNode) -> u64 {
-    1 + node
-        .children()
-        .values()
-        .map(|c| count_vocab_nodes(c))
-        .sum::<u64>()
-}
-
-// Public entry point wrapper
-pub fn run_precompute1(
-    tokenizer: &Regex,
-    parser: Option<&GLRParser>,
-    llm_vocab: Option<Arc<LLMVocab>>,
-    internal_llm_token_map: &BTreeMap<Vec<u8>, LLMTokenID>,
-    internal_max_llm_token: usize,
-) -> DWA {
-    // Reduce internal_llm_token_map to representatives to speed up precomputation
-    let mut representative_llm_token_map: BTreeMap<Vec<u8>, LLMTokenID> = BTreeMap::new();
-    let mut seen_internal_ids = std::collections::HashSet::new();
-
-    for (bytes, id) in internal_llm_token_map {
-        if seen_internal_ids.insert(id.0) {
-            representative_llm_token_map.insert(bytes.clone(), *id);
-        }
-    }
-
-    let representative_states: Vec<TokenizerStateID> = tokenizer.iter_states().collect();
-
-    let mut helper = Precomputer1::new(
-        tokenizer,
-        parser,
-        llm_vocab,
-        &representative_llm_token_map,
-        internal_max_llm_token,
-        representative_states,
-    );
-
-    helper.run_dfs();
-
-    helper.finish()
-}
+ 
+         if let Some(cached_for_vocab_node) =
+             self.possible_matches.borrow().get(&cache_key_ptr)
+         {
+             if let Some(cached_result) =
+                 cached_for_vocab_node.get(&tokenizer_state_id)
+             {
+                 return cached_result.clone();
+             }
+         }
+ 
+         let mut result_map: BTreeMap<GrammarTokenID, LLMTokenBV> = BTreeMap::new();
+ 
+         for (segment_bytes, child_vocab_node) in vocab_node.iter_children() {
+             let exec_result =
+                 self.tokenizer.execute_from_state(&segment_bytes, tokenizer_state_id);
+             for token in &exec_result.matches {
+                 let grammar_token_id = GrammarTokenID(token.id);
+                 let applicable_tokens = child_vocab_node.reachable_token_ids();
+                 *result_map
+                     .entry(grammar_token_id)
+                     .or_insert_with(LLMTokenBV::zeros) |=
+                     HybridBitset::from(applicable_tokens);
+             }
+             if let Some(final_state_val) = exec_result.end_state {
+                 let matches_possible_from_tokenizer_state: std::collections::BTreeSet<_> = self
+                     .tokenizer
+                     .tokens_accessible_from_state(TokenizerStateID(final_state_val))
+                     .into_iter()
+                     .collect();
+                 let matches_here: std::collections::BTreeSet<_> = exec_result
+                     .matches
+                     .iter()
+                     .map(|m| GrammarTokenID(m.id))
+                     .collect();
+                 let possible_new_matches =
+                     &matches_possible_from_tokenizer_state - &matches_here;
+                 if !possible_new_matches.is_empty() {
+                     let next_results = self.possible_matches(
+                         child_vocab_node,
+                         TokenizerStateID(final_state_val),
+                     );
+                     for (token, bv) in next_results {
+                         *result_map
+                             .entry(token)
+                             .or_insert_with(LLMTokenBV::zeros) |= bv;
+                     }
+                 }
+             }
+         }
+ 
+         self.possible_matches
+             .borrow_mut()
+             .entry(cache_key_ptr)
+             .or_default()
+             .insert(tokenizer_state_id, result_map.clone());
+ 
+         result_map
+     }
+ 
+     fn run_dfs(&mut self) {
+         let assoc = self.roots.clone();
+         crate::debug!(3, "Starting precompute DFS for {} tokenizer states", self.roots.len());
+         for (sid, root) in &self.roots {
+             crate::debug!(6, "  {}: {}", sid.0, root);
+         }
+         profiler::reset();
+         let vocab = std::mem::replace(&mut self.vocab, VocabPrefixTree::new());
+         self.dfs(&vocab.root, assoc);
+         self.vocab = vocab;
+         self.pb.finish();
+         profiler::print_summary();
+         crate::debug!(3, "Precomputation complete");
+     }
+ 
+     fn dfs(
+         &mut self,
+         vocab_node: &VocabPrefixTreeNode,
+         assoc_by_state: BTreeMap<TokenizerStateID, NWAStateID>,
+     ) {
+         self.pb.inc(1);
+         for (segment_bytes, child_vocab_node) in vocab_node.iter_children() {
+             let mut next_level_assoc: BTreeMap<TokenizerStateID, NWAStateID> =
+                 BTreeMap::new();
+ 
+             // Queue: pos -> TokenizerState -> (NWAState -> ContextTokens)
+             let mut pending: BTreeMap<
+                 usize,
+                 BTreeMap<TokenizerStateID, NWAStateID>,
+             > = BTreeMap::new();
+             pending.insert(0, assoc_by_state.clone());
+ 
+             let mut pending_edges = Vec::new();
+ 
+             let child_reachable = child_vocab_node.reachable_token_ids();
+             let child_token_id = child_vocab_node.token_id();
+ 
+             // Caches possible matches for end states to prune edge_bv
+             let mut possible_matches_at_end_cache: HashMap<
+                 TokenizerStateID,
+                 BTreeMap<GrammarTokenID, LLMTokenBV>,
+             > = HashMap::new();
+ 
+             while let Some((pos, states_at_pos)) = pending.pop_first() {
+                 // If we reached the end of the segment, these states are ready for the next vocab node
+                 if pos == segment_bytes.len() {
+                     for (tokenizer_state_id, node) in states_at_pos {
+                         let next = *next_level_assoc.entry(tokenizer_state_id).or_insert_with(|| self.nwa.add_state());
+                         self.nwa.add_epsilon(node, next, SimpleBitset::all());
+                     }
+                     continue;
+                 }
+ 
+                 for (tokenizer_state_id, src_node) in states_at_pos {
+                     let exec_result = self
+                         .tokenizer
+                         .execute_from_state(&segment_bytes[pos..], tokenizer_state_id);
+ 
+                     let possible_matches_at_end = if let Some(end_val) = exec_result.end_state {
+                         let ts = TokenizerStateID(end_val);
+                         possible_matches_at_end_cache
+                             .entry(ts)
+                             .or_insert_with(|| self.possible_matches(child_vocab_node, ts))
+                     } else {
+                         // Dummy empty map
+                         possible_matches_at_end_cache
+                             .entry(TokenizerStateID(usize::MAX)) // Arbitrary key that won't be hit
+                             .or_default()
+                     };
+ 
+                     // 1. Handle Matches -> Transitions to Initial State
+                     for match_info in &exec_result.matches {
+                         let terminal_id = GrammarTokenID(match_info.id);
+                         let next_pos = pos + match_info.width;
+ 
+                         // Leaf check: if match consumes remainder of segment
+                         if next_pos == segment_bytes.len() {
+                             let mut edge_bv = RangeSetBlaze::new();
+                             edge_bv.insert(child_token_id);
+                             let final_bv = edge_bv;
+                             if !final_bv.is_empty() {
+                                 let leaf = self.leaf_state;
+                                 pending_edges.push((
+                                     src_node,
+                                     leaf,
+                                     Some(terminal_id),
+                                     final_bv.clone(),
+                                 ));
+                             }
+                         }
+ 
+                         // Continuation logic
+                         let mut edge_bv = child_reachable.clone();
+                         if next_pos == segment_bytes.len() {
+                             edge_bv.remove(child_token_id);
+                             if let Some(pm) = possible_matches_at_end.get(&terminal_id) {
+                                 edge_bv = &edge_bv - pm.inner.as_ref();
+                             }
+                         }
+ 
+                         let final_bv = edge_bv;
+                         if final_bv.is_empty() {
+                             continue;
+                         }
+ 
+                         let dest_map = pending.entry(next_pos).or_default();
+ 
+                         let initial_tsid = self.tokenizer.initial_state_id();
+                         let target = *dest_map
+                             .entry(initial_tsid)
+                             .or_insert_with(|| self.nwa.add_state());
+ 
+                         pending_edges.push((src_node, target, Some(terminal_id), final_bv));
+                     }
+ 
+                     // 2. Handle End State -> Continuation
+                     if let Some(end_state_val) = exec_result.end_state {
+                         let final_tokenizer_state = TokenizerStateID(end_state_val);
+                         let accessible_terminals = self
+                             .tokenizer
+                             .tokens_accessible_from_state(final_tokenizer_state);
+ 
+                         let mut edge_bv = RangeSetBlaze::new();
+                         edge_bv.insert(child_token_id);
+                         let final_edge_bv = edge_bv;
+ 
+                         if !final_edge_bv.is_empty() {
+                             let end_idx = self.leaf_state;
+                             for terminal_id in &accessible_terminals {
+                                 pending_edges.push((
+                                     src_node,
+                                     end_idx,
+                                     Some(*terminal_id),
+                                     final_edge_bv.clone(),
+                                 ));
+                             }
+                         }
+ 
+                         let next = *next_level_assoc.entry(final_tokenizer_state).or_insert_with(|| self.nwa.add_state());
+                         self.nwa.add_epsilon(src_node, next, Weight::all());
+                     }
+                 }
+             }
+ 
+             // Apply all batched writes
+             for (src, dst, key, bv) in pending_edges {
+                 if let Some(k) = key {
+                     let weight = SimpleBitset::from_rsb(bv);
+                     let _ = self.nwa.add_transition(src, k.0 as Label, dst, weight);
+                 }
+             }
+ 
+             if !next_level_assoc.is_empty() {
+                 self.dfs(child_vocab_node, next_level_assoc);
+             }
+         }
+     }
+ }
+ 
+ pub(crate) fn count_vocab_nodes(node: &VocabPrefixTreeNode) -> u64 {
+     1 + node
+         .children()
+         .values()
+         .map(|c| count_vocab_nodes(c))
+         .sum::<u64>()
+ }
+ 
+ // Public entry point wrapper
+ pub fn run_precompute1(
+     tokenizer: &Regex,
+     parser: Option<&GLRParser>,
+     llm_vocab: Option<Arc<LLMVocab>>,
+     internal_llm_token_map: &BTreeMap<Vec<u8>, LLMTokenID>,
+     internal_max_llm_token: usize,
+ ) -> DWA {
+     // Reduce internal_llm_token_map to representatives to speed up precomputation
+     let mut representative_llm_token_map: BTreeMap<Vec<u8>, LLMTokenID> = BTreeMap::new();
+     let mut seen_internal_ids = std::collections::HashSet::new();
+ 
+     for (bytes, id) in internal_llm_token_map {
+         if seen_internal_ids.insert(id.0) {
+             representative_llm_token_map.insert(bytes.clone(), *id);
+         }
+     }
+ 
+     let representative_states: Vec<TokenizerStateID> = tokenizer.iter_states().collect();
+ 
+     let mut helper = Precomputer1::new(
+         tokenizer,
+         parser,
+         llm_vocab,
+         &representative_llm_token_map,
+         internal_max_llm_token,
+         representative_states,
+     );
+ 
+     helper.run_dfs();
+ 
+     helper.finish()
+ }

@@ -463,11 +463,10 @@ pub fn precompute4(
     let traversal_data = reversed_nwa.compute_traversal_data();
 
     // Identify 'roots' for reverse traversal (states with final weights in original NWA)
-    let initial_tokens = LLMTokenBV::max_ones();
     let mut initial_values_bv = Vec::new();
     for (id, state) in input_nwa.states.0.iter().enumerate() {
-        if state.final_weight.is_some() {
-            initial_values_bv.push((id, initial_tokens.clone()));
+        if let Some(fw) = &state.final_weight {
+            initial_values_bv.push((id, fw.clone().into()));
         }
     }
     let has_final_states = !initial_values_bv.is_empty();
@@ -659,6 +658,7 @@ pub fn precompute4(
             let mut nwa_body = {
                 let mut states = states_arena.borrow_mut();
                 let start = states.add_state();
+                states[start].final_weight = Some(Weight::all());
                 NWABody { start_state: start }
             };
 
