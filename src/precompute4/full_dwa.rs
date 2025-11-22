@@ -482,8 +482,9 @@ pub fn precompute4(
 
     // Pass 1: Token propagation and Signature collection
     let start_pass1 = Instant::now();
-    let (node_tokens, unique_signatures) =
+    let (node_tokens, mut unique_signatures) =
         precompute_token_bvs_and_signatures(&reversed_nwa, &traversal_data, initial_values_bv);
+    unique_signatures.insert(vec![vec![None]]);
     crate::debug!(3, "Pass 1: Tokens & Signatures ({} sigs, {:.2?})", unique_signatures.len(), start_pass1.elapsed());
 
     // 3. Build Super DWA / Template Derivation Pool
