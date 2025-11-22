@@ -1,10 +1,10 @@
 use crate::precompute4::utils::DEFAULT_TRANSITION_SYMBOL;
+use crate::precompute4::weighted_automata::common::Label;
 use crate::precompute4::weighted_automata::{DWA, NWA, NWAStateID, NWAStates, Weight};
 use crate::profiler::PROGRESS_BAR_ENABLED;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Instant;
-use crate::precompute4::weighted_automata::common::Label;
 
 type Code = Label;
 type QueryKey = (NWAStateID, Code);

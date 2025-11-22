@@ -227,11 +227,13 @@ impl<'a> Determinizer<'a> {
 }
 
 fn try_build_singleton_loop_union(nwa: &NWA) -> Option<DWA> {
-    if nwa.states.0.is_empty() || nwa.body.start_state >= nwa.states.len() {
+    if nwa.states.0.is_empty() || nwa.body.start_states.len() != 1 {
         return None;
     }
 
-    let start = nwa.body.start_state;
+    let start = nwa.body.start_states[0];
+    if start >= nwa.states.len() { return None; }
+
     if !nwa.states[start].transitions.is_empty() {
         return None;
     }
@@ -323,7 +325,7 @@ impl NWA {
             const STATE_LIMIT: usize = usize::MAX;
             crate::debug!(5, "Determinization: Using general-purpose subset construction (fast-path not taken).");
 
-            if self.states.0.is_empty() || self.body.start_state >= self.states.len() {
+            if self.states.0.is_empty() || self.body.start_states.is_empty() {
                 DWA::new()
             } else {
                 let show_pbar = self.states.len() > 10000;
@@ -345,7 +347,10 @@ impl NWA {
 
                 let mut det = Determinizer::new(self, mp);
                 let mut start_subset: WeightedSubset = WeightedSubset::new();
-                start_subset.insert(self.body.start_state, Weight::all());
+                for &s in &self.body.start_states {
+                    start_subset.insert(s, Weight::all());
+                }
+                
                 let start_id = det.register_state(start_subset);
                 det.dwa.body.start_state = start_id;
 

@@ -1029,11 +1029,6 @@ impl NWA {
     ///  - For each state and epsilon edge, merge multiple (to, w) by unioning weights per `to`.
     ///  - For each state, label, and destination, merge multiple (label, to, w) by unioning weights.
     /// Transitions with empty weight are removed.
-    ///
-    /// This is sound because the weight semiring is (bitset, |, &, ∅, U), so:
-    ///   (w1 & x) | (w2 & x) = (w1 | w2) & x
-    /// for all bitsets w1, w2, x. Thus, multiple parallel transitions are semantically
-    /// equivalent to a single transition with the union of their weights.
     fn compress_transitions(&mut self) -> bool {
         crate::debug!(7, "[NWA] Compressing transitions...");
         let mut changed = false;
@@ -1231,10 +1226,16 @@ impl NWA {
             }
         }
 
-        let start_class = partition.class_of[self.body.start_state];
-        let new_start = class_to_new[&start_class];
+        let mut new_start_states = Vec::new();
+        for &old_start in &self.body.start_states {
+            let start_class = partition.class_of[old_start];
+            let new_start = class_to_new[&start_class];
+            if !new_start_states.contains(&new_start) {
+                new_start_states.push(new_start);
+            }
+        }
         self.states = new_states;
-        self.body.start_state = new_start;
+        self.body.start_states = new_start_states;
     }
 
     fn prune_unreachable(&mut self) -> bool {
@@ -1244,20 +1245,24 @@ impl NWA {
             return false;
         }
 
-        if self.body.start_state >= n {
+        if self.body.start_states.is_empty() {
             let changed = n > 0;
             if changed {
                 self.states = NWAStates::default();
-                let start = self.states.add_state();
-                self.body.start_state = start;
+                self.body.start_states.clear();
             }
             return changed;
         }
 
         let mut reachable = vec![false; n];
         let mut q: VecDeque<NWAStateID> = VecDeque::new();
-        reachable[self.body.start_state] = true;
-        q.push_back(self.body.start_state);
+
+        for &start in &self.body.start_states {
+            if start < n && !reachable[start] {
+                reachable[start] = true;
+                q.push_back(start);
+            }
+        }
 
         while let Some(u) = q.pop_front() {
             let st = &self.states[u];
@@ -1315,7 +1320,13 @@ impl NWA {
             st.transitions = new_transitions;
         }
 
-        self.body.start_state = map[self.body.start_state];
+        let mut new_start_states = Vec::new();
+        for &s in &self.body.start_states {
+            if s < n && reachable[s] {
+                new_start_states.push(map[s]);
+            }
+        }
+        self.body.start_states = new_start_states;
         self.states = new_states;
         true
     }
@@ -1365,22 +1376,19 @@ impl NWA {
             }
         }
 
-        if self.body.start_state >= n || !live[self.body.start_state] {
-            if n == 1 && self.states[0] == NWAState::default() {
-                return false;
-            }
-
-            let changed = n > 0;
-            if changed {
-                self.states = NWAStates::default();
-                let start = self.states.add_state();
-                self.body.start_state = start;
-            }
-            return changed;
-        }
-
         if live.iter().all(|&b| b) {
             return false;
+        }
+        
+        // Check if start states survive
+        let any_start_live = self.body.start_states.iter().any(|&s| s < n && live[s]);
+        if !any_start_live {
+             // If all start states are dead, the NWA accepts empty language.
+             // Collapse to empty.
+             if n == 0 { return false; }
+             self.states = NWAStates::default();
+             self.body.start_states.clear();
+             return true;
         }
 
         let mut map = vec![usize::MAX; n];
@@ -1415,7 +1423,13 @@ impl NWA {
             st.transitions = new_transitions;
         }
 
-        self.body.start_state = map[self.body.start_state];
+        let mut new_start_states = Vec::new();
+        for &s in &self.body.start_states {
+            if s < n && live[s] {
+                new_start_states.push(map[s]);
+            }
+        }
+        self.body.start_states = new_start_states;
         self.states = new_states;
         true
     }
