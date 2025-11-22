@@ -169,10 +169,7 @@ pub struct NWA {
 
 impl NWA {
     pub fn new() -> Self {
-        let mut states = NWAStates::default();
-        let start = states.add_state();
-        let body = NWABody { start_states: vec![start] };
-        Self { states, body }
+        Self { states: NWAStates::default(), body: NWABody::default() }
     }
     pub fn add_state(&mut self) -> NWAStateID { self.states.add_state() }
     pub fn add_epsilon(&mut self, u: NWAStateID, v: NWAStateID, w: Weight) { self.states.add_epsilon(u, v, w); }
