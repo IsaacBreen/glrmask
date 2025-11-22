@@ -1,5 +1,3 @@
-// src/precompute4/weighted_automata/determinization.rs
-
 #![allow(dead_code)]
 #![allow(clippy::needless_borrow)]
 
@@ -350,7 +348,7 @@ impl NWA {
                 for &s in &self.body.start_states {
                     start_subset.insert(s, Weight::all());
                 }
-                
+
                 let start_id = det.register_state(start_subset);
                 det.dwa.body.start_state = start_id;
 
