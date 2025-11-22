@@ -69,14 +69,13 @@ impl<'a> Determinizer<'a> {
     }
 
     fn expand(&mut self, sid: usize) {
-        let closure = &self.closures[sid];
-        let labels: BTreeSet<Label> = closure.keys().flat_map(|&s| self.nwa.states[s].transitions.keys().cloned()).collect();
+        let labels: BTreeSet<Label> = (&self.closures[sid]).keys().flat_map(|&s| self.nwa.states[s].transitions.keys().cloned()).collect();
         
         let pb = self.mp.as_ref().map(|m| m.add(ProgressBar::new(labels.len() as u64).with_message(format!("State {}", sid))));
 
         for ch in labels {
             let mut next = WeightedSubset::new();
-            for (u, cw) in closure {
+            for (u, cw) in &self.closures[sid] {
                 if let Some(ts) = self.nwa.states[*u].transitions.get(&ch) {
                     for (v, w) in ts {
                         let cand = weight_intersection(cw, w);

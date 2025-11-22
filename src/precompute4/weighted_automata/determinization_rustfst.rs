@@ -73,7 +73,7 @@ impl SerializableSemiring for BitsetWeight {
         nom::combinator::map_res(nom::combinator::rest, |s: &str| serde_json::from_str::<Weight>(s).map(|w| Self(intern(w))).map_err(|e| e.to_string()))(i)
     }
 }
-impl std::fmt::Display for BitsetWeight { fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, "{}", serde_json::to_string(&self.0).unwrap()) } }
+impl std::fmt::Display for BitsetWeight { fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, "{}", serde_json::to_string(self.0.as_ref()).unwrap()) } }
 
 pub fn nwa_to_vector_fst(nwa: &NWA) -> VectorFst<BitsetWeight> {
     let mut fst = VectorFst::new();

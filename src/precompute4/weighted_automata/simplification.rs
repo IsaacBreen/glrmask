@@ -92,7 +92,7 @@ impl DWA {
         if n <= 1 { return false; }
         let p = minimize_partition(n, |i, cls| {
             let st = &self.states[i];
-            let mut out: Vec<_> = st.transitions.iter().filter(|(_, &d)| !st.trans_weights.get(0).map_or(false, |w| w.is_empty())).map(|(&l, &d)| (l, cls[d], st.trans_weights[&l].clone())).collect();
+            let mut out: Vec<_> = st.transitions.iter().filter(|(_, &d)| !st.trans_weights.get(&0).map_or(false, |w| w.is_empty())).map(|(&l, &d)| (l, cls[d], st.trans_weights[&l].clone())).collect();
             (st.final_weight.clone(), out)
         });
         if p.count >= n { return false; }
