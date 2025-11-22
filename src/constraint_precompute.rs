@@ -109,7 +109,8 @@ impl<'r> Precomputer1<'r> {
         // TODO: make this simpler.
         let new_start_state = self.nwa.add_state();
         for (tsid, state) in &self.roots {
-            self.nwa.add_transition(new_start_state, tsid.0 as Label, *state, Weight::all()).unwrap();
+            let label = (tsid.0 + self.terminals_count) as Label;
+            self.nwa.add_transition(new_start_state, label, *state, Weight::all()).unwrap();
         }
         self.nwa.body.start_state = new_start_state;
         crate::debug!(3, "Simplifying NWA with {} states...", self.nwa.states.len());
@@ -363,6 +364,7 @@ pub fn run_precompute1(
     llm_vocab: Option<Arc<LLMVocab>>,
     internal_llm_token_map: &BTreeMap<Vec<u8>, LLMTokenID>,
     internal_max_llm_token: usize,
+    terminals_count: usize,
 ) -> DWA {
     // Reduce internal_llm_token_map to representatives to speed up precomputation
     let mut representative_llm_token_map: BTreeMap<Vec<u8>, LLMTokenID> = BTreeMap::new();
@@ -382,9 +384,10 @@ pub fn run_precompute1(
         llm_vocab,
         &representative_llm_token_map,
         internal_max_llm_token,
-        parser.unwrap().terminal_map.len(),
+        terminals_count,
         representative_states,
     );
+
 
     helper.run_dfs();
 
