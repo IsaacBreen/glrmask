@@ -29,7 +29,7 @@ fn test_resolve_negatives_simple_cancellation() {
 
 #[test]
 fn test_resolve_negatives_from_large_nwa_log() {
-    let mut nwa = NWA::new();
+    let mut nwa = NWA::new_empty();
     let mut states = Vec::new();
     for _ in 0..69 {
         states.push(nwa.add_state());

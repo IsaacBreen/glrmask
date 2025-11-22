@@ -324,7 +324,7 @@ pub fn precompute4(parser: &GLRParser, input_nwa: &NWA) -> DWA {
         bit_to_term.push(Some(*term_id));
     }
 
-    let mut super_nwa = NWA::new();
+    let mut super_nwa = NWA::new_empty();
     for (term_id_opt, bit) in &term_to_bit {
         let mut weight = Weight::zeros();
         weight.set(*bit, true);
@@ -526,7 +526,7 @@ fn resolve_negatives_and_optimize_and_determinize(parser: &GLRParser, mut combin
 }
 
 fn instantiate_nwa_template(template: &NWA, ordered_weights: &[Weight]) -> NWA {
-    let mut new_nwa = NWA::new();
+    let mut new_nwa = NWA::new_empty();
     new_nwa.states.0.reserve(template.states.len());
     for _ in 0..template.states.len() { new_nwa.add_state(); }
 

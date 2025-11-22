@@ -168,8 +168,14 @@ pub struct NWA {
 }
 
 impl NWA {
-    pub fn new() -> Self {
+    pub fn new_empty() -> Self {
         Self { states: NWAStates::default(), body: NWABody::default() }
+    }
+    pub fn new() -> Self {
+        let mut nwa = Self::new_empty();
+        let start = nwa.add_state();
+        nwa.body.start_states.push(start);
+        nwa
     }
     pub fn add_state(&mut self) -> NWAStateID { self.states.add_state() }
     pub fn add_epsilon(&mut self, u: NWAStateID, v: NWAStateID, w: Weight) { self.states.add_epsilon(u, v, w); }
@@ -178,7 +184,7 @@ impl NWA {
     }
 
     pub fn reverse(&self) -> NWA {
-        let mut rev = NWA::new();
+        let mut rev = NWA::new_empty();
         // Pre-allocate states
         for _ in 0..self.states.len() { rev.add_state(); }
 
@@ -214,7 +220,7 @@ impl NWA {
     }
 
     pub fn concatenate(left: &NWA, right: &NWA) -> NWA {
-        let mut res = NWA::new();
+        let mut res = NWA::new_empty();
         let _ = res.states.append(&right.states); // Right is at offset 0
         // Construct a body for the right segment
         let right_body = right.body.clone(); // indices are 0-based, valid
@@ -225,7 +231,7 @@ impl NWA {
     }
 
     pub fn union(a: &NWA, b: &NWA) -> NWA {
-        let mut res = NWA::new();
+        let mut res = NWA::new_empty();
         let off_a = res.states.append(&a.states);
         let off_b = res.states.append(&b.states);
         
@@ -237,7 +243,7 @@ impl NWA {
     }
 
     pub fn from_dwa(dwa: &DWA) -> Self {
-        let mut nwa = NWA::new();
+        let mut nwa = NWA::new_empty();
         for _ in 0..dwa.states.len() { nwa.add_state(); }
         nwa.body.start_states = vec![dwa.body.start_state];
 

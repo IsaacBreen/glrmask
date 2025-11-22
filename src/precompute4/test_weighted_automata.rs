@@ -64,7 +64,6 @@ impl DWA {
         let s = self.states[self.body.start_state].clone();
         let state_id = self.states.add_existing_state(s);
         self.states[state_id].apply_weight(w);
-        self.body.start_state = state_id;
         state_id
     }
 }
@@ -1720,8 +1719,6 @@ mod determinization_tests {
     fn test_det_union_of_chars() {
         // NWA for a|b
         let mut nwa = NWA::new();
-        let start_state = nwa.add_state();
-        nwa.body.start_states.push(start_state);
         let s_a = nwa.states.add_state();
         let s_b = nwa.states.add_state();
         let final_a = nwa.states.add_state();
@@ -1750,8 +1747,6 @@ mod determinization_tests {
     fn test_det_nondeterminism_on_char() {
         // NWA with two transitions on 'a'
         let mut nwa = NWA::new();
-        let start = nwa.add_state();
-        nwa.body.start_states.push(start);
         let f1 = nwa.states.add_state();
         let f2 = nwa.states.add_state();
         nwa.add_transition(nwa.body.start_states[0], 'a' as Label, f1, Weight::from_item(1)).unwrap();
@@ -1774,8 +1769,6 @@ mod determinization_tests {
     fn test_det_weight_partitioning() {
         // NWA with overlapping weights on 'a'
         let mut nwa = NWA::new();
-        let start = nwa.add_state();
-        nwa.body.start_states.push(start);
         let f1 = nwa.states.add_state();
         let f2 = nwa.states.add_state();
         // 'a' can lead to f1 with weight [0,1] or f2 with weight [1,2]
@@ -1805,8 +1798,6 @@ mod determinization_tests {
     #[test]
     fn test_det_empty_nwa() {
         let mut nwa = NWA::new();
-        let start = nwa.add_state();
-        nwa.body.start_states.push(start);
         nwa.states.0.clear(); // Truly empty
         let dwa = nwa.determinize_to_dwa();
         assert_eq!(dwa.states.len(), 1);
@@ -1825,8 +1816,6 @@ mod determinization_tests {
     #[test]
     fn test_det_accepts_empty_word() {
         let mut nwa = NWA::new();
-        let start = nwa.add_state();
-        nwa.body.start_states.push(start);
         nwa.states[nwa.body.start_states[0]].final_weight = Some(Weight::from_item(42));
         let dwa = nwa.determinize_to_dwa();
         let mut expected = DWA::new();
@@ -1841,8 +1830,6 @@ mod determinization_tests {
         }
 
         let mut nwa = NWA::new();
-        let start = nwa.add_state();
-        nwa.body.start_states.push(start);
         for _ in 0..38 {
             nwa.states.add_state();
         }
@@ -1943,8 +1930,6 @@ mod determinization_tests {
         }
 
         let mut nwa = NWA::new();
-        let start = nwa.add_state();
-        nwa.body.start_states.push(start);
         // Need states 0 to 37, so 38 states total.
         for _ in 0..37 { nwa.states.add_state(); }
         assert_eq!(nwa.states.len(), 38);
@@ -2019,8 +2004,6 @@ mod determinization_tests {
 
         fn build_nwa_from_components(num_states: usize, components: &[NwaComponent]) -> NWA {
             let mut nwa = NWA::new();
-        let start = nwa.add_state();
-        nwa.body.start_states.push(start);
             while nwa.states.len() < num_states {
                 nwa.states.add_state();
             }
@@ -2116,8 +2099,6 @@ mod determinization_tests {
         }
 
         let mut nwa = NWA::new();
-        let start = nwa.add_state();
-        nwa.body.start_states.push(start);
         for _ in 0..33 { nwa.states.add_state(); }
 
         nwa.add_epsilon(0, 19, Weight::all());
@@ -2147,8 +2128,6 @@ mod determinization_tests {
     fn test_det_union_of_chars_rustfst() {
         // NWA for a|b
         let mut nwa = NWA::new();
-        let start = nwa.add_state();
-        nwa.body.start_states.push(start);
         let s_a = nwa.states.add_state();
         let s_b = nwa.states.add_state();
         let final_a = nwa.states.add_state();
@@ -2177,8 +2156,6 @@ mod determinization_tests {
     fn test_det_nondeterminism_on_char_rustfst() {
         // NWA with two transitions on 'a'
         let mut nwa = NWA::new();
-        let start = nwa.add_state();
-        nwa.body.start_states.push(start);
         let f1 = nwa.states.add_state();
         let f2 = nwa.states.add_state();
         nwa.add_transition(nwa.body.start_states[0], 'a' as Label, f1, Weight::from_item(1)).unwrap();
@@ -2201,8 +2178,6 @@ mod determinization_tests {
     fn test_det_weight_partitioning_rustfst() {
         // NWA with overlapping weights on 'a'
         let mut nwa = NWA::new();
-        let start = nwa.add_state();
-        nwa.body.start_states.push(start);
         let f1 = nwa.states.add_state();
         let f2 = nwa.states.add_state();
         // 'a' can lead to f1 with weight [0,1] or f2 with weight [1,2]
@@ -2232,8 +2207,6 @@ mod determinization_tests {
     #[test]
     fn test_det_empty_nwa_rustfst() {
         let mut nwa = NWA::new();
-        let start = nwa.add_state();
-        nwa.body.start_states.push(start);
         nwa.states.0.clear(); // Truly empty
         let dwa = nwa.determinize_to_dwa_with_rustfst();
         assert_eq!(dwa.states.len(), 1);
@@ -2252,8 +2225,6 @@ mod determinization_tests {
     #[test]
     fn test_det_accepts_empty_word_rustfst() {
         let mut nwa = NWA::new();
-        let start = nwa.add_state();
-        nwa.body.start_states.push(start);
         nwa.states[nwa.body.start_states[0]].final_weight = Some(Weight::from_item(42));
         let dwa = nwa.determinize_to_dwa_with_rustfst();
         let mut expected = DWA::new();
@@ -2268,8 +2239,6 @@ mod determinization_tests {
         }
 
         let mut nwa = NWA::new();
-        let start = nwa.add_state();
-        nwa.body.start_states.push(start);
         for _ in 0..38 {
             nwa.states.add_state();
         }
@@ -2370,8 +2339,6 @@ mod determinization_tests {
         }
 
         let mut nwa = NWA::new();
-        let start = nwa.add_state();
-        nwa.body.start_states.push(start);
         // Need states 0 to 37, so 38 states total.
         for _ in 0..37 { nwa.states.add_state(); }
         assert_eq!(nwa.states.len(), 38);
@@ -2437,8 +2404,6 @@ mod determinization_tests {
         }
 
         let mut nwa = NWA::new();
-        let start = nwa.add_state();
-        nwa.body.start_states.push(start);
         for _ in 0..33 { nwa.states.add_state(); }
 
         nwa.add_epsilon(0, 19, Weight::all());

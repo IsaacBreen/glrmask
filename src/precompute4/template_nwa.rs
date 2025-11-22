@@ -17,7 +17,7 @@ impl From<NWABuildError> for FullDWABuildError {
 }
 
 pub(crate) fn build_template_nwa_from_characterization(bb: &BelowBottomCharacterization) -> Result<NWA, FullDWABuildError> {
-    let mut nwa = NWA::new();
+    let mut nwa = NWA::new_empty();
     let w_all = Weight::all();
     let mut nt_nodes: BTreeMap<NonTerminalID, StateID> = BTreeMap::new();
     for &nt in &bb.all_nts { nt_nodes.insert(nt, nwa.add_state()); }

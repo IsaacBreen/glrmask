@@ -191,7 +191,7 @@ pub fn vector_fst_to_dwa(fst: &VectorFst<BitsetWeight>) -> DWA {
 }
 
 pub fn vector_fst_to_nwa(fst: &VectorFst<BitsetWeight>) -> NWA {
-    let mut nwa = NWA::new();
+    let mut nwa = NWA::new_empty();
     nwa.states.0.clear();
     if fst.num_states() == 0 { return nwa; }
     let mut state_map = HashMap::<StateId, StateID>::new();
