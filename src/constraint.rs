@@ -754,12 +754,15 @@ impl GrammarConstraint {
             out_matches: &mut BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
         ) {
             for (edge_bytes, child) in node.iter_children() {
-                let mut next_grouped_map: HashMap<u32, Vec<u32>> = HashMap::new();
                 let reachable_bv: LLMTokenBV = child.reachable_token_ids().into();
+                let mut next_grouped_map: HashMap<u32, Vec<u32>> = HashMap::new();
 
                 for (start, sources) in &current_states {
                     let mut curr = *start;
                     let mut valid = true;
+                    // Optimization: Accumulate triggered terminals for this edge and apply them in batch.
+                    // This avoids repeated map lookups and bitset unions for every byte.
+                    let mut triggered_terminals: Vec<TerminalID> = Vec::new();
 
                     for &b in edge_bytes.iter() {
                         let offset = (curr as usize) * 256 + (b as usize);
@@ -770,22 +773,24 @@ impl GrammarConstraint {
                         }
                         curr = next;
 
-                        // If matched, record for all sources
-                        if !dfa.finalizers[curr as usize].is_empty() {
-                            for &tid in &dfa.finalizers[curr as usize] {
-                                for &src in sources {
-                                    out_matches
-                                        .entry(TokenizerStateID(src as usize))
-                                        .or_default()
-                                        .entry(tid)
-                                        .or_default()
-                                        .union_with(&reachable_bv);
-                                }
-                            }
+                        let fins = &dfa.finalizers[curr as usize];
+                        if !fins.is_empty() {
+                            triggered_terminals.extend_from_slice(fins);
                         }
                     }
 
                     if valid {
+                        if !triggered_terminals.is_empty() {
+                            triggered_terminals.sort_unstable();
+                            triggered_terminals.dedup();
+                            for &src in sources {
+                                let src_id = TokenizerStateID(src as usize);
+                                let inner_map = out_matches.entry(src_id).or_default();
+                                for &tid in &triggered_terminals {
+                                    inner_map.entry(tid).or_default().union_with(&reachable_bv);
+                                }
+                            }
+                        }
                         next_grouped_map.entry(curr).or_default().extend_from_slice(sources);
                     }
                 }
@@ -847,7 +852,7 @@ impl GrammarConstraint {
 
         // Parallel processing of root children
         let root_children: Vec<_> = vocab_root.iter_children().collect();
-        let results: Vec<_> = root_children
+        let (state_map_entries, possible_matches) = root_children
             .par_iter()
             .map(|(edge_bytes, child_node)| {
                 let mut local_state_map_entries = Vec::new();
@@ -864,6 +869,8 @@ impl GrammarConstraint {
                 for (start, sources) in &initial_states {
                     let mut curr = *start;
                     let mut valid = true;
+                    let mut triggered_terminals = Vec::new();
+
                     for &b in edge_bytes.iter() {
                         let offset = (curr as usize) * 256 + (b as usize);
                         let next = fast_dfa.transitions[offset];
@@ -873,19 +880,21 @@ impl GrammarConstraint {
                         }
                         curr = next;
                         if !fast_dfa.finalizers[curr as usize].is_empty() {
-                            for &tid in &fast_dfa.finalizers[curr as usize] {
-                                for &src in sources {
-                                    local_possible_matches
-                                        .entry(TokenizerStateID(src as usize))
-                                        .or_default()
-                                        .entry(tid)
-                                        .or_default()
-                                        .union_with(&reachable_bv);
-                                }
-                            }
+                            triggered_terminals.extend_from_slice(&fast_dfa.finalizers[curr as usize]);
                         }
                     }
                     if valid {
+                        if !triggered_terminals.is_empty() {
+                            triggered_terminals.sort_unstable();
+                            triggered_terminals.dedup();
+                            for &src in sources {
+                                let src_id = TokenizerStateID(src as usize);
+                                let inner = local_possible_matches.entry(src_id).or_default();
+                                for &tid in &triggered_terminals {
+                                    inner.entry(tid).or_default().union_with(&reachable_bv);
+                                }
+                            }
+                        }
                         next_grouped_map.entry(curr).or_default().extend_from_slice(sources);
                     }
                 }
@@ -914,7 +923,19 @@ impl GrammarConstraint {
 
                 (local_state_map_entries, local_possible_matches)
             })
-            .collect();
+            .reduce(
+                || (Vec::new(), BTreeMap::new()),
+                |mut a, b| {
+                    a.0.extend(b.0);
+                    for (sid, b_map) in b.1 {
+                        let a_map = a.1.entry(sid).or_default();
+                        for (tid, bv) in b_map {
+                            a_map.entry(tid).or_default().union_with(&bv);
+                        }
+                    }
+                    a
+                },
+            );
 
         // Merge
         let mut state_map_out = DedupValueMap::new();
@@ -928,20 +949,8 @@ impl GrammarConstraint {
             state_map_out.insert(LLMTokenID(vocab_root.token_id()), root_map);
         }
 
-        let mut possible_matches: BTreeMap<
-            TokenizerStateID,
-            BTreeMap<TerminalID, LLMTokenBV>,
-        > = BTreeMap::new();
-        for (entries, matches) in results {
-            for (tid, map) in entries {
-                state_map_out.insert(tid, map);
-            }
-            for (sid, term_map) in matches {
-                let target = possible_matches.entry(sid).or_default();
-                for (tid, bv) in term_map {
-                    target.entry(tid).or_default().union_with(&bv);
-                }
-            }
+        for (tid, map) in state_map_entries {
+            state_map_out.insert(tid, map);
         }
 
         (state_map_out, possible_matches)
