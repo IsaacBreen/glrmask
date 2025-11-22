@@ -3,79 +3,71 @@
 
 use chrono::Local;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::cmp::Ordering;
+use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use super::common::{DETERMINIZE_DEBUG, Label, NWAStateID, Weight};
 use super::dwa::DWA;
 use super::nwa::{NWA, NWAStates};
 use crate::precompute4::test_weighted_automata;
 
-type WeightedSubset = BTreeMap<NWAStateID, Weight>;
-type ClosureMap = BTreeMap<NWAStateID, Weight>;
+// Invariants: strictly sorted by NWAStateID, no duplicate IDs, no empty Weights.
+type WeightedSubset = Vec<(NWAStateID, Weight)>;
 
-fn weight_union(a: Weight, b: &Weight) -> Weight { a | b.clone() }
-fn weight_union_in_place(dst: &mut Weight, src: &Weight) { *dst |= src; }
-fn weight_intersection(a: &Weight, b: &Weight) -> Weight { a & b }
 fn is_zero(w: &Weight) -> bool { w.is_empty() }
 
-fn epsilon_closure(nwa_states: &NWAStates, seed: &WeightedSubset) -> ClosureMap {
-    let mut closure: ClosureMap = ClosureMap::new();
-    let mut queue: VecDeque<NWAStateID> = VecDeque::new();
+// Optimized epsilon closure with correct change detection.
+// Uses HashMap for fast lookups during accumulation, returns a sorted Vec.
+fn epsilon_closure_optimized(nwa_states: &NWAStates, seed: &WeightedSubset) -> WeightedSubset {
+    let mut closure_map: HashMap<NWAStateID, Weight> = HashMap::with_capacity(seed.len() * 4);
+    let mut queue: VecDeque<NWAStateID> = VecDeque::with_capacity(seed.len());
 
     for (sid, w) in seed {
         if !is_zero(w) {
-            let prev = closure.get(sid).cloned().unwrap_or_else(Weight::zeros);
-            let neww = weight_union(prev.clone(), w);
-            if neww != prev {
-                closure.insert(*sid, neww.clone());
-                queue.push_back(*sid);
-            }
+            closure_map.insert(*sid, w.clone());
+            queue.push_back(*sid);
         }
     }
 
     while let Some(u) = queue.pop_front() {
-        let uw = closure.get(&u).cloned().unwrap_or_else(Weight::zeros);
-        if is_zero(&uw) {
+        // Snapshot the weight of u to propagate
+        let uw = if let Some(w) = closure_map.get(&u) {
+            w.clone()
+        } else {
             continue;
-        }
-        for (v, w_eps) in &nwa_states[u].epsilons {
-            let cand = weight_intersection(&uw, w_eps);
-            if is_zero(&cand) {
-                continue;
-            }
-            let prev = closure.get(v).cloned().unwrap_or_else(Weight::zeros);
-            let merged = weight_union(prev.clone(), &cand);
-            if merged != prev {
-                closure.insert(*v, merged.clone());
+        };
+
+        if u >= nwa_states.len() { continue; }
+        let st = &nwa_states[u];
+
+        for (v, w_eps) in &st.epsilons {
+            let cand = &uw & w_eps;
+            if cand.is_empty() { continue; }
+
+            let entry = closure_map.entry(*v).or_insert_with(Weight::zeros);
+
+            // If the candidate weight adds new information (is not a subset of existing),
+            // update and propagate.
+            if !cand.is_subset_of(entry) {
+                *entry |= &cand;
                 queue.push_back(*v);
             }
         }
     }
 
-    closure
-}
-
-fn compute_state_and_final_weights(nwa: &NWA, closure: &ClosureMap) -> (Option<Weight>, Option<Weight>) {
-    let entry_opt = None;
-    let mut finalw = Weight::zeros();
-    for (sid, cw) in closure {
-        if let Some(fw) = &nwa.states[*sid].final_weight {
-            let cand = cw & fw;
-            if !is_zero(&cand) {
-                finalw = finalw | cand;
-            }
-        }
-    }
-    let final_opt = if finalw.is_empty() { None } else { Some(finalw) };
-    (entry_opt, final_opt)
+    let mut result: Vec<(NWAStateID, Weight)> = closure_map.into_iter().collect();
+    result.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+    result
 }
 
 struct Determinizer<'a> {
     nwa: &'a NWA,
-    seen: HashMap<ClosureMap, usize>,
-    subsets: Vec<WeightedSubset>,
-    closures: Vec<ClosureMap>,
+    // Map from canonical closure (Sorted Vec) to DWA State ID
+    seen: HashMap<WeightedSubset, usize>,
+    // Queue of DWA State IDs to process
     queue: VecDeque<usize>,
+    // Store the closure for each DWA state to avoid recomputing/cloning implicitly
+    closures: Vec<WeightedSubset>,
     dwa: DWA,
     mp: Option<MultiProgress>,
 }
@@ -88,82 +80,114 @@ impl<'a> Determinizer<'a> {
         Determinizer {
             nwa,
             seen: HashMap::new(),
-            subsets: Vec::new(),
-            closures: Vec::new(),
             queue: VecDeque::new(),
+            closures: Vec::new(),
             dwa,
             mp,
         }
     }
 
-    fn register_state(&mut self, subset: WeightedSubset) -> usize {
-        let mut subset_clean: WeightedSubset = WeightedSubset::new();
-        for (sid, w) in subset {
-            if !is_zero(&w) {
-                subset_clean.insert(sid, w);
-            }
-        }
-
-        let closure = epsilon_closure(&self.nwa.states, &subset_clean);
+    // Returns the DWA state ID for the given closure. If new, registers it.
+    fn register_closure(&mut self, closure: WeightedSubset) -> usize {
         if let Some(&id) = self.seen.get(&closure) {
             return id;
         }
 
         let id = self.dwa.add_state();
-        let (_entry_opt, final_opt) = compute_state_and_final_weights(self.nwa, &closure);
-        if let Some(w) = final_opt {
-            let _ = self.dwa.set_final_weight(id, w);
+
+        // Compute final weights
+        let mut finalw = Weight::zeros();
+        for (sid, cw) in &closure {
+            if let Some(fw) = &self.nwa.states[*sid].final_weight {
+                let cand = cw & fw;
+                if !cand.is_empty() {
+                    finalw |= &cand;
+                }
+            }
+        }
+        if !finalw.is_empty() {
+            let _ = self.dwa.set_final_weight(id, finalw);
         }
 
         self.seen.insert(closure.clone(), id);
-        self.subsets.push(subset_clean);
         self.closures.push(closure);
         self.queue.push_back(id);
         id
     }
 
     fn expand_state(&mut self, sid: usize) {
-        let closure = &self.closures[sid];
+        let closure = self.closures[sid].clone();
+
         if closure.is_empty() {
             return;
         }
 
-        // Accumulate transitions by label in a single pass over the closure.
-        // transition_subsets: Label -> (TargetStateID -> AccumulatedWeight)
-        let mut transition_subsets: BTreeMap<Label, WeightedSubset> = BTreeMap::new();
-        // transition_edge_weights: Label -> AccumulatedWeight (for the DWA edge itself)
-        let mut transition_edge_weights: BTreeMap<Label, Weight> = BTreeMap::new();
+        // 1. Collect raw outgoing transitions: (Label, TargetNWAState, Weight)
+        // Capacity guess: closure size * small factor
+        let mut raw: Vec<(Label, NWAStateID, Weight)> = Vec::with_capacity(closure.len() * 2);
 
-        for (nwa_id, cw) in closure {
-            if is_zero(cw) { continue; }
-            
-            let st = &self.nwa.states[*nwa_id];
-            for (label, targets) in &st.transitions {
-                for (target_id, w_trans) in targets {
-                    let combined = weight_intersection(cw, w_trans);
-                    if !is_zero(&combined) {
-                        // Update the edge weight for this label
-                        transition_edge_weights.entry(*label)
-                            .and_modify(|w| weight_union_in_place(w, &combined))
-                            .or_insert_with(|| combined.clone());
-                        
-                        // Update the target subset for this label
-                        transition_subsets.entry(*label)
-                            .or_default()
-                            .entry(*target_id)
-                            .and_modify(|w| weight_union_in_place(w, &combined))
-                            .or_insert_with(|| combined.clone());
+        for (u, w_u) in &closure {
+            let st = &self.nwa.states[*u];
+            for (lbl, targets) in &st.transitions {
+                for (v, w_trans) in targets {
+                    let w_out = w_u & w_trans;
+                    if !w_out.is_empty() {
+                        raw.push((*lbl, *v, w_out));
                     }
                 }
             }
         }
 
-        // Register new states and add transitions
-        for (label, subset) in transition_subsets {
-            // The edge weight must exist if the subset exists
-            let w_edge = transition_edge_weights.remove(&label).unwrap();
-            let to_dwa_id = self.register_state(subset);
-            let _ = self.dwa.add_transition(sid, label, to_dwa_id, w_edge);
+        if raw.is_empty() {
+            return;
+        }
+
+        // 2. Sort by Label, then Target.
+        // This groups transitions for the same label and same target together.
+        raw.sort_unstable_by(|a, b| {
+            let c = a.0.cmp(&b.0);
+            if c != Ordering::Equal {
+                return c;
+            }
+            a.1.cmp(&b.1)
+        });
+
+        // 3. Iterate through sorted transitions to build next subsets.
+        let mut i = 0;
+        while i < raw.len() {
+            let current_lbl = raw[i].0;
+
+            // Prepare to build the target subset for this label.
+            // Since `raw` is sorted by target within label, we can collect sequentially.
+            let mut next_subset_raw: Vec<(NWAStateID, Weight)> = Vec::new();
+            let mut edge_accum_weight = Weight::zeros();
+
+            while i < raw.len() && raw[i].0 == current_lbl {
+                let target = raw[i].1;
+
+                // Aggregate weights for the same target
+                let mut target_w = raw[i].2.clone();
+                i += 1;
+
+                while i < raw.len() && raw[i].0 == current_lbl && raw[i].1 == target {
+                    target_w |= &raw[i].2;
+                    i += 1;
+                }
+
+                // Add to total edge weight
+                edge_accum_weight |= &target_w;
+                next_subset_raw.push((target, target_w));
+            }
+
+            // `next_subset_raw` is already sorted by NWAStateID because of `raw` sorting.
+            // 4. Compute epsilon closure of this new subset.
+            let next_closure = epsilon_closure_optimized(&self.nwa.states, &next_subset_raw);
+
+            // 5. Register the new DWA state.
+            let target_dwa_id = self.register_closure(next_closure);
+
+            // 6. Add transition to DWA.
+            let _ = self.dwa.add_transition(sid, current_lbl, target_dwa_id, edge_accum_weight);
         }
     }
 }
@@ -174,15 +198,17 @@ fn try_build_singleton_loop_union(nwa: &NWA) -> Option<DWA> {
     }
 
     let start = nwa.body.start_states[0];
-    if start >= nwa.states.len() { return None; }
+    if start >= nwa.states.len() {
+        return None;
+    }
 
     if !nwa.states[start].transitions.is_empty() {
         return None;
     }
 
-    let mut seed: WeightedSubset = WeightedSubset::new();
-    seed.insert(start, Weight::all());
-    let start_closure = epsilon_closure(&nwa.states, &seed);
+    let mut seed: WeightedSubset = Vec::new();
+    seed.push((start, Weight::all()));
+    let start_closure = epsilon_closure_optimized(&nwa.states, &seed);
 
     let mut comps: Vec<(NWAStateID, Weight)> = Vec::new();
     for (sid, cw) in start_closure.iter() {
@@ -288,12 +314,15 @@ impl NWA {
                 });
 
                 let mut det = Determinizer::new(self, mp);
-                let mut start_subset: WeightedSubset = WeightedSubset::new();
+                let mut start_subset: WeightedSubset = Vec::new();
                 for &s in &self.body.start_states {
-                    start_subset.insert(s, Weight::all());
+                    start_subset.push((s, Weight::all()));
                 }
+                // Ensure input to closure is sorted (though start_states typically small)
+                start_subset.sort_unstable_by(|a, b| a.0.cmp(&b.0));
 
-                let start_id = det.register_state(start_subset);
+                let start_closure = epsilon_closure_optimized(&self.states, &start_subset);
+                let start_id = det.register_closure(start_closure);
                 det.dwa.body.start_state = start_id;
 
                 let mut processed_count = 0;
@@ -301,7 +330,12 @@ impl NWA {
                     if det.seen.len() > STATE_LIMIT {
                         let timestamp = Local::now().format("%Y%m%d-%H%M%S");
                         let filename = format!("nwa_dump_{}.json", timestamp);
-                        crate::debug!(5, "Determinization state limit ({}) exceeded. Dumping NWA to {} and panicking.", STATE_LIMIT, filename);
+                        crate::debug!(
+                            5,
+                            "Determinization state limit ({}) exceeded. Dumping NWA to {} and panicking.",
+                            STATE_LIMIT,
+                            filename
+                        );
                         let f = std::fs::File::create(&filename).expect("Unable to create dump file");
                         serde_json::to_writer(f, self).expect("Unable to write NWA to file");
                         panic!("Determinization aborted after reaching {} states.", STATE_LIMIT);
