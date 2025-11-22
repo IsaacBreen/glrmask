@@ -106,12 +106,21 @@ fn compute_cancellations(states: &NWAStates, filter: &HashSet<NWAStateID>) -> Ve
             let ew_entry = new_eps.entry(a).or_default().entry(t).or_default();
             if (new_ew.clone() | &*ew_entry) != *ew_entry {
                 *ew_entry |= &new_ew;
-                if let Some(qa) = queries.get(&a) {
-                    for (&(ap, cp), wap) in qa {
-                        let p = wap & &*ew_entry;
-                        if p.is_empty() { continue; }
-                        let qw = queries.entry(t).or_default().entry((ap, cp)).or_default();
-                        if (p.clone() | &*qw) != *qw { *qw |= &p; wl.push_back((t, ap, cp, qw.clone())); }
+                let updates: Vec<_> = if let Some(qa) = queries.get(&a) {
+                    qa.iter()
+                        .filter_map(|(&(ap, cp), wap)| {
+                            let p = wap & &*ew_entry;
+                            if !p.is_empty() { Some((ap, cp, p)) } else { None }
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                for (ap, cp, p) in updates {
+                    let qw = queries.entry(t).or_default().entry((ap, cp)).or_default();
+                    if (p.clone() | &*qw) != *qw {
+                        *qw |= &p;
+                        wl.push_back((t, ap, cp, qw.clone()));
                     }
                 }
             }
