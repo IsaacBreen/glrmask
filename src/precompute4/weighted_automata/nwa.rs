@@ -241,16 +241,16 @@ impl NWA {
 
     pub fn union(a: &NWA, b: &NWA) -> NWA {
         let mut a = a.clone();
-        NWAStates::union_in_place(&mut a.states, &b, &a.body);
+        a.body = NWAStates::union_in_place(&mut a.states, &b, &a.body);
         a
     }
 
     pub fn union_assign(&mut self, other: &NWA) {
-        NWAStates::union_in_place(&mut self.states, &other, &self.body);
+        self.body = NWAStates::union_in_place(&mut self.states, &other, &self.body);
     }
 
     pub fn concatenate_assign(&mut self, other: &NWA) {
-        NWAStates::concatenate_in_place(&mut self.states, &other, &self.body);
+        self.body = NWAStates::concatenate_in_place(&mut self.states, &other, &self.body);
     }
 
     pub fn from_dwa(dwa: &DWA) -> Self {
