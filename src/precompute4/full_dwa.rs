@@ -757,8 +757,7 @@ fn precompute_token_bvs_and_signatures(
                     let edge_bv: LLMTokenBV = w.clone().into();
                     let combined = &tokens & &edge_bv;
                     if !combined.is_empty() {
-                        let w_weight = Weight::from_rsb(edge_bv.inner.as_ref().clone());
-                        bundles_by_dest.entry(*v).or_default().insert(term, w_weight);
+                        *bundles_by_dest.entry(*v).or_default().entry(term).or_insert_with(Weight::zeros) |= w;
                     }
                 }
             }
@@ -766,8 +765,7 @@ fn precompute_token_bvs_and_signatures(
                 let edge_bv: LLMTokenBV = w.clone().into();
                 let combined = &tokens & &edge_bv;
                 if !combined.is_empty() {
-                    let w_weight = Weight::from_rsb(edge_bv.inner.as_ref().clone());
-                    bundles_by_dest.entry(*v).or_default().insert(None, w_weight);
+                    *bundles_by_dest.entry(*v).or_default().entry(None).or_insert_with(Weight::zeros) |= w;
                 }
             }
 
