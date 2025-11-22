@@ -337,8 +337,8 @@ impl U8Set {
         Self::from_match_fn(move |i| start <= i && i <= end)
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = u8> + '_ {
-        (0..=255).filter(move |&i| self.contains(i))
+    pub fn iter(&self) -> U8SetIter {
+        U8SetIter { x: self.x, y: self.y }
     }
 
     #[inline]
@@ -364,6 +364,29 @@ impl U8Set {
             x: !self.x,
             y: !self.y,
         }
+    }
+}
+
+pub struct U8SetIter {
+    x: u128,
+    y: u128,
+}
+
+impl Iterator for U8SetIter {
+    type Item = u8;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.x != 0 {
+            let t = self.x.trailing_zeros();
+            self.x &= !(1 << t);
+            return Some(t as u8);
+        }
+        if self.y != 0 {
+            let t = self.y.trailing_zeros();
+            self.y &= !(1 << t);
+            return Some((t as u8).wrapping_add(128));
+        }
+        None
     }
 }
 

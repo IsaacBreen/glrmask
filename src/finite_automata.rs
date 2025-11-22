@@ -3,7 +3,7 @@ use crate::datastructures::bitset2::BitSet;
 use crate::datastructures::frozenset::FrozenSet;
 use crate::datastructures::u8set::U8Set;
 use crate::json_serialization::{JSONConvertible, JSONNode};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::collections::BTreeMap as StdMap;
 use std::collections::HashMap;
 use std::fmt::{Debug, Display, Formatter};
@@ -23,9 +23,21 @@ pub struct NFAState {
     non_greedy_finalizers: BTreeSet<GroupID>,
 }
 
-#[derive(Clone, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq)]
 struct StateSet {
     words: Vec<u64>,
+}
+
+impl std::hash::Hash for StateSet {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.words.len().hash(state);
+        for (i, &w) in self.words.iter().enumerate() {
+            if w != 0 {
+                i.hash(state);
+                w.hash(state);
+            }
+        }
+    }
 }
 
 impl StateSet {
@@ -1368,25 +1380,85 @@ impl NFA {
         println!("-----------------");
     }
 
+    fn compute_equivalence_classes(&self) -> (Vec<u8>, usize, Vec<Vec<u8>>) {
+        let mut partitions = vec![U8Set::all()];
+        let mut seen_sets = HashSet::new();
+
+        for state in &self.states {
+            for (set, _) in &state.transitions {
+                if seen_sets.insert(*set) {
+                    let mut next_partitions = Vec::with_capacity(partitions.len() * 2);
+                    for p in partitions {
+                        let intersection = p.intersection(set);
+                        let difference = p.difference(set);
+                        if !intersection.is_empty() {
+                            next_partitions.push(intersection);
+                        }
+                        if !difference.is_empty() {
+                            next_partitions.push(difference);
+                        }
+                    }
+                    partitions = next_partitions;
+                }
+            }
+        }
+
+        let mut class_map = vec![0u8; 256];
+        let mut class_members = vec![Vec::new(); partitions.len()];
+
+        for (i, p) in partitions.iter().enumerate() {
+            for b in p.iter() {
+                class_map[b as usize] = i as u8;
+                class_members[i].push(b);
+            }
+        }
+
+        (class_map, partitions.len(), class_members)
+    }
+
     pub fn to_dfa(self) -> DFA {
         let start_time = std::time::Instant::now();
         let mut dfa_states: Vec<DFAState> = Vec::new();
+        // Use StateSet with sparse hashing
         let mut dfa_state_map: HashMap<StateSet, usize> = HashMap::new();
         let mut worklist: Vec<StateSet> = Vec::new();
 
         // Instrumentation
         let mut t_collect = std::time::Duration::ZERO;
         let mut t_process_inputs = std::time::Duration::ZERO;
-        let mut t_iter_bitset = std::time::Duration::ZERO; // Time spent finding bits in StateSet
-        let mut t_closure_bfs = std::time::Duration::ZERO; // Time spent traversing epsilons
-        let mut t_map_lookup = std::time::Duration::ZERO;  // Time spent in HashMap
+        let mut t_iter_bitset = std::time::Duration::ZERO;
+        let mut t_closure_bfs = std::time::Duration::ZERO;
+        let mut t_map_lookup = std::time::Duration::ZERO;
         let mut total_words_scanned: u64 = 0;
         let mut total_useful_words: u64 = 0;
 
-        // Shared buffers for an-the-fly closure computation
+        // Compute Input Equivalence Classes
+        let start_classes = std::time::Instant::now();
+        let (class_map, num_classes, class_members) = self.compute_equivalence_classes();
+        crate::debug!(4, "Computed {} input equivalence classes in {:.2?}", num_classes, start_classes.elapsed());
+
+        // Pre-process NFA transitions to use class IDs
+        // remapped_transitions[state_id] = list of (class_set, target_state)
+        // where class_set is a BitSet of class IDs.
+        // Since num_classes <= 256, we can use U8Set to store class IDs!
+        let mut remapped_transitions: Vec<Vec<(U8Set, usize)>> = Vec::with_capacity(self.states.len());
+        for state in &self.states {
+            let mut trans = Vec::with_capacity(state.transitions.len());
+            for (u8set, target) in &state.transitions {
+                let mut class_set = U8Set::none();
+                // We only need to check one representative from each class to see if it's in u8set.
+                // But iterating u8set is fast enough.
+                for b in u8set.iter() {
+                    class_set.insert(class_map[b as usize]);
+                }
+                trans.push((class_set, *target));
+            }
+            remapped_transitions.push(trans);
+        }
+
+        // Shared buffers
         let num_nfa_states = self.states.len();
         let mut stack = Vec::with_capacity(1024);
-        // Use StateSet as a reusable bitset for closure computation
         let mut closure_set = StateSet::new(num_nfa_states);
 
         // Compute start state closure
@@ -1421,11 +1493,12 @@ impl NFA {
 
         let mut max_subset_size = 0;
         let mut next_log_threshold = 20_000;
-        
-        // Reuseable structures for DFA construction
-        let mut transition_targets: Vec<StateSet> = (0..256).map(|_| StateSet::new(num_nfa_states)).collect();
-        let mut used_inputs: Vec<usize> = Vec::with_capacity(256);
-        let mut seen_input = [false; 256];
+
+        // Reusable structures
+        // transition_targets is indexed by CLASS ID now
+        let mut transition_targets: Vec<StateSet> = (0..num_classes).map(|_| StateSet::new(num_nfa_states)).collect();
+        let mut used_classes: Vec<usize> = Vec::with_capacity(num_classes);
+        let mut seen_class = vec![false; num_classes];
 
         while let Some(current_set) = worklist.pop() {
             let current_subset_len = current_set.len();
@@ -1444,12 +1517,13 @@ impl NFA {
             // 1. Populate transition_targets for all inputs (COLLECT PHASE)
             let start_collect = std::time::Instant::now();
             for state in current_set.iter() {
-                for (u8set, next_state) in &self.states[state].transitions {
-                    for b in u8set.iter() {
-                        let idx = b as usize;
-                        if !seen_input[idx] {
-                            seen_input[idx] = true;
-                            used_inputs.push(idx);
+                // Use remapped transitions
+                for (class_set, next_state) in &remapped_transitions[state] {
+                    for class_id in class_set.iter() {
+                        let idx = class_id as usize;
+                        if !seen_class[idx] {
+                            seen_class[idx] = true;
+                            used_classes.push(idx);
                         }
                         transition_targets[idx].insert(*next_state);
                     }
@@ -1460,69 +1534,68 @@ impl NFA {
             // 2. Process inputs (PROCESS PHASE)
             let start_process = std::time::Instant::now();
             let mut local_cache: HashMap<&StateSet, usize> = HashMap::new();
+            
+            // Collect all transitions for this state to bulk insert later
+            let mut dfa_transitions_vec: Vec<(u8, usize)> = Vec::new();
 
-            for &idx in &used_inputs {
-                let target_set = &transition_targets[idx];
-                if let Some(&next_state_idx) = local_cache.get(target_set) {
-                     dfa_states[current_dfa_state].transitions.insert(idx as u8, next_state_idx);
-                     continue;
-                }
-
-
-                // Compute closure
-                closure_set.clear(); // Reusing global closure_set
+            for &class_id in &used_classes {
+                let target_set = &transition_targets[class_id];
                 
-                // TIMING: Bitset Iteration
-                let start_iter = std::time::Instant::now();
-                // Inline the iter logic to measure sparsity stats
-                {
-                    let mut w_idx = 0;
-                    let words = &target_set.words;
-                    while w_idx < words.len() {
-                        let mut w = words[w_idx];
-                        total_words_scanned += 1;
-                        if w != 0 {
-                            total_useful_words += 1;
-                            while w != 0 {
-                                let t = w.trailing_zeros();
-                                w &= !(1u64 << t);
-                                let next_state = w_idx * 64 + t as usize;
-                                
-                                if closure_set.insert(next_state) {
-                                    stack.push(next_state);
+                let next_dfa_state_idx = if let Some(&idx) = local_cache.get(target_set) {
+                    idx
+                } else {
+                    // Compute closure
+                    closure_set.clear();
+                    
+                    // TIMING: Bitset Iteration
+                    let start_iter = std::time::Instant::now();
+                    {
+                        let mut w_idx = 0;
+                        let words = &target_set.words;
+                        while w_idx < words.len() {
+                            let mut w = words[w_idx];
+                            total_words_scanned += 1;
+                            if w != 0 {
+                                total_useful_words += 1;
+                                while w != 0 {
+                                    let t = w.trailing_zeros();
+                                    w &= !(1u64 << t);
+                                    let next_state = w_idx * 64 + t as usize;
+                                    
+                                    if closure_set.insert(next_state) {
+                                        stack.push(next_state);
+                                    }
                                 }
                             }
-                        }
-                        w_idx += 1;
-                    }
-                }
-                t_iter_bitset += start_iter.elapsed();
-
-                // TIMING: BFS Closure
-                let start_bfs = std::time::Instant::now();
-                while let Some(u) = stack.pop() {
-                    for &v in &self.states[u].epsilon_transitions {
-                        if closure_set.insert(v) {
-                            stack.push(v);
+                            w_idx += 1;
                         }
                     }
-                }
-                t_closure_bfs += start_bfs.elapsed();
+                    t_iter_bitset += start_iter.elapsed();
 
-                // Get/Create DFA state
-                let start_map = std::time::Instant::now();
-                let next_dfa_state =
-                    if let Some(&existing_state) = dfa_state_map.get(&closure_set) { // closure_set is StateSet
+                    // TIMING: BFS Closure
+                    let start_bfs = std::time::Instant::now();
+                    while let Some(u) = stack.pop() {
+                        for &v in &self.states[u].epsilon_transitions {
+                            if closure_set.insert(v) {
+                                stack.push(v);
+                            }
+                        }
+                    }
+                    t_closure_bfs += start_bfs.elapsed();
+
+                    // Get/Create DFA state
+                    let start_map = std::time::Instant::now();
+                    
+                    let next_state_idx = if let Some(&existing_state) = dfa_state_map.get(&closure_set) {
                         existing_state
                     } else {
                         let new_state_index = dfa_states.len();
-                        let stored_set = closure_set.clone();
-                        dfa_state_map.insert(stored_set.clone(), new_state_index);
-                        worklist.push(stored_set);
+                        dfa_state_map.insert(closure_set.clone(), new_state_index);
+                        worklist.push(closure_set.clone());
 
                         let mut new_finalizers = BTreeSet::new();
                         let mut new_non_greedy_finalizers = BTreeSet::new();
-                        for state in closure_set.iter() { // closure_set is StateSet
+                        for state in closure_set.iter() {
                             new_finalizers.extend(self.states[state].finalizers.iter().cloned());
                             new_non_greedy_finalizers
                                 .extend(self.states[state].non_greedy_finalizers.iter().cloned());
@@ -1537,22 +1610,28 @@ impl NFA {
 
                         new_state_index
                     };
-                t_map_lookup += start_map.elapsed();
+                    t_map_lookup += start_map.elapsed();
+                    
+                    local_cache.insert(&transition_targets[class_id], next_state_idx);
+                    next_state_idx
+                };
 
-                // Since we cannot store reference to transition_targets[idx] in local_cache easily 
-                // (borrow checker issues if we iterate used_inputs), we can just re-lookup or clone.
-                // To keep local_cache valid, we need owned keys or keys that live long enough.
-                // transition_targets lives outside the loop.
-                local_cache.insert(&transition_targets[idx], next_dfa_state);
-                dfa_states[current_dfa_state].transitions.insert(idx as u8, next_dfa_state);
+                // Add transitions for all bytes in this class
+                for &b in &class_members[class_id] {
+                    dfa_transitions_vec.push((b, next_dfa_state_idx));
+                }
             }
             t_process_inputs += start_process.elapsed();
+            
+            // Bulk insert transitions
+            dfa_transitions_vec.sort_unstable_by_key(|k| k.0);
+            dfa_states[current_dfa_state].transitions = CharTransitions::from_sorted_entries(dfa_transitions_vec);
 
-            for &idx in &used_inputs {
-                 seen_input[idx] = false;
+            for &idx in &used_classes {
+                 seen_class[idx] = false;
                  transition_targets[idx].clear();
             }
-            used_inputs.clear();
+            used_classes.clear();
         }
 
         println!("DFA main loop complete. Total states: {}, Max subset size: {}, Time: {:.2?}", dfa_states.len(), max_subset_size, start_time.elapsed());

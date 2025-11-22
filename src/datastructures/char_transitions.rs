@@ -20,6 +20,11 @@ impl<T> CharTransitions<T> {
         Self { entries: Vec::new() }
     }
 
+    /// Construct from a vector of entries that is already sorted by key.
+    pub fn from_sorted_entries(entries: Vec<(u8, T)>) -> Self {
+        Self { entries }
+    }
+
     /// Number of key-value pairs.
     pub fn len(&self) -> usize {
         self.entries.len()
