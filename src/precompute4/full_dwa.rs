@@ -8,7 +8,7 @@ use kdam::{tqdm, BarExt};
 
 use crate::constraint::{LLMTokenBV, PrecomputeNode1Index, Trie1GodWrapper};
 use crate::datastructures::trie::Trie2Index;
-use crate::glr::parser::GLRParser;
+use crate::glr::parser::{ExpectElse, GLRParser};
 use crate::precompute4::nwa_optimizations::{prune_continuations_from_final_states, simplify_default_transitions};
 use crate::precompute4::resolve_negatives::{apply_cancellations, apply_finality_fixpoint, remove_negative_transitions};
 use crate::precompute4::template_nwa::{build_ignore_terminal_dwa, build_template_dwas};
@@ -661,7 +661,7 @@ pub fn precompute4(
 
             for (right_body, terminal_map) in nwa_bodies_map {
                 let (signature, concrete_weights) = canonicalize_bundle(terminal_map);
-                let template_nwa = template_cache.get(&signature).expect("Template must exist");
+                let template_nwa = template_cache.get(&signature).expect_else(|| format!("Template must exist for signature {:?}", signature));
 
                 let mut states = states_arena.borrow_mut();
                 let (left_body_start, remap) =
