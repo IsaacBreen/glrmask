@@ -28,6 +28,12 @@ impl SimplifyRustfstConfig {
     fn with_rm_epsilon(mut self, val: bool) -> Self { self.rm_epsilon = val; self }
 }
 
+impl NWA {
+    pub fn determinize_to_dwa_with_rustfst(&self) -> DWA { determinize_nwa_to_dwa(self) }
+    pub fn simplify_rustfst(&mut self) { self.simplify(); }
+    pub fn simplify_rustfst_with_config(&mut self, _config: SimplifyRustfstConfig) { self.simplify(); }
+}
+
 pub use crate::precompute4::template_nwa::FullDWABuildError;
 
 pub type Precomputed4 = DWA;
@@ -504,7 +510,7 @@ fn precompute_token_bvs_and_signatures(reversed_nwa: &NWA, traversal_data: &NwaT
 }
 
 fn resolve_negatives_and_optimize_and_determinize(parser: &GLRParser, mut combined_nwa: NWA) -> DWA {
-    combined_nwa.simplify();
+    combined_nwa.simplify_rustfst();
     prune_continuations_from_final_states(&mut combined_nwa);
     simplify_remove_epsilon(&mut combined_nwa);
     simplify_default_transitions(&mut combined_nwa);
@@ -513,7 +519,7 @@ fn resolve_negatives_and_optimize_and_determinize(parser: &GLRParser, mut combin
     combined_nwa.simplify();
     simplify_remove_epsilon(&mut combined_nwa);
     combined_nwa = NWA::from_dwa(&combined_nwa.determinize_to_dwa2());
-    combined_nwa.simplify();
+    combined_nwa.simplify_rustfst();
     let mut final_dwa = combined_nwa.determinize_to_dwa();
     final_dwa.minimize_with_rustfst();
     final_dwa
@@ -558,5 +564,5 @@ fn instantiate_nwa_template(template: &NWA, ordered_weights: &[Weight]) -> NWA {
 }
 
 fn simplify_remove_epsilon(nwa: &mut NWA) {
-    nwa.simplify();
+    nwa.simplify_rustfst_with_config(SimplifyRustfstConfig::default().with_rm_epsilon(true));
 }
