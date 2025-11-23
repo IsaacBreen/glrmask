@@ -264,7 +264,7 @@ impl<'r> Precomputer1<'r> {
             }
         }
 
-        let mut signatures: Vec<(Vec<Option<(usize, Weight)>>, usize)> = Vec::new();
+        let mut signatures: Vec<(Vec<Option<(usize, Weight)>>, Vec<Label>)> = Vec::new();
         for label in labels {
             let mut sig = Vec::with_capacity(dwa.states.len());
             for state in &dwa.states.0 {
@@ -272,26 +272,47 @@ impl<'r> Precomputer1<'r> {
             }
 
             let mut found = false;
-            for (existing_sig, count) in &mut signatures {
+            for (existing_sig, collected_labels) in &mut signatures {
                 if existing_sig == &sig {
-                    *count += 1;
+                    collected_labels.push(label);
                     found = true;
                     break;
                 }
             }
             if !found {
-                signatures.push((sig, 1));
+                signatures.push((sig, vec![label]));
             }
         }
 
         let mut stats: HashMap<usize, usize> = HashMap::new();
-        for (_, count) in signatures {
-            *stats.entry(count).or_insert(0) += 1;
+        for (_, collected_labels) in &signatures {
+            *stats.entry(collected_labels.len()).or_insert(0) += 1;
         }
 
         crate::debug!(3, "Equivalent tokenizer state symbols in DWA (stats): {:?}", stats);
         if stats.len() != 1 || stats.values().next() != Some(&1) {
-            crate::debug!(3, "Equivalent tokenizer state symbols in DWA (stats): {:?}", stats);
+            crate::debug!(3, "Equivalence classes:");
+            for (sig_idx, (_, collected_labels)) in signatures.iter().enumerate() {
+                if collected_labels.len() > 1 {
+                    let descriptions: Vec<String> = collected_labels
+                        .iter()
+                        .map(|&l| {
+                            if l >= self.terminals_count as Label {
+                                format!("TSID({})", l - self.terminals_count as Label)
+                            } else {
+                                format!("Terminal({})", l)
+                            }
+                        })
+                        .collect();
+                    crate::debug!(
+                        3,
+                        "  Class {}: {} symbols: {:?}",
+                        sig_idx,
+                        collected_labels.len(),
+                        descriptions
+                    );
+                }
+            }
             assert_eq!(stats.len(), 1, "Expected only one class size (all unique)");
             assert_eq!(stats.keys().next(), Some(&1), "Expected only one state per class (unique behavior)");
         }
