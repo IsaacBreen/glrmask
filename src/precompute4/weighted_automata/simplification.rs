@@ -142,6 +142,89 @@ const DWA_PASS_ORDERINGS: &[&[DwaPass]] = &[
 ];
 
 impl DWA {
+    fn compute_future_weights(&self) -> Vec<Weight> {
+        let n = self.states.len();
+        let mut potentials = vec![Weight::zeros(); n];
+        // Heuristic: reverse topological order is better for convergence,
+        // but since we have cycles, we just use reverse index order.
+        let rev_order: Vec<usize> = (0..n).rev().collect();
+
+        let mut changed = true;
+        let mut iter = 0;
+        while changed {
+            changed = false;
+            iter += 1;
+            for &s in &rev_order {
+                let st = &self.states[s];
+                let mut new_total = st.final_weight.clone().unwrap_or_else(Weight::zeros);
+
+                for (&label, &target) in &st.transitions {
+                    if target < n {
+                        // w(s, a, t) & V[t]
+                        let w = st.trans_weights.get(&label).cloned().unwrap_or_else(Weight::all);
+                        let term = &w & &potentials[target];
+                        new_total |= &term;
+                    }
+                }
+
+                if new_total != potentials[s] {
+                    potentials[s] = new_total;
+                    changed = true;
+                }
+            }
+            // Safety break for cycles that might not converge quickly (though they should)
+            if iter > 2000 {
+                break;
+            }
+        }
+        potentials
+    }
+
+    fn canonicalize_weights(&mut self) -> bool {
+        let potentials = self.compute_future_weights();
+        let n = self.states.len();
+        let mut changed = false;
+
+        for s in 0..n {
+            let pot_s = &potentials[s];
+            let pot_s_c = !pot_s; // Complement
+
+            let st = &mut self.states[s];
+
+            // Update final weight
+            // fw' = fw U pot_s^C
+            if let Some(fw) = &mut st.final_weight {
+                let new_fw = &*fw | &pot_s_c;
+                if *fw != new_fw {
+                    *fw = new_fw;
+                    changed = true;
+                }
+            }
+
+            // Update transition weights
+            // w'(s, a, t) = (w & pot_t) U pot_s^C
+            for (&label, &target) in &st.transitions {
+                if target < n {
+                    if let Some(w) = st.trans_weights.get_mut(&label) {
+                        let pot_t = &potentials[target];
+                        let new_w = (&*w & pot_t) | &pot_s_c;
+                        if *w != new_w {
+                            *w = new_w;
+                            changed = true;
+                        }
+                    }
+                }
+            }
+
+            // Set state weight
+            if st.state_weight.as_ref() != Some(pot_s) {
+                st.state_weight = Some(pot_s.clone());
+                changed = true;
+            }
+        }
+        changed
+    }
+
     pub fn simplify(&mut self) {
         if self.states.len() == 0 {
             return;
@@ -297,41 +380,42 @@ impl DWA {
             crate::debug!(6, "[DWA::simplify] Starting simplification. Initial stats: {}", self.stats());
         }
         let mut total_changed = false;
-        let ordering = &[
-            DwaPass::PruneDeadEnds,
-            DwaPass::Minimize,
-            DwaPass::PushWeights,
-            DwaPass::PruneUnreachable,
-        ];
-        let mut last_changing_passes: Vec<DwaPass> = vec![];
+        
+        // New simplification pipeline:
+        // 1. Prune dead ends (reduce graph size)
+        // 2. Canonicalize weights (Weight Pushing) - this sets state_weights
+        // 3. Push weights to incoming transitions - this clears state_weights and updates edge weights
+        // 4. Prune unreachable (cleanup)
+        // 5. Minimize (Partition Refinement)
+        
+        // We loop a few times because minimization might merge states, creating new opportunities.
+        // But usually one pass of Canonicalize + Minimize is enough for the heavy lifting.
+        
         let mut converged = false;
-
-        for _ in 0..MAX_OPTIMIZE_ITERATIONS {
-            let mut current_changing_passes = vec![];
-            let mut changed_in_iteration = false;
-            for &pass in ordering {
-                let pass_changed = match pass {
-                    DwaPass::PruneUnreachable => self.prune_unreachable(),
-                    DwaPass::PruneDeadEnds => self.prune_dead_ends(),
-                    DwaPass::PushWeights => self.push_weights_into_transitions_and_finals(),
-                    DwaPass::Minimize => self.minimize_states(),
-                };
-                if pass_changed {
-                    current_changing_passes.push(pass);
-                }
-                changed_in_iteration |= pass_changed;
-            }
-
-            total_changed |= changed_in_iteration;
-            if !changed_in_iteration {
+        for _ in 0..10 { // Reduced iterations as this is more effective
+            let mut changed = false;
+            
+            changed |= self.prune_dead_ends();
+            
+            // Weight Pushing
+            let canon_changed = self.canonicalize_weights();
+            let push_changed = self.push_weights_into_transitions_and_finals();
+            changed |= canon_changed || push_changed;
+            
+            changed |= self.prune_unreachable();
+            
+            // Minimization
+            changed |= self.minimize_states();
+            
+            total_changed |= changed;
+            if !changed {
                 converged = true;
                 break;
             }
-            last_changing_passes = current_changing_passes;
         }
 
         if !converged {
-            crate::debug!(3, "DWA simplification did not converge after {} iterations. Still changing: {:?}", MAX_OPTIMIZE_ITERATIONS, last_changing_passes);
+            crate::debug!(3, "DWA simplification did not fully converge.");
         }
 
         if self.states.len() > 1000 {
