@@ -113,6 +113,7 @@ enum DwaPass {
     PruneUnreachable,
     PruneDeadEnds,
     PushWeights,
+    PushWeightsToInitial,
     Minimize,
 }
 
@@ -138,7 +139,7 @@ const DWA_PASS_ORDERINGS: &[&[DwaPass]] = &[
     &[DwaPass::Minimize, DwaPass::PruneDeadEnds, DwaPass::PruneUnreachable, DwaPass::PushWeights],
     &[DwaPass::Minimize, DwaPass::PruneDeadEnds, DwaPass::PushWeights, DwaPass::PruneUnreachable],
     &[DwaPass::Minimize, DwaPass::PushWeights, DwaPass::PruneUnreachable, DwaPass::PruneDeadEnds],
-    &[DwaPass::Minimize, DwaPass::PushWeights, DwaPass::PruneDeadEnds, DwaPass::PruneUnreachable],
+    &[DwaPass::Minimize, DwaPass::PushWeights, DwaPass::PruneDeadEnds, DwaPass::PruneUnreachable, DwaPass::PushWeightsToInitial],
 ];
 
 impl DWA {
@@ -202,6 +203,7 @@ impl DWA {
                     DwaPass::PruneUnreachable => self.prune_unreachable(),
                     DwaPass::PruneDeadEnds => self.prune_dead_ends(),
                     DwaPass::PushWeights => self.push_weights_into_transitions_and_finals(),
+                    DwaPass::PushWeightsToInitial => self.push_weights_to_initial(),
                     DwaPass::Minimize => unreachable!(),
                 };
                 changed_in_iteration |= pass_changed;
@@ -246,6 +248,7 @@ impl DWA {
                         DwaPass::PruneUnreachable => dwa.prune_unreachable(),
                         DwaPass::PruneDeadEnds => dwa.prune_dead_ends(),
                         DwaPass::PushWeights => dwa.push_weights_into_transitions_and_finals(),
+                        DwaPass::PushWeightsToInitial => dwa.push_weights_to_initial(),
                         DwaPass::Minimize => dwa.minimize_states(),
                     };
                     if changed {
@@ -301,6 +304,7 @@ impl DWA {
             DwaPass::PruneDeadEnds,
             DwaPass::Minimize,
             DwaPass::PushWeights,
+            DwaPass::PushWeightsToInitial,
             DwaPass::PruneUnreachable,
         ];
         let mut last_changing_passes: Vec<DwaPass> = vec![];
@@ -314,6 +318,7 @@ impl DWA {
                     DwaPass::PruneUnreachable => self.prune_unreachable(),
                     DwaPass::PruneDeadEnds => self.prune_dead_ends(),
                     DwaPass::PushWeights => self.push_weights_into_transitions_and_finals(),
+                    DwaPass::PushWeightsToInitial => self.push_weights_to_initial(),
                     DwaPass::Minimize => self.minimize_states(),
                 };
                 if pass_changed {
@@ -405,6 +410,105 @@ impl DWA {
             }
         }
 
+        changed
+    }
+
+    fn push_weights_to_initial(&mut self) -> bool {
+        let n = self.states.len();
+        if n == 0 { return false; }
+
+        // 1. Compute backward distance (accumulated weight to final)
+        let mut d = vec![Weight::zeros(); n];
+        let mut q = VecDeque::new();
+        let mut in_queue = vec![false; n];
+
+        // Initialize with final weights
+        for i in 0..n {
+            if let Some(fw) = &self.states[i].final_weight {
+                if !fw.is_empty() {
+                    d[i] = fw.clone();
+                    q.push_back(i);
+                    in_queue[i] = true;
+                }
+            }
+        }
+
+        // Build reverse graph for propagation
+        let mut preds: Vec<Vec<(StateID, Label, Weight)>> = vec![Vec::new(); n];
+        for (u, st) in self.states.0.iter().enumerate() {
+            for (&label, &v) in &st.transitions {
+                if v < n {
+                    let w = st.trans_weights.get(&label).cloned().unwrap_or_else(Weight::all);
+                    preds[v].push((u, label, w));
+                }
+            }
+        }
+
+        while let Some(v) = q.pop_front() {
+            in_queue[v] = false;
+            let d_v = d[v].clone();
+            if d_v.is_empty() { continue; }
+
+            for (u, label, w) in &preds[v] {
+                // d[u] += w * d[v]
+                let new_d = w & &d_v;
+                if !new_d.is_subset_of(&d[*u]) {
+                    d[*u] |= &new_d;
+                    if !in_queue[*u] {
+                        q.push_back(*u);
+                        in_queue[*u] = true;
+                    }
+                }
+            }
+        }
+
+        // 2. Reweight
+        // w'(u->v) = d[u]^-1 * w(u->v) * d[v]
+        // final'(u) = d[u]^-1 * final(u)
+        // start_weight' = d[start] (handled by pushing to initial state if needed, but here we just modify graph)
+        // Wait, if we push to initial, the initial state effectively "absorbs" d[start].
+        // But DWA doesn't have "initial weight" separate from transitions.
+        // However, if we reweight correctly, the "weight" at start is implicit.
+        // Actually, we can't fully push to initial if there's no place to store the initial weight.
+        // But we can push as much as possible.
+        // The reweighting formula ensures that path weights are preserved relative to d[start].
+        // The "lost" weight d[start] is effectively extracted.
+        // Since we want to minimize, extracting common weight is good.
+
+        let mut changed = false;
+        for (u, st) in self.states.0.iter_mut().enumerate() {
+            let d_u = &d[u];
+            let inv_d_u = d_u.complement();
+
+            // Transitions
+            for (&label, &v) in &st.transitions {
+                if v < n {
+                    let d_v = &d[v];
+                    if let Some(w) = st.trans_weights.get_mut(&label) {
+                        // w' = (w & d[v]) | !d[u]
+                        // Note: d[u]^-1 * (w * d[v])
+                        let new_w = (&*w & d_v) | &inv_d_u;
+                        if *w != new_w {
+                            *w = new_w;
+                            changed = true;
+                        }
+                    }
+                }
+            }
+            
+            // Final weights
+            if let Some(fw) = &mut st.final_weight {
+                // fw' = fw * d[u]^-1? No.
+                // Path u->final has weight fw.
+                // We want fw' such that d[u] * fw' = fw.
+                // fw' = d[u]^-1 * fw.
+                let new_fw = &*fw | &inv_d_u;
+                if *fw != new_fw {
+                    *fw = new_fw;
+                    changed = true;
+                }
+            }
+        }
         changed
     }
 
@@ -827,6 +931,7 @@ enum NwaPass {
     PruneUnreachable,
     PruneDeadEnds,
     PushFinalWeights,
+    PushWeightsToInitial,
     CompressTransitions,
     Minimize,
 }
@@ -841,7 +946,7 @@ const NWA_PASS_ORDERINGS: &[&[NwaPass]] = &[
     &[NwaPass::PruneUnreachable, NwaPass::PushFinalWeights, NwaPass::Minimize, NwaPass::CompressTransitions, NwaPass::PruneDeadEnds],
     &[NwaPass::CompressTransitions, NwaPass::PushFinalWeights, NwaPass::Minimize, NwaPass::PruneUnreachable, NwaPass::PruneDeadEnds],
     &[NwaPass::PushFinalWeights, NwaPass::CompressTransitions, NwaPass::Minimize, NwaPass::PruneUnreachable, NwaPass::PruneDeadEnds],
-    &[NwaPass::PruneUnreachable, NwaPass::PruneDeadEnds, NwaPass::CompressTransitions, NwaPass::PushFinalWeights, NwaPass::Minimize],
+    &[NwaPass::PruneUnreachable, NwaPass::PruneDeadEnds, NwaPass::CompressTransitions, NwaPass::PushFinalWeights, NwaPass::PushWeightsToInitial, NwaPass::Minimize],
 ];
 
 impl NWA {
@@ -921,6 +1026,7 @@ impl NWA {
                         NwaPass::PruneUnreachable => nwa.prune_unreachable(),
                         NwaPass::PruneDeadEnds => nwa.prune_dead_ends(),
                         NwaPass::PushFinalWeights => nwa.push_final_weights_along_epsilons(),
+                        NwaPass::PushWeightsToInitial => nwa.push_weights_to_initial(),
                         NwaPass::CompressTransitions => nwa.compress_transitions(),
                         NwaPass::Minimize => nwa.minimize_states(),
                     };
@@ -976,6 +1082,8 @@ impl NWA {
             NwaPass::PruneUnreachable,
             NwaPass::CompressTransitions,
             NwaPass::PushFinalWeights,
+            NwaPass::PushFinalWeights,
+            NwaPass::PushWeightsToInitial,
             NwaPass::PruneDeadEnds,
             NwaPass::Minimize,
         ];
@@ -990,6 +1098,7 @@ impl NWA {
                     NwaPass::PruneUnreachable => self.prune_unreachable(),
                     NwaPass::PruneDeadEnds => self.prune_dead_ends(),
                     NwaPass::PushFinalWeights => self.push_final_weights_along_epsilons(),
+                    NwaPass::PushWeightsToInitial => self.push_weights_to_initial(),
                     NwaPass::CompressTransitions => self.compress_transitions(),
                     NwaPass::Minimize => self.minimize_states(),
                 };
@@ -1142,6 +1251,107 @@ impl NWA {
             }
         }
 
+        changed
+    }
+
+    fn push_weights_to_initial(&mut self) -> bool {
+        let n = self.states.len();
+        if n == 0 { return false; }
+
+        // 1. Compute backward distance (accumulated weight to final)
+        let mut d = vec![Weight::zeros(); n];
+        let mut q = VecDeque::new();
+        let mut in_queue = vec![false; n];
+
+        // Initialize with final weights
+        for i in 0..n {
+            if let Some(fw) = &self.states[i].final_weight {
+                if !fw.is_empty() {
+                    d[i] = fw.clone();
+                    q.push_back(i);
+                    in_queue[i] = true;
+                }
+            }
+        }
+
+        // Build reverse graph
+        // For NWA, we have transitions and epsilons.
+        let mut preds: Vec<Vec<(NWAStateID, Option<Label>, Weight)>> = vec![Vec::new(); n];
+        for (u, st) in self.states.0.iter().enumerate() {
+            // Epsilons
+            for &(v, ref w) in &st.epsilons {
+                if v < n {
+                    preds[v].push((u, None, w.clone()));
+                }
+            }
+            // Labeled
+            for (&lbl, targets) in &st.transitions {
+                for &(v, ref w) in targets {
+                    if v < n {
+                        preds[v].push((u, Some(lbl), w.clone()));
+                    }
+                }
+            }
+        }
+
+        while let Some(v) = q.pop_front() {
+            in_queue[v] = false;
+            let d_v = d[v].clone();
+            if d_v.is_empty() { continue; }
+
+            for (u, _, w) in &preds[v] {
+                // d[u] += w * d[v]
+                let new_d = w & &d_v;
+                if !new_d.is_subset_of(&d[*u]) {
+                    d[*u] |= &new_d;
+                    if !in_queue[*u] {
+                        q.push_back(*u);
+                        in_queue[*u] = true;
+                    }
+                }
+            }
+        }
+
+        // 2. Reweight
+        let mut changed = false;
+        for (u, st) in self.states.0.iter_mut().enumerate() {
+            let d_u = &d[u];
+            let inv_d_u = d_u.complement();
+
+            // Epsilons
+            for (v, w) in &mut st.epsilons {
+                if *v < n {
+                    let d_v = &d[*v];
+                    // w' = (w & d[v]) | !d[u]
+                    let new_w = (&*w & d_v) | &inv_d_u;
+                    if *w != new_w {
+                        *w = new_w;
+                        changed = true;
+                    }
+                }
+            }
+            // Labeled
+            for targets in st.transitions.values_mut() {
+                for (v, w) in targets {
+                    if *v < n {
+                        let d_v = &d[*v];
+                        let new_w = (&*w & d_v) | &inv_d_u;
+                        if *w != new_w {
+                            *w = new_w;
+                            changed = true;
+                        }
+                    }
+                }
+            }
+            // Final weights
+            if let Some(fw) = &mut st.final_weight {
+                let new_fw = &*fw | &inv_d_u;
+                if *fw != new_fw {
+                    *fw = new_fw;
+                    changed = true;
+                }
+            }
+        }
         changed
     }
 
