@@ -221,6 +221,25 @@ impl<'r> Precomputer1<'r> {
             }
         }
 
+        // Get rid of all symbols and weights on edges and print it to show the topology.
+        let mut nwa2 = NWA::new_empty();
+        nwa2.body.start_states = vec![dwa.body.start_state];
+        for _ in 0..dwa.states.len() {
+            nwa2.add_state();
+        }
+        for (src, s) in dwa.states.0.iter().enumerate() {
+            for (&label, &target) in &s.transitions {
+                nwa2.add_transition(src, 0, target, Weight::all()).unwrap();
+            }
+        }
+        nwa2.simplify();
+        dwa = nwa2.determinize();
+        dwa.simplify();
+        println!("After removing symbols and weights on edges, DWA has {} states and {} transitions.", dwa.states.len(), dwa.states.num_transitions());
+        if dwa.states.len() < 50 {
+            println!("{}", dwa);
+        }
+
         dwa
     }
 
