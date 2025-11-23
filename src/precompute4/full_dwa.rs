@@ -297,6 +297,18 @@ pub fn precompute4(parser: &GLRParser, input_nwa: &NWA) -> DWA {
     let (node_tokens, mut unique_signatures) = precompute_token_bvs_and_signatures(&reversed_nwa, &traversal_data, initial_values_bv);
     unique_signatures.insert(vec![vec![None]]);
     crate::debug!(3, "Pass 1: Tokens & Signatures ({} sigs, {:.2?})", unique_signatures.len(), start_pass1.elapsed());
+    let mut unique_term_ids_in_sigs = BTreeSet::new();
+    for sig in &unique_signatures {
+        for terms in sig {
+            for term in terms {
+                if let Some(term_id) = term {
+                    unique_term_ids_in_sigs.insert(term_id.0);
+                }
+            }
+        }
+    }
+    println!("Number of unique terminals in signatures: {}", unique_term_ids_in_sigs.len());
+    println!("Unique terminals in signatures: {:?}", crate::constraint::TerminalBV::from_iter(unique_term_ids_in_sigs.iter().map(|&id| id)));
 
     let mut template_cache = HashMap::new();
 
