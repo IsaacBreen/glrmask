@@ -31,7 +31,7 @@ pub struct NWAState {
     pub epsilons: Vec<(NWAStateID, Weight)>,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NWAStates(pub Vec<NWAState>);
 
 impl NWAStates {
@@ -170,7 +170,7 @@ impl Display for NWAStats {
     }
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NWA {
     pub states: NWAStates,
     pub body: NWABody,
