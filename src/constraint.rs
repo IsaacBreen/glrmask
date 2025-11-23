@@ -10,6 +10,7 @@ use std::collections::BTreeMap as StdMap;
 use bimap::BiBTreeMap;
 use range_set_blaze::RangeSetBlaze;
 use rayon::prelude::*;
+use rustc_hash::FxHashMap;
 
 use crate::{
     datastructures::{
@@ -729,11 +730,12 @@ impl GrammarConstraint {
             current_states: Vec<(u32, Vec<u32>)>,
             dfa: &FastDFA,
             num_terminals: usize,
-            out_matches_vec: &mut [Option<LLMTokenBV>],
+            out_matches: &mut FxHashMap<usize, LLMTokenBV>,
         ) {
             for (edge_bytes, child) in node.iter_children() {
                 let reachable_bv: LLMTokenBV = child.reachable_token_ids().into();
-                let mut next_grouped_map: HashMap<u32, Vec<u32>> = HashMap::new();
+                // Use FxHashMap for internal grouping as well for speed
+                let mut next_grouped_map: FxHashMap<u32, Vec<u32>> = FxHashMap::default();
 
                 for (start, sources) in &current_states {
                     let mut curr = *start;
@@ -765,9 +767,13 @@ impl GrammarConstraint {
                                 let base_idx = (src as usize) * num_terminals;
                                 for &tid in &triggered_terminals {
                                     let idx = base_idx + (tid.0 as usize);
-                                    match &mut out_matches_vec[idx] {
-                                        Some(existing) => existing.union_with(&reachable_bv),
-                                        None => out_matches_vec[idx] = Some(reachable_bv.clone()),
+                                    match out_matches.entry(idx) {
+                                        std::collections::hash_map::Entry::Occupied(mut e) => {
+                                            e.get_mut().union_with(&reachable_bv);
+                                        }
+                                        std::collections::hash_map::Entry::Vacant(e) => {
+                                            e.insert(reachable_bv.clone());
+                                        }
                                     }
                                 }
                             }
@@ -786,7 +792,7 @@ impl GrammarConstraint {
                         next_grouped,
                         dfa,
                         num_terminals,
-                        out_matches_vec,
+                        out_matches,
                     );
                 }
             }
@@ -816,28 +822,43 @@ impl GrammarConstraint {
         };
 
         let num_terminals = max_terminal_val + 1;
-        let matches_vec_len = num_states * num_terminals;
 
-        // Group initial states by current state (identity mapping at root)
-        let mut initial_states: Vec<(u32, Vec<u32>)> = Vec::with_capacity(num_states);
-        for i in 0..num_states {
-            initial_states.push((i as u32, vec![i as u32]));
+        // Precompute states that have transitions for each byte.
+        // This filters the initial loop for each root edge significantly.
+        let mut states_by_first_byte = vec![Vec::new(); 256];
+        for state_idx in 0..num_states {
+            let s_base = state_idx * 256;
+            for b in 0..256 {
+                if transitions[s_base + b] != u32::MAX {
+                    states_by_first_byte[b].push(state_idx as u32);
+                }
+            }
         }
 
         // Parallel processing of root children
         let root_children: Vec<_> = vocab_root.iter_children().collect();
-        let final_matches_vec = root_children
+        let final_matches: FxHashMap<usize, LLMTokenBV> = root_children
             .par_iter()
-            .map(|(edge_bytes, child_node)| {
-                let mut local_matches_vec: Vec<Option<LLMTokenBV>> = vec![None; matches_vec_len];
+            .fold(
+                || FxHashMap::default(),
+                |mut local_matches, (edge_bytes, child_node)| {
+                let first_byte = edge_bytes[0];
+                let relevant_states = &states_by_first_byte[first_byte as usize];
+
+                if relevant_states.is_empty() {
+                    return local_matches;
+                }
 
                 // Manually process the first edge to bootstrap recursion
-                let mut next_grouped_map: HashMap<u32, Vec<u32>> = HashMap::new();
+                let mut next_grouped_map: FxHashMap<u32, Vec<u32>> = FxHashMap::default();
                 let reachable_bv: LLMTokenBV =
                     child_node.reachable_token_ids().into();
 
-                for (start, sources) in &initial_states {
-                    let mut curr = *start;
+                // Iterate only relevant states
+                for &start_state in relevant_states {
+                    // At root, source is just the state itself.
+                    // We simulate a "group" of [start_state].
+                    let mut curr = start_state;
                     let mut valid = true;
                     let mut triggered_terminals = Vec::new();
 
@@ -857,18 +878,21 @@ impl GrammarConstraint {
                         if !triggered_terminals.is_empty() {
                             triggered_terminals.sort_unstable();
                             triggered_terminals.dedup();
-                            for &src in sources {
-                                let base_idx = (src as usize) * num_terminals;
-                                for &tid in &triggered_terminals {
-                                    let idx = base_idx + (tid.0 as usize);
-                                    match &mut local_matches_vec[idx] {
-                                        Some(existing) => existing.union_with(&reachable_bv),
-                                        None => local_matches_vec[idx] = Some(reachable_bv.clone()),
+                            // src is just start_state here
+                            let base_idx = (start_state as usize) * num_terminals;
+                            for &tid in &triggered_terminals {
+                                let idx = base_idx + (tid.0 as usize);
+                                match local_matches.entry(idx) {
+                                    std::collections::hash_map::Entry::Occupied(mut e) => {
+                                        e.get_mut().union_with(&reachable_bv);
+                                    }
+                                    std::collections::hash_map::Entry::Vacant(e) => {
+                                        e.insert(reachable_bv.clone());
                                     }
                                 }
                             }
                         }
-                        next_grouped_map.entry(curr).or_default().extend_from_slice(sources);
+                        next_grouped_map.entry(curr).or_default().push(start_state);
                     }
                 }
 
@@ -880,20 +904,23 @@ impl GrammarConstraint {
                         next_grouped,
                         &fast_dfa,
                         num_terminals,
-                        &mut local_matches_vec,
+                        &mut local_matches,
                     );
                 }
 
-                local_matches_vec
+                local_matches
             })
             .reduce(
-                || vec![None; matches_vec_len],
+                || FxHashMap::default(),
                 |mut a, b| {
-                    for (acc, val) in a.iter_mut().zip(b.into_iter()) {
-                        match (acc, val) {
-                            (Some(acc_bv), Some(val_bv)) => acc_bv.union_with(&val_bv),
-                            (acc@None, Some(val_bv)) => *acc = Some(val_bv),
-                            _ => {}
+                    for (k, v) in b {
+                        match a.entry(k) {
+                            std::collections::hash_map::Entry::Occupied(mut e) => {
+                                e.get_mut().union_with(&v);
+                            }
+                            std::collections::hash_map::Entry::Vacant(e) => {
+                                e.insert(v);
+                            }
                         }
                     }
                     a
@@ -905,15 +932,13 @@ impl GrammarConstraint {
             BTreeMap<TerminalID, LLMTokenBV>,
         > = BTreeMap::new();
 
-        for (idx, opt_bv) in final_matches_vec.into_iter().enumerate() {
-            if let Some(bv) = opt_bv {
-                let src = TokenizerStateID(idx / num_terminals);
-                let tid = TerminalID(idx % num_terminals);
-                possible_matches
-                    .entry(src)
-                    .or_default()
-                    .insert(tid, bv);
-            }
+        for (idx, bv) in final_matches {
+            let src = TokenizerStateID(idx / num_terminals);
+            let tid = TerminalID(idx % num_terminals);
+            possible_matches
+                .entry(src)
+                .or_default()
+                .insert(tid, bv);
         }
 
         possible_matches
