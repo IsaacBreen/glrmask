@@ -1,5 +1,6 @@
 #![allow(clippy::too_many_arguments)]
 
+use crate::datastructures::hybrid_bitset::HybridBitset;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fmt::{self, Debug, Display, Formatter},
@@ -190,7 +191,7 @@ fn optimize_dwa_and_vocab(
         if bv.is_all() { return LLMTokenBV::max_ones(); }
         let mut new_vals = Vec::new();
         for t in bv.iter_up_to(max_tok) {
-            if let Some(&new_t) = old_to_new_map.get(&t) { new_vals.push(*new_t); }
+            if let Some(&new_t) = old_to_new_map.get(&t) { new_vals.push(new_t); }
         }
         let new_bv = HybridBitset::from_iter(new_vals);
         bv_cache.insert(bv.clone(), new_bv.clone());
