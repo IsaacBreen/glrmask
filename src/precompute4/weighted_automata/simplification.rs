@@ -114,6 +114,7 @@ enum DwaPass {
     PruneDeadEnds,
     PushWeights,
     Minimize,
+    RestrictWeights,
 }
 
 const DWA_PASS_ORDERINGS: &[&[DwaPass]] = &[
@@ -203,6 +204,7 @@ impl DWA {
                     DwaPass::PruneDeadEnds => self.prune_dead_ends(),
                     DwaPass::PushWeights => self.push_weights_into_transitions_and_finals(),
                     DwaPass::Minimize => unreachable!(),
+                    DwaPass::RestrictWeights => self.restrict_weights(),
                 };
                 changed_in_iteration |= pass_changed;
             }
@@ -247,6 +249,7 @@ impl DWA {
                         DwaPass::PruneDeadEnds => dwa.prune_dead_ends(),
                         DwaPass::PushWeights => dwa.push_weights_into_transitions_and_finals(),
                         DwaPass::Minimize => dwa.minimize_states(),
+                        DwaPass::RestrictWeights => dwa.restrict_weights(),
                     };
                     if changed {
                         current_changing_passes.push(pass);
@@ -301,6 +304,7 @@ impl DWA {
             DwaPass::PruneDeadEnds,
             DwaPass::Minimize,
             DwaPass::PushWeights,
+            DwaPass::RestrictWeights,
             DwaPass::PruneUnreachable,
         ];
         let mut last_changing_passes: Vec<DwaPass> = vec![];
@@ -315,6 +319,7 @@ impl DWA {
                     DwaPass::PruneDeadEnds => self.prune_dead_ends(),
                     DwaPass::PushWeights => self.push_weights_into_transitions_and_finals(),
                     DwaPass::Minimize => self.minimize_states(),
+                    DwaPass::RestrictWeights => self.restrict_weights(),
                 };
                 if pass_changed {
                     current_changing_passes.push(pass);
@@ -656,6 +661,135 @@ impl DWA {
         self.body.start_state = map[self.body.start_state];
         self.states = new_states;
         true
+    }
+
+    /// Restricts weights based on Forward (I) and Backward (V) potentials.
+    /// effectively performing "in-place weight pushing" by removing dead weight bits.
+    /// W'(u->v) = W(u->v) & I(u) & V(v).
+    pub fn restrict_weights(&mut self) -> bool {
+        let n = self.states.len();
+        if n == 0 { return false; }
+
+        // 1. Backward Potentials (V)
+        let mut v_pot = vec![Weight::zeros(); n];
+        let mut q = VecDeque::new();
+        let mut in_q = vec![false; n];
+
+        for i in 0..n {
+            if let Some(fw) = &self.states[i].final_weight {
+                if !fw.is_empty() {
+                    v_pot[i] = fw.clone();
+                    q.push_back(i);
+                    in_q[i] = true;
+                }
+            }
+        }
+
+        let mut rev_edges = vec![Vec::new(); n];
+        for (u, st) in self.states.0.iter().enumerate() {
+            for (&lbl, &v) in &st.transitions {
+                if v < n {
+                    let w = st.trans_weights.get(&lbl).cloned().unwrap_or_else(Weight::all);
+                    if !w.is_empty() {
+                        rev_edges[v].push((u, w));
+                    }
+                }
+            }
+        }
+
+        while let Some(curr) = q.pop_front() {
+            in_q[curr] = false;
+            let curr_val = v_pot[curr].clone();
+            if curr_val.is_empty() { continue; }
+
+            for (u, w) in &rev_edges[curr] {
+                // Backward prop: V[u] |= (W(u->curr) & V[curr])
+                // Note: Intersect with u's state_weight to be precise, though typically empty in DWA.
+                let u_sw = self.states[*u].state_weight.as_ref().cloned().unwrap_or_else(Weight::all);
+                let prop = &(w & &curr_val) & &u_sw;
+                if !prop.is_empty() && !prop.is_subset_of(&v_pot[*u]) {
+                    v_pot[*u] |= &prop;
+                    if !in_q[*u] {
+                        q.push_back(*u);
+                        in_q[*u] = true;
+                    }
+                }
+            }
+        }
+
+        // 2. Forward Potentials (I)
+        let mut i_pot = vec![Weight::zeros(); n];
+        q.clear();
+        in_q.fill(false);
+
+        let start = self.body.start_state;
+        if start < n {
+            let start_w = self.states[start].state_weight.clone().unwrap_or_else(Weight::all);
+            i_pot[start] = start_w;
+            q.push_back(start);
+            in_q[start] = true;
+        }
+
+        while let Some(u) = q.pop_front() {
+            in_q[u] = false;
+            let u_val = i_pot[u].clone();
+            if u_val.is_empty() { continue; }
+
+            let st = &self.states[u];
+            for (&lbl, &v) in &st.transitions {
+                if v < n {
+                    let w = st.trans_weights.get(&lbl).cloned().unwrap_or_else(Weight::all);
+                    let v_sw = self.states[v].state_weight.as_ref().cloned().unwrap_or_else(Weight::all);
+                    let prop = &(&u_val & &w) & &v_sw;
+                    if !prop.is_empty() && !prop.is_subset_of(&i_pot[v]) {
+                        i_pot[v] |= &prop;
+                        if !in_q[v] {
+                            q.push_back(v);
+                            in_q[v] = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3. Restrict
+        let mut changed = false;
+        for u in 0..n {
+            let i_u = &i_pot[u];
+            let v_u = &v_pot[u];
+
+            if let Some(fw) = &self.states[u].final_weight {
+                let new_fw = fw & i_u;
+                if &new_fw != fw {
+                    self.states[u].final_weight = if new_fw.is_empty() { None } else { Some(new_fw) };
+                    changed = true;
+                }
+            }
+
+            let labels: Vec<Label> = self.states[u].transitions.keys().cloned().collect();
+            for lbl in labels {
+                let v = self.states[u].transitions[&lbl];
+                if v < n {
+                    let w = self.states[u].trans_weights.get(&lbl).cloned().unwrap_or_else(Weight::all);
+                    let req = i_u & &v_pot[v];
+                    let new_w = &w & &req;
+
+                    if new_w.is_empty() {
+                        self.states[u].transitions.remove(&lbl);
+                        self.states[u].trans_weights.remove(&lbl);
+                        changed = true;
+                    } else if &new_w != &w {
+                        self.states[u].trans_weights.insert(lbl, new_w);
+                        changed = true;
+                    }
+                } else {
+                    self.states[u].transitions.remove(&lbl);
+                    self.states[u].trans_weights.remove(&lbl);
+                    changed = true;
+                }
+            }
+        }
+        changed
     }
 }
 
