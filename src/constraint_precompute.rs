@@ -274,17 +274,18 @@ impl<'r> Precomputer1<'r> {
             signatures.entry(sig).or_default().push(label);
         }
 
-        let mut equivalent_count = 0;
-        for (_sig, labels) in &signatures {
+        let mut stats: BTreeMap<usize, usize> = BTreeMap::new();
+        for labels in signatures.values() {
             if labels.len() > 1 {
-                equivalent_count += 1;
-                // Subtract start_label to get back the tokenizer state ID for display
-                let ids: Vec<_> = labels.iter().map(|l| l - start_label).collect();
-                crate::debug!(4, "Equivalent tokenizer states: {:?}", ids);
+                *stats.entry(labels.len()).or_default() += 1;
             }
         }
-        if equivalent_count > 0 {
-            crate::debug!(3, "Found {} groups of equivalent tokenizer state symbols in DWA", equivalent_count);
+
+        if !stats.is_empty() {
+            crate::debug!(3, "Equivalent tokenizer state symbols in DWA (stats):");
+            for (size, count) in stats {
+                crate::debug!(3, "  Group size {}: {} groups", size, count);
+            }
         }
 
         dwa
