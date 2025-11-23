@@ -41,6 +41,7 @@ pub(crate) struct Precomputer1<'r> {
     pub(crate) terminals_count: usize,
     pub(crate) pending_transitions: HashMap<NWAStateID, HashMap<Label, HashMap<NWAStateID, Weight>>>,
     pub(crate) pending_epsilons: HashMap<NWAStateID, HashMap<NWAStateID, Weight>>,
+    pub(crate) live_tokens: HashMap<NWAStateID, Weight>,
 }
 
 impl<'r> Precomputer1<'r> {
@@ -106,6 +107,7 @@ impl<'r> Precomputer1<'r> {
             terminals_count,
             pending_transitions: HashMap::new(),
             pending_epsilons: HashMap::new(),
+            live_tokens: HashMap::new(),
         }
     }
 
@@ -411,7 +413,8 @@ impl<'r> Precomputer1<'r> {
             .or_default()
             .entry(dst)
             .and_modify(|w| *w |= &weight)
-            .or_insert(weight);
+            .or_insert(weight.clone());
+        *self.live_tokens.entry(dst).or_insert_with(Weight::zeros) |= &weight;
     }
 
     fn add_pending_epsilon(&mut self, src: NWAStateID, dst: NWAStateID, weight: Weight) {
@@ -420,7 +423,8 @@ impl<'r> Precomputer1<'r> {
             .or_default()
             .entry(dst)
             .and_modify(|w| *w |= &weight)
-            .or_insert(weight);
+            .or_insert(weight.clone());
+        *self.live_tokens.entry(dst).or_insert_with(Weight::zeros) |= &weight;
     }
 
     fn run_dfs(&mut self) {
@@ -465,7 +469,24 @@ impl<'r> Precomputer1<'r> {
                 // If we reached the end of the segment, these states are ready for the next vocab node
                 if pos == segment_bytes.len() {
                     for (tokenizer_state_id, node) in states_at_pos {
-                        let next = *next_level_assoc.entry(tokenizer_state_id).or_insert_with(|| self.nwa.add_state());
+                        let next_entry = next_level_assoc.entry(tokenizer_state_id);
+                        let next = match next_entry {
+                            std::collections::btree_map::Entry::Occupied(o) => *o.get(),
+                            std::collections::btree_map::Entry::Vacant(v) => {
+                                let mut reuse = None;
+                                if let Some(dsts) = self.pending_epsilons.get(&node) {
+                                    for (dst, _) in dsts {
+                                        if self.live_tokens.get(dst).map_or(true, |live| live.is_disjoint(&Weight::all())) {
+                                            reuse = Some(*dst);
+                                            break;
+                                        }
+                                    }
+                                }
+                                let t = reuse.unwrap_or_else(|| self.nwa.add_state());
+                                v.insert(t);
+                                t
+                            }
+                        };
                         self.add_pending_epsilon(node, next, SimpleBitset::all());
                     }
                     continue;
@@ -522,11 +543,29 @@ impl<'r> Precomputer1<'r> {
                         let dest_map = pending.entry(next_pos).or_default();
 
                         let initial_tsid = self.tokenizer.initial_state_id();
-                        let target = *dest_map
-                            .entry(initial_tsid)
-                            .or_insert_with(|| self.nwa.add_state());
-
                         let weight = SimpleBitset::from_rsb(final_bv);
+
+                        let target_entry = dest_map.entry(initial_tsid);
+                        let target = match target_entry {
+                            std::collections::btree_map::Entry::Occupied(o) => *o.get(),
+                            std::collections::btree_map::Entry::Vacant(v) => {
+                                let mut reuse = None;
+                                if let Some(labels) = self.pending_transitions.get(&src_node) {
+                                    if let Some(dsts) = labels.get(&(terminal_id.0 as Label)) {
+                                        for (dst, _) in dsts {
+                                            if self.live_tokens.get(dst).map_or(true, |live| live.is_disjoint(&weight)) {
+                                                reuse = Some(*dst);
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                                let t = reuse.unwrap_or_else(|| self.nwa.add_state());
+                                v.insert(t);
+                                t
+                            }
+                        };
+
                         self.add_pending_transition(src_node, terminal_id.0 as Label, target, weight);
                     }
 
@@ -552,7 +591,24 @@ impl<'r> Precomputer1<'r> {
                             }
                         }
 
-                        let next = *next_level_assoc.entry(final_tokenizer_state).or_insert_with(|| self.nwa.add_state());
+                        let next_entry = next_level_assoc.entry(final_tokenizer_state);
+                        let next = match next_entry {
+                            std::collections::btree_map::Entry::Occupied(o) => *o.get(),
+                            std::collections::btree_map::Entry::Vacant(v) => {
+                                let mut reuse = None;
+                                if let Some(dsts) = self.pending_epsilons.get(&src_node) {
+                                    for (dst, _) in dsts {
+                                        if self.live_tokens.get(dst).map_or(true, |live| live.is_disjoint(&Weight::all())) {
+                                            reuse = Some(*dst);
+                                            break;
+                                        }
+                                    }
+                                }
+                                let t = reuse.unwrap_or_else(|| self.nwa.add_state());
+                                v.insert(t);
+                                t
+                            }
+                        };
                         self.add_pending_epsilon(src_node, next, Weight::all());
                     }
                 }
