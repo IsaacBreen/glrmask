@@ -38,7 +38,7 @@ impl JSONConvertible for TokenizerStateID {
 }
 
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)] // Added Ord for potential use in BTreeSet/Map
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)] // Added Ord for potential use in BTreeSet/Map
 pub struct Token {
     pub id: GroupID, // GroupID is usize
     pub width: usize,
@@ -67,7 +67,7 @@ impl JSONConvertible for Token {
 }
 
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ExecuteResult {
     pub matches: Vec<Token>,
     pub end_state: Option<usize>,

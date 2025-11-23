@@ -14,7 +14,7 @@ use crate::glr::parser::GLRParser;
 use crate::precompute4::weighted_automata::bitset::SimpleBitset;
 use crate::precompute4::weighted_automata::{DWA, NWA, NWAStateID, Weight};
 use crate::profiler::{self, PROGRESS_BAR_ENABLED};
-use crate::tokenizer::{LLMTokenID, TokenizerStateID};
+use crate::tokenizer::{ExecuteResult, LLMTokenID, TokenizerStateID};
 use crate::types::TerminalID as GrammarTokenID;
 use crate::precompute4::weighted_automata::common::Label;
 
@@ -28,6 +28,7 @@ pub(crate) struct Precomputer1<'r> {
     pub(crate) llm_vocab: Option<Arc<LLMVocab>>,
     pub(crate) vocab: VocabPrefixTree,
     pub(crate) roots: BTreeMap<TokenizerStateID, NWAStateID>,
+    pub(crate) state_equivalence_map: BTreeMap<TokenizerStateID, TokenizerStateID>,
     pub(crate) possible_matches: RefCell<
         BTreeMap<
             *const VocabPrefixTreeNode,
@@ -50,6 +51,7 @@ impl<'r> Precomputer1<'r> {
         internal_max_llm_token: usize,
         terminals_count: usize,
         active_states: Vec<TokenizerStateID>,
+        state_equivalence_map: BTreeMap<TokenizerStateID, TokenizerStateID>,
     ) -> Self {
         let tokens: Vec<(usize, Vec<u8>)> = internal_llm_token_map
             .iter()
@@ -96,6 +98,7 @@ impl<'r> Precomputer1<'r> {
             llm_vocab,
             vocab,
             roots,
+            state_equivalence_map,
             possible_matches: RefCell::new(BTreeMap::new()),
             all_llm_tokens: RangeSetBlaze::from_iter(0..=internal_max_llm_token),
             pb,
@@ -108,9 +111,11 @@ impl<'r> Precomputer1<'r> {
     fn finish(mut self) -> DWA {
         // TODO: make this simpler.
         let new_start_state = self.nwa.add_state();
-        for (tsid, state) in &self.roots {
-            let label = (tsid.0 + self.terminals_count) as Label;
-            self.nwa.add_transition(new_start_state, label, *state, Weight::all()).unwrap();
+        for (tsid, rep_id) in &self.state_equivalence_map {
+            if let Some(&state) = self.roots.get(rep_id) {
+                let label = (tsid.0 + self.terminals_count) as Label;
+                self.nwa.add_transition(new_start_state, label, state, Weight::all()).unwrap();
+            }
         }
         self.nwa.body.start_states = vec![new_start_state];
 
@@ -516,6 +521,25 @@ pub(crate) fn count_vocab_nodes(node: &VocabPrefixTreeNode) -> u64 {
         .sum::<u64>()
 }
 
+fn compute_tokenizer_state_equivalence(
+    tokenizer: &Regex,
+    tokens: &[Vec<u8>],
+) -> BTreeMap<TokenizerStateID, TokenizerStateID> {
+    let mut signature_to_rep: HashMap<Vec<ExecuteResult>, TokenizerStateID> = HashMap::new();
+    let mut map = BTreeMap::new();
+
+    for state in tokenizer.iter_states() {
+        let mut signature = Vec::with_capacity(tokens.len());
+        for token in tokens {
+            signature.push(tokenizer.execute_from_state(token, state));
+        }
+        let rep = *signature_to_rep.entry(signature).or_insert(state);
+        map.insert(state, rep);
+    }
+
+    map
+}
+
 // Public entry point wrapper
 pub fn run_precompute1(
     tokenizer: &Regex,
@@ -535,7 +559,16 @@ pub fn run_precompute1(
         }
     }
 
-    let representative_states: Vec<TokenizerStateID> = tokenizer.iter_states().collect();
+    // Compute tokenizer state equivalence classes to reduce the number of states we precompute
+    let representative_token_bytes: Vec<Vec<u8>> = representative_llm_token_map.keys().cloned().collect();
+    let state_equivalence_map = compute_tokenizer_state_equivalence(tokenizer, &representative_token_bytes);
+    
+    let mut representative_states_set = BTreeSet::new();
+    for rep in state_equivalence_map.values() {
+        representative_states_set.insert(*rep);
+    }
+    let representative_states: Vec<TokenizerStateID> = representative_states_set.into_iter().collect();
+    crate::debug!(3, "Tokenizer state equivalence: {} states -> {} representatives", state_equivalence_map.len(), representative_states.len());
 
     let mut helper = Precomputer1::new(
         tokenizer,
@@ -545,6 +578,7 @@ pub fn run_precompute1(
         internal_max_llm_token,
         terminals_count,
         representative_states,
+        state_equivalence_map,
     );
 
 
