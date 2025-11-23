@@ -284,7 +284,7 @@ pub fn vector_fst_to_dwa(fst: &VectorFst<BitsetWeight>) -> DWA {
 
 pub fn vector_fst_to_nwa(fst: &VectorFst<BitsetWeight>) -> NWA {
     if fst.num_states() == 0 {
-        return NWA::new();
+        return NWA::new_empty();
     }
 
     let mut nwa = NWA::new();
@@ -322,6 +322,56 @@ pub fn vector_fst_to_nwa(fst: &VectorFst<BitsetWeight>) -> NWA {
                 } else {
                     let label = fst_label_to_label(tr.ilabel);
                     nwa.states.add_transition(nwa_state_id, label, target_nwa_id, weight).unwrap();
+                }
+            }
+        }
+    }
+
+    // Attempt to reduce "super-start" state if it looks artificial.
+    // nwa_to_vector_fst creates a super-start at the highest index if multiple start states exist.
+    if nwa.body.start_states.len() == 1 {
+        let candidate = nwa.body.start_states[0];
+        let last_idx = nwa.states.len().saturating_sub(1);
+
+        // The super-start is always the last state added
+        if candidate == last_idx && candidate > 0 {
+            let is_candidate_prop = {
+                let st = &nwa.states[candidate];
+                st.final_weight.as_ref().map_or(true, |w| w.is_empty())
+                    && st.transitions.is_empty()
+                    && !st.epsilons.is_empty()
+                    && st.epsilons.iter().all(|(_, w)| w.is_all_fast())
+            };
+
+            if is_candidate_prop {
+                // Verify no incoming edges point to this candidate
+                let has_incoming = nwa.states.0.iter().enumerate().any(|(i, s)| {
+                    if i == candidate {
+                        // Check for self-loops (which super-start shouldn't have)
+                        return s.epsilons.iter().any(|(t, _)| *t == candidate);
+                    }
+                    // Check labeled transitions
+                    for targets in s.transitions.values() {
+                        for (t, _) in targets {
+                            if *t == candidate {
+                                return true;
+                            }
+                        }
+                    }
+                    // Check epsilon transitions
+                    for (t, _) in &s.epsilons {
+                        if *t == candidate {
+                            return true;
+                        }
+                    }
+                    false
+                });
+
+                if !has_incoming {
+                    // Inline the super-start: replace it with its targets
+                    let new_starts: Vec<NWAStateID> = nwa.states[candidate].epsilons.iter().map(|(t, _)| *t).collect();
+                    nwa.body.start_states = new_starts;
+                    nwa.states.0.pop(); // Remove the last state
                 }
             }
         }
