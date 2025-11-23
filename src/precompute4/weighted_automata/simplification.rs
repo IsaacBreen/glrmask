@@ -309,21 +309,26 @@ impl DWA {
             DwaPass::PushWeightsToInitial,
             DwaPass::PruneUnreachable,
         ];
-        let mut last_changing_passes: Vec<DwaPass> = vec![];
-        let mut converged = false;
         
-        // Track which passes made changes in previous iteration
-        let mut pass_made_change_before: std::collections::HashSet<DwaPass> = 
-            ordering.iter().copied().collect();
+        // History of which passes changed things in the last 2 iterations.
+        // Initialized with all passes so we run everything at least twice before skipping.
+        let all_passes: HashSet<DwaPass> = ordering.iter().copied().collect();
+        let mut history: Vec<HashSet<DwaPass>> = vec![all_passes.clone(), all_passes];
+        
+        let mut force_all_passes = false;
+        let mut converged = false;
 
         for iter_num in 0..MAX_OPTIMIZE_ITERATIONS {
-            let mut current_changing_passes = vec![];
+            let mut current_changing_passes = HashSet::new();
             let mut changed_in_iteration = false;
             
             for &pass in ordering {
-                // Short-circuit: skip passes that didn't change anything last iteration
-                // unless another pass changed something (which might enable this pass)
-                if iter_num > 0 && !pass_made_change_before.contains(&pass) && !changed_in_iteration {
+                // Skip if:
+                // 1. Not forcing all passes
+                // 2. Pass didn't change anything in the last 2 iterations
+                // 3. Nothing has changed yet in this iteration (cascade effect)
+                let recent_activity = history.iter().any(|s| s.contains(&pass));
+                if !force_all_passes && !recent_activity && !changed_in_iteration {
                     continue;
                 }
                 
@@ -335,25 +340,31 @@ impl DWA {
                     DwaPass::Minimize => self.minimize_states(),
                 };
                 if pass_changed {
-                    current_changing_passes.push(pass);
+                    current_changing_passes.insert(pass);
                 }
                 changed_in_iteration |= pass_changed;
             }
             
-            // Update which passes made changes
-            pass_made_change_before.clear();
-            pass_made_change_before.extend(current_changing_passes.iter());
+            history.push(current_changing_passes);
+            if history.len() > 2 {
+                history.remove(0);
+            }
 
             total_changed |= changed_in_iteration;
             if !changed_in_iteration {
-                converged = true;
-                break;
+                if force_all_passes {
+                    converged = true;
+                    break;
+                }
+                force_all_passes = true;
+            } else {
+                force_all_passes = false;
             }
-            last_changing_passes = current_changing_passes;
         }
 
         if !converged {
-            crate::debug!(3, "DWA simplification did not converge after {} iterations. Still changing: {:?}", MAX_OPTIMIZE_ITERATIONS, last_changing_passes);
+            let last_changes = history.last().map(|s| s.iter().copied().collect::<Vec<_>>()).unwrap_or_default();
+            crate::debug!(3, "DWA simplification did not converge after {} iterations. Still changing: {:?}", MAX_OPTIMIZE_ITERATIONS, last_changes);
         }
 
         if self.states.len() > 1000 {
@@ -1091,13 +1102,24 @@ impl NWA {
             NwaPass::PruneDeadEnds,
             NwaPass::Minimize,
         ];
-        let mut last_changing_passes: Vec<NwaPass> = vec![];
+
+        // History of which passes changed things in the last 2 iterations.
+        // Initialized with all passes so we run everything at least twice before skipping.
+        let all_passes: HashSet<NwaPass> = ordering.iter().copied().collect();
+        let mut history: Vec<HashSet<NwaPass>> = vec![all_passes.clone(), all_passes];
+
+        let mut force_all_passes = false;
         let mut converged = false;
 
-        for _ in 0..MAX_OPTIMIZE_ITERATIONS {
-            let mut current_changing_passes = vec![];
+        for iter_num in 0..MAX_OPTIMIZE_ITERATIONS {
+            let mut current_changing_passes = HashSet::new();
             let mut changed_in_iteration = false;
             for &pass in ordering {
+                let recent_activity = history.iter().any(|s| s.contains(&pass));
+                if !force_all_passes && !recent_activity && !changed_in_iteration {
+                    continue;
+                }
+
                 let pass_changed = match pass {
                     NwaPass::PruneUnreachable => self.prune_unreachable(),
                     NwaPass::PruneDeadEnds => self.prune_dead_ends(),
@@ -1107,21 +1129,31 @@ impl NWA {
                     NwaPass::Minimize => self.minimize_states(),
                 };
                 if pass_changed {
-                    current_changing_passes.push(pass);
+                    current_changing_passes.insert(pass);
                 }
                 changed_in_iteration |= pass_changed;
             }
 
+            history.push(current_changing_passes);
+            if history.len() > 2 {
+                history.remove(0);
+            }
+
             total_changed |= changed_in_iteration;
             if !changed_in_iteration {
-                converged = true;
-                break;
+                if force_all_passes {
+                    converged = true;
+                    break;
+                }
+                force_all_passes = true;
+            } else {
+                force_all_passes = false;
             }
-            last_changing_passes = current_changing_passes;
         }
 
         if !converged {
-            crate::debug!(3, "NWA simplification did not converge after {} iterations. Still changing: {:?}", MAX_OPTIMIZE_ITERATIONS, last_changing_passes);
+            let last_changes = history.last().map(|s| s.iter().copied().collect::<Vec<_>>()).unwrap_or_default();
+            crate::debug!(3, "NWA simplification did not converge after {} iterations. Still changing: {:?}", MAX_OPTIMIZE_ITERATIONS, last_changes);
         }
 
         crate::debug!(6, "[NWA::simplify] Simplification finished. Total changed: {}. Final stats: {}", total_changed, self.stats());
