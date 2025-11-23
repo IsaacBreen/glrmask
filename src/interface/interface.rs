@@ -1702,6 +1702,7 @@ mod tests {
             llm_token_map.clone(),
             max_llm_token_id,
         );
+        grammar_constraint.dump_precomputed4();
 
         println!("Initializing state...");
         let mut state = grammar_constraint.init();
