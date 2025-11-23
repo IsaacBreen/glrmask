@@ -845,7 +845,7 @@ impl GrammarConstraint {
         self.vocab
             .internal_to_original
             .get(&internal_id.0)
-            .and_then(|bv| bv.iter_up_to(self.vocab.internal_max_llm_token).next())
+            .and_then(|bv| bv.iter_up_to(self.vocab.max_original_llm_token_id).next())
             .map(|v| LLMTokenID(v))
     }
 
