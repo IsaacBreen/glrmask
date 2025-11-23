@@ -120,6 +120,8 @@ impl<'r> Precomputer1<'r> {
         crate::debug!(3, "Simplifying DWA with {} states...", dwa.states.len());
         self.nwa.simplify();
         crate::debug!(3, "Unrolling DWA with {} states...", dwa.states.len());
+        crate::debug!(3, "Minimizing DWA with {} states", dwa.states.len());
+        dwa.minimize_with_rustfst();
         dwa = dwa.unroll_cycles();
         dwa
     }
