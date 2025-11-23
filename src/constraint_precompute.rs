@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ops::BitOrAssign;
 use std::sync::Arc;
 
@@ -227,8 +227,14 @@ impl<'r> Precomputer1<'r> {
         for _ in 0..dwa.states.len() {
             nwa2.add_state();
         }
+        let mut transitions: BTreeMap<NWAStateID, BTreeSet<NWAStateID>> = BTreeMap::new();
         for (src, s) in dwa.states.0.iter().enumerate() {
             for (&label, &target) in &s.transitions {
+                transitions.entry(src).or_default().insert(target);
+            }
+        }
+        for (src, s) in dwa.states.0.iter_mut().enumerate() {
+            for &target in &transitions[&src] {
                 nwa2.add_transition(src, 0, target, Weight::all()).unwrap();
             }
             nwa2.states[src].final_weight = s.final_weight.clone();
