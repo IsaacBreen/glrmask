@@ -113,16 +113,17 @@ impl<'r> Precomputer1<'r> {
             self.nwa.add_transition(new_start_state, label, *state, Weight::all()).unwrap();
         }
         self.nwa.body.start_states = vec![new_start_state];
-        crate::debug!(3, "Simplifying NWA with {} states...", self.nwa.states.len());
+        crate::debug!(3, "{} states", self.nwa.states.len());
         self.nwa.simplify();
-        crate::debug!(3, "Determinizing NWA with {} states...", self.nwa.states.len());
+        crate::debug!(3, "Simplified NWA with {} states", self.nwa.states.len());
         let mut dwa = self.nwa.determinize();
-        crate::debug!(3, "Simplifying DWA with {} states...", dwa.states.len());
+        crate::debug!(3, "Determinized NWA with {} states", dwa.states.len());
         self.nwa.simplify();
-        crate::debug!(3, "Unrolling DWA with {} states...", dwa.states.len());
-        crate::debug!(3, "Minimizing DWA with {} states", dwa.states.len());
+        crate::debug!(3, "Simplified DWA with {} states", dwa.states.len());
         dwa.minimize_with_rustfst();
+        crate::debug!(3, "Minimized DWA with {} states", dwa.states.len());
         dwa = dwa.unroll_cycles();
+        crate::debug!(3, "Unrolled DWA with {} states", dwa.states.len());
         dwa
     }
 
