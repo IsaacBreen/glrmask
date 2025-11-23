@@ -738,7 +738,7 @@ impl GrammarConstraint {
             original_to_internal: original_to_internal_map.clone(),
             internal_to_original: internal_to_original_map.clone(),
             internal_max_llm_token,
-            max_original_llm_token_id: 0,
+            max_original_llm_token_id,
             internal_to_original_sparse_matrix: vec![],
         };
 
