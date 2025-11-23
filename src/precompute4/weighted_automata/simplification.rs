@@ -36,6 +36,7 @@ struct DwaTransitionSig {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct DwaStateSignature {
     final_weight: Option<Weight>,
+    state_weight: Option<Weight>,
     outgoing: Vec<DwaTransitionSig>,
 }
 
@@ -65,6 +66,7 @@ impl DwaStateSignature {
         // additional sorting.
         DwaStateSignature {
             final_weight: st.final_weight.clone(),
+            state_weight: st.state_weight.clone(),
             outgoing,
         }
     }
@@ -105,6 +107,7 @@ fn minimize_dwa_partition(states: &DWAStates) -> Partition {
 #[derive(Clone, Debug, Default)]
 struct DwaStateBuilder {
     final_weight: Option<Weight>,
+    state_weight: Option<Weight>,
     trans: BTreeMap<Label, (StateID, Weight)>,
 }
 
@@ -166,6 +169,13 @@ impl DWA {
                         new_total |= &term;
                     }
                 }
+                
+                // Incorporate the node weight (state_weight) if present.
+                // potentials[s] represents the total weight of all paths from s to final,
+                // *including* the weight incurred at s itself.
+                if let Some(sw) = &st.state_weight {
+                    new_total &= sw;
+                }
 
                 if new_total != potentials[s] {
                     potentials[s] = new_total;
@@ -187,12 +197,12 @@ impl DWA {
 
         for s in 0..n {
             let pot_s = &potentials[s];
-            let pot_s_c = !pot_s; // Complement
+            let pot_s_c = !pot_s; // Complement (inverse in this semiring)
 
             let st = &mut self.states[s];
 
             // Update final weight
-            // fw' = fw U pot_s^C
+            // fw' = fw / pot_s = fw | !pot_s
             if let Some(fw) = &mut st.final_weight {
                 let new_fw = &*fw | &pot_s_c;
                 if *fw != new_fw {
@@ -202,7 +212,7 @@ impl DWA {
             }
 
             // Update transition weights
-            // w'(s, a, t) = (w & pot_t) U pot_s^C
+            // w'(s, a, t) = (w & pot_t) / pot_s = (w & pot_t) | !pot_s
             for (&label, &target) in &st.transitions {
                 if target < n {
                     if let Some(w) = st.trans_weights.get_mut(&label) {
@@ -216,10 +226,20 @@ impl DWA {
                 }
             }
 
-            // Set state weight
-            if st.state_weight.as_ref() != Some(pot_s) {
-                st.state_weight = Some(pot_s.clone());
-                changed = true;
+            // Update state weight
+            // For the start state, we set it to the total potential (pushing weight to initial).
+            // For other states, we clear it (effectively setting it to One/ALL), because
+            // the weight has been pushed to the incoming transitions (or start state).
+            if s == self.body.start_state {
+                if st.state_weight.as_ref() != Some(pot_s) {
+                    st.state_weight = Some(pot_s.clone());
+                    changed = true;
+                }
+            } else {
+                if st.state_weight.is_some() {
+                    st.state_weight = None;
+                    changed = true;
+                }
             }
         }
         changed
@@ -284,7 +304,7 @@ impl DWA {
                 let pass_changed = match pass {
                     DwaPass::PruneUnreachable => self.prune_unreachable(),
                     DwaPass::PruneDeadEnds => self.prune_dead_ends(),
-                    DwaPass::PushWeights => self.push_weights_into_transitions_and_finals(),
+                    DwaPass::PushWeights => self.canonicalize_weights(),
                     DwaPass::Minimize => unreachable!(),
                 };
                 changed_in_iteration |= pass_changed;
@@ -328,7 +348,7 @@ impl DWA {
                     let changed = match pass {
                         DwaPass::PruneUnreachable => dwa.prune_unreachable(),
                         DwaPass::PruneDeadEnds => dwa.prune_dead_ends(),
-                        DwaPass::PushWeights => dwa.push_weights_into_transitions_and_finals(),
+                        DwaPass::PushWeights => dwa.canonicalize_weights(),
                         DwaPass::Minimize => dwa.minimize_states(),
                     };
                     if changed {
@@ -383,24 +403,18 @@ impl DWA {
         
         // New simplification pipeline:
         // 1. Prune dead ends (reduce graph size)
-        // 2. Canonicalize weights (Weight Pushing) - this sets state_weights
-        // 3. Push weights to incoming transitions - this clears state_weights and updates edge weights
-        // 4. Prune unreachable (cleanup)
-        // 5. Minimize (Partition Refinement)
-        
-        // We loop a few times because minimization might merge states, creating new opportunities.
-        // But usually one pass of Canonicalize + Minimize is enough for the heavy lifting.
+        // 2. Canonicalize weights (Weight Pushing) - this sets state_weights correctly and reweights edges
+        // 3. Prune unreachable (cleanup)
+        // 4. Minimize (Partition Refinement)
         
         let mut converged = false;
-        for _ in 0..10 { // Reduced iterations as this is more effective
+        for _ in 0..10 {
             let mut changed = false;
             
             changed |= self.prune_dead_ends();
             
             // Weight Pushing
-            let canon_changed = self.canonicalize_weights();
-            let push_changed = self.push_weights_into_transitions_and_finals();
-            changed |= canon_changed || push_changed;
+            changed |= self.canonicalize_weights();
             
             changed |= self.prune_unreachable();
             
@@ -422,74 +436,6 @@ impl DWA {
             crate::debug!(6, "[DWA::simplify] Simplification finished. Total changed: {}. Final stats: {}", total_changed, self.stats());
         }
         total_changed
-    }
-
-    fn push_weights_into_transitions_and_finals(&mut self) -> bool {
-        let n = self.states.len();
-        if n == 0 {
-            return false;
-        }
-        let start = self.body.start_state;
-        if start >= n {
-            return false;
-        }
-
-        let mut changed = false;
-        let mut preds: Vec<Vec<(StateID, Label)>> = vec![Vec::new(); n];
-        for (u, st) in self.states.0.iter().enumerate() {
-            for (&label, &v) in &st.transitions {
-                if v < n {
-                    preds[v].push((u, label));
-                }
-            }
-        }
-
-        for v in 0..n {
-            if v == start {
-                continue;
-            }
-            if let Some(sw) = self.states[v].state_weight.take() {
-                if sw.is_empty() {
-                    changed = true;
-                    for (u, label) in &preds[v] {
-                        if let Some(w) = self.states[*u].trans_weights.get_mut(label) {
-                            *w &= &sw;
-                        }
-                    }
-                } else if sw != Weight::all() {
-                    changed = true;
-                    for (u, label) in &preds[v] {
-                        if let Some(w) = self.states[*u].trans_weights.get_mut(label) {
-                            *w &= &sw;
-                        }
-                    }
-                } else {
-                    changed = true;
-                }
-            }
-        }
-
-        if let Some(sw0) = self.states[start].state_weight.take() {
-            if !sw0.is_empty() && sw0 != Weight::all() {
-                changed = true;
-                for st in &mut self.states.0 {
-                    if let Some(ref mut fw) = st.final_weight {
-                        *fw &= &sw0;
-                    }
-                }
-            } else if sw0.is_empty() {
-                changed = true;
-                for st in &mut self.states.0 {
-                    if let Some(ref mut fw) = st.final_weight {
-                        *fw &= &sw0;
-                    }
-                }
-            } else {
-                changed = true;
-            }
-        }
-
-        changed
     }
 
     fn minimize_states(&mut self) -> bool {
@@ -528,7 +474,7 @@ impl DWA {
             let builder = &mut builders[new_id];
             let st = &self.states[old_s];
 
-            debug_assert!(st.state_weight.is_none());
+            // debug_assert!(st.state_weight.is_none()); // state_weight is now allowed and significant
 
             if let Some(ref fw) = st.final_weight {
                 if !fw.is_empty() {
@@ -536,6 +482,15 @@ impl DWA {
                         Some(existing) => *existing |= fw,
                         None => builder.final_weight = Some(fw.clone()),
                     }
+                }
+            }
+
+            if let Some(ref sw) = st.state_weight {
+                // All states in the same class must have the same state_weight (ensured by signature)
+                if builder.state_weight.is_none() {
+                    builder.state_weight = Some(sw.clone());
+                } else {
+                    debug_assert_eq!(builder.state_weight.as_ref(), Some(sw));
                 }
             }
 
@@ -571,7 +526,7 @@ impl DWA {
 
         for (new_id, builder) in builders.into_iter().enumerate() {
             let st = &mut new_states[new_id];
-            st.state_weight = None;
+            st.state_weight = builder.state_weight;
             st.final_weight = builder.final_weight;
             st.transitions.clear();
             st.trans_weights.clear();

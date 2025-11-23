@@ -27,6 +27,7 @@ impl Display for NWABuildError {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NWAState {
     pub final_weight: Option<Weight>,
+    pub state_weight: Option<Weight>,
     pub transitions: BTreeMap<Label, Vec<(NWAStateID, Weight)>>,
     pub epsilons: Vec<(NWAStateID, Weight)>,
 }
@@ -124,6 +125,7 @@ impl Display for NWAStates {
         writeln!(f, "NWAStates ({} states):", self.0.len())?;
         for (id, state) in self.0.iter().enumerate() {
             writeln!(f, "  State {}:", id)?;
+            if let Some(sw) = &state.state_weight { writeln!(f, "    state_weight: {}", sw)?; }
             if let Some(w) = &state.final_weight { writeln!(f, "    final_weight: {}", w)?; }
             for (on, targets) in &state.transitions {
                 for (to, w) in targets {
@@ -260,6 +262,7 @@ impl NWA {
 
         for (i, st) in dwa.states.0.iter().enumerate() {
             nwa.states[i].final_weight = st.final_weight.clone();
+            nwa.states[i].state_weight = st.state_weight.clone();
             for (lbl, to) in &st.transitions {
                 let w = st.trans_weights.get(lbl).cloned().unwrap_or_else(Weight::all);
                 nwa.add_transition(i, *lbl, *to, w).unwrap();
