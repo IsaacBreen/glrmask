@@ -95,7 +95,11 @@ fn count_dwa_ranges(dwa: &DWA) -> usize {
     unique_weights.iter().map(|w| w.rsb.ranges_len()).sum()
 }
 
-fn optimize_dwa_and_vocab(dwa: &mut DWA, vocab: &mut StageVocab) {
+fn optimize_dwa_and_vocab(
+    dwa: &mut DWA,
+    vocab: &mut StageVocab,
+    possible_matches: &mut BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
+) {
     let start_time = std::time::Instant::now();
     let initial_ranges = count_dwa_ranges(dwa);
     let initial_tokens = vocab.internal_max_llm_token + 1;
@@ -177,6 +181,23 @@ fn optimize_dwa_and_vocab(dwa: &mut DWA, vocab: &mut StageVocab) {
         if let Some(w) = &mut state.final_weight { *w = map_weight(w, &mut weight_cache); }
         if let Some(w) = &mut state.state_weight { *w = map_weight(w, &mut weight_cache); }
         for w in state.trans_weights.values_mut() { *w = map_weight(w, &mut weight_cache); }
+    }
+
+    // Remap possible_matches
+    let mut bv_cache: HashMap<LLMTokenBV, LLMTokenBV> = HashMap::new();
+    let mut map_bv = |bv: &LLMTokenBV| -> LLMTokenBV {
+        if let Some(cached) = bv_cache.get(bv) { return cached.clone(); }
+        if bv.is_all() { return LLMTokenBV::max_ones(); }
+        let mut new_vals = Vec::new();
+        for t in bv.iter_up_to(max_tok) {
+            if let Some(&new_t) = old_to_new_map.get(&t) { new_vals.push(*new_t); }
+        }
+        let new_bv = HybridBitset::from_iter(new_vals);
+        bv_cache.insert(bv.clone(), new_bv.clone());
+        new_bv
+    };
+    for map in possible_matches.values_mut() {
+        for bv in map.values_mut() { *bv = map_bv(bv); }
     }
 
     let mut new_internal_to_original: BTreeMap<usize, LLMTokenBV> = BTreeMap::new();
@@ -744,10 +765,10 @@ impl GrammarConstraint {
             parser.terminal_map.len(),
         );
 
-        optimize_dwa_and_vocab(&mut skeleton_dwa, &mut vocab);
-
         let terminal_map_by_llm = terminal_map_by_llm_raw;
-        let possible_matches_precompute1 = computed_possible_matches;
+        let mut possible_matches_precompute1 = computed_possible_matches;
+
+        optimize_dwa_and_vocab(&mut skeleton_dwa, &mut vocab, &mut possible_matches_precompute1);
 
         // Precompute4 (DWA).
         let max_internal_llm_token_id = vocab.internal_max_llm_token;
@@ -758,7 +779,7 @@ impl GrammarConstraint {
         let nwa = NWA::from_dwa(&skeleton_dwa);
         let mut precomputed4 = precompute4(&parser, &nwa);
 
-        optimize_dwa_and_vocab(&mut precomputed4, &mut vocab);
+        optimize_dwa_and_vocab(&mut precomputed4, &mut vocab, &mut possible_matches_precompute1);
 
         let internal_to_original_sparse_matrix =
             StageVocab::build_internal_to_original_sparse_matrix(
