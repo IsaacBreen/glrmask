@@ -34,12 +34,7 @@ impl DWAState {
     }
     
     pub fn apply_weight(&mut self, weight: &Weight) {
-        if let Some(sw) = &mut self.state_weight {
-            *sw &= weight;
-        } else if !weight.is_all_fast() {
-            self.state_weight = Some(weight.clone());
-        }
-
+        if let Some(sw) = &mut self.state_weight { *sw &= weight; if sw.is_empty() { self.state_weight = None; } }
         if let Some(fw) = &mut self.final_weight { *fw &= weight; if fw.is_empty() { self.final_weight = None; } }
         for w in self.trans_weights.values_mut() { *w &= weight; }
     }
@@ -132,7 +127,9 @@ impl DWA {
 
     pub fn apply_weight_inplace(&mut self, weight: &Weight) {
         if self.body.start_state < self.states.len() {
-            self.states[self.body.start_state].apply_weight(weight);
+            let s = &mut self.states[self.body.start_state];
+            if let Some(sw) = &mut s.state_weight { *sw &= weight; } else { s.state_weight = Some(weight.clone()); }
+            s.apply_weight(weight);
         }
     }
 
@@ -149,12 +146,7 @@ impl Display for DWA {
             if let Some(sw) = &state.state_weight { writeln!(f, "    state_weight: {}", sw)?; }
             if let Some(w) = &state.final_weight { writeln!(f, "    final_weight: {}", w)?; }
             for (on, to) in &state.transitions {
-                let w = state.trans_weights.get(on).cloned().unwrap_or_else(Weight::all);
-                if w.is_all_fast() {
-                    writeln!(f, "    {} -> {}", format_pos_code(*on), to)?;
-                } else {
-                    writeln!(f, "    {} -> {} (weight: {})", format_pos_code(*on), to, w)?;
-                }
+                writeln!(f, "    {} -> {}", format_pos_code(*on), to)?;
             }
         }
         Ok(())

@@ -177,12 +177,15 @@ pub fn nwa_to_vector_fst(nwa: &NWA) -> VectorFst<BitsetWeight> {
     }
 
     if !nwa.body.start_states.is_empty() {
-        // Always create a super-start to allow weight pushing to the "beginning"
-        let super_start = fst.add_state();
-        fst.set_start(super_start).unwrap();
-        for &s_idx in &nwa.body.start_states {
-            if let Some(&target) = state_map.get(&s_idx) {
-                fst.add_tr(super_start, Tr::new(EPS_LABEL, EPS_LABEL, BitsetWeight::one(), target)).unwrap();
+        if nwa.body.start_states.len() == 1 {
+            fst.set_start(state_map[&nwa.body.start_states[0]]).unwrap();
+        } else {
+            let super_start = fst.add_state();
+            fst.set_start(super_start).unwrap();
+            for &s_idx in &nwa.body.start_states {
+                if let Some(&target) = state_map.get(&s_idx) {
+                    fst.add_tr(super_start, Tr::new(EPS_LABEL, EPS_LABEL, BitsetWeight::one(), target)).unwrap();
+                }
             }
         }
     }
@@ -235,37 +238,12 @@ pub fn vector_fst_to_dwa(fst: &VectorFst<BitsetWeight>) -> DWA {
     let mut dwa = DWA::new();
     dwa.states.0.clear();
     let mut state_map = HashMap::<StateId, StateID>::new();
-    
-    // Detect super-start wrapper to preserve pushed weights
-    let mut effective_start = fst_start;
-    let mut start_weight = Weight::all();
-
-    let start_trs = fst.get_trs(fst_start).unwrap();
-    let start_is_final = fst.final_weight(fst_start).unwrap().is_some();
-
-    // If start is effectively a wrapper (not final, 1 outgoing eps transition), inline it
-    if !start_is_final && start_trs.trs().len() == 1 {
-        let tr = &start_trs.trs()[0];
-        if tr.ilabel == EPS_LABEL {
-            effective_start = tr.nextstate;
-            start_weight = tr.weight.value().clone();
-        }
-    }
 
     for i in 0..fst.num_states() {
-        let fst_id = i as StateId;
-        if fst_id != fst_start || fst_id == effective_start {
-            let s = dwa.add_state();
-            state_map.insert(fst_id, s);
-        }
+        let s = dwa.add_state();
+        state_map.insert(i as StateId, s);
     }
-    // If map doesn't contain effective_start (e.g. empty machine logic), this defaults to 0 or valid
-    if let Some(&s) = state_map.get(&effective_start) {
-        dwa.body.start_state = s;
-        if !start_weight.is_all_fast() {
-            dwa.apply_weight_inplace(&start_weight);
-        }
-    }
+    dwa.body.start_state = state_map[&fst_start];
 
     for i in 0..fst.num_states() {
         let fst_state_id = i as StateId;
@@ -283,12 +261,6 @@ pub fn vector_fst_to_dwa(fst: &VectorFst<BitsetWeight>) -> DWA {
         for tr in fst.get_trs(fst_state_id).unwrap().trs() {
             if !tr.weight.0.is_empty() {
                 if !state_map.contains_key(&tr.nextstate) {
-                    continue;
-                }
-                if tr.ilabel == EPS_LABEL {
-                    // DWA cannot handle internal epsilons. 
-                    // This should not happen for deterministic FSTs unless it's the start wrapper 
-                    // (handled above) or the machine isn't deterministic.
                     continue;
                 }
                 let res = dwa.add_transition(
