@@ -100,10 +100,12 @@ macro_rules! __debug_grouped_impl {
 
                 // Print line number in Dark Gray, then the message
                 // \x1b[90m = Dark Gray (Bright Black)
+                let msg = format!($user_fmt, $($user_args)*);
+                let indented_msg = msg.replace('\n', "\n        ");
                 println!(
                     concat!("\x1b[90m  {:>4}\x1b[0m  ", "{}", "{}"),
                     line!(),
-                    format_args!($user_fmt, $($user_args)*),
+                    indented_msg,
                     elapsed_suffix
                 );
             }
@@ -152,10 +154,12 @@ macro_rules! __debug_start_impl {
                     *last_file_guard = current_file_str.to_string();
                 }
 
+                let msg = format!($user_fmt, $($user_args)*);
+                let indented_msg = msg.replace('\n', "\n        ");
                 print!(
                     concat!("\x1b[90m  {:>4}\x1b[0m  ", "{}", "{}"),
                     line!(),
-                    format_args!($user_fmt, $($user_args)*),
+                    indented_msg,
                     elapsed_suffix
                 );
                 use std::io::Write;
