@@ -90,6 +90,7 @@ impl Display for BelowBottomCharacterization {
 }
 
 pub fn compute_all_characterizations(parser: &GLRParser) -> BTreeMap<TerminalID, BelowBottomCharacterization> {
+    crate::debug!(3, "Computing characterizations for {} terminals", parser.terminal_map.len());
     parser
         .terminal_map
         .right_values()
