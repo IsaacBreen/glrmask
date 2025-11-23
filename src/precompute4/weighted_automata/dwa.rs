@@ -34,7 +34,12 @@ impl DWAState {
     }
     
     pub fn apply_weight(&mut self, weight: &Weight) {
-        if let Some(sw) = &mut self.state_weight { *sw &= weight; if sw.is_empty() { self.state_weight = None; } }
+        if let Some(sw) = &mut self.state_weight {
+            *sw &= weight;
+        } else if !weight.is_all_fast() {
+            self.state_weight = Some(weight.clone());
+        }
+
         if let Some(fw) = &mut self.final_weight { *fw &= weight; if fw.is_empty() { self.final_weight = None; } }
         for w in self.trans_weights.values_mut() { *w &= weight; }
     }
@@ -127,9 +132,7 @@ impl DWA {
 
     pub fn apply_weight_inplace(&mut self, weight: &Weight) {
         if self.body.start_state < self.states.len() {
-            let s = &mut self.states[self.body.start_state];
-            if let Some(sw) = &mut s.state_weight { *sw &= weight; } else { s.state_weight = Some(weight.clone()); }
-            s.apply_weight(weight);
+            self.states[self.body.start_state].apply_weight(weight);
         }
     }
 
