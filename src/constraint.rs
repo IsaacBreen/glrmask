@@ -132,9 +132,6 @@ pub struct GrammarConstraint {
     /// Tokenizer state -> grammar terminal -> internal LLM token bitset.
     pub possible_matches: BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
 
-    /// Internal-token -> start_tokenizer_state -> end_tokenizer_state.
-    pub state_map_by_llm:
-        DedupValueMap<LLMTokenID, BTreeMap<TokenizerStateID, TokenizerStateID>>,
     /// Internal-token -> start_tokenizer_state -> terminals.
     pub terminal_map_by_llm:
         DedupValueMap<LLMTokenID, BTreeMap<TokenizerStateID, TerminalBV>>,
@@ -178,7 +175,6 @@ impl GrammarConstraint {
             self.post_commit_allow_check_mode,
             other.post_commit_allow_check_mode
         );
-        assert_eq!(self.state_map_by_llm, other.state_map_by_llm);
         assert_eq!(self.terminal_map_by_llm, other.terminal_map_by_llm);
         assert_eq!(self.vocab, other.vocab);
         assert_eq!(self.original_to_dummy_map, other.original_to_dummy_map);
@@ -205,10 +201,6 @@ impl JSONConvertible for GrammarConstraint {
         obj.insert(
             "post_commit_allow_check_mode".to_string(),
             self.post_commit_allow_check_mode.to_json(),
-        );
-        obj.insert(
-            "state_map_by_llm".to_string(),
-            self.state_map_by_llm.to_json(),
         );
         obj.insert(
             "terminal_map_by_llm".to_string(),
@@ -274,14 +266,6 @@ impl JSONConvertible for GrammarConstraint {
                         None => TerminalAllowanceCheckMode::default(),
                     };
 
-                let state_map_by_llm =
-                    match obj.remove("state_map_by_llm") {
-                        Some(n) => DedupValueMap::<
-                            LLMTokenID,
-                            BTreeMap<TokenizerStateID, TokenizerStateID>,
-                        >::from_json(n)?,
-                        None => DedupValueMap::new(),
-                    };
                 let terminal_map_by_llm =
                     match obj.remove("terminal_map_by_llm") {
                         Some(n) => DedupValueMap::<
@@ -348,7 +332,6 @@ impl JSONConvertible for GrammarConstraint {
                     llm_vocab,
                     token_name_map,
                     possible_matches,
-                    state_map_by_llm,
                     terminal_map_by_llm,
                     trie1_god,
                     run_precompute4,
@@ -584,7 +567,7 @@ impl GrammarConstraint {
 
         // Unified fast pass for maps and matches.
         crate::debug!(3, "Computing maps and possible_matches (fast parallel pass)");
-        let (state_map_by_llm_raw, computed_possible_matches) =
+        let computed_possible_matches =
             Self::build_maps_and_matches(&tokenizer, &vocab_tree.root);
         let terminal_map_by_llm_raw =
             Self::rearrange_possible_matches(&computed_possible_matches);
@@ -647,7 +630,6 @@ impl GrammarConstraint {
             parser.terminal_map.len(),
         );
 
-        let state_map_by_llm = state_map_by_llm_raw;
         let terminal_map_by_llm = terminal_map_by_llm_raw;
         let possible_matches_precompute1 = computed_possible_matches;
 
@@ -677,7 +659,6 @@ impl GrammarConstraint {
             llm_vocab,
             token_name_map,
             possible_matches: possible_matches_precompute1,
-            state_map_by_llm,
             terminal_map_by_llm,
             trie1_god: Trie1GodWrapper::new(),
             run_precompute4: config.run_precompute4,
@@ -735,10 +716,7 @@ impl GrammarConstraint {
     pub fn build_maps_and_matches(
         tokenizer: &Regex,
         vocab_root: &VocabPrefixTreeNode,
-    ) -> (
-        DedupValueMap<LLMTokenID, BTreeMap<TokenizerStateID, TokenizerStateID>>,
-        BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
-    ) {
+    ) -> BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>> {
         // Flatten DFA for fast access (u32::MAX represents None)
         struct FastDFA {
             transitions: Vec<u32>,           // size = num_states * 256
@@ -751,7 +729,6 @@ impl GrammarConstraint {
             current_states: Vec<(u32, Vec<u32>)>,
             dfa: &FastDFA,
             num_terminals: usize,
-            out_state_map: &mut Vec<(LLMTokenID, BTreeMap<TokenizerStateID, TokenizerStateID>)>,
             out_matches_vec: &mut [Option<LLMTokenBV>],
         ) {
             for (edge_bytes, child) in node.iter_children() {
@@ -803,23 +780,12 @@ impl GrammarConstraint {
                     next_grouped_map.into_iter().collect();
 
                 if !next_grouped.is_empty() {
-                    // Record state map
-                    let mut map = BTreeMap::new();
-                    for (target, sources) in &next_grouped {
-                        let tgt = TokenizerStateID(*target as usize);
-                        for &src in sources {
-                            map.insert(TokenizerStateID(src as usize), tgt);
-                        }
-                    }
-                    out_state_map.push((LLMTokenID(child.token_id()), map));
-
                     // Recurse
                     process_vocab_node_dfs(
                         child,
                         next_grouped,
                         dfa,
                         num_terminals,
-                        out_state_map,
                         out_matches_vec,
                     );
                 }
@@ -860,10 +826,9 @@ impl GrammarConstraint {
 
         // Parallel processing of root children
         let root_children: Vec<_> = vocab_root.iter_children().collect();
-        let (state_map_entries, final_matches_vec) = root_children
+        let final_matches_vec = root_children
             .par_iter()
             .map(|(edge_bytes, child_node)| {
-                let mut local_state_map_entries = Vec::new();
                 let mut local_matches_vec: Vec<Option<LLMTokenBV>> = vec![None; matches_vec_len];
 
                 // Manually process the first edge to bootstrap recursion
@@ -910,33 +875,21 @@ impl GrammarConstraint {
                 let next_grouped: Vec<(u32, Vec<u32>)> =
                     next_grouped_map.into_iter().collect();
                 if !next_grouped.is_empty() {
-                    let mut map = BTreeMap::new();
-                    for (target, sources) in &next_grouped {
-                        let tgt = TokenizerStateID(*target as usize);
-                        for &src in sources {
-                            map.insert(TokenizerStateID(src as usize), tgt);
-                        }
-                    }
-                    local_state_map_entries
-                        .push((LLMTokenID(child_node.token_id()), map));
-
                     process_vocab_node_dfs(
                         child_node,
                         next_grouped,
                         &fast_dfa,
                         num_terminals,
-                        &mut local_state_map_entries,
                         &mut local_matches_vec,
                     );
                 }
 
-                (local_state_map_entries, local_matches_vec)
+                local_matches_vec
             })
             .reduce(
-                || (Vec::new(), vec![None; matches_vec_len]),
+                || vec![None; matches_vec_len],
                 |mut a, b| {
-                    a.0.extend(b.0);
-                    for (acc, val) in a.1.iter_mut().zip(b.1.into_iter()) {
+                    for (acc, val) in a.iter_mut().zip(b.into_iter()) {
                         match (acc, val) {
                             (Some(acc_bv), Some(val_bv)) => acc_bv.union_with(&val_bv),
                             (acc@None, Some(val_bv)) => *acc = Some(val_bv),
@@ -946,22 +899,6 @@ impl GrammarConstraint {
                     a
                 },
             );
-
-        // Merge
-        let mut state_map_out = DedupValueMap::new();
-        // Root identity
-        {
-            let mut root_map = BTreeMap::new();
-            for i in 0..num_states {
-                let s = TokenizerStateID(i);
-                root_map.insert(s, s);
-            }
-            state_map_out.insert(LLMTokenID(vocab_root.token_id()), root_map);
-        }
-
-        for (tid, map) in state_map_entries {
-            state_map_out.insert(tid, map);
-        }
 
         let mut possible_matches: BTreeMap<
             TokenizerStateID,
@@ -979,7 +916,7 @@ impl GrammarConstraint {
             }
         }
 
-        (state_map_out, possible_matches)
+        possible_matches
     }
 
     pub fn rearrange_possible_matches(
