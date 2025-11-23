@@ -116,9 +116,56 @@ impl<'r> Precomputer1<'r> {
 
         // Stats
         // Find cases where there's multiple instances of same transition - incl symbol/epsilon transition - from one state to another, regardless of weight.
-        todo!();
+        let mut duplicate_transitions = 0;
+        for state in &self.nwa.states.0 {
+            let mut dst_counts = HashMap::new();
+            for (dst, _) in &state.epsilons {
+                *dst_counts.entry(*dst).or_insert(0) += 1;
+            }
+            for count in dst_counts.values() {
+                if *count > 1 {
+                    duplicate_transitions += count - 1;
+                }
+            }
+
+            for targets in state.transitions.values() {
+                let mut dst_counts = HashMap::new();
+                for (dst, _) in targets {
+                    *dst_counts.entry(*dst).or_insert(0) += 1;
+                }
+                for count in dst_counts.values() {
+                    if *count > 1 {
+                        duplicate_transitions += count - 1;
+                    }
+                }
+            }
+        }
+        if duplicate_transitions > 0 {
+            crate::debug!(4, "NWA: Found {} duplicate transitions (same src, dst, label)", duplicate_transitions);
+        }
+
         // Find cases where there's multiple instances of same transition - regardless of symbol/epsilon transition - from one state to another, regardless of weight.
-        todo!();
+        let mut parallel_connections = 0;
+        for state in &self.nwa.states.0 {
+            let mut dst_counts = HashMap::new();
+            for (dst, _) in &state.epsilons {
+                *dst_counts.entry(*dst).or_insert(0) += 1;
+            }
+            for targets in state.transitions.values() {
+                for (dst, _) in targets {
+                    *dst_counts.entry(*dst).or_insert(0) += 1;
+                }
+            }
+
+            for count in dst_counts.values() {
+                if *count > 1 {
+                    parallel_connections += 1;
+                }
+            }
+        }
+        if parallel_connections > 0 {
+            crate::debug!(4, "NWA: Found {} pairs of states connected by multiple transitions", parallel_connections);
+        }
 
         crate::debug!(3, "{} states", self.nwa.states.len());
         self.nwa.simplify();
