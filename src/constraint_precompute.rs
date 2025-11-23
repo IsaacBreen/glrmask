@@ -255,35 +255,45 @@ impl<'r> Precomputer1<'r> {
 
         // Find equivalent symbols in the DWA
         // Only consider tokenizer state transitions (label >= terminals_count)
-        let start_label = self.terminals_count as Label;
-        let all_labels: BTreeSet<Label> =
-            dwa.states.0.iter()
-                .flat_map(|s| s.transitions.keys().cloned())
-                .filter(|&l| l >= start_label)
-                .collect();
-
-        // Signature: For each state in DWA, what does this label do?
-        // Type: Vec<Option<(StateID, Weight)>>
-        let mut signatures: BTreeMap<Vec<Option<(usize, Weight)>>, Vec<Label>> = BTreeMap::new();
-
-        for label in all_labels {
-            let mut sig = Vec::with_capacity(dwa.states.len());
-            for s in &dwa.states.0 {
-                sig.push(s.get_transition(label).map(|(t, w)| (t, w.clone())));
+        let mut labels = std::collections::HashSet::new();
+        for state in &dwa.states.0 {
+            for &label in state.transitions.keys() {
+                if label >= self.terminals_count as Label {
+                    labels.insert(label);
+                }
             }
-            signatures.entry(sig).or_default().push(label);
         }
 
-        let mut stats: BTreeMap<usize, usize> = BTreeMap::new();
-        for labels in signatures.values() {
-            if labels.len() > 1 {
-                *stats.entry(labels.len()).or_default() += 1;
+        let mut signatures: Vec<(Vec<Option<(usize, Weight)>>, usize)> = Vec::new();
+        for label in labels {
+            let mut sig = Vec::with_capacity(dwa.states.len());
+            for state in &dwa.states.0 {
+                sig.push(state.get_transition(label).map(|(to, w)| (to, w.clone())));
             }
+
+            let mut found = false;
+            for (existing_sig, count) in &mut signatures {
+                if existing_sig == &sig {
+                    *count += 1;
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                signatures.push((sig, 1));
+            }
+        }
+
+        let mut stats: HashMap<usize, usize> = HashMap::new();
+        for (_, count) in signatures {
+            *stats.entry(count).or_insert(0) += 1;
         }
 
         crate::debug!(3, "Equivalent tokenizer state symbols in DWA (stats): {:?}", stats);
-        assert!(stats.len() == 1, "Expected only one state per class");
-        assert!(stats.values().next().unwrap() == &1, "Expected only one state per class");
+        if !stats.is_empty() {
+            assert_eq!(stats.len(), 1, "Expected only one class size (all unique)");
+            assert_eq!(stats.keys().next(), Some(&1), "Expected only one state per class (unique behavior)");
+        }
 
         dwa
     }
