@@ -227,15 +227,15 @@ impl<'r> Precomputer1<'r> {
         for _ in 0..dwa.states.len() {
             nwa2.add_state();
         }
-        let mut transitions: Vec<BTreeSet<NWAStateID>> = vec![BTreeSet::new(); dwa.states.len()];
+        let mut transitions: Vec<BTreeMap<NWAStateID, Weight>> = vec![BTreeMap::new(); dwa.states.len()];
         for (src, s) in dwa.states.0.iter().enumerate() {
             for (&label, &target) in &s.transitions {
-                transitions[src].insert(target);
+                *transitions[src].entry(target).or_default() |= &s.trans_weights[&label];
             }
         }
         for (src, s) in dwa.states.0.iter().enumerate() {
-            for &target in &transitions[src] {
-                nwa2.add_transition(src, 0, target, Weight::all()).unwrap();
+            for (&target, w) in &transitions[src] {
+                nwa2.add_transition(src, 0, target, w.clone()).unwrap();
             }
             nwa2.states[src].final_weight = s.final_weight.clone();
         }
