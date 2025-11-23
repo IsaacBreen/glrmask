@@ -722,7 +722,7 @@ impl GrammarConstraint {
         for (s, &r) in state_representatives.iter().enumerate() {
             state_to_rep.insert(TokenizerStateID(s), TokenizerStateID(r));
         }
-        crate::debug!(3, "Tokenizer state equivalence analysis complete. {} -> {} states", all_states_list.len(), state_to_rep.len());
+        crate::debug!(3, "Tokenizer state equivalence analysis complete. {} -> {} states", all_states_list.len(), state_representatives.len());
 
         crate::debug!(3, "Computing maps and possible_matches (fast parallel pass)");
         let computed_possible_matches =
