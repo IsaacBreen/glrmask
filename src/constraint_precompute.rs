@@ -524,6 +524,7 @@ pub fn run_precompute1(
     internal_llm_token_map: &BTreeMap<Vec<u8>, LLMTokenID>,
     internal_max_llm_token: usize,
     terminals_count: usize,
+    active_states: Vec<TokenizerStateID>,
 ) -> DWA {
     // Reduce internal_llm_token_map to representatives to speed up precomputation
     let mut representative_llm_token_map: BTreeMap<Vec<u8>, LLMTokenID> = BTreeMap::new();
@@ -535,8 +536,6 @@ pub fn run_precompute1(
         }
     }
 
-    let representative_states: Vec<TokenizerStateID> = tokenizer.iter_states().collect();
-
     let mut helper = Precomputer1::new(
         tokenizer,
         parser,
@@ -544,7 +543,7 @@ pub fn run_precompute1(
         &representative_llm_token_map,
         internal_max_llm_token,
         terminals_count,
-        representative_states,
+        active_states,
     );
 
 

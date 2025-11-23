@@ -39,6 +39,7 @@ use crate::precompute4::weighted_automata::{DWA, NWA};
 use crate::precompute4::weighted_automata::{SimpleBitset, Weight};
 
 // Import from new modules
+use crate::state_equivalence_analysis_finite_automata::find_state_equivalence_classes;
 pub use crate::constraint_vocab::*;
 pub use crate::constraint_trie::*;
 use crate::constraint_precompute::run_precompute1;
@@ -709,6 +710,19 @@ impl GrammarConstraint {
         crate::debug!(4, "Done building internal vocab prefix tree");
 
         // Unified fast pass for maps and matches.
+        // OPTIMIZATION: State Equivalence Analysis
+        crate::debug!(3, "Analyzing tokenizer state equivalence...");
+        let all_states_list: Vec<usize> = tokenizer.iter_states().map(|s| s.0).collect();
+        let state_representatives = find_state_equivalence_classes(
+            &tokenizer,
+            &internal_tokens_for_vocab.iter().map(|(_, b)| b.clone()).collect::<Vec<_>>(),
+            &all_states_list,
+        );
+        let mut state_to_rep: BTreeMap<TokenizerStateID, TokenizerStateID> = BTreeMap::new();
+        for (s, &r) in state_representatives.iter().enumerate() {
+            state_to_rep.insert(TokenizerStateID(s), TokenizerStateID(r));
+        }
+
         crate::debug!(3, "Computing maps and possible_matches (fast parallel pass)");
         let computed_possible_matches =
             Self::build_maps_and_matches(&tokenizer, &vocab_tree.root);
@@ -763,7 +777,12 @@ impl GrammarConstraint {
             }
         }
 
-        // Precompute1 - generate skeleton DWA
+        // Precompute1 - generate skeleton DWA using only representative states
+        let mut representative_states_set: BTreeSet<TokenizerStateID> = BTreeSet::new();
+        for rep in state_to_rep.values() {
+            representative_states_set.insert(*rep);
+        }
+
         let mut skeleton_dwa = run_precompute1(
             &tokenizer,
             Some(&parser),
@@ -771,7 +790,34 @@ impl GrammarConstraint {
             &internal_llm_token_map,
             vocab.internal_max_llm_token,
             parser.terminal_map.len(),
+            representative_states_set.into_iter().collect(),
         );
+
+        // EXPAND DWA: Add transitions for non-representative states
+        crate::debug!(3, "Expanding DWA transitions for equivalent states...");
+        let start_state_id = skeleton_dwa.body.start_state;
+        {
+            let terminals_count = parser.terminal_map.len();
+            
+            // Collect transitions to add to avoid mutable borrow conflict
+            let mut transitions_to_add = Vec::new();
+            
+            for (state, rep) in &state_to_rep {
+                if state != rep {
+                    let rep_label = (rep.0 + terminals_count) as crate::precompute4::weighted_automata::common::Label;
+                    let state_label = (state.0 + terminals_count) as crate::precompute4::weighted_automata::common::Label;
+                    
+                    // Find where the representative points to
+                    if let Some((target, weight)) = skeleton_dwa.states[start_state_id].get_transition(rep_label) {
+                        transitions_to_add.push((state_label, target, weight.clone()));
+                    }
+                }
+            }
+
+            for (label, target, weight) in transitions_to_add {
+                skeleton_dwa.add_transition(start_state_id, label, target, weight).unwrap();
+            }
+        }
 
         let terminal_map_by_llm = terminal_map_by_llm_raw;
         let mut possible_matches_precompute1 = computed_possible_matches;
