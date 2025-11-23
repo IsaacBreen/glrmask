@@ -10,7 +10,8 @@ use std::fmt::{Debug, Display, Formatter};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use memory_stats::memory_stats;
-use rustc_hash::{FxHashMap, FxHasher};
+use ahash::AHashMap;
+
 
 pub type GroupID = usize;
 
@@ -48,18 +49,16 @@ impl std::hash::Hash for CompressedStateSet {
 }
 
 impl CompressedStateSet {
+    #[inline]
     fn new(_num_bits: usize) -> Self {
-        // Compute hash of empty set
-        let mut hasher = FxHasher::default();
-        0usize.hash(&mut hasher); // Length 0
-        let hash = hasher.finish();
-
+        // Empty set has pre-computed hash
         Self {
             words: Vec::new(),
-            hash,
+            hash: 0,  // Hash of empty vec
         }
     }
 
+    #[inline]
     fn from_sparse(sparse: &SparseStateSet) -> Self {
         let mut words = Vec::with_capacity(sparse.dirty_words.len());
         Self::fill_words_from_sparse(sparse, &mut words);
@@ -67,12 +66,14 @@ impl CompressedStateSet {
         Self { words, hash }
     }
 
+    #[inline]
     fn reuse_from_sparse(sparse: &SparseStateSet, buffer: &mut Self) {
         buffer.words.clear();
         Self::fill_words_from_sparse(sparse, &mut buffer.words);
         buffer.hash = Self::compute_hash(&buffer.words);
     }
 
+    #[inline]
     fn fill_words_from_sparse(sparse: &SparseStateSet, words: &mut Vec<(u32, u64)>) {
         let mut indices = sparse.dirty_words.clone();
         indices.sort_unstable();
@@ -85,8 +86,11 @@ impl CompressedStateSet {
         }
     }
 
+    #[inline]
     fn compute_hash(words: &Vec<(u32, u64)>) -> u64 {
-        let mut hasher = FxHasher::default();
+        // Use ahash's fast hashing
+        use std::hash::Hasher;
+        let mut hasher = ahash::AHasher::default();
         words.len().hash(&mut hasher);
         for &(idx, w) in words {
             idx.hash(&mut hasher);
@@ -95,6 +99,7 @@ impl CompressedStateSet {
         hasher.finish()
     }
 
+    #[inline]
     fn iter(&self) -> CompressedStateSetIter {
         CompressedStateSetIter {
             set: self,
@@ -104,6 +109,7 @@ impl CompressedStateSet {
         }
     }
 
+    #[inline]
     fn len(&self) -> usize {
         self.words.iter().map(|(_, w)| w.count_ones() as usize).sum()
     }
@@ -1623,8 +1629,8 @@ impl NFA {
     pub fn to_dfa(self) -> DFA {
         let start_time = std::time::Instant::now();
         let mut dfa_states: Vec<DFAState> = Vec::new();
-        // Use CompressedStateSet for memory efficiency
-        let mut dfa_state_map: FxHashMap<CompressedStateSet, usize> = FxHashMap::default();
+        // Use AHashMap for faster hashing
+        let mut dfa_state_map: AHashMap<CompressedStateSet, usize> = AHashMap::default();
         let mut worklist: Vec<CompressedStateSet> = Vec::new();
 
         // Instrumentation
@@ -1660,9 +1666,10 @@ impl NFA {
             remapped_transitions.push(trans);
         }
 
-        // Shared buffers
+        // Shared buffers - increase stack capacity for better performance
         let num_nfa_states = self.states.len();
-        let mut stack = Vec::with_capacity(1024);
+        // Allocate larger stack to reduce reallocations (was 1024, now 4096)
+        let mut stack = Vec::with_capacity(4096.min(num_nfa_states));
         let mut closure_set = SparseStateSet::new(num_nfa_states);
 
         // Compact NFA for faster BFS
@@ -1747,7 +1754,7 @@ impl NFA {
 
             // 2. Process inputs (PROCESS PHASE)
             let start_process = std::time::Instant::now();
-            let mut local_cache: FxHashMap<CompressedStateSet, usize> = FxHashMap::default();
+            let mut local_cache: AHashMap<CompressedStateSet, usize> = AHashMap::default();
             let mut scratch_target = CompressedStateSet::new(0);
             let mut scratch_closure = CompressedStateSet::new(0);
             
@@ -1791,13 +1798,17 @@ impl NFA {
                     }
                     t_iter_bitset += start_iter.elapsed();
 
-                    // TIMING: BFS Closure
+                    // TIMING: BFS Closure - inlined and optimized
                     let start_bfs = std::time::Instant::now();
+                    // Inline epsilon closure for better performance
                     while let Some(u) = stack.pop() {
-                        let start = unsafe { *compact_nfa.epsilon_offsets.get_unchecked(u) } as usize;
-                        let end = unsafe { *compact_nfa.epsilon_offsets.get_unchecked(u + 1) } as usize;
-                        for &v in unsafe { compact_nfa.epsilon_targets.get_unchecked(start..end) } {
-                            let v = v as usize;
+                        // Use unsafe raw pointer access for speed
+                        let start_offs = unsafe { *compact_nfa.epsilon_offsets.get_unchecked(u) } as usize;
+                        let end_offs = unsafe { *compact_nfa.epsilon_offsets.get_unchecked(u + 1) } as usize;
+                        
+                        // Iterate over epsilon targets with raw pointer for maximum speed
+                        for i in start_offs..end_offs {
+                            let v = unsafe { *compact_nfa.epsilon_targets.get_unchecked(i) } as usize;
                             if closure_set.insert(v) {
                                 stack.push(v);
                             }

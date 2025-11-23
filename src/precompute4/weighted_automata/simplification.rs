@@ -109,7 +109,7 @@ struct DwaStateBuilder {
     trans: BTreeMap<Label, (StateID, Weight)>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum DwaPass {
     PruneUnreachable,
     PruneDeadEnds,
@@ -117,6 +117,7 @@ enum DwaPass {
     PushWeightsToInitial,
     Minimize,
 }
+
 
 const DWA_PASS_ORDERINGS: &[&[DwaPass]] = &[
     &[DwaPass::PruneUnreachable, DwaPass::PruneDeadEnds, DwaPass::PushWeights, DwaPass::Minimize],
@@ -310,11 +311,22 @@ impl DWA {
         ];
         let mut last_changing_passes: Vec<DwaPass> = vec![];
         let mut converged = false;
+        
+        // Track which passes made changes in previous iteration
+        let mut pass_made_change_before: std::collections::HashSet<DwaPass> = 
+            ordering.iter().copied().collect();
 
-        for _ in 0..MAX_OPTIMIZE_ITERATIONS {
+        for iter_num in 0..MAX_OPTIMIZE_ITERATIONS {
             let mut current_changing_passes = vec![];
             let mut changed_in_iteration = false;
+            
             for &pass in ordering {
+                // Short-circuit: skip passes that didn't change anything last iteration
+                // unless another pass changed something (which might enable this pass)
+                if iter_num > 0 && !pass_made_change_before.contains(&pass) && !changed_in_iteration {
+                    continue;
+                }
+                
                 let pass_changed = match pass {
                     DwaPass::PruneUnreachable => self.prune_unreachable(),
                     DwaPass::PruneDeadEnds => self.prune_dead_ends(),
@@ -327,6 +339,10 @@ impl DWA {
                 }
                 changed_in_iteration |= pass_changed;
             }
+            
+            // Update which passes made changes
+            pass_made_change_before.clear();
+            pass_made_change_before.extend(current_changing_passes.iter());
 
             total_changed |= changed_in_iteration;
             if !changed_in_iteration {
@@ -464,25 +480,10 @@ impl DWA {
         }
 
         // 2. Reweight
-        // w'(u->v) = d[u]^-1 * w(u->v) * d[v]
-        // final'(u) = d[u]^-1 * final(u)
-        // start_weight' = d[start] (handled by pushing to initial state if needed, but here we just modify graph)
-        // Wait, if we push to initial, the initial state effectively "absorbs" d[start].
-        // But DWA doesn't have "initial weight" separate from transitions.
-        // However, if we reweight correctly, the "weight" at start is implicit.
-        // Actually, we can't fully push to initial if there's no place to store the initial weight.
-        // But we can push as much as possible.
-        // The reweighting formula ensures that path weights are preserved relative to d[start].
-        // The "lost" weight d[start] is effectively extracted.
-        // Since we want to minimize, extracting common weight        // 2. Reweight
         let mut changed = false;
         let start_node = self.body.start_state;
         for (u, st) in self.states.0.iter_mut().enumerate() {
             let d_u = &d[u];
-            // If u is start, we don't divide by d[u] (we keep the total weight).
-            // So inv_d_u is effectively Empty (identity for addition/union, which acts as "0" in "w | !d").
-            // Wait, "w | !d". If !d is Empty, we get "w | Empty = w".
-            // So we preserve the weight.
             let inv_d_u = if u == start_node { Weight::zeros() } else { d_u.complement() };
 
             // Transitions
@@ -490,8 +491,6 @@ impl DWA {
                 if v < n {
                     let d_v = &d[v];
                     if let Some(w) = st.trans_weights.get_mut(&label) {
-                        // w' = (w & d[v]) | !d[u]
-                        // Note: d[u]^-1 * (w * d[v])
                         let new_w = (&*w & d_v) | &inv_d_u;
                         if *w != new_w {
                             *w = new_w;
@@ -503,10 +502,6 @@ impl DWA {
             
             // Final weights
             if let Some(fw) = &mut st.final_weight {
-                // fw' = fw * d[u]^-1? No.
-                // Path u->final has weight fw.
-                // We want fw' such that d[u] * fw' = fw.
-                // fw' = d[u]^-1 * fw.
                 let new_fw = &*fw | &inv_d_u;
                 if *fw != new_fw {
                     *fw = new_fw;
@@ -520,6 +515,10 @@ impl DWA {
     fn minimize_states(&mut self) -> bool {
         let n = self.states.len();
         if n <= 1 {
+            return false;
+        }
+        // Skip minimize for very small automata (optimization)
+        if n < 3 {
             return false;
         }
         let partition = minimize_dwa_partition(&self.states);
