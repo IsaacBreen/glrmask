@@ -230,8 +230,8 @@ impl<'r> Precomputer1<'r> {
         let mut transitions: Vec<BTreeMap<NWAStateID, (Weight, usize)>> = vec![BTreeMap::new(); dwa.states.len()];
         for (src, s) in dwa.states.0.iter().enumerate() {
             for (&label, &target) in &s.transitions {
-                let (w, count) = transitions[src].entry(target).or_default();
-                *w |= &s.trans_weights[&label];
+                let (w, count) = transitions[src].entry(target).or_insert_with(|| (Weight::all(), 0));
+                *w &= &s.trans_weights[&label];
                 *count += 1;
             }
         }
