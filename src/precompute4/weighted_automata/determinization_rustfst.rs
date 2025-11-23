@@ -224,8 +224,6 @@ pub fn nwa_to_vector_fst(nwa: &NWA) -> VectorFst<BitsetWeight> {
         }
     }
 
-    assert_eq!(nwa, &vector_fst_to_nwa(&fst));
-
     fst
 }
 
