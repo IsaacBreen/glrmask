@@ -183,7 +183,7 @@ impl<'r> Precomputer1<'r> {
             for weight in state.trans_weights.values() {
                 // Filter out 'all' or very large sets to focus on specific, interesting tokens
                 if !weight.is_all_fast() && weight.len() < 1000 {
-                    for token_id in weight.clone() {
+                    for token_id in weight.iter_up_to(self.all_llm_tokens.len() as usize) {
                         *token_counts.entry(token_id).or_insert(0) += 1;
                     }
                 }
