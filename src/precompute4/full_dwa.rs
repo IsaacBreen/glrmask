@@ -606,15 +606,15 @@ fn precompute_token_bvs_and_signatures(reversed_nwa: &NWA, traversal_data: &NwaT
 }
 
 fn resolve_negatives_and_optimize_and_determinize(parser: &GLRParser, mut combined_nwa: NWA) -> DWA {
-    crate::debug!(3, "Resolving negatives and optimizing...");
+    crate::debug!(3, "Resolving negatives and optimizing for NWA with {} states and {} transitions...", combined_nwa.states.len(), combined_nwa.states.num_transitions());
     prune_continuations_from_final_states(&mut combined_nwa);
-    crate::debug!(3, "Pruned continuations from final states. {} states remaining.", combined_nwa.states.len());
+    crate::debug!(3, "Pruned continuations from final states. NWA with {} states and {} transitions remaining.", combined_nwa.states.len(), combined_nwa.states.num_transitions());
     combined_nwa.simplify();
-    crate::debug!(3, "Simplified NWA. {} states remaining.", combined_nwa.states.len());
+    crate::debug!(3, "Simplified NWA. {} states and {} transitions remaining.", combined_nwa.states.len(), combined_nwa.states.num_transitions());
     let mut dwa = combined_nwa.determinize();
-    crate::debug!(3, "Determinized NWA. {} states remaining.", dwa.states.len());
+    crate::debug!(3, "Determinized NWA. {} states and {} transitions remaining.", dwa.states.len(), dwa.states.num_transitions());
     dwa.simplify();
-    crate::debug!(3, "Simplified DWA. {} states remaining.", dwa.states.len());
+    crate::debug!(3, "Simplified DWA. {} states and {} transitions remaining.", dwa.states.len(), dwa.states.num_transitions());
     dwa
 }
 

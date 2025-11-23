@@ -167,13 +167,13 @@ impl<'r> Precomputer1<'r> {
             crate::debug!(4, "NWA: Found {} pairs of states connected by multiple transitions", parallel_connections);
         }
 
-        crate::debug!(3, "{} states", self.nwa.states.len());
+        crate::debug!(3, "{} states and {} transitions", self.nwa.states.len(), self.nwa.states.num_transitions());
         self.nwa.simplify();
-        crate::debug!(3, "Simplified NWA with {} states", self.nwa.states.len());
+        crate::debug!(3, "Simplified NWA with {} states and {} transitions", self.nwa.states.len(), self.nwa.states.num_transitions());
         let mut dwa = self.nwa.determinize();
-        crate::debug!(3, "Determinized NWA with {} states", dwa.states.len());
+        crate::debug!(3, "Determinized NWA with {} states and {} transitions", dwa.states.len(), dwa.states.num_transitions());
         dwa.simplify();
-        crate::debug!(3, "Simplified DWA with {} states", dwa.states.len());
+        crate::debug!(3, "Simplified DWA with {} states and {} transitions", dwa.states.len(), dwa.states.num_transitions());
         // dwa = dwa.unroll_cycles();
         // crate::debug!(3, "Unrolled DWA with {} states", dwa.states.len());
 
