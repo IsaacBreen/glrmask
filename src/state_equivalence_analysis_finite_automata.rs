@@ -1,5 +1,6 @@
 use crate::finite_automata::Regex;
 use smallvec::SmallVec;
+use std::collections::BTreeSet;
 
 // -----------------------------------------------------------------------------
 // Hashing Utilities (128-bit)
@@ -25,6 +26,26 @@ fn hash_match_event(gid: u32, depth: u32) -> u128 {
 fn hash_end_state(class_id: u64) -> u128 {
     // Distinguish end state hash from match hash by setting high bit or using different mix
     mix_u128((class_id as u128) | (1u128 << 127))
+}
+
+fn compute_state_accessibility_signature(regex: &Regex, state_idx: usize) -> u128 {
+    let state = &regex.dfa.states[state_idx];
+    let mut h = 0u128;
+    
+    // Hash finalizers (immediate matches)
+    for &gid in &state.finalizers {
+        // Mix in a constant to distinguish finalizers from future groups
+        h = h.wrapping_add(mix_u128((gid as u128) << 1));
+    }
+    
+    // Hash possible future group IDs
+    // Use a different mixing constant or shift to distinguish
+    for &gid in &state.possible_future_group_ids {
+        h = h.wrapping_add(mix_u128(((gid as u128) << 1) | 1));
+    }
+    
+    // Final mix to ensure distribution
+    mix_u128(h)
 }
 
 // -----------------------------------------------------------------------------
@@ -103,9 +124,21 @@ pub fn find_state_equivalence_classes(
     trie.compute_subtree_weights(0);
 
     // 2. Partition Refinement Loop
-    let max_state_id = states.iter().max().copied().unwrap_or(0);
-    let mut class_ids = vec![0u64; max_state_id + 1];
+    // Initialize classes based on accessible terminals (output behavior)
+    let max_state_id = regex.dfa.states.len() - 1;
+    let mut class_ids = vec![0u64; regex.dfa.states.len()];
     
+    // Compute initial signatures based on terminal accessibility
+    for i in 0..regex.dfa.states.len() {
+        // We treat the accessibility hash directly as a class discriminator for the start.
+        // We can just use the raw hash for the first round of refinement, or map to small integers.
+        // Mapping to small integers is safer for stability and debugging.
+        // Actually, let's just rely on the hash collision resistance of u128 for the 'signature' part.
+        // But `class_ids` needs to be u64. We can just hash the 128-bit sig to 64-bit.
+        let sig = compute_state_accessibility_signature(regex, i);
+        class_ids[i] = sig as u64;
+    }
+
     // Prepare initial groups for DFS (invariant across iterations)
     // Map: current_dfa_state -> List of original_state_indices (u32)
     let mut initial_groups: Vec<(Vec<u32>, u32)> = Vec::new();
