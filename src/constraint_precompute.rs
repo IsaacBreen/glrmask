@@ -113,6 +113,13 @@ impl<'r> Precomputer1<'r> {
             self.nwa.add_transition(new_start_state, label, *state, Weight::all()).unwrap();
         }
         self.nwa.body.start_states = vec![new_start_state];
+
+        // Stats
+        // Find cases where there's multiple instances of same transition - incl symbol/epsilon transition - from one state to another, regardless of weight.
+        todo!();
+        // Find cases where there's multiple instances of same transition - regardless of symbol/epsilon transition - from one state to another, regardless of weight.
+        todo!();
+
         crate::debug!(3, "{} states", self.nwa.states.len());
         self.nwa.simplify();
         crate::debug!(3, "Simplified NWA with {} states", self.nwa.states.len());
@@ -305,9 +312,7 @@ impl<'r> Precomputer1<'r> {
                     // 2. Handle End State -> Continuation
                     if let Some(end_state_val) = exec_result.end_state {
                         let final_tokenizer_state = TokenizerStateID(end_state_val);
-                        let accessible_terminals = self
-                            .tokenizer
-                            .tokens_accessible_from_state(final_tokenizer_state);
+                        let accessible_terminals = self.tokenizer.tokens_accessible_from_state(final_tokenizer_state);
 
                         let mut edge_bv = RangeSetBlaze::new();
                         edge_bv.insert(child_token_id);
