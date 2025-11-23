@@ -4,6 +4,7 @@ use crate::types::TerminalID as GrammarTokenID;
 use bimap::BiBTreeMap;
 // Added
 use std::collections::{BTreeMap as StdMap, BTreeSet};
+use std::hash::{Hash, Hasher};
 // Added for derive macro pattern, aliased to avoid conflict
 
 pub type LLMToken = Vec<u8>;
@@ -130,4 +131,3 @@ impl Regex {
         (0..self.max_state()).map(|id| TokenizerStateID(id))
     }
 }
-
