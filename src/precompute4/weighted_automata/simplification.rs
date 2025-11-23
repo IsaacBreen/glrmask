@@ -829,6 +829,7 @@ enum NwaPass {
     PushFinalWeights,
     CompressTransitions,
     Minimize,
+    RestrictWeights,
 }
 
 const NWA_PASS_ORDERINGS: &[&[NwaPass]] = &[
@@ -973,10 +974,10 @@ impl NWA {
         let mut total_changed = false;
         // PruneUnreachable, CompressTransitions, PushFinalWeights, PruneDeadEnds, Minimize
         let ordering = &[
+            NwaPass::RestrictWeights,
             NwaPass::PruneUnreachable,
             NwaPass::CompressTransitions,
             NwaPass::PushFinalWeights,
-            NwaPass::PruneDeadEnds,
             NwaPass::Minimize,
         ];
         let mut last_changing_passes: Vec<NwaPass> = vec![];
@@ -992,6 +993,7 @@ impl NWA {
                     NwaPass::PushFinalWeights => self.push_final_weights_along_epsilons(),
                     NwaPass::CompressTransitions => self.compress_transitions(),
                     NwaPass::Minimize => self.minimize_states(),
+                    NwaPass::RestrictWeights => self.restrict_weights(),
                 };
                 if pass_changed {
                     current_changing_passes.push(pass);
@@ -1436,5 +1438,156 @@ impl NWA {
         self.body.start_states = new_start_states;
         self.states = new_states;
         true
+    }
+
+    /// Restricts weights based on Forward (I) and Backward (V) potentials.
+    /// Effectively performs "in-place weight pushing" and pruning of dead weight.
+    /// W'(u->v) = W(u->v) & I(u) & V(v).
+    pub fn restrict_weights(&mut self) -> bool {
+        let n = self.states.len();
+        if n == 0 {
+            return false;
+        }
+
+        // 1. Backward Potentials (V)
+        let mut v_pot = vec![Weight::zeros(); n];
+        let mut q = VecDeque::new();
+        let mut in_q = vec![false; n];
+
+        for i in 0..n {
+            if let Some(fw) = &self.states[i].final_weight {
+                if !fw.is_empty() {
+                    v_pot[i] = fw.clone();
+                    q.push_back(i);
+                    in_q[i] = true;
+                }
+            }
+        }
+
+        // Build reverse edges for backward propagation
+        struct RevEdge { u: usize, w: Weight }
+        let mut rev_edges = vec![Vec::new(); n];
+        for (u, st) in self.states.0.iter().enumerate() {
+            for (v, w) in &st.epsilons {
+                if *v < n {
+                    rev_edges[*v].push(RevEdge { u, w: w.clone() });
+                }
+            }
+            for (_, targets) in &st.transitions {
+                for (v, w) in targets {
+                    if *v < n {
+                        rev_edges[*v].push(RevEdge { u, w: w.clone() });
+                    }
+                }
+            }
+        }
+
+        while let Some(curr) = q.pop_front() {
+            in_q[curr] = false;
+            let curr_val = v_pot[curr].clone();
+            if curr_val.is_empty() { continue; }
+
+            for edge in &rev_edges[curr] {
+                let prop = &edge.w & &curr_val;
+                if !prop.is_empty() && !prop.is_subset_of(&v_pot[edge.u]) {
+                    v_pot[edge.u] |= prop;
+                    if !in_q[edge.u] {
+                        q.push_back(edge.u);
+                        in_q[edge.u] = true;
+                    }
+                }
+            }
+        }
+
+        // 2. Forward Potentials (I)
+        let mut i_pot = vec![Weight::zeros(); n];
+        in_q.fill(false);
+        q.clear(); 
+
+        for &s in &self.body.start_states {
+            if s < n {
+                i_pot[s] = Weight::all();
+                if !in_q[s] {
+                    q.push_back(s);
+                    in_q[s] = true;
+                }
+            }
+        }
+
+        while let Some(u) = q.pop_front() {
+            in_q[u] = false;
+            let u_val = i_pot[u].clone();
+            if u_val.is_empty() { continue; }
+
+            let st = &self.states[u];
+            let mut propagate = |v: usize, w: &Weight| {
+                if v < n {
+                    let prop = &u_val & w;
+                    if !prop.is_empty() && !prop.is_subset_of(&i_pot[v]) {
+                        i_pot[v] |= prop;
+                        if !in_q[v] {
+                            q.push_back(v);
+                            in_q[v] = true;
+                        }
+                    }
+                }
+            };
+
+            for (v, w) in &st.epsilons { propagate(*v, w); }
+            for (_, targets) in &st.transitions {
+                for (v, w) in targets { propagate(*v, w); }
+            }
+        }
+
+        // 3. Restrict Weights
+        let mut changed = false;
+        for u in 0..n {
+            let i_u = &i_pot[u];
+            
+            if let Some(fw) = &self.states[u].final_weight {
+                let new_fw = fw & i_u;
+                if &new_fw != fw {
+                    self.states[u].final_weight = if new_fw.is_empty() { None } else { Some(new_fw) };
+                    changed = true;
+                }
+            }
+
+            let st = &mut self.states[u];
+
+            // Helper to clean vector of (dest, weight)
+            let clean_targets = |targets: &mut Vec<(NWAStateID, Weight)>| -> bool {
+                let mut loc_changed = false;
+                let mut new_targets = Vec::with_capacity(targets.len());
+                for (v, w) in targets.iter() {
+                    if *v < n {
+                        let req = i_u & &v_pot[*v];
+                        let new_w = w & &req;
+                        if !new_w.is_empty() {
+                            if &new_w != w { loc_changed = true; }
+                            new_targets.push((*v, new_w));
+                        } else {
+                            loc_changed = true;
+                        }
+                    } else { loc_changed = true; }
+                }
+                if loc_changed {
+                    *targets = new_targets;
+                }
+                loc_changed
+            };
+
+            if clean_targets(&mut st.epsilons) { changed = true; }
+
+            if !st.transitions.is_empty() {
+                for (_, targets) in st.transitions.iter_mut() {
+                    if clean_targets(targets) { changed = true; }
+                }
+                let len_before = st.transitions.len();
+                st.transitions.retain(|_, t| !t.is_empty());
+                if st.transitions.len() != len_before { changed = true; }
+            }
+        }
+        
+        changed
     }
 }
