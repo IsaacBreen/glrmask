@@ -5,6 +5,7 @@ use crate::finite_automata::{Expr, QuantifierType};
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::interface::{GrammarDefinition, GrammarExpr};
 use crate::types::TerminalID;
+use crate::debug;
 
 pub fn optimize_grammar(grammar: &mut GrammarDefinition) {
     let mut optimizer = GrammarOptimizer::new(grammar);
@@ -17,11 +18,34 @@ impl GrammarDefinition {
     }
 }
 
+#[derive(Default, Debug)]
+struct OptimizationStats {
+    initial_productions: usize,
+    final_productions: usize,
+    initial_terminals: usize,
+    final_terminals: usize,
+    sccs_found: usize,
+    sccs_optimized: usize,
+    interned_exprs: usize,
+}
+
+impl std::fmt::Display for OptimizationStats {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "Grammar Optimization Stats:")?;
+        writeln!(f, "  Productions: {} -> {} (Diff: {})", self.initial_productions, self.final_productions, self.final_productions as isize - self.initial_productions as isize)?;
+        writeln!(f, "  Terminals:   {} -> {} (Diff: {})", self.initial_terminals, self.final_terminals, self.final_terminals as isize - self.initial_terminals as isize)?;
+        writeln!(f, "  SCCs:        {} total, {} optimized", self.sccs_found, self.sccs_optimized)?;
+        writeln!(f, "  Interned:    {} regex expressions", self.interned_exprs)?;
+        Ok(())
+    }
+}
+
 struct GrammarOptimizer<'a> {
     grammar: &'a mut GrammarDefinition,
     // Map from NonTerminal to its resolved Expr (if it has been converted)
     resolved_nts: HashMap<NonTerminal, Expr>,
     interner: ExprInterner,
+    stats: OptimizationStats,
 }
 
 impl<'a> GrammarOptimizer<'a> {
@@ -30,21 +54,33 @@ impl<'a> GrammarOptimizer<'a> {
             grammar,
             resolved_nts: HashMap::new(),
             interner: ExprInterner::new(),
+            stats: OptimizationStats::default(),
         }
     }
 
+    fn count_terminals(&self) -> usize {
+        self.grammar.regex_name_to_group_id.len() + 
+        self.grammar.literal_to_group_id.len() + 
+        self.grammar.external_name_to_group_id.len()
+    }
+
     fn optimize(&mut self) {
+        self.stats.initial_productions = self.grammar.productions.len();
+        self.stats.initial_terminals = self.count_terminals();
+
         // 1. Build dependency graph
         let (graph, nt_list) = self.build_dependency_graph();
         
         // 2. Compute SCCs
         let sccs = self.compute_sccs(&graph, &nt_list);
+        self.stats.sccs_found = sccs.len();
         
         // 3. Process SCCs in topological order
         for scc_indices in sccs {
             let scc_nts: Vec<NonTerminal> = scc_indices.iter().map(|&i| nt_list[i].clone()).collect();
             
             if let Some(resolved_map) = self.try_convert_scc(&scc_nts) {
+                self.stats.sccs_optimized += 1;
                 // Successful conversion
                 for (nt, expr) in resolved_map {
                     self.resolved_nts.insert(nt, expr);
@@ -57,6 +93,12 @@ impl<'a> GrammarOptimizer<'a> {
         
         // 5. Cleanup unused terminals
         self.cleanup_terminals();
+
+        self.stats.final_productions = self.grammar.productions.len();
+        self.stats.final_terminals = self.count_terminals();
+        self.stats.interned_exprs = self.interner.cache.len();
+
+        debug!(3, "{}", self.stats);
     }
 
     fn build_dependency_graph(&self) -> (Vec<Vec<usize>>, Vec<NonTerminal>) {
