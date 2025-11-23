@@ -841,7 +841,7 @@ impl GrammarConstraint {
             .par_iter()
             .fold(
                 || FxHashMap::default(),
-                |mut local_matches, (edge_bytes, child_node)| {
+                |mut local_matches: FxHashMap<usize, LLMTokenBV>, (edge_bytes, child_node)| {
                 let first_byte = edge_bytes[0];
                 let relevant_states = &states_by_first_byte[first_byte as usize];
 
