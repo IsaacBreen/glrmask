@@ -37,7 +37,7 @@ pub struct NWAStates(pub Vec<NWAState>);
 impl NWAStates {
     pub fn len(&self) -> usize { self.0.len() }
 
-    pub fn num_transitions(&self) -> usize { self.0.iter().map(|s| s.transitions.len() + s.epsilons.len()).sum() }
+    pub fn num_transitions(&self) -> usize { self.0.iter().map(|s| s.transitions.iter().map(|(_, v)| v.len()).sum::<usize>() + s.epsilons.len()).sum() }
 
     pub fn add_state(&mut self) -> NWAStateID {
         let id = self.0.len();
