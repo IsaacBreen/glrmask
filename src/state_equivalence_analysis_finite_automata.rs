@@ -22,9 +22,9 @@ fn hash_match_event(gid: u32, depth: u32) -> u128 {
 }
 
 #[inline(always)]
-fn hash_end_state(state: u32) -> u128 {
+fn hash_end_state(class_id: u64) -> u128 {
     // Distinguish end state hash from match hash by setting high bit or using different mix
-    mix_u128((state as u128) | (1u128 << 127))
+    mix_u128((class_id as u128) | (1u128 << 127))
 }
 
 // -----------------------------------------------------------------------------
@@ -102,31 +102,63 @@ pub fn find_state_equivalence_classes(
     }
     trie.compute_subtree_weights(0);
 
-    // 2. DFS
-    let mut accumulators = vec![0u128; states.len()];
+    // 2. Partition Refinement Loop
+    let max_state_id = states.iter().max().copied().unwrap_or(0);
+    let mut class_ids = vec![0u64; max_state_id + 1];
     
-    // Initial active states: map each original state to itself as the current DFA state
-    // Grouped by current DFA state for efficiency
-    // Map: current_dfa_state -> List of original_state_indices
+    // Prepare initial groups for DFS (invariant across iterations)
+    // Map: current_dfa_state -> List of original_state_indices (u32)
     let mut initial_groups: Vec<(Vec<u32>, u32)> = Vec::new();
-    
-    // Optimization: Group by initial state immediately
     let mut map: std::collections::HashMap<u32, Vec<u32>> = std::collections::HashMap::new();
-    for (i, &s) in states.iter().enumerate() {
-        map.entry(s as u32).or_default().push(i as u32);
+    for (idx_in_input, &s) in states.iter().enumerate() {
+        map.entry(s as u32).or_default().push(idx_in_input as u32);
     }
     for (dfa_st, list) in map {
         initial_groups.push((list, dfa_st));
     }
 
-    process_node(regex, &trie, 0, initial_groups, &mut accumulators, 0);
+    // Loop until fixpoint
+    for _iteration in 0..100 {
+        let mut accumulators = vec![0u128; states.len()];
+        
+        process_node(regex, &trie, 0, initial_groups.clone(), &mut accumulators, 0, &class_ids);
 
-    // 3. Group states
-    let mut hash_to_rep: std::collections::HashMap<u128, usize> = std::collections::HashMap::new();
+        // Re-classify based on new hashes + previous class
+        let mut new_class_map: std::collections::HashMap<u128, u64> = std::collections::HashMap::new();
+        let mut next_class = 0u64;
+        let mut changed = false;
+        let mut new_class_ids = vec![0u64; max_state_id + 1];
+
+        for (idx, &s) in states.iter().enumerate() {
+            let h = accumulators[idx];
+            // Mix with previous class to ensure refinement only splits, never merges
+            let combined_hash = mix_u128(h ^ (class_ids[s] as u128));
+            
+            let id = *new_class_map.entry(combined_hash).or_insert_with(|| {
+                let c = next_class;
+                next_class += 1;
+                c
+            });
+            
+            if id != class_ids[s] {
+                changed = true;
+            }
+            new_class_ids[s] = id;
+        }
+
+        class_ids = new_class_ids;
+        if !changed {
+            break;
+        }
+    }
+
+    // 3. Generate final mapping to representatives
+    let mut class_to_rep: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
     let mut mapping = vec![0; states.len()];
     
-    for (i, &hash) in accumulators.iter().enumerate() {
-        let rep = *hash_to_rep.entry(hash).or_insert(states[i]);
+    for (i, &s) in states.iter().enumerate() {
+        let cls = class_ids[s];
+        let rep = *class_to_rep.entry(cls).or_insert(s);
         mapping[i] = rep;
     }
     
@@ -137,20 +169,22 @@ fn process_node(
     regex: &Regex,
     trie: &TokenTrie,
     node_idx: usize,
-    active_groups: Vec<(Vec<u32>, u32)>, // (list of original states, current dfa state)
+    active_groups: Vec<(Vec<u32>, u32)>, // (list of indices into `states`, current dfa state)
     accumulators: &mut Vec<u128>,
     depth: u32,
+    class_ids: &[u64],
 ) {
     let node = &trie.nodes[node_idx];
 
     // 1. Handle token end at this node
     if node.token_weight != 0 {
         for (list, dfa_state) in &active_groups {
-            // If we are here, we are at the end of a token. The outcome is simply the current state.
-            // We hash the current state ID mixed with the token's weight.
-            let h = hash_end_state(*dfa_state).wrapping_mul(node.token_weight);
-            for &orig_s in list {
-                accumulators[orig_s as usize] = accumulators[orig_s as usize].wrapping_add(h);
+            // If we are here, we are at the end of a token.
+            // Use the CLASS of the current state, not the state ID itself.
+            let cls = class_ids[*dfa_state as usize];
+            let h = hash_end_state(cls).wrapping_mul(node.token_weight);
+            for &idx_in_input in list {
+                accumulators[idx_in_input as usize] = accumulators[idx_in_input as usize].wrapping_add(h);
             }
         }
     }
@@ -177,8 +211,8 @@ fn process_node(
                     }
                     // Apply this event to all subtree tokens
                     let contrib = event_hash.wrapping_mul(child_node.subtree_weight);
-                    for &orig_s in list {
-                        accumulators[orig_s as usize] = accumulators[orig_s as usize].wrapping_add(contrib);
+                    for &idx_in_input in list {
+                        accumulators[idx_in_input as usize] = accumulators[idx_in_input as usize].wrapping_add(contrib);
                     }
                 }
                 
@@ -191,7 +225,7 @@ fn process_node(
 
         if !next_groups_map.is_empty() {
             let next_groups: Vec<_> = next_groups_map.into_iter().map(|(k, v)| (v, k)).collect();
-            process_node(regex, trie, child_idx as usize, next_groups, accumulators, depth + 1);
+            process_node(regex, trie, child_idx as usize, next_groups, accumulators, depth + 1, class_ids);
         }
     }
 }
