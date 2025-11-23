@@ -4,7 +4,8 @@ use super::common::{BENCHMARK_DEBUG, Label, NWAStateID, StateID, Weight, OPTIMIZ
 use super::dwa::{DWAState, DWAStates, DWA};
 use super::nwa::{NWAState, NWAStates, NWA};
 use rustfst::algorithms::{minimize, minimize_with_config, MinimizeConfig};
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, VecDeque, HashSet, HashMap};
+use std::sync::Arc;
 
 const MAX_OPTIMIZE_ITERATIONS: usize = 1000;
 
@@ -473,12 +474,16 @@ impl DWA {
         // But we can push as much as possible.
         // The reweighting formula ensures that path weights are preserved relative to d[start].
         // The "lost" weight d[start] is effectively extracted.
-        // Since we want to minimize, extracting common weight is good.
-
+        // Since we want to minimize, extracting common weight        // 2. Reweight
         let mut changed = false;
+        let start_node = self.body.start_state;
         for (u, st) in self.states.0.iter_mut().enumerate() {
             let d_u = &d[u];
-            let inv_d_u = d_u.complement();
+            // If u is start, we don't divide by d[u] (we keep the total weight).
+            // So inv_d_u is effectively Empty (identity for addition/union, which acts as "0" in "w | !d").
+            // Wait, "w | !d". If !d is Empty, we get "w | Empty = w".
+            // So we preserve the weight.
+            let inv_d_u = if u == start_node { Weight::zeros() } else { d_u.complement() };
 
             // Transitions
             for (&label, &v) in &st.transitions {
@@ -1314,9 +1319,12 @@ impl NWA {
 
         // 2. Reweight
         let mut changed = false;
+        // For NWA, check if u is in start_states
+        let starts: HashSet<NWAStateID> = self.body.start_states.iter().cloned().collect();
+
         for (u, st) in self.states.0.iter_mut().enumerate() {
             let d_u = &d[u];
-            let inv_d_u = d_u.complement();
+            let inv_d_u = if starts.contains(&u) { Weight::zeros() } else { d_u.complement() };
 
             // Epsilons
             for (v, w) in &mut st.epsilons {
