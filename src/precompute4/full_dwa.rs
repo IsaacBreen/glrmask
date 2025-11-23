@@ -293,8 +293,9 @@ pub fn precompute4(parser: &GLRParser, input_nwa: &NWA) -> DWA {
         initial_values_bv.push((start, initial_tokens.clone()));
     }
 
+    let offset = parser.terminal_map.len() as Label;
     let start_pass1 = Instant::now();
-    let (node_tokens, mut unique_signatures) = precompute_token_bvs_and_signatures(&reversed_nwa, &traversal_data, initial_values_bv);
+    let (node_tokens, mut unique_signatures) = precompute_token_bvs_and_signatures(&reversed_nwa, &traversal_data, initial_values_bv, offset);
     unique_signatures.insert(vec![vec![None]]);
     crate::debug!(3, "Pass 1: Tokens & Signatures ({} sigs, {:.2?})", unique_signatures.len(), start_pass1.elapsed());
     let mut unique_term_ids_in_sigs = BTreeSet::new();
@@ -457,7 +458,6 @@ pub fn precompute4(parser: &GLRParser, input_nwa: &NWA) -> DWA {
     let initial_values_full: Vec<(usize, (BTreeMap<NWABody, BTreeMap<Option<TerminalID>, Weight>>, LLMTokenBV))> =
         reversed_nwa.body.start_states.iter().map(|&s| (s, (BTreeMap::from([(initial_body.clone(), initial_term_map.clone())]), LLMTokenBV::max_ones()))).collect();
 
-    let offset = parser.terminal_map.len() as Label;
     let final_bodies_arc = Arc::new(Mutex::new(BTreeMap::new()));
 
     crate::debug!(3, "Beginning NWA traversal.");
@@ -539,7 +539,7 @@ pub fn precompute4(parser: &GLRParser, input_nwa: &NWA) -> DWA {
     final_dwa
 }
 
-fn precompute_token_bvs_and_signatures(reversed_nwa: &NWA, traversal_data: &NwaTraversalData, initial_values: Vec<(StateID, LLMTokenBV)>) -> (HashMap<StateID, LLMTokenBV>, HashSet<Signature>) {
+fn precompute_token_bvs_and_signatures(reversed_nwa: &NWA, traversal_data: &NwaTraversalData, initial_values: Vec<(StateID, LLMTokenBV)>, offset: Label) -> (HashMap<StateID, LLMTokenBV>, HashSet<Signature>) {
     let node_tokens: Arc<Mutex<HashMap<StateID, LLMTokenBV>>> = Arc::new(Mutex::new(HashMap::new()));
     let signatures: Arc<Mutex<HashSet<Signature>>> = Arc::new(Mutex::new(HashSet::new()));
 
@@ -559,6 +559,7 @@ fn precompute_token_bvs_and_signatures(reversed_nwa: &NWA, traversal_data: &NwaT
             let mut bundles_by_dest: HashMap<StateID, BTreeMap<Option<TerminalID>, Weight>> = HashMap::new();
             let state = &reversed_nwa.states[node_id];
             for (label, targets) in &state.transitions {
+                if *label >= offset { continue; }
                 let term = Some(TerminalID(*label as usize));
                 for (v, w) in targets {
                     let edge_bv: LLMTokenBV = w.clone().into();
