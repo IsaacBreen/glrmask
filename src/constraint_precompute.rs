@@ -254,42 +254,38 @@ impl<'r> Precomputer1<'r> {
         }
 
         // Find equivalent symbols in the DWA
+        // Only consider tokenizer state transitions (label >= terminals_count)
+        let start_label = self.terminals_count as Label;
         let all_labels: BTreeSet<Label> =
-            dwa.states.0.iter().flat_map(|s| s.transitions.keys().cloned()).collect();
+            dwa.states.0.iter()
+                .flat_map(|s| s.transitions.keys().cloned())
+                .filter(|&l| l >= start_label)
+                .collect();
 
-        // signature is Vec<String>
-        let mut symbol_signatures: BTreeMap<Label, Vec<String>> = BTreeMap::new();
+        // Signature: For each state in DWA, what does this label do?
+        // Type: Vec<Option<(StateID, Weight)>>
+        let mut signatures: BTreeMap<Vec<Option<(usize, Weight)>>, Vec<Label>> = BTreeMap::new();
 
-        for &label in &all_labels {
-            let mut signature = Vec::with_capacity(dwa.states.len());
+        for label in all_labels {
+            let mut sig = Vec::with_capacity(dwa.states.len());
             for s in &dwa.states.0 {
-                match s.get_transition(label) {
-                    Some((target_id, weight)) => {
-                        signature.push(format!("->{} w:{}", target_id, weight));
-                    }
-                    None => signature.push("".to_string()),
-                }
+                sig.push(s.get_transition(label).map(|(t, w)| (t, w.clone())));
             }
-            symbol_signatures.insert(label, signature);
+            signatures.entry(sig).or_default().push(label);
         }
 
-        let mut equivalent_symbols: BTreeMap<Vec<String>, Vec<Label>> = BTreeMap::new();
-        for (label, signature) in symbol_signatures {
-            equivalent_symbols.entry(signature).or_default().push(label);
-        }
-
-        println!("\n--- Equivalent DWA symbols ---");
-        let mut found_any = false;
-        for (_signature, labels) in equivalent_symbols {
+        let mut equivalent_count = 0;
+        for (_sig, labels) in &signatures {
             if labels.len() > 1 {
-                println!("  - Group: {:?}", labels);
-                found_any = true;
+                equivalent_count += 1;
+                // Subtract start_label to get back the tokenizer state ID for display
+                let ids: Vec<_> = labels.iter().map(|l| l - start_label).collect();
+                crate::debug!(4, "Equivalent tokenizer states: {:?}", ids);
             }
         }
-        if !found_any {
-            println!("  No equivalent symbols found.");
+        if equivalent_count > 0 {
+            crate::debug!(3, "Found {} groups of equivalent tokenizer state symbols in DWA", equivalent_count);
         }
-        println!("------------------------------\n");
 
         dwa
     }
