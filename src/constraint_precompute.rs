@@ -253,6 +253,44 @@ impl<'r> Precomputer1<'r> {
             println!("{}", dwa2);
         }
 
+        // Find equivalent symbols in the DWA
+        let all_labels: BTreeSet<Label> =
+            dwa.states.0.iter().flat_map(|s| s.transitions.keys().cloned()).collect();
+
+        // signature is Vec<String>
+        let mut symbol_signatures: BTreeMap<Label, Vec<String>> = BTreeMap::new();
+
+        for &label in &all_labels {
+            let mut signature = Vec::with_capacity(dwa.states.len());
+            for s in &dwa.states.0 {
+                match s.get_transition(label) {
+                    Some((target_id, weight)) => {
+                        signature.push(format!("->{} w:{}", target_id, weight));
+                    }
+                    None => signature.push("".to_string()),
+                }
+            }
+            symbol_signatures.insert(label, signature);
+        }
+
+        let mut equivalent_symbols: BTreeMap<Vec<String>, Vec<Label>> = BTreeMap::new();
+        for (label, signature) in symbol_signatures {
+            equivalent_symbols.entry(signature).or_default().push(label);
+        }
+
+        println!("\n--- Equivalent DWA symbols ---");
+        let mut found_any = false;
+        for (_signature, labels) in equivalent_symbols {
+            if labels.len() > 1 {
+                println!("  - Group: {:?}", labels);
+                found_any = true;
+            }
+        }
+        if !found_any {
+            println!("  No equivalent symbols found.");
+        }
+        println!("------------------------------\n");
+
         dwa
     }
 
