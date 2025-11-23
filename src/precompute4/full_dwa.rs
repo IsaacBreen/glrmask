@@ -308,8 +308,6 @@ pub fn precompute4(parser: &GLRParser, input_nwa: &NWA) -> DWA {
             }
         }
     }
-    println!("Number of unique terminals in signatures: {}", unique_term_ids_in_sigs.len());
-    println!("Unique terminals in signatures: {:?}", crate::constraint::TerminalBV::from_iter(unique_term_ids_in_sigs.iter().map(|&id| id)));
 
     let mut template_cache = HashMap::new();
 
