@@ -224,6 +224,8 @@ pub fn nwa_to_vector_fst(nwa: &NWA) -> VectorFst<BitsetWeight> {
         }
     }
 
+    assert_eq!(nwa, &NWA::from_dwa(&vector_fst_to_dwa(&fst)));
+
     fst
 }
 
@@ -261,23 +263,17 @@ pub fn vector_fst_to_dwa(fst: &VectorFst<BitsetWeight>) -> DWA {
                 if !state_map.contains_key(&tr.nextstate) {
                     continue;
                 }
-                
-                let label = fst_label_to_label(tr.ilabel);
-                let target = state_map[&tr.nextstate];
-                let weight = tr.weight.value().clone();
-
-                if let Some(&existing_target) = dwa.states[dwa_state_id].transitions.get(&label) {
-                    if existing_target == target {
-                        // Merge weights for parallel transitions (same source, label, and target)
-                        let w_ref = dwa.states[dwa_state_id].trans_weights.get_mut(&label).unwrap();
-                        *w_ref |= &weight;
-                    } else {
-                        panic!(
-                            "Error converting VectorFst to DWA: Non-deterministic transition detected (label={}).", label
-                        );
-                    }
-                } else {
-                    dwa.add_transition(dwa_state_id, label, target, weight).unwrap();
+                let res = dwa.add_transition(
+                    dwa_state_id,
+                    fst_label_to_label(tr.ilabel),
+                    state_map[&tr.nextstate],
+                    tr.weight.value().clone(),
+                );
+                if let Err(e) = res {
+                    panic!(
+                        "Error converting VectorFst to DWA: transition already exists. This indicates non-determinism. Error: {:?}",
+                        e
+                    );
                 }
             }
         }
@@ -328,21 +324,6 @@ pub fn vector_fst_to_nwa(fst: &VectorFst<BitsetWeight>) -> NWA {
                     nwa.states.add_transition(nwa_state_id, label, target_nwa_id, weight).unwrap();
                 }
             }
-        }
-    }
-
-    // Try to unpack super-start if it exists (restoring multiple start states)
-    if nwa.body.start_states.len() == 1 {
-        let s = nwa.body.start_states[0];
-        let st = &nwa.states[s];
-
-        let is_super = st.final_weight.as_ref().map_or(true, |w| w.is_empty())
-            && st.transitions.is_empty()
-            && !st.epsilons.is_empty()
-            && st.epsilons.iter().all(|(_, w)| w.is_all_fast());
-
-        if is_super {
-            nwa.body.start_states = st.epsilons.iter().map(|(id, _)| *id).collect();
         }
     }
 
