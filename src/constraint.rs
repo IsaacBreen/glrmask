@@ -829,7 +829,7 @@ impl GrammarConstraint {
         for state_idx in 0..num_states {
             let s_base = state_idx * 256;
             for b in 0..256 {
-                if transitions[s_base + b] != u32::MAX {
+                if fast_dfa.transitions[s_base + b] != u32::MAX {
                     states_by_first_byte[b].push(state_idx as u32);
                 }
             }
