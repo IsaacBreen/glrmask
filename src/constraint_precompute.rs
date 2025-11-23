@@ -233,6 +233,10 @@ impl<'r> Precomputer1<'r> {
             }
             nwa2.states[src].final_weight = s.final_weight.clone();
         }
+        println!("After removing symbols and weights on edges, NWA has {} states and {} transitions.", nwa2.states.len(), nwa2.states.num_transitions());
+        if nwa2.states.len() < 50 {
+            println!("{}", nwa2);
+        }
         nwa2.simplify();
         let mut dwa2 = nwa2.determinize();
         dwa2.simplify();
