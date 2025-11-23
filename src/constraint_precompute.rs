@@ -281,11 +281,9 @@ impl<'r> Precomputer1<'r> {
             }
         }
 
-        if !stats.is_empty() {
-            crate::debug!(3, "Equivalent tokenizer state symbols in DWA (stats): {:?}", stats);
-            assert!(stats.len() == 1, "Expected only one state per class");
-            assert!(stats.values().next().unwrap() == &1, "Expected only one state per class");
-        }
+        crate::debug!(3, "Equivalent tokenizer state symbols in DWA (stats): {:?}", stats);
+        assert!(stats.len() == 1, "Expected only one state per class");
+        assert!(stats.values().next().unwrap() == &1, "Expected only one state per class");
 
         dwa
     }
