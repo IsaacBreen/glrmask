@@ -176,6 +176,51 @@ impl<'r> Precomputer1<'r> {
         crate::debug!(3, "Simplified DWA with {} states", dwa.states.len());
         dwa = dwa.unroll_cycles();
         crate::debug!(3, "Unrolled DWA with {} states", dwa.states.len());
+
+        // Stats: 10 most 'interesting' LLM tokens
+        let mut token_counts: HashMap<usize, usize> = HashMap::new();
+        for state in &dwa.states.0 {
+            for weight in state.trans_weights.values() {
+                // Filter out 'all' or very large sets to focus on specific, interesting tokens
+                if !weight.is_all_fast() && weight.len() < 1000 {
+                    for token_id in weight.clone() {
+                        *token_counts.entry(token_id).or_insert(0) += 1;
+                    }
+                }
+            }
+        }
+
+        let mut counts_vec: Vec<(usize, usize)> = token_counts.into_iter().collect();
+        counts_vec.sort_unstable_by_key(|&(_, count)| std::cmp::Reverse(count));
+
+        let top_tokens: Vec<(usize, usize)> = counts_vec.into_iter().take(10).collect();
+
+        if !top_tokens.is_empty() {
+            let mut id_to_repr: HashMap<usize, String> = HashMap::new();
+            let target_ids: std::collections::HashSet<usize> = top_tokens.iter().map(|(id, _)| *id).collect();
+
+            let mut stack = vec![&self.vocab.root];
+            while let Some(node) = stack.pop() {
+                if target_ids.contains(&node.token_id()) {
+                    let bytes = node.prefix();
+                    let s = format!("{:?}", String::from_utf8_lossy(bytes));
+                    id_to_repr.insert(node.token_id(), s);
+                }
+                if id_to_repr.len() == target_ids.len() {
+                    break;
+                }
+                for child in node.children().values() {
+                    stack.push(child);
+                }
+            }
+
+            crate::debug!(3, "Top 10 most interesting LLM tokens (by transition count in DWA):");
+            for (id, count) in top_tokens {
+                let repr = id_to_repr.get(&id).cloned().unwrap_or_else(|| format!("ID({})", id));
+                crate::debug!(3, "  Token {} ({}): {} transitions", repr, id, count);
+            }
+        }
+
         dwa
     }
 
