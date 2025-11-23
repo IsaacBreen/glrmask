@@ -10,7 +10,6 @@ use std::collections::BTreeMap as StdMap;
 use bimap::BiBTreeMap;
 use range_set_blaze::RangeSetBlaze;
 use rayon::prelude::*;
-use rustc_hash::FxHashMap;
 
 use crate::{
     datastructures::{
@@ -344,55 +343,6 @@ impl JSONConvertible for GrammarConstraint {
             }
             _ => Err("Expected JSONNode::Object for GrammarConstraint".to_string()),
         }
-    }
-}
-
-// A simple dense bitset for tracking sets of states efficiently.
-#[derive(Clone, Debug)]
-pub struct DenseBitSet {
-    data: Vec<u64>,
-}
-
-impl DenseBitSet {
-    pub fn new_empty(num_bits: usize) -> Self {
-        let num_words = (num_bits + 63) / 64;
-        Self { data: vec![0; num_words] }
-    }
-
-    pub fn from_bit(bit: usize, num_bits: usize) -> Self {
-        let mut bs = Self::new_empty(num_bits);
-        bs.set(bit);
-        bs
-    }
-
-    pub fn set(&mut self, bit: usize) {
-        let word_idx = bit / 64;
-        let bit_idx = bit % 64;
-        if word_idx < self.data.len() {
-            self.data[word_idx] |= 1 << bit_idx;
-        }
-    }
-
-    pub fn union_with(&mut self, other: &Self) {
-        for (w_self, w_other) in self.data.iter_mut().zip(&other.data) {
-            *w_self |= *w_other;
-        }
-    }
-
-    pub fn iter_ones(&self) -> impl Iterator<Item = usize> + '_ {
-        self.data.iter().enumerate().flat_map(|(w_idx, &word)| {
-            let mut w = word;
-            let base = w_idx * 64;
-            std::iter::from_fn(move || {
-                if w == 0 {
-                    None
-                } else {
-                    let trailing = w.trailing_zeros();
-                    w &= !(1 << trailing);
-                    Some(base + trailing as usize)
-                }
-            })
-        })
     }
 }
 
@@ -776,104 +726,68 @@ impl GrammarConstraint {
         // Recursive DFS helper
         fn process_vocab_node_dfs(
             node: &VocabPrefixTreeNode,
-            // Map: Current DFA State -> Mask of Original Start States that reached here
-            current_states: FxHashMap<u32, DenseBitSet>,
+            current_states: Vec<(u32, Vec<u32>)>,
             dfa: &FastDFA,
             num_terminals: usize,
-            num_start_states: usize,
-            out_matches: &mut FxHashMap<usize, LLMTokenBV>, 
+            out_matches_vec: &mut [Option<LLMTokenBV>],
         ) {
-            // Pre-calculate the reachable set for this node to avoid cloning it repeatedly
-            // inside the loop if possible, though we need to clone for the map value.
-            let reachable_bv: LLMTokenBV = node.reachable_token_ids().into();
-            
             for (edge_bytes, child) in node.iter_children() {
-                let child_reachable_bv: LLMTokenBV = child.reachable_token_ids().into();
+                let reachable_bv: LLMTokenBV = child.reachable_token_ids().into();
+                let mut next_grouped_map: HashMap<u32, Vec<u32>> = HashMap::new();
 
-                // Optimization: Process the edge byte-by-byte.
-                // This merges states that converge *during* the edge traversal,
-                // preventing exponential explosion of paths.
-                let mut active_states = current_states.clone();
-                
-                // To avoid repeated map allocations/clearing inside the byte loop
-                let mut next_states: FxHashMap<u32, DenseBitSet> = FxHashMap::default();
-                let mut triggered_accum: FxHashMap<usize, DenseBitSet> = FxHashMap::default();
+                for (start, sources) in &current_states {
+                    let mut curr = *start;
+                    let mut valid = true;
+                    // Optimization: Accumulate triggered terminals for this edge and apply them in batch.
+                    // This avoids repeated map lookups and bitset unions for every byte.
+                    let mut triggered_terminals: Vec<TerminalID> = Vec::new();
 
-                let mut is_dead = false;
-
-                for &b in edge_bytes.iter() {
-                    if active_states.is_empty() {
-                        is_dead = true;
-                        break;
-                    }
-                    next_states.clear();
-
-                    for (&curr, mask) in &active_states {
+                    for &b in edge_bytes.iter() {
                         let offset = (curr as usize) * 256 + (b as usize);
                         let next = dfa.transitions[offset];
+                        if next == u32::MAX {
+                            valid = false;
+                            break;
+                        }
+                        curr = next;
 
-                        if next != u32::MAX {
-                            // Merge logic: OR the source masks
-                            match next_states.entry(next) {
-                                std::collections::hash_map::Entry::Occupied(mut e) => {
-                                    e.get_mut().union_with(mask);
-                                }
-                                std::collections::hash_map::Entry::Vacant(e) => {
-                                    e.insert(mask.clone());
-                                }
-                            }
+                        let fins = &dfa.finalizers[curr as usize];
+                        if !fins.is_empty() {
+                            triggered_terminals.extend_from_slice(fins);
+                        }
+                    }
 
-                            // Check finalizers
-                            let fins = &dfa.finalizers[next as usize];
-                            if !fins.is_empty() {
-                                for tid in fins {
-                                    // Accumulate triggers for this terminal
-                                    let t_idx = tid.0 as usize;
-                                    match triggered_accum.entry(t_idx) {
-                                        std::collections::hash_map::Entry::Occupied(mut e) => {
-                                            e.get_mut().union_with(mask);
-                                        }
-                                        std::collections::hash_map::Entry::Vacant(e) => {
-                                            e.insert(mask.clone());
-                                        }
+                    if valid {
+                        if !triggered_terminals.is_empty() {
+                            triggered_terminals.sort_unstable();
+                            triggered_terminals.dedup();
+                            for &src in sources {
+                                let base_idx = (src as usize) * num_terminals;
+                                for &tid in &triggered_terminals {
+                                    let idx = base_idx + (tid.0 as usize);
+                                    match &mut out_matches_vec[idx] {
+                                        Some(existing) => existing.union_with(&reachable_bv),
+                                        None => out_matches_vec[idx] = Some(reachable_bv.clone()),
                                     }
                                 }
                             }
                         }
+                        next_grouped_map.entry(curr).or_default().extend_from_slice(sources);
                     }
-                    // Swap next_states into active_states for the next byte
-                    std::mem::swap(&mut active_states, &mut next_states);
                 }
 
-                if !is_dead {
-                    // 1. Apply triggers accumulated along this edge
-                    if !triggered_accum.is_empty() {
-                        for (t_idx, mask) in triggered_accum.drain() {
-                            for start_state in mask.iter_ones() {
-                                let idx = start_state * num_terminals + t_idx;
-                                match out_matches.entry(idx) {
-                                    std::collections::hash_map::Entry::Occupied(mut e) => {
-                                        e.get_mut().union_with(&child_reachable_bv);
-                                    }
-                                    std::collections::hash_map::Entry::Vacant(e) => {
-                                        e.insert(child_reachable_bv.clone());
-                                    }
-                                }
-                            }
-                        }
-                    }
+                let next_grouped: Vec<(u32, Vec<u32>)> =
+                    next_grouped_map.into_iter().collect();
 
-                    // 2. Recurse if there are surviving states
-                    if !active_states.is_empty() {
-                        process_vocab_node_dfs(
-                            child,
-                            active_states,
-                            dfa,
-                            num_terminals,
-                            num_start_states,
-                            out_matches
-                        );
-                    }
+                if !next_grouped.is_empty() {
+                    // Recurse
+                    process_vocab_node_dfs(
+                        child,
+                        next_grouped,
+                        dfa,
+                        num_terminals,
+                        out_matches_vec,
+                    );
                 }
             }
         }
@@ -902,133 +816,84 @@ impl GrammarConstraint {
         };
 
         let num_terminals = max_terminal_val + 1;
+        let matches_vec_len = num_states * num_terminals;
 
-        // Precompute states that have transitions for each byte.
-        let mut states_by_first_byte = vec![Vec::new(); 256];
-        for state_idx in 0..num_states {
-            let s_base = state_idx * 256;
-            for b in 0..256 {
-                if fast_dfa.transitions[s_base + b] != u32::MAX {
-                    states_by_first_byte[b].push(state_idx as u32);
-                }
-            }
+        // Group initial states by current state (identity mapping at root)
+        let mut initial_states: Vec<(u32, Vec<u32>)> = Vec::with_capacity(num_states);
+        for i in 0..num_states {
+            initial_states.push((i as u32, vec![i as u32]));
         }
 
         // Parallel processing of root children
         let root_children: Vec<_> = vocab_root.iter_children().collect();
-        let final_matches: FxHashMap<usize, LLMTokenBV> = root_children
+        let final_matches_vec = root_children
             .par_iter()
-            .fold(
-                || FxHashMap::default(),
-                |mut local_matches: FxHashMap<usize, LLMTokenBV>, (edge_bytes, child_node)| {
-                let first_byte = edge_bytes[0];
-                let relevant_states = &states_by_first_byte[first_byte as usize];
-
-                if relevant_states.is_empty() {
-                    return local_matches;
-                }
+            .map(|(edge_bytes, child_node)| {
+                let mut local_matches_vec: Vec<Option<LLMTokenBV>> = vec![None; matches_vec_len];
 
                 // Manually process the first edge to bootstrap recursion
-                // Identical logic to the recursive step, but initialization is specific:
-                // The "mask" for each start_state S is just {S}.
-                
-                let child_reachable_bv: LLMTokenBV =
+                let mut next_grouped_map: HashMap<u32, Vec<u32>> = HashMap::new();
+                let reachable_bv: LLMTokenBV =
                     child_node.reachable_token_ids().into();
 
-                // active_states maps CurrentDFAState -> MaskOfStartStates
-                let mut active_states: FxHashMap<u32, DenseBitSet> = FxHashMap::default();
-                // Initialize active_states from relevant_states
-                for &start_state in relevant_states {
-                    active_states.insert(start_state, DenseBitSet::from_bit(start_state as usize, num_states));
-                }
+                for (start, sources) in &initial_states {
+                    let mut curr = *start;
+                    let mut valid = true;
+                    let mut triggered_terminals = Vec::new();
 
-                let mut next_states: FxHashMap<u32, DenseBitSet> = FxHashMap::default();
-                let mut triggered_accum: FxHashMap<usize, DenseBitSet> = FxHashMap::default();
-
-                let mut is_dead = false;
-
-                for &b in edge_bytes.iter() {
-                    if active_states.is_empty() {
-                        is_dead = true;
-                        break;
-                    }
-                    next_states.clear();
-
-                    for (&curr, mask) in &active_states {
+                    for &b in edge_bytes.iter() {
                         let offset = (curr as usize) * 256 + (b as usize);
                         let next = fast_dfa.transitions[offset];
-
-                        if next != u32::MAX {
-                             match next_states.entry(next) {
-                                std::collections::hash_map::Entry::Occupied(mut e) => {
-                                    e.get_mut().union_with(mask);
-                                }
-                                std::collections::hash_map::Entry::Vacant(e) => {
-                                    e.insert(mask.clone());
-                                }
-                            }
-
-                            let fins = &fast_dfa.finalizers[next as usize];
-                            if !fins.is_empty() {
-                                for tid in fins {
-                                    let t_idx = tid.0 as usize;
-                                    match triggered_accum.entry(t_idx) {
-                                        std::collections::hash_map::Entry::Occupied(mut e) => {
-                                            e.get_mut().union_with(mask);
-                                        }
-                                        std::collections::hash_map::Entry::Vacant(e) => {
-                                            e.insert(mask.clone());
-                                        }
+                        if next == u32::MAX {
+                            valid = false;
+                            break;
+                        }
+                        curr = next;
+                        if !fast_dfa.finalizers[curr as usize].is_empty() {
+                            triggered_terminals.extend_from_slice(&fast_dfa.finalizers[curr as usize]);
+                        }
+                    }
+                    if valid {
+                        if !triggered_terminals.is_empty() {
+                            triggered_terminals.sort_unstable();
+                            triggered_terminals.dedup();
+                            for &src in sources {
+                                let base_idx = (src as usize) * num_terminals;
+                                for &tid in &triggered_terminals {
+                                    let idx = base_idx + (tid.0 as usize);
+                                    match &mut local_matches_vec[idx] {
+                                        Some(existing) => existing.union_with(&reachable_bv),
+                                        None => local_matches_vec[idx] = Some(reachable_bv.clone()),
                                     }
                                 }
                             }
                         }
-                    }
-                    std::mem::swap(&mut active_states, &mut next_states);
-                }
-
-                if !is_dead {
-                     if !triggered_accum.is_empty() {
-                        for (t_idx, mask) in triggered_accum.drain() {
-                            for start_state in mask.iter_ones() {
-                                let idx = start_state * num_terminals + t_idx;
-                                match local_matches.entry(idx) {
-                                    std::collections::hash_map::Entry::Occupied(mut e) => {
-                                        e.get_mut().union_with(&child_reachable_bv);
-                                    }
-                                    std::collections::hash_map::Entry::Vacant(e) => {
-                                        e.insert(child_reachable_bv.clone());
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    if !active_states.is_empty() {
-                        process_vocab_node_dfs(
-                            child_node,
-                            active_states,
-                            &fast_dfa,
-                            num_terminals,
-                            num_states,
-                            &mut local_matches,
-                        );
+                        next_grouped_map.entry(curr).or_default().extend_from_slice(sources);
                     }
                 }
-                
-                local_matches
+
+                let next_grouped: Vec<(u32, Vec<u32>)> =
+                    next_grouped_map.into_iter().collect();
+                if !next_grouped.is_empty() {
+                    process_vocab_node_dfs(
+                        child_node,
+                        next_grouped,
+                        &fast_dfa,
+                        num_terminals,
+                        &mut local_matches_vec,
+                    );
+                }
+
+                local_matches_vec
             })
             .reduce(
-                || FxHashMap::default(),
+                || vec![None; matches_vec_len],
                 |mut a, b| {
-                    for (k, v) in b {
-                        match a.entry(k) {
-                            std::collections::hash_map::Entry::Occupied(mut e) => {
-                                e.get_mut().union_with(&v);
-                            }
-                            std::collections::hash_map::Entry::Vacant(e) => {
-                                e.insert(v);
-                            }
+                    for (acc, val) in a.iter_mut().zip(b.into_iter()) {
+                        match (acc, val) {
+                            (Some(acc_bv), Some(val_bv)) => acc_bv.union_with(&val_bv),
+                            (acc@None, Some(val_bv)) => *acc = Some(val_bv),
+                            _ => {}
                         }
                     }
                     a
@@ -1040,13 +905,15 @@ impl GrammarConstraint {
             BTreeMap<TerminalID, LLMTokenBV>,
         > = BTreeMap::new();
 
-        for (idx, bv) in final_matches {
-            let src = TokenizerStateID(idx / num_terminals);
-            let tid = TerminalID(idx % num_terminals);
-            possible_matches
-                .entry(src)
-                .or_default()
-                .insert(tid, bv);
+        for (idx, opt_bv) in final_matches_vec.into_iter().enumerate() {
+            if let Some(bv) = opt_bv {
+                let src = TokenizerStateID(idx / num_terminals);
+                let tid = TerminalID(idx % num_terminals);
+                possible_matches
+                    .entry(src)
+                    .or_default()
+                    .insert(tid, bv);
+            }
         }
 
         possible_matches
