@@ -174,8 +174,8 @@ impl<'r> Precomputer1<'r> {
         crate::debug!(3, "Determinized NWA with {} states", dwa.states.len());
         dwa.simplify();
         crate::debug!(3, "Simplified DWA with {} states", dwa.states.len());
-        dwa = dwa.unroll_cycles();
-        crate::debug!(3, "Unrolled DWA with {} states", dwa.states.len());
+        // dwa = dwa.unroll_cycles();
+        // crate::debug!(3, "Unrolled DWA with {} states", dwa.states.len());
 
         // Stats: 10 most 'interesting' LLM tokens
         let mut token_counts: HashMap<usize, usize> = HashMap::new();
