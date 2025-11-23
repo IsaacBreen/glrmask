@@ -34,13 +34,12 @@ use crate::constraint_precompute1_utils::Trie1Config;
 use crate::datastructures::bitset::Bitset;
 use crate::datastructures::gss_acc::Acc;
 use crate::glr::parser::ParseStateEdgeContent;
-use crate::precompute4::weighted_automata::{DWA, NWA, SimpleBitset, Weight};
+use crate::precompute4::weighted_automata::{DWA, NWA};
 
 // Import from new modules
 pub use crate::constraint_vocab::*;
 pub use crate::constraint_trie::*;
 use crate::constraint_precompute::run_precompute1;
-use crate::datastructures::hybrid_bitset::HybridBitset;
 
 type GSSNode = LeveledGSS<ParseStateEdgeContent, Acc>;
 
@@ -640,10 +639,7 @@ impl GrammarConstraint {
         // Convert the precompute1 Trie to NWA and run precompute4.
         crate::debug!(3, "Running Precompute4");
         let nwa = NWA::from_dwa(&skeleton_dwa);
-        let mut precomputed4 = precompute4(&parser, &nwa);
-
-        // Optimize token space based on usage in the final DWA
-        Self::compress_dwa_and_vocab(&mut precomputed4, &mut vocab);
+        let precomputed4 = precompute4(&parser, &nwa);
 
         let internal_to_original_sparse_matrix =
             StageVocab::build_internal_to_original_sparse_matrix(
@@ -695,126 +691,6 @@ impl GrammarConstraint {
 
     pub fn original_bv_to_internal(&self, original_bv: &LLMTokenBV) -> LLMTokenBV {
         self.vocab.original_bv_to_internal(original_bv)
-    }
-
-    fn compress_dwa_and_vocab(dwa: &mut DWA, vocab: &mut StageVocab) {
-        crate::debug!(3, "Compressing DWA and Vocab based on usage...");
-        let start_time = std::time::Instant::now();
-        let initial_vocab_size = vocab.internal_max_llm_token + 1;
-
-        // 1. Collect unique non-trivial weights
-        let mut unique_weights: std::collections::HashSet<Weight> = std::collections::HashSet::new();
-        for state in &dwa.states.0 {
-            if let Some(w) = &state.final_weight {
-                if !w.is_all_fast() && !w.is_empty() { unique_weights.insert(w.clone()); }
-            }
-            if let Some(w) = &state.state_weight {
-                if !w.is_all_fast() && !w.is_empty() { unique_weights.insert(w.clone()); }
-            }
-            for w in state.trans_weights.values() {
-                if !w.is_all_fast() && !w.is_empty() { unique_weights.insert(w.clone()); }
-            }
-        }
-
-        if unique_weights.is_empty() {
-            crate::debug!(3, "No non-trivial weights found, skipping compression.");
-            return;
-        }
-
-        // 2. Refine partitions
-        let mut partitions = vec![RangeSetBlaze::from_iter([0..=vocab.internal_max_llm_token])];
-
-        for w in unique_weights {
-            let w_rsb = &w.rsb; // Access inner RSB
-            let mut next_partitions = Vec::with_capacity(partitions.len() * 2);
-            for p in partitions {
-                if p.is_disjoint(w_rsb) || p.is_subset(w_rsb) {
-                    next_partitions.push(p);
-                } else {
-                    let intersection = &p & w_rsb;
-                    let difference = &p - w_rsb;
-                    if !intersection.is_empty() { next_partitions.push(intersection); }
-                    if !difference.is_empty() { next_partitions.push(difference); }
-                }
-            }
-            partitions = next_partitions;
-            if partitions.len() == initial_vocab_size { break; }
-        }
-
-        let new_vocab_size = partitions.len();
-        if new_vocab_size == initial_vocab_size {
-             crate::debug!(3, "No compression achieved (size remained {}).", initial_vocab_size);
-             return;
-        }
-
-        crate::debug!(3, "Compressed vocab from {} to {} tokens ({:.2?})", initial_vocab_size, new_vocab_size, start_time.elapsed());
-
-        // 3. Build mappings
-        // old_id -> new_id
-        let mut old_to_new: Vec<usize> = vec![0; initial_vocab_size];
-        // new_id -> representative old_id (to check containment in old weights)
-        let mut new_to_rep: Vec<usize> = Vec::with_capacity(new_vocab_size);
-        // new_id -> RangeSetBlaze (set of old ids)
-        let mut new_to_old_set: Vec<RangeSetBlaze<usize>> = Vec::with_capacity(new_vocab_size);
-
-        // Sort partitions by their first element for deterministic mapping
-        partitions.sort_by_key(|p| p.first().unwrap_or(usize::MAX));
-
-        for (new_id, p) in partitions.into_iter().enumerate() {
-            let rep = p.first().unwrap();
-            new_to_rep.push(rep);
-            for old_id in &p {
-                old_to_new[old_id] = new_id;
-            }
-            new_to_old_set.push(p);
-        }
-
-        // 4. Rewrite DWA weights
-        let mut weight_cache: HashMap<Weight, Weight> = HashMap::new();
-        let mut map_weight = |w: &Weight| -> Weight {
-            if w.is_empty() { return SimpleBitset::zeros(); }
-            if w.is_all_fast() { return SimpleBitset::ones(new_vocab_size); } // ones because vocabulary size changed
-            if let Some(cached) = weight_cache.get(w) { return cached.clone(); }
-
-            let w_rsb = &w.rsb;
-            let mut new_rsb = RangeSetBlaze::new();
-            for (new_id, &rep) in new_to_rep.iter().enumerate() {
-                if w_rsb.contains(rep) {
-                    new_rsb.insert(new_id);
-                }
-            }
-            let new_w = SimpleBitset::from_rsb(new_rsb);
-            weight_cache.insert(w.clone(), new_w.clone());
-            new_w
-        };
-
-        for state in &mut dwa.states.0 {
-            if let Some(w) = &mut state.final_weight { *w = map_weight(w); }
-            if let Some(w) = &mut state.state_weight { *w = map_weight(w); }
-            for w in state.trans_weights.values_mut() { *w = map_weight(w); }
-        }
-
-        // 5. Update Vocab
-        // original_to_internal: map values through old_to_new
-        for internal in vocab.original_to_internal.values_mut() {
-            *internal = old_to_new[*internal];
-        }
-
-        // internal_to_original: new_internal -> union of old originals
-        let mut new_internal_to_original: BTreeMap<usize, LLMTokenBV> = BTreeMap::new();
-        
-        for (new_id, old_ids_rsb) in new_to_old_set.into_iter().enumerate() {
-            let mut union_originals = HybridBitset::zeros();
-            for old_id in old_ids_rsb {
-                if let Some(orig_bv) = vocab.internal_to_original.get(&old_id) {
-                    union_originals |= orig_bv;
-                }
-            }
-            new_internal_to_original.insert(new_id, union_originals);
-        }
-
-        vocab.internal_to_original = new_internal_to_original;
-        vocab.internal_max_llm_token = new_vocab_size - 1;
     }
 
     pub fn internal_to_original(&self, internal_id: LLMTokenID) -> Option<LLMTokenID> {
