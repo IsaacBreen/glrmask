@@ -347,6 +347,55 @@ impl JSONConvertible for GrammarConstraint {
     }
 }
 
+// A simple dense bitset for tracking sets of states efficiently.
+#[derive(Clone, Debug)]
+pub struct DenseBitSet {
+    data: Vec<u64>,
+}
+
+impl DenseBitSet {
+    pub fn new_empty(num_bits: usize) -> Self {
+        let num_words = (num_bits + 63) / 64;
+        Self { data: vec![0; num_words] }
+    }
+
+    pub fn from_bit(bit: usize, num_bits: usize) -> Self {
+        let mut bs = Self::new_empty(num_bits);
+        bs.set(bit);
+        bs
+    }
+
+    pub fn set(&mut self, bit: usize) {
+        let word_idx = bit / 64;
+        let bit_idx = bit % 64;
+        if word_idx < self.data.len() {
+            self.data[word_idx] |= 1 << bit_idx;
+        }
+    }
+
+    pub fn union_with(&mut self, other: &Self) {
+        for (w_self, w_other) in self.data.iter_mut().zip(&other.data) {
+            *w_self |= *w_other;
+        }
+    }
+
+    pub fn iter_ones(&self) -> impl Iterator<Item = usize> + '_ {
+        self.data.iter().enumerate().flat_map(|(w_idx, &word)| {
+            let mut w = word;
+            let base = w_idx * 64;
+            std::iter::from_fn(move || {
+                if w == 0 {
+                    None
+                } else {
+                    let trailing = w.trailing_zeros();
+                    w &= !(1 << trailing);
+                    Some(base + trailing as usize)
+                }
+            })
+        })
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Constructors
 // ---------------------------------------------------------------------------
@@ -713,56 +762,6 @@ impl GrammarConstraint {
     // -----------------------------------------------------------------------
     // Possible-matches-related helpers
     // -----------------------------------------------------------------------
-
-    // A simple dense bitset for tracking sets of states efficiently.
-    // We handle the logic inline or via this helper to ensure fast merges.
-    #[derive(Clone, Debug)]
-    struct DenseBitSet {
-        data: Vec<u64>,
-    }
-
-    impl DenseBitSet {
-        fn new_empty(num_bits: usize) -> Self {
-            let num_words = (num_bits + 63) / 64;
-            Self { data: vec![0; num_words] }
-        }
-
-        fn from_bit(bit: usize, num_bits: usize) -> Self {
-            let mut bs = Self::new_empty(num_bits);
-            bs.set(bit);
-            bs
-        }
-
-        fn set(&mut self, bit: usize) {
-            let word_idx = bit / 64;
-            let bit_idx = bit % 64;
-            if word_idx < self.data.len() {
-                self.data[word_idx] |= 1 << bit_idx;
-            }
-        }
-
-        fn union_with(&mut self, other: &Self) {
-            for (w_self, w_other) in self.data.iter_mut().zip(&other.data) {
-                *w_self |= *w_other;
-            }
-        }
-
-        fn iter_ones(&self) -> impl Iterator<Item = usize> + '_ {
-            self.data.iter().enumerate().flat_map(|(w_idx, &word)| {
-                let mut w = word;
-                let base = w_idx * 64;
-                std::iter::from_fn(move || {
-                    if w == 0 {
-                        None
-                    } else {
-                        let trailing = w.trailing_zeros();
-                        w &= !(1 << trailing);
-                        Some(base + trailing as usize)
-                    }
-                })
-            })
-        }
-    }
 
     pub fn build_maps_and_matches(
         tokenizer: &Regex,
