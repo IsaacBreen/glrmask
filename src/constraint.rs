@@ -712,6 +712,8 @@ impl GrammarConstraint {
         crate::debug!(3, "Computing maps and possible_matches (fast parallel pass)");
         let computed_possible_matches =
             Self::build_maps_and_matches(&tokenizer, &vocab_tree.root);
+        let terminal_map_by_llm_raw =
+            Self::rearrange_possible_matches(&computed_possible_matches);
 
         // Compute terminal follow sets, then map to IDs.
         crate::debug!(3, "Computing terminal follow sets");
@@ -771,6 +773,7 @@ impl GrammarConstraint {
             parser.terminal_map.len(),
         );
 
+        let terminal_map_by_llm = terminal_map_by_llm_raw;
         let mut possible_matches_precompute1 = computed_possible_matches;
 
         optimize_dwa_and_vocab(&mut skeleton_dwa, &mut vocab, &mut possible_matches_precompute1);
@@ -794,9 +797,6 @@ impl GrammarConstraint {
             );
         vocab.max_original_llm_token_id = max_original_llm_token_id;
         vocab.internal_to_original_sparse_matrix = internal_to_original_sparse_matrix;
-
-        let terminal_map_by_llm =
-            Self::rearrange_possible_matches(&possible_matches_precompute1);
 
         GrammarConstraint {
             tokenizer,
@@ -845,7 +845,7 @@ impl GrammarConstraint {
         self.vocab
             .internal_to_original
             .get(&internal_id.0)
-            .and_then(|bv| bv.iter_up_to(self.vocab.max_original_llm_token_id).next())
+            .and_then(|bv| bv.iter_up_to(self.vocab.internal_max_llm_token).next())
             .map(|v| LLMTokenID(v))
     }
 
