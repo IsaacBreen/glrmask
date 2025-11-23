@@ -458,7 +458,7 @@ pub fn precompute4(parser: &GLRParser, input_nwa: &NWA) -> DWA {
     let initial_values_full: Vec<(usize, (BTreeMap<NWABody, BTreeMap<Option<TerminalID>, Weight>>, LLMTokenBV))> =
         reversed_nwa.body.start_states.iter().map(|&s| (s, (BTreeMap::from([(initial_body.clone(), initial_term_map.clone())]), LLMTokenBV::max_ones()))).collect();
 
-    let final_bodies_arc = Arc::new(Mutex::new(BTreeMap::new()));
+    let final_bodies_arc = Arc::new(Mutex::new(BTreeMap::<TokenizerStateID, (NWABody, LLMTokenBV)>::new()));
 
     crate::debug!(3, "Beginning NWA traversal.");
 
@@ -470,7 +470,9 @@ pub fn precompute4(parser: &GLRParser, input_nwa: &NWA) -> DWA {
                 if lbl >= offset {
                     let tsid = TokenizerStateID((lbl - offset) as usize);
                     let mut fb = final_bodies_arc.lock().unwrap();
-                    for body in current_bodies.keys() { fb.insert(tsid, body.clone()); }
+                    let mut combined_body = NWABody { start_states: vec![] };
+                    for body in current_bodies.keys() { combined_body = NWABody::union(&combined_body, body); }
+                    fb.insert(tsid, (combined_body, current_tokens.clone()));
                     return Vec::new();
                 }
             }
@@ -526,10 +528,11 @@ pub fn precompute4(parser: &GLRParser, input_nwa: &NWA) -> DWA {
     let final_bodies = Arc::try_unwrap(final_bodies_arc).unwrap().into_inner().unwrap();
     let mut combined_nwa_states = states_arena.into_inner();
     let combined_start_state = combined_nwa_states.add_state();
-    for (tok_id, body) in final_bodies {
+    for (tok_id, (body, tokens)) in final_bodies {
         let label = tok_id.0 as Label;
+        let weight = Weight::from_rsb(tokens.inner.as_ref().clone());
         for &s in &body.start_states {
-            combined_nwa_states.add_transition(combined_start_state, label, s, Weight::all()).unwrap();
+            combined_nwa_states.add_transition(combined_start_state, label, s, weight.clone()).unwrap();
         }
     }
 
