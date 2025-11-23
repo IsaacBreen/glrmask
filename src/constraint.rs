@@ -1,7 +1,7 @@
 #![allow(clippy::too_many_arguments)]
 
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fmt::{self, Debug, Display, Formatter},
     sync::Arc,
 };
@@ -735,7 +735,7 @@ impl GrammarConstraint {
         }
 
         // Precompute1 - generate skeleton DWA
-        let skeleton_dwa = run_precompute1(
+        let mut skeleton_dwa = run_precompute1(
             &tokenizer,
             Some(&parser),
             Some(llm_vocab.clone()),
@@ -756,7 +756,7 @@ impl GrammarConstraint {
         // Convert the precompute1 Trie to NWA and run precompute4.
         crate::debug!(3, "Running Precompute4");
         let nwa = NWA::from_dwa(&skeleton_dwa);
-        let precomputed4 = precompute4(&parser, &nwa);
+        let mut precomputed4 = precompute4(&parser, &nwa);
 
         optimize_dwa_and_vocab(&mut precomputed4, &mut vocab);
 
