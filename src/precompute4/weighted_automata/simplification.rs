@@ -924,6 +924,7 @@ impl NWA {
                         NwaPass::PushFinalWeights => nwa.push_final_weights_along_epsilons(),
                         NwaPass::CompressTransitions => nwa.compress_transitions(),
                         NwaPass::Minimize => nwa.minimize_states(),
+                        NwaPass::RestrictWeights => nwa.restrict_weights(),
                     };
                     if changed {
                         current_changing_passes.push(pass);
@@ -1465,6 +1466,7 @@ impl NWA {
         }
 
         // Build reverse edges for backward propagation
+        #[derive(Clone)]
         struct RevEdge { u: usize, w: Weight }
         let mut rev_edges = vec![Vec::new(); n];
         for (u, st) in self.states.0.iter().enumerate() {
@@ -1490,7 +1492,7 @@ impl NWA {
             for edge in &rev_edges[curr] {
                 let prop = &edge.w & &curr_val;
                 if !prop.is_empty() && !prop.is_subset_of(&v_pot[edge.u]) {
-                    v_pot[edge.u] |= prop;
+                    v_pot[edge.u] |= &prop;
                     if !in_q[edge.u] {
                         q.push_back(edge.u);
                         in_q[edge.u] = true;
@@ -1524,7 +1526,7 @@ impl NWA {
                 if v < n {
                     let prop = &u_val & w;
                     if !prop.is_empty() && !prop.is_subset_of(&i_pot[v]) {
-                        i_pot[v] |= prop;
+                        i_pot[v] |= &prop;
                         if !in_q[v] {
                             q.push_back(v);
                             in_q[v] = true;
