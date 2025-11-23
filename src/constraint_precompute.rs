@@ -41,6 +41,7 @@ pub(crate) struct Precomputer1<'r> {
     pub(crate) terminals_count: usize,
     pub(crate) pending_transitions: HashMap<NWAStateID, HashMap<Label, HashMap<NWAStateID, Weight>>>,
     pub(crate) pending_epsilons: HashMap<NWAStateID, HashMap<NWAStateID, Weight>>,
+    pub(crate) live_tokens: HashMap<NWAStateID, Weight>,
 }
 
 impl<'r> Precomputer1<'r> {
@@ -66,9 +67,13 @@ impl<'r> Precomputer1<'r> {
         nwa.states.0.clear(); // Clear default start state
 
         let mut roots = BTreeMap::new();
+        let mut live_tokens = HashMap::new();
+        let all_weight = SimpleBitset::from(RangeSetBlaze::from_iter(0..=internal_max_llm_token));
+
         for sid in active_states {
             let root_state = nwa.add_state();
             roots.insert(sid, root_state);
+            live_tokens.insert(root_state, all_weight.clone());
         }
         crate::debug!(4, "Created trie1 roots ({} states)", roots.len());
 
@@ -106,6 +111,7 @@ impl<'r> Precomputer1<'r> {
             terminals_count,
             pending_transitions: HashMap::new(),
             pending_epsilons: HashMap::new(),
+            live_tokens,
         }
     }
 
@@ -423,6 +429,32 @@ impl<'r> Precomputer1<'r> {
             .or_insert(weight);
     }
 
+    fn get_or_create_state(
+        &mut self,
+        map: &mut BTreeMap<TokenizerStateID, NWAStateID>,
+        key: TokenizerStateID,
+        weight: &Weight,
+    ) -> NWAStateID {
+        if let Some(&state) = map.get(&key) {
+            self.live_tokens.entry(state).or_default().union_with(weight);
+            return state;
+        }
+
+        for &state in map.values() {
+            let live = self.live_tokens.entry(state).or_default();
+            if live.is_disjoint(weight) {
+                live.union_with(weight);
+                map.insert(key, state);
+                return state;
+            }
+        }
+
+        let new_state = self.nwa.add_state();
+        self.live_tokens.insert(new_state, weight.clone());
+        map.insert(key, new_state);
+        new_state
+    }
+
     fn run_dfs(&mut self) {
         let assoc = self.roots.clone();
         crate::debug!(3, "Starting precompute DFS for {} tokenizer states", self.roots.len());
@@ -464,8 +496,9 @@ impl<'r> Precomputer1<'r> {
             while let Some((pos, states_at_pos)) = pending.pop_first() {
                 // If we reached the end of the segment, these states are ready for the next vocab node
                 if pos == segment_bytes.len() {
+                    let weight = SimpleBitset::from(child_reachable.clone());
                     for (tokenizer_state_id, node) in states_at_pos {
-                        let next = *next_level_assoc.entry(tokenizer_state_id).or_insert_with(|| self.nwa.add_state());
+                        let next = self.get_or_create_state(&mut next_level_assoc, tokenizer_state_id, &weight);
                         self.add_pending_epsilon(node, next, SimpleBitset::all());
                     }
                     continue;
@@ -522,11 +555,9 @@ impl<'r> Precomputer1<'r> {
                         let dest_map = pending.entry(next_pos).or_default();
 
                         let initial_tsid = self.tokenizer.initial_state_id();
-                        let target = *dest_map
-                            .entry(initial_tsid)
-                            .or_insert_with(|| self.nwa.add_state());
+                        let weight = SimpleBitset::from(final_bv);
+                        let target = self.get_or_create_state(dest_map, initial_tsid, &weight);
 
-                        let weight = SimpleBitset::from_rsb(final_bv);
                         self.add_pending_transition(src_node, terminal_id.0 as Label, target, weight);
                     }
 
@@ -540,19 +571,20 @@ impl<'r> Precomputer1<'r> {
                         let final_edge_bv = edge_bv;
 
                         if !final_edge_bv.is_empty() {
+                            let weight = SimpleBitset::from(final_edge_bv.clone());
                             let end_idx = self.leaf_state;
                             for terminal_id in &accessible_terminals {
-                                let weight = SimpleBitset::from_rsb(final_edge_bv.clone());
                                 self.add_pending_transition(
                                         src_node,
                                         terminal_id.0 as Label,
                                         end_idx,
-                                        weight,
+                                        weight.clone(),
                                     );
                             }
                         }
 
-                        let next = *next_level_assoc.entry(final_tokenizer_state).or_insert_with(|| self.nwa.add_state());
+                        let weight = SimpleBitset::from(child_reachable.clone());
+                        let next = self.get_or_create_state(&mut next_level_assoc, final_tokenizer_state, &weight);
                         self.add_pending_epsilon(src_node, next, Weight::all());
                     }
                 }
