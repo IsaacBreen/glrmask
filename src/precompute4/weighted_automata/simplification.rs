@@ -941,7 +941,7 @@ struct NwaStateBuilder {
     trans: BTreeMap<Label, BTreeMap<NWAStateID, Weight>>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum NwaPass {
     PruneUnreachable,
     PruneDeadEnds,
