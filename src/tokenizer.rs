@@ -4,7 +4,6 @@ use crate::types::TerminalID as GrammarTokenID;
 use bimap::BiBTreeMap;
 // Added
 use std::collections::{BTreeMap as StdMap, BTreeSet};
-use std::hash::{Hash, Hasher};
 // Added for derive macro pattern, aliased to avoid conflict
 
 pub type LLMToken = Vec<u8>;
@@ -39,7 +38,7 @@ impl JSONConvertible for TokenizerStateID {
 }
 
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)] // Added Ord for potential use in BTreeSet/Map
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)] // Added Ord for potential use in BTreeSet/Map
 pub struct Token {
     pub id: GroupID, // GroupID is usize
     pub width: usize,
@@ -68,7 +67,7 @@ impl JSONConvertible for Token {
 }
 
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug)]
 pub struct ExecuteResult {
     pub matches: Vec<Token>,
     pub end_state: Option<usize>,
@@ -131,3 +130,4 @@ impl Regex {
         (0..self.max_state()).map(|id| TokenizerStateID(id))
     }
 }
+

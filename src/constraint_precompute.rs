@@ -2,10 +2,6 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ops::BitOrAssign;
 use std::sync::Arc;
-use std::hash::{Hash, Hasher};
-use std::borrow::Borrow;
-use std::cmp::Ordering;
-use std::iter::FromIterator;
 
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use range_set_blaze::RangeSetBlaze;
@@ -18,7 +14,7 @@ use crate::glr::parser::GLRParser;
 use crate::precompute4::weighted_automata::bitset::SimpleBitset;
 use crate::precompute4::weighted_automata::{DWA, NWA, NWAStateID, Weight};
 use crate::profiler::{self, PROGRESS_BAR_ENABLED};
-use crate::tokenizer::{ExecuteResult, LLMTokenID, Token, TokenizerStateID};
+use crate::tokenizer::{LLMTokenID, TokenizerStateID};
 use crate::types::TerminalID as GrammarTokenID;
 use crate::precompute4::weighted_automata::common::Label;
 
@@ -32,7 +28,6 @@ pub(crate) struct Precomputer1<'r> {
     pub(crate) llm_vocab: Option<Arc<LLMVocab>>,
     pub(crate) vocab: VocabPrefixTree,
     pub(crate) roots: BTreeMap<TokenizerStateID, NWAStateID>,
-    pub(crate) state_equivalence_map: BTreeMap<TokenizerStateID, TokenizerStateID>,
     pub(crate) possible_matches: RefCell<
         BTreeMap<
             *const VocabPrefixTreeNode,
@@ -55,7 +50,6 @@ impl<'r> Precomputer1<'r> {
         internal_max_llm_token: usize,
         terminals_count: usize,
         active_states: Vec<TokenizerStateID>,
-        state_equivalence_map: BTreeMap<TokenizerStateID, TokenizerStateID>,
     ) -> Self {
         let tokens: Vec<(usize, Vec<u8>)> = internal_llm_token_map
             .iter()
@@ -102,7 +96,6 @@ impl<'r> Precomputer1<'r> {
             llm_vocab,
             vocab,
             roots,
-            state_equivalence_map,
             possible_matches: RefCell::new(BTreeMap::new()),
             all_llm_tokens: RangeSetBlaze::from_iter(0..=internal_max_llm_token),
             pb,
@@ -115,14 +108,12 @@ impl<'r> Precomputer1<'r> {
     fn finish(mut self) -> DWA {
         // TODO: make this simpler.
         let new_start_state = self.nwa.add_state();
-        for (tsid, rep_id) in &self.state_equivalence_map {
-            if let Some(&state) = self.roots.get(rep_id) {
-                let label = (tsid.0 + self.terminals_count) as Label;
-                self.nwa.add_transition(new_start_state, label, state, Weight::all()).unwrap();
-            }
+        for (tsid, state) in &self.roots {
+            let label = (tsid.0 + self.terminals_count) as Label;
+            self.nwa.add_transition(new_start_state, label, *state, Weight::all()).unwrap();
         }
         self.nwa.body.start_states = vec![new_start_state];
- 
+
         // Stats
         // Find cases where there's multiple instances of same transition - incl symbol/epsilon transition - from one state to another, regardless of weight.
         let mut duplicate_transitions = 0;
@@ -136,7 +127,7 @@ impl<'r> Precomputer1<'r> {
                     duplicate_transitions += count - 1;
                 }
             }
- 
+
             for targets in state.transitions.values() {
                 let mut dst_counts = HashMap::new();
                 for (dst, _) in targets {
@@ -152,7 +143,7 @@ impl<'r> Precomputer1<'r> {
         if duplicate_transitions > 0 {
             crate::debug!(4, "NWA: Found {} duplicate transitions (same src, dst, label)", duplicate_transitions);
         }
- 
+
         // Find cases where there's multiple instances of same transition - regardless of symbol/epsilon transition - from one state to another, regardless of weight.
         let mut parallel_connections = 0;
         for state in &self.nwa.states.0 {
@@ -165,7 +156,7 @@ impl<'r> Precomputer1<'r> {
                     *dst_counts.entry(*dst).or_insert(0) += 1;
                 }
             }
- 
+
             for count in dst_counts.values() {
                 if *count > 1 {
                     parallel_connections += 1;
@@ -175,7 +166,7 @@ impl<'r> Precomputer1<'r> {
         if parallel_connections > 0 {
             crate::debug!(4, "NWA: Found {} pairs of states connected by multiple transitions", parallel_connections);
         }
- 
+
         crate::debug!(3, "{} states and {} transitions", self.nwa.states.len(), self.nwa.states.num_transitions());
         self.nwa.simplify();
         crate::debug!(3, "Simplified NWA with {} states and {} transitions", self.nwa.states.len(), self.nwa.states.num_transitions());
@@ -185,7 +176,7 @@ impl<'r> Precomputer1<'r> {
         crate::debug!(3, "Simplified DWA with {} states and {} transitions", dwa.states.len(), dwa.states.num_transitions());
         // dwa = dwa.unroll_cycles();
         // crate::debug!(3, "Unrolled DWA with {} states", dwa.states.len());
- 
+
         // Stats: 10 most 'interesting' LLM tokens
         let mut token_counts: HashMap<usize, usize> = HashMap::new();
         for state in &dwa.states.0 {
@@ -198,16 +189,16 @@ impl<'r> Precomputer1<'r> {
                 }
             }
         }
- 
+
         let mut counts_vec: Vec<(usize, usize)> = token_counts.into_iter().collect();
         counts_vec.sort_unstable_by_key(|&(_, count)| std::cmp::Reverse(count));
- 
+
         let top_tokens: Vec<(usize, usize)> = counts_vec.into_iter().take(10).collect();
- 
+
         if !top_tokens.is_empty() {
             let mut id_to_repr: HashMap<usize, String> = HashMap::new();
             let target_ids: std::collections::HashSet<usize> = top_tokens.iter().map(|(id, _)| *id).collect();
- 
+
             let mut stack = vec![&self.vocab.root];
             while let Some(node) = stack.pop() {
                 if target_ids.contains(&node.token_id()) {
@@ -222,14 +213,14 @@ impl<'r> Precomputer1<'r> {
                     stack.push(child);
                 }
             }
- 
+
             crate::debug!(3, "Top 10 most interesting LLM tokens (by transition count in DWA):");
             for (id, count) in top_tokens {
                 let repr = id_to_repr.get(&id).cloned().unwrap_or_else(|| format!("ID({})", id));
                 crate::debug!(3, "  Token {} ({}): {} transitions", repr, id, count);
             }
         }
- 
+
         // Get rid of all symbols and weights on edges and print it to show the topology.
         let mut nwa2 = NWA::new_empty();
         nwa2.body.start_states = vec![dwa.body.start_state];
@@ -261,14 +252,14 @@ impl<'r> Precomputer1<'r> {
         if dwa2.states.len() < 50 && dwa2.states.num_transitions() < 100 {
             println!("{}", dwa2);
         }
- 
+
         // Find equivalent symbols in the DWA
         let all_labels: BTreeSet<Label> =
             dwa.states.0.iter().flat_map(|s| s.transitions.keys().cloned()).collect();
- 
+
         // signature is Vec<String>
         let mut symbol_signatures: BTreeMap<Label, Vec<String>> = BTreeMap::new();
- 
+
         for &label in &all_labels {
             let mut signature = Vec::with_capacity(dwa.states.len());
             for s in &dwa.states.0 {
@@ -281,12 +272,12 @@ impl<'r> Precomputer1<'r> {
             }
             symbol_signatures.insert(label, signature);
         }
- 
+
         let mut equivalent_symbols: BTreeMap<Vec<String>, Vec<Label>> = BTreeMap::new();
         for (label, signature) in symbol_signatures {
             equivalent_symbols.entry(signature).or_default().push(label);
         }
- 
+
         println!("\n--- Equivalent DWA symbols ---");
         let mut found_any = false;
         for (_signature, labels) in equivalent_symbols {
@@ -299,17 +290,17 @@ impl<'r> Precomputer1<'r> {
             println!("  No equivalent symbols found.");
         }
         println!("------------------------------\n");
- 
+
         dwa
     }
- 
+
     fn possible_matches(
         &self,
         vocab_node: &VocabPrefixTreeNode,
         tokenizer_state_id: TokenizerStateID,
     ) -> BTreeMap<GrammarTokenID, LLMTokenBV> {
         let cache_key_ptr = vocab_node as *const VocabPrefixTreeNode;
- 
+
         if let Some(cached_for_vocab_node) =
             self.possible_matches.borrow().get(&cache_key_ptr)
         {
@@ -319,9 +310,9 @@ impl<'r> Precomputer1<'r> {
                 return cached_result.clone();
             }
         }
- 
+
         let mut result_map: BTreeMap<GrammarTokenID, LLMTokenBV> = BTreeMap::new();
- 
+
         for (segment_bytes, child_vocab_node) in vocab_node.iter_children() {
             let exec_result =
                 self.tokenizer.execute_from_state(&segment_bytes, tokenizer_state_id);
@@ -359,16 +350,16 @@ impl<'r> Precomputer1<'r> {
                 }
             }
         }
- 
+
         self.possible_matches
             .borrow_mut()
             .entry(cache_key_ptr)
             .or_default()
             .insert(tokenizer_state_id, result_map.clone());
- 
+
         result_map
     }
- 
+
     fn run_dfs(&mut self) {
         let assoc = self.roots.clone();
         crate::debug!(3, "Starting precompute DFS for {} tokenizer states", self.roots.len());
@@ -380,7 +371,7 @@ impl<'r> Precomputer1<'r> {
         profiler::print_summary();
         crate::debug!(3, "Precomputation complete");
     }
- 
+
     fn dfs(
         &mut self,
         vocab_node: &VocabPrefixTreeNode,
@@ -390,23 +381,23 @@ impl<'r> Precomputer1<'r> {
         for (segment_bytes, child_vocab_node) in vocab_node.iter_children() {
             let mut next_level_assoc: BTreeMap<TokenizerStateID, NWAStateID> =
                 BTreeMap::new();
- 
+
             // Queue: pos -> TokenizerState -> (NWAState -> ContextTokens)
             let mut pending: BTreeMap<
                 usize,
                 BTreeMap<TokenizerStateID, NWAStateID>,
             > = BTreeMap::new();
             pending.insert(0, assoc_by_state.clone());
- 
+
             let child_reachable = child_vocab_node.reachable_token_ids();
             let child_token_id = child_vocab_node.token_id();
- 
+
             // Caches possible matches for end states to prune edge_bv
             let mut possible_matches_at_end_cache: HashMap<
                 TokenizerStateID,
                 BTreeMap<GrammarTokenID, LLMTokenBV>,
             > = HashMap::new();
- 
+
             while let Some((pos, states_at_pos)) = pending.pop_first() {
                 // If we reached the end of the segment, these states are ready for the next vocab node
                 if pos == segment_bytes.len() {
@@ -416,12 +407,12 @@ impl<'r> Precomputer1<'r> {
                     }
                     continue;
                 }
- 
+
                 for (tokenizer_state_id, src_node) in states_at_pos {
                     let exec_result = self
                         .tokenizer
                         .execute_from_state(&segment_bytes[pos..], tokenizer_state_id);
- 
+
                     let possible_matches_at_end = if let Some(end_val) = exec_result.end_state {
                         let ts = TokenizerStateID(end_val);
                         possible_matches_at_end_cache
@@ -433,12 +424,12 @@ impl<'r> Precomputer1<'r> {
                             .entry(TokenizerStateID(usize::MAX)) // Arbitrary key that won't be hit
                             .or_default()
                     };
- 
+
                     // 1. Handle Matches -> Transitions to Initial State
                     for match_info in &exec_result.matches {
                         let terminal_id = GrammarTokenID(match_info.id);
                         let next_pos = pos + match_info.width;
- 
+
                         // Leaf check: if match consumes remainder of segment
                         if next_pos == segment_bytes.len() {
                             let mut edge_bv = RangeSetBlaze::new();
@@ -452,7 +443,7 @@ impl<'r> Precomputer1<'r> {
                                     .unwrap();
                             }
                         }
- 
+
                         // Continuation logic
                         let mut edge_bv = child_reachable.clone();
                         if next_pos == segment_bytes.len() {
@@ -461,34 +452,34 @@ impl<'r> Precomputer1<'r> {
                                 edge_bv = &edge_bv - pm.inner.as_ref();
                             }
                         }
- 
+
                         let final_bv = edge_bv;
                         if final_bv.is_empty() {
                             continue;
                         }
- 
+
                         let dest_map = pending.entry(next_pos).or_default();
- 
+
                         let initial_tsid = self.tokenizer.initial_state_id();
                         let target = *dest_map
                             .entry(initial_tsid)
                             .or_insert_with(|| self.nwa.add_state());
- 
+
                         let weight = SimpleBitset::from_rsb(final_bv);
                         self.nwa
                             .add_transition(src_node, terminal_id.0 as Label, target, weight)
                             .unwrap();
                     }
- 
+
                     // 2. Handle End State -> Continuation
                     if let Some(end_state_val) = exec_result.end_state {
                         let final_tokenizer_state = TokenizerStateID(end_state_val);
                         let accessible_terminals = self.tokenizer.tokens_accessible_from_state(final_tokenizer_state);
- 
+
                         let mut edge_bv = RangeSetBlaze::new();
                         edge_bv.insert(child_token_id);
                         let final_edge_bv = edge_bv;
- 
+
                         if !final_edge_bv.is_empty() {
                             let end_idx = self.leaf_state;
                             for terminal_id in &accessible_terminals {
@@ -503,124 +494,61 @@ impl<'r> Precomputer1<'r> {
                                     .unwrap();
                             }
                         }
- 
+
                         let next = *next_level_assoc.entry(final_tokenizer_state).or_insert_with(|| self.nwa.add_state());
                         self.nwa.add_epsilon(src_node, next, Weight::all());
                     }
                 }
             }
- 
+
             if !next_level_assoc.is_empty() {
                 self.dfs(child_vocab_node, next_level_assoc);
             }
         }
     }
 }
- 
- pub(crate) fn count_vocab_nodes(node: &VocabPrefixTreeNode) -> u64 {
-     1 + node
-         .children()
-         .values()
-         .map(|c| count_vocab_nodes(c))
-         .sum::<u64>()
- }
- 
-+fn compute_tokenizer_state_equivalence(
-+    tokenizer: &Regex,
-+    tokens: &[Vec<u8>],
-+) -> BTreeMap<TokenizerStateID, TokenizerStateID> {
-+    // 1. Build Transition Table: State -> Token -> (Matches, EndStateID)
-+    let states: Vec<TokenizerStateID> = tokenizer.iter_states().collect();
-+    let num_states = states.len();
-+    let state_to_idx: HashMap<TokenizerStateID, usize> = states.iter().enumerate().map(|(i, s)| (*s, i)).collect();
-+
-+    let mut table: Vec<Vec<(Vec<Token>, Option<usize>)>> = Vec::with_capacity(num_states);
-+    
-+    for state in &states {
-+        let mut row = Vec::with_capacity(tokens.len());
-+        for token in tokens {
-+            let res = tokenizer.execute_from_state(token, *state);
-+            // Map end_state (TokenizerStateID) to index for refinement
-+            let end_idx = res.end_state.map(|id| *state_to_idx.get(&TokenizerStateID(id)).unwrap());
-+            row.push((res.matches, end_idx));
-+        }
-+        table.push(row);
-+    }
-+
-+    // 2. Partition Refinement
-+    // Initial partition: based on Matches only.
-+    let mut partition: Vec<usize> = vec![0; num_states];
-+    let mut next_group_id = 0;
-+    {
-+        let mut groups: HashMap<Vec<Vec<Token>>, usize> = HashMap::new();
-+        for (i, row) in table.iter().enumerate() {
-+            // Signature is just the vector of matches
-+            let sig: Vec<Vec<Token>> = row.iter().map(|(m, _)| m.clone()).collect();
-+            let id = *groups.entry(sig).or_insert_with(|| { next_group_id += 1; next_group_id - 1 });
-+            partition[i] = id;
-+        }
-+    }
-+
-+    // Refine loop
-+    loop {
-+        let mut new_partition = vec![0; num_states];
-+        let mut new_next_group_id = 0;
-+        let mut groups: HashMap<(usize, Vec<Option<usize>>), usize> = HashMap::new();
-+
-+        for i in 0..num_states {
-+            let current_group = partition[i];
-+            // Signature: (CurrentGroup, [GroupOf(EndState) for each token])
-+            let transition_sig: Vec<Option<usize>> = table[i].iter().map(|(_, end_idx)| {
-+                end_idx.map(|idx| partition[idx])
-+            }).collect();
-+            
-+            let sig = (current_group, transition_sig);
-+            let id = *groups.entry(sig).or_insert_with(|| { new_next_group_id += 1; new_next_group_id - 1 });
-+            new_partition[i] = id;
-+        }
-+
-+        if new_next_group_id == next_group_id { break; }
-+        partition = new_partition;
-+        next_group_id = new_next_group_id;
-+    }
-+
-+    // 3. Build Mapping
-+    let mut group_reps: HashMap<usize, TokenizerStateID> = HashMap::new();
-+    let mut map = BTreeMap::new();
-+    for (i, &group_id) in partition.iter().enumerate() {
-+        let state = states[i];
-+        let rep = *group_reps.entry(group_id).or_insert(state);
-+        map.insert(state, rep);
-+    }
-+    map
-+}
-+
- // Public entry point wrapper
- pub fn run_precompute1(
-     tokenizer: &Regex,
-@@ -419,7 +609,16 @@ pub fn run_precompute1(
-         }
-     }
- 
--    let representative_states: Vec<TokenizerStateID> = tokenizer.iter_states().collect();
-+    // Compute tokenizer state equivalence classes to reduce the number of states we precompute
-+    let representative_token_bytes: Vec<Vec<u8>> = representative_llm_token_map.keys().cloned().collect();
-+    let state_equivalence_map = compute_tokenizer_state_equivalence(tokenizer, &representative_token_bytes);
-+    
-+    let mut representative_states_set = BTreeSet::new();
-+    for rep in state_equivalence_map.values() {
-+        representative_states_set.insert(*rep);
-+    }
-+    let representative_states: Vec<TokenizerStateID> = representative_states_set.into_iter().collect();
-+    crate::debug!(3, "Tokenizer state equivalence: {} states -> {} representatives", state_equivalence_map.len(), representative_states.len());
- 
-     let mut helper = Precomputer1::new(
-         tokenizer,
-@@ -429,6 +628,7 @@ pub fn run_precompute1(
-         internal_max_llm_token,
-         terminals_count,
-         representative_states,
-+        state_equivalence_map,
-     );
- 
- 
+
+pub(crate) fn count_vocab_nodes(node: &VocabPrefixTreeNode) -> u64 {
+    1 + node
+        .children()
+        .values()
+        .map(|c| count_vocab_nodes(c))
+        .sum::<u64>()
+}
+
+// Public entry point wrapper
+pub fn run_precompute1(
+    tokenizer: &Regex,
+    parser: Option<&GLRParser>,
+    llm_vocab: Option<Arc<LLMVocab>>,
+    internal_llm_token_map: &BTreeMap<Vec<u8>, LLMTokenID>,
+    internal_max_llm_token: usize,
+    terminals_count: usize,
+) -> DWA {
+    // Reduce internal_llm_token_map to representatives to speed up precomputation
+    let mut representative_llm_token_map: BTreeMap<Vec<u8>, LLMTokenID> = BTreeMap::new();
+    let mut seen_internal_ids = std::collections::HashSet::new();
+
+    for (bytes, id) in internal_llm_token_map {
+        if seen_internal_ids.insert(id.0) {
+            representative_llm_token_map.insert(bytes.clone(), *id);
+        }
+    }
+
+    let representative_states: Vec<TokenizerStateID> = tokenizer.iter_states().collect();
+
+    let mut helper = Precomputer1::new(
+        tokenizer,
+        parser,
+        llm_vocab,
+        &representative_llm_token_map,
+        internal_max_llm_token,
+        terminals_count,
+        representative_states,
+    );
+
+
+    helper.run_dfs();
+
+    helper.finish()
+}
