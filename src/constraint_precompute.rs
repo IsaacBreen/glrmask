@@ -282,10 +282,7 @@ impl<'r> Precomputer1<'r> {
         }
 
         if !stats.is_empty() {
-            crate::debug!(3, "Equivalent tokenizer state symbols in DWA (stats):");
-            for (size, count) in stats {
-                crate::debug!(3, "  Group size {}: {} groups", size, count);
-            }
+            crate::debug!(3, "Equivalent tokenizer state symbols in DWA (stats): {:?}", stats);
         }
 
         dwa
