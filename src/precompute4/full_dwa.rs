@@ -615,6 +615,8 @@ fn resolve_negatives_and_optimize_and_determinize(parser: &GLRParser, mut combin
     crate::debug!(3, "Determinized NWA. {} states remaining.", dwa.states.len());
     dwa.simplify();
     crate::debug!(3, "Simplified DWA. {} states remaining.", dwa.states.len());
+    dwa.minimize_with_rustfst();
+    crate::debug!(3, "Minimized DWA. {} states remaining.", dwa.states.len());
     dwa
 }
 
