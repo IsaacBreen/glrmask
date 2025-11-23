@@ -543,6 +543,9 @@ fn precompute_token_bvs_and_signatures(reversed_nwa: &NWA, traversal_data: &NwaT
     let node_tokens: Arc<Mutex<HashMap<StateID, LLMTokenBV>>> = Arc::new(Mutex::new(HashMap::new()));
     let signatures: Arc<Mutex<HashSet<Signature>>> = Arc::new(Mutex::new(HashSet::new()));
 
+    let node_tokens_clone = node_tokens.clone();
+    let signatures_clone = signatures.clone();
+
     nwa_special_map(reversed_nwa, traversal_data, initial_values,
         move |tokens: &LLMTokenBV, edge_label, transitions| {
             let mut results = Vec::new();
@@ -558,7 +561,7 @@ fn precompute_token_bvs_and_signatures(reversed_nwa: &NWA, traversal_data: &NwaT
         },
         |t1, t2| { *t1 |= &t2; },
         move |node_id, tokens| {
-            node_tokens.lock().unwrap().insert(node_id, tokens.clone());
+            node_tokens_clone.lock().unwrap().insert(node_id, tokens.clone());
             let mut bundles_by_dest: HashMap<StateID, BTreeMap<Option<TerminalID>, Weight>> = HashMap::new();
             let state = &reversed_nwa.states[node_id];
             for (label, targets) in &state.transitions {
@@ -581,7 +584,7 @@ fn precompute_token_bvs_and_signatures(reversed_nwa: &NWA, traversal_data: &NwaT
                     bundles_by_dest.entry(*v).or_default().insert(None, w_weight);
                 }
             }
-            let mut sigs = signatures.lock().unwrap();
+            let mut sigs = signatures_clone.lock().unwrap();
             for (_, bundle) in bundles_by_dest {
                 let (sig, _) = canonicalize_bundle(bundle);
                 sigs.insert(sig);
