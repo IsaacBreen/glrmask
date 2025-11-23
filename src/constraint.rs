@@ -111,6 +111,13 @@ fn optimize_dwa_and_vocab(
         if let Some(w) = &state.state_weight { unique_weights.insert(w.clone()); }
         for w in state.trans_weights.values() { unique_weights.insert(w.clone()); }
     }
+    // Also include bitsets from possible_matches to ensure we don't merge tokens
+    // that trigger different grammar terminals, even if they behave identically in the DWA.
+    for inner_map in possible_matches.values() {
+        for bv in inner_map.values() {
+            unique_weights.insert(Weight::from(bv.clone()));
+        }
+    }
 
     let max_tok = vocab.internal_max_llm_token;
     let mut token_to_class: Vec<usize> = vec![0; max_tok + 1];
