@@ -35,6 +35,7 @@ use crate::datastructures::bitset::Bitset;
 use crate::datastructures::gss_acc::Acc;
 use crate::glr::parser::ParseStateEdgeContent;
 use crate::precompute4::weighted_automata::{DWA, NWA};
+use crate::precompute4::weighted_automata::{SimpleBitset, Weight};
 
 // Import from new modules
 pub use crate::constraint_vocab::*;
@@ -84,6 +85,119 @@ impl JSONConvertible for TerminalAllowanceCheckMode {
     }
 }
 
+fn count_dwa_ranges(dwa: &DWA) -> usize {
+    let mut unique_weights = HashSet::new();
+    for state in &dwa.states.0 {
+        if let Some(w) = &state.final_weight { unique_weights.insert(w); }
+        if let Some(w) = &state.state_weight { unique_weights.insert(w); }
+        for w in state.trans_weights.values() { unique_weights.insert(w); }
+    }
+    unique_weights.iter().map(|w| w.rsb.ranges_len()).sum()
+}
+
+fn optimize_dwa_and_vocab(dwa: &mut DWA, vocab: &mut StageVocab) {
+    let start_time = std::time::Instant::now();
+    let initial_ranges = count_dwa_ranges(dwa);
+    let initial_tokens = vocab.internal_max_llm_token + 1;
+
+    let mut unique_weights = HashSet::new();
+    for state in &dwa.states.0 {
+        if let Some(w) = &state.final_weight { unique_weights.insert(w.clone()); }
+        if let Some(w) = &state.state_weight { unique_weights.insert(w.clone()); }
+        for w in state.trans_weights.values() { unique_weights.insert(w.clone()); }
+    }
+
+    let max_tok = vocab.internal_max_llm_token;
+    let mut token_to_class: Vec<usize> = vec![0; max_tok + 1];
+    let mut class_to_tokens: HashMap<usize, Vec<usize>> = HashMap::new();
+    class_to_tokens.insert(0, (0..=max_tok).collect());
+    let mut num_classes = 1;
+
+    for w in &unique_weights {
+        if w.is_all_fast() { continue; }
+        let mut tokens_in_w_by_class: HashMap<usize, Vec<usize>> = HashMap::new();
+        for t in w.iter_up_to(max_tok) {
+            if t <= max_tok {
+                tokens_in_w_by_class.entry(token_to_class[t]).or_default().push(t);
+            }
+        }
+        for (old_cid, present_tokens) in tokens_in_w_by_class {
+            let old_group = class_to_tokens.get_mut(&old_cid).unwrap();
+            if present_tokens.len() < old_group.len() {
+                let new_cid = num_classes;
+                num_classes += 1;
+                let present_set: HashSet<usize> = present_tokens.iter().cloned().collect();
+                old_group.retain(|t| !present_set.contains(t));
+                for &t in &present_tokens { token_to_class[t] = new_cid; }
+                class_to_tokens.insert(new_cid, present_tokens);
+            }
+        }
+    }
+
+    let mut class_freq: HashMap<usize, usize> = HashMap::new();
+    for w in &unique_weights {
+        if w.is_all_fast() {
+            for cid in 0..num_classes { *class_freq.entry(cid).or_default() += 1; }
+        } else {
+            let mut seen_classes = HashSet::new();
+            for t in w.iter_up_to(max_tok) { if t <= max_tok { seen_classes.insert(token_to_class[t]); } }
+            for cid in seen_classes { *class_freq.entry(cid).or_default() += 1; }
+        }
+    }
+
+    let mut classes: Vec<usize> = (0..num_classes).collect();
+    classes.sort_by(|&a, &b| {
+        let fa = class_freq.get(&a).unwrap_or(&0);
+        let fb = class_freq.get(&b).unwrap_or(&0);
+        fb.cmp(fa).then(a.cmp(&b))
+    });
+
+    let mut old_to_new_map: HashMap<usize, usize> = HashMap::new();
+    for (new_id, &class_id) in classes.iter().enumerate() {
+        if let Some(tokens) = class_to_tokens.get(&class_id) {
+            for &t in tokens { old_to_new_map.insert(t, new_id); }
+        }
+    }
+    let new_max_tok = num_classes.saturating_sub(1);
+
+    let mut weight_cache: HashMap<Weight, Weight> = HashMap::new();
+    let mut map_weight = |w: &Weight, cache: &mut HashMap<Weight, Weight>| -> Weight {
+        if let Some(cached) = cache.get(w) { return cached.clone(); }
+        if w.is_all_fast() { return Weight::all(); }
+        let mut new_vals = Vec::new();
+        for t in w.iter_up_to(max_tok) {
+            if let Some(&new_t) = old_to_new_map.get(&t) { new_vals.push(new_t); }
+        }
+        let new_w = SimpleBitset::from_iter(new_vals);
+        cache.insert(w.clone(), new_w.clone());
+        new_w
+    };
+
+    for state in &mut dwa.states.0 {
+        if let Some(w) = &mut state.final_weight { *w = map_weight(w, &mut weight_cache); }
+        if let Some(w) = &mut state.state_weight { *w = map_weight(w, &mut weight_cache); }
+        for w in state.trans_weights.values_mut() { *w = map_weight(w, &mut weight_cache); }
+    }
+
+    let mut new_internal_to_original: BTreeMap<usize, LLMTokenBV> = BTreeMap::new();
+    let mut new_original_to_internal: BTreeMap<usize, usize> = BTreeMap::new();
+    for (old_id, original_bv) in &vocab.internal_to_original {
+        if let Some(&new_id) = old_to_new_map.get(old_id) {
+            new_internal_to_original.entry(new_id).or_insert_with(LLMTokenBV::zeros).union_with(original_bv);
+        }
+    }
+    for (new_id, original_bv) in &new_internal_to_original {
+        for orig in original_bv.iter_up_to(vocab.max_original_llm_token_id) {
+            new_original_to_internal.insert(orig, *new_id);
+        }
+    }
+    vocab.internal_to_original = new_internal_to_original;
+    vocab.original_to_internal = new_original_to_internal;
+    vocab.internal_max_llm_token = new_max_tok;
+
+    let final_ranges = count_dwa_ranges(dwa);
+    crate::debug!(3, "DWA Vocab Optimization: Tokens {} -> {}, Ranges {} -> {}. Time: {:.2?}", initial_tokens, new_max_tok + 1, initial_ranges, final_ranges, start_time.elapsed());
+}
 // ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------
@@ -630,16 +744,21 @@ impl GrammarConstraint {
             parser.terminal_map.len(),
         );
 
+        optimize_dwa_and_vocab(&mut skeleton_dwa, &mut vocab);
+
         let terminal_map_by_llm = terminal_map_by_llm_raw;
         let possible_matches_precompute1 = computed_possible_matches;
 
         // Precompute4 (DWA).
         let max_internal_llm_token_id = vocab.internal_max_llm_token;
+        // Note: vocab.internal_max_llm_token might have changed due to optimization, which is fine.
 
         // Convert the precompute1 Trie to NWA and run precompute4.
         crate::debug!(3, "Running Precompute4");
         let nwa = NWA::from_dwa(&skeleton_dwa);
         let precomputed4 = precompute4(&parser, &nwa);
+
+        optimize_dwa_and_vocab(&mut precomputed4, &mut vocab);
 
         let internal_to_original_sparse_matrix =
             StageVocab::build_internal_to_original_sparse_matrix(
