@@ -458,7 +458,7 @@ pub fn precompute4(parser: &GLRParser, input_nwa: &NWA) -> DWA {
     let initial_values_full: Vec<(usize, (BTreeMap<NWABody, BTreeMap<Option<TerminalID>, Weight>>, LLMTokenBV))> =
         reversed_nwa.body.start_states.iter().map(|&s| (s, (BTreeMap::from([(initial_body.clone(), initial_term_map.clone())]), LLMTokenBV::max_ones()))).collect();
 
-    let final_bodies_arc = Arc::new(Mutex::new(BTreeMap::new()));
+    let final_bodies_arc: Arc<Mutex<BTreeMap<TokenizerStateID, Vec<(NWABody, Weight)>>>> = Arc::new(Mutex::new(BTreeMap::new()));
 
     crate::debug!(3, "Beginning NWA traversal.");
 
@@ -470,7 +470,17 @@ pub fn precompute4(parser: &GLRParser, input_nwa: &NWA) -> DWA {
                 if lbl >= offset {
                     let tsid = TokenizerStateID((lbl - offset) as usize);
                     let mut fb = final_bodies_arc.lock().unwrap();
-                    for body in current_bodies.keys() { fb.insert(tsid, body.clone()); }
+                    let list = fb.entry(tsid).or_default();
+                    for (_dest, weight) in transitions {
+                        let w_bv: LLMTokenBV = weight.clone().into();
+                        let intersection_bv = current_tokens & &w_bv;
+                        if !intersection_bv.is_empty() {
+                            let final_w = Weight::from_rsb(intersection_bv.inner.as_ref().clone());
+                            for body in current_bodies.keys() {
+                                list.push((body.clone(), final_w.clone()));
+                            }
+                        }
+                    }
                     return Vec::new();
                 }
             }
@@ -526,10 +536,12 @@ pub fn precompute4(parser: &GLRParser, input_nwa: &NWA) -> DWA {
     let final_bodies = Arc::try_unwrap(final_bodies_arc).unwrap().into_inner().unwrap();
     let mut combined_nwa_states = states_arena.into_inner();
     let combined_start_state = combined_nwa_states.add_state();
-    for (tok_id, body) in final_bodies {
-        let label = tok_id.0 as Label;
-        for &s in &body.start_states {
-            combined_nwa_states.add_transition(combined_start_state, label, s, Weight::all()).unwrap();
+    for (tsid, list) in final_bodies {
+        let label = tsid.0 as Label;
+        for (body, weight) in list {
+            for &s in &body.start_states {
+                combined_nwa_states.add_transition(combined_start_state, label, s, weight.clone()).unwrap();
+            }
         }
     }
 
