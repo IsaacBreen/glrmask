@@ -436,14 +436,14 @@ impl<'r> Precomputer1<'r> {
         weight: &Weight,
     ) -> NWAStateID {
         if let Some(&state) = map.get(&key) {
-            self.live_tokens.entry(state).or_default().union_with(weight);
+            *self.live_tokens.entry(state).or_default() |= weight;
             return state;
         }
 
         for &state in map.values() {
             let live = self.live_tokens.entry(state).or_default();
             if live.is_disjoint(weight) {
-                live.union_with(weight);
+                *live |= weight;
                 map.insert(key, state);
                 return state;
             }
