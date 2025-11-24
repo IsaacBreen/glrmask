@@ -1007,6 +1007,44 @@ impl ExprGroups {
     }
 }
 
+fn optimize_choice_literals(
+    nfa: &mut NFA,
+    start_state: usize,
+    end_state: usize,
+    sequences: Vec<Vec<u8>>,
+) {
+    #[derive(Default)]
+    struct TrieNode {
+        children: BTreeMap<u8, TrieNode>,
+        is_end: bool,
+    }
+
+    let mut root = TrieNode::default();
+
+    for seq in sequences {
+        let mut node = &mut root;
+        for byte in seq {
+            node = node.children.entry(byte).or_default();
+        }
+        node.is_end = true;
+    }
+
+    // Stack: (node, nfa_state_index)
+    let mut stack = vec![(&root, start_state)];
+
+    while let Some((node, current_nfa_state)) = stack.pop() {
+        if node.is_end {
+            nfa.add_epsilon_transition(current_nfa_state, end_state);
+        }
+
+        for (&byte, child) in &node.children {
+            let next_nfa_state = nfa.add_state();
+            nfa.add_transition(current_nfa_state, byte, next_nfa_state);
+            stack.push((child, next_nfa_state));
+        }
+    }
+}
+
 impl Expr {
     pub fn build(self) -> Regex {
         ExprGroups {
@@ -1114,14 +1152,35 @@ impl Expr {
                     }
                     Expr::Choice(mut exprs) => {
                         let end_state = nfa.add_state();
-                        if exprs.is_empty() {
+
+                        // Optimization: Detect literal strings in the choice and build a Trie for them.
+                        // This drastically reduces NFA size and non-determinism for large dictionaries.
+                        let (literals, mut complex): (Vec<Expr>, Vec<Expr>) = exprs
+                            .into_iter()
+                            .partition(|e| matches!(e, Expr::U8Seq(_)));
+
+                        if !literals.is_empty() {
+                            let seqs: Vec<Vec<u8>> = literals
+                                .into_iter()
+                                .map(|e| {
+                                    if let Expr::U8Seq(s) = e {
+                                        s
+                                    } else {
+                                        unreachable!()
+                                    }
+                                })
+                                .collect();
+                            optimize_choice_literals(nfa, start_state, end_state, seqs);
+                        }
+
+                        if complex.is_empty() {
                             return_value = Some(end_state);
                         } else {
-                            exprs.reverse();
-                            let first = exprs.pop().unwrap();
+                            complex.reverse();
+                            let first = complex.pop().unwrap();
                             state = FrameState::Choice { end_state };
                             stack.push(Frame {
-                                expr: Expr::Choice(exprs),
+                                expr: Expr::Choice(complex),
                                 start_state,
                                 state,
                             });
