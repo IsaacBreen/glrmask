@@ -961,14 +961,14 @@ impl ExprGroups {
         let start = std::time::Instant::now();
         let mut nfa = self.build_nfa();
         crate::debug!(4, "Built NFA in {:.2?}", start.elapsed());
-    print_memory_usage("After NFA build");
-    
-    let start_condense = std::time::Instant::now();
-    nfa.condense_epsilon_sccs();
-    crate::debug!(4, "Condensed NFA in {:.2?}", start_condense.elapsed());
-    
-    // nfa.print_stats(); // Skip stats for speed
-    crate::debug!(3, "Converting NFA to DFA");
+        print_memory_usage("After NFA build");
+
+        let start_condense = std::time::Instant::now();
+        nfa.condense_epsilon_sccs();
+        crate::debug!(4, "Condensed NFA in {:.2?}", start_condense.elapsed());
+
+        // nfa.print_stats(); // Skip stats for speed
+        crate::debug!(3, "Converting NFA to DFA");
         let start = std::time::Instant::now();
         let mut dfa = nfa.to_dfa();
         crate::debug!(4, "Converted NFA to DFA in {:.2?}", start.elapsed());
