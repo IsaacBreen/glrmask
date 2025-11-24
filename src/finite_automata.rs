@@ -11,7 +11,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use ahash::AHashMap;
 use profiler_macro::time_it;
-use crate::datastructures::compressed_state_set::{CompressedStateSet, SparseStateSet};
+use crate::datastructures::compressed_state_set::{CompressedStateSet, SparseStateSet, DenseStateSet};
 use crate::datastructures::state_set::StateSet;
 
 
@@ -25,8 +25,8 @@ pub struct NFAState {
     transitions: Vec<(U8Set, usize)>,
     /// Epsilon transitions: target states reachable without consuming input.
     epsilon_transitions: Vec<usize>,
-    finalizers: BTreeSet<GroupID>,
-    non_greedy_finalizers: BTreeSet<GroupID>,
+    finalizers: DenseStateSet,
+    non_greedy_finalizers: DenseStateSet,
 }
 
 
@@ -106,13 +106,13 @@ impl JSONConvertible for NFAState {
                 let finalizers = obj
                     .remove("finalizers")
                     .ok_or_else(|| "Missing field finalizers for NFAState".to_string())
-                    .and_then(BTreeSet::<GroupID>::from_json)?;
+                    .and_then(DenseStateSet::from_json)?;
                 let non_greedy_finalizers = obj
                     .remove("non_greedy_finalizers")
                     .ok_or_else(|| {
                         "Missing field non_greedy_finalizers for NFAState".to_string()
                     })
-                    .and_then(BTreeSet::<GroupID>::from_json)?;
+                    .and_then(DenseStateSet::from_json)?;
                 Ok(NFAState {
                     transitions,
                     epsilon_transitions,
@@ -163,7 +163,7 @@ impl JSONConvertible for NFA {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct DFAState {
     pub transitions: CharTransitions<usize>,
-    pub finalizers: BTreeSet<GroupID>,
+    pub finalizers: DenseStateSet,
     pub possible_future_group_ids: BTreeSet<GroupID>,
     pub group_id_to_u8set: BTreeMap<GroupID, U8Set>,
 }
@@ -194,7 +194,7 @@ impl JSONConvertible for DFAState {
                 let finalizers = obj
                     .remove("finalizers")
                     .ok_or_else(|| "Missing field finalizers for DFAState".to_string())
-                    .and_then(BTreeSet::<GroupID>::from_json)?;
+                    .and_then(DenseStateSet::from_json)?;
                 let possible_future_group_ids = obj
                     .remove("possible_future_group_ids")
                     .ok_or_else(|| {
@@ -882,8 +882,8 @@ impl NFAState {
         NFAState {
             transitions: Vec::new(),
             epsilon_transitions: Vec::new(),
-            finalizers: BTreeSet::new(),
-            non_greedy_finalizers: BTreeSet::new(),
+            finalizers: DenseStateSet::empty(),
+            non_greedy_finalizers: DenseStateSet::empty(),
         }
     }
 }
@@ -2055,8 +2055,8 @@ impl NFA {
             let new_id = scc_map[old_id];
             let new_state = &mut new_states[new_id];
 
-            new_state.finalizers.extend(state.finalizers.iter().cloned());
-            new_state.non_greedy_finalizers.extend(state.non_greedy_finalizers.iter().cloned());
+            new_state.finalizers.union_with(&state.finalizers);
+            new_state.non_greedy_finalizers.union_with(&state.non_greedy_finalizers);
 
             for (u8set, target) in &state.transitions {
                 let new_target = scc_map[*target];
@@ -2224,11 +2224,11 @@ impl NFA {
 
         let start_finalizers = std::time::Instant::now();
         let (finalizers, non_greedy_finalizers) = crate::time!("compute_finalizers", {
-            let mut finalizers = BTreeSet::new();
-            let mut non_greedy_finalizers = BTreeSet::new();
+            let mut finalizers = DenseStateSet::empty();
+            let mut non_greedy_finalizers = DenseStateSet::empty();
             for state in start_state_set.iter() {
-                finalizers.extend(self.states[state].finalizers.iter().cloned());
-                non_greedy_finalizers.extend(self.states[state].non_greedy_finalizers.iter().cloned());
+                finalizers.union_with(&self.states[state].finalizers);
+                non_greedy_finalizers.union_with(&self.states[state].non_greedy_finalizers);
             }
             (finalizers, non_greedy_finalizers)
         });
@@ -2363,12 +2363,11 @@ impl NFA {
 
                             let start_finalizers = std::time::Instant::now();
                             let (new_finalizers, new_non_greedy_finalizers) = crate::time!("compute_finalizers", {
-                                let mut new_finalizers = BTreeSet::new();
-                                let mut new_non_greedy_finalizers = BTreeSet::new();
+                                let mut new_finalizers = DenseStateSet::empty();
+                                let mut new_non_greedy_finalizers = DenseStateSet::empty();
                                 for state in scratch_closure.iter() {
-                                    new_finalizers.extend(self.states[state].finalizers.iter().cloned());
-                                    new_non_greedy_finalizers
-                                        .extend(self.states[state].non_greedy_finalizers.iter().cloned());
+                                    new_finalizers.union_with(&self.states[state].finalizers);
+                                    new_non_greedy_finalizers.union_with(&self.states[state].non_greedy_finalizers);
                                 }
                                 (new_finalizers, new_non_greedy_finalizers)
                             });

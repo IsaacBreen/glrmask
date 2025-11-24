@@ -16,6 +16,85 @@ impl DenseStateSet {
             words: vec![0; num_words],
         }
     }
+
+    pub fn empty() -> Self {
+        Self { words: Vec::new() }
+    }
+
+    #[inline]
+    pub fn insert(&mut self, bit: usize) {
+        let word_idx = bit / 64;
+        if word_idx >= self.words.len() {
+            self.words.resize(word_idx + 1, 0);
+        }
+        unsafe {
+            *self.words.get_unchecked_mut(word_idx) |= 1u64 << (bit % 64);
+        }
+    }
+
+    #[inline]
+    pub fn contains(&self, bit: usize) -> bool {
+        let word_idx = bit / 64;
+        if word_idx >= self.words.len() {
+            return false;
+        }
+        unsafe {
+            (*self.words.get_unchecked(word_idx) & (1u64 << (bit % 64))) != 0
+        }
+    }
+
+    #[inline]
+    pub fn union_with(&mut self, other: &DenseStateSet) {
+        if other.words.len() > self.words.len() {
+            self.words.resize(other.words.len(), 0);
+        }
+        for (i, word) in other.words.iter().enumerate() {
+            unsafe {
+                *self.words.get_unchecked_mut(i) |= *word;
+            }
+        }
+    }
+
+    pub fn iter(&self) -> DenseStateSetIter {
+        DenseStateSetIter {
+            set: self,
+            word_idx: 0,
+            current_word: if self.words.is_empty() { 0 } else { self.words[0] },
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.words.iter().all(|&w| w == 0)
+    }
+
+    pub fn clear(&mut self) {
+        self.words.fill(0);
+    }
+}
+
+pub struct DenseStateSetIter<'a> {
+    set: &'a DenseStateSet,
+    word_idx: usize,
+    current_word: u64,
+}
+
+impl<'a> Iterator for DenseStateSetIter<'a> {
+    type Item = usize;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if self.current_word != 0 {
+                let t = self.current_word.trailing_zeros();
+                self.current_word &= !(1u64 << t);
+                return Some(self.word_idx * 64 + t as usize);
+            }
+            self.word_idx += 1;
+            if self.word_idx >= self.set.words.len() {
+                return None;
+            }
+            self.current_word = self.set.words[self.word_idx];
+        }
+    }
 }
 
 pub struct SparseStateSet {
