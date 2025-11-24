@@ -56,9 +56,10 @@ impl BitSet {
         self.dirty_words.clear();
     }
 
-    pub fn iter(&mut self) -> impl Iterator<Item = usize> + '_ {
-        self.dirty_words.sort_unstable();
-        self.dirty_words.iter().flat_map(|&w| {
+    pub fn iter(&self) -> impl Iterator<Item=usize> + '_ {
+        let mut dirty = self.dirty_words.clone();
+        dirty.sort_unstable();
+        dirty.into_iter().flat_map(move |w| {
             let word = self.data[w];
             let base = w * 64;
             (0..64).filter(move |&b| (word & (1 << b)) != 0).map(move |b| base + b)
