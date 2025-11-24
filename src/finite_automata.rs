@@ -2165,15 +2165,32 @@ impl NFA {
         // Pre-process NFA transitions to use class IDs
         let mut remapped_transitions: Vec<Vec<(U8Set, usize)>> = Vec::with_capacity(self.states.len());
         for state in &self.states {
-            let mut trans = Vec::with_capacity(state.transitions.len());
+            // Merge transitions to the same target to reduce loop iterations later
+            let mut temp_trans: Vec<(usize, U8Set)> = Vec::with_capacity(state.transitions.len());
             for (u8set, target) in &state.transitions {
                 let mut class_set = U8Set::none();
                 for b in u8set.iter() {
                     class_set.insert(class_map[b as usize]);
                 }
-                trans.push((class_set, *target));
+                temp_trans.push((*target, class_set));
             }
-            remapped_transitions.push(trans);
+            temp_trans.sort_unstable_by_key(|k| k.0);
+
+            let mut merged: Vec<(U8Set, usize)> = Vec::with_capacity(temp_trans.len());
+            if !temp_trans.is_empty() {
+                let (mut curr_tgt, mut curr_set) = temp_trans[0];
+                for (tgt, set) in temp_trans.into_iter().skip(1) {
+                    if tgt == curr_tgt {
+                        curr_set.update(&set);
+                    } else {
+                        merged.push((curr_set, curr_tgt));
+                        curr_tgt = tgt;
+                        curr_set = set;
+                    }
+                }
+                merged.push((curr_set, curr_tgt));
+            }
+            remapped_transitions.push(merged);
         }
         stats.remapped_transitions_time = start_remap.elapsed();
 
@@ -2232,7 +2249,9 @@ impl NFA {
         });
 
         // Reusable structures
-        let mut transition_targets: Vec<SparseStateSet> = (0..num_classes).map(|_| SparseStateSet::new(num_nfa_states)).collect();
+        let num_words = (num_nfa_states + 63) / 64;
+        let mut target_matrix = vec![0u64; num_classes * num_words];
+        let mut target_dirty = vec![Vec::<usize>::with_capacity(4); num_classes];
         let mut used_classes: Vec<usize> = Vec::with_capacity(num_classes);
         let mut seen_class = vec![false; num_classes];
         let mut scratch_target = CompressedStateSet::new(0);
@@ -2264,14 +2283,20 @@ impl NFA {
                     for class_id in class_set.iter() {
                         let idx = class_id as usize;
                         unsafe {
-                            if !*seen_class.get_unchecked(idx) {
-                                *seen_class.get_unchecked_mut(idx) = true;
-                                used_classes.push(idx);
-                            }
-                            transition_targets.get_unchecked_mut(idx).insert_mask(word_idx, bit_mask);
+                        if !*seen_class.get_unchecked(idx) {
+                            *seen_class.get_unchecked_mut(idx) = true;
+                            used_classes.push(idx);
                         }
+                        
+                        let offset = idx * num_words + word_idx;
+                        let word = target_matrix.get_unchecked_mut(offset);
+                        if *word == 0 {
+                            target_dirty.get_unchecked_mut(idx).push(word_idx);
+                        }
+                        *word |= bit_mask;
                     }
                 }
+            }
             }
             stats.time_collect_transitions += start_collect.elapsed();
 
@@ -2282,16 +2307,35 @@ impl NFA {
             let mut dfa_transitions_vec: Vec<(u8, usize)> = Vec::new();
 
             for &class_id in &used_classes {
-                let target_set = unsafe { transition_targets.get_unchecked(class_id) };
+                // Read from flat matrix
+                let dirty_indices = unsafe { target_dirty.get_unchecked(class_id) };
 
                 let start_compress_target = std::time::Instant::now();
-                if target_set.is_empty() {
+                if dirty_indices.is_empty() {
                     scratch_target.words.clear(); // CompressedStateSet.words is pub now
                     let mut hasher = ahash::AHasher::default();
                     scratch_target.words.hash(&mut hasher);
                     scratch_target.hash = hasher.finish();
                 } else {
-                    CompressedStateSet::reuse_from_sparse(target_set, &mut scratch_target);
+                     // Manual construction from flat matrix
+                     scratch_target.words.clear();
+                     // Sort indices to maintain canonical order for hashing
+                     let mut sorted = dirty_indices.clone();
+                     sorted.sort_unstable();
+                     for &w_idx in &sorted {
+                         let w = unsafe { *target_matrix.get_unchecked(class_id * num_words + w_idx) };
+                         scratch_target.words.push((w_idx as u32, w));
+                     }
+                     
+                     let mut hasher = ahash::AHasher::default();
+                     unsafe {
+                        let slice = std::slice::from_raw_parts(
+                            scratch_target.words.as_ptr() as *const u8,
+                            scratch_target.words.len() * std::mem::size_of::<(u32, u64)>()
+                        );
+                        hasher.write(slice);
+                     }
+                     scratch_target.hash = hasher.finish();
                 }
                 stats.time_compress_state_set += start_compress_target.elapsed();
                 stats.total_compressed_sets += 1;
@@ -2305,8 +2349,12 @@ impl NFA {
                 // TIMING: Bitset Iteration
                 let start_iter = std::time::Instant::now();
                 {
-                    for &w_idx in &target_set.dirty_words {
-                        let mut w = target_set.dense.words[w_idx];
+                    for &w_idx in dirty_indices {
+                        let offset = class_id * num_words + w_idx;
+                        let mut w = unsafe { *target_matrix.get_unchecked(offset) };
+                        // Clear for next use
+                        unsafe { *target_matrix.get_unchecked_mut(offset) = 0; }
+                        
                         while w != 0 {
                             let t = w.trailing_zeros();
                             w &= !(1u64 << t);
@@ -2402,7 +2450,7 @@ impl NFA {
 
             for &idx in &used_classes {
                  seen_class[idx] = false;
-                 transition_targets[idx].clear();
+                 target_dirty[idx].clear();
             }
             used_classes.clear();
         }
