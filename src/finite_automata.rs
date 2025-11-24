@@ -999,7 +999,7 @@ impl ExprGroups {
 
             // 3. Strategy B: Left Factoring Pass
             let strat_b_start = std::time::Instant::now();
-            let optimized_expr_b = self.clone().optimize_left_factor();
+            let optimized_expr_b = self.clone().optimize();
             let strat_b_nfa = optimized_expr_b.build_nfa(false); // Optimization done in pass, so false
             let nfa_states = strat_b_nfa.states.len();
             let (dfa_states, total_trans) = run_full_pipeline(strat_b_nfa);
@@ -1069,10 +1069,10 @@ impl ExprGroups {
 }
 
 impl ExprGroups {
-    pub fn optimize_left_factor(self) -> Self {
+    pub fn optimize(self) -> Self {
         ExprGroups {
             groups: self.groups.into_iter().map(|g| ExprGroup {
-                expr: g.expr.optimize_left_factor(),
+                expr: g.expr.optimize(),
                 is_non_greedy: g.is_non_greedy,
             }).collect()
         }
@@ -1463,7 +1463,7 @@ impl Expr {
         }
     }
 
-    pub fn optimize_left_factor(self) -> Self {
+    pub fn optimize(self) -> Self {
         enum Task {
             Expand(Expr),
             Seq(usize),
@@ -1529,14 +1529,14 @@ impl Expr {
                 Task::Choice(len) => {
                     let split_idx = values.len() - len;
                     let children = values.split_off(split_idx);
-                    values.push(Self::apply_left_factoring_reduction(children));
+                    values.push(Self::apply_optimizations(children));
                 }
             }
         }
         values.pop().unwrap()
     }
 
-    fn apply_left_factoring_reduction(exprs: Vec<Expr>) -> Expr {
+    fn apply_optimizations(exprs: Vec<Expr>) -> Expr {
         // 2. Flatten nested choices
         let mut flat = Vec::new();
         for e in exprs {
@@ -1591,11 +1591,11 @@ impl Expr {
                         } else if valid_tails.len() == 1 {
                             valid_tails.pop().unwrap()
                         } else {
-                            // We can safely call optimize_left_factor recursively here because
+                            // We can safely call optimize recursively here because
                             // we are processing tails of a peeled sequence, which decreases structure size.
                             // The recursion depth here is bound by the length of the string/sequence being factored,
                             // not the depth of the grammar graph.
-                            Expr::Choice(valid_tails).optimize_left_factor()
+                            Expr::Choice(valid_tails).optimize()
                         }
                     };
 
