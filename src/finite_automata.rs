@@ -1089,26 +1089,13 @@ fn u8set_to_regex_pattern(set: &U8Set) -> String {
 
 impl Expr {
     fn to_benchmark_string(&self) -> String {
-        let mut cache = HashMap::new();
-        self.to_benchmark_string_impl(&mut cache)
-    }
-
-    fn to_benchmark_string_impl(&self, cache: &mut HashMap<usize, String>) -> String {
         match self {
             Expr::U8Seq(bytes) => bytes.iter().map(|&b| byte_to_regex_char(b)).collect(),
             Expr::U8Class(set) => u8set_to_regex_pattern(set),
-            Expr::Shared(inner) => {
-                let key = Arc::as_ptr(inner) as usize;
-                if let Some(s) = cache.get(&key) {
-                    return s.clone();
-                }
-                let s = inner.to_benchmark_string_impl(cache);
-                cache.insert(key, s.clone());
-                s
-            }
-            Expr::Quantifier(inner, q) => format!("(?:{}){}", inner.to_benchmark_string_impl(cache), match q { QuantifierType::ZeroOrMore => "*", QuantifierType::OneOrMore => "+", QuantifierType::ZeroOrOne => "?" }),
-            Expr::Choice(exprs) => exprs.iter().map(|e| e.to_benchmark_string_impl(cache)).collect::<Vec<_>>().join("|"),
-            Expr::Seq(exprs) => exprs.iter().map(|e| e.to_benchmark_string_impl(cache)).collect::<Vec<_>>().join(""),
+            Expr::Shared(inner) => inner.to_benchmark_string(),
+            Expr::Quantifier(inner, q) => format!("(?:{}){}", inner.to_benchmark_string(), match q { QuantifierType::ZeroOrMore => "*", QuantifierType::OneOrMore => "+", QuantifierType::ZeroOrOne => "?" }),
+            Expr::Choice(exprs) => exprs.iter().map(|e| e.to_benchmark_string()).collect::<Vec<_>>().join("|"),
+            Expr::Seq(exprs) => exprs.iter().map(|e| e.to_benchmark_string()).collect::<Vec<_>>().join(""),
             Expr::Epsilon => String::new(),
         }
     }
@@ -1119,18 +1106,13 @@ impl ExprGroups {
         // Benchmark against standard regex crate
         crate::debug!(2, "Building regex");
         let pattern = self.groups.iter().map(|g| g.expr.to_benchmark_string()).collect::<Vec<_>>().join("|");
+        println!("Regex pattern: {}", pattern);
         crate::debug!(3, "Regex pattern built");
         let start_regex = std::time::Instant::now();
         // Note: This requires the 'regex' crate to be in Cargo.toml
         let _ = ::regex::bytes::Regex::new(&pattern);
         crate::debug!(3, "Regex built");
         let regex_duration = start_regex.elapsed();
-
-        let start_regex_automata = std::time::Instant::now();
-        // Note: This requires the 'regex-automata' crate to be in Cargo.toml
-        let _ = ::regex_automata::dfa::dense::DFA::new(&pattern);
-        crate::debug!(3, "regex-automata DFA built");
-        let regex_automata_duration = start_regex_automata.elapsed();
 
         let start_total = std::time::Instant::now();
         let stats = self.get_stats();
@@ -1159,9 +1141,8 @@ impl ExprGroups {
 
         let our_duration = start_total.elapsed();
         crate::debug!(1, "BENCHMARK RESULT -- Pattern len: {}", pattern.len());
-        crate::debug!(1, "  regex crate:          {:.2?}", regex_duration);
-        crate::debug!(1, "  regex-automata crate: {:.2?}", regex_automata_duration);
-        crate::debug!(1, "  this crate:           {:.2?}", our_duration);
+        crate::debug!(1, "  regex crate: {:.2?}", regex_duration);
+        crate::debug!(1, "  this crate:  {:.2?}", our_duration);
 
         Regex { dfa }
     }
