@@ -897,34 +897,48 @@ impl ExprGroups {
 
         if std::env::var("BENCHMARK_REGEX_OPTIMIZATIONS").is_ok() {
             crate::debug!(0, "=== RUNNING REGEX OPTIMIZATION BENCHMARK ===");
-            let warmup = self.clone();
-            let _ = warmup.build_nfa(false); // Warmup allocator
+
+            // Helper to run full pipeline and return stats
+            fn run_full_pipeline(mut nfa: NFA) -> (usize, usize) {
+                nfa.condense_epsilon_sccs();
+                let mut dfa = nfa.to_dfa();
+                dfa.minimize();
+                (dfa.states.len(), dfa.states.iter().map(|s| s.transitions.len()).sum())
+            }
 
             // 1. Baseline (Naive)
             let baseline_start = std::time::Instant::now();
             let baseline_nfa = self.clone().build_nfa(false);
+            let nfa_states = baseline_nfa.states.len();
+            let (dfa_states, total_trans) = run_full_pipeline(baseline_nfa);
             let baseline_time = baseline_start.elapsed();
-            crate::debug!(0, "BASELINE: NFA Build: {:.2?}, States: {}", baseline_time, baseline_nfa.states.len());
+            crate::debug!(0, "BASELINE: Total Time: {:.2?}, NFA States: {}, DFA States: {}, Trans: {}", baseline_time, nfa_states, dfa_states, total_trans);
             
             // 2. Strategy A: On-the-fly Trie
             let strat_a_start = std::time::Instant::now();
             let strat_a_nfa = self.clone().build_nfa(true);
+            let nfa_states = strat_a_nfa.states.len();
+            let (dfa_states, total_trans) = run_full_pipeline(strat_a_nfa);
             let strat_a_time = strat_a_start.elapsed();
-            crate::debug!(0, "STRAT A (On-the-fly): NFA Build: {:.2?}, States: {}", strat_a_time, strat_a_nfa.states.len());
+            crate::debug!(0, "STRAT A (On-the-fly): Total Time: {:.2?}, NFA States: {}, DFA States: {}, Trans: {}", strat_a_time, nfa_states, dfa_states, total_trans);
 
             // 3. Strategy B: Left Factoring Pass
             let strat_b_start = std::time::Instant::now();
             let optimized_expr_b = self.clone().optimize_left_factor();
             let strat_b_nfa = optimized_expr_b.build_nfa(false); // Optimization done in pass, so false
+            let nfa_states = strat_b_nfa.states.len();
+            let (dfa_states, total_trans) = run_full_pipeline(strat_b_nfa);
             let strat_b_time = strat_b_start.elapsed();
-            crate::debug!(0, "STRAT B (Left-Factor): NFA Build: {:.2?}, States: {}", strat_b_time, strat_b_nfa.states.len());
+            crate::debug!(0, "STRAT B (Left-Factor): Total Time: {:.2?}, NFA States: {}, DFA States: {}, Trans: {}", strat_b_time, nfa_states, dfa_states, total_trans);
 
             // 4. Strategy C: Trie Variant Pass
             let strat_c_start = std::time::Instant::now();
             let optimized_expr_c = self.clone().optimize_trie_variant();
             let strat_c_nfa = optimized_expr_c.build_nfa(false); // NFA builder handles variant explicitly
+            let nfa_states = strat_c_nfa.states.len();
+            let (dfa_states, total_trans) = run_full_pipeline(strat_c_nfa);
             let strat_c_time = strat_c_start.elapsed();
-            crate::debug!(0, "STRAT C (Trie Variant): NFA Build: {:.2?}, States: {}", strat_c_time, strat_c_nfa.states.len());
+            crate::debug!(0, "STRAT C (Trie Variant): Total Time: {:.2?}, NFA States: {}, DFA States: {}, Trans: {}", strat_c_time, nfa_states, dfa_states, total_trans);
             crate::debug!(0, "============================================");
         }
 
