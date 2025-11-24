@@ -1839,6 +1839,14 @@ impl Expr {
         if !classes.is_empty() {
             complex.push(Expr::U8Class(classes));
         }
+        
+        complex.sort();
+        
+        if complex.len() == 1 {
+            complex.pop().unwrap()
+        } else {
+            Expr::Choice(complex)
+        }
     }
 }
 
