@@ -60,22 +60,12 @@ impl NWA {
         let eps_reach = precompute_all_epsilon_closures(&self.states);
 
         // 4. Configure Progress Bar
-        let show_pbar = self.states.len() > 10000;
-        let mp = if show_pbar { Some(MultiProgress::new()) } else { None };
-        let main_pb = mp.as_ref().map(|mp_instance| {
-            let pb = mp_instance.add(ProgressBar::new(1));
-            pb.set_style(
-                ProgressStyle::default_bar()
-                    .template("{spinner:.green} [{elapsed_precise}] States: [{bar:40.cyan/blue}] {pos}/{len} ({eta}) {msg}")
-                    .unwrap()
-                    .progress_chars("#>-"),
-            );
-            pb.set_message("Determinizing NWA");
-            pb
-        });
+        // We only show the progress bar if determinization takes longer than 100ms.
+        let start_time = std::time::Instant::now();
+        let mut pbar_data: Option<(MultiProgress, ProgressBar)> = None;
 
         // 5. Initialize Determinizer
-        let mut det = Determinizer::new(self, &eps_reach, mp);
+        let mut det = Determinizer::new(self, &eps_reach);
 
         // 6. Initial State Construction
         let mut start_map: HashMap<NWAStateID, Weight> = HashMap::new();
@@ -109,7 +99,21 @@ impl NWA {
             }
 
             // Progress Update
-            if let Some(pb) = &main_pb {
+            // Initialize progress bar if > 100ms has elapsed and it's not yet created
+            if pbar_data.is_none() && start_time.elapsed().as_millis() > 100 {
+                let mp = MultiProgress::new();
+                let pb = mp.add(ProgressBar::new(1));
+                pb.set_style(
+                    ProgressStyle::default_bar()
+                        .template("{spinner:.green} [{elapsed_precise}] States: [{bar:40.cyan/blue}] {pos}/{len} ({eta}) {msg}")
+                        .unwrap()
+                        .progress_chars("#>-"),
+                );
+                pb.set_message("Determinizing NWA");
+                pbar_data = Some((mp, pb));
+            }
+
+            if let Some((_, pb)) = &pbar_data {
                 let total_states = det.seen.len();
                 pb.set_length(total_states as u64);
                 pb.set_position(processed_count as u64);
@@ -120,7 +124,7 @@ impl NWA {
             processed_count += 1;
         }
         
-        if let Some(pb) = main_pb {
+        if let Some((_, pb)) = pbar_data {
             pb.finish_with_message("Determinization complete");
         }
 
@@ -255,11 +259,10 @@ struct Determinizer<'a> {
     closures: Vec<WeightedSubset>,
     
     dwa: DWA,
-    mp: Option<MultiProgress>,
 }
 
 impl<'a> Determinizer<'a> {
-    fn new(nwa: &'a NWA, eps_reach: &'a [WeightedSubset], mp: Option<MultiProgress>) -> Self {
+    fn new(nwa: &'a NWA, eps_reach: &'a [WeightedSubset]) -> Self {
         let mut dwa = DWA::new();
         dwa.states.0.clear();
         dwa.body.start_state = 0;
@@ -270,7 +273,6 @@ impl<'a> Determinizer<'a> {
             queue: VecDeque::new(),
             closures: Vec::new(),
             dwa,
-            mp,
         }
     }
 
