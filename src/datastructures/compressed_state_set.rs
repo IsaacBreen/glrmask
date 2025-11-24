@@ -1,5 +1,5 @@
 use std::hash::{Hash, Hasher};
-use ahash::AHasher;
+use rustc_hash::FxHasher;
 use profiler_macro::time_it;
 use crate::datastructures::state_set::StateSet;
 use crate::json_serialization::{JSONConvertible, JSONNode};
@@ -208,45 +208,44 @@ impl CompressedStateSet {
     #[inline]
     #[time_it]
     pub fn from_sparse(sparse: &SparseStateSet) -> Self {
-        // Optimization: Sort indices first, then build words.
-        let mut indices = sparse.dirty_words.clone();
-        indices.sort_unstable();
-
-        let mut words = Vec::with_capacity(indices.len());
-        for &idx in &indices {
+        let mut words = Vec::with_capacity(sparse.dirty_words.len());
+        for &idx in &sparse.dirty_words {
             words.push((idx as u32, sparse.dense.words[idx]));
         }
+        
+        // Sort for binary search compatibility
+        words.sort_unstable_by_key(|&(idx, _)| idx);
 
-        let mut hasher = AHasher::default();
-        // Optimization: Hash as raw bytes
-        unsafe {
-            let slice = std::slice::from_raw_parts(
-                words.as_ptr() as *const u8,
-                words.len() * std::mem::size_of::<(u32, u64)>()
-            );
-            hasher.write(slice);
+        // Compute order-independent XOR hash
+        let mut hash = 0u64;
+        for &(idx, word) in &words {
+            hash ^= (idx as u64).wrapping_mul(0x517cc1b727220a95);
+            hash ^= word.wrapping_mul(0x9e3779b97f4a7c15);
         }
-        let hash = hasher.finish();
 
         Self { words, hash }
     }
 
     #[inline]
     #[time_it]
-    pub fn reuse_from_sparse(sparse: &SparseStateSet, buffer: &mut Self, sort_scratch: &mut Vec<usize>) {
+    pub fn reuse_from_sparse(sparse: &SparseStateSet, buffer: &mut Self, _sort_scratch: &mut Vec<usize>) {
         buffer.words.clear();
 
-        // Use the provided sort buffer to avoid allocating
-        sort_scratch.clear();
-        sort_scratch.extend_from_slice(&sparse.dirty_words);
-        sort_scratch.sort_unstable();
-
-        for &idx in sort_scratch.iter() {
+        // Direct copy without sorting - we'll compute order-independent hash
+        for &idx in &sparse.dirty_words {
             buffer.words.push((idx as u32, sparse.dense.words[idx]));
         }
 
-        // Recompute hash for the buffer
-        buffer.recompute_hash();
+        // Sort for binary search compatibility
+        buffer.words.sort_unstable_by_key(|&(idx, _)| idx);
+
+        // Compute order-independent XOR hash
+        let mut hash = 0u64;
+        for &(idx, word) in &buffer.words {
+            hash ^= (idx as u64).wrapping_mul(0x517cc1b727220a95);
+            hash ^= word.wrapping_mul(0x9e3779b97f4a7c15);
+        }
+        buffer.hash = hash;
     }
 
     #[inline(always)]
@@ -289,7 +288,7 @@ impl CompressedStateSet {
     #[inline]
     #[time_it]
     pub fn recompute_hash(&mut self) {
-        let mut hasher = AHasher::default();
+        let mut hasher = FxHasher::default();
         // Optimization: Hash as raw bytes for speed
         unsafe {
             let slice = std::slice::from_raw_parts(
