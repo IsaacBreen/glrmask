@@ -10,6 +10,8 @@ use std::fmt::{Debug, Display, Formatter};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use ahash::AHashMap;
+use automata::nfa::builder::Builder as AutomataNfaBuilder;
+use automata::nfa::Nfa as AutomataNfa;
 
 
 pub type GroupID = usize;
@@ -1107,20 +1109,46 @@ impl ExprGroups {
         let stats = self.get_stats();
         crate::debug!(2, "Expr Stats: {}", stats);
 
-        // --- Benchmark regex-automata's total build time ---
-        let patterns: Vec<String> = self.groups.iter().map(|g| g.expr.to_benchmark_string()).collect();
-        let start_regex_automata = std::time::Instant::now();
-        // Build a dense DFA from multiple patterns. This is more analogous to our `ExprGroups`.
-        let ra_dfa_result = ::regex_automata::dfa::dense::DFA::new_many(&patterns);
-        let regex_automata_duration = start_regex_automata.elapsed();
-
         crate::debug!(3, "Optimizing Regex (Strategy B)");
         let optimized = self.optimize();
 
         crate::debug!(3, "Building NFA");
-        let start = std::time::Instant::now();
+        let start_nfa_build = std::time::Instant::now();
         let mut nfa = optimized.build_nfa();
-        crate::debug!(4, "Built NFA in {:.2?}", start.elapsed());
+        crate::debug!(4, "Built our NFA in {:.2?}", start_nfa_build.elapsed());
+
+        // --- Benchmark `automata-rs` crate's determinization ---
+        // We programmatically build an identical NFA structure using the `automata-rs`
+        // crate to get a fair, apples-to-apples comparison of the determinization algorithms.
+        let automata_determinization_duration = {
+            let mut builder = AutomataNfaBuilder::new();
+            // Create a mapping from our state indices to the new builder's state IDs.
+            let state_map: Vec<_> = (0..nfa.states.len()).map(|_| builder.new_state()).collect();
+
+            builder.set_start(state_map[nfa.start_state]);
+
+            for (i, state) in nfa.states.iter().enumerate() {
+                if !state.finalizers.is_empty() {
+                    builder.add_accepting(state_map[i]);
+                }
+                // Add byte transitions. The `automata-rs` crate takes `Option<Symbol>`.
+                for (u8set, target) in &state.transitions {
+                    for byte in u8set.iter() {
+                        builder.add_transition(state_map[i], Some(byte), state_map[*target]);
+                    }
+                }
+                // Add epsilon transitions (`None`).
+                for &target in &state.epsilon_transitions {
+                    builder.add_transition(state_map[i], None, state_map[target]);
+                }
+            }
+            let bench_nfa: AutomataNfa<u8> = builder.build();
+
+            // Time only the determinization step.
+            let start_determinize = std::time::Instant::now();
+            let _dfa = bench_nfa.to_dfa();
+            start_determinize.elapsed()
+        };
 
         let nfa_state_count = nfa.states.len();
 
@@ -1129,22 +1157,22 @@ impl ExprGroups {
         crate::debug!(4, "Condensed NFA in {:.2?}", start_condense.elapsed());
 
         crate::debug!(3, "Converting NFA to DFA");
-        let start = std::time::Instant::now();
+        let start_our_determinize = std::time::Instant::now();
         let mut dfa = nfa.to_dfa();
-        crate::debug!(4, "Converted NFA to DFA in {:.2?}", start.elapsed());
-        crate::debug!(3, "Minimizing DFA");
-        let start = std::time::Instant::now();
-        dfa.minimize();
-        crate::debug!(4, "Minimized DFA in {:.2?}", start.elapsed());
+        let our_determinize_duration = start_our_determinize.elapsed();
+        crate::debug!(4, "Converted NFA to DFA in {:.2?}", our_determinize_duration);
 
-        let our_duration = start_total.elapsed();
+        crate::debug!(3, "Minimizing DFA");
+        let start_minimize = std::time::Instant::now();
+        dfa.minimize();
+        crate::debug!(4, "Minimized our DFA in {:.2?}", start_minimize.elapsed());
+
+        let our_total_duration = start_total.elapsed();
+
         crate::debug!(1, "BENCHMARK RESULT -- NFA states: {}", nfa_state_count);
-        if ra_dfa_result.is_ok() {
-            crate::debug!(1, "  regex-automata crate (total build): {:.2?}", regex_automata_duration);
-        } else {
-            crate::debug!(1, "  regex-automata crate: FAILED ({:?})", ra_dfa_result.err());
-        }
-        crate::debug!(1, "  this crate (total build):         {:.2?}", our_duration);
+        crate::debug!(1, "  automata-rs crate (determinization): {:.2?}", automata_determinization_duration);
+        crate::debug!(1, "  this crate (determinization):        {:.2?}", our_determinize_duration);
+        crate::debug!(1, "  this crate (total build):            {:.2?}", our_total_duration);
 
         Regex { dfa }
     }
