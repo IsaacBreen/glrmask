@@ -1,7 +1,6 @@
 import os
 import re
 import argparse
-import time
 
 def generate_diff_grammar(source_path: str, grammar_path: str):
     """
@@ -97,80 +96,6 @@ def generate_diff_grammar(source_path: str, grammar_path: str):
         print(f"Error writing grammar file: {e}")
 
 
-def benchmark_regex(source_path: str):
-    """
-    Constructs an equivalent regex for the grammar and benchmarks the build time.
-    This demonstrates the exponential complexity of expanding the state machine into a single regex.
-    """
-    print(f"\n--- Regex Benchmark ---")
-    print(f"Reading source file for regex: {source_path}")
-    try:
-        with open(source_path, 'r', encoding='utf-8') as f:
-            lines = f.readlines()
-    except IOError as e:
-        print(f"Error reading source file: {e}")
-        return
-
-    num_lines = len(lines)
-    if num_lines > 15:
-        print(f"Warning: File has {num_lines} lines. The equivalent regex size is O(2^N).")
-        print("Construction might hang, consume massive memory, or fail.")
-
-    print("Constructing regex string (iterative bottom-up)...")
-    start_build = time.time()
-
-    # Regex patterns for terminals
-    P_NEWLINE = r'(?:\r?\n)'
-    P_PLUS_LINE = r'(?:\+[^\n\r]*' + P_NEWLINE + r')'
-    P_PLUS_STAR = P_PLUS_LINE + r'*'
-    P_HUNK_HEADER = r'(?:@@[^\n\r]*' + P_NEWLINE + r')'
-
-    # Base case: s{num_lines} ::= PLUS_LINE*;
-    s_next = P_PLUS_STAR
-    l_next = None
-
-    for i in range(num_lines - 1, -1, -1):
-        line_content = lines[i].rstrip('\r\n')
-        
-        if not line_content:
-            T_i = r'(?:[ -]?' + P_NEWLINE + r')'
-        else:
-            T_i = r'(?:[ -]' + re.escape(line_content) + P_NEWLINE + r')'
-
-        if i == num_lines - 1:
-            continuation = r'(?:' + P_PLUS_STAR + P_HUNK_HEADER + s_next + r')?'
-        else:
-            continuation = r'(?:' + l_next + r'|' + P_PLUS_STAR + P_HUNK_HEADER + s_next + r')?'
-
-        l_curr = P_PLUS_STAR + T_i + continuation
-        s_curr = r'(?:' + l_curr + r'|' + s_next + r')'
-
-        l_next = l_curr
-        s_next = s_curr
-
-    P_GIT_LINE = r'(?:diff --git [^\n\r]*' + P_NEWLINE + r')'
-    P_INDEX_LINE = r'(?:index [^\n\r]*' + P_NEWLINE + r')'
-    P_MINUS_LINE = r'(?:--- [^\n\r]*' + P_NEWLINE + r')'
-    P_PLUS_FILE_LINE = r'(?:\+\+\+ [^\n\r]*' + P_NEWLINE + r')'
-    
-    P_FILE_HEADER = r'(?:' + P_GIT_LINE + r'(?:' + P_INDEX_LINE + r')?' + P_MINUS_LINE + P_PLUS_FILE_LINE + r')'
-    P_EOF = r'(?:<\|EOF\|>)'
-
-    full_regex = r'\A' + P_FILE_HEADER + r'?' + r'(?:' + P_HUNK_HEADER + s_next + r')?' + P_EOF + r'\Z'
-
-    build_time = time.time() - start_build
-    print(f"Regex string constructed. Length: {len(full_regex):,} chars.")
-    print(f"String build time: {build_time:.4f} seconds.")
-
-    print("Compiling regex (re.compile)...")
-    start_compile = time.time()
-    try:
-        _ = re.compile(full_regex)
-        compile_time = time.time() - start_compile
-        print(f"Regex compiled successfully in {compile_time:.4f} seconds.")
-    except Exception as e:
-        print(f"Regex compilation failed: {e}")
-
 def main():
     """Command-line interface to generate the diff grammar."""
     parser = argparse.ArgumentParser(
@@ -196,7 +121,6 @@ def main():
 
     generate_diff_grammar(source_path, grammar_path)
 
-    benchmark_regex(source_path)
 
 if __name__ == "__main__":
     main()
