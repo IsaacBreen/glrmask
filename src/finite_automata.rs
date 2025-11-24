@@ -2346,42 +2346,47 @@ impl NFA {
                     stats.global_map_lookups += 1;
                     let start_map_lookup = std::time::Instant::now();
                     let next_state_idx = crate::time!("map_lookup_insert", {
-                        let lookup_result = crate::time!("map_get", dfa_state_map.get(&scratch_closure).copied());
-                        if let Some(existing_state) = lookup_result {
-                            stats.time_map_get += start_map_lookup.elapsed();
-                            stats.global_map_hits += 1;
-                            existing_state
-                        } else {
-                            stats.time_map_get += start_map_lookup.elapsed();
-                            let new_state_index = dfa_states.len();
-                            
-                            let start_map_insert = std::time::Instant::now();
-                            crate::time!("map_insert", dfa_state_map.insert(scratch_closure.clone(), new_state_index));
-                            stats.time_map_insert += start_map_insert.elapsed();
-                            
-                            worklist.push(scratch_closure.clone());
-                            stats.max_worklist_len = stats.max_worklist_len.max(worklist.len());
+                        use rustc_hash::FxHashMap;
+                        use std::collections::hash_map::Entry;
+                        
+                        match dfa_state_map.entry(scratch_closure.clone()) {
+                            Entry::Occupied(e) => {
+                                stats.time_map_get += start_map_lookup.elapsed();
+                                stats.global_map_hits += 1;
+                                *e.get()
+                            }
+                            Entry::Vacant(e) => {
+                                stats.time_map_get += start_map_lookup.elapsed();
+                                let new_state_index = dfa_states.len();
+                                
+                                let start_map_insert = std::time::Instant::now();
+                                e.insert(new_state_index);
+                                stats.time_map_insert += start_map_insert.elapsed();
+                                
+                                worklist.push(scratch_closure.clone());
+                                stats.max_worklist_len = stats.max_worklist_len.max(worklist.len());
 
-                            let start_finalizers = std::time::Instant::now();
-                            let (new_finalizers, new_non_greedy_finalizers) = crate::time!("compute_finalizers", {
-                                let mut new_finalizers = DenseStateSet::empty();
-                                let mut new_non_greedy_finalizers = DenseStateSet::empty();
-                                for state in scratch_closure.iter() {
-                                    new_finalizers.union_with(&self.states[state].finalizers);
-                                    new_non_greedy_finalizers.union_with(&self.states[state].non_greedy_finalizers);
-                                }
-                                (new_finalizers, new_non_greedy_finalizers)
-                            });
-                            stats.time_finalizer_computation += start_finalizers.elapsed();
+                                let start_finalizers = std::time::Instant::now();
+                                let (new_finalizers, new_non_greedy_finalizers) = crate::time!("compute_finalizers", {
+                                    let mut new_finalizers = DenseStateSet::empty();
+                                    let mut new_non_greedy_finalizers = DenseStateSet::empty();
+                                    for state in scratch_closure.iter() {
+                                        new_finalizers.union_with(&self.states[state].finalizers);
+                                        new_non_greedy_finalizers.union_with(&self.states[state].non_greedy_finalizers);
+                                    }
+                                    (new_finalizers, new_non_greedy_finalizers)
+                                });
+                                stats.time_finalizer_computation += start_finalizers.elapsed();
 
-                            dfa_states.push(DFAState {
-                                transitions: CharTransitions::new(),
-                                finalizers: new_finalizers,
-                                possible_future_group_ids: BTreeSet::new(),
-                                group_id_to_u8set: BTreeMap::new(),
-                            });
+                                dfa_states.push(DFAState {
+                                    transitions: CharTransitions::new(),
+                                    finalizers: new_finalizers,
+                                    possible_future_group_ids: BTreeSet::new(),
+                                    group_id_to_u8set: BTreeMap::new(),
+                                });
 
-                            new_state_index
+                                new_state_index
+                            }
                         }
                     });
                     stats.time_map_lookup_insert += start_map.elapsed();
