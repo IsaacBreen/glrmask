@@ -1110,6 +1110,7 @@ impl ExprGroups {
         dfa.minimize();
         crate::debug!(4, "Minimized DFA in {:.2?}", start.elapsed());
         print_memory_usage("After DFA minimization");
+        std::process::exit(0);
         Regex { dfa }
     }
 
