@@ -1697,6 +1697,56 @@ impl Expr {
             return flat.pop().unwrap();
         }
 
+        // OPTIMIZATION: Factor out common structural prefixes (e.g. "A B" | "A C" -> "A (B|C)")
+        // This is crucial for avoiding NFA state explosion on common complex prefixes like quantifiers.
+        // Since 'flat' is sorted, expressions with the same prefix are adjacent.
+        let mut factored = Vec::new();
+        let mut i = 0;
+        while i < flat.len() {
+            let mut j = i + 1;
+            // Determine prefix of flat[i]
+            let p = match &flat[i] {
+                Expr::Seq(s) if !s.is_empty() => Some(&s[0]),
+                e => Some(e),
+            };
+            
+            // Find run of identical prefixes
+            while j < flat.len() {
+                 let next_p = match &flat[j] {
+                     Expr::Seq(s) if !s.is_empty() => Some(&s[0]),
+                     e => Some(e),
+                 };
+                 if p != next_p { break; }
+                 j += 1;
+            }
+            
+            if j > i + 1 {
+                // Found a group of size > 1
+                let prefix = p.unwrap().clone();
+                let mut tails = Vec::with_capacity(j - i);
+                for k in i..j {
+                    match flat[k].clone() {
+                         Expr::Seq(mut s) if !s.is_empty() && &s[0] == &prefix => {
+                             s.remove(0);
+                             tails.push(Expr::make_seq(s));
+                         }
+                         e if e == prefix => tails.push(Expr::Epsilon),
+                         _ => unreachable!("Sorted grouping failed: prefix mismatch"),
+                    }
+                }
+                let tail_expr = Self::make_choice(tails);
+                if tail_expr == Expr::Epsilon {
+                    factored.push(prefix);
+                } else {
+                    factored.push(Expr::make_seq(vec![prefix, tail_expr]));
+                }
+            } else {
+                factored.push(flat[i].clone());
+            }
+            i = j;
+        }
+        flat = factored;
+
         // 2. Partitioning / Left Factoring
         // We map each byte 0..255 to a list of indices in `flat` that cover it.
         // Tails are stored in `tails_storage`.
