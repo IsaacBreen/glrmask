@@ -1089,13 +1089,26 @@ fn u8set_to_regex_pattern(set: &U8Set) -> String {
 
 impl Expr {
     fn to_benchmark_string(&self) -> String {
+        let mut cache = HashMap::new();
+        self.to_benchmark_string_impl(&mut cache)
+    }
+
+    fn to_benchmark_string_impl(&self, cache: &mut HashMap<usize, String>) -> String {
         match self {
             Expr::U8Seq(bytes) => bytes.iter().map(|&b| byte_to_regex_char(b)).collect(),
             Expr::U8Class(set) => u8set_to_regex_pattern(set),
-            Expr::Shared(inner) => inner.to_benchmark_string(),
-            Expr::Quantifier(inner, q) => format!("(?:{}){}", inner.to_benchmark_string(), match q { QuantifierType::ZeroOrMore => "*", QuantifierType::OneOrMore => "+", QuantifierType::ZeroOrOne => "?" }),
-            Expr::Choice(exprs) => exprs.iter().map(|e| e.to_benchmark_string()).collect::<Vec<_>>().join("|"),
-            Expr::Seq(exprs) => exprs.iter().map(|e| e.to_benchmark_string()).collect::<Vec<_>>().join(""),
+            Expr::Shared(inner) => {
+                let key = Arc::as_ptr(inner) as usize;
+                if let Some(s) = cache.get(&key) {
+                    return s.clone();
+                }
+                let s = inner.to_benchmark_string_impl(cache);
+                cache.insert(key, s.clone());
+                s
+            }
+            Expr::Quantifier(inner, q) => format!("(?:{}){}", inner.to_benchmark_string_impl(cache), match q { QuantifierType::ZeroOrMore => "*", QuantifierType::OneOrMore => "+", QuantifierType::ZeroOrOne => "?" }),
+            Expr::Choice(exprs) => exprs.iter().map(|e| e.to_benchmark_string_impl(cache)).collect::<Vec<_>>().join("|"),
+            Expr::Seq(exprs) => exprs.iter().map(|e| e.to_benchmark_string_impl(cache)).collect::<Vec<_>>().join(""),
             Expr::Epsilon => String::new(),
         }
     }
