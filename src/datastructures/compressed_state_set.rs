@@ -313,21 +313,19 @@ impl CompressedStateSet {
     pub fn reuse_from_sparse(sparse: &SparseStateSet, buffer: &mut Self, _sort_scratch: &mut Vec<usize>) {
         buffer.words.clear();
 
-        // Direct copy without sorting - we'll compute order-independent hash
-        for &idx in &sparse.dirty_words {
-            buffer.words.push((idx as u32, sparse.dense.words[idx]));
-        }
-
-        // Sort for binary search compatibility
-        buffer.words.sort_unstable_by_key(|&(idx, _)| idx);
-
-        // Compute order-independent XOR hash
+        // Compute hash while copying - single pass optimization
         let mut hash = 0u64;
-        for &(idx, word) in &buffer.words {
+        for &idx in &sparse.dirty_words {
+            let word = sparse.dense.words[idx];
+            buffer.words.push((idx as u32, word));
+            // XOR-based order-independent hash
             hash ^= (idx as u64).wrapping_mul(0x517cc1b727220a95);
             hash ^= word.wrapping_mul(0x9e3779b97f4a7c15);
         }
         buffer.hash = hash;
+
+        // Sort for binary search compatibility
+        buffer.words.sort_unstable_by_key(|&(idx, _)| idx);
     }
 
     #[inline(always)]
