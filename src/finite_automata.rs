@@ -1466,13 +1466,16 @@ impl Expr {
     pub fn optimize_left_factor(self) -> Self {
         let mut cache = HashMap::new();
         let mut visiting = HashSet::new();
-        self.optimize_left_factor_rec(&mut cache, &mut visiting)
+        self.optimize_left_factor_rec(&mut cache, &mut visiting, 0)
     }
 
-    fn optimize_left_factor_rec(self, cache: &mut HashMap<usize, Expr>, visiting: &mut HashSet<usize>) -> Self {
+    fn optimize_left_factor_rec(self, cache: &mut HashMap<usize, Expr>, visiting: &mut HashSet<usize>, depth: usize) -> Self {
+        if depth > 256 {
+            return self;
+        }
         match self {
-            Expr::Seq(exprs) => Expr::Seq(exprs.into_iter().map(|e| e.optimize_left_factor_rec(cache, visiting)).collect()),
-            Expr::Quantifier(e, q) => Expr::Quantifier(Box::new(e.optimize_left_factor_rec(cache, visiting)), q),
+            Expr::Seq(exprs) => Expr::Seq(exprs.into_iter().map(|e| e.optimize_left_factor_rec(cache, visiting, depth + 1)).collect()),
+            Expr::Quantifier(e, q) => Expr::Quantifier(Box::new(e.optimize_left_factor_rec(cache, visiting, depth + 1)), q),
             Expr::Shared(inner) => {
                 let ptr = Arc::as_ptr(&inner) as usize;
                 if let Some(res) = cache.get(&ptr) {
@@ -1482,7 +1485,7 @@ impl Expr {
                     return Expr::Shared(inner);
                 }
                 visiting.insert(ptr);
-                let optimized_inner = inner.as_ref().clone().optimize_left_factor_rec(cache, visiting);
+                let optimized_inner = inner.as_ref().clone().optimize_left_factor_rec(cache, visiting, depth + 1);
                 let result = Expr::Shared(Arc::new(optimized_inner));
                 visiting.remove(&ptr);
                 cache.insert(ptr, result.clone());
@@ -1490,7 +1493,7 @@ impl Expr {
             },
             Expr::Choice(exprs) => {
                 // 1. Optimize children
-                let mut optimized_exprs: Vec<Expr> = exprs.into_iter().map(|e| e.optimize_left_factor_rec(cache, visiting)).collect();
+                let mut optimized_exprs: Vec<Expr> = exprs.into_iter().map(|e| e.optimize_left_factor_rec(cache, visiting, depth + 1)).collect();
                 
                 // 2. Flatten nested choices
                 let mut flat = Vec::new();
@@ -1536,7 +1539,7 @@ impl Expr {
                                  let mut valid_tails: Vec<Expr> = tails.into_iter().flatten().collect();
                                  if valid_tails.is_empty() { Expr::Epsilon }
                                  else if valid_tails.len() == 1 { valid_tails.pop().unwrap() }
-                                 else { Expr::Choice(valid_tails).optimize_left_factor_rec(cache, visiting) } // Recurse on diverged branches
+                                 else { Expr::Choice(valid_tails).optimize_left_factor_rec(cache, visiting, depth + 1) } // Recurse on diverged branches
                             };
 
                             let head_expr = match head {
@@ -1568,24 +1571,27 @@ impl Expr {
     pub fn optimize_trie_variant(self) -> Self {
         let mut cache = HashMap::new();
         let mut visiting = HashSet::new();
-        self.optimize_trie_variant_rec(&mut cache, &mut visiting)
+        self.optimize_trie_variant_rec(&mut cache, &mut visiting, 0)
     }
 
-    fn optimize_trie_variant_rec(self, cache: &mut HashMap<usize, Expr>, visiting: &mut HashSet<usize>) -> Self {
+    fn optimize_trie_variant_rec(self, cache: &mut HashMap<usize, Expr>, visiting: &mut HashSet<usize>, depth: usize) -> Self {
+        if depth > 256 {
+            return self;
+        }
         match self {
             Expr::Choice(exprs) => {
                 let mut new_exprs = Vec::new();
                 let mut strings = Vec::new();
                 for e in exprs {
-                    let opt = e.optimize_trie_variant_rec(cache, visiting);
+                    let opt = e.optimize_trie_variant_rec(cache, visiting, depth + 1);
                     if let Some(s) = try_extract_literal(&opt) { strings.push(s); }
                     else { new_exprs.push(opt); }
                 }
                 if !strings.is_empty() { new_exprs.push(Expr::StringTrie(strings)); }
                 if new_exprs.len() == 1 { new_exprs.pop().unwrap() } else { Expr::Choice(new_exprs) }
             },
-            Expr::Seq(exprs) => Expr::Seq(exprs.into_iter().map(|e| e.optimize_trie_variant_rec(cache, visiting)).collect()),
-            Expr::Quantifier(e, q) => Expr::Quantifier(Box::new(e.optimize_trie_variant_rec(cache, visiting)), q),
+            Expr::Seq(exprs) => Expr::Seq(exprs.into_iter().map(|e| e.optimize_trie_variant_rec(cache, visiting, depth + 1)).collect()),
+            Expr::Quantifier(e, q) => Expr::Quantifier(Box::new(e.optimize_trie_variant_rec(cache, visiting, depth + 1)), q),
             Expr::Shared(inner) => {
                 let ptr = Arc::as_ptr(&inner) as usize;
                 if let Some(res) = cache.get(&ptr) {
@@ -1595,7 +1601,7 @@ impl Expr {
                     return Expr::Shared(inner);
                 }
                 visiting.insert(ptr);
-                let optimized_inner = inner.as_ref().clone().optimize_trie_variant_rec(cache, visiting);
+                let optimized_inner = inner.as_ref().clone().optimize_trie_variant_rec(cache, visiting, depth + 1);
                 let result = Expr::Shared(Arc::new(optimized_inner));
                 visiting.remove(&ptr);
                 cache.insert(ptr, result.clone());
