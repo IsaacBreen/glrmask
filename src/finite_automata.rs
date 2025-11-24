@@ -9,7 +9,6 @@ use std::collections::HashMap;
 use std::fmt::{Debug, Display, Formatter};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
-use memory_stats::memory_stats;
 use ahash::AHashMap;
 
 
@@ -554,7 +553,6 @@ pub enum Expr {
     Choice(Vec<Expr>),
     Seq(Vec<Expr>),
     Epsilon, // Explicit epsilon transition
-    StringTrie(Vec<Vec<u8>>), // Strategy C: Explicit Trie Variant
 }
 
 impl JSONConvertible for Expr {
@@ -591,11 +589,6 @@ impl JSONConvertible for Expr {
             }
             Expr::Epsilon => {
                 obj.insert("variant".to_string(), JSONNode::String("Epsilon".to_string()));
-            }
-            Expr::StringTrie(seqs) => {
-                obj.insert("variant".to_string(), JSONNode::String("StringTrie".to_string()));
-                // Re-use bytes serialization style for Vec<Vec<u8>> or generic array
-                obj.insert("strings".to_string(), seqs.to_json());
             }
         }
         JSONNode::Object(obj)
@@ -656,12 +649,6 @@ impl JSONConvertible for Expr {
                         Ok(Expr::Seq(exprs))
                     }
                     "Epsilon" => Ok(Expr::Epsilon),
-                    "StringTrie" => {
-                         let strings = obj.remove("strings")
-                            .ok_or_else(|| "Missing field strings for StringTrie".to_string())
-                            .and_then(Vec::<Vec<u8>>::from_json)?;
-                        Ok(Expr::StringTrie(strings))
-                    }
                     _ => Err(format!("Unknown variant {} for Expr", variant)),
                 }
             }
@@ -771,14 +758,13 @@ pub struct ExprStats {
     pub choice: usize,
     pub seq: usize,
     pub epsilon: usize,
-    pub string_trie: usize,
     pub max_depth: usize,
 }
 
 impl std::fmt::Display for ExprStats {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Nodes: {}, Depth: {}, Seq: {}, Choice: {}, Quant: {}, Shared: {}, U8Seq: {}, U8Class: {}, Eps: {}, Trie: {}",
-            self.nodes, self.max_depth, self.seq, self.choice, self.quantifier, self.shared, self.u8seq, self.u8class, self.epsilon, self.string_trie)
+        write!(f, "Nodes: {}, Depth: {}, Seq: {}, Choice: {}, Quant: {}, Shared: {}, U8Seq: {}, U8Class: {}, Eps: {}",
+            self.nodes, self.max_depth, self.seq, self.choice, self.quantifier, self.shared, self.u8seq, self.u8class, self.epsilon)
     }
 }
 
@@ -858,7 +844,6 @@ impl ExprGroups {
                         }
                     }
                     Expr::Epsilon => stats.epsilon += 1,
-                    Expr::StringTrie(_) => stats.string_trie += 1,
                 }
             }
         }
@@ -1064,94 +1049,35 @@ impl NFAState {
     }
 }
 
-fn print_memory_usage(label: &str) {
-    if let Some(usage) = memory_stats() {
-        let physical_mem_mb = usage.physical_mem / 1024 / 1024;
-        crate::debug!(5, "Mem: {} MB ({})", physical_mem_mb, label);
-    }
-}
-
 impl ExprGroups {
     pub fn build(self) -> Regex {
-        print_memory_usage("Start of Regex build");
-
         let stats = self.get_stats();
         crate::debug!(2, "Expr Stats: {}", stats);
 
-        if std::env::var("BENCHMARK_REGEX_OPTIMIZATIONS").is_ok() {
-            crate::debug!(0, "=== RUNNING REGEX OPTIMIZATION BENCHMARK ===");
-
-            // Helper to run full pipeline and return stats
-            fn run_full_pipeline(mut nfa: NFA) -> (usize, usize) {
-                nfa.condense_epsilon_sccs();
-                let mut dfa = nfa.to_dfa();
-                dfa.minimize();
-                (dfa.states.len(), dfa.states.iter().map(|s| s.transitions.len()).sum())
-            }
-
-            // 1. Baseline (Naive)
-            let baseline_start = std::time::Instant::now();
-            let baseline_nfa = self.clone().build_nfa(false);
-            let nfa_states = baseline_nfa.states.len();
-            let (dfa_states, total_trans) = run_full_pipeline(baseline_nfa);
-            let baseline_time = baseline_start.elapsed();
-            crate::debug!(0, "BASELINE: Total Time: {:.2?}, NFA States: {}, DFA States: {}, Trans: {}", baseline_time, nfa_states, dfa_states, total_trans);
-            
-            // 2. Strategy A: On-the-fly Trie
-            let strat_a_start = std::time::Instant::now();
-            let strat_a_nfa = self.clone().build_nfa(true);
-            let nfa_states = strat_a_nfa.states.len();
-            let (dfa_states, total_trans) = run_full_pipeline(strat_a_nfa);
-            let strat_a_time = strat_a_start.elapsed();
-            crate::debug!(0, "STRAT A (On-the-fly): Total Time: {:.2?}, NFA States: {}, DFA States: {}, Trans: {}", strat_a_time, nfa_states, dfa_states, total_trans);
-
-            // 3. Strategy B: Left Factoring Pass
-            let strat_b_start = std::time::Instant::now();
-            let optimized_expr_b = self.clone().optimize();
-            let strat_b_nfa = optimized_expr_b.build_nfa(false); // Optimization done in pass, so false
-            let nfa_states = strat_b_nfa.states.len();
-            let (dfa_states, total_trans) = run_full_pipeline(strat_b_nfa);
-            let strat_b_time = strat_b_start.elapsed();
-            crate::debug!(0, "STRAT B (Left-Factor): Total Time: {:.2?}, NFA States: {}, DFA States: {}, Trans: {}", strat_b_time, nfa_states, dfa_states, total_trans);
-
-            // 4. Strategy C: Trie Variant Pass
-            let strat_c_start = std::time::Instant::now();
-            let optimized_expr_c = self.clone().optimize_trie_variant();
-            let strat_c_nfa = optimized_expr_c.build_nfa(false); // NFA builder handles variant explicitly
-            let nfa_states = strat_c_nfa.states.len();
-            let (dfa_states, total_trans) = run_full_pipeline(strat_c_nfa);
-            let strat_c_time = strat_c_start.elapsed();
-            crate::debug!(0, "STRAT C (Trie Variant): Total Time: {:.2?}, NFA States: {}, DFA States: {}, Trans: {}", strat_c_time, nfa_states, dfa_states, total_trans);
-            crate::debug!(0, "============================================");
-        }
+        crate::debug!(3, "Optimizing Regex (Strategy B)");
+        let optimized = self.optimize();
 
         crate::debug!(3, "Building NFA");
         let start = std::time::Instant::now();
-        // Default to Strategy A (On-the-fly) as it's the most robust local fix
-        let mut nfa = self.build_nfa(true); 
+        let mut nfa = optimized.build_nfa(); 
         crate::debug!(4, "Built NFA in {:.2?}", start.elapsed());
-        print_memory_usage("After NFA build");
 
         let start_condense = std::time::Instant::now();
         nfa.condense_epsilon_sccs();
         crate::debug!(4, "Condensed NFA in {:.2?}", start_condense.elapsed());
 
-        // nfa.print_stats(); // Skip stats for speed
         crate::debug!(3, "Converting NFA to DFA");
         let start = std::time::Instant::now();
         let mut dfa = nfa.to_dfa();
         crate::debug!(4, "Converted NFA to DFA in {:.2?}", start.elapsed());
-        print_memory_usage("After NFA to DFA conversion");
         crate::debug!(3, "Minimizing DFA");
         let start = std::time::Instant::now();
         dfa.minimize();
         crate::debug!(4, "Minimized DFA in {:.2?}", start.elapsed());
-        print_memory_usage("After DFA minimization");
-        std::process::exit(0);
         Regex { dfa }
     }
 
-    fn build_nfa(self, optimize_on_the_fly: bool) -> NFA {
+    fn build_nfa(self) -> NFA {
         let mut nfa = NFA {
             states: vec![NFAState::new()],
             start_state: 0,
@@ -1171,7 +1097,6 @@ impl ExprGroups {
                 &mut nfa,
                 start_state,
                 &mut cache,
-                optimize_on_the_fly,
             );
             prefix_end
         } else {
@@ -1184,7 +1109,7 @@ impl ExprGroups {
             nfa.add_epsilon_transition(split_point, group_start_state);
             
             let end_state =
-                Expr::handle_expr_cached(expr, &mut nfa, group_start_state, &mut cache, optimize_on_the_fly);
+                Expr::handle_expr_cached(expr, &mut nfa, group_start_state, &mut cache);
             
             if is_non_greedy {
                 nfa.states[end_state].finalizers.insert(group_idx);
@@ -1209,87 +1134,6 @@ impl ExprGroups {
             }).collect()
         }
     }
-
-    pub fn optimize_trie_variant(self) -> Self {
-        ExprGroups {
-            groups: self.groups.into_iter().map(|g| ExprGroup {
-                expr: g.expr.optimize_trie_variant(),
-                is_non_greedy: g.is_non_greedy,
-            }).collect()
-        }
-    }
-}
-
-/// Helper for Strategy A & C: Build NFA directly from a list of byte sequences using a Trie
-fn build_trie_nfa(
-    nfa: &mut NFA,
-    start_state: usize,
-    end_state: usize,
-    mut sequences: Vec<Vec<u8>>,
-) {
-    if sequences.is_empty() {
-        return;
-    }
-    sequences.sort_unstable();
-
-    let mut path = vec![start_state];
-
-    for i in 0..sequences.len() {
-        let seq = &sequences[i];
-        let mut common = 0;
-
-        if i > 0 {
-            let prev = &sequences[i - 1];
-            let max_common = prev.len().min(seq.len());
-            while common < max_common && prev[common] == seq[common] {
-                common += 1;
-            }
-        }
-
-        // We share the path up to `common` length
-        path.truncate(common + 1);
-        let mut current_state = path[common];
-
-        // Create new path for the rest
-        for &byte in &seq[common..] {
-            let next_state = nfa.add_state();
-            nfa.add_transition(current_state, byte, next_state);
-            current_state = next_state;
-            path.push(current_state);
-        }
-
-        nfa.add_epsilon_transition(current_state, end_state);
-    }
-}
-
-fn try_extract_literal_into(expr: &Expr, buf: &mut Vec<u8>) -> bool {
-    match expr {
-        Expr::U8Seq(bytes) => {
-            buf.extend_from_slice(bytes);
-            true
-        }
-        Expr::Seq(exprs) => {
-            let start_len = buf.len();
-            for e in exprs {
-                if !try_extract_literal_into(e, buf) {
-                    buf.truncate(start_len);
-                    return false;
-                }
-            }
-            true
-        }
-        _ => false,
-    }
-}
-
-/// Helper to recursively extract a byte sequence from nested Seqs of U8Seqs
-fn try_extract_literal(expr: &Expr) -> Option<Vec<u8>> {
-    let mut buf = Vec::new();
-    if try_extract_literal_into(expr, &mut buf) {
-        Some(buf)
-    } else {
-        None
-    }
 }
 
 impl Expr {
@@ -1308,7 +1152,6 @@ impl Expr {
         nfa: &mut NFA,
         current_state: usize,
         cache: &mut HashMap<usize, (usize, usize)>,
-        optimize_on_the_fly: bool,
     ) -> usize {
         enum FrameState {
             Start,
@@ -1356,12 +1199,6 @@ impl Expr {
                     Expr::Epsilon => {
                         return_value = Some(start_state);
                     }
-                    Expr::StringTrie(seqs) => {
-                        // Strategy C consumer
-                        let end_state = nfa.add_state();
-                        build_trie_nfa(nfa, start_state, end_state, seqs);
-                        return_value = Some(end_state);
-                    }
                     Expr::Shared(ref inner) => {
                         let key = Arc::as_ptr(inner) as usize;
                         if let Some(&(entry, end)) = cache.get(&key) {
@@ -1406,26 +1243,6 @@ impl Expr {
                     }
                     Expr::Choice(mut exprs) => {
                         let end_state = nfa.add_state();
-
-                        // Strategy A: On-the-fly Optimization
-                        if optimize_on_the_fly {
-                            let mut literal_seqs = Vec::new();
-                            let mut complex_exprs = Vec::new();
-
-                            for e in exprs {
-                                let mut buf = Vec::new();
-                                if try_extract_literal_into(&e, &mut buf) {
-                                    literal_seqs.push(buf);
-                                } else {
-                                    complex_exprs.push(e);
-                                }
-                            }
-
-                            if !literal_seqs.is_empty() {
-                                build_trie_nfa(nfa, start_state, end_state, literal_seqs);
-                            }
-                            exprs = complex_exprs;
-                        }
 
                         if exprs.is_empty() {
                             return_value = Some(end_state);
@@ -1586,7 +1403,7 @@ impl Expr {
 
     fn handle_expr(expr: Expr, nfa: &mut NFA, current_state: usize) -> usize {
         let mut cache: HashMap<usize, (usize, usize)> = HashMap::new();
-        Self::handle_expr_cached(expr, nfa, current_state, &mut cache, true)
+        Self::handle_expr_cached(expr, nfa, current_state, &mut cache)
     }
 
     // --- Optimizers ---
@@ -1925,96 +1742,6 @@ impl Expr {
         } else {
             Expr::Choice(complex)
         }
-    }
-
-    pub fn optimize_trie_variant(self) -> Self {
-        enum Task {
-            Expand(Expr),
-            Seq(usize),
-            Choice(usize),
-            Quantifier(QuantifierType),
-            Shared(usize, Arc<Expr>),
-        }
-
-        let mut stack = vec![Task::Expand(self)];
-        let mut values: Vec<Expr> = Vec::with_capacity(32);
-        let mut cache: HashMap<usize, Expr> = HashMap::new();
-        let mut visiting: HashSet<usize> = HashSet::new();
-
-        while let Some(task) = stack.pop() {
-            match task {
-                Task::Expand(expr) => match expr {
-                    Expr::Seq(sub) => {
-                        stack.push(Task::Seq(sub.len()));
-                        for x in sub.into_iter().rev() {
-                            stack.push(Task::Expand(x));
-                        }
-                    }
-                    Expr::Choice(sub) => {
-                        stack.push(Task::Choice(sub.len()));
-                        for x in sub.into_iter().rev() {
-                            stack.push(Task::Expand(x));
-                        }
-                    }
-                    Expr::Quantifier(sub, q) => {
-                        stack.push(Task::Quantifier(q));
-                        stack.push(Task::Expand(*sub));
-                    }
-                    Expr::Shared(inner) => {
-                        let ptr = Arc::as_ptr(&inner) as usize;
-                        if let Some(res) = cache.get(&ptr) {
-                            values.push(res.clone());
-                        } else if visiting.contains(&ptr) {
-                            values.push(Expr::Shared(inner));
-                        } else {
-                            visiting.insert(ptr);
-                            stack.push(Task::Shared(ptr, inner.clone()));
-                            stack.push(Task::Expand(inner.as_ref().clone()));
-                        }
-                    }
-                    leaf => values.push(leaf),
-                },
-                Task::Seq(len) => {
-                    let split_idx = values.len() - len;
-                    let children = values.split_off(split_idx);
-                    values.push(Self::make_seq(children));
-                }
-                Task::Quantifier(q) => {
-                    let child = values.pop().unwrap();
-                    values.push(Expr::Quantifier(Box::new(child), q));
-                }
-                Task::Shared(ptr, _) => {
-                    let child = values.pop().unwrap();
-                    visiting.remove(&ptr);
-                    let res = Expr::Shared(Arc::new(child));
-                    cache.insert(ptr, res.clone());
-                    values.push(res);
-                }
-                Task::Choice(len) => {
-                    let split_idx = values.len() - len;
-                    let children = values.split_off(split_idx);
-                    // Apply Trie logic locally
-                    let mut new_exprs = Vec::new();
-                    let mut strings = Vec::new();
-                    for e in children {
-                        if let Some(s) = try_extract_literal(&e) {
-                            strings.push(s);
-                        } else {
-                            new_exprs.push(e);
-                        }
-                    }
-                    if !strings.is_empty() {
-                        new_exprs.push(Expr::StringTrie(strings));
-                    }
-                    if new_exprs.len() == 1 {
-                        values.push(new_exprs.pop().unwrap());
-                    } else {
-                        values.push(Expr::Choice(new_exprs));
-                    }
-                }
-            }
-        }
-        values.pop().unwrap()
     }
 }
 
