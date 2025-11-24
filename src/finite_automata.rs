@@ -2360,10 +2360,11 @@ impl NFA {
                                 let new_state_index = dfa_states.len();
                                 
                                 let start_map_insert = std::time::Instant::now();
+                                let key = e.key().clone();
                                 e.insert(new_state_index);
                                 stats.time_map_insert += start_map_insert.elapsed();
                                 
-                                worklist.push(scratch_closure.clone());
+                                worklist.push(key);
                                 stats.max_worklist_len = stats.max_worklist_len.max(worklist.len());
 
                                 let start_finalizers = std::time::Instant::now();
