@@ -76,7 +76,7 @@ impl CompressedStateSet {
         sparse.dirty_words.sort_unstable();
         let indices = &sparse.dirty_words;
 
-        for &idx in &indices {
+        for &idx in indices {
             let w = sparse.dense.words[idx];
             if w != 0 {
                 words.push((idx as u32, w));
@@ -2506,7 +2506,7 @@ impl DFA {
             states.push(NFAState {
                 transitions,
                 epsilon_transitions: Vec::new(),
-                finalizers: state.finalizers.unfreeze(),
+                finalizers: state.finalizers.clone().unfreeze(),
                 non_greedy_finalizers,
             });
         }
@@ -2534,7 +2534,7 @@ impl DFA {
         let max_group_id = self
             .states
             .iter()
-            .flat_map(|s| s.finalizers.last())
+            .flat_map(|s| s.finalizers.iter().last())
             .max()
             .copied()
             .unwrap_or(0);
@@ -3011,7 +3011,7 @@ impl RegexState<'_> {
         self.matches.clear();
     }
 
-    pub fn possible_future_group_ids(&self) -> BTreeSet<GroupID> {
+    pub fn possible_future_group_ids(&self) -> FrozenSet<GroupID> {
         let state = &self.regex.dfa.states[self.current_state];
         state.possible_future_group_ids.clone()
     }
@@ -3046,7 +3046,7 @@ impl Regex {
         let mut all_matches: Vec<Match> = Vec::new();
 
         let mut current_state = state;
-        let mut matched_groups: BTreeSet<GroupID> = dfa.states[state].finalizers.clone();
+        let mut matched_groups: BTreeSet<GroupID> = dfa.states[state].finalizers.clone().unfreeze();
 
         if dfa.states[state].transitions.is_empty() {
             return ExecutionResult {
