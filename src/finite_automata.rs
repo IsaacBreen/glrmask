@@ -1264,96 +1264,8 @@ impl ExprGroups {
         crate::debug!(3, "Optimizing Expression Tree");
         let optimized = self.optimize();
         crate::debug!(3, "Building NFA");
-        
         let start = std::time::Instant::now();
-        // Strategy 2: Glushkov Construction (Epsilon-Free)
-        let mut builder = GlushkovBuilder::new();
-        let mut nfa = NFA {
-            states: Vec::new(),
-            start_state: 0,
-        };
-        
-        // Start state is 0
-        nfa.add_state(); 
-
-        let mut group_info = Vec::new();
-        for group in &optimized.groups {
-            group_info.push(builder.process(&group.expr));
-        }
-
-        // Create states for all positions 1..=N
-        for set in builder.transitions {
-            let id = nfa.add_state();
-            // NFAState is created empty
-            // We will fill transitions next
-        }
-
-        // Fill transitions
-        // 1. From Start (0)
-        for (g_idx, info) in group_info.iter().enumerate() {
-            let group = &optimized.groups[g_idx];
-            if info.nullable {
-                nfa.states[0].finalizers.insert(g_idx);
-                if group.is_non_greedy { nfa.states[0].non_greedy_finalizers.insert(g_idx); }
-            }
-            for &pos in &info.first {
-                // Transition 0 -> pos+1
-                let char_set = nfa.states[pos+1].transitions.first().map(|x| x.0.clone()).unwrap_or_else(|| {
-                    // We haven't stored the char_set in NFA state yet? 
-                    // Ah, GlushkovBuilder has it in `transitions` (which we consumed or can access?)
-                    // We iterated `builder.transitions` above but didn't store them.
-                    // We need to access the source `transitions` again.
-                    // Actually, let's fix the loop above.
-                    U8Set::none()
-                }); 
-                // Wait, I can't access it if I consumed it.
-                // I need to iterate and keep the sets.
-            }
-        }
-        
-        // Correct construction loop:
-        // Re-init NFA
-        nfa.states.clear();
-        nfa.add_state(); // 0
-
-        // Add states 1..N and store their acceptance char
-        let mut state_chars = Vec::new();
-        for set in &builder.transitions {
-            nfa.add_state();
-            state_chars.push(set.clone());
-        }
-
-        // Transitions from Start
-        for (g_idx, info) in group_info.iter().enumerate() {
-            for &pos in &info.first {
-                let target = pos + 1;
-                let set = state_chars[pos].clone();
-                nfa.add_u8set_transition(0, set, target);
-            }
-        }
-
-        // Transitions between positions
-        for (pos, nexts) in builder.follows.iter().enumerate() {
-            let source = pos + 1;
-            for &next_pos in nexts {
-                let target = next_pos + 1;
-                let set = state_chars[next_pos].clone();
-                nfa.add_u8set_transition(source, set, target);
-            }
-        }
-
-        // Finalizers
-        for (g_idx, info) in group_info.iter().enumerate() {
-            let group = &optimized.groups[g_idx];
-            for &pos in &info.last {
-                let state = pos + 1;
-                nfa.states[state].finalizers.insert(g_idx);
-                if group.is_non_greedy {
-                    nfa.states[state].non_greedy_finalizers.insert(g_idx);
-                }
-            }
-        }
-
+        let mut nfa = optimized.build_nfa(false);
         crate::debug!(4, "Built NFA in {:.2?}", start.elapsed());
         print_memory_usage("After NFA build");
 
@@ -1373,7 +1285,69 @@ impl ExprGroups {
         Regex { dfa }
     }
 
-    // Removed old build_nfa
+    pub fn build_nfa(self, _optimize_on_the_fly: bool) -> NFA {
+        let mut builder = GlushkovBuilder::new();
+        let mut nfa = NFA {
+            states: Vec::new(),
+            start_state: 0,
+        };
+        
+        // Start state is 0
+        nfa.add_state(); 
+
+        let mut group_info = Vec::new();
+        for group in &self.groups {
+            group_info.push(builder.process(&group.expr));
+        }
+
+        // Add states 1..N and store their acceptance char
+        let mut state_chars = Vec::new();
+        for set in &builder.transitions {
+            nfa.add_state();
+            state_chars.push(set.clone());
+        }
+
+        // Transitions from Start
+        for (g_idx, info) in group_info.iter().enumerate() {
+            // Handle empty match at start
+            if info.nullable {
+                nfa.states[0].finalizers.insert(g_idx);
+                if self.groups[g_idx].is_non_greedy {
+                     nfa.states[0].non_greedy_finalizers.insert(g_idx); 
+                }
+            }
+            
+            for &pos in &info.first {
+                let target = pos + 1;
+                let set = state_chars[pos].clone();
+                nfa.add_u8set_transition(0, set, target);
+            }
+        }
+
+        // Transitions between positions
+        for (pos, nexts) in builder.follows.iter().enumerate() {
+            let source = pos + 1;
+            for &next_pos in nexts {
+                let target = next_pos + 1;
+                let set = state_chars[next_pos].clone();
+                nfa.add_u8set_transition(source, set, target);
+            }
+        }
+
+        // Finalizers
+        for (g_idx, info) in group_info.iter().enumerate() {
+            let group = &self.groups[g_idx];
+            for &pos in &info.last {
+                let state = pos + 1;
+                nfa.states[state].finalizers.insert(g_idx);
+                if group.is_non_greedy {
+                    nfa.states[state].non_greedy_finalizers.insert(g_idx);
+                }
+            }
+        }
+        
+        nfa
+    }
 }
 
 impl ExprGroups {
