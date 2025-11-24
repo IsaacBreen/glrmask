@@ -2187,7 +2187,7 @@ impl NFA {
 
         // Compute start state closure
         stack.push(self.start_state);
-        closure_set.insert(self.start_state);
+        closure_set.insert_bit(self.start_state);
         stats.total_closure_pushes += 1;
 
         let start_bfs = std::time::Instant::now();
@@ -2197,7 +2197,7 @@ impl NFA {
             stats.total_epsilon_edges_traversed += (end - start) as u64;
             for &v in &compact_nfa.epsilon_targets[start..end] {
                 let v = v as usize;
-                if closure_set.insert(v) {
+                if closure_set.insert_bit(v) {
                     stack.push(v);
                     stats.total_closure_pushes += 1;
                 }
@@ -2259,6 +2259,8 @@ impl NFA {
             let start_collect = std::time::Instant::now();
             for state in current_set.iter() {
                 for (class_set, next_state) in unsafe { remapped_transitions.get_unchecked(state) } {
+                    let word_idx = next_state / 64;
+                    let bit_mask = 1u64 << (next_state % 64);
                     for class_id in class_set.iter() {
                         let idx = class_id as usize;
                         unsafe {
@@ -2266,7 +2268,7 @@ impl NFA {
                                 *seen_class.get_unchecked_mut(idx) = true;
                                 used_classes.push(idx);
                             }
-                            transition_targets.get_unchecked_mut(idx).insert(*next_state);
+                            transition_targets.get_unchecked_mut(idx).insert_mask(word_idx, bit_mask);
                         }
                     }
                 }
@@ -2310,7 +2312,7 @@ impl NFA {
                             w &= !(1u64 << t);
                             let next_state = w_idx * 64 + t as usize;
 
-                            if closure_set.insert(next_state) {
+                            if closure_set.insert_bit(next_state) {
                                 stack.push(next_state);
                                 stats.total_closure_pushes += 1;
                             }
@@ -2328,7 +2330,7 @@ impl NFA {
 
                     for i in start_offs..end_offs {
                         let v = unsafe { *compact_nfa.epsilon_targets.get_unchecked(i) } as usize;
-                        if closure_set.insert(v) {
+                        if closure_set.insert_bit(v) {
                             stack.push(v);
                             stats.total_closure_pushes += 1;
                         }

@@ -31,7 +31,7 @@ impl SparseStateSet {
 
     #[time_it]
     #[inline(always)]
-    pub fn insert(&mut self, bit: usize) -> bool {
+    pub fn insert_bit(&mut self, bit: usize) -> bool {
         let word_idx = bit / 64;
         let bit_mask = 1u64 << (bit % 64);
         unsafe {
@@ -45,6 +45,17 @@ impl SparseStateSet {
             } else {
                 false
             }
+        }
+    }
+
+    #[inline(always)]
+    pub fn insert_mask(&mut self, word_idx: usize, mask: u64) {
+        unsafe {
+            let word = self.dense.words.get_unchecked_mut(word_idx);
+            if *word == 0 {
+                self.dirty_words.push(word_idx);
+            }
+            *word |= mask;
         }
     }
 
