@@ -23,71 +23,65 @@ def generate_diff_grammar(source_path: str, grammar_path: str):
     grammar_parts = []
 
     # --- 1. Preamble and Top-Level Rules ---
-    grammar_parts.append("#![ignore(IGNORE)]")
-    grammar_parts.append("")
+    # REMOVED: #![ignore(IGNORE)] - Diffs are whitespace sensitive!
+
+    grammar_parts.append("root ::= diff;")
     grammar_parts.append("diff ::= FILE_HEADER? ( HUNK_HEADER s0 )? EOF;")
     grammar_parts.append("FILE_HEADER ::= GIT_LINE INDEX_LINE? MINUS_LINE PLUS_FILE_LINE;")
-    grammar_parts.append("EOF  ::= '<|EOF|>';")
+    grammar_parts.append("EOF  ::= '<|EOF|>';") # Ensure this matches your tokenizer's EOF
     grammar_parts.append("")
 
-    # --- 2. 's' Rules (Start of a context block) ---
-    grammar_parts.append("// 's' rules: Allow starting a context block at a given line or skipping.")
+    # --- 2. 's' Rules (Search for Hunk Start) ---
+    grammar_parts.append("// 's' rules: Find the start of a hunk")
     for i in range(num_lines):
+        # Try to match line i, or skip and try line i+1
         grammar_parts.append(f"s{i} ::= l{i} | s{i+1};")
 
+    # If we reach the end of the file, we only allow trailing additions
     grammar_parts.append(f"s{num_lines} ::= PLUS_LINE*;")
     grammar_parts.append("")
 
-    # --- 3. 'l' Rules (Continuation of a context block) ---
-    grammar_parts.append("// 'l' rules: Match a specific context line and continue or start a new hunk.")
+    # --- 3. 'l' Rules (Match Context/Deletion) ---
+    grammar_parts.append("// 'l' rules: Match content exactly, then continue or new hunk")
     for i in range(num_lines):
+        # After matching line i, we can:
+        # 1. Continue immediately to line i+1
+        # 2. Have some additions, then a Hunk Header, skipping to i+1
         if i < num_lines - 1:
             continuation = f"( l{i+1} | PLUS_LINE* HUNK_HEADER s{i+1} )?"
         else:
             continuation = f"( PLUS_LINE* HUNK_HEADER s{num_lines} )?"
 
+        # NOTE: PLUS_LINE* allows insertions *before* the context/deletion line
         grammar_parts.append(f"l{i} ::= PLUS_LINE* L{i} {continuation};")
     grammar_parts.append("")
 
     # --- 4. Terminal Definitions ---
     grammar_parts.append("// --- TERMINALS ---")
-
     grammar_parts.append(r"GIT_LINE         ::= 'diff --git' [^\n\r]* NEWLINE;")
     grammar_parts.append(r"INDEX_LINE       ::= 'index' [^\n\r]* NEWLINE;")
     grammar_parts.append(r"MINUS_LINE       ::= '---' [^\n\r]* NEWLINE;")
     grammar_parts.append(r"PLUS_FILE_LINE   ::= '+++' [^\n\r]* NEWLINE;")
+    grammar_parts.append(r"HUNK_HEADER      ::= '@@' [^\n\r]* NEWLINE;")
+    grammar_parts.append(r"PLUS_LINE        ::= '+' [^\n\r]* NEWLINE;")
+
+    # Safer NEWLINE definition (using escaped chars rather than literal line breaks)
+    grammar_parts.append(r"NEWLINE          ::= '\n' | '\r\n';")
     grammar_parts.append("")
 
-    # Use raw strings (r"...") to prevent Python from interpreting \n and \r.
-    grammar_parts.append(r"HUNK_HEADER ::= '@@' [^\n\r]* NEWLINE;")
-    grammar_parts.append(r"PLUS_LINE   ::= '+' [^\n\r]* NEWLINE;")
-
-    # This line is intentionally NOT a raw string. We WANT Python to interpret '\\'
-    # as a single '\', so the EBNF parser sees '\r' and '\n' and matches the
-    # actual control characters.
-    grammar_parts.append("NEWLINE     ::= ( '\\r'? '\\n' );")
-    grammar_parts.append("")
-
-    # Use a raw string here as well for the same reason.
-    grammar_parts.append(r"IGNORE ::= ( [ \t]+ | '//'[^\n\r]* | '/*'( [^*] | '*'[^/] )*'*/' )+ ;")
-    grammar_parts.append("")
-
-    # Context-line terminals (one for each line in the source file)
-    grammar_parts.append("// Context-line terminals (one for each line in the source file)")
+    # --- 5. Content Lines ---
+    grammar_parts.append("// Context-line terminals")
     for i, line in enumerate(lines):
         content = line.rstrip('\r\n')
 
         if not content:
-            grammar_parts.append(f"L{i} ::= ( ' ' | '-' )? NEWLINE;")
+            # Strict diffs require a space or minus even for empty lines
+            grammar_parts.append(f"L{i} ::= ( ' ' | '-' ) NEWLINE;")
         else:
-            # This logic for escaping the file's content remains correct.
-            # It handles backslashes and quotes that might be in the source file.
-            escaped_content = content.replace('\\', '\\\\')
-            escaped_content = escaped_content.replace("'", "\\'")
+            # Escape backslashes and quotes for the EBNF string literal
+            escaped_content = content.replace('\\', '\\\\').replace('"', '\\"')
+            grammar_parts.append(f'L{i} ::= ( " " | "-" ) "{escaped_content}" NEWLINE;')
 
-            grammar_parts.append(f"L{i} ::= ( ' ' | '-' ) '{escaped_content}' NEWLINE;")
-
-    # --- 5. Write the grammar to the output file ---
     try:
         with open(grammar_path, 'w', encoding='utf-8') as f:
             f.write('\n'.join(grammar_parts))
