@@ -233,15 +233,15 @@ impl CompressedStateSet {
 
     #[inline]
     #[time_it]
-    pub fn reuse_from_sparse(sparse: &SparseStateSet, buffer: &mut Self) {
+    pub fn reuse_from_sparse(sparse: &SparseStateSet, buffer: &mut Self, sort_scratch: &mut Vec<usize>) {
         buffer.words.clear();
 
-        // We can't easily reuse a buffer for sorting indices without allocating,
-        // unless we pass one in. For now, let's just clone dirty_words which is small (Vec<usize>).
-        let mut indices = sparse.dirty_words.clone();
-        indices.sort_unstable();
+        // Use the provided sort buffer to avoid allocating
+        sort_scratch.clear();
+        sort_scratch.extend_from_slice(&sparse.dirty_words);
+        sort_scratch.sort_unstable();
 
-        for &idx in &indices {
+        for &idx in sort_scratch.iter() {
             buffer.words.push((idx as u32, sparse.dense.words[idx]));
         }
 

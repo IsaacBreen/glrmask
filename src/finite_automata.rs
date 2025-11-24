@@ -2246,6 +2246,7 @@ impl NFA {
         let mut used_classes: Vec<usize> = Vec::with_capacity(num_classes);
         let mut seen_class = vec![false; num_classes];
         let mut scratch_closure = CompressedStateSet::new();
+        let mut sort_scratch = Vec::with_capacity(1024);
 
         let mut next_log_threshold = 20_000;
         while let Some(current_set) = worklist.pop() {
@@ -2337,7 +2338,7 @@ impl NFA {
                     // Get/Create DFA state
                     let start_map = std::time::Instant::now();
                     let start_compress_closure = std::time::Instant::now();
-                    crate::time!("compress_state_set", CompressedStateSet::reuse_from_sparse(&closure_set, &mut scratch_closure));
+                    crate::time!("compress_state_set", CompressedStateSet::reuse_from_sparse(&closure_set, &mut scratch_closure, &mut sort_scratch));
                     stats.time_compress_state_set += start_compress_closure.elapsed();
                     stats.total_compressed_sets += 1;
                     stats.total_compressed_words += scratch_closure.words.len() as u64;
