@@ -110,12 +110,10 @@ impl NWA {
 
             // Progress Update
             if let Some(pb) = &main_pb {
-                if processed_count % 100 == 0 {
-                    let total_states = det.seen.len();
-                    pb.set_length(total_states as u64);
-                    pb.set_position(processed_count as u64);
-                    pb.set_message(format!("Expanding state {}/{}", processed_count + 1, total_states));
-                }
+                let total_states = det.seen.len();
+                pb.set_length(total_states as u64);
+                pb.set_position(processed_count as u64);
+                pb.set_message(format!("Expanding state {}/{}", processed_count + 1, total_states));
             }
 
             det.expand_state(sid);
