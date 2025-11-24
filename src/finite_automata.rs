@@ -1,6 +1,6 @@
 use crate::datastructures::char_transitions::CharTransitions;
 use crate::datastructures::bitset2::BitSet;
-use crate::datastructures::frozenset::{FreezeBTreeSet, FrozenSet, UnfreezeBTreeSet};
+use crate::datastructures::frozenset::FrozenSet;
 use crate::datastructures::u8set::U8Set;
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -57,7 +57,7 @@ impl CompressedStateSet {
     }
 
     #[inline]
-    fn from_sparse(sparse: &mut SparseStateSet) -> Self {
+    fn from_sparse(sparse: &SparseStateSet) -> Self {
         let mut words = Vec::with_capacity(sparse.dirty_words.len());
         Self::fill_words_from_sparse(sparse, &mut words);
         let hash = Self::compute_hash(&words);
@@ -65,18 +65,18 @@ impl CompressedStateSet {
     }
 
     #[inline]
-    fn reuse_from_sparse(sparse: &mut SparseStateSet, buffer: &mut Self) {
+    fn reuse_from_sparse(sparse: &SparseStateSet, buffer: &mut Self) {
         buffer.words.clear();
         Self::fill_words_from_sparse(sparse, &mut buffer.words);
         buffer.hash = Self::compute_hash(&buffer.words);
     }
 
     #[inline]
-    fn fill_words_from_sparse(sparse: &mut SparseStateSet, words: &mut Vec<(u32, u64)>) {
-        sparse.dirty_words.sort_unstable();
-        let indices = &sparse.dirty_words;
+    fn fill_words_from_sparse(sparse: &SparseStateSet, words: &mut Vec<(u32, u64)>) {
+        let mut indices = sparse.dirty_words.clone();
+        indices.sort_unstable();
 
-        for &idx in indices {
+        for &idx in &indices {
             let w = sparse.dense.words[idx];
             if w != 0 {
                 words.push((idx as u32, w));
@@ -324,8 +324,8 @@ impl JSONConvertible for NFA {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct DFAState {
     pub transitions: CharTransitions<usize>,
-    pub finalizers: FrozenSet<GroupID>,
-    pub possible_future_group_ids: FrozenSet<GroupID>,
+    pub finalizers: BTreeSet<GroupID>,
+    pub possible_future_group_ids: BTreeSet<GroupID>,
     pub group_id_to_u8set: BTreeMap<GroupID, U8Set>,
 }
 
@@ -355,11 +355,13 @@ impl JSONConvertible for DFAState {
                 let finalizers = obj
                     .remove("finalizers")
                     .ok_or_else(|| "Missing field finalizers for DFAState".to_string())
-                    .and_then(FrozenSet::<GroupID>::from_json)?;
+                    .and_then(BTreeSet::<GroupID>::from_json)?;
                 let possible_future_group_ids = obj
                     .remove("possible_future_group_ids")
-                    .ok_or_else(|| "Missing field possible_future_group_ids for DFAState".to_string())
-                    .and_then(FrozenSet::<GroupID>::from_json)?;
+                    .ok_or_else(|| {
+                        "Missing field possible_future_group_ids for DFAState".to_string()
+                    })
+                    .and_then(BTreeSet::<GroupID>::from_json)?;
                 let group_id_to_u8set = obj
                     .remove("group_id_to_u8set")
                     .ok_or_else(|| {
@@ -382,7 +384,7 @@ impl JSONConvertible for DFAState {
 pub struct DFA {
     pub states: Vec<DFAState>,
     pub start_state: usize,
-    pub non_greedy_finalizers: FrozenSet<GroupID>,
+    pub non_greedy_finalizers: BTreeSet<GroupID>,
 }
 
 // Manual impl for DFA
@@ -410,8 +412,10 @@ impl JSONConvertible for DFA {
                     .and_then(usize::from_json)?;
                 let non_greedy_finalizers = obj
                     .remove("non_greedy_finalizers")
-                    .ok_or_else(|| "Missing field non_greedy_finalizers for DFA".to_string())
-                    .and_then(FrozenSet::<GroupID>::from_json)?;
+                    .ok_or_else(|| {
+                        "Missing field non_greedy_finalizers for DFA".to_string()
+                    })
+                    .and_then(BTreeSet::<GroupID>::from_json)?;
                 Ok(DFA {
                     states,
                     start_state,
@@ -2270,7 +2274,7 @@ impl NFA {
             }
         }
 
-        let start_state_set = CompressedStateSet::from_sparse(&mut closure_set);
+        let start_state_set = CompressedStateSet::from_sparse(&closure_set);
         dfa_state_map.insert(start_state_set.clone(), 0);
         worklist.push(start_state_set.clone());
 
@@ -2283,8 +2287,8 @@ impl NFA {
 
         dfa_states.push(DFAState {
             transitions: CharTransitions::new(),
-            finalizers: finalizers.freeze(),
-            possible_future_group_ids: FrozenSet::new(),
+            finalizers,
+            possible_future_group_ids: BTreeSet::new(),
             group_id_to_u8set: BTreeMap::new(),
         });
 
@@ -2342,9 +2346,15 @@ impl NFA {
             let mut dfa_transitions_vec: Vec<(u8, usize)> = Vec::new();
 
             for &class_id in &used_classes {
-                let target_set = unsafe { transition_targets.get_unchecked_mut(class_id) };
+                let target_set = unsafe { transition_targets.get_unchecked(class_id) };
 
-                CompressedStateSet::reuse_from_sparse(target_set, &mut scratch_target);
+                // Empty set check
+                if target_set.dirty_words.is_empty() {
+                    scratch_target.words.clear();
+                    scratch_target.hash = CompressedStateSet::compute_hash(&scratch_target.words);
+                } else {
+                    CompressedStateSet::reuse_from_sparse(target_set, &mut scratch_target);
+                }
 
                 let next_dfa_state_idx = if let Some(&idx) = local_cache.get(&scratch_target) {
                     idx
@@ -2391,7 +2401,7 @@ impl NFA {
 
                     // Get/Create DFA state
                     let start_map = std::time::Instant::now();
-                    CompressedStateSet::reuse_from_sparse(&mut closure_set, &mut scratch_closure);
+                    CompressedStateSet::reuse_from_sparse(&closure_set, &mut scratch_closure);
 
                     let next_state_idx = if let Some(&existing_state) = dfa_state_map.get(&scratch_closure) {
                         existing_state
@@ -2417,8 +2427,8 @@ impl NFA {
 
                         dfa_states.push(DFAState {
                             transitions: CharTransitions::new(),
-                            finalizers: new_finalizers.freeze(),
-                            possible_future_group_ids: FrozenSet::new(),
+                            finalizers: new_finalizers,
+                            possible_future_group_ids: BTreeSet::new(),
                             group_id_to_u8set: BTreeMap::new(),
                         });
 
@@ -2460,14 +2470,12 @@ impl NFA {
         let mut dfa = DFA {
             states: dfa_states,
             start_state: 0,
-            non_greedy_finalizers: FrozenSet::new(),
+            non_greedy_finalizers: BTreeSet::new(),
         };
 
-        let mut non_greedy_finalizers = BTreeSet::new();
         for state in &self.states {
-            non_greedy_finalizers.extend(state.non_greedy_finalizers.iter().cloned());
+            dfa.non_greedy_finalizers.extend(state.non_greedy_finalizers.iter().cloned());
         }
-        dfa.non_greedy_finalizers = non_greedy_finalizers.freeze();
 
         let meta_start = std::time::Instant::now();
         dfa.recompute_metadata();
@@ -2506,7 +2514,7 @@ impl DFA {
             states.push(NFAState {
                 transitions,
                 epsilon_transitions: Vec::new(),
-                finalizers: state.finalizers.clone().unfreeze(),
+                finalizers: state.finalizers.clone(),
                 non_greedy_finalizers,
             });
         }
@@ -2519,7 +2527,7 @@ impl DFA {
 
     pub fn compute_possible_future_group_ids(&mut self) {
         for state in &mut self.states {
-            state.possible_future_group_ids = FrozenSet::new();
+            state.possible_future_group_ids = BTreeSet::new();
         }
 
         let num_states = self.states.len();
@@ -2534,7 +2542,7 @@ impl DFA {
         let max_group_id = self
             .states
             .iter()
-            .flat_map(|s| s.finalizers.iter().last())
+            .flat_map(|s| s.finalizers.last())
             .max()
             .copied()
             .unwrap_or(0);
@@ -2611,7 +2619,7 @@ impl DFA {
                     }
                 }
             }
-            state.possible_future_group_ids = set.freeze();
+            state.possible_future_group_ids = set;
         }
     }
 
@@ -2712,7 +2720,7 @@ impl DFA {
 
         self.remove_unreachable_states();
 
-        let mut partitions_map: BTreeMap<FrozenSet<GroupID>, BTreeSet<usize>> = BTreeMap::new();
+        let mut partitions_map: BTreeMap<BTreeSet<GroupID>, BTreeSet<usize>> = BTreeMap::new();
         for (state_idx, state) in self.states.iter().enumerate() {
             partitions_map
                 .entry(state.finalizers.clone())
@@ -2814,8 +2822,8 @@ impl DFA {
 }
 
 fn should_terminate_early(
-    possible_future_group_ids: &FrozenSet<GroupID>,
-    non_greedy_finalizers: &FrozenSet<GroupID>,
+    possible_future_group_ids: &BTreeSet<GroupID>,
+    non_greedy_finalizers: &BTreeSet<GroupID>,
     matched_groups: &BTreeSet<GroupID>,
 ) -> bool {
     possible_future_group_ids
@@ -3011,7 +3019,7 @@ impl RegexState<'_> {
         self.matches.clear();
     }
 
-    pub fn possible_future_group_ids(&self) -> FrozenSet<GroupID> {
+    pub fn possible_future_group_ids(&self) -> BTreeSet<GroupID> {
         let state = &self.regex.dfa.states[self.current_state];
         state.possible_future_group_ids.clone()
     }
@@ -3046,7 +3054,7 @@ impl Regex {
         let mut all_matches: Vec<Match> = Vec::new();
 
         let mut current_state = state;
-        let mut matched_groups: BTreeSet<GroupID> = dfa.states[state].finalizers.clone().unfreeze();
+        let mut matched_groups: BTreeSet<GroupID> = dfa.states[state].finalizers.clone();
 
         if dfa.states[state].transitions.is_empty() {
             return ExecutionResult {
