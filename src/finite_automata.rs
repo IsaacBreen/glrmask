@@ -1573,93 +1573,120 @@ impl Expr {
     }
 
     fn make_choice(exprs: Vec<Expr>) -> Expr {
-        let mut flat = Vec::with_capacity(exprs.len());
-        for e in exprs {
-            if let Expr::Choice(subs) = e {
-                flat.extend(subs);
-            } else {
-                flat.push(e);
+        // 1. Flatten choices and Distribute Seq(Choice, ...)
+        // We use a stack to handle nested structures resulting from distribution
+        let mut worklist = exprs;
+        let mut flat = Vec::with_capacity(worklist.len());
+
+        while let Some(e) = worklist.pop() {
+            match e {
+                Expr::Choice(subs) => {
+                    worklist.extend(subs);
+                }
+                Expr::Seq(mut subs) if !subs.is_empty() => {
+                    // Check if the first element is a Choice, if so distribute
+                    // Note: We need to inspect the first element without removing it yet,
+                    // or remove and put back.
+                    let first = subs.remove(0);
+                    match first {
+                        Expr::Choice(choices) => {
+                            // Distribute: Seq(Choice(A, B), C...) -> Choice(Seq(A, C...), Seq(B, C...))
+                            // We push these back to worklist to flatten the resulting Choice implicitly
+                            for c in choices {
+                                let mut new_seq = Vec::with_capacity(subs.len() + 1);
+                                new_seq.push(c);
+                                new_seq.extend(subs.clone());
+                                worklist.push(Expr::Seq(new_seq));
+                            }
+                        }
+                        _ => {
+                            // Put it back and keep the Seq
+                            subs.insert(0, first);
+                            flat.push(Expr::Seq(subs));
+                        }
+                    }
+                }
+                _ => flat.push(e),
             }
         }
-        
+
         if flat.is_empty() {
             return Expr::Choice(vec![]);
         }
         
+        // Sort and dedup to merge identical branches early
         flat.sort();
         flat.dedup();
         
         if flat.len() == 1 {
             return flat.pop().unwrap();
         }
-        
-        // Merge pure classes and single-byte U8Seqs
-        let mut merged = Vec::with_capacity(flat.len());
-        let mut combined_class = U8Set::none();
-        let mut has_class = false;
-        
-        for e in flat {
-            match e {
-                Expr::U8Class(c) => {
-                    combined_class |= c;
-                    has_class = true;
-                }
-                Expr::U8Seq(ref s) if s.len() == 1 => {
-                    combined_class.insert(s[0]);
-                    has_class = true;
-                }
-                _ => merged.push(e),
-            }
-        }
-        
-        if has_class {
-            merged.push(Expr::U8Class(combined_class));
-        }
-        
-        if merged.len() == 1 {
-            return merged.pop().unwrap();
-        }
-        
-        // Left factoring
-        let mut groups: HashMap<U8Set, Vec<Option<Expr>>> = HashMap::new();
+
+        // 2. Partitioning / Left Factoring
+        // We map each byte 0..255 to a list of indices in `flat` that cover it.
+        // Tails are stored in `tails_storage`.
+        let mut overlap_map: Vec<Vec<usize>> = vec![Vec::with_capacity(2); 256];
+        let mut tails_storage: Vec<Option<Expr>> = Vec::with_capacity(flat.len());
         let mut others = Vec::new();
-        
-        for e in merged {
+
+        // Iterate and split heads
+        for e in flat {
             let (head, tail) = e.split_head();
             match head {
-                Head::Class(c) => {
-                    groups.entry(c).or_default().push(tail);
+                Head::Class(set) => {
+                    let idx = tails_storage.len();
+                    tails_storage.push(tail);
+                    for b in set.iter() {
+                        overlap_map[b as usize].push(idx);
+                    }
                 }
                 Head::Other => {
+                    // tail is the full expression in this case
                     others.push(tail.unwrap());
                 }
             }
         }
-        
-        let mut final_choices = others;
-        for (class_set, tails) in groups {
-            let tail_expr = if tails.is_empty() {
-                Expr::Epsilon
-            } else {
-                let mut valid_tails: Vec<Expr> = tails.into_iter().flatten().collect();
-                if valid_tails.is_empty() {
-                    Expr::Epsilon
-                } else if valid_tails.len() == 1 {
-                    valid_tails.pop().unwrap()
-                } else {
-                    Self::make_choice(valid_tails)
-                }
-            };
-            
-            let head_expr = Expr::U8Class(class_set);
-            
-            if matches!(tail_expr, Expr::Epsilon) {
-                final_choices.push(head_expr);
-            } else {
-                final_choices.push(Self::make_seq(vec![head_expr, tail_expr]));
+
+        // 3. Group by signature
+        // Map Signature (Vec<usize>) -> Bytes (Vec<u8>)
+        let mut sig_to_bytes: BTreeMap<Vec<usize>, Vec<u8>> = BTreeMap::new();
+        for (b, sig) in overlap_map.into_iter().enumerate() {
+            if !sig.is_empty() {
+                sig_to_bytes.entry(sig).or_default().push(b as u8);
             }
         }
-        
+
+        let mut final_choices = Vec::with_capacity(sig_to_bytes.len() + others.len());
+
+        // 4. Construct factored expressions
+        for (indices, bytes) in sig_to_bytes {
+            let class_set = U8Set::from_bytes(&bytes);
+            
+            // Collect tails for this signature
+            let mut current_tails = Vec::with_capacity(indices.len());
+            for idx in indices {
+                if let Some(t) = &tails_storage[idx] {
+                    current_tails.push(t.clone());
+                } else {
+                    current_tails.push(Expr::Epsilon);
+                }
+            }
+
+            // Recursively make choice for the tails
+            let tail_expr = Self::make_choice(current_tails);
+
+            if tail_expr == Expr::Epsilon {
+                final_choices.push(Expr::U8Class(class_set));
+            } else {
+                final_choices.push(Self::make_seq(vec![Expr::U8Class(class_set), tail_expr]));
+            }
+        }
+
+        final_choices.extend(others);
+
+        // Clean up: sort again to ensure deterministic output
+        final_choices.sort();
+
         if final_choices.len() == 1 {
             final_choices.pop().unwrap()
         } else {
