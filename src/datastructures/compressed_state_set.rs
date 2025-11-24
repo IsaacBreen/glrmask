@@ -2,8 +2,9 @@ use std::hash::{Hash, Hasher};
 use ahash::AHasher;
 use profiler_macro::time_it;
 
-#[derive(Clone)]
+#[derive(Clone, Eq, Debug)]
 pub struct CompressedStateSet {
+    // Sorted by word index. (word_index, word_value)
     // Sorted by word index. (word_index, word_value)
     pub words: Vec<(u32, u64)>,
     pub hash: u64,
