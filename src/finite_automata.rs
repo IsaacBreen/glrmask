@@ -788,6 +788,23 @@ impl ExprGroups {
             return (None, Vec::new(), Vec::new());
         }
 
+        // Debug: log the structure of first few groups
+        crate::debug!(0, "=== OPTIMIZE_PREFIXES DEBUG ===");
+        crate::debug!(0, "Total groups: {}", self.groups.len());
+        for i in 0..self.groups.len().min(3) {
+            let inner = self.groups[i].expr.unwrap_shared();
+            crate::debug!(0, "Group {}: {:?}", i, match inner {
+                Expr::Seq(exprs) => format!("Seq({} elements)", exprs.len()),
+                Expr::U8Seq(_) => "U8Seq".to_string(),
+                Expr::U8Class(_) => "U8Class".to_string(),
+                Expr::Choice(_) => "Choice".to_string(),
+                Expr::Quantifier(_, _) => "Quantifier".to_string(),
+                Expr::Epsilon => "Epsilon".to_string(),
+                Expr::StringTrie(_) => "StringTrie".to_string(),
+                Expr::Shared(_) => "Shared".to_string(),
+            });
+        }
+
         // Candidate prefix is the first element of the first group's expression
         // We iterate to find a candidate that is shared by at least 2 groups?
         // Or just take the first one and see who follows.
@@ -839,8 +856,6 @@ impl ExprGroups {
                 other_groups.push((idx, group));
             }
         }
-        
-        crate::debug!(1, "Optimized prefix for {}/{} groups", prefixed_groups.len(), prefixed_groups.len() + other_groups.len());
         
         (Some(prefix), prefixed_groups, other_groups)
     }
@@ -1188,7 +1203,6 @@ impl ExprGroups {
         let (prefix, prefixed_groups, other_groups) = self.optimize_prefixes();
 
         let split_point = if let Some(prefix_expr) = prefix {
-            crate::debug!(1, "Factored out common prefix in NFA construction");
             // Build the prefix NFA from start_state
             let start_state = nfa.start_state;
             let prefix_end = Expr::handle_expr_cached(
@@ -2430,6 +2444,38 @@ impl NFA {
         dfa
     }
 
+    /// Precompute epsilon closure for each NFA state.
+    /// Returns a Vec where result[i] is a DenseStateSet of all states reachable from i via epsilon.
+    fn precompute_epsilon_closures(&self) -> Vec<DenseStateSet> {
+        let n = self.states.len();
+        let mut closures: Vec<DenseStateSet> = (0..n).map(|_| DenseStateSet::new(n)).collect();
+        
+        // For each state, compute its epsilon closure via BFS
+        let mut stack = Vec::with_capacity(256);
+        for start_state in 0..n {
+            let closure = &mut closures[start_state];
+            
+            // Every state is in its own closure
+            closure.words[start_state / 64] |= 1u64 << (start_state % 64);
+            
+            stack.clear();
+            stack.push(start_state);
+            
+            while let Some(u) = stack.pop() {
+                for &v in &self.states[u].epsilon_transitions {
+                    let word_idx = v / 64;
+                    let bit_mask = 1u64 << (v % 64);
+                    if (closure.words[word_idx] & bit_mask) == 0 {
+                        closure.words[word_idx] |= bit_mask;
+                        stack.push(v);
+                    }
+                }
+            }
+        }
+        
+        closures
+    }
+
     fn to_dfa_impl(self) -> DFA {
         let start_time = std::time::Instant::now();
         let mut dfa_states: Vec<DFAState> = Vec::new();
@@ -2468,26 +2514,23 @@ impl NFA {
             remapped_transitions.push(trans);
         }
 
-        // Shared buffers - increase stack capacity for better performance
+        // Precompute epsilon closures for all states (MAJOR OPTIMIZATION)
+        let start_precompute = std::time::Instant::now();
+        let epsilon_closures = self.precompute_epsilon_closures();
+        crate::debug!(4, "Precomputed epsilon closures in {:.2?}", start_precompute.elapsed());
+
+        // Shared buffers
         let num_nfa_states = self.states.len();
-        // Allocate larger stack to reduce reallocations (was 1024, now 4096)
-        let mut stack = Vec::with_capacity(4096.min(num_nfa_states));
         let mut closure_set = SparseStateSet::new(num_nfa_states);
 
-        // Compact NFA for faster BFS
-        let compact_nfa = self.build_compact_nfa();
-
-        // Compute start state closure
-        stack.push(self.start_state);
-        closure_set.insert(self.start_state);
-
-        while let Some(u) = stack.pop() {
-            let start = compact_nfa.epsilon_offsets[u] as usize;
-            let end = compact_nfa.epsilon_offsets[u + 1] as usize;
-            for &v in &compact_nfa.epsilon_targets[start..end] {
-                let v = v as usize;
-                if closure_set.insert(v) {
-                    stack.push(v);
+        // Compute start state closure using precomputed data
+        closure_set.clear();
+        // Union all closures for the start state (which is just the start state's closure)
+        for (word_idx, word) in epsilon_closures[self.start_state].words.iter().enumerate() {
+            if *word != 0 {
+                closure_set.dense.words[word_idx] = *word;
+                if !closure_set.dirty_words.contains(&word_idx) {
+                    closure_set.dirty_words.push(word_idx);
                 }
             }
         }
@@ -2580,42 +2623,35 @@ impl NFA {
                     // Compute closure
                     closure_set.clear();
 
-                    // TIMING: Bitset Iteration
-                    let start_iter = std::time::Instant::now();
-                    {
-                        // Iterate using dirty_words for speed
-                        for &w_idx in &target_set.dirty_words {
-                            let mut w = target_set.dense.words[w_idx];
-                            while w != 0 {
-                                let t = w.trailing_zeros();
-                                w &= !(1u64 << t);
-                                let next_state = w_idx * 64 + t as usize;
-
-                                if closure_set.insert(next_state) {
-                                    stack.push(next_state);
+                    // TIMING: Closure Union - using precomputed closures
+                    let start_closure = std::time::Instant::now();
+                    closure_set.clear();
+                    
+                    // Union all precomputed closures for states in target_set
+                    for &w_idx in &target_set.dirty_words {
+                        let mut w = target_set.dense.words[w_idx];
+                        while w != 0 {
+                            let t = w.trailing_zeros();
+                            w &= !(1u64 << t);
+                            let state = w_idx * 64 + t as usize;
+                            
+                            // Union the precomputed closure for this state
+                            for (closure_word_idx, &closure_word) in epsilon_closures[state].words.iter().enumerate() {
+                                if closure_word != 0 {
+                                    let old_word = closure_set.dense.words[closure_word_idx];
+                                    let new_word = old_word | closure_word;
+                                    if new_word != old_word {
+                                        closure_set.dense.words[closure_word_idx] = new_word;
+                                        if old_word == 0 {
+                                            // Word transitioned from 0 to non-zero, mark as dirty
+                                            closure_set.dirty_words.push(closure_word_idx);
+                                        }
+                                    }
                                 }
                             }
                         }
                     }
-                    t_iter_bitset += start_iter.elapsed();
-
-                    // TIMING: BFS Closure - inlined and optimized
-                    let start_bfs = std::time::Instant::now();
-                    // Inline epsilon closure for better performance
-                    while let Some(u) = stack.pop() {
-                        // Use unsafe raw pointer access for speed
-                        let start_offs = unsafe { *compact_nfa.epsilon_offsets.get_unchecked(u) } as usize;
-                        let end_offs = unsafe { *compact_nfa.epsilon_offsets.get_unchecked(u + 1) } as usize;
-
-                        // Iterate over epsilon targets with raw pointer for maximum speed
-                        for i in start_offs..end_offs {
-                            let v = unsafe { *compact_nfa.epsilon_targets.get_unchecked(i) } as usize;
-                            if closure_set.insert(v) {
-                                stack.push(v);
-                            }
-                        }
-                    }
-                    t_closure_bfs += start_bfs.elapsed();
+                    t_closure_bfs += start_closure.elapsed();
 
                     // Get/Create DFA state
                     let start_map = std::time::Instant::now();
