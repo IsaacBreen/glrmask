@@ -120,11 +120,12 @@ def main():
                 print("\n!!! PANIC !!!")
                 print(f"Process took {duration:.4f}s which exceeds the 1.0s limit.")
                 print(f"Exponential explosion detected at line {i}.")
+                print(f"Regex length was {str_len:,} characters.")
                 sys.exit(1)
 
         except re.error as e:
             print(f"\n!!! REGEX ERROR !!!")
-            print(f"Compilation failed at line {i}.")
+            print(f"Compilation failed at line {i} with regex length {str_len:,}.")
             print(f"Reason: {e}")
             print("The pattern likely exceeded Python's maximum recursion depth or pattern size.")
             sys.exit(1)
