@@ -1429,7 +1429,7 @@ impl Expr {
             Expr::U8Seq(mut s) if !s.is_empty() => {
                 let h = s.remove(0);
                 let t = if s.is_empty() { None } else { Some(Expr::U8Seq(s)) };
-                (Head::Byte(h), t)
+                (Head::Class(U8Set::from_u8(h)), t)
             },
             Expr::U8Class(c) => (Head::Class(c), None),
             Expr::Seq(mut s) if !s.is_empty() => {
@@ -1442,20 +1442,20 @@ impl Expr {
                         // but since Head::Other implies we can't optimize, we handle it loosely.
                         // We'll return Other and re-wrap the simplified tail if possible, 
                         // but for now, just returning Other with a reconstructed Seq is enough to bail out.
-                        let mut reconstructed = vec![first_tail.unwrap_or(Expr::Epsilon)]; 
+                        let mut reconstructed = vec![first_tail.unwrap_or(Expr::Epsilon)];
                         // Note: ^ logic slightly lossy if we don't return exact original, 
                         // but split_head is internal heuristic. 
                         // Correct approach: if Other, return original 'self' in tail? 
                         // For simplicity in this patch, we treat Other as a barrier.
                         reconstructed.extend(s);
-                        (Head::Other, Some(Expr::Seq(reconstructed)))
+                        (Head::Other, Some(Expr::make_seq(reconstructed)))
                     },
-                    _ => {
+                    Head::Class(c) => {
                         let tail = match first_tail {
                             Some(t) => { s.insert(0, t); Some(Expr::Seq(s)) },
                             None => if s.is_empty() { None } else { Some(Expr::Seq(s)) }
                         };
-                        (head, tail)
+                        (Head::Class(c), tail)
                     }
                 }
             },
@@ -1513,7 +1513,7 @@ impl Expr {
                 Task::Seq(len) => {
                     let split_idx = values.len() - len;
                     let children = values.split_off(split_idx);
-                    values.push(Expr::Seq(children));
+                    values.push(Self::make_seq(children));
                 }
                 Task::Quantifier(q) => {
                     let child = values.pop().unwrap();
@@ -1529,104 +1529,141 @@ impl Expr {
                 Task::Choice(len) => {
                     let split_idx = values.len() - len;
                     let children = values.split_off(split_idx);
-                    values.push(Self::apply_optimizations(children));
+                    values.push(Self::make_choice(children));
                 }
             }
         }
         values.pop().unwrap()
     }
 
-    fn apply_optimizations(exprs: Vec<Expr>) -> Expr {
-        // 2. Flatten nested choices
-        let mut flat = Vec::new();
+    fn make_seq(exprs: Vec<Expr>) -> Expr {
+        let mut flat = Vec::with_capacity(exprs.len());
         for e in exprs {
-            if let Expr::Choice(kids) = e {
-                flat.extend(kids);
+            if let Expr::Seq(subs) = e {
+                flat.extend(subs);
+            } else if matches!(e, Expr::Epsilon) {
+                continue;
             } else {
                 flat.push(e);
             }
         }
-        let mut exprs = flat;
-
-        // 3. Iterative Left-Factoring (Peel Common Prefix)
-        let mut common_prefix = Vec::new();
-
-        loop {
-            if exprs.is_empty() {
-                break;
-            }
-
-            let mut groups: HashMap<Head, Vec<Option<Expr>>> = HashMap::new();
-            let mut others = Vec::new();
-
-            for e in exprs {
-                let (head, tail) = e.split_head();
-                if matches!(head, Head::Other) {
-                    others.push(tail.unwrap());
+        
+        if flat.is_empty() {
+            return Expr::Epsilon;
+        }
+        
+        let mut merged = Vec::with_capacity(flat.len());
+        for e in flat {
+            if let Expr::U8Seq(mut curr) = e {
+                if let Some(Expr::U8Seq(prev)) = merged.last_mut() {
+                    prev.append(&mut curr);
                 } else {
-                    groups.entry(head).or_default().push(tail);
+                    merged.push(Expr::U8Seq(curr));
                 }
-            }
-
-            if others.is_empty() && groups.len() == 1 {
-                // We have a common prefix for ALL options
-                let (head, tails) = groups.into_iter().next().unwrap();
-                let head_expr = match head {
-                    Head::Byte(b) => Expr::U8Seq(vec![b]),
-                    Head::Class(c) => Expr::U8Class(c),
-                    _ => unreachable!(),
-                };
-                common_prefix.push(head_expr);
-                exprs = tails.into_iter().flatten().collect();
             } else {
-                // Divergence point.
-                let mut final_choices = others;
-                for (head, tails) in groups {
-                    let tail_expr = if tails.is_empty() {
-                        Expr::Epsilon
-                    } else {
-                        let mut valid_tails: Vec<Expr> = tails.into_iter().flatten().collect();
-                        if valid_tails.is_empty() {
-                            Expr::Epsilon
-                        } else if valid_tails.len() == 1 {
-                            valid_tails.pop().unwrap()
-                        } else {
-                            // We can safely call optimize recursively here because
-                            // we are processing tails of a peeled sequence, which decreases structure size.
-                            // The recursion depth here is bound by the length of the string/sequence being factored,
-                            // not the depth of the grammar graph.
-                            Expr::Choice(valid_tails).optimize()
-                        }
-                    };
-
-                    let head_expr = match head {
-                        Head::Byte(b) => Expr::U8Seq(vec![b]),
-                        Head::Class(c) => Expr::U8Class(c),
-                        _ => unreachable!(),
-                    };
-
-                    if matches!(tail_expr, Expr::Epsilon) {
-                        final_choices.push(head_expr);
-                    } else {
-                        final_choices.push(Expr::Seq(vec![head_expr, tail_expr]));
-                    }
-                }
-                let branch_expr = if final_choices.len() == 1 {
-                    final_choices.pop().unwrap()
-                } else {
-                    Expr::Choice(final_choices)
-                };
-                common_prefix.push(branch_expr);
-                break; // Stop looping
+                merged.push(e);
             }
         }
-
-        if common_prefix.is_empty() {
-            Expr::Epsilon
-        } else if common_prefix.len() == 1 {
-            common_prefix.pop().unwrap()
+        
+        if merged.len() == 1 {
+            merged.pop().unwrap()
         } else {
-            Expr::Seq(common_prefix)
+            Expr::Seq(merged)
+        }
+    }
+
+    fn make_choice(exprs: Vec<Expr>) -> Expr {
+        let mut flat = Vec::with_capacity(exprs.len());
+        for e in exprs {
+            if let Expr::Choice(subs) = e {
+                flat.extend(subs);
+            } else {
+                flat.push(e);
+            }
+        }
+        
+        if flat.is_empty() {
+            return Expr::Choice(vec![]);
+        }
+        
+        flat.sort();
+        flat.dedup();
+        
+        if flat.len() == 1 {
+            return flat.pop().unwrap();
+        }
+        
+        // Merge pure classes and single-byte U8Seqs
+        let mut merged = Vec::with_capacity(flat.len());
+        let mut combined_class = U8Set::none();
+        let mut has_class = false;
+        
+        for e in flat {
+            match e {
+                Expr::U8Class(c) => {
+                    combined_class |= c;
+                    has_class = true;
+                }
+                Expr::U8Seq(ref s) if s.len() == 1 => {
+                    combined_class.insert(s[0]);
+                    has_class = true;
+                }
+                _ => merged.push(e),
+            }
+        }
+        
+        if has_class {
+            merged.push(Expr::U8Class(combined_class));
+        }
+        
+        if merged.len() == 1 {
+            return merged.pop().unwrap();
+        }
+        
+        // Left factoring
+        let mut groups: HashMap<U8Set, Vec<Option<Expr>>> = HashMap::new();
+        let mut others = Vec::new();
+        
+        for e in merged {
+            let (head, tail) = e.split_head();
+            match head {
+                Head::Class(c) => {
+                    groups.entry(c).or_default().push(tail);
+                }
+                Head::Other => {
+                    others.push(tail.unwrap());
+                }
+            }
+        }
+        
+        let mut final_choices = others;
+        for (class_set, tails) in groups {
+            let tail_expr = if tails.is_empty() {
+                Expr::Epsilon
+            } else {
+                let mut valid_tails: Vec<Expr> = tails.into_iter().flatten().collect();
+                if valid_tails.is_empty() {
+                    Expr::Epsilon
+                } else if valid_tails.len() == 1 {
+                    valid_tails.pop().unwrap()
+                } else {
+                    Self::make_choice(valid_tails)
+                }
+            };
+            
+            let head_expr = Expr::U8Class(class_set);
+            
+            if matches!(tail_expr, Expr::Epsilon) {
+                final_choices.push(head_expr);
+            } else {
+                final_choices.push(Self::make_seq(vec![head_expr, tail_expr]));
+            }
+        }
+        
+        if final_choices.len() == 1 {
+            final_choices.pop().unwrap()
+        } else {
+            Expr::Choice(final_choices)
         }
     }
 
@@ -1680,7 +1717,7 @@ impl Expr {
                 Task::Seq(len) => {
                     let split_idx = values.len() - len;
                     let children = values.split_off(split_idx);
-                    values.push(Expr::Seq(children));
+                    values.push(Self::make_seq(children));
                 }
                 Task::Quantifier(q) => {
                     let child = values.pop().unwrap();
@@ -1722,7 +1759,7 @@ impl Expr {
 }
 
 #[derive(PartialEq, Eq, Hash, Clone)]
-enum Head { Byte(u8), Class(U8Set), Other }
+enum Head { Class(U8Set), Other }
 
 impl NFA {
     pub fn add_state(&mut self) -> usize {
