@@ -14,5 +14,6 @@ pub mod leveled_gss;
 pub mod gss_acc;
 pub mod bitset2;
 pub mod compressed_state_set;
+pub mod state_set;
 
 pub use entry_api::{EntryApi, OrderedMapEntry};

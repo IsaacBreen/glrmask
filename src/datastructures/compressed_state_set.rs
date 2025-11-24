@@ -1,8 +1,9 @@
 use std::hash::{Hash, Hasher};
 use ahash::AHasher;
 use profiler_macro::time_it;
+use crate::datastructures::state_set::StateSet;
 
-#[derive(Clone, Eq, Debug)]
+#[derive(Clone, Eq, Debug, Default)]
 pub struct CompressedStateSet {
     // Sorted by word index. (word_index, word_value)
     // Sorted by word index. (word_index, word_value)
@@ -101,6 +102,29 @@ impl CompressedStateSet {
     pub fn len(&self) -> usize {
         self.words.iter().map(|(_, w)| w.count_ones() as usize).sum()
     }
+}
+
+impl FromIterator<usize> for CompressedStateSet {
+    fn from_iter<T: IntoIterator<Item = usize>>(iter: T) -> Self {
+        let mut set = CompressedStateSet::new();
+        for i in iter {
+            set.insert(i);
+        }
+        set
+    }
+}
+
+impl StateSet for CompressedStateSet {
+    type Iter<'a> = CompressedStateSetIter<'a>;
+
+    fn with_capacity(_: usize) -> Self { Self::new() }
+    fn insert(&mut self, state: usize) -> bool { self.insert(state) }
+    fn contains(&self, state: usize) -> bool { self.contains(state) }
+    fn len(&self) -> usize { self.len() }
+    fn is_empty(&self) -> bool { self.words.is_empty() }
+    fn clear(&mut self) { self.clear() }
+    fn iter<'a>(&'a self) -> Self::Iter<'a> { self.iter() }
+    fn recompute_hash(&mut self) { self.recompute_hash() }
 }
 
 pub struct CompressedStateSetIter<'a> {

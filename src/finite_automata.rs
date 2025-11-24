@@ -12,9 +12,11 @@ use std::sync::Arc;
 use ahash::AHashMap;
 use profiler_macro::time_it;
 use crate::datastructures::compressed_state_set::CompressedStateSet;
+use crate::datastructures::state_set::StateSet;
 
 
 pub type GroupID = usize;
+pub type ActiveStateSet = CompressedStateSet;
 
 #[derive(Debug, Clone)]
 pub struct NFAState {
@@ -2151,9 +2153,9 @@ impl NFA {
         let mut dfa_states: Vec<DFAState> = Vec::with_capacity(100_000);
         // Use FxHashMap for faster hashing
         use rustc_hash::FxHashMap;
-        let mut dfa_state_map: FxHashMap<CompressedStateSet, usize> = FxHashMap::default();
+        let mut dfa_state_map: FxHashMap<ActiveStateSet, usize> = FxHashMap::default();
         dfa_state_map.reserve(100_000);
-        let mut worklist: Vec<CompressedStateSet> = Vec::with_capacity(1024);
+        let mut worklist: Vec<ActiveStateSet> = Vec::with_capacity(1024);
 
         // Compute Input Equivalence Classes
         let start_classes = std::time::Instant::now();
@@ -2180,7 +2182,7 @@ impl NFA {
         // Shared buffers
         let num_nfa_states = self.states.len();
         let mut stack = Vec::with_capacity(num_nfa_states);
-        let mut closure_set = CompressedStateSet::new();
+        let mut closure_set = ActiveStateSet::with_capacity(num_nfa_states);
 
         // Compact NFA for faster BFS
         let compact_nfa = self.build_compact_nfa();
@@ -2233,7 +2235,7 @@ impl NFA {
         });
 
         // Reusable structures
-        let mut transition_targets: Vec<CompressedStateSet> = (0..num_classes).map(|_| CompressedStateSet::new()).collect();
+        let mut transition_targets: Vec<ActiveStateSet> = (0..num_classes).map(|_| ActiveStateSet::with_capacity(num_nfa_states)).collect();
         let mut used_classes: Vec<usize> = Vec::with_capacity(num_classes);
         let mut seen_class = vec![false; num_classes];
 
@@ -2286,16 +2288,10 @@ impl NFA {
                 // TIMING: Bitset Iteration
                 let start_iter = std::time::Instant::now();
                 {
-                    for &(w_idx, mut w) in &target_set.words {
-                        while w != 0 {
-                            let t = w.trailing_zeros();
-                            w &= !(1u64 << t);
-                            let next_state = (w_idx as usize) * 64 + (t as usize);
-
-                            if closure_set.insert(next_state) {
-                                stack.push(next_state);
-                                stats.total_closure_pushes += 1;
-                            }
+                    for next_state in target_set.iter() {
+                        if closure_set.insert(next_state) {
+                            stack.push(next_state);
+                            stats.total_closure_pushes += 1;
                         }
                     }
                 }
@@ -2321,10 +2317,10 @@ impl NFA {
                 // Get/Create DFA state
                 let start_map = std::time::Instant::now();
                 let start_compress_closure = std::time::Instant::now();
-                closure_set.recompute_hash();
+                closure_set.recompute_hash(); // Optimization hook
                 stats.time_compress_state_set += start_compress_closure.elapsed();
                 stats.total_compressed_sets += 1;
-                stats.total_compressed_words += closure_set.words.len() as u64;
+                // stats.total_compressed_words += closure_set.words.len() as u64; // Removed field access dependency
 
                 stats.global_map_lookups += 1;
                 let start_map_lookup = std::time::Instant::now();
@@ -2346,15 +2342,10 @@ impl NFA {
                     let start_finalizers = std::time::Instant::now();
                     let mut new_finalizers = BTreeSet::new();
                     let mut new_non_greedy_finalizers = BTreeSet::new();
-                    for &(w_idx, mut w) in &closure_set.words {
-                         while w != 0 {
-                             let t = w.trailing_zeros();
-                             w &= !(1u64 << t);
-                             let state = (w_idx as usize) * 64 + (t as usize);
-                             new_finalizers.extend(self.states[state].finalizers.iter().cloned());
-                             new_non_greedy_finalizers
-                                 .extend(self.states[state].non_greedy_finalizers.iter().cloned());
-                         }
+                    for state in closure_set.iter() {
+                        new_finalizers.extend(self.states[state].finalizers.iter().cloned());
+                        new_non_greedy_finalizers
+                            .extend(self.states[state].non_greedy_finalizers.iter().cloned());
                     }
                     stats.time_finalizer_computation += start_finalizers.elapsed();
 
