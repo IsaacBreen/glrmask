@@ -699,11 +699,10 @@ fn resolve_negatives_and_optimize_and_determinize(parser: &GLRParser, mut combin
     prune_continuations_from_final_states(&mut combined_nwa);
     crate::debug!(3, "Pruned continuations from final states. NWA with {} states and {} transitions remaining.", combined_nwa.states.len(), combined_nwa.states.num_transitions());
     
-    // OPTIMIZATION: Use lightweight simplification before determinization.
-    // Full minimization is expensive here (1.32s in benchmark), and determinization 
-    // will merge equivalent states anyway, so heavy simplification has limited benefit.
-    combined_nwa.simplify_lightweight();
-    crate::debug!(3, "Simplified NWA (lightweight). {} states and {} transitions remaining.", combined_nwa.states.len(), combined_nwa.states.num_transitions());
+    // Full simplify() is actually needed here to reduce the massive combined NWA (1M+ states).
+    // Lightweight pruning left 144K states which caused worse performance downstream.
+    combined_nwa.simplify();
+    crate::debug!(3, "Simplified NWA. {} states and {} transitions remaining.", combined_nwa.states.len(), combined_nwa.states.num_transitions());
     
     let mut dwa = combined_nwa.determinize();
     crate::debug!(3, "Determinized NWA. {} states and {} transitions remaining.", dwa.states.len(), dwa.states.num_transitions());

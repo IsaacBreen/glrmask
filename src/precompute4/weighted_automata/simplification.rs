@@ -1178,7 +1178,7 @@ impl NWA {
     ///  - For each state and epsilon edge, merge multiple (to, w) by unioning weights per `to`.
     ///  - For each state, label, and destination, merge multiple (label, to, w) by unioning weights.
     /// Transitions with empty weight are removed.
-    fn compress_transitions(&mut self) -> bool {
+    pub fn compress_transitions(&mut self) -> bool {
         crate::debug!(7, "[NWA] Compressing transitions...");
         let mut changed = false;
 
@@ -1491,7 +1491,7 @@ impl NWA {
         self.body.start_states = new_start_states;
     }
 
-    fn prune_unreachable(&mut self) -> bool {
+    pub fn prune_unreachable(&mut self) -> bool {
         crate::debug!(7, "[NWA] Pruning unreachable states...");
         let n = self.states.len();
         if n == 0 {
@@ -1584,7 +1584,7 @@ impl NWA {
         true
     }
 
-    fn prune_dead_ends(&mut self) -> bool {
+    pub fn prune_dead_ends(&mut self) -> bool {
         crate::debug!(7, "[NWA] Pruning dead ends...");
         let n = self.states.len();
         if n == 0 {
