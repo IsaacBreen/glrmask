@@ -761,6 +761,74 @@ impl JSONConvertible for ExprGroups {
     }
 }
 
+#[derive(Debug, Default, Clone)]
+pub struct ExprStats {
+    pub nodes: usize,
+    pub u8seq: usize,
+    pub u8class: usize,
+    pub shared: usize,
+    pub quantifier: usize,
+    pub choice: usize,
+    pub seq: usize,
+    pub epsilon: usize,
+    pub string_trie: usize,
+    pub max_depth: usize,
+}
+
+impl std::fmt::Display for ExprStats {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Nodes: {}, Depth: {}, Seq: {}, Choice: {}, Quant: {}, Shared: {}, U8Seq: {}, U8Class: {}, Eps: {}, Trie: {}",
+            self.nodes, self.max_depth, self.seq, self.choice, self.quantifier, self.shared, self.u8seq, self.u8class, self.epsilon, self.string_trie)
+    }
+}
+
+impl ExprGroups {
+    pub fn get_stats(&self) -> ExprStats {
+        let mut stats = ExprStats::default();
+        let mut visited = HashSet::new();
+
+        for group in &self.groups {
+            let mut stack = vec![(&group.expr, 0)];
+            while let Some((expr, depth)) = stack.pop() {
+                stats.nodes += 1;
+                if depth > stats.max_depth {
+                    stats.max_depth = depth;
+                }
+                match expr {
+                    Expr::U8Seq(_) => stats.u8seq += 1,
+                    Expr::U8Class(_) => stats.u8class += 1,
+                    Expr::Shared(inner) => {
+                        stats.shared += 1;
+                        let ptr = Arc::as_ptr(inner) as usize;
+                        if visited.insert(ptr) {
+                            stack.push((inner, depth + 1));
+                        }
+                    }
+                    Expr::Quantifier(inner, _) => {
+                        stats.quantifier += 1;
+                        stack.push((inner, depth + 1));
+                    }
+                    Expr::Choice(children) => {
+                        stats.choice += 1;
+                        for c in children {
+                            stack.push((c, depth + 1));
+                        }
+                    }
+                    Expr::Seq(children) => {
+                        stats.seq += 1;
+                        for c in children {
+                            stack.push((c, depth + 1));
+                        }
+                    }
+                    Expr::Epsilon => stats.epsilon += 1,
+                    Expr::StringTrie(_) => stats.string_trie += 1,
+                }
+            }
+        }
+        stats
+    }
+}
+
 impl From<Expr> for ExprGroup {
     fn from(expr: Expr) -> Self {
         ExprGroup {
@@ -969,6 +1037,9 @@ fn print_memory_usage(label: &str) {
 impl ExprGroups {
     pub fn build(self) -> Regex {
         print_memory_usage("Start of Regex build");
+
+        let stats = self.get_stats();
+        crate::debug!(2, "Expr Stats: {}", stats);
 
         if std::env::var("BENCHMARK_REGEX_OPTIMIZATIONS").is_ok() {
             crate::debug!(0, "=== RUNNING REGEX OPTIMIZATION BENCHMARK ===");
