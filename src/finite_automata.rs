@@ -10,6 +10,7 @@ use std::fmt::{Debug, Display, Formatter};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use ahash::AHashMap;
+use crate::datastructures::compressed_state_set::{CompressedStateSet, SparseStateSet};
 
 
 pub type GroupID = usize;
@@ -23,214 +24,6 @@ pub struct NFAState {
     epsilon_transitions: Vec<usize>,
     finalizers: BTreeSet<GroupID>,
     non_greedy_finalizers: BTreeSet<GroupID>,
-}
-
-#[derive(Clone, Eq)]
-struct CompressedStateSet {
-    // Sorted by word index. (word_index, word_value)
-    words: Vec<(u32, u64)>,
-    hash: u64,
-}
-
-impl PartialEq for CompressedStateSet {
-    fn eq(&self, other: &Self) -> bool {
-        if self.hash != other.hash {
-            return false;
-        }
-        self.words == other.words
-    }
-}
-
-impl std::hash::Hash for CompressedStateSet {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.hash.hash(state);
-    }
-}
-
-impl CompressedStateSet {
-    #[inline]
-    fn new(_num_bits: usize) -> Self {
-        Self {
-            words: Vec::new(),
-            hash: 0,
-        }
-    }
-
-    #[inline]
-    #[inline]
-    fn from_sparse(sparse: &SparseStateSet, stats: &mut DFAConversionStats) -> Self {
-        // Optimization: Sort indices first, then build words.
-        // This avoids moving the larger (u32, u64) tuples during sort.
-        let start_alloc = std::time::Instant::now();
-        let mut indices = sparse.dirty_words.clone();
-        stats.time_allocating += start_alloc.elapsed();
-        stats.allocations_count += 1;
-        stats.allocated_bytes += (indices.capacity() * std::mem::size_of::<usize>()) as u64;
-
-        let start_sort = std::time::Instant::now();
-        indices.sort_unstable();
-        stats.time_sorting += start_sort.elapsed();
-
-        let start_alloc_words = std::time::Instant::now();
-        let mut words = Vec::with_capacity(indices.len());
-        stats.time_allocating += start_alloc_words.elapsed();
-        stats.allocations_count += 1;
-        stats.allocated_bytes += (words.capacity() * std::mem::size_of::<(u32, u64)>()) as u64;
-
-        for &idx in &indices {
-            words.push((idx as u32, sparse.dense.words[idx]));
-        }
-
-        let start_hash = std::time::Instant::now();
-        let mut hasher = ahash::AHasher::default();
-        // Optimization: Hash as raw bytes
-        unsafe {
-            let slice = std::slice::from_raw_parts(
-                words.as_ptr() as *const u8,
-                words.len() * std::mem::size_of::<(u32, u64)>()
-            );
-            hasher.write(slice);
-        }
-        let hash = hasher.finish();
-        stats.time_hashing += start_hash.elapsed();
-        
-        Self { words, hash }
-    }
-
-    #[inline]
-    fn reuse_from_sparse(sparse: &SparseStateSet, buffer: &mut Self, stats: &mut DFAConversionStats) {
-        buffer.words.clear();
-        
-        // We can't easily reuse a buffer for sorting indices without allocating,
-        // unless we pass one in. For now, let's just clone dirty_words which is small (Vec<usize>).
-        let start_alloc = std::time::Instant::now();
-        let mut indices = sparse.dirty_words.clone();
-        stats.time_allocating += start_alloc.elapsed();
-        stats.allocations_count += 1;
-        stats.allocated_bytes += (indices.capacity() * std::mem::size_of::<usize>()) as u64;
-
-        let start_sort = std::time::Instant::now();
-        indices.sort_unstable();
-        stats.time_sorting += start_sort.elapsed();
-
-        for &idx in &indices {
-            buffer.words.push((idx as u32, sparse.dense.words[idx]));
-        }
-        
-        use std::hash::Hasher;
-        let start_hash = std::time::Instant::now();
-        let mut hasher = ahash::AHasher::default();
-        // Optimization: Hash as raw bytes
-        unsafe {
-            let slice = std::slice::from_raw_parts(
-                buffer.words.as_ptr() as *const u8,
-                buffer.words.len() * std::mem::size_of::<(u32, u64)>()
-            );
-            hasher.write(slice);
-        }
-        buffer.hash = hasher.finish();
-        stats.time_hashing += start_hash.elapsed();
-    }
-
-    #[inline]
-    fn iter(&self) -> CompressedStateSetIter {
-        CompressedStateSetIter {
-            set: self,
-            idx: 0,
-            current_word: 0,
-            current_word_idx: 0,
-        }
-    }
-
-    #[inline]
-    fn len(&self) -> usize {
-        self.words.iter().map(|(_, w)| w.count_ones() as usize).sum()
-    }
-}
-
-struct CompressedStateSetIter<'a> {
-    set: &'a CompressedStateSet,
-    idx: usize,
-    current_word: u64,
-    current_word_idx: u32,
-}
-
-impl<'a> Iterator for CompressedStateSetIter<'a> {
-    type Item = usize;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            if self.current_word != 0 {
-                let trailing = self.current_word.trailing_zeros();
-                self.current_word &= !(1u64 << trailing);
-                return Some(self.current_word_idx as usize * 64 + trailing as usize);
-            }
-            if self.idx >= self.set.words.len() {
-                return None;
-            }
-            let (w_idx, w) = self.set.words[self.idx];
-            self.current_word = w;
-            self.current_word_idx = w_idx;
-            self.idx += 1;
-        }
-    }
-}
-
-struct SparseStateSet {
-    dense: DenseStateSet,
-    dirty_words: Vec<usize>,
-}
-
-#[derive(Clone)]
-struct DenseStateSet {
-    words: Vec<u64>,
-}
-
-impl DenseStateSet {
-    fn new(num_bits: usize) -> Self {
-        let num_words = (num_bits + 63) / 64;
-        Self {
-            words: vec![0; num_words],
-        }
-    }
-}
-
-impl SparseStateSet {
-    fn new(num_bits: usize) -> Self {
-        Self {
-            dense: DenseStateSet::new(num_bits),
-            dirty_words: Vec::new(),
-        }
-    }
-
-    #[inline(always)]
-    fn insert(&mut self, bit: usize) -> bool {
-        let word_idx = bit / 64;
-        let bit_mask = 1u64 << (bit % 64);
-        unsafe {
-            let word = self.dense.words.get_unchecked_mut(word_idx);
-            if (*word & bit_mask) == 0 {
-                if *word == 0 {
-                    self.dirty_words.push(word_idx);
-                }
-                *word |= bit_mask;
-                true
-            } else {
-                false
-            }
-        }
-    }
-
-    fn clear(&mut self) {
-        for &idx in &self.dirty_words {
-            self.dense.words[idx] = 0;
-        }
-        self.dirty_words.clear();
-    }
-
-    fn is_empty(&self) -> bool {
-        self.dirty_words.is_empty()
-    }
 }
 
 
@@ -2411,7 +2204,7 @@ impl NFA {
         stats.time_closure_bfs += start_bfs.elapsed();
 
         let start_compress = std::time::Instant::now();
-        let start_state_set = CompressedStateSet::from_sparse(&closure_set, &mut stats);
+        let start_state_set = CompressedStateSet::from_sparse(&closure_set);
         stats.time_compress_state_set += start_compress.elapsed();
         stats.total_compressed_sets += 1;
         stats.total_compressed_words += start_state_set.words.len() as u64;
@@ -2489,12 +2282,12 @@ impl NFA {
 
                 let start_compress_target = std::time::Instant::now();
                 if target_set.is_empty() {
-                    scratch_target.words.clear();
+                    scratch_target.words.clear(); // CompressedStateSet.words is pub now
                     let mut hasher = ahash::AHasher::default();
                     scratch_target.words.hash(&mut hasher);
                     scratch_target.hash = hasher.finish();
                 } else {
-                    CompressedStateSet::reuse_from_sparse(target_set, &mut scratch_target, &mut stats);
+                    CompressedStateSet::reuse_from_sparse(target_set, &mut scratch_target);
                 }
                 stats.time_compress_state_set += start_compress_target.elapsed();
                 stats.total_compressed_sets += 1;
@@ -2544,7 +2337,7 @@ impl NFA {
                 // Get/Create DFA state
                 let start_map = std::time::Instant::now();
                 let start_compress_closure = std::time::Instant::now();
-                CompressedStateSet::reuse_from_sparse(&closure_set, &mut scratch_closure, &mut stats);
+                CompressedStateSet::reuse_from_sparse(&closure_set, &mut scratch_closure);
                 stats.time_compress_state_set += start_compress_closure.elapsed();
                 stats.total_compressed_sets += 1;
                 stats.total_compressed_words += scratch_closure.words.len() as u64;
