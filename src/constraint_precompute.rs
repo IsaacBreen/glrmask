@@ -240,101 +240,101 @@ impl<'r> Precomputer1<'r> {
             }
         }
 
-        // // Get rid of all symbols and weights on edges and print it to show the topology.
-        // let mut nwa2 = NWA::new_empty();
-        // nwa2.body.start_states = vec![dwa.body.start_state];
-        // for _ in 0..dwa.states.len() {
-        //     nwa2.add_state();
-        // }
-        // let mut transitions: Vec<BTreeMap<NWAStateID, (Weight, usize)>> = vec![BTreeMap::new(); dwa.states.len()];
-        // for (src, s) in dwa.states.0.iter().enumerate() {
-        //     for (&label, &target) in &s.transitions {
-        //         let (w, count) = transitions[src].entry(target).or_insert_with(|| (Weight::zeros(), 0));
-        //         *w |= &s.trans_weights[&label];
-        //         *count += 1;
-        //     }
-        // }
-        // for (src, s) in dwa.states.0.iter().enumerate() {
-        //     for (&target, (w, count)) in &transitions[src] {
-        //         nwa2.add_transition(src, *count as i32, target, w.clone());
-        //     }
-        //     nwa2.states[src].final_weight = s.final_weight.clone();
-        // }
-        // println!("After removing symbols and weights on edges, NWA has {} states and {} transitions.", nwa2.states.len(), nwa2.states.num_transitions());
-        // if nwa2.states.len() < 50 && nwa2.states.num_transitions() < 100 {
-        //     println!("{}", nwa2);
-        // }
-        // nwa2.simplify();
-        // let mut dwa2 = nwa2.determinize();
-        // dwa2.simplify();
-        // println!("After removing symbols and weights on edges, DWA has {} states and {} transitions.", dwa2.states.len(), dwa2.states.num_transitions());
-        // if dwa2.states.len() < 50 && dwa2.states.num_transitions() < 100 {
-        //     println!("{}", dwa2);
-        // }
-        //
-        // // Find equivalent symbols in the DWA
-        // // Only consider tokenizer state transitions (label >= terminals_count)
-        // let mut labels = std::collections::HashSet::new();
-        // for state in &dwa.states.0 {
-        //     for &label in state.transitions.keys() {
-        //         if label >= self.terminals_count as Label {
-        //             labels.insert(label);
-        //         }
-        //     }
-        // }
-        //
-        // let mut signatures: Vec<(Vec<Option<(usize, Weight)>>, Vec<Label>)> = Vec::new();
-        // for label in labels {
-        //     let mut sig = Vec::with_capacity(dwa.states.len());
-        //     for state in &dwa.states.0 {
-        //         sig.push(state.get_transition(label).map(|(to, w)| (to, w.clone())));
-        //     }
-        //
-        //     let mut found = false;
-        //     for (existing_sig, collected_labels) in &mut signatures {
-        //         if existing_sig == &sig {
-        //             collected_labels.push(label);
-        //             found = true;
-        //             break;
-        //         }
-        //     }
-        //     if !found {
-        //         signatures.push((sig, vec![label]));
-        //     }
-        // }
-        //
-        // let mut stats: HashMap<usize, usize> = HashMap::new();
-        // for (_, collected_labels) in &signatures {
-        //     *stats.entry(collected_labels.len()).or_insert(0) += 1;
-        // }
-        //
-        // crate::debug!(3, "Equivalent tokenizer state symbols in DWA (stats): {:?}", stats);
-        // if stats.len() != 1 || stats.values().next() != Some(&1) {
-        //     crate::debug!(3, "Equivalence classes:");
-        //     for (sig_idx, (_, collected_labels)) in signatures.iter().enumerate() {
-        //         if collected_labels.len() > 1 {
-        //             let descriptions: Vec<String> = collected_labels
-        //                 .iter()
-        //                 .map(|&l| {
-        //                     if l >= self.terminals_count as Label {
-        //                         format!("TSID({})", l - self.terminals_count as Label)
-        //                     } else {
-        //                         format!("Terminal({})", l)
-        //                     }
-        //                 })
-        //                 .collect();
-        //             crate::debug!(
-        //                 3,
-        //                 "  Class {}: {} symbols: {:?}",
-        //                 sig_idx,
-        //                 collected_labels.len(),
-        //                 descriptions
-        //             );
-        //         }
-        //     }
-        //     assert_eq!(stats.len(), 1, "Expected only one class size (all unique)");
-        //     assert_eq!(stats.keys().next(), Some(&1), "Expected only one state per class (unique behavior)");
-        // }
+        // Get rid of all symbols and weights on edges and print it to show the topology.
+        let mut nwa2 = NWA::new_empty();
+        nwa2.body.start_states = vec![dwa.body.start_state];
+        for _ in 0..dwa.states.len() {
+            nwa2.add_state();
+        }
+        let mut transitions: Vec<BTreeMap<NWAStateID, (Weight, usize)>> = vec![BTreeMap::new(); dwa.states.len()];
+        for (src, s) in dwa.states.0.iter().enumerate() {
+            for (&label, &target) in &s.transitions {
+                let (w, count) = transitions[src].entry(target).or_insert_with(|| (Weight::zeros(), 0));
+                *w |= &s.trans_weights[&label];
+                *count += 1;
+            }
+        }
+        for (src, s) in dwa.states.0.iter().enumerate() {
+            for (&target, (w, count)) in &transitions[src] {
+                nwa2.add_transition(src, *count as i32, target, w.clone());
+            }
+            nwa2.states[src].final_weight = s.final_weight.clone();
+        }
+        println!("After removing symbols and weights on edges, NWA has {} states and {} transitions.", nwa2.states.len(), nwa2.states.num_transitions());
+        if nwa2.states.len() < 50 && nwa2.states.num_transitions() < 100 {
+            println!("{}", nwa2);
+        }
+        nwa2.simplify();
+        let mut dwa2 = nwa2.determinize();
+        dwa2.simplify();
+        println!("After removing symbols and weights on edges, DWA has {} states and {} transitions.", dwa2.states.len(), dwa2.states.num_transitions());
+        if dwa2.states.len() < 50 && dwa2.states.num_transitions() < 100 {
+            println!("{}", dwa2);
+        }
+
+        // Find equivalent symbols in the DWA
+        // Only consider tokenizer state transitions (label >= terminals_count)
+        let mut labels = std::collections::HashSet::new();
+        for state in &dwa.states.0 {
+            for &label in state.transitions.keys() {
+                if label >= self.terminals_count as Label {
+                    labels.insert(label);
+                }
+            }
+        }
+
+        let mut signatures: Vec<(Vec<Option<(usize, Weight)>>, Vec<Label>)> = Vec::new();
+        for label in labels {
+            let mut sig = Vec::with_capacity(dwa.states.len());
+            for state in &dwa.states.0 {
+                sig.push(state.get_transition(label).map(|(to, w)| (to, w.clone())));
+            }
+
+            let mut found = false;
+            for (existing_sig, collected_labels) in &mut signatures {
+                if existing_sig == &sig {
+                    collected_labels.push(label);
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                signatures.push((sig, vec![label]));
+            }
+        }
+
+        let mut stats: HashMap<usize, usize> = HashMap::new();
+        for (_, collected_labels) in &signatures {
+            *stats.entry(collected_labels.len()).or_insert(0) += 1;
+        }
+
+        crate::debug!(3, "Equivalent tokenizer state symbols in DWA (stats): {:?}", stats);
+        if stats.len() != 1 || stats.values().next() != Some(&1) {
+            crate::debug!(3, "Equivalence classes:");
+            for (sig_idx, (_, collected_labels)) in signatures.iter().enumerate() {
+                if collected_labels.len() > 1 {
+                    let descriptions: Vec<String> = collected_labels
+                        .iter()
+                        .map(|&l| {
+                            if l >= self.terminals_count as Label {
+                                format!("TSID({})", l - self.terminals_count as Label)
+                            } else {
+                                format!("Terminal({})", l)
+                            }
+                        })
+                        .collect();
+                    crate::debug!(
+                        3,
+                        "  Class {}: {} symbols: {:?}",
+                        sig_idx,
+                        collected_labels.len(),
+                        descriptions
+                    );
+                }
+            }
+            assert_eq!(stats.len(), 1, "Expected only one class size (all unique)");
+            assert_eq!(stats.keys().next(), Some(&1), "Expected only one state per class (unique behavior)");
+        }
 
         dwa
     }
