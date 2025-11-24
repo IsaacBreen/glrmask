@@ -11,7 +11,6 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use memory_stats::memory_stats;
 use ahash::AHashMap;
-use roaring::RoaringBitmap;
 
 
 pub type GroupID = usize;
@@ -27,9 +26,10 @@ pub struct NFAState {
     non_greedy_finalizers: BTreeSet<GroupID>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Eq)]
 struct CompressedStateSet {
-    bitmap: RoaringBitmap,
+    // Sorted by word index. (word_index, word_value)
+    words: Vec<(u32, u64)>,
     hash: u64,
 }
 
@@ -38,11 +38,9 @@ impl PartialEq for CompressedStateSet {
         if self.hash != other.hash {
             return false;
         }
-        self.bitmap == other.bitmap
+        self.words == other.words
     }
 }
-
-impl Eq for CompressedStateSet {}
 
 impl std::hash::Hash for CompressedStateSet {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
@@ -53,69 +51,146 @@ impl std::hash::Hash for CompressedStateSet {
 impl CompressedStateSet {
     #[inline]
     fn new(_num_bits: usize) -> Self {
-        let bitmap = RoaringBitmap::new();
-        let hash = Self::compute_hash(&bitmap);
         Self {
-            bitmap,
-            hash,
+            words: Vec::new(),
+            hash: 0,
         }
     }
 
     #[inline]
     fn from_sparse(sparse: &SparseStateSet) -> Self {
-        let bitmap = sparse.bitmap.clone();
-        let hash = Self::compute_hash(&bitmap);
-        Self { bitmap, hash }
+        let mut words = Vec::with_capacity(sparse.dirty_words.len());
+        Self::fill_words_from_sparse(sparse, &mut words);
+        let hash = Self::compute_hash(&words);
+        Self { words, hash }
     }
 
     #[inline]
     fn reuse_from_sparse(sparse: &SparseStateSet, buffer: &mut Self) {
-        // RoaringBitmap doesn't support easy reuse without allocation if content differs significantly,
-        // but cloning is optimized.
-        buffer.bitmap = sparse.bitmap.clone();
-        buffer.hash = Self::compute_hash(&buffer.bitmap);
+        buffer.words.clear();
+        Self::fill_words_from_sparse(sparse, &mut buffer.words);
+        buffer.hash = Self::compute_hash(&buffer.words);
     }
 
     #[inline]
-    fn compute_hash(bitmap: &RoaringBitmap) -> u64 {
+    fn fill_words_from_sparse(sparse: &SparseStateSet, words: &mut Vec<(u32, u64)>) {
+        let mut indices = sparse.dirty_words.clone();
+        indices.sort_unstable();
+
+        for &idx in &indices {
+            let w = sparse.dense.words[idx];
+            if w != 0 {
+                words.push((idx as u32, w));
+            }
+        }
+    }
+
+    #[inline]
+    fn compute_hash(words: &Vec<(u32, u64)>) -> u64 {
+        // Use ahash's fast hashing
         use std::hash::Hasher;
         let mut hasher = ahash::AHasher::default();
-        for bit in bitmap.iter() {
-            bit.hash(&mut hasher);
+        words.len().hash(&mut hasher);
+        for &(idx, w) in words {
+            idx.hash(&mut hasher);
+            w.hash(&mut hasher);
         }
         hasher.finish()
     }
 
     #[inline]
-    fn iter(&self) -> impl Iterator<Item = usize> + '_ {
-        self.bitmap.iter().map(|x| x as usize)
+    fn iter(&self) -> CompressedStateSetIter {
+        CompressedStateSetIter {
+            set: self,
+            idx: 0,
+            current_word: 0,
+            current_word_idx: 0,
+        }
     }
 
     #[inline]
     fn len(&self) -> usize {
-        self.bitmap.len() as usize
+        self.words.iter().map(|(_, w)| w.count_ones() as usize).sum()
+    }
+}
+
+struct CompressedStateSetIter<'a> {
+    set: &'a CompressedStateSet,
+    idx: usize,
+    current_word: u64,
+    current_word_idx: u32,
+}
+
+impl<'a> Iterator for CompressedStateSetIter<'a> {
+    type Item = usize;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if self.current_word != 0 {
+                let trailing = self.current_word.trailing_zeros();
+                self.current_word &= !(1u64 << trailing);
+                return Some(self.current_word_idx as usize * 64 + trailing as usize);
+            }
+            if self.idx >= self.set.words.len() {
+                return None;
+            }
+            let (w_idx, w) = self.set.words[self.idx];
+            self.current_word = w;
+            self.current_word_idx = w_idx;
+            self.idx += 1;
+        }
     }
 }
 
 struct SparseStateSet {
-    bitmap: RoaringBitmap,
+    dense: DenseStateSet,
+    dirty_words: Vec<usize>,
+}
+
+#[derive(Clone)]
+struct DenseStateSet {
+    words: Vec<u64>,
+}
+
+impl DenseStateSet {
+    fn new(num_bits: usize) -> Self {
+        let num_words = (num_bits + 63) / 64;
+        Self {
+            words: vec![0; num_words],
+        }
+    }
 }
 
 impl SparseStateSet {
-    fn new(_num_bits: usize) -> Self {
+    fn new(num_bits: usize) -> Self {
         Self {
-            bitmap: RoaringBitmap::new(),
+            dense: DenseStateSet::new(num_bits),
+            dirty_words: Vec::new(),
         }
     }
 
     fn insert(&mut self, bit: usize) -> bool {
-        self.bitmap.insert(bit as u32)
+        let word_idx = bit / 64;
+        let bit_mask = 1u64 << (bit % 64);
+        if (self.dense.words[word_idx] & bit_mask) == 0 {
+            if self.dense.words[word_idx] == 0 {
+                self.dirty_words.push(word_idx);
+            }
+            self.dense.words[word_idx] |= bit_mask;
+            true
+        } else {
+            false
+        }
     }
 
     fn clear(&mut self) {
-        self.bitmap.clear();
+        for &idx in &self.dirty_words {
+            self.dense.words[idx] = 0;
+        }
+        self.dirty_words.clear();
     }
 }
+
 
 struct CompactNFA {
     epsilon_offsets: Vec<u32>,
@@ -1990,9 +2065,9 @@ impl NFA {
                 let target_set = unsafe { transition_targets.get_unchecked(class_id) };
 
                 // Empty set check
-                if target_set.bitmap.is_empty() {
-                    scratch_target.bitmap.clear();
-                    scratch_target.hash = CompressedStateSet::compute_hash(&scratch_target.bitmap);
+                if target_set.dirty_words.is_empty() {
+                    scratch_target.words.clear();
+                    scratch_target.hash = CompressedStateSet::compute_hash(&scratch_target.words);
                 } else {
                     CompressedStateSet::reuse_from_sparse(target_set, &mut scratch_target);
                 }
@@ -2006,10 +2081,17 @@ impl NFA {
                     // TIMING: Bitset Iteration
                     let start_iter = std::time::Instant::now();
                     {
-                        for next_state in target_set.bitmap.iter() {
-                            let next_state = next_state as usize;
-                            if closure_set.insert(next_state) {
-                                stack.push(next_state);
+                        // Iterate using dirty_words for speed
+                        for &w_idx in &target_set.dirty_words {
+                            let mut w = target_set.dense.words[w_idx];
+                            while w != 0 {
+                                let t = w.trailing_zeros();
+                                w &= !(1u64 << t);
+                                let next_state = w_idx * 64 + t as usize;
+
+                                if closure_set.insert(next_state) {
+                                    stack.push(next_state);
+                                }
                             }
                         }
                     }
@@ -2047,11 +2129,16 @@ impl NFA {
                         let mut new_finalizers = BTreeSet::new();
                         let mut new_non_greedy_finalizers = BTreeSet::new();
                         // Sparse iteration for finalizers
-                        for state in closure_set.bitmap.iter() {
-                             let state = state as usize;
-                             new_finalizers.extend(self.states[state].finalizers.iter().cloned());
-                             new_non_greedy_finalizers
-                                 .extend(self.states[state].non_greedy_finalizers.iter().cloned());
+                        for &w_idx in &closure_set.dirty_words {
+                             let mut w = closure_set.dense.words[w_idx];
+                             while w != 0 {
+                                 let t = w.trailing_zeros();
+                                 w &= !(1u64 << t);
+                                 let state = w_idx * 64 + t as usize;
+                                 new_finalizers.extend(self.states[state].finalizers.iter().cloned());
+                                 new_non_greedy_finalizers
+                                     .extend(self.states[state].non_greedy_finalizers.iter().cloned());
+                             }
                         }
 
                         dfa_states.push(DFAState {
