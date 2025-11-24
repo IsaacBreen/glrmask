@@ -27,7 +27,7 @@ pub struct NFAState {
     non_greedy_finalizers: BTreeSet<GroupID>,
 }
 
-#[derive(Clone, Eq)]
+#[derive(Clone)]
 struct CompressedStateSet {
     bitmap: RoaringBitmap,
     hash: u64,
@@ -41,6 +41,8 @@ impl PartialEq for CompressedStateSet {
         self.bitmap == other.bitmap
     }
 }
+
+impl Eq for CompressedStateSet {}
 
 impl std::hash::Hash for CompressedStateSet {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
@@ -78,7 +80,9 @@ impl CompressedStateSet {
     fn compute_hash(bitmap: &RoaringBitmap) -> u64 {
         use std::hash::Hasher;
         let mut hasher = ahash::AHasher::default();
-        bitmap.hash(&mut hasher);
+        for bit in bitmap.iter() {
+            bit.hash(&mut hasher);
+        }
         hasher.finish()
     }
 
@@ -1320,7 +1324,7 @@ impl Expr {
         match self {
             Expr::Seq(exprs) => Expr::Seq(exprs.into_iter().map(|e| e.optimize_left_factor()).collect()),
             Expr::Quantifier(e, q) => Expr::Quantifier(Box::new(e.optimize_left_factor()), q),
-            Expr::Shared(e) => Expr::Shared(Arc::new(e.optimize_left_factor())),
+            Expr::Shared(e) => Expr::Shared(Arc::new(e.as_ref().clone().optimize_left_factor())),
             Expr::Choice(exprs) => {
                 // 1. Optimize children
                 let mut optimized_exprs: Vec<Expr> = exprs.into_iter().map(|e| e.optimize_left_factor()).collect();
@@ -1422,7 +1426,7 @@ impl Expr {
             },
             Expr::Seq(exprs) => Expr::Seq(exprs.into_iter().map(|e| e.optimize_trie_variant()).collect()),
             Expr::Quantifier(e, q) => Expr::Quantifier(Box::new(e.optimize_trie_variant()), q),
-            Expr::Shared(e) => Expr::Shared(Arc::new(e.optimize_trie_variant())),
+            Expr::Shared(e) => Expr::Shared(Arc::new(e.as_ref().clone().optimize_trie_variant())),
             x => x,
         }
     }
