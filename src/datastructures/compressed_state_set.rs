@@ -1,6 +1,5 @@
 use std::hash::{Hash, Hasher};
 use rustc_hash::FxHasher;
-use profiler_macro::time_it;
 use crate::datastructures::state_set::StateSet;
 use crate::json_serialization::{JSONConvertible, JSONNode};
 
@@ -262,7 +261,6 @@ pub struct CompressedStateSet {
 }
 
 impl PartialEq for CompressedStateSet {
-    #[time_it]
     fn eq(&self, other: &Self) -> bool {
         if self.hash != other.hash {
             return false;
@@ -272,7 +270,6 @@ impl PartialEq for CompressedStateSet {
 }
 
 impl Hash for CompressedStateSet {
-    #[time_it]
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.hash.hash(state);
     }
@@ -366,7 +363,6 @@ impl CompressedStateSet {
     }
 
     #[inline]
-    #[time_it]
     pub fn recompute_hash(&mut self) {
         let mut hasher = FxHasher::default();
         // Optimization: Hash as raw bytes for speed
@@ -381,7 +377,6 @@ impl CompressedStateSet {
     }
 
     #[inline]
-    #[time_it]
     pub fn iter(&self) -> CompressedStateSetIter {
         CompressedStateSetIter {
             set: self,
@@ -392,14 +387,12 @@ impl CompressedStateSet {
     }
 
     #[inline]
-    #[time_it]
     pub fn len(&self) -> usize {
         self.words.iter().map(|(_, w)| w.count_ones() as usize).sum()
     }
 }
 
 impl FromIterator<usize> for CompressedStateSet {
-    #[time_it]
     fn from_iter<T: IntoIterator<Item = usize>>(iter: T) -> Self {
         let mut set = CompressedStateSet::new();
         for i in iter {

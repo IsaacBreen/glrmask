@@ -1,5 +1,4 @@
 use std::hash::{Hash, Hasher};
-use profiler_macro::time_it;
 use crate::datastructures::state_set::StateSet;
 
 #[derive(Debug, Clone, Default)]
@@ -26,7 +25,6 @@ impl Hash for BitSet {
 }
 
 impl BitSet {
-    #[time_it]
     pub fn new(capacity_bits: usize) -> Self {
         let words = (capacity_bits + 63) / 64;
         Self {
@@ -36,7 +34,6 @@ impl BitSet {
         }
     }
 
-    #[time_it]
     pub fn len(&self) -> usize {
         self.data.iter().map(|&x| x.count_ones() as usize).sum()
     }
@@ -46,7 +43,6 @@ impl BitSet {
     }
 
     #[inline]
-    #[time_it]
     pub fn insert(&mut self, bit: usize) -> bool {
         if bit >= self.capacity_bits {
             return false;
@@ -65,7 +61,6 @@ impl BitSet {
     }
 
     #[inline]
-    #[time_it]
     pub fn contains(&self, bit: usize) -> bool {
         if bit >= self.capacity_bits {
             return false;
@@ -80,7 +75,6 @@ impl BitSet {
         self.dirty_words.clear();
     }
 
-    #[time_it]
     pub fn iter(&self) -> BitSetIter {
         BitSetIter {
             bitset: self,
@@ -134,7 +128,6 @@ pub struct BitSetIter<'a> {
 impl<'a> Iterator for BitSetIter<'a> {
     type Item = usize;
 
-    #[time_it]
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             if self.current_word != 0 {
