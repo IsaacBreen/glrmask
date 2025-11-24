@@ -1119,7 +1119,7 @@ impl ExprGroups {
         // --- Benchmark regex-automata's determinization ---
         let start_regex_automata = std::time::Instant::now();
         let ra_dfa_result = (|| -> Result<_, Box<dyn std::error::Error>> {
-            let mut ra_builder = regex_automata::util::nfa::Builder::new();
+            let mut ra_builder = regex_automata::nfa::thompson::Builder::new();
             let mut state_map = Vec::with_capacity(nfa.states.len());
             for _ in 0..nfa.states.len() {
                 state_map.push(ra_builder.add_state()?);
