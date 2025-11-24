@@ -475,6 +475,7 @@ pub enum Expr {
     Choice(Vec<Expr>),
     Seq(Vec<Expr>),
     Epsilon, // Explicit epsilon transition
+    StringTrie(Vec<Vec<u8>>), // Strategy C: Explicit Trie Variant
 }
 
 impl JSONConvertible for Expr {
@@ -511,6 +512,11 @@ impl JSONConvertible for Expr {
             }
             Expr::Epsilon => {
                 obj.insert("variant".to_string(), JSONNode::String("Epsilon".to_string()));
+            }
+            Expr::StringTrie(seqs) => {
+                obj.insert("variant".to_string(), JSONNode::String("StringTrie".to_string()));
+                // Re-use bytes serialization style for Vec<Vec<u8>> or generic array
+                obj.insert("strings".to_string(), seqs.to_json());
             }
         }
         JSONNode::Object(obj)
@@ -571,6 +577,12 @@ impl JSONConvertible for Expr {
                         Ok(Expr::Seq(exprs))
                     }
                     "Epsilon" => Ok(Expr::Epsilon),
+                    "StringTrie" => {
+                         let strings = obj.remove("strings")
+                            .ok_or_else(|| "Missing field strings for StringTrie".to_string())
+                            .and_then(Vec::<Vec<u8>>::from_json)?;
+                        Ok(Expr::StringTrie(strings))
+                    }
                     _ => Err(format!("Unknown variant {} for Expr", variant)),
                 }
             }
@@ -878,9 +890,44 @@ fn print_memory_usage(label: &str) {
 impl ExprGroups {
     pub fn build(self) -> Regex {
         print_memory_usage("Start of Regex build");
+
+        if std::env::var("BENCHMARK_REGEX_OPTIMIZATIONS").is_ok() {
+            crate::debug!(0, "=== RUNNING REGEX OPTIMIZATION BENCHMARK ===");
+            let warmup = self.clone();
+            let _ = warmup.build_nfa(false); // Warmup allocator
+
+            // 1. Baseline (Naive)
+            let baseline_start = std::time::Instant::now();
+            let baseline_nfa = self.clone().build_nfa(false);
+            let baseline_time = baseline_start.elapsed();
+            crate::debug!(0, "BASELINE: NFA Build: {:.2?}, States: {}", baseline_time, baseline_nfa.states.len());
+            
+            // 2. Strategy A: On-the-fly Trie
+            let strat_a_start = std::time::Instant::now();
+            let strat_a_nfa = self.clone().build_nfa(true);
+            let strat_a_time = strat_a_start.elapsed();
+            crate::debug!(0, "STRAT A (On-the-fly): NFA Build: {:.2?}, States: {}", strat_a_time, strat_a_nfa.states.len());
+
+            // 3. Strategy B: Left Factoring Pass
+            let strat_b_start = std::time::Instant::now();
+            let optimized_expr_b = self.clone().optimize_left_factor();
+            let strat_b_nfa = optimized_expr_b.build_nfa(false); // Optimization done in pass, so false
+            let strat_b_time = strat_b_start.elapsed();
+            crate::debug!(0, "STRAT B (Left-Factor): NFA Build: {:.2?}, States: {}", strat_b_time, strat_b_nfa.states.len());
+
+            // 4. Strategy C: Trie Variant Pass
+            let strat_c_start = std::time::Instant::now();
+            let optimized_expr_c = self.clone().optimize_trie_variant();
+            let strat_c_nfa = optimized_expr_c.build_nfa(false); // NFA builder handles variant explicitly
+            let strat_c_time = strat_c_start.elapsed();
+            crate::debug!(0, "STRAT C (Trie Variant): NFA Build: {:.2?}, States: {}", strat_c_time, strat_c_nfa.states.len());
+            crate::debug!(0, "============================================");
+        }
+
         crate::debug!(3, "Building NFA");
         let start = std::time::Instant::now();
-        let mut nfa = self.build_nfa();
+        // Default to Strategy A (On-the-fly) as it's the most robust local fix
+        let mut nfa = self.build_nfa(true); 
         crate::debug!(4, "Built NFA in {:.2?}", start.elapsed());
         print_memory_usage("After NFA build");
 
@@ -902,7 +949,7 @@ impl ExprGroups {
         Regex { dfa }
     }
 
-    fn build_nfa(self) -> NFA {
+    fn build_nfa(self, optimize_on_the_fly: bool) -> NFA {
         let mut nfa = NFA {
             states: vec![NFAState::new()],
             start_state: 0,
@@ -913,7 +960,7 @@ impl ExprGroups {
             let group_start_state = nfa.add_state();
             nfa.add_epsilon_transition(nfa.start_state, group_start_state);
             let end_state =
-                Expr::handle_expr_cached(expr, &mut nfa, group_start_state, &mut cache);
+                Expr::handle_expr_cached(expr, &mut nfa, group_start_state, &mut cache, optimize_on_the_fly);
             if is_non_greedy {
                 nfa.states[end_state].finalizers.insert(group);
                 nfa.states[end_state]
@@ -925,6 +972,54 @@ impl ExprGroups {
         }
 
         nfa
+    }
+}
+
+impl ExprGroups {
+    pub fn optimize_left_factor(self) -> Self {
+        ExprGroups {
+            groups: self.groups.into_iter().map(|g| ExprGroup {
+                expr: g.expr.optimize_left_factor(),
+                is_non_greedy: g.is_non_greedy,
+            }).collect()
+        }
+    }
+
+    pub fn optimize_trie_variant(self) -> Self {
+        ExprGroups {
+            groups: self.groups.into_iter().map(|g| ExprGroup {
+                expr: g.expr.optimize_trie_variant(),
+                is_non_greedy: g.is_non_greedy,
+            }).collect()
+        }
+    }
+}
+
+/// Helper for Strategy A & C: Build NFA directly from a list of byte sequences using a Trie
+fn build_trie_nfa(nfa: &mut NFA, start_state: usize, end_state: usize, sequences: Vec<Vec<u8>>) {
+    #[derive(Default)]
+    struct TrieNode {
+        children: BTreeMap<u8, TrieNode>,
+        is_end: bool,
+    }
+    let mut root = TrieNode::default();
+    for seq in sequences {
+        let mut node = &mut root;
+        for byte in seq {
+            node = node.children.entry(byte).or_default();
+        }
+        node.is_end = true;
+    }
+    let mut stack = vec![(&root, start_state)];
+    while let Some((node, current_state)) = stack.pop() {
+        if node.is_end {
+            nfa.add_epsilon_transition(current_state, end_state);
+        }
+        for (&byte, child) in &node.children {
+            let next_state = nfa.add_state();
+            nfa.add_transition(current_state, byte, next_state);
+            stack.push((child, next_state));
+        }
     }
 }
 
@@ -944,6 +1039,7 @@ impl Expr {
         nfa: &mut NFA,
         current_state: usize,
         cache: &mut HashMap<usize, (usize, usize)>,
+        optimize_on_the_fly: bool,
     ) -> usize {
         enum FrameState {
             Start,
@@ -991,6 +1087,12 @@ impl Expr {
                     Expr::Epsilon => {
                         return_value = Some(start_state);
                     }
+                    Expr::StringTrie(seqs) => {
+                        // Strategy C consumer
+                        let end_state = nfa.add_state();
+                        build_trie_nfa(nfa, start_state, end_state, seqs);
+                        return_value = Some(end_state);
+                    }
                     Expr::Shared(ref inner) => {
                         let key = Arc::as_ptr(inner) as usize;
                         if let Some(&(entry, end)) = cache.get(&key) {
@@ -1035,6 +1137,21 @@ impl Expr {
                     }
                     Expr::Choice(mut exprs) => {
                         let end_state = nfa.add_state();
+
+                        // Strategy A: On-the-fly Optimization
+                        if optimize_on_the_fly {
+                            let (literals, complex): (Vec<Expr>, Vec<Expr>) = exprs.into_iter()
+                                .partition(|e| matches!(e, Expr::U8Seq(_)));
+                            
+                            if !literals.is_empty() {
+                                let seqs: Vec<Vec<u8>> = literals.into_iter().map(|e| {
+                                    if let Expr::U8Seq(v) = e { v } else { unreachable!() }
+                                }).collect();
+                                build_trie_nfa(nfa, start_state, end_state, seqs);
+                            }
+                            exprs = complex;
+                        }
+
                         if exprs.is_empty() {
                             return_value = Some(end_state);
                         } else {
@@ -1192,9 +1309,122 @@ impl Expr {
         return_value.expect("Stack empty but no return value")
     }
 
-    fn handle_expr(expr: Expr, nfa: &mut NFA, mut current_state: usize) -> usize {
+    fn handle_expr(expr: Expr, nfa: &mut NFA, current_state: usize) -> usize {
         let mut cache: HashMap<usize, (usize, usize)> = HashMap::new();
-        Self::handle_expr_cached(expr, nfa, current_state, &mut cache)
+        Self::handle_expr_cached(expr, nfa, current_state, &mut cache, true)
+    }
+
+    // --- Optimizers ---
+
+    pub fn optimize_left_factor(self) -> Self {
+        match self {
+            Expr::Seq(exprs) => Expr::Seq(exprs.into_iter().map(|e| e.optimize_left_factor()).collect()),
+            Expr::Quantifier(e, q) => Expr::Quantifier(Box::new(e.optimize_left_factor()), q),
+            Expr::Shared(e) => Expr::Shared(Arc::new(e.optimize_left_factor())),
+            Expr::Choice(exprs) => {
+                // 1. Optimize children
+                let mut optimized_exprs: Vec<Expr> = exprs.into_iter().map(|e| e.optimize_left_factor()).collect();
+                
+                // 2. Flatten nested choices
+                let mut flat = Vec::new();
+                for e in optimized_exprs {
+                    if let Expr::Choice(kids) = e { flat.extend(kids); } else { flat.push(e); }
+                }
+                optimized_exprs = flat;
+
+                // 3. Group by Head
+                #[derive(PartialEq, Eq, Hash, Clone)]
+                enum Head { Byte(u8), Class(U8Set), Other }
+                
+                let mut groups: HashMap<Head, Vec<Option<Expr>>> = HashMap::new();
+                let mut others = Vec::new();
+
+                for e in optimized_exprs {
+                    // Simple head splitter
+                    let (head, tail) = match e {
+                        Expr::U8Seq(mut s) if !s.is_empty() => {
+                            let h = s.remove(0);
+                            let t = if s.is_empty() { None } else { Some(Expr::U8Seq(s)) };
+                            (Head::Byte(h), t)
+                        },
+                        Expr::U8Class(c) => (Head::Class(c), None),
+                        Expr::Seq(mut s) if !s.is_empty() => {
+                             // Only handle simple head of first elem if it's U8Seq/Class
+                             let first = s.remove(0);
+                             match first {
+                                 Expr::U8Seq(mut fs) if !fs.is_empty() => {
+                                     let h = fs.remove(0);
+                                     let t_seq = if fs.is_empty() { None } else { Some(Expr::U8Seq(fs)) };
+                                     let tail = match t_seq {
+                                         Some(t) => { s.insert(0, t); Some(Expr::Seq(s)) },
+                                         None => if s.is_empty() { None } else { Some(Expr::Seq(s)) }
+                                     };
+                                     (Head::Byte(h), tail)
+                                 },
+                                 _ => {
+                                     s.insert(0, first); // Put back
+                                     (Head::Other, Some(Expr::Seq(s)))
+                                 }
+                             }
+                        },
+                        x => (Head::Other, Some(x)),
+                    };
+                    
+                    if matches!(head, Head::Other) {
+                        others.push(tail.unwrap());
+                    } else {
+                        groups.entry(head).or_default().push(tail);
+                    }
+                }
+
+                // 4. Reconstruct
+                let mut final_choices = others;
+                for (head, tails) in groups {
+                    let tail_expr = if tails.is_empty() { Expr::Epsilon } 
+                    else { 
+                         let mut valid_tails: Vec<Expr> = tails.into_iter().flatten().collect();
+                         if valid_tails.is_empty() { Expr::Epsilon }
+                         else if valid_tails.len() == 1 { valid_tails.pop().unwrap() }
+                         else { Expr::Choice(valid_tails).optimize_left_factor() } // Recurse
+                    };
+
+                    let head_expr = match head {
+                        Head::Byte(b) => Expr::U8Seq(vec![b]),
+                        Head::Class(c) => Expr::U8Class(c),
+                        _ => unreachable!(),
+                    };
+                    
+                    if matches!(tail_expr, Expr::Epsilon) {
+                         final_choices.push(head_expr);
+                    } else {
+                         final_choices.push(Expr::Seq(vec![head_expr, tail_expr]));
+                    }
+                }
+                
+                if final_choices.len() == 1 { final_choices.pop().unwrap() } else { Expr::Choice(final_choices) }
+            }
+            x => x,
+        }
+    }
+
+    pub fn optimize_trie_variant(self) -> Self {
+        match self {
+            Expr::Choice(exprs) => {
+                let mut new_exprs = Vec::new();
+                let mut strings = Vec::new();
+                for e in exprs {
+                    let opt = e.optimize_trie_variant();
+                    if let Expr::U8Seq(s) = opt { strings.push(s); }
+                    else { new_exprs.push(opt); }
+                }
+                if !strings.is_empty() { new_exprs.push(Expr::StringTrie(strings)); }
+                if new_exprs.len() == 1 { new_exprs.pop().unwrap() } else { Expr::Choice(new_exprs) }
+            },
+            Expr::Seq(exprs) => Expr::Seq(exprs.into_iter().map(|e| e.optimize_trie_variant()).collect()),
+            Expr::Quantifier(e, q) => Expr::Quantifier(Box::new(e.optimize_trie_variant()), q),
+            Expr::Shared(e) => Expr::Shared(Arc::new(e.optimize_trie_variant())),
+            x => x,
+        }
     }
 }
 
