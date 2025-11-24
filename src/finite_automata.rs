@@ -1870,6 +1870,7 @@ impl Expr {
                     Head::Other => (Head::Other, Some(Expr::Quantifier(inner, QuantifierType::OneOrMore))),
                 }
             },
+            Expr::Shared(inner) => inner.as_ref().clone().split_head(),
             x => (Head::Other, Some(x)),
         }
     }
