@@ -476,7 +476,7 @@ impl<'r> Precomputer1<'r> {
                                 let mut reuse = None;
                                 if let Some(dsts) = self.pending_epsilons.get(&node) {
                                     for (dst, _) in dsts {
-                                        if self.live_tokens.get(dst).map_or(true, |live| live.is_disjoint(&Weight::all())) {
+                                        if *dst != node && self.live_tokens.get(dst).map_or(true, |live| live.is_disjoint(&Weight::all())) {
                                             reuse = Some(*dst);
                                             break;
                                         }
@@ -553,7 +553,7 @@ impl<'r> Precomputer1<'r> {
                                 if let Some(labels) = self.pending_transitions.get(&src_node) {
                                     if let Some(dsts) = labels.get(&(terminal_id.0 as Label)) {
                                         for (dst, _) in dsts {
-                                            if self.live_tokens.get(dst).map_or(true, |live| live.is_disjoint(&weight)) {
+                                            if *dst != src_node && self.live_tokens.get(dst).map_or(true, |live| live.is_disjoint(&weight)) {
                                                 reuse = Some(*dst);
                                                 break;
                                             }
@@ -598,7 +598,7 @@ impl<'r> Precomputer1<'r> {
                                 let mut reuse = None;
                                 if let Some(dsts) = self.pending_epsilons.get(&src_node) {
                                     for (dst, _) in dsts {
-                                        if self.live_tokens.get(dst).map_or(true, |live| live.is_disjoint(&Weight::all())) {
+                                        if *dst != src_node && self.live_tokens.get(dst).map_or(true, |live| live.is_disjoint(&Weight::all())) {
                                             reuse = Some(*dst);
                                             break;
                                         }
