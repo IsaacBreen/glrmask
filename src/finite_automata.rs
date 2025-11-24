@@ -10,6 +10,7 @@ use std::fmt::{Debug, Display, Formatter};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use ahash::AHashMap;
+use profiler_macro::time_it;
 use crate::datastructures::compressed_state_set::{CompressedStateSet, SparseStateSet};
 
 
@@ -2143,6 +2144,7 @@ impl NFA {
         dfa
     }
 
+    #[time_it]
     fn to_dfa_impl(self) -> DFA {
         let mut stats = DFAConversionStats::default();
         let start_time = std::time::Instant::now();
@@ -2427,6 +2429,7 @@ impl NFA {
 }
 
 impl DFA {
+    #[time_it]
     pub fn to_nfa(&self) -> NFA {
         let mut states = Vec::with_capacity(self.states.len());
 
