@@ -783,66 +783,41 @@ impl std::fmt::Display for ExprStats {
 }
 
 impl ExprGroups {
-    pub fn optimize_prefixes(self) -> (Option<Expr>, Vec<(usize, ExprGroup)>, Vec<(usize, ExprGroup)>) {
+    pub fn optimize_prefixes(self) -> (Option<Expr>, ExprGroups) {
         if self.groups.is_empty() {
-            return (None, Vec::new(), Vec::new());
+            return (None, self);
         }
 
         // Candidate prefix is the first element of the first group's expression
-        // We iterate to find a candidate that is shared by at least 2 groups?
-        // Or just take the first one and see who follows.
-        // If the first group is the exception, we might miss the common prefix of the rest.
-        // Heuristic: Check first few groups.
-        
-        let mut best_prefix: Option<Expr> = None;
-        let mut best_count = 0;
-        
-        // Check first 5 groups for candidates
-        for i in 0..self.groups.len().min(5) {
-            let candidate = match self.groups[i].expr.unwrap_shared() {
+        let candidate_prefix = match &self.groups[0].expr {
+            Expr::Seq(exprs) if !exprs.is_empty() => &exprs[0],
+            Expr::Shared(inner) => match inner.as_ref() {
                 Expr::Seq(exprs) if !exprs.is_empty() => &exprs[0],
-                _ => continue,
-            };
-            
-            let mut count = 0;
-            for group in &self.groups {
-                if group.expr.strip_prefix(candidate).is_some() {
-                    count += 1;
-                }
-            }
-            
-            if count > best_count {
-                best_count = count;
-                best_prefix = Some(candidate.clone());
+                _ => return (None, self),
+            },
+            _ => return (None, self),
+        };
+
+        // Check if all groups start with this prefix
+        for group in &self.groups {
+            if group.expr.strip_prefix(candidate_prefix).is_none() {
+                return (None, self);
             }
         }
-        
-        // If no significant sharing (e.g. < 2 groups), don't bother?
-        // Actually, even 2 groups is worth it if the prefix is complex.
-        if best_count < 2 || best_prefix.is_none() {
-            // Return all as "other", with indices
-            let others = self.groups.into_iter().enumerate().collect();
-            return (None, Vec::new(), others);
+
+        // Factor out the prefix
+        let prefix = candidate_prefix.clone();
+        let mut new_groups = Vec::with_capacity(self.groups.len());
+
+        for group in self.groups {
+            let remainder = group.expr.strip_prefix(&prefix).unwrap();
+            new_groups.push(ExprGroup {
+                expr: remainder,
+                is_non_greedy: group.is_non_greedy,
+            });
         }
-        
-        let prefix = best_prefix.unwrap();
-        let mut prefixed_groups = Vec::with_capacity(best_count);
-        let mut other_groups = Vec::with_capacity(self.groups.len() - best_count);
-        
-        for (idx, group) in self.groups.into_iter().enumerate() {
-            if let Some(remainder) = group.expr.strip_prefix(&prefix) {
-                prefixed_groups.push((idx, ExprGroup {
-                    expr: remainder,
-                    is_non_greedy: group.is_non_greedy,
-                }));
-            } else {
-                other_groups.push((idx, group));
-            }
-        }
-        
-        crate::debug!(1, "Optimized prefix for {}/{} groups", prefixed_groups.len(), prefixed_groups.len() + other_groups.len());
-        
-        (Some(prefix), prefixed_groups, other_groups)
+
+        (Some(prefix), ExprGroups { groups: new_groups })
     }
 
     pub fn get_stats(&self) -> ExprStats {
@@ -1185,7 +1160,7 @@ impl ExprGroups {
         let mut cache: HashMap<usize, (usize, usize)> = HashMap::new();
 
         // Optimization: Factor out common prefix (e.g. ignore pattern)
-        let (prefix, prefixed_groups, other_groups) = self.optimize_prefixes();
+        let (prefix, groups) = self.optimize_prefixes();
 
         let split_point = if let Some(prefix_expr) = prefix {
             crate::debug!(1, "Factored out common prefix in NFA construction");
@@ -1203,28 +1178,10 @@ impl ExprGroups {
             nfa.start_state
         };
 
-        // Handle prefixed groups (connect from split_point)
-        for (group_idx, ExprGroup { expr, is_non_greedy }) in prefixed_groups {
+        for (group_idx, ExprGroup { expr, is_non_greedy }) in groups.groups.into_iter().enumerate() {
             let group_start_state = nfa.add_state();
+            // Connect from the split point (end of prefix or start state)
             nfa.add_epsilon_transition(split_point, group_start_state);
-            
-            let end_state =
-                Expr::handle_expr_cached(expr, &mut nfa, group_start_state, &mut cache, optimize_on_the_fly);
-            
-            if is_non_greedy {
-                nfa.states[end_state].finalizers.insert(group_idx);
-                nfa.states[end_state]
-                    .non_greedy_finalizers
-                    .insert(group_idx);
-            } else {
-                nfa.states[end_state].finalizers.insert(group_idx);
-            }
-        }
-
-        // Handle other groups (connect from start_state)
-        for (group_idx, ExprGroup { expr, is_non_greedy }) in other_groups {
-            let group_start_state = nfa.add_state();
-            nfa.add_epsilon_transition(nfa.start_state, group_start_state);
             
             let end_state =
                 Expr::handle_expr_cached(expr, &mut nfa, group_start_state, &mut cache, optimize_on_the_fly);
@@ -1763,34 +1720,27 @@ impl Expr {
     }
 
     pub fn strip_prefix(&self, prefix: &Expr) -> Option<Expr> {
-        let self_inner = self.unwrap_shared();
-        let prefix_inner = prefix.unwrap_shared();
-
-        if self_inner == prefix_inner {
+        if self == prefix {
             return Some(Expr::Epsilon);
         }
 
-        match self_inner {
+        match self {
             Expr::Seq(exprs) => {
                 if exprs.is_empty() {
                     return None;
                 }
                 // Check if the first element matches the prefix
-                if exprs[0].unwrap_shared() == prefix_inner {
+                if &exprs[0] == prefix {
                     // Return the rest as a sequence
                     return Some(Expr::make_seq(exprs[1..].to_vec()));
                 }
+                // TODO: Handle case where prefix matches a prefix of exprs[0]?
+                // For now, we only handle exact match of the first element,
+                // which is sufficient for the "ignore . core" pattern.
                 None
             }
-            // If self was Shared, unwrap_shared handled it.
+            Expr::Shared(inner) => inner.strip_prefix(prefix),
             _ => None,
-        }
-    }
-
-    pub fn unwrap_shared(&self) -> &Expr {
-        match self {
-            Expr::Shared(inner) => inner.unwrap_shared(),
-            _ => self,
         }
     }
 
