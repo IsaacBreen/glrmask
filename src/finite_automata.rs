@@ -1464,151 +1464,260 @@ impl Expr {
     }
 
     pub fn optimize_left_factor(self) -> Self {
-        let mut cache = HashMap::new();
-        let mut visiting = HashSet::new();
-        self.optimize_left_factor_rec(&mut cache, &mut visiting, 0)
+        enum Task {
+            Expand(Expr),
+            Seq(usize),
+            Choice(usize),
+            Quantifier(QuantifierType),
+            Shared(usize, Arc<Expr>),
+        }
+
+        let mut stack = vec![Task::Expand(self)];
+        let mut values: Vec<Expr> = Vec::with_capacity(32);
+        let mut cache: HashMap<usize, Expr> = HashMap::new();
+        let mut visiting: HashSet<usize> = HashSet::new();
+
+        while let Some(task) = stack.pop() {
+            match task {
+                Task::Expand(expr) => match expr {
+                    Expr::Seq(sub) => {
+                        stack.push(Task::Seq(sub.len()));
+                        for x in sub.into_iter().rev() {
+                            stack.push(Task::Expand(x));
+                        }
+                    }
+                    Expr::Choice(sub) => {
+                        stack.push(Task::Choice(sub.len()));
+                        for x in sub.into_iter().rev() {
+                            stack.push(Task::Expand(x));
+                        }
+                    }
+                    Expr::Quantifier(sub, q) => {
+                        stack.push(Task::Quantifier(q));
+                        stack.push(Task::Expand(*sub));
+                    }
+                    Expr::Shared(inner) => {
+                        let ptr = Arc::as_ptr(&inner) as usize;
+                        if let Some(res) = cache.get(&ptr) {
+                            values.push(res.clone());
+                        } else if visiting.contains(&ptr) {
+                            values.push(Expr::Shared(inner));
+                        } else {
+                            visiting.insert(ptr);
+                            stack.push(Task::Shared(ptr, inner.clone()));
+                            stack.push(Task::Expand(inner.as_ref().clone()));
+                        }
+                    }
+                    leaf => values.push(leaf),
+                },
+                Task::Seq(len) => {
+                    let split_idx = values.len() - len;
+                    let children = values.split_off(split_idx);
+                    values.push(Expr::Seq(children));
+                }
+                Task::Quantifier(q) => {
+                    let child = values.pop().unwrap();
+                    values.push(Expr::Quantifier(Box::new(child), q));
+                }
+                Task::Shared(ptr, _) => {
+                    let child = values.pop().unwrap();
+                    visiting.remove(&ptr);
+                    let res = Expr::Shared(Arc::new(child));
+                    cache.insert(ptr, res.clone());
+                    values.push(res);
+                }
+                Task::Choice(len) => {
+                    let split_idx = values.len() - len;
+                    let children = values.split_off(split_idx);
+                    values.push(Self::apply_left_factoring_reduction(children));
+                }
+            }
+        }
+        values.pop().unwrap()
     }
 
-    fn optimize_left_factor_rec(self, cache: &mut HashMap<usize, Expr>, visiting: &mut HashSet<usize>, depth: usize) -> Self {
-        if depth > 256 {
-            return self;
-        }
-        match self {
-            Expr::Seq(exprs) => Expr::Seq(exprs.into_iter().map(|e| e.optimize_left_factor_rec(cache, visiting, depth + 1)).collect()),
-            Expr::Quantifier(e, q) => Expr::Quantifier(Box::new(e.optimize_left_factor_rec(cache, visiting, depth + 1)), q),
-            Expr::Shared(inner) => {
-                let ptr = Arc::as_ptr(&inner) as usize;
-                if let Some(res) = cache.get(&ptr) {
-                    return res.clone();
-                }
-                if visiting.contains(&ptr) {
-                    return Expr::Shared(inner);
-                }
-                visiting.insert(ptr);
-                let optimized_inner = inner.as_ref().clone().optimize_left_factor_rec(cache, visiting, depth + 1);
-                let result = Expr::Shared(Arc::new(optimized_inner));
-                visiting.remove(&ptr);
-                cache.insert(ptr, result.clone());
-                result
-            },
-            Expr::Choice(exprs) => {
-                // 1. Optimize children
-                let mut optimized_exprs: Vec<Expr> = exprs.into_iter().map(|e| e.optimize_left_factor_rec(cache, visiting, depth + 1)).collect();
-                
-                // 2. Flatten nested choices
-                let mut flat = Vec::new();
-                for e in optimized_exprs {
-                    if let Expr::Choice(kids) = e { flat.extend(kids); } else { flat.push(e); }
-                }
-                let mut exprs = flat;
-                
-                // 3. Iterative Left-Factoring (Peel Common Prefix)
-                let mut common_prefix = Vec::new();
-                
-                loop {
-                    if exprs.is_empty() { break; }
-                    
-                    let mut groups: HashMap<Head, Vec<Option<Expr>>> = HashMap::new();
-                    let mut others = Vec::new();
-
-                    for e in exprs {
-                        let (head, tail) = e.split_head();
-                        if matches!(head, Head::Other) {
-                            others.push(tail.unwrap());
-                        } else {
-                            groups.entry(head).or_default().push(tail);
-                        }
-                    }
-
-                    if others.is_empty() && groups.len() == 1 {
-                        // We have a common prefix for ALL options
-                        let (head, tails) = groups.into_iter().next().unwrap();
-                        let head_expr = match head {
-                            Head::Byte(b) => Expr::U8Seq(vec![b]),
-                            Head::Class(c) => Expr::U8Class(c),
-                            _ => unreachable!(),
-                        };
-                        common_prefix.push(head_expr);
-                        exprs = tails.into_iter().flatten().collect();
-                    } else {
-                        // Divergence point.
-                        let mut final_choices = others;
-                        for (head, tails) in groups {
-                            let tail_expr = if tails.is_empty() { Expr::Epsilon } 
-                            else { 
-                                 let mut valid_tails: Vec<Expr> = tails.into_iter().flatten().collect();
-                                 if valid_tails.is_empty() { Expr::Epsilon }
-                                 else if valid_tails.len() == 1 { valid_tails.pop().unwrap() }
-                                 else { Expr::Choice(valid_tails).optimize_left_factor_rec(cache, visiting, depth + 1) } // Recurse on diverged branches
-                            };
-
-                            let head_expr = match head {
-                                Head::Byte(b) => Expr::U8Seq(vec![b]),
-                                Head::Class(c) => Expr::U8Class(c),
-                                _ => unreachable!(),
-                            };
-                            
-                            if matches!(tail_expr, Expr::Epsilon) {
-                                final_choices.push(head_expr);
-                            } else {
-                                final_choices.push(Expr::Seq(vec![head_expr, tail_expr]));
-                            }
-                        }
-                        let branch_expr = if final_choices.len() == 1 { final_choices.pop().unwrap() } else { Expr::Choice(final_choices) };
-                        common_prefix.push(branch_expr);
-                        break; // Stop looping
-                    }
-                }
-                
-                if common_prefix.is_empty() { Expr::Epsilon }
-                else if common_prefix.len() == 1 { common_prefix.pop().unwrap() }
-                else { Expr::Seq(common_prefix) }
+    fn apply_left_factoring_reduction(exprs: Vec<Expr>) -> Expr {
+        // 2. Flatten nested choices
+        let mut flat = Vec::new();
+        for e in exprs {
+            if let Expr::Choice(kids) = e {
+                flat.extend(kids);
+            } else {
+                flat.push(e);
             }
-            x => x,
+        }
+        let mut exprs = flat;
+
+        // 3. Iterative Left-Factoring (Peel Common Prefix)
+        let mut common_prefix = Vec::new();
+
+        loop {
+            if exprs.is_empty() {
+                break;
+            }
+
+            let mut groups: HashMap<Head, Vec<Option<Expr>>> = HashMap::new();
+            let mut others = Vec::new();
+
+            for e in exprs {
+                let (head, tail) = e.split_head();
+                if matches!(head, Head::Other) {
+                    others.push(tail.unwrap());
+                } else {
+                    groups.entry(head).or_default().push(tail);
+                }
+            }
+
+            if others.is_empty() && groups.len() == 1 {
+                // We have a common prefix for ALL options
+                let (head, tails) = groups.into_iter().next().unwrap();
+                let head_expr = match head {
+                    Head::Byte(b) => Expr::U8Seq(vec![b]),
+                    Head::Class(c) => Expr::U8Class(c),
+                    _ => unreachable!(),
+                };
+                common_prefix.push(head_expr);
+                exprs = tails.into_iter().flatten().collect();
+            } else {
+                // Divergence point.
+                let mut final_choices = others;
+                for (head, tails) in groups {
+                    let tail_expr = if tails.is_empty() {
+                        Expr::Epsilon
+                    } else {
+                        let mut valid_tails: Vec<Expr> = tails.into_iter().flatten().collect();
+                        if valid_tails.is_empty() {
+                            Expr::Epsilon
+                        } else if valid_tails.len() == 1 {
+                            valid_tails.pop().unwrap()
+                        } else {
+                            // We can safely call optimize_left_factor recursively here because
+                            // we are processing tails of a peeled sequence, which decreases structure size.
+                            // The recursion depth here is bound by the length of the string/sequence being factored,
+                            // not the depth of the grammar graph.
+                            Expr::Choice(valid_tails).optimize_left_factor()
+                        }
+                    };
+
+                    let head_expr = match head {
+                        Head::Byte(b) => Expr::U8Seq(vec![b]),
+                        Head::Class(c) => Expr::U8Class(c),
+                        _ => unreachable!(),
+                    };
+
+                    if matches!(tail_expr, Expr::Epsilon) {
+                        final_choices.push(head_expr);
+                    } else {
+                        final_choices.push(Expr::Seq(vec![head_expr, tail_expr]));
+                    }
+                }
+                let branch_expr = if final_choices.len() == 1 {
+                    final_choices.pop().unwrap()
+                } else {
+                    Expr::Choice(final_choices)
+                };
+                common_prefix.push(branch_expr);
+                break; // Stop looping
+            }
+        }
+
+        if common_prefix.is_empty() {
+            Expr::Epsilon
+        } else if common_prefix.len() == 1 {
+            common_prefix.pop().unwrap()
+        } else {
+            Expr::Seq(common_prefix)
         }
     }
 
     pub fn optimize_trie_variant(self) -> Self {
-        let mut cache = HashMap::new();
-        let mut visiting = HashSet::new();
-        self.optimize_trie_variant_rec(&mut cache, &mut visiting, 0)
-    }
+        enum Task {
+            Expand(Expr),
+            Seq(usize),
+            Choice(usize),
+            Quantifier(QuantifierType),
+            Shared(usize, Arc<Expr>),
+        }
 
-    fn optimize_trie_variant_rec(self, cache: &mut HashMap<usize, Expr>, visiting: &mut HashSet<usize>, depth: usize) -> Self {
-        if depth > 256 {
-            return self;
+        let mut stack = vec![Task::Expand(self)];
+        let mut values: Vec<Expr> = Vec::with_capacity(32);
+        let mut cache: HashMap<usize, Expr> = HashMap::new();
+        let mut visiting: HashSet<usize> = HashSet::new();
+
+        while let Some(task) = stack.pop() {
+            match task {
+                Task::Expand(expr) => match expr {
+                    Expr::Seq(sub) => {
+                        stack.push(Task::Seq(sub.len()));
+                        for x in sub.into_iter().rev() {
+                            stack.push(Task::Expand(x));
+                        }
+                    }
+                    Expr::Choice(sub) => {
+                        stack.push(Task::Choice(sub.len()));
+                        for x in sub.into_iter().rev() {
+                            stack.push(Task::Expand(x));
+                        }
+                    }
+                    Expr::Quantifier(sub, q) => {
+                        stack.push(Task::Quantifier(q));
+                        stack.push(Task::Expand(*sub));
+                    }
+                    Expr::Shared(inner) => {
+                        let ptr = Arc::as_ptr(&inner) as usize;
+                        if let Some(res) = cache.get(&ptr) {
+                            values.push(res.clone());
+                        } else if visiting.contains(&ptr) {
+                            values.push(Expr::Shared(inner));
+                        } else {
+                            visiting.insert(ptr);
+                            stack.push(Task::Shared(ptr, inner.clone()));
+                            stack.push(Task::Expand(inner.as_ref().clone()));
+                        }
+                    }
+                    leaf => values.push(leaf),
+                },
+                Task::Seq(len) => {
+                    let split_idx = values.len() - len;
+                    let children = values.split_off(split_idx);
+                    values.push(Expr::Seq(children));
+                }
+                Task::Quantifier(q) => {
+                    let child = values.pop().unwrap();
+                    values.push(Expr::Quantifier(Box::new(child), q));
+                }
+                Task::Shared(ptr, _) => {
+                    let child = values.pop().unwrap();
+                    visiting.remove(&ptr);
+                    let res = Expr::Shared(Arc::new(child));
+                    cache.insert(ptr, res.clone());
+                    values.push(res);
+                }
+                Task::Choice(len) => {
+                    let split_idx = values.len() - len;
+                    let children = values.split_off(split_idx);
+                    // Apply Trie logic locally
+                    let mut new_exprs = Vec::new();
+                    let mut strings = Vec::new();
+                    for e in children {
+                        if let Some(s) = try_extract_literal(&e) {
+                            strings.push(s);
+                        } else {
+                            new_exprs.push(e);
+                        }
+                    }
+                    if !strings.is_empty() {
+                        new_exprs.push(Expr::StringTrie(strings));
+                    }
+                    if new_exprs.len() == 1 {
+                        values.push(new_exprs.pop().unwrap());
+                    } else {
+                        values.push(Expr::Choice(new_exprs));
+                    }
+                }
+            }
         }
-        match self {
-            Expr::Choice(exprs) => {
-                let mut new_exprs = Vec::new();
-                let mut strings = Vec::new();
-                for e in exprs {
-                    let opt = e.optimize_trie_variant_rec(cache, visiting, depth + 1);
-                    if let Some(s) = try_extract_literal(&opt) { strings.push(s); }
-                    else { new_exprs.push(opt); }
-                }
-                if !strings.is_empty() { new_exprs.push(Expr::StringTrie(strings)); }
-                if new_exprs.len() == 1 { new_exprs.pop().unwrap() } else { Expr::Choice(new_exprs) }
-            },
-            Expr::Seq(exprs) => Expr::Seq(exprs.into_iter().map(|e| e.optimize_trie_variant_rec(cache, visiting, depth + 1)).collect()),
-            Expr::Quantifier(e, q) => Expr::Quantifier(Box::new(e.optimize_trie_variant_rec(cache, visiting, depth + 1)), q),
-            Expr::Shared(inner) => {
-                let ptr = Arc::as_ptr(&inner) as usize;
-                if let Some(res) = cache.get(&ptr) {
-                    return res.clone();
-                }
-                if visiting.contains(&ptr) {
-                    return Expr::Shared(inner);
-                }
-                visiting.insert(ptr);
-                let optimized_inner = inner.as_ref().clone().optimize_trie_variant_rec(cache, visiting, depth + 1);
-                let result = Expr::Shared(Arc::new(optimized_inner));
-                visiting.remove(&ptr);
-                cache.insert(ptr, result.clone());
-                result
-            },
-            x => x,
-        }
+        values.pop().unwrap()
     }
 }
 
