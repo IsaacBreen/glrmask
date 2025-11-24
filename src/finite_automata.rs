@@ -1089,45 +1089,74 @@ impl ExprGroups {
 }
 
 /// Helper for Strategy A & C: Build NFA directly from a list of byte sequences using a Trie
-fn build_trie_nfa(nfa: &mut NFA, start_state: usize, end_state: usize, sequences: Vec<Vec<u8>>) {
-    #[derive(Default)]
-    struct TrieNode {
-        children: BTreeMap<u8, TrieNode>,
-        is_end: bool,
+fn build_trie_nfa(
+    nfa: &mut NFA,
+    start_state: usize,
+    end_state: usize,
+    mut sequences: Vec<Vec<u8>>,
+) {
+    if sequences.is_empty() {
+        return;
     }
-    let mut root = TrieNode::default();
-    for seq in sequences {
-        let mut node = &mut root;
-        for byte in seq {
-            node = node.children.entry(byte).or_default();
+    sequences.sort_unstable();
+
+    let mut path = vec![start_state];
+
+    for i in 0..sequences.len() {
+        let seq = &sequences[i];
+        let mut common = 0;
+
+        if i > 0 {
+            let prev = &sequences[i - 1];
+            let max_common = prev.len().min(seq.len());
+            while common < max_common && prev[common] == seq[common] {
+                common += 1;
+            }
         }
-        node.is_end = true;
-    }
-    let mut stack = vec![(&root, start_state)];
-    while let Some((node, current_state)) = stack.pop() {
-        if node.is_end {
-            nfa.add_epsilon_transition(current_state, end_state);
-        }
-        for (&byte, child) in &node.children {
+
+        // We share the path up to `common` length
+        path.truncate(common + 1);
+        let mut current_state = path[common];
+
+        // Create new path for the rest
+        for &byte in &seq[common..] {
             let next_state = nfa.add_state();
             nfa.add_transition(current_state, byte, next_state);
-            stack.push((child, next_state));
+            current_state = next_state;
+            path.push(current_state);
         }
+
+        nfa.add_epsilon_transition(current_state, end_state);
+    }
+}
+
+fn try_extract_literal_into(expr: &Expr, buf: &mut Vec<u8>) -> bool {
+    match expr {
+        Expr::U8Seq(bytes) => {
+            buf.extend_from_slice(bytes);
+            true
+        }
+        Expr::Seq(exprs) => {
+            let start_len = buf.len();
+            for e in exprs {
+                if !try_extract_literal_into(e, buf) {
+                    buf.truncate(start_len);
+                    return false;
+                }
+            }
+            true
+        }
+        _ => false,
     }
 }
 
 /// Helper to recursively extract a byte sequence from nested Seqs of U8Seqs
 fn try_extract_literal(expr: &Expr) -> Option<Vec<u8>> {
-    match expr {
-        Expr::U8Seq(bytes) => Some(bytes.clone()),
-        Expr::Seq(exprs) => {
-            let mut result = Vec::new();
-            for e in exprs {
-                result.extend(try_extract_literal(e)?);
-            }
-            Some(result)
-        },
-        _ => None
+    let mut buf = Vec::new();
+    if try_extract_literal_into(expr, &mut buf) {
+        Some(buf)
+    } else {
+        None
     }
 }
 
@@ -1248,16 +1277,22 @@ impl Expr {
 
                         // Strategy A: On-the-fly Optimization
                         if optimize_on_the_fly {
-                            let (literals, complex): (Vec<Expr>, Vec<Expr>) = exprs.into_iter()
-                                .partition(|e| try_extract_literal(e).is_some());
-                            
-                            if !literals.is_empty() {
-                                let seqs: Vec<Vec<u8>> = literals.into_iter().map(|e| {
-                                    try_extract_literal(&e).unwrap()
-                                }).collect();
-                                build_trie_nfa(nfa, start_state, end_state, seqs);
+                            let mut literal_seqs = Vec::new();
+                            let mut complex_exprs = Vec::new();
+
+                            for e in exprs {
+                                let mut buf = Vec::new();
+                                if try_extract_literal_into(&e, &mut buf) {
+                                    literal_seqs.push(buf);
+                                } else {
+                                    complex_exprs.push(e);
+                                }
                             }
-                            exprs = complex;
+
+                            if !literal_seqs.is_empty() {
+                                build_trie_nfa(nfa, start_state, end_state, literal_seqs);
+                            }
+                            exprs = complex_exprs;
                         }
 
                         if exprs.is_empty() {
