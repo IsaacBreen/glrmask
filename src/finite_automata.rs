@@ -1692,6 +1692,99 @@ impl Expr {
 #[derive(PartialEq, Eq, Hash, Clone)]
 enum Head { Class(U8Set), Other }
 
+#[derive(Debug, Default)]
+struct DFAConversionStats {
+    total_time: std::time::Duration,
+    class_computation_time: std::time::Duration,
+    remapped_transitions_time: std::time::Duration,
+    dfa_metadata_time: std::time::Duration,
+
+    dfa_states_created: usize,
+    max_subset_size: usize,
+    total_subset_size: u64,
+    max_worklist_len: usize,
+
+    time_collect_transitions: std::time::Duration,
+    time_process_inputs: std::time::Duration,
+    time_bitset_iteration: std::time::Duration,
+    time_closure_bfs: std::time::Duration,
+    time_map_lookup_insert: std::time::Duration,
+    time_finalizer_computation: std::time::Duration,
+    time_compress_state_set: std::time::Duration,
+
+    global_map_lookups: u64,
+    global_map_hits: u64,
+    local_cache_hits: u64,
+    local_cache_misses: u64,
+
+    total_closure_pushes: u64,
+    total_epsilon_edges_traversed: u64,
+
+    total_compressed_sets: u64,
+    total_compressed_words: u64,
+
+    // Granular Stats
+    time_hashing: std::time::Duration,
+    time_map_insert: std::time::Duration,
+    time_map_get: std::time::Duration,
+    time_sorting: std::time::Duration,
+    time_allocating: std::time::Duration,
+    
+    allocations_count: u64,
+    allocated_bytes: u64,
+}
+
+impl std::fmt::Display for DFAConversionStats {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let avg_subset_size = if self.dfa_states_created > 0 {
+            self.total_subset_size as f64 / self.dfa_states_created as f64
+        } else { 0.0 };
+        let global_map_misses = self.global_map_lookups - self.global_map_hits;
+        let time_remainder = self.time_process_inputs.saturating_sub(self.time_bitset_iteration).saturating_sub(self.time_closure_bfs).saturating_sub(self.time_map_lookup_insert).saturating_sub(self.time_finalizer_computation).saturating_sub(self.time_compress_state_set);
+
+        writeln!(f, "--- DFA Conversion Stats ---")?;
+        writeln!(f, "Total time: {:.2?}", self.total_time)?;
+        writeln!(f, "  - Input Equivalence Classes: {:.2?}", self.class_computation_time)?;
+        writeln!(f, "  - Remap NFA transitions:     {:.2?}", self.remapped_transitions_time)?;
+        writeln!(f, "  - Main Loop:                 {:.2?}", self.time_collect_transitions + self.time_process_inputs)?;
+        writeln!(f, "  - DFA Metadata:              {:.2?}", self.dfa_metadata_time)?;
+        
+        writeln!(f, "\nDFA size:")?;
+        writeln!(f, "  - States created: {}", self.dfa_states_created)?;
+        writeln!(f, "  - Max NFA subset size: {}", self.max_subset_size)?;
+        writeln!(f, "  - Avg NFA subset size: {:.2}", avg_subset_size)?;
+
+        writeln!(f, "\nMain Loop Timings:")?;
+        writeln!(f, "  - Collect Transitions: {:.2?}", self.time_collect_transitions)?;
+        writeln!(f, "  - Process Inputs Loop: {:.2?}", self.time_process_inputs)?;
+        writeln!(f, "    - Closure BFS:       {:.2?} ({} pushes, {} edges)", self.time_closure_bfs, self.total_closure_pushes, self.total_epsilon_edges_traversed)?;
+        writeln!(f, "    - Map Lookup/Insert: {:.2?}", self.time_map_lookup_insert)?;
+        writeln!(f, "    - Finalizer Comp:    {:.2?}", self.time_finalizer_computation)?;
+        writeln!(f, "    - BitSet Iteration:  {:.2?}", self.time_bitset_iteration)?;
+        writeln!(f, "    - Compress StateSet: {:.2?}", self.time_compress_state_set)?;
+        writeln!(f, "      - Sorting:         {:.2?}", self.time_sorting)?;
+        writeln!(f, "      - Hashing:         {:.2?}", self.time_hashing)?;
+        writeln!(f, "    - Remainder:         {:.2?}", time_remainder)?;
+
+        writeln!(f, "\nDetailed Map Stats:")?;
+        writeln!(f, "  - Map Get Time:      {:.2?}", self.time_map_get)?;
+        writeln!(f, "  - Map Insert Time:   {:.2?}", self.time_map_insert)?;
+
+        writeln!(f, "\nMemory Stats (Approx):")?;
+        writeln!(f, "  - Allocations:       {}", self.allocations_count)?;
+        writeln!(f, "  - Allocated Bytes:   {}", self.allocated_bytes)?;
+        writeln!(f, "  - Time Allocating:   {:.2?}", self.time_allocating)?;
+
+        writeln!(f, "\nCache and Map Performance:")?;
+        writeln!(f, "  - Global Map Lookups: {} ({} hits, {} misses, {:.2}% hit rate)", self.global_map_lookups, self.global_map_hits, global_map_misses, if self.global_map_lookups > 0 { (self.global_map_hits as f64 * 100.0) / self.global_map_lookups as f64 } else { 0.0 })?;
+        writeln!(f, "  - Local Cache Lookups: {} ({} hits, {} misses, {:.2}% hit rate)", self.local_cache_hits + self.local_cache_misses, self.local_cache_hits, self.local_cache_misses, if (self.local_cache_hits + self.local_cache_misses) > 0 { (self.local_cache_hits as f64 * 100.0) / (self.local_cache_hits + self.local_cache_misses) as f64 } else { 0.0 })?;
+        writeln!(f, "  - Max worklist length: {}", self.max_worklist_len)?;
+
+        writeln!(f, "\nData Structure Stats:")?;
+        write!(f, "  - Avg words per CompressedStateSet: {:.2}", if self.total_compressed_sets > 0 { self.total_compressed_words as f64 / self.total_compressed_sets as f64 } else { 0.0 } )
+    }
+}
+
 impl NFA {
     pub fn add_state(&mut self) -> usize {
         let new_index = self.states.len();
@@ -2042,32 +2135,37 @@ impl NFA {
     }
 
     pub fn to_dfa(self) -> DFA {
-        self.to_dfa_impl()
+        crate::profiler::reset();
+        let dfa = self.to_dfa_impl();
+        crate::profiler::print_summary();
+
+        // let nfa = dfa.to_nfa();
+        // let start = std::time::Instant::now();
+        // let _ = nfa.to_dfa_impl();
+        // crate::debug!(2, "Deterministic NFA -> DFA benchmark: {:.2?}", start.elapsed());
+        dfa
     }
 
+    #[time_it]
     fn to_dfa_impl(self) -> DFA {
-        use rayon::prelude::*;
+        let mut stats = DFAConversionStats::default();
+        let start_time = std::time::Instant::now();
         let mut dfa_states: Vec<DFAState> = Vec::with_capacity(120_000);
         // Use FxHashMap for faster hashing
         use rustc_hash::FxHashMap;
         let mut dfa_state_map: FxHashMap<ActiveStateSet, usize> = FxHashMap::default();
         dfa_state_map.reserve(120_000);
-
-        // We also need a way to look up the CompressedStateSet by ID during the parallel phase.
-        // dfa_states[id] stores DFAState, which doesn't have the set.
-        let mut state_sets: Vec<CompressedStateSet> = Vec::with_capacity(120_000);
-
-        // Use integer IDs for worklist to be more lightweight
-        let mut worklist: Vec<usize> = Vec::with_capacity(2048);
+        let mut worklist: Vec<ActiveStateSet> = Vec::with_capacity(2048);
 
         // Compute Input Equivalence Classes
         let start_classes = std::time::Instant::now();
         let (class_map, num_classes, class_members) = crate::time!("compute_equivalence_classes", self.compute_equivalence_classes());
-        let (class_map, num_classes, class_members) = self.compute_equivalence_classes();
-        crate::debug!(4, "Computed {} input equivalence classes", num_classes);
+        stats.class_computation_time = start_classes.elapsed();
+        crate::debug!(4, "Computed {} input equivalence classes in {:.2?}", num_classes, stats.class_computation_time);
 
+        let start_remap = std::time::Instant::now();
         // Pre-process NFA transitions to use class IDs
-        let remapped_transitions = {
+        let remapped_transitions = crate::time!("remap_transitions", {
             let mut remapped_transitions: Vec<Vec<(U8Set, usize)>> = Vec::with_capacity(self.states.len());
             for state in &self.states {
                 let mut trans = Vec::with_capacity(state.transitions.len());
@@ -2081,7 +2179,8 @@ impl NFA {
                 remapped_transitions.push(trans);
             }
             remapped_transitions
-        };
+        });
+        stats.remapped_transitions_time = start_remap.elapsed();
 
         // Shared buffers
         let num_nfa_states = self.states.len();
@@ -2094,33 +2193,46 @@ impl NFA {
         // Compute start state closure
         stack.push(self.start_state);
         closure_set.insert(self.start_state);
+        stats.total_closure_pushes += 1;
 
-        {
+        let start_bfs = std::time::Instant::now();
+        crate::time!("initial_closure_bfs", {
             while let Some(u) = stack.pop() {
                 let start = compact_nfa.epsilon_offsets[u] as usize;
                 let end = compact_nfa.epsilon_offsets[u + 1] as usize;
+                stats.total_epsilon_edges_traversed += (end - start) as u64;
                 for &v in &compact_nfa.epsilon_targets[start..end] {
                     let v = v as usize;
                     if closure_set.insert(v) {
                         stack.push(v);
+                        stats.total_closure_pushes += 1;
                     }
                 }
             }
-        }
+        });
+        stats.time_closure_bfs += start_bfs.elapsed();
 
-        let start_state_set = CompressedStateSet::from_sparse(&closure_set);
+        let start_compress = std::time::Instant::now();
+        let start_state_set = crate::time!("compress_state_set", CompressedStateSet::from_sparse(&closure_set));
+        stats.time_compress_state_set += start_compress.elapsed();
+        stats.total_compressed_sets += 1;
+        stats.total_compressed_words += start_state_set.words.len() as u64;
 
         dfa_state_map.insert(start_state_set.clone(), 0);
-        state_sets.push(start_state_set.clone());
-        worklist.push(0);
+        worklist.push(start_state_set.clone());
+        stats.max_worklist_len = stats.max_worklist_len.max(worklist.len());
 
-        let finalizers = {
+        let start_finalizers = std::time::Instant::now();
+        let (finalizers, non_greedy_finalizers) = crate::time!("compute_finalizers", {
             let mut finalizers = DenseStateSet::empty();
+            let mut non_greedy_finalizers = DenseStateSet::empty();
             for state in start_state_set.iter() {
                 finalizers.union_with(&self.states[state].finalizers);
+                non_greedy_finalizers.union_with(&self.states[state].non_greedy_finalizers);
             }
-            finalizers
-        };
+            (finalizers, non_greedy_finalizers)
+        });
+        stats.time_finalizer_computation += start_finalizers.elapsed();
 
         dfa_states.push(DFAState {
             transitions: CharTransitions::new(),
@@ -2129,151 +2241,168 @@ impl NFA {
             group_id_to_u8set: BTreeMap::new(),
         });
 
-        // Parallel BFS Loop
+        // Reusable structures
+        let mut transition_targets: Vec<SparseStateSet> = (0..num_classes).map(|_| SparseStateSet::new(num_nfa_states)).collect();
+        let mut used_classes: Vec<usize> = Vec::with_capacity(num_classes);
+        let mut seen_class = vec![false; num_classes];
+        let mut scratch_closure = CompressedStateSet::new();
+        let mut sort_scratch: Vec<usize> = Vec::with_capacity(1024);
+
         let mut next_log_threshold = 20_000;
-        
-        enum TransResult {
-            Known(u8, usize),
-            New(u8, CompressedStateSet, DenseStateSet),
-        }
-
-        struct ThreadLocalState {
-            closure_set: SparseStateSet,
-            stack: Vec<usize>,
-            scratch_closure: CompressedStateSet,
-            sort_scratch: Vec<usize>,
-            transition_targets: Vec<SparseStateSet>,
-            used_classes: Vec<usize>,
-            seen_class: Vec<bool>,
-        }
-
-        while !worklist.is_empty() {
+        while let Some(current_set) = worklist.pop() {
+            stats.max_worklist_len = stats.max_worklist_len.max(worklist.len() + 1);
+            let current_subset_len = current_set.len();
+            stats.max_subset_size = stats.max_subset_size.max(current_subset_len);
+            stats.total_subset_size += current_subset_len as u64;
             if dfa_states.len() >= next_log_threshold {
-                crate::debug!(6, "DFA progress: {} states, worklist {}", dfa_states.len(), worklist.len());
+                crate::debug!(6, "DFA progress: {} states, worklist {}, subset size {} (max {}), elapsed {:.2?}", dfa_states.len(), worklist.len(), current_subset_len, stats.max_subset_size, start_time.elapsed());
                 next_log_threshold += 20_000;
             }
 
-            let results: Vec<(usize, Vec<TransResult>)> = worklist.par_iter()
-                .map_init(
-                    || ThreadLocalState {
-                        closure_set: SparseStateSet::new(num_nfa_states),
-                        stack: Vec::with_capacity(64),
-                        scratch_closure: CompressedStateSet::new(),
-                        sort_scratch: Vec::with_capacity(64),
-                        transition_targets: (0..num_classes).map(|_| SparseStateSet::new(num_nfa_states)).collect(),
-                        used_classes: Vec::with_capacity(num_classes),
-                        seen_class: vec![false; num_classes],
-                    },
-                    |tls, &source_id| {
-                        let current_set = &state_sets[source_id];
+            let start_map_get = std::time::Instant::now();
+            let current_dfa_state = *dfa_state_map
+                .get(&current_set)
+                .expect("DFA state set not found in map");
+            stats.time_map_get += start_map_get.elapsed();
 
-                        // Collect Transitions
-                        for state in current_set.iter() {
-                            for (class_set, next_state) in unsafe { remapped_transitions.get_unchecked(state) } {
-                                for class_id in class_set.iter() {
-                                    let idx = class_id as usize;
-                                    unsafe {
-                                        if !*tls.seen_class.get_unchecked(idx) {
-                                            *tls.seen_class.get_unchecked_mut(idx) = true;
-                                            tls.used_classes.push(idx);
-                                        }
-                                        tls.transition_targets.get_unchecked_mut(idx).insert(*next_state);
-                                    }
+            // 1. Populate transition_targets for all inputs (COLLECT PHASE)
+            let start_collect = std::time::Instant::now();
+            crate::time!("collect_transitions", {
+                for state in current_set.iter() {
+                    for (class_set, next_state) in unsafe { remapped_transitions.get_unchecked(state) } {
+                        for class_id in class_set.iter() {
+                            let idx = class_id as usize;
+                            unsafe {
+                                if !*seen_class.get_unchecked(idx) {
+                                    *seen_class.get_unchecked_mut(idx) = true;
+                                    used_classes.push(idx); 
                                 }
+                                transition_targets.get_unchecked_mut(idx).insert(*next_state);
                             }
                         }
-
-                        let mut transitions = Vec::with_capacity(tls.used_classes.len() * 2);
-                        
-                        // Process Inputs
-                        for &class_id in &tls.used_classes {
-                            let target_set = unsafe { tls.transition_targets.get_unchecked(class_id) };
-                            tls.closure_set.clear();
-                            
-                            for &w_idx in &target_set.dirty_words {
-                                let mut w = target_set.dense.words[w_idx];
-                                while w != 0 {
-                                    let t = w.trailing_zeros();
-                                    w &= !(1u64 << t);
-                                    let next_state = w_idx * 64 + t as usize;
-                                    if tls.closure_set.insert(next_state) {
-                                        tls.stack.push(next_state);
-                                    }
-                                }
-                            }
-
-                            while let Some(u) = tls.stack.pop() {
-                                let start_offs = unsafe { *compact_nfa.epsilon_offsets.get_unchecked(u) } as usize;
-                                let end_offs = unsafe { *compact_nfa.epsilon_offsets.get_unchecked(u + 1) } as usize;
-                                for i in start_offs..end_offs {
-                                    let v = unsafe { *compact_nfa.epsilon_targets.get_unchecked(i) } as usize;
-                                    if tls.closure_set.insert(v) {
-                                        tls.stack.push(v);
-                                    }
-                                }
-                            }
-
-                            CompressedStateSet::reuse_from_sparse(&tls.closure_set, &mut tls.scratch_closure, &mut tls.sort_scratch);
-                            
-                            // Try to find if we've seen this state before.
-                            // NOTE: dfa_state_map is read-only in this parallel section.
-                            // New states discovered in this batch won't be in dfa_state_map yet,
-                            // but will be deduplicated in the serial phase.
-                            if let Some(&id) = dfa_state_map.get(&tls.scratch_closure) {
-                                for &b in &class_members[class_id] {
-                                    transitions.push(TransResult::Known(b, id));
-                                }
-                            } else {
-                                let mut finalizers = DenseStateSet::empty();
-                                for state in tls.scratch_closure.iter() {
-                                    finalizers.union_with(&self.states[state].finalizers);
-                                }
-                                for &b in &class_members[class_id] {
-                                    transitions.push(TransResult::New(b, tls.scratch_closure.clone(), finalizers.clone()));
-                                }
-                            }
-                        }
-
-                        for &idx in &tls.used_classes {
-                            tls.seen_class[idx] = false;
-                            tls.transition_targets[idx].clear();
-                        }
-                        tls.used_classes.clear();
-
-                        (source_id, transitions)
                     }
-                ).collect();
+                }
+            });
+            stats.time_collect_transitions += start_collect.elapsed();
 
-            worklist.clear();
+            // 2. Process inputs (PROCESS PHASE)
+            let start_process = std::time::Instant::now();
             
-            for (source_id, trans_list) in results {
-                let mut dfa_transitions = Vec::with_capacity(trans_list.len());
-                for item in trans_list {
-                    let (u8_val, target_id) = match item {
-                        TransResult::Known(u, id) => (u, id),
-                        TransResult::New(u, set, fin) => {
-                            if let Some(&id) = dfa_state_map.get(&set) {
-                                (u, id)
-                            } else {
-                                let new_id = dfa_states.len();
-                                dfa_state_map.insert(set.clone(), new_id);
-                                state_sets.push(set);
+            let mut dfa_transitions_vec: Vec<(u8, usize)> = Vec::with_capacity(used_classes.len() * 2);
+            
+            crate::time!("process_inputs", {
+                for &class_id in &used_classes {
+                    let target_set = unsafe { transition_targets.get_unchecked(class_id) };
+                    
+                    closure_set.clear();
+                    
+                    // Bitset iteration
+                    let start_iter = std::time::Instant::now();
+                    crate::time!("bitset_iteration", {
+                        for &w_idx in &target_set.dirty_words {
+                            let mut w = target_set.dense.words[w_idx];
+                            while w != 0 {
+                                let t = w.trailing_zeros();
+                                w &= !(1u64 << t);
+                                let next_state = w_idx * 64 + t as usize;
+                                if closure_set.insert(next_state) {
+                                    stack.push(next_state);
+                                    stats.total_closure_pushes += 1;
+                                }
+                            }
+                        }
+                    });
+                    stats.time_bitset_iteration += start_iter.elapsed();
+
+                    // BFS Closure
+                    let start_bfs = std::time::Instant::now();
+                    crate::time!("closure_bfs", {
+                        while let Some(u) = stack.pop() {
+                            let start_offs = unsafe { *compact_nfa.epsilon_offsets.get_unchecked(u) } as usize;
+                            let end_offs = unsafe { *compact_nfa.epsilon_offsets.get_unchecked(u + 1) } as usize;
+                            stats.total_epsilon_edges_traversed += (end_offs - start_offs) as u64;
+                            
+                            for i in start_offs..end_offs {
+                                let v = unsafe { *compact_nfa.epsilon_targets.get_unchecked(i) } as usize;
+                                if closure_set.insert(v) {
+                                    stack.push(v);
+                                    stats.total_closure_pushes += 1;
+                                }
+                            }
+                        }
+                    });
+                    stats.time_closure_bfs += start_bfs.elapsed();
+
+                    // Compress state set
+                    let start_compress = std::time::Instant::now();
+                    crate::time!("compress_state_set", CompressedStateSet::reuse_from_sparse(&closure_set, &mut scratch_closure, &mut sort_scratch));
+                    stats.time_compress_state_set += start_compress.elapsed();
+                    stats.total_compressed_sets += 1;
+                    stats.total_compressed_words += scratch_closure.words.len() as u64;
+
+                    // Map lookup/insert
+                    stats.global_map_lookups += 1;
+                    let start_map = std::time::Instant::now();
+                    let next_state_idx = crate::time!("map_lookup_insert", {
+                        match dfa_state_map.entry(scratch_closure.clone()) {
+                            std::collections::hash_map::Entry::Occupied(e) => {
+                                stats.time_map_get += start_map.elapsed();
+                                stats.global_map_hits += 1;
+                                *e.get()
+                            }
+                            std::collections::hash_map::Entry::Vacant(e) => {
+                                stats.time_map_get += start_map.elapsed();
+                                let new_state_index = dfa_states.len();
+                                
+                                let start_insert = std::time::Instant::now();
+                                let key = e.key().clone();
+                                e.insert(new_state_index);
+                                stats.time_map_insert += start_insert.elapsed();
+                                
+                                worklist.push(key.clone());
+                                stats.max_worklist_len = stats.max_worklist_len.max(worklist.len());
+
+                                let start_finalizers = std::time::Instant::now();
+                                let (new_finalizers, new_non_greedy_finalizers) = crate::time!("compute_finalizers", {
+                                    let mut new_finalizers = DenseStateSet::empty();
+                                    let mut new_non_greedy_finalizers = DenseStateSet::empty();
+                                    for state in key.iter() {
+                                        new_finalizers.union_with(&self.states[state].finalizers);
+                                        new_non_greedy_finalizers.union_with(&self.states[state].non_greedy_finalizers);
+                                    }
+                                    (new_finalizers, new_non_greedy_finalizers)
+                                });
+                                stats.time_finalizer_computation += start_finalizers.elapsed();
+
                                 dfa_states.push(DFAState {
                                     transitions: CharTransitions::new(),
-                                    finalizers: fin,
+                                    finalizers: new_finalizers,
                                     possible_future_group_ids: BTreeSet::new(),
                                     group_id_to_u8set: BTreeMap::new(),
                                 });
-                                worklist.push(new_id);
-                                (u, new_id)
+
+                                new_state_index
                             }
                         }
-                    };
-                    dfa_transitions.push((u8_val, target_id));
+                    });
+                    stats.time_map_lookup_insert += start_map.elapsed();
+
+                    for &b in &class_members[class_id] {
+                        dfa_transitions_vec.push((b, next_state_idx));
+                    }
                 }
-                dfa_transitions.sort_unstable_by_key(|k| k.0);
-                dfa_states[source_id].transitions = CharTransitions::from_sorted_entries(dfa_transitions);
+            });
+            stats.time_process_inputs += start_process.elapsed();
+
+            // Bulk insert transitions
+            dfa_transitions_vec.sort_unstable_by_key(|k| k.0);
+            dfa_states[current_dfa_state].transitions = CharTransitions::from_sorted_entries(dfa_transitions_vec);
+
+            for &idx in &used_classes {
+                 seen_class[idx] = false;
+                 transition_targets[idx].clear();
             }
+            used_classes.clear();
         }
 
         let mut dfa = DFA {
@@ -2288,7 +2417,14 @@ impl NFA {
             }
         }
 
-        dfa.recompute_metadata();
+        let meta_start = std::time::Instant::now();
+        crate::time!("recompute_metadata", dfa.recompute_metadata());
+        stats.dfa_metadata_time = meta_start.elapsed();
+        
+        stats.total_time = start_time.elapsed();
+        stats.dfa_states_created = dfa.states.len();
+
+        crate::debug!(2, "{}", stats);
 
         dfa
     }
