@@ -2339,9 +2339,11 @@ impl NFA {
     }
 
     pub fn to_dfa(self) -> DFA {
+        crate::profiler::reset();
         let dfa = self.to_dfa_impl();
 
         let nfa = dfa.to_nfa();
+        crate::profiler::print_summary();
         let start = std::time::Instant::now();
         let _ = nfa.to_dfa_impl();
         crate::debug!(2, "Deterministic NFA -> DFA benchmark: {:.2?}", start.elapsed());
