@@ -1106,13 +1106,18 @@ impl ExprGroups {
         // Benchmark against standard regex crate
         crate::debug!(2, "Building regex");
         let pattern = self.groups.iter().map(|g| g.expr.to_benchmark_string()).collect::<Vec<_>>().join("|");
-        println!("Regex pattern: {}", pattern);
         crate::debug!(3, "Regex pattern built");
         let start_regex = std::time::Instant::now();
         // Note: This requires the 'regex' crate to be in Cargo.toml
         let _ = ::regex::bytes::Regex::new(&pattern);
         crate::debug!(3, "Regex built");
         let regex_duration = start_regex.elapsed();
+
+        let start_regex_automata = std::time::Instant::now();
+        // Note: This requires the 'regex-automata' crate to be in Cargo.toml
+        let _ = ::regex_automata::dfa::dense::DFA::new(&pattern);
+        crate::debug!(3, "regex-automata DFA built");
+        let regex_automata_duration = start_regex_automata.elapsed();
 
         let start_total = std::time::Instant::now();
         let stats = self.get_stats();
@@ -1141,8 +1146,9 @@ impl ExprGroups {
 
         let our_duration = start_total.elapsed();
         crate::debug!(1, "BENCHMARK RESULT -- Pattern len: {}", pattern.len());
-        crate::debug!(1, "  regex crate: {:.2?}", regex_duration);
-        crate::debug!(1, "  this crate:  {:.2?}", our_duration);
+        crate::debug!(1, "  regex crate:          {:.2?}", regex_duration);
+        crate::debug!(1, "  regex-automata crate: {:.2?}", regex_automata_duration);
+        crate::debug!(1, "  this crate:           {:.2?}", our_duration);
 
         Regex { dfa }
     }
