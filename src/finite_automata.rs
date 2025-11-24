@@ -1104,10 +1104,13 @@ impl Expr {
 impl ExprGroups {
     pub fn build(self) -> Regex {
         // Benchmark against standard regex crate
+        crate::debug!(2, "Building regex");
         let pattern = self.groups.iter().map(|g| g.expr.to_benchmark_string()).collect::<Vec<_>>().join("|");
+        crate::debug!(3, "Regex pattern built");
         let start_regex = std::time::Instant::now();
         // Note: This requires the 'regex' crate to be in Cargo.toml
-        let _ = ::regex::bytes::Regex::new(&pattern); 
+        let _ = ::regex::bytes::Regex::new(&pattern);
+        crate::debug!(3, "Regex built");
         let regex_duration = start_regex.elapsed();
 
         let start_total = std::time::Instant::now();
