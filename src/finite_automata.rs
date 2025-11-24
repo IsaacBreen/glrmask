@@ -73,7 +73,10 @@ impl CompressedStateSet {
 
     #[inline]
     fn fill_words_from_sparse(sparse: &SparseStateSet, words: &mut Vec<(u32, u64)>) {
-        for idx in sparse.dirty_words.iter() {
+        let mut indices = sparse.dirty_words.clone();
+        indices.sort_unstable();
+
+        for &idx in &indices {
             let w = sparse.dense.words[idx];
             if w != 0 {
                 words.push((idx as u32, w));
@@ -140,7 +143,7 @@ impl<'a> Iterator for CompressedStateSetIter<'a> {
 
 struct SparseStateSet {
     dense: DenseStateSet,
-    dirty_words: BitSet,
+    dirty_words: Vec<usize>,
 }
 
 #[derive(Clone)]
@@ -161,7 +164,7 @@ impl SparseStateSet {
     fn new(num_bits: usize) -> Self {
         Self {
             dense: DenseStateSet::new(num_bits),
-            dirty_words: BitSet::new((num_bits + 63) / 64),
+            dirty_words: Vec::new(),
         }
     }
 
@@ -170,7 +173,7 @@ impl SparseStateSet {
         let bit_mask = 1u64 << (bit % 64);
         if (self.dense.words[word_idx] & bit_mask) == 0 {
             if self.dense.words[word_idx] == 0 {
-                self.dirty_words.insert(word_idx);
+                self.dirty_words.push(word_idx);
             }
             self.dense.words[word_idx] |= bit_mask;
             true
@@ -180,7 +183,7 @@ impl SparseStateSet {
     }
 
     fn clear(&mut self) {
-        for idx in self.dirty_words.iter() {
+        for &idx in &self.dirty_words {
             self.dense.words[idx] = 0;
         }
         self.dirty_words.clear();
@@ -2449,7 +2452,7 @@ impl NFA {
                     let start_iter = std::time::Instant::now();
                     {
                         // Iterate using dirty_words for speed
-                        for w_idx in target_set.dirty_words.iter() {
+                        for &w_idx in &target_set.dirty_words {
                             let mut w = target_set.dense.words[w_idx];
                             while w != 0 {
                                 let t = w.trailing_zeros();
@@ -2507,7 +2510,7 @@ impl NFA {
                         let mut new_finalizers = BTreeSet::new();
                         let mut new_non_greedy_finalizers = BTreeSet::new();
                         // Sparse iteration for finalizers
-                        for w_idx in closure_set.dirty_words.iter() {
+                        for &w_idx in &closure_set.dirty_words {
                              let mut w = closure_set.dense.words[w_idx];
                              while w != 0 {
                                  let t = w.trailing_zeros();
