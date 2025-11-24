@@ -783,6 +783,43 @@ impl std::fmt::Display for ExprStats {
 }
 
 impl ExprGroups {
+    pub fn optimize_prefixes(self) -> (Option<Expr>, ExprGroups) {
+        if self.groups.is_empty() {
+            return (None, self);
+        }
+
+        // Candidate prefix is the first element of the first group's expression
+        let candidate_prefix = match &self.groups[0].expr {
+            Expr::Seq(exprs) if !exprs.is_empty() => &exprs[0],
+            Expr::Shared(inner) => match inner.as_ref() {
+                Expr::Seq(exprs) if !exprs.is_empty() => &exprs[0],
+                _ => return (None, self),
+            },
+            _ => return (None, self),
+        };
+
+        // Check if all groups start with this prefix
+        for group in &self.groups {
+            if group.expr.strip_prefix(candidate_prefix).is_none() {
+                return (None, self);
+            }
+        }
+
+        // Factor out the prefix
+        let prefix = candidate_prefix.clone();
+        let mut new_groups = Vec::with_capacity(self.groups.len());
+
+        for group in self.groups {
+            let remainder = group.expr.strip_prefix(&prefix).unwrap();
+            new_groups.push(ExprGroup {
+                expr: remainder,
+                is_non_greedy: group.is_non_greedy,
+            });
+        }
+
+        (Some(prefix), ExprGroups { groups: new_groups })
+    }
+
     pub fn get_stats(&self) -> ExprStats {
         let mut stats = ExprStats::default();
         let mut visited = HashSet::new();
@@ -1121,18 +1158,41 @@ impl ExprGroups {
         };
 
         let mut cache: HashMap<usize, (usize, usize)> = HashMap::new();
-        for (group, ExprGroup { expr, is_non_greedy }) in self.groups.into_iter().enumerate() {
+
+        // Optimization: Factor out common prefix (e.g. ignore pattern)
+        let (prefix, groups) = self.optimize_prefixes();
+
+        let split_point = if let Some(prefix_expr) = prefix {
+            crate::debug!(1, "Factored out common prefix in NFA construction");
+            // Build the prefix NFA from start_state
+            let start_state = nfa.start_state;
+            let prefix_end = Expr::handle_expr_cached(
+                prefix_expr,
+                &mut nfa,
+                start_state,
+                &mut cache,
+                optimize_on_the_fly,
+            );
+            prefix_end
+        } else {
+            nfa.start_state
+        };
+
+        for (group_idx, ExprGroup { expr, is_non_greedy }) in groups.groups.into_iter().enumerate() {
             let group_start_state = nfa.add_state();
-            nfa.add_epsilon_transition(nfa.start_state, group_start_state);
+            // Connect from the split point (end of prefix or start state)
+            nfa.add_epsilon_transition(split_point, group_start_state);
+            
             let end_state =
                 Expr::handle_expr_cached(expr, &mut nfa, group_start_state, &mut cache, optimize_on_the_fly);
+            
             if is_non_greedy {
-                nfa.states[end_state].finalizers.insert(group);
+                nfa.states[end_state].finalizers.insert(group_idx);
                 nfa.states[end_state]
                     .non_greedy_finalizers
-                    .insert(group);
+                    .insert(group_idx);
             } else {
-                nfa.states[end_state].finalizers.insert(group);
+                nfa.states[end_state].finalizers.insert(group_idx);
             }
         }
 
@@ -1659,7 +1719,32 @@ impl Expr {
         values.pop().unwrap()
     }
 
-    fn make_seq(exprs: Vec<Expr>) -> Expr {
+    pub fn strip_prefix(&self, prefix: &Expr) -> Option<Expr> {
+        if self == prefix {
+            return Some(Expr::Epsilon);
+        }
+
+        match self {
+            Expr::Seq(exprs) => {
+                if exprs.is_empty() {
+                    return None;
+                }
+                // Check if the first element matches the prefix
+                if &exprs[0] == prefix {
+                    // Return the rest as a sequence
+                    return Some(Expr::make_seq(exprs[1..].to_vec()));
+                }
+                // TODO: Handle case where prefix matches a prefix of exprs[0]?
+                // For now, we only handle exact match of the first element,
+                // which is sufficient for the "ignore . core" pattern.
+                None
+            }
+            Expr::Shared(inner) => inner.strip_prefix(prefix),
+            _ => None,
+        }
+    }
+
+    pub fn make_seq(exprs: Vec<Expr>) -> Expr {
         let mut flat = Vec::with_capacity(exprs.len());
         for e in exprs {
             if let Expr::Seq(subs) = e {
