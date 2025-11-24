@@ -347,7 +347,6 @@ impl CompressedStateSet {
         }
     }
 
-    #[time_it]
     pub fn contains(&self, bit: usize) -> bool {
         let word_idx = (bit >> 6) as u32;
         let mask = 1u64 << (bit & 0x3F);
