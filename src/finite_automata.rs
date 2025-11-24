@@ -1482,16 +1482,32 @@ impl Expr {
                         // but split_head is internal heuristic. 
                         // Correct approach: if Other, return original 'self' in tail? 
                         // For simplicity in this patch, we treat Other as a barrier.
+                        // But for simplicity in this patch, we treat Other as a barrier.
                         reconstructed.extend(s);
                         (Head::Other, Some(Expr::make_seq(reconstructed)))
                     },
                     Head::Class(c) => {
                         let tail = match first_tail {
-                            Some(t) => { s.insert(0, t); Some(Expr::Seq(s)) },
-                            None => if s.is_empty() { None } else { Some(Expr::Seq(s)) }
+                            Some(t) => { s.insert(0, t); Some(Self::make_seq(s)) },
+                            None => if s.is_empty() { None } else { Some(Self::make_seq(s)) }
                         };
                         (Head::Class(c), tail)
                     }
+                }
+            },
+            Expr::Quantifier(inner, QuantifierType::OneOrMore) => {
+                // Rep1(A) -> A . Rep(A)
+                let (head, tail_opt) = inner.as_ref().clone().split_head();
+                match head {
+                    Head::Class(c) => {
+                        let rep_a = Expr::Quantifier(inner, QuantifierType::ZeroOrMore);
+                        let tail = match tail_opt {
+                            Some(t) => Some(Self::make_seq(vec![t, rep_a])),
+                            None => Some(rep_a)
+                        };
+                        (Head::Class(c), tail)
+                    }
+                    Head::Other => (Head::Other, Some(Expr::Quantifier(inner, QuantifierType::OneOrMore))),
                 }
             },
             x => (Head::Other, Some(x)),
@@ -1587,6 +1603,16 @@ impl Expr {
             return Expr::Epsilon;
         }
         
+        // Normalize: U8Class(size 1) -> U8Seq
+        for e in &mut flat {
+            if let Expr::U8Class(ref set) = e {
+                if set.len() == 1 {
+                    let b = set.iter().next().unwrap();
+                    *e = Expr::U8Seq(vec![b]);
+                }
+            }
+        }
+
         let mut merged = Vec::with_capacity(flat.len());
         for e in flat {
             if let Expr::U8Seq(mut curr) = e {
@@ -1719,11 +1745,26 @@ impl Expr {
 
         final_choices.extend(others);
 
-        // Clean up: sort again to ensure deterministic output
-        final_choices.sort();
-
-        if final_choices.len() == 1 {
-            final_choices.pop().unwrap()
+        // Merge U8Class and single-byte U8Seq alternatives
+        let mut classes = U8Set::none();
+        let mut complex = Vec::with_capacity(final_choices.len());
+        
+        for e in final_choices {
+            match e {
+                Expr::U8Class(c) => classes.update(&c),
+                Expr::U8Seq(ref s) if s.len() == 1 => { classes.insert(s[0]); },
+                _ => complex.push(e),
+            }
+        }
+        
+        if !classes.is_empty() {
+            complex.push(Expr::U8Class(classes));
+        }
+        
+        complex.sort();
+        
+        if complex.len() == 1 {
+            complex.pop().unwrap()
         } else {
             Expr::Choice(final_choices)
         }
