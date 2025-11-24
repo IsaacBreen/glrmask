@@ -3,6 +3,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use rayon::prelude::*;
+
 use kdam::{tqdm, BarExt};
 
 use crate::constraint::LLMTokenBV;
@@ -245,25 +247,51 @@ fn can_derive(parent: &Signature, child_index: &SignatureIndex) -> Option<Vec<We
 }
 
 fn specialize_dwa_relative(parent_dwa: &DWA, mapping: &[Weight]) -> DWA {
-    let mut specialized_dwa = parent_dwa.clone();
-    let mut cache: HashMap<Weight, SimpleBitset> = HashMap::new();
-    let mut map_weight = |w: &Weight| -> Weight {
-        if let Some(cw) = cache.get(w) { return cw.clone(); }
-        let mut new_w = Weight::zeros();
-        for bit in w.iter_up_to(mapping.len()) {
-            if let Some(target_w) = mapping.get(bit) { new_w |= target_w; }
+    // We construct the new states in parallel to avoid cloning the whole structure
+    // and to speed up the weight mapping.
+    let new_states_vec: Vec<crate::precompute4::weighted_automata::dwa::DWAState> = parent_dwa.states.0.par_iter().map_with(HashMap::<Weight, Weight>::new(), |cache, state| {
+        let mut map_weight = |w: &Weight| -> Weight {
+            if let Some(cw) = cache.get(w) { return cw.clone(); }
+            let mut new_w = Weight::zeros();
+            for bit in w.iter_up_to(mapping.len()) {
+                if let Some(target_w) = mapping.get(bit) { new_w |= target_w; }
+            }
+            cache.insert(w.clone(), new_w.clone());
+            new_w
+        };
+
+        let mut new_state = crate::precompute4::weighted_automata::dwa::DWAState::default();
+        
+        // Final weight
+        if let Some(fw) = &state.final_weight {
+            let new_fw = map_weight(fw);
+            if !new_fw.is_empty() { new_state.final_weight = Some(new_fw); }
         }
-        cache.insert(w.clone(), new_w.clone());
-        new_w
-    };
-    for state in &mut specialized_dwa.states.0 {
-        if let Some(fw) = &mut state.final_weight { *fw = map_weight(fw); if fw.is_empty() { state.final_weight = None; } }
-        if let Some(sw) = &mut state.state_weight { *sw = map_weight(sw); if sw.is_empty() { state.state_weight = None; } }
-        for tw in state.trans_weights.values_mut() { *tw = map_weight(tw); }
-        state.trans_weights.retain(|_, w| !w.is_empty());
-        state.transitions.retain(|k, _| state.trans_weights.contains_key(k));
+
+        // State weight
+        if let Some(sw) = &state.state_weight {
+            let new_sw = map_weight(sw);
+            if !new_sw.is_empty() { new_state.state_weight = Some(new_sw); }
+        }
+
+        // Transitions
+        for (label, w) in &state.trans_weights {
+            let new_w = map_weight(w);
+            if !new_w.is_empty() {
+                new_state.trans_weights.insert(*label, new_w);
+                if let Some(target) = state.transitions.get(label) {
+                    new_state.transitions.insert(*label, *target);
+                }
+            }
+        }
+        
+        new_state
+    }).collect();
+
+    DWA {
+        states: crate::precompute4::weighted_automata::dwa::DWAStates(new_states_vec),
+        body: parent_dwa.body.clone(),
     }
-    specialized_dwa
 }
 
 fn canonicalize_bundle(terminal_map: BTreeMap<Option<TerminalID>, Weight>) -> (Signature, Vec<Weight>) {
@@ -408,37 +436,23 @@ pub fn precompute4(parser: &GLRParser, input_nwa: &NWA) -> DWA {
         super_dwa.simplify();
 
         let super_signature: Signature = bit_to_term.iter().map(|t| vec![*t]).collect();
-        let mut pool: Vec<(Signature, DWA)> = vec![(super_signature, super_dwa.clone())];
-
-        complex_signatures.sort_by(|a, b| {
-            let groups_a = a.len(); let groups_b = b.len();
-            if groups_a != groups_b { return groups_b.cmp(&groups_a); }
-            let terms_a: usize = a.iter().map(|g| g.len()).sum();
-            let terms_b: usize = b.iter().map(|g| g.len()).sum();
-            terms_b.cmp(&terms_a)
-        });
-
-        for target_sig in complex_signatures {
-            let target_idx = SignatureIndex::new(&target_sig);
-            let mut best_parent: Option<(usize, Vec<Weight>)> = None;
-            let mut best_score = usize::MAX;
-
-            // Optimization: pool can get large, but for complex sigs it's usually small.
-            // If complex_sigs is huge, this loop is O(N^2), but we've filtered 99% of items out already.
-            for (p_idx, (p_sig, _)) in pool.iter().enumerate() {
-                if let Some(mapping) = can_derive(p_sig, &target_idx) {
-                    let score = p_sig.len();
-                    if score < best_score { best_score = score; best_parent = Some((p_idx, mapping)); }
-                }
-            }
-
-            // Fallback: If the reduced Super DWA doesn't cover this (rare edge case if logic above is buggy), panic or handle
-            let (parent_idx, mapping) = best_parent.expect("Super signature should always be a valid parent for complex sigs");
-            let parent_dwa = &pool[parent_idx].1;
-            let mut derived_dwa = specialize_dwa_relative(parent_dwa, &mapping);
+        
+        // PARALLEL OPTIMIZATION: Always derive from Super DWA to allow parallel processing.
+        // This avoids the sequential dependency of the original "best parent" greedy approach.
+        // Since Super DWA can derive everything, this is correct.
+        // Parallelizing the heavy `simplify()` calls yields significant speedups.
+        let results: Vec<(Signature, NWA)> = complex_signatures.par_iter().map(|target_sig| {
+            let target_idx = SignatureIndex::new(target_sig);
+            // We know Super DWA (super_signature) can derive target_sig
+            let mapping = can_derive(&super_signature, &target_idx).expect("Super signature must derive target");
+            
+            let mut derived_dwa = specialize_dwa_relative(&super_dwa, &mapping);
             derived_dwa.simplify();
-            template_cache.insert(target_sig.clone(), NWA::from_dwa(&derived_dwa));
-            pool.push((target_sig, derived_dwa));
+            (target_sig.clone(), NWA::from_dwa(&derived_dwa))
+        }).collect();
+
+        for (sig, nwa) in results {
+            template_cache.insert(sig, nwa);
         }
     }
     // OPTIMIZATION END
