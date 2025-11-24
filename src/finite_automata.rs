@@ -197,6 +197,179 @@ struct CompactNFA {
     epsilon_targets: Vec<u32>,
 }
 
+#[derive(Clone, Debug)]
+struct NodeInfo {
+    nullable: bool,
+    first: Vec<usize>, // Sorted list of PositionIDs
+    last: Vec<usize>,  // Sorted list of PositionIDs
+}
+
+impl NodeInfo {
+    fn empty() -> Self {
+        NodeInfo { nullable: true, first: vec![], last: vec![] }
+    }
+    
+    fn byte(id: usize) -> Self {
+        NodeInfo { nullable: false, first: vec![id], last: vec![id] }
+    }
+}
+
+struct GlushkovBuilder {
+    transitions: Vec<U8Set>, // PosID -> U8Set
+    follows: Vec<Vec<usize>>, // PosID -> Vec<PosID>
+    cache: HashMap<usize, NodeInfo>,
+}
+
+fn union_sorted(a: &[usize], b: &[usize]) -> Vec<usize> {
+    let mut res = Vec::with_capacity(a.len() + b.len());
+    let mut i = 0;
+    let mut j = 0;
+    while i < a.len() && j < b.len() {
+        if a[i] < b[j] {
+            res.push(a[i]);
+            i += 1;
+        } else if b[j] < a[i] {
+            res.push(b[j]);
+            j += 1;
+        } else {
+            res.push(a[i]);
+            i += 1;
+            j += 1;
+        }
+    }
+    res.extend_from_slice(&a[i..]);
+    res.extend_from_slice(&b[j..]);
+    res
+}
+
+impl GlushkovBuilder {
+    fn new() -> Self {
+        Self {
+            transitions: Vec::new(),
+            follows: Vec::new(),
+            cache: HashMap::new(),
+        }
+    }
+
+    fn alloc_pos(&mut self, set: U8Set) -> usize {
+        let id = self.transitions.len();
+        self.transitions.push(set);
+        self.follows.push(Vec::new());
+        id
+    }
+
+    fn add_follow(&mut self, from: usize, to: usize) {
+        self.follows[from].push(to);
+    }
+
+    fn process(&mut self, expr: &Expr) -> NodeInfo {
+        match expr {
+            Expr::U8Seq(bytes) => {
+                if bytes.is_empty() { return NodeInfo::empty(); }
+                let mut first_id = 0;
+                let mut prev = 0;
+                for (i, &b) in bytes.iter().enumerate() {
+                    let id = self.alloc_pos(U8Set::from_u8(b));
+                    if i == 0 { first_id = id; }
+                    else { self.add_follow(prev, id); }
+                    prev = id;
+                }
+                NodeInfo { nullable: false, first: vec![first_id], last: vec![prev] }
+            }
+            Expr::U8Class(set) => NodeInfo::byte(self.alloc_pos(set.clone())),
+            Expr::Epsilon => NodeInfo::empty(),
+            Expr::Shared(inner) => {
+                let key = Arc::as_ptr(inner) as usize;
+                if let Some(info) = self.cache.get(&key) {
+                    return info.clone();
+                }
+                let info = self.process(inner);
+                self.cache.insert(key, info.clone());
+                info
+            }
+            Expr::Choice(exprs) => {
+                let mut nullable = false;
+                let mut first = Vec::new();
+                let mut last = Vec::new();
+                for e in exprs {
+                    let info = self.process(e);
+                    if info.nullable { nullable = true; }
+                    first = union_sorted(&first, &info.first);
+                    last = union_sorted(&last, &info.last);
+                }
+                NodeInfo { nullable, first, last }
+            }
+            Expr::Seq(exprs) => {
+                let mut children = Vec::with_capacity(exprs.len());
+                for e in exprs {
+                    children.push(self.process(e));
+                }
+                for i in 0..children.len().saturating_sub(1) {
+                    let prev = &children[i];
+                    let next = &children[i+1];
+                    for &p in &prev.last {
+                        for &n in &next.first {
+                            self.add_follow(p, n);
+                        }
+                    }
+                }
+                let mut nullable = true;
+                for c in &children { if !c.nullable { nullable = false; break; } }
+                let mut first = Vec::new();
+                for c in &children {
+                    first = union_sorted(&first, &c.first);
+                    if !c.nullable { break; }
+                }
+                let mut last = Vec::new();
+                for c in children.iter().rev() {
+                    last = union_sorted(&last, &c.last);
+                    if !c.nullable { break; }
+                }
+                NodeInfo { nullable, first, last }
+            }
+            Expr::Quantifier(inner, kind) => {
+                let info = self.process(inner);
+                // Loop edge
+                if *kind != QuantifierType::ZeroOrOne {
+                    for &l in &info.last {
+                        for &f in &info.first {
+                            self.add_follow(l, f);
+                        }
+                    }
+                }
+                NodeInfo {
+                    nullable: info.nullable || *kind != QuantifierType::OneOrMore,
+                    first: info.first,
+                    last: info.last,
+                }
+            }
+            Expr::StringTrie(seqs) => {
+                // Treat as Choice of U8Seqs
+                let mut nullable = false;
+                let mut first = Vec::new();
+                let mut last = Vec::new();
+                for bytes in seqs {
+                    if bytes.is_empty() {
+                        nullable = true;
+                        continue;
+                    }
+                    let mut start_id = 0;
+                    let mut prev = 0;
+                    for (i, &b) in bytes.iter().enumerate() {
+                        let id = self.alloc_pos(U8Set::from_u8(b));
+                        if i == 0 { start_id = id; }
+                        else { self.add_follow(prev, id); }
+                        prev = id;
+                    }
+                    first = union_sorted(&first, &[start_id]);
+                    last = union_sorted(&last, &[prev]);
+                }
+                NodeInfo { nullable, first, last }
+            }
+        }
+    }
+}
+
 // Manual impl for NFAState
 impl JSONConvertible for NFAState {
     fn to_json(&self) -> JSONNode {
@@ -1091,15 +1264,100 @@ impl ExprGroups {
         crate::debug!(3, "Optimizing Expression Tree");
         let optimized = self.optimize();
         crate::debug!(3, "Building NFA");
+        
         let start = std::time::Instant::now();
-        // Use false for on-the-fly since we already ran the global optimization pass
-        let mut nfa = optimized.build_nfa(false);
+        // Strategy 2: Glushkov Construction (Epsilon-Free)
+        let mut builder = GlushkovBuilder::new();
+        let mut nfa = NFA {
+            states: Vec::new(),
+            start_state: 0,
+        };
+        
+        // Start state is 0
+        nfa.add_state(); 
+
+        let mut group_info = Vec::new();
+        for group in &optimized.groups {
+            group_info.push(builder.process(&group.expr));
+        }
+
+        // Create states for all positions 1..=N
+        for set in builder.transitions {
+            let id = nfa.add_state();
+            // NFAState is created empty
+            // We will fill transitions next
+        }
+
+        // Fill transitions
+        // 1. From Start (0)
+        for (g_idx, info) in group_info.iter().enumerate() {
+            let group = &optimized.groups[g_idx];
+            if info.nullable {
+                nfa.states[0].finalizers.insert(g_idx);
+                if group.is_non_greedy { nfa.states[0].non_greedy_finalizers.insert(g_idx); }
+            }
+            for &pos in &info.first {
+                // Transition 0 -> pos+1
+                let char_set = nfa.states[pos+1].transitions.first().map(|x| x.0.clone()).unwrap_or_else(|| {
+                    // We haven't stored the char_set in NFA state yet? 
+                    // Ah, GlushkovBuilder has it in `transitions` (which we consumed or can access?)
+                    // We iterated `builder.transitions` above but didn't store them.
+                    // We need to access the source `transitions` again.
+                    // Actually, let's fix the loop above.
+                    U8Set::none()
+                }); 
+                // Wait, I can't access it if I consumed it.
+                // I need to iterate and keep the sets.
+            }
+        }
+        
+        // Correct construction loop:
+        // Re-init NFA
+        nfa.states.clear();
+        nfa.add_state(); // 0
+
+        // Add states 1..N and store their acceptance char
+        let mut state_chars = Vec::new();
+        for set in &builder.transitions {
+            nfa.add_state();
+            state_chars.push(set.clone());
+        }
+
+        // Transitions from Start
+        for (g_idx, info) in group_info.iter().enumerate() {
+            for &pos in &info.first {
+                let target = pos + 1;
+                let set = state_chars[pos].clone();
+                nfa.add_u8set_transition(0, set, target);
+            }
+        }
+
+        // Transitions between positions
+        for (pos, nexts) in builder.follows.iter().enumerate() {
+            let source = pos + 1;
+            for &next_pos in nexts {
+                let target = next_pos + 1;
+                let set = state_chars[next_pos].clone();
+                nfa.add_u8set_transition(source, set, target);
+            }
+        }
+
+        // Finalizers
+        for (g_idx, info) in group_info.iter().enumerate() {
+            let group = &optimized.groups[g_idx];
+            for &pos in &info.last {
+                let state = pos + 1;
+                nfa.states[state].finalizers.insert(g_idx);
+                if group.is_non_greedy {
+                    nfa.states[state].non_greedy_finalizers.insert(g_idx);
+                }
+            }
+        }
+
         crate::debug!(4, "Built NFA in {:.2?}", start.elapsed());
         print_memory_usage("After NFA build");
 
-        let start_condense = std::time::Instant::now();
-        nfa.condense_epsilon_sccs();
-        crate::debug!(4, "Condensed NFA in {:.2?}", start_condense.elapsed());
+        // NFA has no epsilon transitions, so we skip condense_epsilon_sccs
 
         // nfa.print_stats(); // Skip stats for speed
         crate::debug!(3, "Converting NFA to DFA");
@@ -1115,30 +1373,7 @@ impl ExprGroups {
         Regex { dfa }
     }
 
-    fn build_nfa(self, optimize_on_the_fly: bool) -> NFA {
-        let mut nfa = NFA {
-            states: vec![NFAState::new()],
-            start_state: 0,
-        };
-
-        let mut cache: HashMap<usize, (usize, usize)> = HashMap::new();
-        for (group, ExprGroup { expr, is_non_greedy }) in self.groups.into_iter().enumerate() {
-            let group_start_state = nfa.add_state();
-            nfa.add_epsilon_transition(nfa.start_state, group_start_state);
-            let end_state =
-                Expr::handle_expr_cached(expr, &mut nfa, group_start_state, &mut cache, optimize_on_the_fly);
-            if is_non_greedy {
-                nfa.states[end_state].finalizers.insert(group);
-                nfa.states[end_state]
-                    .non_greedy_finalizers
-                    .insert(group);
-            } else {
-                nfa.states[end_state].finalizers.insert(group);
-            }
-        }
-
-        nfa
-    }
+    // Removed old build_nfa
 }
 
 impl ExprGroups {
