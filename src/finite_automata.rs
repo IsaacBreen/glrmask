@@ -59,8 +59,14 @@ impl CompressedStateSet {
     #[inline]
     fn from_sparse(sparse: &SparseStateSet) -> Self {
         let mut words = Vec::with_capacity(sparse.dirty_words.len());
-        Self::fill_words_from_sparse(sparse, &mut words);
-        let hash = Self::compute_hash(&words);
+        for (i, &w) in sparse.dense.words.iter().enumerate() {
+            if w != 0 {
+                words.push((i as u32, w));
+            }
+        }
+        let mut hasher = ahash::AHasher::default();
+        words.hash(&mut hasher);
+        let hash = hasher.finish();
         Self { words, hash }
     }
 
@@ -81,19 +87,6 @@ impl CompressedStateSet {
         let mut hasher = ahash::AHasher::default();
         buffer.words.hash(&mut hasher);
         buffer.hash = hasher.finish();
-    }
-
-    #[inline]
-    fn compute_hash(words: &Vec<(u32, u64)>) -> u64 {
-        // Use ahash's fast hashing
-        use std::hash::Hasher;
-        let mut hasher = ahash::AHasher::default();
-        words.len().hash(&mut hasher);
-        for &(idx, w) in words {
-            idx.hash(&mut hasher);
-            w.hash(&mut hasher);
-        }
-        hasher.finish()
     }
 
     #[inline]
@@ -2431,7 +2424,9 @@ impl NFA {
                 // Empty set check
                 if target_set.dirty_words.is_empty() {
                     scratch_target.words.clear();
-                    scratch_target.hash = CompressedStateSet::compute_hash(&scratch_target.words);
+                    let mut hasher = ahash::AHasher::default();
+                    scratch_target.words.hash(&mut hasher);
+                    scratch_target.hash = hasher.finish();
                 } else {
                     CompressedStateSet::reuse_from_sparse(target_set, &mut scratch_target);
                 }
