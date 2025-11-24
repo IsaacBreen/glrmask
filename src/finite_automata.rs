@@ -1645,6 +1645,46 @@ impl Expr {
             }
         }
 
+        // OPTIMIZATION: Expand ZeroOrMore at the start of alternatives to allow factoring.
+        // A* B -> (A A* B) | B
+        // This exposes 'A' as a prefix, allowing 'make_choice' to merge it with other branches starting with 'A'.
+        let mut expanded = Vec::with_capacity(flat.len());
+        for e in flat {
+            let (is_zom, body, rest) = match &e {
+                Expr::Quantifier(body, QuantifierType::ZeroOrMore) => (true, body.clone(), None),
+                Expr::Seq(subs) if !subs.is_empty() => {
+                    if let Expr::Quantifier(body, QuantifierType::ZeroOrMore) = &subs[0] {
+                        (true, body.clone(), Some(subs[1..].to_vec()))
+                    } else {
+                        (false, Box::new(Expr::Epsilon), None)
+                    }
+                }
+                _ => (false, Box::new(Expr::Epsilon), None),
+            };
+
+            if is_zom {
+                // Only expand if the body has a definite class head (consumes input).
+                // This prevents infinite expansion of nullable loops like (A*)*.
+                let (head, _) = body.as_ref().clone().split_head();
+                if matches!(head, Head::Class(_)) {
+                    // 1. Loop Entry: A (A* ...) -> represented as body followed by original expr
+                    // We construct Seq(body, e).
+                    let entry_seq = vec![*body, e.clone()];
+                    expanded.push(Expr::make_seq(entry_seq));
+
+                    // 2. Loop Skip: rest
+                    if let Some(r) = rest {
+                        expanded.push(Expr::make_seq(r));
+                    } else {
+                        expanded.push(Expr::Epsilon);
+                    }
+                    continue;
+                }
+            }
+            expanded.push(e);
+        }
+        flat = expanded;
+
         if flat.is_empty() {
             return Expr::Choice(vec![]);
         }
