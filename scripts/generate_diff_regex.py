@@ -93,8 +93,8 @@ def main():
 
     print(f"Input file loaded: {len(all_lines)} lines.")
     print("Starting incremental regex construction...")
-    print(f"{'Line Count':<12} | {'Regex Length (chars)':<20} | {'Time (sec)':<12} | {'Status'}")
-    print("-" * 65)
+    print(f"{'Line Count':<12} | {'Regex Length (chars)':<25} | {'Time (sec)':<12} | {'Status'}")
+    print("-" * 70)
 
     # Loop from 1 line up to total lines
     for i in range(1, len(all_lines) + 1):
@@ -113,19 +113,18 @@ def main():
             step_end = time.time()
             duration = step_end - step_start
 
-            print(f"{i:<12} | {str_len:<20,} | {duration:.4f}       | OK")
+            print(f"{i:<12} | {str_len:<25,} | {duration:.4f}       | OK")
 
             # PANIC CONDITION
             if duration > 1.0:
                 print("\n!!! PANIC !!!")
                 print(f"Process took {duration:.4f}s which exceeds the 1.0s limit.")
                 print(f"Exponential explosion detected at line {i}.")
-                print(f"Regex length was {str_len:,} characters.")
                 sys.exit(1)
 
         except re.error as e:
             print(f"\n!!! REGEX ERROR !!!")
-            print(f"Compilation failed at line {i} with regex length {str_len:,}.")
+            print(f"Compilation failed at line {i}.")
             print(f"Reason: {e}")
             print("The pattern likely exceeded Python's maximum recursion depth or pattern size.")
             sys.exit(1)
