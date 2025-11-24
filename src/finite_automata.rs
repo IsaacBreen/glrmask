@@ -188,53 +188,6 @@ impl SparseStateSet {
 }
 
 
-#[derive(Clone)]
-struct DenseBitSet {
-    data: Vec<u64>,
-    dirty_words: Vec<usize>,
-}
-
-impl DenseBitSet {
-        pub fn new(bits: usize) -> Self {
-        let words = (bits + 63) / 64;
-        DenseBitSet {
-            data: vec![0; words],
-            dirty_words: Vec::new(),
-        }
-    }
-
-    #[inline(always)]
-    pub fn insert(&mut self, bit: usize) -> bool {
-        let w = bit / 64;
-        let b = bit % 64;
-        let mask = 1u64 << b;
-        if (self.data[w] & mask) != 0 {
-            return false;
-        }
-        self.dirty_words.push(w);
-        self.data[w] |= mask;
-        true
-    }
-
-        pub fn clear(&mut self) {
-            for &w in &self.dirty_words {
-                self.data[w] = 0;
-            }
-            self.dirty_words.clear();
-        }
-
-        pub fn iter(&self) -> impl Iterator<Item = usize> + '_ {
-            let mut dirty = self.dirty_words.clone();
-            dirty.sort_unstable();
-            dirty.into_iter().flat_map(move |w| {
-                let word = self.data[w];
-                let base = w * 64;
-                (0..64).filter(move |&b| (word & (1 << b)) != 0).map(move |b| base + b)
-            })
-        }
-    }
-
-
 struct CompactNFA {
     epsilon_offsets: Vec<u32>,
     epsilon_targets: Vec<u32>,
