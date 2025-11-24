@@ -2150,12 +2150,12 @@ impl NFA {
     fn to_dfa_impl(self) -> DFA {
         let mut stats = DFAConversionStats::default();
         let start_time = std::time::Instant::now();
-        let mut dfa_states: Vec<DFAState> = Vec::with_capacity(100_000);
+        let mut dfa_states: Vec<DFAState> = Vec::with_capacity(120_000);
         // Use FxHashMap for faster hashing
         use rustc_hash::FxHashMap;
         let mut dfa_state_map: FxHashMap<ActiveStateSet, usize> = FxHashMap::default();
-        dfa_state_map.reserve(100_000);
-        let mut worklist: Vec<ActiveStateSet> = Vec::with_capacity(1024);
+        dfa_state_map.reserve(120_000);
+        let mut worklist: Vec<ActiveStateSet> = Vec::with_capacity(2048);
 
         // Compute Input Equivalence Classes
         let start_classes = std::time::Instant::now();
