@@ -49,10 +49,92 @@ impl DenseStateSet {
         if other.words.len() > self.words.len() {
             self.words.resize(other.words.len(), 0);
         }
-        for (i, word) in other.words.iter().enumerate() {
-            unsafe {
-                *self.words.get_unchecked_mut(i) |= *word;
+        
+        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+        unsafe {
+            self.union_with_avx2(other);
+        }
+        
+        #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+        unsafe {
+            self.union_with_neon(other);
+        }
+        
+        #[cfg(not(any(
+            all(target_arch = "x86_64", target_feature = "avx2"),
+            all(target_arch = "aarch64", target_feature = "neon")
+        )))]
+        {
+            // Scalar fallback - process 8 words at a time for better pipelining
+            let other_words = &other.words;
+            let len = other_words.len();
+            let chunks = len / 8;
+            let remainder = len % 8;
+            
+            for i in 0..chunks {
+                let base = i * 8;
+                unsafe {
+                    *self.words.get_unchecked_mut(base) |= *other_words.get_unchecked(base);
+                    *self.words.get_unchecked_mut(base + 1) |= *other_words.get_unchecked(base + 1);
+                    *self.words.get_unchecked_mut(base + 2) |= *other_words.get_unchecked(base + 2);
+                    *self.words.get_unchecked_mut(base + 3) |= *other_words.get_unchecked(base + 3);
+                    *self.words.get_unchecked_mut(base + 4) |= *other_words.get_unchecked(base + 4);
+                    *self.words.get_unchecked_mut(base + 5) |= *other_words.get_unchecked(base + 5);
+                    *self.words.get_unchecked_mut(base + 6) |= *other_words.get_unchecked(base + 6);
+                    *self.words.get_unchecked_mut(base + 7) |= *other_words.get_unchecked(base + 7);
+                }
             }
+            
+            // Handle remaining words
+            for i in (chunks * 8)..len {
+                unsafe {
+                    *self.words.get_unchecked_mut(i) |= *other_words.get_unchecked(i);
+                }
+            }
+        }
+    }
+    
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    #[inline]
+    unsafe fn union_with_avx2(&mut self, other: &DenseStateSet) {
+        use std::arch::x86_64::*;
+        
+        let other_words = &other.words;
+        let len = other_words.len();
+        let simd_len = (len / 4) * 4; // Process 4 u64s (256 bits) at a time
+        
+        for i in (0..simd_len).step_by(4) {
+            let a = _mm256_loadu_si256(self.words.as_ptr().add(i) as *const __m256i);
+            let b = _mm256_loadu_si256(other_words.as_ptr().add(i) as *const __m256i);
+            let result = _mm256_or_si256(a, b);
+            _mm256_storeu_si256(self.words.as_mut_ptr().add(i) as *mut __m256i, result);
+        }
+        
+        // Handle remaining words
+        for i in simd_len..len {
+            *self.words.get_unchecked_mut(i) |= *other_words.get_unchecked(i);
+        }
+    }
+    
+    #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+    #[inline]
+    unsafe fn union_with_neon(&mut self, other: &DenseStateSet) {
+        use std::arch::aarch64::*;
+        
+        let other_words = &other.words;
+        let len = other_words.len();
+        let simd_len = (len / 2) * 2; // Process 2 u64s (128 bits) at a time
+        
+        for i in (0..simd_len).step_by(2) {
+            let a = vld1q_u64(self.words.as_ptr().add(i));
+            let b = vld1q_u64(other_words.as_ptr().add(i));
+            let result = vorrq_u64(a, b);
+            vst1q_u64(self.words.as_mut_ptr().add(i), result);
+        }
+        
+        // Handle remaining words
+        for i in simd_len..len {
+            *self.words.get_unchecked_mut(i) |= *other_words.get_unchecked(i);
         }
     }
 
