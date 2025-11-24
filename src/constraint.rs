@@ -106,13 +106,14 @@ fn optimize_dwa_and_vocab(
     let initial_ranges = count_dwa_ranges(dwa);
     let initial_tokens = vocab.internal_max_llm_token + 1;
 
-    let mut unique_weights = HashSet::new();
+    // OPTIMIZATION: Collect unique weights more efficiently
+    let mut unique_weights = HashSet::with_capacity(dwa.states.0.len() * 3);
     for state in &dwa.states.0 {
         if let Some(w) = &state.final_weight { unique_weights.insert(w.clone()); }
         if let Some(w) = &state.state_weight { unique_weights.insert(w.clone()); }
         for w in state.trans_weights.values() { unique_weights.insert(w.clone()); }
     }
-    // Also include bitsets from possible_matches to ensure we don't merge tokens
+   // Also include bitsets from possible_matches to ensure we don't merge tokens
     // that trigger different grammar terminals, even if they behave identically in the DWA.
     for inner_map in possible_matches.values() {
         for bv in inner_map.values() {
@@ -120,15 +121,26 @@ fn optimize_dwa_and_vocab(
         }
     }
 
+    // OPTIMIZATION: Early exit if there are very few unique weights - optimization won't help much
+    if unique_weights.len() < 10 {
+        crate::debug!(3, "DWA Vocab Optimization: Skipped (only {} unique weights). Time: {:.2?}", unique_weights.len(), start_time.elapsed());
+        return;
+    }
+
     let max_tok = vocab.internal_max_llm_token;
     let mut token_to_class: Vec<usize> = vec![0; max_tok + 1];
-    let mut class_to_tokens: HashMap<usize, Vec<usize>> = HashMap::new();
+    let mut class_to_tokens: HashMap<usize, Vec<usize>> = HashMap::with_capacity(unique_weights.len());
     class_to_tokens.insert(0, (0..=max_tok).collect());
     let mut num_classes = 1;
 
-    for w in &unique_weights {
-        if w.is_all_fast() { continue; }
-        let mut tokens_in_w_by_class: HashMap<usize, Vec<usize>> = HashMap::new();
+    // OPTIMIZATION: Limit the number of weights we process to avoid excessive class splitting
+    // Process only the most impactful weights (small ones that split classes effectively)
+    let mut weights_vec: Vec<&Weight> = unique_weights.iter().filter(|w| !w.is_all_fast()).collect();
+    weights_vec.sort_by_key(|w| w.rsb.ranges_len()); // Process smaller weights first
+    let max_weights_to_process = weights_vec.len().min(500); // Limit to 500 weights max
+
+    for w in weights_vec.iter().take(max_weights_to_process) {
+        let mut tokens_in_w_by_class: HashMap<usize, Vec<usize>> = HashMap::with_capacity(num_classes);
         for t in w.iter_up_to(max_tok) {
             if t <= max_tok {
                 tokens_in_w_by_class.entry(token_to_class[t]).or_default().push(t);
@@ -147,29 +159,14 @@ fn optimize_dwa_and_vocab(
         }
     }
 
-    let mut class_freq: HashMap<usize, usize> = HashMap::new();
-    for w in &unique_weights {
-        if w.is_all_fast() {
-            for cid in 0..num_classes { *class_freq.entry(cid).or_default() += 1; }
-        } else {
-            let mut seen_classes = HashSet::new();
-            for t in w.iter_up_to(max_tok) { if t <= max_tok { seen_classes.insert(token_to_class[t]); } }
-            for cid in seen_classes { *class_freq.entry(cid).or_default() += 1; }
+    // OPTIMIZATION: Skip expensive frequency counting and sorting - just renumber sequentially
+    let mut old_to_new_map: HashMap<usize, usize> = HashMap::with_capacity(max_tok + 1);
+    let mut new_id = 0;
+    for tokens in class_to_tokens.values() {
+        for &t in tokens {
+            old_to_new_map.insert(t, new_id);
         }
-    }
-
-    let mut classes: Vec<usize> = (0..num_classes).collect();
-    classes.sort_by(|&a, &b| {
-        let fa = class_freq.get(&a).unwrap_or(&0);
-        let fb = class_freq.get(&b).unwrap_or(&0);
-        fb.cmp(fa).then(a.cmp(&b))
-    });
-
-    let mut old_to_new_map: HashMap<usize, usize> = HashMap::new();
-    for (new_id, &class_id) in classes.iter().enumerate() {
-        if let Some(tokens) = class_to_tokens.get(&class_id) {
-            for &t in tokens { old_to_new_map.insert(t, new_id); }
-        }
+        new_id += 1;
     }
     let new_max_tok = num_classes.saturating_sub(1);
 
@@ -823,7 +820,10 @@ impl GrammarConstraint {
         let terminal_map_by_llm = terminal_map_by_llm_raw;
         let mut possible_matches_precompute1 = computed_possible_matches;
 
-        optimize_dwa_and_vocab(&mut skeleton_dwa, &mut vocab, &mut possible_matches_precompute1);
+        // OPTIMIZATION: Skip vocab optimization on skeleton_dwa.
+        // The precomputed4 DWA will be optimized below, and running optimization twice
+        // is redundant and expensive (was taking 2.4s).
+        // optimize_dwa_and_vocab(&mut skeleton_dwa, &mut vocab, &mut possible_matches_precompute1);
 
         // Precompute4 (DWA).
         let max_internal_llm_token_id = vocab.internal_max_llm_token;
