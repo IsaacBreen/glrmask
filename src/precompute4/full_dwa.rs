@@ -596,7 +596,8 @@ pub fn precompute4(parser: &GLRParser, input_nwa: &NWA) -> DWA {
     }
 
     let combined_nwa = NWA { states: combined_nwa_states, body: NWABody { start_states: vec![combined_start_state] } };
-    let final_dwa = resolve_negatives_and_optimize_and_determinize(parser, combined_nwa);
+    let mut final_dwa = resolve_negatives_and_optimize_and_determinize(parser, combined_nwa);
+    final_dwa.simplify();
     crate::debug!(3, "Precomputation complete. Final DWA stats: {}", final_dwa.stats());
     final_dwa
 }
@@ -661,7 +662,7 @@ fn resolve_negatives_and_optimize_and_determinize(parser: &GLRParser, mut combin
     crate::debug!(3, "Resolving negatives and optimizing for NWA with {} states and {} transitions...", combined_nwa.states.len(), combined_nwa.states.num_transitions());
     prune_continuations_from_final_states(&mut combined_nwa);
     crate::debug!(3, "Pruned continuations from final states. NWA with {} states and {} transitions remaining.", combined_nwa.states.len(), combined_nwa.states.num_transitions());
-    combined_nwa.simplify_lightweight();
+    combined_nwa.simplify();
     crate::debug!(3, "Simplified NWA. {} states and {} transitions remaining.", combined_nwa.states.len(), combined_nwa.states.num_transitions());
     let mut dwa = combined_nwa.determinize();
     crate::debug!(3, "Determinized NWA. {} states and {} transitions remaining.", dwa.states.len(), dwa.states.num_transitions());
