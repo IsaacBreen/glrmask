@@ -29,7 +29,7 @@ impl SparseStateSet {
         }
     }
 
-    #[time_it]
+    // #[time_it]
     #[inline(always)]
     pub fn insert_bit(&mut self, bit: usize) -> bool {
         let word_idx = bit / 64;
@@ -184,7 +184,7 @@ pub struct CompressedStateSetIter<'a> {
 impl<'a> Iterator for CompressedStateSetIter<'a> {
     type Item = usize;
 
-    #[time_it]
+    // #[time_it]
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             if self.current_word != 0 {
