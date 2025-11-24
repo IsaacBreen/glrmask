@@ -3880,28 +3880,28 @@ mod group_u8set_tests {
 
         dfa.states.push(DFAState {
             transitions: CharTransitions::new(),
-            finalizers: BTreeSet::new(),
+            finalizers: DenseStateSet::new(2),
             possible_future_group_ids: BTreeSet::new(),
             group_id_to_u8set: BTreeMap::new(),
         });
 
         dfa.states.push(DFAState {
             transitions: CharTransitions::new(),
-            finalizers: BTreeSet::new(),
+            finalizers: DenseStateSet::new(2),
             possible_future_group_ids: BTreeSet::new(),
             group_id_to_u8set: BTreeMap::new(),
         });
 
         dfa.states.push(DFAState {
             transitions: CharTransitions::new(),
-            finalizers: BTreeSet::from([0]),
+            finalizers: DenseStateSet::new_from_slice(2, &[0]),
             possible_future_group_ids: BTreeSet::new(),
             group_id_to_u8set: BTreeMap::new(),
         });
 
         dfa.states.push(DFAState {
             transitions: CharTransitions::new(),
-            finalizers: BTreeSet::from([1]),
+            finalizers: DenseStateSet::new_from_slice(2, &[1]),
             possible_future_group_ids: BTreeSet::new(),
             group_id_to_u8set: BTreeMap::new(),
         });

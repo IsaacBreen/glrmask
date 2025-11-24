@@ -17,6 +17,15 @@ impl DenseStateSet {
         }
     }
 
+    pub fn new_from_slice(num_bits: usize, slice: &[usize]) -> Self {
+        let num_words = (num_bits + 63) / 64;
+        let mut words = vec![0; num_words];
+        for &bit in slice {
+            words[bit / 64] |= 1u64 << (bit % 64);
+        }
+        Self { words }
+    }
+
     pub fn empty() -> Self {
         Self { words: Vec::new() }
     }
@@ -189,6 +198,16 @@ impl<'a> IntoIterator for &'a DenseStateSet {
 
     fn into_iter(self) -> Self::IntoIter {
         self.iter()
+    }
+}
+
+impl FromIterator<usize> for DenseStateSet {
+    fn from_iter<T: IntoIterator<Item = usize>>(iter: T) -> Self {
+        let mut set = DenseStateSet::empty();
+        for i in iter {
+            set.insert(i);
+        }
+        set
     }
 }
 
