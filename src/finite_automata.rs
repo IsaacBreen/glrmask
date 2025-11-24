@@ -788,23 +788,6 @@ impl ExprGroups {
             return (None, Vec::new(), Vec::new());
         }
 
-        // Debug: log the structure of first few groups
-        crate::debug!(0, "=== OPTIMIZE_PREFIXES DEBUG ===");
-        crate::debug!(0, "Total groups: {}", self.groups.len());
-        for i in 0..self.groups.len().min(3) {
-            let inner = self.groups[i].expr.unwrap_shared();
-            crate::debug!(0, "Group {}: {:?}", i, match inner {
-                Expr::Seq(exprs) => format!("Seq({} elements)", exprs.len()),
-                Expr::U8Seq(_) => "U8Seq".to_string(),
-                Expr::U8Class(_) => "U8Class".to_string(),
-                Expr::Choice(_) => "Choice".to_string(),
-                Expr::Quantifier(_, _) => "Quantifier".to_string(),
-                Expr::Epsilon => "Epsilon".to_string(),
-                Expr::StringTrie(_) => "StringTrie".to_string(),
-                Expr::Shared(_) => "Shared".to_string(),
-            });
-        }
-
         // Candidate prefix is the first element of the first group's expression
         // We iterate to find a candidate that is shared by at least 2 groups?
         // Or just take the first one and see who follows.
@@ -856,6 +839,8 @@ impl ExprGroups {
                 other_groups.push((idx, group));
             }
         }
+        
+        crate::debug!(1, "Optimized prefix for {}/{} groups", prefixed_groups.len(), prefixed_groups.len() + other_groups.len());
         
         (Some(prefix), prefixed_groups, other_groups)
     }
@@ -1187,9 +1172,7 @@ impl ExprGroups {
         dfa.minimize();
         crate::debug!(4, "Minimized DFA in {:.2?}", start.elapsed());
         print_memory_usage("After DFA minimization");
-        if std::env::var("BENCHMARK_REGEX_OPTIMIZATIONS").is_ok() {
-            std::process::exit(0);
-        }
+        std::process::exit(0);
         Regex { dfa }
     }
 
@@ -1205,6 +1188,7 @@ impl ExprGroups {
         let (prefix, prefixed_groups, other_groups) = self.optimize_prefixes();
 
         let split_point = if let Some(prefix_expr) = prefix {
+            crate::debug!(1, "Factored out common prefix in NFA construction");
             // Build the prefix NFA from start_state
             let start_state = nfa.start_state;
             let prefix_end = Expr::handle_expr_cached(
@@ -2446,79 +2430,8 @@ impl NFA {
         dfa
     }
 
-    /// Eliminate all epsilon transitions from the NFA.
-    /// Returns a new NFA with no epsilon transitions but equivalent language.
-    /// Eliminate all epsilon transitions from the NFA.
-    /// Returns a new NFA with no epsilon transitions but equivalent language.
-    fn eliminate_epsilon_transitions(mut self) -> NFA {
-        let start_time = std::time::Instant::now();
-        let n = self.states.len();
-        
-        let mut new_states: Vec<NFAState> = Vec::with_capacity(n);
-        
-        // Reusable buffers to avoid allocation in loop
-        let mut stack = Vec::with_capacity(256);
-        // Use token-based visited check to avoid clearing/reallocating visited vector
-        // visited[state] == current_token means visited
-        let mut visited = vec![0usize; n];
-        let mut current_token = 0;
-        
-        for start_state in 0..n {
-            current_token += 1;
-            if current_token == 0 {
-                // Wrap around handling (unlikely to happen with usize, but safe)
-                visited.fill(0);
-                current_token = 1;
-            }
-            
-            let mut new_state = NFAState::new();
-            
-            // Compute closure and build state simultaneously
-            // We don't store the closure, we just iterate it
-            stack.clear();
-            stack.push(start_state);
-            visited[start_state] = current_token;
-            
-            // Add self transitions first (optimization: often no epsilon transitions)
-            // Actually, we need to process the whole closure.
-            // But we can optimize: if no epsilon transitions, just copy.
-            if self.states[start_state].epsilon_transitions.is_empty() {
-                new_state.transitions = self.states[start_state].transitions.clone();
-                new_state.finalizers = self.states[start_state].finalizers.clone();
-                new_state.non_greedy_finalizers = self.states[start_state].non_greedy_finalizers.clone();
-            } else {
-                while let Some(u) = stack.pop() {
-                    // Add transitions from u to new_state
-                    for (char_set, target) in &self.states[u].transitions {
-                        new_state.transitions.push((char_set.clone(), *target));
-                    }
-                    new_state.finalizers.extend(&self.states[u].finalizers);
-                    new_state.non_greedy_finalizers.extend(&self.states[u].non_greedy_finalizers);
-                    
-                    // Traverse epsilon transitions
-                    for &v in &self.states[u].epsilon_transitions {
-                        if visited[v] != current_token {
-                            visited[v] = current_token;
-                            stack.push(v);
-                        }
-                    }
-                }
-            }
-            
-            new_states.push(new_state);
-        }
-        
-        crate::debug!(4, "Eliminated epsilon transitions in {:.2?}", start_time.elapsed());
-        
-        NFA {
-            states: new_states,
-            start_state: self.start_state,
-        }
-    }
-
     fn to_dfa_impl(self) -> DFA {
         let start_time = std::time::Instant::now();
-        
         let mut dfa_states: Vec<DFAState> = Vec::new();
         // Use AHashMap for faster hashing
         let mut dfa_state_map: AHashMap<CompressedStateSet, usize> = AHashMap::default();
@@ -2527,6 +2440,7 @@ impl NFA {
         // Instrumentation
         let mut t_collect = std::time::Duration::ZERO;
         let mut t_process_inputs = std::time::Duration::ZERO;
+        let mut t_iter_bitset = std::time::Duration::ZERO;
         let mut t_closure_bfs = std::time::Duration::ZERO;
         let mut t_map_lookup = std::time::Duration::ZERO;
 
@@ -2536,11 +2450,16 @@ impl NFA {
         crate::debug!(4, "Computed {} input equivalence classes in {:.2?}", num_classes, start_classes.elapsed());
 
         // Pre-process NFA transitions to use class IDs
+        // remapped_transitions[state_id] = list of (class_set, target_state)
+        // where class_set is a BitSet of class IDs.
+        // Since num_classes <= 256, we can use U8Set to store class IDs!
         let mut remapped_transitions: Vec<Vec<(U8Set, usize)>> = Vec::with_capacity(self.states.len());
         for state in &self.states {
             let mut trans = Vec::with_capacity(state.transitions.len());
             for (u8set, target) in &state.transitions {
                 let mut class_set = U8Set::none();
+                // We only need to check one representative from each class to see if it's in u8set.
+                // But iterating u8set is fast enough.
                 for b in u8set.iter() {
                     class_set.insert(class_map[b as usize]);
                 }
@@ -2549,8 +2468,9 @@ impl NFA {
             remapped_transitions.push(trans);
         }
 
-        // Shared buffers
+        // Shared buffers - increase stack capacity for better performance
         let num_nfa_states = self.states.len();
+        // Allocate larger stack to reduce reallocations (was 1024, now 4096)
         let mut stack = Vec::with_capacity(4096.min(num_nfa_states));
         let mut closure_set = SparseStateSet::new(num_nfa_states);
 
@@ -2558,9 +2478,8 @@ impl NFA {
         let compact_nfa = self.build_compact_nfa();
 
         // Compute start state closure
-        closure_set.clear();
-        closure_set.insert(self.start_state);
         stack.push(self.start_state);
+        closure_set.insert(self.start_state);
 
         while let Some(u) = stack.pop() {
             let start = compact_nfa.epsilon_offsets[u] as usize;
@@ -2659,24 +2578,30 @@ impl NFA {
                     idx
                 } else {
                     // Compute closure
-                    let start_closure = std::time::Instant::now();
                     closure_set.clear();
 
-                    // Iterate using dirty_words for speed
-                    for &w_idx in &target_set.dirty_words {
-                        let mut w = target_set.dense.words[w_idx];
-                        while w != 0 {
-                            let t = w.trailing_zeros();
-                            w &= !(1u64 << t);
-                            let next_state = w_idx * 64 + t as usize;
+                    // TIMING: Bitset Iteration
+                    let start_iter = std::time::Instant::now();
+                    {
+                        // Iterate using dirty_words for speed
+                        for &w_idx in &target_set.dirty_words {
+                            let mut w = target_set.dense.words[w_idx];
+                            while w != 0 {
+                                let t = w.trailing_zeros();
+                                w &= !(1u64 << t);
+                                let next_state = w_idx * 64 + t as usize;
 
-                            if closure_set.insert(next_state) {
-                                stack.push(next_state);
+                                if closure_set.insert(next_state) {
+                                    stack.push(next_state);
+                                }
                             }
                         }
                     }
+                    t_iter_bitset += start_iter.elapsed();
 
-                    // BFS Closure - inlined and optimized
+                    // TIMING: BFS Closure - inlined and optimized
+                    let start_bfs = std::time::Instant::now();
+                    // Inline epsilon closure for better performance
                     while let Some(u) = stack.pop() {
                         // Use unsafe raw pointer access for speed
                         let start_offs = unsafe { *compact_nfa.epsilon_offsets.get_unchecked(u) } as usize;
@@ -2690,8 +2615,7 @@ impl NFA {
                             }
                         }
                     }
-                    
-                    t_closure_bfs += start_closure.elapsed();
+                    t_closure_bfs += start_bfs.elapsed();
 
                     // Get/Create DFA state
                     let start_map = std::time::Instant::now();
@@ -2756,9 +2680,10 @@ impl NFA {
         crate::debug!(2, "Detailed Timing breakdown:");
         crate::debug!(2, "  Collect Transitions: {:.2?}", t_collect);
         crate::debug!(2, "  Process Inputs Loop: {:.2?}", t_process_inputs);
-        crate::debug!(2, "    - Closure (no-op):  {:.2?}", t_closure_bfs);
+        crate::debug!(2, "    - BitSet Iteration: {:.2?}", t_iter_bitset);
+        crate::debug!(2, "    - Closure BFS:      {:.2?}", t_closure_bfs);
         crate::debug!(2, "    - Map Lookup/Ins:   {:.2?}", t_map_lookup);
-        crate::debug!(2, "    - Remainder:        {:.2?}", t_process_inputs - t_closure_bfs - t_map_lookup);
+        crate::debug!(2, "    - Remainder:        {:.2?}", t_process_inputs - t_iter_bitset - t_closure_bfs - t_map_lookup);
 
         let mut dfa = DFA {
             states: dfa_states,
