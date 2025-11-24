@@ -10,7 +10,6 @@ use std::fmt::{Debug, Display, Formatter};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use ahash::AHashMap;
-use regex_automata;
 
 
 pub type GroupID = usize;
@@ -1108,6 +1107,13 @@ impl ExprGroups {
         let stats = self.get_stats();
         crate::debug!(2, "Expr Stats: {}", stats);
 
+        // --- Benchmark regex-automata's total build time ---
+        let patterns: Vec<String> = self.groups.iter().map(|g| g.expr.to_benchmark_string()).collect();
+        let start_regex_automata = std::time::Instant::now();
+        // Build a dense DFA from multiple patterns. This is more analogous to our `ExprGroups`.
+        let ra_dfa_result = ::regex_automata::dfa::dense::DFA::new_many(&patterns);
+        let regex_automata_duration = start_regex_automata.elapsed();
+
         crate::debug!(3, "Optimizing Regex (Strategy B)");
         let optimized = self.optimize();
 
@@ -1115,47 +1121,6 @@ impl ExprGroups {
         let start = std::time::Instant::now();
         let mut nfa = optimized.build_nfa();
         crate::debug!(4, "Built NFA in {:.2?}", start.elapsed());
-
-        // --- Benchmark regex-automata's determinization ---
-        let start_regex_automata = std::time::Instant::now();
-        let ra_dfa_result = (|| -> Result<_, Box<dyn std::error::Error>> {
-            let mut ra_builder = regex_automata::nfa::thompson::Builder::new();
-            let mut state_map = Vec::with_capacity(nfa.states.len());
-            for _ in 0..nfa.states.len() {
-                state_map.push(ra_builder.add_state()?);
-            }
-            ra_builder.set_start(state_map[nfa.start_state]);
-            for (i, state) in nfa.states.iter().enumerate() {
-                if !state.finalizers.is_empty() {
-                    ra_builder.add_match_state(state_map[i]);
-                }
-                for (u8set, target) in &state.transitions {
-                    let mut iter = u8set.iter().peekable();
-                    while let Some(start) = iter.next() {
-                        let mut end = start;
-                        while let Some(&next) = iter.peek() {
-                            if next == end.wrapping_add(1) {
-                                end = iter.next().unwrap();
-                            } else {
-                                break;
-                            }
-                        }
-                        ra_builder.add_transition(state_map[i], state_map[*target], start..=end);
-                    }
-                }
-                for &target in &state.epsilon_transitions {
-                    ra_builder.add_epsilon(state_map[i], state_map[target]);
-                }
-            }
-            let ra_nfa = ra_builder.build();
-            let ra_dfa_config = regex_automata::dfa::dense::Config::new()
-                .start_kind(regex_automata::dfa::StartKind::Unanchored);
-            let _ra_dfa = regex_automata::dfa::dense::Builder::new()
-                .configure(ra_dfa_config)
-                .build_from_nfa(&ra_nfa)?;
-            Ok(())
-        })();
-        let regex_automata_duration = start_regex_automata.elapsed();
 
         let nfa_state_count = nfa.states.len();
 
@@ -1175,11 +1140,11 @@ impl ExprGroups {
         let our_duration = start_total.elapsed();
         crate::debug!(1, "BENCHMARK RESULT -- NFA states: {}", nfa_state_count);
         if ra_dfa_result.is_ok() {
-            crate::debug!(1, "  regex-automata crate (determinization): {:.2?}", regex_automata_duration);
+            crate::debug!(1, "  regex-automata crate (total build): {:.2?}", regex_automata_duration);
         } else {
             crate::debug!(1, "  regex-automata crate: FAILED ({:?})", ra_dfa_result.err());
         }
-        crate::debug!(1, "  this crate (total build):               {:.2?}", our_duration);
+        crate::debug!(1, "  this crate (total build):         {:.2?}", our_duration);
 
         Regex { dfa }
     }
