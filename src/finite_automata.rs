@@ -59,14 +59,16 @@ impl CompressedStateSet {
     #[inline]
     #[inline]
     fn from_sparse(sparse: &SparseStateSet) -> Self {
-        // Optimization: Sort indices first, then build words.
-        // This avoids moving the larger (u32, u64) tuples during sort.
-        let mut indices = sparse.dirty_words.clone();
-        indices.sort_unstable();
-
-        let mut words = Vec::with_capacity(indices.len());
-        for &idx in &indices {
-            words.push((idx as u32, sparse.dense.words[idx]));
+        let mut words = Vec::new();
+        for (block_idx, &block) in sparse.dirty_blocks.iter().enumerate() {
+            if block == 0 { continue; }
+            let mut b = block;
+            while b != 0 {
+                let t = b.trailing_zeros();
+                b &= !(1u64 << t);
+                let word_idx = block_idx * 64 + t as usize;
+                words.push((word_idx as u32, sparse.dense.words[word_idx]));
+            }
         }
 
         let mut hasher = ahash::AHasher::default();
@@ -79,19 +81,17 @@ impl CompressedStateSet {
     fn reuse_from_sparse(sparse: &SparseStateSet, buffer: &mut Self) {
         buffer.words.clear();
         
-        // We can't easily reuse a buffer for sorting indices without allocating,
-        // unless we pass one in. For now, let's just clone dirty_words which is small (Vec<usize>).
-        // Or better: if dirty_words is already sorted (it often is if inserted in order), check that?
-        // But insertion into SparseStateSet doesn't guarantee order if we jump around.
-        // Let's just sort indices.
-        let mut indices = sparse.dirty_words.clone();
-        indices.sort_unstable();
-
-        for &idx in &indices {
-            buffer.words.push((idx as u32, sparse.dense.words[idx]));
+        for (block_idx, &block) in sparse.dirty_blocks.iter().enumerate() {
+            if block == 0 { continue; }
+            let mut b = block;
+            while b != 0 {
+                let t = b.trailing_zeros();
+                b &= !(1u64 << t);
+                let word_idx = block_idx * 64 + t as usize;
+                buffer.words.push((word_idx as u32, sparse.dense.words[word_idx]));
+            }
         }
         
-        // Compute hash inline to avoid function call overhead
         use std::hash::Hasher;
         let mut hasher = ahash::AHasher::default();
         buffer.words.hash(&mut hasher);
@@ -144,7 +144,7 @@ impl<'a> Iterator for CompressedStateSetIter<'a> {
 
 struct SparseStateSet {
     dense: DenseStateSet,
-    dirty_words: Vec<usize>,
+    dirty_blocks: Vec<u64>,
 }
 
 #[derive(Clone)]
@@ -163,9 +163,11 @@ impl DenseStateSet {
 
 impl SparseStateSet {
     fn new(num_bits: usize) -> Self {
+        let num_words = (num_bits + 63) / 64;
+        let num_blocks = (num_words + 63) / 64;
         Self {
             dense: DenseStateSet::new(num_bits),
-            dirty_words: Vec::new(),
+            dirty_blocks: vec![0; num_blocks],
         }
     }
 
@@ -174,7 +176,9 @@ impl SparseStateSet {
         let bit_mask = 1u64 << (bit % 64);
         if (self.dense.words[word_idx] & bit_mask) == 0 {
             if self.dense.words[word_idx] == 0 {
-                self.dirty_words.push(word_idx);
+                let block_idx = word_idx / 64;
+                let block_mask = 1u64 << (word_idx % 64);
+                self.dirty_blocks[block_idx] |= block_mask;
             }
             self.dense.words[word_idx] |= bit_mask;
             true
@@ -184,10 +188,21 @@ impl SparseStateSet {
     }
 
     fn clear(&mut self) {
-        for &idx in &self.dirty_words {
-            self.dense.words[idx] = 0;
+        for (block_idx, &block) in self.dirty_blocks.iter().enumerate() {
+            if block == 0 { continue; }
+            let mut b = block;
+            while b != 0 {
+                let t = b.trailing_zeros();
+                b &= !(1u64 << t);
+                let word_idx = block_idx * 64 + t as usize;
+                self.dense.words[word_idx] = 0;
+            }
         }
-        self.dirty_words.clear();
+        self.dirty_blocks.fill(0);
+    }
+
+    fn is_empty(&self) -> bool {
+        self.dirty_blocks.iter().all(|&b| b == 0)
     }
 }
 
@@ -2421,7 +2436,7 @@ impl NFA {
                 let target_set = unsafe { transition_targets.get_unchecked(class_id) };
 
                 let start_compress_target = std::time::Instant::now();
-                if target_set.dirty_words.is_empty() {
+                if target_set.is_empty() {
                     scratch_target.words.clear();
                     let mut hasher = ahash::AHasher::default();
                     scratch_target.words.hash(&mut hasher);
@@ -2441,16 +2456,23 @@ impl NFA {
                 // TIMING: Bitset Iteration
                 let start_iter = std::time::Instant::now();
                 {
-                    for &w_idx in &target_set.dirty_words {
-                        let mut w = target_set.dense.words[w_idx];
-                        while w != 0 {
-                            let t = w.trailing_zeros();
-                            w &= !(1u64 << t);
-                            let next_state = w_idx * 64 + t as usize;
+                    for (block_idx, &block) in target_set.dirty_blocks.iter().enumerate() {
+                        if block == 0 { continue; }
+                        let mut b = block;
+                        while b != 0 {
+                            let t = b.trailing_zeros();
+                            b &= !(1u64 << t);
+                            let w_idx = block_idx * 64 + t as usize;
+                            let mut w = target_set.dense.words[w_idx];
+                            while w != 0 {
+                                let t2 = w.trailing_zeros();
+                                w &= !(1u64 << t2);
+                                let next_state = w_idx * 64 + t2 as usize;
 
-                            if closure_set.insert(next_state) {
-                                stack.push(next_state);
-                                stats.total_closure_pushes += 1;
+                                if closure_set.insert(next_state) {
+                                    stack.push(next_state);
+                                    stats.total_closure_pushes += 1;
+                                }
                             }
                         }
                     }
@@ -2495,16 +2517,23 @@ impl NFA {
                     let start_finalizers = std::time::Instant::now();
                     let mut new_finalizers = BTreeSet::new();
                     let mut new_non_greedy_finalizers = BTreeSet::new();
-                    for &w_idx in &closure_set.dirty_words {
-                         let mut w = closure_set.dense.words[w_idx];
-                         while w != 0 {
-                             let t = w.trailing_zeros();
-                             w &= !(1u64 << t);
-                             let state = w_idx * 64 + t as usize;
-                             new_finalizers.extend(self.states[state].finalizers.iter().cloned());
-                             new_non_greedy_finalizers
-                                 .extend(self.states[state].non_greedy_finalizers.iter().cloned());
-                         }
+                    for (block_idx, &block) in closure_set.dirty_blocks.iter().enumerate() {
+                        if block == 0 { continue; }
+                        let mut b = block;
+                        while b != 0 {
+                            let t = b.trailing_zeros();
+                            b &= !(1u64 << t);
+                            let w_idx = block_idx * 64 + t as usize;
+                            let mut w = closure_set.dense.words[w_idx];
+                            while w != 0 {
+                                let t2 = w.trailing_zeros();
+                                w &= !(1u64 << t2);
+                                let state = w_idx * 64 + t2 as usize;
+                                new_finalizers.extend(self.states[state].finalizers.iter().cloned());
+                                new_non_greedy_finalizers
+                                    .extend(self.states[state].non_greedy_finalizers.iter().cloned());
+                            }
+                        }
                     }
                     stats.time_finalizer_computation += start_finalizers.elapsed();
 
