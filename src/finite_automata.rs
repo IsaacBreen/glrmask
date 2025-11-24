@@ -83,7 +83,14 @@ impl CompressedStateSet {
 
         let start_hash = std::time::Instant::now();
         let mut hasher = ahash::AHasher::default();
-        words.hash(&mut hasher);
+        // Optimization: Hash as raw bytes
+        unsafe {
+            let slice = std::slice::from_raw_parts(
+                words.as_ptr() as *const u8,
+                words.len() * std::mem::size_of::<(u32, u64)>()
+            );
+            hasher.write(slice);
+        }
         let hash = hasher.finish();
         stats.time_hashing += start_hash.elapsed();
         
@@ -113,7 +120,14 @@ impl CompressedStateSet {
         use std::hash::Hasher;
         let start_hash = std::time::Instant::now();
         let mut hasher = ahash::AHasher::default();
-        buffer.words.hash(&mut hasher);
+        // Optimization: Hash as raw bytes
+        unsafe {
+            let slice = std::slice::from_raw_parts(
+                buffer.words.as_ptr() as *const u8,
+                buffer.words.len() * std::mem::size_of::<(u32, u64)>()
+            );
+            hasher.write(slice);
+        }
         buffer.hash = hasher.finish();
         stats.time_hashing += start_hash.elapsed();
     }
@@ -189,17 +203,21 @@ impl SparseStateSet {
         }
     }
 
+    #[inline(always)]
     fn insert(&mut self, bit: usize) -> bool {
         let word_idx = bit / 64;
         let bit_mask = 1u64 << (bit % 64);
-        if (self.dense.words[word_idx] & bit_mask) == 0 {
-            if self.dense.words[word_idx] == 0 {
-                self.dirty_words.push(word_idx);
+        unsafe {
+            let word = self.dense.words.get_unchecked_mut(word_idx);
+            if (*word & bit_mask) == 0 {
+                if *word == 0 {
+                    self.dirty_words.push(word_idx);
+                }
+                *word |= bit_mask;
+                true
+            } else {
+                false
             }
-            self.dense.words[word_idx] |= bit_mask;
-            true
-        } else {
-            false
         }
     }
 
@@ -2364,7 +2382,7 @@ impl NFA {
 
         // Shared buffers
         let num_nfa_states = self.states.len();
-        let mut stack = Vec::with_capacity(32768.min(num_nfa_states));
+        let mut stack = Vec::with_capacity(num_nfa_states);
         let mut closure_set = SparseStateSet::new(num_nfa_states);
 
         // Compact NFA for faster BFS
