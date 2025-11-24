@@ -486,7 +486,7 @@ pub fn precompute4(parser: &GLRParser, input_nwa: &NWA) -> DWA {
             let mapping = can_derive(&super_signature, &target_idx).expect("Super signature must derive target");
             
             let mut derived_dwa = specialize_dwa_relative(&super_dwa, &mapping, &super_dwa_unique_weights);
-            derived_dwa.simplify();
+            derived_dwa.simplify_lightweight();
             (target_sig.clone(), NWA::from_dwa(&derived_dwa))
         }).collect();
 
@@ -564,10 +564,9 @@ pub fn precompute4(parser: &GLRParser, input_nwa: &NWA) -> DWA {
             for (right_body, terminal_map) in nwa_bodies_map {
                 let (signature, concrete_weights) = canonicalize_bundle(terminal_map);
                 let template_nwa = template_cache.get(&signature).expect_else(|| format!("Template must exist for signature {:?}", signature));
-                let instantiated_template = instantiate_nwa_template(template_nwa, &concrete_weights);
                 let mut states = states_arena.borrow_mut();
                 let new_states_offset = states.len();
-                let composed_body = states.concatenate_in_place(&instantiated_template, &right_body);
+                let composed_body = instantiate_nwa_template_into(template_nwa, &concrete_weights, &mut states, &right_body);
                 let new_states_filter: HashSet<NWAStateID> = (new_states_offset..states.len()).collect();
                 if !new_states_filter.is_empty() {
                     apply_cancellations(&mut states, &new_states_filter);
@@ -662,19 +661,23 @@ fn resolve_negatives_and_optimize_and_determinize(parser: &GLRParser, mut combin
     crate::debug!(3, "Resolving negatives and optimizing for NWA with {} states and {} transitions...", combined_nwa.states.len(), combined_nwa.states.num_transitions());
     prune_continuations_from_final_states(&mut combined_nwa);
     crate::debug!(3, "Pruned continuations from final states. NWA with {} states and {} transitions remaining.", combined_nwa.states.len(), combined_nwa.states.num_transitions());
-    combined_nwa.simplify();
+    combined_nwa.simplify_lightweight();
     crate::debug!(3, "Simplified NWA. {} states and {} transitions remaining.", combined_nwa.states.len(), combined_nwa.states.num_transitions());
     let mut dwa = combined_nwa.determinize();
     crate::debug!(3, "Determinized NWA. {} states and {} transitions remaining.", dwa.states.len(), dwa.states.num_transitions());
-    dwa.simplify();
+    dwa.simplify_lightweight();
     crate::debug!(3, "Simplified DWA. {} states and {} transitions remaining.", dwa.states.len(), dwa.states.num_transitions());
     dwa
 }
 
-fn instantiate_nwa_template(template: &NWA, ordered_weights: &[Weight]) -> NWA {
-    let mut new_nwa = NWA::new_empty();
-    new_nwa.states.0.reserve(template.states.len());
-    for _ in 0..template.states.len() { new_nwa.add_state(); }
+fn instantiate_nwa_template_into(
+    template: &NWA,
+    ordered_weights: &[Weight],
+    states: &mut NWAStates,
+    right_body: &NWABody,
+) -> NWABody {
+    let offset = states.len();
+    states.0.reserve(template.states.len());
 
     let mut union_cache: HashMap<Weight, Weight> = HashMap::new();
     let mut map_abstract_weight = |w: &Weight| -> Weight {
@@ -688,25 +691,47 @@ fn instantiate_nwa_template(template: &NWA, ordered_weights: &[Weight]) -> NWA {
         concrete
     };
 
-    for (old_id, old_state) in template.states.0.iter().enumerate() {
-        let new_state = &mut new_nwa.states[old_id];
-        if let Some(fw) = &old_state.final_weight {
-            let concrete = map_abstract_weight(fw);
-            if !concrete.is_empty() { new_state.final_weight = Some(concrete); }
-        }
+    for old_state in &template.states.0 {
+        let mut new_state = crate::precompute4::weighted_automata::nwa::NWAState::default();
+        
+        // Transitions
         for (lbl, targets) in &old_state.transitions {
+            let mut new_targets = Vec::with_capacity(targets.len());
             for (target, w) in targets {
                 let concrete = map_abstract_weight(w);
-                if !concrete.is_empty() { new_nwa.states.add_transition(old_id, *lbl, *target, concrete).unwrap(); }
+                if !concrete.is_empty() {
+                    new_targets.push((*target + offset, concrete));
+                }
+            }
+            if !new_targets.is_empty() {
+                new_state.transitions.insert(*lbl, new_targets);
             }
         }
+
+        // Epsilons
         for (target, w) in &old_state.epsilons {
             let concrete = map_abstract_weight(w);
-            if !concrete.is_empty() { new_nwa.states.add_epsilon(old_id, *target, concrete); }
+            if !concrete.is_empty() {
+                new_state.epsilons.push((*target + offset, concrete));
+            }
         }
+
+        // Final Weight -> Epsilon to right_body starts
+        if let Some(fw) = &old_state.final_weight {
+            let concrete = map_abstract_weight(fw);
+            if !concrete.is_empty() {
+                for &r_start in &right_body.start_states {
+                    new_state.epsilons.push((r_start, concrete.clone()));
+                }
+            }
+        }
+
+        states.0.push(new_state);
     }
-    new_nwa.body = template.body.clone();
-    new_nwa
+
+    NWABody {
+        start_states: template.body.start_states.iter().map(|s| s + offset).collect()
+    }
 }
 
 fn simplify_remove_epsilon(nwa: &mut NWA) {
