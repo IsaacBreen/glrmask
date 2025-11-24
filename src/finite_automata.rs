@@ -898,20 +898,20 @@ impl ExprGroups {
 
         crate::debug!(3, "Building NFA");
         let start = std::time::Instant::now();
-        let mut nfa = optimized.build_nfa(); 
+        let mut nfa = crate::time!("build_nfa", optimized.build_nfa());
         crate::debug!(4, "Built NFA in {:.2?}", start.elapsed());
 
         let start_condense = std::time::Instant::now();
-        nfa.condense_epsilon_sccs();
+        crate::time!("condense_epsilon_sccs", nfa.condense_epsilon_sccs());
         crate::debug!(4, "Condensed NFA in {:.2?}", start_condense.elapsed());
 
         crate::debug!(3, "Converting NFA to DFA");
         let start = std::time::Instant::now();
-        let mut dfa = nfa.to_dfa();
+        let mut dfa = crate::time!("to_dfa", nfa.to_dfa());
         crate::debug!(4, "Converted NFA to DFA in {:.2?}", start.elapsed());
         crate::debug!(3, "Minimizing DFA");
         let start = std::time::Instant::now();
-        dfa.minimize();
+        crate::time!("minimize_dfa", dfa.minimize());
         crate::debug!(4, "Minimized DFA in {:.2?}", start.elapsed());
         Regex { dfa }
     }
@@ -2159,24 +2159,27 @@ impl NFA {
 
         // Compute Input Equivalence Classes
         let start_classes = std::time::Instant::now();
-        let (class_map, num_classes, class_members) = self.compute_equivalence_classes();
+        let (class_map, num_classes, class_members) = crate::time!("compute_equivalence_classes", self.compute_equivalence_classes());
         stats.class_computation_time = start_classes.elapsed();
         crate::debug!(4, "Computed {} input equivalence classes in {:.2?}", num_classes, stats.class_computation_time);
 
         let start_remap = std::time::Instant::now();
         // Pre-process NFA transitions to use class IDs
-        let mut remapped_transitions: Vec<Vec<(U8Set, usize)>> = Vec::with_capacity(self.states.len());
-        for state in &self.states {
-            let mut trans = Vec::with_capacity(state.transitions.len());
-            for (u8set, target) in &state.transitions {
-                let mut class_set = U8Set::none();
-                for b in u8set.iter() {
-                    class_set.insert(class_map[b as usize]);
+        let remapped_transitions = crate::time!("remap_transitions", {
+            let mut remapped_transitions: Vec<Vec<(U8Set, usize)>> = Vec::with_capacity(self.states.len());
+            for state in &self.states {
+                let mut trans = Vec::with_capacity(state.transitions.len());
+                for (u8set, target) in &state.transitions {
+                    let mut class_set = U8Set::none();
+                    for b in u8set.iter() {
+                        class_set.insert(class_map[b as usize]);
+                    }
+                    trans.push((class_set, *target));
                 }
-                trans.push((class_set, *target));
+                remapped_transitions.push(trans);
             }
-            remapped_transitions.push(trans);
-        }
+            remapped_transitions
+        });
         stats.remapped_transitions_time = start_remap.elapsed();
 
         // Shared buffers
@@ -2193,22 +2196,24 @@ impl NFA {
         stats.total_closure_pushes += 1;
 
         let start_bfs = std::time::Instant::now();
-        while let Some(u) = stack.pop() {
-            let start = compact_nfa.epsilon_offsets[u] as usize;
-            let end = compact_nfa.epsilon_offsets[u + 1] as usize;
-            stats.total_epsilon_edges_traversed += (end - start) as u64;
-            for &v in &compact_nfa.epsilon_targets[start..end] {
-                let v = v as usize;
-                if closure_set.insert(v) {
-                    stack.push(v);
-                    stats.total_closure_pushes += 1;
+        crate::time!("initial_closure_bfs", {
+            while let Some(u) = stack.pop() {
+                let start = compact_nfa.epsilon_offsets[u] as usize;
+                let end = compact_nfa.epsilon_offsets[u + 1] as usize;
+                stats.total_epsilon_edges_traversed += (end - start) as u64;
+                for &v in &compact_nfa.epsilon_targets[start..end] {
+                    let v = v as usize;
+                    if closure_set.insert(v) {
+                        stack.push(v);
+                        stats.total_closure_pushes += 1;
+                    }
                 }
             }
-        }
+        });
         stats.time_closure_bfs += start_bfs.elapsed();
 
         let start_compress = std::time::Instant::now();
-        let start_state_set = CompressedStateSet::from_sparse(&closure_set);
+        let start_state_set = crate::time!("compress_state_set", CompressedStateSet::from_sparse(&closure_set));
         stats.time_compress_state_set += start_compress.elapsed();
         stats.total_compressed_sets += 1;
         stats.total_compressed_words += start_state_set.words.len() as u64;
@@ -2218,12 +2223,15 @@ impl NFA {
         stats.max_worklist_len = stats.max_worklist_len.max(worklist.len());
 
         let start_finalizers = std::time::Instant::now();
-        let mut finalizers = BTreeSet::new();
-        let mut non_greedy_finalizers = BTreeSet::new();
-        for state in start_state_set.iter() {
-            finalizers.extend(self.states[state].finalizers.iter().cloned());
-            non_greedy_finalizers.extend(self.states[state].non_greedy_finalizers.iter().cloned());
-        }
+        let (finalizers, non_greedy_finalizers) = crate::time!("compute_finalizers", {
+            let mut finalizers = BTreeSet::new();
+            let mut non_greedy_finalizers = BTreeSet::new();
+            for state in start_state_set.iter() {
+                finalizers.extend(self.states[state].finalizers.iter().cloned());
+                non_greedy_finalizers.extend(self.states[state].non_greedy_finalizers.iter().cloned());
+            }
+            (finalizers, non_greedy_finalizers)
+        });
         stats.time_finalizer_computation += start_finalizers.elapsed();
 
         dfa_states.push(DFAState {
@@ -2258,20 +2266,22 @@ impl NFA {
 
             // 1. Populate transition_targets for all inputs (COLLECT PHASE)
             let start_collect = std::time::Instant::now();
-            for state in current_set.iter() {
-                for (class_set, next_state) in unsafe { remapped_transitions.get_unchecked(state) } {
-                    for class_id in class_set.iter() {
-                        let idx = class_id as usize;
-                        unsafe {
-                            if !*seen_class.get_unchecked(idx) {
-                                *seen_class.get_unchecked_mut(idx) = true;
-                                used_classes.push(idx); 
+            crate::time!("collect_transitions", {
+                for state in current_set.iter() {
+                    for (class_set, next_state) in unsafe { remapped_transitions.get_unchecked(state) } {
+                        for class_id in class_set.iter() {
+                            let idx = class_id as usize;
+                            unsafe {
+                                if !*seen_class.get_unchecked(idx) {
+                                    *seen_class.get_unchecked_mut(idx) = true;
+                                    used_classes.push(idx); 
+                                }
+                                transition_targets.get_unchecked_mut(idx).insert(*next_state);
                             }
-                            transition_targets.get_unchecked_mut(idx).insert(*next_state);
                         }
                     }
                 }
-            }
+            });
             stats.time_collect_transitions += start_collect.elapsed();
 
             // 2. Process inputs (PROCESS PHASE)
@@ -2280,97 +2290,107 @@ impl NFA {
             // Collect all transitions for this state to bulk insert later
             let mut dfa_transitions_vec: Vec<(u8, usize)> = Vec::new();
 
-            for &class_id in &used_classes {
-                let target_set = unsafe { transition_targets.get_unchecked(class_id) };
-                
-                closure_set.clear();
+            crate::time!("process_inputs", {
+                for &class_id in &used_classes {
+                    let target_set = unsafe { transition_targets.get_unchecked(class_id) };
+                    
+                    closure_set.clear();
 
-                // TIMING: Bitset Iteration
-                let start_iter = std::time::Instant::now();
-                {
-                    for &w_idx in &target_set.dirty_words {
-                        let mut w = target_set.dense.words[w_idx];
-                        while w != 0 {
-                            let t = w.trailing_zeros();
-                            w &= !(1u64 << t);
-                            let next_state = w_idx * 64 + t as usize;
+                    // TIMING: Bitset Iteration
+                    let start_iter = std::time::Instant::now();
+                    crate::time!("bitset_iteration", {
+                        for &w_idx in &target_set.dirty_words {
+                            let mut w = target_set.dense.words[w_idx];
+                            while w != 0 {
+                                let t = w.trailing_zeros();
+                                w &= !(1u64 << t);
+                                let next_state = w_idx * 64 + t as usize;
 
-                            if closure_set.insert(next_state) {
-                                stack.push(next_state);
-                                stats.total_closure_pushes += 1;
+                                if closure_set.insert(next_state) {
+                                    stack.push(next_state);
+                                    stats.total_closure_pushes += 1;
+                                }
                             }
                         }
-                    }
-                }
-                stats.time_bitset_iteration += start_iter.elapsed();
-
-                // TIMING: BFS Closure
-                let start_bfs = std::time::Instant::now();
-                while let Some(u) = stack.pop() {
-                    let start_offs = unsafe { *compact_nfa.epsilon_offsets.get_unchecked(u) } as usize;
-                    let end_offs = unsafe { *compact_nfa.epsilon_offsets.get_unchecked(u + 1) } as usize;
-                    stats.total_epsilon_edges_traversed += (end_offs - start_offs) as u64;
-
-                    for i in start_offs..end_offs {
-                        let v = unsafe { *compact_nfa.epsilon_targets.get_unchecked(i) } as usize;
-                        if closure_set.insert(v) {
-                            stack.push(v);
-                            stats.total_closure_pushes += 1;
-                        }
-                    }
-                }
-                stats.time_closure_bfs += start_bfs.elapsed();
-
-                // Get/Create DFA state
-                let start_map = std::time::Instant::now();
-                let start_compress_closure = std::time::Instant::now();
-                CompressedStateSet::reuse_from_sparse(&closure_set, &mut scratch_closure);
-                stats.time_compress_state_set += start_compress_closure.elapsed();
-                stats.total_compressed_sets += 1;
-                stats.total_compressed_words += scratch_closure.words.len() as u64;
-
-                stats.global_map_lookups += 1;
-                let start_map_lookup = std::time::Instant::now();
-                let next_state_idx = if let Some(&existing_state) = dfa_state_map.get(&scratch_closure) {
-                    stats.time_map_get += start_map_lookup.elapsed();
-                    stats.global_map_hits += 1;
-                    existing_state
-                } else {
-                    stats.time_map_get += start_map_lookup.elapsed();
-                    let new_state_index = dfa_states.len();
-                    
-                    let start_map_insert = std::time::Instant::now();
-                    dfa_state_map.insert(scratch_closure.clone(), new_state_index);
-                    stats.time_map_insert += start_map_insert.elapsed();
-                    
-                    worklist.push(scratch_closure.clone());
-                    stats.max_worklist_len = stats.max_worklist_len.max(worklist.len());
-
-                    let start_finalizers = std::time::Instant::now();
-                    let mut new_finalizers = BTreeSet::new();
-                    let mut new_non_greedy_finalizers = BTreeSet::new();
-                    for state in scratch_closure.iter() {
-                        new_finalizers.extend(self.states[state].finalizers.iter().cloned());
-                        new_non_greedy_finalizers
-                            .extend(self.states[state].non_greedy_finalizers.iter().cloned());
-                    }
-                    stats.time_finalizer_computation += start_finalizers.elapsed();
-
-                    dfa_states.push(DFAState {
-                        transitions: CharTransitions::new(),
-                        finalizers: new_finalizers,
-                        possible_future_group_ids: BTreeSet::new(),
-                        group_id_to_u8set: BTreeMap::new(),
                     });
+                    stats.time_bitset_iteration += start_iter.elapsed();
 
-                    new_state_index
-                };
-                stats.time_map_lookup_insert += start_map.elapsed();
+                    // TIMING: BFS Closure
+                    let start_bfs = std::time::Instant::now();
+                    crate::time!("closure_bfs", {
+                        while let Some(u) = stack.pop() {
+                            let start_offs = unsafe { *compact_nfa.epsilon_offsets.get_unchecked(u) } as usize;
+                            let end_offs = unsafe { *compact_nfa.epsilon_offsets.get_unchecked(u + 1) } as usize;
+                            stats.total_epsilon_edges_traversed += (end_offs - start_offs) as u64;
 
-                for &b in &class_members[class_id] {
-                    dfa_transitions_vec.push((b, next_state_idx));
+                            for i in start_offs..end_offs {
+                                let v = unsafe { *compact_nfa.epsilon_targets.get_unchecked(i) } as usize;
+                                if closure_set.insert(v) {
+                                    stack.push(v);
+                                    stats.total_closure_pushes += 1;
+                                }
+                            }
+                        }
+                    });
+                    stats.time_closure_bfs += start_bfs.elapsed();
+
+                    // Get/Create DFA state
+                    let start_map = std::time::Instant::now();
+                    let start_compress_closure = std::time::Instant::now();
+                    crate::time!("compress_state_set", CompressedStateSet::reuse_from_sparse(&closure_set, &mut scratch_closure));
+                    stats.time_compress_state_set += start_compress_closure.elapsed();
+                    stats.total_compressed_sets += 1;
+                    stats.total_compressed_words += scratch_closure.words.len() as u64;
+
+                    stats.global_map_lookups += 1;
+                    let start_map_lookup = std::time::Instant::now();
+                    let next_state_idx = crate::time!("map_lookup_insert", {
+                        let lookup_result = crate::time!("map_get", dfa_state_map.get(&scratch_closure).copied());
+                        if let Some(existing_state) = lookup_result {
+                            stats.time_map_get += start_map_lookup.elapsed();
+                            stats.global_map_hits += 1;
+                            existing_state
+                        } else {
+                            stats.time_map_get += start_map_lookup.elapsed();
+                            let new_state_index = dfa_states.len();
+                            
+                            let start_map_insert = std::time::Instant::now();
+                            crate::time!("map_insert", dfa_state_map.insert(scratch_closure.clone(), new_state_index));
+                            stats.time_map_insert += start_map_insert.elapsed();
+                            
+                            worklist.push(scratch_closure.clone());
+                            stats.max_worklist_len = stats.max_worklist_len.max(worklist.len());
+
+                            let start_finalizers = std::time::Instant::now();
+                            let (new_finalizers, new_non_greedy_finalizers) = crate::time!("compute_finalizers", {
+                                let mut new_finalizers = BTreeSet::new();
+                                let mut new_non_greedy_finalizers = BTreeSet::new();
+                                for state in scratch_closure.iter() {
+                                    new_finalizers.extend(self.states[state].finalizers.iter().cloned());
+                                    new_non_greedy_finalizers
+                                        .extend(self.states[state].non_greedy_finalizers.iter().cloned());
+                                }
+                                (new_finalizers, new_non_greedy_finalizers)
+                            });
+                            stats.time_finalizer_computation += start_finalizers.elapsed();
+
+                            dfa_states.push(DFAState {
+                                transitions: CharTransitions::new(),
+                                finalizers: new_finalizers,
+                                possible_future_group_ids: BTreeSet::new(),
+                                group_id_to_u8set: BTreeMap::new(),
+                            });
+
+                            new_state_index
+                        }
+                    });
+                    stats.time_map_lookup_insert += start_map.elapsed();
+
+                    for &b in &class_members[class_id] {
+                        dfa_transitions_vec.push((b, next_state_idx));
+                    }
                 }
-            }
+            });
             stats.time_process_inputs += start_process.elapsed();
 
             // Bulk insert transitions
@@ -2395,7 +2415,7 @@ impl NFA {
         }
 
         let meta_start = std::time::Instant::now();
-        dfa.recompute_metadata();
+        crate::time!("recompute_metadata", dfa.recompute_metadata());
         stats.dfa_metadata_time = meta_start.elapsed();
         
         stats.total_time = start_time.elapsed();
