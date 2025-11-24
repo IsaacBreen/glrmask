@@ -2444,40 +2444,75 @@ impl NFA {
         dfa
     }
 
-    /// Precompute epsilon closure for each NFA state.
-    /// Returns a Vec where result[i] is a DenseStateSet of all states reachable from i via epsilon.
-    fn precompute_epsilon_closures(&self) -> Vec<DenseStateSet> {
+    /// Eliminate all epsilon transitions from the NFA.
+    /// Returns a new NFA with no epsilon transitions but equivalent language.
+    fn eliminate_epsilon_transitions(mut self) -> NFA {
+        let start_time = std::time::Instant::now();
         let n = self.states.len();
-        let mut closures: Vec<DenseStateSet> = (0..n).map(|_| DenseStateSet::new(n)).collect();
         
-        // For each state, compute its epsilon closure via BFS
+        // Compute epsilon closure for each state
+        let mut closures: Vec<Vec<usize>> = vec![Vec::new(); n];
         let mut stack = Vec::with_capacity(256);
+        
         for start_state in 0..n {
             let closure = &mut closures[start_state];
+            closure.push(start_state);
             
-            // Every state is in its own closure
-            closure.words[start_state / 64] |= 1u64 << (start_state % 64);
-            
+            let mut visited = vec![false; n];
+            visited[start_state] = true;
             stack.clear();
             stack.push(start_state);
             
             while let Some(u) = stack.pop() {
                 for &v in &self.states[u].epsilon_transitions {
-                    let word_idx = v / 64;
-                    let bit_mask = 1u64 << (v % 64);
-                    if (closure.words[word_idx] & bit_mask) == 0 {
-                        closure.words[word_idx] |= bit_mask;
+                    if !visited[v] {
+                        visited[v] = true;
+                        closure.push(v);
                         stack.push(v);
                     }
                 }
             }
         }
         
-        closures
+        // Build new NFA without epsilon transitions
+        let mut new_states: Vec<NFAState> = Vec::with_capacity(n);
+        
+        for state_id in 0..n {
+            let mut new_state = NFAState::new();
+            
+            // For each state in this state's epsilon closure
+            for &closure_state in &closures[state_id] {
+                // Add all non-epsilon transitions
+                for (char_set, target) in &self.states[closure_state].transitions {
+                    new_state.transitions.push((char_set.clone(), *target));
+                }
+                
+                // Merge finalizers
+                new_state.finalizers.extend(&self.states[closure_state].finalizers);
+                new_state.non_greedy_finalizers.extend(&self.states[closure_state].non_greedy_finalizers);
+            }
+            
+            // No epsilon transitions in new NFA
+            new_state.epsilon_transitions.clear();
+            
+            new_states.push(new_state);
+        }
+        
+        crate::debug!(4, "Eliminated epsilon transitions in {:.2?}", start_time.elapsed());
+        
+        NFA {
+            states: new_states,
+            start_state: self.start_state,
+        }
     }
 
-    fn to_dfa_impl(self) -> DFA {
+    fn to_dfa_impl(mut self) -> DFA {
         let start_time = std::time::Instant::now();
+        
+        // MAJOR OPTIMIZATION: Eliminate epsilon transitions upfront
+        // This converts the NFA to epsilon-free form, making DFA construction use the fast path
+        self = self.eliminate_epsilon_transitions();
+        
         let mut dfa_states: Vec<DFAState> = Vec::new();
         // Use AHashMap for faster hashing
         let mut dfa_state_map: AHashMap<CompressedStateSet, usize> = AHashMap::default();
@@ -2486,7 +2521,6 @@ impl NFA {
         // Instrumentation
         let mut t_collect = std::time::Duration::ZERO;
         let mut t_process_inputs = std::time::Duration::ZERO;
-        let mut t_iter_bitset = std::time::Duration::ZERO;
         let mut t_closure_bfs = std::time::Duration::ZERO;
         let mut t_map_lookup = std::time::Duration::ZERO;
 
@@ -2496,16 +2530,11 @@ impl NFA {
         crate::debug!(4, "Computed {} input equivalence classes in {:.2?}", num_classes, start_classes.elapsed());
 
         // Pre-process NFA transitions to use class IDs
-        // remapped_transitions[state_id] = list of (class_set, target_state)
-        // where class_set is a BitSet of class IDs.
-        // Since num_classes <= 256, we can use U8Set to store class IDs!
         let mut remapped_transitions: Vec<Vec<(U8Set, usize)>> = Vec::with_capacity(self.states.len());
         for state in &self.states {
             let mut trans = Vec::with_capacity(state.transitions.len());
             for (u8set, target) in &state.transitions {
                 let mut class_set = U8Set::none();
-                // We only need to check one representative from each class to see if it's in u8set.
-                // But iterating u8set is fast enough.
                 for b in u8set.iter() {
                     class_set.insert(class_map[b as usize]);
                 }
@@ -2514,46 +2543,13 @@ impl NFA {
             remapped_transitions.push(trans);
         }
 
-        // On-demand epsilon closure cache (only compute what we need)
-        let mut epsilon_closure_cache: AHashMap<usize, DenseStateSet> = AHashMap::default();
-
         // Shared buffers
         let num_nfa_states = self.states.len();
-        let mut stack = Vec::with_capacity(256);
         let mut closure_set = SparseStateSet::new(num_nfa_states);
 
-        // Compute start state closure
+        // Since we eliminated epsilon transitions, "closure" is just the state itself
         closure_set.clear();
-        
-        // Compute epsilon closure for start state
-        let mut start_closure = DenseStateSet::new(num_nfa_states);
-        start_closure.words[self.start_state / 64] |= 1u64 << (self.start_state % 64);
-        stack.push(self.start_state);
-        
-        while let Some(u) = stack.pop() {
-            for &v in &self.states[u].epsilon_transitions {
-                let word_idx = v / 64;
-                let bit_mask = 1u64 << (v % 64);
-                if (start_closure.words[word_idx] & bit_mask) == 0 {
-                    start_closure.words[word_idx] |= bit_mask;
-                    stack.push(v);
-                }
-            }
-        }
-        
-        // Cache it
-        epsilon_closure_cache.insert(self.start_state, start_closure);
-        
-        // Copy to closure_set
-        let start_closure_ref = &epsilon_closure_cache[&self.start_state];
-        for (word_idx, word) in start_closure_ref.words.iter().enumerate() {
-            if *word != 0 {
-                closure_set.dense.words[word_idx] = *word;
-                if !closure_set.dirty_words.contains(&word_idx) {
-                    closure_set.dirty_words.push(word_idx);
-                }
-            }
-        }
+        closure_set.insert(self.start_state);
 
         let start_state_set = CompressedStateSet::from_sparse(&closure_set);
         dfa_state_map.insert(start_state_set.clone(), 0);
@@ -2640,56 +2636,16 @@ impl NFA {
                 let next_dfa_state_idx = if let Some(&idx) = local_cache.get(&scratch_target) {
                     idx
                 } else {
-                    // TIMING: Closure Union - using cached closures
+                    // Since epsilon transitions are eliminated, closure = target_set
                     let start_closure = std::time::Instant::now();
-                    closure_set.clear();
                     
-                    // Union all cached closures for states in target_set
+                    // Just copy target_set to closure_set (no epsilon expansion needed)
+                    closure_set.clear();
                     for &w_idx in &target_set.dirty_words {
-                        let mut w = target_set.dense.words[w_idx];
-                        while w != 0 {
-                            let t = w.trailing_zeros();
-                            w &= !(1u64 << t);
-                            let state = w_idx * 64 + t as usize;
-                            
-                            // Get or compute closure for this state
-                            if !epsilon_closure_cache.contains_key(&state) {
-                                let mut state_closure = DenseStateSet::new(num_nfa_states);
-                                state_closure.words[state / 64] |= 1u64 << (state % 64);
-                                
-                                stack.clear();
-                                stack.push(state);
-                                
-                                while let Some(u) = stack.pop() {
-                                    for &v in &self.states[u].epsilon_transitions {
-                                        let word_idx = v / 64;
-                                        let bit_mask = 1u64 << (v % 64);
-                                        if (state_closure.words[word_idx] & bit_mask) == 0 {
-                                            state_closure.words[word_idx] |= bit_mask;
-                                            stack.push(v);
-                                        }
-                                    }
-                                }
-                                
-                                epsilon_closure_cache.insert(state, state_closure);
-                            }
-                            
-                            // Union the cached closure
-                            let state_closure = &epsilon_closure_cache[&state];
-                            for (closure_word_idx, &closure_word) in state_closure.words.iter().enumerate() {
-                                if closure_word != 0 {
-                                    let old_word = closure_set.dense.words[closure_word_idx];
-                                    let new_word = old_word | closure_word;
-                                    if new_word != old_word {
-                                        closure_set.dense.words[closure_word_idx] = new_word;
-                                        if old_word == 0 {
-                                            closure_set.dirty_words.push(closure_word_idx);
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                        closure_set.dense.words[w_idx] = target_set.dense.words[w_idx];
+                        closure_set.dirty_words.push(w_idx);
                     }
+                    
                     t_closure_bfs += start_closure.elapsed();
 
                     // Get/Create DFA state
@@ -2755,10 +2711,9 @@ impl NFA {
         crate::debug!(2, "Detailed Timing breakdown:");
         crate::debug!(2, "  Collect Transitions: {:.2?}", t_collect);
         crate::debug!(2, "  Process Inputs Loop: {:.2?}", t_process_inputs);
-        crate::debug!(2, "    - BitSet Iteration: {:.2?}", t_iter_bitset);
-        crate::debug!(2, "    - Closure BFS:      {:.2?}", t_closure_bfs);
+        crate::debug!(2, "    - Closure (no-op):  {:.2?}", t_closure_bfs);
         crate::debug!(2, "    - Map Lookup/Ins:   {:.2?}", t_map_lookup);
-        crate::debug!(2, "    - Remainder:        {:.2?}", t_process_inputs - t_iter_bitset - t_closure_bfs - t_map_lookup);
+        crate::debug!(2, "    - Remainder:        {:.2?}", t_process_inputs - t_closure_bfs - t_map_lookup);
 
         let mut dfa = DFA {
             states: dfa_states,
