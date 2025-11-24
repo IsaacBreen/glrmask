@@ -549,18 +549,7 @@ impl<'r> Precomputer1<'r> {
                         let target = match target_entry {
                             std::collections::btree_map::Entry::Occupied(o) => *o.get(),
                             std::collections::btree_map::Entry::Vacant(v) => {
-                                let mut reuse = None;
-                                if let Some(labels) = self.pending_transitions.get(&src_node) {
-                                    if let Some(dsts) = labels.get(&(terminal_id.0 as Label)) {
-                                        for (dst, _) in dsts {
-                                            if self.live_tokens.get(dst).map_or(true, |live| live.is_disjoint(&weight)) {
-                                                reuse = Some(*dst);
-                                                break;
-                                            }
-                                        }
-                                    }
-                                }
-                                let t = reuse.unwrap_or_else(|| self.nwa.add_state());
+                                let t = self.nwa.add_state();
                                 v.insert(t);
                                 t
                             }
