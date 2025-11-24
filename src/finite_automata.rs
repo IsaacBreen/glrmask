@@ -11,7 +11,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use ahash::AHashMap;
 use profiler_macro::time_it;
-use crate::datastructures::compressed_state_set::{CompressedStateSet, SparseStateSet};
+use crate::datastructures::compressed_state_set::CompressedStateSet;
 
 
 pub type GroupID = usize;
@@ -2180,7 +2180,7 @@ impl NFA {
         // Shared buffers
         let num_nfa_states = self.states.len();
         let mut stack = Vec::with_capacity(num_nfa_states);
-        let mut closure_set = SparseStateSet::new(num_nfa_states);
+        let mut closure_set = CompressedStateSet::new();
 
         // Compact NFA for faster BFS
         let compact_nfa = self.build_compact_nfa();
@@ -2206,7 +2206,8 @@ impl NFA {
         stats.time_closure_bfs += start_bfs.elapsed();
 
         let start_compress = std::time::Instant::now();
-        let start_state_set = CompressedStateSet::from_sparse(&closure_set);
+        closure_set.recompute_hash();
+        let start_state_set = closure_set.clone();
         stats.time_compress_state_set += start_compress.elapsed();
         stats.total_compressed_sets += 1;
         stats.total_compressed_words += start_state_set.words.len() as u64;
@@ -2232,11 +2233,9 @@ impl NFA {
         });
 
         // Reusable structures
-        let mut transition_targets: Vec<SparseStateSet> = (0..num_classes).map(|_| SparseStateSet::new(num_nfa_states)).collect();
+        let mut transition_targets: Vec<CompressedStateSet> = (0..num_classes).map(|_| CompressedStateSet::new()).collect();
         let mut used_classes: Vec<usize> = Vec::with_capacity(num_classes);
         let mut seen_class = vec![false; num_classes];
-        let mut scratch_target = CompressedStateSet::new(0);
-        let mut scratch_closure = CompressedStateSet::new(0);
 
         let mut next_log_threshold = 20_000;
         while let Some(current_set) = worklist.pop() {
@@ -2264,7 +2263,7 @@ impl NFA {
                         unsafe {
                             if !*seen_class.get_unchecked(idx) {
                                 *seen_class.get_unchecked_mut(idx) = true;
-                                used_classes.push(idx);
+                                used_classes.push(idx); 
                             }
                             transition_targets.get_unchecked_mut(idx).insert(*next_state);
                         }
@@ -2280,35 +2279,18 @@ impl NFA {
             let mut dfa_transitions_vec: Vec<(u8, usize)> = Vec::new();
 
             for &class_id in &used_classes {
-                let target_set = unsafe { transition_targets.get_unchecked(class_id) };
-
-                let start_compress_target = std::time::Instant::now();
-                if target_set.is_empty() {
-                    scratch_target.words.clear(); // CompressedStateSet.words is pub now
-                    let mut hasher = ahash::AHasher::default();
-                    scratch_target.words.hash(&mut hasher);
-                    scratch_target.hash = hasher.finish();
-                } else {
-                    CompressedStateSet::reuse_from_sparse(target_set, &mut scratch_target);
-                }
-                stats.time_compress_state_set += start_compress_target.elapsed();
-                stats.total_compressed_sets += 1;
-                stats.total_compressed_words += scratch_target.words.len() as u64;
-
-                // Removed local_cache to avoid overhead of hashing/lookup for low hit rate.
-                // Directly compute closure.
+                let target_set = unsafe { transition_targets.get_unchecked_mut(class_id) };
                 
                 closure_set.clear();
 
                 // TIMING: Bitset Iteration
                 let start_iter = std::time::Instant::now();
                 {
-                    for &w_idx in &target_set.dirty_words {
-                        let mut w = target_set.dense.words[w_idx];
+                    for &(w_idx, mut w) in &target_set.words {
                         while w != 0 {
                             let t = w.trailing_zeros();
                             w &= !(1u64 << t);
-                            let next_state = w_idx * 64 + t as usize;
+                            let next_state = (w_idx as usize) * 64 + (t as usize);
 
                             if closure_set.insert(next_state) {
                                 stack.push(next_state);
@@ -2339,14 +2321,14 @@ impl NFA {
                 // Get/Create DFA state
                 let start_map = std::time::Instant::now();
                 let start_compress_closure = std::time::Instant::now();
-                CompressedStateSet::reuse_from_sparse(&closure_set, &mut scratch_closure);
+                closure_set.recompute_hash();
                 stats.time_compress_state_set += start_compress_closure.elapsed();
                 stats.total_compressed_sets += 1;
-                stats.total_compressed_words += scratch_closure.words.len() as u64;
+                stats.total_compressed_words += closure_set.words.len() as u64;
 
                 stats.global_map_lookups += 1;
                 let start_map_lookup = std::time::Instant::now();
-                let next_state_idx = if let Some(&existing_state) = dfa_state_map.get(&scratch_closure) {
+                let next_state_idx = if let Some(&existing_state) = dfa_state_map.get(&closure_set) {
                     stats.time_map_get += start_map_lookup.elapsed();
                     stats.global_map_hits += 1;
                     existing_state
@@ -2355,21 +2337,20 @@ impl NFA {
                     let new_state_index = dfa_states.len();
                     
                     let start_map_insert = std::time::Instant::now();
-                    dfa_state_map.insert(scratch_closure.clone(), new_state_index);
+                    dfa_state_map.insert(closure_set.clone(), new_state_index);
                     stats.time_map_insert += start_map_insert.elapsed();
                     
-                    worklist.push(scratch_closure.clone());
+                    worklist.push(closure_set.clone());
                     stats.max_worklist_len = stats.max_worklist_len.max(worklist.len());
 
                     let start_finalizers = std::time::Instant::now();
                     let mut new_finalizers = BTreeSet::new();
                     let mut new_non_greedy_finalizers = BTreeSet::new();
-                    for &w_idx in &closure_set.dirty_words {
-                         let mut w = closure_set.dense.words[w_idx];
+                    for &(w_idx, mut w) in &closure_set.words {
                          while w != 0 {
                              let t = w.trailing_zeros();
                              w &= !(1u64 << t);
-                             let state = w_idx * 64 + t as usize;
+                             let state = (w_idx as usize) * 64 + (t as usize);
                              new_finalizers.extend(self.states[state].finalizers.iter().cloned());
                              new_non_greedy_finalizers
                                  .extend(self.states[state].non_greedy_finalizers.iter().cloned());

@@ -3,64 +3,6 @@ use ahash::AHasher;
 use profiler_macro::time_it;
 
 #[derive(Clone)]
-pub struct DenseStateSet {
-    pub words: Vec<u64>,
-}
-
-impl DenseStateSet {
-    pub fn new(num_bits: usize) -> Self {
-        let num_words = (num_bits + 63) / 64;
-        Self {
-            words: vec![0; num_words],
-        }
-    }
-}
-
-pub struct SparseStateSet {
-    pub dense: DenseStateSet,
-    pub dirty_words: Vec<usize>,
-}
-
-impl SparseStateSet {
-    pub fn new(num_bits: usize) -> Self {
-        Self {
-            dense: DenseStateSet::new(num_bits),
-            dirty_words: Vec::new(),
-        }
-    }
-
-    // #[time_it]
-    #[inline(always)]
-    pub fn insert(&mut self, bit: usize) -> bool {
-        let word_idx = bit / 64;
-        let bit_mask = 1u64 << (bit % 64);
-        unsafe {
-            let word = self.dense.words.get_unchecked_mut(word_idx);
-            if (*word & bit_mask) == 0 {
-                if *word == 0 {
-                    self.dirty_words.push(word_idx);
-                }
-                *word |= bit_mask;
-                true
-            } else {
-                false
-            }
-        }
-    }
-
-    pub fn clear(&mut self) {
-        for &idx in &self.dirty_words {
-            self.dense.words[idx] = 0;
-        }
-        self.dirty_words.clear();
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.dirty_words.is_empty()
-    }
-}
-
-#[derive(Clone, Eq)]
 pub struct CompressedStateSet {
     // Sorted by word index. (word_index, word_value)
     pub words: Vec<(u32, u64)>,
@@ -86,63 +28,60 @@ impl Hash for CompressedStateSet {
 
 impl CompressedStateSet {
     #[inline]
-    pub fn new(_num_bits: usize) -> Self {
+    pub fn new() -> Self {
         Self {
             words: Vec::new(),
             hash: 0,
         }
     }
 
-    #[inline]
-    #[time_it]
-    pub fn from_sparse(sparse: &SparseStateSet) -> Self {
-        // Optimization: Sort indices first, then build words.
-        let mut indices = sparse.dirty_words.clone();
-        indices.sort_unstable();
-
-        let mut words = Vec::with_capacity(indices.len());
-        for &idx in &indices {
-            words.push((idx as u32, sparse.dense.words[idx]));
+    #[inline(always)]
+    pub fn insert(&mut self, bit: usize) -> bool {
+        let word_idx = (bit >> 6) as u32;
+        let mask = 1u64 << (bit & 0x3F);
+        match self.words.binary_search_by_key(&word_idx, |&(w, _)| w) {
+            Ok(idx) => {
+                let old = self.words[idx].1;
+                if (old & mask) == 0 {
+                    self.words[idx].1 |= mask;
+                    true
+                } else {
+                    false
+                }
+            }
+            Err(idx) => {
+                self.words.insert(idx, (word_idx, mask));
+                true
+            }
         }
+    }
 
-        let mut hasher = AHasher::default();
-        // Optimization: Hash as raw bytes
-        unsafe {
-            let slice = std::slice::from_raw_parts(
-                words.as_ptr() as *const u8,
-                words.len() * std::mem::size_of::<(u32, u64)>()
-            );
-            hasher.write(slice);
+    pub fn contains(&self, bit: usize) -> bool {
+        let word_idx = (bit >> 6) as u32;
+        let mask = 1u64 << (bit & 0x3F);
+        match self.words.binary_search_by_key(&word_idx, |&(w, _)| w) {
+            Ok(idx) => (self.words[idx].1 & mask) != 0,
+            Err(_) => false,
         }
-        let hash = hasher.finish();
+    }
 
-        Self { words, hash }
+    pub fn clear(&mut self) {
+        self.words.clear();
+        self.hash = 0;
     }
 
     #[inline]
-    #[time_it]
-    pub fn reuse_from_sparse(sparse: &SparseStateSet, buffer: &mut Self) {
-        buffer.words.clear();
-
-        // We can't easily reuse a buffer for sorting indices without allocating,
-        // unless we pass one in. For now, let's just clone dirty_words which is small (Vec<usize>).
-        let mut indices = sparse.dirty_words.clone();
-        indices.sort_unstable();
-
-        for &idx in &indices {
-            buffer.words.push((idx as u32, sparse.dense.words[idx]));
-        }
-
+    pub fn recompute_hash(&mut self) {
         let mut hasher = AHasher::default();
-        // Optimization: Hash as raw bytes
+        // Optimization: Hash as raw bytes for speed
         unsafe {
             let slice = std::slice::from_raw_parts(
-                buffer.words.as_ptr() as *const u8,
-                buffer.words.len() * std::mem::size_of::<(u32, u64)>()
+                self.words.as_ptr() as *const u8,
+                self.words.len() * std::mem::size_of::<(u32, u64)>()
             );
             hasher.write(slice);
         }
-        buffer.hash = hasher.finish();
+        self.hash = hasher.finish();
     }
 
     #[inline]
