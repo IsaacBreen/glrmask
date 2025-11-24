@@ -59,11 +59,11 @@ impl CompressedStateSet {
     #[inline]
     fn from_sparse(sparse: &SparseStateSet) -> Self {
         let mut words = Vec::with_capacity(sparse.dirty_words.len());
-        for (i, &w) in sparse.dense.words.iter().enumerate() {
-            if w != 0 {
-                words.push((i as u32, w));
-            }
+        for &idx in &sparse.dirty_words {
+            words.push((idx as u32, sparse.dense.words[idx]));
         }
+        words.sort_unstable(); // Ensure canonical order for hashing
+
         let mut hasher = ahash::AHasher::default();
         words.hash(&mut hasher);
         let hash = hasher.finish();
@@ -73,14 +73,10 @@ impl CompressedStateSet {
     #[inline]
     fn reuse_from_sparse(sparse: &SparseStateSet, buffer: &mut Self) {
         buffer.words.clear();
-        // Optimization: Iterate dense words directly.
-        // For 300k states, dense size is ~4800 u64s (38KB).
-        // Linear scan is cache-friendly and faster than cloning+sorting dirty_words indices.
-        for (i, &w) in sparse.dense.words.iter().enumerate() {
-            if w != 0 {
-                buffer.words.push((i as u32, w));
-            }
+        for &idx in &sparse.dirty_words {
+            buffer.words.push((idx as u32, sparse.dense.words[idx]));
         }
+        buffer.words.sort_unstable(); // Ensure canonical order for hashing
         
         // Compute hash inline to avoid function call overhead
         use std::hash::Hasher;
@@ -2445,11 +2441,9 @@ impl NFA {
                     // TIMING: Bitset Iteration
                     let start_iter = std::time::Instant::now();
                     {
-                        // Iterate dense words directly.
-                        // dirty_words maintenance overhead and cache misses are costlier than linear scan of 38KB.
-                        for (w_idx, &w_orig) in target_set.dense.words.iter().enumerate() {
-                            let mut w = w_orig;
-                            if w == 0 { continue; }
+                        // Iterate using dirty_words for speed
+                        for &w_idx in &target_set.dirty_words {
+                            let mut w = target_set.dense.words[w_idx];
                             while w != 0 {
                                 let t = w.trailing_zeros();
                                 w &= !(1u64 << t);
@@ -2505,10 +2499,9 @@ impl NFA {
                         let start_finalizers = std::time::Instant::now();
                         let mut new_finalizers = BTreeSet::new();
                         let mut new_non_greedy_finalizers = BTreeSet::new();
-                        // Dense scan for finalizers
-                        for (w_idx, &w_orig) in closure_set.dense.words.iter().enumerate() {
-                             let mut w = w_orig;
-                             if w == 0 { continue; }
+                        // Sparse iteration for finalizers
+                        for &w_idx in &closure_set.dirty_words {
+                             let mut w = closure_set.dense.words[w_idx];
                              while w != 0 {
                                  let t = w.trailing_zeros();
                                  w &= !(1u64 << t);
