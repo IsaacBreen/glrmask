@@ -10,6 +10,7 @@ use std::fmt::{Debug, Display, Formatter};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use ahash::AHashMap;
+use regex_automata;
 
 
 pub type GroupID = usize;
@@ -1103,22 +1104,6 @@ impl Expr {
 
 impl ExprGroups {
     pub fn build(self) -> Regex {
-        // Benchmark against standard regex crate
-        crate::debug!(2, "Building regex");
-        let pattern = self.groups.iter().map(|g| g.expr.to_benchmark_string()).collect::<Vec<_>>().join("|");
-        crate::debug!(3, "Regex pattern built");
-        let start_regex = std::time::Instant::now();
-        // Note: This requires the 'regex' crate to be in Cargo.toml
-        let _ = ::regex::bytes::Regex::new(&pattern);
-        crate::debug!(3, "Regex built");
-        let regex_duration = start_regex.elapsed();
-
-        let start_regex_automata = std::time::Instant::now();
-        // Note: This requires the 'regex-automata' crate to be in Cargo.toml
-        let _ = ::regex_automata::dfa::dense::DFA::new(&pattern);
-        crate::debug!(3, "regex-automata DFA built");
-        let regex_automata_duration = start_regex_automata.elapsed();
-
         let start_total = std::time::Instant::now();
         let stats = self.get_stats();
         crate::debug!(2, "Expr Stats: {}", stats);
@@ -1128,8 +1113,51 @@ impl ExprGroups {
 
         crate::debug!(3, "Building NFA");
         let start = std::time::Instant::now();
-        let mut nfa = optimized.build_nfa(); 
+        let mut nfa = optimized.build_nfa();
         crate::debug!(4, "Built NFA in {:.2?}", start.elapsed());
+
+        // --- Benchmark regex-automata's determinization ---
+        let start_regex_automata = std::time::Instant::now();
+        let ra_dfa_result = (|| -> Result<_, Box<dyn std::error::Error>> {
+            let mut ra_builder = regex_automata::util::nfa::Builder::new();
+            let mut state_map = Vec::with_capacity(nfa.states.len());
+            for _ in 0..nfa.states.len() {
+                state_map.push(ra_builder.add_state()?);
+            }
+            ra_builder.set_start(state_map[nfa.start_state]);
+            for (i, state) in nfa.states.iter().enumerate() {
+                if !state.finalizers.is_empty() {
+                    ra_builder.add_match_state(state_map[i]);
+                }
+                for (u8set, target) in &state.transitions {
+                    let mut iter = u8set.iter().peekable();
+                    while let Some(start) = iter.next() {
+                        let mut end = start;
+                        while let Some(&next) = iter.peek() {
+                            if next == end.wrapping_add(1) {
+                                end = iter.next().unwrap();
+                            } else {
+                                break;
+                            }
+                        }
+                        ra_builder.add_transition(state_map[i], state_map[*target], start..=end);
+                    }
+                }
+                for &target in &state.epsilon_transitions {
+                    ra_builder.add_epsilon(state_map[i], state_map[target]);
+                }
+            }
+            let ra_nfa = ra_builder.build();
+            let ra_dfa_config = regex_automata::dfa::dense::Config::new()
+                .start_kind(regex_automata::dfa::StartKind::Unanchored);
+            let _ra_dfa = regex_automata::dfa::dense::Builder::new()
+                .configure(ra_dfa_config)
+                .build_from_nfa(&ra_nfa)?;
+            Ok(())
+        })();
+        let regex_automata_duration = start_regex_automata.elapsed();
+
+        let nfa_state_count = nfa.states.len();
 
         let start_condense = std::time::Instant::now();
         nfa.condense_epsilon_sccs();
@@ -1145,10 +1173,13 @@ impl ExprGroups {
         crate::debug!(4, "Minimized DFA in {:.2?}", start.elapsed());
 
         let our_duration = start_total.elapsed();
-        crate::debug!(1, "BENCHMARK RESULT -- Pattern len: {}", pattern.len());
-        crate::debug!(1, "  regex crate:          {:.2?}", regex_duration);
-        crate::debug!(1, "  regex-automata crate: {:.2?}", regex_automata_duration);
-        crate::debug!(1, "  this crate:           {:.2?}", our_duration);
+        crate::debug!(1, "BENCHMARK RESULT -- NFA states: {}", nfa_state_count);
+        if ra_dfa_result.is_ok() {
+            crate::debug!(1, "  regex-automata crate (determinization): {:.2?}", regex_automata_duration);
+        } else {
+            crate::debug!(1, "  regex-automata crate: FAILED ({:?})", ra_dfa_result.err());
+        }
+        crate::debug!(1, "  this crate (total build):               {:.2?}", our_duration);
 
         Regex { dfa }
     }
