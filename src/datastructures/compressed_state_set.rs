@@ -10,7 +10,7 @@ pub struct DenseStateSet {
 }
 
 impl DenseStateSet {
-    #[time_it]
+    // #[time_it]
     pub fn new(num_bits: usize) -> Self {
         let num_words = (num_bits + 63) / 64;
         Self {
@@ -215,7 +215,7 @@ pub struct SparseStateSet {
 }
 
 impl SparseStateSet {
-    #[time_it]
+    // #[time_it]
     pub fn new(num_bits: usize) -> Self {
         Self {
             dense: DenseStateSet::new(num_bits),
@@ -279,7 +279,7 @@ impl Hash for CompressedStateSet {
 }
 
 impl CompressedStateSet {
-    #[inline]
+    // #[inline]
     pub fn new() -> Self {
         Self {
             words: Vec::new(),
@@ -288,7 +288,7 @@ impl CompressedStateSet {
     }
 
     #[inline]
-    #[time_it]
+    // #[time_it]
     pub fn from_sparse(sparse: &SparseStateSet) -> Self {
         let mut words = Vec::with_capacity(sparse.dirty_words.len());
         for &idx in &sparse.dirty_words {
@@ -309,7 +309,7 @@ impl CompressedStateSet {
     }
 
     #[inline]
-    #[time_it]
+    // #[time_it]
     pub fn reuse_from_sparse(sparse: &SparseStateSet, buffer: &mut Self, _sort_scratch: &mut Vec<usize>) {
         buffer.words.clear();
 
