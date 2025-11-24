@@ -998,7 +998,7 @@ impl GrammarConstraint {
                 transitions[i * 256 + (byte as usize)] = next as u32;
             }
             let mut state_fins = Vec::new();
-            for &gid in &state.finalizers {
+            for gid in &state.finalizers {
                 if gid > max_terminal_val { max_terminal_val = gid; }
                 state_fins.push(TerminalID(gid));
             }

@@ -1832,10 +1832,10 @@ impl NFA {
             total_transitions_count += state.transitions.len();
             total_epsilon_count += state.epsilon_transitions.len();
 
-            if let Some(&m) = state.finalizers.iter().max() {
+            if let Some(m) = state.finalizers.iter().max() {
                 if m > max_group_id { max_group_id = m; }
             }
-            if let Some(&m) = state.non_greedy_finalizers.iter().max() {
+            if let Some(m) = state.non_greedy_finalizers.iter().max() {
                 if m > max_group_id { max_group_id = m; }
             }
 
@@ -2410,7 +2410,9 @@ impl NFA {
         };
 
         for state in &self.states {
-            dfa.non_greedy_finalizers.extend(state.non_greedy_finalizers.iter().cloned());
+            for gid in state.non_greedy_finalizers.iter() {
+                dfa.non_greedy_finalizers.insert(gid);
+            }
         }
 
         let meta_start = std::time::Instant::now();
@@ -2446,8 +2448,8 @@ impl DFA {
                 transitions.push((set, target));
             }
 
-            let mut non_greedy_finalizers = BTreeSet::new();
-            for &gid in &state.finalizers {
+            let mut non_greedy_finalizers = DenseStateSet::empty();
+            for gid in state.finalizers.iter() {
                 if self.non_greedy_finalizers.contains(&gid) {
                     non_greedy_finalizers.insert(gid);
                 }
@@ -2484,9 +2486,8 @@ impl DFA {
         let max_group_id = self
             .states
             .iter()
-            .flat_map(|s| s.finalizers.last())
+            .flat_map(|s| s.finalizers.iter())
             .max()
-            .copied()
             .unwrap_or(0);
 
         let u64_per_state = (max_group_id / 64) + 1;
@@ -2501,7 +2502,7 @@ impl DFA {
                     let pred_offset = pred_idx * u64_per_state;
                     let mut changed = false;
 
-                    for &gid in &self.states[target_idx].finalizers {
+                    for gid in &self.states[target_idx].finalizers {
                         let word_idx = gid / 64;
                         let bit_mask = 1u64 << (gid % 64);
                         if (future_bits[pred_offset + word_idx] & bit_mask) == 0 {
@@ -2588,9 +2589,10 @@ impl DFA {
                 let chain = next_state
                     .possible_future_group_ids
                     .iter()
+                    .copied()
                     .chain(next_state.finalizers.iter());
 
-                for &group_id in chain {
+                for group_id in chain {
                     group_id_to_u8set
                         .entry(group_id)
                         .or_insert_with(U8Set::none)
@@ -2664,8 +2666,9 @@ impl DFA {
 
         let mut partitions_map: BTreeMap<BTreeSet<GroupID>, BTreeSet<usize>> = BTreeMap::new();
         for (state_idx, state) in self.states.iter().enumerate() {
+            let finalizers_btree: BTreeSet<GroupID> = state.finalizers.iter().collect();
             partitions_map
-                .entry(state.finalizers.clone())
+                .entry(finalizers_btree)
                 .or_default()
                 .insert(state_idx);
         }
@@ -2788,7 +2791,7 @@ impl RegexState<'_> {
             if let Some(&next_state) = state_data.transitions.get(next_u8) {
                 self.current_state = next_state;
                 local_position += 1;
-                for &group_id in &dfa.states[self.current_state].finalizers {
+                for group_id in &dfa.states[self.current_state].finalizers {
                     all_matches.push(Match {
                         group_id,
                         position: self.position + local_position,
@@ -2981,7 +2984,7 @@ impl Regex {
         let mut max_gid: Option<GroupID> = None;
         for s in &self.dfa.states {
             if let Some(m) = s.finalizers.iter().max() {
-                max_gid = Some(max_gid.map_or(*m, |cur| cur.max(*m)));
+                max_gid = Some(max_gid.map_or(m, |cur| cur.max(m)));
             }
         }
         max_gid.map(|m| m + 1).unwrap_or(0)
@@ -2996,7 +2999,7 @@ impl Regex {
         let mut all_matches: Vec<Match> = Vec::new();
 
         let mut current_state = state;
-        let mut matched_groups: BTreeSet<GroupID> = dfa.states[state].finalizers.clone();
+        let mut matched_groups: BTreeSet<GroupID> = dfa.states[state].finalizers.iter().collect();
 
         if dfa.states[state].transitions.is_empty() {
             return ExecutionResult {
@@ -3025,7 +3028,7 @@ impl Regex {
             let state_data = &dfa.states[current_state];
 
             if !state_data.finalizers.is_empty() {
-                for &group_id in &state_data.finalizers {
+                for group_id in &state_data.finalizers {
                     all_matches.push(Match {
                         group_id,
                         position: local_position,
@@ -3063,7 +3066,7 @@ impl Regex {
         let matches = self.dfa.states[state]
             .finalizers
             .iter()
-            .map(|&group_id| (group_id, 0))
+            .map(|group_id| (group_id, 0))
             .collect();
         RegexState {
             regex: self,

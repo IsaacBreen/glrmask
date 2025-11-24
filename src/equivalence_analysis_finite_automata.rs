@@ -210,7 +210,7 @@ fn process_string_node(
                 let next_data = &regex.dfa.states[next_state];
                 if !next_data.finalizers.is_empty() {
                     let child = &trie.nodes[child_idx as usize];
-                    for &gid in &next_data.finalizers {
+                    for gid in &next_data.finalizers {
                         for lin_idx in (child.range_start as usize)..(child.range_end as usize) {
                             let orig = linearized_mapping[lin_idx];
                             let rem = remainder_hashes[orig][(depth + 1) as usize];

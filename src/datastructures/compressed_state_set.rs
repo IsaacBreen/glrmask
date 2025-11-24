@@ -2,8 +2,9 @@ use std::hash::{Hash, Hasher};
 use ahash::AHasher;
 use profiler_macro::time_it;
 use crate::datastructures::state_set::StateSet;
+use crate::json_serialization::{JSONConvertible, JSONNode};
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct DenseStateSet {
     pub words: Vec<u64>,
 }
@@ -70,6 +71,10 @@ impl DenseStateSet {
     pub fn clear(&mut self) {
         self.words.fill(0);
     }
+
+    pub fn len(&self) -> usize {
+        self.words.iter().map(|w| w.count_ones() as usize).sum()
+    }
 }
 
 pub struct DenseStateSetIter<'a> {
@@ -94,6 +99,31 @@ impl<'a> Iterator for DenseStateSetIter<'a> {
             }
             self.current_word = self.set.words[self.word_idx];
         }
+    }
+}
+
+impl<'a> IntoIterator for &'a DenseStateSet {
+    type Item = usize;
+    type IntoIter = DenseStateSetIter<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl JSONConvertible for DenseStateSet {
+    fn to_json(&self) -> JSONNode {
+        let items: Vec<usize> = self.iter().collect();
+        items.to_json()
+    }
+
+    fn from_json(node: JSONNode) -> Result<Self, String> {
+        let items = Vec::<usize>::from_json(node)?;
+        let mut set = DenseStateSet::empty();
+        for item in items {
+            set.insert(item);
+        }
+        Ok(set)
     }
 }
 

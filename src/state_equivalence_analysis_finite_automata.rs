@@ -188,7 +188,7 @@ fn process_node(
                 // Handle match events on this transition
                 if !next_data.finalizers.is_empty() {
                     let mut event_hash = 0u128;
-                    for &gid in &next_data.finalizers {
+                    for gid in &next_data.finalizers {
                         event_hash = event_hash.wrapping_add(hash_match_event(gid as u32, depth + 1));
                     }
                     // Apply this event to all subtree tokens
