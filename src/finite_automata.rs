@@ -1820,10 +1820,10 @@ impl Expr {
         let mut classes = U8Set::none();
         let mut complex = Vec::with_capacity(final_choices.len());
         
-        for e in final_choices {
+        for e in final_choices.into_iter() {
             match e {
                 Expr::U8Class(c) => classes.update(&c),
-                Expr::U8Seq(ref s) if s.len() == 1 => { classes.insert(s[0]); },
+                Expr::U8Seq(s) if s.len() == 1 => { classes.insert(s[0]); },
                 _ => complex.push(e),
             }
         }
@@ -1837,7 +1837,7 @@ impl Expr {
         if complex.len() == 1 {
             complex.pop().unwrap()
         } else {
-            Expr::Choice(final_choices)
+            Expr::Choice(complex)
         }
     }
 
