@@ -1004,6 +1004,7 @@ impl GrammarDefinition {
                             nullability
                         }
                     }
+                    Expr::StringTrie(_) => todo!(),
                 }
             }
             let mut cache: HashMap<Arc<Expr>, Nullability> = HashMap::new();

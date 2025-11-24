@@ -612,6 +612,7 @@ impl Hash for InternKey {
                 }
             }
             Expr::Epsilon => {}
+            Expr::StringTrie(_) => todo!()
         }
     }
 }
