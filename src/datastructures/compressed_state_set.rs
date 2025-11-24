@@ -9,6 +9,7 @@ pub struct DenseStateSet {
 }
 
 impl DenseStateSet {
+    #[time_it]
     pub fn new(num_bits: usize) -> Self {
         let num_words = (num_bits + 63) / 64;
         Self {
@@ -23,6 +24,7 @@ pub struct SparseStateSet {
 }
 
 impl SparseStateSet {
+    #[time_it]
     pub fn new(num_bits: usize) -> Self {
         Self {
             dense: DenseStateSet::new(num_bits),
@@ -139,6 +141,7 @@ impl CompressedStateSet {
     }
 
     #[inline(always)]
+    // #[time_it]
     pub fn insert(&mut self, bit: usize) -> bool {
         let word_idx = (bit >> 6) as u32;
         let mask = 1u64 << (bit & 0x3F);
@@ -159,6 +162,7 @@ impl CompressedStateSet {
         }
     }
 
+    #[time_it]
     pub fn contains(&self, bit: usize) -> bool {
         let word_idx = (bit >> 6) as u32;
         let mask = 1u64 << (bit & 0x3F);
@@ -174,6 +178,7 @@ impl CompressedStateSet {
     }
 
     #[inline]
+    #[time_it]
     pub fn recompute_hash(&mut self) {
         let mut hasher = AHasher::default();
         // Optimization: Hash as raw bytes for speed
@@ -206,6 +211,7 @@ impl CompressedStateSet {
 }
 
 impl FromIterator<usize> for CompressedStateSet {
+    #[time_it]
     fn from_iter<T: IntoIterator<Item = usize>>(iter: T) -> Self {
         let mut set = CompressedStateSet::new();
         for i in iter {
