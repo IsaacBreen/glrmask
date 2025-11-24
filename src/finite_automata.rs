@@ -1088,10 +1088,12 @@ impl ExprGroups {
             crate::debug!(0, "============================================");
         }
 
+        crate::debug!(3, "Optimizing Expression Tree");
+        let optimized = self.optimize();
         crate::debug!(3, "Building NFA");
         let start = std::time::Instant::now();
-        // Default to Strategy A (On-the-fly) as it's the most robust local fix
-        let mut nfa = self.build_nfa(true); 
+        // Use false for on-the-fly since we already ran the global optimization pass
+        let mut nfa = optimized.build_nfa(false);
         crate::debug!(4, "Built NFA in {:.2?}", start.elapsed());
         print_memory_usage("After NFA build");
 
@@ -1228,6 +1230,75 @@ fn try_extract_literal(expr: &Expr) -> Option<Vec<u8>> {
         Some(buf)
     } else {
         None
+    }
+}
+
+struct TrieNode {
+    children: BTreeMap<u8, TrieNode>,
+    is_end: bool,
+}
+
+impl TrieNode {
+    fn new() -> Self {
+        TrieNode {
+            children: BTreeMap::new(),
+            is_end: false,
+        }
+    }
+
+    fn insert(&mut self, seq: &[u8]) {
+        let mut node = self;
+        for &b in seq {
+            node = node.children.entry(b).or_insert_with(TrieNode::new);
+        }
+        node.is_end = true;
+    }
+
+    fn to_expr(self) -> Expr {
+        let mut branches: BTreeMap<Expr, Vec<u8>> = BTreeMap::new();
+
+        for (byte, node) in self.children {
+            let tail = node.to_expr();
+            branches.entry(tail).or_default().push(byte);
+        }
+
+        let mut choices = Vec::new();
+        if self.is_end {
+            choices.push(Expr::Epsilon);
+        }
+
+        for (tail, mut bytes) in branches {
+            bytes.sort_unstable();
+            let prefix = if bytes.len() == 1 {
+                Expr::U8Seq(vec![bytes[0]])
+            } else {
+                let mut set = U8Set::none();
+                for b in bytes {
+                    set.insert(b);
+                }
+                Expr::U8Class(set)
+            };
+
+            let branch = match tail {
+                Expr::Epsilon => prefix,
+                Expr::U8Seq(mut s) if matches!(prefix, Expr::U8Seq(_)) => {
+                    if let Expr::U8Seq(p) = prefix {
+                        s.insert(0, p[0]);
+                        Expr::U8Seq(s)
+                    } else {
+                        unreachable!()
+                    }
+                }
+                _ => Expr::Seq(vec![prefix, tail]),
+            };
+            choices.push(branch);
+        }
+
+        if choices.len() == 1 {
+            choices.pop().unwrap()
+        } else {
+            Expr::Choice(choices)
+        }
     }
 }
 
@@ -1753,6 +1824,32 @@ impl Expr {
         if flat.len() == 1 {
             return flat.pop().unwrap();
         }
+
+        // 2. Global Trie Optimization for Literals
+        let mut literals = Vec::new();
+        let mut complex = Vec::new();
+
+        for e in flat {
+            if let Some(seq) = try_extract_literal(&e) {
+                literals.push(seq);
+            } else {
+                complex.push(e);
+            }
+        }
+
+        if !literals.is_empty() {
+            let mut root = TrieNode::new();
+            for seq in literals {
+                root.insert(&seq);
+            }
+            let trie_expr = root.to_expr();
+            match trie_expr {
+                Expr::Choice(subs) => complex.extend(subs),
+                single => complex.push(single),
+            }
+        }
+
+        let flat = complex;
 
         // 2. Partitioning / Left Factoring
         // We map each byte 0..255 to a list of indices in `flat` that cover it.
