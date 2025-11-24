@@ -1842,6 +1842,9 @@ impl Expr {
     }
 }
 
+#[derive(PartialEq, Eq, Hash, Clone)]
+enum Head { Class(U8Set), Other }
+
 #[derive(Debug, Default)]
 struct DFAConversionStats {
     total_time: std::time::Duration,
