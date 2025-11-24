@@ -19,6 +19,10 @@ impl BitSet {
         self.data.iter().map(|&x| x.count_ones() as usize).sum()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     #[inline]
     pub fn insert(&mut self, bit: usize) -> bool {
         if bit >= self.capacity_bits {
