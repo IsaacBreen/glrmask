@@ -1627,6 +1627,16 @@ impl NFA {
     }
 
     pub fn to_dfa(self) -> DFA {
+        let dfa = self.to_dfa_impl();
+
+        let nfa = dfa.to_nfa();
+        let start = std::time::Instant::now();
+        let _ = nfa.to_dfa_impl();
+        println!("Deterministic NFA -> DFA benchmark: {:.2?}", start.elapsed());
+        dfa
+    }
+
+    fn to_dfa_impl(self) -> DFA {
         let start_time = std::time::Instant::now();
         let mut dfa_states: Vec<DFAState> = Vec::new();
         // Use AHashMap for faster hashing
@@ -1912,6 +1922,45 @@ impl NFA {
 }
 
 impl DFA {
+    pub fn to_nfa(&self) -> NFA {
+        let mut states = Vec::with_capacity(self.states.len());
+
+        for state in &self.states {
+            let mut target_groups: BTreeMap<usize, Vec<u8>> = BTreeMap::new();
+            for (byte, target) in &state.transitions {
+                target_groups.entry(*target).or_default().push(byte);
+            }
+
+            let mut transitions = Vec::with_capacity(target_groups.len());
+            for (target, bytes) in target_groups {
+                let mut set = U8Set::none();
+                for b in bytes {
+                    set.insert(b);
+                }
+                transitions.push((set, target));
+            }
+
+            let mut non_greedy_finalizers = BTreeSet::new();
+            for &gid in &state.finalizers {
+                if self.non_greedy_finalizers.contains(&gid) {
+                    non_greedy_finalizers.insert(gid);
+                }
+            }
+
+            states.push(NFAState {
+                transitions,
+                epsilon_transitions: Vec::new(),
+                finalizers: state.finalizers.clone(),
+                non_greedy_finalizers,
+            });
+        }
+
+        NFA {
+            states,
+            start_state: self.start_state,
+        }
+    }
+
     pub fn compute_possible_future_group_ids(&mut self) {
         for state in &mut self.states {
             state.possible_future_group_ids = BTreeSet::new();
