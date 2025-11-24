@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use rayon::prelude::*;
+use range_set_blaze::RangeSetBlaze;
 
 use kdam::{tqdm, BarExt};
 
@@ -252,10 +253,29 @@ fn specialize_dwa_relative(parent_dwa: &DWA, mapping: &[Weight]) -> DWA {
     let new_states_vec: Vec<crate::precompute4::weighted_automata::dwa::DWAState> = parent_dwa.states.0.par_iter().map_with(HashMap::<Weight, Weight>::new(), |cache, state| {
         let mut map_weight = |w: &Weight| -> Weight {
             if let Some(cw) = cache.get(w) { return cw.clone(); }
-            let mut new_w = Weight::zeros();
+            
+            // OPTIMIZATION: Accumulate in a local RangeSetBlaze to avoid SimpleBitset lock contention
+            // SimpleBitset::bitor involves global caching and locking which kills parallel performance.
+            let mut accumulator = RangeSetBlaze::new();
+            let mut is_all = false;
+
             for bit in w.iter_up_to(mapping.len()) {
-                if let Some(target_w) = mapping.get(bit) { new_w |= target_w; }
+                if let Some(target_w) = mapping.get(bit) {
+                    if target_w.is_all_fast() {
+                        is_all = true;
+                        break;
+                    }
+                    // Access the inner RSB directly to avoid locking
+                    accumulator |= &target_w.rsb;
+                }
             }
+
+            let new_w = if is_all {
+                Weight::all()
+            } else {
+                Weight::from_rsb(accumulator)
+            };
+
             cache.insert(w.clone(), new_w.clone());
             new_w
         };
