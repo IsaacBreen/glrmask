@@ -2288,7 +2288,13 @@ impl NFA {
     fn to_dfa_impl(self) -> DFA {
         let mut stats = DFAConversionStats::default();
         let start_time = std::time::Instant::now();
-        
+        let mut dfa_states: Vec<DFAState> = Vec::with_capacity(100_000);
+        // Use FxHashMap for faster hashing
+        use rustc_hash::FxHashMap;
+        let mut dfa_state_map: FxHashMap<CompressedStateSet, usize> = FxHashMap::default();
+        dfa_state_map.reserve(100_000);
+        let mut worklist: Vec<CompressedStateSet> = Vec::with_capacity(1024);
+
         // Compute Input Equivalence Classes
         let start_classes = std::time::Instant::now();
         let (class_map, num_classes, class_members) = self.compute_equivalence_classes();
@@ -2311,21 +2317,14 @@ impl NFA {
         }
         stats.remapped_transitions_time = start_remap.elapsed();
 
+        // Shared buffers
+        let num_nfa_states = self.states.len();
+        let mut stack = Vec::with_capacity(32768.min(num_nfa_states));
+        let mut closure_set = SparseStateSet::new(num_nfa_states);
+
         // Compact NFA for faster BFS
         let compact_nfa = self.build_compact_nfa();
 
-        // Phase-based Parallel Data Structures
-        const NUM_SHARDS: usize = 64;
-        let mut shards: Vec<AHashMap<CompressedStateSet, usize>> = (0..NUM_SHARDS).map(|_| AHashMap::default()).collect();
-        let mut state_sets: Vec<CompressedStateSet> = Vec::new();
-        let mut dfa_transitions: Vec<CharTransitions<usize>> = Vec::new();
-        let mut dfa_finalizers: Vec<BTreeSet<GroupID>> = Vec::new(); // DFAState only stores finalizers, not non_greedy_finalizers
-        
-        // Initial state
-        let num_nfa_states = self.states.len();
-        let mut closure_set = SparseStateSet::new(num_nfa_states);
-        let mut stack = Vec::with_capacity(1024);
-        
         // Compute start state closure
         stack.push(self.start_state);
         closure_set.insert(self.start_state);
@@ -2346,243 +2345,195 @@ impl NFA {
         }
         stats.time_closure_bfs += start_bfs.elapsed();
 
+        let start_compress = std::time::Instant::now();
         let start_state_set = CompressedStateSet::from_sparse(&closure_set);
+        stats.time_compress_state_set += start_compress.elapsed();
         stats.total_compressed_sets += 1;
         stats.total_compressed_words += start_state_set.words.len() as u64;
 
-        // Insert start state
-        let start_hash = start_state_set.hash;
-        shards[(start_hash as usize) % NUM_SHARDS].insert(start_state_set.clone(), 0);
-        state_sets.push(start_state_set);
-        dfa_transitions.push(CharTransitions::new()); // Placeholder
-        
-        // Compute finalizers for start state
-        let mut start_fin = BTreeSet::new();
-        for &w_idx in &closure_set.dirty_words {
-             let mut w = closure_set.dense.words[w_idx];
-             while w != 0 {
-                 let t = w.trailing_zeros();
-                 w &= !(1u64 << t);
-                 let state = w_idx * 64 + t as usize;
-                 start_fin.extend(self.states[state].finalizers.iter().cloned());
-             }
+        dfa_state_map.insert(start_state_set.clone(), 0);
+        worklist.push(start_state_set.clone());
+        stats.max_worklist_len = stats.max_worklist_len.max(worklist.len());
+
+        let start_finalizers = std::time::Instant::now();
+        let mut finalizers = BTreeSet::new();
+        let mut non_greedy_finalizers = BTreeSet::new();
+        for state in start_state_set.iter() {
+            finalizers.extend(self.states[state].finalizers.iter().cloned());
+            non_greedy_finalizers.extend(self.states[state].non_greedy_finalizers.iter().cloned());
         }
-        dfa_finalizers.push(start_fin);
+        stats.time_finalizer_computation += start_finalizers.elapsed();
 
-        let mut worklist = vec![0]; // Start state ID
-        let next_state_id = std::sync::atomic::AtomicUsize::new(1);
+        dfa_states.push(DFAState {
+            transitions: CharTransitions::new(),
+            finalizers,
+            possible_future_group_ids: BTreeSet::new(),
+            group_id_to_u8set: BTreeMap::new(),
+        });
 
-        // Main Loop
-        let start_process = std::time::Instant::now();
-        use rayon::prelude::*;
+        // Reusable structures
+        let mut transition_targets: Vec<SparseStateSet> = (0..num_classes).map(|_| SparseStateSet::new(num_nfa_states)).collect();
+        let mut used_classes: Vec<usize> = Vec::with_capacity(num_classes);
+        let mut seen_class = vec![false; num_classes];
+        let mut scratch_target = CompressedStateSet::new(0);
+        let mut scratch_closure = CompressedStateSet::new(0);
 
-        while !worklist.is_empty() {
-            stats.max_worklist_len = stats.max_worklist_len.max(worklist.len());
-            
-            // Step 1: Expand (Parallel)
-            // Produce shard_buffers: Vec<Vec<(batch_idx, u8, CompressedStateSet)>>
-            // We use map_init to avoid allocating buffers every time
-            let shard_buffers_nested: Vec<Vec<Vec<(usize, u8, CompressedStateSet)>>> = worklist
-                .par_iter()
-                .enumerate()
-                .map_init(
-                    || {
-                        (
-                            SparseStateSet::new(num_nfa_states), // closure_set
-                            Vec::with_capacity(1024),            // stack
-                            (0..num_classes).map(|_| SparseStateSet::new(num_nfa_states)).collect::<Vec<_>>(), // transition_targets
-                            Vec::with_capacity(num_classes),     // used_classes
-                            vec![false; num_classes],            // seen_class
-                            CompressedStateSet::new(0),          // scratch_target
-                            (0..NUM_SHARDS).map(|_| Vec::new()).collect::<Vec<_>>(), // output_buffers
-                        )
-                    },
-                    |buffers, (batch_idx, &state_id)| {
-                        let (closure_set, stack, transition_targets, used_classes, seen_class, scratch_target, output_buffers) = buffers;
-                        
-                        // Clear output buffers
-                        for buf in output_buffers.iter_mut() {
-                            buf.clear();
+        let mut next_log_threshold = 20_000;
+        while let Some(current_set) = worklist.pop() {
+            stats.max_worklist_len = stats.max_worklist_len.max(worklist.len() + 1);
+            let current_subset_len = current_set.len();
+            stats.max_subset_size = stats.max_subset_size.max(current_subset_len);
+            stats.total_subset_size += current_subset_len as u64;
+            if dfa_states.len() >= next_log_threshold {
+                crate::debug!(6, "DFA progress: {} states, worklist {}, subset size {} (max {}), elapsed {:.2?}", dfa_states.len(), worklist.len(), current_subset_len, stats.max_subset_size, start_time.elapsed());
+                next_log_threshold += 20_000;
+            }
+
+            let current_dfa_state = *dfa_state_map
+                .get(&current_set)
+                .expect("DFA state set not found in map");
+
+            // 1. Populate transition_targets for all inputs (COLLECT PHASE)
+            let start_collect = std::time::Instant::now();
+            for state in current_set.iter() {
+                for (class_set, next_state) in unsafe { remapped_transitions.get_unchecked(state) } {
+                    for class_id in class_set.iter() {
+                        let idx = class_id as usize;
+                        unsafe {
+                            if !*seen_class.get_unchecked(idx) {
+                                *seen_class.get_unchecked_mut(idx) = true;
+                                used_classes.push(idx);
+                            }
+                            transition_targets.get_unchecked_mut(idx).insert(*next_state);
                         }
-
-                        let current_set = &state_sets[state_id]; // Read-only access
-
-                        // 1. Collect Transitions
-                        // We need to iterate the CompressedStateSet.
-                        // Since we don't have the SparseStateSet, we iterate the compressed words.
-                        for &(w_idx_u32, mut w) in &current_set.words {
-                            let w_idx = w_idx_u32 as usize;
-                            while w != 0 {
-                                let t = w.trailing_zeros();
-                                w &= !(1u64 << t);
-                                let state = w_idx * 64 + t as usize;
-                                
-                                for (class_set, next_state) in unsafe { remapped_transitions.get_unchecked(state) } {
-                                    for class_id in class_set.iter() {
-                                        let idx = class_id as usize;
-                                        unsafe {
-                                            if !*seen_class.get_unchecked(idx) {
-                                                *seen_class.get_unchecked_mut(idx) = true;
-                                                used_classes.push(idx);
-                                            }
-                                            transition_targets.get_unchecked_mut(idx).insert(*next_state);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        // 2. Process Inputs
-                        for &class_id in used_classes.iter() {
-                            let target_set = unsafe { transition_targets.get_unchecked(class_id) };
-
-                            if target_set.dirty_words.is_empty() {
-                                continue;
-                            }
-
-                            // Compute closure
-                            closure_set.clear();
-                            for &w_idx in &target_set.dirty_words {
-                                let mut w = target_set.dense.words[w_idx];
-                                while w != 0 {
-                                    let t = w.trailing_zeros();
-                                    w &= !(1u64 << t);
-                                    let next_state = w_idx * 64 + t as usize;
-                                    if closure_set.insert(next_state) {
-                                        stack.push(next_state);
-                                    }
-                                }
-                            }
-                            while let Some(u) = stack.pop() {
-                                let start_offs = unsafe { *compact_nfa.epsilon_offsets.get_unchecked(u) } as usize;
-                                let end_offs = unsafe { *compact_nfa.epsilon_offsets.get_unchecked(u + 1) } as usize;
-                                for i in start_offs..end_offs {
-                                    let v = unsafe { *compact_nfa.epsilon_targets.get_unchecked(i) } as usize;
-                                    if closure_set.insert(v) {
-                                        stack.push(v);
-                                    }
-                                }
-                            }
-
-                            // Compress
-                            CompressedStateSet::reuse_from_sparse(closure_set, scratch_target);
-                            
-                            // Hash and buffer
-                            let hash = scratch_target.hash;
-                            let shard_idx = (hash as usize) % NUM_SHARDS;
-                            
-                            for &b in &class_members[class_id] {
-                                output_buffers[shard_idx].push((batch_idx, b, scratch_target.clone()));
-                            }
-                        }
-
-                        // Cleanup
-                        for &idx in used_classes.iter() {
-                            seen_class[idx] = false;
-                            transition_targets[idx].clear();
-                        }
-                        used_classes.clear();
-
-                        output_buffers.clone() // Clone the buffers to return
                     }
-                )
-                .collect();
-
-            // Transpose buffers: shard_inputs[shard_idx] = Vec<(batch_idx, u8, CompressedStateSet)>
-            let mut shard_inputs: Vec<Vec<(usize, u8, CompressedStateSet)>> = (0..NUM_SHARDS).map(|_| Vec::new()).collect();
-            for thread_buffers in shard_buffers_nested {
-                for (shard_idx, buf) in thread_buffers.into_iter().enumerate() {
-                    shard_inputs[shard_idx].extend(buf);
                 }
             }
+            stats.time_collect_transitions += start_collect.elapsed();
 
-            // Step 2: Resolve (Parallel over shards)
-            // Returns: (new_ids, new_state_sets, new_finalizers, resolved_transitions)
-            let resolve_results: Vec<_> = shards
-                .par_iter_mut()
-                .zip(shard_inputs)
-                .map(|(map, inputs)| {
-                    let mut new_ids = Vec::new();
-                    let mut new_state_sets = Vec::new();
-                    let mut new_finalizers = Vec::new();
-                    let mut resolved_transitions = Vec::with_capacity(inputs.len());
-
-                    for (batch_idx, b, target_set) in inputs {
-                        let id = if let Some(&id) = map.get(&target_set) {
-                            id
-                        } else {
-                            let id = next_state_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            map.insert(target_set.clone(), id);
-                            
-                            // Compute finalizers for new state
-                            // We need to iterate target_set.
-                            let mut fin = BTreeSet::new();
-                            for &(w_idx_u32, mut w) in &target_set.words {
-                                let w_idx = w_idx_u32 as usize;
-                                while w != 0 {
-                                    let t = w.trailing_zeros();
-                                    w &= !(1u64 << t);
-                                    let state = w_idx * 64 + t as usize;
-                                    fin.extend(self.states[state].finalizers.iter().cloned());
-                                }
-                            }
-                            
-                            new_ids.push(id);
-                            new_state_sets.push((id, target_set));
-                            new_finalizers.push((id, fin));
-                            id
-                        };
-                        resolved_transitions.push((batch_idx, b, id));
-                    }
-                    (new_ids, new_state_sets, new_finalizers, resolved_transitions)
-                })
-                .collect();
-
-            // Step 3: Collect (Serial)
-            let mut next_worklist = Vec::new();
-            let mut all_resolved_transitions = Vec::new();
+            // 2. Process inputs (PROCESS PHASE)
+            let start_process = std::time::Instant::now();
             
-            let current_max_id = next_state_id.load(std::sync::atomic::Ordering::Relaxed);
-            if state_sets.len() < current_max_id {
-                state_sets.resize(current_max_id, CompressedStateSet::new(0)); // Dummy fill
-                dfa_transitions.resize(current_max_id, CharTransitions::new());
-                dfa_finalizers.resize(current_max_id, BTreeSet::new());
-            }
+            // Collect all transitions for this state to bulk insert later
+            let mut dfa_transitions_vec: Vec<(u8, usize)> = Vec::new();
 
-            for (ids, sets, fins, trans) in resolve_results {
-                next_worklist.extend(ids);
-                all_resolved_transitions.extend(trans);
+            for &class_id in &used_classes {
+                let target_set = unsafe { transition_targets.get_unchecked(class_id) };
+
+                let start_compress_target = std::time::Instant::now();
+                if target_set.dirty_words.is_empty() {
+                    scratch_target.words.clear();
+                    let mut hasher = ahash::AHasher::default();
+                    scratch_target.words.hash(&mut hasher);
+                    scratch_target.hash = hasher.finish();
+                } else {
+                    CompressedStateSet::reuse_from_sparse(target_set, &mut scratch_target);
+                }
+                stats.time_compress_state_set += start_compress_target.elapsed();
+                stats.total_compressed_sets += 1;
+                stats.total_compressed_words += scratch_target.words.len() as u64;
+
+                // Removed local_cache to avoid overhead of hashing/lookup for low hit rate.
+                // Directly compute closure.
                 
-                for (id, set) in sets {
-                    state_sets[id] = set;
+                closure_set.clear();
+
+                // TIMING: Bitset Iteration
+                let start_iter = std::time::Instant::now();
+                {
+                    for &w_idx in &target_set.dirty_words {
+                        let mut w = target_set.dense.words[w_idx];
+                        while w != 0 {
+                            let t = w.trailing_zeros();
+                            w &= !(1u64 << t);
+                            let next_state = w_idx * 64 + t as usize;
+
+                            if closure_set.insert(next_state) {
+                                stack.push(next_state);
+                                stats.total_closure_pushes += 1;
+                            }
+                        }
+                    }
                 }
-                for (id, f) in fins {
-                    dfa_finalizers[id] = f;
+                stats.time_bitset_iteration += start_iter.elapsed();
+
+                // TIMING: BFS Closure
+                let start_bfs = std::time::Instant::now();
+                while let Some(u) = stack.pop() {
+                    let start_offs = unsafe { *compact_nfa.epsilon_offsets.get_unchecked(u) } as usize;
+                    let end_offs = unsafe { *compact_nfa.epsilon_offsets.get_unchecked(u + 1) } as usize;
+                    stats.total_epsilon_edges_traversed += (end_offs - start_offs) as u64;
+
+                    for i in start_offs..end_offs {
+                        let v = unsafe { *compact_nfa.epsilon_targets.get_unchecked(i) } as usize;
+                        if closure_set.insert(v) {
+                            stack.push(v);
+                            stats.total_closure_pushes += 1;
+                        }
+                    }
+                }
+                stats.time_closure_bfs += start_bfs.elapsed();
+
+                // Get/Create DFA state
+                let start_map = std::time::Instant::now();
+                let start_compress_closure = std::time::Instant::now();
+                CompressedStateSet::reuse_from_sparse(&closure_set, &mut scratch_closure);
+                stats.time_compress_state_set += start_compress_closure.elapsed();
+                stats.total_compressed_sets += 1;
+                stats.total_compressed_words += scratch_closure.words.len() as u64;
+
+                stats.global_map_lookups += 1;
+                let next_state_idx = if let Some(&existing_state) = dfa_state_map.get(&scratch_closure) {
+                    stats.global_map_hits += 1;
+                    existing_state
+                } else {
+                    let new_state_index = dfa_states.len();
+                    dfa_state_map.insert(scratch_closure.clone(), new_state_index);
+                    worklist.push(scratch_closure.clone());
+                    stats.max_worklist_len = stats.max_worklist_len.max(worklist.len());
+
+                    let start_finalizers = std::time::Instant::now();
+                    let mut new_finalizers = BTreeSet::new();
+                    let mut new_non_greedy_finalizers = BTreeSet::new();
+                    for &w_idx in &closure_set.dirty_words {
+                         let mut w = closure_set.dense.words[w_idx];
+                         while w != 0 {
+                             let t = w.trailing_zeros();
+                             w &= !(1u64 << t);
+                             let state = w_idx * 64 + t as usize;
+                             new_finalizers.extend(self.states[state].finalizers.iter().cloned());
+                             new_non_greedy_finalizers
+                                 .extend(self.states[state].non_greedy_finalizers.iter().cloned());
+                         }
+                    }
+                    stats.time_finalizer_computation += start_finalizers.elapsed();
+
+                    dfa_states.push(DFAState {
+                        transitions: CharTransitions::new(),
+                        finalizers: new_finalizers,
+                        possible_future_group_ids: BTreeSet::new(),
+                        group_id_to_u8set: BTreeMap::new(),
+                    });
+
+                    new_state_index
+                };
+                stats.time_map_lookup_insert += start_map.elapsed();
+
+                for &b in &class_members[class_id] {
+                    dfa_transitions_vec.push((b, next_state_idx));
                 }
             }
-            
-            // Build transitions for the current batch
-            // `batch_idx` refers to the index in the `worklist` from the start of this iteration.
-            // So `worklist[batch_idx]` is the source DFA state ID.
-            for (batch_idx, b, target_id) in all_resolved_transitions {
-                let source_id = worklist[batch_idx];
-                dfa_transitions[source_id].insert(b, target_id);
+            stats.time_process_inputs += start_process.elapsed();
+
+            // Bulk insert transitions
+            dfa_transitions_vec.sort_unstable_by_key(|k| k.0);
+            dfa_states[current_dfa_state].transitions = CharTransitions::from_sorted_entries(dfa_transitions_vec);
+
+            for &idx in &used_classes {
+                 seen_class[idx] = false;
+                 transition_targets[idx].clear();
             }
-
-            worklist = next_worklist;
-        }
-        
-        stats.time_process_inputs += start_process.elapsed();
-
-        // Assemble DFA
-        let mut dfa_states = Vec::with_capacity(state_sets.len());
-        for i in 0..state_sets.len() {
-            dfa_states.push(DFAState {
-                transitions: std::mem::take(&mut dfa_transitions[i]),
-                finalizers: std::mem::take(&mut dfa_finalizers[i]),
-                possible_future_group_ids: BTreeSet::new(),
-                group_id_to_u8set: BTreeMap::new(),
-            });
+            used_classes.clear();
         }
 
         let mut dfa = DFA {
