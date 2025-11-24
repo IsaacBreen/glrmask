@@ -405,6 +405,31 @@ impl<'r> Precomputer1<'r> {
         result_map
     }
 
+    fn get_or_create_next_state(
+        &mut self,
+        src_node: NWAStateID,
+        tokenizer_state: TokenizerStateID,
+        next_level_assoc: &mut BTreeMap<TokenizerStateID, NWAStateID>,
+    ) -> NWAStateID {
+        match next_level_assoc.entry(tokenizer_state) {
+            std::collections::btree_map::Entry::Occupied(o) => *o.get(),
+            std::collections::btree_map::Entry::Vacant(v) => {
+                let mut reuse = None;
+                if let Some(dsts) = self.pending_epsilons.get(&src_node) {
+                    for (dst, _) in dsts {
+                        if self.live_tokens.get(dst).map_or(true, |live| live.is_disjoint(&Weight::all())) {
+                            reuse = Some(*dst);
+                            break;
+                        }
+                    }
+                }
+                let t = reuse.unwrap_or_else(|| self.nwa.add_state());
+                v.insert(t);
+                t
+            }
+        }
+    }
+
     fn add_pending_transition(&mut self, src: NWAStateID, label: Label, dst: NWAStateID, weight: Weight) {
         self.pending_transitions
             .entry(src)
@@ -469,25 +494,8 @@ impl<'r> Precomputer1<'r> {
                 // If we reached the end of the segment, these states are ready for the next vocab node
                 if pos == segment_bytes.len() {
                     for (tokenizer_state_id, node) in states_at_pos {
-                        let next_entry = next_level_assoc.entry(tokenizer_state_id);
-                        let next = match next_entry {
-                            std::collections::btree_map::Entry::Occupied(o) => *o.get(),
-                            std::collections::btree_map::Entry::Vacant(v) => {
-                                let mut reuse = None;
-                                if let Some(dsts) = self.pending_epsilons.get(&node) {
-                                    for (dst, _) in dsts {
-                                        if self.live_tokens.get(dst).map_or(true, |live| live.is_disjoint(&Weight::all())) {
-                                            reuse = Some(*dst);
-                                            break;
-                                        }
-                                    }
-                                }
-                                let t = reuse.unwrap_or_else(|| self.nwa.add_state());
-                                v.insert(t);
-                                t
-                            }
-                        };
-                        self.add_pending_epsilon(node, next, SimpleBitset::all());
+                        let next = self.get_or_create_next_state(node, tokenizer_state_id, &mut next_level_assoc);
+                        self.add_pending_epsilon(node, next, Weight::all());
                     }
                     continue;
                 }
@@ -580,24 +588,7 @@ impl<'r> Precomputer1<'r> {
                             }
                         }
 
-                        let next_entry = next_level_assoc.entry(final_tokenizer_state);
-                        let next = match next_entry {
-                            std::collections::btree_map::Entry::Occupied(o) => *o.get(),
-                            std::collections::btree_map::Entry::Vacant(v) => {
-                                let mut reuse = None;
-                                if let Some(dsts) = self.pending_epsilons.get(&src_node) {
-                                    for (dst, _) in dsts {
-                                        if self.live_tokens.get(dst).map_or(true, |live| live.is_disjoint(&Weight::all())) {
-                                            reuse = Some(*dst);
-                                            break;
-                                        }
-                                    }
-                                }
-                                let t = reuse.unwrap_or_else(|| self.nwa.add_state());
-                                v.insert(t);
-                                t
-                            }
-                        };
+                        let next = self.get_or_create_next_state(src_node, final_tokenizer_state, &mut next_level_assoc);
                         self.add_pending_epsilon(src_node, next, Weight::all());
                     }
                 }
