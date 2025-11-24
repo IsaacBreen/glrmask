@@ -1106,6 +1106,7 @@ impl ExprGroups {
         // Benchmark against standard regex crate
         crate::debug!(2, "Building regex");
         let pattern = self.groups.iter().map(|g| g.expr.to_benchmark_string()).collect::<Vec<_>>().join("|");
+        println!("Regex pattern: {}", pattern);
         crate::debug!(3, "Regex pattern built");
         let start_regex = std::time::Instant::now();
         // Note: This requires the 'regex' crate to be in Cargo.toml
