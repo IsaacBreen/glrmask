@@ -1,5 +1,6 @@
 use std::hash::{Hash, Hasher};
 use ahash::AHasher;
+use profiler_macro::time_it;
 
 #[derive(Clone)]
 pub struct DenseStateSet {
@@ -28,6 +29,7 @@ impl SparseStateSet {
         }
     }
 
+    #[time_it]
     #[inline(always)]
     pub fn insert(&mut self, bit: usize) -> bool {
         let word_idx = bit / 64;
@@ -66,6 +68,7 @@ pub struct CompressedStateSet {
 }
 
 impl PartialEq for CompressedStateSet {
+    #[time_it]
     fn eq(&self, other: &Self) -> bool {
         if self.hash != other.hash {
             return false;
@@ -75,6 +78,7 @@ impl PartialEq for CompressedStateSet {
 }
 
 impl Hash for CompressedStateSet {
+    #[time_it]
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.hash.hash(state);
     }
@@ -90,6 +94,7 @@ impl CompressedStateSet {
     }
 
     #[inline]
+    #[time_it]
     pub fn from_sparse(sparse: &SparseStateSet) -> Self {
         // Optimization: Sort indices first, then build words.
         let mut indices = sparse.dirty_words.clone();
@@ -115,6 +120,7 @@ impl CompressedStateSet {
     }
 
     #[inline]
+    #[time_it]
     pub fn reuse_from_sparse(sparse: &SparseStateSet, buffer: &mut Self) {
         buffer.words.clear();
 
@@ -140,6 +146,7 @@ impl CompressedStateSet {
     }
 
     #[inline]
+    #[time_it]
     pub fn iter(&self) -> CompressedStateSetIter {
         CompressedStateSetIter {
             set: self,
@@ -150,6 +157,7 @@ impl CompressedStateSet {
     }
 
     #[inline]
+    #[time_it]
     pub fn len(&self) -> usize {
         self.words.iter().map(|(_, w)| w.count_ones() as usize).sum()
     }
@@ -165,6 +173,7 @@ pub struct CompressedStateSetIter<'a> {
 impl<'a> Iterator for CompressedStateSetIter<'a> {
     type Item = usize;
 
+    #[time_it]
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             if self.current_word != 0 {
