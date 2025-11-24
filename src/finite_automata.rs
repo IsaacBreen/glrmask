@@ -2551,11 +2551,27 @@ impl NFA {
 
         // Shared buffers
         let num_nfa_states = self.states.len();
+        let mut stack = Vec::with_capacity(4096.min(num_nfa_states));
         let mut closure_set = SparseStateSet::new(num_nfa_states);
 
-        // Since we eliminated epsilon transitions, "closure" is just the state itself
+        // Compact NFA for faster BFS
+        let compact_nfa = self.build_compact_nfa();
+
+        // Compute start state closure
         closure_set.clear();
         closure_set.insert(self.start_state);
+        stack.push(self.start_state);
+
+        while let Some(u) = stack.pop() {
+            let start = compact_nfa.epsilon_offsets[u] as usize;
+            let end = compact_nfa.epsilon_offsets[u + 1] as usize;
+            for &v in &compact_nfa.epsilon_targets[start..end] {
+                let v = v as usize;
+                if closure_set.insert(v) {
+                    stack.push(v);
+                }
+            }
+        }
 
         let start_state_set = CompressedStateSet::from_sparse(&closure_set);
         dfa_state_map.insert(start_state_set.clone(), 0);
@@ -2642,14 +2658,37 @@ impl NFA {
                 let next_dfa_state_idx = if let Some(&idx) = local_cache.get(&scratch_target) {
                     idx
                 } else {
-                    // Since epsilon transitions are eliminated, closure = target_set
+                    // Compute closure
                     let start_closure = std::time::Instant::now();
-                    
-                    // Just copy target_set to closure_set (no epsilon expansion needed)
                     closure_set.clear();
+
+                    // Iterate using dirty_words for speed
                     for &w_idx in &target_set.dirty_words {
-                        closure_set.dense.words[w_idx] = target_set.dense.words[w_idx];
-                        closure_set.dirty_words.push(w_idx);
+                        let mut w = target_set.dense.words[w_idx];
+                        while w != 0 {
+                            let t = w.trailing_zeros();
+                            w &= !(1u64 << t);
+                            let next_state = w_idx * 64 + t as usize;
+
+                            if closure_set.insert(next_state) {
+                                stack.push(next_state);
+                            }
+                        }
+                    }
+
+                    // BFS Closure - inlined and optimized
+                    while let Some(u) = stack.pop() {
+                        // Use unsafe raw pointer access for speed
+                        let start_offs = unsafe { *compact_nfa.epsilon_offsets.get_unchecked(u) } as usize;
+                        let end_offs = unsafe { *compact_nfa.epsilon_offsets.get_unchecked(u + 1) } as usize;
+
+                        // Iterate over epsilon targets with raw pointer for maximum speed
+                        for i in start_offs..end_offs {
+                            let v = unsafe { *compact_nfa.epsilon_targets.get_unchecked(i) } as usize;
+                            if closure_set.insert(v) {
+                                stack.push(v);
+                            }
+                        }
                     }
                     
                     t_closure_bfs += start_closure.elapsed();
