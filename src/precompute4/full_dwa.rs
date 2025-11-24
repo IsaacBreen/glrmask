@@ -247,15 +247,13 @@ fn can_derive(parent: &Signature, child_index: &SignatureIndex) -> Option<Vec<We
     Some(mapping)
 }
 
-fn specialize_dwa_relative(parent_dwa: &DWA, mapping: &[Weight]) -> DWA {
-    // We construct the new states in parallel to avoid cloning the whole structure
-    // and to speed up the weight mapping.
-    let new_states_vec: Vec<crate::precompute4::weighted_automata::dwa::DWAState> = parent_dwa.states.0.par_iter().map_with(HashMap::<Weight, Weight>::new(), |cache, state| {
-        let mut map_weight = |w: &Weight| -> Weight {
-            if let Some(cw) = cache.get(w) { return cw.clone(); }
-            
+fn specialize_dwa_relative(parent_dwa: &DWA, mapping: &[Weight], parent_unique_weights: &[Weight]) -> DWA {
+    // Pre-compute the mapping for all unique weights in the parent DWA.
+    // This avoids re-computing the mapping for the same weight multiple times across different states
+    // and allows us to use a read-only map during the parallel state construction.
+    let weight_map: HashMap<Weight, Weight> = parent_unique_weights.iter()
+        .map(|w| {
             // OPTIMIZATION: Accumulate in a local RangeSetBlaze to avoid SimpleBitset lock contention
-            // SimpleBitset::bitor involves global caching and locking which kills parallel performance.
             let mut accumulator = RangeSetBlaze::new();
             let mut is_all = false;
 
@@ -275,9 +273,16 @@ fn specialize_dwa_relative(parent_dwa: &DWA, mapping: &[Weight]) -> DWA {
             } else {
                 Weight::from_rsb(accumulator)
             };
+            (w.clone(), new_w)
+        })
+        .collect();
 
-            cache.insert(w.clone(), new_w.clone());
-            new_w
+    // We construct the new states in parallel using the pre-computed map.
+    let new_states_vec: Vec<crate::precompute4::weighted_automata::dwa::DWAState> = parent_dwa.states.0.par_iter().map(|state| {
+        let map_weight = |w: &Weight| -> Weight {
+            if let Some(cw) = weight_map.get(w) { return cw.clone(); }
+            // Fallback should not happen if parent_unique_weights is complete, but safe to keep
+            Weight::zeros() 
         };
 
         let mut new_state = crate::precompute4::weighted_automata::dwa::DWAState::default();
@@ -457,6 +462,20 @@ pub fn precompute4(parser: &GLRParser, input_nwa: &NWA) -> DWA {
 
         let super_signature: Signature = bit_to_term.iter().map(|t| vec![*t]).collect();
         
+        // Collect all unique weights from super_dwa once
+        let super_dwa_unique_weights: Vec<Weight> = super_dwa.states.0.par_iter()
+            .fold(HashSet::new, |mut acc, s| {
+                 if let Some(w) = &s.state_weight { acc.insert(w.clone()); }
+                 if let Some(w) = &s.final_weight { acc.insert(w.clone()); }
+                 for w in s.trans_weights.values() { acc.insert(w.clone()); }
+                 acc
+            })
+            .reduce(HashSet::new, |mut a, b| {
+                for w in b { a.insert(w); }
+                a
+            })
+            .into_iter().collect();
+
         // PARALLEL OPTIMIZATION: Always derive from Super DWA to allow parallel processing.
         // This avoids the sequential dependency of the original "best parent" greedy approach.
         // Since Super DWA can derive everything, this is correct.
@@ -466,7 +485,7 @@ pub fn precompute4(parser: &GLRParser, input_nwa: &NWA) -> DWA {
             // We know Super DWA (super_signature) can derive target_sig
             let mapping = can_derive(&super_signature, &target_idx).expect("Super signature must derive target");
             
-            let mut derived_dwa = specialize_dwa_relative(&super_dwa, &mapping);
+            let mut derived_dwa = specialize_dwa_relative(&super_dwa, &mapping, &super_dwa_unique_weights);
             derived_dwa.simplify();
             (target_sig.clone(), NWA::from_dwa(&derived_dwa))
         }).collect();

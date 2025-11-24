@@ -39,8 +39,31 @@ impl Default for SimpleBitset {
 }
 
 // Global interning for SimpleBitset
+// Global interning for SimpleBitset
 struct Interner(HashMap<u64, Vec<Arc<SimpleBitsetInner>>>);
-static INTERNER: Lazy<Mutex<Interner>> = Lazy::new(|| Mutex::new(Interner(HashMap::new())));
+
+const NUM_SHARDS: usize = 64;
+
+struct ShardedInterner {
+    shards: Vec<Mutex<Interner>>,
+}
+
+impl ShardedInterner {
+    fn new() -> Self {
+        let mut shards = Vec::with_capacity(NUM_SHARDS);
+        for _ in 0..NUM_SHARDS {
+            shards.push(Mutex::new(Interner(HashMap::new())));
+        }
+        Self { shards }
+    }
+
+    fn get(&self, fp: u64) -> &Mutex<Interner> {
+        &self.shards[(fp as usize) % NUM_SHARDS]
+    }
+}
+
+static INTERNER: Lazy<ShardedInterner> = Lazy::new(ShardedInterner::new);
+
 static ZEROS: Lazy<SimpleBitset> =
     Lazy::new(|| SimpleBitset(Arc::new(SimpleBitsetInner { rsb: RangeSetBlaze::new(), fp: FP_ZERO, is_all: false })));
 static ALL: Lazy<SimpleBitset> = Lazy::new(|| {
@@ -48,13 +71,31 @@ static ALL: Lazy<SimpleBitset> = Lazy::new(|| {
 });
 
 type OpCache = LruCache<(usize, usize), SimpleBitset>;
-const CACHE_SIZE: NonZeroUsize = unsafe { NonZeroUsize::new_unchecked(1024) };
+const CACHE_SIZE: NonZeroUsize = unsafe { NonZeroUsize::new_unchecked(1024) }; // Per shard
 
-static UNION_CACHE: Lazy<Mutex<OpCache>> =
-    Lazy::new(|| Mutex::new(LruCache::new(CACHE_SIZE)));
-static INTERSECTION_CACHE: Lazy<Mutex<OpCache>> =
-    Lazy::new(|| Mutex::new(LruCache::new(CACHE_SIZE)));
-static SUB_CACHE: Lazy<Mutex<OpCache>> = Lazy::new(|| Mutex::new(LruCache::new(CACHE_SIZE)));
+struct ShardedCache {
+    shards: Vec<Mutex<OpCache>>,
+}
+
+impl ShardedCache {
+    fn new() -> Self {
+        let mut shards = Vec::with_capacity(NUM_SHARDS);
+        for _ in 0..NUM_SHARDS {
+            shards.push(Mutex::new(LruCache::new(CACHE_SIZE)));
+        }
+        Self { shards }
+    }
+
+    fn get(&self, key: (usize, usize)) -> &Mutex<OpCache> {
+        // Simple hash for the pair of pointers
+        let h = (key.0 ^ key.1.rotate_left(32)); 
+        &self.shards[h % NUM_SHARDS]
+    }
+}
+
+static UNION_CACHE: Lazy<ShardedCache> = Lazy::new(ShardedCache::new);
+static INTERSECTION_CACHE: Lazy<ShardedCache> = Lazy::new(ShardedCache::new);
+static SUB_CACHE: Lazy<ShardedCache> = Lazy::new(ShardedCache::new);
 
 pub(crate) const FP_ZERO: u64 = 0x9E37_79B9_7F4A_7C15;
 const FP_ALL: u64 = 0xD6E8_FEB8_6659_FD93;
@@ -99,7 +140,7 @@ fn intern(rsb: RangeSetBlaze<usize>) -> SimpleBitset {
         return ALL.clone();
     }
 
-    let mut interner = INTERNER.lock().unwrap();
+    let mut interner = INTERNER.get(fp).lock().unwrap();
     let candidates = interner.0.entry(fp).or_default();
     for candidate in candidates.iter() {
         if candidate.rsb == rsb {
@@ -301,7 +342,7 @@ impl<'a> BitAnd<&'a SimpleBitset> for &'a SimpleBitset {
         let p2 = Arc::as_ptr(&rhs.0) as usize;
         let key = if p1 < p2 { (p1, p2) } else { (p2, p1) };
 
-        let mut cache = INTERSECTION_CACHE.lock().unwrap();
+        let mut cache = INTERSECTION_CACHE.get(key).lock().unwrap();
         if let Some(result) = cache.get(&key) {
             return result.clone();
         }
@@ -332,7 +373,7 @@ impl<'a> BitOr<&'a SimpleBitset> for &'a SimpleBitset {
         let p2 = Arc::as_ptr(&rhs.0) as usize;
         let key = if p1 < p2 { (p1, p2) } else { (p2, p1) };
 
-        let mut cache = UNION_CACHE.lock().unwrap();
+        let mut cache = UNION_CACHE.get(key).lock().unwrap();
         if let Some(result) = cache.get(&key) {
             return result.clone();
         }
@@ -417,7 +458,7 @@ impl<'a> Sub<&'a SimpleBitset> for &'a SimpleBitset {
         let p2 = Arc::as_ptr(&rhs.0) as usize;
         let key = (p1, p2);
 
-        let mut cache = SUB_CACHE.lock().unwrap();
+        let mut cache = SUB_CACHE.get(key).lock().unwrap();
         if let Some(result) = cache.get(&key) {
             return result.clone();
         }
