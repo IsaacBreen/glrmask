@@ -1049,72 +1049,8 @@ impl NFAState {
     }
 }
 
-fn byte_to_regex_char(b: u8) -> String {
-    if b.is_ascii_alphanumeric() {
-        (b as char).to_string()
-    } else {
-        format!("\\x{:02x}", b)
-    }
-}
-
-fn u8set_to_regex_pattern(set: &U8Set) -> String {
-    if set.is_empty() { return String::new(); }
-    if set.len() == 256 { return ".".to_string(); }
-    let mut res = String::from("[");
-    let mut iter = set.iter();
-    if let Some(mut start) = iter.next() {
-        let mut end = start;
-        for next in iter {
-            if next == end + 1 {
-                end = next;
-            } else {
-                res.push_str(&byte_to_regex_char(start));
-                if start != end {
-                    res.push('-');
-                    res.push_str(&byte_to_regex_char(end));
-                }
-                start = next;
-                end = next;
-            }
-        }
-        res.push_str(&byte_to_regex_char(start));
-        if start != end {
-            res.push('-');
-            res.push_str(&byte_to_regex_char(end));
-        }
-    }
-    res.push(']');
-    res
-}
-
-impl Expr {
-    fn to_benchmark_string(&self) -> String {
-        match self {
-            Expr::U8Seq(bytes) => bytes.iter().map(|&b| byte_to_regex_char(b)).collect(),
-            Expr::U8Class(set) => u8set_to_regex_pattern(set),
-            Expr::Shared(inner) => inner.to_benchmark_string(),
-            Expr::Quantifier(inner, q) => format!("(?:{}){}", inner.to_benchmark_string(), match q { QuantifierType::ZeroOrMore => "*", QuantifierType::OneOrMore => "+", QuantifierType::ZeroOrOne => "?" }),
-            Expr::Choice(exprs) => exprs.iter().map(|e| e.to_benchmark_string()).collect::<Vec<_>>().join("|"),
-            Expr::Seq(exprs) => exprs.iter().map(|e| e.to_benchmark_string()).collect::<Vec<_>>().join(""),
-            Expr::Epsilon => String::new(),
-        }
-    }
-}
-
 impl ExprGroups {
     pub fn build(self) -> Regex {
-        // Benchmark against standard regex crate
-        crate::debug!(2, "Building regex");
-        let pattern = self.groups.iter().map(|g| g.expr.to_benchmark_string()).collect::<Vec<_>>().join("|");
-        println!("Regex pattern: {}", pattern);
-        crate::debug!(3, "Regex pattern built");
-        let start_regex = std::time::Instant::now();
-        // Note: This requires the 'regex' crate to be in Cargo.toml
-        let _ = ::regex::bytes::Regex::new(&pattern);
-        crate::debug!(3, "Regex built");
-        let regex_duration = start_regex.elapsed();
-
-        let start_total = std::time::Instant::now();
         let stats = self.get_stats();
         crate::debug!(2, "Expr Stats: {}", stats);
 
@@ -1138,12 +1074,6 @@ impl ExprGroups {
         let start = std::time::Instant::now();
         dfa.minimize();
         crate::debug!(4, "Minimized DFA in {:.2?}", start.elapsed());
-
-        let our_duration = start_total.elapsed();
-        crate::debug!(1, "BENCHMARK RESULT -- Pattern len: {}", pattern.len());
-        crate::debug!(1, "  regex crate: {:.2?}", regex_duration);
-        crate::debug!(1, "  this crate:  {:.2?}", our_duration);
-
         Regex { dfa }
     }
 
