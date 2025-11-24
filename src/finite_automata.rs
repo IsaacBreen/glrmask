@@ -1342,13 +1342,13 @@ impl NFA {
         let total_estimated_bytes = total_base_size + transitions_capacity_bytes + epsilon_capacity_bytes + finalizers_est_bytes + non_greedy_est_bytes;
         let to_mb = |bytes: usize| bytes as f64 / 1024.0 / 1024.0;
 
-        println!("--- NFA Stats ---");
-        println!("States: {}", num_states);
-        println!("Estimated Size: {:.2} MB", to_mb(total_estimated_bytes));
-        println!("  Base (Vec headers, etc): {:.2} MB", to_mb(total_base_size));
-        println!("  Transitions Data: {:.2} MB", to_mb(transitions_capacity_bytes));
-        println!("  Epsilon Data: {:.2} MB", to_mb(epsilon_capacity_bytes));
-        println!("  Finalizers (est): {:.2} MB", to_mb(finalizers_est_bytes + non_greedy_est_bytes));
+        crate::debug!(2, "--- NFA Stats ---");
+        crate::debug!(2, "States: {}", num_states);
+        crate::debug!(2, "Estimated Size: {:.2} MB", to_mb(total_estimated_bytes));
+        crate::debug!(2, "  Base (Vec headers, etc): {:.2} MB", to_mb(total_base_size));
+        crate::debug!(2, "  Transitions Data: {:.2} MB", to_mb(transitions_capacity_bytes));
+        crate::debug!(2, "  Epsilon Data: {:.2} MB", to_mb(epsilon_capacity_bytes));
+        crate::debug!(2, "  Finalizers (est): {:.2} MB", to_mb(finalizers_est_bytes + non_greedy_est_bytes));
 
         // 1. Finalizer Sets -> Bitsets
         // Cost of Bitset: (max_group_id bits / 8) per set. Two sets per state.
@@ -1359,24 +1359,24 @@ impl NFA {
         let total_bitset_cost = num_states * 2 * (bytes_per_set + bitset_overhead);
         let current_finalizer_cost = finalizers_est_bytes + non_greedy_est_bytes;
         let savings_bitsets = (current_finalizer_cost as isize) - (total_bitset_cost as isize);
-        println!("  [Savings] Finalizers -> Bitsets: {:.2} MB (current est: {:.2} MB, bitset: {:.2} MB)",
+        crate::debug!(2, "  [Savings] Finalizers -> Bitsets: {:.2} MB (current est: {:.2} MB, bitset: {:.2} MB)",
             to_mb(savings_bitsets.max(0) as usize), to_mb(current_finalizer_cost), to_mb(total_bitset_cost));
 
         // 2. State IDs u32
         // (u8, usize) [16 bytes] -> (u8, u32) [8 bytes]. usize [8 bytes] -> u32 [4 bytes].
         let current_trans_data_used = total_transitions_count * std::mem::size_of::<(u8, usize)>();
-        let u32_trans_data_used = total_transitions_count * 8; 
+        let u32_trans_data_used = total_transitions_count * 8;
         let current_eps_data_used = total_epsilon_count * std::mem::size_of::<usize>();
         let u32_eps_data_used = total_epsilon_count * 4;
         let savings_u32 = (current_trans_data_used + current_eps_data_used) - (u32_trans_data_used + u32_eps_data_used);
-        println!("  [Savings] State IDs -> u32: {:.2} MB", to_mb(savings_u32));
+        crate::debug!(2, "  [Savings] State IDs -> u32: {:.2} MB", to_mb(savings_u32));
 
         // 3. Compact Transitions
         // Vec<(u8, usize)> [16 bytes] -> Vec<(U8Set, usize)> [48 bytes: 32(set) + 8(usize) + 8(pad)]
         let compact_item_size = 48;
         let compact_total_size = compacted_transitions_count * compact_item_size;
         let savings_compact = (current_trans_data_used as isize) - (compact_total_size as isize);
-        println!("  [Savings] Compact Transitions: {:.2} MB (current: {:.2} MB, compacted: {:.2} MB)",
+        crate::debug!(2, "  [Savings] Compact Transitions: {:.2} MB (current: {:.2} MB, compacted: {:.2} MB)",
             savings_compact as f64 / 1024.0 / 1024.0, to_mb(current_trans_data_used), to_mb(compact_total_size));
 
         if num_states > 0 {
@@ -1470,10 +1470,10 @@ impl NFA {
             } else {
                 0.0
             };
-            println!("  SCCs: {}, Non-trivial (size>1): {} ({} states, avg size {:.2})",
+            crate::debug!(2, "  SCCs: {}, Non-trivial (size>1): {} ({} states, avg size {:.2})",
                 num_sccs, num_non_trivial_sccs, total_states_in_non_trivial_sccs, avg_non_trivial_scc_size);
         }
-        println!("-----------------");
+        crate::debug!(2, "-----------------");
     }
 
     fn condense_epsilon_sccs(&mut self) {
@@ -1632,7 +1632,7 @@ impl NFA {
         let nfa = dfa.to_nfa();
         let start = std::time::Instant::now();
         let _ = nfa.to_dfa_impl();
-        println!("Deterministic NFA -> DFA benchmark: {:.2?}", start.elapsed());
+        crate::debug!(2, "Deterministic NFA -> DFA benchmark: {:.2?}", start.elapsed());
         dfa
     }
 
@@ -1767,13 +1767,13 @@ impl NFA {
             let mut local_cache: AHashMap<CompressedStateSet, usize> = AHashMap::default();
             let mut scratch_target = CompressedStateSet::new(0);
             let mut scratch_closure = CompressedStateSet::new(0);
-            
+
             // Collect all transitions for this state to bulk insert later
             let mut dfa_transitions_vec: Vec<(u8, usize)> = Vec::new();
 
             for &class_id in &used_classes {
                 let target_set = unsafe { transition_targets.get_unchecked(class_id) };
-                
+
                 // Empty set check
                 if target_set.dirty_words.is_empty() {
                     scratch_target.words.clear();
@@ -1787,7 +1787,7 @@ impl NFA {
                 } else {
                     // Compute closure
                     closure_set.clear();
-                    
+
                     // TIMING: Bitset Iteration
                     let start_iter = std::time::Instant::now();
                     {
@@ -1799,7 +1799,7 @@ impl NFA {
                                 let t = w.trailing_zeros();
                                 w &= !(1u64 << t);
                                 let next_state = w_idx * 64 + t as usize;
-                                
+
                                 if closure_set.insert(next_state) {
                                     stack.push(next_state);
                                 }
@@ -1815,7 +1815,7 @@ impl NFA {
                         // Use unsafe raw pointer access for speed
                         let start_offs = unsafe { *compact_nfa.epsilon_offsets.get_unchecked(u) } as usize;
                         let end_offs = unsafe { *compact_nfa.epsilon_offsets.get_unchecked(u + 1) } as usize;
-                        
+
                         // Iterate over epsilon targets with raw pointer for maximum speed
                         for i in start_offs..end_offs {
                             let v = unsafe { *compact_nfa.epsilon_targets.get_unchecked(i) } as usize;
@@ -1829,7 +1829,7 @@ impl NFA {
                     // Get/Create DFA state
                     let start_map = std::time::Instant::now();
                     CompressedStateSet::reuse_from_sparse(&closure_set, &mut scratch_closure);
-                    
+
                     let next_state_idx = if let Some(&existing_state) = dfa_state_map.get(&scratch_closure) {
                         existing_state
                     } else {
@@ -1862,7 +1862,7 @@ impl NFA {
                         new_state_index
                     };
                     t_map_lookup += start_map.elapsed();
-                    
+
                     local_cache.insert(scratch_target.clone(), next_state_idx);
                     next_state_idx
                 };
@@ -1873,7 +1873,7 @@ impl NFA {
                 }
             }
             t_process_inputs += start_process.elapsed();
-            
+
             // Bulk insert transitions
             dfa_transitions_vec.sort_unstable_by_key(|k| k.0);
             dfa_states[current_dfa_state].transitions = CharTransitions::from_sorted_entries(dfa_transitions_vec);
@@ -1885,23 +1885,23 @@ impl NFA {
             used_classes.clear();
         }
 
-        println!("DFA main loop complete. Total states: {}, Max subset size: {}, Time: {:.2?}", dfa_states.len(), max_subset_size, start_time.elapsed());
-        println!("Detailed Timing breakdown:");
-        println!("  Collect Transitions: {:.2?}", t_collect);
-        println!("  Process Inputs Loop: {:.2?}", t_process_inputs);
-        println!("    - BitSet Iteration: {:.2?}", t_iter_bitset);
-        println!("    - Closure BFS:      {:.2?}", t_closure_bfs);
-        println!("    - Map Lookup/Ins:   {:.2?}", t_map_lookup);
-        println!("    - Remainder:        {:.2?}", t_process_inputs - t_iter_bitset - t_closure_bfs - t_map_lookup);
-        
+        crate::debug!(2, "DFA main loop complete. Total states: {}, Max subset size: {}, Time: {:.2?}", dfa_states.len(), max_subset_size, start_time.elapsed());
+        crate::debug!(2, "Detailed Timing breakdown:");
+        crate::debug!(2, "  Collect Transitions: {:.2?}", t_collect);
+        crate::debug!(2, "  Process Inputs Loop: {:.2?}", t_process_inputs);
+        crate::debug!(2, "    - BitSet Iteration: {:.2?}", t_iter_bitset);
+        crate::debug!(2, "    - Closure BFS:      {:.2?}", t_closure_bfs);
+        crate::debug!(2, "    - Map Lookup/Ins:   {:.2?}", t_map_lookup);
+        crate::debug!(2, "    - Remainder:        {:.2?}", t_process_inputs - t_iter_bitset - t_closure_bfs - t_map_lookup);
+
         let sparsity_ratio = if total_words_scanned > 0 {
             total_useful_words as f64 / total_words_scanned as f64
         } else {
             0.0
         };
-        println!("BitSet Sparsity Stats:");
-        println!("  Total Words Scanned: {}", total_words_scanned);
-        println!("  Words with bits:     {} ({:.4}% useful)", total_useful_words, sparsity_ratio * 100.0);
+        crate::debug!(2, "BitSet Sparsity Stats:");
+        crate::debug!(2, "  Total Words Scanned: {}", total_words_scanned);
+        crate::debug!(2, "  Words with bits:     {} ({:.4}% useful)", total_useful_words, sparsity_ratio * 100.0);
 
         let mut dfa = DFA {
             states: dfa_states,
