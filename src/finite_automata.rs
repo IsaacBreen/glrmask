@@ -2446,54 +2446,62 @@ impl NFA {
 
     /// Eliminate all epsilon transitions from the NFA.
     /// Returns a new NFA with no epsilon transitions but equivalent language.
+    /// Eliminate all epsilon transitions from the NFA.
+    /// Returns a new NFA with no epsilon transitions but equivalent language.
     fn eliminate_epsilon_transitions(mut self) -> NFA {
         let start_time = std::time::Instant::now();
         let n = self.states.len();
         
-        // Compute epsilon closure for each state
-        let mut closures: Vec<Vec<usize>> = vec![Vec::new(); n];
+        let mut new_states: Vec<NFAState> = Vec::with_capacity(n);
+        
+        // Reusable buffers to avoid allocation in loop
         let mut stack = Vec::with_capacity(256);
+        // Use token-based visited check to avoid clearing/reallocating visited vector
+        // visited[state] == current_token means visited
+        let mut visited = vec![0usize; n];
+        let mut current_token = 0;
         
         for start_state in 0..n {
-            let closure = &mut closures[start_state];
-            closure.push(start_state);
+            current_token += 1;
+            if current_token == 0 {
+                // Wrap around handling (unlikely to happen with usize, but safe)
+                visited.fill(0);
+                current_token = 1;
+            }
             
-            let mut visited = vec![false; n];
-            visited[start_state] = true;
+            let mut new_state = NFAState::new();
+            
+            // Compute closure and build state simultaneously
+            // We don't store the closure, we just iterate it
             stack.clear();
             stack.push(start_state);
+            visited[start_state] = current_token;
             
-            while let Some(u) = stack.pop() {
-                for &v in &self.states[u].epsilon_transitions {
-                    if !visited[v] {
-                        visited[v] = true;
-                        closure.push(v);
-                        stack.push(v);
+            // Add self transitions first (optimization: often no epsilon transitions)
+            // Actually, we need to process the whole closure.
+            // But we can optimize: if no epsilon transitions, just copy.
+            if self.states[start_state].epsilon_transitions.is_empty() {
+                new_state.transitions = self.states[start_state].transitions.clone();
+                new_state.finalizers = self.states[start_state].finalizers.clone();
+                new_state.non_greedy_finalizers = self.states[start_state].non_greedy_finalizers.clone();
+            } else {
+                while let Some(u) = stack.pop() {
+                    // Add transitions from u to new_state
+                    for (char_set, target) in &self.states[u].transitions {
+                        new_state.transitions.push((char_set.clone(), *target));
+                    }
+                    new_state.finalizers.extend(&self.states[u].finalizers);
+                    new_state.non_greedy_finalizers.extend(&self.states[u].non_greedy_finalizers);
+                    
+                    // Traverse epsilon transitions
+                    for &v in &self.states[u].epsilon_transitions {
+                        if visited[v] != current_token {
+                            visited[v] = current_token;
+                            stack.push(v);
+                        }
                     }
                 }
             }
-        }
-        
-        // Build new NFA without epsilon transitions
-        let mut new_states: Vec<NFAState> = Vec::with_capacity(n);
-        
-        for state_id in 0..n {
-            let mut new_state = NFAState::new();
-            
-            // For each state in this state's epsilon closure
-            for &closure_state in &closures[state_id] {
-                // Add all non-epsilon transitions
-                for (char_set, target) in &self.states[closure_state].transitions {
-                    new_state.transitions.push((char_set.clone(), *target));
-                }
-                
-                // Merge finalizers
-                new_state.finalizers.extend(&self.states[closure_state].finalizers);
-                new_state.non_greedy_finalizers.extend(&self.states[closure_state].non_greedy_finalizers);
-            }
-            
-            // No epsilon transitions in new NFA
-            new_state.epsilon_transitions.clear();
             
             new_states.push(new_state);
         }
