@@ -1418,6 +1418,15 @@ fn try_extract_literal_into(expr: &Expr, buf: &mut Vec<u8>) -> bool {
             buf.extend_from_slice(bytes);
             true
         }
+        Expr::U8Class(set) => {
+            if set.len() == 1 {
+                buf.push(set.iter().next().unwrap());
+                true
+            } else {
+                false
+            }
+        }
+        Expr::Shared(inner) => try_extract_literal_into(inner, buf),
         Expr::Seq(exprs) => {
             let start_len = buf.len();
             for e in exprs {
