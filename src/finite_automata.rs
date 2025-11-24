@@ -1187,7 +1187,9 @@ impl ExprGroups {
         dfa.minimize();
         crate::debug!(4, "Minimized DFA in {:.2?}", start.elapsed());
         print_memory_usage("After DFA minimization");
-        std::process::exit(0);
+        if std::env::var("BENCHMARK_REGEX_OPTIMIZATIONS").is_ok() {
+            std::process::exit(0);
+        }
         Regex { dfa }
     }
 
@@ -2514,12 +2516,8 @@ impl NFA {
         }
     }
 
-    fn to_dfa_impl(mut self) -> DFA {
+    fn to_dfa_impl(self) -> DFA {
         let start_time = std::time::Instant::now();
-        
-        // MAJOR OPTIMIZATION: Eliminate epsilon transitions upfront
-        // This converts the NFA to epsilon-free form, making DFA construction use the fast path
-        self = self.eliminate_epsilon_transitions();
         
         let mut dfa_states: Vec<DFAState> = Vec::new();
         // Use AHashMap for faster hashing
