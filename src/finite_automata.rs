@@ -1711,46 +1711,6 @@ impl Expr {
             }
         }
 
-        // OPTIMIZATION: Expand ZeroOrMore at the start of alternatives to allow factoring.
-        // A* B -> (A A* B) | B
-        // This exposes 'A' as a prefix, allowing 'make_choice' to merge it with other branches starting with 'A'.
-        let mut expanded = Vec::with_capacity(flat.len());
-        for e in flat {
-            let (is_zom, body, rest) = match &e {
-                Expr::Quantifier(body, QuantifierType::ZeroOrMore) => (true, body.clone(), None),
-                Expr::Seq(subs) if !subs.is_empty() => {
-                    if let Expr::Quantifier(body, QuantifierType::ZeroOrMore) = &subs[0] {
-                        (true, body.clone(), Some(subs[1..].to_vec()))
-                    } else {
-                        (false, Box::new(Expr::Epsilon), None)
-                    }
-                }
-                _ => (false, Box::new(Expr::Epsilon), None),
-            };
-
-            if is_zom {
-                // Only expand if the body has a definite class head (consumes input).
-                // This prevents infinite expansion of nullable loops like (A*)*.
-                let (head, _) = body.as_ref().clone().split_head();
-                if matches!(head, Head::Class(_)) {
-                    // 1. Loop Entry: A (A* ...) -> represented as body followed by original expr
-                    // We construct Seq(body, e).
-                    let entry_seq = vec![*body, e.clone()];
-                    expanded.push(Expr::make_seq(entry_seq));
-
-                    // 2. Loop Skip: rest
-                    if let Some(r) = rest {
-                        expanded.push(Expr::make_seq(r));
-                    } else {
-                        expanded.push(Expr::Epsilon);
-                    }
-                    continue;
-                }
-            }
-            expanded.push(e);
-        }
-        flat = expanded;
-
         if flat.is_empty() {
             return Expr::Choice(vec![]);
         }
@@ -1762,6 +1722,61 @@ impl Expr {
         if flat.len() == 1 {
             return flat.pop().unwrap();
         }
+
+        // NEW: Factor out common structural prefixes (e.g. "A B" | "A C" -> "A (B|C)")
+        // This handles cases like P* L0 | P* L1 -> P* (L0 | L1), preventing NFA explosion
+        // by sharing the P* subgraph.
+        let mut factored = Vec::with_capacity(flat.len());
+        let mut iter = flat.into_iter().peekable();
+
+        while let Some(e) = iter.next() {
+            let prefix = match &e {
+                Expr::Seq(s) if !s.is_empty() => s[0].clone(),
+                _ => e.clone(),
+            };
+
+            // Check next elements for the same prefix. Since 'flat' is sorted,
+            // identical prefixes will be adjacent.
+            let mut group = vec![e];
+            while let Some(next) = iter.peek() {
+                let next_p = match next {
+                    Expr::Seq(s) if !s.is_empty() => &s[0],
+                    _ => next,
+                };
+                if next_p == &prefix {
+                    group.push(iter.next().unwrap());
+                } else {
+                    break;
+                }
+            }
+
+            if group.len() > 1 {
+                let tails: Vec<Expr> = group.into_iter().map(|item| {
+                    match item {
+                        Expr::Seq(mut s) if !s.is_empty() && s[0] == prefix => {
+                            let mut iter = s.into_iter();
+                            iter.next(); // Skip prefix
+                            Expr::make_seq(iter.collect())
+                        }
+                        item if item == prefix => Expr::Epsilon,
+                        _ => unreachable!("Sorted grouping failed: prefix mismatch"),
+                    }
+                }).collect();
+
+                let tail_expr = Self::make_choice(tails);
+                if tail_expr == Expr::Epsilon {
+                    factored.push(prefix);
+                } else {
+                    factored.push(Expr::make_seq(vec![prefix, tail_expr]));
+                }
+            } else {
+                factored.push(group.pop().unwrap());
+            }
+        }
+        flat = factored;
+
+        // 2. Partitioning / Left Factoring
+        // We map each byte 0..255 to a list of indices in `flat` that cover it.
 
         // OPTIMIZATION: Factor out common structural prefixes (e.g. "A B" | "A C" -> "A (B|C)")
         // This is crucial for avoiding NFA state explosion on common complex prefixes like quantifiers.
