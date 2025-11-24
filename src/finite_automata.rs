@@ -2514,19 +2514,39 @@ impl NFA {
             remapped_transitions.push(trans);
         }
 
-        // Precompute epsilon closures for all states (MAJOR OPTIMIZATION)
-        let start_precompute = std::time::Instant::now();
-        let epsilon_closures = self.precompute_epsilon_closures();
-        crate::debug!(4, "Precomputed epsilon closures in {:.2?}", start_precompute.elapsed());
+        // On-demand epsilon closure cache (only compute what we need)
+        let mut epsilon_closure_cache: AHashMap<usize, DenseStateSet> = AHashMap::default();
 
         // Shared buffers
         let num_nfa_states = self.states.len();
+        let mut stack = Vec::with_capacity(256);
         let mut closure_set = SparseStateSet::new(num_nfa_states);
 
-        // Compute start state closure using precomputed data
+        // Compute start state closure
         closure_set.clear();
-        // Union all closures for the start state (which is just the start state's closure)
-        for (word_idx, word) in epsilon_closures[self.start_state].words.iter().enumerate() {
+        
+        // Compute epsilon closure for start state
+        let mut start_closure = DenseStateSet::new(num_nfa_states);
+        start_closure.words[self.start_state / 64] |= 1u64 << (self.start_state % 64);
+        stack.push(self.start_state);
+        
+        while let Some(u) = stack.pop() {
+            for &v in &self.states[u].epsilon_transitions {
+                let word_idx = v / 64;
+                let bit_mask = 1u64 << (v % 64);
+                if (start_closure.words[word_idx] & bit_mask) == 0 {
+                    start_closure.words[word_idx] |= bit_mask;
+                    stack.push(v);
+                }
+            }
+        }
+        
+        // Cache it
+        epsilon_closure_cache.insert(self.start_state, start_closure);
+        
+        // Copy to closure_set
+        let start_closure_ref = &epsilon_closure_cache[&self.start_state];
+        for (word_idx, word) in start_closure_ref.words.iter().enumerate() {
             if *word != 0 {
                 closure_set.dense.words[word_idx] = *word;
                 if !closure_set.dirty_words.contains(&word_idx) {
@@ -2620,14 +2640,11 @@ impl NFA {
                 let next_dfa_state_idx = if let Some(&idx) = local_cache.get(&scratch_target) {
                     idx
                 } else {
-                    // Compute closure
-                    closure_set.clear();
-
-                    // TIMING: Closure Union - using precomputed closures
+                    // TIMING: Closure Union - using cached closures
                     let start_closure = std::time::Instant::now();
                     closure_set.clear();
                     
-                    // Union all precomputed closures for states in target_set
+                    // Union all cached closures for states in target_set
                     for &w_idx in &target_set.dirty_words {
                         let mut w = target_set.dense.words[w_idx];
                         while w != 0 {
@@ -2635,15 +2652,37 @@ impl NFA {
                             w &= !(1u64 << t);
                             let state = w_idx * 64 + t as usize;
                             
-                            // Union the precomputed closure for this state
-                            for (closure_word_idx, &closure_word) in epsilon_closures[state].words.iter().enumerate() {
+                            // Get or compute closure for this state
+                            if !epsilon_closure_cache.contains_key(&state) {
+                                let mut state_closure = DenseStateSet::new(num_nfa_states);
+                                state_closure.words[state / 64] |= 1u64 << (state % 64);
+                                
+                                stack.clear();
+                                stack.push(state);
+                                
+                                while let Some(u) = stack.pop() {
+                                    for &v in &self.states[u].epsilon_transitions {
+                                        let word_idx = v / 64;
+                                        let bit_mask = 1u64 << (v % 64);
+                                        if (state_closure.words[word_idx] & bit_mask) == 0 {
+                                            state_closure.words[word_idx] |= bit_mask;
+                                            stack.push(v);
+                                        }
+                                    }
+                                }
+                                
+                                epsilon_closure_cache.insert(state, state_closure);
+                            }
+                            
+                            // Union the cached closure
+                            let state_closure = &epsilon_closure_cache[&state];
+                            for (closure_word_idx, &closure_word) in state_closure.words.iter().enumerate() {
                                 if closure_word != 0 {
                                     let old_word = closure_set.dense.words[closure_word_idx];
                                     let new_word = old_word | closure_word;
                                     if new_word != old_word {
                                         closure_set.dense.words[closure_word_idx] = new_word;
                                         if old_word == 0 {
-                                            // Word transitioned from 0 to non-zero, mark as dirty
                                             closure_set.dirty_words.push(closure_word_idx);
                                         }
                                     }
