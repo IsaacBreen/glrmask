@@ -277,11 +277,19 @@ fn specialize_dwa_relative(parent_dwa: &DWA, mapping: &[Weight], parent_unique_w
         })
         .collect();
 
+    specialize_dwa_relative_with_map(parent_dwa, &weight_map)
+}
+
+fn specialize_dwa_relative_with_map(parent_dwa: &DWA, weight_map: &HashMap<Weight, Weight>) -> DWA {
+    // Optimized version that uses a pre-computed weight_map.
+    // This is faster when specializing many DWAs from the same parent with different mappings,
+    // as the weight_map can be computed once and reused.
+    
     // We construct the new states in parallel using the pre-computed map.
     let new_states_vec: Vec<crate::precompute4::weighted_automata::dwa::DWAState> = parent_dwa.states.0.par_iter().map(|state| {
         let map_weight = |w: &Weight| -> Weight {
             if let Some(cw) = weight_map.get(w) { return cw.clone(); }
-            // Fallback should not happen if parent_unique_weights is complete, but safe to keep
+            // Fallback should not happen if weight_map is complete, but safe to keep
             Weight::zeros() 
         };
 
@@ -405,12 +413,11 @@ pub fn precompute4(parser: &GLRParser, input_nwa: &NWA) -> DWA {
             NWA::union_assign(&mut combined_nwa, &NWA::from_dwa(template));
         }
 
-        // Note: We simplify but do NOT determinize immediately here if we want to stay NWA,
-        // but the cache expects NWA. However, determinizing reduces state bloat before storage.
-        // The original code stored NWA in cache.
-        combined_nwa.simplify();
+        // OPTIMIZATION: Skip NWA simplification for simple signatures.
+        // Determinization will merge states anyway, so pre-simplification has minimal benefit.
+        // Use lightweight simplification on the DWA to avoid expensive minimization.
         let mut dwa = combined_nwa.determinize();
-        dwa.simplify();
+        dwa.simplify_lightweight();
 
         template_cache.insert(sig, NWA::from_dwa(&dwa));
         let _ = simple_pb.update(1);
@@ -456,9 +463,10 @@ pub fn precompute4(parser: &GLRParser, input_nwa: &NWA) -> DWA {
             NWA::union_assign(&mut super_nwa, &NWA::from_dwa(&weighted_dwa));
         }
 
-        super_nwa.simplify();
+        // OPTIMIZATION: Use lightweight simplification for super DWA construction.
+        // Full minimization is expensive and not critical for intermediate results.
         let mut super_dwa = super_nwa.determinize();
-        super_dwa.simplify();
+        super_dwa.simplify_lightweight();
 
         let super_signature: Signature = bit_to_term.iter().map(|t| vec![*t]).collect();
         
@@ -476,16 +484,44 @@ pub fn precompute4(parser: &GLRParser, input_nwa: &NWA) -> DWA {
             })
             .into_iter().collect();
 
-        // PARALLEL OPTIMIZATION: Always derive from Super DWA to allow parallel processing.
-        // This avoids the sequential dependency of the original "best parent" greedy approach.
-        // Since Super DWA can derive everything, this is correct.
-        // Parallelizing the heavy `simplify()` calls yields significant speedups.
-        let results: Vec<(Signature, NWA)> = complex_signatures.par_iter().map(|target_sig| {
+        // PRE-COMPUTE: Build all weight mappings for all complex signatures upfront
+        // This avoids redundant computation inside specialize_dwa_relative, which was creating
+        // a new weight_map HashMap for each of the 199 complex signatures.
+        let all_mappings: Vec<(Signature, Vec<Weight>, HashMap<Weight, Weight>)> = complex_signatures.par_iter().map(|target_sig| {
             let target_idx = SignatureIndex::new(target_sig);
-            // We know Super DWA (super_signature) can derive target_sig
             let mapping = can_derive(&super_signature, &target_idx).expect("Super signature must derive target");
             
-            let mut derived_dwa = specialize_dwa_relative(&super_dwa, &mapping, &super_dwa_unique_weights);
+            // Pre-compute the weight mapping for this target signature
+            let weight_map: HashMap<Weight, Weight> = super_dwa_unique_weights.iter()
+                .map(|w| {
+                    let mut accumulator = RangeSetBlaze::new();
+                    let mut is_all = false;
+
+                    for bit in w.iter_up_to(mapping.len()) {
+                        if let Some(target_w) = mapping.get(bit) {
+                            if target_w.is_all_fast() {
+                                is_all = true;
+                                break;
+                            }
+                            accumulator |= &target_w.rsb;
+                        }
+                    }
+
+                    let new_w = if is_all {
+                        Weight::all()
+                    } else {
+                        Weight::from_rsb(accumulator)
+                    };
+                    (w.clone(), new_w)
+                })
+                .collect();
+            
+            (target_sig.clone(), mapping, weight_map)
+        }).collect();
+
+        // PARALLEL OPTIMIZATION: Specialize DWAs using pre-computed weight mappings
+        let results: Vec<(Signature, NWA)> = all_mappings.par_iter().map(|(target_sig, _mapping, weight_map)| {
+            let mut derived_dwa = specialize_dwa_relative_with_map(&super_dwa, weight_map);
             derived_dwa.simplify_lightweight();
             (target_sig.clone(), NWA::from_dwa(&derived_dwa))
         }).collect();
@@ -662,8 +698,13 @@ fn resolve_negatives_and_optimize_and_determinize(parser: &GLRParser, mut combin
     crate::debug!(3, "Resolving negatives and optimizing for NWA with {} states and {} transitions...", combined_nwa.states.len(), combined_nwa.states.num_transitions());
     prune_continuations_from_final_states(&mut combined_nwa);
     crate::debug!(3, "Pruned continuations from final states. NWA with {} states and {} transitions remaining.", combined_nwa.states.len(), combined_nwa.states.num_transitions());
-    combined_nwa.simplify();
-    crate::debug!(3, "Simplified NWA. {} states and {} transitions remaining.", combined_nwa.states.len(), combined_nwa.states.num_transitions());
+    
+    // OPTIMIZATION: Use lightweight simplification before determinization.
+    // Full minimization is expensive here (1.32s in benchmark), and determinization 
+    // will merge equivalent states anyway, so heavy simplification has limited benefit.
+    combined_nwa.simplify_lightweight();
+    crate::debug!(3, "Simplified NWA (lightweight). {} states and {} transitions remaining.", combined_nwa.states.len(), combined_nwa.states.num_transitions());
+    
     let mut dwa = combined_nwa.determinize();
     crate::debug!(3, "Determinized NWA. {} states and {} transitions remaining.", dwa.states.len(), dwa.states.num_transitions());
     dwa.simplify_lightweight();
