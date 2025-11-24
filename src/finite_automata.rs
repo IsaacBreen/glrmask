@@ -58,43 +58,64 @@ impl CompressedStateSet {
 
     #[inline]
     #[inline]
-    fn from_sparse(sparse: &SparseStateSet) -> Self {
+    fn from_sparse(sparse: &SparseStateSet, stats: &mut DFAConversionStats) -> Self {
         // Optimization: Sort indices first, then build words.
         // This avoids moving the larger (u32, u64) tuples during sort.
+        let start_alloc = std::time::Instant::now();
         let mut indices = sparse.dirty_words.clone();
-        indices.sort_unstable();
+        stats.time_allocating += start_alloc.elapsed();
+        stats.allocations_count += 1;
+        stats.allocated_bytes += (indices.capacity() * std::mem::size_of::<usize>()) as u64;
 
+        let start_sort = std::time::Instant::now();
+        indices.sort_unstable();
+        stats.time_sorting += start_sort.elapsed();
+
+        let start_alloc_words = std::time::Instant::now();
         let mut words = Vec::with_capacity(indices.len());
+        stats.time_allocating += start_alloc_words.elapsed();
+        stats.allocations_count += 1;
+        stats.allocated_bytes += (words.capacity() * std::mem::size_of::<(u32, u64)>()) as u64;
+
         for &idx in &indices {
             words.push((idx as u32, sparse.dense.words[idx]));
         }
 
+        let start_hash = std::time::Instant::now();
         let mut hasher = ahash::AHasher::default();
         words.hash(&mut hasher);
         let hash = hasher.finish();
+        stats.time_hashing += start_hash.elapsed();
+        
         Self { words, hash }
     }
 
     #[inline]
-    fn reuse_from_sparse(sparse: &SparseStateSet, buffer: &mut Self) {
+    fn reuse_from_sparse(sparse: &SparseStateSet, buffer: &mut Self, stats: &mut DFAConversionStats) {
         buffer.words.clear();
         
         // We can't easily reuse a buffer for sorting indices without allocating,
         // unless we pass one in. For now, let's just clone dirty_words which is small (Vec<usize>).
-        // Or better: if dirty_words is already sorted (it often is if inserted in order), check that?
-        // But insertion into SparseStateSet doesn't guarantee order if we jump around.
-        // Let's just sort indices.
+        let start_alloc = std::time::Instant::now();
         let mut indices = sparse.dirty_words.clone();
+        stats.time_allocating += start_alloc.elapsed();
+        stats.allocations_count += 1;
+        stats.allocated_bytes += (indices.capacity() * std::mem::size_of::<usize>()) as u64;
+
+        let start_sort = std::time::Instant::now();
         indices.sort_unstable();
+        stats.time_sorting += start_sort.elapsed();
 
         for &idx in &indices {
             buffer.words.push((idx as u32, sparse.dense.words[idx]));
         }
         
         use std::hash::Hasher;
+        let start_hash = std::time::Instant::now();
         let mut hasher = ahash::AHasher::default();
         buffer.words.hash(&mut hasher);
         buffer.hash = hasher.finish();
+        stats.time_hashing += start_hash.elapsed();
     }
 
     #[inline]
@@ -1887,6 +1908,16 @@ struct DFAConversionStats {
 
     total_compressed_sets: u64,
     total_compressed_words: u64,
+
+    // Granular Stats
+    time_hashing: std::time::Duration,
+    time_map_insert: std::time::Duration,
+    time_map_get: std::time::Duration,
+    time_sorting: std::time::Duration,
+    time_allocating: std::time::Duration,
+    
+    allocations_count: u64,
+    allocated_bytes: u64,
 }
 
 impl std::fmt::Display for DFAConversionStats {
@@ -1917,7 +1948,18 @@ impl std::fmt::Display for DFAConversionStats {
         writeln!(f, "    - Finalizer Comp:    {:.2?}", self.time_finalizer_computation)?;
         writeln!(f, "    - BitSet Iteration:  {:.2?}", self.time_bitset_iteration)?;
         writeln!(f, "    - Compress StateSet: {:.2?}", self.time_compress_state_set)?;
+        writeln!(f, "      - Sorting:         {:.2?}", self.time_sorting)?;
+        writeln!(f, "      - Hashing:         {:.2?}", self.time_hashing)?;
         writeln!(f, "    - Remainder:         {:.2?}", time_remainder)?;
+
+        writeln!(f, "\nDetailed Map Stats:")?;
+        writeln!(f, "  - Map Get Time:      {:.2?}", self.time_map_get)?;
+        writeln!(f, "  - Map Insert Time:   {:.2?}", self.time_map_insert)?;
+
+        writeln!(f, "\nMemory Stats (Approx):")?;
+        writeln!(f, "  - Allocations:       {}", self.allocations_count)?;
+        writeln!(f, "  - Allocated Bytes:   {}", self.allocated_bytes)?;
+        writeln!(f, "  - Time Allocating:   {:.2?}", self.time_allocating)?;
 
         writeln!(f, "\nCache and Map Performance:")?;
         writeln!(f, "  - Global Map Lookups: {} ({} hits, {} misses, {:.2}% hit rate)", self.global_map_lookups, self.global_map_hits, global_map_misses, if self.global_map_lookups > 0 { (self.global_map_hits as f64 * 100.0) / self.global_map_lookups as f64 } else { 0.0 })?;
@@ -2349,7 +2391,7 @@ impl NFA {
         stats.time_closure_bfs += start_bfs.elapsed();
 
         let start_compress = std::time::Instant::now();
-        let start_state_set = CompressedStateSet::from_sparse(&closure_set);
+        let start_state_set = CompressedStateSet::from_sparse(&closure_set, &mut stats);
         stats.time_compress_state_set += start_compress.elapsed();
         stats.total_compressed_sets += 1;
         stats.total_compressed_words += start_state_set.words.len() as u64;
@@ -2392,9 +2434,11 @@ impl NFA {
                 next_log_threshold += 20_000;
             }
 
+            let start_map_get = std::time::Instant::now();
             let current_dfa_state = *dfa_state_map
                 .get(&current_set)
                 .expect("DFA state set not found in map");
+            stats.time_map_get += start_map_get.elapsed();
 
             // 1. Populate transition_targets for all inputs (COLLECT PHASE)
             let start_collect = std::time::Instant::now();
@@ -2430,7 +2474,7 @@ impl NFA {
                     scratch_target.words.hash(&mut hasher);
                     scratch_target.hash = hasher.finish();
                 } else {
-                    CompressedStateSet::reuse_from_sparse(target_set, &mut scratch_target);
+                    CompressedStateSet::reuse_from_sparse(target_set, &mut scratch_target, &mut stats);
                 }
                 stats.time_compress_state_set += start_compress_target.elapsed();
                 stats.total_compressed_sets += 1;
@@ -2480,18 +2524,25 @@ impl NFA {
                 // Get/Create DFA state
                 let start_map = std::time::Instant::now();
                 let start_compress_closure = std::time::Instant::now();
-                CompressedStateSet::reuse_from_sparse(&closure_set, &mut scratch_closure);
+                CompressedStateSet::reuse_from_sparse(&closure_set, &mut scratch_closure, &mut stats);
                 stats.time_compress_state_set += start_compress_closure.elapsed();
                 stats.total_compressed_sets += 1;
                 stats.total_compressed_words += scratch_closure.words.len() as u64;
 
                 stats.global_map_lookups += 1;
+                let start_map_lookup = std::time::Instant::now();
                 let next_state_idx = if let Some(&existing_state) = dfa_state_map.get(&scratch_closure) {
+                    stats.time_map_get += start_map_lookup.elapsed();
                     stats.global_map_hits += 1;
                     existing_state
                 } else {
+                    stats.time_map_get += start_map_lookup.elapsed();
                     let new_state_index = dfa_states.len();
+                    
+                    let start_map_insert = std::time::Instant::now();
                     dfa_state_map.insert(scratch_closure.clone(), new_state_index);
+                    stats.time_map_insert += start_map_insert.elapsed();
+                    
                     worklist.push(scratch_closure.clone());
                     stats.max_worklist_len = stats.max_worklist_len.max(worklist.len());
 
