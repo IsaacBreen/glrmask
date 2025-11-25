@@ -582,24 +582,24 @@ impl PyGrammarConstraint {
     }
 
     pub fn internal_bv_to_original_bitset(&self, internal_bv: &PyHybridBitset) -> PyResult<PyBitset> {
-        let original_bv = self.inner.vocab.internal_bv_to_original(&internal_bv.inner);
+        let original_bv = self.inner.precompute4_vocab.internal_bv_to_original(&internal_bv.inner);
         Ok(PyBitset { inner: original_bv })
     }
 
     pub fn internal_bv_to_original_hybrid_bitset(&self, internal_bv: &PyHybridBitset) -> PyResult<PyBitset> {
-        let original_bv = self.inner.vocab.internal_bv_to_original(&internal_bv.inner);
+        let original_bv = self.inner.precompute4_vocab.internal_bv_to_original(&internal_bv.inner);
         Ok(PyBitset { inner: original_bv })
     }
 
     pub fn internal_bv_to_original(&self, it: Bound<'_, PyIterator>) -> PyResult<PyBitset> {
-        let original_bv = self.inner.vocab.internal_bv_to_original(&HybridBitset::from_iter(it.extract::<Vec<usize>>()?));
+        let original_bv = self.inner.precompute4_vocab.internal_bv_to_original(&HybridBitset::from_iter(it.extract::<Vec<usize>>()?));
         Ok(PyBitset { inner: original_bv })
     }
 
     #[getter]
     fn vocab(&self) -> PyStageVocab {
         PyStageVocab {
-            inner: Arc::new(self.inner.vocab.clone()),
+            inner: Arc::new(self.inner.precompute4_vocab.clone()),
         }
     }
 }

@@ -282,7 +282,7 @@ pub struct GrammarConstraint {
     pub run_precompute4: bool,
     pub post_commit_allow_check_mode: TerminalAllowanceCheckMode,
 
-    pub vocab: StageVocab,
+    pub precompute4_vocab: StageVocab,
 
     /// Maps original terminal IDs to dummy terminal IDs (if any).
     pub(crate) original_to_dummy_map: BTreeMap<TerminalID, TerminalID>,
@@ -317,7 +317,7 @@ impl GrammarConstraint {
             other.post_commit_allow_check_mode
         );
         assert_eq!(self.terminal_map_by_llm, other.terminal_map_by_llm);
-        assert_eq!(self.vocab, other.vocab);
+        assert_eq!(self.precompute4_vocab, other.precompute4_vocab);
         assert_eq!(self.original_to_dummy_map, other.original_to_dummy_map);
     }
 }
@@ -347,7 +347,7 @@ impl JSONConvertible for GrammarConstraint {
             "terminal_map_by_llm".to_string(),
             self.terminal_map_by_llm.to_json(),
         );
-        obj.insert("vocab".to_string(), self.vocab.to_json());
+        obj.insert("vocab".to_string(), self.precompute4_vocab.to_json());
         obj.insert("llm_vocab".to_string(), self.llm_vocab.to_json());
         obj.insert(
             "original_to_dummy_map".to_string(),
@@ -477,7 +477,7 @@ impl JSONConvertible for GrammarConstraint {
                     trie1_god,
                     run_precompute4,
                     post_commit_allow_check_mode,
-                    vocab,
+                    precompute4_vocab: vocab,
                     original_to_dummy_map,
                 };
                 Ok(gc)
@@ -858,7 +858,7 @@ impl GrammarConstraint {
             trie1_god: Trie1GodWrapper::new(),
             run_precompute4: config.run_precompute4,
             post_commit_allow_check_mode: TerminalAllowanceCheckMode::default(),
-            vocab,
+            precompute4_vocab: vocab,
             original_to_dummy_map,
         }
     }
@@ -877,28 +877,28 @@ impl GrammarConstraint {
     // -----------------------------------------------------------------------
 
     pub fn all_internal_llm_tokens_bitset(&self) -> LLMTokenBV {
-        LLMTokenBV::ones(self.vocab.internal_max_llm_token + 1)
+        LLMTokenBV::ones(self.precompute4_vocab.internal_max_llm_token + 1)
     }
 
     pub fn internal_bv_to_original(&self, internal_bv: &LLMTokenBV) -> Bitset {
-        self.vocab.internal_bv_to_original(internal_bv)
+        self.precompute4_vocab.internal_bv_to_original(internal_bv)
     }
 
     pub fn original_bv_to_internal(&self, original_bv: &LLMTokenBV) -> LLMTokenBV {
-        self.vocab.original_bv_to_internal(original_bv)
+        self.precompute4_vocab.original_bv_to_internal(original_bv)
     }
 
     pub fn internal_to_original(&self, internal_id: LLMTokenID) -> Option<LLMTokenID> {
-        self.vocab
+        self.precompute4_vocab
             .internal_to_original
             .get(&internal_id.0)
-            .and_then(|bv| bv.iter_up_to(self.vocab.internal_max_llm_token).next())
+            .and_then(|bv| bv.iter_up_to(self.precompute4_vocab.internal_max_llm_token).next())
             .map(|v| LLMTokenID(v))
     }
 
     #[inline]
     pub fn original_id_to_internal(&self, original_id: LLMTokenID) -> Option<LLMTokenID> {
-        self.vocab
+        self.precompute4_vocab
             .original_to_internal
             .get(&original_id.0)
             .map(|v| LLMTokenID(*v))

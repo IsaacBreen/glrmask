@@ -360,7 +360,7 @@ impl GrammarConstraint {
     pub fn dump_precomputed1(&self) {
         GrammarConstraint::_dump_precomputed(
             &self.precomputed1,
-            &self.vocab.internal_to_original,
+            &self.precompute4_vocab.internal_to_original,
             &self.token_name_map,
             &self.llm_vocab.llm_token_map,
             &self.trie1_god,
