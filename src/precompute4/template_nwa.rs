@@ -122,16 +122,15 @@ pub(crate) fn build_template_nwa_from_characterization(bb: &BelowBottomCharacter
 
 /// Build template DWAs for all terminals in the parser.
 pub(crate) fn build_template_dwas(parser: &GLRParser) -> Result<BTreeMap<TerminalID, DWA>, FullDWABuildError> {
-    use rayon::prelude::*;
-
+    // NOTE: Removed rayon parallelism - benchmarks showed single-threaded is 3x faster
+    // (317ms vs 951ms) due to memory contention in dwa.simplify()/minimize operations.
     let all = compute_all_characterizations(parser);
     crate::debug!(5, "Computed characterizations.");
 
-    // OPTIMIZATION: Parallelize template building using rayon
-    // Building 82 templates takes 538ms, parallelization should provide ~3-4x speedup
-    let results: Result<Vec<_>, _> = all.into_par_iter().map(|(term, bb)| {
-        let mut nwa = build_template_nwa_from_characterization(&bb)?;
-        nwa.simplify();
+    // Build templates sequentially - actually faster than parallel due to memory contention
+    let results: Result<Vec<_>, _> = all.into_iter().map(|(term, bb)| {
+        let nwa = build_template_nwa_from_characterization(&bb)?;
+        // Skip nwa.simplify() - let determinize handle it
         let mut dwa = nwa.determinize();
         dwa.simplify();
         crate::debug!(7, "Built template DWA for terminal {:?}:", term);

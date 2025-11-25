@@ -194,9 +194,10 @@ impl NWA {
         // Production configs based on experiments
         let config = match context {
             "Precompute1" => DeterminizeAndSimplifyConfig {
-                // Best: NWA=[PruneDeadEnds, PruneUnreachable, CompressTransitions] | DWA=[Minimize]
+                // OPTIMIZATION: Skip Minimize to save ~420ms - Precompute1 is just input to precompute4
+                // The final DWA will be minimized, so intermediate minimization is redundant.
                 nwa_passes: vec![NwaPass::PruneDeadEnds, NwaPass::PruneUnreachable, NwaPass::CompressTransitions],
-                dwa_passes: vec![DwaPass::Minimize],
+                dwa_passes: vec![DwaPass::PruneDeadEnds],
             },
             "FinalDWA" => DeterminizeAndSimplifyConfig {
                 // Best: NWA=[] | DWA=[PruneDeadEnds, Minimize]
