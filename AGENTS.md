@@ -60,6 +60,93 @@ RUST_TEST_THREADS=1 RUSTFLAGS=-Awarnings ENABLE_PROGRESS_BAR=0 CARGO_PROFILE_DEV
 
 ---
 
+## Research & Paper Writing
+
+### Notes Structure
+
+Notes are organized in `notes/`:
+
+```
+notes/
+├── index.md              # Master index, always update this
+├── daily/
+│   └── YYYY-MM-DD.md     # Daily notes, one per day
+└── attachments/
+    ├── references.md     # Literature review & citations
+    ├── ideas.md          # Running ideas & TODOs
+    └── ...               # Other long-running notes
+```
+
+**Daily Notes Protocol:**
+1. Each day gets one note file: `notes/daily/YYYY-MM-DD.md`
+2. Append new sections chronologically with timestamp headers
+3. When creating a new day's note, update `notes/index.md` with summary
+4. Link to attachments for detailed/lengthy content
+
+### Paper
+
+LaTeX paper is in `paper/`:
+
+```
+paper/
+├── main.tex              # Main document
+├── references.bib        # Bibliography
+├── figures/              # Figures (PDF, PNG, etc.)
+└── sections/             # Optional: modular sections
+```
+
+**Build paper:**
+```bash
+cd paper && latexmk -pdf main.tex
+```
+
+**Continuous build:**
+```bash
+cd paper && latexmk -pdf -pvc main.tex
+```
+
+### Downloads
+
+External resources go in `downloads/`:
+
+```
+downloads/
+├── papers/               # PDF papers
+├── repos/                # Cloned repositories  
+└── data/                 # Datasets
+```
+
+**Naming conventions:**
+- Papers: `YYYY_AuthorLastName_ShortTitle.pdf`
+- Repos: `owner_reponame/`
+
+### Research Tools
+
+**Web search:**
+Use `vscode-websearchforcopilot_webSearch` for literature discovery.
+
+**Download papers:**
+- arXiv: Fetch PDF URLs directly (e.g., `https://arxiv.org/pdf/XXXX.XXXXX.pdf`)
+- Use `fetch_webpage` to get abstract/metadata first
+- Download via curl: `curl -L "https://arxiv.org/pdf/XXXX.XXXXX.pdf" -o downloads/papers/YYYY_Author_Title.pdf`
+
+**Clone GitHub repos:**
+Use terminal with shallow clone to save space:
+```bash
+git clone --depth 1 https://github.com/owner/repo.git downloads/repos/owner_repo
+```
+
+**Search GitHub code (without cloning):**
+Use `github_repo` tool to search code snippets in public repos.
+
+**When doing literature review:**
+1. Search for papers on topic
+2. Download PDFs to `downloads/papers/`
+3. Add entry to `notes/attachments/references.md`
+4. Note key findings in daily note
+
+---
+
 IMPORTANT GLOBAL INSTRUCTIONS
 
 DO NOT STOP GOING until the job is done. Do not the user for additional input. Keep going without supervision until it's done. Make whatever adjustments or assumptions are needed. The user will be watching over you so it's safe. But do NOT stop.

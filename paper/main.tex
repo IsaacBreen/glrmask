@@ -1,0 +1,184 @@
+\documentclass[11pt,a4paper]{article}
+
+% === Packages ===
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{amsthm}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{hyperref}
+\usepackage{cleveref}
+\usepackage{natbib}
+\usepackage{xcolor}
+\usepackage{tikz}
+\usepackage{subcaption}
+\usepackage{microtype}
+
+% === Custom Commands ===
+\newcommand{\todo}[1]{\textcolor{red}{[TODO: #1]}}
+\newcommand{\note}[1]{\textcolor{blue}{[Note: #1]}}
+\newcommand{\cmark}{\ding{51}}
+\newcommand{\xmark}{\ding{55}}
+
+% === Theorem Environments ===
+\theoremstyle{plain}
+\newtheorem{theorem}{Theorem}[section]
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{proposition}[theorem]{Proposition}
+\newtheorem{corollary}[theorem]{Corollary}
+
+\theoremstyle{definition}
+\newtheorem{definition}[theorem]{Definition}
+\newtheorem{example}[theorem]{Example}
+
+\theoremstyle{remark}
+\newtheorem{remark}[theorem]{Remark}
+
+% === Document Info ===
+\title{Grammar-Constrained Decoding for Large Language Models:\\
+Efficient Precomputation via Deterministic Weighted Automata}
+
+\author{
+  Isaac Breen\\
+  % \affiliation
+  \texttt{email@example.com}
+}
+
+\date{\today}
+
+% === Begin Document ===
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+\todo{Write abstract}
+
+We present a method for grammar-constrained decoding in large language models that achieves efficient inference through precomputation. Our approach compiles context-free grammars into deterministic weighted automata, enabling per-token constraint computation in time independent of the grammar size. We demonstrate significant speedups over existing methods while maintaining exact constraint satisfaction.
+\end{abstract}
+
+% === Introduction ===
+\section{Introduction}
+\label{sec:introduction}
+
+\todo{Write introduction}
+
+Large language models (LLMs) have demonstrated remarkable capabilities in generating text, code, and structured data. However, ensuring that generated outputs conform to specific syntactic constraints remains a challenge. Grammar-constrained decoding addresses this by restricting the model's output space to strings that satisfy a given grammar.
+
+\paragraph{Contributions.}
+\begin{itemize}
+    \item \todo{List contributions}
+    \item A precomputation framework that compiles grammars to deterministic weighted automata
+    \item Theoretical analysis of complexity bounds
+    \item Empirical evaluation showing significant speedups
+\end{itemize}
+
+% === Related Work ===
+\section{Related Work}
+\label{sec:related-work}
+
+\todo{Write related work}
+
+\subsection{Constrained Decoding}
+
+\subsection{Grammar-Based Generation}
+
+\subsection{Automata-Based Methods}
+
+% === Background ===
+\section{Background}
+\label{sec:background}
+
+\todo{Write background section}
+
+\subsection{Context-Free Grammars}
+
+\subsection{Weighted Automata}
+
+\subsection{Tokenization and Constraints}
+
+% === Method ===
+\section{Method}
+\label{sec:method}
+
+\todo{Write method section}
+
+\subsection{Overview}
+
+\subsection{Grammar Compilation}
+
+\subsection{Precomputation Strategy}
+
+\subsection{Runtime Constraint Enforcement}
+
+% === Theoretical Analysis ===
+\section{Theoretical Analysis}
+\label{sec:theory}
+
+\todo{Write theoretical analysis}
+
+\subsection{Complexity Analysis}
+
+\subsection{Correctness}
+
+% === Experiments ===
+\section{Experiments}
+\label{sec:experiments}
+
+\todo{Write experiments section}
+
+\subsection{Experimental Setup}
+
+\subsection{Baselines}
+
+\subsection{Results}
+
+\subsubsection{Runtime Performance}
+
+\subsubsection{Memory Usage}
+
+\subsubsection{Scalability}
+
+\subsection{Ablation Studies}
+
+% === Discussion ===
+\section{Discussion}
+\label{sec:discussion}
+
+\todo{Write discussion}
+
+\subsection{Limitations}
+
+\subsection{Future Work}
+
+% === Conclusion ===
+\section{Conclusion}
+\label{sec:conclusion}
+
+\todo{Write conclusion}
+
+% === Acknowledgments ===
+\section*{Acknowledgments}
+
+\todo{Add acknowledgments}
+
+% === Bibliography ===
+\bibliographystyle{plainnat}
+\bibliography{references}
+
+% === Appendix ===
+\appendix
+
+\section{Additional Proofs}
+\label{app:proofs}
+
+\section{Implementation Details}
+\label{app:implementation}
+
+\section{Additional Experiments}
+\label{app:experiments}
+
+\end{document}

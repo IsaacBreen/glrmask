@@ -19,6 +19,34 @@ variations_results/
 .build/
 delta_debug_results/
 
+# === Downloads (large files) ===
+downloads/papers/*.pdf
+downloads/repos/
+downloads/data/
+!downloads/**/.gitkeep
+!downloads/README.md
+
+# === LaTeX build artifacts ===
+paper/*.aux
+paper/*.bbl
+paper/*.blg
+paper/*.fdb_latexmk
+paper/*.fls
+paper/*.log
+paper/*.out
+paper/*.synctex.gz
+paper/*.toc
+paper/*.lof
+paper/*.lot
+paper/*.nav
+paper/*.snm
+paper/*.vrb
+paper/*.run.xml
+paper/*.bcf
+paper/*-blx.bib
+paper/*.pdf
+!paper/figures/*.pdf
+
 # Created by https://www.toptal.com/developers/gitignore/api/rust,jetbrains,macos,python
 # Edit at https://www.toptal.com/developers/gitignore?templates=rust,jetbrains,macos,python
 
