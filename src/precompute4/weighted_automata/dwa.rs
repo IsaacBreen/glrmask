@@ -67,8 +67,11 @@ impl DWAStates {
     pub fn copy_state(&mut self, state_id: StateID) -> StateID {
         let state = self[state_id].clone(); self.add_existing_state(state)
     }
-    pub fn apply_weight(&mut self, state_id: StateID, weight: &Weight) {
+    pub fn apply_weight_to_state(&mut self, state_id: StateID, weight: &Weight) {
         self[state_id].apply_weight(weight);
+    }
+    pub fn apply_weight_to_all_states(&mut self, weight: &Weight) {
+        for state in self.0.iter_mut() { state.apply_weight(weight); }
     }
 }
 
