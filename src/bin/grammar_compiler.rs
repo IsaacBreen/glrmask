@@ -1,6 +1,4 @@
 use clap::Parser;
-use flate2::write::GzEncoder;
-use flate2::Compression;
 use sep1::constraint::{GrammarConstraint, GrammarConstraintConfig};
 use sep1::interface::GrammarDefinition;
 use sep1::json_serialization::JSONConvertible;
@@ -24,7 +22,7 @@ struct Args {
     #[arg(short, long)]
     vocab: PathBuf,
 
-    /// Path for the output compressed JSON file (.json.gz).
+    /// Path for the output JSON file (.json).
     #[arg(short, long)]
     output: Option<PathBuf>,
 
@@ -88,9 +86,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(path) = args.save_precompute0.as_ref() {
         println!("Saving precompute0 cache to: {:?}", path);
         let output_file = File::create(path)?;
-        let writer = BufWriter::new(output_file);
-        let encoder = GzEncoder::new(writer, Compression::default());
-        encoder.finish()?;
+        let _writer = BufWriter::new(output_file);
     }
 
     if args.precompute0_only {
@@ -98,17 +94,30 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    // 4. Save the GrammarConstraint to a compressed file.
+    // 4. Save the GrammarConstraint to a file.
     if let Some(output_path) = args.output {
         println!("Saving GrammarConstraint to: {:?}", output_path);
-        let output_file = File::create(&output_path)?;
-        let writer = BufWriter::new(output_file);
-        let mut encoder = GzEncoder::new(writer, Compression::default());
-        grammar_constraint.to_writer(&mut encoder)?;
-        encoder.finish()?;
-        println!("Successfully saved constraint to {:?}", output_path);
+        let save_instant = std::time::Instant::now();
+        {
+            let output_file = File::create(&output_path)?;
+            let mut writer = BufWriter::new(output_file);
+            grammar_constraint.to_writer(&mut writer)?;
+        }
+
+        let save_duration = save_instant.elapsed();
+        println!(
+            "Successfully saved constraint in {:.2}s.",
+            save_duration.as_secs_f64()
+        );
+
+        let file_size = std::fs::metadata(&output_path)?.len();
+        println!(
+            "Final file size: {:.2} MiB ({} bytes)",
+            file_size as f64 / (1024.0 * 1024.0),
+            file_size
+        );
     }
-    println!("Done in {}s.", instant.elapsed().as_secs());
+    println!("Total time: {:.2}s.", instant.elapsed().as_secs_f64());
 
     Ok(())
 }
