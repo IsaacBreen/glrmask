@@ -1700,21 +1700,35 @@ impl NWA {
              return self.run_determinize_and_simplify_experiment(context);
         }
         
-        // Default "production" config
-        // Based on current manual sequence in full_dwa.rs:
-        // 1. compress_transitions
-        // 2. determinize
-        // 3. simplify (which runs PruneDeadEnds, Minimize, PushWeights, PushWeightsToInitial, PruneUnreachable)
-        
-        let config = DeterminizeAndSimplifyConfig {
-            nwa_passes: vec![NwaPass::CompressTransitions],
-            dwa_passes: vec![
-                DwaPass::PruneDeadEnds,
-                DwaPass::Minimize,
-                DwaPass::PushWeights,
-                DwaPass::PushWeightsToInitial,
-                DwaPass::PruneUnreachable,
-            ],
+        // Production configs based on experiments
+        let config = match context {
+            "Precompute1" => DeterminizeAndSimplifyConfig {
+                // Best: NWA=[PruneDeadEnds, PruneUnreachable, CompressTransitions] | DWA=[Minimize]
+                nwa_passes: vec![NwaPass::PruneDeadEnds, NwaPass::PruneUnreachable, NwaPass::CompressTransitions],
+                dwa_passes: vec![DwaPass::Minimize],
+            },
+            "FinalDWA" => DeterminizeAndSimplifyConfig {
+                // Best: NWA=[] | DWA=[PruneDeadEnds, Minimize]
+                nwa_passes: vec![],
+                dwa_passes: vec![DwaPass::PruneDeadEnds, DwaPass::Minimize],
+            },
+            "SuperDWA" => DeterminizeAndSimplifyConfig {
+                // Fallback / Default for SuperDWA (was not large enough to trigger experiment in test)
+                // Using a balanced approach
+                nwa_passes: vec![NwaPass::CompressTransitions],
+                dwa_passes: vec![DwaPass::PruneDeadEnds, DwaPass::Minimize],
+            },
+            _ => DeterminizeAndSimplifyConfig {
+                // Default fallback
+                nwa_passes: vec![NwaPass::CompressTransitions],
+                dwa_passes: vec![
+                    DwaPass::PruneDeadEnds,
+                    DwaPass::Minimize,
+                    DwaPass::PushWeights,
+                    DwaPass::PushWeightsToInitial,
+                    DwaPass::PruneUnreachable,
+                ],
+            }
         };
         self.determinize_and_simplify_with_config(config)
     }
