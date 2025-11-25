@@ -1,43 +1,91 @@
 % BibTeX Bibliography for Grammar-Constrained Decoding Paper
-% Add references in BibTeX format below
-
-% === Constrained Decoding ===
-
-@article{willard2023outlines,
-  title={Efficient Guided Generation for Large Language Models},
-  author={Willard, Brandon T. and Louf, R{\'e}mi},
-  journal={arXiv preprint arXiv:2307.09702},
-  year={2023}
-}
-
-% === Grammar-Based Methods ===
-
-% === Automata Theory ===
 
 % === Language Models ===
 
-@article{vaswani2017attention,
-  title={Attention is all you need},
-  author={Vaswani, Ashish and Shazeer, Noam and Parmar, Niki and Uszkoreit, Jakob and Jones, Llion and Gomez, Aidan N and Kaiser, {\L}ukasz and Polosukhin, Illia},
-  journal={Advances in neural information processing systems},
-  volume={30},
-  year={2017}
+@inproceedings{vaswani2017attention,
+  author = {Vaswani, Ashish and Shazeer, Noam and Parmar, Niki and Uszkoreit, Jakob and Jones, Llion and Gomez, Aidan N. and Kaiser, {\L}ukasz and Polosukhin, Illia},
+  title = {Attention Is All You Need},
+  booktitle = {Advances in Neural Information Processing Systems},
+  year = {2017},
+  volume = {30},
+  pages = {5998--6008}
+}
+
+% === Constrained Decoding ===
+
+@inproceedings{geng2023gcd,
+  author = {Geng, Saibo and Josifoski, Martin and Peyrard, Maxime and West, Robert},
+  title = {Grammar-Constrained Decoding for Structured {NLP} Tasks without Finetuning},
+  booktitle = {Proceedings of the 2023 Conference on Empirical Methods in Natural Language Processing},
+  year = {2023},
+  pages = {10932--10952},
+  publisher = {Association for Computational Linguistics}
+}
+
+@article{willard2023outlines,
+  author = {Willard, Brandon T. and Louf, R\'{e}mi},
+  title = {Efficient Guided Generation for Large Language Models},
+  journal = {arXiv preprint arXiv:2307.09702},
+  year = {2023}
+}
+
+@article{dong2024xgrammar,
+  author = {Dong, Yixin and Shi, Charlie F. and Chen, Tianqi and others},
+  title = {{XGrammar}: Flexible and Efficient Structured Generation Engine for Large Language Models},
+  journal = {arXiv preprint arXiv:2411.15100},
+  year = {2024}
+}
+
+% === Parsing ===
+
+@inproceedings{tomita1985glr,
+  author = {Tomita, Masaru},
+  title = {An Efficient Context-Free Parsing Algorithm for Natural Languages},
+  booktitle = {Proceedings of the 9th International Joint Conference on Artificial Intelligence},
+  year = {1985},
+  pages = {756--764}
 }
 
 % === Tokenization ===
 
-@article{sennrich2016bpe,
-  title={Neural machine translation of rare words with subword units},
-  author={Sennrich, Rico and Haddow, Barry and Birch, Alexandra},
-  journal={arXiv preprint arXiv:1508.07909},
-  year={2016}
+@inproceedings{sennrich2016bpe,
+  author = {Sennrich, Rico and Haddow, Barry and Birch, Alexandra},
+  title = {Neural Machine Translation of Rare Words with Subword Units},
+  booktitle = {Proceedings of the 54th Annual Meeting of the Association for Computational Linguistics},
+  year = {2016},
+  pages = {1715--1725}
 }
 
-% === JSON/Structured Generation ===
+% === Automata Theory ===
 
-% === Code Generation ===
+@book{droste2009handbook,
+  author = {Droste, Manfred and Kuich, Werner and Vogler, Heiko},
+  title = {Handbook of Weighted Automata},
+  publisher = {Springer},
+  year = {2009}
+}
 
 % === Related Systems ===
 
-% Placeholder entries - to be replaced with actual references
+@misc{guidance2023,
+  author = {{Microsoft}},
+  title = {Guidance: A guidance language for controlling large language models},
+  year = {2023},
+  howpublished = {\url{https://github.com/guidance-ai/guidance}}
+}
 
+@inproceedings{beurer2023lmql,
+  author = {Beurer-Kellner, Luca and Fischer, Marc and Vechev, Martin},
+  title = {Prompting Is Programming: A Query Language for Large Language Models},
+  booktitle = {Proceedings of the 44th ACM SIGPLAN Conference on Programming Language Design and Implementation},
+  year = {2023},
+  pages = {1946--1969}
+}
+
+@inproceedings{hokamp2017lexically,
+  author = {Hokamp, Chris and Liu, Qun},
+  title = {Lexically Constrained Decoding for Sequence Generation Using Grid Beam Search},
+  booktitle = {Proceedings of the 55th Annual Meeting of the Association for Computational Linguistics},
+  year = {2017},
+  pages = {1535--1546}
+}

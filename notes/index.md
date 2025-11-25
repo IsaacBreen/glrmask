@@ -12,7 +12,7 @@ This index tracks all research activities, literature review, experiments, and p
 
 | Date | Summary | Key Topics |
 |------|---------|------------|
-| [2025-11-25](daily/2025-11-25.md) | Project setup, research infrastructure | Infrastructure, planning |
+| [2025-11-25](daily/2025-11-25.md) | Project setup, infrastructure, **full paper draft** | Infrastructure, paper writing |
 
 ---
 
@@ -21,29 +21,31 @@ This index tracks all research activities, literature review, experiments, and p
 - [Attachments](attachments/) — Long-running notes, supplementary materials
 - [References](attachments/references.md) — Literature review and citations
 - [Ideas & TODOs](attachments/ideas.md) — Running list of ideas and tasks
-- [Paper Draft](../paper/) — LaTeX document
+- [Paper Draft](../paper/) — LaTeX document (14 pages, complete)
 
 ---
 
 ## Project Status
 
-### Current Phase: Paper Writing
+### Current Phase: Paper Polishing
 
 **Main Goals:**
-- [ ] Complete literature review
-- [ ] Draft paper outline
-- [ ] Run final experiments
-- [ ] Write paper sections
-- [ ] Prepare figures and tables
+- [x] Complete literature review (initial)
+- [x] Draft paper outline
+- [x] Write full paper draft (14 pages)
+- [ ] Run actual benchmarks with real numbers
+- [ ] Create publication-quality figures
+- [ ] Polish prose and structure
+- [ ] Get peer feedback
 
 ### Key Milestones
 
 | Milestone | Status | Target Date |
 |-----------|--------|-------------|
-| Literature review | 🔄 In Progress | TBD |
-| Paper outline | ⏳ Not Started | TBD |
-| Experiments complete | ⏳ Not Started | TBD |
-| First draft | ⏳ Not Started | TBD |
+| Literature review | ✅ Complete (initial) | 2025-11-25 |
+| Paper outline | ✅ Complete | 2025-11-25 |
+| First draft | ✅ Complete (14 pages) | 2025-11-25 |
+| Experiments complete | 🔄 In Progress | TBD |
 | Final submission | ⏳ Not Started | TBD |
 
 ---
