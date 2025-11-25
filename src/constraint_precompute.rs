@@ -198,7 +198,7 @@ impl<'r> Precomputer1<'r> {
         crate::debug!(3, "Determinized NWA with {} states and {} transitions", dwa.states.len(), dwa.states.num_transitions());
         
         // Lightweight DWA simplification is sufficient
-        dwa.simplify_lightweight();
+        dwa.simplify();
         crate::debug!(3, "Simplified DWA with {} states and {} transitions", dwa.states.len(), dwa.states.num_transitions());
 
         dwa
