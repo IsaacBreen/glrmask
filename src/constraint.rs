@@ -347,7 +347,7 @@ impl JSONConvertible for GrammarConstraint {
             "terminal_map_by_llm".to_string(),
             self.terminal_map_by_llm.to_json(),
         );
-        obj.insert("vocab".to_string(), self.precompute4_vocab.to_json());
+        obj.insert("precompute4_vocab".to_string(), self.precompute4_vocab.to_json());
         obj.insert("llm_vocab".to_string(), self.llm_vocab.to_json());
         obj.insert(
             "original_to_dummy_map".to_string(),
@@ -437,8 +437,8 @@ impl JSONConvertible for GrammarConstraint {
                     })
                 };
 
-                // Stage vocab: new key "vocab", fall back to old names if present.
-                let mut vocab_node = if let Some(n) = obj.remove("vocab") {
+                // Stage vocab: new key "precompute4_vocab", fall back to old names if present.
+                let mut vocab_node = if let Some(n) = obj.remove("precompute4_vocab") {
                     n
                 } else if let Some(n) = obj.remove("precompute_vocab") {
                     n

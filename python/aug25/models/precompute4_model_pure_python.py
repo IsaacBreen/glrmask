@@ -252,8 +252,8 @@ class Model(GraphProvider):
         data = json.loads(s)
         dumps, bs_from_json = json.dumps, ffi.HybridBitset.from_json_string
 
-        py_vocab = ffi.StageVocab.from_json_string(dumps(data['vocab']))
-        vocab = data['vocab']
+        py_vocab = ffi.StageVocab.from_json_string(dumps(data['precompute4_vocab']))
+        vocab = data['precompute4_vocab']
         all_internal_llm_tokens_bitset = RangeSet.from_ranges([(0, vocab['internal_max_llm_token'])])
 
         def _parse_weight(w_json: Any) -> LLMTokenSet:
