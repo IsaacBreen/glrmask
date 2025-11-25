@@ -1,0 +1,476 @@
+{
+    "internal_max_llm_token": 1,
+    "llm_token_map": [
+        [
+            [32],
+            220
+        ],
+        [
+            [32, 102],
+            282
+        ]
+    ],
+    "max_original_llm_token_id": 282,
+    "original_to_internal_id_bimap": [
+        [220, 0],
+        [282, 1]
+    ],
+    "parser": {
+        "item_set_map": [
+            [
+                [
+                    {
+                        "dot_position": 1,
+                        "production": {
+                            "lhs": "start",
+                            "rhs": [
+                                {"value": "start[0]", "variant": "Terminal"},
+                                {"value": "\"f\"", "variant": "Terminal"}
+                            ]
+                        }
+                    }
+                ],
+                0
+            ],
+            [
+                [
+                    {
+                        "dot_position": 2,
+                        "production": {
+                            "lhs": "start",
+                            "rhs": [
+                                {"value": "start[0]", "variant": "Terminal"},
+                                {"value": "\"f\"", "variant": "Terminal"}
+                            ]
+                        }
+                    }
+                ],
+                1
+            ],
+            [
+                [
+                    {
+                        "dot_position": 0,
+                        "production": {
+                            "lhs": "start'",
+                            "rhs": [
+                                {"value": "start", "variant": "NonTerminal"}
+                            ]
+                        }
+                    }
+                ],
+                2
+            ],
+            [
+                [
+                    {
+                        "dot_position": 1,
+                        "production": {
+                            "lhs": "start'",
+                            "rhs": [
+                                {"value": "start", "variant": "NonTerminal"}
+                            ]
+                        }
+                    }
+                ],
+                3
+            ]
+        ],
+        "non_terminal_map": [
+            ["DEDENT", 7],
+            ["ENDMARKER", 13],
+            ["FSTRING_END", 10],
+            ["FSTRING_MIDDLE", 11],
+            ["FSTRING_START", 9],
+            ["IGNORE", 2],
+            ["INDENT", 6],
+            ["NAME", 3],
+            ["NEWLINE", 5],
+            ["NUMBER", 4],
+            ["STRING", 8],
+            ["TYPE_COMMENT", 12],
+            ["start", 1],
+            ["start'", 0]
+        ],
+        "productions": [
+            {
+                "lhs": "start'",
+                "rhs": [
+                    {"value": "start", "variant": "NonTerminal"}
+                ]
+            },
+            {
+                "lhs": "start",
+                "rhs": [
+                    {"value": "start[0]", "variant": "Terminal"},
+                    {"value": "\"f\"", "variant": "Terminal"}
+                ]
+            },
+            {
+                "lhs": "IGNORE",
+                "rhs": [
+                    {"value": "IGNORE[0]", "variant": "Terminal"}
+                ]
+            },
+            {
+                "lhs": "NAME",
+                "rhs": [
+                    {"value": "IGNORE", "variant": "NonTerminal"},
+                    {"value": "IGNORE[0]", "variant": "Terminal"}
+                ]
+            },
+            {
+                "lhs": "NUMBER",
+                "rhs": [
+                    {"value": "IGNORE", "variant": "NonTerminal"},
+                    {"value": "IGNORE[0]", "variant": "Terminal"}
+                ]
+            },
+            {
+                "lhs": "NEWLINE",
+                "rhs": [
+                    {"value": "IGNORE", "variant": "NonTerminal"},
+                    {"value": "IGNORE[0]", "variant": "Terminal"}
+                ]
+            },
+            {
+                "lhs": "INDENT",
+                "rhs": [
+                    {"value": "IGNORE", "variant": "NonTerminal"},
+                    {"value": "IGNORE[0]", "variant": "Terminal"}
+                ]
+            },
+            {
+                "lhs": "DEDENT",
+                "rhs": [
+                    {"value": "IGNORE", "variant": "NonTerminal"},
+                    {"value": "IGNORE[0]", "variant": "Terminal"}
+                ]
+            },
+            {
+                "lhs": "STRING",
+                "rhs": [
+                    {"value": "IGNORE", "variant": "NonTerminal"},
+                    {"value": "IGNORE[0]", "variant": "Terminal"}
+                ]
+            },
+            {
+                "lhs": "FSTRING_START",
+                "rhs": [
+                    {"value": "IGNORE", "variant": "NonTerminal"},
+                    {"value": "IGNORE[0]", "variant": "Terminal"}
+                ]
+            },
+            {
+                "lhs": "FSTRING_END",
+                "rhs": [
+                    {"value": "IGNORE", "variant": "NonTerminal"},
+                    {"value": "IGNORE[0]", "variant": "Terminal"}
+                ]
+            },
+            {
+                "lhs": "FSTRING_MIDDLE",
+                "rhs": [
+                    {"value": "IGNORE", "variant": "NonTerminal"},
+                    {"value": "IGNORE[0]", "variant": "Terminal"}
+                ]
+            },
+            {
+                "lhs": "TYPE_COMMENT",
+                "rhs": [
+                    {"value": "IGNORE", "variant": "NonTerminal"},
+                    {"value": "IGNORE[0]", "variant": "Terminal"}
+                ]
+            },
+            {
+                "lhs": "ENDMARKER",
+                "rhs": [
+                    {"value": "IGNORE", "variant": "NonTerminal"},
+                    {"value": "IGNORE[0]", "variant": "Terminal"}
+                ]
+            }
+        ],
+        "stage_7_table": [
+            [
+                0,
+                {
+                    "gotos": [],
+                    "shifts_and_reduces": [
+                        [
+                            1,
+                            {"state_id": 1, "variant": "Shift"}
+                        ]
+                    ]
+                }
+            ],
+            [
+                1,
+                {
+                    "gotos": [],
+                    "shifts_and_reduces": []
+                }
+            ],
+            [
+                2,
+                {
+                    "gotos": [
+                        [1, 3]
+                    ],
+                    "shifts_and_reduces": [
+                        [
+                            0,
+                            {"state_id": 0, "variant": "Shift"}
+                        ]
+                    ]
+                }
+            ],
+            [
+                3,
+                {
+                    "gotos": [],
+                    "shifts_and_reduces": []
+                }
+            ]
+        ],
+        "start_state_id": 2,
+        "terminal_map": [
+            ["\"f\"", 1],
+            ["IGNORE[0]", 2],
+            ["start[0]", 0]
+        ]
+    },
+    "precomputed": [
+        [
+            0,
+            {
+                "nodes": [
+                    {
+                        "children": [
+                            [
+                                0,
+                                [
+                                    [
+                                        1,
+                                        [
+                                            [0, 1]
+                                        ]
+                                    ]
+                                ]
+                            ]
+                        ],
+                        "max_depth": 0,
+                        "value": {
+                            "active": [],
+                            "clean_end": null,
+                            "finalizers": [
+                                [
+                                    0,
+                                    {
+                                        "content": [
+                                            [
+                                                1,
+                                                [
+                                                    [0, 0]
+                                                ]
+                                            ]
+                                        ]
+                                    }
+                                ]
+                            ]
+                        }
+                    },
+                    {
+                        "children": [
+                            [
+                                1,
+                                [
+                                    [
+                                        2,
+                                        [
+                                            [1, 1]
+                                        ]
+                                    ]
+                                ]
+                            ]
+                        ],
+                        "max_depth": 1,
+                        "value": {
+                            "active": [
+                                [0, 1]
+                            ],
+                            "clean_end": [
+                                [0, 0]
+                            ],
+                            "finalizers": []
+                        }
+                    },
+                    {
+                        "children": [],
+                        "max_depth": 2,
+                        "value": {
+                            "active": [
+                                [1, 1]
+                            ],
+                            "clean_end": [
+                                [1, 1]
+                            ],
+                            "finalizers": []
+                        }
+                    }
+                ],
+                "root_idx": 0
+            }
+        ],
+        [
+            1,
+            {
+                "nodes": [
+                    {
+                        "children": [
+                            [
+                                0,
+                                [
+                                    [
+                                        1,
+                                        [
+                                            [0, 1]
+                                        ]
+                                    ]
+                                ]
+                            ]
+                        ],
+                        "max_depth": 0,
+                        "value": {
+                            "active": [],
+                            "clean_end": null,
+                            "finalizers": [
+                                [
+                                    0,
+                                    {
+                                        "content": [
+                                            [
+                                                1,
+                                                [
+                                                    [0, 0]
+                                                ]
+                                            ]
+                                        ]
+                                    }
+                                ]
+                            ]
+                        }
+                    },
+                    {
+                        "children": [
+                            [
+                                1,
+                                [
+                                    [
+                                        2,
+                                        [
+                                            [1, 1]
+                                        ]
+                                    ]
+                                ]
+                            ]
+                        ],
+                        "max_depth": 1,
+                        "value": {
+                            "active": [
+                                [0, 1]
+                            ],
+                            "clean_end": [
+                                [0, 0]
+                            ],
+                            "finalizers": []
+                        }
+                    },
+                    {
+                        "children": [],
+                        "max_depth": 2,
+                        "value": {
+                            "active": [
+                                [1, 1]
+                            ],
+                            "clean_end": [
+                                [1, 1]
+                            ],
+                            "finalizers": []
+                        }
+                    }
+                ],
+                "root_idx": 0
+            }
+        ],
+        [
+            2,
+            {
+                "nodes": [
+                    {
+                        "children": [],
+                        "max_depth": 0,
+                        "value": {
+                            "active": [],
+                            "clean_end": null,
+                            "finalizers": []
+                        }
+                    }
+                ],
+                "root_idx": 0
+            }
+        ]
+    ],
+    "token_name_map": [
+        ["\"f\"", 1],
+        ["IGNORE[0]", 2],
+        ["start[0]", 0]
+    ],
+    "tokenizer": {
+        "dfa": {
+            "non_greedy_finalizers": [],
+            "start_state": 0,
+            "states": [
+                {
+                    "finalizers": [0, 2],
+                    "group_id_to_u8set": [
+                        [
+                            0,
+                            [32]
+                        ],
+                        [
+                            1,
+                            [102]
+                        ]
+                    ],
+                    "possible_future_group_ids": [0, 1],
+                    "transitions": {
+                        "data": {"102": 2, "32": 1},
+                        "u8set": [32, 102]
+                    }
+                },
+                {
+                    "finalizers": [0],
+                    "group_id_to_u8set": [
+                        [
+                            0,
+                            [32]
+                        ]
+                    ],
+                    "possible_future_group_ids": [0],
+                    "transitions": {
+                        "data": {"32": 1},
+                        "u8set": [32]
+                    }
+                },
+                {
+                    "finalizers": [1],
+                    "group_id_to_u8set": [],
+                    "possible_future_group_ids": [],
+                    "transitions": {
+                        "u8set": []
+                    }
+                }
+            ]
+        }
+    }
+}

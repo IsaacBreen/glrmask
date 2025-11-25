@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "python-interpreter": {
+      "command": "uvx",
+      "args": [
+        "mcp-python-interpreter",
+        "--dir",
+        "/Users/isaacbreen/Projects2/grammars2024",
+        "--python-path",
+        "/Users/isaacbreen/miniforge3/envs/py312/bin/python3"
+      ],
+      "env": {
+        "MCP_ALLOW_SYSTEM_ACCESS": "0"
+      }
+    }
+  }
+}

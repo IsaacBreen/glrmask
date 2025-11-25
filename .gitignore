@@ -4,6 +4,9 @@ llm_logs/
 restore-chat-history
 .temp*
 zzz_bash_agent.yaml
+
+# === Paper repository (separate git repo) ===
+gcg-paper/
 python/benchmark_results/
 timings_visualization*.html
 external/
