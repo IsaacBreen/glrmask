@@ -697,8 +697,8 @@ impl GrammarConstraint {
         let nwa = NWA::from_dwa(&skeleton_dwa);
         let mut precomputed4 = precompute4(&parser, &nwa);
 
-        optimize_dwa_and_vocab(&mut precomputed4, &mut vocab, &mut possible_matches_precompute1);
         precomputed4.states.clip_weights(vocab.internal_max_llm_token);
+        optimize_dwa_and_vocab(&mut precomputed4, &mut vocab, &mut possible_matches_precompute1);
 
         let internal_to_original_sparse_matrix =
             StageVocab::build_internal_to_original_sparse_matrix(
