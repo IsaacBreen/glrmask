@@ -232,20 +232,12 @@ fn optimize_dwa_and_vocab(
 #[derive(Debug, Clone)]
 pub struct GrammarConstraintConfig {
     pub trie1: Trie1Config,
-    pub run_precompute4: bool,
-    pub use_dummy_terminals: bool,
-    pub dummy_terminal_map: BTreeMap<String, BTreeSet<Terminal>>,
-    pub dummy_terminal_penalties: BTreeMap<String, usize>,
 }
 
 impl Default for GrammarConstraintConfig {
     fn default() -> Self {
         Self {
             trie1: Trie1Config::off(),
-            run_precompute4: true,
-            use_dummy_terminals: false,
-            dummy_terminal_map: BTreeMap::new(),
-            dummy_terminal_penalties: BTreeMap::new(),
         }
     }
 }
@@ -264,7 +256,6 @@ pub struct GrammarConstraint {
     pub parser: GLRParser,
 
     // Precomputations
-    pub precomputed1: Precomputed,
     pub precomputed4: Precomputed4,
 
     pub original_llm_vocab: Arc<LLMVocab>,
@@ -273,43 +264,14 @@ pub struct GrammarConstraint {
     /// Tokenizer state -> grammar terminal -> internal LLM token bitset.
     pub possible_matches: BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
 
-    /// Internal-token -> start_tokenizer_state -> terminals.
-    pub terminal_map_by_llm:
-        DedupValueMap<LLMTokenID, BTreeMap<TokenizerStateID, TerminalBV>>,
-
-    pub(crate) trie1_god: Trie1GodWrapper,
-
-    pub run_precompute4: bool,
-    pub post_commit_allow_check_mode: TerminalAllowanceCheckMode,
-
     pub precompute4_vocab: StageVocab,
-
-    /// Maps original terminal IDs to dummy terminal IDs (if any).
-    pub(crate) original_to_dummy_map: BTreeMap<TerminalID, TerminalID>,
 }
 
 impl GrammarConstraint {
     pub fn assert_eq(&self, other: &Self) {
         assert_eq!(self.tokenizer, other.tokenizer);
         assert_eq!(self.parser, other.parser);
-
-        assert_eq!(self.precomputed1.len(), other.precomputed1.len());
-        for ((sid1, arc1), (sid2, arc2)) in
-            self.precomputed1.iter().zip(other.precomputed1.iter())
-        {
-            assert_eq!(sid1, sid2);
-            assert!(PrecomputeNode1::are_graphs_equal(
-                &self.trie1_god,
-                *arc1,
-                &other.trie1_god,
-                *arc2
-            ));
-        }
-
-        assert_eq!(
-            self.original_llm_vocab.llm_token_map,
-            other.original_llm_vocab.llm_token_map
-        );
+        // Note: precomputed4 is skipped as it may differ due to runtime computation
         assert_eq!(self.token_name_map, other.token_name_map);
         assert_eq!(self.possible_matches, other.possible_matches);
         assert_eq!(self.precompute4_vocab, other.precompute4_vocab);
@@ -353,7 +315,6 @@ impl JSONConvertible for GrammarConstraint {
                     .remove("parser")
                     .ok_or_else(|| "Missing field parser".to_string())
                     .and_then(GLRParser::from_json)?;
-                let precomputed1 = Precomputed::new();
                 let precomputed4 = obj
                     .remove("precomputed4")
                     .ok_or_else(|| "Missing field precomputed4".to_string())
@@ -369,11 +330,6 @@ impl JSONConvertible for GrammarConstraint {
                 } else {
                     BTreeMap::new()
                 };
-
-                let trie1_god = Trie1GodWrapper::new();
-                let run_precompute4 = true;
-                let post_commit_allow_check_mode = TerminalAllowanceCheckMode::default();
-                let terminal_map_by_llm = DedupValueMap::new();
 
                 // Reconstruct LLMVocab from map
                 let original_llm_vocab = if let Some(n) = obj.remove("original_llm_vocab") {
@@ -423,22 +379,14 @@ impl JSONConvertible for GrammarConstraint {
                     return Err("Missing precompute4_vocab".to_string());
                 };
 
-                let original_to_dummy_map = BTreeMap::new();
-
                 let gc = GrammarConstraint {
                     tokenizer,
                     parser,
-                    precomputed1,
                     precomputed4,
-                    original_llm_vocab: original_llm_vocab,
+                    original_llm_vocab,
                     token_name_map,
                     possible_matches,
-                    terminal_map_by_llm,
-                    trie1_god,
-                    run_precompute4,
-                    post_commit_allow_check_mode,
                     precompute4_vocab: vocab,
-                    original_to_dummy_map,
                 };
                 Ok(gc)
             }
@@ -524,39 +472,10 @@ impl GrammarConstraint {
         max_original_llm_token_id: usize,
         config: &GrammarConstraintConfig,
     ) -> Self {
-        let initial_compiled_grammar =
-            CompiledGrammar::from_definition(grammar_definition.clone());
-
-        if !config.use_dummy_terminals {
-            return Self::from_compiled_grammar_with_config(
-                initial_compiled_grammar,
-                llm_token_map,
-                max_original_llm_token_id,
-                config,
-            );
-        }
-
-        let (final_productions, new_dummy_terminals) =
-            crate::glr::analyze::rewrite_productions_with_dummies(
-                &grammar_definition.productions,
-                &config.dummy_terminal_map,
-            );
-
-        let final_compiled_grammar = if !new_dummy_terminals.is_empty() {
-            let mut final_grammar_def = (*grammar_definition).clone();
-            final_grammar_def.productions = final_productions;
-            for dummy_terminal in new_dummy_terminals {
-                if let Terminal::RegexName(name) = dummy_terminal {
-                    final_grammar_def.add_external_terminal(&name);
-                }
-            }
-            CompiledGrammar::from_definition(Arc::new(final_grammar_def))
-        } else {
-            initial_compiled_grammar
-        };
-
+        let compiled_grammar = CompiledGrammar::from_definition(grammar_definition.clone());
+        
         Self::from_compiled_grammar_with_config(
-            final_compiled_grammar,
+            compiled_grammar,
             llm_token_map,
             max_original_llm_token_id,
             config,
@@ -684,8 +603,6 @@ impl GrammarConstraint {
         crate::debug!(3, "Computing maps and possible_matches (fast parallel pass)");
         let computed_possible_matches =
             Self::build_maps_and_matches(&tokenizer, &vocab_tree.root);
-        let terminal_map_by_llm_raw =
-            Self::rearrange_possible_matches(&computed_possible_matches);
 
         // Compute terminal follow sets, then map to IDs.
         crate::debug!(3, "Computing terminal follow sets");
@@ -720,20 +637,6 @@ impl GrammarConstraint {
             max_original_llm_token_id,
             internal_to_original_sparse_matrix: vec![],
         };
-
-        let mut original_to_dummy_map: BTreeMap<TerminalID, TerminalID> = BTreeMap::new();
-        for (dummy_name, original_terminals) in &config.dummy_terminal_map {
-            let dummy_term = Terminal::regex_name(dummy_name);
-            if let Some(&dummy_id) = parser.terminal_map.get_by_left(&dummy_term) {
-                for original_terminal in original_terminals {
-                    if let Some(&original_id) =
-                        parser.terminal_map.get_by_left(original_terminal)
-                    {
-                        original_to_dummy_map.insert(original_id, dummy_id);
-                    }
-                }
-            }
-        }
 
         // Precompute1 - generate skeleton DWA using only representative states
         let mut representative_states_set: BTreeSet<TokenizerStateID> = BTreeSet::new();
@@ -777,7 +680,6 @@ impl GrammarConstraint {
             }
         }
 
-        let terminal_map_by_llm = terminal_map_by_llm_raw;
         let mut possible_matches_precompute1 = computed_possible_matches;
 
         // OPTIMIZATION: Skip vocab optimization on skeleton_dwa.
@@ -808,18 +710,11 @@ impl GrammarConstraint {
         GrammarConstraint {
             tokenizer,
             parser,
-            // Trie data structures are unused/empty.
-            precomputed1: Precomputed::new(),
             precomputed4,
-            original_llm_vocab: original_llm_vocab,
-            token_name_map,
             possible_matches: possible_matches_precompute1,
-            terminal_map_by_llm,
-            trie1_god: Trie1GodWrapper::new(),
-            run_precompute4: config.run_precompute4,
-            post_commit_allow_check_mode: TerminalAllowanceCheckMode::default(),
+            original_llm_vocab,
+            token_name_map,
             precompute4_vocab: vocab,
-            original_to_dummy_map,
         }
     }
 

@@ -200,9 +200,6 @@ impl<'a> GrammarConstraintState<'a> {
                     let mut gss = gss_at_offset.clone();
                     let terminal_id = TerminalID(match_info.id);
 
-                    if let Some(dummy_id) = self.parent.original_to_dummy_map.get(&terminal_id) {
-                        gss = self.parent.parser.process_token_gss(&gss, *dummy_id);
-                    }
                     gss = self.parent.parser.process_token_gss(&gss, terminal_id);
 
                     if !gss.is_empty() {

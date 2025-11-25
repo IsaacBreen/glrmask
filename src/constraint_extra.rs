@@ -356,17 +356,11 @@ pub fn dump_precompute_trie_recursive(
 }
 
 impl GrammarConstraint {
-    /// Dumps the structure of the precomputed Trie map for visualization.
+    /// Stub for compatibility - precomputed1 field has been removed
     pub fn dump_precomputed1(&self) {
-        GrammarConstraint::_dump_precomputed(
-            &self.precomputed1,
-            &self.precompute4_vocab.internal_to_original,
-            &self.token_name_map,
-            &self.original_llm_vocab.llm_token_map,
-            &self.trie1_god,
-        );
+        eprintln!("Warning: dump_precomputed1() is no longer supported (precomputed1 field removed)");
     }
-
+    
     pub fn _dump_precomputed(
         precomputed1: &BTreeMap<TokenizerStateID, PrecomputeNode1Index>,
         internal_to_original_map: &BTreeMap<usize, LLMTokenBV>,
