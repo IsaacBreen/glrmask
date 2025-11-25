@@ -1,0 +1,25 @@
+================================================================================
+JSON Schema Benchmarking Suite
+================================================================================
+
+Warning: xgrammar not available: No module named 'triton'
+✗ XGrammar not available
+✓ llguidance available
+✗ llguidance error: Expecting a TokenizerWrapper() class
+✓ Outlines available
+  (skipping - wrapper incomplete)
+
+Testing 0 system(s) on 3 schema(s)
+
+Schema: simple_user
+
+Schema: product_array
+
+Schema: nested_config
+
+Results saved to: benchmarking/results/json_schema_results.json
+
+================================================================================
+SUMMARY
+================================================================================
+

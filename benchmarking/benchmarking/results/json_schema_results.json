@@ -1,1 +1,38 @@
-[]
+[
+  {
+    "system_name": "llguidance",
+    "schema_name": "simple_user",
+    "compilation_time_sec": 0,
+    "num_tokens_processed": 0,
+    "avg_mask_time_ms": 0,
+    "avg_commit_time_ms": 0,
+    "total_time_sec": 0,
+    "memory_bytes": 0,
+    "success": false,
+    "error_message": "AttributeError: 'builtins.LLInterpreter' object has no attribute 'get_mask'\nTraceback (most recent call last):\n  File \"/Users/isaacbreen/Projects2/grammars2024/benchmarking/run_json_schema_benchmarks.py\", line 75, in run_single_benchmark\n    mask_result = system.get_mask(state)\n                  ^^^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/isaacbreen/Projects2/grammars2024/benchmarking/systems/llguidance_wrapper.py\", line 112, in get_mask\n    mask, elapsed = time_function(get_bitmask)\n                    ^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/isaacbreen/Projects2/grammars2024/benchmarking/systems/base.py\", line 172, in time_function\n    result = func(*args, **kwargs)\n             ^^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/isaacbreen/Projects2/grammars2024/benchmarking/systems/llguidance_wrapper.py\", line 109, in get_bitmask\n    mask = state.get_mask()\n           ^^^^^^^^^^^^^^\nAttributeError: 'builtins.LLInterpreter' object has no attribute 'get_mask'\n"
+  },
+  {
+    "system_name": "llguidance",
+    "schema_name": "product_array",
+    "compilation_time_sec": 0,
+    "num_tokens_processed": 0,
+    "avg_mask_time_ms": 0,
+    "avg_commit_time_ms": 0,
+    "total_time_sec": 0,
+    "memory_bytes": 0,
+    "success": false,
+    "error_message": "AttributeError: 'builtins.LLInterpreter' object has no attribute 'get_mask'\nTraceback (most recent call last):\n  File \"/Users/isaacbreen/Projects2/grammars2024/benchmarking/run_json_schema_benchmarks.py\", line 75, in run_single_benchmark\n    mask_result = system.get_mask(state)\n                  ^^^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/isaacbreen/Projects2/grammars2024/benchmarking/systems/llguidance_wrapper.py\", line 112, in get_mask\n    mask, elapsed = time_function(get_bitmask)\n                    ^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/isaacbreen/Projects2/grammars2024/benchmarking/systems/base.py\", line 172, in time_function\n    result = func(*args, **kwargs)\n             ^^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/isaacbreen/Projects2/grammars2024/benchmarking/systems/llguidance_wrapper.py\", line 109, in get_bitmask\n    mask = state.get_mask()\n           ^^^^^^^^^^^^^^\nAttributeError: 'builtins.LLInterpreter' object has no attribute 'get_mask'\n"
+  },
+  {
+    "system_name": "llguidance",
+    "schema_name": "nested_config",
+    "compilation_time_sec": 0,
+    "num_tokens_processed": 0,
+    "avg_mask_time_ms": 0,
+    "avg_commit_time_ms": 0,
+    "total_time_sec": 0,
+    "memory_bytes": 0,
+    "success": false,
+    "error_message": "AttributeError: 'builtins.LLInterpreter' object has no attribute 'get_mask'\nTraceback (most recent call last):\n  File \"/Users/isaacbreen/Projects2/grammars2024/benchmarking/run_json_schema_benchmarks.py\", line 75, in run_single_benchmark\n    mask_result = system.get_mask(state)\n                  ^^^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/isaacbreen/Projects2/grammars2024/benchmarking/systems/llguidance_wrapper.py\", line 112, in get_mask\n    mask, elapsed = time_function(get_bitmask)\n                    ^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/isaacbreen/Projects2/grammars2024/benchmarking/systems/base.py\", line 172, in time_function\n    result = func(*args, **kwargs)\n             ^^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/isaacbreen/Projects2/grammars2024/benchmarking/systems/llguidance_wrapper.py\", line 109, in get_bitmask\n    mask = state.get_mask()\n           ^^^^^^^^^^^^^^\nAttributeError: 'builtins.LLInterpreter' object has no attribute 'get_mask'\n"
+  }
+]

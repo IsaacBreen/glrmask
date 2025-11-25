@@ -129,7 +129,7 @@ def main():
     print("=" * 80)
     print()
     
-    # Initialize systems
+    # Initialize systems list FIRST
     systems = []
     
     # XGrammar
@@ -142,6 +142,17 @@ def main():
             print("✗ XGrammar not available")
     except Exception as e:
         print(f"✗ XGrammar error: {e}")
+    
+    # llguidance
+    try:
+        from benchmarking.systems.llguidance_wrapper import LLGuidanceSystem, LLGUIDANCE_AVAILABLE
+        if LLGUIDANCE_AVAILABLE:
+            print("✓ llguidance available")
+            systems.append(LLGuidanceSystem(tokenizer_name="gpt2"))
+        else:
+            print("✗ llguidance not available")
+    except Exception as e:
+        print(f"✗ llguidance error: {e}")
     
     # Outlines
     try:
