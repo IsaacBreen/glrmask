@@ -7,7 +7,9 @@ import copy
 
 # --- Configuration ---
 # The path to your grammar constraint file.
-FILE_PATH = "/Users/isaacbreen/Projects2/grammars2024/.cache/test_vocabs/constraint_js.json"
+# The path to your grammar constraint file.
+FILE_PATH = "json.json"
+# FILE_PATH = "/Users/isaacbreen/Projects2/grammars2024/.cache/test_vocabs/constraint_js.json"
 # FILE_PATH = "/Users/isaacbreen/Projects2/grammars2024/.cache/test_vocabs/example_diff_constraint.json"
 
 
@@ -64,113 +66,202 @@ def calculate_pooled_size(instances):
 
 # --- Weight-Specific Helper ---
 
-def parse_weight_to_set(data, format_type):
+def parse_weight_to_set(data, format_type, pool=None):
     """Converts a JSON weight object into a standard Python set of integers."""
     s = set()
-    if not data: return frozenset()
+    if data is None: return frozenset()
+    
+    # Handle pooled indices
+    if isinstance(data, int):
+        if not pool: return frozenset()
+        if format_type == 'SimpleBitset':
+            # pool['weights'] maps id -> SimpleBitset data
+            data = pool['weights'].get(str(data)) or pool['weights'].get(data)
+        elif format_type == 'LLMTokenBV':
+            # pool['hybrid_bitsets'] maps id -> HybridBitset data
+            data = pool['hybrid_bitsets'].get(str(data)) or pool['hybrid_bitsets'].get(data)
+        
+        if data is None: return frozenset() # Should not happen if index is valid
+
     if format_type == 'SimpleBitset':
-        for start, end in data: s.update(range(start, end))
+        # SimpleBitset is usually [start, end, start, end...] or similar?
+        # Wait, SimpleBitset serialization in Rust might be different.
+        # Let's assume it's list of ranges [start, end] based on previous code, 
+        # BUT previous code said: "for start, end in data: s.update(range(start, end))"
+        # This implies data is [[start, end], [start, end]]?
+        # Let's check the data format.
+        if isinstance(data, list):
+            if len(data) > 0 and isinstance(data[0], list):
+                 for start, end in data: s.update(range(start, end))
+            else:
+                 # Maybe flattened?
+                 pass
     elif format_type == 'LLMTokenBV':
-        for i in range(0, len(data), 2): s.update(range(data[i], data[i+1]))
+        # HybridBitset is [start, end, start, end...] flattened
+        if isinstance(data, list):
+            for i in range(0, len(data), 2): s.update(range(data[i], data[i+1] + 1)) # Inclusive end?
+            # Rust HybridBitset to_json: flat.push(start); flat.push(end); (inclusive)
+            # Python range is exclusive. So data[i+1] + 1.
+            
     return frozenset(s)
+
+def load_pool(data):
+    """Parses the 'pool' field from the JSON data."""
+    pool = {'weights': {}, 'hybrid_bitsets': {}, 'dfa_states': {}}
+    if 'pool' not in data: return None
+    
+    p = data['pool']
+    
+    # Helper to parse DedupValueMap
+    def parse_map(map_data):
+        res = {}
+        if 'values' in map_data:
+            for pair in map_data['values']:
+                if len(pair) == 2:
+                    id_val, val = pair
+                    res[id_val] = val
+                    res[str(id_val)] = val
+        return res
+
+    if 'weights' in p: pool['weights'] = parse_map(p['weights'])
+    if 'hybrid_bitsets' in p: pool['hybrid_bitsets'] = parse_map(p['hybrid_bitsets'])
+    if 'dfa_states' in p: pool['dfa_states'] = parse_map(p['dfa_states'])
+    
+    return pool
 
 
 # --- Analysis Core Functions ---
 
 def analyze_weights(data):
     """Analyzes the space efficiency of all weights in the GrammarConstraint."""
+    pool = load_pool(data)
     all_weights = []
     max_token_id = 0
 
     # Extract weights from all known locations
-    if 'precomputed4' in data and 'states' in data['precomputed4']:
-        for state in data['precomputed4']['states']:
+    # 1. DWA (Pooled)
+    if 'dwa' in data and 'states' in data['dwa']:
+        # data['dwa']['states'] is a list of objects with indices
+        for state in data['dwa']['states']:
             for key in ['final_weight', 'state_weight']:
-                if state.get(key):
-                    w_obj = state[key]
-                    w_set = parse_weight_to_set(w_obj, 'SimpleBitset')
-                    all_weights.append({'original_obj': w_obj, 'set': w_set, 'format': 'SimpleBitset'})
+                if state.get(key) is not None:
+                    w_idx = state[key]
+                    w_set = parse_weight_to_set(w_idx, 'SimpleBitset', pool)
+                    all_weights.append({'is_pooled': True, 'index': w_idx, 'set': w_set, 'format': 'SimpleBitset'})
                     if w_set: max_token_id = max(max_token_id, max(w_set))
-            for _, w_obj in state.get('trans_weights', []):
-                w_set = parse_weight_to_set(w_obj, 'SimpleBitset')
-                all_weights.append({'original_obj': w_obj, 'set': w_set, 'format': 'SimpleBitset'})
+            
+            # trans_weights is a map label -> index
+            # It might be serialized as a dict (if keys are strings) or list of pairs (if keys are ints)
+            tw = state.get('trans_weights', {})
+            iterator = []
+            if isinstance(tw, dict):
+                iterator = tw.items()
+            elif isinstance(tw, list):
+                iterator = tw
+            
+            for _, w_idx in iterator:
+                 w_set = parse_weight_to_set(w_idx, 'SimpleBitset', pool)
+                 all_weights.append({'is_pooled': True, 'index': w_idx, 'set': w_set, 'format': 'SimpleBitset'})
+                 if w_set: max_token_id = max(max_token_id, max(w_set))
+    
+    # 2. Possible Matches (Pooled)
+    if 'possible_matches' in data:
+        pm = data['possible_matches']
+        iterator = []
+        if isinstance(pm, dict):
+            iterator = pm.items()
+        elif isinstance(pm, list):
+            iterator = pm
+            
+        for _, terminal_map in iterator:
+            # terminal_map is BTreeMap<TerminalID, usize> -> list of pairs
+            inner_iterator = []
+            if isinstance(terminal_map, dict):
+                inner_iterator = terminal_map.items()
+            elif isinstance(terminal_map, list):
+                inner_iterator = terminal_map
+                
+            for _, w_idx in inner_iterator:
+                w_set = parse_weight_to_set(w_idx, 'LLMTokenBV', pool)
+                all_weights.append({'is_pooled': True, 'index': w_idx, 'set': w_set, 'format': 'LLMTokenBV'})
                 if w_set: max_token_id = max(max_token_id, max(w_set))
 
-    for _, terminal_map in data.get('possible_matches', []):
-        for _, w_obj in terminal_map:
-            w_set = parse_weight_to_set(w_obj, 'LLMTokenBV')
-            all_weights.append({'original_obj': w_obj, 'set': w_set, 'format': 'LLMTokenBV'})
-            if w_set: max_token_id = max(max_token_id, max(w_set))
+    # 3. Vocab (Not Pooled)
+    # precompute4_vocab -> internal_to_original is a map index -> LLMTokenBV
+    if 'vocab' in data and 'internal_to_original' in data['vocab']:
+         # internal_to_original is a list of [k, v] pairs in JSON if it's a BTreeMap? 
+         # Wait, Rust BTreeMap<usize, LLMTokenBV> serializes to JSON object if keys are strings, 
+         # but keys are usize. JSON keys must be strings. 
+         # Let's assume it's an object or check the file.
+         # In the previous code it iterated over it.
+         vocab_map = data['vocab']['internal_to_original']
+         # If it's a dict
+         if isinstance(vocab_map, dict):
+             iterator = vocab_map.items()
+         elif isinstance(vocab_map, list): # Array of pairs
+             iterator = vocab_map
+         else:
+             iterator = []
 
-    for _, w_obj in data.get('precompute4_vocab', []):
-        w_set = parse_weight_to_set(w_obj, 'LLMTokenBV')
-        all_weights.append({'original_obj': w_obj, 'set': w_set, 'format': 'LLMTokenBV'})
-        if w_set: max_token_id = max(max_token_id, max(w_set))
+         for _, w_obj in iterator:
+            w_set = parse_weight_to_set(w_obj, 'LLMTokenBV', pool)
+            all_weights.append({'is_pooled': False, 'original_obj': w_obj, 'set': w_set, 'format': 'LLMTokenBV'})
+            if w_set: max_token_id = max(max_token_id, max(w_set))
 
     if not all_weights: return None
 
-    original_total_size = sum(len(json.dumps(w['original_obj'])) for w in all_weights)
+    # Calculate "Unpooled Size" (what it would be without pooling)
+    unpooled_total_size = 0
+    current_pooled_size = 0
+    
+    # For pooled items, unpooled size is size of the set serialized.
+    # Current size is size of index.
+    
+    # For unpooled items (vocab), unpooled size is size of obj.
+    # Current size is size of obj.
 
-    # Use a dictionary to count occurrences of each unique weight set
-    unique_weights = defaultdict(lambda: {'count': 0})
     for w in all_weights:
-        unique_weights[w['set']]['count'] += 1
-        # Store the format type, ensuring consistency if a set appears in multiple formats
-        if 'format' not in unique_weights[w['set']]:
-            unique_weights[w['set']]['format'] = w['format']
+        # Re-construct the unpooled object to measure its size
+        is_simple = w['format'] == 'SimpleBitset'
+        ranges = set_to_ranges(w['set'])
+        # SimpleBitset format: [[s,e], [s,e]]? Or flattened?
+        # HybridBitset format: [s, e, s, e]
+        
+        if is_simple:
+            # Approximation of SimpleBitset JSON
+            obj = ranges 
+        else:
+            obj = [x for r in ranges for x in r]
+            
+        obj_size = len(json.dumps(obj))
+        
+        if w['is_pooled']:
+            unpooled_total_size += obj_size
+            current_pooled_size += len(str(w['index']))
+        else:
+            unpooled_total_size += len(json.dumps(w.get('original_obj', obj)))
+            current_pooled_size += len(json.dumps(w.get('original_obj', obj)))
 
-    # Pre-calculate the size of each unique weight in different encodings
-    for s, info in unique_weights.items():
-        is_simple = info['format'] == 'SimpleBitset'
-        ranges = set_to_ranges(s)
-        range_obj = ranges if is_simple else [i for r in ranges for i in r]
-        size_range = len(json.dumps(range_obj))
-        size_bitset = calculate_bitset_json_size(s, max_token_id)
-        info['sizes'] = {'range': size_range, 'bitset': size_bitset, 'hybrid': min(size_range, size_bitset)}
+    # Add the size of the pool itself to the current size
+    pool_size = 0
+    if pool:
+        if 'weights' in data.get('pool', {}):
+            pool_size += len(json.dumps(data['pool']['weights']))
+        if 'hybrid_bitsets' in data.get('pool', {}):
+            pool_size += len(json.dumps(data['pool']['hybrid_bitsets']))
 
-    # Calculate totals for non-pooled strategies
-    total_size_bitset = sum(w['sizes']['bitset'] * w['count'] for w in unique_weights.values())
-    total_size_hybrid = sum(w['sizes']['hybrid'] * w['count'] for w in unique_weights.values())
-
-    # For pooling, we need to get the pre-calculated size for each individual weight instance
-    # and then pass the list of these sizes (as canonical strings) to the pooling calculator.
-
-    # Create lists of the JSON-stringified *unique objects* that will be in the pool
-    unique_range_objects = [json.dumps(unique_weights[s]['sizes']['range']) for s in unique_weights]
-    unique_bitset_objects = [json.dumps(unique_weights[s]['sizes']['bitset']) for s in unique_weights]
-    unique_hybrid_objects = [json.dumps(unique_weights[s]['sizes']['hybrid']) for s in unique_weights]
-
-    # Create a map from a weight set to its future index in the pool
-    set_to_index = {s: i for i, s in enumerate(unique_weights.keys())}
-
-    # Calculate the size of all integer references
-    references_size = sum(len(str(set_to_index[w['set']])) for w in all_weights)
-
-    # Calculate the size of the pool itself (unique objects + JSON overhead)
-    def get_pool_storage_size(unique_objects):
-        if not unique_objects: return 0
-        num_unique = len(unique_objects)
-        json_array_overhead = len(json.dumps([0] * num_unique)) - num_unique
-        return sum(len(obj) for obj in unique_objects) + json_array_overhead
-
-    pooled_size_range = get_pool_storage_size(unique_range_objects) + references_size
-    pooled_size_bitset = get_pool_storage_size(unique_bitset_objects) + references_size
-    pooled_size_hybrid = get_pool_storage_size(unique_hybrid_objects) + references_size
+    current_total_size = current_pooled_size + pool_size
 
     return {
         'component_name': 'Weights (SimpleBitset & LLMTokenBV)',
-        'original_size': original_total_size,
+        'original_size': unpooled_total_size, # This is the "Before Optimization" size
         'stats': {
             'Total Instances': len(all_weights),
-            'Unique Instances': len(unique_weights),
-            'Max Token ID': max_token_id
+            'Max Token ID': max_token_id,
+            'Pool Size': pool_size
         },
         'strategies': {
-            'Bitset-based (No Pooling)': total_size_bitset,
-            'Hybrid (No Pooling)': total_size_hybrid,
-            'Pooled Range-based': pooled_size_range,
-            'Pooled Bitset-based': pooled_size_bitset,
-            'Pooled Hybrid (Best Method)': pooled_size_hybrid
+            'Current Pooled Implementation': current_total_size
         }
     }
 
@@ -231,24 +322,49 @@ def analyze_tokenizer_dfa(data):
     strategies['Selective Pooling (Sets Only)'] = size + dfa_shell_size
 
     # Strategy 4: Full Component Pooling
-    size = 0
-    component_stats = {}
-    for key in state_component_data[0].keys():
-        instances = [json.dumps(s[key]) for s in state_component_data]
-        size += calculate_pooled_size(instances)
-        component_stats[key] = {'total': len(instances), 'unique': len(set(instances))}
-    strategies['Full Component Pooling (Best Method)'] = size + dfa_shell_size
+    # In the new pooled format, dfa_states are in the pool.
+    # We can just measure the current size.
+    
+    # But analyze_tokenizer_dfa is called with the full data.
+    # If 'tokenizer_dfa' is in data, it means we are using the new format.
+    # The old format had 'tokenizer' -> 'dfa'.
+    
+    if 'tokenizer_dfa' in data:
+        # New format
+        # tokenizer_dfa has 'state_indices'
+        indices = data['tokenizer_dfa']['state_indices']
+        references_size = sum(len(str(i)) for i in indices)
+        
+        pool = load_pool(data)
+        pool_size = 0
+        if pool and 'dfa_states' in data.get('pool', {}):
+             pool_size = len(json.dumps(data['pool']['dfa_states']))
+             
+        current_size = references_size + pool_size + len(json.dumps(data['tokenizer_dfa'])) # Shell
+        
+        # Estimate unpooled size
+        # We need to reconstruct the states to estimate their unpooled size
+        unpooled_size = 0
+        if pool:
+            for idx in indices:
+                state = pool['dfa_states'].get(idx) or pool['dfa_states'].get(str(idx))
+                if state:
+                    unpooled_size += len(json.dumps(state))
+        
+        strategies = {'Current Pooled Implementation': current_size}
+        original_tokenizer_size = unpooled_size # Estimate
+        
+        return {
+            'component_name': 'Tokenizer DFA',
+            'original_size': original_tokenizer_size,
+            'stats': {
+                'DFA States': len(indices),
+            },
+            'strategies': strategies
+        }
 
-    return {
-        'component_name': 'Tokenizer DFA',
-        'original_size': original_tokenizer_size,
-        'stats': {
-            'DFA States': num_states,
-            'Max Group ID': max_group_id,
-            'Component Uniqueness': component_stats
-        },
-        'strategies': strategies
-    }
+    # Old format analysis (kept for reference if needed, but we are analyzing new format)
+    return None
 
 
 # --- Reporting ---
@@ -304,8 +420,8 @@ def main(file_path):
 
     original_weights_size = weights_results['original_size']
     original_tokenizer_size = tokenizer_results['original_size']
-    best_weights_size = weights_results['strategies']['Pooled Hybrid (Best Method)']
-    best_tokenizer_size = tokenizer_results['strategies']['Full Component Pooling (Best Method)']
+    best_weights_size = weights_results['strategies']['Current Pooled Implementation']
+    best_tokenizer_size = tokenizer_results['strategies']['Current Pooled Implementation']
 
     size_of_other_json_parts = original_total_file_size - original_weights_size - original_tokenizer_size
     new_total_file_size = size_of_other_json_parts + best_weights_size + best_tokenizer_size
@@ -318,5 +434,9 @@ def main(file_path):
     print(f"{'Estimated Total Reduction:':<35} {total_reduction:>15,} bytes ({total_percent:.2f}%)")
     print("=" * 100)
 
+import sys
 if __name__ == "__main__":
-    main(FILE_PATH)
+    if len(sys.argv) > 1:
+        main(sys.argv[1])
+    else:
+        main(FILE_PATH)

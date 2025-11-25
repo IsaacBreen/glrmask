@@ -42,7 +42,9 @@ use crate::precompute4::weighted_automata::{SimpleBitset, Weight};
 use crate::state_equivalence_analysis_finite_automata::find_state_equivalence_classes;
 pub use crate::constraint_vocab::*;
 pub use crate::constraint_trie::*;
+pub use crate::constraint_trie::*;
 use crate::constraint_precompute::run_precompute1;
+use crate::constraint_json::PooledGrammarConstraint;
 
 type GSSNode = LeveledGSS<ParseStateEdgeContent, Acc>;
 
@@ -280,118 +282,13 @@ impl GrammarConstraint {
 
 impl JSONConvertible for GrammarConstraint {
     fn to_json(&self) -> JSONNode {
-        let mut obj = StdMap::new();
-        obj.insert("tokenizer".to_string(), self.tokenizer.to_json());
-        obj.insert("parser".to_string(), self.parser.to_json());
-        obj.insert("precomputed4".to_string(), self.precomputed4.to_json());
-        obj.insert("token_name_map".to_string(), self.token_name_map.to_json());
-        obj.insert(
-            "possible_matches".to_string(),
-            self.possible_matches.to_json(),
-        );
-
-        // Minimal serialization for vocabs: only store the primary maps.
-        // Derived fields (max_ids, inverse maps, sparse matrices) are reconstructed in from_json.
-        obj.insert(
-            "precompute4_vocab".to_string(),
-            self.precompute4_vocab.internal_to_original.to_json(),
-        );
-        obj.insert(
-            "original_llm_vocab".to_string(),
-            self.original_llm_vocab.llm_token_map.to_json(),
-        );
-
-        JSONNode::Object(obj)
+        let pooled = PooledGrammarConstraint::from_constraint(self);
+        pooled.to_json()
     }
 
     fn from_json(node: JSONNode) -> Result<Self, String> {
-        match node {
-            JSONNode::Object(mut obj) => {
-                let tokenizer = obj
-                    .remove("tokenizer")
-                    .ok_or_else(|| "Missing field tokenizer".to_string())
-                    .and_then(Regex::from_json)?;
-                let parser = obj
-                    .remove("parser")
-                    .ok_or_else(|| "Missing field parser".to_string())
-                    .and_then(GLRParser::from_json)?;
-                let precomputed4 = obj
-                    .remove("precomputed4")
-                    .ok_or_else(|| "Missing field precomputed4".to_string())
-                    .and_then(Precomputed4::from_json)?;
-
-                let token_name_map = obj
-                    .remove("token_name_map")
-                    .ok_or_else(|| "Missing field token_name_map".to_string())
-                    .and_then(|n| BiBTreeMap::<Terminal, usize>::from_json(n))?;
-
-                let possible_matches = if let Some(n) = obj.remove("possible_matches") {
-                    BTreeMap::<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>::from_json(n)?
-                } else {
-                    BTreeMap::new()
-                };
-
-                // Reconstruct LLMVocab from map
-                let original_llm_vocab = if let Some(n) = obj.remove("original_llm_vocab") {
-                    let llm_token_map = BiBTreeMap::<Vec<u8>, LLMTokenID>::from_json(n)?;
-                    let max_original_llm_token_id =
-                        llm_token_map.iter().map(|(_, id)| id.0).max().unwrap_or(0);
-                    Arc::new(LLMVocab {
-                        llm_token_map,
-                        max_original_llm_token_id,
-                    })
-                } else {
-                    return Err("Missing field original_llm_vocab".to_string());
-                };
-
-                // Reconstruct StageVocab from internal_to_original map
-                let vocab = if let Some(n) = obj.remove("precompute4_vocab") {
-                    let internal_to_original = BTreeMap::<usize, LLMTokenBV>::from_json(n)?;
-                    let internal_max_llm_token =
-                        internal_to_original.keys().max().copied().unwrap_or(0);
-
-                    let mut original_to_internal = BTreeMap::new();
-                    let mut max_original_llm_token_id = 0;
-                    for (internal, original_bv) in &internal_to_original {
-                        for orig in original_bv.iter_up_to(usize::MAX) {
-                            original_to_internal.insert(orig, *internal);
-                            if orig > max_original_llm_token_id {
-                                max_original_llm_token_id = orig;
-                            }
-                        }
-                    }
-
-                    let internal_to_original_sparse_matrix =
-                        StageVocab::build_internal_to_original_sparse_matrix(
-                            &internal_to_original,
-                            max_original_llm_token_id,
-                            internal_max_llm_token,
-                        );
-
-                    StageVocab {
-                        original_to_internal,
-                        internal_to_original,
-                        internal_max_llm_token,
-                        max_original_llm_token_id,
-                        internal_to_original_sparse_matrix,
-                    }
-                } else {
-                    return Err("Missing precompute4_vocab".to_string());
-                };
-
-                let gc = GrammarConstraint {
-                    tokenizer,
-                    parser,
-                    precomputed4,
-                    original_llm_vocab,
-                    token_name_map,
-                    possible_matches,
-                    precompute4_vocab: vocab,
-                };
-                Ok(gc)
-            }
-            _ => Err("Expected JSONNode::Object for GrammarConstraint".to_string()),
-        }
+        let pooled = PooledGrammarConstraint::from_json(node)?;
+        Ok(pooled.to_constraint())
     }
 }
 

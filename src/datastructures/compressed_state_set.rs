@@ -3,7 +3,7 @@ use rustc_hash::FxHasher;
 use crate::datastructures::state_set::StateSet;
 use crate::json_serialization::{JSONConvertible, JSONNode};
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DenseStateSet {
     pub words: Vec<u64>,
 }

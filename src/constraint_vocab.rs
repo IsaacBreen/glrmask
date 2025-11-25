@@ -243,10 +243,10 @@ where
     K: Ord + Clone + Eq,
     V: Clone + Eq + std::hash::Hash,
 {
-    key_to_id: BTreeMap<K, usize>,
-    id_to_value: BTreeMap<usize, V>,
-    value_to_id: HashMap<V, usize>,
-    next_id: usize,
+    pub key_to_id: BTreeMap<K, usize>,
+    pub id_to_value: BTreeMap<usize, V>,
+    pub value_to_id: HashMap<V, usize>,
+    pub next_id: usize,
 }
 
 impl<K, V> Default for DedupValueMap<K, V>

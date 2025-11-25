@@ -160,7 +160,7 @@ impl JSONConvertible for NFA {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DFAState {
     pub transitions: CharTransitions<usize>,
     pub finalizers: DenseStateSet,
@@ -219,7 +219,7 @@ impl JSONConvertible for DFAState {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DFA {
     pub states: Vec<DFAState>,
     pub start_state: usize,
