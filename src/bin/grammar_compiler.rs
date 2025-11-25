@@ -42,7 +42,7 @@ struct Args {
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let mut instant = std::time::Instant::now();
+    let instant = std::time::Instant::now();
     let args = Args::parse();
 
     if !args.precompute0_only && args.output.is_none() {
