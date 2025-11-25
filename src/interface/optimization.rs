@@ -245,18 +245,18 @@ impl<'a> GrammarOptimizer<'a> {
             let prod_indices = self.production_indices.get(nt).cloned().unwrap_or_default();
 
             for prod_idx in prod_indices {
-                let prod = &self.grammar.productions[prod_idx];
+                let rhs = self.grammar.productions[prod_idx].rhs.clone();
                 let mut prefix_exprs = Vec::new();
                 let mut target_scc_idx = None;
                 
-                for (idx, symbol) in prod.rhs.iter().enumerate() {
+                for (idx, symbol) in rhs.iter().enumerate() {
                     match symbol {
                         Symbol::Terminal(t) => {
                             prefix_exprs.push(self.get_expr_for_terminal(t));
                         }
                         Symbol::NonTerminal(ref other_nt) => {
                             if let Some(&local_idx) = nt_to_local_idx.get(other_nt) {
-                                if idx != prod.rhs.len() - 1 { 
+                                if idx != rhs.len() - 1 { 
                                     return None; 
                                 }
                                 target_scc_idx = Some(local_idx);
@@ -298,11 +298,11 @@ impl<'a> GrammarOptimizer<'a> {
             let prod_indices = self.production_indices.get(nt).cloned().unwrap_or_default();
 
             for prod_idx in prod_indices {
-                let prod = &self.grammar.productions[prod_idx];
+                let rhs = self.grammar.productions[prod_idx].rhs.clone();
                 let mut suffix_exprs = Vec::new();
                 let mut target_scc_idx = None;
                 
-                for (idx, symbol) in prod.rhs.iter().enumerate() {
+                for (idx, symbol) in rhs.iter().enumerate() {
                     match symbol {
                         Symbol::Terminal(t) => {
                             suffix_exprs.push(self.get_expr_for_terminal(t));
