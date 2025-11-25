@@ -1,7 +1,6 @@
 use crate::precompute4::weighted_automata::{DWAState, RangeSet, DWA, DWABuildError, NWA, NWABuildError, Weight, format_word, DWAStates, StateID};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::time::{SystemTime, UNIX_EPOCH};
-use crate::precompute4::resolve_negatives::resolve_negative_codes_in_dwa;
 use crate::precompute4::weighted_automata::common::Label;
 
 // --- Stochastic validation controls and RNG ---
