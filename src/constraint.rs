@@ -267,7 +267,7 @@ pub struct GrammarConstraint {
     pub precomputed1: Precomputed,
     pub precomputed4: Precomputed4,
 
-    pub llm_vocab: Arc<LLMVocab>,
+    pub original_llm_vocab: Arc<LLMVocab>,
     pub(crate) token_name_map: BiBTreeMap<Terminal, usize>,
 
     /// Tokenizer state -> grammar terminal -> internal LLM token bitset.
@@ -307,8 +307,8 @@ impl GrammarConstraint {
         }
 
         assert_eq!(
-            self.llm_vocab.llm_token_map,
-            other.llm_vocab.llm_token_map
+            self.original_llm_vocab.llm_token_map,
+            other.original_llm_vocab.llm_token_map
         );
         assert_eq!(self.token_name_map, other.token_name_map);
         assert_eq!(self.possible_matches, other.possible_matches);
@@ -348,7 +348,7 @@ impl JSONConvertible for GrammarConstraint {
             self.terminal_map_by_llm.to_json(),
         );
         obj.insert("precompute4_vocab".to_string(), self.precompute4_vocab.to_json());
-        obj.insert("llm_vocab".to_string(), self.llm_vocab.to_json());
+        obj.insert("original_llm_vocab".to_string(), self.original_llm_vocab.to_json());
         obj.insert(
             "original_to_dummy_map".to_string(),
             self.original_to_dummy_map.to_json(),
@@ -416,8 +416,8 @@ impl JSONConvertible for GrammarConstraint {
                         None => DedupValueMap::new(),
                     };
 
-                // Handle llm_vocab deserialization with fallback
-                let llm_vocab = if let Some(n) = obj.remove("llm_vocab") {
+                // Handle original_llm_vocab deserialization with fallback
+                let original_llm_vocab = if let Some(n) = obj.remove("original_llm_vocab") {
                     Arc::new(LLMVocab::from_json(n)?)
                 } else {
                     // Fallback to old format
@@ -454,7 +454,7 @@ impl JSONConvertible for GrammarConstraint {
                     if !vocab_obj.contains_key("max_original_llm_token_id") {
                         vocab_obj.insert(
                             "max_original_llm_token_id".to_string(),
-                            llm_vocab.max_original_llm_token_id.to_json(),
+                            original_llm_vocab.max_original_llm_token_id.to_json(),
                         );
                     }
                 }
@@ -470,7 +470,7 @@ impl JSONConvertible for GrammarConstraint {
                     parser,
                     precomputed1,
                     precomputed4,
-                    llm_vocab,
+                    original_llm_vocab: original_llm_vocab,
                     token_name_map,
                     possible_matches,
                     terminal_map_by_llm,
@@ -748,7 +748,7 @@ impl GrammarConstraint {
             }
         }
 
-        let llm_vocab = Arc::new(LLMVocab {
+        let original_llm_vocab = Arc::new(LLMVocab {
             llm_token_map: llm_token_map.clone(),
             max_original_llm_token_id,
         });
@@ -784,7 +784,7 @@ impl GrammarConstraint {
         let mut skeleton_dwa = run_precompute1(
             &tokenizer,
             Some(&parser),
-            Some(llm_vocab.clone()),
+            Some(original_llm_vocab.clone()),
             &internal_llm_token_map,
             vocab.internal_max_llm_token,
             parser.terminal_map.len(),
@@ -851,7 +851,7 @@ impl GrammarConstraint {
             // Trie data structures are unused/empty.
             precomputed1: Precomputed::new(),
             precomputed4,
-            llm_vocab,
+            original_llm_vocab: original_llm_vocab,
             token_name_map,
             possible_matches: possible_matches_precompute1,
             terminal_map_by_llm,
@@ -1167,7 +1167,7 @@ impl GrammarConstraint {
         let mut state = BTreeMap::new();
         state.insert(
             self.tokenizer.initial_state_id(),
-            self.parser.init_glr_parser(Some(self.llm_vocab.clone())),
+            self.parser.init_glr_parser(Some(self.original_llm_vocab.clone())),
         );
         GrammarConstraintState { parent: self, state }
     }
@@ -1333,7 +1333,7 @@ impl<'a> GrammarConstraintState<'a> {
         self.commit_bytes(
             &self
                 .parent
-                .llm_vocab
+                .original_llm_vocab
                 .llm_token_map
                 .get_by_right(&llm_token_id)
                 .unwrap()

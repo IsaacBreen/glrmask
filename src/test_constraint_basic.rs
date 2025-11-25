@@ -148,9 +148,9 @@ fn test_constraint_simple() {
     let _mask_before = constraint_state_for_comp.get_mask();
     constraint_state_for_comp.commit(*llm_token_id_for_comp);
 
-    let mut parser_state_for_comp = parser.init_glr_parser_null(Some(constraint.llm_vocab.clone()));
+    let mut parser_state_for_comp = parser.init_glr_parser_null(Some(constraint.original_llm_vocab.clone()));
     for grammar_tokens in grammar_tokenss {
-        let mut parser_state = parser.init_glr_parser(Some(constraint.llm_vocab.clone()));
+        let mut parser_state = parser.init_glr_parser(Some(constraint.original_llm_vocab.clone()));
         for grammar_token in grammar_tokens {
             let grammar_token_id = grammar_token_map.get_by_left(&regex_name(grammar_token)).unwrap();
             if let Some(dummy_id) = constraint.original_to_dummy_map.get(grammar_token_id) {
@@ -233,7 +233,7 @@ fn test_constraint_simple_simplified() {
     // let mut constraint_state_for_comp = constraint.init();
     // constraint_state_for_comp.commit(*llm_token_id_for_comp);
     //
-    // let mut parser_state_for_comp = parser.init_glr_parser(Some(constraint.llm_vocab.clone()));
+    // let mut parser_state_for_comp = parser.init_glr_parser(Some(constraint.original_llm_vocab.clone()));
     // let grammar_token_id = grammar_token_map.get_by_left(&regex_name("A")).unwrap();
     // parser_state_for_comp.step(*grammar_token_id);
     //
@@ -310,7 +310,7 @@ fn test_constraint_expression() {
     let _mask_before = constraint_state_for_comp.get_mask(); // Optional, for debugging
     constraint_state_for_comp.commit(*llm_token_id_for_comp);
 
-    let mut parser_state_for_comp = parser.init_glr_parser(Some(constraint.llm_vocab.clone()));
+    let mut parser_state_for_comp = parser.init_glr_parser(Some(constraint.original_llm_vocab.clone()));
     for grammar_token_id in grammar_token_ids {
         if let Some(dummy_id) = constraint.original_to_dummy_map.get(grammar_token_id) {
             parser_state_for_comp.step(*dummy_id);
@@ -491,7 +491,7 @@ fn test_aborted_tokenizer_restart_equivalence() {
         &GrammarConstraintConfig::default(),
     );
     println!("parser: {}", constraint.parser);
-    println!("Vocab: {:?}", constraint.llm_vocab);
+    println!("Vocab: {:?}", constraint.original_llm_vocab);
 
     // Scenario 1: Commit "#", then "a"
     let mut constraint_state1 = constraint.init();

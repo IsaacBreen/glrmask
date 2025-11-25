@@ -362,7 +362,7 @@ impl GrammarConstraint {
             &self.precomputed1,
             &self.precompute4_vocab.internal_to_original,
             &self.token_name_map,
-            &self.llm_vocab.llm_token_map,
+            &self.original_llm_vocab.llm_token_map,
             &self.trie1_god,
         );
     }

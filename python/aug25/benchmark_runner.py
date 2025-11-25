@@ -364,7 +364,7 @@ def main():
     # Tokenize input code once
     print(f"Loading and tokenizing code from: {args.code}")
     constraint_json = json.loads(constraint_json_str)
-    llm_token_map: tuple[list[int], int] = constraint_json['llm_vocab']['llm_token_map']
+    llm_token_map: tuple[list[int], int] = constraint_json['original_llm_vocab']['llm_token_map']
     id_to_token: dict[int, bytes] = {}
     for token_bytes, token_id in llm_token_map:
         id_to_token[token_id] = bytes(token_bytes)

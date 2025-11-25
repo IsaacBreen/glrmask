@@ -321,8 +321,8 @@ impl GLRParser {
         self.init_glr_parser_with_acc()
     }
 
-    pub fn parse(&self, input: &[TerminalID], llm_vocab: Option<Arc<LLMVocab>>) -> GLRParserState {
-        let mut state = self.init_glr_parser(llm_vocab);
+    pub fn parse(&self, input: &[TerminalID], original_llm_vocab: Option<Arc<LLMVocab>>) -> GLRParserState {
+        let mut state = self.init_glr_parser(original_llm_vocab);
         state.parse(input);
         state
     }

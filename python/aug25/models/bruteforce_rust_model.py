@@ -24,7 +24,7 @@ class BruteForceRustModel:
         constraint_state = ffi.GrammarConstraintState(constraint)
         
         data = json.loads(s)
-        id_to_token = {v: bytes(k) for k, v in data['llm_vocab']['llm_token_map']}
+        id_to_token = {v: bytes(k) for k, v in data['original_llm_vocab']['llm_token_map']}
 
         return BruteForceRustModel(constraint, constraint_state, id_to_token)
 
