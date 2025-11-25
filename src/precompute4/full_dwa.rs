@@ -466,7 +466,7 @@ pub fn precompute4(parser: &GLRParser, input_nwa: &NWA) -> DWA {
         // OPTIMIZATION: Use lightweight simplification for super DWA construction.
         // Full minimization is expensive and not critical for intermediate results.
         let mut super_dwa = super_nwa.determinize();
-        super_dwa.simplify_lightweight();
+        super_dwa.simplify();
 
         let super_signature: Signature = bit_to_term.iter().map(|t| vec![*t]).collect();
         
@@ -701,12 +701,12 @@ fn resolve_negatives_and_optimize_and_determinize(parser: &GLRParser, mut combin
     
     // Full simplify() is actually needed here to reduce the massive combined NWA (1M+ states).
     // Lightweight pruning left 144K states which caused worse performance downstream.
-    combined_nwa.simplify();
+    combined_nwa.compress_transitions();
     crate::debug!(3, "Simplified NWA. {} states and {} transitions remaining.", combined_nwa.states.len(), combined_nwa.states.num_transitions());
     
     let mut dwa = combined_nwa.determinize();
     crate::debug!(3, "Determinized NWA. {} states and {} transitions remaining.", dwa.states.len(), dwa.states.num_transitions());
-    dwa.simplify_lightweight();
+    dwa.simplify();
     crate::debug!(3, "Simplified DWA. {} states and {} transitions remaining.", dwa.states.len(), dwa.states.num_transitions());
     dwa
 }
