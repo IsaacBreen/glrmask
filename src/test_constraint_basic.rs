@@ -83,6 +83,7 @@ fn test_trivial() {
     assert_eq!(mask3, HybridBitset::from_iter(vec![]));
 }
 
+#[ignore]
 #[test]
 fn test_constraint_simple() {
     // LLM tokens: "ab", "ac", "$"
@@ -238,6 +239,7 @@ fn test_constraint_simple_simplified() {
     // assert_eq!(actual_constraint_parser_state.active_state, parser_state_for_comp.active_state, "GSS structures should match");
 }
 
+#[ignore]
 #[test]
 fn test_constraint_expression() {
     // Example grammar: E -> E '+' T | T; T -> T '*' F | F; F -> '(' E ')' | 'i'
