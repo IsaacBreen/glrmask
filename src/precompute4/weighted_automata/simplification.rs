@@ -1,13 +1,13 @@
 #![allow(dead_code)]
 
-use super::common::{BENCHMARK_DEBUG, Label, NWAStateID, StateID, Weight, optimize_debug};
+use super::common::{BENCHMARK_DEBUG, Label, NWAStateID, StateID, Weight};
 use super::dwa::{DWAState, DWAStates, DWA};
 use super::nwa::{NWAState, NWAStates, NWA};
 use rustfst::algorithms::{minimize, minimize_with_config, MinimizeConfig};
 use std::collections::{BTreeMap, VecDeque, HashSet, HashMap};
 use std::sync::Arc;
 
-const MAX_OPTIMIZE_ITERATIONS: usize = 1000;
+pub const MAX_OPTIMIZE_ITERATIONS: usize = 1000;
 
 #[derive(Clone, Debug)]
 struct Partition {
@@ -110,7 +110,7 @@ struct DwaStateBuilder {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-enum DwaPass {
+pub enum DwaPass {
     PruneUnreachable,
     PruneDeadEnds,
     PushWeights,
@@ -118,41 +118,13 @@ enum DwaPass {
     Minimize,
 }
 
-
-const DWA_PASS_ORDERINGS: &[&[DwaPass]] = &[
-    &[DwaPass::PruneUnreachable, DwaPass::PruneDeadEnds, DwaPass::PushWeights, DwaPass::Minimize],
-    &[DwaPass::Minimize, DwaPass::PruneUnreachable, DwaPass::PruneDeadEnds, DwaPass::PushWeights],
-    &[DwaPass::PushWeights, DwaPass::PruneUnreachable, DwaPass::PruneDeadEnds, DwaPass::Minimize],
-    &[DwaPass::PushWeights, DwaPass::Minimize, DwaPass::PruneUnreachable, DwaPass::PruneDeadEnds],
-    &[DwaPass::PruneUnreachable, DwaPass::PushWeights, DwaPass::Minimize, DwaPass::PruneDeadEnds],
-    &[DwaPass::PruneDeadEnds, DwaPass::PushWeights, DwaPass::Minimize, DwaPass::PruneUnreachable],
-    &[DwaPass::PruneUnreachable, DwaPass::PruneDeadEnds, DwaPass::Minimize, DwaPass::PushWeights],
-    &[DwaPass::PruneUnreachable, DwaPass::PushWeights, DwaPass::PruneDeadEnds, DwaPass::Minimize],
-    &[DwaPass::PruneUnreachable, DwaPass::Minimize, DwaPass::PruneDeadEnds, DwaPass::PushWeights],
-    &[DwaPass::PruneUnreachable, DwaPass::Minimize, DwaPass::PushWeights, DwaPass::PruneDeadEnds],
-    &[DwaPass::PruneDeadEnds, DwaPass::PruneUnreachable, DwaPass::PushWeights, DwaPass::Minimize],
-    &[DwaPass::PruneDeadEnds, DwaPass::PruneUnreachable, DwaPass::Minimize, DwaPass::PushWeights],
-    &[DwaPass::PruneDeadEnds, DwaPass::PushWeights, DwaPass::PruneUnreachable, DwaPass::Minimize],
-    &[DwaPass::PruneDeadEnds, DwaPass::Minimize, DwaPass::PruneUnreachable, DwaPass::PushWeights],
-    &[DwaPass::PruneDeadEnds, DwaPass::Minimize, DwaPass::PushWeights, DwaPass::PruneUnreachable],
-    &[DwaPass::PushWeights, DwaPass::PruneDeadEnds, DwaPass::PruneUnreachable, DwaPass::Minimize],
-    &[DwaPass::PushWeights, DwaPass::PruneDeadEnds, DwaPass::Minimize, DwaPass::PruneUnreachable],
-    &[DwaPass::PushWeights, DwaPass::Minimize, DwaPass::PruneDeadEnds, DwaPass::PruneUnreachable],
-    &[DwaPass::Minimize, DwaPass::PruneDeadEnds, DwaPass::PruneUnreachable, DwaPass::PushWeights],
-    &[DwaPass::Minimize, DwaPass::PruneDeadEnds, DwaPass::PushWeights, DwaPass::PruneUnreachable],
-    &[DwaPass::Minimize, DwaPass::PushWeights, DwaPass::PruneUnreachable, DwaPass::PruneDeadEnds],
-    &[DwaPass::Minimize, DwaPass::PushWeights, DwaPass::PruneDeadEnds, DwaPass::PruneUnreachable, DwaPass::PushWeightsToInitial],
-];
-
 impl DWA {
     pub fn simplify(&mut self) {
         if self.states.len() == 0 {
             return;
         }
 
-        if self.states.len() > 1000 && optimize_debug() {
-            self.run_optimization_experiment();
-        } else if BENCHMARK_DEBUG {
+        if BENCHMARK_DEBUG {
             let initial_states = self.states.len();
             let mut internal = self.clone();
             let internal_start = std::time::Instant::now();
@@ -222,74 +194,7 @@ impl DWA {
         *self = DWA::from_rustfst(&fst);
     }
 
-    fn run_optimization_experiment(&mut self) {
-        let initial_clone = self.clone();
-        let initial_states = self.states.len();
-        println!("[DWA Optimize] Starting experiment with {} states.", initial_states);
-
-        let mut best_result: Option<(DWA, std::time::Duration, usize)> = None;
-
-        for (i, &ordering) in DWA_PASS_ORDERINGS.iter().enumerate() {
-            let mut dwa = initial_clone.clone();
-            let start_time = std::time::Instant::now();
-            let mut iterations = 0;
-            let mut timed_out = false;
-            let mut last_changing_passes: Vec<DwaPass> = Vec::new();
-
-            loop {
-                if iterations >= MAX_OPTIMIZE_ITERATIONS {
-                    timed_out = true;
-                    break;
-                }
-                iterations += 1;
-
-                let mut changed_in_iteration = false;
-                let mut current_changing_passes: Vec<DwaPass> = Vec::new();
-                for &pass in ordering {
-                    let changed = match pass {
-                        DwaPass::PruneUnreachable => dwa.prune_unreachable(),
-                        DwaPass::PruneDeadEnds => dwa.prune_dead_ends(),
-                        DwaPass::PushWeights => dwa.push_weights_into_transitions_and_finals(),
-                        DwaPass::PushWeightsToInitial => dwa.push_weights_to_initial(),
-                        DwaPass::Minimize => dwa.minimize_states(),
-                    };
-                    if changed {
-                        current_changing_passes.push(pass);
-                    }
-                    changed_in_iteration |= changed;
-                }
-                if !changed_in_iteration {
-                    last_changing_passes.clear();
-                    break;
-                } else {
-                    last_changing_passes = current_changing_passes;
-                }
-            }
-
-            let elapsed = start_time.elapsed();
-            let final_states = dwa.states.len();
-
-            let ordering_str = format!("{:?}", ordering);
-            let timeout_str = if timed_out {
-                format!(" (TIMED OUT, changing: {:?})", last_changing_passes)
-            } else {
-                "".to_string()
-            };
-            println!("[DWA Optimize] Ordering #{}: {}, Time: {:.2?}, States: {}{}", i, ordering_str, elapsed, final_states, timeout_str);
-
-            if !timed_out && best_result.as_ref().map_or(true, |(_, best_time, best_states)| {
-                final_states < *best_states || (final_states == *best_states && elapsed < *best_time)
-            }) {
-                best_result = Some((dwa, elapsed, final_states));
-            }
-        }
-
-        if let Some((best_dwa, _, _)) = best_result {
-            *self = best_dwa;
-        }
-    }
-
-    fn simplify_with_rustfst(&mut self) -> bool {
+    pub fn simplify_with_rustfst(&mut self) -> bool {
         let min_config = MinimizeConfig::default();
         let mut fst = self.to_rustfst();
         minimize_with_config(&mut fst, min_config).unwrap();
@@ -297,7 +202,7 @@ impl DWA {
         true
     }
 
-    fn simplify_internal(&mut self) -> bool {
+    pub fn simplify_internal(&mut self) -> bool {
         if self.states.len() > 1000 {
             crate::debug!(6, "[DWA::simplify] Starting simplification. Initial stats: {}", self.stats());
         }
@@ -373,7 +278,7 @@ impl DWA {
         total_changed
     }
 
-    fn push_weights_into_transitions_and_finals(&mut self) -> bool {
+    pub fn push_weights_into_transitions_and_finals(&mut self) -> bool {
         let n = self.states.len();
         if n == 0 {
             return false;
@@ -441,7 +346,7 @@ impl DWA {
         changed
     }
 
-    fn push_weights_to_initial(&mut self) -> bool {
+    pub fn push_weights_to_initial(&mut self) -> bool {
         let n = self.states.len();
         if n == 0 { return false; }
 
@@ -523,7 +428,7 @@ impl DWA {
         changed
     }
 
-    fn minimize_states(&mut self) -> bool {
+    pub fn minimize_states(&mut self) -> bool {
         let n = self.states.len();
         if n <= 1 {
             return false;
@@ -942,7 +847,7 @@ struct NwaStateBuilder {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-enum NwaPass {
+pub enum NwaPass {
     PruneUnreachable,
     PruneDeadEnds,
     PushFinalWeights,
@@ -951,28 +856,13 @@ enum NwaPass {
     Minimize,
 }
 
-const NWA_PASS_ORDERINGS: &[&[NwaPass]] = &[
-    &[NwaPass::PruneUnreachable, NwaPass::PushFinalWeights, NwaPass::CompressTransitions, NwaPass::PruneDeadEnds, NwaPass::Minimize],
-    &[NwaPass::Minimize, NwaPass::PruneUnreachable, NwaPass::PruneDeadEnds, NwaPass::PushFinalWeights, NwaPass::CompressTransitions],
-    &[NwaPass::CompressTransitions, NwaPass::PushFinalWeights, NwaPass::PruneUnreachable, NwaPass::PruneDeadEnds, NwaPass::Minimize],
-    &[NwaPass::PruneUnreachable, NwaPass::CompressTransitions, NwaPass::PushFinalWeights, NwaPass::PruneDeadEnds, NwaPass::Minimize],
-    &[NwaPass::Minimize, NwaPass::CompressTransitions, NwaPass::PushFinalWeights, NwaPass::PruneUnreachable, NwaPass::PruneDeadEnds],
-    &[NwaPass::PushFinalWeights, NwaPass::PruneUnreachable, NwaPass::PruneDeadEnds, NwaPass::CompressTransitions, NwaPass::Minimize],
-    &[NwaPass::PruneUnreachable, NwaPass::PushFinalWeights, NwaPass::Minimize, NwaPass::CompressTransitions, NwaPass::PruneDeadEnds],
-    &[NwaPass::CompressTransitions, NwaPass::PushFinalWeights, NwaPass::Minimize, NwaPass::PruneUnreachable, NwaPass::PruneDeadEnds],
-    &[NwaPass::PushFinalWeights, NwaPass::CompressTransitions, NwaPass::Minimize, NwaPass::PruneUnreachable, NwaPass::PruneDeadEnds],
-    &[NwaPass::PruneUnreachable, NwaPass::PruneDeadEnds, NwaPass::CompressTransitions, NwaPass::PushFinalWeights, NwaPass::PushWeightsToInitial, NwaPass::Minimize],
-];
-
 impl NWA {
     pub fn simplify(&mut self) {
         if self.states.len() == 0 {
             return;
         }
 
-        if self.states.len() > 1000 && optimize_debug() {
-            self.run_optimization_experiment();
-        } else if BENCHMARK_DEBUG {
+        if BENCHMARK_DEBUG {
             let initial_states = self.states.len();
             let mut internal = self.clone();
             let internal_start = std::time::Instant::now();
@@ -1011,74 +901,6 @@ impl NWA {
         let mut fst = self.to_rustfst();
         minimize_with_config(&mut fst, MinimizeConfig::default().with_allow_nondet(true)).unwrap();
         *self = NWA::from_rustfst(&fst);
-    }
-
-    fn run_optimization_experiment(&mut self) {
-        let initial_clone = self.clone();
-        let initial_states = self.states.len();
-        println!("[NWA Optimize] Starting experiment with {} states.", initial_states);
-
-        let mut best_result: Option<(NWA, std::time::Duration, usize)> = None;
-
-        for (i, &ordering) in NWA_PASS_ORDERINGS.iter().enumerate() {
-            let mut nwa = initial_clone.clone();
-            let start_time = std::time::Instant::now();
-            let mut iterations = 0;
-            let mut timed_out = false;
-            let mut last_changing_passes: Vec<NwaPass> = Vec::new();
-
-            loop {
-                if iterations >= MAX_OPTIMIZE_ITERATIONS {
-                    timed_out = true;
-                    break;
-                }
-                iterations += 1;
-
-                let mut changed_in_iteration = false;
-                let mut current_changing_passes: Vec<NwaPass> = Vec::new();
-                for &pass in ordering {
-                    let changed = match pass {
-                        NwaPass::PruneUnreachable => nwa.prune_unreachable(),
-                        NwaPass::PruneDeadEnds => nwa.prune_dead_ends(),
-                        NwaPass::PushFinalWeights => nwa.push_final_weights_along_epsilons(),
-                        NwaPass::PushWeightsToInitial => nwa.push_weights_to_initial(),
-                        NwaPass::CompressTransitions => nwa.compress_transitions(),
-                        NwaPass::Minimize => nwa.minimize_states(),
-                    };
-                    if changed {
-                        current_changing_passes.push(pass);
-                    }
-                    changed_in_iteration |= changed;
-                }
-                if !changed_in_iteration {
-                    last_changing_passes.clear();
-                    break;
-                } else {
-                    last_changing_passes = current_changing_passes;
-                }
-            }
-
-            let elapsed = start_time.elapsed();
-            let final_states = nwa.states.len();
-
-            let ordering_str = format!("{:?}", ordering);
-            let timeout_str = if timed_out {
-                format!(" (TIMED OUT, changing: {:?})", last_changing_passes)
-            } else {
-                "".to_string()
-            };
-            println!("[NWA Optimize] Ordering #{}: {}, Time: {:.2?}, States: {}{}", i, ordering_str, elapsed, final_states, timeout_str);
-
-            if !timed_out && best_result.as_ref().map_or(true, |(_, best_time, best_states)| {
-                final_states < *best_states || (final_states == *best_states && elapsed < *best_time)
-            }) {
-                best_result = Some((nwa, elapsed, final_states));
-            }
-        }
-
-        if let Some((best_nwa, _, _)) = best_result {
-            *self = best_nwa;
-        }
     }
 
     pub fn simplify_with_rustfst(&mut self) -> bool {
@@ -1160,7 +982,7 @@ impl NWA {
         total_changed
     }
 
-    fn minimize_states(&mut self) -> bool {
+    pub fn minimize_states(&mut self) -> bool {
         crate::debug!(7, "[NWA] Minimizing states...");
         let n = self.states.len();
         if n <= 1 {
@@ -1228,7 +1050,7 @@ impl NWA {
         changed
     }
 
-    fn push_final_weights_along_epsilons(&mut self) -> bool {
+    pub fn push_final_weights_along_epsilons(&mut self) -> bool {
         crate::debug!(7, "[NWA] Pushing final weights along epsilons...");
         let n = self.states.len();
         if n == 0 {
@@ -1290,7 +1112,7 @@ impl NWA {
         changed
     }
 
-    fn push_weights_to_initial(&mut self) -> bool {
+    pub fn push_weights_to_initial(&mut self) -> bool {
         let n = self.states.len();
         if n == 0 { return false; }
 
@@ -1685,143 +1507,5 @@ impl NWA {
         self.body.start_states = new_start_states;
         self.states = new_states;
         true
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct DeterminizeAndSimplifyConfig {
-    pub nwa_passes: Vec<NwaPass>,
-    pub dwa_passes: Vec<DwaPass>,
-}
-
-impl NWA {
-    pub fn determinize_and_simplify(mut self, context: &str) -> DWA {
-        if self.states.len() > 1000 && optimize_debug() {
-             return self.run_determinize_and_simplify_experiment(context);
-        }
-        
-        // Production configs based on experiments
-        let config = match context {
-            "Precompute1" => DeterminizeAndSimplifyConfig {
-                // Best: NWA=[PruneDeadEnds, PruneUnreachable, CompressTransitions] | DWA=[Minimize]
-                nwa_passes: vec![NwaPass::PruneDeadEnds, NwaPass::PruneUnreachable, NwaPass::CompressTransitions],
-                dwa_passes: vec![DwaPass::Minimize],
-            },
-            "FinalDWA" => DeterminizeAndSimplifyConfig {
-                // Best: NWA=[] | DWA=[PruneDeadEnds, Minimize]
-                nwa_passes: vec![],
-                dwa_passes: vec![DwaPass::PruneDeadEnds, DwaPass::Minimize],
-            },
-            "SuperDWA" => DeterminizeAndSimplifyConfig {
-                // Fallback / Default for SuperDWA (was not large enough to trigger experiment in test)
-                // Using a balanced approach
-                nwa_passes: vec![NwaPass::CompressTransitions],
-                dwa_passes: vec![DwaPass::PruneDeadEnds, DwaPass::Minimize],
-            },
-            _ => DeterminizeAndSimplifyConfig {
-                // Default fallback
-                nwa_passes: vec![NwaPass::CompressTransitions],
-                dwa_passes: vec![
-                    DwaPass::PruneDeadEnds,
-                    DwaPass::Minimize,
-                    DwaPass::PushWeights,
-                    DwaPass::PushWeightsToInitial,
-                    DwaPass::PruneUnreachable,
-                ],
-            }
-        };
-        self.determinize_and_simplify_with_config(config)
-    }
-
-    pub fn determinize_and_simplify_with_config(&mut self, config: DeterminizeAndSimplifyConfig) -> DWA {
-        // Run NWA passes
-        for pass in config.nwa_passes {
-             match pass {
-                NwaPass::PruneUnreachable => { self.prune_unreachable(); },
-                NwaPass::PruneDeadEnds => { self.prune_dead_ends(); },
-                NwaPass::PushFinalWeights => { self.push_final_weights_along_epsilons(); },
-                NwaPass::PushWeightsToInitial => { self.push_weights_to_initial(); },
-                NwaPass::CompressTransitions => { self.compress_transitions(); },
-                NwaPass::Minimize => { self.minimize_states(); },
-            }
-        }
-        
-        let mut dwa = self.determinize();
-        
-        // Run DWA passes
-        for pass in config.dwa_passes {
-             match pass {
-                DwaPass::PruneUnreachable => { dwa.prune_unreachable(); },
-                DwaPass::PruneDeadEnds => { dwa.prune_dead_ends(); },
-                DwaPass::PushWeights => { dwa.push_weights_into_transitions_and_finals(); },
-                DwaPass::PushWeightsToInitial => { dwa.push_weights_to_initial(); },
-                DwaPass::Minimize => { dwa.minimize_states(); },
-            }
-        }
-        dwa
-    }
-    
-    fn run_determinize_and_simplify_experiment(self, context: &str) -> DWA {
-        let initial_states = self.states.len();
-        println!("[Det&Sim Experiment] [{}] Starting experiment with {} NWA states.", context, initial_states);
-        
-        // Define interesting NWA sequences
-        let nwa_configs: Vec<Vec<NwaPass>> = vec![
-            vec![], // Baseline: no NWA simplification
-            vec![NwaPass::CompressTransitions],
-            vec![NwaPass::PruneUnreachable, NwaPass::CompressTransitions],
-            vec![NwaPass::PruneDeadEnds, NwaPass::PruneUnreachable, NwaPass::CompressTransitions],
-            vec![NwaPass::CompressTransitions, NwaPass::Minimize],
-            vec![NwaPass::PushFinalWeights, NwaPass::CompressTransitions],
-            // Add more aggressive ones
-            vec![NwaPass::PruneUnreachable, NwaPass::CompressTransitions, NwaPass::Minimize],
-        ];
-
-        // Define interesting DWA sequences
-        let dwa_configs: Vec<Vec<DwaPass>> = vec![
-            vec![DwaPass::PruneDeadEnds, DwaPass::Minimize, DwaPass::PushWeights, DwaPass::PushWeightsToInitial, DwaPass::PruneUnreachable], // Standard
-            vec![DwaPass::Minimize],
-            vec![DwaPass::PruneDeadEnds, DwaPass::Minimize],
-            vec![DwaPass::PushWeights, DwaPass::Minimize],
-            vec![DwaPass::Minimize, DwaPass::PushWeights],
-            vec![DwaPass::PruneUnreachable, DwaPass::PruneDeadEnds, DwaPass::Minimize],
-        ];
-
-        let mut best_result: Option<(DWA, std::time::Duration, usize)> = None;
-        let mut best_config_idx = (0, 0);
-        
-        let initial_nwa = self; // moved here
-        
-        for (n_idx, nwa_pass_seq) in nwa_configs.iter().enumerate() {
-            for (d_idx, dwa_pass_seq) in dwa_configs.iter().enumerate() {
-                let mut nwa_clone = initial_nwa.clone();
-                
-                let start_time = std::time::Instant::now();
-                
-                let config = DeterminizeAndSimplifyConfig {
-                    nwa_passes: nwa_pass_seq.clone(),
-                    dwa_passes: dwa_pass_seq.clone(),
-                };
-                
-                let dwa = nwa_clone.determinize_and_simplify_with_config(config);
-                
-                let elapsed = start_time.elapsed();
-                let final_states = dwa.states.len();
-                
-                println!("[Det&Sim Experiment] [{}] Config N#{}-D#{}: NWA={:?} | DWA={:?} -> Time: {:.2?}, States: {}", 
-                    context, n_idx, d_idx, nwa_pass_seq, dwa_pass_seq, elapsed, final_states);
-                
-                if best_result.as_ref().map_or(true, |(_, best_time, best_states)| {
-                    // Prefer fewer states, then faster time
-                    final_states < *best_states || (final_states == *best_states && elapsed < *best_time)
-                }) {
-                    best_result = Some((dwa, elapsed, final_states));
-                    best_config_idx = (n_idx, d_idx);
-                }
-            }
-        }
-        
-        println!("[Det&Sim Experiment] [{}] Winner: Config N#{}-D#{}", context, best_config_idx.0, best_config_idx.1);
-        best_result.unwrap().0
     }
 }

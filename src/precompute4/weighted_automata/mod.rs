@@ -8,6 +8,7 @@ pub mod dwa;
 pub mod json;
 pub mod nwa;
 pub mod simplification;
+pub mod simplification_experiment;
 pub mod unroll;
 mod test_determinization;
 pub(crate) mod test_weighted_automata;
