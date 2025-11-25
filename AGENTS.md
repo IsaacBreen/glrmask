@@ -67,6 +67,8 @@ RUST_TEST_THREADS=1 RUSTFLAGS=-Awarnings ENABLE_PROGRESS_BAR=0 CARGO_PROFILE_DEV
 
 ## Research & Paper Writing
 
+Paper-related material is stored in `gcg-paper/`.
+
 ### Notes Structure
 
 Notes are organized in `notes/`:
