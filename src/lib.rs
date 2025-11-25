@@ -20,3 +20,4 @@ mod state_equivalence_analysis_finite_automata;
 
 pub mod constraint_vocab;
 pub mod constraint_precompute;
+mod test_finite_automata;
