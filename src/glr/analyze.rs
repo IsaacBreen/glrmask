@@ -297,7 +297,7 @@ pub fn remove_productions_with_undefined_nonterminals(
             break;
         }
 
-        crate::debug!(3, "Removing {} productions with undefined non-terminals.", removed.len());
+        crate::debug!(5, "Removing {} productions with undefined non-terminals.", removed.len());
 
         let all_rhs_nonterminals: BTreeSet<NonTerminal> = removed
             .iter()
@@ -309,14 +309,14 @@ pub fn remove_productions_with_undefined_nonterminals(
             })
             .collect();
 
-        crate::debug!(2, "Missing non-terminals ({}) in productions:", all_rhs_nonterminals.len());
+        crate::debug!(4, "Missing non-terminals ({}) in productions:", all_rhs_nonterminals.len());
         for nt in all_rhs_nonterminals.difference(&defined_lhs) {
-            crate::debug!(4, "  {}", nt.0);
+            crate::debug!(6, "  {}", nt.0);
         }
 
-        crate::debug!(5, "Removed productions:");
+        crate::debug!(7, "Removed productions:");
         for (_, prod) in &removed {
-            crate::debug!(5, "  {}", prod);
+            crate::debug!(7, "  {}", prod);
         }
 
         current = kept;
@@ -380,7 +380,7 @@ pub fn drop_dead(productions: &[Production]) -> Vec<Production> {
         .cloned()
         .collect();
 
-    crate::debug!(2, "Dropped {} productions", productions.len() - new_productions.len());
+    crate::debug!(4, "Dropped {} productions", productions.len() - new_productions.len());
 
     new_productions
 }
@@ -456,13 +456,13 @@ pub fn filter_productions_by_reachability(
     interesting_symbols: &BTreeSet<Symbol>,
 ) -> Vec<Production> {
     if interesting_symbols.is_empty() {
-        crate::debug!(2, "filter_productions_by_reachability: interesting_symbols is empty, returning no productions.");
+        crate::debug!(4, "filter_productions_by_reachability: interesting_symbols is empty, returning no productions.");
         return Vec::new();
     }
 
     let can_derive_set =
         compute_can_derive_interesting(initial_productions, interesting_symbols);
-    crate::debug!(3, "filter_productions_by_reachability: CanDeriveInteresting set: {:?}", can_derive_set.iter().map(|nt| &nt.0).collect::<Vec<_>>());
+    crate::debug!(5, "filter_productions_by_reachability: CanDeriveInteresting set: {:?}", can_derive_set.iter().map(|nt| &nt.0).collect::<Vec<_>>());
 
     let mut kept_productions = Vec::new();
     for production in initial_productions {
@@ -480,7 +480,7 @@ pub fn filter_productions_by_reachability(
         if lhs_can_derive_interesting && rhs_can_derive_interesting_for_this_rule {
             kept_productions.push(production.clone());
         } else {
-            crate::debug!(4, "Filtering out production: {} (LHS can derive interesting: {}, RHS of this rule can derive interesting: {})", production, lhs_can_derive_interesting, rhs_can_derive_interesting_for_this_rule);
+            crate::debug!(6, "Filtering out production: {} (LHS can derive interesting: {}, RHS of this rule can derive interesting: {})", production, lhs_can_derive_interesting, rhs_can_derive_interesting_for_this_rule);
         }
     }
 
@@ -673,7 +673,7 @@ pub fn resolve_direct_right_recursion(
                 lhs: new_nt.clone(),
                 rhs: new_rhs,
             };
-            crate::debug!(5, "  Transforming recursive rule '{}' -> '{}'", rec_rule, new_prod);
+            crate::debug!(7, "  Transforming recursive rule '{}' -> '{}'", rec_rule, new_prod);
             new_productions.push(new_prod);
         }
 
@@ -682,7 +682,7 @@ pub fn resolve_direct_right_recursion(
             lhs: new_nt.clone(),
             rhs: Vec::new(),
         };
-        crate::debug!(5, "  Adding new epsilon rule: '{}'", epsilon_prod);
+        crate::debug!(7, "  Adding new epsilon rule: '{}'", epsilon_prod);
         new_productions.push(epsilon_prod);
     }
 
