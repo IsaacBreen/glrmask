@@ -240,7 +240,6 @@ class Model(GraphProvider):
     internal_to_original_map: Dict[int, RangeSetOut]
     all_internal_llm_tokens_bitset: LLMTokenSet
     ignore_terminal_id: Optional[int]
-    original_to_dummy_map: Dict[int, int]
     state: Dict[int, GSS]
     suppress_stats_report: bool = True
     last_get_mask_cost: int = 0
@@ -252,97 +251,97 @@ class Model(GraphProvider):
         data = json.loads(s)
         dumps, bs_from_json = json.dumps, ffi.HybridBitset.from_json_string
 
-        py_vocab = ffi.StageVocab.from_json_string(dumps(data['precompute4_vocab']))
-        vocab = data['precompute4_vocab']
+        py_vocab = ffi.StageVocab.from_json_string(dumps(data['vocab']))
+        vocab = data['vocab']
         all_internal_llm_tokens_bitset = RangeSet.from_ranges([(0, vocab['internal_max_llm_token'])])
 
-        def _parse_weight(w_json: Any) -> LLMTokenSet:
-            if w_json is None:
+        def parse_simple_bitset(bs_json: Any) -> LLMTokenSet:
+            if bs_json == "ALL":
                 return all_internal_llm_tokens_bitset
-            # Handle SimpleBitset serialization (assuming it might be wrapped or direct RangeSetBlaze)
-            # If it's a dict with "rsb", use that. If it's a list, assume ranges or integers.
-            # For now, assuming it matches what RangeSet.from_json_string expects or is a list of ranges.
-            # If it's from Rust's RangeSetBlaze serde, it might be a list of integers.
-            # But here we assume it's compatible with our RangeSet loading or we adapt.
-            # Given we don't have the exact JSON format of SimpleBitset here, we try standard approaches.
-            try:
-                if isinstance(w_json, dict) and 'inner' in w_json:
-                    # HybridBitset style
-                    return RangeSet.from_ranges(bs_from_json(dumps(w_json)).to_ranges())
-                if isinstance(w_json, dict) and 'rsb' in w_json:
-                    # SimpleBitset style?
-                    return RangeSet.from_ranges(bs_from_json(dumps(w_json['rsb'])).to_ranges())
-                # Fallback: try parsing as HybridBitset directly
-                return RangeSet.from_ranges(bs_from_json(dumps(w_json)).to_ranges())
-            except Exception:
-                # If it's a list of integers (RangeSetBlaze default serde), we might need to handle it.
-                # But let's assume the provided JSON uses the compatible format.
-                return all_internal_llm_tokens_bitset
+            ranges = []
+            for item in bs_json:
+                if isinstance(item, int):
+                    ranges.append((item, item))
+                else:
+                    ranges.append(tuple(item))
+            return RangeSet.from_ranges(ranges)
 
         # Load DWA
-        dwa_json = data['precomputed4']
-        states_data = dwa_json['states']
+        dwa_json = data['dwa']
+        weight_pool = [parse_simple_bitset(w) for w in dwa_json['weight_pool']]
+
         dwa_states = []
-        for s in states_data:
-            trans_map = dict(s['transitions'])  # label -> target
-            weights_map = dict(s['trans_weights'])  # label -> weight
+        for s_arr in dwa_json['states']:
+            final_weight_idx, state_weight_idx, transitions_arr = None, None, []
+            if len(s_arr) == 1:
+                [transitions_arr] = s_arr
+            elif len(s_arr) == 2:
+                final_weight_idx, transitions_arr = s_arr
+            elif len(s_arr) == 3:
+                final_weight_idx, state_weight_idx, transitions_arr = s_arr
 
             merged_trans = {}
-            for label_str, target in trans_map.items():
-                label = int(label_str)
-                w_json = weights_map.get(label_str)
-                weight = _parse_weight(w_json) if w_json is not None else all_internal_llm_tokens_bitset
-                merged_trans[label] = (target, weight)
+            for dest, weight_idx, labels in transitions_arr:
+                weight = weight_pool[weight_idx] if weight_idx is not None else all_internal_llm_tokens_bitset
+                for label in labels:
+                    merged_trans[label] = (dest, weight)
 
-            st_weight = _parse_weight(s.get('state_weight')) if s.get('state_weight') is not None else None
-            fin_weight = _parse_weight(s.get('final_weight')) if s.get('final_weight') is not None else None
-
+            st_weight = weight_pool[state_weight_idx] if state_weight_idx is not None else None
+            fin_weight = weight_pool[final_weight_idx] if final_weight_idx is not None else None
             dwa_states.append(DWAState(merged_trans, st_weight, fin_weight))
 
         start_state = dwa_json['start_state']
         dwa = DWA(dwa_states, start_state)
 
         # Tokenizer
-        dfa_data = data['tokenizer']['dfa']
-        dfa_states = [DFAState(
-            transitions={int(k): v for k, v in s['transitions'].get('data', {}).items()},
-            finalizers=set(s['finalizers']),
-            possible_future_group_ids=set(s['possible_future_group_ids'])
-        ) for s in dfa_data['states']]
+        dfa_data = data['tokenizer_dfa']
+        num_states = len(dfa_data['state_finalizers'])
+        dfa_states = []
+        for i in range(num_states):
+            transitions = {}
+            for u8set, target in dfa_data['state_transitions'][i]:
+                for item in u8set:
+                    if isinstance(item, int):
+                        transitions[item] = target
+                    else:
+                        for byte in range(item[0], item[1] + 1):
+                            transitions[byte] = target
+
+            finalizers = set(dfa_data['state_finalizers'][i])
+            possible_future_group_ids = set(dfa_data['state_possible_future_group_ids'][i])
+            dfa_states.append(DFAState(transitions, finalizers, possible_future_group_ids))
         tokenizer = PyTokenizer(dfa_states, dfa_data['start_state'], set(dfa_data['non_greedy_finalizers']))
 
         # Parser Table
         parser_data = data['parser']
         py_table: Dict[int, Row] = {}
-        for state_id_str, row_data in parser_data['stage_7_table']:
-            state_id, py_row = int(state_id_str), Row()
-            for term_id_str, action_data in row_data['shifts_and_reduces_full']:
-                term_id, variant = int(term_id_str), action_data['variant']
-                if variant == 'Shift':
-                    py_row.actions[term_id] = action_data['state_id']
-                elif variant == 'Reduce':
-                    py_row.actions[term_id] = Reduce(action_data['nonterminal_id'], action_data['len'], tuple(sorted(action_data['production_ids'])))
-                elif variant == 'Split':
-                    reduces = {int(l): {int(n): tuple(sorted(p)) for n, p in nd} for l, nd in action_data['reduces']}
-                    py_row.actions[term_id] = Split(action_data['shift'], reduces)
-            py_row.gotos = {int(nt): goto['state_id'] for nt, goto in row_data['gotos'] if goto['state_id'] is not None}
+        for state_id, row_data in parser_data['stage_7_table']:
+            py_row = Row()
+            for term_id, action_data in row_data[0]:
+                variant = action_data[0]
+                if variant == 'S':
+                    py_row.actions[term_id] = action_data[1]
+                elif variant == 'R':
+                    py_row.actions[term_id] = Reduce(action_data[1], action_data[2], ())
+                elif variant == 'X':
+                    reduces_by_len = collections.defaultdict(dict)
+                    for nt_id, length in action_data[2]:
+                        reduces_by_len[length][nt_id] = ()
+                    py_row.actions[term_id] = Split(action_data[1], dict(reduces_by_len))
+            py_row.gotos = {nt: goto[0] for nt, goto in row_data[1] if goto[0] is not None}
             py_table[state_id] = py_row
         parser_table = ParserTable(parser_data['start_state_id'], py_table)
 
-        # Misc data
+        matches_pool = [RangeSet.from_ranges(ffi.HybridBitset(p).to_ranges()) for p in data['matches_pool']]
         pmc_json = data['possible_matches']
         possible_matches_cache = {}
-        for tsid_json, term_map_json in pmc_json:
-            tsid = int(tsid_json)
+        for tsid_str, term_map_json in pmc_json.items():
+            tsid = int(tsid_str)
             term_map = {}
-            for term_id_json, bv_json in term_map_json:
-                term_id = int(term_id_json)
-                bv = RangeSet.from_ranges(bs_from_json(dumps(bv_json)).to_ranges())
-                term_map[term_id] = bv
+            for term_id_str, pool_idx in term_map_json.items():
+                term_id = int(term_id_str)
+                term_map[term_id] = matches_pool[pool_idx]
             possible_matches_cache[tsid] = term_map
-
-        original_to_dummy_map_json = data.get('original_to_dummy_map', [])
-        original_to_dummy_map = {int(k): int(v) for k, v in original_to_dummy_map_json}
 
         # Initial state
         initial_acc = PyAcc({}, all_internal_llm_tokens_bitset)
@@ -355,11 +354,10 @@ class Model(GraphProvider):
             tokenizer_initial_state=tokenizer.initial_state_id(),
             vocab=py_vocab,
             possible_matches_cache=possible_matches_cache,
-            id_to_token={v: bytes(k) for k, v in data['original_llm_vocab']['llm_token_map']},
+            id_to_token={v: bytes(k) for k, v in data['original_llm_vocab']},
             internal_to_original_map={int(k): RangeSetOut.from_indices(v) for k, v in dict(vocab['internal_to_original']).items()},
             all_internal_llm_tokens_bitset=all_internal_llm_tokens_bitset,
             ignore_terminal_id=parser_data.get('ignore_terminal_id'),
-            original_to_dummy_map=original_to_dummy_map,
             state={tokenizer.initial_state_id(): initial_gss},
         )
 
@@ -411,11 +409,7 @@ class Model(GraphProvider):
             end_state, matches = self.tokenizer.execute_from_state(token_bytes[offset:], tsid)
 
             for term_id, width in matches:
-                proc_gss = gss
-                dummy_id = self.original_to_dummy_map.get(term_id)
-                if dummy_id is not None:
-                    proc_gss = self._process_token(proc_gss, dummy_id)
-                proc_gss = self._process_token(proc_gss, term_id)
+                proc_gss = self._process_token(gss, term_id)
 
                 if end_state is not None and term_id in self.tokenizer.states[end_state].possible_future_group_ids:
                     proc_gss = self._disallow_terminal_in_state(proc_gss, end_state, term_id)
