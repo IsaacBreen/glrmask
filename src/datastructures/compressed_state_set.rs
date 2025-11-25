@@ -1,247 +1,27 @@
 use std::hash::{Hash, Hasher};
 use rustc_hash::FxHasher;
 use crate::datastructures::state_set::StateSet;
-use crate::json_serialization::{JSONConvertible, JSONNode};
+use crate::datastructures::bitset::Bitset;
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct DenseStateSet {
-    pub words: Vec<u64>,
-}
+/// Type alias for backward compatibility.
+/// DenseStateSet is now unified with Bitset.
+pub type DenseStateSet = Bitset;
 
-impl DenseStateSet {
-    // #[time_it]
-    pub fn new(num_bits: usize) -> Self {
-        let num_words = (num_bits + 63) / 64;
-        Self {
-            words: vec![0; num_words],
-        }
-    }
-
-    pub fn new_from_slice(num_bits: usize, slice: &[usize]) -> Self {
-        let num_words = (num_bits + 63) / 64;
-        let mut words = vec![0; num_words];
-        for &bit in slice {
-            words[bit / 64] |= 1u64 << (bit % 64);
-        }
-        Self { words }
-    }
-
-    pub fn empty() -> Self {
-        Self { words: Vec::new() }
-    }
-
-    #[inline]
-    pub fn insert(&mut self, bit: usize) {
-        let word_idx = bit / 64;
-        if word_idx >= self.words.len() {
-            self.words.resize(word_idx + 1, 0);
-        }
-        unsafe {
-            *self.words.get_unchecked_mut(word_idx) |= 1u64 << (bit % 64);
-        }
-    }
-
-    #[inline]
-    pub fn contains(&self, bit: usize) -> bool {
-        let word_idx = bit / 64;
-        if word_idx >= self.words.len() {
-            return false;
-        }
-        unsafe {
-            (*self.words.get_unchecked(word_idx) & (1u64 << (bit % 64))) != 0
-        }
-    }
-
-    #[inline]
-    pub fn union_with(&mut self, other: &DenseStateSet) {
-        if other.words.len() > self.words.len() {
-            self.words.resize(other.words.len(), 0);
-        }
-        
-        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
-        unsafe {
-            self.union_with_avx2(other);
-        }
-        
-        #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
-        unsafe {
-            self.union_with_neon(other);
-        }
-        
-        #[cfg(not(any(
-            all(target_arch = "x86_64", target_feature = "avx2"),
-            all(target_arch = "aarch64", target_feature = "neon")
-        )))]
-        {
-            // Scalar fallback - process 8 words at a time for better pipelining
-            let other_words = &other.words;
-            let len = other_words.len();
-            let chunks = len / 8;
-            let remainder = len % 8;
-            
-            for i in 0..chunks {
-                let base = i * 8;
-                unsafe {
-                    *self.words.get_unchecked_mut(base) |= *other_words.get_unchecked(base);
-                    *self.words.get_unchecked_mut(base + 1) |= *other_words.get_unchecked(base + 1);
-                    *self.words.get_unchecked_mut(base + 2) |= *other_words.get_unchecked(base + 2);
-                    *self.words.get_unchecked_mut(base + 3) |= *other_words.get_unchecked(base + 3);
-                    *self.words.get_unchecked_mut(base + 4) |= *other_words.get_unchecked(base + 4);
-                    *self.words.get_unchecked_mut(base + 5) |= *other_words.get_unchecked(base + 5);
-                    *self.words.get_unchecked_mut(base + 6) |= *other_words.get_unchecked(base + 6);
-                    *self.words.get_unchecked_mut(base + 7) |= *other_words.get_unchecked(base + 7);
-                }
-            }
-            
-            // Handle remaining words
-            for i in (chunks * 8)..len {
-                unsafe {
-                    *self.words.get_unchecked_mut(i) |= *other_words.get_unchecked(i);
-                }
-            }
-        }
-    }
-    
-    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
-    #[inline]
-    unsafe fn union_with_avx2(&mut self, other: &DenseStateSet) {
-        use std::arch::x86_64::*;
-        
-        let other_words = &other.words;
-        let len = other_words.len();
-        let simd_len = (len / 4) * 4; // Process 4 u64s (256 bits) at a time
-        
-        for i in (0..simd_len).step_by(4) {
-            let a = _mm256_loadu_si256(self.words.as_ptr().add(i) as *const __m256i);
-            let b = _mm256_loadu_si256(other_words.as_ptr().add(i) as *const __m256i);
-            let result = _mm256_or_si256(a, b);
-            _mm256_storeu_si256(self.words.as_mut_ptr().add(i) as *mut __m256i, result);
-        }
-        
-        // Handle remaining words
-        for i in simd_len..len {
-            *self.words.get_unchecked_mut(i) |= *other_words.get_unchecked(i);
-        }
-    }
-    
-    #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
-    #[inline]
-    unsafe fn union_with_neon(&mut self, other: &DenseStateSet) {
-        use std::arch::aarch64::*;
-        
-        let other_words = &other.words;
-        let len = other_words.len();
-        let simd_len = (len / 2) * 2; // Process 2 u64s (128 bits) at a time
-        
-        for i in (0..simd_len).step_by(2) {
-            let a = vld1q_u64(self.words.as_ptr().add(i));
-            let b = vld1q_u64(other_words.as_ptr().add(i));
-            let result = vorrq_u64(a, b);
-            vst1q_u64(self.words.as_mut_ptr().add(i), result);
-        }
-        
-        // Handle remaining words
-        for i in simd_len..len {
-            *self.words.get_unchecked_mut(i) |= *other_words.get_unchecked(i);
-        }
-    }
-
-    pub fn iter(&self) -> DenseStateSetIter {
-        DenseStateSetIter {
-            set: self,
-            word_idx: 0,
-            current_word: if self.words.is_empty() { 0 } else { self.words[0] },
-        }
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.words.iter().all(|&w| w == 0)
-    }
-
-    pub fn clear(&mut self) {
-        self.words.fill(0);
-    }
-
-    pub fn len(&self) -> usize {
-        self.words.iter().map(|w| w.count_ones() as usize).sum()
-    }
-}
-
-pub struct DenseStateSetIter<'a> {
-    set: &'a DenseStateSet,
-    word_idx: usize,
-    current_word: u64,
-}
-
-impl<'a> Iterator for DenseStateSetIter<'a> {
-    type Item = usize;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            if self.current_word != 0 {
-                let t = self.current_word.trailing_zeros();
-                self.current_word &= !(1u64 << t);
-                return Some(self.word_idx * 64 + t as usize);
-            }
-            self.word_idx += 1;
-            if self.word_idx >= self.set.words.len() {
-                return None;
-            }
-            self.current_word = self.set.words[self.word_idx];
-        }
-    }
-}
-
-impl<'a> IntoIterator for &'a DenseStateSet {
-    type Item = usize;
-    type IntoIter = DenseStateSetIter<'a>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.iter()
-    }
-}
-
-impl FromIterator<usize> for DenseStateSet {
-    fn from_iter<T: IntoIterator<Item = usize>>(iter: T) -> Self {
-        let mut set = DenseStateSet::empty();
-        for i in iter {
-            set.insert(i);
-        }
-        set
-    }
-}
-
-impl JSONConvertible for DenseStateSet {
-    fn to_json(&self) -> JSONNode {
-        let items: Vec<usize> = self.iter().collect();
-        items.to_json()
-    }
-
-    fn from_json(node: JSONNode) -> Result<Self, String> {
-        let items = Vec::<usize>::from_json(node)?;
-        let mut set = DenseStateSet::empty();
-        for item in items {
-            set.insert(item);
-        }
-        Ok(set)
-    }
-}
-
+/// A sparse state set that tracks which words have been modified for efficient clearing.
+/// Uses a dense bitset internally but maintains a list of dirty word indices.
 pub struct SparseStateSet {
-    pub dense: DenseStateSet,
+    pub dense: Bitset,
     pub dirty_words: Vec<usize>,
 }
 
 impl SparseStateSet {
-    // #[time_it]
     pub fn new(num_bits: usize) -> Self {
         Self {
-            dense: DenseStateSet::new(num_bits),
+            dense: Bitset::new(num_bits),
             dirty_words: Vec::new(),
         }
     }
 
-    // #[time_it]
     #[inline(always)]
     pub fn insert(&mut self, bit: usize) -> bool {
         let word_idx = bit / 64;
@@ -272,9 +52,11 @@ impl SparseStateSet {
     }
 }
 
+/// A compressed representation of a state set using sparse storage.
+/// Stores only non-zero words as (word_index, word_value) pairs.
 #[derive(Clone, Eq, Debug, Default)]
 pub struct CompressedStateSet {
-    // Sorted by word index. (word_index, word_value)
+    /// Sorted by word index. (word_index, word_value)
     pub words: Vec<(u32, u64)>,
     pub hash: u64,
 }
@@ -295,7 +77,6 @@ impl Hash for CompressedStateSet {
 }
 
 impl CompressedStateSet {
-    // #[inline]
     pub fn new() -> Self {
         Self {
             words: Vec::new(),
@@ -304,7 +85,6 @@ impl CompressedStateSet {
     }
 
     #[inline]
-    // #[time_it]
     pub fn from_sparse(sparse: &SparseStateSet) -> Self {
         let mut words = Vec::with_capacity(sparse.dirty_words.len());
         for &idx in &sparse.dirty_words {
@@ -325,7 +105,6 @@ impl CompressedStateSet {
     }
 
     #[inline]
-    // #[time_it]
     pub fn reuse_from_sparse(sparse: &SparseStateSet, buffer: &mut Self, _sort_scratch: &mut Vec<usize>) {
         buffer.words.clear();
 
@@ -345,7 +124,6 @@ impl CompressedStateSet {
     }
 
     #[inline(always)]
-    // #[time_it]
     pub fn insert(&mut self, bit: usize) -> bool {
         let word_idx = (bit >> 6) as u32;
         let mask = 1u64 << (bit & 0x3F);
@@ -443,7 +221,6 @@ pub struct CompressedStateSetIter<'a> {
 impl<'a> Iterator for CompressedStateSetIter<'a> {
     type Item = usize;
 
-    // #[time_it]
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             if self.current_word != 0 {

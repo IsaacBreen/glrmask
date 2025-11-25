@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 use crate::datastructures::hybrid_bitset::RangeSet;
+use crate::json_serialization::{JSONConvertible, JSONNode};
 use range_set_blaze::RangeSetBlaze;
 use std::iter::FromIterator;
 use std::ops::{
@@ -19,6 +20,29 @@ impl Bitset {
     /// Creates a new, empty Bitset.
     pub fn zeros() -> Self {
         Bitset { words: Vec::new() }
+    }
+    
+    /// Alias for `zeros()` - creates an empty bitset.
+    pub fn empty() -> Self {
+        Self::zeros()
+    }
+    
+    /// Creates a new Bitset with capacity for `num_bits` bits, all initialized to zero.
+    pub fn new(num_bits: usize) -> Self {
+        let num_words = (num_bits + WORD_SIZE - 1) / WORD_SIZE;
+        Self {
+            words: vec![0; num_words],
+        }
+    }
+    
+    /// Creates a new Bitset from a slice of indices.
+    pub fn new_from_slice(num_bits: usize, slice: &[usize]) -> Self {
+        let num_words = (num_bits + WORD_SIZE - 1) / WORD_SIZE;
+        let mut words = vec![0; num_words];
+        for &bit in slice {
+            words[bit / WORD_SIZE] |= 1u64 << (bit % WORD_SIZE);
+        }
+        Self { words }
     }
 
     /// Creates a new Bitset with all indices from 0 up to `len` (exclusive) set to true.
@@ -106,6 +130,11 @@ impl Bitset {
     pub fn clear(&mut self) {
         self.words.clear();
     }
+    
+    /// Clears all bits but keeps the allocated capacity (fills with zeros).
+    pub fn clear_keep_capacity(&mut self) {
+        self.words.fill(0);
+    }
 
     /// Returns an iterator over the indices of the set bits.
     pub fn iter_indices(&self) -> impl Iterator<Item = usize> + '_ {
@@ -122,11 +151,170 @@ impl Bitset {
                 })
             })
     }
+    
+    /// Returns an efficient iterator over the indices of set bits.
+    pub fn iter(&self) -> BitsetIter {
+        BitsetIter {
+            set: self,
+            word_idx: 0,
+            current_word: if self.words.is_empty() { 0 } else { self.words[0] },
+        }
+    }
+    
+    /// Performs in-place union with another bitset (self |= other).
+    #[inline]
+    pub fn union_with(&mut self, other: &Bitset) {
+        if other.words.len() > self.words.len() {
+            self.words.resize(other.words.len(), 0);
+        }
+        
+        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+        unsafe {
+            self.union_with_avx2(other);
+            return;
+        }
+        
+        #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+        unsafe {
+            self.union_with_neon(other);
+            return;
+        }
+        
+        #[cfg(not(any(
+            all(target_arch = "x86_64", target_feature = "avx2"),
+            all(target_arch = "aarch64", target_feature = "neon")
+        )))]
+        {
+            // Scalar fallback - process 8 words at a time for better pipelining
+            let other_words = &other.words;
+            let len = other_words.len();
+            let chunks = len / 8;
+            
+            for i in 0..chunks {
+                let base = i * 8;
+                unsafe {
+                    *self.words.get_unchecked_mut(base) |= *other_words.get_unchecked(base);
+                    *self.words.get_unchecked_mut(base + 1) |= *other_words.get_unchecked(base + 1);
+                    *self.words.get_unchecked_mut(base + 2) |= *other_words.get_unchecked(base + 2);
+                    *self.words.get_unchecked_mut(base + 3) |= *other_words.get_unchecked(base + 3);
+                    *self.words.get_unchecked_mut(base + 4) |= *other_words.get_unchecked(base + 4);
+                    *self.words.get_unchecked_mut(base + 5) |= *other_words.get_unchecked(base + 5);
+                    *self.words.get_unchecked_mut(base + 6) |= *other_words.get_unchecked(base + 6);
+                    *self.words.get_unchecked_mut(base + 7) |= *other_words.get_unchecked(base + 7);
+                }
+            }
+            
+            // Handle remaining words
+            for i in (chunks * 8)..len {
+                unsafe {
+                    *self.words.get_unchecked_mut(i) |= *other_words.get_unchecked(i);
+                }
+            }
+        }
+    }
+    
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    #[inline]
+    unsafe fn union_with_avx2(&mut self, other: &Bitset) {
+        use std::arch::x86_64::*;
+        
+        let other_words = &other.words;
+        let len = other_words.len();
+        let simd_len = (len / 4) * 4; // Process 4 u64s (256 bits) at a time
+        
+        for i in (0..simd_len).step_by(4) {
+            let a = _mm256_loadu_si256(self.words.as_ptr().add(i) as *const __m256i);
+            let b = _mm256_loadu_si256(other_words.as_ptr().add(i) as *const __m256i);
+            let result = _mm256_or_si256(a, b);
+            _mm256_storeu_si256(self.words.as_mut_ptr().add(i) as *mut __m256i, result);
+        }
+        
+        // Handle remaining words
+        for i in simd_len..len {
+            *self.words.get_unchecked_mut(i) |= *other_words.get_unchecked(i);
+        }
+    }
+    
+    #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+    #[inline]
+    unsafe fn union_with_neon(&mut self, other: &Bitset) {
+        use std::arch::aarch64::*;
+        
+        let other_words = &other.words;
+        let len = other_words.len();
+        let simd_len = (len / 2) * 2; // Process 2 u64s (128 bits) at a time
+        
+        for i in (0..simd_len).step_by(2) {
+            let a = vld1q_u64(self.words.as_ptr().add(i));
+            let b = vld1q_u64(other_words.as_ptr().add(i));
+            let result = vorrq_u64(a, b);
+            vst1q_u64(self.words.as_mut_ptr().add(i), result);
+        }
+        
+        // Handle remaining words
+        for i in simd_len..len {
+            *self.words.get_unchecked_mut(i) |= *other_words.get_unchecked(i);
+        }
+    }
 
     pub fn from_words_vec(words: Vec<u64>) -> Self {
         Bitset {
             words,
         }
+    }
+}
+
+// --- Iterator ---
+
+pub struct BitsetIter<'a> {
+    set: &'a Bitset,
+    word_idx: usize,
+    current_word: u64,
+}
+
+impl<'a> Iterator for BitsetIter<'a> {
+    type Item = usize;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if self.current_word != 0 {
+                let t = self.current_word.trailing_zeros();
+                self.current_word &= !(1u64 << t);
+                return Some(self.word_idx * WORD_SIZE + t as usize);
+            }
+            self.word_idx += 1;
+            if self.word_idx >= self.set.words.len() {
+                return None;
+            }
+            self.current_word = self.set.words[self.word_idx];
+        }
+    }
+}
+
+impl<'a> IntoIterator for &'a Bitset {
+    type Item = usize;
+    type IntoIter = BitsetIter<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+// --- JSON Serialization ---
+
+impl JSONConvertible for Bitset {
+    fn to_json(&self) -> JSONNode {
+        let items: Vec<usize> = self.iter().collect();
+        items.to_json()
+    }
+
+    fn from_json(node: JSONNode) -> Result<Self, String> {
+        let items = Vec::<usize>::from_json(node)?;
+        let mut set = Bitset::empty();
+        for item in items {
+            set.insert(item);
+        }
+        Ok(set)
     }
 }
 

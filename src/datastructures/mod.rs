@@ -10,7 +10,6 @@ pub mod cache;
 pub mod entry_api;
 pub mod leveled_gss;
 pub mod gss_acc;
-pub mod sparse_bitset;
 pub mod compressed_state_set;
 pub mod state_set;
 
