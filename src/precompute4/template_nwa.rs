@@ -122,17 +122,22 @@ pub(crate) fn build_template_nwa_from_characterization(bb: &BelowBottomCharacter
 
 /// Build template DWAs for all terminals in the parser.
 pub(crate) fn build_template_dwas(parser: &GLRParser) -> Result<BTreeMap<TerminalID, DWA>, FullDWABuildError> {
-    let all = compute_all_characterizations(parser);
-    let mut out = BTreeMap::new();
-    for (term, bb) in all {
+    use rayon::prelude::*;
+    
+   let all = compute_all_characterizations(parser);
+    
+    // OPTIMIZATION: Parallelize template building using rayon
+    // Building 82 templates takes 538ms, parallelization should provide ~3-4x speedup
+    let results: Result<Vec<_>, _> = all.into_par_iter().map(|(term, bb)| {
         let mut nwa = build_template_nwa_from_characterization(&bb)?;
         nwa.simplify();
         let mut dwa = nwa.determinize();
         dwa.simplify();
         crate::debug!(6, "Built template DWA for terminal {:?}:", term);
-        out.insert(term, dwa);
-    }
-    Ok(out)
+        Ok((term, dwa))
+    }).collect();
+    
+    results.map(|vec| vec.into_iter().collect())
 }
 
 /// Identity DWA used for the "ignore" terminal: start is final and there are no transitions.
