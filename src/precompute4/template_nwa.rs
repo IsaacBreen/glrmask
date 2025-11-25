@@ -123,9 +123,10 @@ pub(crate) fn build_template_nwa_from_characterization(bb: &BelowBottomCharacter
 /// Build template DWAs for all terminals in the parser.
 pub(crate) fn build_template_dwas(parser: &GLRParser) -> Result<BTreeMap<TerminalID, DWA>, FullDWABuildError> {
     use rayon::prelude::*;
-    
-   let all = compute_all_characterizations(parser);
-    
+
+    let all = compute_all_characterizations(parser);
+    crate::debug!(5, "Computed characterizations.");
+
     // OPTIMIZATION: Parallelize template building using rayon
     // Building 82 templates takes 538ms, parallelization should provide ~3-4x speedup
     let results: Result<Vec<_>, _> = all.into_par_iter().map(|(term, bb)| {
@@ -133,10 +134,10 @@ pub(crate) fn build_template_dwas(parser: &GLRParser) -> Result<BTreeMap<Termina
         nwa.simplify();
         let mut dwa = nwa.determinize();
         dwa.simplify();
-        crate::debug!(6, "Built template DWA for terminal {:?}:", term);
+        crate::debug!(7, "Built template DWA for terminal {:?}:", term);
         Ok((term, dwa))
     }).collect();
-    
+
     results.map(|vec| vec.into_iter().collect())
 }
 
