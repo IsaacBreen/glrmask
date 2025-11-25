@@ -1,10 +1,14 @@
-
 import re
 import sys
+import argparse
 
-def parse_log(filename):
-    with open(filename, 'r') as f:
-        content = f.read()
+def parse_log(filename, top_n):
+    try:
+        with open(filename, 'r') as f:
+            content = f.read()
+    except FileNotFoundError:
+        print(f"Error: File '{filename}' not found.")
+        sys.exit(1)
 
     # Regex to capture experiment lines
     # [Det&Sim Experiment] [Context] Config N#x-D#y: NWA=[...] | DWA=[...] -> Time: 1.23s, States: 123
@@ -43,6 +47,10 @@ def parse_log(filename):
             'states': states
         })
 
+    if not experiments:
+        print("No matching experiment lines found in the log.")
+        return
+
     for context, results in experiments.items():
         print(f"--- Context: {context} ---")
         # Sort by states (asc), then time (asc)
@@ -55,14 +63,22 @@ def parse_log(filename):
         print(f"  Time: {best['time']:.4f}s")
         print(f"  States: {best['states']}")
         print(f"  (Config N#{best['n_idx']}-D#{best['d_idx']})")
-        
-        print("\nTop 5 Configurations:")
-        for i, res in enumerate(results[:5]):
+
+        print(f"\nTop {top_n} Configurations:")
+        for i, res in enumerate(results[:top_n]):
              print(f"  {i+1}. States: {res['states']}, Time: {res['time']:.4f}s | NWA: [{res['nwa_passes']}] | DWA: [{res['dwa_passes']}]")
         print("\n")
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage: python analyze_experiments.py <log_file>")
-        sys.exit(1)
-    parse_log(sys.argv[1])
+    parser = argparse.ArgumentParser(description="Analyze Det&Sim Experiment logs.")
+    
+    # Positional argument for the filename
+    parser.add_argument("filename", help="The path to the log file to analyze")
+    
+    # Optional argument for 'n' (number of top results)
+    parser.add_argument("-n", "--number", type=int, default=5, 
+                        help="Number of top configurations to display (default: 5)")
+
+    args = parser.parse_args()
+
+    parse_log(args.filename, args.number)
