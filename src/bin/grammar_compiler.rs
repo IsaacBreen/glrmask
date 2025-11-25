@@ -1,11 +1,13 @@
 use clap::Parser;
+use flate2::write::GzEncoder;
+use flate2::Compression;
 use sep1::constraint::{GrammarConstraint, GrammarConstraintConfig};
 use sep1::interface::GrammarDefinition;
 use sep1::json_serialization::JSONConvertible;
 use sep1::tokenizer::{LLMTokenID, LLMTokenMap};
 use std::collections::BTreeMap;
 use std::fs::File;
-use std::io::{BufReader, BufWriter};
+use std::io::{BufReader, BufWriter, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -22,7 +24,7 @@ struct Args {
     #[arg(short, long)]
     vocab: PathBuf,
 
-    /// Path for the output JSON file (.json).
+    /// Path for the output file (.json or .json.gz).
     #[arg(short, long)]
     output: Option<PathBuf>,
 
@@ -98,12 +100,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(output_path) = args.output {
         println!("Saving GrammarConstraint to: {:?}", output_path);
         let save_instant = std::time::Instant::now();
-        {
-            let output_file = File::create(&output_path)?;
-            let mut writer = BufWriter::new(output_file);
-            grammar_constraint.to_writer(&mut writer)?;
-        }
 
+        let output_file = File::create(&output_path)?;
+        let buf_writer = BufWriter::new(output_file);
+
+        let mut writer: Box<dyn Write> =
+            if output_path.extension().and_then(|s| s.to_str()) == Some("gz") {
+                println!("Using gzip compression.");
+                Box::new(GzEncoder::new(buf_writer, Compression::default()))
+            } else {
+                Box::new(buf_writer)
+            };
+
+        grammar_constraint.to_writer(&mut writer)?;
         let save_duration = save_instant.elapsed();
         println!(
             "Successfully saved constraint in {:.2}s.",
