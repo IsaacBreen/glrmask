@@ -6,7 +6,7 @@ cd python && RUSTFLAGS=-Awarnings maturin develop -r
 ```
 
 ```bash
-MACRO_DEBUG_LEVEL=5 python scripts/compile.py \
+MACRO_DEBUG_LEVEL=5 timeout 120 python scripts/compile.py \
     --grammar src/js.ebnf \
     --output .cache/test_vocabs/constraint_js.json.gz \
     --vocab-url "https://huggingface.co/openai-community/gpt2/raw/main/vocab.json"
@@ -24,7 +24,7 @@ REPEAT=3 AGG_METHOD="min" SKIP_CPP_BUILD=1 SKIP_RUST_BUILD=1 MACRO_DEBUG_LEVEL=2
 ```bash
 # Build a grammar constraint representing a valid git diff of some file (choosing src/constraint.rs here but could be anything).anything).
 python scripts/generate_diff_grammar.py .cache/test_vocabs/constraint.rs.old -o .cache/test_vocabs/example_diff_constraint.ebnf
-MACRO_DEBUG_LEVEL=5 python scripts/compile.py \
+MACRO_DEBUG_LEVEL=5 timeout 120 python scripts/compile.py \
     --grammar .cache/test_vocabs/example_diff_constraint.ebnf \
     --output .cache/test_vocabs/example_diff_constraint.json.gz \
     --vocab-url "https://huggingface.co/openai-community/gpt2/raw/main/vocab.json"
@@ -84,7 +84,7 @@ notes/
     └── ...               # Other long-running notes
 ```
 
-We treat this like a research journal or like a personal wiki.
+We treat this like a research journal or like a personal wiki. Try to keep track of your thoughts and ideas here. It's important that your progress is traceable so in future people can understand what you did and why, and benefit from any insights you may have discovered.
 
 **Daily Notes Protocol:**
 1. Each day gets one note file: `notes/daily/YYYY-MM-DD.md`
