@@ -3,7 +3,7 @@
 #![allow(dead_code)]
 #![allow(clippy::needless_borrow)]
 
-use super::bitset::RangeSet;
+use super::rangeset::RangeSet;
 use super::common::{Label, StateID, Weight};
 use super::dwa::{DWABody, DWAState, DWAStates, DWA, DWABuildError};
 use super::nwa::{NWABody, NWAState, NWAStates, NWA};

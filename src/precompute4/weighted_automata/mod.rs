@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-pub mod bitset;
+pub mod rangeset;
 pub mod common;
 pub mod determinization;
 pub mod determinization_rustfst;
@@ -12,7 +12,7 @@ pub mod unroll;
 mod test_determinization;
 pub(crate) mod test_weighted_automata;
 
-pub use self::bitset::RangeSet;
+pub use self::rangeset::RangeSet;
 pub use self::common::{format_i16_char, format_pos_code, format_word, NWAStateID, StateID, Weight};
 pub use self::dwa::{DWABody, DWABuildError, DWAState, DWAStates, DWA};
 pub use self::nwa::{NWABody, NWABuildError, NWAState, NWAStates, NWA};

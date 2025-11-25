@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 #![allow(clippy::needless_borrow)]
 
-use super::bitset::RangeSet;
+use super::rangeset::RangeSet;
 
 pub(crate) const STOCHASTIC_DEBUG: bool = false;
 pub(crate) const DETERMINIZE_DEBUG: bool = false;

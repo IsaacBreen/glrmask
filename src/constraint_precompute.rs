@@ -11,7 +11,7 @@ use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
 use crate::finite_automata::Regex;
 use crate::glr::parser::GLRParser;
-use crate::precompute4::weighted_automata::bitset::RangeSet;
+use crate::precompute4::weighted_automata::rangeset::RangeSet;
 use crate::precompute4::weighted_automata::{DWA, NWA, NWAStateID, Weight};
 use crate::profiler::{self, PROGRESS_BAR_ENABLED};
 use crate::tokenizer::{LLMTokenID, TokenizerStateID};
