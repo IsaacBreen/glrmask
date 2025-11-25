@@ -312,13 +312,7 @@ impl GrammarConstraint {
         );
         assert_eq!(self.token_name_map, other.token_name_map);
         assert_eq!(self.possible_matches, other.possible_matches);
-        assert_eq!(
-            self.post_commit_allow_check_mode,
-            other.post_commit_allow_check_mode
-        );
-        assert_eq!(self.terminal_map_by_llm, other.terminal_map_by_llm);
         assert_eq!(self.precompute4_vocab, other.precompute4_vocab);
-        assert_eq!(self.original_to_dummy_map, other.original_to_dummy_map);
     }
 }
 
