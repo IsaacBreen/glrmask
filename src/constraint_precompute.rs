@@ -11,7 +11,7 @@ use crate::datastructures::hybrid_bitset::HybridBitset;
 use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
 use crate::finite_automata::Regex;
 use crate::glr::parser::GLRParser;
-use crate::precompute4::weighted_automata::bitset::SimpleBitset;
+use crate::precompute4::weighted_automata::bitset::RangeSet;
 use crate::precompute4::weighted_automata::{DWA, NWA, NWAStateID, Weight};
 use crate::profiler::{self, PROGRESS_BAR_ENABLED};
 use crate::tokenizer::{LLMTokenID, TokenizerStateID};
@@ -390,7 +390,7 @@ impl<'r> Precomputer1<'r> {
                             let final_bv = edge_bv;
                             if !final_bv.is_empty() {
                                 let leaf = self.leaf_state;
-                                let weight = SimpleBitset::from_rsb(final_bv);
+                                let weight = RangeSet::from_rsb(final_bv);
                                 self.add_pending_transition(src_node, terminal_id.0 as Label, leaf, weight);
                             }
                         }
@@ -412,7 +412,7 @@ impl<'r> Precomputer1<'r> {
                         let dest_map = pending.entry(next_pos).or_default();
 
                         let initial_tsid = self.tokenizer.initial_state_id();
-                        let weight = SimpleBitset::from_rsb(final_bv);
+                        let weight = RangeSet::from_rsb(final_bv);
 
                         let target_entry = dest_map.entry(initial_tsid);
                         let target = match target_entry {
@@ -439,7 +439,7 @@ impl<'r> Precomputer1<'r> {
                         if !final_edge_bv.is_empty() {
                             let end_idx = self.leaf_state;
                             for terminal_id in &accessible_terminals {
-                                let weight = SimpleBitset::from_rsb(final_edge_bv.clone());
+                                let weight = RangeSet::from_rsb(final_edge_bv.clone());
                                 self.add_pending_transition(
                                         src_node,
                                         terminal_id.0 as Label,

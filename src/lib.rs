@@ -8,7 +8,6 @@ pub mod interface;
 mod r#macro;
 pub mod tokenizer;
 mod types;
-mod multi_dfa;
 pub mod json_serialization;
 mod test_constraint_basic;
 // mod test_constraint_python;
