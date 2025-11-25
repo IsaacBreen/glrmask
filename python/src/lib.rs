@@ -544,10 +544,6 @@ impl PyGrammarConstraint {
         })
     }
 
-    fn dump_precomputed1(&self) {
-        self.inner.dump_precomputed1();
-    }
-
     fn get_id_to_token_map(&self, py: Python) -> PyResult<PyObject> {
         let dict = PyDict::new_bound(py);
         for (token_bytes, token_id) in self.inner.original_llm_vocab.llm_token_map.iter() {
