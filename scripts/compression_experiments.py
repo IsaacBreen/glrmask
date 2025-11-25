@@ -98,10 +98,14 @@ def parse_weight_to_set(data, format_type, pool=None):
                  pass
     elif format_type == 'LLMTokenBV':
         # HybridBitset is [start, end, start, end...] flattened
+        # Ranges are INCLUSIVE in Rust (start..=end)
         if isinstance(data, list):
-            for i in range(0, len(data), 2): s.update(range(data[i], data[i+1] + 1)) # Inclusive end?
-            # Rust HybridBitset to_json: flat.push(start); flat.push(end); (inclusive)
-            # Python range is exclusive. So data[i+1] + 1.
+            if len(data) % 2 != 0:
+                # Malformed data, skip
+                pass
+            else:
+                for i in range(0, len(data), 2): 
+                    s.update(range(data[i], data[i+1] + 1)) # +1 because Rust ranges are inclusive
             
     return frozenset(s)
 
@@ -267,68 +271,7 @@ def analyze_weights(data):
 
 def analyze_tokenizer_dfa(data):
     """Analyzes the space efficiency of the tokenizer DFA with multiple strategies."""
-    tokenizer_data = data.get('tokenizer')
-    if not tokenizer_data or 'dfa' not in tokenizer_data: return None
-
-    original_tokenizer_size = len(json.dumps(tokenizer_data))
-    dfa_states = tokenizer_data.get('dfa', {}).get('states', [])
-    num_states = len(dfa_states)
-    if num_states == 0: return None
-
-    # --- Pre-computation Step: Re-encode all states and components ---
-    max_group_id = -1
-    for state in dfa_states:
-        all_ids = set(state.get('finalizers', [])).union(set(state.get('possible_future_group_ids', [])))
-        if all_ids: max_group_id = max(max_group_id, max(all_ids))
-
-    state_component_data = []
-    for state in dfa_states:
-        components = {}
-        # Transitions
-        grouped_by_dest = defaultdict(set)
-        for byte, dest in state.get('transitions', []): grouped_by_dest[dest].add(byte)
-        components['transitions'] = sorted([[dest, set_to_u8set_obj(bs)] for dest, bs in grouped_by_dest.items()])
-        # Sets (Finalizers, etc.)
-        for key in ['finalizers', 'possible_future_group_ids']:
-            s = set(state.get(key, []))
-            size_range = len(json.dumps(set_to_ranges(s)))
-            size_bitset = calculate_bitset_json_size(s, max_group_id)
-            components[key] = set_to_ranges(s) if size_range <= size_bitset else f"bitset_placeholder_{key}"
-        # group_id_to_u8set
-        components['group_id_to_u8set'] = state.get('group_id_to_u8set', [])
-        state_component_data.append(components)
-
-    # --- Calculation Step: Evaluate each strategy ---
-    strategies = {}
-    dfa_shell_size = len(json.dumps({k: v for k, v in tokenizer_data['dfa'].items() if k != 'states'})) - 1
-
-    # Strategy 1: Re-encoded Only (no pooling)
-    size = sum(len(json.dumps(s)) for s in state_component_data)
-    strategies['Re-encoded Only'] = size + dfa_shell_size
-
-    # Strategy 2: State-level Pooling
-    canonical_states = [json.dumps(s) for s in state_component_data]
-    strategies['State-level Pooling'] = calculate_pooled_size(canonical_states) + dfa_shell_size
-
-    # Strategy 3: Selective Pooling (Sets Only)
-    size = 0
-    pooled_keys = ['finalizers', 'possible_future_group_ids']
-    inline_keys = ['transitions', 'group_id_to_u8set']
-    for key in pooled_keys:
-        instances = [json.dumps(s[key]) for s in state_component_data]
-        size += calculate_pooled_size(instances)
-    for key in inline_keys:
-        size += sum(len(json.dumps(s[key])) for s in state_component_data)
-    strategies['Selective Pooling (Sets Only)'] = size + dfa_shell_size
-
-    # Strategy 4: Full Component Pooling
-    # In the new pooled format, dfa_states are in the pool.
-    # We can just measure the current size.
-    
-    # But analyze_tokenizer_dfa is called with the full data.
-    # If 'tokenizer_dfa' is in data, it means we are using the new format.
-    # The old format had 'tokenizer' -> 'dfa'.
-    
+    # Check for new pooled format first
     if 'tokenizer_dfa' in data:
         # New format
         # tokenizer_dfa has 'state_indices'
@@ -340,7 +283,9 @@ def analyze_tokenizer_dfa(data):
         if pool and 'dfa_states' in data.get('pool', {}):
              pool_size = len(json.dumps(data['pool']['dfa_states']))
              
-        current_size = references_size + pool_size + len(json.dumps(data['tokenizer_dfa'])) # Shell
+        # Calculate current size (pooled)
+        tokenizer_dfa_size = len(json.dumps(data['tokenizer_dfa']))
+        current_size = pool_size + tokenizer_dfa_size
         
         # Estimate unpooled size
         # We need to reconstruct the states to estimate their unpooled size
@@ -351,6 +296,10 @@ def analyze_tokenizer_dfa(data):
                 if state:
                     unpooled_size += len(json.dumps(state))
         
+        # Add shell overhead
+        shell_size = len(json.dumps({k: v for k, v in data['tokenizer_dfa'].items() if k != 'state_indices'}))
+        unpooled_size += shell_size
+        
         strategies = {'Current Pooled Implementation': current_size}
         original_tokenizer_size = unpooled_size # Estimate
         
@@ -359,12 +308,16 @@ def analyze_tokenizer_dfa(data):
             'original_size': original_tokenizer_size,
             'stats': {
                 'DFA States': len(indices),
+                'Pool Size (bytes)': pool_size,
             },
             'strategies': strategies
         }
+    
+    # Old format analysis
+    tokenizer_data = data.get('tokenizer')
+    if not tokenizer_data or 'dfa' not in tokenizer_data: 
+        return None
 
-    # Old format analysis (kept for reference if needed, but we are analyzing new format)
-    return None
 
 
 # --- Reporting ---
