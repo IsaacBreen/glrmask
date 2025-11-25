@@ -238,7 +238,31 @@ impl JSONConvertible for DFA {
         let mut group_id_map_list = Vec::with_capacity(num_states);
 
         for state in &self.states {
-            transitions_list.push(state.transitions.to_json());
+            // Compact transitions by grouping all input bytes that lead to the same
+            // target state into a U8Set. Each entry is:
+            //   [ <u8set JSON>, <target state index> ]
+            //
+            // This is significantly smaller than storing one entry per byte, while
+            // still being interpretable: you see ranges of characters per target.
+            let mut target_to_set: BTreeMap<usize, U8Set> = BTreeMap::new();
+            for (byte, &target) in &state.transitions {
+                target_to_set
+                    .entry(target)
+                    .and_modify(|set| {
+                        set.insert(byte);
+                    })
+                    .or_insert_with(|| U8Set::from_u8(byte));
+            }
+
+            let mut packed_transitions = Vec::with_capacity(target_to_set.len());
+            for (target, u8set) in target_to_set {
+                packed_transitions.push(JSONNode::Array(vec![
+                    u8set.to_json(),
+                    target.to_json(),
+                ]));
+            }
+            transitions_list.push(JSONNode::Array(packed_transitions));
+
             finalizers_list.push(state.finalizers.to_json());
             possible_futures_list.push(state.possible_future_group_ids.to_json());
             group_id_map_list.push(state.group_id_to_u8set.to_json());
@@ -296,16 +320,20 @@ impl JSONConvertible for DFA {
                     })
                     .and_then(BTreeSet::<GroupID>::from_json)?;
 
-                let transitions_nodes = obj.remove("state_transitions")
+                let transitions_nodes = obj
+                    .remove("state_transitions")
                     .ok_or_else(|| "Missing field 'state_transitions' for DFA".to_string())?
                     .into_array()?;
-                let finalizers_nodes = obj.remove("state_finalizers")
+                let finalizers_nodes = obj
+                    .remove("state_finalizers")
                     .ok_or_else(|| "Missing field 'state_finalizers' for DFA".to_string())?
                     .into_array()?;
-                let possible_futures_nodes = obj.remove("state_possible_future_group_ids")
+                let possible_futures_nodes = obj
+                    .remove("state_possible_future_group_ids")
                     .ok_or_else(|| "Missing field 'state_possible_future_group_ids' for DFA".to_string())?
                     .into_array()?;
-                let group_id_map_nodes = obj.remove("state_group_id_to_u8set")
+                let group_id_map_nodes = obj
+                    .remove("state_group_id_to_u8set")
                     .ok_or_else(|| "Missing field 'state_group_id_to_u8set' for DFA".to_string())?
                     .into_array()?;
 
@@ -317,21 +345,95 @@ impl JSONConvertible for DFA {
                 }
 
                 let mut states = Vec::with_capacity(num_states);
-                let states_iter = transitions_nodes.into_iter()
+                let states_iter = transitions_nodes
+                    .into_iter()
                     .zip(finalizers_nodes.into_iter())
                     .zip(possible_futures_nodes.into_iter())
                     .zip(group_id_map_nodes.into_iter())
                     .map(|(((t, f), p), g)| (t, f, p, g));
 
                 for (i, (t_node, f_node, p_node, g_node)) in states_iter.enumerate() {
-                    let transitions = CharTransitions::<usize>::from_json(t_node)
-                        .map_err(|e| format!("DFA state[{}].transitions: {}", i, e))?;
+                    // Transitions may be in one of two formats:
+                    //   1. Old per-byte format (CharTransitions JSON): [[byte, target], ...]
+                    //   2. New compact format:                        [[u8set_json, target], ...]
+                    //
+                    // We detect the new format when the first element of each inner pair
+                    // is itself an Array (i.e. U8Set's JSON representation).
+                    let transitions = match &t_node {
+                        JSONNode::Array(arr) => {
+                            if arr.is_empty() {
+                                CharTransitions::<usize>::new()
+                            } else {
+                                match &arr[0] {
+                                    // New compact format: [ [<u8set JSON>, <target>], ... ]
+                                    JSONNode::Array(inner)
+                                        if inner.len() == 2
+                                            && matches!(inner[0], JSONNode::Array(_)) =>
+                                    {
+                                        let mut entries: Vec<(u8, usize)> = Vec::new();
+                                        for (entry_idx, entry_node) in arr.iter().enumerate() {
+                                            match entry_node {
+                                                JSONNode::Array(pair) if pair.len() == 2 => {
+                                                    let u8set = U8Set::from_json(pair[0].clone())
+                                                        .map_err(|e| {
+                                                            format!(
+                                                                "DFA state[{}].transitions[{}].u8set: {}",
+                                                                i, entry_idx, e
+                                                            )
+                                                        })?;
+                                                    let target =
+                                                        usize::from_json(pair[1].clone())
+                                                            .map_err(|e| {
+                                                                format!(
+                                                                    "DFA state[{}].transitions[{}].target: {}",
+                                                                    i, entry_idx, e
+                                                                )
+                                                            })?;
+                                                    for b in u8set.iter() {
+                                                        entries.push((b, target));
+                                                    }
+                                                }
+                                                other => {
+                                                    return Err(format!(
+                                                        "DFA state[{}].transitions[{}]: expected [u8set, target] array, got {}",
+                                                        i,
+                                                        entry_idx,
+                                                        other.short_preview()
+                                                    ));
+                                                }
+                                            }
+                                        }
+                                        entries.sort_by_key(|(b, _)| *b);
+                                        CharTransitions::from_sorted_entries(entries)
+                                    }
+                                    // Otherwise treat as old per-byte format.
+                                    _ => CharTransitions::<usize>::from_json(t_node.clone())
+                                        .map_err(|e| {
+                                            format!("DFA state[{}].transitions: {}", i, e)
+                                        })?,
+                                }
+                            }
+                        }
+                        // Not an array: fall back to the old parser so we get a meaningful error.
+                        _ => CharTransitions::<usize>::from_json(t_node.clone())
+                            .map_err(|e| {
+                                format!("DFA state[{}].transitions: {}", i, e)
+                            })?,
+                    };
+
                     let finalizers = DenseStateSet::from_json(f_node)
                         .map_err(|e| format!("DFA state[{}].finalizers: {}", i, e))?;
-                    let possible_future_group_ids = BTreeSet::<GroupID>::from_json(p_node)
-                        .map_err(|e| format!("DFA state[{}].possible_future_group_ids: {}", i, e))?;
-                    let group_id_to_u8set = BTreeMap::<GroupID, U8Set>::from_json(g_node)
-                        .map_err(|e| format!("DFA state[{}].group_id_to_u8set: {}", i, e))?;
+                    let possible_future_group_ids =
+                        BTreeSet::<GroupID>::from_json(p_node).map_err(|e| {
+                            format!(
+                                "DFA state[{}].possible_future_group_ids: {}",
+                                i, e
+                            )
+                        })?;
+                    let group_id_to_u8set =
+                        BTreeMap::<GroupID, U8Set>::from_json(g_node).map_err(|e| {
+                            format!("DFA state[{}].group_id_to_u8set: {}", i, e)
+                        })?;
 
                     states.push(DFAState {
                         transitions,
