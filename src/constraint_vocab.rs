@@ -96,10 +96,7 @@ impl JSONConvertible for StageVocab {
             "max_original_llm_token_id".to_string(),
             self.max_original_llm_token_id.to_json(),
         );
-        m.insert(
-            "internal_to_original_sparse_matrix".to_string(),
-            self.internal_to_original_sparse_matrix.to_json(),
-        );
+        // SKIP: internal_to_original_sparse_matrix (rebuild on load)
         JSONNode::Object(m)
     }
 
@@ -127,17 +124,12 @@ impl JSONConvertible for StageVocab {
                     .map(|(k, v)| (k, v.into_iter().collect()))
                     .collect();
                 let internal_to_original_sparse_matrix =
-                    match obj.remove("internal_to_original_sparse_matrix") {
-                        Some(n) => Vec::<Vec<(u16, u64)>>::from_json(n)?,
-                        None => {
-                            // For backward compatibility, compute it if missing.
-                            Self::build_internal_to_original_sparse_matrix(
-                                &internal_to_original,
-                                max_original_llm_token_id,
-                                internal_max_llm_token,
-                            )
-                        }
-                    };
+            // Always rebuild sparse matrix from internal_to_original
+            Self::build_internal_to_original_sparse_matrix(
+                &internal_to_original,
+                max_original_llm_token_id,
+                internal_max_llm_token,
+            );
 
                 Ok(StageVocab {
                     original_to_internal,
