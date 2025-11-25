@@ -4,7 +4,6 @@ use crate::constraint::{
     Trie0GodWrapper, Trie1GodWrapper,
 };
 use crate::datastructures::hybrid_bitset::HybridBitset;
-use crate::datastructures::trie::{Trie, Trie2Index};
 use crate::glr::grammar::Terminal;
 use crate::glr::table::StateID;
 use crate::json_serialization::{JSONConvertible, JSONNode};
