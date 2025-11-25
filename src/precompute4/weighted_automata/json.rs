@@ -125,10 +125,12 @@ impl JSONConvertible for DWA {
             let mut s_obj = BTreeMap::new();
             s_obj.insert("t".to_string(), JSONNode::Array(trans_json));
             if let Some(w) = &state.final_weight {
-                s_obj.insert("f".to_string(), w.to_json());
+                let w_id = intern_weight(w);
+                s_obj.insert("f".to_string(), w_id.to_json());
             }
             if let Some(w) = &state.state_weight {
-                s_obj.insert("s".to_string(), w.to_json());
+                let w_id = intern_weight(w);
+                s_obj.insert("s".to_string(), w_id.to_json());
             }
             states_json.push(JSONNode::Object(s_obj));
         }
