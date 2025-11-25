@@ -230,21 +230,61 @@ pub struct DFA {
 impl JSONConvertible for DFA {
     fn to_json(&self) -> JSONNode {
         let mut obj = StdMap::new();
-        obj.insert("states".to_string(), self.states.to_json());
+
+        let num_states = self.states.len();
+        let mut transitions_list = Vec::with_capacity(num_states);
+        let mut finalizers_list = Vec::with_capacity(num_states);
+        let mut possible_futures_list = Vec::with_capacity(num_states);
+        let mut group_id_map_list = Vec::with_capacity(num_states);
+
+        for state in &self.states {
+            transitions_list.push(state.transitions.to_json());
+            finalizers_list.push(state.finalizers.to_json());
+            possible_futures_list.push(state.possible_future_group_ids.to_json());
+            group_id_map_list.push(state.group_id_to_u8set.to_json());
+        }
+
         obj.insert("start_state".to_string(), self.start_state.to_json());
         obj.insert(
             "non_greedy_finalizers".to_string(),
             self.non_greedy_finalizers.to_json(),
         );
+        // Use more descriptive keys to avoid collision with DFAState fields
+        obj.insert("state_transitions".to_string(), JSONNode::Array(transitions_list));
+        obj.insert("state_finalizers".to_string(), JSONNode::Array(finalizers_list));
+        obj.insert("state_possible_future_group_ids".to_string(), JSONNode::Array(possible_futures_list));
+        obj.insert("state_group_id_to_u8set".to_string(), JSONNode::Array(group_id_map_list));
+
         JSONNode::Object(obj)
     }
+
     fn from_json(node: JSONNode) -> Result<Self, String> {
         match node {
             JSONNode::Object(mut obj) => {
-                let states = obj
-                    .remove("states")
-                    .ok_or_else(|| "Missing field states for DFA".to_string())
-                    .and_then(Vec::<DFAState>::from_json)?;
+                // Handle old format for backward compatibility
+                if obj.contains_key("states") {
+                    let states = obj
+                        .remove("states")
+                        .ok_or_else(|| "Missing field states for DFA".to_string())
+                        .and_then(Vec::<DFAState>::from_json)?;
+                    let start_state = obj
+                        .remove("start_state")
+                        .ok_or_else(|| "Missing field start_state for DFA".to_string())
+                        .and_then(usize::from_json)?;
+                    let non_greedy_finalizers = obj
+                        .remove("non_greedy_finalizers")
+                        .ok_or_else(|| {
+                            "Missing field non_greedy_finalizers for DFA".to_string()
+                        })
+                        .and_then(BTreeSet::<GroupID>::from_json)?;
+                    return Ok(DFA {
+                        states,
+                        start_state,
+                        non_greedy_finalizers,
+                    });
+                }
+
+                // New compact format
                 let start_state = obj
                     .remove("start_state")
                     .ok_or_else(|| "Missing field start_state for DFA".to_string())
@@ -255,6 +295,52 @@ impl JSONConvertible for DFA {
                         "Missing field non_greedy_finalizers for DFA".to_string()
                     })
                     .and_then(BTreeSet::<GroupID>::from_json)?;
+
+                let transitions_nodes = obj.remove("state_transitions")
+                    .ok_or_else(|| "Missing field 'state_transitions' for DFA".to_string())?
+                    .into_array()?;
+                let finalizers_nodes = obj.remove("state_finalizers")
+                    .ok_or_else(|| "Missing field 'state_finalizers' for DFA".to_string())?
+                    .into_array()?;
+                let possible_futures_nodes = obj.remove("state_possible_future_group_ids")
+                    .ok_or_else(|| "Missing field 'state_possible_future_group_ids' for DFA".to_string())?
+                    .into_array()?;
+                let group_id_map_nodes = obj.remove("state_group_id_to_u8set")
+                    .ok_or_else(|| "Missing field 'state_group_id_to_u8set' for DFA".to_string())?
+                    .into_array()?;
+
+                let num_states = transitions_nodes.len();
+                if finalizers_nodes.len() != num_states ||
+                   possible_futures_nodes.len() != num_states ||
+                   group_id_map_nodes.len() != num_states {
+                    return Err("Mismatched lengths for DFA state arrays".to_string());
+                }
+
+                let mut states = Vec::with_capacity(num_states);
+                let states_iter = transitions_nodes.into_iter()
+                    .zip(finalizers_nodes.into_iter())
+                    .zip(possible_futures_nodes.into_iter())
+                    .zip(group_id_map_nodes.into_iter())
+                    .map(|(((t, f), p), g)| (t, f, p, g));
+
+                for (i, (t_node, f_node, p_node, g_node)) in states_iter.enumerate() {
+                    let transitions = CharTransitions::<usize>::from_json(t_node)
+                        .map_err(|e| format!("DFA state[{}].transitions: {}", i, e))?;
+                    let finalizers = DenseStateSet::from_json(f_node)
+                        .map_err(|e| format!("DFA state[{}].finalizers: {}", i, e))?;
+                    let possible_future_group_ids = BTreeSet::<GroupID>::from_json(p_node)
+                        .map_err(|e| format!("DFA state[{}].possible_future_group_ids: {}", i, e))?;
+                    let group_id_to_u8set = BTreeMap::<GroupID, U8Set>::from_json(g_node)
+                        .map_err(|e| format!("DFA state[{}].group_id_to_u8set: {}", i, e))?;
+                    
+                    states.push(DFAState {
+                        transitions,
+                        finalizers,
+                        possible_future_group_ids,
+                        group_id_to_u8set,
+                    });
+                }
+
                 Ok(DFA {
                     states,
                     start_state,
