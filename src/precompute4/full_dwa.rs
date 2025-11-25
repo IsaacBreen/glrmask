@@ -11,7 +11,7 @@ use kdam::{tqdm, BarExt};
 use crate::constraint::LLMTokenBV;
 use crate::glr::parser::{ExpectElse, GLRParser};
 use crate::precompute4::nwa_optimizations::prune_continuations_from_final_states;
-use crate::precompute4::resolve_negatives::{apply_cancellations, apply_finality_fixpoint, remove_negative_transitions};
+use crate::precompute4::resolve_negatives::{apply_cancellations, apply_finality_fixpoint, remove_negative_transitions, apply_cancellations_range, apply_finality_fixpoint_range, remove_negative_transitions_range};
 use crate::precompute4::template_nwa::{build_ignore_terminal_dwa, build_template_dwas};
 use crate::precompute4::weighted_automata::{
     common::Label, determinization_rustfst::determinize_nwa_to_dwa, DWA, NWA, NWABody, NWAStateID, NWAStates,
@@ -602,11 +602,12 @@ pub fn precompute4(parser: &GLRParser, input_nwa: &NWA) -> DWA {
                 let mut states = states_arena.borrow_mut();
                 let new_states_offset = states.len();
                 let composed_body = instantiate_nwa_template_into(template_nwa, &concrete_weights, &mut states, &right_body);
-                let new_states_filter: HashSet<NWAStateID> = (new_states_offset..states.len()).collect();
-                if !new_states_filter.is_empty() {
-                    apply_cancellations(&mut states, &new_states_filter);
-                    apply_finality_fixpoint(&mut states, &new_states_filter);
-                    remove_negative_transitions(&mut states, &new_states_filter);
+                // Use range-based functions to avoid HashSet allocation
+                let state_range = new_states_offset..states.len();
+                if !state_range.is_empty() {
+                    apply_cancellations_range(&mut states, state_range.clone());
+                    apply_finality_fixpoint_range(&mut states, state_range.clone());
+                    remove_negative_transitions_range(&mut states, state_range);
                 }
                 nwa_body = NWABody::union(&nwa_body, &composed_body);
             }
