@@ -419,7 +419,12 @@ pub fn precompute4(parser: &GLRParser, input_nwa: &NWA) -> DWA {
         let mut dwa = combined_nwa.determinize();
         dwa.simplify_lightweight();
 
-        template_cache.insert(sig, NWA::from_dwa(&dwa));
+        // Resolve negatives in the template BEFORE caching.
+        // This avoids repeated negative resolution during instantiation.
+        let mut template_nwa = NWA::from_dwa(&dwa);
+        crate::precompute4::resolve_negatives::resolve_negative_codes_in_nwa(&mut template_nwa);
+        
+        template_cache.insert(sig, template_nwa);
         let _ = simple_pb.update(1);
     }
 
@@ -605,9 +610,20 @@ pub fn precompute4(parser: &GLRParser, input_nwa: &NWA) -> DWA {
                 // Use range-based functions to avoid HashSet allocation
                 let state_range = new_states_offset..states.len();
                 if !state_range.is_empty() {
+                    // Track negative resolution timing
+                    static NEG_RES_TIME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                    static NEG_RES_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                    let neg_start = std::time::Instant::now();
                     apply_cancellations_range(&mut states, state_range.clone());
                     apply_finality_fixpoint_range(&mut states, state_range.clone());
                     remove_negative_transitions_range(&mut states, state_range);
+                    let neg_elapsed = neg_start.elapsed().as_micros() as u64;
+                    NEG_RES_TIME.fetch_add(neg_elapsed, std::sync::atomic::Ordering::Relaxed);
+                    let count = NEG_RES_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if count == 8000 {
+                        let total_us = NEG_RES_TIME.load(std::sync::atomic::Ordering::Relaxed);
+                        crate::debug!(3, "Negative resolution: {} calls, {}ms total, {:.1}µs avg", count, total_us / 1000, total_us as f64 / count as f64);
+                    }
                 }
                 nwa_body = NWABody::union(&nwa_body, &composed_body);
             }

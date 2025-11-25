@@ -78,7 +78,9 @@ fn minimize_dwa_partition(states: &DWAStates) -> Partition {
     }
 
     let mut partition = Partition::new(n);
+    let mut iteration = 0;
     loop {
+        iteration += 1;
         let mut sig_to_class: HashMap<DwaStateSignature, usize> = HashMap::new();
         let mut new_classes = vec![0; n];
         let mut next_class = 0;
@@ -94,6 +96,7 @@ fn minimize_dwa_partition(states: &DWAStates) -> Partition {
         }
 
         if new_classes == partition.class_of {
+            crate::debug!(5, "Minimize partition converged in {} iterations: {} states -> {} classes", iteration, n, next_class);
             partition.num_classes = next_class;
             return partition;
         }

@@ -238,10 +238,13 @@ impl NWA {
             }
         }
 
+        let det_start = std::time::Instant::now();
         let mut dwa = self.determinize();
+        crate::debug!(5, "Determinization took {:?}, produced {} states", det_start.elapsed(), dwa.states.len());
 
         // Run DWA passes
-        for pass in config.dwa_passes {
+        for pass in &config.dwa_passes {
+            let pass_start = std::time::Instant::now();
             match pass {
                 DwaPass::PruneUnreachable => { dwa.prune_unreachable(); },
                 DwaPass::PruneDeadEnds => { dwa.prune_dead_ends(); },
@@ -249,6 +252,7 @@ impl NWA {
                 DwaPass::PushWeightsToInitial => { dwa.push_weights_to_initial(); },
                 DwaPass::Minimize => { dwa.minimize_states(); },
             }
+            crate::debug!(5, "DWA pass {:?} took {:?}, now {} states", pass, pass_start.elapsed(), dwa.states.len());
         }
         dwa
     }
