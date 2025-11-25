@@ -11,6 +11,8 @@ use crate::json_serialization::{JSONConvertible, JSONNode};
 use range_set_blaze::RangeSetBlaze;
 use std::collections::{BTreeMap, HashMap};
 use std::iter::FromIterator;
+use crate::json_serialization::JSONNode::Array;
+
 impl JSONConvertible for SimpleBitset {
     fn to_json(&self) -> JSONNode {
         let ranges_vec: Vec<Vec<usize>> = self.rsb.ranges().map(|ri| vec![*ri.start(), *ri.end()]).collect();
@@ -112,7 +114,7 @@ impl JSONConvertible for DWA {
             // Serialize groups: [dest, weight_id_opt, [labels...]]
             let mut trans_json = Vec::new();
             for ((dest, w_id), labels) in groups {
-                let w_val = w_id.map(|n| JSONNode::Number(n.into())).unwrap_or(JSONNode::Null);
+                let w_val = w_id.map(|n| n.to_json()).unwrap_or(JSONNode::Null);
                 trans_json.push(JSONNode::Array(vec![
                     dest.to_json(),
                     w_val,
@@ -123,10 +125,10 @@ impl JSONConvertible for DWA {
             let mut s_obj = BTreeMap::new();
             s_obj.insert("t".to_string(), JSONNode::Array(trans_json));
             if let Some(w) = &state.final_weight {
-                s_obj.insert("f".to_string(), JSONNode::Number(intern_weight(w).into()));
+                s_obj.insert("f".to_string(), w.to_json());
             }
             if let Some(w) = &state.state_weight {
-                s_obj.insert("s".to_string(), JSONNode::Number(intern_weight(w).into()));
+                s_obj.insert("s".to_string(), w.to_json());
             }
             states_json.push(JSONNode::Object(s_obj));
         }
@@ -144,7 +146,7 @@ impl JSONConvertible for DWA {
         let pool_node = obj.remove("weight_pool").ok_or("Missing weight_pool")?;
         let weight_pool = Vec::<Weight>::from_json(pool_node)?;
         let get_weight = |n: JSONNode| -> Result<Weight, String> {
-            let idx = n.as_u64().ok_or("Invalid weight index")? as usize;
+            let idx = usize::from_json(n)?;
             weight_pool.get(idx).cloned().ok_or_else(|| "Weight index out of bounds".to_string())
         };
 

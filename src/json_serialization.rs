@@ -180,6 +180,16 @@ impl JSONNode {
             )),
         }
     }
+
+    pub fn into_array(self) -> Result<Vec<JSONNode>, String> {
+        match self {
+            JSONNode::Array(arr) => Ok(arr),
+            other => Err(format!(
+                "Expected JSONNode::Array, got {}",
+                other.short_preview()
+            )),
+        }
+    }
 }
 
 // --- JSONConvertible Trait ---

@@ -314,7 +314,7 @@ impl JSONConvertible for GrammarConstraint {
         obj.insert("possible_matches".to_string(), pooled_matches.to_json());
 
         // Skeleton vocab info
-        obj.insert("max_orig_id".to_string(), JSONNode::Number(self.original_llm_vocab.max_original_llm_token_id.into()));
+        obj.insert("max_orig_id".to_string(), self.original_llm_vocab.max_original_llm_token_id.to_json());
 
         JSONNode::Object(obj)
     }
@@ -329,7 +329,7 @@ impl JSONConvertible for GrammarConstraint {
         let parser = GLRParser::from_json(obj.remove("parser").ok_or("Missing parser")?)?;
         let token_name_map = BiBTreeMap::from_json(obj.remove("token_name_map").ok_or("Missing token_name_map")?)?;
 
-        let max_orig_id = obj.remove("max_orig_id").and_then(|n| n.as_u64()).unwrap_or(0) as usize;
+        let max_orig_id = usize::from_json(obj.remove("max_orig_id").ok_or("Missing max_orig_id")?)?;
         let original_llm_vocab = Arc::new(LLMVocab {
             llm_token_map: BiBTreeMap::new(), // Dummy, as original map is too large
             max_original_llm_token_id: max_orig_id,
@@ -346,7 +346,7 @@ impl JSONConvertible for GrammarConstraint {
             let mut inner_map = BTreeMap::new();
             for (tid_str, idx_node) in inner_obj {
                 let tid: usize = tid_str.parse().map_err(|_| "Invalid terminal ID key")?;
-                let idx = idx_node.as_u64().ok_or("Invalid pool index")? as usize;
+                let idx = usize::from_json(idx_node).map_err(|_| "Invalid pool index")?;
                 let bv = matches_pool.get(idx).ok_or("Pool index out of bounds")?.clone();
                 inner_map.insert(TerminalID(tid), bv);
             }
