@@ -2,6 +2,7 @@ use crate::datastructures::char_transitions::CharTransitions;
 use crate::datastructures::frozenset::FrozenSet;
 use crate::datastructures::u8set::U8Set;
 use crate::json_serialization::{JSONConvertible, JSONNode};
+use json_convertible_derive::JSONConvertible;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::collections::BTreeMap as StdMap;
 use std::collections::HashMap;
@@ -454,94 +455,21 @@ impl JSONConvertible for DFA {
 }
 
 // TODO: should this *really* derive `Clone`? Users probably shouldn't clone this, should they?
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, JSONConvertible)]
 pub struct Regex {
     pub dfa: DFA,
 }
 
-// Manual impl for Regex
-impl JSONConvertible for Regex {
-    fn to_json(&self) -> JSONNode {
-        let mut obj = StdMap::new();
-        obj.insert("dfa".to_string(), self.dfa.to_json());
-        JSONNode::Object(obj)
-    }
-    fn from_json(node: JSONNode) -> Result<Self, String> {
-        match node {
-            JSONNode::Object(mut obj) => {
-                let dfa = obj
-                    .remove("dfa")
-                    .ok_or_else(|| "Missing field dfa for Regex".to_string())
-                    .and_then(DFA::from_json)?;
-                Ok(Regex { dfa })
-            }
-            _ => Err("Expected JSONNode::Object for Regex".to_string()),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, JSONConvertible)]
 pub struct Match {
     pub group_id: GroupID,
     pub position: usize,
 }
 
-// Manual impl for Match
-impl JSONConvertible for Match {
-    fn to_json(&self) -> JSONNode {
-        let mut obj = StdMap::new();
-        obj.insert("group_id".to_string(), self.group_id.to_json());
-        obj.insert("position".to_string(), self.position.to_json());
-        JSONNode::Object(obj)
-    }
-    fn from_json(node: JSONNode) -> Result<Self, String> {
-        match node {
-            JSONNode::Object(mut obj) => {
-                let group_id = obj
-                    .remove("group_id")
-                    .ok_or_else(|| "Missing field group_id for Match".to_string())
-                    .and_then(GroupID::from_json)?;
-                let position = obj
-                    .remove("position")
-                    .ok_or_else(|| "Missing field position for Match".to_string())
-                    .and_then(usize::from_json)?;
-                Ok(Match { group_id, position })
-            }
-            _ => Err("Expected JSONNode::Object for Match".to_string()),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, JSONConvertible)]
 pub struct FinalStateReport {
     pub position: usize,
     pub matches: BTreeMap<GroupID, usize>, // GroupID to position
-}
-
-// Manual impl for FinalStateReport
-impl JSONConvertible for FinalStateReport {
-    fn to_json(&self) -> JSONNode {
-        let mut obj = StdMap::new();
-        obj.insert("position".to_string(), self.position.to_json());
-        obj.insert("matches".to_string(), self.matches.to_json());
-        JSONNode::Object(obj)
-    }
-    fn from_json(node: JSONNode) -> Result<Self, String> {
-        match node {
-            JSONNode::Object(mut obj) => {
-                let position = obj
-                    .remove("position")
-                    .ok_or_else(|| "Missing field position for FinalStateReport".to_string())
-                    .and_then(usize::from_json)?;
-                let matches = obj
-                    .remove("matches")
-                    .ok_or_else(|| "Missing field matches for FinalStateReport".to_string())
-                    .and_then(|n| BTreeMap::<GroupID, usize>::from_json(n))?;
-                Ok(FinalStateReport { position, matches })
-            }
-            _ => Err("Expected JSONNode::Object for FinalStateReport".to_string()),
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -683,95 +611,23 @@ impl JSONConvertible for Expr {
     }
 }
 
-#[derive(Debug, Clone, Eq, PartialEq, PartialOrd, Ord, Hash)]
+// QuantifierType is a unit-only enum - derive macro produces string serialization
+#[derive(Debug, Clone, Eq, PartialEq, PartialOrd, Ord, Hash, JSONConvertible)]
 pub enum QuantifierType {
     ZeroOrMore, // *
     OneOrMore,  // +
     ZeroOrOne,  // ?
 }
 
-// Manual impl for QuantifierType (enum)
-impl JSONConvertible for QuantifierType {
-    fn to_json(&self) -> JSONNode {
-        let variant_name = match self {
-            QuantifierType::ZeroOrMore => "ZeroOrMore",
-            QuantifierType::OneOrMore => "OneOrMore",
-            QuantifierType::ZeroOrOne => "ZeroOrOne",
-        };
-        JSONNode::String(variant_name.to_string())
-    }
-    fn from_json(node: JSONNode) -> Result<Self, String> {
-        match node {
-            JSONNode::String(s) => match s.as_str() {
-                "ZeroOrMore" => Ok(QuantifierType::ZeroOrMore),
-                "OneOrMore" => Ok(QuantifierType::OneOrMore),
-                "ZeroOrOne" => Ok(QuantifierType::ZeroOrOne),
-                _ => Err(format!("Unknown variant {} for QuantifierType", s)),
-            },
-            _ => Err("Expected JSONNode::String for QuantifierType".to_string()),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, JSONConvertible)]
 pub struct ExprGroup {
     pub expr: Expr,
     pub is_non_greedy: bool,
 }
 
-// Manual impl for ExprGroup
-impl JSONConvertible for ExprGroup {
-    fn to_json(&self) -> JSONNode {
-        let mut obj = StdMap::new();
-        obj.insert("expr".to_string(), self.expr.to_json());
-        obj.insert("is_non_greedy".to_string(), self.is_non_greedy.to_json());
-        JSONNode::Object(obj)
-    }
-    fn from_json(node: JSONNode) -> Result<Self, String> {
-        match node {
-            JSONNode::Object(mut obj) => {
-                let expr = obj
-                    .remove("expr")
-                    .ok_or_else(|| "Missing field expr for ExprGroup".to_string())
-                    .and_then(Expr::from_json)?;
-                let is_non_greedy = obj
-                    .remove("is_non_greedy")
-                    .ok_or_else(|| "Missing field is_non_greedy for ExprGroup".to_string())
-                    .and_then(bool::from_json)?;
-                Ok(ExprGroup {
-                    expr,
-                    is_non_greedy,
-                })
-            }
-            _ => Err("Expected JSONNode::Object for ExprGroup".to_string()),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, JSONConvertible)]
 pub struct ExprGroups {
     pub groups: Vec<ExprGroup>,
-}
-
-// Manual impl for ExprGroups
-impl JSONConvertible for ExprGroups {
-    fn to_json(&self) -> JSONNode {
-        let mut obj = StdMap::new();
-        obj.insert("groups".to_string(), self.groups.to_json());
-        JSONNode::Object(obj)
-    }
-    fn from_json(node: JSONNode) -> Result<Self, String> {
-        match node {
-            JSONNode::Object(mut obj) => {
-                let groups = obj
-                    .remove("groups")
-                    .ok_or_else(|| "Missing field groups for ExprGroups".to_string())
-                    .and_then(Vec::<ExprGroup>::from_json)?;
-                Ok(ExprGroups { groups })
-            }
-            _ => Err("Expected JSONNode::Object for ExprGroups".to_string()),
-        }
-    }
 }
 
 #[derive(Debug, Default)]

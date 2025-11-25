@@ -9,6 +9,7 @@ use std::{
 use std::collections::BTreeMap as StdMap;
 
 use bimap::BiBTreeMap;
+use json_convertible_derive::JSONConvertible;
 use range_set_blaze::RangeSetBlaze;
 use rayon::prelude::*;
 
@@ -48,41 +49,14 @@ type GSSNode = LeveledGSS<ParseStateEdgeContent, Acc>;
 // Terminal allowance mode
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, JSONConvertible)]
+#[json_convertible(rename_all = "snake_case")]
 pub enum TerminalAllowanceCheckMode {
     None,
     ImmediateSets,
     ImmediateProbe,
     #[default]
     StepProbe,
-}
-
-impl JSONConvertible for TerminalAllowanceCheckMode {
-    fn to_json(&self) -> JSONNode {
-        let s = match self {
-            TerminalAllowanceCheckMode::None => "none",
-            TerminalAllowanceCheckMode::ImmediateSets => "immediate_sets",
-            TerminalAllowanceCheckMode::ImmediateProbe => "immediate_probe",
-            TerminalAllowanceCheckMode::StepProbe => "step_probe",
-        };
-        JSONNode::String(s.to_string())
-    }
-
-    fn from_json(node: JSONNode) -> Result<Self, String> {
-        match node {
-            JSONNode::String(s) => match s.as_str() {
-                "none" => Ok(TerminalAllowanceCheckMode::None),
-                "immediate_sets" => Ok(TerminalAllowanceCheckMode::ImmediateSets),
-                "immediate_probe" => Ok(TerminalAllowanceCheckMode::ImmediateProbe),
-                "step_probe" => Ok(TerminalAllowanceCheckMode::StepProbe),
-                other => Err(format!("Unknown TerminalAllowanceCheckMode '{}'", other)),
-            },
-            other => Err(format!(
-                "Expected JSON string for TerminalAllowanceCheckMode, got {:?}",
-                other
-            )),
-        }
-    }
 }
 
 fn count_dwa_ranges(dwa: &DWA) -> usize {

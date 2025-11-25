@@ -11,6 +11,7 @@ use crate::glr::parser::{ActionFn, GLRParser};
 use crate::json_serialization::{JSONConvertible, JSONNode};
 pub use crate::types::TerminalID;
 use bimap::BiBTreeMap;
+use json_convertible_derive::JSONConvertible;
 use memory_stats::memory_stats;
 use profiler_macro::time_it;
 use std::collections::BTreeMap as StdMap;
@@ -484,41 +485,14 @@ impl JSONConvertible for Goto {
     }
 }
 
-#[derive(Debug, Default, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Default, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, JSONConvertible)]
 pub struct StateID(pub usize);
 
-impl JSONConvertible for StateID {
-    fn to_json(&self) -> JSONNode {
-        self.0.to_json()
-    }
-    fn from_json(node: JSONNode) -> Result<Self, String> {
-        usize::from_json(node).map(StateID)
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, JSONConvertible)]
 pub struct ProductionID(pub usize);
 
-impl JSONConvertible for ProductionID {
-    fn to_json(&self) -> JSONNode {
-        self.0.to_json()
-    }
-    fn from_json(node: JSONNode) -> Result<Self, String> {
-        usize::from_json(node).map(ProductionID)
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, JSONConvertible)]
 pub struct NonTerminalID(pub usize);
-
-impl JSONConvertible for NonTerminalID {
-    fn to_json(&self) -> JSONNode {
-        self.0.to_json()
-    }
-    fn from_json(node: JSONNode) -> Result<Self, String> {
-        usize::from_json(node).map(NonTerminalID)
-    }
-}
 
 #[time_it]
 fn stage_1(

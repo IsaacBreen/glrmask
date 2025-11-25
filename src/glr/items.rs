@@ -1,43 +1,13 @@
 use crate::glr::grammar::{Production, Symbol};
-use crate::json_serialization::{JSONConvertible, JSONNode};
-use std::collections::BTreeMap as StdMap;
+use json_convertible_derive::JSONConvertible;
 use std::fmt::{Display, Formatter};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, JSONConvertible)]
 pub struct Item {
     /// Index into the `productions` array passed around the parser generator.
     pub production_id: usize,
     /// Dot position inside `productions[production_id].rhs` (0 <= dot_position <= len).
     pub dot_position: usize,
-}
-
-impl JSONConvertible for Item {
-    fn to_json(&self) -> JSONNode {
-        let mut obj = StdMap::new();
-        obj.insert("production_id".to_string(), self.production_id.to_json());
-        obj.insert("dot_position".to_string(), self.dot_position.to_json());
-        JSONNode::Object(obj)
-    }
-
-    fn from_json(node: JSONNode) -> Result<Self, String> {
-        match node {
-            JSONNode::Object(mut obj) => {
-                let production_id = obj
-                    .remove("production_id")
-                    .ok_or_else(|| "Missing field production_id for Item".to_string())
-                    .and_then(usize::from_json)?;
-                let dot_position = obj
-                    .remove("dot_position")
-                    .ok_or_else(|| "Missing field dot_position for Item".to_string())
-                    .and_then(usize::from_json)?;
-                Ok(Item {
-                    production_id,
-                    dot_position,
-                })
-            }
-            _ => Err("Expected JSONNode::Object for Item".to_string()),
-        }
-    }
 }
 
 impl Display for Item {

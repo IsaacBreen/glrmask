@@ -1,23 +1,14 @@
 use crate::json_serialization::{JSONConvertible, JSONNode};
+use json_convertible_derive::JSONConvertible;
 use std::collections::BTreeMap as StdMap;
 use std::fmt::{Display, Formatter};
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, JSONConvertible)]
 pub struct NonTerminal(pub String);
 
 impl From<&str> for NonTerminal {
     fn from(s: &str) -> Self {
         NonTerminal(s.to_string())
-    }
-}
-
-impl JSONConvertible for NonTerminal {
-    fn to_json(&self) -> JSONNode {
-        self.0.to_json()
-    }
-
-    fn from_json(node: JSONNode) -> Result<Self, String> {
-        String::from_json(node).map(NonTerminal)
     }
 }
 
@@ -127,82 +118,16 @@ impl Terminal {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, JSONConvertible)]
 pub enum Symbol {
     Terminal(Terminal),
     NonTerminal(NonTerminal),
 }
 
-impl JSONConvertible for Symbol {
-    fn to_json(&self) -> JSONNode {
-        let mut obj = StdMap::new();
-        match self {
-            Symbol::Terminal(t) => {
-                obj.insert("variant".to_string(), JSONNode::String("Terminal".to_string()));
-                obj.insert("value".to_string(), t.to_json());
-            }
-            Symbol::NonTerminal(nt) => {
-                obj.insert(
-                    "variant".to_string(),
-                    JSONNode::String("NonTerminal".to_string()),
-                );
-                obj.insert("value".to_string(), nt.to_json());
-            }
-        }
-        JSONNode::Object(obj)
-    }
-
-    fn from_json(node: JSONNode) -> Result<Self, String> {
-        match node {
-            JSONNode::Object(mut obj) => {
-                let variant = obj
-                    .remove("variant")
-                    .ok_or_else(|| "Missing field variant for Symbol".to_string())
-                    .and_then(String::from_json)?;
-                let value_node = obj
-                    .remove("value")
-                    .ok_or_else(|| "Missing field value for Symbol".to_string())?;
-                match variant.as_str() {
-                    "Terminal" => Terminal::from_json(value_node).map(Symbol::Terminal),
-                    "NonTerminal" => NonTerminal::from_json(value_node).map(Symbol::NonTerminal),
-                    _ => Err(format!("Unknown variant {variant} for Symbol")),
-                }
-            }
-            _ => Err("Expected JSONNode::Object for Symbol".to_string()),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, JSONConvertible)]
 pub struct Production {
     pub lhs: NonTerminal,
     pub rhs: Vec<Symbol>,
-}
-
-impl JSONConvertible for Production {
-    fn to_json(&self) -> JSONNode {
-        let mut obj = StdMap::new();
-        obj.insert("lhs".to_string(), self.lhs.to_json());
-        obj.insert("rhs".to_string(), self.rhs.to_json());
-        JSONNode::Object(obj)
-    }
-
-    fn from_json(node: JSONNode) -> Result<Self, String> {
-        match node {
-            JSONNode::Object(mut obj) => {
-                let lhs = obj
-                    .remove("lhs")
-                    .ok_or_else(|| "Missing field lhs for Production".to_string())
-                    .and_then(NonTerminal::from_json)?;
-                let rhs = obj
-                    .remove("rhs")
-                    .ok_or_else(|| "Missing field rhs for Production".to_string())
-                    .and_then(Vec::<Symbol>::from_json)?;
-                Ok(Production { lhs, rhs })
-            }
-            _ => Err("Expected JSONNode::Object for Production".to_string()),
-        }
-    }
 }
 
 impl Display for Production {

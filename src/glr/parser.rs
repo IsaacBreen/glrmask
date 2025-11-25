@@ -8,6 +8,7 @@ use crate::json_serialization::{JSONConvertible, JSONNode};
 use crate::profiler::GSS_LOGGING_ENABLED;
 use crate::debug;
 use bimap::BiBTreeMap;
+use json_convertible_derive::JSONConvertible;
 use profiler_macro::time_it;
 use std::any::Any;
 use std::cmp::Ordering;
@@ -66,29 +67,9 @@ impl UserDataTrait for () {}
 
 pub type ActionFn = Arc<dyn Fn(&mut Arc<dyn UserDataTrait>) -> bool + Send + Sync>;
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, JSONConvertible)]
 pub struct ParseStateEdgeContent {
     pub state_id: StateID,
-}
-
-impl JSONConvertible for ParseStateEdgeContent {
-    fn to_json(&self) -> JSONNode {
-        let mut obj = StdMap::new();
-        obj.insert("state_id".to_string(), self.state_id.to_json());
-        JSONNode::Object(obj)
-    }
-    fn from_json(node: JSONNode) -> Result<Self, String> {
-        match node {
-            JSONNode::Object(mut obj) => {
-                let state_id = obj
-                    .remove("state_id")
-                    .ok_or_else(|| "Missing field state_id for ParseStateEdgeContent".to_string())
-                    .and_then(StateID::from_json)?;
-                Ok(ParseStateEdgeContent { state_id })
-            }
-            _ => Err("Expected JSONNode::Object for ParseStateEdgeContent".to_string()),
-        }
-    }
 }
 
 pub type ParserGSS = LeveledGSS<ParseStateEdgeContent, Acc>;
