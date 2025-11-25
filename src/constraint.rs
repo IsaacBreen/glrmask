@@ -44,7 +44,6 @@ pub use crate::constraint_vocab::*;
 pub use crate::constraint_trie::*;
 pub use crate::constraint_trie::*;
 use crate::constraint_precompute::run_precompute1;
-use crate::constraint_json::PooledGrammarConstraint;
 
 type GSSNode = LeveledGSS<ParseStateEdgeContent, Acc>;
 
@@ -282,13 +281,87 @@ impl GrammarConstraint {
 
 impl JSONConvertible for GrammarConstraint {
     fn to_json(&self) -> JSONNode {
-        let pooled = PooledGrammarConstraint::from_constraint(self);
-        pooled.to_json()
-    }
+        // Efficient inline pooling for match bitsets
+        let mut bitset_pool: Vec<LLMTokenBV> = Vec::new();
+        let mut bitset_map: BTreeMap<LLMTokenBV, usize> = BTreeMap::new();
 
+        let mut pooled_matches: BTreeMap<String, BTreeMap<String, usize>> = BTreeMap::new();
+
+        for (state_id, inner) in &self.possible_matches {
+            let mut new_inner = BTreeMap::new();
+            for (term_id, bv) in inner {
+                let idx = if let Some(&i) = bitset_map.get(bv) { i }
+                else {
+                    let i = bitset_pool.len();
+                    bitset_pool.push(bv.clone());
+                    bitset_map.insert(bv.clone(), i);
+                    i
+                };
+                new_inner.insert(term_id.0.to_string(), idx);
+            }
+            pooled_matches.insert(state_id.0.to_string(), new_inner);
+        }
+
+        let mut obj = BTreeMap::new();
+        obj.insert("tokenizer_dfa".to_string(), self.tokenizer.dfa.to_json());
+        obj.insert("dwa".to_string(), self.precomputed4.to_json());
+        obj.insert("vocab".to_string(), self.precompute4_vocab.to_json());
+        obj.insert("parser".to_string(), self.parser.to_json());
+        obj.insert("token_name_map".to_string(), self.token_name_map.to_json());
+
+        // Matches
+        obj.insert("matches_pool".to_string(), bitset_pool.to_json());
+        obj.insert("possible_matches".to_string(), pooled_matches.to_json());
+
+        // Skeleton vocab info
+        obj.insert("max_orig_id".to_string(), JSONNode::Number(self.original_llm_vocab.max_original_llm_token_id.into()));
+
+        JSONNode::Object(obj)
+    }
     fn from_json(node: JSONNode) -> Result<Self, String> {
-        let pooled = PooledGrammarConstraint::from_json(node)?;
-        Ok(pooled.to_constraint())
+        let mut obj = node.into_object()?;
+
+        let dfa = crate::finite_automata::DFA::from_json(obj.remove("tokenizer_dfa").ok_or("Missing tokenizer_dfa")?)?;
+        let tokenizer = Regex { dfa };
+
+        let dwa = DWA::from_json(obj.remove("dwa").ok_or("Missing dwa")?)?;
+        let vocab = StageVocab::from_json(obj.remove("vocab").ok_or("Missing vocab")?)?;
+        let parser = GLRParser::from_json(obj.remove("parser").ok_or("Missing parser")?)?;
+        let token_name_map = BiBTreeMap::from_json(obj.remove("token_name_map").ok_or("Missing token_name_map")?)?;
+
+        let max_orig_id = obj.remove("max_orig_id").and_then(|n| n.as_u64()).unwrap_or(0) as usize;
+        let original_llm_vocab = Arc::new(LLMVocab {
+            llm_token_map: BiBTreeMap::new(), // Dummy, as original map is too large
+            max_original_llm_token_id: max_orig_id,
+        });
+
+        let matches_pool = Vec::<LLMTokenBV>::from_json(obj.remove("matches_pool").ok_or("Missing matches_pool")?)?;
+        let pooled_matches_node = obj.remove("possible_matches").ok_or("Missing possible_matches")?;
+        let pm_obj = pooled_matches_node.into_object()?;
+
+        let mut possible_matches = BTreeMap::new();
+        for (sid_str, inner_node) in pm_obj {
+            let sid: usize = sid_str.parse().map_err(|_| "Invalid state ID key")?;
+            let inner_obj = inner_node.into_object()?;
+            let mut inner_map = BTreeMap::new();
+            for (tid_str, idx_node) in inner_obj {
+                let tid: usize = tid_str.parse().map_err(|_| "Invalid terminal ID key")?;
+                let idx = idx_node.as_u64().ok_or("Invalid pool index")? as usize;
+                let bv = matches_pool.get(idx).ok_or("Pool index out of bounds")?.clone();
+                inner_map.insert(TerminalID(tid), bv);
+            }
+            possible_matches.insert(TokenizerStateID(sid), inner_map);
+        }
+
+        Ok(GrammarConstraint {
+            tokenizer,
+            parser,
+            precomputed4: dwa,
+            original_llm_vocab,
+            token_name_map,
+            possible_matches,
+            precompute4_vocab: vocab,
+        })
     }
 }
 

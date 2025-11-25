@@ -5,13 +5,12 @@
 
 use super::bitset::SimpleBitset;
 use super::common::{Label, StateID, Weight};
-use super::dwa::{DWABody, DWAState, DWAStates, DWA};
+use super::dwa::{DWABody, DWAState, DWAStates, DWA, DWABuildError};
 use super::nwa::{NWABody, NWAState, NWAStates, NWA};
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use range_set_blaze::RangeSetBlaze;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::iter::FromIterator;
-
 impl JSONConvertible for SimpleBitset {
     fn to_json(&self) -> JSONNode {
         let ranges_vec: Vec<Vec<usize>> = self.rsb.ranges().map(|ri| vec![*ri.start(), *ri.end()]).collect();
@@ -85,15 +84,111 @@ impl JSONConvertible for DWAState {
 
 impl JSONConvertible for DWA {
     fn to_json(&self) -> JSONNode {
+        // Local pool for weights to compact serialization
+        let mut weight_pool: Vec<Weight> = Vec::new();
+        let mut weight_map: HashMap<Weight, usize> = HashMap::new();
+
+        let mut intern_weight = |w: &Weight| -> usize {
+            if let Some(&id) = weight_map.get(w) {
+                id
+            } else {
+                let id = weight_pool.len();
+                weight_pool.push(w.clone());
+                weight_map.insert(w.clone(), id);
+                id
+            }
+        };
+
+        let mut states_json = Vec::with_capacity(self.states.len());
+        for state in &self.states.0 {
+            // Group transitions by (dest, weight_id)
+            let mut groups: BTreeMap<(StateID, Option<usize>), Vec<Label>> = BTreeMap::new();
+            for (label, dest) in &state.transitions {
+                let w = state.trans_weights.get(label);
+                let w_id = w.map(|x| intern_weight(x));
+                groups.entry((*dest, w_id)).or_default().push(*label);
+            }
+
+            // Serialize groups: [dest, weight_id_opt, [labels...]]
+            let mut trans_json = Vec::new();
+            for ((dest, w_id), labels) in groups {
+                let w_val = w_id.map(|n| JSONNode::Number(n.into())).unwrap_or(JSONNode::Null);
+                trans_json.push(JSONNode::Array(vec![
+                    dest.to_json(),
+                    w_val,
+                    labels.to_json()
+                ]));
+            }
+
+            let mut s_obj = BTreeMap::new();
+            s_obj.insert("t".to_string(), JSONNode::Array(trans_json));
+            if let Some(w) = &state.final_weight {
+                s_obj.insert("f".to_string(), JSONNode::Number(intern_weight(w).into()));
+            }
+            if let Some(w) = &state.state_weight {
+                s_obj.insert("s".to_string(), JSONNode::Number(intern_weight(w).into()));
+            }
+            states_json.push(JSONNode::Object(s_obj));
+        }
+
         let mut obj = BTreeMap::new();
-        obj.insert("states".to_string(), self.states.0.to_json());
+        obj.insert("states".to_string(), JSONNode::Array(states_json));
         obj.insert("start_state".to_string(), self.body.start_state.to_json());
+        obj.insert("weight_pool".to_string(), weight_pool.to_json());
         JSONNode::Object(obj)
     }
+
     fn from_json(node: JSONNode) -> Result<Self, String> {
         let mut obj = node.into_object()?;
+
+        let pool_node = obj.remove("weight_pool").ok_or("Missing weight_pool")?;
+        let weight_pool = Vec::<Weight>::from_json(pool_node)?;
+        let get_weight = |n: JSONNode| -> Result<Weight, String> {
+            let idx = n.as_u64().ok_or("Invalid weight index")? as usize;
+            weight_pool.get(idx).cloned().ok_or_else(|| "Weight index out of bounds".to_string())
+        };
+
+        let states_node = obj.remove("states").ok_or("Missing states")?;
+        let states_arr = states_node.into_array()?;
+        let mut states = Vec::with_capacity(states_arr.len());
+
+        for s_node in states_arr {
+            let mut s_obj = s_node.into_object()?;
+            let final_weight = if let Some(n) = s_obj.remove("f") { Some(get_weight(n)?) } else { None };
+            let state_weight = if let Some(n) = s_obj.remove("s") { Some(get_weight(n)?) } else { None };
+
+            let mut transitions = BTreeMap::new();
+            let mut trans_weights = BTreeMap::new();
+
+            if let Some(t_node) = s_obj.remove("t") {
+                let t_arr = t_node.into_array()?;
+                for group_node in t_arr {
+                    let mut group = group_node.into_array()?;
+                    if group.len() != 3 { return Err("Invalid transition group format".to_string()); }
+                    let labels_node = group.pop().unwrap();
+                    let w_node = group.pop().unwrap();
+                    let dest_node = group.pop().unwrap();
+
+                    let dest = StateID::from_json(dest_node)?;
+                    let weight = match w_node {
+                        JSONNode::Null => None,
+                        n => Some(get_weight(n)?),
+                    };
+
+                    let labels = Vec::<Label>::from_json(labels_node)?;
+                    for label in labels {
+                        transitions.insert(label, dest);
+                        if let Some(w) = &weight {
+                            trans_weights.insert(label, w.clone());
+                        }
+                    }
+                }
+            }
+            states.push(DWAState { transitions, final_weight, trans_weights, state_weight });
+        }
+
         Ok(DWA {
-            states: DWAStates(Vec::<DWAState>::from_json(obj.remove("states").ok_or("Missing states")?)?),
+            states: DWAStates(states),
             body: DWABody { start_state: StateID::from_json(obj.remove("start_state").ok_or("Missing start_state")?)? },
         })
     }
