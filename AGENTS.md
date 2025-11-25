@@ -1,5 +1,10 @@
 Common commands to compile/run the code:
 
+To build the Rust binding for Python, run:
+```bash
+cd python && RUSTFLAGS=-Awarnings maturin develop -r
+```
+
 ```bash
 MACRO_DEBUG_LEVEL=5 python scripts/compile.py \
     --grammar src/js.ebnf \
@@ -76,6 +81,8 @@ notes/
     ├── ideas.md          # Running ideas & TODOs
     └── ...               # Other long-running notes
 ```
+
+We treat this like a research journal or like a personal wiki.
 
 **Daily Notes Protocol:**
 1. Each day gets one note file: `notes/daily/YYYY-MM-DD.md`

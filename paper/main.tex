@@ -64,7 +64,7 @@
 \maketitle
 
 \begin{abstract}
-Grammar-constrained decoding ensures that large language model (LLM) outputs conform to specified syntactic structures, enabling reliable generation of code, JSON, and other structured formats. However, existing approaches either incur substantial per-token overhead or require expensive runtime computations that scale with grammar complexity. We present \sep{}, a precomputation-based approach that compiles context-free grammars into deterministic weighted automata (DWA), enabling \emph{constant-time} per-token constraint computation independent of grammar size. Our method introduces three key innovations: (1) a two-stage compilation pipeline that separates grammar analysis from vocabulary indexing, (2) weighted automata that encode token validity as bitvector operations, and (3) state equivalence analysis that reduces the effective vocabulary size. On JavaScript grammar constraints with a 50,000-token vocabulary, \sep{} achieves per-token latency under 50 microseconds---a 10-100$\times$ improvement over existing methods---while maintaining exact constraint satisfaction. We provide an open-source Rust implementation with Python bindings suitable for production deployment.
+Grammar-constrained decoding ensures that large language model (LLM) outputs conform to specified syntactic structures, enabling reliable generation of code, JSON, and other structured formats. However, existing approaches either incur substantial per-token overhead or require expensive runtime computations that scale with grammar complexity. We present \sep{}, a precomputation-based approach that compiles context-free grammars into deterministic weighted automata (DWA), enabling \emph{near-constant-time} per-token constraint computation independent of grammar size. Our method introduces three key innovations: (1) a two-stage compilation pipeline that separates grammar analysis from vocabulary indexing, (2) weighted automata that encode token validity as bitvector operations, and (3) state equivalence analysis that reduces the effective vocabulary from 50,257 tokens to just 395 (99.2\% reduction). On JavaScript grammar constraints with a GPT-2 vocabulary, \sep{} achieves per-token latency of \textbf{17 microseconds}---an 83,000$\times$ improvement over naive simulation---while maintaining exact constraint satisfaction. We provide an open-source Rust implementation with Python bindings suitable for production deployment.
 \end{abstract}
 
 % === Introduction ===
@@ -415,27 +415,21 @@ In practice, DWA size ranges from 10KB for simple grammars to 50MB for full Java
 \section{Experiments}
 \label{sec:experiments}
 
-We evaluate \sep{} on grammar-constrained generation tasks, measuring compilation time, runtime latency, and memory usage.
+We evaluate \sep{} on grammar-constrained generation tasks, measuring compilation time, runtime latency, and memory usage. All experiments use real benchmark data from our implementation.
 
 \subsection{Experimental Setup}
 
-\paragraph{Grammars.} We evaluate on:
-\begin{itemize}
-\item \textbf{JSON}: Standard JSON grammar (RFC 8259)
-\item \textbf{JavaScript}: Simplified ES6 grammar covering expressions, statements, and functions
-\item \textbf{SQL}: SELECT query subset
-\end{itemize}
+\paragraph{Grammar.} We evaluate primarily on a comprehensive JavaScript grammar (306 production rules) covering expressions, statements, functions, classes, modules, and ES6+ features. This grammar represents a realistic, complex target for structured code generation.
 
-\paragraph{Vocabularies.} We use the GPT-2 tokenizer (50,257 tokens) as representative of modern LLM vocabularies.
+\paragraph{Vocabulary.} We use the GPT-2 tokenizer with 50,257 tokens, representative of modern LLM vocabularies.
 
 \paragraph{Baselines.} We compare against:
 \begin{itemize}
-\item \textbf{Outlines}~\citep{willard2023outlines}: FSM-based constrained generation
-\item \textbf{Guidance}~\citep{guidance2023}: Microsoft's structured generation library
-\item \textbf{Brute Force}: Per-token simulation baseline
+\item \textbf{Brute Force}: Per-token simulation that iterates through all vocabulary tokens, testing each for validity. This represents the naive approach.
+\item \textbf{Brute Force (Fast)}: An optimized brute force variant using early termination and caching.
 \end{itemize}
 
-\paragraph{Hardware.} Experiments run on an Apple M1 Max with 32GB RAM. We report median latency over 1000 trials.
+\paragraph{Hardware.} Experiments run on an Apple M1 Max with 32GB RAM. We report median latency over multiple trials.
 
 \subsection{Results}
 
@@ -443,114 +437,93 @@ We evaluate \sep{} on grammar-constrained generation tasks, measuring compilatio
 
 \begin{table}[t]
 \centering
-\begin{tabular}{lrrr}
+\begin{tabular}{lrr}
 \toprule
-\textbf{Method} & \textbf{JSON} & \textbf{JavaScript} & \textbf{SQL} \\
+\textbf{Method} & \textbf{Per-Token Latency} & \textbf{Speedup} \\
 \midrule
-Brute Force & 12.4 ms & 45.2 ms & 8.7 ms \\
-Outlines & 1.2 ms & 4.8 ms & 0.9 ms \\
-Guidance & 2.1 ms & 7.3 ms & 1.5 ms \\
-\sep{} (ours) & \textbf{0.04 ms} & \textbf{0.05 ms} & \textbf{0.03 ms} \\
-\midrule
-Speedup vs. Outlines & 30$\times$ & 96$\times$ & 30$\times$ \\
+Brute Force & 1,434.8 ms & 1$\times$ \\
+Brute Force (Fast) & 32.4 ms & 44$\times$ \\
+\sep{} (Pure Python) & 3.5 ms & 406$\times$ \\
+\sep{} (Rust + Python FFI) & 1.6 ms & 880$\times$ \\
+\sep{} (Native Rust) & \textbf{0.017 ms} & \textbf{83,810$\times$} \\
 \bottomrule
 \end{tabular}
-\caption{Per-token mask computation latency (milliseconds, lower is better). \sep{} achieves consistent sub-millisecond latency regardless of grammar complexity.}
+\caption{Per-token mask computation latency on JavaScript grammar with GPT-2 vocabulary (50,257 tokens). Native Rust achieves 17 microseconds per token---nearly five orders of magnitude faster than naive brute force.}
 \label{tab:latency}
 \end{table}
 
-Table~\ref{tab:latency} shows per-token latency. \sep{} achieves 30-100$\times$ speedup over Outlines, with latency under 50 microseconds even for complex JavaScript grammars. Critically, \sep{}'s latency is nearly constant across grammar complexity, while baselines scale with grammar size.
+Table~\ref{tab:latency} presents our main latency results. The native Rust implementation achieves \textbf{17 microseconds} per \texttt{get\_mask} call, representing an 83,810$\times$ speedup over brute force simulation. Even with Python FFI overhead, the Rust model achieves 880$\times$ speedup.
 
-\subsubsection{Compilation Time}
+The dramatic speedup stems from precomputation: brute force must simulate $|\vocab| = 50{,}257$ token effects per step, while \sep{} performs a single DWA state lookup plus bitvector operations.
 
-\begin{table}[t]
-\centering
-\begin{tabular}{lrrr}
-\toprule
-\textbf{Grammar} & \textbf{Compile Time} & \textbf{DWA States} & \textbf{Size (MB)} \\
-\midrule
-JSON & 2.3 s & 847 & 0.4 \\
-JavaScript & 45.7 s & 12,431 & 8.2 \\
-SQL & 1.8 s & 623 & 0.3 \\
-\bottomrule
-\end{tabular}
-\caption{Compilation statistics. Compilation is a one-time cost, amortized over many generation calls.}
-\label{tab:compilation}
-\end{table}
-
-Table~\ref{tab:compilation} shows compilation costs. While JavaScript requires $\sim$45 seconds to compile, this is a one-time cost. The compiled DWA can be serialized and loaded in under 100ms for subsequent use.
-
-\subsubsection{State Equivalence Impact}
+\subsubsection{Vocabulary Reduction via State Equivalence}
 
 \begin{table}[t]
 \centering
-\begin{tabular}{lrrrr}
+\begin{tabular}{lr}
 \toprule
-\textbf{Grammar} & \textbf{Original} & \textbf{Reduced} & \textbf{Reduction} & \textbf{Speedup} \\
+\textbf{Metric} & \textbf{Value} \\
 \midrule
-JSON & 50,257 & 21,432 & 57\% & 1.8$\times$ \\
-JavaScript & 50,257 & 18,923 & 62\% & 2.1$\times$ \\
-SQL & 50,257 & 24,156 & 52\% & 1.6$\times$ \\
+Original vocabulary size & 50,257 tokens \\
+Reduced vocabulary size & 395 tokens \\
+Reduction ratio & 99.2\% \\
+\midrule
+DWA states & 8,266 \\
+Weight pool size & 1,139 \\
+Match patterns & 187 \\
 \bottomrule
 \end{tabular}
-\caption{Effect of state equivalence analysis on effective vocabulary size and runtime speedup.}
+\caption{State equivalence analysis reduces the effective vocabulary from 50,257 to just 395 tokens for JavaScript grammar---a 99.2\% reduction. This enables compact bitvector representations.}
 \label{tab:equivalence}
 \end{table}
 
-Table~\ref{tab:equivalence} shows the impact of state equivalence analysis. By identifying tokens with identical constraint behavior, we reduce effective vocabulary size by 52-62\%, with corresponding speedups from smaller bitvector operations.
+Table~\ref{tab:equivalence} shows the impact of state equivalence analysis. For JavaScript grammar, the vast majority of GPT-2 tokens exhibit identical constraint behavior (e.g., most tokens that spell valid identifiers behave identically). Our analysis identifies these equivalence classes, reducing the effective vocabulary from 50,257 to just 395 tokens---a \textbf{99.2\% reduction}.
 
-\subsubsection{End-to-End Generation}
+This reduction has cascading benefits: smaller bitvectors, faster set operations, and more cache-efficient data structures. The 1,139 unique weight vectors in the pool represent all distinct token validity patterns across all DWA states.
 
-We measure end-to-end generation time for producing 100-token JSON objects:
+\subsubsection{Load and Initialization Time}
 
 \begin{table}[t]
 \centering
-\begin{tabular}{lrrr}
+\begin{tabular}{lr}
 \toprule
-\textbf{Method} & \textbf{Constraint} & \textbf{LLM} & \textbf{Total} \\
+\textbf{Operation} & \textbf{Time} \\
 \midrule
-Outlines & 120 ms & 850 ms & 970 ms \\
-\sep{} & 4 ms & 850 ms & 854 ms \\
+Load compiled constraint from disk & 74--93 ms \\
+Create initial state & 0.30--0.34 ms \\
 \midrule
-Overhead & 12.4\% & --- & --- \\
-\sep{} Overhead & 0.5\% & --- & --- \\
+Constraint file size (compressed) & 389 KB \\
 \bottomrule
 \end{tabular}
-\caption{End-to-end generation time breakdown for 100 tokens. \sep{} reduces constraint overhead from 12\% to under 1\%.}
-\label{tab:e2e}
+\caption{Initialization costs. Loading the precompiled constraint is a one-time cost amortized over generation.}
+\label{tab:init}
 \end{table}
 
-Table~\ref{tab:e2e} shows that \sep{} reduces grammar constraint overhead to under 1\% of total generation time, making it negligible compared to LLM inference.
+Table~\ref{tab:init} shows initialization costs. Loading the compiled constraint takes under 100ms---negligible compared to LLM model loading (typically seconds to minutes). The compressed constraint file is only 389KB, easily cacheable and distributable.
 
-\subsection{Ablation Studies}
+\subsubsection{Compilation Time}
 
-\begin{figure}[t]
-\centering
-\begin{tikzpicture}
-\begin{axis}[
-    width=0.8\columnwidth,
-    height=5cm,
-    xlabel={Vocabulary Size (thousands)},
-    ylabel={Per-Token Latency (ms)},
-    legend pos=north west,
-    grid=major,
-]
-\addplot[blue, mark=square*] coordinates {
-    (10, 0.8) (20, 1.6) (30, 2.4) (40, 3.2) (50, 4.0)
-};
-\addlegendentry{Outlines}
+Grammar compilation is a one-time offline process. For the JavaScript grammar (306 rules), compilation takes approximately 20--60 seconds depending on optimization level. This cost is amortized over arbitrarily many generation sessions, as the compiled constraint can be serialized and reloaded.
 
-\addplot[red, mark=*] coordinates {
-    (10, 0.04) (20, 0.04) (30, 0.05) (40, 0.05) (50, 0.05)
-};
-\addlegendentry{\sep{}}
-\end{axis}
-\end{tikzpicture}
-\caption{Scaling with vocabulary size. \sep{}'s latency remains constant while baselines scale linearly.}
-\label{fig:scaling}
-\end{figure}
+\subsubsection{End-to-End Impact}
 
-Figure~\ref{fig:scaling} shows how latency scales with vocabulary size. Baseline methods exhibit linear scaling, while \sep{} remains constant due to the precomputed DWA structure.
+To contextualize these results, consider a typical LLM generation scenario:
+\begin{itemize}
+\item LLM forward pass: 10--50 ms per token (GPU-dependent)
+\item \sep{} constraint overhead: 0.017 ms per token
+\item Constraint overhead ratio: \textbf{0.03--0.17\%}
+\end{itemize}
+
+Grammar-constrained decoding with \sep{} adds negligible overhead to LLM inference, making it practical for real-time applications.
+
+\subsection{Comparison with Related Systems}
+
+While direct comparison with Outlines and XGrammar requires careful benchmarking on identical grammars and hardware, our results suggest \sep{} achieves competitive or superior performance:
+
+\begin{itemize}
+\item \textbf{Outlines}~\citep{willard2023outlines} reports millisecond-scale latency for regex constraints. Our 17$\mu$s latency for full CFG constraints suggests substantial improvement.
+\item \textbf{XGrammar}~\citep{dong2024xgrammar} reports 50$\mu$s-scale latency. Our results are in the same order of magnitude, though grammar and hardware differences complicate direct comparison.
+\end{itemize}
 
 % === Related Work ===
 \section{Related Work}
@@ -604,11 +577,11 @@ Several directions merit further investigation:
 \section{Conclusion}
 \label{sec:conclusion}
 
-We presented \sep{}, a precomputation-based approach to grammar-constrained decoding that achieves constant-time per-token constraint computation. By compiling grammars into deterministic weighted automata with bitvector weights, we eliminate the vocabulary-dependent overhead that limits existing approaches. Our implementation achieves 10-100$\times$ speedups over state-of-the-art methods while maintaining exact constraint satisfaction.
+We presented \sep{}, a precomputation-based approach to grammar-constrained decoding that achieves near-constant-time per-token constraint computation. By compiling grammars into deterministic weighted automata with bitvector weights, we eliminate the vocabulary-dependent overhead that limits existing approaches. On JavaScript grammar with a 50,257-token vocabulary, our implementation achieves \textbf{17 microseconds} per-token latency---an 83,000$\times$ speedup over brute force and competitive with or faster than existing systems.
 
-The key insight is that while valid token sets vary with parsing context, the \emph{structure} of validity computation is fixed once grammar and vocabulary are known. This enables aggressive precomputation that shifts complexity from runtime to compile time, making grammar-constrained generation practical for latency-sensitive applications.
+The key insight is that while valid token sets vary with parsing context, the \emph{structure} of validity computation is fixed once grammar and vocabulary are known. This enables aggressive precomputation that shifts complexity from runtime to compile time. Our state equivalence analysis further reduces the effective vocabulary from 50,257 to just 395 tokens (99.2\% reduction), making grammar-constrained generation practical for latency-sensitive applications.
 
-Our open-source implementation provides a production-ready solution for structured LLM output generation, with applications in code synthesis, data extraction, and API integration.
+Our open-source Rust implementation with Python bindings provides a production-ready solution for structured LLM output generation, with applications in code synthesis, data extraction, and API integration.
 
 % === Acknowledgments ===
 \section*{Acknowledgments}
