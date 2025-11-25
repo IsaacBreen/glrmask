@@ -327,32 +327,24 @@ impl JSONConvertible for GrammarConstraint {
         let mut obj = StdMap::new();
         obj.insert("tokenizer".to_string(), self.tokenizer.to_json());
         obj.insert("parser".to_string(), self.parser.to_json());
-        obj.insert("precomputed1".to_string(), self.precomputed1.to_json());
         obj.insert("precomputed4".to_string(), self.precomputed4.to_json());
         obj.insert("token_name_map".to_string(), self.token_name_map.to_json());
         obj.insert(
             "possible_matches".to_string(),
             self.possible_matches.to_json(),
         );
-        obj.insert("trie1_god".to_string(), self.trie1_god.to_json());
+
+        // Minimal serialization for vocabs: only store the primary maps.
+        // Derived fields (max_ids, inverse maps, sparse matrices) are reconstructed in from_json.
         obj.insert(
-            "run_precompute4".to_string(),
-            self.run_precompute4.to_json(),
+            "precompute4_vocab".to_string(),
+            self.precompute4_vocab.internal_to_original.to_json(),
         );
         obj.insert(
-            "post_commit_allow_check_mode".to_string(),
-            self.post_commit_allow_check_mode.to_json(),
+            "original_llm_vocab".to_string(),
+            self.original_llm_vocab.llm_token_map.to_json(),
         );
-        obj.insert(
-            "terminal_map_by_llm".to_string(),
-            self.terminal_map_by_llm.to_json(),
-        );
-        obj.insert("precompute4_vocab".to_string(), self.precompute4_vocab.to_json());
-        obj.insert("original_llm_vocab".to_string(), self.original_llm_vocab.to_json());
-        obj.insert(
-            "original_to_dummy_map".to_string(),
-            self.original_to_dummy_map.to_json(),
-        );
+
         JSONNode::Object(obj)
     }
 
@@ -367,10 +359,7 @@ impl JSONConvertible for GrammarConstraint {
                     .remove("parser")
                     .ok_or_else(|| "Missing field parser".to_string())
                     .and_then(GLRParser::from_json)?;
-                let precomputed1 = obj
-                    .remove("precomputed1")
-                    .ok_or_else(|| "Missing field precomputed1".to_string())
-                    .and_then(Precomputed::from_json)?;
+                let precomputed1 = Precomputed::new();
                 let precomputed4 = obj
                     .remove("precomputed4")
                     .ok_or_else(|| "Missing field precomputed4".to_string())
@@ -381,89 +370,66 @@ impl JSONConvertible for GrammarConstraint {
                     .ok_or_else(|| "Missing field token_name_map".to_string())
                     .and_then(|n| BiBTreeMap::<Terminal, usize>::from_json(n))?;
 
-                // possible_matches: prefer new key, fall back to old *_precompute1 for compatibility
                 let possible_matches = if let Some(n) = obj.remove("possible_matches") {
-                    BTreeMap::<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>::from_json(n)?
-                } else if let Some(n) = obj.remove("possible_matches_precompute1") {
                     BTreeMap::<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>::from_json(n)?
                 } else {
                     BTreeMap::new()
                 };
 
-                let trie1_god = obj
-                    .remove("trie1_god")
-                    .ok_or_else(|| "Missing field trie1_god".to_string())
-                    .and_then(Trie1GodWrapper::from_json)?;
+                let trie1_god = Trie1GodWrapper::new();
+                let run_precompute4 = true;
+                let post_commit_allow_check_mode = TerminalAllowanceCheckMode::default();
+                let terminal_map_by_llm = DedupValueMap::new();
 
-                let run_precompute4 = obj
-                    .remove("run_precompute4")
-                    .map(bool::from_json)
-                    .transpose()?
-                    .unwrap_or(true);
-
-                let post_commit_allow_check_mode =
-                    match obj.remove("post_commit_allow_check_mode") {
-                        Some(n) => TerminalAllowanceCheckMode::from_json(n)?,
-                        None => TerminalAllowanceCheckMode::default(),
-                    };
-
-                let terminal_map_by_llm =
-                    match obj.remove("terminal_map_by_llm") {
-                        Some(n) => DedupValueMap::<
-                            LLMTokenID,
-                            BTreeMap<TokenizerStateID, TerminalBV>,
-                        >::from_json(n)?,
-                        None => DedupValueMap::new(),
-                    };
-
-                // Handle original_llm_vocab deserialization with fallback
+                // Reconstruct LLMVocab from map
                 let original_llm_vocab = if let Some(n) = obj.remove("original_llm_vocab") {
-                    Arc::new(LLMVocab::from_json(n)?)
-                } else {
-                    // Fallback to old format
-                    let max_original_llm_token_id = obj
-                        .remove("max_original_llm_token_id")
-                        .ok_or_else(|| "Missing field max_original_llm_token_id".to_string())
-                        .and_then(usize::from_json)?;
-
-                    let llm_token_map = obj
-                        .remove("llm_token_map")
-                        .ok_or_else(|| "Missing field llm_token_map".to_string())
-                        .and_then(|n| BiBTreeMap::<Vec<u8>, LLMTokenID>::from_json(n))?;
-
+                    let llm_token_map = BiBTreeMap::<Vec<u8>, LLMTokenID>::from_json(n)?;
+                    let max_original_llm_token_id =
+                        llm_token_map.iter().map(|(_, id)| id.0).max().unwrap_or(0);
                     Arc::new(LLMVocab {
                         llm_token_map,
                         max_original_llm_token_id,
                     })
-                };
-
-                // Stage vocab: new key "precompute4_vocab", fall back to old names if present.
-                let mut vocab_node = if let Some(n) = obj.remove("precompute4_vocab") {
-                    n
-                } else if let Some(n) = obj.remove("precompute_vocab") {
-                    n
                 } else {
-                    return Err(
-                        "Missing stage vocab (vocab/precompute_vocab/precompute0_vocab)"
-                            .to_string(),
-                    );
+                    return Err("Missing field original_llm_vocab".to_string());
                 };
 
-                // For backward compatibility, inject max_original_llm_token_id into vocab JSON if needed.
-                if let JSONNode::Object(ref mut vocab_obj) = vocab_node {
-                    if !vocab_obj.contains_key("max_original_llm_token_id") {
-                        vocab_obj.insert(
-                            "max_original_llm_token_id".to_string(),
-                            original_llm_vocab.max_original_llm_token_id.to_json(),
-                        );
+                // Reconstruct StageVocab from internal_to_original map
+                let vocab = if let Some(n) = obj.remove("precompute4_vocab") {
+                    let internal_to_original = BTreeMap::<usize, LLMTokenBV>::from_json(n)?;
+                    let internal_max_llm_token =
+                        internal_to_original.keys().max().copied().unwrap_or(0);
+
+                    let mut original_to_internal = BTreeMap::new();
+                    let mut max_original_llm_token_id = 0;
+                    for (internal, original_bv) in &internal_to_original {
+                        for orig in original_bv.iter_up_to(usize::MAX) {
+                            original_to_internal.insert(orig, *internal);
+                            if orig > max_original_llm_token_id {
+                                max_original_llm_token_id = orig;
+                            }
+                        }
                     }
-                }
-                let vocab = StageVocab::from_json(vocab_node)?;
 
-                let original_to_dummy_map = match obj.remove("original_to_dummy_map") {
-                    Some(n) => BTreeMap::<TerminalID, TerminalID>::from_json(n)?,
-                    None => BTreeMap::new(),
+                    let internal_to_original_sparse_matrix =
+                        StageVocab::build_internal_to_original_sparse_matrix(
+                            &internal_to_original,
+                            max_original_llm_token_id,
+                            internal_max_llm_token,
+                        );
+
+                    StageVocab {
+                        original_to_internal,
+                        internal_to_original,
+                        internal_max_llm_token,
+                        max_original_llm_token_id,
+                        internal_to_original_sparse_matrix,
+                    }
+                } else {
+                    return Err("Missing precompute4_vocab".to_string());
                 };
+
+                let original_to_dummy_map = BTreeMap::new();
 
                 let gc = GrammarConstraint {
                     tokenizer,
