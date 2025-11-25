@@ -1,5 +1,5 @@
 // src/test_constraint_basic.rs
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::sync::Arc;
 use std::time::Instant;
@@ -867,7 +867,7 @@ fn test_precompute_a_plus_tokenizer() {
 
     // The destination state should be final
     let dest_state = &dwa.states[dest_state_id];
-    assert!(dest_state.is_final(), "Destination state should be final");
+    assert!(dest_state.final_weight.is_some(), "Destination state should be final");
 }
 
 #[ignore]
@@ -960,7 +960,7 @@ fn test_precompute_x_eq() {
         HybridBitset::from_iter(vec![x_llm_id]),
         "Weight for X edge is wrong"
     );
-    assert!(dwa.states[x_dest_id].is_final(), "Destination for X edge should be final");
+    assert!(dwa.states[x_dest_id].final_weight.is_some(), "Destination for X edge should be final");
 
     // 2. Verify the edge for 'SPACE'
     let (space_dest_id, space_weight) = parsing_start_state
@@ -973,7 +973,7 @@ fn test_precompute_x_eq() {
         "Weight for SPACE edge is wrong"
     );
     let node_after_space = &dwa.states[space_dest_id];
-    assert!(!node_after_space.is_final(), "Destination for SPACE should not be final");
+    assert!(!node_after_space.final_weight.is_some(), "Destination for SPACE should not be final");
 
     // 3. Verify the node after 'SPACE'
     let (equals_dest_id, equals_weight) = node_after_space
@@ -986,7 +986,7 @@ fn test_precompute_x_eq() {
         HybridBitset::from_iter(vec![space_equals_llm_id]),
         "Weight for EQUALS edge is wrong"
     );
-    assert!(dwa.states[equals_dest_id].is_final(), "Destination for EQUALS edge should be final");
+    assert!(dwa.states[equals_dest_id].final_weight.is_some(), "Destination for EQUALS edge should be final");
 }
 
 #[test]
