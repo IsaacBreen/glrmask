@@ -2,28 +2,82 @@
 
 ## GrammarConstraint
 
-The JSON serialization format for `GrammarConstraint` has been overhauled to reduce size and complexity. This is a breaking change.
+The JSON serialization format for `GrammarConstraint` has been overhauled to reduce size and improve parsing performance. **This is a breaking change** - old JSON files will not deserialize.
 
 ### Removed Fields
 
-The following fields are no longer serialized and will be initialized with default/empty values upon deserialization:
-- `precomputed1` (Replaced by `precomputed4`)
-- `trie1_god`
-- `run_precompute4` (Defaults to `true`)
-- `post_commit_allow_check_mode` (Defaults to `StepProbe`)
-- `terminal_map_by_llm`
-- `original_to_dummy_map`
+The following fields are no longer serialized:
+- `precomputed1` (functionality replaced by `precomputed4`)
+- `trie1_god` (runtime-only structure)
+- `run_precompute4` (always true)
+- `post_commit_allow_check_mode` (runtime-only)
+- `terminal_map_by_llm` (runtime-only)
+- `original_to_dummy_map` (dummy terminal support removed)
+
+### Removed from GrammarConstraintConfig
+
+- `use_dummy_terminals`
+- `dummy_terminal_map`
+- `dummy_terminal_penalties`
+- `run_precompute4`
+
+**Note:** Dummy terminal support has been completely removed from the codebase.
+
+### Compact Array Formats
+
+The following types now use compact array formats instead of verbose objects:
+
+#### CharTransitions
+```diff
+- {"97": target1, "98": target2}
++ [[97, target1], [98, target2]]
+```
+
+#### HybridBitset
+```diff
+- [[start1, end1], [start2, end2]]
++ [start1, end1, start2, end2]
+```
+
+#### Stage7ShiftsAndReducesLookaheadValue
+```diff
+- {"variant": "Shift", "state_id": X}
++ ["S", X]
+
+- {"variant": "Reduce", "nonterminal_id": X, "len": Y, "production_ids": [...]}
++ ["R", X, Y]  // production_ids dropped
+
+- {"variant": "Split", "shift": null, "reduces": {...}}
++ ["X", null, [[nt_id, len], ...]]
+```
+
+#### Goto
+```diff
+- {"state_id": X, "accept": false}
++ [X, false]
+```
+
+#### Row
+```diff
+- {"shifts_and_reduces_full": {...}, "gotos": {...}, "default_reduce": ...}
++ [[[tid, Action], ...], [[ntid, Goto], ...], default_reduce]
+```
 
 ### Changed Fields
 
 #### `precompute4_vocab` (StageVocab)
-**Old Format:** A JSON object containing `internal_to_original`, `original_to_internal`, `internal_max_llm_token`, etc.
-**New Format:** A simple JSON map representing `internal_to_original`. All other fields (inverse map, sparse matrix, max IDs) are recomputed during deserialization.
+- **Old:** JSON object with all fields  
+- **New:** Only `internal_to_original` map serialized; other fields recomputed on load
 
 #### `original_llm_vocab` (LLMVocab)
-**Old Format:** A JSON object containing `llm_token_map` and `max_original_llm_token_id`.
-**New Format:** The JSON representation of `llm_token_map` directly. `max_original_llm_token_id` is derived from the map keys.
+- **Old:** Object with `llm_token_map` and `max_original_llm_token_id`
+- **New:** Direct `llm_token_map`; `max_original_llm_token_id` derived from keys
 
-### Action Required
+### Migration Path
 
-If you are manually constructing or parsing these JSON files outside of the `GrammarConstraint::to_json` / `from_json` methods, you must update your schemas to match the new reduced structure. Old JSON files may fail to load if they are missing the new direct map structures, though `GrammarConstraint` does not support backward compatibility for the old format.
+**Old JSON files are not compatible**. To migrate:
+1. Load grammar with old code version
+2. Re-serialize with new code version
+3. Use new JSON going forward
+
+Alternatively, rebuild grammars from source EBNF definitions.
