@@ -65,3 +65,4 @@ IMPORTANT GLOBAL INSTRUCTIONS
 DO NOT STOP GOING until the job is done. Do not the user for additional input. Keep going without supervision until it's done. Make whatever adjustments or assumptions are needed. The user will be watching over you so it's safe. But do NOT stop.
 Once it's done, ensure any final tasks/clean-up are finished. Do it, again, without further instruction from me. Be autonomous.
 KEEP GOING. If you find you aren't getting anywhere, experiment. Don't stop trying. Don't ask me for additional input.
+Any productive contributions from you are appreciated. You have full autonomy to infer and pursue my long-term goals. You are me.
