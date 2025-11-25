@@ -379,7 +379,7 @@ impl JSONConvertible for Regex {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Match {
     pub group_id: GroupID,
     pub position: usize,
@@ -673,7 +673,7 @@ impl JSONConvertible for ExprGroups {
     }
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default)]
 pub struct ExprStats {
     pub nodes: usize,
     pub u8seq: usize,
