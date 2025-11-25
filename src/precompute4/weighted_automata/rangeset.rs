@@ -14,7 +14,7 @@ use std::iter::FromIterator;
 use std::num::NonZeroUsize;
 use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Deref, Not, Sub, SubAssign};
 use std::sync::{Arc, Mutex};
-use crate::datastructures::hybrid_bitset::RangeSet;
+use crate::datastructures::hybrid_bitset::RangeSet as OtherRangeSet;
 
 /// Thin wrapper around `RangeSetBlaze<usize>` with cached fingerprint and `is_all` flag.
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd)]
@@ -333,12 +333,12 @@ impl From<RangeSetBlaze<usize>> for RangeSet {
     fn from(rsb: RangeSetBlaze<usize>) -> Self { intern(rsb) }
 }
 
-impl From<RangeSet> for RangeSet {
-    fn from(hb: RangeSet) -> Self { intern(hb.inner.as_ref().clone()) }
+impl From<OtherRangeSet> for RangeSet {
+    fn from(hb: OtherRangeSet) -> Self { intern(hb.inner.as_ref().clone()) }
 }
 
-impl From<RangeSet> for RangeSet {
-    fn from(sb: RangeSet) -> Self { RangeSet::from(sb.rsb.clone()) }
+impl From<RangeSet> for OtherRangeSet {
+    fn from(sb: RangeSet) -> Self { OtherRangeSet::from(sb.rsb.clone()) }
 }
 
 impl<'a> BitAnd<&'a RangeSet> for &'a RangeSet {

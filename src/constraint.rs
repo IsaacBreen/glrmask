@@ -35,7 +35,7 @@ use crate::datastructures::bitset::Bitset;
 use crate::datastructures::gss_acc::Acc;
 use crate::glr::parser::ParseStateEdgeContent;
 use crate::precompute4::weighted_automata::{DWA, NWA};
-use crate::precompute4::weighted_automata::{RangeSet, Weight};
+use crate::precompute4::weighted_automata::{RangeSet as WARangeSet, Weight};
 
 // Import from new modules
 use crate::state_equivalence_analysis_finite_automata::find_state_equivalence_classes;
@@ -176,7 +176,7 @@ fn optimize_dwa_and_vocab(
         for t in w.iter_up_to(max_tok) {
             if let Some(&new_t) = old_to_new_map.get(&t) { new_vals.push(new_t); }
         }
-        let new_w = RangeSet::from_iter(new_vals);
+        let new_w = WARangeSet::from_iter(new_vals);
         cache.insert(w.clone(), new_w.clone());
         new_w
     };
