@@ -790,6 +790,11 @@ fn test_simple_def_match_non_zero_llm_id() {
 #[ignore]
 #[test]
 fn test_precompute_a_plus_tokenizer() {
+    use crate::constraint_precompute::run_precompute1;
+    use crate::constraint_vocab::LLMVocab;
+    use crate::precompute4::weighted_automata::common::Label;
+    use crate::tokenizer::TokenizerStateID;
+
     // Tokenizer for `a+`
     let tokenizer_expr = groups![repeat1_fast(eat_u8(b'a'))];
     let tokenizer = tokenizer_expr.build();
@@ -809,48 +814,70 @@ fn test_precompute_a_plus_tokenizer() {
 
     let parser = generate_glr_parser_with_terminal_map(&productions, grammar_token_map.clone(), None);
 
-    // Token name map for stats
-    let mut token_name_map = BiBTreeMap::new();
-    token_name_map.insert(regex_name("A_PLUS"), 0);
-
-    // Create the constraint, which runs precomputation
-    let constraint = GrammarConstraint::new(
-        tokenizer.clone(),
-        parser,
-        llm_token_map,
-        token_name_map,
+    let original_llm_vocab = Arc::new(LLMVocab {
+        llm_token_map: llm_token_map.clone(),
         max_original_llm_token_id,
+    });
+
+    // In this test, original and internal are the same.
+    let internal_llm_token_map: BTreeMap<_, _> =
+        llm_token_map.iter().map(|(k, v)| (k.clone(), *v)).collect();
+    let internal_max_llm_token = max_original_llm_token_id;
+
+    let terminals_count = parser.terminal_map.len();
+    let active_states = vec![tokenizer.initial_state_id()];
+
+    let dwa = run_precompute1(
+        &tokenizer,
+        Some(&parser),
+        Some(original_llm_vocab),
+        &internal_llm_token_map,
+        internal_max_llm_token,
+        terminals_count,
+        active_states,
     );
-    // constraint.dump_precomputed1();
-    // constraint.dump_precomputed2();
 
     // --- Verification ---
-    // assert_eq!(constraint.precomputed.len(), 1, "Expected precomputed trie for only one tokenizer state");
-    let initial_state_id = tokenizer.initial_state_id();
-    let root_node = constraint.precomputed1.get(&initial_state_id).expect("No precomputed trie for initial state").read(&constraint.trie1_god).unwrap();
+    let start_state_id = dwa.body.start_state;
+    let start_state = &dwa.states[start_state_id];
 
-    // 1. Check root node's clean_end
-    let root_value = &root_node.value;
-    // let clean_end_bv = root_value.clean_end.as_ref().expect("Root should have a clean_end bitset");
-    let expected_tokens = HybridBitset::from_iter(vec![0, 1]); // LLM tokens "a" and "aa"
-    // assert_eq!(*clean_end_bv, expected_tokens, "Clean_end content is incorrect");
+    // Transition from DWA start to parsing start on tokenizer state
+    let initial_tsid = tokenizer.initial_state_id();
+    let tsid_label = (initial_tsid.0 + terminals_count) as Label;
+    let (parsing_start_state_id, _) = start_state
+        .get_transition(tsid_label)
+        .expect("No transition for initial tokenizer state");
+    let parsing_start_state = &dwa.states[parsing_start_state_id];
 
-    // 2. Check root node's children and the leaf node
-    assert_eq!(root_node.children().len(), 1, "Root should have one child edge key");
-    let (edge_gtid_opt, destinations) = root_node.children().iter().next().unwrap();
-    assert_eq!(*edge_gtid_opt, Some(TerminalID(0)), "Edge key should be for grammar token 0");
-    assert_eq!(destinations.len(), 1, "Should be one destination for the edge");
-    let (child_arc_wrapper, edge_bv) = destinations.iter().next().unwrap();
-    assert_eq!(*edge_bv, expected_tokens, "Edge token bitset is incorrect");
-    let binding = child_arc_wrapper.as_arc().clone();
-    let child_node = binding.read(&constraint.trie1_god).unwrap();
-    assert!(child_node.is_leaf(), "Child node should be a leaf after pruning");
-    // assert_eq!(*child_node.value.clean_end.as_ref().unwrap(), expected_tokens, "Clean_end bitset is incorrect");
+    // From parsing start, there should be a transition on terminal A_PLUS
+    let a_plus_tid = *grammar_token_map
+        .get_by_left(&regex_name("A_PLUS"))
+        .unwrap();
+    let (dest_state_id, weight) = parsing_start_state
+        .get_transition(a_plus_tid.0 as Label)
+        .expect("No transition for A_PLUS terminal");
+
+    // The weight should contain tokens for "a" and "aa"
+    let mut expected_tokens = HybridBitset::zeros();
+    expected_tokens.insert(llm_token_map.get_by_left(b"a".as_ref()).unwrap().0);
+    expected_tokens.insert(llm_token_map.get_by_left(b"aa".as_ref()).unwrap().0);
+
+    let weight_tokens: HybridBitset = weight.iter_up_to(internal_max_llm_token).collect();
+    assert_eq!(weight_tokens, expected_tokens, "Weight on edge is incorrect");
+
+    // The destination state should be final
+    let dest_state = &dwa.states[dest_state_id];
+    assert!(dest_state.is_final(), "Destination state should be final");
 }
 
 #[ignore]
 #[test]
 fn test_precompute_x_eq() {
+    use crate::constraint_precompute::run_precompute1;
+    use crate::constraint_vocab::LLMVocab;
+    use crate::precompute4::weighted_automata::common::Label;
+    use crate::tokenizer::TokenizerStateID;
+
     // Tokenizer for `=|x| `
     let tokenizer_expr = groups![
         eat_u8(b'x'),
@@ -880,35 +907,39 @@ fn test_precompute_x_eq() {
 
     let parser = generate_glr_parser_with_terminal_map(&productions, grammar_token_map.clone(), None);
 
-    // Token name map for stats
-    let mut token_name_map = BiBTreeMap::new();
-    token_name_map.insert(regex_name("X"), 0);
-    token_name_map.insert(regex_name("SPACE"), 1);
-    token_name_map.insert(regex_name("EQUALS"), 2);
-    token_name_map.insert(regex_name("ANY"), 3);
-
-    // Create the constraint, which runs precomputation
-    let constraint = GrammarConstraint::new(
-        tokenizer.clone(),
-        parser,
-        llm_token_map.clone(),
-        token_name_map,
+    let original_llm_vocab = Arc::new(LLMVocab {
+        llm_token_map: llm_token_map.clone(),
         max_original_llm_token_id,
+    });
+
+    let internal_llm_token_map: BTreeMap<_, _> =
+        llm_token_map.iter().map(|(k, v)| (k.clone(), *v)).collect();
+    let internal_max_llm_token = max_original_llm_token_id;
+
+    let terminals_count = parser.terminal_map.len();
+    let active_states = vec![tokenizer.initial_state_id()];
+
+    let dwa = run_precompute1(
+        &tokenizer,
+        Some(&parser),
+        Some(original_llm_vocab),
+        &internal_llm_token_map,
+        internal_max_llm_token,
+        terminals_count,
+        active_states,
     );
-    // constraint.dump_precomputed1();
-    // constraint.dump_precomputed2();
 
-    // LLM token "x" should result in one edge in the root precompute node for state 0 with the terminal for `X`.
-    // LLM token " =" should result in one edge in the root precompute node for state 0 with the terminal for `SPACE` and a subsequent edge from its destination with the terminal for `EQUALS`.
     // --- Verification ---
-    let initial_state_id = tokenizer.initial_state_id();
-    let root_arc = constraint.precomputed1.get(&initial_state_id)
-        .expect("No precomputed trie for initial tokenizer state");
-    let root_node = root_arc.read(&constraint.trie1_god).unwrap();
+    let start_state_id = dwa.body.start_state;
+    let start_state = &dwa.states[start_state_id];
 
-    // The root node should have two outgoing edge keys: one for 'X' (from LLM token "x")
-    // and one for 'SPACE' (from LLM token " =").
-    assert_eq!(root_node.children().len(), 3, "Root node should have three outgoing edge keys");
+    // Transition from DWA start to parsing start on tokenizer state
+    let initial_tsid = tokenizer.initial_state_id();
+    let tsid_label = (initial_tsid.0 + terminals_count) as Label;
+    let (parsing_start_state_id, _) = start_state
+        .get_transition(tsid_label)
+        .expect("No transition for initial tokenizer state");
+    let parsing_start_state = &dwa.states[parsing_start_state_id];
 
     // Get the grammar token IDs for our terminals
     let x_tid = *grammar_token_map.get_by_left(&regex_name("X")).unwrap();
@@ -916,39 +947,46 @@ fn test_precompute_x_eq() {
     let equals_tid = *grammar_token_map.get_by_left(&regex_name("EQUALS")).unwrap();
 
     // Get the LLM token IDs
-    let x_llm_id: HybridBitset = constraint.internal_bv_to_original(&LLMTokenBV::from_item(llm_token_map.get_by_left(b"x".as_ref()).unwrap().0)).into();
-    let space_equals_llm_id: HybridBitset = constraint.internal_bv_to_original(&LLMTokenBV::from_item(llm_token_map.get_by_left(b" =".as_ref()).unwrap().0)).into();
+    let x_llm_id = llm_token_map.get_by_left(b"x".as_ref()).unwrap().0;
+    let space_equals_llm_id = llm_token_map.get_by_left(b" =".as_ref()).unwrap().0;
 
     // 1. Verify the edge for 'X'
-    let x_dests = root_node.get(&Some(x_tid)).expect("No edge for terminal 'X'");
-    assert_eq!(x_dests.len(), 1, "Should be one destination for 'X' edge");
-    let (x_dest_wrapper, x_edge_bv) = x_dests.iter().next().unwrap();
-    assert_eq!(*x_edge_bv, x_llm_id.clone(), "Edge for 'X' has wrong LLM token bitset");
-    let binding = x_dest_wrapper.as_arc().clone();
-    let x_dest_node = binding.read(&constraint.trie1_god).unwrap();
-    assert!(x_dest_node.value.end, "Destination for 'X' edge should be an end node");
-    drop(x_dest_node);
+    let (x_dest_id, x_weight) = parsing_start_state
+        .get_transition(x_tid.0 as Label)
+        .expect("No transition for X");
+    let x_weight_tokens: HybridBitset = x_weight.iter_up_to(internal_max_llm_token).collect();
+    assert_eq!(
+        x_weight_tokens,
+        HybridBitset::from_iter(vec![x_llm_id]),
+        "Weight for X edge is wrong"
+    );
+    assert!(dwa.states[x_dest_id].is_final(), "Destination for X edge should be final");
 
     // 2. Verify the edge for 'SPACE'
-    let space_dests = root_node.get(&Some(space_tid)).expect("No edge for terminal 'SPACE'");
-    assert_eq!(space_dests.len(), 1, "Should be one destination for 'SPACE' edge");
-    let (space_dest_wrapper, space_edge_bv) = space_dests.iter().next().unwrap();
-    assert_eq!(*space_edge_bv, space_equals_llm_id.clone(), "Edge for 'SPACE' has wrong LLM token bitset");let binding = space_dest_wrapper.as_arc().clone();
-    let node_after_space = binding.read(&constraint.trie1_god).unwrap();
-    assert!(!node_after_space.value.end, "Destination for 'SPACE' should not be an end node");
+    let (space_dest_id, space_weight) = parsing_start_state
+        .get_transition(space_tid.0 as Label)
+        .expect("No transition for SPACE");
+    let space_weight_tokens: HybridBitset = space_weight.iter_up_to(internal_max_llm_token).collect();
+    assert_eq!(
+        space_weight_tokens,
+        HybridBitset::from_iter(vec![space_equals_llm_id]),
+        "Weight for SPACE edge is wrong"
+    );
+    let node_after_space = &dwa.states[space_dest_id];
+    assert!(!node_after_space.is_final(), "Destination for SPACE should not be final");
 
     // 3. Verify the node after 'SPACE'
-    assert_eq!(node_after_space.children().len(), 1, "Intermediate node should have one child");
-    let (equals_edge_key, equals_dests) = node_after_space.children().iter().next().unwrap();
-    assert_eq!(*equals_edge_key, Some(equals_tid), "Edge from intermediate node should be for 'EQUALS'");
-    let (equals_dest_wrapper, equals_edge_bv) = equals_dests.iter().next().unwrap();
-    assert_eq!(*equals_edge_bv, space_equals_llm_id.clone(), "Edge for 'EQUALS' has wrong LLM token bitset");
-    let binding = equals_dest_wrapper.as_arc().clone();
-    let equals_dest_node = binding.read(&constraint.trie1_god).unwrap();
-    assert!(equals_dest_node.value.end, "Destination for 'EQUALS' edge should be an end node");
-
-    // 4. Check that the two end nodes are the same instance
-    assert_eq!(x_dest_wrapper, equals_dest_wrapper, "Both paths should lead to the same end node instance");
+    let (equals_dest_id, equals_weight) = node_after_space
+        .get_transition(equals_tid.0 as Label)
+        .expect("No transition for EQUALS");
+    let equals_weight_tokens: HybridBitset =
+        equals_weight.iter_up_to(internal_max_llm_token).collect();
+    assert_eq!(
+        equals_weight_tokens,
+        HybridBitset::from_iter(vec![space_equals_llm_id]),
+        "Weight for EQUALS edge is wrong"
+    );
+    assert!(dwa.states[equals_dest_id].is_final(), "Destination for EQUALS edge should be final");
 }
 
 #[test]
