@@ -1,5 +1,8 @@
 use std::collections::BTreeMap;
 
+use kdam::prelude::*;
+use kdam::{tqdm, BarExt};
+
 use crate::glr::parser::GLRParser;
 use crate::glr::table::{NonTerminalID, StateID as ParserStateID, TerminalID};
 use crate::precompute4::characterize::{compute_all_characterizations, BelowBottomCharacterization};
@@ -127,16 +130,27 @@ pub(crate) fn build_template_dwas(parser: &GLRParser) -> Result<BTreeMap<Termina
     let all = compute_all_characterizations(parser);
     crate::debug!(5, "Computed characterizations.");
 
+    let pb = tqdm!(
+        total = all.len(),
+        desc = "Building template DWAs",
+        disable = !crate::profiler::PROGRESS_BAR_ENABLED,
+        leave = false
+    );
+
     // OPTIMIZATION: Parallelize template building using rayon
     // Building 82 templates takes 538ms, parallelization should provide ~3-4x speedup
-    let results: Result<Vec<_>, _> = all.into_par_iter().map(|(term, bb)| {
-        let mut nwa = build_template_nwa_from_characterization(&bb)?;
-        nwa.simplify();
-        let mut dwa = nwa.determinize();
-        dwa.simplify();
-        crate::debug!(7, "Built template DWA for terminal {:?}:", term);
-        Ok((term, dwa))
-    }).collect();
+    let results: Result<Vec<_>, _> = all
+        .into_par_iter()
+        .tqdm_with_bar(pb)
+        .map(|(term, bb)| {
+            let mut nwa = build_template_nwa_from_characterization(&bb)?;
+            nwa.simplify();
+            let mut dwa = nwa.determinize();
+            dwa.simplify();
+            crate::debug!(7, "Built template DWA for terminal {:?}:", term);
+            Ok((term, dwa))
+        })
+        .collect();
 
     results.map(|vec| vec.into_iter().collect())
 }
