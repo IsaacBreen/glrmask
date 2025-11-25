@@ -150,7 +150,7 @@ impl DWA {
             return;
         }
 
-        if OPTIMIZE_DEBUG {
+        if self.states.len() > 1000 && OPTIMIZE_DEBUG {
             self.run_optimization_experiment();
         } else if BENCHMARK_DEBUG {
             let initial_states = self.states.len();
@@ -970,7 +970,7 @@ impl NWA {
             return;
         }
 
-        if OPTIMIZE_DEBUG {
+        if self.states.len() > 1000 && OPTIMIZE_DEBUG {
             self.run_optimization_experiment();
         } else if BENCHMARK_DEBUG {
             let initial_states = self.states.len();
@@ -1685,5 +1685,129 @@ impl NWA {
         self.body.start_states = new_start_states;
         self.states = new_states;
         true
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct DeterminizeAndSimplifyConfig {
+    pub nwa_passes: Vec<NwaPass>,
+    pub dwa_passes: Vec<DwaPass>,
+}
+
+impl NWA {
+    pub fn determinize_and_simplify(mut self, context: &str) -> DWA {
+        if self.states.len() > 1000 && OPTIMIZE_DEBUG {
+             return self.run_determinize_and_simplify_experiment(context);
+        }
+        
+        // Default "production" config
+        // Based on current manual sequence in full_dwa.rs:
+        // 1. compress_transitions
+        // 2. determinize
+        // 3. simplify (which runs PruneDeadEnds, Minimize, PushWeights, PushWeightsToInitial, PruneUnreachable)
+        
+        let config = DeterminizeAndSimplifyConfig {
+            nwa_passes: vec![NwaPass::CompressTransitions],
+            dwa_passes: vec![
+                DwaPass::PruneDeadEnds,
+                DwaPass::Minimize,
+                DwaPass::PushWeights,
+                DwaPass::PushWeightsToInitial,
+                DwaPass::PruneUnreachable,
+            ],
+        };
+        self.determinize_and_simplify_with_config(config)
+    }
+
+    pub fn determinize_and_simplify_with_config(&mut self, config: DeterminizeAndSimplifyConfig) -> DWA {
+        // Run NWA passes
+        for pass in config.nwa_passes {
+             match pass {
+                NwaPass::PruneUnreachable => { self.prune_unreachable(); },
+                NwaPass::PruneDeadEnds => { self.prune_dead_ends(); },
+                NwaPass::PushFinalWeights => { self.push_final_weights_along_epsilons(); },
+                NwaPass::PushWeightsToInitial => { self.push_weights_to_initial(); },
+                NwaPass::CompressTransitions => { self.compress_transitions(); },
+                NwaPass::Minimize => { self.minimize_states(); },
+            }
+        }
+        
+        let mut dwa = self.determinize();
+        
+        // Run DWA passes
+        for pass in config.dwa_passes {
+             match pass {
+                DwaPass::PruneUnreachable => { dwa.prune_unreachable(); },
+                DwaPass::PruneDeadEnds => { dwa.prune_dead_ends(); },
+                DwaPass::PushWeights => { dwa.push_weights_into_transitions_and_finals(); },
+                DwaPass::PushWeightsToInitial => { dwa.push_weights_to_initial(); },
+                DwaPass::Minimize => { dwa.minimize_states(); },
+            }
+        }
+        dwa
+    }
+    
+    fn run_determinize_and_simplify_experiment(self, context: &str) -> DWA {
+        let initial_states = self.states.len();
+        println!("[Det&Sim Experiment] [{}] Starting experiment with {} NWA states.", context, initial_states);
+        
+        // Define interesting NWA sequences
+        let nwa_configs: Vec<Vec<NwaPass>> = vec![
+            vec![], // Baseline: no NWA simplification
+            vec![NwaPass::CompressTransitions],
+            vec![NwaPass::PruneUnreachable, NwaPass::CompressTransitions],
+            vec![NwaPass::PruneDeadEnds, NwaPass::PruneUnreachable, NwaPass::CompressTransitions],
+            vec![NwaPass::CompressTransitions, NwaPass::Minimize],
+            vec![NwaPass::PushFinalWeights, NwaPass::CompressTransitions],
+            // Add more aggressive ones
+            vec![NwaPass::PruneUnreachable, NwaPass::CompressTransitions, NwaPass::Minimize],
+        ];
+
+        // Define interesting DWA sequences
+        let dwa_configs: Vec<Vec<DwaPass>> = vec![
+            vec![DwaPass::PruneDeadEnds, DwaPass::Minimize, DwaPass::PushWeights, DwaPass::PushWeightsToInitial, DwaPass::PruneUnreachable], // Standard
+            vec![DwaPass::Minimize],
+            vec![DwaPass::PruneDeadEnds, DwaPass::Minimize],
+            vec![DwaPass::PushWeights, DwaPass::Minimize],
+            vec![DwaPass::Minimize, DwaPass::PushWeights],
+            vec![DwaPass::PruneUnreachable, DwaPass::PruneDeadEnds, DwaPass::Minimize],
+        ];
+
+        let mut best_result: Option<(DWA, std::time::Duration, usize)> = None;
+        let mut best_config_idx = (0, 0);
+        
+        let initial_nwa = self; // moved here
+        
+        for (n_idx, nwa_pass_seq) in nwa_configs.iter().enumerate() {
+            for (d_idx, dwa_pass_seq) in dwa_configs.iter().enumerate() {
+                let mut nwa_clone = initial_nwa.clone();
+                
+                let start_time = std::time::Instant::now();
+                
+                let config = DeterminizeAndSimplifyConfig {
+                    nwa_passes: nwa_pass_seq.clone(),
+                    dwa_passes: dwa_pass_seq.clone(),
+                };
+                
+                let dwa = nwa_clone.determinize_and_simplify_with_config(config);
+                
+                let elapsed = start_time.elapsed();
+                let final_states = dwa.states.len();
+                
+                println!("[Det&Sim Experiment] [{}] Config N#{}-D#{}: NWA={:?} | DWA={:?} -> Time: {:.2?}, States: {}", 
+                    context, n_idx, d_idx, nwa_pass_seq, dwa_pass_seq, elapsed, final_states);
+                
+                if best_result.as_ref().map_or(true, |(_, best_time, best_states)| {
+                    // Prefer fewer states, then faster time
+                    final_states < *best_states || (final_states == *best_states && elapsed < *best_time)
+                }) {
+                    best_result = Some((dwa, elapsed, final_states));
+                    best_config_idx = (n_idx, d_idx);
+                }
+            }
+        }
+        
+        println!("[Det&Sim Experiment] [{}] Winner: Config N#{}-D#{}", context, best_config_idx.0, best_config_idx.1);
+        best_result.unwrap().0
     }
 }
