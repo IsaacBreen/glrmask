@@ -38,6 +38,12 @@ impl DWAState {
         if let Some(fw) = &mut self.final_weight { *fw &= weight; if fw.is_empty() { self.final_weight = None; } }
         for w in self.trans_weights.values_mut() { *w &= weight; }
     }
+
+    pub fn clip_weights(&mut self, max: usize) {
+        if let Some(sw) = &mut self.state_weight { sw.clip_max(max); if sw.is_empty() { self.state_weight = None; } }
+        if let Some(fw) = &mut self.final_weight { fw.clip_max(max); if fw.is_empty() { self.final_weight = None; } }
+        for w in self.trans_weights.values_mut() { w.clip_max(max); }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -72,6 +78,9 @@ impl DWAStates {
     }
     pub fn apply_weight_to_all_states(&mut self, weight: &Weight) {
         for state in self.0.iter_mut() { state.apply_weight(weight); }
+    }
+    pub fn clip_weights(&mut self, max: usize) {
+        for state in self.0.iter_mut() { state.clip_weights(max); }
     }
 }
 
