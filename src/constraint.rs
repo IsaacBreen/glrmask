@@ -40,8 +40,6 @@ use crate::precompute4::weighted_automata::{SimpleBitset, Weight};
 // Import from new modules
 use crate::state_equivalence_analysis_finite_automata::find_state_equivalence_classes;
 pub use crate::constraint_vocab::*;
-pub use crate::constraint_trie::*;
-pub use crate::constraint_trie::*;
 use crate::constraint_precompute::run_precompute1;
 
 type GSSNode = LeveledGSS<ParseStateEdgeContent, Acc>;

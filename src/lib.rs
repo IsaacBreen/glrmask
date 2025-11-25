@@ -3,7 +3,6 @@ pub mod finite_automata;
 pub mod equivalence_analysis_finite_automata;
 pub mod glr;
 pub mod constraint;
-mod constraint_extra;
 pub mod datastructures;
 pub mod interface;
 mod r#macro;
@@ -21,5 +20,4 @@ mod constraint_fns;
 mod state_equivalence_analysis_finite_automata;
 
 pub mod constraint_vocab;
-pub mod constraint_trie;
 pub mod constraint_precompute;
