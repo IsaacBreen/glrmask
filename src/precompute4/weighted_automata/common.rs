@@ -6,7 +6,12 @@ use super::bitset::SimpleBitset;
 pub(crate) const STOCHASTIC_DEBUG: bool = false;
 pub(crate) const DETERMINIZE_DEBUG: bool = false;
 pub(crate) const BENCHMARK_DEBUG: bool = false;
-pub(crate) const OPTIMIZE_DEBUG: bool = false;
+
+pub(crate) fn optimize_debug() -> bool {
+    std::env::var("TOKENIZERS_OPTIMIZE_DEBUG")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
 
 pub type StateID = usize;
 pub type Weight = SimpleBitset;

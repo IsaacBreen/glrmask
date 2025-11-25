@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use super::common::{BENCHMARK_DEBUG, Label, NWAStateID, StateID, Weight, OPTIMIZE_DEBUG};
+use super::common::{BENCHMARK_DEBUG, Label, NWAStateID, StateID, Weight, optimize_debug};
 use super::dwa::{DWAState, DWAStates, DWA};
 use super::nwa::{NWAState, NWAStates, NWA};
 use rustfst::algorithms::{minimize, minimize_with_config, MinimizeConfig};
@@ -150,7 +150,7 @@ impl DWA {
             return;
         }
 
-        if self.states.len() > 1000 && OPTIMIZE_DEBUG {
+        if self.states.len() > 1000 && optimize_debug() {
             self.run_optimization_experiment();
         } else if BENCHMARK_DEBUG {
             let initial_states = self.states.len();
@@ -970,7 +970,7 @@ impl NWA {
             return;
         }
 
-        if self.states.len() > 1000 && OPTIMIZE_DEBUG {
+        if self.states.len() > 1000 && optimize_debug() {
             self.run_optimization_experiment();
         } else if BENCHMARK_DEBUG {
             let initial_states = self.states.len();
@@ -1696,7 +1696,7 @@ pub struct DeterminizeAndSimplifyConfig {
 
 impl NWA {
     pub fn determinize_and_simplify(mut self, context: &str) -> DWA {
-        if self.states.len() > 1000 && OPTIMIZE_DEBUG {
+        if self.states.len() > 1000 && optimize_debug() {
              return self.run_determinize_and_simplify_experiment(context);
         }
         
