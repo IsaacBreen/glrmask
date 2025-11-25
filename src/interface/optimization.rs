@@ -241,11 +241,10 @@ impl<'a> GrammarOptimizer<'a> {
         let mut finals: Vec<Expr> = vec![self.interner.choice(vec![]); scc_nts.len()];
         let nt_to_local_idx: HashMap<&NonTerminal, usize> = scc_nts.iter().enumerate().map(|(i, nt)| (nt, i)).collect();
 
-        let empty_vec = Vec::new();
         for (i, nt) in scc_nts.iter().enumerate() {
-            let prod_indices = self.production_indices.get(nt).unwrap_or(&empty_vec);
+            let prod_indices = self.production_indices.get(nt).cloned().unwrap_or_default();
 
-            for &prod_idx in prod_indices {
+            for prod_idx in prod_indices {
                 let prod = &self.grammar.productions[prod_idx];
                 let mut prefix_exprs = Vec::new();
                 let mut target_scc_idx = None;
@@ -295,11 +294,10 @@ impl<'a> GrammarOptimizer<'a> {
         let mut finals: Vec<Expr> = vec![self.interner.choice(vec![]); scc_nts.len()];
         let nt_to_local_idx: HashMap<&NonTerminal, usize> = scc_nts.iter().enumerate().map(|(i, nt)| (nt, i)).collect();
 
-        let empty_vec = Vec::new();
         for (i, nt) in scc_nts.iter().enumerate() {
-            let prod_indices = self.production_indices.get(nt).unwrap_or(&empty_vec);
+            let prod_indices = self.production_indices.get(nt).cloned().unwrap_or_default();
 
-            for &prod_idx in prod_indices {
+            for prod_idx in prod_indices {
                 let prod = &self.grammar.productions[prod_idx];
                 let mut suffix_exprs = Vec::new();
                 let mut target_scc_idx = None;
