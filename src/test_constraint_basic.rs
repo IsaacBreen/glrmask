@@ -55,7 +55,6 @@ fn test_trivial() {
         &GrammarConstraintConfig::default(),
     );
     println!("Parser: {}", constraint.parser);
-    constraint.dump_precomputed1();
     // constraint.dump_precomputed2();
     constraint.dump_precomputed4();
 
@@ -110,7 +109,6 @@ fn test_constraint_simple() {
         2, // max_original_llm_token_id
         &GrammarConstraintConfig::default(),
     );
-    constraint.dump_precomputed1();
     // constraint.dump_precomputed2();
 
     let mut constraint_state = constraint.init();
@@ -153,9 +151,6 @@ fn test_constraint_simple() {
         let mut parser_state = parser.init_glr_parser(Some(constraint.original_llm_vocab.clone()));
         for grammar_token in grammar_tokens {
             let grammar_token_id = grammar_token_map.get_by_left(&regex_name(grammar_token)).unwrap();
-            if let Some(dummy_id) = constraint.original_to_dummy_map.get(grammar_token_id) {
-                parser_state.step(*dummy_id);
-            }
             parser_state.step(*grammar_token_id);
         }
         parser_state_for_comp.merge_with(parser_state);
@@ -275,7 +270,6 @@ fn test_constraint_expression() {
         6, // max_original_llm_token_id
         &GrammarConstraintConfig::default(),
     );
-    constraint.dump_precomputed1();
     // constraint.dump_precomputed2();
     constraint.dump_precomputed4();
     // constraint.dump_precomputed_special();
@@ -312,9 +306,6 @@ fn test_constraint_expression() {
 
     let mut parser_state_for_comp = parser.init_glr_parser(Some(constraint.original_llm_vocab.clone()));
     for grammar_token_id in grammar_token_ids {
-        if let Some(dummy_id) = constraint.original_to_dummy_map.get(grammar_token_id) {
-            parser_state_for_comp.step(*dummy_id);
-        }
         parser_state_for_comp.step(*grammar_token_id);
     }
 
@@ -353,7 +344,6 @@ fn test_constraint_expression_simplified_06_11_25() {
         &GrammarConstraintConfig::default(),
     );
     println!("Parser: {}", constraint.parser);
-    constraint.dump_precomputed1();
     constraint.dump_precomputed4();
 
     // Initial state and step
@@ -553,7 +543,6 @@ fn test_multi_commit_aborted_tokenizer_restart_equivalence() {
         max_original_llm_token_id,
         &GrammarConstraintConfig::default(),
     );
-    constraint.dump_precomputed1();
 
     // Scenario 1: Commit "#", then "a"
     let mut constraint_state3 = constraint.init();
@@ -690,8 +679,6 @@ fn test_ignore_token() {
     );
     println!("Parser: {}", constraint.parser);
     // constraint.dump_precomputed1();
-    // constraint.dump_precomputed2();
-    constraint.dump_precomputed1();
     constraint.dump_precomputed4();
 
     // --- Runtime check ---
@@ -835,34 +822,16 @@ fn test_precompute_a_plus_tokenizer() {
         max_original_llm_token_id,
     );
     // constraint.dump_precomputed1();
-    // constraint.dump_precomputed2();
 
     // --- Verification ---
-    // assert_eq!(constraint.precomputed.len(), 1, "Expected precomputed trie for only one tokenizer state");
-    let initial_state_id = tokenizer.initial_state_id();
-    let root_node = constraint.precomputed1.get(&initial_state_id).expect("No precomputed trie for initial state").read(&constraint.trie1_god).unwrap();
-
-    // 1. Check root node's clean_end
-    let root_value = &root_node.value;
-    // let clean_end_bv = root_value.clean_end.as_ref().expect("Root should have a clean_end bitset");
-    let expected_tokens = HybridBitset::from_iter(vec![0, 1]); // LLM tokens "a" and "aa"
-    // assert_eq!(*clean_end_bv, expected_tokens, "Clean_end content is incorrect");
-
-    // 2. Check root node's children and the leaf node
-    assert_eq!(root_node.children().len(), 1, "Root should have one child edge key");
-    let (edge_gtid_opt, destinations) = root_node.children().iter().next().unwrap();
-    assert_eq!(*edge_gtid_opt, Some(TerminalID(0)), "Edge key should be for grammar token 0");
-    assert_eq!(destinations.len(), 1, "Should be one destination for the edge");
-    let (child_arc_wrapper, edge_bv) = destinations.iter().next().unwrap();
-    assert_eq!(*edge_bv, expected_tokens, "Edge token bitset is incorrect");
-    let binding = child_arc_wrapper.as_arc().clone();
-    let child_node = binding.read(&constraint.trie1_god).unwrap();
-    assert!(child_node.is_leaf(), "Child node should be a leaf after pruning");
-    // assert_eq!(*child_node.value.clean_end.as_ref().unwrap(), expected_tokens, "Clean_end bitset is incorrect");
+    // This test is disabled because it inspects internal precomputation structures
+    // (`precomputed1`, `trie1_god`) that have been removed.
+    // The functionality is still tested via end-to-end mask generation.
 }
 
 #[ignore]
 #[test]
+#[ignore] // Test disabled: accesses removed internal fields (precomputed1, trie1_god)
 fn test_precompute_x_eq() {
     // Tokenizer for `=|x| `
     let tokenizer_expr = groups![
@@ -911,57 +880,10 @@ fn test_precompute_x_eq() {
     // constraint.dump_precomputed1();
     // constraint.dump_precomputed2();
 
-    // LLM token "x" should result in one edge in the root precompute node for state 0 with the terminal for `X`.
-    // LLM token " =" should result in one edge in the root precompute node for state 0 with the terminal for `SPACE` and a subsequent edge from its destination with the terminal for `EQUALS`.
     // --- Verification ---
-    let initial_state_id = tokenizer.initial_state_id();
-    let root_arc = constraint.precomputed1.get(&initial_state_id)
-        .expect("No precomputed trie for initial tokenizer state");
-    let root_node = root_arc.read(&constraint.trie1_god).unwrap();
-
-    // The root node should have two outgoing edge keys: one for 'X' (from LLM token "x")
-    // and one for 'SPACE' (from LLM token " =").
-    assert_eq!(root_node.children().len(), 3, "Root node should have three outgoing edge keys");
-
-    // Get the grammar token IDs for our terminals
-    let x_tid = *grammar_token_map.get_by_left(&regex_name("X")).unwrap();
-    let space_tid = *grammar_token_map.get_by_left(&regex_name("SPACE")).unwrap();
-    let equals_tid = *grammar_token_map.get_by_left(&regex_name("EQUALS")).unwrap();
-
-    // Get the LLM token IDs
-    let x_llm_id: HybridBitset = constraint.internal_bv_to_original(&LLMTokenBV::from_item(llm_token_map.get_by_left(b"x".as_ref()).unwrap().0)).into();
-    let space_equals_llm_id: HybridBitset = constraint.internal_bv_to_original(&LLMTokenBV::from_item(llm_token_map.get_by_left(b" =".as_ref()).unwrap().0)).into();
-
-    // 1. Verify the edge for 'X'
-    let x_dests = root_node.get(&Some(x_tid)).expect("No edge for terminal 'X'");
-    assert_eq!(x_dests.len(), 1, "Should be one destination for 'X' edge");
-    let (x_dest_wrapper, x_edge_bv) = x_dests.iter().next().unwrap();
-    assert_eq!(*x_edge_bv, x_llm_id.clone(), "Edge for 'X' has wrong LLM token bitset");
-    let binding = x_dest_wrapper.as_arc().clone();
-    let x_dest_node = binding.read(&constraint.trie1_god).unwrap();
-    assert!(x_dest_node.value.end, "Destination for 'X' edge should be an end node");
-    drop(x_dest_node);
-
-    // 2. Verify the edge for 'SPACE'
-    let space_dests = root_node.get(&Some(space_tid)).expect("No edge for terminal 'SPACE'");
-    assert_eq!(space_dests.len(), 1, "Should be one destination for 'SPACE' edge");
-    let (space_dest_wrapper, space_edge_bv) = space_dests.iter().next().unwrap();
-    assert_eq!(*space_edge_bv, space_equals_llm_id.clone(), "Edge for 'SPACE' has wrong LLM token bitset");let binding = space_dest_wrapper.as_arc().clone();
-    let node_after_space = binding.read(&constraint.trie1_god).unwrap();
-    assert!(!node_after_space.value.end, "Destination for 'SPACE' should not be an end node");
-
-    // 3. Verify the node after 'SPACE'
-    assert_eq!(node_after_space.children().len(), 1, "Intermediate node should have one child");
-    let (equals_edge_key, equals_dests) = node_after_space.children().iter().next().unwrap();
-    assert_eq!(*equals_edge_key, Some(equals_tid), "Edge from intermediate node should be for 'EQUALS'");
-    let (equals_dest_wrapper, equals_edge_bv) = equals_dests.iter().next().unwrap();
-    assert_eq!(*equals_edge_bv, space_equals_llm_id.clone(), "Edge for 'EQUALS' has wrong LLM token bitset");
-    let binding = equals_dest_wrapper.as_arc().clone();
-    let equals_dest_node = binding.read(&constraint.trie1_god).unwrap();
-    assert!(equals_dest_node.value.end, "Destination for 'EQUALS' edge should be an end node");
-
-    // 4. Check that the two end nodes are the same instance
-    assert_eq!(x_dest_wrapper, equals_dest_wrapper, "Both paths should lead to the same end node instance");
+    // This test is disabled because it inspects internal precomputation structures
+    // (`precomputed1`, `trie1_god`) that have been removed.
+    // The functionality is still tested via end-to-end mask generation.
 }
 
 #[test]
@@ -1078,8 +1000,6 @@ fn test_constraint_expression_no_parens() {
         token_name_map,
         3,
     );
-    println!("parser: {}", constraint.parser);
-    constraint.dump_precomputed1();
 
     // Initial state and step
     let mut state = constraint.init();
@@ -1325,8 +1245,6 @@ fn test_constraint_expression_unbalanced_parens2() {
         token_name_map,
         3,
     );
-    constraint.dump_precomputed1();
-    // constraint.dump_precomputed2();
 
     // Initial state and step
     let mut state = constraint.init();
@@ -1437,7 +1355,6 @@ fn test_js_simplified_ebnf_string() -> Result<(), Box<dyn std::error::Error>> {
     // println!("Tokenizer: {}", constraint.tokenizer);
     // println!("Parser: {}", constraint.parser);
     // constraint.dump_precomputed0();
-    constraint.dump_precomputed1();
 
     // 4. Initialize state and get the initial mask
     let mut state = constraint.init();
@@ -1499,8 +1416,6 @@ fn test_js_like_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>>
         max_original_llm_token_id,
         &GrammarConstraintConfig::default(),
     );
-    constraint.dump_precomputed1();
-    constraint.dump_precomputed4();
 
     // 5. Initialize state and get the initial mask
     let mut state = constraint.init();
@@ -1545,8 +1460,6 @@ fn test_js_like_grammar_initial_mask_simplified() -> Result<(), Box<dyn std::err
         &GrammarConstraintConfig::default(),
     );
     println!("Parser: {}", constraint.parser);
-    constraint.dump_precomputed1();
-    constraint.dump_precomputed4();
 
     // 5. Initialize state and get the initial mask
     let mut state = constraint.init();
@@ -1601,8 +1514,6 @@ fn test_ebnf_ignore_directive_with_partial_match() -> Result<(), Box<dyn std::er
         &GrammarConstraintConfig::default(),
     );
     println!("Parser: {}", constraint.parser);
-    constraint.dump_precomputed1();
-    constraint.dump_precomputed4();
 
     // 5. Initialize state and get the initial mask
     let mut state = constraint.init();
@@ -1881,7 +1792,6 @@ fn test_ebnf_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>> {
     );
     println!("Tokenizer: {}", constraint.tokenizer);
     println!("Parser: {}", constraint.parser);
-    constraint.dump_precomputed1();
 
     // 5. Initialize state and get the initial mask
     let mut state = constraint.init();
@@ -1926,8 +1836,6 @@ fn test_ebnf_grammar_initial_mask_mandatory_pass() -> Result<(), Box<dyn std::er
     );
     println!("Tokenizer: {}", constraint.tokenizer);
     println!("Parser: {}", constraint.parser);
-    constraint.dump_precomputed1();
-    constraint.dump_precomputed4();
 
     // 5. Initialize state and get the initial mask
     let mut state = constraint.init();
@@ -2340,7 +2248,6 @@ fn test_constraint_indirect_recursion_simplified() {
         2, // max_original_llm_token_id
         &GrammarConstraintConfig::default(),
     );
-    constraint.dump_precomputed1();
 
     // Initial state and step
     let mut state = constraint.init();
@@ -2382,8 +2289,6 @@ fn test_constraint_repetition_a() {
         &GrammarConstraintConfig::default(),
     );
     println!("Parser: {}", constraint.parser);
-    constraint.dump_precomputed1();
-    // constraint.dump_precomputed2();
     constraint.dump_precomputed4();
 
     // Initial state and step
@@ -2515,8 +2420,6 @@ fn test_constraint_expression_trivial_direct() {
         &GrammarConstraintConfig::default(),
     );
     println!("Parser: {}", constraint.parser);
-    constraint.dump_precomputed1();
-    // constraint.dump_precomputed2();
     constraint.dump_precomputed4();
 
     // Initial state and step
@@ -2566,8 +2469,6 @@ fn test_constraint_expression_trivial_direct_limited_vocab() {
         &GrammarConstraintConfig::default(),
     );
     println!("Parser: {}", constraint.parser);
-    constraint.dump_precomputed1();
-    // constraint.dump_precomputed2();
     constraint.dump_precomputed4();
 
     // Initial state and step
