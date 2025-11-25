@@ -332,7 +332,7 @@ impl JSONConvertible for DFA {
                         .map_err(|e| format!("DFA state[{}].possible_future_group_ids: {}", i, e))?;
                     let group_id_to_u8set = BTreeMap::<GroupID, U8Set>::from_json(g_node)
                         .map_err(|e| format!("DFA state[{}].group_id_to_u8set: {}", i, e))?;
-                    
+
                     states.push(DFAState {
                         transitions,
                         finalizers,
