@@ -198,7 +198,9 @@ impl SimpleBitsetInner {
 
     pub fn contains(&self, index: usize) -> bool { self.rsb.contains(index) }
 
-    pub fn max_item(&self) -> Option<usize> { self.rsb.iter().last() }
+    pub fn min_item(&self) -> Option<usize> { self.rsb.min() }
+
+    pub fn max_item(&self) -> Option<usize> { self.rsb.max() }
 
     pub fn iter_up_to(&self, max: usize) -> impl Iterator<Item = usize> {
         (&self.rsb & &RangeSetBlaze::from_iter([0..=max])).into_iter()
@@ -253,6 +255,23 @@ impl SimpleBitset {
         if self.is_empty() {
             return;
         }
+        if min > max {
+            *self = Self::zeros();
+            return;
+        }
+        if self.is_all_fast() {
+            *self = Self::from_ranges(&[(min, max)]);
+            return;
+        }
+
+        // Since not empty, min/max will be Some.
+        let self_min = self.rsb.min().unwrap();
+        let self_max = self.rsb.max().unwrap();
+
+        if self_min >= min && self_max <= max {
+            return; // Already within range
+        }
+
         let clip_rsb = RangeSetBlaze::from_iter([min..=max]);
         let rsb = &self.rsb & &clip_rsb;
         *self = intern(rsb);
