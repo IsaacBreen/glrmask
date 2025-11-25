@@ -26,32 +26,36 @@ pub struct HybridBitset {
 
 impl JSONConvertible for HybridBitset {
     fn to_json(&self) -> JSONNode {
-        // Serialize as an array of [start, end] inclusive ranges
-        let ranges_vec: Vec<Vec<usize>> = self
-            .inner
-            .ranges()
-            .map(|range_inclusive| vec![*range_inclusive.start(), *range_inclusive.end()])
-            .collect();
-        ranges_vec.to_json()
+        // Flattened array format: [start1, end1, start2, end2, ...]
+        let mut flat = Vec::new();
+        for range in self.inner.ranges() {
+            flat.push(JSONNode::UInt(*range.start() as u128));
+            flat.push(JSONNode::UInt(*range.end() as u128));
+        }
+        JSONNode::Array(flat)
     }
 
     fn from_json(node: JSONNode) -> Result<Self, String> {
-        let ranges_vec: Vec<Vec<usize>> = Vec::from_json(node)?;
-        let mut ranges = Vec::new();
-        for mut range_vec in ranges_vec {
-            if range_vec.len() != 2 {
-                return Err(format!(
-                    "Expected 2-element array for HybridBitset range, got {:?}",
-                    range_vec
-                ));
+        match node {
+            JSONNode::Array(arr) => {
+                if arr.len() % 2 != 0 {
+                    return Err(format!(
+                        "Expected even number of elements in flattened HybridBitset array, got {}",
+                        arr.len()
+                    ));
+                }
+                let mut ranges = Vec::new();
+                for chunk in arr.chunks(2) {
+                    let start = usize::from_json(chunk[0].clone())?;
+                    let end = usize::from_json(chunk[1].clone())?;
+                    ranges.push(start..=end);
+                }
+                Ok(HybridBitset {
+                    inner: cache::intern_l1(RangeSetBlaze::from_iter(ranges)),
+                })
             }
-            let end = range_vec.pop().unwrap();
-            let start = range_vec.pop().unwrap();
-            ranges.push(start..=end);
+            _ => Err("Expected JSONNode::Array for HybridBitset".to_string()),
         }
-        Ok(HybridBitset {
-            inner: cache::intern_l1(RangeSetBlaze::from_iter(ranges)),
-        })
     }
 }
 

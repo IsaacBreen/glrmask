@@ -774,6 +774,33 @@ where
     }
 }
 
+// --- Helper Functions for Byte Serialization ---
+
+/// Converts a byte slice to JSON, preferring String encoding when valid UTF-8.
+/// Falls back to Array of integers for non-UTF-8 data.
+pub fn bytes_to_json(bytes: &[u8]) -> JSONNode {
+    match String::from_utf8(bytes.to_vec()) {
+        Ok(s) => JSONNode::String(s),
+        Err(_) => JSONNode::Array(bytes.iter().map(|&b| JSONNode::UInt(b as u128)).collect()),
+    }
+}
+
+/// Reconstructs a byte vector from JSON (either String or Array format).
+pub fn json_to_bytes(node: JSONNode) -> Result<Vec<u8>, String> {
+    match node {
+        JSONNode::String(s) => Ok(s.into_bytes()),
+        JSONNode::Array(arr) => {
+            let mut bytes = Vec::with_capacity(arr.len());
+            for item in arr {
+                let val = u8::from_json(item)?;
+                bytes.push(val);
+            }
+            Ok(bytes)
+        }
+        _ => Err("Expected String or Array for bytes".to_string()),
+    }
+}
+
 impl serde::Serialize for JSONNode {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where

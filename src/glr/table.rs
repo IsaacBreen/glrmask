@@ -202,97 +202,114 @@ impl Stage7ShiftsAndReducesLookaheadValue {
 
 impl JSONConvertible for Stage7ShiftsAndReducesLookaheadValue {
     fn to_json(&self) -> JSONNode {
-        let mut obj = StdMap::new();
         match self {
             Stage7ShiftsAndReducesLookaheadValue::Shift(state_id) => {
-                obj.insert("variant".to_string(), JSONNode::String("Shift".to_string()));
-                obj.insert("state_id".to_string(), state_id.to_json());
+                // ["S", state_id]
+                JSONNode::Array(vec![
+                    JSONNode::String("S".to_string()),
+                    state_id.to_json(),
+                ])
             }
             Stage7ShiftsAndReducesLookaheadValue::Reduce {
                 nonterminal_id,
                 len,
-                production_ids,
+                production_ids: _, // Drop production_ids from serialization
             } => {
-                obj.insert("variant".to_string(), JSONNode::String("Reduce".to_string()));
-                obj.insert("nonterminal_id".to_string(), nonterminal_id.to_json());
-                obj.insert("len".to_string(), len.to_json());
-                obj.insert("production_ids".to_string(), production_ids.to_json());
+                // ["R", nonterminal_id, len]
+                JSONNode::Array(vec![
+                    JSONNode::String("R".to_string()),
+                    nonterminal_id.to_json(),
+                    len.to_json(),
+                ])
             }
             Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
-                obj.insert("variant".to_string(), JSONNode::String("Split".to_string()));
-                obj.insert("shift".to_string(), shift.to_json());
-                obj.insert("reduces".to_string(), reduces.to_json());
+                // ["X", shift_opt, [[nt_id, len], ...]]
+                // Flatten reduces map into array of [nt_id, len] pairs
+                let mut reduce_pairs = Vec::new();
+                for (len, nts) in reduces {
+                    for (nt_id, _pids) in nts {
+                        reduce_pairs.push(JSONNode::Array(vec![
+                            nt_id.to_json(),
+                            len.to_json(),
+                        ]));
+                    }
+                }
+                JSONNode::Array(vec![
+                    JSONNode::String("X".to_string()),
+                    shift.to_json(),
+                    JSONNode::Array(reduce_pairs),
+                ])
             }
         }
-        JSONNode::Object(obj)
     }
 
     fn from_json(node: JSONNode) -> Result<Self, String> {
         match node {
-            JSONNode::Object(mut obj) => {
-                let variant = obj
-                    .remove("variant")
-                    .ok_or_else(|| {
-                        "Missing field variant for Stage7ShiftsAndReducesLookaheadValue"
-                            .to_string()
-                    })
-                    .and_then(String::from_json)?;
-                match variant.as_str() {
-                    "Shift" => {
-                        let state_id = obj
-                            .remove("state_id")
-                            .ok_or_else(|| "Missing field state_id for Shift".to_string())
-                            .and_then(StateID::from_json)?;
+            JSONNode::Array(mut arr) if !arr.is_empty() => {
+                let tag = String::from_json(arr.remove(0))?;
+                match tag.as_str() {
+                    "S" => {
+                        if arr.len() != 1 {
+                            return Err(format!(
+                                "Expected [\"S\", state_id], got {} elements",
+                                arr.len() + 1
+                            ));
+                        }
+                        let state_id = StateID::from_json(arr.remove(0))?;
                         Ok(Stage7ShiftsAndReducesLookaheadValue::Shift(state_id))
                     }
-                    "Reduce" => {
-                        let nonterminal_id = obj
-                            .remove("nonterminal_id")
-                            .ok_or_else(|| {
-                                "Missing field nonterminal_id for Reduce".to_string()
-                            })
-                            .and_then(NonTerminalID::from_json)?;
-                        let len = obj
-                            .remove("len")
-                            .ok_or_else(|| "Missing field len for Reduce".to_string())
-                            .and_then(usize::from_json)?;
-                        let production_ids = obj
-                            .remove("production_ids")
-                            .ok_or_else(|| {
-                                "Missing field production_ids for Reduce".to_string()
-                            })
-                            .and_then(|n| Vec::<ProductionID>::from_json(n))?;
+                    "R" => {
+                        if arr.len() != 2 {
+                            return Err(format!(
+                                "Expected [\"R\", nt_id, len], got {} elements",
+                                arr.len() + 1
+                            ));
+                        }
+                        let nonterminal_id = NonTerminalID::from_json(arr.remove(0))?;
+                        let len = usize::from_json(arr.remove(0))?;
                         Ok(Stage7ShiftsAndReducesLookaheadValue::Reduce {
                             nonterminal_id,
                             len,
-                            production_ids,
+                            production_ids: Vec::new(), // Reconstructed as empty
                         })
                     }
-                    "Split" => {
-                        let shift = obj
-                            .remove("shift")
-                            .ok_or_else(|| "Missing field shift for Split".to_string())
-                            .and_then(Option::<StateID>::from_json)?;
-                        let reduces = obj
-                            .remove("reduces")
-                            .ok_or_else(|| "Missing field reduces for Split".to_string())
-                            .and_then(|n| {
-                                BTreeMap::<
-                                    usize,
-                                    BTreeMap<NonTerminalID, Vec<ProductionID>>,
-                                >::from_json(n)
-                            })?;
+                    "X" => {
+                        if arr.len() != 2 {
+                            return Err(format!(
+                                "Expected [\"X\", shift_opt, reduces], got {} elements",
+                                arr.len() + 1
+                            ));
+                        }
+                        let shift = Option::<StateID>::from_json(arr.remove(0))?;
+                        let reduce_array = arr.remove(0);
+                        
+                        // Parse [[nt_id, len], ...] back into nested BTreeMap
+                        let mut reduces: BTreeMap<usize, BTreeMap<NonTerminalID, Vec<ProductionID>>> = BTreeMap::new();
+                        match reduce_array {
+                            JSONNode::Array(pairs) => {
+                                for pair in pairs {
+                                    match pair {
+                                        JSONNode::Array(mut p) if p.len() == 2 => {
+                                            let nt_id = NonTerminalID::from_json(p.remove(0))?;
+                                            let len = usize::from_json(p.remove(0))?;
+                                            reduces.entry(len).or_default().insert(nt_id, Vec::new());
+                                        }
+                                        _ => return Err("Expected [nt_id, len] pair in Split reduces".to_string()),
+                                    }
+                                }
+                            }
+                            _ => return Err("Expected array of reduces in Split".to_string()),
+                        }
+                        
                         Ok(Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces })
                     }
                     _ => Err(format!(
-                        "Unknown variant {} for Stage7ShiftsAndReducesLookaheadValue",
-                        variant
+                        "Unknown variant tag '{}' for Stage7ShiftsAndReducesLookaheadValue",
+                        tag
                     )),
                 }
             }
-            _ => Err(
-                "Expected JSONNode::Object for Stage7ShiftsAndReducesLookaheadValue".to_string(),
-            ),
+            _ => Err("Expected JSONNode::Array for Stage7ShiftsAndReducesLookaheadValue".to_string()),
         }
     }
 }
@@ -371,32 +388,72 @@ impl Row {
 
 impl JSONConvertible for Row {
     fn to_json(&self) -> JSONNode {
-        let mut obj = StdMap::new();
-        obj.insert(
-            "shifts_and_reduces_full".to_string(),
-            self.shifts_and_reduces_full.to_json(),
-        );
-        obj.insert("default_reduce".to_string(), self.default_reduce.to_json());
-        obj.insert("gotos".to_string(), self.gotos.to_json());
-        JSONNode::Object(obj)
+        // [[[term_id, Action], ...], [[nt_id, Goto], ...], default_reduce]
+        let shifts_pairs: Vec<JSONNode> = self
+            .shifts_and_reduces_full
+            .iter()
+            .map(|(tid, action)| JSONNode::Array(vec![tid.to_json(), action.to_json()]))
+            .collect();
+        let gotos_pairs: Vec<JSONNode> = self
+            .gotos
+            .iter()
+            .map(|(ntid, goto)| JSONNode::Array(vec![ntid.to_json(), goto.to_json()]))
+            .collect();
+        JSONNode::Array(vec![
+            JSONNode::Array(shifts_pairs),
+            JSONNode::Array(gotos_pairs),
+            self.default_reduce.to_json(),
+        ])
     }
     fn from_json(node: JSONNode) -> Result<Self, String> {
         match node {
-            JSONNode::Object(mut obj) => Ok(Row {
-                shifts_and_reduces_full: ShiftsAndReducesFull::from_json(
-                    obj.remove("shifts_and_reduces_full").ok_or_else(|| {
-                        "Missing field shifts_and_reduces_full for Row".to_string()
-                    })?,
-                )?,
-                default_reduce: Option::<Stage7ShiftsAndReducesLookaheadValue>::from_json(
-                    obj.remove("default_reduce").unwrap_or(JSONNode::Null),
-                )?,
-                gotos: BTreeMap::<NonTerminalID, Goto>::from_json(
-                    obj.remove("gotos")
-                        .ok_or_else(|| "Missing field gotos for Row".to_string())?,
-                )?,
-            }),
-            _ => Err("Expected JSONNode::Object for Row".to_string()),
+            JSONNode::Array(mut arr) if arr.len() == 3 => {
+                // Parse shifts_and_reduces_full
+                let mut shifts_and_reduces_full = BTreeMap::new();
+                match arr.remove(0) {
+                    JSONNode::Array(pairs) => {
+                        for pair in pairs {
+                            match pair {
+                                JSONNode::Array(mut p) if p.len() == 2 => {
+                                    let tid = TerminalID::from_json(p.remove(0))?;
+                                    let action = Stage7ShiftsAndReducesLookaheadValue::from_json(p.remove(0))?;
+                                    shifts_and_reduces_full.insert(tid, action);
+                                }
+                                _ => return Err("Expected [term_id, action] pair in Row shifts".to_string()),
+                            }
+                        }
+                    }
+                    _ => return Err("Expected array of shift pairs in Row".to_string()),
+                }
+                
+                // Parse gotos
+                let mut gotos = BTreeMap::new();
+                match arr.remove(0) {
+                    JSONNode::Array(pairs) => {
+                        for pair in pairs {
+                            match pair {
+                                JSONNode::Array(mut p) if p.len() == 2 => {
+                                    let ntid = NonTerminalID::from_json(p.remove(0))?;
+                                    let goto = Goto::from_json(p.remove(0))?;
+                                    gotos.insert(ntid, goto);
+                                }
+                                _ => return Err("Expected [nt_id, goto] pair in Row gotos".to_string()),
+                            }
+                        }
+                    }
+                    _ => return Err("Expected array of goto pairs in Row".to_string()),
+                }
+                
+                // Parse default_reduce
+                let default_reduce = Option::<Stage7ShiftsAndReducesLookaheadValue>::from_json(arr.remove(0))?;
+                
+                Ok(Row {
+                    shifts_and_reduces_full,
+                    default_reduce,
+                    gotos,
+                })
+            }
+            _ => Err("Expected JSONNode::Array of length 3 for Row".to_string()),
         }
     }
 }
@@ -409,24 +466,20 @@ pub struct Goto {
 
 impl JSONConvertible for Goto {
     fn to_json(&self) -> JSONNode {
-        let mut obj = StdMap::new();
-        obj.insert("state_id".to_string(), self.state_id.to_json());
-        obj.insert("accept".to_string(), self.accept.to_json());
-        JSONNode::Object(obj)
+        // [state_id_opt, accept_bool]
+        JSONNode::Array(vec![
+            self.state_id.to_json(),
+            self.accept.to_json(),
+        ])
     }
     fn from_json(node: JSONNode) -> Result<Self, String> {
         match node {
-            JSONNode::Object(mut obj) => Ok(Goto {
-                state_id: obj
-                    .remove("state_id")
-                    .ok_or_else(|| "Missing field 'state_id' for Goto".to_string())
-                    .and_then(Option::<StateID>::from_json)?,
-                accept: obj
-                    .remove("accept")
-                    .ok_or_else(|| "Missing field 'accept' for Goto".to_string())
-                    .and_then(bool::from_json)?,
-            }),
-            _ => Err("Expected JSONNode::Object for Goto".to_string()),
+            JSONNode::Array(mut arr) if arr.len() == 2 => {
+                let state_id = Option::<StateID>::from_json(arr.remove(0))?;
+                let accept = bool::from_json(arr.remove(0))?;
+                Ok(Goto { state_id, accept })
+            }
+            _ => Err("Expected JSONNode::Array of length 2 for Goto".to_string()),
         }
     }
 }

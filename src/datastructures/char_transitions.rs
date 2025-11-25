@@ -190,30 +190,53 @@ impl<T: fmt::Debug> fmt::Debug for CharTransitions<T> {
 
 impl<T: JSONConvertible> JSONConvertible for CharTransitions<T> {
     fn to_json(&self) -> JSONNode {
-        let mut obj = StdMap::new();
-        for (k, v) in &self.entries {
-            obj.insert(k.to_string(), v.to_json());
-        }
-        JSONNode::Object(obj)
+        // Sparse array format: [[byte_val, target], ...]
+        let pairs = self
+            .entries
+            .iter()
+            .map(|(k, v)| JSONNode::Array(vec![JSONNode::UInt(*k as u128), v.to_json()]))
+            .collect();
+        JSONNode::Array(pairs)
     }
 
     fn from_json(node: JSONNode) -> Result<Self, String> {
         match node {
-            JSONNode::Object(map) => {
-                let mut result = CharTransitions::new();
-                for (key_str, val_node) in map {
-                    let key = key_str.parse::<u8>().map_err(|e| {
-                        format!(
-                            "Invalid u8 key in CharTransitions JSON: {}, err: {}",
-                            key_str, e
-                        )
-                    })?;
-                    let value = T::from_json(val_node)?;
-                    result.insert(key, value);
+            JSONNode::Array(arr) => {
+                let mut entries = Vec::with_capacity(arr.len());
+                for (i, pair_node) in arr.into_iter().enumerate() {
+                    match pair_node {
+                        JSONNode::Array(mut pair_vec) if pair_vec.len() == 2 => {
+                            let val_node = pair_vec.pop().unwrap();
+                            let key_node = pair_vec.pop().unwrap();
+                            let key = u8::from_json(key_node).map_err(|e| {
+                                format!(
+                                    "While deserializing CharTransitions at $[{}][0] (key): {}",
+                                    i, e
+                                )
+                            })?;
+                            let value = T::from_json(val_node).map_err(|e| {
+                                format!(
+                                    "While deserializing CharTransitions at $[{}][1] (value): {}",
+                                    i, e
+                                )
+                            })?;
+                            entries.push((key, value));
+                        }
+                        other => {
+                            return Err(format!(
+                                "Expected 2-element array for CharTransitions entry at $[{}], got {}",
+                                i,
+                                other.short_preview()
+                            ))
+                        }
+                    }
                 }
-                Ok(result)
+                // Entries should already be sorted from serialization, but verify/sort just in case
+                entries.sort_by_key(|(k, _)| *k);
+                Ok(CharTransitions::from_sorted_entries(entries))
             }
-            _ => Err("Expected JSONNode::Object for CharTransitions".to_string()),
+            _ => Err("Expected JSONNode::Array for CharTransitions".to_string()),
         }
     }
 }
+
