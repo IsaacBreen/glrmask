@@ -2,13 +2,13 @@ use std::hash::{Hash, Hasher};
 use crate::datastructures::state_set::StateSet;
 
 #[derive(Debug, Clone, Default)]
-pub struct BitSet {
+pub struct SparseBitSet {
     data: Vec<u64>,
     dirty_words: Vec<usize>,
     capacity_bits: usize,
 }
 
-impl PartialEq for BitSet {
+impl PartialEq for SparseBitSet {
     fn eq(&self, other: &Self) -> bool {
         // Two BitSets are equal if their data vectors are equal.
         // We assume unused capacity in 'data' is always zeroed via clear/insert logic.
@@ -16,15 +16,15 @@ impl PartialEq for BitSet {
     }
 }
 
-impl Eq for BitSet {}
+impl Eq for SparseBitSet {}
 
-impl Hash for BitSet {
+impl Hash for SparseBitSet {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.data.hash(state);
     }
 }
 
-impl BitSet {
+impl SparseBitSet {
     pub fn new(capacity_bits: usize) -> Self {
         let words = (capacity_bits + 63) / 64;
         Self {
@@ -75,8 +75,8 @@ impl BitSet {
         self.dirty_words.clear();
     }
 
-    pub fn iter(&self) -> BitSetIter {
-        BitSetIter {
+    pub fn iter(&self) -> SparseBitSetIter {
+        SparseBitSetIter {
             bitset: self,
             dirty_idx: 0,
             current_word_idx: 0,
@@ -85,14 +85,14 @@ impl BitSet {
     }
 }
 
-impl FromIterator<usize> for BitSet {
+impl FromIterator<usize> for SparseBitSet {
     fn from_iter<T: IntoIterator<Item = usize>>(iter: T) -> Self {
         // Note: This default impl creates a small BitSet and might panic if indices exceed capacity.
         // For proper usage, construct with `with_capacity` first.
         // Here we assume a default large enough for typical small tests or resizes (if we added resizing).
         // Since our BitSet doesn't resize, this is risky if not used carefully.
         // However, standard `collect()` usage is rare in the hot path compared to `insert`.
-        let mut set = BitSet::new(1024); 
+        let mut set = SparseBitSet::new(1024);
         for i in iter {
             if i >= set.capacity_bits {
                 // In a real impl, we'd resize here. For now, we just panic or ignore?
@@ -106,8 +106,8 @@ impl FromIterator<usize> for BitSet {
     }
 }
 
-impl StateSet for BitSet {
-    type Iter<'a> = BitSetIter<'a>;
+impl StateSet for SparseBitSet {
+    type Iter<'a> = SparseBitSetIter<'a>;
 
     fn with_capacity(capacity: usize) -> Self { Self::new(capacity) }
     fn insert(&mut self, state: usize) -> bool { self.insert(state) }
@@ -118,14 +118,14 @@ impl StateSet for BitSet {
     fn iter<'a>(&'a self) -> Self::Iter<'a> { self.iter() }
 }
 
-pub struct BitSetIter<'a> {
-    bitset: &'a BitSet,
+pub struct SparseBitSetIter<'a> {
+    bitset: &'a SparseBitSet,
     dirty_idx: usize,
     current_word_idx: usize,
     current_word: u64,
 }
 
-impl<'a> Iterator for BitSetIter<'a> {
+impl<'a> Iterator for SparseBitSetIter<'a> {
     type Item = usize;
 
     fn next(&mut self) -> Option<Self::Item> {

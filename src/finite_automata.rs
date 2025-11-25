@@ -1,5 +1,5 @@
 use crate::datastructures::char_transitions::CharTransitions;
-use crate::datastructures::bitset2::BitSet;
+use crate::datastructures::sparse_bitset::SparseBitSet;
 use crate::datastructures::frozenset::FrozenSet;
 use crate::datastructures::u8set::U8Set;
 use crate::json_serialization::{JSONConvertible, JSONNode};
