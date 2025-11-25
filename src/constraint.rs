@@ -31,7 +31,6 @@ use crate::{
     tokenizer::{LLMTokenID, LLMTokenMap, TokenizerStateID},
     types::{TerminalID as GrammarTokenID, TerminalID},
 };
-use crate::constraint_precompute1_utils::Trie1Config;
 use crate::datastructures::bitset::Bitset;
 use crate::datastructures::gss_acc::Acc;
 use crate::glr::parser::ParseStateEdgeContent;
@@ -232,13 +231,11 @@ fn optimize_dwa_and_vocab(
 
 #[derive(Debug, Clone)]
 pub struct GrammarConstraintConfig {
-    pub trie1: Trie1Config,
 }
 
 impl Default for GrammarConstraintConfig {
     fn default() -> Self {
         Self {
-            trie1: Trie1Config::off(),
         }
     }
 }

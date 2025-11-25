@@ -14,7 +14,6 @@ pub mod json_serialization;
 mod test_constraint_basic;
 // mod test_constraint_python;
 mod profiler;
-mod constraint_precompute1_utils;
 
 // New lightweight pass framework for Trie3 optimization
 mod precompute4;
