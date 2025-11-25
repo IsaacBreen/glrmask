@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests {
     use crate::constraint::GrammarConstraint;
-    use crate::datastructures::hybrid_bitset::HybridBitset;
+    use crate::datastructures::hybrid_bitset::RangeSet;
     use crate::finite_automata::{
         eat_u8, eat_u8_seq, greedy_group, groups, Expr as RegexExpr, QuantifierType,
     };
@@ -21,7 +21,7 @@ mod tests {
     use std::collections::BTreeSet;
     use crate::glr::table::generate_glr_parser;
 
-    fn bitvec_with_capacity_and_values(capacity: usize, values: Vec<usize>) -> HybridBitset {
+    fn bitvec_with_capacity_and_values(capacity: usize, values: Vec<usize>) -> RangeSet {
         let mut bitvec = BitVec::new();
         bitvec.resize(capacity, false);
         for value in values {
@@ -351,8 +351,8 @@ mod tests {
 
         let _eof_llm_token_id = LLMTokenID(next_llm_id_val);
 
-        let ids_to_mask = |ids: &[LLMTokenID]| -> HybridBitset {
-            let mut bs = HybridBitset::zeros();
+        let ids_to_mask = |ids: &[LLMTokenID]| -> RangeSet {
+            let mut bs = RangeSet::zeros();
             for id in ids {
                 bs.insert(id.0);
             }
@@ -400,7 +400,7 @@ mod tests {
 
         state.commit(tok_eats);
         current_mask = state.get_mask();
-        let expected_eof_mask = HybridBitset::zeros();
+        let expected_eof_mask = RangeSet::zeros();
         assert_eq!(current_mask, expected_eof_mask);
 
         println!("Sentence grammar test completed successfully.");
@@ -455,8 +455,8 @@ mod tests {
 
         let _eof_llm_token_id = LLMTokenID(next_llm_id_val);
 
-        let ids_to_mask = |ids: &[LLMTokenID]| -> HybridBitset {
-            let mut bs = HybridBitset::zeros();
+        let ids_to_mask = |ids: &[LLMTokenID]| -> RangeSet {
+            let mut bs = RangeSet::zeros();
             for id in ids {
                 bs.insert(id.0);
             }

@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use crate::datastructures::hybrid_bitset::HybridBitset;
+use crate::datastructures::hybrid_bitset::RangeSet;
 use range_set_blaze::RangeSetBlaze;
 use std::iter::FromIterator;
 use std::ops::{
@@ -249,14 +249,14 @@ impl SubAssign<&Bitset> for Bitset {
 
 // --- Conversions ---
 
-impl From<&HybridBitset> for Bitset {
-    fn from(hybrid: &HybridBitset) -> Self {
+impl From<&RangeSet> for Bitset {
+    fn from(hybrid: &RangeSet) -> Self {
         hybrid.iter_indices().collect()
     }
 }
 
-impl From<HybridBitset> for Bitset {
-    fn from(hybrid: HybridBitset) -> Self {
+impl From<RangeSet> for Bitset {
+    fn from(hybrid: RangeSet) -> Self {
         Self::from(&hybrid)
     }
 }

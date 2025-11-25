@@ -1,6 +1,6 @@
 use super::*;
 // Still needed for macro use perhaps?
-use crate::datastructures::hybrid_bitset::HybridBitset;
+use crate::datastructures::hybrid_bitset::RangeSet;
 use std::iter::FromIterator;
 
 

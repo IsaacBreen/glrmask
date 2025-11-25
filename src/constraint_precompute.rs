@@ -7,7 +7,7 @@ use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use range_set_blaze::RangeSetBlaze;
 
 use crate::constraint_vocab::{LLMTokenBV, LLMVocab};
-use crate::datastructures::hybrid_bitset::HybridBitset;
+use crate::datastructures::hybrid_bitset::RangeSet;
 use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
 use crate::finite_automata::Regex;
 use crate::glr::parser::GLRParser;
@@ -228,7 +228,7 @@ impl<'r> Precomputer1<'r> {
                 *result_map
                     .entry(grammar_token_id)
                     .or_insert_with(LLMTokenBV::zeros) |=
-                    HybridBitset::from(applicable_tokens);
+                    RangeSet::from(applicable_tokens);
             }
             if let Some(final_state_val) = exec_result.end_state {
                 let matches_possible_from_tokenizer_state: std::collections::BTreeSet<_> = self

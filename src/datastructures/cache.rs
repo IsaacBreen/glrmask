@@ -1,4 +1,4 @@
-use crate::datastructures::hybrid_bitset::HybridBitset;
+use crate::datastructures::hybrid_bitset::RangeSet;
 use lru::LruCache;
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
@@ -32,8 +32,8 @@ struct L1OpKey {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct L2OpKey {
     op: BinOp,
-    a: Acc<RangeMapBlaze<usize, HybridBitset>>,
-    b: Acc<RangeMapBlaze<usize, HybridBitset>>,
+    a: Acc<RangeMapBlaze<usize, RangeSet>>,
+    b: Acc<RangeMapBlaze<usize, RangeSet>>,
 }
 
 // --- Global Caches ---
@@ -43,11 +43,11 @@ const OP_CACHE_CAPACITY: usize = 100_000;
 struct Caches {
     // Value caches (interning pools)
     l1_values: LruCache<RangeSetBlaze<usize>, Acc<RangeSetBlaze<usize>>>,
-    l2_values: LruCache<RangeMapBlaze<usize, HybridBitset>, Acc<RangeMapBlaze<usize, HybridBitset>>>,
+    l2_values: LruCache<RangeMapBlaze<usize, RangeSet>, Acc<RangeMapBlaze<usize, RangeSet>>>,
 
     // Operation caches
     l1_ops: LruCache<L1OpKey, Acc<RangeSetBlaze<usize>>>,
-    l2_ops: LruCache<L2OpKey, Acc<RangeMapBlaze<usize, HybridBitset>>>,
+    l2_ops: LruCache<L2OpKey, Acc<RangeMapBlaze<usize, RangeSet>>>,
 }
 
 impl Caches {
@@ -103,8 +103,8 @@ pub fn put_l1_op_cache(
 
 // L2 (HybridL2Bitset)
 pub fn intern_l2(
-    rm: RangeMapBlaze<usize, HybridBitset>,
-) -> Acc<RangeMapBlaze<usize, HybridBitset>> {
+    rm: RangeMapBlaze<usize, RangeSet>,
+) -> Acc<RangeMapBlaze<usize, RangeSet>> {
     let mut caches = GLOBAL_CACHES.lock();
     if let Some(acc) = caches.l2_values.get(&rm) {
         return acc.clone();
@@ -116,9 +116,9 @@ pub fn intern_l2(
 
 pub fn get_l2_op_cache(
     op: BinOp,
-    a: &Acc<RangeMapBlaze<usize, HybridBitset>>,
-    b: &Acc<RangeMapBlaze<usize, HybridBitset>>,
-) -> Option<Acc<RangeMapBlaze<usize, HybridBitset>>> {
+    a: &Acc<RangeMapBlaze<usize, RangeSet>>,
+    b: &Acc<RangeMapBlaze<usize, RangeSet>>,
+) -> Option<Acc<RangeMapBlaze<usize, RangeSet>>> {
     let mut caches = GLOBAL_CACHES.lock();
     let key = L2OpKey { op, a: a.clone(), b: b.clone() };
     caches.l2_ops.get(&key).cloned()
@@ -126,9 +126,9 @@ pub fn get_l2_op_cache(
 
 pub fn put_l2_op_cache(
     op: BinOp,
-    a: Acc<RangeMapBlaze<usize, HybridBitset>>,
-    b: Acc<RangeMapBlaze<usize, HybridBitset>>,
-    result: Acc<RangeMapBlaze<usize, HybridBitset>>,
+    a: Acc<RangeMapBlaze<usize, RangeSet>>,
+    b: Acc<RangeMapBlaze<usize, RangeSet>>,
+    result: Acc<RangeMapBlaze<usize, RangeSet>>,
 ) {
     let mut caches = GLOBAL_CACHES.lock();
     let key = L2OpKey { op, a, b };

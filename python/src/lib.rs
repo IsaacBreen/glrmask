@@ -9,7 +9,7 @@ use pyo3::types::{PyDict, PyIterator, PySet, PyTuple};
 use sep1::constraint::{GrammarConstraint, GrammarConstraintState, StageVocab};
 use sep1::datastructures::bitset::{Bitset as RustBitset, Bitset};
 use sep1::datastructures::gss_acc::{Acc as RustAcc, Acc};
-use sep1::datastructures::hybrid_bitset::{HybridBitset as RustHybridBitset, HybridBitset};
+use sep1::datastructures::hybrid_bitset::{RangeSet as RustHybridBitset, RangeSet};
 use sep1::datastructures::leveled_gss::LeveledGSS;
 use sep1::datastructures::u8set::U8Set;
 use sep1::finite_automata::Regex;
@@ -592,7 +592,7 @@ impl PyGrammarConstraint {
     }
 
     pub fn internal_bv_to_original(&self, it: Bound<'_, PyIterator>) -> PyResult<PyBitset> {
-        let original_bv = self.inner.precompute4_vocab.internal_bv_to_original(&HybridBitset::from_iter(it.extract::<Vec<usize>>()?));
+        let original_bv = self.inner.precompute4_vocab.internal_bv_to_original(&RangeSet::from_iter(it.extract::<Vec<usize>>()?));
         Ok(PyBitset { inner: original_bv })
     }
 

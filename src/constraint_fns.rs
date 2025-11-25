@@ -1,5 +1,5 @@
 use crate::constraint::{GrammarConstraintState, TerminalAllowanceCheckMode};
-use crate::datastructures::hybrid_bitset::HybridBitset;
+use crate::datastructures::hybrid_bitset::RangeSet;
 use crate::datastructures::leveled_gss::LeveledGSS;
 use crate::glr::parser::{GLRParserState, ParseStateEdgeContent};
 use crate::glr::table::TerminalID;
@@ -17,7 +17,7 @@ type ParserGSS = LeveledGSS<ParseStateEdgeContent, Acc>;
 
 impl<'a> GrammarConstraintState<'a> {
     pub fn get_mask4(&self) -> Bitset {
-        let final_mask_internal = RefCell::new(HybridBitset::zeros());
+        let final_mask_internal = RefCell::new(RangeSet::zeros());
         if self.state.is_empty() {
             return self.parent.precompute4_vocab.internal_bv_to_original(&final_mask_internal.into_inner());
         }
@@ -39,7 +39,7 @@ impl<'a> GrammarConstraintState<'a> {
                 if acc.terminals_union.is_empty() {
                     return Some(acc.clone());
                 }
-                let mut forbidden_llm_tokens = HybridBitset::zeros();
+                let mut forbidden_llm_tokens = RangeSet::zeros();
                 for (&tokenizer_state_id, disallowed_in_state) in &acc.terminals_union {
                     if disallowed_in_state.is_empty() { continue; }
                     if let Some(state_matches) = possible_matches.get(&TokenizerStateID(tokenizer_state_id)) {
@@ -91,7 +91,7 @@ impl<'a> GrammarConstraintState<'a> {
                     if let Some(reduced_acc) = gss.reduce_acc() {
                         let final_tokens = &reduced_acc & &final_weight.rsb;
                         if !final_tokens.is_empty() {
-                            *final_mask_internal.borrow_mut() |= HybridBitset::from(final_tokens);
+                            *final_mask_internal.borrow_mut() |= RangeSet::from(final_tokens);
                         }
                     }
                 }
@@ -172,7 +172,7 @@ impl<'a> GrammarConstraintState<'a> {
             });
             // Remap tokenizer states
             gss = gss.apply(|acc| {
-                let mut new_terminals_union: BTreeMap<usize, HybridBitset> = BTreeMap::new();
+                let mut new_terminals_union: BTreeMap<usize, RangeSet> = BTreeMap::new();
                 for (old, new) in &state_map {
                     if let Some(bv) = acc.terminals_union.get(&old.0) {
                         new_terminals_union.entry(new.0).or_default().bitor_assign(bv);
@@ -238,7 +238,7 @@ impl<'a> GrammarConstraintState<'a> {
         for glr_state in self.state.values_mut() {
             glr_state.stack = glr_state.stack.apply(|acc| {
                 let mut new_acc = acc.clone();
-                new_acc.llm_tokens_union = HybridBitset::max_ones();
+                new_acc.llm_tokens_union = RangeSet::max_ones();
                 new_acc
             });
             glr_state.stack = glr_state.stack.fuse(Some(1));

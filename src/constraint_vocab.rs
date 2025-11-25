@@ -5,7 +5,7 @@ use std::collections::BTreeMap as StdMap;
 
 use bimap::BiBTreeMap;
 use crate::datastructures::{
-    hybrid_bitset::HybridBitset,
+    hybrid_bitset::RangeSet,
 };
 use crate::datastructures::bitset::Bitset;
 use crate::tokenizer::LLMTokenID;
@@ -15,9 +15,9 @@ use crate::json_serialization::{JSONConvertible, JSONNode};
 // Basic aliases
 // ---------------------------------------------------------------------------
 
-pub type LLMTokenBV = HybridBitset;
-pub type TerminalBV = HybridBitset;
-pub type StateIDBV = HybridBitset;
+pub type LLMTokenBV = RangeSet;
+pub type TerminalBV = RangeSet;
+pub type StateIDBV = RangeSet;
 
 // ---------------------------------------------------------------------------
 // Vocab structures
@@ -177,7 +177,7 @@ impl StageVocab {
     /// Convert an internal BV (using `self.vocab`) back to original IDs.
     pub fn internal_bv_to_original(&self, internal_bv: &LLMTokenBV) -> Bitset {
         if internal_bv.is_all() {
-            let mut internal_bv_ones = HybridBitset::ones(self.internal_max_llm_token + 1);
+            let mut internal_bv_ones = RangeSet::ones(self.internal_max_llm_token + 1);
             return self.internal_bv_to_original(&internal_bv_ones);
         }
 
@@ -206,7 +206,7 @@ impl StageVocab {
     }
 
     pub fn original_bv_to_internal(&self, original_bv: &LLMTokenBV) -> LLMTokenBV {
-        let mut internal_bv = HybridBitset::zeros();
+        let mut internal_bv = RangeSet::zeros();
         if original_bv.is_all() {
             for &internal_id in self.original_to_internal.values() {
                 internal_bv.insert(internal_id);

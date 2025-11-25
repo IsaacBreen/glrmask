@@ -7,7 +7,7 @@ use std::fmt;
 use bitvec::prelude::*;
 use range_set_blaze::RangeSetBlaze;
 // Keep for macros or other uses if needed
-use crate::datastructures::hybrid_bitset::HybridBitset;
+use crate::datastructures::hybrid_bitset::RangeSet;
 use crate::json_serialization::{JSONConvertible, JSONNode};
 // Added for derive macro pattern
 

@@ -20,11 +20,11 @@ use std::sync::Arc;
 
 // --- The Hybrid Bitset Struct ---
 #[derive(Default, Clone, Eq)]
-pub struct HybridBitset {
+pub struct RangeSet {
     pub(crate) inner: Arc<RangeSetBlaze<usize>>,
 }
 
-impl JSONConvertible for HybridBitset {
+impl JSONConvertible for RangeSet {
     fn to_json(&self) -> JSONNode {
         // Flattened array format: [start1, end1, start2, end2, ...]
         let mut flat = Vec::new();
@@ -50,7 +50,7 @@ impl JSONConvertible for HybridBitset {
                     let end = usize::from_json(chunk[1].clone())?;
                     ranges.push(start..=end);
                 }
-                Ok(HybridBitset {
+                Ok(RangeSet {
                     inner: cache::intern_l1(RangeSetBlaze::from_iter(ranges)),
                 })
             }
@@ -87,7 +87,7 @@ impl<'a> Debug for DebugRangesTruncated<'a> {
     }
 }
 
-impl Debug for HybridBitset {
+impl Debug for RangeSet {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         if self.is_all() {
             return f
@@ -112,7 +112,7 @@ impl Debug for HybridBitset {
     }
 }
 
-impl Display for HybridBitset {
+impl Display for RangeSet {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "[")?;
 
@@ -137,10 +137,10 @@ impl Display for HybridBitset {
 }
 
 // --- Core Implementation (`impl HybridBitset`) ---
-impl HybridBitset {
+impl RangeSet {
     /// Creates a new, empty HybridBitset.
     pub fn zeros() -> Self {
-        HybridBitset {
+        RangeSet {
             inner: cache::intern_l1(RangeSetBlaze::new()),
         }
     }
@@ -152,29 +152,29 @@ impl HybridBitset {
     /// Creates a new HybridBitset with all indices from 0 up to `max_value` (inclusive) set to true.
     pub fn ones(len: usize) -> Self {
         if len == 0 {
-            HybridBitset::zeros()
+            RangeSet::zeros()
         } else {
-            HybridBitset {
+            RangeSet {
                 inner: cache::intern_l1(RangeSetBlaze::from_iter([0..=len - 1])),
             }
         }
     }
 
     pub fn max_ones() -> Self {
-        HybridBitset {
+        RangeSet {
             inner: cache::intern_l1(RangeSetBlaze::from_iter([0..=usize::MAX])),
         }
     }
 
     /// Creates a HybridBitset from an iterator of indices.
     pub fn from_iter<I: IntoIterator<Item = usize>>(iter: I) -> Self {
-        HybridBitset {
+        RangeSet {
             inner: cache::intern_l1(RangeSetBlaze::from_iter(iter)),
         }
     }
 
     pub fn from_item(item: usize) -> Self {
-        HybridBitset {
+        RangeSet {
             inner: cache::intern_l1(RangeSetBlaze::from_iter([item..=item])),
         }
     }
@@ -199,7 +199,7 @@ impl HybridBitset {
         self.inner.is_empty()
     }
     pub fn is_all(&self) -> bool {
-        self == &HybridBitset::max_ones()
+        self == &RangeSet::max_ones()
     }
 
     /// Checks if a specific index is set.
@@ -521,7 +521,7 @@ impl<'a> Iterator for Iter<'a> {
 
 impl<'a> std::iter::ExactSizeIterator for Iter<'a> {}
 
-impl<'a> IntoIterator for &'a HybridBitset {
+impl<'a> IntoIterator for &'a RangeSet {
     type Item = usize;
     type IntoIter = Iter<'a>;
 
@@ -530,7 +530,7 @@ impl<'a> IntoIterator for &'a HybridBitset {
     }
 }
 
-impl IntoIterator for HybridBitset {
+impl IntoIterator for RangeSet {
     type Item = usize;
     type IntoIter = range_set_blaze::IntoIter<usize>;
 
@@ -545,7 +545,7 @@ impl IntoIterator for HybridBitset {
 
 // --- Boolean Iterator ---
 pub struct BitsIter<'a> {
-    bitset: &'a HybridBitset,
+    bitset: &'a RangeSet,
     current_idx: usize,
     max_idx_to_iterate: usize, // Inclusive
     is_all: bool,
@@ -585,13 +585,13 @@ impl<'a> Iterator for BitsIter<'a> {
 
 impl<'a> std::iter::ExactSizeIterator for BitsIter<'a> {}
 
-impl FromIterator<usize> for HybridBitset {
+impl FromIterator<usize> for RangeSet {
     fn from_iter<I: IntoIterator<Item = usize>>(iter: I) -> Self {
         Self::from_iter(iter)
     }
 }
 
-impl Extend<usize> for HybridBitset {
+impl Extend<usize> for RangeSet {
     fn extend<I: IntoIterator<Item = usize>>(&mut self, iter: I) {
         // Avoids clone if Arc is unique
         Arc::make_mut(&mut self.inner).extend(iter);
@@ -602,8 +602,8 @@ impl Extend<usize> for HybridBitset {
 
 // --- Bitwise Operations (Creating New Sets) ---
 
-impl BitAnd for &HybridBitset {
-    type Output = HybridBitset;
+impl BitAnd for &RangeSet {
+    type Output = RangeSet;
 
     fn bitand(self, rhs: Self) -> Self::Output {
         if Arc::ptr_eq(&self.inner, &rhs.inner) {
@@ -611,15 +611,15 @@ impl BitAnd for &HybridBitset {
         }
         if self.is_simple() || rhs.is_simple() {
             let result_inner = &*self.inner & &*rhs.inner;
-            return HybridBitset {
+            return RangeSet {
                 inner: cache::intern_l1(result_inner),
             };
         }
         if let Some(cached) = cache::get_l1_op_cache(cache::BinOp::And, &self.inner, &rhs.inner) {
-            return HybridBitset { inner: cached };
+            return RangeSet { inner: cached };
         }
         if let Some(cached) = cache::get_l1_op_cache(cache::BinOp::And, &rhs.inner, &self.inner) {
-            return HybridBitset { inner: cached };
+            return RangeSet { inner: cached };
         }
 
         let result_inner = &*self.inner & &*rhs.inner;
@@ -632,12 +632,12 @@ impl BitAnd for &HybridBitset {
             result_acc.clone(),
         );
 
-        HybridBitset { inner: result_acc }
+        RangeSet { inner: result_acc }
     }
 }
 
-impl BitOr for &HybridBitset {
-    type Output = HybridBitset;
+impl BitOr for &RangeSet {
+    type Output = RangeSet;
 
     fn bitor(self, rhs: Self) -> Self::Output {
         if Arc::ptr_eq(&self.inner, &rhs.inner) {
@@ -645,15 +645,15 @@ impl BitOr for &HybridBitset {
         }
         if self.is_simple() || rhs.is_simple() {
             let result_inner = &*self.inner | &*rhs.inner;
-            return HybridBitset {
+            return RangeSet {
                 inner: cache::intern_l1(result_inner),
             };
         }
         if let Some(cached) = cache::get_l1_op_cache(cache::BinOp::Or, &self.inner, &rhs.inner) {
-            return HybridBitset { inner: cached };
+            return RangeSet { inner: cached };
         }
         if let Some(cached) = cache::get_l1_op_cache(cache::BinOp::Or, &rhs.inner, &self.inner) {
-            return HybridBitset { inner: cached };
+            return RangeSet { inner: cached };
         }
 
         let result_inner = &*self.inner | &*rhs.inner;
@@ -666,28 +666,28 @@ impl BitOr for &HybridBitset {
             result_acc.clone(),
         );
 
-        HybridBitset { inner: result_acc }
+        RangeSet { inner: result_acc }
     }
 }
 
-impl BitXor for &HybridBitset {
-    type Output = HybridBitset;
+impl BitXor for &RangeSet {
+    type Output = RangeSet;
 
     fn bitxor(self, rhs: Self) -> Self::Output {
         if Arc::ptr_eq(&self.inner, &rhs.inner) {
-            return HybridBitset::zeros();
+            return RangeSet::zeros();
         }
         if self.is_simple() || rhs.is_simple() {
             let result_inner = &*self.inner ^ &*rhs.inner;
-            return HybridBitset {
+            return RangeSet {
                 inner: cache::intern_l1(result_inner),
             };
         }
         if let Some(cached) = cache::get_l1_op_cache(cache::BinOp::Xor, &self.inner, &rhs.inner) {
-            return HybridBitset { inner: cached };
+            return RangeSet { inner: cached };
         }
         if let Some(cached) = cache::get_l1_op_cache(cache::BinOp::Xor, &rhs.inner, &self.inner) {
-            return HybridBitset { inner: cached };
+            return RangeSet { inner: cached };
         }
 
         let result_inner = &*self.inner ^ &*rhs.inner;
@@ -700,25 +700,25 @@ impl BitXor for &HybridBitset {
             result_acc.clone(),
         );
 
-        HybridBitset { inner: result_acc }
+        RangeSet { inner: result_acc }
     }
 }
 
-impl Sub for &HybridBitset {
-    type Output = HybridBitset;
+impl Sub for &RangeSet {
+    type Output = RangeSet;
 
     fn sub(self, rhs: Self) -> Self::Output {
         if Arc::ptr_eq(&self.inner, &rhs.inner) {
-            return HybridBitset::zeros();
+            return RangeSet::zeros();
         }
         if self.is_simple() || rhs.is_simple() {
             let result_inner = &*self.inner - &*rhs.inner;
-            return HybridBitset {
+            return RangeSet {
                 inner: cache::intern_l1(result_inner),
             };
         }
         if let Some(cached) = cache::get_l1_op_cache(cache::BinOp::Sub, &self.inner, &rhs.inner) {
-            return HybridBitset { inner: cached };
+            return RangeSet { inner: cached };
         }
 
         let result_inner = &*self.inner - &*rhs.inner;
@@ -731,39 +731,39 @@ impl Sub for &HybridBitset {
             result_acc.clone(),
         );
 
-        HybridBitset { inner: result_acc }
+        RangeSet { inner: result_acc }
     }
 }
 
 // --- In-place Bitwise Operations ---
-impl BitAndAssign for HybridBitset {
+impl BitAndAssign for RangeSet {
     fn bitand_assign(&mut self, rhs: Self) {
         *self = &*self & &rhs;
     }
 }
-impl BitOrAssign for HybridBitset {
+impl BitOrAssign for RangeSet {
     fn bitor_assign(&mut self, rhs: Self) {
         *self = &*self | &rhs;
     }
 }
-impl BitXorAssign for HybridBitset {
+impl BitXorAssign for RangeSet {
     fn bitxor_assign(&mut self, rhs: Self) {
         *self = &*self ^ &rhs;
     }
 }
-impl SubAssign for HybridBitset {
+impl SubAssign for RangeSet {
     fn sub_assign(&mut self, rhs: Self) {
         *self = &*self - &rhs;
     }
 }
 
-impl BitAndAssign<&HybridBitset> for HybridBitset {
-    fn bitand_assign(&mut self, rhs: &HybridBitset) {
+impl BitAndAssign<&RangeSet> for RangeSet {
+    fn bitand_assign(&mut self, rhs: &RangeSet) {
         *self = &*self & rhs;
     }
 }
-impl BitOrAssign<&HybridBitset> for HybridBitset {
-    fn bitor_assign(&mut self, rhs: &HybridBitset) {
+impl BitOrAssign<&RangeSet> for RangeSet {
+    fn bitor_assign(&mut self, rhs: &RangeSet) {
         if Arc::ptr_eq(&self.inner, &rhs.inner) {
             return;
         }
@@ -774,31 +774,31 @@ impl BitOrAssign<&HybridBitset> for HybridBitset {
         self.inner = cache::intern_l1(new_inner);
     }
 }
-impl BitXorAssign<&HybridBitset> for HybridBitset {
-    fn bitxor_assign(&mut self, rhs: &HybridBitset) {
+impl BitXorAssign<&RangeSet> for RangeSet {
+    fn bitxor_assign(&mut self, rhs: &RangeSet) {
         *self = &*self ^ rhs;
     }
 }
-impl SubAssign<&HybridBitset> for HybridBitset {
-    fn sub_assign(&mut self, rhs: &HybridBitset) {
+impl SubAssign<&RangeSet> for RangeSet {
+    fn sub_assign(&mut self, rhs: &RangeSet) {
         *self = &*self - rhs;
     }
 }
 
 // --- Equality, Hashing, Ordering ---
-impl PartialEq for HybridBitset {
+impl PartialEq for RangeSet {
     fn eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.inner, &other.inner) || *self.inner == *other.inner
     }
 }
 
-impl PartialOrd for HybridBitset {
+impl PartialOrd for RangeSet {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl Ord for HybridBitset {
+impl Ord for RangeSet {
     fn cmp(&self, other: &Self) -> Ordering {
         if Arc::ptr_eq(&self.inner, &other.inner) {
             return Ordering::Equal;
@@ -807,7 +807,7 @@ impl Ord for HybridBitset {
     }
 }
 
-impl Hash for HybridBitset {
+impl Hash for RangeSet {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.inner.hash(state);
     }
@@ -816,95 +816,95 @@ impl Hash for HybridBitset {
 // --- Conversions ---
 use bitvec::prelude::*;
 
-impl Into<BitVec<usize, Lsb0>> for HybridBitset {
+impl Into<BitVec<usize, Lsb0>> for RangeSet {
     fn into(self) -> BitVec<usize, Lsb0> {
         todo!("Conversion from HybridBitset (RangeSetBlaze based) to BitVec is not directly implemented yet.")
     }
 }
 
-impl From<BitVec<usize, Lsb0>> for HybridBitset {
+impl From<BitVec<usize, Lsb0>> for RangeSet {
     fn from(bitvec: BitVec<usize, Lsb0>) -> Self {
-        HybridBitset {
+        RangeSet {
             inner: cache::intern_l1(RangeSetBlaze::from_iter(bitvec.iter_ones())),
         }
     }
 }
 
-impl From<RangeSetBlaze<usize>> for HybridBitset {
+impl From<RangeSetBlaze<usize>> for RangeSet {
     fn from(range_set: RangeSetBlaze<usize>) -> Self {
-        HybridBitset {
+        RangeSet {
             inner: cache::intern_l1(range_set),
         }
     }
 }
 
-impl From<&RangeSetBlaze<usize>> for HybridBitset {
+impl From<&RangeSetBlaze<usize>> for RangeSet {
     fn from(range_set: &RangeSetBlaze<usize>) -> Self {
-        HybridBitset {
+        RangeSet {
             inner: cache::intern_l1(range_set.clone()),
         }
     }
 }
 
-impl From<&Bitset> for HybridBitset {
+impl From<&Bitset> for RangeSet {
     fn from(bitset: &Bitset) -> Self {
-        HybridBitset::from_iter(bitset.iter_indices())
+        RangeSet::from_iter(bitset.iter_indices())
     }
 }
 
-impl From<Bitset> for HybridBitset {
+impl From<Bitset> for RangeSet {
     fn from(bitset: Bitset) -> Self {
-        HybridBitset::from_iter(bitset.iter_indices())
+        RangeSet::from_iter(bitset.iter_indices())
     }
 }
 
 // --- Operations on owned values ---
-impl BitAnd<HybridBitset> for HybridBitset {
-    type Output = HybridBitset;
-    fn bitand(self, rhs: HybridBitset) -> Self::Output {
+impl BitAnd<RangeSet> for RangeSet {
+    type Output = RangeSet;
+    fn bitand(self, rhs: RangeSet) -> Self::Output {
         &self & &rhs
     }
 }
-impl BitOr<HybridBitset> for HybridBitset {
-    type Output = HybridBitset;
-    fn bitor(self, rhs: HybridBitset) -> Self::Output {
+impl BitOr<RangeSet> for RangeSet {
+    type Output = RangeSet;
+    fn bitor(self, rhs: RangeSet) -> Self::Output {
         &self | &rhs
     }
 }
-impl BitXor<HybridBitset> for HybridBitset {
-    type Output = HybridBitset;
-    fn bitxor(self, rhs: HybridBitset) -> Self::Output {
+impl BitXor<RangeSet> for RangeSet {
+    type Output = RangeSet;
+    fn bitxor(self, rhs: RangeSet) -> Self::Output {
         &self ^ &rhs
     }
 }
-impl Sub<HybridBitset> for HybridBitset {
-    type Output = HybridBitset;
+impl Sub<RangeSet> for RangeSet {
+    type Output = RangeSet;
     fn sub(self, rhs: Self) -> Self::Output {
         &self - &rhs
     }
 }
 
-impl<'a> BitAnd<&'a HybridBitset> for HybridBitset {
-    type Output = HybridBitset;
-    fn bitand(self, rhs: &'a HybridBitset) -> Self::Output {
+impl<'a> BitAnd<&'a RangeSet> for RangeSet {
+    type Output = RangeSet;
+    fn bitand(self, rhs: &'a RangeSet) -> Self::Output {
         &self & rhs
     }
 }
-impl<'a> BitOr<&'a HybridBitset> for HybridBitset {
-    type Output = HybridBitset;
-    fn bitor(self, rhs: &'a HybridBitset) -> Self::Output {
+impl<'a> BitOr<&'a RangeSet> for RangeSet {
+    type Output = RangeSet;
+    fn bitor(self, rhs: &'a RangeSet) -> Self::Output {
         &self | rhs
     }
 }
-impl<'a> BitXor<&'a HybridBitset> for HybridBitset {
-    type Output = HybridBitset;
-    fn bitxor(self, rhs: &'a HybridBitset) -> Self::Output {
+impl<'a> BitXor<&'a RangeSet> for RangeSet {
+    type Output = RangeSet;
+    fn bitxor(self, rhs: &'a RangeSet) -> Self::Output {
         &self ^ rhs
     }
 }
-impl<'a> Sub<&'a HybridBitset> for HybridBitset {
-    type Output = HybridBitset;
-    fn sub(self, rhs: &'a HybridBitset) -> Self::Output {
+impl<'a> Sub<&'a RangeSet> for RangeSet {
+    type Output = RangeSet;
+    fn sub(self, rhs: &'a RangeSet) -> Self::Output {
         &self - rhs
     }
 }
@@ -923,14 +923,14 @@ mod tests {
 
     #[test]
     fn test_new_empty_len() {
-        let set = HybridBitset::zeros();
+        let set = RangeSet::zeros();
         assert_eq!(set.len(), 0);
         assert!(set.is_empty());
     }
 
     #[test]
     fn test_insert_basic() {
-        let mut set = HybridBitset::zeros();
+        let mut set = RangeSet::zeros();
         assert!(set.insert(10));
         assert!(!set.insert(10)); // Already present
         assert!(set.insert(20));
@@ -942,7 +942,7 @@ mod tests {
 
     #[test]
     fn test_remove_basic() {
-        let mut set = HybridBitset::from_iter(vec![10, 20, 30]);
+        let mut set = RangeSet::from_iter(vec![10, 20, 30]);
         assert_eq!(set.len(), 3);
         assert!(set.remove(20));
         assert_eq!(set.len(), 2);
@@ -955,7 +955,7 @@ mod tests {
     #[test]
     fn test_iteration() {
         let indices = vec![5, 1, 100, 42];
-        let set = HybridBitset::from_iter(indices.clone());
+        let set = RangeSet::from_iter(indices.clone());
         let mut collected: Vec<usize> = set.iter_indices().collect();
         collected.sort_unstable();
         let mut expected = indices;
@@ -967,7 +967,7 @@ mod tests {
     #[test]
     fn test_into_iteration() {
         let indices = vec![5, 1, 100, 42];
-        let set = HybridBitset::from_iter(indices.clone());
+        let set = RangeSet::from_iter(indices.clone());
         let mut collected: Vec<usize> = set.into_iter().collect(); // Consumes set
         collected.sort_unstable();
         let mut expected = indices;
@@ -978,8 +978,8 @@ mod tests {
     #[test]
     fn test_set_ops_sparse_sparse() {
         // Names are now conceptual, as internal repr is opaque
-        let set1 = HybridBitset::from_iter(vec![1, 2, 3, 10]);
-        let set2 = HybridBitset::from_iter(vec![3, 4, 5, 10]);
+        let set1 = RangeSet::from_iter(vec![1, 2, 3, 10]);
+        let set2 = RangeSet::from_iter(vec![3, 4, 5, 10]);
 
         let intersection = &set1 & &set2;
         let union = &set1 | &set2;
@@ -1007,8 +1007,8 @@ mod tests {
     #[test]
     fn test_set_ops_dense_dense() {
         // Names are now conceptual
-        let set1 = HybridBitset::from_iter(0..SPARSE_TO_DENSE_THRESHOLD + 10);
-        let set2 = HybridBitset::from_iter(5..SPARSE_TO_DENSE_THRESHOLD + 20);
+        let set1 = RangeSet::from_iter(0..SPARSE_TO_DENSE_THRESHOLD + 10);
+        let set2 = RangeSet::from_iter(5..SPARSE_TO_DENSE_THRESHOLD + 20);
 
         let intersection = &set1 & &set2;
         let union = &set1 | &set2;
@@ -1044,8 +1044,8 @@ mod tests {
     fn test_set_ops_mixed() {
         // Names are now conceptual
         let set1_conceptually_sparse =
-            HybridBitset::from_iter(vec![1, 2, 3, SPARSE_TO_DENSE_THRESHOLD + 100]);
-        let set2_conceptually_dense = HybridBitset::from_iter(0..SPARSE_TO_DENSE_THRESHOLD + 5);
+            RangeSet::from_iter(vec![1, 2, 3, SPARSE_TO_DENSE_THRESHOLD + 100]);
+        let set2_conceptually_dense = RangeSet::from_iter(0..SPARSE_TO_DENSE_THRESHOLD + 5);
 
         let intersection1 = &set1_conceptually_sparse & &set2_conceptually_dense;
         let intersection1_expected: BTreeSet<usize> = vec![1, 2, 3].into_iter().collect();
@@ -1091,10 +1091,10 @@ mod tests {
 
     #[test]
     fn test_equality_and_hash() {
-        let set1 = HybridBitset::from_iter(vec![1, 5, 10]);
-        let set1_clone = HybridBitset::from_iter(vec![1, 5, 10]); // Same elements
-        let set2 = HybridBitset::from_iter(vec![1, 5, 11]); // Different elements
-        let empty_set = HybridBitset::zeros();
+        let set1 = RangeSet::from_iter(vec![1, 5, 10]);
+        let set1_clone = RangeSet::from_iter(vec![1, 5, 10]); // Same elements
+        let set2 = RangeSet::from_iter(vec![1, 5, 11]); // Different elements
+        let empty_set = RangeSet::zeros();
 
         assert_eq!(set1, set1_clone);
         assert_ne!(set1, set2);
@@ -1104,7 +1104,7 @@ mod tests {
         assert!(Arc::ptr_eq(&set1.inner, &set1_clone.inner));
 
         use std::collections::hash_map::DefaultHasher;
-        let hash = |s: &HybridBitset| -> u64 {
+        let hash = |s: &RangeSet| -> u64 {
             let mut hasher = DeterministicHasher::new(DefaultHasher::new());
             s.hash(&mut hasher);
             hasher.finish()
@@ -1129,7 +1129,7 @@ mod tests {
 
     #[test]
     fn test_large_index() {
-        let mut set = HybridBitset::zeros();
+        let mut set = RangeSet::zeros();
         let large_idx = 1_000_000;
         set.insert(large_idx);
         set.insert(0);
@@ -1148,13 +1148,13 @@ mod tests {
 
     #[test]
     fn test_clear() {
-        let mut set = HybridBitset::from_iter(0..SPARSE_TO_DENSE_THRESHOLD + 10);
+        let mut set = RangeSet::from_iter(0..SPARSE_TO_DENSE_THRESHOLD + 10);
         assert!(!set.is_empty());
         set.clear();
         assert!(set.is_empty());
         assert_eq!(set.len(), 0);
 
-        let mut set2 = HybridBitset::from_iter(vec![1, 2, 3]);
+        let mut set2 = RangeSet::from_iter(vec![1, 2, 3]);
         assert!(!set2.is_empty());
         set2.clear();
         assert!(set2.is_empty());
@@ -1163,8 +1163,8 @@ mod tests {
 
     #[test]
     fn test_assign_ops() {
-        let set1_orig = HybridBitset::from_iter(vec![1, 2, 10]);
-        let set2 = HybridBitset::from_iter(vec![2, 3, 20]);
+        let set1_orig = RangeSet::from_iter(vec![1, 2, 10]);
+        let set2 = RangeSet::from_iter(vec![2, 3, 20]);
 
         let mut set1 = set1_orig.clone();
         set1 |= set2.clone();
@@ -1173,25 +1173,25 @@ mod tests {
             BTreeSet::from_iter(vec![1, 2, 3, 10, 20])
         );
 
-        let set3_orig = HybridBitset::from_iter(0..DENSE_TO_SPARSE_THRESHOLD); // Conceptual dense
+        let set3_orig = RangeSet::from_iter(0..DENSE_TO_SPARSE_THRESHOLD); // Conceptual dense
         let set4 =
-            HybridBitset::from_iter((DENSE_TO_SPARSE_THRESHOLD / 2)..DENSE_TO_SPARSE_THRESHOLD + 10);
+            RangeSet::from_iter((DENSE_TO_SPARSE_THRESHOLD / 2)..DENSE_TO_SPARSE_THRESHOLD + 10);
         let expected_and =
             (DENSE_TO_SPARSE_THRESHOLD / 2..DENSE_TO_SPARSE_THRESHOLD).collect::<BTreeSet<_>>();
         let mut set3 = set3_orig.clone();
         set3 &= set4.clone();
         assert_eq!(set3.iter_indices().collect::<BTreeSet<_>>(), expected_and);
 
-        let mut set5 = HybridBitset::from_iter(vec![1, 2, 3]);
-        let set6 = HybridBitset::from_iter(vec![3, 4, 5]);
+        let mut set5 = RangeSet::from_iter(vec![1, 2, 3]);
+        let set6 = RangeSet::from_iter(vec![3, 4, 5]);
         set5 ^= set6.clone();
         assert_eq!(
             set5.iter_indices().collect::<BTreeSet<_>>(),
             BTreeSet::from_iter(vec![1, 2, 4, 5])
         );
 
-        let mut set7 = HybridBitset::from_iter(vec![1, 2, 3, 4, 5]);
-        let set8 = HybridBitset::from_iter(vec![2, 4, 6]);
+        let mut set7 = RangeSet::from_iter(vec![1, 2, 3, 4, 5]);
+        let set8 = RangeSet::from_iter(vec![2, 4, 6]);
         set7 -= set8.clone();
         assert_eq!(
             set7.iter_indices().collect::<BTreeSet<_>>(),
@@ -1201,8 +1201,8 @@ mod tests {
 
     #[test]
     fn test_assign_ops_ref() {
-        let set1_orig = HybridBitset::from_iter(vec![1, 2, 10]);
-        let set2 = HybridBitset::from_iter(vec![2, 3, 20]);
+        let set1_orig = RangeSet::from_iter(vec![1, 2, 10]);
+        let set2 = RangeSet::from_iter(vec![2, 3, 20]);
 
         let mut set1 = set1_orig.clone();
         set1 |= &set2;
@@ -1211,25 +1211,25 @@ mod tests {
             BTreeSet::from_iter(vec![1, 2, 3, 10, 20])
         );
 
-        let set3_orig = HybridBitset::from_iter(0..DENSE_TO_SPARSE_THRESHOLD);
+        let set3_orig = RangeSet::from_iter(0..DENSE_TO_SPARSE_THRESHOLD);
         let set4 =
-            HybridBitset::from_iter((DENSE_TO_SPARSE_THRESHOLD / 2)..DENSE_TO_SPARSE_THRESHOLD + 10);
+            RangeSet::from_iter((DENSE_TO_SPARSE_THRESHOLD / 2)..DENSE_TO_SPARSE_THRESHOLD + 10);
         let expected_and =
             (DENSE_TO_SPARSE_THRESHOLD / 2..DENSE_TO_SPARSE_THRESHOLD).collect::<BTreeSet<_>>();
         let mut set3 = set3_orig.clone();
         set3 &= &set4;
         assert_eq!(set3.iter_indices().collect::<BTreeSet<_>>(), expected_and);
 
-        let mut set5 = HybridBitset::from_iter(vec![1, 2, 3]);
-        let set6 = HybridBitset::from_iter(vec![3, 4, 5]);
+        let mut set5 = RangeSet::from_iter(vec![1, 2, 3]);
+        let set6 = RangeSet::from_iter(vec![3, 4, 5]);
         set5 ^= &set6;
         assert_eq!(
             set5.iter_indices().collect::<BTreeSet<_>>(),
             BTreeSet::from_iter(vec![1, 2, 4, 5])
         );
 
-        let mut set7 = HybridBitset::from_iter(vec![1, 2, 3, 4, 5]);
-        let set8 = HybridBitset::from_iter(vec![2, 4, 6]);
+        let mut set7 = RangeSet::from_iter(vec![1, 2, 3, 4, 5]);
+        let set8 = RangeSet::from_iter(vec![2, 4, 6]);
         set7 -= &set8;
         assert_eq!(
             set7.iter_indices().collect::<BTreeSet<_>>(),
@@ -1240,9 +1240,9 @@ mod tests {
     #[test]
     fn test_dense_dense_edge_cases() {
         // Conceptual names
-        let d1 = HybridBitset::zeros();
-        let d2 = HybridBitset::zeros();
-        let d3 = HybridBitset::from_iter(0..DENSE_TO_SPARSE_THRESHOLD);
+        let d1 = RangeSet::zeros();
+        let d2 = RangeSet::zeros();
+        let d3 = RangeSet::from_iter(0..DENSE_TO_SPARSE_THRESHOLD);
 
         assert_eq!(&d1 & &d2, d1);
         assert_eq!(&d1 | &d2, d1);
@@ -1258,8 +1258,8 @@ mod tests {
         assert_eq!(&d1 - &d3, d1);
         assert_eq!(&d3 - &d1, d3);
 
-        let d4 = HybridBitset::from_iter(0..5);
-        let d5 = HybridBitset::from_iter(3..10);
+        let d4 = RangeSet::from_iter(0..5);
+        let d5 = RangeSet::from_iter(3..10);
 
         let inter = &d4 & &d5;
         assert_eq!(
@@ -1290,7 +1290,7 @@ mod tests {
     fn test_from_iterator_trait() {
         // Renamed to avoid conflict
         let data = vec![10, 20, 10, 30, 20];
-        let set: HybridBitset = data.into_iter().collect();
+        let set: RangeSet = data.into_iter().collect();
 
         let expected: BTreeSet<usize> = vec![10, 20, 30].into_iter().collect();
         assert_eq!(set.iter_indices().collect::<BTreeSet<_>>(), expected);
@@ -1298,14 +1298,14 @@ mod tests {
 
     #[test]
     fn test_iter_bits() {
-        let empty_set = HybridBitset::zeros();
+        let empty_set = RangeSet::zeros();
         assert_eq!(
             empty_set.iter_bits().collect::<Vec<bool>>(),
             Vec::<bool>::new()
         );
         assert_eq!(empty_set.iter_bits().len(), 0);
 
-        let sparse_set = HybridBitset::from_iter(vec![1, 3]);
+        let sparse_set = RangeSet::from_iter(vec![1, 3]);
         let expected_sparse_bools = vec![false, true, false, true];
         assert_eq!(
             sparse_set.iter_bits().collect::<Vec<bool>>(),
@@ -1314,7 +1314,7 @@ mod tests {
         assert_eq!(sparse_set.iter_bits().len(), expected_sparse_bools.len());
 
         // Test with a set that would have been dense
-        let dense_like_set = HybridBitset::from_iter(vec![1, 3]); // Max index 3
+        let dense_like_set = RangeSet::from_iter(vec![1, 3]); // Max index 3
                                                                   // RangeSetBlaze doesn't have an explicit dense conversion, iter_bits uses .last()
         assert_eq!(
             dense_like_set.iter_bits().collect::<Vec<bool>>(),
@@ -1325,9 +1325,9 @@ mod tests {
             expected_sparse_bools.len()
         );
 
-        let empty_set_from_non_empty = HybridBitset::from_iter(vec![5]);
+        let empty_set_from_non_empty = RangeSet::from_iter(vec![5]);
         let _ = empty_set_from_non_empty.inner.last(); // just to use it
-        let mut empty_set_cleared = HybridBitset::from_iter(vec![5]);
+        let mut empty_set_cleared = RangeSet::from_iter(vec![5]);
         empty_set_cleared.clear();
         assert_eq!(
             empty_set_cleared.iter_bits().collect::<Vec<bool>>(),
@@ -1338,7 +1338,7 @@ mod tests {
 
     #[test]
     fn test_ones() {
-        let set_ones_small = HybridBitset::ones(4); // 0, 1, 2, 3
+        let set_ones_small = RangeSet::ones(4); // 0, 1, 2, 3
         assert_eq!(set_ones_small.len(), 4);
         assert!(set_ones_small.contains(0));
         assert!(set_ones_small.contains(1));
@@ -1347,7 +1347,7 @@ mod tests {
         assert!(!set_ones_small.contains(4));
 
         let len = SPARSE_TO_DENSE_THRESHOLD + 5;
-        let set_ones_large = HybridBitset::ones(len + 1); // Corrected: len is exclusive upper bound for RangeSetBlaze
+        let set_ones_large = RangeSet::ones(len + 1); // Corrected: len is exclusive upper bound for RangeSetBlaze
         assert_eq!(set_ones_large.len(), SPARSE_TO_DENSE_THRESHOLD + 6);
         for i in 0..=(SPARSE_TO_DENSE_THRESHOLD + 5) {
             assert!(set_ones_large.contains(i));
@@ -1360,12 +1360,12 @@ mod tests {
         // assert!(!set_ones_max.is_empty()); //
         // assert_eq!(set_ones_max.len(), usize::MAX); // This is correct
 
-        let set_ones_one = HybridBitset::ones(1); // Should contain only 0
+        let set_ones_one = RangeSet::ones(1); // Should contain only 0
         assert_eq!(set_ones_one.len(), 1);
         assert!(set_ones_one.contains(0));
         assert!(!set_ones_one.contains(1));
 
-        let set_ones_zero = HybridBitset::ones(0); // Should be empty
+        let set_ones_zero = RangeSet::ones(0); // Should be empty
         assert_eq!(set_ones_zero.len(), 0);
         assert!(set_ones_zero.is_empty());
     }
@@ -1374,9 +1374,9 @@ mod tests {
     #[test]
     fn test_find_good_permutation() {
         // Example from the problem description
-        let s1 = HybridBitset::from_iter(vec![1, 2, 3, 4, 8, 9]);
-        let s2 = HybridBitset::from_iter(vec![2, 3, 5, 7, 8, 9, 15]);
-        let s3 = HybridBitset::from_iter(vec![1, 4, 5, 6, 7, 8, 12, 13]);
+        let s1 = RangeSet::from_iter(vec![1, 2, 3, 4, 8, 9]);
+        let s2 = RangeSet::from_iter(vec![2, 3, 5, 7, 8, 9, 15]);
+        let s3 = RangeSet::from_iter(vec![1, 4, 5, 6, 7, 8, 12, 13]);
 
         let sets = vec![&s1, &s2, &s3];
 
@@ -1385,11 +1385,11 @@ mod tests {
         assert_eq!(original_cost, 2 + 4 + 3); // 9
 
         // Find the permutation
-        let perm_map = HybridBitset::find_good_permutation(&sets);
+        let perm_map = RangeSet::find_good_permutation(&sets);
 
         // Apply the permutation
         let apply_permutation =
-            |set: &HybridBitset, map: &std::collections::HashMap<usize, usize>| -> HybridBitset {
+            |set: &RangeSet, map: &std::collections::HashMap<usize, usize>| -> RangeSet {
                 set.iter_indices().map(|val| *map.get(&val).unwrap()).collect()
             };
 
@@ -1411,12 +1411,12 @@ mod tests {
         );
 
         // Test with sets that have no shared adjacencies
-        let s4 = HybridBitset::from_iter(vec![100, 200, 300]);
-        let s5 = HybridBitset::from_iter(vec![400, 500]);
+        let s4 = RangeSet::from_iter(vec![100, 200, 300]);
+        let s5 = RangeSet::from_iter(vec![400, 500]);
         let disjoint_sets = vec![&s4, &s5];
         let original_disjoint_cost: usize =
             disjoint_sets.iter().map(|s| s.inner().ranges_len()).sum();
-        let perm_map_disjoint = HybridBitset::find_good_permutation(&disjoint_sets);
+        let perm_map_disjoint = RangeSet::find_good_permutation(&disjoint_sets);
         let new_disjoint_cost: usize = disjoint_sets
             .iter()
             .map(|s| {
@@ -1435,13 +1435,13 @@ mod tests {
 
     #[test]
     fn test_sub_is_intersection_with_inverted() {
-        let set_a = HybridBitset::from_iter(vec![1, 2, 10, 100]);
-        let set_b = HybridBitset::from_iter(vec![2, 3, 20, 100]);
+        let set_a = RangeSet::from_iter(vec![1, 2, 10, 100]);
+        let set_b = RangeSet::from_iter(vec![2, 3, 20, 100]);
 
         let diff = &set_a - &set_b;
         let diff_with_inverted = &set_a & &set_b.inverted();
 
-        let expected_diff = HybridBitset::from_iter(vec![1, 10]);
+        let expected_diff = RangeSet::from_iter(vec![1, 10]);
 
         assert_eq!(diff, expected_diff);
         assert_eq!(diff_with_inverted, expected_diff);
@@ -1449,7 +1449,7 @@ mod tests {
 
     #[test]
     fn test_constraint() {
-        let original_set = HybridBitset::from_iter(vec![1, 10, 100, 1000]);
+        let original_set = RangeSet::from_iter(vec![1, 10, 100, 1000]);
 
         // Constraint that includes all elements
         let mut constrained1 = original_set.clone();
@@ -1459,7 +1459,7 @@ mod tests {
         // Constraint that cuts off some elements
         let mut constrained2 = original_set.clone();
         constrained2.constrain(500);
-        let expected2 = HybridBitset::from_iter(vec![1, 10, 100]);
+        let expected2 = RangeSet::from_iter(vec![1, 10, 100]);
         assert_eq!(constrained2, expected2);
 
         // Constraint that cuts off all elements
@@ -1470,11 +1470,11 @@ mod tests {
         // Constraint at an edge
         let mut constrained4 = original_set.clone();
         constrained4.constrain(100);
-        let expected4 = HybridBitset::from_iter(vec![1, 10, 100]);
+        let expected4 = RangeSet::from_iter(vec![1, 10, 100]);
         assert_eq!(constrained4, expected4);
 
         // Constraint on an empty set
-        let mut empty_set = HybridBitset::zeros();
+        let mut empty_set = RangeSet::zeros();
         empty_set.constrain(100);
         assert!(empty_set.is_empty());
 
@@ -1486,19 +1486,19 @@ mod tests {
 
     #[test]
     fn test_extend() {
-        let mut set = HybridBitset::from_iter(vec![1, 5]);
+        let mut set = RangeSet::from_iter(vec![1, 5]);
         let new_elements = vec![5, 10, 20];
         set.extend(new_elements);
 
         let expected: BTreeSet<usize> = vec![1, 5, 10, 20].into_iter().collect();
         assert_eq!(set.iter_indices().collect::<BTreeSet<_>>(), expected);
 
-        let mut empty_set = HybridBitset::zeros();
+        let mut empty_set = RangeSet::zeros();
         empty_set.extend(vec![100, 200]);
         let expected_empty: BTreeSet<usize> = vec![100, 200].into_iter().collect();
         assert_eq!(empty_set.iter_indices().collect::<BTreeSet<_>>(), expected_empty);
 
-        let mut large_set = HybridBitset::from_iter(0..10);
+        let mut large_set = RangeSet::from_iter(0..10);
         large_set.extend(15..20);
         let expected_large: BTreeSet<usize> = (0..10).chain(15..20).collect();
         assert_eq!(large_set.iter_indices().collect::<BTreeSet<_>>(), expected_large);
@@ -1506,19 +1506,19 @@ mod tests {
 
     #[test]
     fn test_display_format() {
-        let set1 = HybridBitset::from_iter(vec![0, 1, 2, 3, 4, 7, 9, 10, 11]);
+        let set1 = RangeSet::from_iter(vec![0, 1, 2, 3, 4, 7, 9, 10, 11]);
         assert_eq!(format!("{}", set1), "[0..4, 7, 9..11]");
 
-        let set2 = HybridBitset::zeros();
+        let set2 = RangeSet::zeros();
         assert_eq!(format!("{}", set2), "[]");
 
-        let set3 = HybridBitset::from_iter(vec![42]);
+        let set3 = RangeSet::from_iter(vec![42]);
         assert_eq!(format!("{}", set3), "[42]");
 
-        let set4 = HybridBitset::from_iter(vec![10, 12, 14]);
+        let set4 = RangeSet::from_iter(vec![10, 12, 14]);
         assert_eq!(format!("{}", set4), "[10, 12, 14]");
 
-        let set5 = HybridBitset::ones(5); // 0..=4
+        let set5 = RangeSet::ones(5); // 0..=4
         assert_eq!(format!("{}", set5), "[0..4]");
     }
 }
