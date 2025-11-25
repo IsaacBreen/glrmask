@@ -5,11 +5,10 @@ use chrono::Local;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, VecDeque};
-
+use crate::precompute4::weighted_automata::test_weighted_automata;
 use super::common::{DETERMINIZE_DEBUG, Label, NWAStateID, Weight};
 use super::dwa::DWA;
 use super::nwa::{NWA, NWAStates};
-use crate::precompute4::test_weighted_automata;
 
 // ============================================================================
 // Common Types & Helpers

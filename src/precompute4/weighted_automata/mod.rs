@@ -10,7 +10,7 @@ pub mod nwa;
 pub mod simplification;
 pub mod unroll;
 mod test_determinization;
-mod test_weighted_automata;
+pub(crate) mod test_weighted_automata;
 
 pub use self::bitset::RangeSet;
 pub use self::common::{format_i16_char, format_pos_code, format_word, NWAStateID, StateID, Weight};
