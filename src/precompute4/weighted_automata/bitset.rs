@@ -18,29 +18,29 @@ use crate::datastructures::hybrid_bitset::HybridBitset;
 
 /// Thin wrapper around `RangeSetBlaze<usize>` with cached fingerprint and `is_all` flag.
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd)]
-pub struct SimpleBitset(Arc<SimpleBitsetInner>);
+pub struct RangeSet(Arc<RangeSetInner>);
 
 #[derive(Eq, PartialEq, Ord, PartialOrd)]
-pub struct SimpleBitsetInner {
+pub struct RangeSetInner {
     pub(crate) rsb: RangeSetBlaze<usize>,
     pub(crate) fp: u64,
     is_all: bool,
 }
 
-impl Deref for SimpleBitset {
-    type Target = SimpleBitsetInner;
+impl Deref for RangeSet {
+    type Target = RangeSetInner;
 
     #[inline]
     fn deref(&self) -> &Self::Target { &self.0 }
 }
 
-impl Default for SimpleBitset {
+impl Default for RangeSet {
     fn default() -> Self { Self::zeros() }
 }
 
 // Global interning for SimpleBitset
 // Global interning for SimpleBitset
-struct Interner(HashMap<u64, Vec<Arc<SimpleBitsetInner>>>);
+struct Interner(HashMap<u64, Vec<Arc<RangeSetInner>>>);
 
 const NUM_SHARDS: usize = 64;
 
@@ -64,13 +64,13 @@ impl ShardedInterner {
 
 static INTERNER: Lazy<ShardedInterner> = Lazy::new(ShardedInterner::new);
 
-static ZEROS: Lazy<SimpleBitset> =
-    Lazy::new(|| SimpleBitset(Arc::new(SimpleBitsetInner { rsb: RangeSetBlaze::new(), fp: FP_ZERO, is_all: false })));
-static ALL: Lazy<SimpleBitset> = Lazy::new(|| {
-    SimpleBitset(Arc::new(SimpleBitsetInner { rsb: universe_rsb(), fp: FP_ALL, is_all: true }))
+static ZEROS: Lazy<RangeSet> =
+    Lazy::new(|| RangeSet(Arc::new(RangeSetInner { rsb: RangeSetBlaze::new(), fp: FP_ZERO, is_all: false })));
+static ALL: Lazy<RangeSet> = Lazy::new(|| {
+    RangeSet(Arc::new(RangeSetInner { rsb: universe_rsb(), fp: FP_ALL, is_all: true }))
 });
 
-type OpCache = LruCache<(usize, usize), SimpleBitset>;
+type OpCache = LruCache<(usize, usize), RangeSet>;
 const CACHE_SIZE: NonZeroUsize = unsafe { NonZeroUsize::new_unchecked(1024) }; // Per shard
 
 struct ShardedCache {
@@ -131,7 +131,7 @@ fn calc_is_all_and_fp(rsb: &RangeSetBlaze<usize>) -> (bool, u64) {
     }
 }
 
-fn intern(rsb: RangeSetBlaze<usize>) -> SimpleBitset {
+fn intern(rsb: RangeSetBlaze<usize>) -> RangeSet {
     if rsb.is_empty() {
         return ZEROS.clone();
     }
@@ -144,13 +144,13 @@ fn intern(rsb: RangeSetBlaze<usize>) -> SimpleBitset {
     let candidates = interner.0.entry(fp).or_default();
     for candidate in candidates.iter() {
         if candidate.rsb == rsb {
-            return SimpleBitset(candidate.clone());
+            return RangeSet(candidate.clone());
         }
     }
 
-    let new_inner = Arc::new(SimpleBitsetInner { rsb, fp, is_all });
+    let new_inner = Arc::new(RangeSetInner { rsb, fp, is_all });
     candidates.push(new_inner.clone());
-    SimpleBitset(new_inner)
+    RangeSet(new_inner)
 }
 
 #[inline]
@@ -159,7 +159,7 @@ fn universe_rsb() -> RangeSetBlaze<usize> { RangeSetBlaze::from_iter([0usize..=u
 #[inline]
 fn complement_rsb(rsb: &RangeSetBlaze<usize>) -> RangeSetBlaze<usize> { &universe_rsb() - rsb }
 
-impl SimpleBitset {
+impl RangeSet {
     pub fn zeros() -> Self { ZEROS.clone() }
 
     pub fn ones(len: usize) -> Self {
@@ -178,7 +178,7 @@ impl SimpleBitset {
     pub fn from_rsb(rsb: RangeSetBlaze<usize>) -> Self { intern(rsb) }
 }
 
-impl SimpleBitsetInner {
+impl RangeSetInner {
     pub fn len(&self) -> usize { self.rsb.len().try_into().unwrap_or(usize::MAX) }
 
     pub fn is_empty(&self) -> bool { self.rsb.is_empty() }
@@ -186,7 +186,7 @@ impl SimpleBitsetInner {
     #[inline]
     pub fn is_all_fast(&self) -> bool { self.is_all }
 
-    pub fn is_disjoint(&self, other: &SimpleBitset) -> bool {
+    pub fn is_disjoint(&self, other: &RangeSet) -> bool {
         if self.is_empty() || other.is_empty() {
             return true;
         }
@@ -208,15 +208,15 @@ impl SimpleBitsetInner {
 
 }
 
-impl SimpleBitset {
-    pub fn is_subset_of(&self, rhs: &SimpleBitset) -> bool { (self & rhs) == *self }
+impl RangeSet {
+    pub fn is_subset_of(&self, rhs: &RangeSet) -> bool { (self & rhs) == *self }
 
-    pub fn complement(&self) -> SimpleBitset {
+    pub fn complement(&self) -> RangeSet {
         if self.is_empty() {
-            return SimpleBitset::all();
+            return RangeSet::all();
         }
         if self.is_all_fast() {
-            return SimpleBitset::zeros();
+            return RangeSet::zeros();
         }
         let rsb = complement_rsb(&self.rsb);
         intern(rsb)
@@ -282,21 +282,21 @@ impl SimpleBitset {
     pub fn clip_max(&mut self, max: usize) { self.clip_to_range(0, max); }
 }
 
-impl Hash for SimpleBitset {
+impl Hash for RangeSet {
     fn hash<H: Hasher>(&self, state: &mut H) { state.write_u64(self.fp); }
 }
 
-impl Debug for SimpleBitset {
+impl Debug for RangeSet {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         if self.is_all_fast() {
-            write!(f, "SimpleBitset(ALL)")
+            write!(f, "RangeSet(ALL)")
         } else {
             Debug::fmt(&self.0.rsb, f)
         }
     }
 }
 
-impl Display for SimpleBitset {
+impl Display for RangeSet {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         if self.is_all_fast() {
             return write!(f, "ALL");
@@ -317,38 +317,38 @@ impl Display for SimpleBitset {
     }
 }
 
-impl FromIterator<usize> for SimpleBitset {
+impl FromIterator<usize> for RangeSet {
     fn from_iter<T: IntoIterator<Item = usize>>(iter: T) -> Self {
         intern(RangeSetBlaze::from_iter(iter))
     }
 }
 
-impl FromIterator<std::ops::RangeInclusive<usize>> for SimpleBitset {
+impl FromIterator<std::ops::RangeInclusive<usize>> for RangeSet {
     fn from_iter<T: IntoIterator<Item = std::ops::RangeInclusive<usize>>>(iter: T) -> Self {
         intern(RangeSetBlaze::from_iter(iter))
     }
 }
 
-impl From<RangeSetBlaze<usize>> for SimpleBitset {
+impl From<RangeSetBlaze<usize>> for RangeSet {
     fn from(rsb: RangeSetBlaze<usize>) -> Self { intern(rsb) }
 }
 
-impl From<HybridBitset> for SimpleBitset {
+impl From<HybridBitset> for RangeSet {
     fn from(hb: HybridBitset) -> Self { intern(hb.inner.as_ref().clone()) }
 }
 
-impl From<SimpleBitset> for HybridBitset {
-    fn from(sb: SimpleBitset) -> Self { HybridBitset::from(sb.rsb.clone()) }
+impl From<RangeSet> for HybridBitset {
+    fn from(sb: RangeSet) -> Self { HybridBitset::from(sb.rsb.clone()) }
 }
 
-impl<'a> BitAnd<&'a SimpleBitset> for &'a SimpleBitset {
-    type Output = SimpleBitset;
-    fn bitand(self, rhs: &'a SimpleBitset) -> Self::Output {
+impl<'a> BitAnd<&'a RangeSet> for &'a RangeSet {
+    type Output = RangeSet;
+    fn bitand(self, rhs: &'a RangeSet) -> Self::Output {
         if Arc::ptr_eq(&self.0, &rhs.0) {
             return self.clone();
         }
         if self.is_empty() || rhs.is_empty() {
-            return SimpleBitset::zeros();
+            return RangeSet::zeros();
         }
         if self.is_all_fast() {
             return rhs.clone();
@@ -372,14 +372,14 @@ impl<'a> BitAnd<&'a SimpleBitset> for &'a SimpleBitset {
     }
 }
 
-impl<'a> BitOr<&'a SimpleBitset> for &'a SimpleBitset {
-    type Output = SimpleBitset;
-    fn bitor(self, rhs: &'a SimpleBitset) -> Self::Output {
+impl<'a> BitOr<&'a RangeSet> for &'a RangeSet {
+    type Output = RangeSet;
+    fn bitor(self, rhs: &'a RangeSet) -> Self::Output {
         if Arc::ptr_eq(&self.0, &rhs.0) {
             return self.clone();
         }
         if self.is_all_fast() || rhs.is_all_fast() {
-            return SimpleBitset::all();
+            return RangeSet::all();
         }
         if self.is_empty() {
             return rhs.clone();
@@ -403,74 +403,74 @@ impl<'a> BitOr<&'a SimpleBitset> for &'a SimpleBitset {
     }
 }
 
-impl BitAndAssign<&SimpleBitset> for SimpleBitset {
-    fn bitand_assign(&mut self, rhs: &SimpleBitset) {
+impl BitAndAssign<&RangeSet> for RangeSet {
+    fn bitand_assign(&mut self, rhs: &RangeSet) {
         *self = &*self & rhs;
     }
 }
 
-impl BitOrAssign<&SimpleBitset> for SimpleBitset {
-    fn bitor_assign(&mut self, rhs: &SimpleBitset) {
+impl BitOrAssign<&RangeSet> for RangeSet {
+    fn bitor_assign(&mut self, rhs: &RangeSet) {
         *self = &*self | rhs;
     }
 }
 
-impl BitAnd<SimpleBitset> for SimpleBitset {
-    type Output = SimpleBitset;
-    fn bitand(self, rhs: SimpleBitset) -> Self::Output { (&self) & (&rhs) }
+impl BitAnd<RangeSet> for RangeSet {
+    type Output = RangeSet;
+    fn bitand(self, rhs: RangeSet) -> Self::Output { (&self) & (&rhs) }
 }
 
-impl BitOr<SimpleBitset> for SimpleBitset {
-    type Output = SimpleBitset;
-    fn bitor(self, rhs: SimpleBitset) -> Self::Output { (&self) | (&rhs) }
+impl BitOr<RangeSet> for RangeSet {
+    type Output = RangeSet;
+    fn bitor(self, rhs: RangeSet) -> Self::Output { (&self) | (&rhs) }
 }
 
-impl<'a> BitAnd<&'a SimpleBitset> for SimpleBitset {
-    type Output = SimpleBitset;
-    fn bitand(self, rhs: &'a SimpleBitset) -> Self::Output { (&self) & rhs }
+impl<'a> BitAnd<&'a RangeSet> for RangeSet {
+    type Output = RangeSet;
+    fn bitand(self, rhs: &'a RangeSet) -> Self::Output { (&self) & rhs }
 }
 
-impl<'a> BitOr<&'a SimpleBitset> for SimpleBitset {
-    type Output = SimpleBitset;
-    fn bitor(self, rhs: &'a SimpleBitset) -> Self::Output { (&self) | rhs }
+impl<'a> BitOr<&'a RangeSet> for RangeSet {
+    type Output = RangeSet;
+    fn bitor(self, rhs: &'a RangeSet) -> Self::Output { (&self) | rhs }
 }
 
-impl<'a> BitAnd<SimpleBitset> for &'a SimpleBitset {
-    type Output = SimpleBitset;
-    fn bitand(self, rhs: SimpleBitset) -> Self::Output { self & (&rhs) }
+impl<'a> BitAnd<RangeSet> for &'a RangeSet {
+    type Output = RangeSet;
+    fn bitand(self, rhs: RangeSet) -> Self::Output { self & (&rhs) }
 }
 
-impl<'a> BitOr<SimpleBitset> for &'a SimpleBitset {
-    type Output = SimpleBitset;
-    fn bitor(self, rhs: SimpleBitset) -> Self::Output { self | (&rhs) }
+impl<'a> BitOr<RangeSet> for &'a RangeSet {
+    type Output = RangeSet;
+    fn bitor(self, rhs: RangeSet) -> Self::Output { self | (&rhs) }
 }
 
-impl SubAssign<&SimpleBitset> for SimpleBitset {
-    fn sub_assign(&mut self, rhs: &SimpleBitset) {
+impl SubAssign<&RangeSet> for RangeSet {
+    fn sub_assign(&mut self, rhs: &RangeSet) {
         *self = &*self - rhs;
     }
 }
 
-impl SubAssign<SimpleBitset> for SimpleBitset {
-    fn sub_assign(&mut self, rhs: SimpleBitset) { *self -= &rhs }
+impl SubAssign<RangeSet> for RangeSet {
+    fn sub_assign(&mut self, rhs: RangeSet) { *self -= &rhs }
 }
 
-impl Sub<SimpleBitset> for SimpleBitset {
-    type Output = SimpleBitset;
-    fn sub(self, rhs: SimpleBitset) -> Self::Output { (&self) - (&rhs) }
+impl Sub<RangeSet> for RangeSet {
+    type Output = RangeSet;
+    fn sub(self, rhs: RangeSet) -> Self::Output { (&self) - (&rhs) }
 }
 
-impl<'a> Sub<&'a SimpleBitset> for &'a SimpleBitset {
-    type Output = SimpleBitset;
-    fn sub(self, rhs: &'a SimpleBitset) -> Self::Output {
+impl<'a> Sub<&'a RangeSet> for &'a RangeSet {
+    type Output = RangeSet;
+    fn sub(self, rhs: &'a RangeSet) -> Self::Output {
         if Arc::ptr_eq(&self.0, &rhs.0) {
-            return SimpleBitset::zeros();
+            return RangeSet::zeros();
         }
         if self.is_empty() || rhs.is_empty() {
             return self.clone();
         }
         if rhs.is_all_fast() {
-            return SimpleBitset::zeros();
+            return RangeSet::zeros();
         }
 
         let p1 = Arc::as_ptr(&self.0) as usize;
@@ -492,33 +492,33 @@ impl<'a> Sub<&'a SimpleBitset> for &'a SimpleBitset {
     }
 }
 
-impl Not for SimpleBitset {
-    type Output = SimpleBitset;
+impl Not for RangeSet {
+    type Output = RangeSet;
     fn not(self) -> Self::Output {
         if self.is_empty() {
-            return SimpleBitset::all();
+            return RangeSet::all();
         }
         if self.is_all_fast() {
-            return SimpleBitset::zeros();
+            return RangeSet::zeros();
         }
         intern(complement_rsb(&self.rsb))
     }
 }
 
-impl Not for &SimpleBitset {
-    type Output = SimpleBitset;
+impl Not for &RangeSet {
+    type Output = RangeSet;
     fn not(self) -> Self::Output {
         if self.is_empty() {
-            return SimpleBitset::all();
+            return RangeSet::all();
         }
         if self.is_all_fast() {
-            return SimpleBitset::zeros();
+            return RangeSet::zeros();
         }
         intern(complement_rsb(&self.rsb))
     }
 }
 
-impl Serialize for SimpleBitset {
+impl Serialize for RangeSet {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where S: Serializer {
         #[derive(Serialize)]
@@ -554,7 +554,7 @@ impl Serialize for SimpleBitset {
     }
 }
 
-impl<'de> Deserialize<'de> for SimpleBitset {
+impl<'de> Deserialize<'de> for RangeSet {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where D: Deserializer<'de> {
         use serde::de;
@@ -576,7 +576,7 @@ impl<'de> Deserialize<'de> for SimpleBitset {
         match Repr::deserialize(deserializer)? {
             Repr::All(s) => {
                 if s == "ALL" {
-                    Ok(SimpleBitset::all())
+                    Ok(RangeSet::all())
                 } else {
                     Err(de::Error::custom("expected string 'ALL' for all-bitset"))
                 }

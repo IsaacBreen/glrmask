@@ -11,7 +11,7 @@ pub mod simplification;
 pub mod unroll;
 mod test_determinization;
 
-pub use self::bitset::SimpleBitset;
+pub use self::bitset::RangeSet;
 pub use self::common::{format_i16_char, format_pos_code, format_word, NWAStateID, StateID, Weight};
 pub use self::dwa::{DWABody, DWABuildError, DWAState, DWAStates, DWA};
 pub use self::nwa::{NWABody, NWABuildError, NWAState, NWAStates, NWA};

@@ -1,4 +1,4 @@
-use crate::precompute4::weighted_automata::{DWAState, SimpleBitset, DWA, DWABuildError, NWA, NWABuildError, Weight, format_word, DWAStates, StateID};
+use crate::precompute4::weighted_automata::{DWAState, RangeSet, DWA, DWABuildError, NWA, NWABuildError, Weight, format_word, DWAStates, StateID};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::time::{SystemTime, UNIX_EPOCH};
 use crate::precompute4::resolve_negatives::resolve_negative_codes_in_dwa;
@@ -281,10 +281,10 @@ pub fn stochastic_equivalence_test(mut a: DWA, mut b: DWA) {
 
 #[test]
 fn test_simple_bitset_ops() {
-    let set1 = SimpleBitset::from_iter(vec![1, 2, 5]);
-    let set2 = SimpleBitset::from_iter(vec![2, 3, 5, 6]);
-    let all = SimpleBitset::all();
-    let zeros = SimpleBitset::zeros();
+    let set1 = RangeSet::from_iter(vec![1, 2, 5]);
+    let set2 = RangeSet::from_iter(vec![2, 3, 5, 6]);
+    let all = RangeSet::all();
+    let zeros = RangeSet::zeros();
 
     assert_eq!((&set1 & &set2).iter_up_to(10).collect::<Vec<_>>(), vec![2, 5]);
     assert_eq!((&set1 | &set2).iter_up_to(10).collect::<Vec<_>>(), vec![1, 2, 3, 5, 6]);
@@ -304,19 +304,19 @@ fn test_dwa_builder() {
     assert_eq!(s1, 1);
     assert_eq!(dwa.states.len(), 2);
 
-    dwa.set_final_weight(1, SimpleBitset::from_item(20)).unwrap();
+    dwa.set_final_weight(1, RangeSet::from_item(20)).unwrap();
 
-    assert_eq!(dwa.states[1].final_weight, Some(SimpleBitset::from_item(20)));
+    assert_eq!(dwa.states[1].final_weight, Some(RangeSet::from_item(20)));
 
-    dwa.add_transition(0, b'a' as Label, 1, SimpleBitset::from_item(30)).unwrap();
+    dwa.add_transition(0, b'a' as Label, 1, RangeSet::from_item(30)).unwrap();
     assert_eq!(*dwa.states[0].transitions.get(&(b'a' as Label)).unwrap(), 1);
-    assert_eq!(*dwa.states[0].trans_weights.get(&(b'a' as Label)).unwrap(), SimpleBitset::from_item(30));
+    assert_eq!(*dwa.states[0].trans_weights.get(&(b'a' as Label)).unwrap(), RangeSet::from_item(30));
 
     // Test error cases
-    let res = dwa.add_transition(0, b'a' as Label, 1, SimpleBitset::zeros());
+    let res = dwa.add_transition(0, b'a' as Label, 1, RangeSet::zeros());
     assert!(matches!(res, Err(DWABuildError::TransitionAlreadyExists { from: 0, on: 97 })));
 
-    let res = dwa.set_final_weight(10, SimpleBitset::zeros());
+    let res = dwa.set_final_weight(10, RangeSet::zeros());
     assert!(matches!(res, Err(DWABuildError::StateOutOfBounds { state: 10 })));
 }
 

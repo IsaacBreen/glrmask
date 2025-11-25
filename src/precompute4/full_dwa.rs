@@ -10,11 +10,11 @@ use kdam::{tqdm, BarExt};
 
 use crate::constraint::LLMTokenBV;
 use crate::glr::parser::{ExpectElse, GLRParser};
-use crate::precompute4::nwa_optimizations::{prune_continuations_from_final_states, simplify_default_transitions};
+use crate::precompute4::nwa_optimizations::prune_continuations_from_final_states;
 use crate::precompute4::resolve_negatives::{apply_cancellations, apply_finality_fixpoint, remove_negative_transitions};
 use crate::precompute4::template_nwa::{build_ignore_terminal_dwa, build_template_dwas};
 use crate::precompute4::weighted_automata::{
-    common::Label, determinization_rustfst::determinize_nwa_to_dwa, DWA, NWA, NWABody, NWAStateID, NWAStates, SimpleBitset,
+    common::Label, determinization_rustfst::determinize_nwa_to_dwa, DWA, NWA, NWABody, NWAStateID, NWAStates,
     StateID, Weight,
 };
 use crate::tokenizer::TokenizerStateID;

@@ -3,7 +3,7 @@
 #![allow(dead_code)]
 #![allow(clippy::needless_borrow)]
 
-use super::bitset::SimpleBitset;
+use super::bitset::RangeSet;
 use super::common::{Label, StateID, Weight};
 use super::dwa::{DWABody, DWAState, DWAStates, DWA, DWABuildError};
 use super::nwa::{NWABody, NWAState, NWAStates, NWA};
@@ -13,7 +13,7 @@ use range_set_blaze::RangeSetBlaze;
 use std::collections::{BTreeMap, HashMap};
 use std::iter::FromIterator;
 
-impl JSONConvertible for SimpleBitset {
+impl JSONConvertible for RangeSet {
     fn to_json(&self) -> JSONNode {
         let ranges_vec: Vec<Vec<usize>> = self
             .rsb
@@ -34,7 +34,7 @@ impl JSONConvertible for SimpleBitset {
             let start = v.pop().unwrap();
             ranges.push(start..=end);
         }
-        Ok(SimpleBitset::from_rsb(RangeSetBlaze::from_iter(ranges)))
+        Ok(RangeSet::from_rsb(RangeSetBlaze::from_iter(ranges)))
     }
 }
 
