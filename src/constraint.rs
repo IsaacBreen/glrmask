@@ -311,7 +311,21 @@ impl JSONConvertible for GrammarConstraint {
 
         // Matches
         obj.insert("matches_pool".to_string(), bitset_pool.to_json());
-        obj.insert("possible_matches".to_string(), pooled_matches.to_json());
+        let possible_matches_node = JSONNode::Object(
+            pooled_matches
+                .into_iter()
+                .map(|(k, v_map)| {
+                    let inner_node = JSONNode::Object(
+                        v_map
+                            .into_iter()
+                            .map(|(inner_k, inner_v)| (inner_k, inner_v.to_json()))
+                            .collect(),
+                    );
+                    (k, inner_node)
+                })
+                .collect(),
+        );
+        obj.insert("possible_matches".to_string(), possible_matches_node);
 
         // Skeleton vocab info
         obj.insert("max_orig_id".to_string(), self.original_llm_vocab.max_original_llm_token_id.to_json());
@@ -346,7 +360,7 @@ impl JSONConvertible for GrammarConstraint {
             let mut inner_map = BTreeMap::new();
             for (tid_str, idx_node) in inner_obj {
                 let tid: usize = tid_str.parse().map_err(|_| "Invalid terminal ID key")?;
-                let idx = usize::from_json(idx_node).map_err(|_| "Invalid pool index")?;
+                let idx = usize::from_json(idx_node)?;
                 let bv = matches_pool.get(idx).ok_or("Pool index out of bounds")?.clone();
                 inner_map.insert(TerminalID(tid), bv);
             }
