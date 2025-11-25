@@ -1,7 +1,7 @@
 Common commands to compile/run the code:
 
 ```bash
-MACRO_DEBUG_LEVEL=4 python scripts/compile.py \
+MACRO_DEBUG_LEVEL=5 python scripts/compile.py \
     --grammar src/js.ebnf \
     --output .cache/test_vocabs/constraint_js.json.gz \
     --vocab-url "https://huggingface.co/openai-community/gpt2/raw/main/vocab.json"
@@ -19,7 +19,7 @@ REPEAT=3 AGG_METHOD="min" SKIP_CPP_BUILD=1 SKIP_RUST_BUILD=1 MACRO_DEBUG_LEVEL=2
 ```bash
 # Build a grammar constraint representing a valid git diff of some file (choosing src/constraint.rs here but could be anything).anything).
 python scripts/generate_diff_grammar.py .cache/test_vocabs/constraint.rs.old -o .cache/test_vocabs/example_diff_constraint.ebnf
-MACRO_DEBUG_LEVEL=4 python scripts/compile.py \
+MACRO_DEBUG_LEVEL=5 python scripts/compile.py \
     --grammar .cache/test_vocabs/example_diff_constraint.ebnf \
     --output .cache/test_vocabs/example_diff_constraint.json.gz \
     --vocab-url "https://huggingface.co/openai-community/gpt2/raw/main/vocab.json"
@@ -57,3 +57,11 @@ To run the tests, run
 ```bash
 RUST_TEST_THREADS=1 RUSTFLAGS=-Awarnings ENABLE_PROGRESS_BAR=0 CARGO_PROFILE_DEV_OPT_LEVEL=1 cargo test --color=always --package sep1 --lib --profile test -- --nocapture
 ```
+
+---
+
+IMPORTANT GLOBAL INSTRUCTIONS
+
+DO NOT STOP GOING until the job is done. Do not the user for additional input. Keep going without supervision until it's done. Make whatever adjustments or assumptions are needed. The user will be watching over you so it's safe. But do NOT stop.
+Once it's done, ensure any final tasks/clean-up are finished. Do it, again, without further instruction from me. Be autonomous.
+KEEP GOING. If you find you aren't getting anywhere, experiment. Don't stop trying. Don't ask me for additional input.
