@@ -6,7 +6,6 @@ use std::collections::BTreeMap as StdMap;
 use bimap::BiBTreeMap;
 use crate::datastructures::{
     hybrid_bitset::HybridBitset,
-    hybrid_l2_bitset::HybridL2Bitset,
 };
 use crate::datastructures::bitset::Bitset;
 use crate::tokenizer::LLMTokenID;
@@ -19,8 +18,6 @@ use crate::json_serialization::{JSONConvertible, JSONNode};
 pub type LLMTokenBV = HybridBitset;
 pub type TerminalBV = HybridBitset;
 pub type StateIDBV = HybridBitset;
-/// A 2D bitset where L1 is tokenizer state and L2 is terminal ID.
-pub type TerminalInfo = HybridL2Bitset;
 
 // ---------------------------------------------------------------------------
 // Vocab structures
