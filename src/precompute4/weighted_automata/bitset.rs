@@ -198,9 +198,9 @@ impl SimpleBitsetInner {
 
     pub fn contains(&self, index: usize) -> bool { self.rsb.contains(index) }
 
-    pub fn min_item(&self) -> Option<usize> { self.rsb.iter().next() }
+    pub fn min_item(&self) -> Option<usize> { self.rsb.ranges().next().map(|r| *r.start()) }
 
-    pub fn max_item(&self) -> Option<usize> { self.rsb.iter().last() }
+    pub fn max_item(&self) -> Option<usize> { self.rsb.ranges().last().map(|r| *r.end()) }
 
     pub fn iter_up_to(&self, max: usize) -> impl Iterator<Item = usize> {
         (&self.rsb & &RangeSetBlaze::from_iter([0..=max])).into_iter()
