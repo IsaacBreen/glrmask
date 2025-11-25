@@ -46,6 +46,7 @@ struct GrammarOptimizer<'a> {
     resolved_nts: HashMap<NonTerminal, Expr>,
     interner: ExprInterner,
     stats: OptimizationStats,
+    production_indices: HashMap<NonTerminal, Vec<usize>>,
 }
 
 impl<'a> GrammarOptimizer<'a> {
@@ -55,6 +56,7 @@ impl<'a> GrammarOptimizer<'a> {
             resolved_nts: HashMap::new(),
             interner: ExprInterner::new(),
             stats: OptimizationStats::default(),
+            production_indices: HashMap::new(),
         }
     }
 
@@ -67,6 +69,11 @@ impl<'a> GrammarOptimizer<'a> {
     fn optimize(&mut self) {
         self.stats.initial_productions = self.grammar.productions.len();
         self.stats.initial_terminals = self.count_terminals();
+
+        // Index productions by LHS for O(1) lookup during SCC processing
+        for (idx, prod) in self.grammar.productions.iter().enumerate() {
+            self.production_indices.entry(prod.lhs.clone()).or_default().push(idx);
+        }
 
         // 1. Build dependency graph
         let (graph, nt_list) = self.build_dependency_graph();
@@ -120,13 +127,15 @@ impl<'a> GrammarOptimizer<'a> {
                 for symbol in &prod.rhs {
                     if let Symbol::NonTerminal(ref target) = symbol {
                         if let Some(&v) = nt_to_idx.get(target) {
-                            if !graph[u].contains(&v) {
-                                graph[u].push(v);
-                            }
+                            graph[u].push(v);
                         }
                     }
                 }
             }
+        }
+        for edges in &mut graph {
+            edges.sort_unstable();
+            edges.dedup();
         }
         
         (graph, nt_list)
@@ -185,10 +194,15 @@ impl<'a> GrammarOptimizer<'a> {
         // we should still optimize them to regex.
         if scc_nts.len() == 1 {
             let nt = &scc_nts[0];
-            let productions: Vec<Production> = self.grammar.productions.iter().filter(|p| &p.lhs == nt).cloned().collect();
+            
+            // Use the index to avoid scanning all productions
+            let empty_vec = Vec::new();
+            let prod_indices = self.production_indices.get(nt).unwrap_or(&empty_vec);
+            // Note: we just iterate indices and access grammar.productions
             
             // Check if any production has self-recursion
-            let has_self_recursion = productions.iter().any(|prod| {
+            let has_self_recursion = prod_indices.iter().any(|&idx| {
+                let prod = &self.grammar.productions[idx];
                 prod.rhs.iter().any(|sym| {
                     matches!(sym, Symbol::NonTerminal(ref other) if other == nt)
                 })
@@ -196,7 +210,8 @@ impl<'a> GrammarOptimizer<'a> {
             
             if !has_self_recursion {
                 // Check if all references are to unresolved non-terminals
-                let only_unresolved_nt_refs = productions.iter().all(|prod| {
+                let only_unresolved_nt_refs = prod_indices.iter().all(|&idx| {
+                    let prod = &self.grammar.productions[idx];
                     prod.rhs.iter().all(|sym| {
                         match sym {
                             Symbol::Terminal(_) => false, // Has terminals, should optimize
@@ -226,11 +241,12 @@ impl<'a> GrammarOptimizer<'a> {
         let mut finals: Vec<Expr> = vec![self.interner.choice(vec![]); scc_nts.len()];
         let nt_to_local_idx: HashMap<&NonTerminal, usize> = scc_nts.iter().enumerate().map(|(i, nt)| (nt, i)).collect();
 
+        let empty_vec = Vec::new();
         for (i, nt) in scc_nts.iter().enumerate() {
-            let productions: Vec<Production> = self.grammar.productions.iter().filter(|p| &p.lhs == nt).cloned().collect();
-            if productions.is_empty() { continue; }
+            let prod_indices = self.production_indices.get(nt).unwrap_or(&empty_vec);
 
-            for prod in productions {
+            for &prod_idx in prod_indices {
+                let prod = &self.grammar.productions[prod_idx];
                 let mut prefix_exprs = Vec::new();
                 let mut target_scc_idx = None;
                 
@@ -279,11 +295,12 @@ impl<'a> GrammarOptimizer<'a> {
         let mut finals: Vec<Expr> = vec![self.interner.choice(vec![]); scc_nts.len()];
         let nt_to_local_idx: HashMap<&NonTerminal, usize> = scc_nts.iter().enumerate().map(|(i, nt)| (nt, i)).collect();
 
+        let empty_vec = Vec::new();
         for (i, nt) in scc_nts.iter().enumerate() {
-            let productions: Vec<Production> = self.grammar.productions.iter().filter(|p| &p.lhs == nt).cloned().collect();
-            if productions.is_empty() { continue; }
+            let prod_indices = self.production_indices.get(nt).unwrap_or(&empty_vec);
 
-            for prod in productions {
+            for &prod_idx in prod_indices {
+                let prod = &self.grammar.productions[prod_idx];
                 let mut suffix_exprs = Vec::new();
                 let mut target_scc_idx = None;
                 
