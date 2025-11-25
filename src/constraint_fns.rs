@@ -248,11 +248,6 @@ impl<'a> GrammarConstraintState<'a> {
         }
         self.state.retain(|_, glr_parser_state| glr_parser_state.is_ok());
 
-        if self.parent.post_commit_allow_check_mode != TerminalAllowanceCheckMode::None {
-            // The simplified parser does not currently support these checks.
-            // To match Python, this logic is disabled.
-        }
-
         crate::debug!(4, "Active tokenizer states after committing text (bytes {:?}): {:?}", llm_token_bytes, self.state.keys().map(|k| k.0).collect::<Vec<_>>());
     }
 }
