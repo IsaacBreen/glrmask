@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use kdam::prelude::*;
+use kdam::TqdmParallelIterator;
 use kdam::{tqdm, BarExt};
 
 use crate::glr::parser::GLRParser;
