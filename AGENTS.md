@@ -72,7 +72,7 @@ RUST_TEST_THREADS=1 RUSTFLAGS=-Awarnings ENABLE_PROGRESS_BAR=0 CARGO_PROFILE_DEV
 
 Feel free to commit changes locally, but do not push.
 
-When making significant changes to the codebase or research notes, it's encouraged to commit logical chunks of work. Avoid using `git add .` as there may be other unstaged changes unrelated to your work.
+When making significant changes to the codebase or research notes, it's encouraged to commit logical chunks of work. Avoid using `git add .` as there may be other unstaged changes unrelated to your work. Avoid comitting large 'dump' files, e.g. generated results, unless important, e.g. generated data that is used directly in the paper.
 
 `gcg-paper/` is a separate git repository (not a submodule), and is gitignored by the main repository. When committing changes to paper/research files, you must commit within the `gcg-paper/` directory separately.
 
