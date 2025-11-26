@@ -158,7 +158,7 @@ def _format_ranges_as_tokens(ranges: Tuple[Tuple[int, int], ...], id_to_token: D
                 current_group = next_group
 
     # Truncation logic - limit to ~400 characters for readable output
-    MAX_LEN = 600
+    MAX_LEN = 1000
     output_str = ""
     truncated = False
     for i, part in enumerate(all_parts):
