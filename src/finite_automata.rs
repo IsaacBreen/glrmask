@@ -35,93 +35,64 @@ struct CompactNFA {
     epsilon_targets: Vec<u32>,
 }
 
-// Manual impl for NFAState
-impl JSONConvertible for NFAState {
-    fn to_json(&self) -> JSONNode {
-        let mut obj = StdMap::new();
+/// Intermediate JSON representation for NFAState transitions.
+/// Maps byte -> list of target states for non-deterministic transitions.
+#[derive(Debug, Clone, JSONConvertible)]
+struct NFAStateJSON {
+    /// byte (as string key) -> targets
+    transitions: BTreeMap<String, Vec<usize>>,
+    epsilon_transitions: Vec<usize>,
+    finalizers: DenseStateSet,
+    non_greedy_finalizers: DenseStateSet,
+}
 
-        // Serialize transitions as a map from u8 to Vec<usize>,
-        // matching the previous TrieMap<Vec<usize>> representation.
-        let mut transitions_map: StdMap<String, JSONNode> = StdMap::new();
+impl NFAState {
+    fn to_json_struct(&self) -> NFAStateJSON {
         let mut grouped: BTreeMap<u8, Vec<usize>> = BTreeMap::new();
         for (set, target) in &self.transitions {
             for byte in set.iter() {
                 grouped.entry(byte).or_default().push(*target);
             }
         }
-        for (byte, targets) in grouped {
-            transitions_map.insert(byte.to_string(), targets.to_json());
+        let transitions: BTreeMap<String, Vec<usize>> = grouped
+            .into_iter()
+            .map(|(byte, targets)| (byte.to_string(), targets))
+            .collect();
+        
+        NFAStateJSON {
+            transitions,
+            epsilon_transitions: self.epsilon_transitions.clone(),
+            finalizers: self.finalizers.clone(),
+            non_greedy_finalizers: self.non_greedy_finalizers.clone(),
         }
-        obj.insert("transitions".to_string(), JSONNode::Object(transitions_map));
-
-        obj.insert(
-            "epsilon_transitions".to_string(),
-            self.epsilon_transitions.to_json(),
-        );
-        obj.insert("finalizers".to_string(), self.finalizers.to_json());
-        obj.insert(
-            "non_greedy_finalizers".to_string(),
-            self.non_greedy_finalizers.to_json(),
-        );
-        JSONNode::Object(obj)
     }
-
-    fn from_json(node: JSONNode) -> Result<Self, String> {
-        match node {
-            JSONNode::Object(mut obj) => {
-                // Deserialize transitions from the old JSON format:
-                // { "<u8>": [usize, usize, ...], ... }
-                let transitions_node = obj
-                    .remove("transitions")
-                    .ok_or_else(|| "Missing field transitions for NFAState".to_string())?;
-
-                let mut transitions: Vec<(U8Set, usize)> = Vec::new();
-                match transitions_node {
-                    JSONNode::Object(map) => {
-                        for (key_str, val_node) in map {
-                            let byte = key_str.parse::<u8>().map_err(|e| {
-                                format!(
-                                    "Invalid u8 key in NFAState transitions: {}, err: {}",
-                                    key_str, e
-                                )
-                            })?;
-                            let targets = Vec::<usize>::from_json(val_node)?;
-                            for target in targets {
-                                transitions.push((U8Set::from_u8(byte), target));
-                            }
-                        }
-                    }
-                    other => {
-                        return Err(format!(
-                            "NFAState 'transitions' field must be a JSON object, got {:?}",
-                            other
-                        ))
-                    }
-                }
-
-                let epsilon_transitions = obj
-                    .remove("epsilon_transitions")
-                    .ok_or_else(|| "Missing field epsilon_transitions for NFAState".to_string())
-                    .and_then(Vec::<usize>::from_json)?;
-                let finalizers = obj
-                    .remove("finalizers")
-                    .ok_or_else(|| "Missing field finalizers for NFAState".to_string())
-                    .and_then(DenseStateSet::from_json)?;
-                let non_greedy_finalizers = obj
-                    .remove("non_greedy_finalizers")
-                    .ok_or_else(|| {
-                        "Missing field non_greedy_finalizers for NFAState".to_string()
-                    })
-                    .and_then(DenseStateSet::from_json)?;
-                Ok(NFAState {
-                    transitions,
-                    epsilon_transitions,
-                    finalizers,
-                    non_greedy_finalizers,
-                })
+    
+    fn from_json_struct(s: NFAStateJSON) -> Result<Self, String> {
+        let mut transitions: Vec<(U8Set, usize)> = Vec::new();
+        for (byte_str, targets) in s.transitions {
+            let byte = byte_str.parse::<u8>().map_err(|e| {
+                format!("Invalid u8 key in NFAState transitions: {}, err: {}", byte_str, e)
+            })?;
+            for target in targets {
+                transitions.push((U8Set::from_u8(byte), target));
             }
-            _ => Err("Expected JSONNode::Object for NFAState".to_string()),
         }
+        
+        Ok(NFAState {
+            transitions,
+            epsilon_transitions: s.epsilon_transitions,
+            finalizers: s.finalizers,
+            non_greedy_finalizers: s.non_greedy_finalizers,
+        })
+    }
+}
+
+impl JSONConvertible for NFAState {
+    fn to_json(&self) -> JSONNode {
+        self.to_json_struct().to_json()
+    }
+    fn from_json(node: JSONNode) -> Result<Self, String> {
+        NFAStateJSON::from_json(node).and_then(Self::from_json_struct)
     }
 }
 
@@ -131,32 +102,25 @@ pub struct NFA {
     start_state: usize,
 }
 
-// Manual impl for NFA
+/// Simple intermediate type for NFA using derive macro.
+#[derive(Debug, Clone, JSONConvertible)]
+struct NFAJSON {
+    states: Vec<NFAState>,
+    start_state: usize,
+}
+
 impl JSONConvertible for NFA {
     fn to_json(&self) -> JSONNode {
-        let mut obj = StdMap::new();
-        obj.insert("states".to_string(), self.states.to_json());
-        obj.insert("start_state".to_string(), self.start_state.to_json());
-        JSONNode::Object(obj)
+        NFAJSON {
+            states: self.states.clone(),
+            start_state: self.start_state,
+        }.to_json()
     }
     fn from_json(node: JSONNode) -> Result<Self, String> {
-        match node {
-            JSONNode::Object(mut obj) => {
-                let states = obj
-                    .remove("states")
-                    .ok_or_else(|| "Missing field states for NFA".to_string())
-                    .and_then(Vec::<NFAState>::from_json)?;
-                let start_state = obj
-                    .remove("start_state")
-                    .ok_or_else(|| "Missing field start_state for NFA".to_string())
-                    .and_then(usize::from_json)?;
-                Ok(NFA {
-                    states,
-                    start_state,
-                })
-            }
-            _ => Err("Expected JSONNode::Object for NFA".to_string()),
-        }
+        NFAJSON::from_json(node).map(|j| NFA {
+            states: j.states,
+            start_state: j.start_state,
+        })
     }
 }
 
@@ -168,54 +132,41 @@ pub struct DFAState {
     pub group_id_to_u8set: BTreeMap<GroupID, U8Set>,
 }
 
-// Manual impl for DFAState
+/// DFAState derives JSONConvertible, used for the old format and as a building block.
+#[derive(Debug, Clone, JSONConvertible)]
+struct DFAStateJSON {
+    transitions: CharTransitions<usize>,
+    finalizers: DenseStateSet,
+    possible_future_group_ids: BTreeSet<GroupID>,
+    group_id_to_u8set: BTreeMap<GroupID, U8Set>,
+}
+
+impl DFAState {
+    fn to_json_struct(&self) -> DFAStateJSON {
+        DFAStateJSON {
+            transitions: self.transitions.clone(),
+            finalizers: self.finalizers.clone(),
+            possible_future_group_ids: self.possible_future_group_ids.clone(),
+            group_id_to_u8set: self.group_id_to_u8set.clone(),
+        }
+    }
+    
+    fn from_json_struct(s: DFAStateJSON) -> Self {
+        DFAState {
+            transitions: s.transitions,
+            finalizers: s.finalizers,
+            possible_future_group_ids: s.possible_future_group_ids,
+            group_id_to_u8set: s.group_id_to_u8set,
+        }
+    }
+}
+
 impl JSONConvertible for DFAState {
     fn to_json(&self) -> JSONNode {
-        let mut obj = StdMap::new();
-        obj.insert("transitions".to_string(), self.transitions.to_json());
-        obj.insert("finalizers".to_string(), self.finalizers.to_json());
-        obj.insert(
-            "possible_future_group_ids".to_string(),
-            self.possible_future_group_ids.to_json(),
-        );
-        obj.insert(
-            "group_id_to_u8set".to_string(),
-            self.group_id_to_u8set.to_json(),
-        );
-        JSONNode::Object(obj)
+        self.to_json_struct().to_json()
     }
     fn from_json(node: JSONNode) -> Result<Self, String> {
-        match node {
-            JSONNode::Object(mut obj) => {
-                let transitions = obj
-                    .remove("transitions")
-                    .ok_or_else(|| "Missing field transitions for DFAState".to_string())
-                    .and_then(|n| CharTransitions::<usize>::from_json(n))?;
-                let finalizers = obj
-                    .remove("finalizers")
-                    .ok_or_else(|| "Missing field finalizers for DFAState".to_string())
-                    .and_then(DenseStateSet::from_json)?;
-                let possible_future_group_ids = obj
-                    .remove("possible_future_group_ids")
-                    .ok_or_else(|| {
-                        "Missing field possible_future_group_ids for DFAState".to_string()
-                    })
-                    .and_then(BTreeSet::<GroupID>::from_json)?;
-                let group_id_to_u8set = obj
-                    .remove("group_id_to_u8set")
-                    .ok_or_else(|| {
-                        "Missing field group_id_to_u8set for DFAState".to_string()
-                    })
-                    .and_then(|n| BTreeMap::<GroupID, U8Set>::from_json(n))?;
-                Ok(DFAState {
-                    transitions,
-                    finalizers,
-                    possible_future_group_ids,
-                    group_id_to_u8set,
-                })
-            }
-            _ => Err("Expected JSONNode::Object for DFAState".to_string()),
-        }
+        DFAStateJSON::from_json(node).map(Self::from_json_struct)
     }
 }
 
@@ -226,230 +177,129 @@ pub struct DFA {
     pub non_greedy_finalizers: BTreeSet<GroupID>,
 }
 
-// Manual impl for DFA
-impl JSONConvertible for DFA {
-    fn to_json(&self) -> JSONNode {
-        let mut obj = StdMap::new();
+/// Compact transition entry: (U8Set, target_state)
+/// Groups all input bytes that lead to the same target state.
+#[derive(Debug, Clone, JSONConvertible)]
+struct CompactTransitionEntry(U8Set, usize);
 
-        let num_states = self.states.len();
-        let mut transitions_list = Vec::with_capacity(num_states);
-        let mut finalizers_list = Vec::with_capacity(num_states);
-        let mut possible_futures_list = Vec::with_capacity(num_states);
-        let mut group_id_map_list = Vec::with_capacity(num_states);
+/// Compact DFA JSON representation for efficient serialization.
+/// Each state's transitions are grouped by target state for smaller output.
+#[derive(Debug, Clone, JSONConvertible)]
+struct DFAJSON {
+    start_state: usize,
+    non_greedy_finalizers: BTreeSet<GroupID>,
+    /// Each element is a list of (U8Set, target) pairs
+    state_transitions: Vec<Vec<CompactTransitionEntry>>,
+    state_finalizers: Vec<DenseStateSet>,
+    state_possible_future_group_ids: Vec<BTreeSet<GroupID>>,
+    state_group_id_to_u8set: Vec<BTreeMap<GroupID, U8Set>>,
+}
+
+/// Old format for backward compatibility
+#[derive(Debug, Clone, JSONConvertible)]
+struct DFAOldJSON {
+    states: Vec<DFAStateJSON>,
+    start_state: usize,
+    non_greedy_finalizers: BTreeSet<GroupID>,
+}
+
+impl DFA {
+    fn to_compact_json(&self) -> DFAJSON {
+        let mut state_transitions = Vec::with_capacity(self.states.len());
+        let mut state_finalizers = Vec::with_capacity(self.states.len());
+        let mut state_possible_future_group_ids = Vec::with_capacity(self.states.len());
+        let mut state_group_id_to_u8set = Vec::with_capacity(self.states.len());
 
         for state in &self.states {
-            // Compact transitions by grouping all input bytes that lead to the same
-            // target state into a U8Set. Each entry is:
-            //   [ <u8set JSON>, <target state index> ]
-            //
-            // This is significantly smaller than storing one entry per byte, while
-            // still being interpretable: you see ranges of characters per target.
+            // Compact transitions by grouping all input bytes that lead to the same target
             let mut target_to_set: BTreeMap<usize, U8Set> = BTreeMap::new();
             for (byte, &target) in &state.transitions {
                 target_to_set
                     .entry(target)
-                    .and_modify(|set| {
-                        set.insert(byte);
-                    })
+                    .and_modify(|set| { set.insert(byte); })
                     .or_insert_with(|| U8Set::from_u8(byte));
             }
 
-            let mut packed_transitions = Vec::with_capacity(target_to_set.len());
-            for (target, u8set) in target_to_set {
-                packed_transitions.push(JSONNode::Array(vec![
-                    u8set.to_json(),
-                    target.to_json(),
-                ]));
-            }
-            transitions_list.push(JSONNode::Array(packed_transitions));
-
-            finalizers_list.push(state.finalizers.to_json());
-            possible_futures_list.push(state.possible_future_group_ids.to_json());
-            group_id_map_list.push(state.group_id_to_u8set.to_json());
+            let packed_transitions: Vec<CompactTransitionEntry> = target_to_set
+                .into_iter()
+                .map(|(target, u8set)| CompactTransitionEntry(u8set, target))
+                .collect();
+            
+            state_transitions.push(packed_transitions);
+            state_finalizers.push(state.finalizers.clone());
+            state_possible_future_group_ids.push(state.possible_future_group_ids.clone());
+            state_group_id_to_u8set.push(state.group_id_to_u8set.clone());
         }
 
-        obj.insert("start_state".to_string(), self.start_state.to_json());
-        obj.insert(
-            "non_greedy_finalizers".to_string(),
-            self.non_greedy_finalizers.to_json(),
-        );
-        // Use more descriptive keys to avoid collision with DFAState fields
-        obj.insert("state_transitions".to_string(), JSONNode::Array(transitions_list));
-        obj.insert("state_finalizers".to_string(), JSONNode::Array(finalizers_list));
-        obj.insert("state_possible_future_group_ids".to_string(), JSONNode::Array(possible_futures_list));
-        obj.insert("state_group_id_to_u8set".to_string(), JSONNode::Array(group_id_map_list));
+        DFAJSON {
+            start_state: self.start_state,
+            non_greedy_finalizers: self.non_greedy_finalizers.clone(),
+            state_transitions,
+            state_finalizers,
+            state_possible_future_group_ids,
+            state_group_id_to_u8set,
+        }
+    }
+    
+    fn from_compact_json(j: DFAJSON) -> Result<Self, String> {
+        let num_states = j.state_transitions.len();
+        if j.state_finalizers.len() != num_states ||
+           j.state_possible_future_group_ids.len() != num_states ||
+           j.state_group_id_to_u8set.len() != num_states {
+            return Err("Mismatched lengths for DFA state arrays".to_string());
+        }
 
-        JSONNode::Object(obj)
+        let mut states = Vec::with_capacity(num_states);
+        for i in 0..num_states {
+            // Expand compact transitions back to per-byte
+            let mut entries: Vec<(u8, usize)> = Vec::new();
+            for CompactTransitionEntry(u8set, target) in &j.state_transitions[i] {
+                for b in u8set.iter() {
+                    entries.push((b, *target));
+                }
+            }
+            entries.sort_by_key(|(b, _)| *b);
+            let transitions = CharTransitions::from_sorted_entries(entries);
+
+            states.push(DFAState {
+                transitions,
+                finalizers: j.state_finalizers[i].clone(),
+                possible_future_group_ids: j.state_possible_future_group_ids[i].clone(),
+                group_id_to_u8set: j.state_group_id_to_u8set[i].clone(),
+            });
+        }
+
+        Ok(DFA {
+            states,
+            start_state: j.start_state,
+            non_greedy_finalizers: j.non_greedy_finalizers,
+        })
+    }
+    
+    fn from_old_json(j: DFAOldJSON) -> Self {
+        DFA {
+            states: j.states.into_iter().map(DFAState::from_json_struct).collect(),
+            start_state: j.start_state,
+            non_greedy_finalizers: j.non_greedy_finalizers,
+        }
+    }
+}
+
+impl JSONConvertible for DFA {
+    fn to_json(&self) -> JSONNode {
+        self.to_compact_json().to_json()
     }
 
     fn from_json(node: JSONNode) -> Result<Self, String> {
-        match node {
-            JSONNode::Object(mut obj) => {
-                // Handle old format for backward compatibility
-                if obj.contains_key("states") {
-                    let states = obj
-                        .remove("states")
-                        .ok_or_else(|| "Missing field states for DFA".to_string())
-                        .and_then(Vec::<DFAState>::from_json)?;
-                    let start_state = obj
-                        .remove("start_state")
-                        .ok_or_else(|| "Missing field start_state for DFA".to_string())
-                        .and_then(usize::from_json)?;
-                    let non_greedy_finalizers = obj
-                        .remove("non_greedy_finalizers")
-                        .ok_or_else(|| {
-                            "Missing field non_greedy_finalizers for DFA".to_string()
-                        })
-                        .and_then(BTreeSet::<GroupID>::from_json)?;
-                    return Ok(DFA {
-                        states,
-                        start_state,
-                        non_greedy_finalizers,
-                    });
-                }
-
-                // New compact format
-                let start_state = obj
-                    .remove("start_state")
-                    .ok_or_else(|| "Missing field start_state for DFA".to_string())
-                    .and_then(usize::from_json)?;
-                let non_greedy_finalizers = obj
-                    .remove("non_greedy_finalizers")
-                    .ok_or_else(|| {
-                        "Missing field non_greedy_finalizers for DFA".to_string()
-                    })
-                    .and_then(BTreeSet::<GroupID>::from_json)?;
-
-                let transitions_nodes = obj
-                    .remove("state_transitions")
-                    .ok_or_else(|| "Missing field 'state_transitions' for DFA".to_string())?
-                    .into_array()?;
-                let finalizers_nodes = obj
-                    .remove("state_finalizers")
-                    .ok_or_else(|| "Missing field 'state_finalizers' for DFA".to_string())?
-                    .into_array()?;
-                let possible_futures_nodes = obj
-                    .remove("state_possible_future_group_ids")
-                    .ok_or_else(|| "Missing field 'state_possible_future_group_ids' for DFA".to_string())?
-                    .into_array()?;
-                let group_id_map_nodes = obj
-                    .remove("state_group_id_to_u8set")
-                    .ok_or_else(|| "Missing field 'state_group_id_to_u8set' for DFA".to_string())?
-                    .into_array()?;
-
-                let num_states = transitions_nodes.len();
-                if finalizers_nodes.len() != num_states ||
-                   possible_futures_nodes.len() != num_states ||
-                   group_id_map_nodes.len() != num_states {
-                    return Err("Mismatched lengths for DFA state arrays".to_string());
-                }
-
-                let mut states = Vec::with_capacity(num_states);
-                let states_iter = transitions_nodes
-                    .into_iter()
-                    .zip(finalizers_nodes.into_iter())
-                    .zip(possible_futures_nodes.into_iter())
-                    .zip(group_id_map_nodes.into_iter())
-                    .map(|(((t, f), p), g)| (t, f, p, g));
-
-                for (i, (t_node, f_node, p_node, g_node)) in states_iter.enumerate() {
-                    // Transitions may be in one of two formats:
-                    //   1. Old per-byte format (CharTransitions JSON): [[byte, target], ...]
-                    //   2. New compact format:                        [[u8set_json, target], ...]
-                    //
-                    // We detect the new format when the first element of each inner pair
-                    // is itself an Array (i.e. U8Set's JSON representation).
-                    let transitions = match &t_node {
-                        JSONNode::Array(arr) => {
-                            if arr.is_empty() {
-                                CharTransitions::<usize>::new()
-                            } else {
-                                match &arr[0] {
-                                    // New compact format: [ [<u8set JSON>, <target>], ... ]
-                                    JSONNode::Array(inner)
-                                        if inner.len() == 2
-                                            && matches!(inner[0], JSONNode::Array(_)) =>
-                                    {
-                                        let mut entries: Vec<(u8, usize)> = Vec::new();
-                                        for (entry_idx, entry_node) in arr.iter().enumerate() {
-                                            match entry_node {
-                                                JSONNode::Array(pair) if pair.len() == 2 => {
-                                                    let u8set = U8Set::from_json(pair[0].clone())
-                                                        .map_err(|e| {
-                                                            format!(
-                                                                "DFA state[{}].transitions[{}].u8set: {}",
-                                                                i, entry_idx, e
-                                                            )
-                                                        })?;
-                                                    let target =
-                                                        usize::from_json(pair[1].clone())
-                                                            .map_err(|e| {
-                                                                format!(
-                                                                    "DFA state[{}].transitions[{}].target: {}",
-                                                                    i, entry_idx, e
-                                                                )
-                                                            })?;
-                                                    for b in u8set.iter() {
-                                                        entries.push((b, target));
-                                                    }
-                                                }
-                                                other => {
-                                                    return Err(format!(
-                                                        "DFA state[{}].transitions[{}]: expected [u8set, target] array, got {}",
-                                                        i,
-                                                        entry_idx,
-                                                        other.short_preview()
-                                                    ));
-                                                }
-                                            }
-                                        }
-                                        entries.sort_by_key(|(b, _)| *b);
-                                        CharTransitions::from_sorted_entries(entries)
-                                    }
-                                    // Otherwise treat as old per-byte format.
-                                    _ => CharTransitions::<usize>::from_json(t_node.clone())
-                                        .map_err(|e| {
-                                            format!("DFA state[{}].transitions: {}", i, e)
-                                        })?,
-                                }
-                            }
-                        }
-                        // Not an array: fall back to the old parser so we get a meaningful error.
-                        _ => CharTransitions::<usize>::from_json(t_node.clone())
-                            .map_err(|e| {
-                                format!("DFA state[{}].transitions: {}", i, e)
-                            })?,
-                    };
-
-                    let finalizers = DenseStateSet::from_json(f_node)
-                        .map_err(|e| format!("DFA state[{}].finalizers: {}", i, e))?;
-                    let possible_future_group_ids =
-                        BTreeSet::<GroupID>::from_json(p_node).map_err(|e| {
-                            format!(
-                                "DFA state[{}].possible_future_group_ids: {}",
-                                i, e
-                            )
-                        })?;
-                    let group_id_to_u8set =
-                        BTreeMap::<GroupID, U8Set>::from_json(g_node).map_err(|e| {
-                            format!("DFA state[{}].group_id_to_u8set: {}", i, e)
-                        })?;
-
-                    states.push(DFAState {
-                        transitions,
-                        finalizers,
-                        possible_future_group_ids,
-                        group_id_to_u8set,
-                    });
-                }
-
-                Ok(DFA {
-                    states,
-                    start_state,
-                    non_greedy_finalizers,
-                })
-            }
-            _ => Err("Expected JSONNode::Object for DFA".to_string()),
+        // Try compact format first, then fall back to old format
+        let mut obj = node.clone().into_object()?;
+        
+        if obj.contains_key("states") {
+            // Old format
+            DFAOldJSON::from_json(node).map(Self::from_old_json)
+        } else {
+            // New compact format
+            DFAJSON::from_json(node).and_then(Self::from_compact_json)
         }
     }
 }
@@ -509,105 +359,58 @@ pub enum Expr {
     Epsilon, // Explicit epsilon transition
 }
 
+/// Intermediate type for Expr JSON serialization (maintains backward compatibility)
+#[derive(JSONConvertible)]
+enum ExprJSON {
+    U8Seq { bytes: Vec<u8> },
+    U8Class { u8set: U8Set },
+    Shared { inner: Box<ExprJSON> },
+    Quantifier { expr: Box<ExprJSON>, q_type: QuantifierType },
+    Choice { exprs: Vec<ExprJSON> },
+    Seq { exprs: Vec<ExprJSON> },
+    Epsilon,
+}
+
+impl ExprJSON {
+    fn from_expr(expr: &Expr) -> Self {
+        match expr {
+            Expr::U8Seq(bytes) => ExprJSON::U8Seq { bytes: bytes.clone() },
+            Expr::U8Class(u8set) => ExprJSON::U8Class { u8set: u8set.clone() },
+            Expr::Shared(inner) => ExprJSON::Shared { inner: Box::new(ExprJSON::from_expr(inner)) },
+            Expr::Quantifier(expr, q_type) => ExprJSON::Quantifier {
+                expr: Box::new(ExprJSON::from_expr(expr)),
+                q_type: q_type.clone(),
+            },
+            Expr::Choice(exprs) => ExprJSON::Choice {
+                exprs: exprs.iter().map(ExprJSON::from_expr).collect(),
+            },
+            Expr::Seq(exprs) => ExprJSON::Seq {
+                exprs: exprs.iter().map(ExprJSON::from_expr).collect(),
+            },
+            Expr::Epsilon => ExprJSON::Epsilon,
+        }
+    }
+
+    fn to_expr(self) -> Expr {
+        match self {
+            ExprJSON::U8Seq { bytes } => Expr::U8Seq(bytes),
+            ExprJSON::U8Class { u8set } => Expr::U8Class(u8set),
+            ExprJSON::Shared { inner } => Expr::Shared(Arc::new(inner.to_expr())),
+            ExprJSON::Quantifier { expr, q_type } => Expr::Quantifier(Box::new(expr.to_expr()), q_type),
+            ExprJSON::Choice { exprs } => Expr::Choice(exprs.into_iter().map(|e| e.to_expr()).collect()),
+            ExprJSON::Seq { exprs } => Expr::Seq(exprs.into_iter().map(|e| e.to_expr()).collect()),
+            ExprJSON::Epsilon => Expr::Epsilon,
+        }
+    }
+}
+
 impl JSONConvertible for Expr {
     fn to_json(&self) -> JSONNode {
-        let mut obj = StdMap::new();
-        match self {
-            Expr::U8Seq(bytes) => {
-                obj.insert("variant".to_string(), JSONNode::String("U8Seq".to_string()));
-                obj.insert("bytes".to_string(), bytes.to_json());
-            }
-            Expr::U8Class(u8set) => {
-                obj.insert("variant".to_string(), JSONNode::String("U8Class".to_string()));
-                obj.insert("u8set".to_string(), u8set.to_json());
-            }
-            Expr::Shared(inner) => {
-                obj.insert("variant".to_string(), JSONNode::String("Shared".to_string()));
-                obj.insert("inner".to_string(), inner.to_json());
-            }
-            Expr::Quantifier(expr, q_type) => {
-                obj.insert(
-                    "variant".to_string(),
-                    JSONNode::String("Quantifier".to_string()),
-                );
-                obj.insert("expr".to_string(), expr.to_json());
-                obj.insert("q_type".to_string(), q_type.to_json());
-            }
-            Expr::Choice(exprs) => {
-                obj.insert("variant".to_string(), JSONNode::String("Choice".to_string()));
-                obj.insert("exprs".to_string(), exprs.to_json());
-            }
-            Expr::Seq(exprs) => {
-                obj.insert("variant".to_string(), JSONNode::String("Seq".to_string()));
-                obj.insert("exprs".to_string(), exprs.to_json());
-            }
-            Expr::Epsilon => {
-                obj.insert("variant".to_string(), JSONNode::String("Epsilon".to_string()));
-            }
-        }
-        JSONNode::Object(obj)
+        ExprJSON::from_expr(self).to_json()
     }
 
     fn from_json(node: JSONNode) -> Result<Self, String> {
-        match node {
-            JSONNode::Object(mut obj) => {
-                let variant = obj
-                    .remove("variant")
-                    .ok_or_else(|| "Missing field variant for Expr".to_string())
-                    .and_then(String::from_json)?;
-                match variant.as_str() {
-                    "U8Seq" => {
-                        let bytes = obj
-                            .remove("bytes")
-                            .ok_or_else(|| "Missing field bytes for U8Seq".to_string())
-                            .and_then(Vec::<u8>::from_json)?;
-                        Ok(Expr::U8Seq(bytes))
-                    }
-                    "U8Class" => {
-                        let u8set = obj
-                            .remove("u8set")
-                            .ok_or_else(|| "Missing field u8set for U8Class".to_string())
-                            .and_then(U8Set::from_json)?;
-                        Ok(Expr::U8Class(u8set))
-                    }
-                    "Shared" => {
-                        let inner = obj
-                            .remove("inner")
-                            .ok_or_else(|| "Missing field inner for Shared".to_string())?;
-                        let expr = Expr::from_json(inner)?;
-                        Ok(Expr::Shared(Arc::new(expr)))
-                    }
-                    "Quantifier" => {
-                        let expr_node = obj
-                            .remove("expr")
-                            .ok_or_else(|| "Missing field expr for Quantifier".to_string())?;
-                        let expr = Box::new(Expr::from_json(expr_node)?);
-                        let q_type = obj
-                            .remove("q_type")
-                            .ok_or_else(|| "Missing field q_type for Quantifier".to_string())
-                            .and_then(QuantifierType::from_json)?;
-                        Ok(Expr::Quantifier(expr, q_type))
-                    }
-                    "Choice" => {
-                        let exprs = obj
-                            .remove("exprs")
-                            .ok_or_else(|| "Missing field exprs for Choice".to_string())
-                            .and_then(Vec::<Expr>::from_json)?;
-                        Ok(Expr::Choice(exprs))
-                    }
-                    "Seq" => {
-                        let exprs = obj
-                            .remove("exprs")
-                            .ok_or_else(|| "Missing field exprs for Seq".to_string())
-                            .and_then(Vec::<Expr>::from_json)?;
-                        Ok(Expr::Seq(exprs))
-                    }
-                    "Epsilon" => Ok(Expr::Epsilon),
-                    _ => Err(format!("Unknown variant {} for Expr", variant)),
-                }
-            }
-            _ => Err("Expected JSONNode::Object for Expr".to_string()),
-        }
+        ExprJSON::from_json(node).map(|e| e.to_expr())
     }
 }
 

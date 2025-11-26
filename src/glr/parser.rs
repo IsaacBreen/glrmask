@@ -119,6 +119,58 @@ pub struct GLRParser {
     pub actions: BTreeMap<crate::glr::table::NonTerminalID, ActionFn>,
 }
 
+/// Intermediate type for GLRParser JSON serialization
+#[derive(JSONConvertible)]
+struct GLRParserJSON {
+    stage_7_table: Table,
+    productions: Vec<Production>,
+    terminal_map: BiBTreeMap<crate::glr::grammar::Terminal, TerminalID>,
+    non_terminal_map: BiBTreeMap<NonTerminal, crate::glr::table::NonTerminalID>,
+    item_set_map: BiBTreeMap<Vec<Item>, StateID>,
+    start_state_id: StateID,
+    everything_state_id: StateID,
+    ignore_terminal_id: Option<TerminalID>,
+}
+
+impl GLRParserJSON {
+    fn from_parser(p: &GLRParser) -> Self {
+        GLRParserJSON {
+            stage_7_table: p.table.clone(),
+            productions: p.productions.clone(),
+            terminal_map: p.terminal_map.clone(),
+            non_terminal_map: p.non_terminal_map.clone(),
+            item_set_map: p.item_set_map.clone(),
+            start_state_id: p.start_state_id,
+            everything_state_id: p.everything_state_id,
+            ignore_terminal_id: p.ignore_terminal_id,
+        }
+    }
+
+    fn to_parser(self) -> GLRParser {
+        GLRParser::new(
+            self.stage_7_table,
+            self.productions,
+            self.terminal_map,
+            self.non_terminal_map,
+            self.item_set_map,
+            self.start_state_id,
+            self.everything_state_id,
+            BTreeMap::new(), // actions provided at runtime
+            self.ignore_terminal_id,
+        )
+    }
+}
+
+impl JSONConvertible for GLRParser {
+    fn to_json(&self) -> JSONNode {
+        GLRParserJSON::from_parser(self).to_json()
+    }
+
+    fn from_json(node: JSONNode) -> Result<Self, String> {
+        GLRParserJSON::from_json(node).map(|p| p.to_parser())
+    }
+}
+
 impl Display for GLRParser {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(
@@ -129,82 +181,6 @@ impl Display for GLRParser {
             self.terminal_map.len(),
             self.non_terminal_map.len()
         )
-    }
-}
-
-impl JSONConvertible for GLRParser {
-    fn to_json(&self) -> JSONNode {
-        let mut obj = StdMap::new();
-        obj.insert("stage_7_table".to_string(), self.table.to_json());
-        obj.insert("productions".to_string(), self.productions.to_json());
-        obj.insert("terminal_map".to_string(), self.terminal_map.to_json());
-        obj.insert("non_terminal_map".to_string(), self.non_terminal_map.to_json());
-        obj.insert("item_set_map".to_string(), self.item_set_map.to_json());
-        obj.insert("start_state_id".to_string(), self.start_state_id.to_json());
-        obj.insert(
-            "everything_state_id".to_string(),
-            self.everything_state_id.to_json(),
-        );
-        obj.insert(
-            "ignore_terminal_id".to_string(),
-            self.ignore_terminal_id.to_json(),
-        );
-        // actions are provided at runtime.
-        JSONNode::Object(obj)
-    }
-
-    fn from_json(node: JSONNode) -> Result<Self, String> {
-        match node {
-            JSONNode::Object(mut obj) => {
-                let table = obj
-                    .remove("stage_7_table")
-                    .ok_or_else(|| "Missing field stage_7_table".to_string())
-                    .and_then(Table::from_json)?;
-                let productions = obj
-                    .remove("productions")
-                    .ok_or_else(|| "Missing field productions".to_string())
-                    .and_then(Vec::<Production>::from_json)?;
-                let _start_production_id =
-                    obj.remove("start_production_id").and_then(|n| usize::from_json(n).ok());
-                let terminal_map = obj
-                    .remove("terminal_map")
-                    .ok_or_else(|| "Missing field terminal_map".to_string())
-                    .and_then(|n| BiBTreeMap::<crate::glr::grammar::Terminal, TerminalID>::from_json(n))?;
-                let non_terminal_map = obj
-                    .remove("non_terminal_map")
-                    .ok_or_else(|| "Missing field non_terminal_map".to_string())
-                    .and_then(|n| BiBTreeMap::<NonTerminal, crate::glr::table::NonTerminalID>::from_json(n))?;
-                let item_set_map = obj
-                    .remove("item_set_map")
-                    .ok_or_else(|| "Missing field item_set_map".to_string())
-                    .and_then(|n| BiBTreeMap::<Vec<Item>, StateID>::from_json(n))?;
-                let start_state_id = obj
-                    .remove("start_state_id")
-                    .ok_or_else(|| "Missing field start_state_id".to_string())
-                    .and_then(StateID::from_json)?;
-                let everything_state_id = obj
-                    .remove("everything_state_id")
-                    .ok_or_else(|| "Missing field everything_state_id".to_string())
-                    .and_then(StateID::from_json)?;
-                let ignore_terminal_id = obj
-                    .remove("ignore_terminal_id")
-                    .ok_or_else(|| "Missing field ignore_terminal_id for GLRParser".to_string())
-                    .and_then(Option::<TerminalID>::from_json)?;
-
-                Ok(GLRParser::new(
-                    table,
-                    productions,
-                    terminal_map,
-                    non_terminal_map,
-                    item_set_map,
-                    start_state_id,
-                    everything_state_id,
-                    BTreeMap::new(),
-                    ignore_terminal_id,
-                ))
-            }
-            _ => Err("Expected JSONNode::Object for GLRParser".to_string()),
-        }
     }
 }
 

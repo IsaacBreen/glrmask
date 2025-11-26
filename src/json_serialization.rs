@@ -439,6 +439,16 @@ impl<T: JSONConvertible> JSONConvertible for Option<T> {
     }
 }
 
+// --- Implementation for Box ---
+impl<T: JSONConvertible> JSONConvertible for Box<T> {
+    fn to_json(&self) -> JSONNode {
+        (**self).to_json()
+    }
+    fn from_json(node: JSONNode) -> Result<Self, String> {
+        T::from_json(node).map(Box::new)
+    }
+}
+
 // --- Implementations for Collections ---
 
 impl<T: JSONConvertible> JSONConvertible for Vec<T> {

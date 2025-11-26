@@ -24,38 +24,52 @@ pub enum Terminal {
     Literal(Vec<u8>),
 }
 
+/// Intermediate type for Terminal JSON serialization (maintains backward compatibility)
+/// Uses "type" field with values "Regex" and "Literal" instead of standard "variant"
+#[derive(JSONConvertible)]
+enum TerminalJSON {
+    Regex { value: String },
+    Literal { value: Vec<u8> },
+}
+
+impl TerminalJSON {
+    fn from_terminal(t: &Terminal) -> Self {
+        match t {
+            Terminal::RegexName(name) => TerminalJSON::Regex { value: name.clone() },
+            Terminal::Literal(bytes) => TerminalJSON::Literal { value: bytes.clone() },
+        }
+    }
+
+    fn to_terminal(self) -> Terminal {
+        match self {
+            TerminalJSON::Regex { value } => Terminal::RegexName(value),
+            TerminalJSON::Literal { value } => Terminal::Literal(value),
+        }
+    }
+}
+
 impl JSONConvertible for Terminal {
     fn to_json(&self) -> JSONNode {
-        match self {
-            Terminal::RegexName(name) => {
-                let mut obj = StdMap::new();
-                obj.insert("type".to_string(), JSONNode::String("Regex".to_string()));
-                obj.insert("value".to_string(), JSONNode::String(name.clone()));
+        // Use "type" key instead of "variant" for backward compatibility
+        match TerminalJSON::from_terminal(self).to_json() {
+            JSONNode::Object(mut obj) => {
+                if let Some(variant) = obj.remove("variant") {
+                    obj.insert("type".to_string(), variant);
+                }
                 JSONNode::Object(obj)
             }
-            Terminal::Literal(bytes) => {
-                let mut obj = StdMap::new();
-                obj.insert("type".to_string(), JSONNode::String("Literal".to_string()));
-                obj.insert("value".to_string(), bytes.to_json());
-                JSONNode::Object(obj)
-            }
+            other => other,
         }
     }
 
     fn from_json(node: JSONNode) -> Result<Self, String> {
+        // Accept "type" key for backward compatibility
         match node {
             JSONNode::Object(mut obj) => {
-                let type_field = obj
-                    .remove("type")
-                    .ok_or_else(|| "Missing field type for Terminal".to_string())?;
-                let value_field = obj
-                    .remove("value")
-                    .ok_or_else(|| "Missing field value for Terminal".to_string())?;
-                match String::from_json(type_field)?.as_str() {
-                    "Regex" => Ok(Terminal::RegexName(String::from_json(value_field)?)),
-                    "Literal" => Vec::<u8>::from_json(value_field).map(Terminal::Literal),
-                    _ => Err("Unknown type for Terminal".to_string()),
+                if let Some(type_val) = obj.remove("type") {
+                    obj.insert("variant".to_string(), type_val);
                 }
+                TerminalJSON::from_json(JSONNode::Object(obj)).map(|t| t.to_terminal())
             }
             _ => Err("Expected JSONNode::Object for Terminal".to_string()),
         }

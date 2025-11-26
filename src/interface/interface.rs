@@ -12,6 +12,7 @@ use crate::glr::analyze::simplify_grammar;
 use crate::glr::grammar::regex_name;
 // May not be used directly here anymore
 use bimap::BiBTreeMap;
+use json_convertible_derive::JSONConvertible;
 use kdam::tqdm;
 use std::collections::BTreeMap as StdMap;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -35,110 +36,66 @@ pub enum GrammarExpr {
     AnyChar,
 }
 
+/// Intermediate type for GrammarExpr JSON serialization (maintains backward compatibility)
+#[derive(JSONConvertible)]
+enum GrammarExprJSON {
+    Ref { name: String },
+    Sequence { exprs: Vec<GrammarExprJSON> },
+    Choice { exprs: Vec<GrammarExprJSON> },
+    Optional { expr: Box<GrammarExprJSON> },
+    Repeat { expr: Box<GrammarExprJSON> },
+    Literal { bytes: Vec<u8> },
+    CharClass { def: String },
+    AnyChar,
+}
+
+impl GrammarExprJSON {
+    fn from_expr(e: &GrammarExpr) -> Self {
+        match e {
+            GrammarExpr::Ref(name) => GrammarExprJSON::Ref { name: name.clone() },
+            GrammarExpr::Sequence(exprs) => GrammarExprJSON::Sequence {
+                exprs: exprs.iter().map(GrammarExprJSON::from_expr).collect(),
+            },
+            GrammarExpr::Choice(exprs) => GrammarExprJSON::Choice {
+                exprs: exprs.iter().map(GrammarExprJSON::from_expr).collect(),
+            },
+            GrammarExpr::Optional(expr) => GrammarExprJSON::Optional {
+                expr: Box::new(GrammarExprJSON::from_expr(expr)),
+            },
+            GrammarExpr::Repeat(expr) => GrammarExprJSON::Repeat {
+                expr: Box::new(GrammarExprJSON::from_expr(expr)),
+            },
+            GrammarExpr::Literal(bytes) => GrammarExprJSON::Literal { bytes: bytes.clone() },
+            GrammarExpr::CharClass(s) => GrammarExprJSON::CharClass { def: s.clone() },
+            GrammarExpr::AnyChar => GrammarExprJSON::AnyChar,
+        }
+    }
+
+    fn to_expr(self) -> GrammarExpr {
+        match self {
+            GrammarExprJSON::Ref { name } => GrammarExpr::Ref(name),
+            GrammarExprJSON::Sequence { exprs } => {
+                GrammarExpr::Sequence(exprs.into_iter().map(|e| e.to_expr()).collect())
+            }
+            GrammarExprJSON::Choice { exprs } => {
+                GrammarExpr::Choice(exprs.into_iter().map(|e| e.to_expr()).collect())
+            }
+            GrammarExprJSON::Optional { expr } => GrammarExpr::Optional(Box::new(expr.to_expr())),
+            GrammarExprJSON::Repeat { expr } => GrammarExpr::Repeat(Box::new(expr.to_expr())),
+            GrammarExprJSON::Literal { bytes } => GrammarExpr::Literal(bytes),
+            GrammarExprJSON::CharClass { def } => GrammarExpr::CharClass(def),
+            GrammarExprJSON::AnyChar => GrammarExpr::AnyChar,
+        }
+    }
+}
+
 impl JSONConvertible for GrammarExpr {
     fn to_json(&self) -> JSONNode {
-        let mut obj = StdMap::new();
-        match self {
-            GrammarExpr::Ref(name) => {
-                obj.insert("variant".to_string(), JSONNode::String("Ref".to_string()));
-                obj.insert("name".to_string(), name.to_json());
-            }
-            GrammarExpr::Sequence(exprs) => {
-                obj.insert("variant".to_string(), JSONNode::String("Sequence".to_string()));
-                obj.insert("exprs".to_string(), exprs.to_json());
-            }
-            GrammarExpr::Choice(exprs) => {
-                obj.insert("variant".to_string(), JSONNode::String("Choice".to_string()));
-                obj.insert("exprs".to_string(), exprs.to_json());
-            }
-            GrammarExpr::Optional(expr_box) => {
-                obj.insert("variant".to_string(), JSONNode::String("Optional".to_string()));
-                obj.insert("expr".to_string(), expr_box.to_json());
-            }
-            GrammarExpr::Repeat(expr_box) => {
-                obj.insert("variant".to_string(), JSONNode::String("Repeat".to_string()));
-                obj.insert("expr".to_string(), expr_box.to_json());
-            }
-            GrammarExpr::Literal(bytes) => {
-                obj.insert("variant".to_string(), JSONNode::String("Literal".to_string()));
-                obj.insert("bytes".to_string(), bytes.to_json());
-            }
-            GrammarExpr::CharClass(s) => {
-                obj.insert("variant".to_string(), JSONNode::String("CharClass".to_string()));
-                obj.insert("def".to_string(), s.to_json());
-            }
-            GrammarExpr::AnyChar => {
-                obj.insert("variant".to_string(), JSONNode::String("AnyChar".to_string()));
-            }
-        }
-        JSONNode::Object(obj)
+        GrammarExprJSON::from_expr(self).to_json()
     }
 
     fn from_json(node: JSONNode) -> Result<Self, String> {
-        match node {
-            JSONNode::Object(mut obj) => {
-                let variant = obj
-                    .remove("variant")
-                    .ok_or_else(|| "Missing field variant for GrammarExpr".to_string())
-                    .and_then(String::from_json)?;
-                match variant.as_str() {
-                    "Ref" => {
-                        let name = obj
-                            .remove("name")
-                            .ok_or_else(|| "Missing field name for Ref".to_string())
-                            .and_then(String::from_json)?;
-                        Ok(GrammarExpr::Ref(name))
-                    }
-                    "Sequence" => {
-                        let exprs = obj
-                            .remove("exprs")
-                            .ok_or_else(|| "Missing field exprs for Sequence".to_string())
-                            .and_then(Vec::<GrammarExpr>::from_json)?;
-                        Ok(GrammarExpr::Sequence(exprs))
-                    }
-                    "Choice" => {
-                        let exprs = obj
-                            .remove("exprs")
-                            .ok_or_else(|| "Missing field exprs for Choice".to_string())
-                            .and_then(Vec::<GrammarExpr>::from_json)?;
-                        Ok(GrammarExpr::Choice(exprs))
-                    }
-                    "Optional" => {
-                        let expr_node = obj
-                            .remove("expr")
-                            .ok_or_else(|| "Missing field expr for Optional".to_string())?;
-                        Ok(GrammarExpr::Optional(Box::new(GrammarExpr::from_json(
-                            expr_node,
-                        )?)))
-                    }
-                    "Repeat" => {
-                        let expr_node = obj
-                            .remove("expr")
-                            .ok_or_else(|| "Missing field expr for Repeat".to_string())?;
-                        Ok(GrammarExpr::Repeat(Box::new(GrammarExpr::from_json(
-                            expr_node,
-                        )?)))
-                    }
-                    "Literal" => {
-                        let bytes = obj
-                            .remove("bytes")
-                            .ok_or_else(|| "Missing field bytes for Literal".to_string())
-                            .and_then(Vec::<u8>::from_json)?;
-                        Ok(GrammarExpr::Literal(bytes))
-                    }
-                    "CharClass" => {
-                        let s = obj
-                            .remove("def")
-                            .ok_or_else(|| "Missing field def for CharClass".to_string())
-                            .and_then(String::from_json)?;
-                        Ok(GrammarExpr::CharClass(s))
-                    }
-                    "AnyChar" => Ok(GrammarExpr::AnyChar),
-                    _ => Err(format!("Unknown variant {} for GrammarExpr", variant)),
-                }
-            }
-            _ => Err("Expected JSONNode::Object for GrammarExpr".to_string()),
-        }
+        GrammarExprJSON::from_json(node).map(|e| e.to_expr())
     }
 }
 
@@ -1240,41 +1197,39 @@ pub struct CompiledGrammar {
     pub glr_parser: GLRParser,
 }
 
+/// Intermediate type for CompiledGrammar JSON serialization
+#[derive(JSONConvertible)]
+struct CompiledGrammarJSON {
+    definition: GrammarDefinition,
+    tokenizer: Regex,
+    glr_parser: GLRParser,
+}
+
+impl CompiledGrammarJSON {
+    fn from_compiled(c: &CompiledGrammar) -> Self {
+        CompiledGrammarJSON {
+            definition: (*c.definition).clone(),
+            tokenizer: c.tokenizer.clone(),
+            glr_parser: c.glr_parser.clone(),
+        }
+    }
+
+    fn to_compiled(self) -> CompiledGrammar {
+        CompiledGrammar {
+            definition: Arc::new(self.definition),
+            tokenizer: self.tokenizer,
+            glr_parser: self.glr_parser,
+        }
+    }
+}
+
 impl JSONConvertible for CompiledGrammar {
     fn to_json(&self) -> JSONNode {
-        let mut obj = StdMap::new();
-        obj.insert("definition".to_string(), self.definition.to_json());
-        obj.insert("tokenizer".to_string(), self.tokenizer.to_json());
-        obj.insert("glr_parser".to_string(), self.glr_parser.to_json());
-        JSONNode::Object(obj)
+        CompiledGrammarJSON::from_compiled(self).to_json()
     }
 
     fn from_json(node: JSONNode) -> Result<Self, String> {
-        match node {
-            JSONNode::Object(mut obj) => {
-                let definition_node = obj
-                    .remove("definition")
-                    .ok_or_else(|| "Missing field definition for CompiledGrammar".to_string())?;
-                let definition = Arc::new(GrammarDefinition::from_json(definition_node)?);
-
-                let tokenizer_node = obj
-                    .remove("tokenizer")
-                    .ok_or_else(|| "Missing field tokenizer for CompiledGrammar".to_string())?;
-                let tokenizer = Regex::from_json(tokenizer_node)?;
-
-                let glr_parser_node = obj
-                    .remove("glr_parser")
-                    .ok_or_else(|| "Missing field glr_parser for CompiledGrammar".to_string())?;
-                let glr_parser = GLRParser::from_json(glr_parser_node)?;
-
-                Ok(CompiledGrammar {
-                    definition,
-                    tokenizer,
-                    glr_parser,
-                })
-            }
-            _ => Err("Expected JSONNode::Object for CompiledGrammar".to_string()),
-        }
+        CompiledGrammarJSON::from_json(node).map(|c| c.to_compiled())
     }
 }
 

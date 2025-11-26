@@ -248,19 +248,33 @@ impl GrammarConstraint {
     }
 }
 
-impl JSONConvertible for GrammarConstraint {
-    fn to_json(&self) -> JSONNode {
-        // Efficient inline pooling for match bitsets
+// ---------------------------------------------------------------------------
+// Intermediate JSON types for GrammarConstraint serialization
+// ---------------------------------------------------------------------------
+
+/// Pooled representation of possible_matches for efficient serialization.
+/// Instead of storing the full bitset for each (state, terminal) pair,
+/// we store an index into a shared pool of unique bitsets.
+#[derive(Debug, Clone, JSONConvertible)]
+struct PossibleMatchesJSON {
+    /// Pool of unique bitsets
+    matches_pool: Vec<LLMTokenBV>,
+    /// state_id (as string) -> terminal_id (as string) -> pool index
+    state_terminal_indices: BTreeMap<String, BTreeMap<String, usize>>,
+}
+
+impl PossibleMatchesJSON {
+    fn from_possible_matches(pm: &BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>) -> Self {
         let mut bitset_pool: Vec<LLMTokenBV> = Vec::new();
         let mut bitset_map: BTreeMap<LLMTokenBV, usize> = BTreeMap::new();
+        let mut state_terminal_indices: BTreeMap<String, BTreeMap<String, usize>> = BTreeMap::new();
 
-        let mut pooled_matches: BTreeMap<String, BTreeMap<String, usize>> = BTreeMap::new();
-
-        for (state_id, inner) in &self.possible_matches {
+        for (state_id, inner) in pm {
             let mut new_inner = BTreeMap::new();
             for (term_id, bv) in inner {
-                let idx = if let Some(&i) = bitset_map.get(bv) { i }
-                else {
+                let idx = if let Some(&i) = bitset_map.get(bv) {
+                    i
+                } else {
                     let i = bitset_pool.len();
                     bitset_pool.push(bv.clone());
                     bitset_map.insert(bv.clone(), i);
@@ -268,82 +282,87 @@ impl JSONConvertible for GrammarConstraint {
                 };
                 new_inner.insert(term_id.0.to_string(), idx);
             }
-            pooled_matches.insert(state_id.0.to_string(), new_inner);
+            state_terminal_indices.insert(state_id.0.to_string(), new_inner);
         }
 
-        let mut obj = BTreeMap::new();
-        obj.insert("tokenizer_dfa".to_string(), self.tokenizer.dfa.to_json());
-        obj.insert("dwa".to_string(), self.precomputed4.to_json());
-        obj.insert("vocab".to_string(), self.precompute4_vocab.to_json());
-        obj.insert("parser".to_string(), self.parser.to_json());
-        obj.insert("token_name_map".to_string(), self.token_name_map.to_json());
-
-        // Matches
-        obj.insert("matches_pool".to_string(), bitset_pool.to_json());
-        let possible_matches_node = JSONNode::Object(
-            pooled_matches
-                .into_iter()
-                .map(|(k, v_map)| {
-                    let inner_node = JSONNode::Object(
-                        v_map
-                            .into_iter()
-                            .map(|(inner_k, inner_v)| (inner_k, inner_v.to_json()))
-                            .collect(),
-                    );
-                    (k, inner_node)
-                })
-                .collect(),
-        );
-        obj.insert("possible_matches".to_string(), possible_matches_node);
-
-        // Skeleton vocab info
-        obj.insert("max_orig_id".to_string(), self.original_llm_vocab.max_original_llm_token_id.to_json());
-
-        JSONNode::Object(obj)
+        PossibleMatchesJSON {
+            matches_pool: bitset_pool,
+            state_terminal_indices,
+        }
     }
-    fn from_json(node: JSONNode) -> Result<Self, String> {
-        let mut obj = node.into_object()?;
 
-        let dfa = crate::finite_automata::DFA::from_json(obj.remove("tokenizer_dfa").ok_or("Missing tokenizer_dfa")?)?;
-        let tokenizer = Regex { dfa };
-
-        let dwa = DWA::from_json(obj.remove("dwa").ok_or("Missing dwa")?)?;
-        let vocab = StageVocab::from_json(obj.remove("vocab").ok_or("Missing vocab")?)?;
-        let parser = GLRParser::from_json(obj.remove("parser").ok_or("Missing parser")?)?;
-        let token_name_map = BiBTreeMap::from_json(obj.remove("token_name_map").ok_or("Missing token_name_map")?)?;
-
-        let max_orig_id = usize::from_json(obj.remove("max_orig_id").ok_or("Missing max_orig_id")?)?;
-        let original_llm_vocab = Arc::new(LLMVocab {
-            llm_token_map: BiBTreeMap::new(), // Dummy, as original map is too large
-            max_original_llm_token_id: max_orig_id,
-        });
-
-        let matches_pool = Vec::<LLMTokenBV>::from_json(obj.remove("matches_pool").ok_or("Missing matches_pool")?)?;
-        let pooled_matches_node = obj.remove("possible_matches").ok_or("Missing possible_matches")?;
-        let pm_obj = pooled_matches_node.into_object()?;
-
+    fn to_possible_matches(self) -> Result<BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>, String> {
         let mut possible_matches = BTreeMap::new();
-        for (sid_str, inner_node) in pm_obj {
+        for (sid_str, inner_map) in self.state_terminal_indices {
             let sid: usize = sid_str.parse().map_err(|_| "Invalid state ID key")?;
-            let inner_obj = inner_node.into_object()?;
-            let mut inner_map = BTreeMap::new();
-            for (tid_str, idx_node) in inner_obj {
+            let mut inner = BTreeMap::new();
+            for (tid_str, idx) in inner_map {
                 let tid: usize = tid_str.parse().map_err(|_| "Invalid terminal ID key")?;
-                let idx = usize::from_json(idx_node)?;
-                let bv = matches_pool.get(idx).ok_or("Pool index out of bounds")?.clone();
-                inner_map.insert(TerminalID(tid), bv);
+                let bv = self.matches_pool.get(idx).ok_or("Pool index out of bounds")?.clone();
+                inner.insert(TerminalID(tid), bv);
             }
-            possible_matches.insert(TokenizerStateID(sid), inner_map);
+            possible_matches.insert(TokenizerStateID(sid), inner);
         }
+        Ok(possible_matches)
+    }
+}
+
+/// Intermediate JSON representation of GrammarConstraint.
+/// Uses struct field names for clear serialization.
+#[derive(Debug, Clone, JSONConvertible)]
+struct GrammarConstraintJSON {
+    tokenizer_dfa: crate::finite_automata::DFA,
+    dwa: DWA,
+    vocab: StageVocab,
+    parser: GLRParser,
+    token_name_map: BiBTreeMap<Terminal, usize>,
+    possible_matches: PossibleMatchesJSON,
+    /// Full original LLM vocab (optional for backward compat)
+    original_llm_vocab: Option<LLMVocab>,
+    /// Fallback: just max_original_llm_token_id if full vocab not available
+    max_orig_id: Option<usize>,
+}
+
+impl JSONConvertible for GrammarConstraint {
+    fn to_json(&self) -> JSONNode {
+        let intermediate = GrammarConstraintJSON {
+            tokenizer_dfa: self.tokenizer.dfa.clone(),
+            dwa: self.precomputed4.clone(),
+            vocab: self.precompute4_vocab.clone(),
+            parser: self.parser.clone(),
+            token_name_map: self.token_name_map.clone(),
+            possible_matches: PossibleMatchesJSON::from_possible_matches(&self.possible_matches),
+            original_llm_vocab: Some((*self.original_llm_vocab).clone()),
+            max_orig_id: Some(self.original_llm_vocab.max_original_llm_token_id),
+        };
+        intermediate.to_json()
+    }
+
+    fn from_json(node: JSONNode) -> Result<Self, String> {
+        let intermediate = GrammarConstraintJSON::from_json(node)?;
+
+        let tokenizer = Regex { dfa: intermediate.tokenizer_dfa };
+        let possible_matches = intermediate.possible_matches.to_possible_matches()?;
+
+        // Restore original_llm_vocab: prefer full vocab, fall back to skeleton
+        let original_llm_vocab = if let Some(vocab) = intermediate.original_llm_vocab {
+            Arc::new(vocab)
+        } else {
+            let max_orig_id = intermediate.max_orig_id.ok_or("Missing both original_llm_vocab and max_orig_id")?;
+            Arc::new(LLMVocab {
+                llm_token_map: BiBTreeMap::new(), // Dummy when full vocab not available
+                max_original_llm_token_id: max_orig_id,
+            })
+        };
 
         Ok(GrammarConstraint {
             tokenizer,
-            parser,
-            precomputed4: dwa,
+            parser: intermediate.parser,
+            precomputed4: intermediate.dwa,
             original_llm_vocab,
-            token_name_map,
+            token_name_map: intermediate.token_name_map,
             possible_matches,
-            precompute4_vocab: vocab,
+            precompute4_vocab: intermediate.vocab,
         })
     }
 }

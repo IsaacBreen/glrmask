@@ -4,6 +4,7 @@ use std::borrow::Borrow;
 use std::collections::BTreeMap as StdMap;
 
 use bimap::BiBTreeMap;
+use json_convertible_derive::JSONConvertible;
 use crate::datastructures::{
     hybrid_bitset::RangeSet,
 };
@@ -23,7 +24,8 @@ pub type StateIDBV = RangeSet;
 // Vocab structures
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+/// LLM vocabulary: maps byte sequences to token IDs.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, JSONConvertible)]
 pub struct LLMVocab {
     pub llm_token_map: BiBTreeMap<Vec<u8>, LLMTokenID>,
     pub max_original_llm_token_id: usize,
@@ -38,106 +40,55 @@ pub struct StageVocab {
     pub internal_to_original_sparse_matrix: Vec<Vec<(u16, u64)>>,
 }
 
-impl JSONConvertible for LLMVocab {
-    fn to_json(&self) -> JSONNode {
-        let mut m = StdMap::new();
-        m.insert(
-            "llm_token_map".to_string(),
-            self.llm_token_map.to_json(),
-        );
-        m.insert(
-            "max_original_llm_token_id".to_string(),
-            self.max_original_llm_token_id.to_json(),
-        );
-        JSONNode::Object(m)
-    }
-
-    fn from_json(node: JSONNode) -> Result<Self, String> {
-        match node {
-            JSONNode::Object(mut obj) => {
-                let llm_token_map = obj
-                    .remove("llm_token_map")
-                    .ok_or("LLMVocab: missing llm_token_map".to_string())
-                    .and_then(|n| BiBTreeMap::<Vec<u8>, LLMTokenID>::from_json(n))?;
-                let max_original_llm_token_id = obj
-                    .remove("max_original_llm_token_id")
-                    .ok_or("LLMVocab: missing max_original_llm_token_id".to_string())
-                    .and_then(usize::from_json)?;
-                Ok(LLMVocab {
-                    llm_token_map,
-                    max_original_llm_token_id,
-                })
-            }
-            _ => Err("LLMVocab: expected object".to_string()),
-        }
-    }
+/// Intermediate JSON representation of StageVocab.
+/// internal_to_original is stored as Vec<(usize, Vec<usize>)> for efficient serialization.
+/// internal_to_original_sparse_matrix is skipped (rebuilt on load).
+#[derive(Debug, Clone, JSONConvertible)]
+struct StageVocabJSON {
+    original_to_internal: BTreeMap<usize, usize>,
+    internal_to_original: Vec<(usize, Vec<usize>)>,
+    internal_max_llm_token: usize,
+    max_original_llm_token_id: usize,
 }
 
 impl JSONConvertible for StageVocab {
     fn to_json(&self) -> JSONNode {
-        let mut m = StdMap::new();
-        m.insert(
-            "original_to_internal".to_string(),
-            self.original_to_internal.to_json(),
-        );
-        let mut ito: Vec<(usize, Vec<usize>)> = Vec::new();
-        for (k, bv) in &self.internal_to_original {
-            ito.push((*k, bv.iter_up_to(self.max_original_llm_token_id).collect::<Vec<_>>()));
-        }
-        m.insert("internal_to_original".to_string(), ito.to_json());
-        m.insert(
-            "internal_max_llm_token".to_string(),
-            self.internal_max_llm_token.to_json(),
-        );
-        m.insert(
-            "max_original_llm_token_id".to_string(),
-            self.max_original_llm_token_id.to_json(),
-        );
-        // SKIP: internal_to_original_sparse_matrix (rebuild on load)
-        JSONNode::Object(m)
+        let ito: Vec<(usize, Vec<usize>)> = self.internal_to_original
+            .iter()
+            .map(|(k, bv)| (*k, bv.iter_up_to(self.max_original_llm_token_id).collect()))
+            .collect();
+        
+        let intermediate = StageVocabJSON {
+            original_to_internal: self.original_to_internal.clone(),
+            internal_to_original: ito,
+            internal_max_llm_token: self.internal_max_llm_token,
+            max_original_llm_token_id: self.max_original_llm_token_id,
+        };
+        intermediate.to_json()
     }
 
     fn from_json(node: JSONNode) -> Result<Self, String> {
-        match node {
-            JSONNode::Object(mut obj) => {
-                let original_to_internal = obj
-                    .remove("original_to_internal")
-                    .ok_or("StageVocab: missing original_to_internal".to_string())
-                    .and_then(BTreeMap::<usize, usize>::from_json)?;
-                let internal_max_llm_token = obj
-                    .remove("internal_max_llm_token")
-                    .ok_or("StageVocab: missing internal_max_llm_token".to_string())
-                    .and_then(usize::from_json)?;
-                let max_original_llm_token_id = obj
-                    .remove("max_original_llm_token_id")
-                    .ok_or("StageVocab: missing max_original_llm_token_id".to_string())
-                    .and_then(usize::from_json)?;
-                let ito_vec: Vec<(usize, Vec<usize>)> = obj
-                    .remove("internal_to_original")
-                    .ok_or("StageVocab: missing internal_to_original".to_string())
-                    .and_then(Vec::from_json)?;
-                let internal_to_original: BTreeMap<usize, LLMTokenBV> = ito_vec
-                    .into_iter()
-                    .map(|(k, v)| (k, v.into_iter().collect()))
-                    .collect();
-                let internal_to_original_sparse_matrix =
-            // Always rebuild sparse matrix from internal_to_original
-            Self::build_internal_to_original_sparse_matrix(
-                &internal_to_original,
-                max_original_llm_token_id,
-                internal_max_llm_token,
-            );
+        let intermediate = StageVocabJSON::from_json(node)?;
+        
+        let internal_to_original: BTreeMap<usize, LLMTokenBV> = intermediate
+            .internal_to_original
+            .into_iter()
+            .map(|(k, v)| (k, v.into_iter().collect()))
+            .collect();
+        
+        let internal_to_original_sparse_matrix = Self::build_internal_to_original_sparse_matrix(
+            &internal_to_original,
+            intermediate.max_original_llm_token_id,
+            intermediate.internal_max_llm_token,
+        );
 
-                Ok(StageVocab {
-                    original_to_internal,
-                    internal_to_original,
-                    internal_max_llm_token,
-                    max_original_llm_token_id,
-                    internal_to_original_sparse_matrix,
-                })
-            }
-            _ => Err("StageVocab: expected object".to_string()),
-        }
+        Ok(StageVocab {
+            original_to_internal: intermediate.original_to_internal,
+            internal_to_original,
+            internal_max_llm_token: intermediate.internal_max_llm_token,
+            max_original_llm_token_id: intermediate.max_original_llm_token_id,
+            internal_to_original_sparse_matrix,
+        })
     }
 }
 
