@@ -103,12 +103,12 @@ Notes are organized in `gcg-paper/notes/`:
 ```
 gcg-paper/notes/
 ├── index.md              # Master index, always update this
+├── user.md               # User instructions, comments & observations
 ├── daily/
 │   └── YYYY-MM-DD.md     # Daily notes, one per day
 └── attachments/
     ├── references.md     # Literature review & citations
     ├── ideas.md          # Running ideas & TODOs
-    ├── user.md           # User comments & observations
     └── ...               # Other long-running notes
 ```
 
@@ -194,9 +194,18 @@ cmdand heredoc> import llguidance as llg
 PYTHON_SCRIPT
 ```
 
-It tends to cause escape errors. Instead, write a script to `temp/` and run it.
+*Also* avoid passing long code strings
 
-Also avoid HEREDOC for writing to files. Avoid HEREDOC in general.
+```bash
+> cd /Users/isaacbreen/Projects2/grammars2024 && python3 -c '
+cmdand quote> import _sep1
+...
+'
+```
+
+Both cases tend to cause escape errors. Instead, write a script to `temp/`, for example, and run it.
+
+Also avoid HEREDOC for writing to files. Avoid HEREDOC and long quoted strings in bash in general.
 
 ---
 
