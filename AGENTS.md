@@ -74,16 +74,20 @@ Feel free to commit changes locally, but do not push.
 
 When making significant changes to the codebase or research notes, it's encouraged to commit logical chunks of work. Avoid using `git add .` as there may be other unstaged changes unrelated to your work.
 
-Example workflow:
+`gcg-paper/` is a separate git repository (not a submodule), and is gitignored by the main repository. When committing changes to paper/research files, you must commit within the `gcg-paper/` directory separately.
+
+Example workflow for main repository:
 ```bash
 git add file1.rs file2.rs
 git commit -m "feat: add optimization for X"
 ```
 
-Or for research/paper work:
+Example workflow for research/paper work (separate repo):
 ```bash
-git add gcg-paper/notes/daily/2025-11-26.md gcg-paper/paper/main.tex
+cd gcg-paper
+git add notes/daily/2025-11-26.md paper/main.tex
 git commit -m "docs: update paper with benchmark results"
+cd ..
 ```
 
 ---
