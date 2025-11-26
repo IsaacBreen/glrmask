@@ -4,17 +4,19 @@ from typing import Any, List, Tuple
 import time
 import json
 import gzip
+import subprocess
+import tempfile
+import os
 
-# Add project root to sys.path to allow importing python.aug25
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
+# Add project root to sys.path
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from benchmarking.systems.base import BaseSystem, CompilationResult, MaskResult, CommitResult, time_function
+from benchmarking.json_schema_to_ebnf import convert_schema_to_ebnf
 
 # Import the Rust model
-# We try to import the rust_model from python.aug25.models
-# This assumes the C++ extension _sep1 is available in the python path
 try:
     from python.aug25.models.rust_model import Model as RustModel
     import _sep1 as ffi
@@ -33,35 +35,139 @@ class Sep1System(BaseSystem):
         vocab: dict[int, bytes],
         **kwargs
     ) -> CompilationResult:
-        """
-        For sep1, 'compilation' usually means loading the precomputed JSON.
-        If the input is a raw grammar file (EBNF), we would need to run the full compilation pipeline.
-        For now, we assume the input IS the precomputed JSON/GZ file, as per our current workflow.
-        
-        TODO: Implement EBNF -> JSON compilation if needed.
-        """
         start_time = time.perf_counter()
         
-        # Check if it's already a compiled JSON
-        if grammar_path.suffix == '.json' or grammar_path.name.endswith('.json.gz'):
-            if grammar_path.name.endswith('.gz'):
-                with gzip.open(grammar_path, 'rt', encoding='utf-8') as f:
-                    json_str = f.read()
-            else:
-                json_str = grammar_path.read_text(encoding='utf-8')
-                
-            # We don't actually "compile" here, we just verify we can load it?
-            # Or we return the JSON string as the "compiled" artifact?
-            # The RustModel.from_json_string takes the string.
-            compiled = json_str
-            
+        # 1. Determine input format and convert to EBNF if needed
+        if grammar_path.suffix == '.json' and not grammar_path.name.endswith('.json.gz'):
+            # It's a JSON Schema (unless it's a precompiled constraint, but we assume schema for .json)
+            # Check if it looks like a schema
+            try:
+                with open(grammar_path) as f:
+                    data = json.load(f)
+                if "llm_token_map" in data:
+                    # It's a precompiled constraint
+                    ebnf_path = None
+                    compiled_json_path = grammar_path
+                else:
+                    # It's a JSON Schema
+                    # Convert to EBNF
+                    ebnf_str = convert_schema_to_ebnf(data)
+                    
+                    # Save EBNF to temp file
+                    fd, ebnf_path_str = tempfile.mkstemp(suffix=".ebnf", text=True)
+                    os.close(fd)
+                    ebnf_path = Path(ebnf_path_str)
+                    ebnf_path.write_text(ebnf_str)
+                    
+                    # We need to compile this EBNF
+                    compiled_json_path = None
+            except Exception as e:
+                raise ValueError(f"Failed to parse JSON file {grammar_path}: {e}")
+        elif grammar_path.suffix == '.ebnf':
+            ebnf_path = grammar_path
+            compiled_json_path = None
+        elif grammar_path.name.endswith('.json.gz'):
+             # Precompiled
+             ebnf_path = None
+             compiled_json_path = grammar_path
         else:
-            raise ValueError(f"sep1 currently expects a precompiled .json or .json.gz file, got {grammar_path}")
+            raise ValueError(f"Unsupported file format: {grammar_path}")
+
+        # 2. Compile EBNF to GrammarConstraint if needed
+        if ebnf_path:
+            # We need a vocab file for the compiler
+            # Create a temp vocab file
+            # The compiler expects a JSON map: {"token": id}
+            # We have vocab: {id: bytes}
+            # We need to decode bytes to string. This might be lossy for raw bytes tokens!
+            # But the compiler handles "Ġ" etc replacement.
+            # Let's try to reconstruct the vocab map.
+            
+            vocab_map = {}
+            for tid, tbytes in vocab.items():
+                # Try to decode utf-8, fallback to latin1 or repr?
+                # The compiler expects UTF-8 strings usually.
+                # GPT-2 vocab is byte-level BPE.
+                try:
+                    tstr = tbytes.decode('utf-8')
+                    # The compiler replaces Ġ with space, etc.
+                    # We should provide the raw string if possible?
+                    # Actually, the compiler expects the string representation that matches the tokenizer.
+                    # For GPT2, we might need to handle the byte encoder.
+                    # But for now, let's assume standard utf-8 decoding works for most tokens.
+                    vocab_map[tstr] = tid
+                except UnicodeDecodeError:
+                    # Skip tokens that aren't valid utf-8?
+                    # Or use a placeholder?
+                    pass
+            
+            fd, vocab_path_str = tempfile.mkstemp(suffix=".json", text=True)
+            os.close(fd)
+            vocab_path = Path(vocab_path_str)
+            with open(vocab_path, 'w') as f:
+                json.dump(vocab_map, f)
+                
+            # Output path
+            fd, output_path_str = tempfile.mkstemp(suffix=".json", text=True)
+            os.close(fd)
+            output_path = Path(output_path_str)
+            
+            # Run compiler
+            # Assuming 'grammar-compiler' binary is in target/release/grammar-compiler
+            compiler_bin = PROJECT_ROOT / "target" / "release" / "grammar-compiler"
+            if not compiler_bin.exists():
+                # Try debug
+                compiler_bin = PROJECT_ROOT / "target" / "debug" / "grammar-compiler"
+                
+            if not compiler_bin.exists():
+                # Try running via cargo
+                cmd = ["cargo", "run", "--release", "--bin", "grammar-compiler", "--", 
+                       "--grammar", str(ebnf_path), 
+                       "--vocab", str(vocab_path), 
+                       "--output", str(output_path)]
+            else:
+                cmd = [str(compiler_bin), 
+                       "--grammar", str(ebnf_path), 
+                       "--vocab", str(vocab_path), 
+                       "--output", str(output_path)]
+                       
+            # print(f"Running compiler: {' '.join(cmd)}")
+            result = subprocess.run(cmd, capture_output=True, text=True, cwd=PROJECT_ROOT)
+            
+            # Cleanup temp files
+            vocab_path.unlink()
+            if grammar_path.suffix == '.json' and not grammar_path.name.endswith('.json.gz'):
+                 # We created the ebnf file
+                 # ebnf_path.unlink() # Keep for debugging
+                 pass
+            
+            if result.returncode != 0:
+                print(f"Compiler STDOUT: {result.stdout}")
+                print(f"Compiler STDERR: {result.stderr}")
+                print(f"EBNF Content:\n{ebnf_path.read_text()}")
+                raise RuntimeError(f"Compiler failed:\n{result.stderr}")
+                
+            compiled_json_path = output_path
+            
+            # Cleanup EBNF if success
+            if grammar_path.suffix == '.json' and not grammar_path.name.endswith('.json.gz'):
+                ebnf_path.unlink()
+            
+        # 3. Load the compiled constraint
+        if compiled_json_path.name.endswith('.gz'):
+            with gzip.open(compiled_json_path, 'rt', encoding='utf-8') as f:
+                json_str = f.read()
+        else:
+            json_str = compiled_json_path.read_text(encoding='utf-8')
+            
+        # Cleanup output file if we created it
+        if ebnf_path:
+            compiled_json_path.unlink()
 
         elapsed = time.perf_counter() - start_time
         
         return CompilationResult(
-            compiled=compiled,
+            compiled=json_str,
             compilation_time_sec=elapsed,
             metadata={"source": str(grammar_path)}
         )
@@ -74,14 +180,15 @@ class Sep1System(BaseSystem):
         model: RustModel = state
         
         start = time.perf_counter()
-        # get_mask returns a Bitset (from ffi_bitset.py)
         mask_bitset = model.get_mask()
         elapsed = time.perf_counter() - start
         
-        # Convert to list of integers for the result
-        # The Bitset has a .to_ranges() method, we can convert that to a flat list
+        # sep1 returns [start, end] inclusive ranges
         ranges = mask_bitset.to_ranges()
+        
         valid_tokens = []
+        # If to_ranges returns inclusive [start, end], then range(start, end + 1) is correct.
+        # Assuming inclusive for now based on previous code.
         for start_idx, end_idx in ranges:
             valid_tokens.extend(range(start_idx, end_idx + 1))
             
@@ -103,5 +210,5 @@ class Sep1System(BaseSystem):
         )
 
     def supports_grammar_format(self, format: str) -> bool:
-        # We support our own precompiled format
-        return format in ["sep1_json", "sep1_gz"]
+        return format in ["sep1_json", "sep1_gz", "json_schema", "ebnf"]
+

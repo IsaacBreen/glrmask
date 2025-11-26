@@ -100,23 +100,36 @@ class LLGuidanceSystem(BaseSystem):
         
         # Create interpreter with compiled grammar and tokenizer
         interpreter = LLInterpreter(self.ll_tokenizer, compiled)
+        
+        # Initialize the interpreter state
+        interpreter.start_without_prompt()
+        
         return interpreter
     
     def get_mask(self, state: Any) -> MaskResult:
         """Get valid token mask."""
         def get_bitmask():
-            # llguidance returns mask via get_mask()
-            mask = state.get_mask()
-            return mask
+            # llguidance returns (mask_bytes, json_stats) via compute_mask()
+            mask_tuple = state.compute_mask()
+            return mask_tuple[0]
         
-        mask, elapsed = time_function(get_bitmask)
+        mask_bytes, elapsed = time_function(get_bitmask)
         
-        # Convert mask to list of valid token IDs
-        # Assuming mask is a list/array of booleans or integers
-        if hasattr(mask, '__iter__'):
-            valid_tokens = [i for i, v in enumerate(mask) if v]
+        # Convert mask bytes to list of valid token IDs
+        valid_tokens = []
+        if isinstance(mask_bytes, bytes):
+            # Parse bitmask
+            # Assuming little-endian bits in bytes
+            for byte_idx, byte_val in enumerate(mask_bytes):
+                if byte_val == 0:
+                    continue
+                for bit_idx in range(8):
+                    if (byte_val >> bit_idx) & 1:
+                        token_id = byte_idx * 8 + bit_idx
+                        valid_tokens.append(token_id)
         else:
-            # Fallback - might need to adjust based on actual return type
+            # Fallback or error
+            print(f"Warning: Unexpected mask type: {type(mask_bytes)}")
             valid_tokens = []
         
         return MaskResult(
