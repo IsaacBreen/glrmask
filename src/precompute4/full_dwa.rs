@@ -11,7 +11,7 @@ use kdam::{tqdm, BarExt};
 use crate::constraint::LLMTokenBV;
 use crate::glr::parser::{ExpectElse, GLRParser};
 use crate::precompute4::nwa_optimizations::prune_continuations_from_final_states;
-use crate::precompute4::resolve_negatives::{apply_cancellations, apply_finality_fixpoint, remove_negative_transitions, apply_cancellations_range, apply_finality_fixpoint_range, remove_negative_transitions_range};
+use crate::precompute4::resolve_negatives::{apply_cancellations, apply_finality_fixpoint, remove_negative_transitions};
 use crate::precompute4::template_nwa::{build_ignore_terminal_dwa, build_template_dwas};
 use crate::precompute4::weighted_automata::{
     common::Label, determinization_rustfst::determinize_nwa_to_dwa, DWA, NWA, NWABody, NWAStateID, NWAStates,
@@ -419,12 +419,7 @@ pub fn precompute4(parser: &GLRParser, input_nwa: &NWA) -> DWA {
         let mut dwa = combined_nwa.determinize();
         dwa.simplify_lightweight();
 
-        // Resolve negatives in the template BEFORE caching.
-        // This avoids repeated negative resolution during instantiation.
-        let mut template_nwa = NWA::from_dwa(&dwa);
-        crate::precompute4::resolve_negatives::resolve_negative_codes_in_nwa(&mut template_nwa);
-        
-        template_cache.insert(sig, template_nwa);
+        template_cache.insert(sig, NWA::from_dwa(&dwa));
         let _ = simple_pb.update(1);
     }
 
@@ -607,23 +602,11 @@ pub fn precompute4(parser: &GLRParser, input_nwa: &NWA) -> DWA {
                 let mut states = states_arena.borrow_mut();
                 let new_states_offset = states.len();
                 let composed_body = instantiate_nwa_template_into(template_nwa, &concrete_weights, &mut states, &right_body);
-                // Use range-based functions to avoid HashSet allocation
-                let state_range = new_states_offset..states.len();
-                if !state_range.is_empty() {
-                    // Track negative resolution timing
-                    static NEG_RES_TIME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-                    static NEG_RES_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-                    let neg_start = std::time::Instant::now();
-                    apply_cancellations_range(&mut states, state_range.clone());
-                    apply_finality_fixpoint_range(&mut states, state_range.clone());
-                    remove_negative_transitions_range(&mut states, state_range);
-                    let neg_elapsed = neg_start.elapsed().as_micros() as u64;
-                    NEG_RES_TIME.fetch_add(neg_elapsed, std::sync::atomic::Ordering::Relaxed);
-                    let count = NEG_RES_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    if count == 8000 {
-                        let total_us = NEG_RES_TIME.load(std::sync::atomic::Ordering::Relaxed);
-                        crate::debug!(3, "Negative resolution: {} calls, {}ms total, {:.1}µs avg", count, total_us / 1000, total_us as f64 / count as f64);
-                    }
+                let new_states_filter: HashSet<NWAStateID> = (new_states_offset..states.len()).collect();
+                if !new_states_filter.is_empty() {
+                    apply_cancellations(&mut states, &new_states_filter);
+                    apply_finality_fixpoint(&mut states, &new_states_filter);
+                    remove_negative_transitions(&mut states, &new_states_filter);
                 }
                 nwa_body = NWABody::union(&nwa_body, &composed_body);
             }
