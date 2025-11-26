@@ -1,5 +1,0 @@
----
-triple:          'arm64-apple-darwin'
-binary-path:     'aug25/models/precompute3_engine.cpython-312-darwin.so'
-relocations:     []
-...

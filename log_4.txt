@@ -1,5 +1,0 @@
-Avg for record 1: 20.00
-
-                                        Multi-line
-                                        string in with block.
-                                        
