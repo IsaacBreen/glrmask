@@ -71,10 +71,10 @@ Paper-related material is stored in `gcg-paper/`.
 
 ### Notes Structure
 
-Notes are organized in `notes/`:
+Notes are organized in `gcg-paper/notes/`:
 
 ```
-notes/
+gcg-paper/notes/
 ├── index.md              # Master index, always update this
 ├── daily/
 │   └── YYYY-MM-DD.md     # Daily notes, one per day
@@ -87,17 +87,17 @@ notes/
 We treat this like a research journal or like a personal wiki. Try to keep track of your thoughts and ideas here. It's important that your progress is traceable so in future people can understand what you did and why, and benefit from any insights you may have discovered.
 
 **Daily Notes Protocol:**
-1. Each day gets one note file: `notes/daily/YYYY-MM-DD.md`
+1. Each day gets one note file: `gcg-paper/notes/daily/YYYY-MM-DD.md`
 2. Append new sections chronologically with timestamp headers
-3. When creating a new day's note, update `notes/index.md` with summary
+3. When creating a new day's note, update `gcg-paper/notes/index.md` with summary
 4. Link to attachments for detailed/lengthy content
 
 ### Paper
 
-LaTeX paper is in `paper/`:
+LaTeX paper is in `gcg-paper/paper/`:
 
 ```
-paper/
+gcg-paper/paper/
 ├── main.tex              # Main document
 ├── references.bib        # Bibliography
 ├── figures/              # Figures (PDF, PNG, etc.)
@@ -106,20 +106,20 @@ paper/
 
 **Build paper:**
 ```bash
-cd paper && latexmk -pdf main.tex
+cd gcg-paper/paper && latexmk -pdf main.tex
 ```
 
 **Continuous build:**
 ```bash
-cd paper && latexmk -pdf -pvc main.tex
+cd gcg-paper/paper && latexmk -pdf -pvc main.tex
 ```
 
 ### Downloads
 
-External resources go in `downloads/`:
+External resources go in `gcg-paper/downloads/`:
 
 ```
-downloads/
+gcg-paper/downloads/
 ├── papers/               # PDF papers
 ├── repos/                # Cloned repositories  
 └── data/                 # Datasets
@@ -137,12 +137,12 @@ Use `vscode-websearchforcopilot_webSearch` for literature discovery.
 **Download papers:**
 - arXiv: Fetch PDF URLs directly (e.g., `https://arxiv.org/pdf/XXXX.XXXXX.pdf`)
 - Use `fetch_webpage` to get abstract/metadata first
-- Download via curl: `curl -L "https://arxiv.org/pdf/XXXX.XXXXX.pdf" -o downloads/papers/YYYY_Author_Title.pdf`
+- Download via curl: `curl -L "https://arxiv.org/pdf/XXXX.XXXXX.pdf" -o gcg-paper/downloads/papers/YYYY_Author_Title.pdf`
 
 **Clone GitHub repos:**
 Use terminal with shallow clone to save space:
 ```bash
-git clone --depth 1 https://github.com/owner/repo.git downloads/repos/owner_repo
+git clone --depth 1 https://github.com/owner/repo.git gcg-paper/downloads/repos/owner_repo
 ```
 
 **Search GitHub code (without cloning):**
@@ -150,8 +150,8 @@ Use `github_repo` tool to search code snippets in public repos.
 
 **When doing literature review:**
 1. Search for papers on topic
-2. Download PDFs to `downloads/papers/`
-3. Add entry to `notes/attachments/references.md`
+2. Download PDFs to `gcg-paper/downloads/papers/`
+3. Add entry to `gcg-paper/notes/attachments/references.md`
 4. Note key findings in daily note
 
 ---
