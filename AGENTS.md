@@ -228,6 +228,10 @@ Also avoid HEREDOC for writing to files. Avoid HEREDOC and long quoted strings i
 
 ---
 
+Don't bother running benchmarks for lots of iterations unless either it's fast to do so or the user explicitly asks you to. This only needs to be done once, and the user will decide when the time is right. Until then, we only need rough placeholders stats. Otherwise, it wastes time and slows the development cycle.
+
+---
+
 IMPORTANT GLOBAL INSTRUCTIONS
 
 DO NOT STOP GOING until the job is done. Do not the user for additional input. Keep going without supervision until it's done. Make whatever adjustments or assumptions are needed. The user will be watching over you so it's safe. But do NOT stop.
