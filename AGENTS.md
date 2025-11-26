@@ -156,6 +156,22 @@ Use `github_repo` tool to search code snippets in public repos.
 
 ---
 
+Avoid running code like this:
+
+```bash
+# Example of what NOT to do
+cd /Users/isaacbreen/Projects2/grammars2024 && python3 << 'PYTHON_SCRIPT'
+cmdand heredoc> import llguidance as llg
+...
+PYTHON_SCRIPT
+```
+
+It tends to cause escape errors. Instead, write a script to `temp/` and run it.
+
+Also avoid HEREDOC for writing to files. Avoid HEREDOC in general.
+
+---
+
 IMPORTANT GLOBAL INSTRUCTIONS
 
 DO NOT STOP GOING until the job is done. Do not the user for additional input. Keep going without supervision until it's done. Make whatever adjustments or assumptions are needed. The user will be watching over you so it's safe. But do NOT stop.
