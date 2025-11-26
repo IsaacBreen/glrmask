@@ -120,6 +120,23 @@ We treat this like a research journal or like a personal wiki. Try to keep track
 3. When creating a new day's note, update `gcg-paper/notes/index.md` with summary
 4. Link to attachments for detailed/lengthy content
 
+**When to Check `user.md`:**
+
+Check `gcg-paper/notes/user.md` periodically when:
+- You're stuck or making no progress on a task for a very long time
+- Encountering repeated environment-related errors (dependency issues, system configuration, etc.)
+- Facing insurmountable problems that can't be resolved through code changes
+- At the start of a new conversation or task if you haven't checked recently
+
+Do NOT rely on it for:
+- Normal code-related errors that can be debugged and fixed
+- One-off failures or temporary issues
+- General guidance when you're not sure what to do next
+- Routine development work
+
+The user *may* update it occasionally, but you shouldn't rely on it. Definitely do not under any circumstances *wait* for it to be updated before proceeding.
+
+
 ### Paper
 
 LaTeX paper is in `gcg-paper/paper/`:
@@ -203,7 +220,7 @@ cmdand quote> import _sep1
 '
 ```
 
-Both cases tend to cause escape errors. Instead, write a script to `temp/`, for example, and run it.
+Both cases tend to cause escape errors. Instead, when you want to run some Python code ad hoc, write a script to `temp/`, for example, and run it. Note that the `temp/` directory is gitignored.
 
 Also avoid HEREDOC for writing to files. Avoid HEREDOC and long quoted strings in bash in general.
 
