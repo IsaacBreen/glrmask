@@ -159,6 +159,8 @@ cd gcg-paper/paper && latexmk -pdf main.tex
 cd gcg-paper/paper && latexmk -pdf -pvc main.tex
 ```
 
+IMPORTANT: **Do NOT** attempt to create or access paper in `paper/`; **the correct directory is `gcg-paper/paper/`.**
+
 ### Downloads
 
 External resources go in `gcg-paper/downloads/`:
