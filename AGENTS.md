@@ -81,6 +81,7 @@ gcg-paper/notes/
 └── attachments/
     ├── references.md     # Literature review & citations
     ├── ideas.md          # Running ideas & TODOs
+    ├── user.md           # User comments & observations
     └── ...               # Other long-running notes
 ```
 
