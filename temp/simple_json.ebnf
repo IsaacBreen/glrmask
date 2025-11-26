@@ -1,0 +1,15 @@
+#![ignore(WS)]
+value ::= object | array | string | number | "true" | "false" | "null" ;
+object ::= "{" pair_list "}" ;
+pair_list ::= pair pair_rest | ;
+pair_rest ::= pair_rest "," pair | ;
+pair ::= string ":" value ;
+array ::= "[" value_list "]" ;
+value_list ::= value value_rest | ;
+value_rest ::= value_rest "," value | ;
+string ::= '"' CHARS '"' ;
+CHARS ::= [^"\\]* ;
+number ::= SIGN DIGITS ;
+SIGN ::= ["-]? ;
+DIGITS ::= [0-9]+ ;
+WS ::= [ \t\n\r]+ ;

@@ -1,0 +1,20 @@
+#![ignore(WS)]
+program ::= statement statements ;
+statements ::= statements statement | ;
+statement ::= assignment | expression_stmt ;
+assignment ::= IDENT "=" expression ";" ;
+expression_stmt ::= expression ";" ;
+expression ::= term expr_rest ;
+expr_rest ::= expr_rest add_op term | ;
+add_op ::= "+" | "-" ;
+term ::= factor term_rest ;
+term_rest ::= term_rest mul_op factor | ;
+mul_op ::= "*" | "/" ;
+factor ::= NUMBER | IDENT | "(" expression ")" | call ;
+call ::= IDENT "(" args_opt ")" ;
+args_opt ::= args | ;
+args ::= expression args_rest ;
+args_rest ::= args_rest "," expression | ;
+IDENT ::= [a-zA-Z_][a-zA-Z0-9_]* ;
+NUMBER ::= [0-9]+ ;
+WS ::= [ \t\n\r]+ ;
