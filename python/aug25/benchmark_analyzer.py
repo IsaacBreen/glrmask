@@ -157,8 +157,8 @@ def _format_ranges_as_tokens(ranges: Tuple[Tuple[int, int], ...], id_to_token: D
                 sub_range_start_idx = i
                 current_group = next_group
 
-    # Truncation logic
-    MAX_LEN = 30000
+    # Truncation logic - limit to ~400 characters for readable output
+    MAX_LEN = 400
     output_str = ""
     truncated = False
     for i, part in enumerate(all_parts):
@@ -174,15 +174,29 @@ def _format_ranges_as_tokens(ranges: Tuple[Tuple[int, int], ...], id_to_token: D
 
     return output_str
 
-def _format_numeric_ranges(ranges: Tuple[Tuple[int, int], ...]) -> str:
-    """Converts numeric ranges to a clean string like '1..10, 12, 15..20'."""
-    parts = []
-    for start, end in ranges:
+def _format_numeric_ranges(ranges: Tuple[Tuple[int, int], ...], max_len: int = 400) -> str:
+    """Converts numeric ranges to a clean string like '1..10, 12, 15..20'.
+    
+    Truncates output to max_len characters for readability.
+    """
+    output_str = ""
+    truncated = False
+    for i, (start, end) in enumerate(ranges):
         if start == end:
-            parts.append(str(start))
+            part = str(start)
         else:
-            parts.append(f"{start}..{end}")
-    return ", ".join(parts)
+            part = f"{start}..{end}"
+        
+        next_str = output_str + (", " if i > 0 else "") + part
+        if len(next_str) > max_len and i > 0:
+            truncated = True
+            break
+        output_str = next_str
+    
+    if truncated:
+        output_str += ", ..."
+    
+    return output_str
 
 def _print_mismatch_context(code_bytes: bytes, start_byte: int, end_byte: int):
     """Prints the source line and context for a token mismatch."""
@@ -391,7 +405,7 @@ def analyze_results(result_files: List[Path], output_dir: Path, baseline_key: Op
                         constraint_json = json.load(f_plain)
 
                 id_to_token: dict[int, bytes] = {}
-                llm_token_map = constraint_json.get('llm_token_map', [])
+                llm_token_map = constraint_json.get('original_llm_vocab', {}).get('llm_token_map', [])
                 for token_bytes_list, token_id in llm_token_map:
                     id_to_token[token_id] = bytes(token_bytes_list)
                 id_to_token_by_model[model_name] = id_to_token
