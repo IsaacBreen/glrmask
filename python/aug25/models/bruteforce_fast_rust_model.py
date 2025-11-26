@@ -30,7 +30,7 @@ class BruteForceFastRustModel:
         constraint_state = ffi.GrammarConstraintState(constraint)
         
         data = json.loads(s)
-        vocab = data['precompute4_vocab']
+        vocab = data['vocab']
 
         internal_to_original_map = {
             int(k): RangeSet.from_indices(v) for k, v in dict(vocab['internal_to_original']).items()

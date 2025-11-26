@@ -191,7 +191,7 @@ def analyze_weights(data):
                 if w_set: max_token_id = max(max_token_id, max(w_set))
 
     # 3. Vocab (Not Pooled)
-    # precompute4_vocab -> internal_to_original is a map index -> LLMTokenBV
+    # vocab -> internal_to_original is a map index -> LLMTokenBV
     if 'vocab' in data and 'internal_to_original' in data['vocab']:
          # internal_to_original is a list of [k, v] pairs in JSON if it's a BTreeMap? 
          # Wait, Rust BTreeMap<usize, LLMTokenBV> serializes to JSON object if keys are strings, 
