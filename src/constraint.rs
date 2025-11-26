@@ -1139,23 +1139,15 @@ impl<'a> GrammarConstraintState<'a> {
     }
 
     pub fn commit(&mut self, llm_token_id: LLMTokenID) {
-        // Look up the token bytes for the given ID
-        if let Some(token_bytes) = self
-            .parent
-            .original_llm_vocab
-            .llm_token_map
-            .get_by_right(&llm_token_id)
-        {
-            self.commit_bytes(token_bytes);
-        } else {
-            // Token ID not in vocabulary - this is an error but we shouldn't panic
-            // Log it if debug is enabled and return without updating state
-            eprintln!(
-                "Warning: Attempted to commit token ID {} which is not in the vocabulary (max: {})",
-                llm_token_id.0,
-                self.parent.original_llm_vocab.max_original_llm_token_id
-            );
-        }
+        self.commit_bytes(
+            &self
+                .parent
+                .original_llm_vocab
+                .llm_token_map
+                .get_by_right(&llm_token_id)
+                .unwrap()
+                .clone(),
+        );
     }
 
     pub fn is_active(&self) -> bool { !self.state.is_empty() }
