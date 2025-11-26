@@ -207,22 +207,22 @@ Avoid running code like this:
 
 ```bash
 # Example of what NOT to do
-cd /Users/isaacbreen/Projects2/grammars2024 && python3 << 'PYTHON_SCRIPT'
-cmdand heredoc> import llguidance as llg
+python3 << 'EOF'
+import llguidance as llg
 ...
-PYTHON_SCRIPT
+EOF
 ```
 
 *Also* avoid passing long code strings
 
 ```bash
 > cd /Users/isaacbreen/Projects2/grammars2024 && python3 -c '
-cmdand quote> import _sep1
+import _sep1
 ...
 '
 ```
 
-Both cases tend to cause escape errors. Instead, when you want to run some Python code ad hoc, write a script to `temp/`, for example, and run it. Note that the `temp/` directory is gitignored.
+Both tactics tend to cause escape errors. Instead, when you want to run some Python code ad hoc, write a script to e.g. `temp/` and run it. Note that the `temp/` directory is gitignored.
 
 Also avoid HEREDOC for writing to files. Avoid HEREDOC and long quoted strings in bash in general.
 
