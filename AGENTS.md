@@ -65,7 +65,45 @@ RUST_TEST_THREADS=1 RUSTFLAGS=-Awarnings ENABLE_PROGRESS_BAR=0 CARGO_PROFILE_DEV
 
 ---
 
+
+---
+
+## Git Operations
+
+**IMPORTANT: Feel free to commit changes locally, but DO NOT push.**
+
+When making significant changes to the codebase or research notes:
+
+1. **Commit frequently** - It's encouraged to commit logical chunks of work
+2. **Write descriptive commit messages** - Follow conventional commit format when possible
+3. **DO NOT PUSH** - Never run `git push` or push to remote repositories
+4. **Staging changes** - Use `git add` to stage relevant files
+
+Example workflow:
+```bash
+git add file1.rs file2.rs
+git commit -m "feat: add optimization for X"
+```
+
+Or for research/paper work:
+```bash
+git add gcg-paper/notes/daily/2025-11-26.md gcg-paper/paper/main.tex
+git commit -m "docs: update paper with benchmark results"
+```
+
+**Conventional commit types:**
+- `feat:` - New features
+- `fix:` - Bug fixes
+- `docs:` - Documentation changes
+- `refactor:` - Code refactoring
+- `perf:` - Performance improvements
+- `test:` - Test additions or updates
+- `chore:` - Maintenance tasks
+
+---
+
 ## Research & Paper Writing
+
 
 Paper-related material is stored in `gcg-paper/`.
 
