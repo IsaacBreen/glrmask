@@ -105,13 +105,14 @@ fn optimize_dwa_and_vocab(
     class_to_tokens.insert(0, (0..=max_tok).collect());
     let mut num_classes = 1;
 
-    // OPTIMIZATION: Limit the number of weights we process to avoid excessive class splitting
-    // Process only the most impactful weights (small ones that split classes effectively)
+    // Process all non-trivial weights to ensure correct equivalence class partitioning.
+    // Previously limited to 500 weights, but this caused incorrect token merging when
+    // tokens differed only in weights beyond the limit.
     let mut weights_vec: Vec<&Weight> = unique_weights.iter().filter(|w| !w.is_all_fast()).collect();
-    weights_vec.sort_by_key(|w| w.rsb.ranges_len()); // Process smaller weights first
-    let max_weights_to_process = weights_vec.len().min(500); // Limit to 500 weights max
+    weights_vec.sort_by_key(|w| w.rsb.ranges_len()); // Process smaller weights first for efficiency
+    crate::debug!(3, "DWA Vocab Optimization: Processing {} unique weights", weights_vec.len());
 
-    for w in weights_vec.iter().take(max_weights_to_process) {
+    for w in weights_vec.iter() {
         let mut tokens_in_w_by_class: HashMap<usize, Vec<usize>> = HashMap::with_capacity(num_classes);
         for t in w.iter_up_to(max_tok) {
             if t <= max_tok {
