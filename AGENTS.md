@@ -122,19 +122,19 @@ We treat this like a research journal or like a personal wiki. Try to keep track
 
 **When to Check `user.md`:**
 
-Check `gcg-paper/notes/user.md` periodically when:
+You *may* (but don't have to) check `gcg-paper/notes/user.md` periodically when:
 - You're stuck or making no progress on a task for a very long time
 - Encountering repeated environment-related errors (dependency issues, system configuration, etc.)
 - Facing insurmountable problems that can't be resolved through code changes
 - At the start of a new conversation or task if you haven't checked recently
 
-Do NOT rely on it for:
+Do not rely on it for:
 - Normal code-related errors that can be debugged and fixed
 - One-off failures or temporary issues
 - General guidance when you're not sure what to do next
 - Routine development work
 
-The user *may* update it occasionally, but you shouldn't rely on it. Definitely do not under any circumstances *wait* for it to be updated before proceeding.
+The user *may* update it occasionally, but you shouldn't rely on that. Definitely do not under any circumstances *wait* for it to be updated before proceeding.
 
 
 ### Paper
