@@ -1,0 +1,16 @@
+{
+  "name": "Grammar Constrained Decoding",
+  "version": "1.0.0",
+  "features": [
+    "precomputation",
+    "weighted automata",
+    "state equivalence"
+  ],
+  "performance": {
+    "latency_us": 17,
+    "speedup": 83810,
+    "vocabulary_size": 50257
+  },
+  "active": true,
+  "count": 42
+}

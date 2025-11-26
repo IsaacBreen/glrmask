@@ -1,0 +1,21 @@
+{
+  "name": "Grammar Constrained Decoding",
+  "version": "1.0.0",
+  "authors": ["Isaac Breen"],
+  "description": "Efficient grammar-constrained decoding via precomputed DWA",
+  "performance": {
+    "latency_us": 17,
+    "speedup": 83810,
+    "vocabulary_reduction": 0.992
+  },
+  "benchmarks": [
+    {"name": "JavaScript", "tokens": 50257, "classes": 395},
+    {"name": "JSON", "tokens": 50257, "classes": 260}
+  ],
+  "config": {
+    "enabled": true,
+    "debug": false,
+    "max_states": 8266,
+    "weights_pool": 1139
+  }
+}

@@ -1,0 +1,23 @@
+// RFC 8259 compliant JSON grammar for benchmarking
+#![ignore(WS)]
+
+json ::= value EOF;
+EOF ::= '<|EOF|>';
+WS ::= [ \t\n\r]+;
+
+value ::= object | array | STRING | NUMBER | 'true' | 'false' | 'null';
+
+object ::= '{' (pair (',' pair)*)? '}';
+pair ::= STRING ':' value;
+
+array ::= '[' (value (',' value)*)? ']';
+
+STRING ::= '"' CHAR* '"';
+CHAR ::= [^"\\] | '\\' ESCAPE;
+ESCAPE ::= ["\\/bfnrt] | 'u' HEX HEX HEX HEX;
+HEX ::= [0-9a-fA-F];
+
+NUMBER ::= '-'? INT FRAC? EXP?;
+INT ::= '0' | [1-9][0-9]*;
+FRAC ::= '.' [0-9]+;
+EXP ::= [eE] [+-]? [0-9]+;
