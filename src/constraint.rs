@@ -34,7 +34,7 @@ use crate::{
 };
 use crate::datastructures::bitset::Bitset;
 use crate::datastructures::gss_acc::Acc;
-use crate::glr::parser::ParseStateEdgeContent;
+use crate::glr::parser::{ExpectElse, ParseStateEdgeContent};
 use crate::precompute4::weighted_automata::{DWA, NWA};
 use crate::precompute4::weighted_automata::{RangeSet as WARangeSet, Weight};
 
@@ -1145,7 +1145,7 @@ impl<'a> GrammarConstraintState<'a> {
                 .original_llm_vocab
                 .llm_token_map
                 .get_by_right(&llm_token_id)
-                .unwrap()
+                .expect_else(|| "LLM token ID not found in original vocab".to_string())
                 .clone(),
         );
     }
