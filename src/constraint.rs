@@ -1145,7 +1145,7 @@ impl<'a> GrammarConstraintState<'a> {
                 .original_llm_vocab
                 .llm_token_map
                 .get_by_right(&llm_token_id)
-                .expect_else(|| format!("LLM token ID {:?} not found in original vocab map. Max voacb ID: {}", llm_token_id, self.parent.original_llm_vocab.max_original_llm_token_id))
+                .expect_else(|| format!("LLM token ID {} not found in original vocab map. Vocab size: {}, Max vocab ID: {}", llm_token_id.0, self.parent.original_llm_vocab.llm_token_map.len(), self.parent.original_llm_vocab.max_original_llm_token_id))
                 .clone(),
         );
     }
