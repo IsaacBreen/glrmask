@@ -218,7 +218,7 @@ fn process_string_node(
                     for gid in &next_data.finalizers {
                         for lin_idx in (child.range_start as usize)..(child.range_end as usize) {
                             let orig = linearized_mapping[lin_idx];
-                            let rem = remainder_hashes[orig][(depth + 1) as usize];
+                            let rem = remainder_hashes[orig].get((depth + 1) as usize).copied().unwrap_or(0);
                             let h = hash_outcome(KIND_MATCH, gid as u32, depth + 1, rem, 0);
                             accumulators[orig] = accumulators[orig].wrapping_add(weight.wrapping_mul(h));
                         }
@@ -271,18 +271,34 @@ fn process_string_node(
 // -----------------------------------------------------------------------------
 
 fn precompute_remainder_hashes(regex: &Regex, strings: &[Vec<u8>]) -> Vec<Vec<u64>> {
-    strings.iter().map(|s| {
-        (0..=s.len()).map(|i| {
+    let mut result = Vec::with_capacity(strings.len());
+
+    for s in strings {
+        let len = s.len();
+        let mut hashes = vec![0u64; len + 1];
+
+        // Base case: End of string is a Terminal outcome
+        // We fold the u128 hash to u64
+        let term_hash = hash_outcome(KIND_TERM, 0, 0, 0, 0);
+        hashes[len] = (term_hash ^ (term_hash >> 64)) as u64;
+
+        for i in (0..len).rev() {
             let exec = regex.execute_from_state_fast(&s[i..], regex.dfa.start_state);
-            let mut h = 0u64;
-            for m in exec.matches {
-                let k = (m.group_id as u64).wrapping_mul(0x9E3779B97F4A7C15) ^ ((m.position as u64).rotate_left(32));
-                h = h.wrapping_mul(0xC6A4A7935BD1E995).wrapping_add(k);
+            
+            // Find first non-zero-width match (greedy earliest)
+            if let Some(m) = exec.matches.iter().find(|m| m.position > 0) {
+                 let next_idx = i + m.position;
+                 let next_h = hashes.get(next_idx).copied().unwrap_or(0); // Safe due to sizing
+                 let h = hash_outcome(KIND_MATCH, m.group_id as u32, m.position as u32, next_h, 0);
+                 hashes[i] = (h ^ (h >> 64)) as u64;
+            } else {
+                 let h = hash_outcome(KIND_DEAD_END, 0, 0, 0, 0);
+                 hashes[i] = (h ^ (h >> 64)) as u64;
             }
-            let end_val = if let Some(fs) = exec.end_state { (fs as u64).wrapping_add(1) } else { 0 };
-            h ^ end_val.rotate_left(17)
-        }).collect()
-    }).collect()
+        }
+        result.push(hashes);
+    }
+    result
 }
 
 fn group_by_hash(accumulators: &[u128]) -> BTreeMap<Vec<usize>, Vec<usize>> {
