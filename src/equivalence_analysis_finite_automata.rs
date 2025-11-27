@@ -2,6 +2,7 @@ use crate::finite_automata::{Regex, GroupID};
 use crate::profiler::PROGRESS_BAR_ENABLED;
 use hashbrown::HashMap;
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
+use rayon::prelude::*;
 use smallvec::SmallVec;
 use std::collections::BTreeMap;
 
@@ -11,14 +12,7 @@ use std::collections::BTreeMap;
 
 /// If true, performs a brute-force verification step after hashing.
 /// This guarantees 100% correctness at the cost of performance.
-/// 
-/// NOTE: Currently set to true because the hash-based algorithm uses single-pass
-/// DFA execution semantics, but the constraint system uses iterative tokenization
-/// (restarting from state 0 after each terminal match). The verification step
-/// correctly splits any groups that were incorrectly merged.
-/// 
-/// Performance impact: ~200ms additional overhead for 50k tokens.
-const VERIFY_RESULTS: bool = true;
+const VERIFY_RESULTS: bool = false;
 
 // -----------------------------------------------------------------------------
 // Hashing Utilities (128-bit)
@@ -275,15 +269,19 @@ fn process_string_node(
 // -----------------------------------------------------------------------------
 
 fn precompute_remainder_hashes(regex: &Regex, strings: &[Vec<u8>]) -> Vec<Vec<u64>> {
-    strings.iter().map(|s| {
+    // Compute a hash for each suffix of each string using ITERATIVE tokenization.
+    // After a match, tokenization restarts from the start state.
+    // 
+    // This is parallelized across strings since each string's hashes are independent.
+    strings.par_iter().map(|s| {
         (0..=s.len()).map(|i| {
-            let exec = regex.execute_from_state_fast(&s[i..], regex.dfa.start_state);
+            let outcome = iterative_tokenize(regex, &s[i..], regex.dfa.start_state);
             let mut h = 0u64;
-            for m in exec.matches {
-                let k = (m.group_id as u64).wrapping_mul(0x9E3779B97F4A7C15) ^ ((m.position as u64).rotate_left(32));
+            for (group_id, position) in outcome.matches {
+                let k = (group_id as u64).wrapping_mul(0x9E3779B97F4A7C15) ^ ((position as u64).rotate_left(32));
                 h = h.wrapping_mul(0xC6A4A7935BD1E995).wrapping_add(k);
             }
-            let end_val = if let Some(fs) = exec.end_state { (fs as u64).wrapping_add(1) } else { 0 };
+            let end_val = if let Some(fs) = outcome.end_state { (fs as u64).wrapping_add(1) } else { 0 };
             h ^ end_val.rotate_left(17)
         }).collect()
     }).collect()
@@ -384,13 +382,14 @@ fn iterative_tokenize(regex: &Regex, s: &[u8], initial_state: usize) -> Iterativ
             }
         }
         
-        // Take the first (earliest) match - this matches the tokenization priority
-        // Matches are sorted by position, so the first one is the earliest
-        let first_match = &exec.matches[0];
-        all_matches.push((first_match.group_id, offset + first_match.position));
+        // Take the LAST match - this is the LONGEST (greedy) match.
+        // Matches are ordered by position, so last match is the longest.
+        // This matches the greedy tokenization semantics used by most lexers.
+        let last_match = &exec.matches[exec.matches.len() - 1];
+        all_matches.push((last_match.group_id, offset + last_match.position));
         
         // After a terminal match, restart from state 0 at the new offset
-        offset += first_match.position;
+        offset += last_match.position;
         current_state = regex.dfa.start_state;
     }
     
