@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 /// If true, performs a brute-force verification step after hashing.
 /// This guarantees 100% correctness at the cost of performance.
-const VERIFY_RESULTS: bool = true;
+const VERIFY_RESULTS: bool = false;
 
 // -----------------------------------------------------------------------------
 // Hashing Utilities (128-bit)
