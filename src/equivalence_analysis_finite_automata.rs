@@ -412,7 +412,7 @@ fn verify_string_classes(regex: &Regex, strings: &[Vec<u8>], initial_states: &[u
             eprintln!("    String {}: {:?} (Hash: {:032x})", idx2, String::from_utf8_lossy(&strings[*idx2]), accumulators[*idx2]);
             eprintln!("    Were grouped together but are NOT equivalent");
         }
-    panic!("Hash collision or logic error detected in equivalence analysis");
+        panic!("Hash collision or logic error detected in equivalence analysis");
     }
 }
 
