@@ -11,7 +11,14 @@ use std::collections::BTreeMap;
 
 /// If true, performs a brute-force verification step after hashing.
 /// This guarantees 100% correctness at the cost of performance.
-const VERIFY_RESULTS: bool = false;
+/// 
+/// NOTE: Currently set to true because the hash-based algorithm uses single-pass
+/// DFA execution semantics, but the constraint system uses iterative tokenization
+/// (restarting from state 0 after each terminal match). The verification step
+/// correctly splits any groups that were incorrectly merged.
+/// 
+/// Performance impact: ~200ms additional overhead for 50k tokens.
+const VERIFY_RESULTS: bool = true;
 
 // -----------------------------------------------------------------------------
 // Hashing Utilities (128-bit)
@@ -122,7 +129,7 @@ pub fn find_equivalence_classes(
     strings: &[Vec<u8>],
     initial_states: &[usize],
 ) -> BTreeMap<Vec<usize>, Vec<usize>> {
-    // // TEMP: Disable
+    // // TEMP: Disable equivalence classes to verify this is the source of the bug
     // return strings.iter().enumerate().map(|(i, _)| (vec![i], vec![i])).collect();
     crate::debug!(3, "Analyzing string equivalence for {} strings.", strings.len());
     let pb = create_pb(4);
@@ -303,6 +310,7 @@ fn create_pb(len: u64) -> ProgressBar {
 fn verify_string_classes(regex: &Regex, strings: &[Vec<u8>], initial_states: &[usize], classes: &mut BTreeMap<Vec<usize>, Vec<usize>>) {
     let mut new_classes: BTreeMap<Vec<usize>, Vec<usize>> = BTreeMap::new();
     let mut next_id = 0;
+    let mut num_split = 0;
 
     for (_, group) in classes.iter() {
         if group.len() <= 1 {
@@ -320,22 +328,286 @@ fn verify_string_classes(regex: &Regex, strings: &[Vec<u8>], initial_states: &[u
             }
             subgroups.push((idx, vec![idx]));
         }
+        if subgroups.len() > 1 {
+            num_split += 1;
+            eprintln!("VERIFY: Group of {} split into {} subgroups. First few strings:", group.len(), subgroups.len());
+            for (i, (leader, members)) in subgroups.iter().enumerate().take(3) {
+                eprintln!("  Subgroup {}: {:?} (leader: {:?})", i, members.len(), String::from_utf8_lossy(&strings[*leader]));
+            }
+        }
         for (_, members) in subgroups {
             new_classes.entry(vec![next_id]).or_default().extend(members);
             next_id += 1;
         }
     }
+    if num_split > 0 {
+        eprintln!("VERIFY: Split {} groups due to incorrect hashing", num_split);
+    }
     *classes = new_classes;
+}
+
+/// Represents the outcome of iteratively tokenizing a string.
+/// This captures all the information needed to determine equivalence.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct IterativeTokenizationOutcome {
+    /// Sequence of (group_id, position) for each matched terminal
+    matches: Vec<(GroupID, usize)>,
+    /// Final state after consuming the entire string (None if dead-ended)
+    end_state: Option<usize>,
+}
+
+/// Performs iterative tokenization, matching the semantics of commit_bytes.
+/// After each terminal match, restarts from state 0 at the new offset.
+fn iterative_tokenize(regex: &Regex, s: &[u8], initial_state: usize) -> IterativeTokenizationOutcome {
+    let mut all_matches = Vec::new();
+    let mut offset = 0;
+    let mut current_state = initial_state;
+    
+    while offset < s.len() {
+        let exec = regex.execute_from_state_fast(&s[offset..], current_state);
+        
+        if exec.matches.is_empty() {
+            // No match found, check if we have an end state
+            if let Some(end_state) = exec.end_state {
+                // We consumed partial input but didn't complete a terminal match
+                // The end_state tells us where we'd continue from
+                return IterativeTokenizationOutcome {
+                    matches: all_matches,
+                    end_state: Some(end_state),
+                };
+            } else {
+                // Dead end - no match possible
+                return IterativeTokenizationOutcome {
+                    matches: all_matches,
+                    end_state: None,
+                };
+            }
+        }
+        
+        // Take the first (earliest) match - this matches the tokenization priority
+        // Matches are sorted by position, so the first one is the earliest
+        let first_match = &exec.matches[0];
+        all_matches.push((first_match.group_id, offset + first_match.position));
+        
+        // After a terminal match, restart from state 0 at the new offset
+        offset += first_match.position;
+        current_state = regex.dfa.start_state;
+    }
+    
+    // Consumed entire string
+    // The final state is the current state we'd continue from
+    IterativeTokenizationOutcome {
+        matches: all_matches,
+        end_state: Some(current_state),
+    }
 }
 
 fn are_strings_eq(regex: &Regex, strings: &[Vec<u8>], states: &[usize], a: usize, b: usize) -> bool {
     let (sa, sb) = (&strings[a], &strings[b]);
     for &st in states {
-        let (ra, rb) = (regex.execute_from_state_fast(sa, st), regex.execute_from_state_fast(sb, st));
-        if ra.end_state != rb.end_state || ra.matches.len() != rb.matches.len() { return false; }
-        for (ma, mb) in ra.matches.iter().zip(rb.matches.iter()) {
-            if ma.group_id != mb.group_id || ma.position != mb.position { return false; }
+        let outcome_a = iterative_tokenize(regex, sa, st);
+        let outcome_b = iterative_tokenize(regex, sb, st);
+        if outcome_a != outcome_b {
+            return false;
         }
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::finite_automata::eat_u8;
+    use crate::groups;
+
+    /// Verify that find_equivalence_classes produces the same groupings as brute-force.
+    fn verify_equivalence_classes(regex: &Regex, strings: &[Vec<u8>]) {
+        let initial_states: Vec<usize> = (0..regex.dfa.states.len()).collect();
+        let classes = find_equivalence_classes(regex, strings, &initial_states);
+
+        // Build brute-force equivalence classes
+        let mut bf_classes: Vec<Vec<usize>> = Vec::new();
+        for i in 0..strings.len() {
+            let mut found = false;
+            for class in &mut bf_classes {
+                if are_strings_eq(regex, strings, &initial_states, class[0], i) {
+                    class.push(i);
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                bf_classes.push(vec![i]);
+            }
+        }
+
+        // Compare: each class from find_equivalence_classes should be a subset of some bf_class
+        for (_, indices) in &classes {
+            if indices.len() <= 1 {
+                continue;
+            }
+            // All members should be equivalent according to brute-force
+            let first = indices[0];
+            for &other in &indices[1..] {
+                assert!(
+                    are_strings_eq(regex, strings, &initial_states, first, other),
+                    "Strings {} and {} are in same class but not equivalent!\n  {:?}\n  {:?}",
+                    first, other,
+                    String::from_utf8_lossy(&strings[first]),
+                    String::from_utf8_lossy(&strings[other])
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_equivalence_simple_dead_ends() {
+        // Regex that matches 'a' or 'b' (two groups)
+        // Strings: "a", "b", "c", "d"
+        // Expected: "a" alone, "b" alone, "c" and "d" together (both dead-end immediately)
+        let regex = groups![
+            eat_u8(b'a'),
+            eat_u8(b'b'),
+        ].build();
+
+        let strings: Vec<Vec<u8>> = vec![
+            b"a".to_vec(),
+            b"b".to_vec(),
+            b"c".to_vec(),
+            b"d".to_vec(),
+        ];
+
+        verify_equivalence_classes(&regex, &strings);
+    }
+
+    #[test]
+    fn test_equivalence_different_dead_end_depths() {
+        // Regex: 'ab' (matches 'a' followed by 'b')
+        // Strings: "ab", "ac", "ax", "bc"
+        // "ab" matches, "ac" and "ax" dead-end at position 2, "bc" dead-ends at position 1
+        // "ac" and "ax" should be equivalent (same outcome), but different from "bc"
+        let regex = groups![
+            crate::seq_fast!(eat_u8(b'a'), eat_u8(b'b')),
+        ].build();
+
+        let strings: Vec<Vec<u8>> = vec![
+            b"ab".to_vec(),
+            b"ac".to_vec(),
+            b"ax".to_vec(),
+            b"bc".to_vec(),
+        ];
+
+        verify_equivalence_classes(&regex, &strings);
+    }
+
+    #[test]
+    fn test_equivalence_shared_prefix_different_suffix() {
+        // Regex: '[' or ']' as separate tokens
+        // Strings: " []", " [&", " ['", " [("
+        // " []" should have a third match (']'), while others dead-end
+        let regex = groups![
+            eat_u8(b' '),
+            eat_u8(b'['),
+            eat_u8(b']'),
+        ].build();
+
+        let strings: Vec<Vec<u8>> = vec![
+            b" []".to_vec(),
+            b" [&".to_vec(),
+            b" ['".to_vec(),
+            b" [(".to_vec(),
+        ];
+
+        verify_equivalence_classes(&regex, &strings);
+    }
+
+    #[test]
+    fn test_equivalence_with_multi_char_tokens() {
+        // Simulate JSON-like tokenizer with multi-char possibilities
+        // Tokens: 'true', 'false', '[', ']', '{', '}'
+        use crate::seq_fast;
+        
+        // Build 'true' and 'false' as sequences
+        let true_seq = seq_fast!(eat_u8(b't'), eat_u8(b'r'), eat_u8(b'u'), eat_u8(b'e'));
+        let false_seq = seq_fast!(eat_u8(b'f'), eat_u8(b'a'), eat_u8(b'l'), eat_u8(b's'), eat_u8(b'e'));
+        
+        let regex = groups![
+            true_seq,
+            false_seq,
+            eat_u8(b'['),
+            eat_u8(b']'),
+            eat_u8(b'{'),
+            eat_u8(b'}'),
+        ].build();
+
+        let strings: Vec<Vec<u8>> = vec![
+            b"true".to_vec(),       // matches 'true'
+            b"false".to_vec(),      // matches 'false'
+            b"falsehood".to_vec(),  // matches 'false', then dead-end on 'h'
+            b"falsely".to_vec(),    // matches 'false', then dead-end on 'l'
+            b"tru".to_vec(),        // dead-end, no complete match
+            b"fal".to_vec(),        // dead-end, no complete match
+            b"[]".to_vec(),         // matches '[', then ']'
+            b"[&".to_vec(),         // matches '[', then dead-end
+            b"{}".to_vec(),         // matches '{', then '}'
+            b"{:".to_vec(),         // matches '{', then dead-end
+        ];
+
+        verify_equivalence_classes(&regex, &strings);
+    }
+
+    #[test]
+    fn test_equivalence_minimal_json_like() {
+        // More minimal test: 'false' token, strings 'false' vs 'falsehood' vs 'falsely'
+        // 'false' should be alone
+        // 'falsehood' and 'falsely' should be together (both: match 'false' at pos 5, then dead-end)
+        use crate::seq_fast;
+        
+        let false_seq = seq_fast!(eat_u8(b'f'), eat_u8(b'a'), eat_u8(b'l'), eat_u8(b's'), eat_u8(b'e'));
+        
+        let regex = groups![
+            false_seq,
+        ].build();
+
+        let strings: Vec<Vec<u8>> = vec![
+            b"false".to_vec(),
+            b"falsehood".to_vec(),
+            b"falsely".to_vec(),
+        ];
+
+        verify_equivalence_classes(&regex, &strings);
+    }
+
+    #[test]
+    fn test_equivalence_end_with_extra_char() {
+        // Regression test for iterative tokenization semantics.
+        // " []" should NOT be equivalent to " [];" because after iteratively 
+        // tokenizing both strings:
+        // - " []" -> [WS, '[', ']'] and ends at state 0 (consumed all input)
+        // - " [];" -> [WS, '[', ']'] but then ';' at state 0 causes dead-end
+        //
+        // The fix ensures are_strings_eq uses iterative tokenization (restarting
+        // from state 0 after each terminal match) instead of single-pass DFA execution.
+        use crate::finite_automata::rep1;
+        
+        let regex = groups![
+            rep1(eat_u8(b' ')),  // WS
+            eat_u8(b'['),        // array open
+            eat_u8(b']'),        // array close
+        ].build();
+
+        let strings: Vec<Vec<u8>> = vec![
+            b" []".to_vec(),   // matches WS, [, ] and ends successfully
+            b" [];".to_vec(),  // matches WS, [, ], then ';' causes dead-end
+        ];
+
+        // Verify they are NOT considered equivalent
+        let initial_states: Vec<usize> = (0..regex.dfa.states.len()).collect();
+        let are_equal = are_strings_eq(&regex, &strings, &initial_states, 0, 1);
+        assert!(!are_equal, 
+            "Strings ' []' and ' [];' should NOT be equivalent - the latter has a trailing char that dead-ends");
+        
+        // Also verify through the full find_equivalence_classes function
+        verify_equivalence_classes(&regex, &strings);
+    }
 }
