@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 
 /// If true, performs a brute-force verification step after hashing.
 /// This guarantees 100% correctness at the cost of performance.
-const VERIFY_RESULTS: bool = false;
+const VERIFY_RESULTS: bool = true;
 
 // -----------------------------------------------------------------------------
 // Hashing Utilities (128-bit)
@@ -171,7 +171,7 @@ pub fn find_equivalence_classes(
 
     if VERIFY_RESULTS {
         pb.set_message("Verifying...");
-        verify_string_classes(regex, strings, initial_states, &mut classes);
+        verify_string_classes(regex, strings, initial_states, &classes);
     }
 
     pb.finish_with_message("Done");
@@ -319,7 +319,7 @@ fn create_pb(len: u64) -> ProgressBar {
     pb
 }
 
-fn verify_string_classes(regex: &Regex, strings: &[Vec<u8>], initial_states: &[usize], classes: &mut BTreeMap<Vec<usize>, Vec<usize>>) {
+fn verify_string_classes(regex: &Regex, strings: &[Vec<u8>], initial_states: &[usize], classes: &BTreeMap<Vec<usize>, Vec<usize>>) {
     let mut new_classes: BTreeMap<Vec<usize>, Vec<usize>> = BTreeMap::new();
     let mut next_id = 0;
 
@@ -344,7 +344,10 @@ fn verify_string_classes(regex: &Regex, strings: &[Vec<u8>], initial_states: &[u
             next_id += 1;
         }
     }
-    *classes = new_classes;
+    assert_eq!(classes.len(), new_classes.len(),
+        "Verification failed: Expected {} classes, but brute-force found {} classes.",
+        classes.len(), new_classes.len()
+    );
 }
 
 /// Represents the outcome of iteratively tokenizing a string.
