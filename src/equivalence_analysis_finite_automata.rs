@@ -3,7 +3,7 @@ use crate::profiler::PROGRESS_BAR_ENABLED;
 use hashbrown::HashMap;
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use smallvec::SmallVec;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 // -----------------------------------------------------------------------------
 // Configuration
@@ -131,8 +131,11 @@ pub fn find_equivalence_classes(
     crate::debug!(3, "Analyzing string equivalence for {} strings.", strings.len());
     let pb = create_pb(4);
 
+    pb.set_message("Computing state signatures...");
+    let state_signatures = compute_state_signatures(regex);
+
     pb.set_message("Precomputing signatures...");
-    let remainder_hashes = precompute_remainder_hashes(regex, strings);
+    let remainder_hashes = precompute_remainder_hashes(regex, strings, &state_signatures);
     pb.inc(1);
 
     pb.set_message("Building Trie...");
@@ -155,7 +158,7 @@ pub fn find_equivalence_classes(
     root_active.sort_unstable_by_key(|k| k.0);
 
     process_string_node(
-        regex, &trie, 0, root_active, &remainder_hashes,
+        regex, &trie, 0, root_active, &remainder_hashes, &state_signatures,
         &linearized_mapping, &mut accumulators, &mut diffs, 0
     );
     pb.inc(1);
@@ -185,6 +188,7 @@ fn process_string_node(
     node_idx: usize,
     active_states: Vec<(u32, u128)>,
     remainder_hashes: &[Vec<u64>],
+    state_signatures: &[u32],
     linearized_mapping: &[usize],
     accumulators: &mut Vec<u128>,
     diffs: &mut Vec<u128>,
@@ -196,7 +200,8 @@ fn process_string_node(
     if let Some(_orig_idx) = node.terminal_string_idx {
         let lin_idx = node.range_start as usize;
         for &(dfa_state, weight) in &active_states {
-            let h = hash_outcome(KIND_TERM, 0, 0, 0, dfa_state);
+            let signature = state_signatures[dfa_state as usize];
+            let h = hash_outcome(KIND_TERM, 0, 0, 0, signature);
             let contrib = weight.wrapping_mul(h);
             diffs[lin_idx] = diffs[lin_idx].wrapping_add(contrib);
             diffs[lin_idx + 1] = diffs[lin_idx + 1].wrapping_sub(contrib);
@@ -262,7 +267,7 @@ fn process_string_node(
             merged.push((cs, cw));
         }
 
-        process_string_node(regex, trie, child as usize, merged, remainder_hashes, linearized_mapping, accumulators, diffs, depth + 1);
+        process_string_node(regex, trie, child as usize, merged, remainder_hashes, state_signatures, linearized_mapping, accumulators, diffs, depth + 1);
     }
 }
 
@@ -270,7 +275,26 @@ fn process_string_node(
 // Helpers & Verification
 // -----------------------------------------------------------------------------
 
-fn precompute_remainder_hashes(regex: &Regex, strings: &[Vec<u8>]) -> Vec<Vec<u64>> {
+fn compute_state_signatures(regex: &Regex) -> Vec<u32> {
+    let mut unique_sigs: HashMap<Vec<GroupID>, u32> = HashMap::new();
+    let mut state_sigs = Vec::with_capacity(regex.dfa.states.len());
+    let mut next_id = 1; 
+    
+    for state in &regex.dfa.states {
+        // Two states are equivalent if they allow the same set of future tokens
+        let sig: Vec<GroupID> = state.possible_future_group_ids.iter().cloned().collect();
+        if let Some(&id) = unique_sigs.get(&sig) {
+            state_sigs.push(id);
+        } else {
+            unique_sigs.insert(sig, next_id);
+            state_sigs.push(next_id);
+            next_id += 1;
+        }
+    }
+    state_sigs
+}
+
+fn precompute_remainder_hashes(regex: &Regex, strings: &[Vec<u8>], state_signatures: &[u32]) -> Vec<Vec<u64>> {
     let mut result = Vec::with_capacity(strings.len());
 
     for s in strings {
@@ -293,7 +317,7 @@ fn precompute_remainder_hashes(regex: &Regex, strings: &[Vec<u8>]) -> Vec<Vec<u6
                  hashes[i] = (h ^ (h >> 64)) as u64;
             } else {
                  let (kind, state) = match exec.end_state {
-                     Some(s) => (KIND_TERM, s as u32),
+                     Some(s) => (KIND_TERM, state_signatures[s]),
                      None => (KIND_DEAD_END, 0),
                  };
                  let h = hash_outcome(kind, 0, 0, 0, state);
@@ -388,7 +412,7 @@ fn verify_string_classes(regex: &Regex, strings: &[Vec<u8>], initial_states: &[u
             eprintln!("    String {}: {:?} (Hash: {:032x})", idx2, String::from_utf8_lossy(&strings[*idx2]), accumulators[*idx2]);
             eprintln!("    Were grouped together but are NOT equivalent");
         }
-        panic!("Hash collision or logic error detected in equivalence analysis");
+    panic!("Hash collision or logic error detected in equivalence analysis");
     }
 }
 
@@ -398,9 +422,13 @@ fn verify_string_classes(regex: &Regex, strings: &[Vec<u8>], initial_states: &[u
 struct IterativeTokenizationOutcome {
     /// Sequence of (group_id, position) for each matched terminal
     matches: Vec<(GroupID, usize)>,
-    /// Final state after consuming the entire string (None if dead-ended)
-    end_state: Option<usize>,
+    /// Whether the entire string was consumed
+    consumed_all: bool,
+    /// Possible future tokens from the end state (empty if dead-ended)
+    future_tokens: Vec<GroupID>,
 }
+
+/// Performs iterative tokenization, matching the semantics of commit_bytes.
 
 /// Performs iterative tokenization, matching the semantics of commit_bytes.
 /// After each terminal match, restarts from state 0 at the new offset.
@@ -419,13 +447,15 @@ fn iterative_tokenize(regex: &Regex, s: &[u8], initial_state: usize) -> Iterativ
                 // The end_state tells us where we'd continue from
                 return IterativeTokenizationOutcome {
                     matches: all_matches,
-                    end_state: Some(end_state),
+                    consumed_all: true,
+                    future_tokens: regex.dfa.states[end_state].possible_future_group_ids.iter().cloned().collect(),
                 };
             } else {
                 // Dead end - no match possible
                 return IterativeTokenizationOutcome {
                     matches: all_matches,
-                    end_state: None,
+                    consumed_all: false,
+                    future_tokens: Vec::new(),
                 };
             }
         }
@@ -444,7 +474,8 @@ fn iterative_tokenize(regex: &Regex, s: &[u8], initial_state: usize) -> Iterativ
     // The final state is the current state we'd continue from
     IterativeTokenizationOutcome {
         matches: all_matches,
-        end_state: Some(current_state),
+        consumed_all: true,
+        future_tokens: regex.dfa.states[current_state].possible_future_group_ids.iter().cloned().collect(),
     }
 }
 
