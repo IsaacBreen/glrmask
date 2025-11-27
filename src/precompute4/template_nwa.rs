@@ -19,7 +19,7 @@ impl From<NWABuildError> for FullDWABuildError {
 }
 
 /// Build a template NWA corresponding to the characterization of a single terminal.
-pub(crate) fn build_template_nwa_from_characterization(bb: &BelowBottomCharacterization) -> Result<NWA, FullDWABuildError> {
+pub fn build_template_nwa_from_characterization(bb: &BelowBottomCharacterization) -> Result<NWA, FullDWABuildError> {
     let mut nwa = NWA::new();
     let w_all = Weight::all();
 

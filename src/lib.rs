@@ -14,7 +14,7 @@ mod test_constraint_basic;
 mod profiler;
 
 // New lightweight pass framework for Trie3 optimization
-mod precompute4;
+pub mod precompute4;
 mod constraint_fns;
 mod state_equivalence_analysis_finite_automata;
 
