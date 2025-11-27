@@ -151,12 +151,7 @@ gcg-paper/paper/
 
 **Build paper:**
 ```bash
-cd gcg-paper/paper && latexmk -pdf main.tex
-```
-
-**Continuous build:**
-```bash
-cd gcg-paper/paper && latexmk -pdf -pvc main.tex
+cd gcg-paper/paper && pdflatex --interaction=nonstopmode main.tex; cd -
 ```
 
 IMPORTANT: **Do NOT** attempt to create or access paper in `paper/`; **the correct directory is `gcg-paper/paper/`.**
