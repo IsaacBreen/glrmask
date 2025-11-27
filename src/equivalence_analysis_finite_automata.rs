@@ -328,13 +328,69 @@ fn verify_string_classes(regex: &Regex, strings: &[Vec<u8>], initial_states: &[u
     *classes = new_classes;
 }
 
+/// Represents the outcome of iteratively tokenizing a string.
+/// This captures all the information needed to determine equivalence.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct IterativeTokenizationOutcome {
+    /// Sequence of (group_id, position) for each matched terminal
+    matches: Vec<(GroupID, usize)>,
+    /// Final state after consuming the entire string (None if dead-ended)
+    end_state: Option<usize>,
+}
+
+/// Performs iterative tokenization, matching the semantics of commit_bytes.
+/// After each terminal match, restarts from state 0 at the new offset.
+fn iterative_tokenize(regex: &Regex, s: &[u8], initial_state: usize) -> IterativeTokenizationOutcome {
+    let mut all_matches = Vec::new();
+    let mut offset = 0;
+    let mut current_state = initial_state;
+    
+    while offset < s.len() {
+        let exec = regex.execute_from_state_fast(&s[offset..], current_state);
+        
+        if exec.matches.is_empty() {
+            // No match found, check if we have an end state
+            if let Some(end_state) = exec.end_state {
+                // We consumed partial input but didn't complete a terminal match
+                // The end_state tells us where we'd continue from
+                return IterativeTokenizationOutcome {
+                    matches: all_matches,
+                    end_state: Some(end_state),
+                };
+            } else {
+                // Dead end - no match possible
+                return IterativeTokenizationOutcome {
+                    matches: all_matches,
+                    end_state: None,
+                };
+            }
+        }
+        
+        // Take the first (earliest) match - this matches the tokenization priority
+        // Matches are sorted by position, so the first one is the earliest
+        let first_match = &exec.matches[0];
+        all_matches.push((first_match.group_id, offset + first_match.position));
+        
+        // After a terminal match, restart from state 0 at the new offset
+        offset += first_match.position;
+        current_state = regex.dfa.start_state;
+    }
+    
+    // Consumed entire string
+    // The final state is the current state we'd continue from
+    IterativeTokenizationOutcome {
+        matches: all_matches,
+        end_state: Some(current_state),
+    }
+}
+
 fn are_strings_eq(regex: &Regex, strings: &[Vec<u8>], states: &[usize], a: usize, b: usize) -> bool {
     let (sa, sb) = (&strings[a], &strings[b]);
     for &st in states {
-        let (ra, rb) = (regex.execute_from_state_fast(sa, st), regex.execute_from_state_fast(sb, st));
-        if ra.end_state != rb.end_state || ra.matches.len() != rb.matches.len() { return false; }
-        for (ma, mb) in ra.matches.iter().zip(rb.matches.iter()) {
-            if ma.group_id != mb.group_id || ma.position != mb.position { return false; }
+        let outcome_a = iterative_tokenize(regex, sa, st);
+        let outcome_b = iterative_tokenize(regex, sb, st);
+        if outcome_a != outcome_b {
+            return false;
         }
     }
     true
