@@ -203,7 +203,7 @@ Use `github_repo` tool to search code snippets in public repos.
 
 ---
 
-Avoid running code like this:
+**IMPORTANT:** Avoid using HEREDOC:
 
 ```bash
 # Example of what NOT to do
@@ -213,7 +213,7 @@ import llguidance as llg
 EOF
 ```
 
-*Also* avoid passing long code strings
+*Also* avoid using long strings in bash:
 
 ```bash
 > cd /Users/isaacbreen/Projects2/grammars2024 && python3 -c '
@@ -222,9 +222,8 @@ import _sep1
 '
 ```
 
-Both tactics tend to cause escape errors. Instead, when you want to run some Python code ad hoc, write a script to e.g. `temp/` and run it. Note that the `temp/` directory is gitignored.
+Both tactics **tend to cause escape errors**. Instead, when you want to run some Python code ad hoc, **write a script to a temporary file** e.g. in `temp/` and run it. Note that the `temp/` directory is gitignored.
 
-Also avoid HEREDOC for writing to files. Avoid HEREDOC and long quoted strings in bash in general.
 
 ---
 
