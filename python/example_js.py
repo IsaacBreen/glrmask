@@ -111,9 +111,10 @@ def main():
     id_to_token = {}
     max_token_id = 0
     for token_str, token_id in gpt2_vocab_map.items():
-        # The GPT-2 tokenizer uses 'Ġ' to represent a space prefix and 'Ċ' for newlines.
+        # The GPT-2 tokenizer uses special Unicode characters for bytes:
+        # 'Ġ' (U+0120) for space, 'Ċ' (U+010A) for newline, 'ĉ' (U+0109) for tab, 'č' (U+010D) for CR
         # We need to convert these back to their raw byte representations.
-        processed_str = token_str.replace("Ġ", " ").replace("Ċ", "\n")
+        processed_str = token_str.replace("Ġ", " ").replace("Ċ", "\n").replace("ĉ", "\t").replace("č", "\r")
         token_bytes = processed_str.encode('utf-8')
 
         token_to_id[token_bytes] = token_id

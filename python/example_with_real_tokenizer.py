@@ -44,7 +44,8 @@ model_name = "Qwen/Qwen2.5-Coder-0.5B"
 # model_name = "gpt2"
 tokenizer = AutoTokenizer.from_pretrained(model_name)
 
-llm_token_to_id = {token.replace("Ġ", " ").encode(): i for token, i in tokenizer.vocab.items()}
+# Convert GPT-2/Qwen byte-level BPE Unicode characters to actual bytes
+llm_token_to_id = {token.replace("Ġ", " ").replace("Ċ", "\n").replace("ĉ", "\t").replace("č", "\r").encode(): i for token, i in tokenizer.vocab.items()}
 llm_id_to_token = {i: token for token, i in llm_token_to_id.items()}
 llm_tokens = list(tokenizer.vocab.keys())
 print("vocab size:", len(llm_tokens))

@@ -151,8 +151,9 @@ if __name__ == "__main__":
     skipped_tokens = 0
     for token_str, token_id in tokenizer.vocab.items():
         try:
-            # Handle potential special characters or byte representations like GPT-2's 'Ġ' for space
-            processed_token_str = token_str.replace("Ġ", " ")
+            # Handle special byte-level BPE characters:
+            # GPT-2/Qwen: Ġ=space, Ċ=newline, ĉ=tab, č=CR
+            processed_token_str = token_str.replace("Ġ", " ").replace("Ċ", "\n").replace("ĉ", "\t").replace("č", "\r")
             # Encode to bytes, assuming UTF-8
             token_bytes = processed_token_str.encode('utf-8')
             llm_token_to_id[token_bytes] = token_id

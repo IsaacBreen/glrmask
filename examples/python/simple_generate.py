@@ -285,11 +285,11 @@ if __name__ == "__main__":
     # model.to('cuda') # Uncomment if a CUDA-enabled GPU is available
 
     # Prepare LLM token maps.
-    # Tokenizers like Qwen's might use special characters (e.g., ' ' U+2581) for spaces.
-    # These need to be converted to standard spaces ' ' for matching grammar literals.
+    # Tokenizers like Qwen's/GPT-2's use special Unicode characters for byte-level BPE:
+    # Ġ (U+0120) -> space, Ċ (U+010A) -> newline, ĉ (U+0109) -> tab, č (U+010D) -> CR
     raw_tokenizer_vocab = tokenizer.get_vocab()
     processed_tokenizer_vocab: Dict[str, int] = {
-        k.replace("Ġ", " "): v  # Replace Qwen's space char U+2581 with standard space ' '
+        k.replace("Ġ", " ").replace("Ċ", "\n").replace("ĉ", "\t").replace("č", "\r"): v
         for k, v in raw_tokenizer_vocab.items()
     }
 

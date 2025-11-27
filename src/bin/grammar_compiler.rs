@@ -66,7 +66,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut max_original_llm_token_id = 0;
 
     for (token_str, token_id) in vocab {
-        let processed_token_str = token_str.replace("Ġ", " ").replace("ą", "\n").replace("Ċ", "\n");
+        // Convert GPT-2 byte-level BPE Unicode characters to actual bytes
+        // See: https://github.com/openai/gpt-2/blob/master/src/encoder.py
+        // Ġ (U+0120) -> space, Ċ (U+010A) -> newline, ĉ (U+0109) -> tab, č (U+010D) -> CR
+        // Note: ą appears to be a legacy mapping that also represents newline in some contexts
+        let processed_token_str = token_str
+            .replace("Ġ", " ")
+            .replace("ą", "\n")
+            .replace("Ċ", "\n")
+            .replace("ĉ", "\t")
+            .replace("č", "\r");
         let token_bytes = processed_token_str.as_bytes().to_vec();
         llm_token_map.insert(token_bytes, LLMTokenID(token_id));
         max_original_llm_token_id = max_original_llm_token_id.max(token_id);

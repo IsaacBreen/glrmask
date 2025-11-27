@@ -111,8 +111,11 @@ def filter_vocab(vocab: dict[str, int], allowed_lengths: set[int], min_len_unbou
     
     filtered = {}
     for token_str, token_id in vocab.items():
-        # This processing matches the logic in the Rust tests
-        processed_str = token_str.replace("Ġ", " ").replace("ą", "\n").replace("Ċ", "\n")
+        # Convert GPT-2 byte-level BPE Unicode characters to actual bytes
+        # See: https://github.com/openai/gpt-2/blob/master/src/encoder.py
+        # Ġ (U+0120) -> space, Ċ (U+010A) -> newline, ĉ (U+0109) -> tab, č (U+010D) -> CR
+        # Note: ą appears to be a legacy mapping that also represents newline in some contexts
+        processed_str = token_str.replace("Ġ", " ").replace("ą", "\n").replace("Ċ", "\n").replace("ĉ", "\t").replace("č", "\r")
         token_len = len(processed_str.encode('utf-8'))
         
         keep = False
