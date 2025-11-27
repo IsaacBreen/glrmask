@@ -277,11 +277,16 @@ fn process_string_node(
 
 fn compute_state_signatures(regex: &Regex) -> Vec<u64> {
     regex.dfa.states.iter().map(|s| {
-        let mut h = 0u64;
+        let mut h = 0xcbf29ce484222325u64; // FNV-1a 64-bit init
         for &gid in &s.possible_future_group_ids {
-            // Simple rolling mix for the set of IDs
-            h = h.wrapping_mul(0x9e3779b97f4a7c15).wrapping_add(gid as u64);
+            let k = (gid as u64).wrapping_add(1);
+            h ^= k;
+            h = h.wrapping_mul(0x100000001b3u64); // FNV prime
         }
+        // Final avalanche
+        h ^= h >> 33;
+        h = h.wrapping_mul(0xff51afd7ed558ccdu64);
+        h ^= h >> 33;
         h
     }).collect()
 }
