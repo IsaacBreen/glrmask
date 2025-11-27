@@ -1428,6 +1428,83 @@ fn test_constraint_expression_cycle() {
 }
 
 #[test]
+fn test_json_gpt2() -> Result<(), Box<dyn std::error::Error>> {
+    let ebnf_grammar = indoc! {r#"
+        #![ignore(WS)]
+        value ::= object | array | STRING | NUMBER | 'true' | 'false' | 'null' ;
+        object ::= '{' pairs '}' ;
+        pairs ::= pair (',' pair)* | ;
+        pair ::= STRING ':' value ;
+        array ::= '[' items ']' ;
+        items ::= value (',' value)* | ;
+        STRING ::= '"' [^"]* '"' ;
+        NUMBER ::= '-'? [0-9]+ ;
+        WS ::= [ \t\n\r]+ ;
+    "#};
+    let grammar_definition = GrammarDefinition::from_ebnf(ebnf_grammar)?;
+
+    // Simulate a subset of GPT-2 vocab (representative tokens)
+    let mut llm_token_map = LLMTokenMap::new();
+    let tokens = vec![
+        // Whitespace
+        (" ".as_bytes().to_vec(), 0),
+        ("\n".as_bytes().to_vec(), 1),
+        // Structural
+        ("{".as_bytes().to_vec(), 2),
+        ("}".as_bytes().to_vec(), 3),
+        ("[".as_bytes().to_vec(), 4),
+        ("]".as_bytes().to_vec(), 5),
+        (":".as_bytes().to_vec(), 6),
+        (",".as_bytes().to_vec(), 7),
+        // Keywords
+        ("true".as_bytes().to_vec(), 8),
+        ("false".as_bytes().to_vec(), 9),
+        ("null".as_bytes().to_vec(), 10),
+        // Strings
+        ("\"".as_bytes().to_vec(), 11),
+        ("\"key\"".as_bytes().to_vec(), 12),
+        // Numbers
+        ("-".as_bytes().to_vec(), 13),
+        ("1".as_bytes().to_vec(), 14),
+        ("123".as_bytes().to_vec(), 15),
+        // Invalid
+        ("apple".as_bytes().to_vec(), 16),
+        ("x".as_bytes().to_vec(), 17),
+        // Partial (likely invalid)
+        ("tr".as_bytes().to_vec(), 18),
+    ];
+
+    let max_id = tokens.iter().map(|(_, id)| *id).max().unwrap_or(0);
+    for (b, id) in &tokens {
+        llm_token_map.insert(b.clone(), LLMTokenID(*id));
+    }
+
+    let constraint = GrammarConstraint::new_from_grammar_definition(
+        Arc::new(grammar_definition),
+        llm_token_map.clone(),
+        max_id,
+        &GrammarConstraintConfig::default(),
+    );
+
+    let mut state = constraint.init();
+    let mask = state.get_mask();
+    println!("Initial mask: {:?}", mask);
+
+    // Brute force verification
+    let mut expected_mask = RangeSet::zeros();
+    for (_bytes, id) in &llm_token_map {
+        let mut temp_state = constraint.init();
+        temp_state.commit(*id);
+        if temp_state.is_active() {
+            expected_mask.insert(id.0);
+        }
+    }
+    assert_eq!(mask, expected_mask, "Initial mask should match brute force check");
+
+    Ok(())
+}
+
+#[test]
 fn test_js_simplified_ebnf_string() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Load and compile the grammar from the EBNF file
     let ebnf_grammar = indoc! {r#"
