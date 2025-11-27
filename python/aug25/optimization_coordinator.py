@@ -17,6 +17,7 @@ from statistics import mean, median
 
 import numpy as np
 
+from python.aug25.constraint_utils import extract_id_to_token_map
 from python.aug25.stats import Stats
 from python.aug25.models.precompute3_model_pure_python_opt3 import Model
 from python.aug25.models.precompute3_model_pure_python_opt3 import VariationBase
@@ -36,11 +37,7 @@ def load_constraint_text(path: Path) -> str:
 
 def build_id_to_token(constraint_json_str: str) -> dict[int, bytes]:
     constraint_json = json.loads(constraint_json_str)
-    llm_token_map = constraint_json['original_llm_vocab']['llm_token_map']
-    id_to_token: dict[int, bytes] = {}
-    for token_bytes, token_id in llm_token_map:
-        id_to_token[token_id] = bytes(token_bytes)
-    return id_to_token
+    return extract_id_to_token_map(constraint_json)
 
 
 def aggregate(values, method: str):

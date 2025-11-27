@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 import numpy as np
 from tqdm import tqdm
 
+from python.aug25.constraint_utils import extract_id_to_token_map
 from python.aug25.stats import Stats
 
 # --- Helper Functions (from former example_js.py) ---
@@ -364,10 +365,7 @@ def main():
     # Tokenize input code once
     print(f"Loading and tokenizing code from: {args.code}")
     constraint_json = json.loads(constraint_json_str)
-    llm_token_map: tuple[list[int], int] = constraint_json['original_llm_vocab']['llm_token_map']
-    id_to_token: dict[int, bytes] = {}
-    for token_bytes, token_id in llm_token_map:
-        id_to_token[token_id] = bytes(token_bytes)
+    id_to_token = extract_id_to_token_map(constraint_json)
     code_bytes = args.code.read_bytes()
     tokens_with_pos = greedy_tokenizer(code_bytes, id_to_token)
     print(f"Tokenized into {len(tokens_with_pos)} tokens.")

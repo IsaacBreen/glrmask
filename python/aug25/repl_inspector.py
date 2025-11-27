@@ -12,6 +12,7 @@ if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
 # Import the visualizer, which is a standalone script
+from python.aug25.constraint_utils import extract_id_to_token_map
 from python.aug25.visualize_constraint import visualize_constraint
 
 # --- Data Structures ---
@@ -206,7 +207,10 @@ class Inspector:
         return ConstraintModel(
             roots_map=roots_map, arena=arena, tokenizer=tokenizer, parser_table=parser_table,
             possible_matches=possible_matches,
-            llm_token_map={bytes(k).decode('utf-8', 'replace'): v for k, v in data['original_llm_vocab']['llm_token_map']},
+            llm_token_map={
+                token_bytes.decode('utf-8', 'replace'): token_id
+                for token_id, token_bytes in extract_id_to_token_map(data).items()
+            },
             internal_to_original_map={int(k): v for k, v in dict(vocab['internal_to_original']).items()},
             internal_max_llm_token=vocab['internal_max_llm_token']
         )

@@ -7,6 +7,11 @@ import warnings
 
 import pandas as pd
 
+try:
+    from .constraint_utils import extract_id_to_token_map
+except ImportError:
+    from constraint_utils import extract_id_to_token_map
+
 
 # Suppress noisy FutureWarning from seaborn/pandas
 warnings.filterwarnings('ignore', category=FutureWarning)
@@ -404,10 +409,7 @@ def analyze_results(result_files: List[Path], output_dir: Path, baseline_key: Op
                     with open(p, 'r', encoding='utf-8') as f_plain:
                         constraint_json = json.load(f_plain)
 
-                id_to_token: dict[int, bytes] = {}
-                llm_token_map = constraint_json.get('original_llm_vocab', {}).get('llm_token_map', [])
-                for token_bytes_list, token_id in llm_token_map:
-                    id_to_token[token_id] = bytes(token_bytes_list)
+                id_to_token = extract_id_to_token_map(constraint_json)
                 id_to_token_by_model[model_name] = id_to_token
             except Exception as e:
                 print(f"Warning: could not load vocab from {grammar_file} for {model_name}: {e}")
