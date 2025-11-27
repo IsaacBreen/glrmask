@@ -34,7 +34,7 @@ impl SimplifyRustfstConfig {
 pub use crate::precompute4::template_nwa::FullDWABuildError;
 
 pub type Precomputed4 = DWA;
-type Signature = Vec<Vec<Option<TerminalID>>>;
+pub type Signature = Vec<Vec<Option<TerminalID>>>;
 
 pub struct NwaTraversalData {
     pub comp_id: Vec<usize>,
@@ -327,7 +327,7 @@ fn specialize_dwa_relative_with_map(parent_dwa: &DWA, weight_map: &HashMap<Weigh
     }
 }
 
-fn canonicalize_bundle(terminal_map: BTreeMap<Option<TerminalID>, Weight>) -> (Signature, Vec<Weight>) {
+pub fn canonicalize_bundle(terminal_map: BTreeMap<Option<TerminalID>, Weight>) -> (Signature, Vec<Weight>) {
     let mut weight_groups: HashMap<Weight, Vec<Option<TerminalID>>> = HashMap::new();
     for (term, weight) in terminal_map {
         if !weight.is_empty() { weight_groups.entry(weight).or_default().push(term); }
@@ -638,7 +638,7 @@ pub fn precompute4(parser: &GLRParser, input_nwa: &NWA) -> DWA {
     final_dwa
 }
 
-fn precompute_token_bvs_and_signatures(reversed_nwa: &NWA, traversal_data: &NwaTraversalData, initial_values: Vec<(StateID, LLMTokenBV)>, offset: Label) -> (HashMap<StateID, LLMTokenBV>, HashSet<Signature>) {
+pub fn precompute_token_bvs_and_signatures(reversed_nwa: &NWA, traversal_data: &NwaTraversalData, initial_values: Vec<(StateID, LLMTokenBV)>, offset: Label) -> (HashMap<StateID, LLMTokenBV>, HashSet<Signature>) {
     let node_tokens: Arc<Mutex<HashMap<StateID, LLMTokenBV>>> = Arc::new(Mutex::new(HashMap::new()));
     let signatures: Arc<Mutex<HashSet<Signature>>> = Arc::new(Mutex::new(HashSet::new()));
 
@@ -694,7 +694,7 @@ fn precompute_token_bvs_and_signatures(reversed_nwa: &NWA, traversal_data: &NwaT
     (Arc::try_unwrap(node_tokens).unwrap().into_inner().unwrap(), Arc::try_unwrap(signatures).unwrap().into_inner().unwrap())
 }
 
-fn resolve_negatives_and_optimize_and_determinize(parser: &GLRParser, mut combined_nwa: NWA) -> DWA {
+pub fn resolve_negatives_and_optimize_and_determinize(parser: &GLRParser, mut combined_nwa: NWA) -> DWA {
     crate::debug!(3, "Resolving negatives and optimizing for NWA with {} states and {} transitions...", combined_nwa.states.len(), combined_nwa.states.num_transitions());
     prune_continuations_from_final_states(&mut combined_nwa);
     crate::debug!(3, "Pruned continuations from final states. NWA with {} states and {} transitions remaining.", combined_nwa.states.len(), combined_nwa.states.num_transitions());
@@ -706,7 +706,7 @@ fn resolve_negatives_and_optimize_and_determinize(parser: &GLRParser, mut combin
     dwa
 }
 
-fn instantiate_nwa_template_into(
+pub fn instantiate_nwa_template_into(
     template: &NWA,
     ordered_weights: &[Weight],
     states: &mut NWAStates,

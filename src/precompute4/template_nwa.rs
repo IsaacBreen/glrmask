@@ -121,7 +121,7 @@ pub fn build_template_nwa_from_characterization(bb: &BelowBottomCharacterization
 }
 
 /// Build template DWAs for all terminals in the parser.
-pub(crate) fn build_template_dwas(parser: &GLRParser) -> Result<BTreeMap<TerminalID, DWA>, FullDWABuildError> {
+pub fn build_template_dwas(parser: &GLRParser) -> Result<BTreeMap<TerminalID, DWA>, FullDWABuildError> {
     // NOTE: Removed rayon parallelism - benchmarks showed single-threaded is 3x faster
     // (317ms vs 951ms) due to memory contention in dwa.simplify()/minimize operations.
     let all = compute_all_characterizations(parser);
@@ -141,14 +141,14 @@ pub(crate) fn build_template_dwas(parser: &GLRParser) -> Result<BTreeMap<Termina
 }
 
 /// Identity DWA used for the "ignore" terminal: start is final and there are no transitions.
-pub(crate) fn build_ignore_terminal_dwa() -> DWA {
+pub fn build_ignore_terminal_dwa() -> DWA {
     let mut dwa = DWA::new();
     dwa.states[dwa.body.start_state].final_weight = Some(Weight::all());
     dwa
 }
 
 /// DWA that accepts the empty string with the given weight.
-pub(crate) fn build_epsilon_dwa(weight: Weight) -> DWA {
+pub fn build_epsilon_dwa(weight: Weight) -> DWA {
     let mut dwa = DWA::new();
     dwa.states[dwa.body.start_state].final_weight = Some(weight);
     dwa
