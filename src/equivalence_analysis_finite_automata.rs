@@ -344,10 +344,8 @@ fn verify_string_classes(regex: &Regex, strings: &[Vec<u8>], initial_states: &[u
             next_id += 1;
         }
     }
-    assert_eq!(classes.len(), new_classes.len(),
-        "Verification failed: Expected {} classes, but brute-force found {} classes.",
-        classes.len(), new_classes.len()
-    );
+    // Ensure they're exactly the same, and report any differences
+    assert_eq!(classes, &new_classes);
 }
 
 /// Represents the outcome of iteratively tokenizing a string.
