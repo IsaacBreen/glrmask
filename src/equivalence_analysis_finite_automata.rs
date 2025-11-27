@@ -32,9 +32,9 @@ fn get_init_weight(idx: usize) -> u128 {
     mix_u128((idx as u128) << 1 | 1) | 1
 }
 
-const KIND_DEAD_END: u8 = 0;
-const KIND_MATCH: u8 = 1;
-const KIND_TERM: u8 = 2;
+const KIND_DEAD_END: u8 = 1;
+const KIND_MATCH: u8 = 2;
+const KIND_TERM: u8 = 3;
 
 #[inline(always)]
 fn hash_outcome(
@@ -44,7 +44,7 @@ fn hash_outcome(
     remainder_sig: u64,
     final_state: u32,
 ) -> u128 {
-    let flags = (kind as u32) | (final_state << 2);
+    let flags = (kind as u32) | (final_state << 4);
     let packed = ((match_pos as u128) << 96)
         | ((match_group as u128) << 64)
         | ((flags as u128) << 32);
