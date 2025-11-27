@@ -2,7 +2,6 @@ use crate::finite_automata::{Regex, GroupID};
 use crate::profiler::PROGRESS_BAR_ENABLED;
 use hashbrown::HashMap;
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
-use rayon::prelude::*;
 use smallvec::SmallVec;
 use std::collections::BTreeMap;
 
@@ -123,7 +122,7 @@ pub fn find_equivalence_classes(
     strings: &[Vec<u8>],
     initial_states: &[usize],
 ) -> BTreeMap<Vec<usize>, Vec<usize>> {
-    // // TEMP: Disable equivalence classes to verify this is the source of the bug
+    // // TEMP: Disable
     // return strings.iter().enumerate().map(|(i, _)| (vec![i], vec![i])).collect();
     crate::debug!(3, "Analyzing string equivalence for {} strings.", strings.len());
     let pb = create_pb(4);
@@ -269,19 +268,15 @@ fn process_string_node(
 // -----------------------------------------------------------------------------
 
 fn precompute_remainder_hashes(regex: &Regex, strings: &[Vec<u8>]) -> Vec<Vec<u64>> {
-    // Compute a hash for each suffix of each string using ITERATIVE tokenization.
-    // After a match, tokenization restarts from the start state.
-    // 
-    // This is parallelized across strings since each string's hashes are independent.
-    strings.par_iter().map(|s| {
+    strings.iter().map(|s| {
         (0..=s.len()).map(|i| {
-            let outcome = iterative_tokenize(regex, &s[i..], regex.dfa.start_state);
+            let exec = regex.execute_from_state_fast(&s[i..], regex.dfa.start_state);
             let mut h = 0u64;
-            for (group_id, position) in outcome.matches {
-                let k = (group_id as u64).wrapping_mul(0x9E3779B97F4A7C15) ^ ((position as u64).rotate_left(32));
+            for m in exec.matches {
+                let k = (m.group_id as u64).wrapping_mul(0x9E3779B97F4A7C15) ^ ((m.position as u64).rotate_left(32));
                 h = h.wrapping_mul(0xC6A4A7935BD1E995).wrapping_add(k);
             }
-            let end_val = if let Some(fs) = outcome.end_state { (fs as u64).wrapping_add(1) } else { 0 };
+            let end_val = if let Some(fs) = exec.end_state { (fs as u64).wrapping_add(1) } else { 0 };
             h ^ end_val.rotate_left(17)
         }).collect()
     }).collect()
@@ -308,7 +303,6 @@ fn create_pb(len: u64) -> ProgressBar {
 fn verify_string_classes(regex: &Regex, strings: &[Vec<u8>], initial_states: &[usize], classes: &mut BTreeMap<Vec<usize>, Vec<usize>>) {
     let mut new_classes: BTreeMap<Vec<usize>, Vec<usize>> = BTreeMap::new();
     let mut next_id = 0;
-    let mut num_split = 0;
 
     for (_, group) in classes.iter() {
         if group.len() <= 1 {
@@ -326,88 +320,21 @@ fn verify_string_classes(regex: &Regex, strings: &[Vec<u8>], initial_states: &[u
             }
             subgroups.push((idx, vec![idx]));
         }
-        if subgroups.len() > 1 {
-            num_split += 1;
-            eprintln!("VERIFY: Group of {} split into {} subgroups. First few strings:", group.len(), subgroups.len());
-            for (i, (leader, members)) in subgroups.iter().enumerate().take(3) {
-                eprintln!("  Subgroup {}: {:?} (leader: {:?})", i, members.len(), String::from_utf8_lossy(&strings[*leader]));
-            }
-        }
         for (_, members) in subgroups {
             new_classes.entry(vec![next_id]).or_default().extend(members);
             next_id += 1;
         }
     }
-    if num_split > 0 {
-        eprintln!("VERIFY: Split {} groups due to incorrect hashing", num_split);
-    }
     *classes = new_classes;
-}
-
-/// Represents the outcome of iteratively tokenizing a string.
-/// This captures all the information needed to determine equivalence.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct IterativeTokenizationOutcome {
-    /// Sequence of (group_id, position) for each matched terminal
-    matches: Vec<(GroupID, usize)>,
-    /// Final state after consuming the entire string (None if dead-ended)
-    end_state: Option<usize>,
-}
-
-/// Performs iterative tokenization, matching the semantics of commit_bytes.
-/// After each terminal match, restarts from state 0 at the new offset.
-fn iterative_tokenize(regex: &Regex, s: &[u8], initial_state: usize) -> IterativeTokenizationOutcome {
-    let mut all_matches = Vec::new();
-    let mut offset = 0;
-    let mut current_state = initial_state;
-    
-    while offset < s.len() {
-        let exec = regex.execute_from_state_fast(&s[offset..], current_state);
-        
-        if exec.matches.is_empty() {
-            // No match found, check if we have an end state
-            if let Some(end_state) = exec.end_state {
-                // We consumed partial input but didn't complete a terminal match
-                // The end_state tells us where we'd continue from
-                return IterativeTokenizationOutcome {
-                    matches: all_matches,
-                    end_state: Some(end_state),
-                };
-            } else {
-                // Dead end - no match possible
-                return IterativeTokenizationOutcome {
-                    matches: all_matches,
-                    end_state: None,
-                };
-            }
-        }
-        
-        // Take the LAST match - this is the LONGEST (greedy) match.
-        // Matches are ordered by position, so last match is the longest.
-        // This matches the greedy tokenization semantics used by most lexers.
-        let last_match = &exec.matches[exec.matches.len() - 1];
-        all_matches.push((last_match.group_id, offset + last_match.position));
-        
-        // After a terminal match, restart from state 0 at the new offset
-        offset += last_match.position;
-        current_state = regex.dfa.start_state;
-    }
-    
-    // Consumed entire string
-    // The final state is the current state we'd continue from
-    IterativeTokenizationOutcome {
-        matches: all_matches,
-        end_state: Some(current_state),
-    }
 }
 
 fn are_strings_eq(regex: &Regex, strings: &[Vec<u8>], states: &[usize], a: usize, b: usize) -> bool {
     let (sa, sb) = (&strings[a], &strings[b]);
     for &st in states {
-        let outcome_a = iterative_tokenize(regex, sa, st);
-        let outcome_b = iterative_tokenize(regex, sb, st);
-        if outcome_a != outcome_b {
-            return false;
+        let (ra, rb) = (regex.execute_from_state_fast(sa, st), regex.execute_from_state_fast(sb, st));
+        if ra.end_state != rb.end_state || ra.matches.len() != rb.matches.len() { return false; }
+        for (ma, mb) in ra.matches.iter().zip(rb.matches.iter()) {
+            if ma.group_id != mb.group_id || ma.position != mb.position { return false; }
         }
     }
     true
