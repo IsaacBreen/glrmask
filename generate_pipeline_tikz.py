@@ -178,7 +178,7 @@ def parse_tokenizer_dfa(dfa_str: str) -> Tuple[Set[int], List[Tuple[int, int, st
 
 
 def run_dot_layout(nodes: Set[int], edges: List[Tuple], final_states: Set[int] = None, 
-                   large: bool = False) -> Optional[str]:
+                   large: bool = False, nodesep: float = None, ranksep: float = None) -> Optional[str]:
     """Generate layout using Graphviz dot."""
     if final_states is None:
         final_states = set()
@@ -186,16 +186,24 @@ def run_dot_layout(nodes: Set[int], edges: List[Tuple], final_states: Set[int] =
     dot_content = ["digraph G {"]
     dot_content.append('  rankdir=LR;')
     
-    if large:
-        dot_content.append('  nodesep=1.5;')
-        dot_content.append('  ranksep=2.0;')
+    # Use provided values, or defaults based on 'large'
+    if nodesep is not None:
+        dot_content.append(f'  nodesep={nodesep};')
+    elif large:
+        dot_content.append('  nodesep=1.8;')
     else:
-        dot_content.append('  nodesep=0.8;')
-        dot_content.append('  ranksep=1.0;')
+        dot_content.append('  nodesep=1.2;')
+    
+    if ranksep is not None:
+        dot_content.append(f'  ranksep={ranksep};')
+    elif large:
+        dot_content.append('  ranksep=2.5;')
+    else:
+        dot_content.append('  ranksep=1.5;')
     
     for n in sorted(nodes):
         shape = "doublecircle" if n in final_states else "circle"
-        dot_content.append(f'  {n} [shape={shape}, width=0.5, height=0.5, fixedsize=true, fontsize=10];')
+        dot_content.append(f'  {n} [shape={shape}, width=0.4, height=0.4, fixedsize=true, fontsize=8];')
         
     for edge in edges:
         u, v = edge[0], edge[1]
@@ -398,7 +406,7 @@ def generate_merged_dwa_with_mini_dfas(
         if n == 0:
             styles.append("initial")
         style_str = ",".join(styles)
-        tikz.append(f"\\node[{style_str}, minimum size=12mm] (merged{n}) at ({tx:.2f},{ty:.2f}) {{\\large {n}}};")
+        tikz.append(f"\\node[{style_str}, minimum size=8mm] (merged{n}) at ({tx:.2f},{ty:.2f}) {{{n}}};")
     
     # Group edges and prepare mini-DFA positions
     edge_info = []
@@ -406,10 +414,12 @@ def generate_merged_dwa_with_mini_dfas(
         if u not in layout["nodes"] or v not in layout["nodes"]:
             continue
         
-        # Calculate midpoint for mini-DFA placement
+        # Calculate a point 40% along the edge (closer to source) for mini-DFA placement
         x1, y1 = layout["nodes"][u]
         x2, y2 = layout["nodes"][v]
-        mx, my = (x1 + x2) / 2 - cx, (y1 + y2) / 2 - cy
+        t = 0.4  # Position along edge (0=source, 1=target)
+        mx = x1 + t * (x2 - x1) - cx
+        my = y1 + t * (y2 - y1) - cy
         
         # Offset perpendicular to edge direction for label placement
         dx, dy = x2 - x1, y2 - y1
@@ -418,7 +428,7 @@ def generate_merged_dwa_with_mini_dfas(
             # Normal vector (perpendicular)
             nx, ny = -dy / length, dx / length
             # Offset the label position above the edge
-            offset = 1.5
+            offset = 1.2
             mx += nx * offset
             my += ny * offset
         
@@ -439,12 +449,12 @@ def generate_merged_dwa_with_mini_dfas(
             term_name = terminal_names.get(symbol, f"T{symbol}")
             
             # Generate mini-DFA at edge midpoint
-            mini_plain = run_dot_layout(tnodes, tedges, tfinal_set)
+            mini_plain = run_dot_layout(tnodes, tedges, tfinal_set, nodesep=0.6, ranksep=0.8)
             if mini_plain:
                 mini_layout = parse_dot_plain(mini_plain)
                 mini_bbox = mini_layout["bbox"]
                 mini_cx, mini_cy = mini_bbox[2] / 2, mini_bbox[3] / 2
-                mini_scale = 0.25  # Very small
+                mini_scale = 0.20  # Very small
                 
                 safe_edge = f"mini{u}to{v}"
                 tikz.append(f"\\begin{{scope}}[shift={{({mx:.2f},{my:.2f})}}, scale={mini_scale}]")
@@ -810,16 +820,30 @@ def main():
 """)
     
     # Layout constants
-    LEFT_COL = -14
+    FAR_LEFT_COL = -22  # LLM Vocab
+    LEFT_COL = -10      # Tokenizer
     RIGHT_COL = 14
     CENTER_COL = 0
     
     # ===================
-    # STAGE 0: Input Grammar (TOP CENTER)
+    # STAGE 0: LLM Vocab (FAR LEFT) and Input Grammar (TOP CENTER-RIGHT)
     # ===================
     y_grammar = 0
-    tex.append(r"% ========== STAGE 0: Input Grammar ==========")
-    tex.append(r"\node[grammarbox] (grammar) at (0, 0) {")
+    
+    # LLM Vocab box (far left)
+    tex.append(r"% ========== FAR LEFT: LLM Vocabulary ==========")
+    tex.append(f"\\node[stagebox, fill=tokenizer!10] (vocab) at ({FAR_LEFT_COL}, 0) {{")
+    tex.append(r"  \begin{tabular}{c}")
+    tex.append(r"  \textbf{LLM Vocabulary}\\[3pt]")
+    tex.append(r"  \footnotesize (50,257 tokens)\\")
+    tex.append(r"  \tiny e.g., GPT-2/GPT-3")
+    tex.append(r"  \end{tabular}")
+    tex.append(r"};")
+    tex.append("")
+    
+    # Grammar box (center-right)
+    tex.append(r"% ========== TOP: Input Grammar ==========")
+    tex.append(f"\\node[grammarbox] (grammar) at ({RIGHT_COL/2}, 0) {{")
     tex.append(r"  \begin{tabular}{l}")
     tex.append(r"  \textbf{Input Grammar (EBNF):}\\[3pt]")
     for line in grammar.strip().split('\n'):
@@ -832,29 +856,33 @@ def main():
     tex.append(r"};")
     tex.append("")
     
-    # Split arrows from grammar
+    # Split arrows: vocab goes to tokenizer, grammar splits to tokenizer and parser
     y_split = -4
+    tex.append(f"\\draw[splitarrow] (vocab.south) -- ({FAR_LEFT_COL}, {y_split});")
     tex.append(f"\\draw[splitarrow] (grammar.south) -- ++(0,-1) -| ({LEFT_COL}, {y_split});")
     tex.append(f"\\draw[splitarrow] (grammar.south) -- ++(0,-1) -| ({RIGHT_COL}, {y_split});")
-    tex.append(f"\\node[font=\\footnotesize\\itshape] at ({LEFT_COL/2 - 2}, {y_split + 1.5}) {{Tokenizer}};")
-    tex.append(f"\\node[font=\\footnotesize\\itshape] at ({RIGHT_COL/2 + 2}, {y_split + 1.5}) {{Parser}};")
+    tex.append(f"\\node[font=\\footnotesize\\itshape] at ({(FAR_LEFT_COL + LEFT_COL)/2}, {y_split + 1.5}) {{Tokenizer}};")
+    tex.append(f"\\node[font=\\footnotesize\\itshape] at ({(LEFT_COL + RIGHT_COL)/2 + 2}, {y_split + 1.5}) {{Parser}};")
     tex.append("")
     
     # ===================
-    # LEFT COLUMN: Tokenizer DFA
+    # LEFT COLUMN: Tokenizer DFA (between FAR_LEFT and LEFT)
     # ===================
-    y_tokenizer = -6
+    y_tokenizer = -7
     tex.append(r"% ========== LEFT: Tokenizer DFA ==========")
     tokenizer_final_set = set(tokenizer_finals.keys())
+    tokenizer_x = (FAR_LEFT_COL + LEFT_COL) / 2  # Between vocab and left column
     tex.append(generate_automaton_tikz(
         tokenizer_nodes, tokenizer_edges, tokenizer_final_set,
         "Tokenizer DFA",
-        (LEFT_COL, y_tokenizer),
-        scale=0.8,
+        (tokenizer_x, y_tokenizer),
+        scale=0.7,
         show_labels=True,
-        node_size="8mm",
-        font_size="\\scriptsize"
+        node_size="6mm",
+        font_size="\\tiny"
     ))
+    # Arrow from vocab to tokenizer
+    tex.append(f"\\draw[flowarrow] ({FAR_LEFT_COL}, {y_split - 1}) -- ({tokenizer_x - 2}, {y_tokenizer + 2});")
     tex.append("")
     
     # ===================
@@ -868,27 +896,27 @@ def main():
     # ===================
     # LEFT COLUMN: Terminal DWA (Skeleton / Precompute1)
     # ===================
-    y_terminal_dwa = -16
+    y_terminal_dwa = -18
     tex.append(r"% ========== LEFT: Terminal DWA (Skeleton) ==========")
     skel_final_set = set(skel_finals.keys())
     tex.append(generate_automaton_tikz(
         skel_nodes, skel_edges, skel_final_set,
         "Terminal DWA (Skeleton)",
         (LEFT_COL, y_terminal_dwa),
-        scale=0.8,
+        scale=0.7,
         terminal_names=terminal_names,
         show_labels=True,
-        node_size="8mm",
-        font_size="\\scriptsize"
+        node_size="6mm",
+        font_size="\\tiny"
     ))
     # Arrow from tokenizer to terminal DWA
-    tex.append(f"\\draw[flowarrow] ({LEFT_COL}, {y_tokenizer - 4}) -- ({LEFT_COL}, {y_terminal_dwa + 4});")
+    tex.append(f"\\draw[flowarrow] ({tokenizer_x}, {y_tokenizer - 3}) -- ({LEFT_COL}, {y_terminal_dwa + 3});")
     tex.append("")
     
     # ===================
     # RIGHT COLUMN: Below-Zero Characterizations
     # ===================
-    y_char = -14
+    y_char = -15
     tex.append(r"% ========== RIGHT: Below-Zero Characterizations ==========")
     tex.append(generate_characterization_box(char_data, terminal_names, (RIGHT_COL, y_char)))
     tex.append("")
@@ -896,12 +924,12 @@ def main():
     # ===================
     # RIGHT COLUMN: Template DFAs
     # ===================
-    y_templates = -22
+    y_templates = -24
     tex.append(r"% ========== RIGHT: Template DFAs ==========")
     tex.append(f"\\node[font=\\bfseries\\large] at ({RIGHT_COL}, {y_templates + 2}) {{Template DFAs}};")
     
     num_templates = len(template_dwas)
-    x_spacing = 5
+    x_spacing = 6  # More spacing between templates
     start_x = RIGHT_COL - (num_templates - 1) * x_spacing / 2
     
     for i, (tid, (tnodes, tedges, tfinals)) in enumerate(sorted(template_dwas.items())):
@@ -913,57 +941,57 @@ def main():
             tnodes, tedges, tfinal_set,
             f"T({term_name_escaped})",
             (x_pos, y_templates - 3),
-            scale=0.5,
+            scale=0.45,
             show_labels=True,
             as_state_id=True,  # Edge labels are state IDs!
-            node_size="6mm",
+            node_size="5mm",
             font_size="\\tiny"
         ))
     
     # Arrow from LALR to characterizations to templates
     tex.append(f"\\draw[flowarrow] ({RIGHT_COL}, {y_lalr - 4}) -- ({RIGHT_COL}, {y_char + 2});")
-    tex.append(f"\\draw[flowarrow] ({RIGHT_COL}, {y_char - 4}) -- ({RIGHT_COL}, {y_templates + 3});")
+    tex.append(f"\\draw[flowarrow] ({RIGHT_COL}, {y_char - 5}) -- ({RIGHT_COL}, {y_templates + 3});")
     tex.append("")
     
     # ===================
     # CENTER: Merge point - Terminal DWA with Template DFAs on Edges
     # ===================
-    y_merged = -36
+    y_merged = -40
     tex.append(r"% ========== CENTER: Terminal DWA with Template DFAs on Edges ==========")
     tex.append(f"\\node[font=\\bfseries\\large] at ({CENTER_COL}, {y_merged + 4}) {{Terminal DWA with Template DFAs on Edges}};")
     tex.append(f"\\node[font=\\footnotesize\\itshape, text=dark!60] at ({CENTER_COL}, {y_merged + 3.2}) {{(Each terminal edge shows its Template DFA)}};")
     
     # Merge arrows
-    tex.append(f"\\draw[splitarrow] ({LEFT_COL}, {y_terminal_dwa - 5}) -- ++(0,-4) -| ({CENTER_COL - 4}, {y_merged + 2});")
-    tex.append(f"\\draw[splitarrow] ({RIGHT_COL}, {y_templates - 8}) -- ++(0,-4) -| ({CENTER_COL + 4}, {y_merged + 2});")
+    tex.append(f"\\draw[splitarrow] ({LEFT_COL}, {y_terminal_dwa - 6}) -- ++(0,-4) -| ({CENTER_COL - 4}, {y_merged + 2});")
+    tex.append(f"\\draw[splitarrow] ({RIGHT_COL}, {y_templates - 10}) -- ++(0,-4) -| ({CENTER_COL + 4}, {y_merged + 2});")
     
     # Draw the merged DWA with actual mini-DFAs on edges!
     tex.append(generate_merged_dwa_with_mini_dfas(
         skel_nodes, skel_edges, skel_finals,
         template_dwas, terminal_names,
         (CENTER_COL, y_merged - 4),
-        scale=1.0
+        scale=0.9
     ))
     tex.append("")
     
     # ===================
     # CENTER: Flattened NWA
     # ===================
-    y_flat = -62
+    y_flat = -68
     tex.append(r"% ========== CENTER: Flattened NWA ==========")
-    tex.append(f"\\draw[flowarrow] ({CENTER_COL}, {y_merged - 14}) -- ({CENTER_COL}, {y_flat + 10});")
-    tex.append(f"\\node[font=\\footnotesize, text=dark!60] at ({CENTER_COL + 5}, {(y_merged - 14 + y_flat + 10)/2}) {{Flatten (inline templates)}};")
+    tex.append(f"\\draw[flowarrow] ({CENTER_COL}, {y_merged - 16}) -- ({CENTER_COL}, {y_flat + 12});")
+    tex.append(f"\\node[font=\\footnotesize, text=dark!60] at ({CENTER_COL + 5}, {(y_merged - 16 + y_flat + 12)/2}) {{Flatten (inline templates)}};")
     
     flat_final_set = set(flat_finals.keys())
     tex.append(generate_automaton_tikz(
         flat_nodes, flat_edges, flat_final_set,
         "Flattened NWA (with Push Transitions)",
         (CENTER_COL, y_flat),
-        scale=0.45,
+        scale=0.40,
         terminal_names=None,  # Edge labels are state IDs
         show_labels=True,
         as_state_id=True,
-        node_size="7mm",
+        node_size="5mm",
         font_size="\\tiny"
     ))
     tex.append("")
@@ -971,21 +999,21 @@ def main():
     # ===================
     # CENTER: Final DWA
     # ===================
-    y_final = -86
+    y_final = -94
     tex.append(r"% ========== CENTER: Final DWA ==========")
-    tex.append(f"\\draw[flowarrow] ({CENTER_COL}, {y_flat - 12}) -- ({CENTER_COL}, {y_final + 10});")
-    tex.append(f"\\node[font=\\footnotesize, text=dark!60, align=center] at ({CENTER_COL + 7}, {(y_flat - 12 + y_final + 10)/2}) {{Resolve push transitions,\\\\Determinize \\& Simplify}};")
+    tex.append(f"\\draw[flowarrow] ({CENTER_COL}, {y_flat - 14}) -- ({CENTER_COL}, {y_final + 12});")
+    tex.append(f"\\node[font=\\footnotesize, text=dark!60, align=center] at ({CENTER_COL + 7}, {(y_flat - 14 + y_final + 12)/2}) {{Resolve push transitions,\\\\Determinize \\& Simplify}};")
     
     final_final_set = set(final_finals.keys())
     tex.append(generate_automaton_tikz(
         final_nodes, final_edges, final_final_set,
         "Final DWA",
         (CENTER_COL, y_final),
-        scale=0.45,
+        scale=0.40,
         terminal_names=None,
         show_labels=True,
         as_state_id=True,
-        node_size="7mm",
+        node_size="5mm",
         font_size="\\tiny"
     ))
     tex.append("")
