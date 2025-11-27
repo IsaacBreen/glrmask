@@ -44,17 +44,11 @@ fn hash_outcome(
     remainder_sig: u64,
     final_state: u32,
 ) -> u128 {
-    // Mix core data first
-    let data = ((match_pos as u128) << 64) | (match_group as u128);
-    let mut h = mix_u128(data ^ (remainder_sig as u128));
-
-    // Differentiate outcome kinds structurally
-    match kind {
-        KIND_MATCH => h, // Pass-through for common case
-        KIND_TERM => mix_u128(h ^ (final_state as u128) ^ 0x55555555_55555555),
-        KIND_DEAD_END => mix_u128(h ^ 0xAAAAAAAA_AAAAAAAA),
-        _ => h,
-    }
+    let flags = (kind as u32) | (final_state << 4);
+    let packed = ((match_pos as u128) << 96)
+        | ((match_group as u128) << 64)
+        | ((flags as u128) << 32);
+    mix_u128(packed ^ (remainder_sig as u128))
 }
 
 // -----------------------------------------------------------------------------
