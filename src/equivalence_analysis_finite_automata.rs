@@ -288,23 +288,37 @@ fn precompute_remainder_hashes(regex: &Regex, strings: &[Vec<u8>]) -> Vec<Vec<u6
         for i in (0..len).rev() {
             let exec = regex.execute_from_state_fast(&s[i..], regex.dfa.start_state);
             
-            // Find greedy match (longest), breaking ties with group ID.
-            if let Some(m) = exec.matches.iter()
-                .filter(|m| m.position > 0)
-                .max_by_key(|m| (m.position, m.group_id)) 
-            {
-                 let next_idx = i + m.position;
-                 let next_h = hashes.get(next_idx).copied().unwrap_or(0); // Safe due to sizing
-                 let h = hash_outcome(KIND_MATCH, m.group_id as u32, m.position as u32, next_h, 0);
-                 hashes[i] = (h ^ (h >> 64)) as u64;
-            } else {
-                 let (kind, state) = match exec.end_state {
-                     Some(s) => (KIND_TERM, s as u32),
-                     None => (KIND_DEAD_END, 0),
-                 };
-                 let h = hash_outcome(kind, 0, 0, 0, state);
-                 hashes[i] = (h ^ (h >> 64)) as u64;
+            let mut node_hash = 0u128;
+
+            // 1. Pass-through (consumed remaining string fully)
+            if let Some(st) = exec.end_state {
+                let h = hash_outcome(KIND_TERM, 0, 0, 0, st as u32);
+                node_hash = node_hash.wrapping_add(h);
             }
+
+            // 2. Token Matches (Ambiguity: sum all valid greedy-per-group paths)
+            if !exec.matches.is_empty() {
+                let mut matches = exec.matches;
+                // Sort by GroupID, then Position descending to easily pick longest per group
+                matches.sort_unstable_by(|a, b| {
+                    a.group_id.cmp(&b.group_id)
+                        .then_with(|| b.position.cmp(&a.position))
+                });
+
+                let mut prev_gid = usize::MAX;
+                for m in matches {
+                    if m.position == 0 { continue; }
+                    if m.group_id == prev_gid { continue; } // Skip shorter matches for same group
+                    prev_gid = m.group_id;
+
+                    let next_idx = i + m.position;
+                    let next_h = unsafe { *hashes.get_unchecked(next_idx) };
+                    let h = hash_outcome(KIND_MATCH, m.group_id as u32, m.position as u32, next_h, 0);
+                    node_hash = node_hash.wrapping_add(h);
+                }
+            }
+            
+            hashes[i] = (node_hash ^ (node_hash >> 64)) as u64;
         }
         result.push(hashes);
     }
