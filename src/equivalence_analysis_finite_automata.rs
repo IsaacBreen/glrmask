@@ -19,10 +19,13 @@ const VERIFY_RESULTS: bool = true;
 
 #[inline(always)]
 fn mix_u128(mut x: u128) -> u128 {
+    const C1: u128 = 0x9e3779b97f4a7c15_bf58476d1ce4e5b9;
+    const C2: u128 = 0x94d049bb133111eb_ff51afd7ed558ccd;
+
     x ^= x >> 33;
-    x = x.wrapping_mul(0xff51afd7ed558ccd);
+    x = x.wrapping_mul(C1);
     x ^= x >> 33;
-    x = x.wrapping_mul(0xc4ceb9fe1a85ec53);
+    x = x.wrapping_mul(C2);
     x ^= x >> 33;
     x
 }
@@ -285,8 +288,11 @@ fn precompute_remainder_hashes(regex: &Regex, strings: &[Vec<u8>]) -> Vec<Vec<u6
         for i in (0..len).rev() {
             let exec = regex.execute_from_state_fast(&s[i..], regex.dfa.start_state);
             
-            // Find first non-zero-width match (greedy earliest)
-            if let Some(m) = exec.matches.iter().find(|m| m.position > 0) {
+            // Find greedy match (longest), breaking ties with group ID.
+            if let Some(m) = exec.matches.iter()
+                .filter(|m| m.position > 0)
+                .max_by_key(|m| (m.position, m.group_id)) 
+            {
                  let next_idx = i + m.position;
                  let next_h = hashes.get(next_idx).copied().unwrap_or(0); // Safe due to sizing
                  let h = hash_outcome(KIND_MATCH, m.group_id as u32, m.position as u32, next_h, 0);
