@@ -2,6 +2,7 @@ from typing import Dict, List
 import json
 import _sep1 as ffi
 from ..common_interface import RangeSet
+from ..constraint_utils import extract_id_to_token_map
 from tqdm import tqdm
 
 class BruteForceRustModel:
@@ -24,7 +25,7 @@ class BruteForceRustModel:
         constraint_state = ffi.GrammarConstraintState(constraint)
         
         data = json.loads(s)
-        id_to_token = {v: bytes(k) for k, v in data['original_llm_vocab']['llm_token_map']}
+        id_to_token = extract_id_to_token_map(data)
 
         return BruteForceRustModel(constraint, constraint_state, id_to_token)
 

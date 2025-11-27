@@ -147,9 +147,9 @@ fn test_constraint_simple() {
     let _mask_before = constraint_state_for_comp.get_mask();
     constraint_state_for_comp.commit(*llm_token_id_for_comp);
 
-    let mut parser_state_for_comp = parser.init_glr_parser_null(Some(constraint.original_llm_vocab.clone()));
+    let mut parser_state_for_comp = parser.init_glr_parser_null(None);
     for grammar_tokens in grammar_tokenss {
-        let mut parser_state = parser.init_glr_parser(Some(constraint.original_llm_vocab.clone()));
+        let mut parser_state = parser.init_glr_parser(None);
         for grammar_token in grammar_tokens {
             let grammar_token_id = grammar_token_map.get_by_left(&regex_name(grammar_token)).unwrap();
             parser_state.step(*grammar_token_id);
@@ -229,7 +229,7 @@ fn test_constraint_simple_simplified() {
     // let mut constraint_state_for_comp = constraint.init();
     // constraint_state_for_comp.commit(*llm_token_id_for_comp);
     //
-    // let mut parser_state_for_comp = parser.init_glr_parser(Some(constraint.original_llm_vocab.clone()));
+    // let mut parser_state_for_comp = parser.init_glr_parser(None);
     // let grammar_token_id = grammar_token_map.get_by_left(&regex_name("A")).unwrap();
     // parser_state_for_comp.step(*grammar_token_id);
     //
@@ -306,7 +306,7 @@ fn test_constraint_expression() {
     let _mask_before = constraint_state_for_comp.get_mask(); // Optional, for debugging
     constraint_state_for_comp.commit(*llm_token_id_for_comp);
 
-    let mut parser_state_for_comp = parser.init_glr_parser(Some(constraint.original_llm_vocab.clone()));
+    let mut parser_state_for_comp = parser.init_glr_parser(None);
     for grammar_token_id in grammar_token_ids {
         parser_state_for_comp.step(*grammar_token_id);
     }
@@ -483,7 +483,7 @@ fn test_aborted_tokenizer_restart_equivalence() {
         &GrammarConstraintConfig::default(),
     );
     println!("parser: {}", constraint.parser);
-    println!("Vocab: {:?}", constraint.original_llm_vocab);
+    println!("Commit vocab: {:?}", constraint.commit_vocab);
 
     // Scenario 1: Commit "#", then "a"
     let mut constraint_state1 = constraint.init();
@@ -793,7 +793,6 @@ fn test_simple_def_match_non_zero_llm_id() {
 #[test]
 fn test_precompute_a_plus_tokenizer() {
     use crate::constraint_precompute::run_precompute1;
-    use crate::constraint_vocab::LLMVocab;
     use crate::precompute4::weighted_automata::common::Label;
     use crate::tokenizer::TokenizerStateID;
 
@@ -816,11 +815,6 @@ fn test_precompute_a_plus_tokenizer() {
 
     let parser = generate_glr_parser_with_terminal_map(&productions, grammar_token_map.clone(), None);
 
-    let original_llm_vocab = Arc::new(LLMVocab {
-        llm_token_map: llm_token_map.clone(),
-        max_original_llm_token_id,
-    });
-
     // In this test, original and internal are the same.
     let internal_llm_token_map: BTreeMap<_, _> =
         llm_token_map.iter().map(|(k, v)| (k.clone(), *v)).collect();
@@ -832,7 +826,6 @@ fn test_precompute_a_plus_tokenizer() {
     let dwa = run_precompute1(
         &tokenizer,
         Some(&parser),
-        Some(original_llm_vocab),
         &internal_llm_token_map,
         internal_max_llm_token,
         terminals_count,
@@ -876,7 +869,6 @@ fn test_precompute_a_plus_tokenizer() {
 #[test]
 fn test_precompute_x_eq() {
     use crate::constraint_precompute::run_precompute1;
-    use crate::constraint_vocab::LLMVocab;
     use crate::precompute4::weighted_automata::common::Label;
     use crate::tokenizer::TokenizerStateID;
 
@@ -909,11 +901,6 @@ fn test_precompute_x_eq() {
 
     let parser = generate_glr_parser_with_terminal_map(&productions, grammar_token_map.clone(), None);
 
-    let original_llm_vocab = Arc::new(LLMVocab {
-        llm_token_map: llm_token_map.clone(),
-        max_original_llm_token_id,
-    });
-
     let internal_llm_token_map: BTreeMap<_, _> =
         llm_token_map.iter().map(|(k, v)| (k.clone(), *v)).collect();
     let internal_max_llm_token = max_original_llm_token_id;
@@ -924,7 +911,6 @@ fn test_precompute_x_eq() {
     let dwa = run_precompute1(
         &tokenizer,
         Some(&parser),
-        Some(original_llm_vocab),
         &internal_llm_token_map,
         internal_max_llm_token,
         terminals_count,

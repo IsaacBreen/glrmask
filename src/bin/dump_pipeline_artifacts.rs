@@ -75,7 +75,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let skeleton_dwa = run_precompute1(
         tokenizer,
         Some(parser),
-        None,
         &internal_llm_token_map,
         internal_max_llm_token,
         terminals_count,

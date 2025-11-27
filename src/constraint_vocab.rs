@@ -40,6 +40,32 @@ pub struct StageVocab {
     pub internal_to_original_sparse_matrix: Vec<Vec<(u16, u64)>>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitVocab {
+    pub representatives: Vec<Vec<u8>>,
+    pub original_to_representative: Vec<u32>,
+}
+
+impl CommitVocab {
+    pub const INVALID_REPRESENTATIVE: u32 = u32::MAX;
+
+    pub fn new(representatives: Vec<Vec<u8>>, original_to_representative: Vec<u32>) -> Self {
+        Self { representatives, original_to_representative }
+    }
+
+    pub fn is_empty(&self) -> bool { self.representatives.is_empty() }
+
+    pub fn representative_index(&self, token_id: LLMTokenID) -> Option<usize> {
+        let rep_idx = *self.original_to_representative.get(token_id.0)?;
+        if rep_idx == Self::INVALID_REPRESENTATIVE { None } else { Some(rep_idx as usize) }
+    }
+
+    pub fn token_bytes(&self, token_id: LLMTokenID) -> Option<&[u8]> {
+        let idx = self.representative_index(token_id)?;
+        self.representatives.get(idx).map(|bytes| bytes.as_slice())
+    }
+}
+
 /// Intermediate JSON representation of StageVocab.
 /// internal_to_original is stored as Vec<(usize, Vec<usize>)> for efficient serialization.
 /// internal_to_original_sparse_matrix is skipped (rebuilt on load).
@@ -49,6 +75,12 @@ struct StageVocabJSON {
     internal_to_original: Vec<(usize, Vec<usize>)>,
     internal_max_llm_token: usize,
     max_original_llm_token_id: usize,
+}
+
+#[derive(Debug, Clone, JSONConvertible)]
+struct CommitVocabJSON {
+    representatives: Vec<Vec<u8>>,
+    original_to_representative: Vec<u32>,
 }
 
 impl JSONConvertible for StageVocab {
@@ -88,6 +120,24 @@ impl JSONConvertible for StageVocab {
             internal_max_llm_token: intermediate.internal_max_llm_token,
             max_original_llm_token_id: intermediate.max_original_llm_token_id,
             internal_to_original_sparse_matrix,
+        })
+    }
+}
+
+impl JSONConvertible for CommitVocab {
+    fn to_json(&self) -> JSONNode {
+        let intermediate = CommitVocabJSON {
+            representatives: self.representatives.clone(),
+            original_to_representative: self.original_to_representative.clone(),
+        };
+        intermediate.to_json()
+    }
+
+    fn from_json(node: JSONNode) -> Result<Self, String> {
+        let intermediate = CommitVocabJSON::from_json(node)?;
+        Ok(Self {
+            representatives: intermediate.representatives,
+            original_to_representative: intermediate.original_to_representative,
         })
     }
 }

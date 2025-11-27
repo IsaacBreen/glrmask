@@ -19,6 +19,7 @@ use crate::{
         vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode},
     },
     equivalence_analysis_finite_automata,
+    equivalence_analysis_finite_automata_end_states,
     finite_automata::Regex,
     glr::{
         analyze::compute_terminal_follow_sets,
@@ -229,7 +230,7 @@ pub struct GrammarConstraint {
     // Precomputations
     pub precomputed4: Precomputed4,
 
-    pub original_llm_vocab: Arc<LLMVocab>,
+    pub commit_vocab: Arc<CommitVocab>,
     pub(crate) token_name_map: BiBTreeMap<Terminal, usize>,
 
     /// Tokenizer state -> grammar terminal -> internal LLM token bitset.
@@ -246,6 +247,7 @@ impl GrammarConstraint {
         assert_eq!(self.token_name_map, other.token_name_map);
         assert_eq!(self.possible_matches, other.possible_matches);
         assert_eq!(self.precompute4_vocab, other.precompute4_vocab);
+        assert_eq!(self.commit_vocab, other.commit_vocab);
     }
 }
 
@@ -318,6 +320,7 @@ struct GrammarConstraintJSON {
     parser: GLRParser,
     token_name_map: BiBTreeMap<Terminal, usize>,
     possible_matches: PossibleMatchesJSON,
+    commit_vocab: Option<CommitVocab>,
     /// Full original LLM vocab (optional for backward compat)
     original_llm_vocab: Option<LLMVocab>,
     /// Fallback: just max_original_llm_token_id if full vocab not available
@@ -333,8 +336,9 @@ impl JSONConvertible for GrammarConstraint {
             parser: self.parser.clone(),
             token_name_map: self.token_name_map.clone(),
             possible_matches: PossibleMatchesJSON::from_possible_matches(&self.possible_matches),
-            original_llm_vocab: Some((*self.original_llm_vocab).clone()),
-            max_orig_id: Some(self.original_llm_vocab.max_original_llm_token_id),
+            commit_vocab: Some((*self.commit_vocab).clone()),
+            original_llm_vocab: None,
+            max_orig_id: Some(self.precompute4_vocab.max_original_llm_token_id),
         };
         intermediate.to_json()
     }
@@ -345,22 +349,27 @@ impl JSONConvertible for GrammarConstraint {
         let tokenizer = Regex { dfa: intermediate.tokenizer_dfa };
         let possible_matches = intermediate.possible_matches.to_possible_matches()?;
 
-        // Restore original_llm_vocab: prefer full vocab, fall back to skeleton
-        let original_llm_vocab = if let Some(vocab) = intermediate.original_llm_vocab {
+        let commit_vocab = if let Some(vocab) = intermediate.commit_vocab {
             Arc::new(vocab)
+        } else if let Some(legacy_vocab) = intermediate.original_llm_vocab {
+            Arc::new(Self::build_commit_vocab(
+                &legacy_vocab.llm_token_map,
+                &tokenizer,
+                legacy_vocab.max_original_llm_token_id,
+            ))
         } else {
-            let max_orig_id = intermediate.max_orig_id.ok_or("Missing both original_llm_vocab and max_orig_id")?;
-            Arc::new(LLMVocab {
-                llm_token_map: BiBTreeMap::new(), // Dummy when full vocab not available
-                max_original_llm_token_id: max_orig_id,
-            })
+            let max_orig_id = intermediate.max_orig_id.ok_or("Missing commit_vocab and legacy vocab metadata")?;
+            Arc::new(CommitVocab::new(
+                Vec::new(),
+                vec![CommitVocab::INVALID_REPRESENTATIVE; max_orig_id + 1],
+            ))
         };
 
         Ok(GrammarConstraint {
             tokenizer,
             parser: intermediate.parser,
             precomputed4: intermediate.dwa,
-            original_llm_vocab,
+            commit_vocab,
             token_name_map: intermediate.token_name_map,
             possible_matches,
             precompute4_vocab: intermediate.vocab,
@@ -506,6 +515,92 @@ impl GrammarConstraint {
         original_to_internal_map
     }
 
+    fn build_commit_vocab(
+        llm_token_map: &LLMTokenMap,
+        tokenizer: &Regex,
+        max_original_llm_token_id: usize,
+    ) -> CommitVocab {
+        if llm_token_map.is_empty() {
+            return CommitVocab::new(Vec::new(), Vec::new());
+        }
+
+        let mut sorted_tokens: Vec<_> = llm_token_map.iter().collect();
+        sorted_tokens.sort_by_key(|(_, id)| id.0);
+
+        let mut llm_token_strings: Vec<Vec<u8>> = Vec::with_capacity(sorted_tokens.len());
+        let mut original_ids: Vec<LLMTokenID> = Vec::with_capacity(sorted_tokens.len());
+        let mut highest_original_id = 0usize;
+        for (bytes, id) in sorted_tokens {
+            highest_original_id = highest_original_id.max(id.0);
+            llm_token_strings.push(bytes.clone());
+            original_ids.push(*id);
+        }
+
+        let effective_max = max_original_llm_token_id.max(highest_original_id);
+        let mut original_to_representative =
+            vec![CommitVocab::INVALID_REPRESENTATIVE; effective_max + 1];
+
+        let initial_states: Vec<usize> = tokenizer.iter_states().map(|s| s.0).collect();
+        let equivalence_classes = equivalence_analysis_finite_automata_end_states::find_equivalence_classes(
+            tokenizer,
+            &llm_token_strings,
+            &initial_states,
+        );
+
+        let mut representatives: Vec<Vec<u8>> = Vec::with_capacity(equivalence_classes.len());
+        let mut assigned = vec![false; llm_token_strings.len()];
+
+        for (_signature, string_indices) in equivalence_classes {
+            if string_indices.is_empty() {
+                continue;
+            }
+            let rep_idx = string_indices
+                .iter()
+                .copied()
+                .min_by(|&a, &b| {
+                    llm_token_strings[a]
+                        .len()
+                        .cmp(&llm_token_strings[b].len())
+                        .then_with(|| llm_token_strings[a].cmp(&llm_token_strings[b]))
+                })
+                .unwrap();
+            let representative_id = representatives.len();
+            representatives.push(llm_token_strings[rep_idx].clone());
+            for idx in string_indices {
+                assigned[idx] = true;
+                let orig_id = original_ids[idx].0;
+                if orig_id >= original_to_representative.len() {
+                    original_to_representative
+                        .resize(orig_id + 1, CommitVocab::INVALID_REPRESENTATIVE);
+                }
+                original_to_representative[orig_id] = representative_id as u32;
+            }
+        }
+
+        for (idx, was_assigned) in assigned.iter().enumerate() {
+            if *was_assigned {
+                continue;
+            }
+            let representative_id = representatives.len();
+            representatives.push(llm_token_strings[idx].clone());
+            let orig_id = original_ids[idx].0;
+            if orig_id >= original_to_representative.len() {
+                original_to_representative
+                    .resize(orig_id + 1, CommitVocab::INVALID_REPRESENTATIVE);
+            }
+            original_to_representative[orig_id] = representative_id as u32;
+        }
+
+        crate::debug!(
+            3,
+            "Commit vocab built with {} representatives for {} tokens",
+            representatives.len(),
+            llm_token_strings.len()
+        );
+
+        CommitVocab::new(representatives, original_to_representative)
+    }
+
     fn build_with_config(
         tokenizer: Regex,
         parser: GLRParser,
@@ -598,10 +693,11 @@ impl GrammarConstraint {
             }
         }
 
-        let original_llm_vocab = Arc::new(LLMVocab {
-            llm_token_map: llm_token_map.clone(),
+        let commit_vocab = Arc::new(Self::build_commit_vocab(
+            &llm_token_map,
+            &tokenizer,
             max_original_llm_token_id,
-        });
+        ));
 
         let mut vocab = StageVocab {
             original_to_internal: original_to_internal_map.clone(),
@@ -620,7 +716,6 @@ impl GrammarConstraint {
         let mut skeleton_dwa = run_precompute1(
             &tokenizer,
             Some(&parser),
-            Some(original_llm_vocab.clone()),
             &internal_llm_token_map,
             vocab.internal_max_llm_token,
             parser.terminal_map.len(),
@@ -686,7 +781,7 @@ impl GrammarConstraint {
             parser,
             precomputed4,
             possible_matches: possible_matches_precompute1,
-            original_llm_vocab,
+            commit_vocab,
             token_name_map,
             precompute4_vocab: vocab,
         }
@@ -996,7 +1091,7 @@ impl GrammarConstraint {
         let mut state = BTreeMap::new();
         state.insert(
             self.tokenizer.initial_state_id(),
-            self.parser.init_glr_parser(Some(self.original_llm_vocab.clone())),
+            self.parser.init_glr_parser(None),
         );
         GrammarConstraintState { parent: self, state }
     }
@@ -1159,15 +1254,12 @@ impl<'a> GrammarConstraintState<'a> {
     }
 
     pub fn commit(&mut self, llm_token_id: LLMTokenID) {
-        self.commit_bytes(
-            &self
-                .parent
-                .original_llm_vocab
-                .llm_token_map
-                .get_by_right(&llm_token_id)
-                .expect_else(|| format!("LLM token ID {} not found in original vocab map. Vocab size: {}, Max vocab ID: {}", llm_token_id.0, self.parent.original_llm_vocab.llm_token_map.len(), self.parent.original_llm_vocab.max_original_llm_token_id))
-                .clone(),
-        );
+        let token_bytes = self
+            .parent
+            .commit_vocab
+            .token_bytes(llm_token_id)
+            .expect_else(|| format!("LLM token ID {} not mapped to a representative token", llm_token_id.0));
+        self.commit_bytes(token_bytes);
     }
 
     pub fn is_active(&self) -> bool { !self.state.is_empty() }

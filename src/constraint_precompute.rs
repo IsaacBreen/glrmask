@@ -6,7 +6,7 @@ use std::sync::Arc;
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use range_set_blaze::RangeSetBlaze;
 
-use crate::constraint_vocab::{LLMTokenBV, LLMVocab};
+use crate::constraint_vocab::LLMTokenBV;
 use crate::datastructures::hybrid_bitset::RangeSet;
 use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
 use crate::finite_automata::Regex;
@@ -25,7 +25,6 @@ use crate::precompute4::weighted_automata::common::Label;
 pub(crate) struct Precomputer1<'r> {
     pub(crate) tokenizer: &'r Regex,
     pub(crate) parser: Option<&'r GLRParser>,
-    pub(crate) original_llm_vocab: Option<Arc<LLMVocab>>,
     pub(crate) vocab: VocabPrefixTree,
     pub(crate) roots: BTreeMap<TokenizerStateID, NWAStateID>,
     pub(crate) possible_matches: RefCell<
@@ -48,7 +47,6 @@ impl<'r> Precomputer1<'r> {
     fn new(
         tokenizer: &'r Regex,
         parser: Option<&'r GLRParser>,
-        original_llm_vocab: Option<Arc<LLMVocab>>,
         internal_llm_token_map: &BTreeMap<Vec<u8>, LLMTokenID>,
         internal_max_llm_token: usize,
         terminals_count: usize,
@@ -96,7 +94,6 @@ impl<'r> Precomputer1<'r> {
         Self {
             tokenizer,
             parser,
-            original_llm_vocab,
             vocab,
             roots,
             possible_matches: RefCell::new(BTreeMap::new()),
@@ -474,7 +471,6 @@ pub(crate) fn count_vocab_nodes(node: &VocabPrefixTreeNode) -> u64 {
 pub fn run_precompute1(
     tokenizer: &Regex,
     parser: Option<&GLRParser>,
-    original_llm_vocab: Option<Arc<LLMVocab>>,
     internal_llm_token_map: &BTreeMap<Vec<u8>, LLMTokenID>,
     internal_max_llm_token: usize,
     terminals_count: usize,
@@ -493,7 +489,6 @@ pub fn run_precompute1(
     let mut helper = Precomputer1::new(
         tokenizer,
         parser,
-        original_llm_vocab,
         &representative_llm_token_map,
         internal_max_llm_token,
         terminals_count,

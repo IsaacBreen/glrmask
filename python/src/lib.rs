@@ -6,7 +6,7 @@ use ouroboros::self_referencing;
 use pyo3::basic::CompareOp;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyIterator, PySet, PyTuple};
-use sep1::constraint::{GrammarConstraint, GrammarConstraintState, StageVocab};
+use sep1::constraint::{CommitVocab, GrammarConstraint, GrammarConstraintState, StageVocab};
 use sep1::datastructures::bitset::{Bitset as RustBitset, Bitset};
 use sep1::datastructures::gss_acc::{Acc as RustAcc, Acc};
 use sep1::datastructures::hybrid_bitset::{RangeSet as RustHybridBitset, RangeSet};
@@ -546,8 +546,18 @@ impl PyGrammarConstraint {
 
     fn get_id_to_token_map(&self, py: Python) -> PyResult<PyObject> {
         let dict = PyDict::new_bound(py);
-        for (token_bytes, token_id) in self.inner.original_llm_vocab.llm_token_map.iter() {
-            dict.set_item(token_id.0, token_bytes.as_slice())?;
+        for (original_id, rep_idx) in self
+            .inner
+            .commit_vocab
+            .original_to_representative
+            .iter()
+            .enumerate()
+        {
+            if *rep_idx == CommitVocab::INVALID_REPRESENTATIVE {
+                continue;
+            }
+            let token_bytes = &self.inner.commit_vocab.representatives[*rep_idx as usize];
+            dict.set_item(original_id, token_bytes.as_slice())?;
         }
         Ok(dict.into())
     }
