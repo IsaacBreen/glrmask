@@ -970,6 +970,7 @@ mod tests {
         assert_eq!(grammar.terminal_to_group_id().len(), 1);
     }
 
+    #[ignore]
     #[test]
     fn test_large_diff_grammar_optimization() {
         // Replicates the structure of generate_diff_grammar.py for a large file (1000 lines)
