@@ -175,7 +175,7 @@ pub fn find_equivalence_classes(
 
     if VERIFY_RESULTS {
         pb.set_message("Verifying...");
-        classes = verify_and_correct_string_classes(regex, strings, initial_states, &classes, &accumulators);
+        verify_string_classes(regex, strings, initial_states, &classes, &accumulators);
     }
 
     pb.finish_with_message("Done");
@@ -361,13 +361,7 @@ fn create_pb(len: u64) -> ProgressBar {
     pb
 }
 
-fn verify_and_correct_string_classes(
-    regex: &Regex, 
-    strings: &[Vec<u8>], 
-    initial_states: &[usize], 
-    classes: &BTreeMap<Vec<usize>, Vec<usize>>, 
-    accumulators: &[u128]
-) -> BTreeMap<Vec<usize>, Vec<usize>> {
+fn verify_string_classes(regex: &Regex, strings: &[Vec<u8>], initial_states: &[usize], classes: &BTreeMap<Vec<usize>, Vec<usize>>, accumulators: &[u128]) {
     let mut new_classes: BTreeMap<Vec<usize>, Vec<usize>> = BTreeMap::new();
     let mut next_id = 0;
 
@@ -392,50 +386,48 @@ fn verify_and_correct_string_classes(
             next_id += 1;
         }
     }
-    // Log if hash-based classification differs from brute-force verification
+    // Ensure they're exactly the same, and report any differences
     if classes != &new_classes {
-        let collision_count = new_classes.len() - classes.len();
-        crate::debug!(2, "Hash collision(s) detected and corrected: {} class(es) were split during verification", collision_count);
-        
-        // Find some illustrative examples of differences (for debug output only)
-        if crate::r#macro::get_macro_debug_level() >= 3 {
-            let mut examples = Vec::new();
+        // Find some illustrative examples of differences
+        let mut examples = Vec::new();
 
-            // Check for strings that are in same class in 'classes' but different in 'new_classes'
-            for (_, group) in classes.iter() {
-                if group.len() > 1 {
-                    // Find which new_classes these strings ended up in
-                    let mut new_class_ids: HashMap<usize, Vec<usize>> = HashMap::new();
-                    for &idx in group {
-                        for (new_id, new_group) in new_classes.iter() {
-                            if new_group.contains(&idx) {
-                                new_class_ids.entry(new_id[0]).or_default().push(idx);
-                                break;
-                            }
+        // Check for strings that are in same class in 'classes' but different in 'new_classes'
+        for (_, group) in classes.iter() {
+            if group.len() > 1 {
+                // Find which new_classes these strings ended up in
+                let mut new_class_ids: HashMap<usize, Vec<usize>> = HashMap::new();
+                for &idx in group {
+                    for (new_id, new_group) in new_classes.iter() {
+                        if new_group.contains(&idx) {
+                            new_class_ids.entry(new_id[0]).or_default().push(idx);
+                            break;
                         }
                     }
+                }
 
-                    if new_class_ids.len() > 1 && examples.len() < 3 {
-                        // This group was split - show first 2 strings from different subgroups
-                        let mut iter = new_class_ids.values();
-                        if let (Some(subgroup1), Some(subgroup2)) = (iter.next(), iter.next()) {
-                            if let (Some(&idx1), Some(&idx2)) = (subgroup1.first(), subgroup2.first()) {
-                                examples.push((idx1, idx2));
-                            }
+                if new_class_ids.len() > 1 && examples.len() < 3 {
+                    // This group was split - show first 2 strings from different subgroups
+                    let mut iter = new_class_ids.values();
+                    if let (Some(subgroup1), Some(subgroup2)) = (iter.next(), iter.next()) {
+                        if let (Some(&idx1), Some(&idx2)) = (subgroup1.first(), subgroup2.first()) {
+                            examples.push((idx1, idx2));
                         }
                     }
                 }
             }
-
-            crate::debug!(3, "Hash collision details: hash classes={}, verified classes={}", classes.len(), new_classes.len());
-            for (i, (idx1, idx2)) in examples.iter().enumerate() {
-                crate::debug!(3, "  Example {}: String {}: {:?} (Hash: {:032x})", i + 1, idx1, String::from_utf8_lossy(&strings[*idx1]), accumulators[*idx1]);
-                crate::debug!(3, "            String {}: {:?} (Hash: {:032x})", idx2, String::from_utf8_lossy(&strings[*idx2]), accumulators[*idx2]);
-            }
         }
+
+        eprintln!("ERROR: Hash-based classification differs from brute-force verification!");
+        eprintln!("Total classes: hash={}, verified={}", classes.len(), new_classes.len());
+        eprintln!("\nIllustrative examples of incorrectly grouped strings:");
+        for (i, (idx1, idx2)) in examples.iter().enumerate() {
+            eprintln!("  Example {}:", i + 1);
+            eprintln!("    String {}: {:?} (Hash: {:032x})", idx1, String::from_utf8_lossy(&strings[*idx1]), accumulators[*idx1]);
+            eprintln!("    String {}: {:?} (Hash: {:032x})", idx2, String::from_utf8_lossy(&strings[*idx2]), accumulators[*idx2]);
+            eprintln!("    Were grouped together but are NOT equivalent");
+        }
+        panic!("Hash collision or logic error detected in equivalence analysis");
     }
-    
-    new_classes
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
