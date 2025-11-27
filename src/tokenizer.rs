@@ -8,7 +8,7 @@ use std::collections::{BTreeMap as StdMap, BTreeSet, BTreeMap};
 // Added for derive macro pattern, aliased to avoid conflict
 
 pub type LLMToken = Vec<u8>;
-// Changed from BiBTreeMap to BTreeMap - we never use bidirectional lookup for this map
+// Use BTreeMap for compatibility with serialization
 pub type LLMTokenMap = BTreeMap<Vec<u8>, LLMTokenID>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, JSONConvertible)]

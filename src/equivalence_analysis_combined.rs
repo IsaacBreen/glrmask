@@ -2,6 +2,7 @@ use crate::finite_automata::{Regex, GroupID};
 use crate::profiler::PROGRESS_BAR_ENABLED;
 use hashbrown::HashMap;
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
+use rayon::prelude::*;
 use smallvec::SmallVec;
 use std::collections::BTreeMap;
 
@@ -75,9 +76,10 @@ fn hash_outcome_commit(
 // Trie Definition
 // -----------------------------------------------------------------------------
 
-#[derive(Default, Clone)]
+#[derive(Clone, Default)]
 struct TrieNode {
-    transitions: SmallVec<[(u8, u32); 4]>,
+    // Use HashMap for O(1) lookup with less memory overhead
+    transitions: hashbrown::HashMap<u8, u32>,
     terminal_string_idx: Option<u32>,
     range_start: u32,
     range_end: u32,
@@ -95,21 +97,13 @@ impl Trie {
     fn insert(&mut self, s: &[u8], original_idx: u32) {
         let mut node_idx = 0;
         for &b in s {
-            let mut found = None;
-            for &(byte, child) in &self.nodes[node_idx].transitions {
-                if byte == b {
-                    found = Some(child as usize);
-                    break;
-                }
-            }
-            match found {
-                Some(child) => node_idx = child,
-                None => {
-                    let new_node_idx = self.nodes.len();
-                    self.nodes.push(TrieNode::default());
-                    self.nodes[node_idx].transitions.push((b, new_node_idx as u32));
-                    node_idx = new_node_idx;
-                }
+            if let Some(&child) = self.nodes[node_idx].transitions.get(&b) {
+                node_idx = child as usize;
+            } else {
+                let new_node_idx = self.nodes.len() as u32;
+                self.nodes.push(TrieNode::default());
+                self.nodes[node_idx].transitions.insert(b, new_node_idx);
+                node_idx = new_node_idx as usize;
             }
         }
         self.nodes[node_idx].terminal_string_idx = Some(original_idx);
@@ -126,9 +120,11 @@ impl Trie {
         if let Some(orig_idx) = self.nodes[node_idx].terminal_string_idx {
             mapping.push(orig_idx as usize);
         }
-        self.nodes[node_idx].transitions.sort_unstable_by_key(|k| k.0);
-        let children = self.nodes[node_idx].transitions.clone();
-        for &(_, child_idx) in &children {
+        // Get sorted keys
+        let mut keys: Vec<u8> = self.nodes[node_idx].transitions.keys().copied().collect();
+        keys.sort_unstable();
+        for b in keys {
+            let child_idx = self.nodes[node_idx].transitions[&b];
             self.dfs_linearize(child_idx as usize, mapping);
         }
         let end = mapping.len() as u32;
@@ -166,21 +162,29 @@ pub fn find_equivalence_classes_combined(
     crate::debug!(3, "Combined equivalence analysis for {} strings.", strings.len());
     let pb = create_pb(4);
 
+    let t0 = std::time::Instant::now();
     pb.set_message("Precomputing signatures...");
     let state_signatures = compute_state_signatures(regex);
+    crate::debug!(4, "  State signatures: {:?}", t0.elapsed());
+    
     // Precompute remainder hashes for BOTH mask and commit in one pass
+    let t1 = std::time::Instant::now();
     let (remainder_hashes_mask, remainder_hashes_commit) = 
         precompute_remainder_hashes_combined(regex, strings, &state_signatures);
+    crate::debug!(4, "  Remainder hashes (parallel): {:?}", t1.elapsed());
     pb.inc(1);
 
+    let t2 = std::time::Instant::now();
     pb.set_message("Building Trie...");
     let mut trie = Trie::new();
     for (i, s) in strings.iter().enumerate() {
         trie.insert(s, i as u32);
     }
     let linearized_mapping = trie.linearize();
+    crate::debug!(4, "  Trie build: {:?}", t2.elapsed());
     pb.inc(1);
 
+    let t3 = std::time::Instant::now();
     pb.set_message("Symbolic Execution...");
     let mut accumulators_mask = vec![0u128; strings.len()];
     let mut diffs_mask = vec![0u128; strings.len() + 1];
@@ -203,8 +207,10 @@ pub fn find_equivalence_classes_combined(
         &mut accumulators_commit, &mut diffs_commit,
         0
     );
+    crate::debug!(4, "  Symbolic execution: {:?}", t3.elapsed());
     pb.inc(1);
 
+    let t4 = std::time::Instant::now();
     pb.set_message("Grouping...");
     // Apply diffs for mask
     let mut current_diff = 0u128;
@@ -222,6 +228,7 @@ pub fn find_equivalence_classes_combined(
 
     let mask_classes = group_by_hash(&accumulators_mask);
     let commit_classes = group_by_hash(&accumulators_commit);
+    crate::debug!(4, "  Grouping: {:?}", t4.elapsed());
 
     pb.finish_with_message("Done");
     
@@ -268,6 +275,7 @@ fn process_string_node_combined(
         }
     }
 
+    // Check if node has any children
     if node.transitions.is_empty() { return; }
 
     // 2. Transitions
@@ -275,7 +283,7 @@ fn process_string_node_combined(
 
     for &(dfa_state, weight) in &active_states {
         let dfa_node = &regex.dfa.states[dfa_state as usize];
-        for &(byte, child_idx) in &node.transitions {
+        for (&byte, &child_idx) in &node.transitions {
             if let Some(&next_state) = dfa_node.transitions.get(byte) {
                 let next_data = &regex.dfa.states[next_state];
                 if !next_data.finalizers.is_empty() {
@@ -377,10 +385,8 @@ fn precompute_remainder_hashes_combined(
     strings: &[Vec<u8>],
     state_signatures: &[u64],
 ) -> (Vec<Vec<u64>>, Vec<Vec<u64>>) {
-    let mut result_mask = Vec::with_capacity(strings.len());
-    let mut result_commit = Vec::with_capacity(strings.len());
-
-    for s in strings {
+    // Process strings in parallel - each string is independent
+    let results: Vec<(Vec<u64>, Vec<u64>)> = strings.par_iter().map(|s| {
         let len = s.len();
         let mut hashes_mask = vec![0u64; len + 1];
         let mut hashes_commit = vec![0u64; len + 1];
@@ -441,9 +447,11 @@ fn precompute_remainder_hashes_combined(
             hashes_mask[i] = (node_hash_mask ^ (node_hash_mask >> 64)) as u64;
             hashes_commit[i] = (node_hash_commit ^ (node_hash_commit >> 64)) as u64;
         }
-        result_mask.push(hashes_mask);
-        result_commit.push(hashes_commit);
-    }
+        (hashes_mask, hashes_commit)
+    }).collect();
+    
+    // Unzip the results
+    let (result_mask, result_commit): (Vec<_>, Vec<_>) = results.into_iter().unzip();
     (result_mask, result_commit)
 }
 
