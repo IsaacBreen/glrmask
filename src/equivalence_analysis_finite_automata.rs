@@ -171,7 +171,7 @@ pub fn find_equivalence_classes(
 
     if VERIFY_RESULTS {
         pb.set_message("Verifying...");
-        verify_string_classes(regex, strings, initial_states, &classes);
+        verify_string_classes(regex, strings, initial_states, &classes, &accumulators);
     }
 
     pb.finish_with_message("Done");
@@ -292,7 +292,11 @@ fn precompute_remainder_hashes(regex: &Regex, strings: &[Vec<u8>]) -> Vec<Vec<u6
                  let h = hash_outcome(KIND_MATCH, m.group_id as u32, m.position as u32, next_h, 0);
                  hashes[i] = (h ^ (h >> 64)) as u64;
             } else {
-                 let h = hash_outcome(KIND_DEAD_END, 0, 0, 0, 0);
+                 let (kind, state) = match exec.end_state {
+                     Some(s) => (KIND_TERM, s as u32),
+                     None => (KIND_DEAD_END, 0),
+                 };
+                 let h = hash_outcome(kind, 0, 0, 0, state);
                  hashes[i] = (h ^ (h >> 64)) as u64;
             }
         }
@@ -319,7 +323,7 @@ fn create_pb(len: u64) -> ProgressBar {
     pb
 }
 
-fn verify_string_classes(regex: &Regex, strings: &[Vec<u8>], initial_states: &[usize], classes: &BTreeMap<Vec<usize>, Vec<usize>>) {
+fn verify_string_classes(regex: &Regex, strings: &[Vec<u8>], initial_states: &[usize], classes: &BTreeMap<Vec<usize>, Vec<usize>>, accumulators: &[u128]) {
     let mut new_classes: BTreeMap<Vec<usize>, Vec<usize>> = BTreeMap::new();
     let mut next_id = 0;
 
@@ -380,8 +384,8 @@ fn verify_string_classes(regex: &Regex, strings: &[Vec<u8>], initial_states: &[u
         eprintln!("\nIllustrative examples of incorrectly grouped strings:");
         for (i, (idx1, idx2)) in examples.iter().enumerate() {
             eprintln!("  Example {}:", i + 1);
-            eprintln!("    String {}: {:?}", idx1, String::from_utf8_lossy(&strings[*idx1]));
-            eprintln!("    String {}: {:?}", idx2, String::from_utf8_lossy(&strings[*idx2]));
+            eprintln!("    String {}: {:?} (Hash: {:032x})", idx1, String::from_utf8_lossy(&strings[*idx1]), accumulators[*idx1]);
+            eprintln!("    String {}: {:?} (Hash: {:032x})", idx2, String::from_utf8_lossy(&strings[*idx2]), accumulators[*idx2]);
             eprintln!("    Were grouped together but are NOT equivalent");
         }
         panic!("Hash collision or logic error detected in equivalence analysis");
@@ -459,7 +463,7 @@ fn are_strings_eq(regex: &Regex, strings: &[Vec<u8>], states: &[usize], a: usize
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::finite_automata::eat_u8;
+    use crate::finite_automata::{eat_u8, eat_u8_seq};
     use crate::groups;
 
     /// Verify that find_equivalence_classes produces the same groupings as brute-force.
@@ -532,6 +536,26 @@ mod tests {
             "Strings ' []' and ' [];' should NOT be equivalent - the latter has a trailing char that dead-ends");
         
         // Also verify through the full find_equivalence_classes function
+        verify_equivalence_classes(&regex, &strings);
+    }
+
+    #[test]
+    fn test_equivalence_end_state_collision() {
+        // Regression test: " f" and " n" were colliding because remainder hash ignored end_state.
+        // Setup: WS | "false" | "null"
+        // " f" -> Matches WS, then remainder "f" results in partial match state for "false"
+        // " n" -> Matches WS, then remainder "n" results in partial match state for "null"
+        
+        let f_seq = eat_u8_seq(b"false".to_vec());
+        let n_seq = eat_u8_seq(b"null".to_vec());
+        let ws = eat_u8(b' ');
+        
+        let regex = groups![ws, f_seq, n_seq].build();
+        
+        let strings: Vec<Vec<u8>> = vec![
+            b" f".to_vec(),
+            b" n".to_vec(),
+        ];
         verify_equivalence_classes(&regex, &strings);
     }
 }
