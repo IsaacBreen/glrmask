@@ -27,7 +27,7 @@ pub type StateIDBV = RangeSet;
 /// LLM vocabulary: maps byte sequences to token IDs.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, JSONConvertible)]
 pub struct LLMVocab {
-    pub llm_token_map: BiBTreeMap<Vec<u8>, LLMTokenID>,
+    pub llm_token_map: BTreeMap<Vec<u8>, LLMTokenID>,
     pub max_original_llm_token_id: usize,
 }
 

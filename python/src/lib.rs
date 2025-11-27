@@ -1,6 +1,6 @@
 #![recursion_limit = "256"]
 
-use bimap::BiBTreeMap;
+use std::collections::BTreeMap;
 use numpy::{IntoPyArray, PyArray1};
 use ouroboros::self_referencing;
 use pyo3::basic::CompareOp;
@@ -28,7 +28,6 @@ use sep1::interface::{
 use sep1::json_serialization::{JSONConvertible, JSONNode};
 use sep1::tokenizer::LLMTokenID;
 use std::collections::hash_map::DefaultHasher;
-use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -495,7 +494,7 @@ impl PyGrammarConstraint {
         token_to_id: &Bound<'_, PyDict>,
         max_llm_token_id: usize,
     ) -> PyResult<Self> {
-        let mut llm_token_map: BiBTreeMap<Vec<u8>, LLMTokenID> = BiBTreeMap::new();
+        let mut llm_token_map: BTreeMap<Vec<u8>, LLMTokenID> = BTreeMap::new();
         for (key, value) in token_to_id.iter() {
             let token = key.extract::<&[u8]>()?;
             let id = value.extract::<usize>()?;

@@ -20,6 +20,7 @@ use crate::{
     },
     equivalence_analysis_finite_automata,
     equivalence_analysis_finite_automata_end_states,
+    equivalence_analysis_combined,
     finite_automata::Regex,
     glr::{
         analyze::compute_terminal_follow_sets,
@@ -515,6 +516,152 @@ impl GrammarConstraint {
         original_to_internal_map
     }
 
+    /// Combined setup that computes both internal mappings and commit vocab in a single pass.
+    /// This is more efficient than calling setup_llm_token_mappings and build_commit_vocab separately
+    /// because we only run the equivalence analysis once.
+    fn setup_combined(
+        llm_token_map: &LLMTokenMap,
+        tokenizer: &Regex,
+        max_original_llm_token_id: usize,
+    ) -> (BTreeMap<usize, usize>, CommitVocab) {
+        if llm_token_map.is_empty() {
+            return (BTreeMap::new(), CommitVocab::new(Vec::new(), Vec::new()));
+        }
+
+        // For very small vocabs, skip equivalence analysis
+        if llm_token_map.len() < 10 {
+            let identity_map: BTreeMap<usize, usize> = llm_token_map
+                .iter()
+                .map(|(_bytes, id)| (id.0, id.0))
+                .collect();
+            
+            let mut sorted_tokens: Vec<_> = llm_token_map.iter().collect();
+            sorted_tokens.sort_by_key(|(_, id)| id.0);
+            
+            let mut highest_original_id = 0usize;
+            for (_, id) in &sorted_tokens {
+                highest_original_id = highest_original_id.max(id.0);
+            }
+            let effective_max = max_original_llm_token_id.max(highest_original_id);
+            
+            let mut representatives = Vec::with_capacity(sorted_tokens.len());
+            let mut original_to_representative = vec![CommitVocab::INVALID_REPRESENTATIVE; effective_max + 1];
+            
+            for (idx, (bytes, id)) in sorted_tokens.into_iter().enumerate() {
+                representatives.push(bytes.clone());
+                original_to_representative[id.0] = idx as u32;
+            }
+            
+            return (identity_map, CommitVocab::new(representatives, original_to_representative));
+        }
+
+        // Sort tokens by bytes for consistent ordering
+        let mut sorted_tokens: Vec<_> = llm_token_map.iter().collect();
+        sorted_tokens.sort_by_key(|(bytes, _id)| *bytes);
+
+        let mut llm_token_strings: Vec<Vec<u8>> = Vec::with_capacity(sorted_tokens.len());
+        let mut original_ids: Vec<LLMTokenID> = Vec::with_capacity(sorted_tokens.len());
+        let mut highest_original_id = 0usize;
+
+        for (bytes, id) in &sorted_tokens {
+            highest_original_id = highest_original_id.max(id.0);
+            llm_token_strings.push((*bytes).clone());
+            original_ids.push(**id);
+        }
+
+        let initial_states: Vec<usize> = tokenizer.iter_states().map(|s| s.0).collect();
+
+        // Run combined equivalence analysis - THE KEY OPTIMIZATION
+        let combined_result = equivalence_analysis_combined::find_equivalence_classes_combined(
+            tokenizer,
+            &llm_token_strings,
+            &initial_states,
+        );
+
+        if is_debug_level_enabled(3) {
+            let num_original_tokens = llm_token_strings.len();
+            crate::debug!(
+                3,
+                "Combined Equivalence Analysis: {} tokens -> {} mask classes, {} commit classes",
+                num_original_tokens,
+                combined_result.mask_classes.len(),
+                combined_result.commit_classes.len()
+            );
+        }
+
+        // Build original_to_internal map from mask_classes
+        let mut original_to_internal_map = BTreeMap::new();
+        let mut internal_id_counter = 0;
+        for (_signature, string_indices) in combined_result.mask_classes {
+            let internal_id = internal_id_counter;
+            internal_id_counter += 1;
+            for string_index in string_indices {
+                let original_llm_id = original_ids[string_index];
+                original_to_internal_map.insert(original_llm_id.0, internal_id);
+            }
+        }
+
+        // Build CommitVocab from commit_classes
+        let effective_max = max_original_llm_token_id.max(highest_original_id);
+        let mut original_to_representative =
+            vec![CommitVocab::INVALID_REPRESENTATIVE; effective_max + 1];
+        let mut representatives: Vec<Vec<u8>> = Vec::with_capacity(combined_result.commit_classes.len());
+        let mut assigned = vec![false; llm_token_strings.len()];
+
+        for (_signature, string_indices) in combined_result.commit_classes {
+            if string_indices.is_empty() {
+                continue;
+            }
+            // Pick shortest representative
+            let rep_idx = string_indices
+                .iter()
+                .copied()
+                .min_by(|&a, &b| {
+                    llm_token_strings[a]
+                        .len()
+                        .cmp(&llm_token_strings[b].len())
+                        .then_with(|| llm_token_strings[a].cmp(&llm_token_strings[b]))
+                })
+                .unwrap();
+            let representative_id = representatives.len();
+            representatives.push(llm_token_strings[rep_idx].clone());
+            for idx in string_indices {
+                assigned[idx] = true;
+                let orig_id = original_ids[idx].0;
+                if orig_id >= original_to_representative.len() {
+                    original_to_representative
+                        .resize(orig_id + 1, CommitVocab::INVALID_REPRESENTATIVE);
+                }
+                original_to_representative[orig_id] = representative_id as u32;
+            }
+        }
+
+        // Handle any unassigned tokens (shouldn't happen, but safety)
+        for (idx, was_assigned) in assigned.iter().enumerate() {
+            if *was_assigned {
+                continue;
+            }
+            let representative_id = representatives.len();
+            representatives.push(llm_token_strings[idx].clone());
+            let orig_id = original_ids[idx].0;
+            if orig_id >= original_to_representative.len() {
+                original_to_representative
+                    .resize(orig_id + 1, CommitVocab::INVALID_REPRESENTATIVE);
+            }
+            original_to_representative[orig_id] = representative_id as u32;
+        }
+
+        crate::debug!(
+            3,
+            "Commit vocab built with {} representatives for {} tokens",
+            representatives.len(),
+            llm_token_strings.len()
+        );
+
+        let commit_vocab = CommitVocab::new(representatives, original_to_representative);
+        (original_to_internal_map, commit_vocab)
+    }
+
     fn build_commit_vocab(
         llm_token_map: &LLMTokenMap,
         tokenizer: &Regex,
@@ -621,15 +768,21 @@ impl GrammarConstraint {
             "Epsilon tokens are not supported."
         );
 
-        // Global original<->internal mapping.
-        let original_to_internal_map =
-            Self::setup_llm_token_mappings(&llm_token_map, &tokenizer);
+        // Combined equivalence analysis - computes both mask and commit classes in one pass
+        let (original_to_internal_map, commit_vocab_data) = Self::setup_combined(
+            &llm_token_map,
+            &tokenizer,
+            max_original_llm_token_id,
+        );
+        let commit_vocab = Arc::new(commit_vocab_data);
+
         let internal_max_llm_token = original_to_internal_map
             .values()
             .copied()
             .max()
             .unwrap_or(0);
 
+        crate::debug!(3, "Building internal_to_original_map");
         let mut internal_to_original_map: BTreeMap<usize, LLMTokenBV> = BTreeMap::new();
         for (orig, int_id) in &original_to_internal_map {
             internal_to_original_map
@@ -637,14 +790,33 @@ impl GrammarConstraint {
                 .or_default()
                 .insert(*orig);
         }
+        crate::debug!(3, "Done building internal_to_original_map");
 
-        // Build internal LLM token map keyed by bytes.
+        // Build internal LLM token map with only ONE representative per internal ID.
+        // This dramatically reduces the vocab tree size from 50K to ~200 entries.
+        crate::debug!(3, "Building internal_llm_token_map");
         let mut internal_llm_token_map: BTreeMap<Vec<u8>, LLMTokenID> = BTreeMap::new();
-        for (bytes, original_id) in llm_token_map.iter() {
-            if let Some(internal_id_val) = original_to_internal_map.get(&original_id.0) {
-                internal_llm_token_map.insert(bytes.clone(), LLMTokenID(*internal_id_val));
+        let mut seen_internal_ids: HashSet<usize> = HashSet::new();
+        
+        // Sort tokens by bytes to get deterministic representatives (shortest first)
+        let mut sorted_tokens: Vec<_> = llm_token_map.iter().collect();
+        sorted_tokens.sort_by(|(a_bytes, _), (b_bytes, _)| {
+            a_bytes.len().cmp(&b_bytes.len()).then_with(|| a_bytes.cmp(b_bytes))
+        });
+        
+        for (bytes, original_id) in sorted_tokens {
+            if let Some(&internal_id_val) = original_to_internal_map.get(&original_id.0) {
+                if seen_internal_ids.insert(internal_id_val) {
+                    // First time seeing this internal ID - use this token as representative
+                    internal_llm_token_map.insert(bytes.clone(), LLMTokenID(internal_id_val));
+                }
             }
         }
+
+        crate::debug!(3, "internal_llm_token_map has {} representative entries (was {} total)",
+            internal_llm_token_map.len(),
+            llm_token_map.len()
+        );
 
         // Vocab tree for internal tokens.
         crate::debug!(3, "Building internal vocab prefix tree");
@@ -693,11 +865,7 @@ impl GrammarConstraint {
             }
         }
 
-        let commit_vocab = Arc::new(Self::build_commit_vocab(
-            &llm_token_map,
-            &tokenizer,
-            max_original_llm_token_id,
-        ));
+        // commit_vocab is already computed in setup_combined above
 
         let mut vocab = StageVocab {
             original_to_internal: original_to_internal_map.clone(),

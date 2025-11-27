@@ -4,11 +4,12 @@ use crate::types::TerminalID as GrammarTokenID;
 use bimap::BiBTreeMap;
 use json_convertible_derive::JSONConvertible;
 // Added
-use std::collections::{BTreeMap as StdMap, BTreeSet};
+use std::collections::{BTreeMap as StdMap, BTreeSet, BTreeMap};
 // Added for derive macro pattern, aliased to avoid conflict
 
 pub type LLMToken = Vec<u8>;
-pub type LLMTokenMap = BiBTreeMap<Vec<u8>, LLMTokenID>;
+// Changed from BiBTreeMap to BTreeMap - we never use bidirectional lookup for this map
+pub type LLMTokenMap = BTreeMap<Vec<u8>, LLMTokenID>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, JSONConvertible)]
 pub struct LLMTokenID(pub usize);

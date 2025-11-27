@@ -58,10 +58,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     // 2. Load the vocabulary.
     println!("Loading vocabulary from: {:?}", args.vocab);
+    let t0 = std::time::Instant::now();
     let vocab_file = File::open(&args.vocab)?;
     let reader = BufReader::new(vocab_file);
     let vocab: BTreeMap<String, usize> = serde_json::from_reader(reader)?;
+    println!("  JSON parsing: {:?}", t0.elapsed());
 
+    let t1 = std::time::Instant::now();
     let mut llm_token_map = LLMTokenMap::new();
     let mut max_original_llm_token_id = 0;
 
@@ -80,6 +83,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         llm_token_map.insert(token_bytes, LLMTokenID(token_id));
         max_original_llm_token_id = max_original_llm_token_id.max(token_id);
     }
+    println!("  BiBTreeMap building: {:?}", t1.elapsed());
     println!("Vocabulary loaded ({} tokens, max ID: {}).", llm_token_map.len(), max_original_llm_token_id);
 
     // 3. Construct the GrammarConstraint.
