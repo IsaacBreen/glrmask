@@ -1567,6 +1567,15 @@ fn test_json_gpt2_initial_mask_bruteforce_manual() -> Result<(), Box<dyn std::er
         next_id += 1;
     }
 
+    let others = vec![
+        "fa", "fal", "fals", "false"
+    ];
+
+    for other in others {
+        llm_token_map.insert(other.as_bytes().to_vec(), LLMTokenID(next_id));
+        next_id += 1;
+    }
+
     let constraint = GrammarConstraint::new_from_grammar_definition(
         Arc::new(grammar_definition),
         llm_token_map.clone(),
