@@ -1517,6 +1517,36 @@ fn test_json_gpt2_initial_mask_bruteforce() -> Result<(), Box<dyn std::error::Er
         }
     }
     assert_eq!(errors, 0, "Initial mask does not match brute-force validity check.");
+
+   // 22935: ' {{'
+   // 23834: ' […]'
+   // 24566: ' falsely'
+   // 25787: ' [];'
+   // 26076: ' [+'
+   // 26894: ' [...]'
+   // 30138: ' [*'
+   // 36338: ' [*]'
+   // 37110: ' falsehood'
+   // 37250: " ['"
+   // 43839: ' {\\'
+   // 46110: ' {:'
+   // 46581: ' [/'
+   // 47175: ' [+]'
+   // 47527: ' [('
+   // 48683: ' {*'
+   // 49074: ' [|'
+   // 49082: ' [&'
+    let manually_verified_exclusions = vec![
+        " {{", " […]", " falsely", " [];", " [+", " [...]", " [*", " [*]", " falsehood",
+        " ['", " {\\", " {:", " [/", " [+]", " [(", " {*", " [|", " [&",
+    ];
+    for token_str in manually_verified_exclusions {
+        let id = vocab_map.get(token_str)
+            .and_then(|v| v.as_u64())
+            .expect(&format!("Token {} not found in vocab", token_str));
+        assert!(!mask.contains(id as usize), "Manually verified exclusion '{}' (ID {}) is initial mask", token_str, id);
+    }
+
     Ok(())
 }
 
