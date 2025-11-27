@@ -345,7 +345,47 @@ fn verify_string_classes(regex: &Regex, strings: &[Vec<u8>], initial_states: &[u
         }
     }
     // Ensure they're exactly the same, and report any differences
-    assert_eq!(classes, &new_classes);
+    if classes != &new_classes {
+        // Find some illustrative examples of differences
+        let mut examples = Vec::new();
+
+        // Check for strings that are in same class in 'classes' but different in 'new_classes'
+        for (_, group) in classes.iter() {
+            if group.len() > 1 {
+                // Find which new_classes these strings ended up in
+                let mut new_class_ids: HashMap<usize, Vec<usize>> = HashMap::new();
+                for &idx in group {
+                    for (new_id, new_group) in new_classes.iter() {
+                        if new_group.contains(&idx) {
+                            new_class_ids.entry(new_id[0]).or_default().push(idx);
+                            break;
+                        }
+                    }
+                }
+
+                if new_class_ids.len() > 1 && examples.len() < 3 {
+                    // This group was split - show first 2 strings from different subgroups
+                    let mut iter = new_class_ids.values();
+                    if let (Some(subgroup1), Some(subgroup2)) = (iter.next(), iter.next()) {
+                        if let (Some(&idx1), Some(&idx2)) = (subgroup1.first(), subgroup2.first()) {
+                            examples.push((idx1, idx2));
+                        }
+                    }
+                }
+            }
+        }
+
+        eprintln!("ERROR: Hash-based classification differs from brute-force verification!");
+        eprintln!("Total classes: hash={}, verified={}", classes.len(), new_classes.len());
+        eprintln!("\nIllustrative examples of incorrectly grouped strings:");
+        for (i, (idx1, idx2)) in examples.iter().enumerate() {
+            eprintln!("  Example {}:", i + 1);
+            eprintln!("    String {}: {:?}", idx1, String::from_utf8_lossy(&strings[*idx1]));
+            eprintln!("    String {}: {:?}", idx2, String::from_utf8_lossy(&strings[*idx2]));
+            eprintln!("    Were grouped together but are NOT equivalent");
+        }
+        panic!("Hash collision or logic error detected in equivalence analysis");
+    }
 }
 
 /// Represents the outcome of iteratively tokenizing a string.
