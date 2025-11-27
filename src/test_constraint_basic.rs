@@ -1551,6 +1551,79 @@ fn test_json_gpt2_initial_mask_bruteforce() -> Result<(), Box<dyn std::error::Er
 }
 
 #[test]
+fn test_json_gpt2_initial_mask_bruteforce_manual() -> Result<(), Box<dyn std::error::Error>> {
+    let ebnf_grammar = indoc! {r#"
+        #![ignore(WS)]
+        value ::= object | array | STRING | NUMBER | 'true' | 'false' | 'null' ;
+        object ::= '{' pairs '}' ;
+        pairs ::= pair (',' pair)* | ;
+        pair ::= STRING ':' value ;
+        array ::= '[' items ']' ;
+        items ::= value (',' value)* | ;
+        STRING ::= '"' [^"]* '"' ;
+        NUMBER ::= '-'? [0-9]+ ;
+        WS ::= [ \t\n\r]+ ;
+    "#};
+    let grammar_definition = GrammarDefinition::from_ebnf(ebnf_grammar)?;
+
+    let mut llm_token_map = LLMTokenMap::new();
+    let mut next_id = 0;
+
+    // Add all single byte tokens
+    for i in 0u8..=255 {
+        llm_token_map.insert(vec![i], LLMTokenID(next_id));
+        next_id += 1;
+    }
+
+    let manually_verified_exclusions = vec![
+        " {{", " […]", " falsely", " [];", " [+", " [...]", " [*", " [*]", " falsehood",
+        " ['", " {\\", " {:", " [/", " [+]", " [(", " {*", " [|", " [&",
+    ];
+
+    for excl in &manually_verified_exclusions {
+        llm_token_map.insert(excl.as_bytes().to_vec(), LLMTokenID(next_id));
+        next_id += 1;
+    }
+
+    let constraint = GrammarConstraint::new_from_grammar_definition(
+        Arc::new(grammar_definition),
+        llm_token_map.clone(),
+        next_id - 1,
+        &GrammarConstraintConfig::default(),
+    );
+
+    let mut state = constraint.init();
+    let mask = state.get_mask();
+    println!("Initial mask size: {} / {}", mask.len(), llm_token_map.len());
+
+    // Brute force verification
+    println!("Starting brute-force verification of {} tokens...", llm_token_map.len());
+    let mut errors = 0;
+    for (bytes, id) in &llm_token_map {
+        let mut temp_state = constraint.init();
+        temp_state.commit(*id);
+        let is_valid = temp_state.is_active();
+        let allowed = mask.contains(id.0);
+
+        if is_valid != allowed {
+             let s = String::from_utf8_lossy(bytes);
+             println!("Mismatch! Token ID {}: Mask={}, Valid={}. Token: {:?}", id.0, allowed, is_valid, s);
+             errors += 1;
+             if errors > 20 { panic!("Too many mismatches."); }
+        }
+    }
+    assert_eq!(errors, 0, "Initial mask does not match brute-force validity check.");
+
+    // Verify exclusions specifically
+    for token_str in manually_verified_exclusions {
+        let id = llm_token_map.get_by_left(token_str.as_bytes()).unwrap();
+        assert!(!mask.contains(id.0), "Manually verified exclusion '{}' (ID {}) is in initial mask", token_str, id.0);
+    }
+
+    Ok(())
+}
+
+#[test]
 fn test_js_simplified_ebnf_string() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Load and compile the grammar from the EBNF file
     let ebnf_grammar = indoc! {r#"
