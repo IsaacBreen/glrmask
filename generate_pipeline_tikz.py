@@ -2,15 +2,15 @@
 """
 Generate a comprehensive TikZ figure of the full grammar compilation pipeline.
 
-This generates:
-1. Full input grammar (EBNF)
-2. Full LALR(1) parse table (as a table)
-3. Full Terminal DWA (Skeleton DWA)
-4. ALL below-zero characterizations for ALL terminals
-5. ALL Template DFAs for ALL terminals
-6. Terminal DWA with Template DFAs substituted on edges
-7. Full Flattened NWA
-8. Full Final DWA
+Layout (from user request):
+- Top: Input Grammar
+- Split: LEFT = Tokenizer DFA, RIGHT = LALR Parse Table
+- LEFT below Tokenizer: Terminal DWA (Skeleton)
+- RIGHT below Parse Table: Below-zero Characterizations + Template DFAs
+- CENTER (merge): Terminal DWA with Template DFAs substituted on edges (with MINI DFAs!)
+- CENTER: Flattened NWA (push transitions visible)
+- CENTER: NWA with push transitions resolved
+- CENTER: Final DWA
 
 All automata include edge labels with symbols and weights.
 Uses UPPERCASE convention for paper (DWA, NWA, DFA, LALR).
@@ -20,6 +20,7 @@ import json
 import re
 import subprocess
 from typing import Dict, List, Set, Tuple, Optional, Any
+from collections import defaultdict
 
 # Special symbol constants (from Rust code)
 REDUCE_BASE = -2147483648  # i32::MIN
@@ -35,59 +36,43 @@ def format_weight(weight_str: str) -> str:
 
 def escape_for_latex_label(s: str) -> str:
     """Escape special characters for use in TikZ node labels."""
-    # Handle dollar sign (very important!)
     s = s.replace('$', '\\$')
-    # Handle underscores
     s = s.replace('_', '\\_')
-    # Handle percent
     s = s.replace('%', '\\%')
-    # Handle ampersand
     s = s.replace('&', '\\&')
-    # Handle hash
     s = s.replace('#', '\\#')
     return s
 
 
-def format_symbol(symbol: Any, terminal_names: Dict[int, str] = None) -> str:
+def format_symbol(symbol: Any, terminal_names: Dict[int, str] = None, as_state_id: bool = False) -> str:
     """Format a symbol for edge labels.
     
-    Symbols can be:
-    - epsilon (None) -> $\\varepsilon$
-    - Terminal IDs (0, 1, 2, ...)
-    - State IDs for gotos
-    - Special reduce/goto markers
-    - neg(x) patterns in NWAs
+    If as_state_id=True, always format as state ID (for template DFAs).
+    Otherwise, may map to terminal names.
     """
     if symbol is None:
         return "$\\varepsilon$"
     
     if isinstance(symbol, str):
-        # Handle neg(x) patterns
         if symbol.startswith("neg("):
             inner = symbol[4:-1]
-            try:
-                inner_int = int(inner)
-                if terminal_names and inner_int in terminal_names:
-                    name = escape_for_latex_label(terminal_names[inner_int])
-                    return f"$\\neg${name}"
-                return f"$\\neg${inner}"
-            except:
-                return escape_for_latex_label(symbol)
+            return f"$\\neg${inner}"
+        # Don't double-escape strings that already have escapes
+        if '\\' in symbol:
+            return symbol
         return escape_for_latex_label(symbol)
     
-    # Integer symbols
     if isinstance(symbol, int):
-        # Check for special markers
+        # Check for reduce actions (large negative numbers)
         if symbol <= REDUCE_BASE + 100 and symbol >= REDUCE_BASE:
-            # It's a reduce action
             reduce_id = symbol - REDUCE_BASE
             return f"R{reduce_id}"
-        elif symbol >= GOTO_BASE - 100 and symbol <= GOTO_BASE + 100:
-            # It's a goto action
-            if symbol == GOTO_BASE:
-                return "GOTO"
-            offset = symbol - GOTO_BASE
-            return f"G{offset}"
+        # Check for goto actions (large positive numbers)
+        elif symbol >= GOTO_BASE - 100:
+            return "GOTO"
+        # Otherwise it's a state ID (or terminal if not as_state_id)
+        elif as_state_id:
+            return str(symbol)
         elif terminal_names and symbol in terminal_names:
             return escape_for_latex_label(terminal_names[symbol])
         else:
@@ -97,12 +82,7 @@ def format_symbol(symbol: Any, terminal_names: Dict[int, str] = None) -> str:
 
 
 def parse_dwa_with_labels(dwa_str: str) -> Tuple[Set[int], List[Tuple[int, int, Any, str]], Dict[int, str]]:
-    """Parse a DWA string, extracting nodes, edges with labels, and final weights.
-    
-    Returns:
-        (nodes, edges, final_weights)
-        where edges is list of (source, target, symbol, weight)
-    """
+    """Parse a DWA string, extracting nodes, edges with labels, and final weights."""
     nodes = set()
     edges = []
     final_weights = {}
@@ -117,11 +97,9 @@ def parse_dwa_with_labels(dwa_str: str) -> Tuple[Set[int], List[Tuple[int, int, 
                 current_state = int(match.group(1))
                 nodes.add(current_state)
         elif "->" in line and "final_weight" not in line:
-            # Parse: symbol -> target (weight: X) or symbol -> target
             parts = line.split("->")
             label_str = parts[0].strip()
             
-            # Parse symbol
             if label_str == "ε":
                 symbol = None
             elif label_str.startswith("neg("):
@@ -132,16 +110,12 @@ def parse_dwa_with_labels(dwa_str: str) -> Tuple[Set[int], List[Tuple[int, int, 
                 except ValueError:
                     symbol = label_str
             
-            # Parse target and optional weight
             target_part = parts[1].strip()
             target_match = re.match(r"(\d+)", target_part)
             if target_match:
                 target = int(target_match.group(1))
-                
-                # Extract weight if present
                 weight_match = re.search(r"\(weight:\s*([^)]+)\)", target_part)
                 weight = weight_match.group(1).strip() if weight_match else "ALL"
-                
                 edges.append((current_state, target, symbol, weight))
                 nodes.add(target)
         elif "final_weight:" in line:
@@ -151,16 +125,64 @@ def parse_dwa_with_labels(dwa_str: str) -> Tuple[Set[int], List[Tuple[int, int, 
     return nodes, edges, final_weights
 
 
-def parse_dwa(dwa_str):
-    """Legacy parser for backward compatibility."""
-    nodes, edges_with_weights, final_weights = parse_dwa_with_labels(dwa_str)
-    edges = [(e[0], e[1], e[2]) for e in edges_with_weights]
-    return nodes, edges, final_weights
+def parse_tokenizer_dfa(dfa_str: str) -> Tuple[Set[int], List[Tuple[int, int, str, str]], Dict[int, List[int]]]:
+    """Parse tokenizer DFA debug output.
+    
+    Returns (nodes, edges, finalizers) where edges have (source, target, char_label, "ALL")
+    and finalizers maps state to list of group IDs.
+    """
+    nodes = set()
+    edges = []
+    finalizers = {}
+    
+    # Parse DFAState entries
+    # Pattern: DFAState { transitions: {byte: state, ...}, finalizers: Bitset { words: [...] }, ...
+    state_pattern = r"DFAState \{ transitions: \{([^}]*)\}, finalizers: Bitset \{ words: \[([^\]]*)\]"
+    
+    state_id = 0
+    for match in re.finditer(state_pattern, dfa_str):
+        nodes.add(state_id)
+        transitions_str = match.group(1)
+        finalizers_str = match.group(2)
+        
+        # Parse transitions
+        for trans_match in re.finditer(r"(\d+): (\d+)", transitions_str):
+            byte_val = int(trans_match.group(1))
+            target = int(trans_match.group(2))
+            nodes.add(target)
+            # Convert byte to char for label
+            if byte_val == 36:  # $
+                label = "\\$"
+            elif 32 <= byte_val <= 126:
+                label = chr(byte_val)
+                if label in ['$', '_', '%', '&', '#', '{', '}']:
+                    label = '\\' + label
+            else:
+                label = f"0x{byte_val:02x}"
+            edges.append((state_id, target, label, "ALL"))
+        
+        # Parse finalizers
+        if finalizers_str.strip():
+            words = [int(w) for w in finalizers_str.split(',') if w.strip()]
+            final_groups = []
+            for word_idx, word in enumerate(words):
+                for bit in range(64):
+                    if word & (1 << bit):
+                        final_groups.append(word_idx * 64 + bit)
+            if final_groups:
+                finalizers[state_id] = final_groups
+        
+        state_id += 1
+    
+    return nodes, edges, finalizers
 
 
-def run_dot_layout(nodes: Set[int], edges: List[Tuple], final_weights: Dict[int, str], 
+def run_dot_layout(nodes: Set[int], edges: List[Tuple], final_states: Set[int] = None, 
                    large: bool = False) -> Optional[str]:
     """Generate layout using Graphviz dot."""
+    if final_states is None:
+        final_states = set()
+    
     dot_content = ["digraph G {"]
     dot_content.append('  rankdir=LR;')
     
@@ -168,12 +190,12 @@ def run_dot_layout(nodes: Set[int], edges: List[Tuple], final_weights: Dict[int,
         dot_content.append('  nodesep=1.5;')
         dot_content.append('  ranksep=2.0;')
     else:
-        dot_content.append('  nodesep=1.0;')
-        dot_content.append('  ranksep=1.2;')
+        dot_content.append('  nodesep=0.8;')
+        dot_content.append('  ranksep=1.0;')
     
-    for n in nodes:
-        shape = "doublecircle" if n in final_weights else "circle"
-        dot_content.append(f'  {n} [shape={shape}, width=0.6, height=0.6, fixedsize=true, fontsize=12];')
+    for n in sorted(nodes):
+        shape = "doublecircle" if n in final_states else "circle"
+        dot_content.append(f'  {n} [shape={shape}, width=0.5, height=0.5, fixedsize=true, fontsize=10];')
         
     for edge in edges:
         u, v = edge[0], edge[1]
@@ -193,11 +215,9 @@ def run_dot_layout(nodes: Set[int], edges: List[Tuple], final_weights: Dict[int,
         stdout, stderr = process.communicate(input=dot_str, timeout=10)
         
         if process.returncode != 0:
-            print(f"Graphviz error: {stderr}")
             return None
         return stdout
     except Exception as e:
-        print(f"Error running graphviz: {e}")
         return None
 
 
@@ -221,52 +241,37 @@ def parse_dot_plain(plain_output: str) -> Dict:
     return layout
 
 
-def escape_latex(s: str) -> str:
-    """Escape special LaTeX characters."""
-    s = s.replace('\\', '\\textbackslash{}')
-    s = s.replace('_', '\\_')
-    s = s.replace('{', '\\{')
-    s = s.replace('}', '\\}')
-    s = s.replace('&', '\\&')
-    s = s.replace('%', '\\%')
-    s = s.replace('#', '\\#')
-    s = s.replace('$', '\\$')
-    s = s.replace('~', '\\textasciitilde{}')
-    s = s.replace('^', '\\textasciicircum{}')
-    return s
-
-
-def format_edge_label(symbol: Any, weight: str, terminal_names: Dict[int, str] = None) -> str:
+def format_edge_label(symbol: Any, weight: str, terminal_names: Dict[int, str] = None, 
+                      as_state_id: bool = False) -> str:
     """Format the edge label with symbol and weight."""
-    sym_str = format_symbol(symbol, terminal_names)
+    sym_str = format_symbol(symbol, terminal_names, as_state_id=as_state_id)
     weight_str = format_weight(weight)
     
     if weight_str == "ALL":
         return sym_str
     else:
-        # Compact weight display
         weight_short = weight_str
-        if len(weight_short) > 15:
-            weight_short = weight_short[:12] + "..."
+        if len(weight_short) > 12:
+            weight_short = weight_short[:10] + ".."
         return f"{sym_str}/{weight_short}"
 
 
-def generate_automaton_tikz_with_labels(
+def generate_automaton_tikz(
     nodes: Set[int], 
-    edges: List[Tuple[int, int, Any, str]], 
-    final_weights: Dict[int, str], 
+    edges: List[Tuple], 
+    final_states: Set[int],
     name: str, 
     pos: Tuple[float, float] = (0, 0), 
     scale: float = 1.0, 
     terminal_names: Dict[int, str] = None,
     show_labels: bool = True,
-    compact: bool = False
+    as_state_id: bool = False,
+    node_size: str = "10mm",
+    font_size: str = "\\small"
 ) -> str:
     """Generate TikZ code for an automaton with labeled edges."""
     
-    # Get simple edges for layout
-    simple_edges = [(e[0], e[1], e[2]) for e in edges]
-    plain = run_dot_layout(nodes, edges, final_weights, large=not compact)
+    plain = run_dot_layout(nodes, edges, final_states)
     if not plain:
         return f"% Failed to layout {name}\n"
         
@@ -282,29 +287,25 @@ def generate_automaton_tikz_with_labels(
         tikz.append(f"\\node[anchor=south, font=\\bfseries\\large] at (0,{bbox[3]/2 + 0.8}) {{{name}}};")
     
     # Draw nodes
-    for n, (x, y) in layout["nodes"].items():
+    for n in sorted(nodes):
+        if n not in layout["nodes"]:
+            continue
+        x, y = layout["nodes"][n]
         tx, ty = x - cx, y - cy
         styles = ["state"]
-        if n in final_weights:
+        if n in final_states:
             styles = ["accepting"]
         if n == 0:
             styles.append("initial")
         style_str = ",".join(styles)
-        
-        # Add final weight label if present
-        if n in final_weights:
-            weight = format_weight(final_weights[n])
-            if weight != "ALL":
-                tikz.append(f"\\node[{style_str}] (n{safe_name}{n}) at ({tx:.2f},{ty:.2f}) {{{n}}};")
-                tikz.append(f"\\node[font=\\tiny, below=1pt of n{safe_name}{n}] {{{weight}}};")
-            else:
-                tikz.append(f"\\node[{style_str}] (n{safe_name}{n}) at ({tx:.2f},{ty:.2f}) {{{n}}};")
-        else:
-            tikz.append(f"\\node[{style_str}] (n{safe_name}{n}) at ({tx:.2f},{ty:.2f}) {{{n}}};")
+        tikz.append(f"\\node[{style_str}, minimum size={node_size}] (n{safe_name}{n}) at ({tx:.2f},{ty:.2f}) {{{font_size} {n}}};")
     
-    # Group edges by (source, target) to handle multiple edges
+    # Group edges by (source, target)
     edge_groups: Dict[Tuple[int, int], List[Tuple[Any, str]]] = {}
-    for u, v, symbol, weight in edges:
+    for edge in edges:
+        u, v = edge[0], edge[1]
+        symbol = edge[2] if len(edge) > 2 else None
+        weight = edge[3] if len(edge) > 3 else "ALL"
         key = (u, v)
         if key not in edge_groups:
             edge_groups[key] = []
@@ -312,22 +313,20 @@ def generate_automaton_tikz_with_labels(
     
     # Draw edges
     for (u, v), labels in edge_groups.items():
+        if u not in layout["nodes"] or v not in layout["nodes"]:
+            continue
         nu = f"n{safe_name}{u}"
         nv = f"n{safe_name}{v}"
         
-        # Format combined label
         if show_labels:
             label_parts = []
-            for symbol, weight in labels:
-                label_parts.append(format_edge_label(symbol, weight, terminal_names))
+            for symbol, weight in labels[:4]:  # Limit to 4 labels
+                label_parts.append(format_edge_label(symbol, weight, terminal_names, as_state_id=as_state_id))
             
-            # Truncate if too many labels
-            if len(label_parts) > 3:
-                label_text = ", ".join(label_parts[:3]) + ", ..."
+            if len(labels) > 4:
+                label_text = ", ".join(label_parts) + ", ..."
             else:
                 label_text = ", ".join(label_parts)
-            
-            label_text = label_text.replace("_", "\\_")
             
             if u == v:
                 tikz.append(f"\\path[edge] ({nu}) edge[loop above] node[font=\\tiny, above] {{{label_text}}} ({nv});")
@@ -343,36 +342,194 @@ def generate_automaton_tikz_with_labels(
     return "\n".join(tikz)
 
 
-def generate_automaton_tikz(nodes, edges, final_weights, name, pos=(0,0), scale=1.0, large=False):
-    """Legacy function for backward compatibility - no edge labels."""
-    plain = run_dot_layout(nodes, edges, final_weights, large=large)
+def generate_mini_automaton_tikz(
+    nodes: Set[int], 
+    edges: List[Tuple], 
+    final_states: Set[int],
+    edge_name: str,
+    scale: float = 0.15
+) -> str:
+    """Generate a MINI automaton for embedding in an edge label.
+    
+    Returns TikZ scope that can be placed at a position.
+    """
+    plain = run_dot_layout(nodes, edges, final_states)
     if not plain:
-        return f"% Failed to layout {name}\n"
+        return ""
         
     layout = parse_dot_plain(plain)
-    bbox = layout["bbox"]
-    cx, cy = bbox[2]/2, bbox[3]/2
+
+
+def generate_merged_dwa_with_mini_dfas(
+    skel_nodes: Set[int],
+    skel_edges: List[Tuple],
+    skel_finals: Dict[int, str],
+    template_dwas: Dict[int, Tuple],
+    terminal_names: Dict[int, str],
+    pos: Tuple[float, float],
+    scale: float = 0.8
+) -> str:
+    """Generate the merged Terminal DWA with actual mini template DFA visuals on edges.
     
-    safe_name = re.sub(r'[^a-zA-Z0-9]', '', name)
+    This is the "crazy" visualization where edges show miniaturized template DFAs.
+    """
+    # First, layout the skeleton
+    skel_final_set = set(skel_finals.keys())
+    plain = run_dot_layout(skel_nodes, skel_edges, skel_final_set)
+    if not plain:
+        return f"% Failed to layout merged DWA\n"
+    
+    layout = parse_dot_plain(plain)
+    bbox = layout["bbox"]
+    cx, cy = bbox[2] / 2, bbox[3] / 2
     
     tikz = []
     tikz.append(f"\\begin{{scope}}[shift={{({pos[0]},{pos[1]})}}, scale={scale}]")
-    tikz.append(f"\\node[anchor=north, font=\\bfseries] at (0,{bbox[3]/2+0.8}) {{{name}}};")
     
-    for n, (x, y) in layout["nodes"].items():
+    # Draw skeleton nodes
+    for n in sorted(skel_nodes):
+        if n not in layout["nodes"]:
+            continue
+        x, y = layout["nodes"][n]
         tx, ty = x - cx, y - cy
-        style = "state"
-        if n in final_weights: style = "accepting"
-        if n == 0: style += ",initial"
-        tikz.append(f"\\node[{style}] (n{safe_name}{n}) at ({tx:.2f},{ty:.2f}) {{{n}}};")
+        styles = ["state"]
+        if n in skel_final_set:
+            styles = ["accepting"]
+        if n == 0:
+            styles.append("initial")
+        style_str = ",".join(styles)
+        tikz.append(f"\\node[{style_str}, minimum size=12mm] (merged{n}) at ({tx:.2f},{ty:.2f}) {{\\large {n}}};")
     
-    for u, v, label in edges:
-        nu = f"n{safe_name}{u}"
-        nv = f"n{safe_name}{v}"
-        if u == v:
-            tikz.append(f"\\path[edge] ({nu}) edge[loop above] ({nv});")
+    # Group edges and prepare mini-DFA positions
+    edge_info = []
+    for u, v, symbol, weight in skel_edges:
+        if u not in layout["nodes"] or v not in layout["nodes"]:
+            continue
+        
+        # Calculate midpoint for mini-DFA placement
+        x1, y1 = layout["nodes"][u]
+        x2, y2 = layout["nodes"][v]
+        mx, my = (x1 + x2) / 2 - cx, (y1 + y2) / 2 - cy
+        
+        # Offset perpendicular to edge direction for label placement
+        dx, dy = x2 - x1, y2 - y1
+        length = (dx**2 + dy**2) ** 0.5
+        if length > 0:
+            # Normal vector (perpendicular)
+            nx, ny = -dy / length, dx / length
+            # Offset the label position above the edge
+            offset = 1.5
+            mx += nx * offset
+            my += ny * offset
+        
+        edge_info.append((u, v, symbol, weight, mx, my))
+    
+    # Draw edges with mini-DFAs
+    for u, v, symbol, weight, mx, my in edge_info:
+        nu = f"merged{u}"
+        nv = f"merged{v}"
+        
+        # Draw the edge
+        tikz.append(f"\\path[edge, very thick] ({nu}) edge ({nv});")
+        
+        # If this symbol is a terminal (0-3), draw a mini template DFA
+        if isinstance(symbol, int) and symbol in template_dwas:
+            tnodes, tedges, tfinals = template_dwas[symbol]
+            tfinal_set = set(tfinals.keys())
+            term_name = terminal_names.get(symbol, f"T{symbol}")
+            
+            # Generate mini-DFA at edge midpoint
+            mini_plain = run_dot_layout(tnodes, tedges, tfinal_set)
+            if mini_plain:
+                mini_layout = parse_dot_plain(mini_plain)
+                mini_bbox = mini_layout["bbox"]
+                mini_cx, mini_cy = mini_bbox[2] / 2, mini_bbox[3] / 2
+                mini_scale = 0.25  # Very small
+                
+                safe_edge = f"mini{u}to{v}"
+                tikz.append(f"\\begin{{scope}}[shift={{({mx:.2f},{my:.2f})}}, scale={mini_scale}]")
+                
+                # Mini label above
+                tikz.append(f"\\node[font=\\tiny\\bfseries, above] at (0, {mini_bbox[3]/2 + 0.5}) {{T({term_name.replace('$', '\\$')})}};")
+                
+                # Draw mini nodes
+                for n in sorted(tnodes):
+                    if n not in mini_layout["nodes"]:
+                        continue
+                    x, y = mini_layout["nodes"][n]
+                    tx, ty = x - mini_cx, y - mini_cy
+                    style = "state, minimum size=3mm, inner sep=0pt"
+                    if n in tfinal_set:
+                        style = "accepting, minimum size=3mm, inner sep=0pt"
+                    if n == 0:
+                        style += ", initial, initial text="
+                    tikz.append(f"\\node[{style}] (m{safe_edge}n{n}) at ({tx:.2f},{ty:.2f}) {{}};")
+                
+                # Draw mini edges (no labels)
+                edge_pairs = set()
+                for te in tedges:
+                    tu, tv = te[0], te[1]
+                    if (tu, tv) in edge_pairs:
+                        continue
+                    edge_pairs.add((tu, tv))
+                    if tu not in mini_layout["nodes"] or tv not in mini_layout["nodes"]:
+                        continue
+                    mnu = f"m{safe_edge}n{tu}"
+                    mnv = f"m{safe_edge}n{tv}"
+                    if tu == tv:
+                        tikz.append(f"\\path[edge, thin] ({mnu}) edge[loop above, looseness=6] ({mnv});")
+                    else:
+                        tikz.append(f"\\path[edge, thin] ({mnu}) edge ({mnv});")
+                
+                tikz.append("\\end{scope}")
+                
+                # Also show weight if not ALL
+                weight_str = format_weight(weight)
+                if weight_str != "ALL":
+                    tikz.append(f"\\node[font=\\tiny, below] at ({mx:.2f},{my - 1:.2f}) {{{weight_str[:10]}}};")
         else:
-            tikz.append(f"\\path[edge] ({nu}) edge ({nv});")
+            # Just draw symbol label for non-terminal edges
+            sym_str = format_symbol(symbol, terminal_names, as_state_id=True)
+            tikz.append(f"\\node[font=\\small, fill=white] at ({mx:.2f},{my:.2f}) {{{sym_str}}};")
+    
+    tikz.append("\\end{scope}")
+    return "\n".join(tikz)
+    bbox = layout["bbox"]
+    cx, cy = bbox[2] / 2, bbox[3] / 2
+    
+    safe_name = re.sub(r'[^a-zA-Z0-9]', '', edge_name)
+    
+    tikz = []
+    tikz.append(f"\\begin{{scope}}[scale={scale}]")
+    
+    # Draw nodes (very small)
+    for n in sorted(nodes):
+        if n not in layout["nodes"]:
+            continue
+        x, y = layout["nodes"][n]
+        tx, ty = x - cx, y - cy
+        style = "state, minimum size=3mm"
+        if n in final_states:
+            style = "accepting, minimum size=3mm"
+        if n == 0:
+            style += ", initial"
+        tikz.append(f"\\node[{style}] (m{safe_name}{n}) at ({tx:.2f},{ty:.2f}) {{}};")
+    
+    # Draw edges (no labels to keep it tiny)
+    edge_pairs = set()
+    for edge in edges:
+        u, v = edge[0], edge[1]
+        if (u, v) in edge_pairs:
+            continue
+        edge_pairs.add((u, v))
+        if u not in layout["nodes"] or v not in layout["nodes"]:
+            continue
+        mu = f"m{safe_name}{u}"
+        mv = f"m{safe_name}{v}"
+        if u == v:
+            tikz.append(f"\\path[edge, thin] ({mu}) edge[loop above, looseness=4] ({mv});")
+        else:
+            tikz.append(f"\\path[edge, thin] ({mu}) edge ({mv});")
     
     tikz.append("\\end{scope}")
     return "\n".join(tikz)
@@ -382,16 +539,12 @@ def parse_lalr_table(lalr_str: str) -> Dict:
     """Parse the LALR table string into a structured format."""
     states = {}
     
-    # Split by StateID to get each state's content
     state_parts = re.split(r'StateID\((\d+)\):\s*Row\s*\{', lalr_str)
     
-    # Skip first empty part
     for i in range(1, len(state_parts), 2):
         state_id = int(state_parts[i])
         if i + 1 < len(state_parts):
             content = state_parts[i + 1]
-            # Find the content up to the next state or end
-            # We need to handle nested braces
             brace_count = 1
             end_idx = 0
             for j, c in enumerate(content):
@@ -413,14 +566,12 @@ def parse_lalr_table(lalr_str: str) -> Dict:
             "default_reduce": None
         }
         
-        # Parse shifts
         shift_pattern = r"TerminalID\((\d+)\):\s*Shift\(StateID\((\d+)\)\)"
         for shift_match in re.finditer(shift_pattern, content):
             term_id = int(shift_match.group(1))
             target = int(shift_match.group(2))
             state_data["shifts"][term_id] = target
         
-        # Parse reduces
         reduce_pattern = r"TerminalID\((\d+)\):\s*Reduce\s*\{\s*nonterminal_id:\s*NonTerminalID\((\d+)\),\s*len:\s*(\d+)"
         for red_match in re.finditer(reduce_pattern, content):
             term_id = int(red_match.group(1))
@@ -428,13 +579,11 @@ def parse_lalr_table(lalr_str: str) -> Dict:
             prod_len = int(red_match.group(3))
             state_data["reduces"][term_id] = (nt_id, prod_len)
         
-        # Parse default reduce
         def_reduce_pattern = r"default_reduce:\s*Some\(Reduce\s*\{\s*nonterminal_id:\s*NonTerminalID\((\d+)\),\s*len:\s*(\d+)"
         def_match = re.search(def_reduce_pattern, content)
         if def_match:
             state_data["default_reduce"] = (int(def_match.group(1)), int(def_match.group(2)))
         
-        # Parse gotos - extract them from the gotos section
         gotos_match = re.search(r"gotos:\s*\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}", content)
         if gotos_match:
             gotos_content = gotos_match.group(1)
@@ -453,7 +602,6 @@ def generate_lalr_table_tikz(lalr_data: Dict, terminal_names: Dict[int, str],
                              nonterminal_names: Dict[int, str], pos: Tuple[float, float]) -> str:
     """Generate a TikZ table representation of the LALR parse table."""
     
-    # Get all terminal and nonterminal IDs
     all_terminals = set()
     all_nonterminals = set()
     for state_data in lalr_data.values():
@@ -467,27 +615,25 @@ def generate_lalr_table_tikz(lalr_data: Dict, terminal_names: Dict[int, str],
     
     tikz = []
     tikz.append(f"\\begin{{scope}}[shift={{({pos[0]},{pos[1]})}}]")
-    tikz.append("\\node[anchor=north, font=\\bfseries\\large] at (4, 1) {LALR(1) Parse Table};")
+    tikz.append("\\node[anchor=north, font=\\bfseries\\large] at (0, 1) {LALR(1) Parse Table};")
     
-    # Build table
     col_spec = "c|" + "c" * len(terminals) + "|" + "c" * len(nonterminals)
     
-    tikz.append("\\node[anchor=north] at (4, 0) {")
+    tikz.append("\\node[anchor=north] at (0, 0) {")
+    tikz.append("\\scalebox{0.8}{")
     tikz.append("\\begin{tabular}{" + col_spec + "}")
     tikz.append("\\hline")
     
-    # Header row - escape special characters
     header = ["State"]
     for t in terminals:
         name = terminal_names.get(t, f"t{t}")
-        name = name.replace('$', '\\$')  # Escape dollar sign
-        header.append(name)
+        name = name.replace('$', '\\$')
+        header.append(f"\\textbf{{{name}}}")
     for nt in nonterminals:
-        header.append(nonterminal_names.get(nt, f"N{nt}"))
+        header.append(f"\\textit{{{nonterminal_names.get(nt, f'N{nt}')}}}")
     tikz.append(" & ".join(header) + " \\\\")
     tikz.append("\\hline")
     
-    # State rows
     for state in states:
         row = [str(state)]
         state_data = lalr_data[state]
@@ -514,14 +660,16 @@ def generate_lalr_table_tikz(lalr_data: Dict, terminal_names: Dict[int, str],
     
     tikz.append("\\hline")
     tikz.append("\\end{tabular}")
+    tikz.append("}")
     tikz.append("};")
     tikz.append("\\end{scope}")
     
     return "\n".join(tikz)
 
 
-def generate_characterization_tikz(char_data: Dict[str, str], pos: Tuple[float, float]) -> str:
-    """Generate TikZ representation of below-zero characterizations."""
+def generate_characterization_box(char_data: Dict[str, str], terminal_names: Dict[int, str], 
+                                   pos: Tuple[float, float]) -> str:
+    """Generate TikZ box showing all below-zero characterizations."""
     
     tikz = []
     tikz.append(f"\\begin{{scope}}[shift={{({pos[0]},{pos[1]})}}]")
@@ -529,29 +677,27 @@ def generate_characterization_tikz(char_data: Dict[str, str], pos: Tuple[float, 
     
     y_offset = -0.5
     for term_id, char_str in sorted(char_data.items()):
-        # Parse key info from characterization
         term_match = re.search(r"terminal:\s*TerminalID\((\d+)\)", char_str)
-        term_num = term_match.group(1) if term_match else "?"
+        term_num = int(term_match.group(1)) if term_match else 0
+        term_name = terminal_names.get(term_num, f"T{term_num}")
+        term_name_escaped = term_name.replace('$', '\\$')
         
-        # Extract initial shifts
+        # Extract key info
         shift_match = re.search(r"initial_shifts:\s*\{([^}]*)\}", char_str)
         shifts = shift_match.group(1) if shift_match else ""
+        shift_pairs = re.findall(r"\(StateID\((\d+)\),\s*StateID\((\d+)\)\)", shifts)
         
-        # Extract initial reduces
         reduce_match = re.search(r"initial_reduces:\s*\{([^}]*)\}", char_str)
         reduces = reduce_match.group(1) if reduce_match else ""
-        
-        # Format compactly
-        shift_pairs = re.findall(r"\(StateID\((\d+)\),\s*StateID\((\d+)\)\)", shifts)
         reduce_tuples = re.findall(r"\(StateID\((\d+)\),\s*\d+,\s*NonTerminalID\((\d+)\)\)", reduces)
         
-        shift_str = ", ".join([f"({s},{t})" for s, t in shift_pairs]) if shift_pairs else "∅"
-        reduce_str = ", ".join([f"({s},N{n})" for s, n in reduce_tuples]) if reduce_tuples else "∅"
+        shift_str = ", ".join([f"({s}$\\to${t})" for s, t in shift_pairs]) if shift_pairs else "$\\emptyset$"
+        reduce_str = ", ".join([f"({s},N{n})" for s, n in reduce_tuples]) if reduce_tuples else "$\\emptyset$"
         
-        tikz.append(f"\\node[anchor=west, font=\\small] at (-8, {y_offset}) {{")
-        tikz.append(f"  \\textbf{{T{term_num}:}} shifts: {{{shift_str}}}, reduces: {{{reduce_str}}}")
+        tikz.append(f"\\node[anchor=west, font=\\footnotesize] at (-5, {y_offset}) {{")
+        tikz.append(f"  \\textbf{{{term_name_escaped}:}} shifts=\\{{{shift_str}\\}}, reduces=\\{{{reduce_str}\\}}")
         tikz.append("};")
-        y_offset -= 0.7
+        y_offset -= 0.6
     
     tikz.append("\\end{scope}")
     return "\n".join(tikz)
@@ -561,49 +707,45 @@ def main():
     with open("pipeline_artifacts.json", "r") as f:
         data = json.load(f)
     
-    # Extract terminal names from grammar
-    grammar = data["grammar_ebnf"]
-    # For this simple grammar, manually define terminal names based on the grammar
-    terminal_names = {
-        0: "$",    # End of input
-        1: "a",
-        2: "b", 
-        3: "c"
-    }
+    # Terminal and nonterminal names
+    terminal_names = {0: "$", 1: "a", 2: "b", 3: "c"}
+    nonterminal_names = {0: "S", 1: "A", 2: "B", 3: "C", 4: "C'"}
     
-    nonterminal_names = {
-        0: "S",
-        1: "A",
-        2: "B", 
-        3: "C",
-        4: "C'"
-    }
-    
-    # Parse LALR table
+    # Parse all data
     lalr_data = parse_lalr_table(data["lalr_table"])
-    
-    # Parse all automata (with labels)
-    templates = data["template_dfas_all"]
-    char_data = data["characterizations_all"]
+    tokenizer_nodes, tokenizer_edges, tokenizer_finals = parse_tokenizer_dfa(data["tokenizer_dfa"])
     skel_nodes, skel_edges, skel_finals = parse_dwa_with_labels(data["skeleton_dwa"])
     flat_nodes, flat_edges, flat_finals = parse_dwa_with_labels(data["flattened_nwa"])
     final_nodes, final_edges, final_finals = parse_dwa_with_labels(data["final_dwa"])
     
+    # Parse template DFAs
+    template_dwas = {}
+    for tid, dwa_str in data["template_dfas_all"].items():
+        nodes, edges, finals = parse_dwa_with_labels(dwa_str)
+        term_match = re.search(r'\d+', tid)
+        term_id = int(term_match.group()) if term_match else 0
+        template_dwas[term_id] = (nodes, edges, finals)
+    
+    grammar = data["grammar_ebnf"]
+    char_data = data["characterizations_all"]
+    
     tex = []
     
-    # Document preamble
-    tex.append(r"""\documentclass[tikz,border=30pt]{standalone}
+    # Preamble
+    tex.append(r"""\documentclass[tikz,border=20pt]{standalone}
 \usepackage{lmodern}
 \usepackage{tikz}
 \usepackage{amsmath}
 \usepackage{amssymb}
-\usetikzlibrary{automata,positioning,arrows.meta,shapes,shadows,fit,calc}
+\usetikzlibrary{automata,positioning,arrows.meta,shapes,shadows,fit,calc,backgrounds}
 
 \definecolor{primary}{RGB}{41,128,185}
 \definecolor{accent}{RGB}{39,174,96}
 \definecolor{dark}{RGB}{52,73,94}
 \definecolor{grammar}{RGB}{155,89,182}
 \definecolor{lalr}{RGB}{230,126,34}
+\definecolor{tokenizer}{RGB}{46,204,113}
+\definecolor{template}{RGB}{52,152,219}
 
 \begin{document}
 \begin{tikzpicture}[
@@ -612,11 +754,11 @@ def main():
     state/.style={
         circle,
         draw=primary,
-        very thick,
-        minimum size=10mm,
+        thick,
+        minimum size=8mm,
         fill=white,
         text=dark,
-        font=\small
+        font=\scriptsize
     },
     accepting/.style={
         state,
@@ -631,7 +773,7 @@ def main():
     edge/.style={
         ->,
         draw=dark!70,
-        thick
+        semithick
     },
     stagebox/.style={
         rectangle,
@@ -640,8 +782,6 @@ def main():
         rounded corners=3pt,
         fill=white,
         drop shadow,
-        minimum width=6cm,
-        minimum height=2.5cm,
         align=center
     },
     grammarbox/.style={
@@ -657,156 +797,198 @@ def main():
         ->,
         draw=dark,
         line width=2pt,
+        >=Stealth
+    },
+    splitarrow/.style={
+        ->,
+        draw=dark,
+        line width=1.5pt,
         dashed
     }
 ]
 
 """)
     
-    # ===================
-    # STAGE 0: Input Grammar
-    # ===================
-    tex.append(r"% ========== STAGE 0: Input Grammar ==========")
-    tex.append(r"\node[font=\Huge\bfseries, text=dark] (title) at (0, 2) {Grammar Compilation Pipeline};")
-    tex.append("")
+    # Layout constants
+    LEFT_COL = -14
+    RIGHT_COL = 14
+    CENTER_COL = 0
     
-    # Grammar box
-    tex.append(r"\node[grammarbox, below=1cm of title] (grammar) {")
+    # ===================
+    # STAGE 0: Input Grammar (TOP CENTER)
+    # ===================
+    y_grammar = 0
+    tex.append(r"% ========== STAGE 0: Input Grammar ==========")
+    tex.append(r"\node[grammarbox] (grammar) at (0, 0) {")
     tex.append(r"  \begin{tabular}{l}")
     tex.append(r"  \textbf{Input Grammar (EBNF):}\\[3pt]")
     for line in grammar.strip().split('\n'):
         line = line.strip()
         if line:
-            # Escape special chars and format
-            line = line.replace('$', '\\$')  # Escape dollar sign FIRST
+            line = line.replace('$', '\\$')
             line = line.replace('|', '$|$').replace('"', "``").replace("'", "`")
             tex.append(f"  {line}\\\\")
     tex.append(r"  \end{tabular}")
     tex.append(r"};")
     tex.append("")
     
+    # Split arrows from grammar
+    y_split = -4
+    tex.append(f"\\draw[splitarrow] (grammar.south) -- ++(0,-1) -| ({LEFT_COL}, {y_split});")
+    tex.append(f"\\draw[splitarrow] (grammar.south) -- ++(0,-1) -| ({RIGHT_COL}, {y_split});")
+    tex.append(f"\\node[font=\\footnotesize\\itshape] at ({LEFT_COL/2 - 2}, {y_split + 1.5}) {{Tokenizer}};")
+    tex.append(f"\\node[font=\\footnotesize\\itshape] at ({RIGHT_COL/2 + 2}, {y_split + 1.5}) {{Parser}};")
+    tex.append("")
+    
     # ===================
-    # STAGE 1: LALR Parse Table
+    # LEFT COLUMN: Tokenizer DFA
     # ===================
-    tex.append(r"% ========== STAGE 1: LALR(1) Parse Table ==========")
+    y_tokenizer = -6
+    tex.append(r"% ========== LEFT: Tokenizer DFA ==========")
+    tokenizer_final_set = set(tokenizer_finals.keys())
+    tex.append(generate_automaton_tikz(
+        tokenizer_nodes, tokenizer_edges, tokenizer_final_set,
+        "Tokenizer DFA",
+        (LEFT_COL, y_tokenizer),
+        scale=0.8,
+        show_labels=True,
+        node_size="8mm",
+        font_size="\\scriptsize"
+    ))
+    tex.append("")
+    
+    # ===================
+    # RIGHT COLUMN: LALR Parse Table
+    # ===================
     y_lalr = -6
-    tex.append(generate_lalr_table_tikz(lalr_data, terminal_names, nonterminal_names, (0, y_lalr)))
+    tex.append(r"% ========== RIGHT: LALR(1) Parse Table ==========")
+    tex.append(generate_lalr_table_tikz(lalr_data, terminal_names, nonterminal_names, (RIGHT_COL, y_lalr)))
     tex.append("")
     
     # ===================
-    # STAGE 2: Below-Zero Characterizations
+    # LEFT COLUMN: Terminal DWA (Skeleton / Precompute1)
     # ===================
-    tex.append(r"% ========== STAGE 2: Below-Zero Characterizations ==========")
-    y_char = y_lalr - 8
-    tex.append(generate_characterization_tikz(char_data, (0, y_char)))
-    tex.append("")
-    
-    # ===================
-    # STAGE 3: Template DFAs
-    # ===================
-    tex.append(r"% ========== STAGE 3: Template DFAs ==========")
-    y_templates = y_char - 8
-    tex.append(f"\\node[font=\\Large\\bfseries, text=dark] at (0, {y_templates + 1}) {{Template DFAs (One Per Terminal)}};")
-    
-    template_items = list(templates.items())
-    num_temps = len(template_items)
-    x_spacing = 8
-    
-    for i, (tid, dwa_str) in enumerate(template_items):
-        tnodes, tedges, tfinals = parse_dwa_with_labels(dwa_str)
-        tid_num = re.search(r'\d+', tid).group()
-        term_name = terminal_names.get(int(tid_num), f"T{tid_num}")
-        # Escape $ for LaTeX title
-        term_name_escaped = term_name.replace('$', '\\$')
-        x_pos = (i - (num_temps - 1) / 2) * x_spacing
-        tex.append(generate_automaton_tikz_with_labels(
-            tnodes, tedges, tfinals, 
-            f"Template DFA for {term_name_escaped}",
-            (x_pos, y_templates - 5), 
-            scale=0.7, 
-            terminal_names=terminal_names,
-            show_labels=True,
-            compact=True
-        ))
-    tex.append("")
-    
-    # ===================
-    # STAGE 4: Terminal DWA (Skeleton)
-    # ===================
-    tex.append(r"% ========== STAGE 4: Terminal DWA (Skeleton) ==========")
-    y_skel = y_templates - 16
-    tex.append(generate_automaton_tikz_with_labels(
-        skel_nodes, skel_edges, skel_finals,
+    y_terminal_dwa = -16
+    tex.append(r"% ========== LEFT: Terminal DWA (Skeleton) ==========")
+    skel_final_set = set(skel_finals.keys())
+    tex.append(generate_automaton_tikz(
+        skel_nodes, skel_edges, skel_final_set,
         "Terminal DWA (Skeleton)",
-        (0, y_skel),
-        scale=0.9,
+        (LEFT_COL, y_terminal_dwa),
+        scale=0.8,
         terminal_names=terminal_names,
-        show_labels=True
+        show_labels=True,
+        node_size="8mm",
+        font_size="\\scriptsize"
     ))
+    # Arrow from tokenizer to terminal DWA
+    tex.append(f"\\draw[flowarrow] ({LEFT_COL}, {y_tokenizer - 4}) -- ({LEFT_COL}, {y_terminal_dwa + 4});")
     tex.append("")
     
-    # ===================  
-    # STAGE 5: Terminal DWA with Template DFAs Substituted
     # ===================
-    tex.append(r"% ========== STAGE 5: Terminal DWA with Templates Substituted ==========")
-    y_subst = y_skel - 10
-    tex.append(f"\\node[font=\\Large\\bfseries, text=dark] at (0, {y_subst + 1}) {{Terminal DWA with Template DFAs on Edges}};")
-    tex.append(f"\\node[font=\\small, text=dark!70] at (0, {y_subst + 0.3}) {{(Each edge to a terminal state is replaced by the corresponding Template DFA)}};")
+    # RIGHT COLUMN: Below-Zero Characterizations
+    # ===================
+    y_char = -14
+    tex.append(r"% ========== RIGHT: Below-Zero Characterizations ==========")
+    tex.append(generate_characterization_box(char_data, terminal_names, (RIGHT_COL, y_char)))
+    tex.append("")
     
-    # For this, we show the skeleton but indicate template substitution
-    tex.append(generate_automaton_tikz_with_labels(
+    # ===================
+    # RIGHT COLUMN: Template DFAs
+    # ===================
+    y_templates = -22
+    tex.append(r"% ========== RIGHT: Template DFAs ==========")
+    tex.append(f"\\node[font=\\bfseries\\large] at ({RIGHT_COL}, {y_templates + 2}) {{Template DFAs}};")
+    
+    num_templates = len(template_dwas)
+    x_spacing = 5
+    start_x = RIGHT_COL - (num_templates - 1) * x_spacing / 2
+    
+    for i, (tid, (tnodes, tedges, tfinals)) in enumerate(sorted(template_dwas.items())):
+        term_name = terminal_names.get(tid, f"T{tid}")
+        term_name_escaped = term_name.replace('$', '\\$')
+        tfinal_set = set(tfinals.keys())
+        x_pos = start_x + i * x_spacing
+        tex.append(generate_automaton_tikz(
+            tnodes, tedges, tfinal_set,
+            f"T({term_name_escaped})",
+            (x_pos, y_templates - 3),
+            scale=0.5,
+            show_labels=True,
+            as_state_id=True,  # Edge labels are state IDs!
+            node_size="6mm",
+            font_size="\\tiny"
+        ))
+    
+    # Arrow from LALR to characterizations to templates
+    tex.append(f"\\draw[flowarrow] ({RIGHT_COL}, {y_lalr - 4}) -- ({RIGHT_COL}, {y_char + 2});")
+    tex.append(f"\\draw[flowarrow] ({RIGHT_COL}, {y_char - 4}) -- ({RIGHT_COL}, {y_templates + 3});")
+    tex.append("")
+    
+    # ===================
+    # CENTER: Merge point - Terminal DWA with Template DFAs on Edges
+    # ===================
+    y_merged = -36
+    tex.append(r"% ========== CENTER: Terminal DWA with Template DFAs on Edges ==========")
+    tex.append(f"\\node[font=\\bfseries\\large] at ({CENTER_COL}, {y_merged + 4}) {{Terminal DWA with Template DFAs on Edges}};")
+    tex.append(f"\\node[font=\\footnotesize\\itshape, text=dark!60] at ({CENTER_COL}, {y_merged + 3.2}) {{(Each terminal edge shows its Template DFA)}};")
+    
+    # Merge arrows
+    tex.append(f"\\draw[splitarrow] ({LEFT_COL}, {y_terminal_dwa - 5}) -- ++(0,-4) -| ({CENTER_COL - 4}, {y_merged + 2});")
+    tex.append(f"\\draw[splitarrow] ({RIGHT_COL}, {y_templates - 8}) -- ++(0,-4) -| ({CENTER_COL + 4}, {y_merged + 2});")
+    
+    # Draw the merged DWA with actual mini-DFAs on edges!
+    tex.append(generate_merged_dwa_with_mini_dfas(
         skel_nodes, skel_edges, skel_finals,
-        "",
-        (0, y_subst - 4),
-        scale=0.9,
-        terminal_names=terminal_names,
-        show_labels=True
+        template_dwas, terminal_names,
+        (CENTER_COL, y_merged - 4),
+        scale=1.0
     ))
     tex.append("")
     
     # ===================
-    # STAGE 6: Flattened NWA
+    # CENTER: Flattened NWA
     # ===================
-    tex.append(r"% ========== STAGE 6: Flattened NWA ==========")
-    y_flat = y_subst - 20
-    tex.append(generate_automaton_tikz_with_labels(
-        flat_nodes, flat_edges, flat_finals,
-        "Flattened NWA",
-        (0, y_flat),
-        scale=0.55,
-        terminal_names=terminal_names,
+    y_flat = -62
+    tex.append(r"% ========== CENTER: Flattened NWA ==========")
+    tex.append(f"\\draw[flowarrow] ({CENTER_COL}, {y_merged - 14}) -- ({CENTER_COL}, {y_flat + 10});")
+    tex.append(f"\\node[font=\\footnotesize, text=dark!60] at ({CENTER_COL + 5}, {(y_merged - 14 + y_flat + 10)/2}) {{Flatten (inline templates)}};")
+    
+    flat_final_set = set(flat_finals.keys())
+    tex.append(generate_automaton_tikz(
+        flat_nodes, flat_edges, flat_final_set,
+        "Flattened NWA (with Push Transitions)",
+        (CENTER_COL, y_flat),
+        scale=0.45,
+        terminal_names=None,  # Edge labels are state IDs
         show_labels=True,
-        compact=False
+        as_state_id=True,
+        node_size="7mm",
+        font_size="\\tiny"
     ))
     tex.append("")
     
     # ===================
-    # STAGE 7: Final DWA
+    # CENTER: Final DWA
     # ===================
-    tex.append(r"% ========== STAGE 7: Final DWA ==========")
-    y_final = y_flat - 22
-    tex.append(generate_automaton_tikz_with_labels(
-        final_nodes, final_edges, final_finals,
+    y_final = -86
+    tex.append(r"% ========== CENTER: Final DWA ==========")
+    tex.append(f"\\draw[flowarrow] ({CENTER_COL}, {y_flat - 12}) -- ({CENTER_COL}, {y_final + 10});")
+    tex.append(f"\\node[font=\\footnotesize, text=dark!60, align=center] at ({CENTER_COL + 7}, {(y_flat - 12 + y_final + 10)/2}) {{Resolve push transitions,\\\\Determinize \\& Simplify}};")
+    
+    final_final_set = set(final_finals.keys())
+    tex.append(generate_automaton_tikz(
+        final_nodes, final_edges, final_final_set,
         "Final DWA",
-        (0, y_final),
-        scale=0.55,
-        terminal_names=terminal_names,
+        (CENTER_COL, y_final),
+        scale=0.45,
+        terminal_names=None,
         show_labels=True,
-        compact=False
+        as_state_id=True,
+        node_size="7mm",
+        font_size="\\tiny"
     ))
     tex.append("")
-    
-    # ===================
-    # Flow Arrows
-    # ===================
-    tex.append(r"% ========== Flow Arrows ==========")
-    tex.append(r"\draw[flowarrow] (grammar.south) -- +(0, -0.5);")
-    tex.append(f"\\draw[flowarrow] (0, {y_lalr - 3.5}) -- +(0, -1);")
-    tex.append(f"\\draw[flowarrow] (0, {y_char - 3.5}) -- +(0, -1);")
-    tex.append(f"\\draw[flowarrow] (0, {y_templates - 11}) -- +(0, -1);")
-    tex.append(f"\\draw[flowarrow] (0, {y_skel - 5}) -- +(0, -1);")
-    tex.append(f"\\draw[flowarrow] (0, {y_subst - 9}) -- +(0, -1);")
-    tex.append(f"\\draw[flowarrow] (0, {y_flat - 10}) -- +(0, -1);")
     
     tex.append(r"""
 \end{tikzpicture}
@@ -818,9 +1000,11 @@ def main():
         f.write("\n".join(tex))
         
     print(f"Generated {output_path}")
+    print(f"  Layout: LEFT (Tokenizer, Terminal DWA), RIGHT (LALR, Chars, Templates), CENTER (merged stages)")
+    print(f"  - Tokenizer DFA: {len(tokenizer_nodes)} states")
     print(f"  - {len(lalr_data)} LALR states")
     print(f"  - {len(char_data)} below-zero characterizations")
-    print(f"  - {len(templates)} template DFAs")
+    print(f"  - {len(template_dwas)} template DFAs")
     print(f"  - Skeleton DWA: {len(skel_nodes)} states, {len(skel_edges)} edges")
     print(f"  - Flattened NWA: {len(flat_nodes)} states, {len(flat_edges)} edges")
     print(f"  - Final DWA: {len(final_nodes)} states, {len(final_edges)} edges")
