@@ -45,13 +45,13 @@ fn hash_outcome(
     match_group: u32,
     match_pos: u32,
     remainder_sig: u64,
-    final_state: u32,
+    state_sig: u64,
 ) -> u128 {
-    let flags = (kind as u32) | (final_state << 4);
+    let flags = kind as u32;
     let packed = ((match_pos as u128) << 96)
         | ((match_group as u128) << 64)
         | ((flags as u128) << 32);
-    mix_u128(packed ^ (remainder_sig as u128))
+    mix_u128(packed ^ (remainder_sig as u128) ^ (state_sig as u128))
 }
 
 // -----------------------------------------------------------------------------
@@ -134,8 +134,9 @@ pub fn find_equivalence_classes(
     crate::debug!(3, "Analyzing string equivalence for {} strings.", strings.len());
     let pb = create_pb(4);
 
+    let state_signatures = compute_state_signatures(regex);
     pb.set_message("Precomputing signatures...");
-    let remainder_hashes = precompute_remainder_hashes(regex, strings);
+    let remainder_hashes = precompute_remainder_hashes(regex, strings, &state_signatures);
     pb.inc(1);
 
     pb.set_message("Building Trie...");
@@ -158,7 +159,7 @@ pub fn find_equivalence_classes(
     root_active.sort_unstable_by_key(|k| k.0);
 
     process_string_node(
-        regex, &trie, 0, root_active, &remainder_hashes,
+        regex, &trie, 0, root_active, &remainder_hashes, &state_signatures,
         &linearized_mapping, &mut accumulators, &mut diffs, 0
     );
     pb.inc(1);
@@ -188,6 +189,7 @@ fn process_string_node(
     node_idx: usize,
     active_states: Vec<(u32, u128)>,
     remainder_hashes: &[Vec<u64>],
+    state_signatures: &[u64],
     linearized_mapping: &[usize],
     accumulators: &mut Vec<u128>,
     diffs: &mut Vec<u128>,
@@ -199,7 +201,7 @@ fn process_string_node(
     if let Some(_orig_idx) = node.terminal_string_idx {
         let lin_idx = node.range_start as usize;
         for &(dfa_state, weight) in &active_states {
-            let h = hash_outcome(KIND_TERM, 0, 0, 0, dfa_state);
+            let h = hash_outcome(KIND_TERM, 0, 0, 0, state_signatures[dfa_state as usize]);
             let contrib = weight.wrapping_mul(h);
             diffs[lin_idx] = diffs[lin_idx].wrapping_add(contrib);
             diffs[lin_idx + 1] = diffs[lin_idx + 1].wrapping_sub(contrib);
@@ -265,7 +267,7 @@ fn process_string_node(
             merged.push((cs, cw));
         }
 
-        process_string_node(regex, trie, child as usize, merged, remainder_hashes, linearized_mapping, accumulators, diffs, depth + 1);
+        process_string_node(regex, trie, child as usize, merged, remainder_hashes, state_signatures, linearized_mapping, accumulators, diffs, depth + 1);
     }
 }
 
@@ -273,7 +275,18 @@ fn process_string_node(
 // Helpers & Verification
 // -----------------------------------------------------------------------------
 
-fn precompute_remainder_hashes(regex: &Regex, strings: &[Vec<u8>]) -> Vec<Vec<u64>> {
+fn compute_state_signatures(regex: &Regex) -> Vec<u64> {
+    regex.dfa.states.iter().map(|s| {
+        let mut h = 0u64;
+        for &gid in &s.possible_future_group_ids {
+            // Simple rolling mix for the set of IDs
+            h = h.wrapping_mul(0x9e3779b97f4a7c15).wrapping_add(gid as u64);
+        }
+        h
+    }).collect()
+}
+
+fn precompute_remainder_hashes(regex: &Regex, strings: &[Vec<u8>], state_signatures: &[u64]) -> Vec<Vec<u64>> {
     let mut result = Vec::with_capacity(strings.len());
 
     for s in strings {
@@ -292,7 +305,7 @@ fn precompute_remainder_hashes(regex: &Regex, strings: &[Vec<u8>]) -> Vec<Vec<u6
 
             // 1. Pass-through (consumed remaining string fully)
             if let Some(st) = exec.end_state {
-                let h = hash_outcome(KIND_TERM, 0, 0, 0, st as u32);
+                let h = hash_outcome(KIND_TERM, 0, 0, 0, state_signatures[st]);
                 node_hash = node_hash.wrapping_add(h);
             }
 
@@ -415,7 +428,7 @@ fn verify_string_classes(regex: &Regex, strings: &[Vec<u8>], initial_states: &[u
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 struct TokenizationOutcome {
     tokens: Vec<GroupID>,
-    final_state: Option<usize>,
+    future_possibilities: Option<BTreeSet<GroupID>>,
 }
 
 fn get_tokenization_outcomes(regex: &Regex, s: &[u8], initial_state: usize) -> BTreeSet<TokenizationOutcome> {
@@ -427,7 +440,7 @@ fn get_tokenization_outcomes(regex: &Regex, s: &[u8], initial_state: usize) -> B
         if offset == s.len() {
             results.insert(TokenizationOutcome {
                 tokens: history,
-                final_state: Some(state),
+                future_possibilities: Some(regex.dfa.states[state].possible_future_group_ids.clone()),
             });
             continue;
         }
@@ -439,7 +452,7 @@ fn get_tokenization_outcomes(regex: &Regex, s: &[u8], initial_state: usize) -> B
         if let Some(end_st) = exec.end_state {
             results.insert(TokenizationOutcome {
                 tokens: history.clone(),
-                final_state: Some(end_st),
+                future_possibilities: Some(regex.dfa.states[end_st].possible_future_group_ids.clone()),
             });
         }
 
