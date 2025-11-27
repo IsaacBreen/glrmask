@@ -1428,7 +1428,9 @@ fn test_constraint_expression_cycle() {
 }
 
 #[test]
-fn test_json_gpt2() -> Result<(), Box<dyn std::error::Error>> {
+fn test_json_gpt2_initial_mask_bruteforce() -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::BufReader;
+
     let ebnf_grammar = indoc! {r#"
         #![ignore(WS)]
         value ::= object | array | STRING | NUMBER | 'true' | 'false' | 'null' ;
@@ -1443,40 +1445,48 @@ fn test_json_gpt2() -> Result<(), Box<dyn std::error::Error>> {
     "#};
     let grammar_definition = GrammarDefinition::from_ebnf(ebnf_grammar)?;
 
-    // Simulate a subset of GPT-2 vocab (representative tokens)
-    let mut llm_token_map = LLMTokenMap::new();
-    let tokens = vec![
-        // Whitespace
-        (" ".as_bytes().to_vec(), 0),
-        ("\n".as_bytes().to_vec(), 1),
-        // Structural
-        ("{".as_bytes().to_vec(), 2),
-        ("}".as_bytes().to_vec(), 3),
-        ("[".as_bytes().to_vec(), 4),
-        ("]".as_bytes().to_vec(), 5),
-        (":".as_bytes().to_vec(), 6),
-        (",".as_bytes().to_vec(), 7),
-        // Keywords
-        ("true".as_bytes().to_vec(), 8),
-        ("false".as_bytes().to_vec(), 9),
-        ("null".as_bytes().to_vec(), 10),
-        // Strings
-        ("\"".as_bytes().to_vec(), 11),
-        ("\"key\"".as_bytes().to_vec(), 12),
-        // Numbers
-        ("-".as_bytes().to_vec(), 13),
-        ("1".as_bytes().to_vec(), 14),
-        ("123".as_bytes().to_vec(), 15),
-        // Invalid
-        ("apple".as_bytes().to_vec(), 16),
-        ("x".as_bytes().to_vec(), 17),
-        // Partial (likely invalid)
-        ("tr".as_bytes().to_vec(), 18),
-    ];
+    // Attempt to load gpt2 vocab from various paths
+    let paths = vec!["vocab.json", "src/tests/data/vocab.json", "gpt2_vocab.json"];
+    let mut vocab_json: Option<serde_json::Value> = None;
+    for p in paths {
+        if let Ok(file) = fs::File::open(p) {
+            let reader = BufReader::new(file);
+            if let Ok(v) = serde_json::from_reader(reader) {
+                println!("Loaded vocab from {}", p);
+                vocab_json = Some(v);
+                break;
+            }
+        }
+    }
 
-    let max_id = tokens.iter().map(|(_, id)| *id).max().unwrap_or(0);
-    for (b, id) in &tokens {
-        llm_token_map.insert(b.clone(), LLMTokenID(*id));
+    let vocab_json = match vocab_json {
+        Some(v) => v,
+        None => {
+            println!("Skipping test_json_gpt2_initial_mask_bruteforce: vocab.json not found.");
+            println!("To run, download https://huggingface.co/openai-community/gpt2/raw/main/vocab.json to project root.");
+            return Ok(());
+        }
+    };
+
+    let vocab_map = vocab_json.as_object().ok_or("vocab.json must be a JSON object")?;
+    let mut llm_token_map = LLMTokenMap::new();
+    let mut max_id = 0;
+
+    for (token_str, id_val) in vocab_map {
+        let id = id_val.as_u64().ok_or("Token ID must be u64")? as usize;
+        if id > max_id { max_id = id; }
+
+        // Minimal Byte-Pair Encoding reversal for GPT-2:
+        // Map 'Ġ' (U+0120) to space, 'Ċ' (U+010A) to newline.
+        let bytes: Vec<u8> = token_str.chars().flat_map(|c| {
+            match c {
+                'Ġ' => vec![b' '],
+                'Ċ' => vec![b'\n'],
+                c if c.is_ascii() => vec![c as u8],
+                _ => c.to_string().into_bytes(), // Fallback
+            }
+        }).collect();
+        llm_token_map.insert(bytes, LLMTokenID(id));
     }
 
     let constraint = GrammarConstraint::new_from_grammar_definition(
@@ -1488,19 +1498,25 @@ fn test_json_gpt2() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut state = constraint.init();
     let mask = state.get_mask();
-    println!("Initial mask: {:?}", mask);
+    println!("Initial mask size: {} / {}", mask.len(), llm_token_map.len());
 
     // Brute force verification
-    let mut expected_mask = RangeSet::zeros();
-    for (_bytes, id) in &llm_token_map {
+    println!("Starting brute-force verification of {} tokens...", llm_token_map.len());
+    let mut errors = 0;
+    for (bytes, id) in &llm_token_map {
         let mut temp_state = constraint.init();
         temp_state.commit(*id);
-        if temp_state.is_active() {
-            expected_mask.insert(id.0);
+        let is_valid = temp_state.is_active();
+        let allowed = mask.contains(id.0);
+
+        if is_valid != allowed {
+             let s = String::from_utf8_lossy(bytes);
+             println!("Mismatch! Token ID {}: Mask={}, Valid={}. Token: {:?}", id.0, allowed, is_valid, s);
+             errors += 1;
+             if errors > 20 { panic!("Too many mismatches."); }
         }
     }
-    assert_eq!(mask, expected_mask, "Initial mask should match brute force check");
-
+    assert_eq!(errors, 0, "Initial mask does not match brute-force validity check.");
     Ok(())
 }
 
