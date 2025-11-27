@@ -152,7 +152,7 @@ impl<'a> GrammarConstraintState<'a> {
         if llm_token_bytes.is_empty() {
             return;
         }
-        crate::debug!(3, "Committing bytes: {:?}", String::from_utf8_lossy(llm_token_bytes));
+        crate::debug!(6, "Committing bytes: {:?}", String::from_utf8_lossy(llm_token_bytes));
 
         let (state_map, terminals_map) = self.compute_commit_maps(llm_token_bytes);
 
@@ -245,6 +245,6 @@ impl<'a> GrammarConstraintState<'a> {
         }
         self.state.retain(|_, glr_parser_state| glr_parser_state.is_ok());
 
-        crate::debug!(4, "Active tokenizer states after committing text (bytes {:?}): {:?}", llm_token_bytes, self.state.keys().map(|k| k.0).collect::<Vec<_>>());
+        crate::debug!(6, "Active tokenizer states after committing text (bytes {:?}): {:?}", llm_token_bytes, self.state.keys().map(|k| k.0).collect::<Vec<_>>());
     }
 }
