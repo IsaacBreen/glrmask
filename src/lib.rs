@@ -24,3 +24,4 @@ pub mod constraint_vocab;
 pub mod constraint_precompute;
 mod test_finite_automata;
 mod equivalence_analysis_finite_automata_end_states;
+mod fill_benchmark;
