@@ -78,8 +78,8 @@ fn hash_outcome_commit(
 
 #[derive(Clone, Default)]
 struct TrieNode {
-    // Use HashMap for O(1) lookup with less memory overhead
-    transitions: hashbrown::HashMap<u8, u32>,
+    // Use BTreeMap to maintain sorted order - avoids sorting during linearize
+    transitions: std::collections::BTreeMap<u8, u32>,
     terminal_string_idx: Option<u32>,
     range_start: u32,
     range_end: u32,
@@ -120,11 +120,9 @@ impl Trie {
         if let Some(orig_idx) = self.nodes[node_idx].terminal_string_idx {
             mapping.push(orig_idx as usize);
         }
-        // Get sorted keys
-        let mut keys: Vec<u8> = self.nodes[node_idx].transitions.keys().copied().collect();
-        keys.sort_unstable();
-        for b in keys {
-            let child_idx = self.nodes[node_idx].transitions[&b];
+        // BTreeMap already maintains sorted order, no need to sort
+        let children: Vec<_> = self.nodes[node_idx].transitions.values().copied().collect();
+        for child_idx in children {
             self.dfs_linearize(child_idx as usize, mapping);
         }
         let end = mapping.len() as u32;
@@ -165,13 +163,13 @@ pub fn find_equivalence_classes_combined(
     let t0 = std::time::Instant::now();
     pb.set_message("Precomputing signatures...");
     let state_signatures = compute_state_signatures(regex);
-    crate::debug!(4, "  State signatures: {:?}", t0.elapsed());
+    crate::debug!(3, "  Equiv: State signatures: {:?}", t0.elapsed());
     
     // Precompute remainder hashes for BOTH mask and commit in one pass
     let t1 = std::time::Instant::now();
     let (remainder_hashes_mask, remainder_hashes_commit) = 
         precompute_remainder_hashes_combined(regex, strings, &state_signatures);
-    crate::debug!(4, "  Remainder hashes (parallel): {:?}", t1.elapsed());
+    crate::debug!(3, "  Equiv: Remainder hashes (parallel): {:?}", t1.elapsed());
     pb.inc(1);
 
     let t2 = std::time::Instant::now();
@@ -180,8 +178,9 @@ pub fn find_equivalence_classes_combined(
     for (i, s) in strings.iter().enumerate() {
         trie.insert(s, i as u32);
     }
+    let t_insert = t2.elapsed();
     let linearized_mapping = trie.linearize();
-    crate::debug!(4, "  Trie build: {:?}", t2.elapsed());
+    crate::debug!(3, "  Equiv: Trie build: {:?} (insert: {:?}, linearize: {:?})", t2.elapsed(), t_insert, t2.elapsed() - t_insert);
     pb.inc(1);
 
     let t3 = std::time::Instant::now();
@@ -208,6 +207,7 @@ pub fn find_equivalence_classes_combined(
         0
     );
     crate::debug!(4, "  Symbolic execution: {:?}", t3.elapsed());
+    crate::debug!(3, "  Equiv: Symbolic execution: {:?}", t3.elapsed());
     pb.inc(1);
 
     let t4 = std::time::Instant::now();
@@ -228,7 +228,7 @@ pub fn find_equivalence_classes_combined(
 
     let mask_classes = group_by_hash(&accumulators_mask);
     let commit_classes = group_by_hash(&accumulators_commit);
-    crate::debug!(4, "  Grouping: {:?}", t4.elapsed());
+    crate::debug!(3, "  Equiv: Grouping: {:?}", t4.elapsed());
 
     pb.finish_with_message("Done");
     
@@ -456,14 +456,24 @@ fn precompute_remainder_hashes_combined(
 }
 
 fn group_by_hash(accumulators: &[u128]) -> BTreeMap<Vec<usize>, Vec<usize>> {
-    let mut map = HashMap::new();
-    let mut next_id = 0;
-    let mut classes: BTreeMap<Vec<usize>, Vec<usize>> = BTreeMap::new();
+    // Optimized: First pass maps hashes to IDs, second pass creates result
+    let mut hash_to_id: HashMap<u128, usize> = HashMap::new();
+    let mut id_to_indices: Vec<Vec<usize>> = Vec::new();
+    
     for (i, &h) in accumulators.iter().enumerate() {
-        let id = *map.entry(h).or_insert_with(|| { next_id += 1; next_id - 1 });
-        classes.entry(vec![id]).or_default().push(i);
+        let id = *hash_to_id.entry(h).or_insert_with(|| {
+            id_to_indices.push(Vec::new());
+            id_to_indices.len() - 1
+        });
+        id_to_indices[id].push(i);
     }
-    classes
+    
+    // Convert to final format
+    id_to_indices
+        .into_iter()
+        .enumerate()
+        .map(|(id, indices)| (vec![id], indices))
+        .collect()
 }
 
 fn create_pb(len: u64) -> ProgressBar {

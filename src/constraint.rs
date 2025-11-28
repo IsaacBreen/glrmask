@@ -112,8 +112,9 @@ fn optimize_dwa_and_vocab(
     // tokens differed only in weights beyond the limit.
     let mut weights_vec: Vec<&Weight> = unique_weights.iter().filter(|w| !w.is_all_fast()).collect();
     weights_vec.sort_by_key(|w| w.rsb.ranges_len()); // Process smaller weights first for efficiency
-    crate::debug!(3, "DWA Vocab Optimization: Processing {} unique weights", weights_vec.len());
+    crate::debug!(3, "DWA Vocab Optimization: Processing {} unique weights (max_tok={})", weights_vec.len(), max_tok);
 
+    let t_partition = std::time::Instant::now();
     for w in weights_vec.iter() {
         let mut tokens_in_w_by_class: HashMap<usize, Vec<usize>> = HashMap::with_capacity(num_classes);
         for t in w.iter_up_to(max_tok) {
@@ -133,8 +134,10 @@ fn optimize_dwa_and_vocab(
             }
         }
     }
+    crate::debug!(3, "  DWA Vocab Partition: {:?}", t_partition.elapsed());
 
     // OPTIMIZATION: Skip expensive frequency counting and sorting - just renumber sequentially
+    let t_renumber = std::time::Instant::now();
     let mut old_to_new_map: HashMap<usize, usize> = HashMap::with_capacity(max_tok + 1);
     let mut new_id = 0;
     for tokens in class_to_tokens.values() {
@@ -180,21 +183,28 @@ fn optimize_dwa_and_vocab(
     for map in possible_matches.values_mut() {
         for bv in map.values_mut() { *bv = map_bv(bv); }
     }
+    crate::debug!(3, "  DWA Vocab Remap: {:?}", t_renumber.elapsed());
 
+    let t_rebuild = std::time::Instant::now();
     let mut new_internal_to_original: BTreeMap<usize, LLMTokenBV> = BTreeMap::new();
-    let mut new_original_to_internal: BTreeMap<usize, usize> = BTreeMap::new();
     for (old_id, original_bv) in &vocab.internal_to_original {
         if let Some(&new_id) = old_to_new_map.get(old_id) {
             new_internal_to_original.entry(new_id).or_insert_with(LLMTokenBV::zeros).union_with(original_bv);
         }
     }
-    for (new_id, original_bv) in &new_internal_to_original {
-        for orig in original_bv.iter_up_to(vocab.max_original_llm_token_id) {
-            new_original_to_internal.insert(orig, *new_id);
+    crate::debug!(3, "  DWA Vocab internal_to_original: {:?}", t_rebuild.elapsed());
+    
+    // Instead of rebuilding original_to_internal from bitvectors (O(50K inserts)),
+    // update the existing map in-place (O(n) value updates)
+    let t_reverse = std::time::Instant::now();
+    for val in vocab.original_to_internal.values_mut() {
+        if let Some(&new_id) = old_to_new_map.get(val) {
+            *val = new_id;
         }
     }
+    crate::debug!(3, "  DWA Vocab original_to_internal (in-place): {:?}", t_reverse.elapsed());
     vocab.internal_to_original = new_internal_to_original;
-    vocab.original_to_internal = new_original_to_internal;
+    // vocab.original_to_internal is already updated in-place
     vocab.internal_max_llm_token = new_max_tok;
 
     let final_ranges = count_dwa_ranges(dwa);
@@ -783,35 +793,43 @@ impl GrammarConstraint {
             .unwrap_or(0);
 
         crate::debug!(3, "Building internal_to_original_map");
-        let mut internal_to_original_map: BTreeMap<usize, LLMTokenBV> = BTreeMap::new();
+        let t_i2o = std::time::Instant::now();
+        // Optimized: Batch collect then create RangeSets from iterators (faster than individual inserts)
+        let mut groups: Vec<Vec<usize>> = vec![Vec::new(); internal_max_llm_token + 1];
         for (orig, int_id) in &original_to_internal_map {
-            internal_to_original_map
-                .entry(*int_id)
-                .or_default()
-                .insert(*orig);
+            groups[*int_id].push(*orig);
         }
-        crate::debug!(3, "Done building internal_to_original_map");
+        let internal_to_original_map: BTreeMap<usize, LLMTokenBV> = groups
+            .into_iter()
+            .enumerate()
+            .filter(|(_, v)| !v.is_empty())
+            .map(|(int_id, origs)| (int_id, LLMTokenBV::from_iter(origs)))
+            .collect();
+        crate::debug!(3, "Done building internal_to_original_map in {:?}", t_i2o.elapsed());
 
         // Build internal LLM token map with only ONE representative per internal ID.
         // This dramatically reduces the vocab tree size from 50K to ~200 entries.
         crate::debug!(3, "Building internal_llm_token_map");
-        let mut internal_llm_token_map: BTreeMap<Vec<u8>, LLMTokenID> = BTreeMap::new();
-        let mut seen_internal_ids: HashSet<usize> = HashSet::new();
         
-        // Sort tokens by bytes to get deterministic representatives (shortest first)
-        let mut sorted_tokens: Vec<_> = llm_token_map.iter().collect();
-        sorted_tokens.sort_by(|(a_bytes, _), (b_bytes, _)| {
-            a_bytes.len().cmp(&b_bytes.len()).then_with(|| a_bytes.cmp(b_bytes))
-        });
+        // Optimized: Instead of sorting all 50K tokens, group by internal ID and pick shortest
+        let t_map = std::time::Instant::now();
+        let mut best_by_internal: HashMap<usize, (&Vec<u8>, usize)> = HashMap::with_capacity(internal_to_original_map.len());
         
-        for (bytes, original_id) in sorted_tokens {
-            if let Some(&internal_id_val) = original_to_internal_map.get(&original_id.0) {
-                if seen_internal_ids.insert(internal_id_val) {
-                    // First time seeing this internal ID - use this token as representative
-                    internal_llm_token_map.insert(bytes.clone(), LLMTokenID(internal_id_val));
+        for (bytes, original_id) in llm_token_map.iter() {
+            if let Some(&internal_id) = original_to_internal_map.get(&original_id.0) {
+                let entry = best_by_internal.entry(internal_id).or_insert((bytes, original_id.0));
+                // Keep the shortest token (or lexicographically first if same length)
+                if bytes.len() < entry.0.len() || (bytes.len() == entry.0.len() && bytes < entry.0) {
+                    *entry = (bytes, original_id.0);
                 }
             }
         }
+        
+        let internal_llm_token_map: BTreeMap<Vec<u8>, LLMTokenID> = best_by_internal
+            .into_iter()
+            .map(|(internal_id, (bytes, _orig))| (bytes.clone(), LLMTokenID(internal_id)))
+            .collect();
+        crate::debug!(3, "  internal_llm_token_map built in {:?}", t_map.elapsed());
 
         crate::debug!(3, "internal_llm_token_map has {} representative entries (was {} total)",
             internal_llm_token_map.len(),
