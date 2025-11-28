@@ -604,7 +604,8 @@ impl GrammarConstraint {
         }
 
         // Build original_to_internal map AND track best representative per class (combined)
-        let mut original_to_internal_map = BTreeMap::new();
+        // Use Vec for O(1) access instead of BTreeMap O(log n)
+        let mut original_to_internal_vec: Vec<usize> = vec![usize::MAX; highest_original_id + 1];
         let mut best_rep_by_internal: Vec<usize> = Vec::with_capacity(combined_result.mask_classes.len());
         let mut internal_id_counter = 0;
         for (_signature, string_indices) in combined_result.mask_classes {
@@ -621,9 +622,15 @@ impl GrammarConstraint {
             
             for string_index in string_indices {
                 let original_llm_id = original_ids[string_index];
-                original_to_internal_map.insert(original_llm_id.0, internal_id);
+                original_to_internal_vec[original_llm_id.0] = internal_id;
             }
         }
+        // Convert to BTreeMap for compatibility with rest of code
+        let original_to_internal_map: BTreeMap<usize, usize> = original_to_internal_vec
+            .into_iter()
+            .enumerate()
+            .filter(|&(_, v)| v != usize::MAX)
+            .collect();
 
         // Build CommitVocab from commit_classes - optimized version
         let effective_max = max_original_llm_token_id.max(highest_original_id);
