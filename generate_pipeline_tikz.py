@@ -171,7 +171,7 @@ def main():
     latex_content = generate_latex_structure()
     
     # Writing to a new filename to avoid overwriting your original while testing
-    filename = "pipeline_full.tex"
+    filename = "pipeline_fixed.tex"
     with open(filename, "w") as f:
         f.write(latex_content)
     
