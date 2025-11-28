@@ -83,6 +83,79 @@ fn test_trivial() {
     assert_eq!(mask3, RangeSet::from_iter(vec![]));
 }
 
+/// Test that x;x is correctly parsed as two expression statements.
+/// This is a minimal reproduction of a bug where semicolon is not allowed after x.
+#[test]
+fn test_x_semicolon_x() {
+    // Grammar: program ::= expression_statement expression_statement? EOF
+    //          expression_statement ::= expression ';'?
+    //          expression ::= 'x'
+    
+    let ebnf_grammar = indoc! {r#"
+        program ::= expression_statement expression_statement? EOF;
+        expression_statement ::= expression ';'? ;
+        expression ::= 'x' ;
+        EOF ::= '$';
+    "#};
+    let grammar_definition = GrammarDefinition::from_ebnf(ebnf_grammar).unwrap();
+    println!("Grammar: {}", grammar_definition);
+
+    // LLM tokens: "x" -> 0, ";" -> 1, "$" -> 2
+    let mut llm_token_map = LLMTokenMap::new();
+    llm_token_map.insert(b"x".to_vec(), LLMTokenID(0));
+    llm_token_map.insert(b";".to_vec(), LLMTokenID(1));
+    llm_token_map.insert(b"$".to_vec(), LLMTokenID(2));
+
+    let constraint = GrammarConstraint::new_from_grammar_definition(
+        Arc::new(grammar_definition),
+        llm_token_map,
+        2, // max_original_llm_token_id
+        &GrammarConstraintConfig::default(),
+    );
+    constraint.dump_precomputed4();
+
+    let mut state = constraint.init();
+    
+    // Initial mask should allow "x"
+    println!("\n--- Initial state ---");
+    let mask0 = state.get_mask();
+    println!("Initial mask: {:?}", mask0);
+    assert!(mask0.contains(0), "x should be allowed initially");
+    
+    // Commit "x"
+    println!("\n--- After committing 'x' ---");
+    state.commit(LLMTokenID(0));
+    let mask1 = state.get_mask();
+    println!("Mask after x: {:?}", mask1);
+    
+    // After x, semicolon should be allowed (for x;)
+    assert!(mask1.contains(1), "semicolon should be allowed after x");
+    // Also x should be allowed (for xx)
+    assert!(mask1.contains(0), "x should be allowed after x (for second expression_statement)");
+    // EOF should be allowed (for x$)
+    assert!(mask1.contains(2), "EOF should be allowed after x");
+    
+    // Commit ";"
+    println!("\n--- After committing ';' ---");
+    state.commit(LLMTokenID(1));
+    let mask2 = state.get_mask();
+    println!("Mask after x;: {:?}", mask2);
+    
+    // After x;, x should be allowed (for x;x)
+    assert!(mask2.contains(0), "x should be allowed after x;");
+    // EOF should be allowed (for x;$)
+    assert!(mask2.contains(2), "EOF should be allowed after x;");
+    
+    // Commit "x"
+    println!("\n--- After committing second 'x' ---");
+    state.commit(LLMTokenID(0));
+    let mask3 = state.get_mask();
+    println!("Mask after x;x: {:?}", mask3);
+    
+    // After x;x, EOF should be allowed
+    assert!(mask3.contains(2), "EOF should be allowed after x;x");
+}
+
 #[ignore]
 #[test]
 fn test_constraint_simple() {
