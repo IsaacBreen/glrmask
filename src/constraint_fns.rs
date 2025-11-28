@@ -283,6 +283,6 @@ impl<'a> GrammarConstraintState<'a> {
         }
         self.state.retain(|_, glr_parser_state| glr_parser_state.is_ok());
 
-        crate::debug!(6, "Active tokenizer states after committing text (bytes {:?}): {:?}", llm_token_bytes, self.state.keys().map(|k| k.0).collect::<Vec<_>>());
+        crate::debug!(8, "Active tokenizer states after committing text (bytes {:?}): {:?}", llm_token_bytes, self.state.keys().map(|k| k.0).collect::<Vec<_>>());
     }
 }
