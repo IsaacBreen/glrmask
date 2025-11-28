@@ -13,67 +13,45 @@ use crate::tokenizer::LLMTokenID;
 use crate::json_serialization::{JSONConvertible, JSONNode};
 
 // ---------------------------------------------------------------------------
-// LLM Vocabulary Trie
+// LLM Vocabulary Storage
 // ---------------------------------------------------------------------------
 
-/// A trie-based vocabulary that stores LLM tokens efficiently.
-/// Uses a trie structure where each node maps byte values to child nodes,
-/// and leaf nodes store the token ID.
+/// Simple vocabulary storage that maps token IDs to their byte sequences.
 /// 
-/// This is more compact than storing a flat mapping because BPE vocabularies
-/// have many shared prefixes, and the trie structure compresses very well with gzip.
+/// This replaces the more complex CommitVocab (which used representatives + mapping)
+/// and the intermediate LLMVocabTrie (which maintained an unused trie structure).
+/// 
+/// Serializes as a flat `{hex: id}` dictionary which compresses well with gzip.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LLMVocabTrie {
-    /// The trie root. Maps byte -> child node.
-    /// Token IDs are stored at leaf positions.
-    root: TrieNode,
-    /// Reverse lookup: token_id -> byte sequence (built lazily or on demand)
+    // NOTE: Named "Trie" for backward compatibility but is now just a simple Vec.
+    // The name will be updated in a future refactor.
+    
+    /// Maps token_id -> byte sequence. Indexed by token ID.
     id_to_bytes: Vec<Option<Vec<u8>>>,
     /// Maximum token ID in this vocab
     pub max_token_id: usize,
 }
 
-/// A node in the vocabulary trie.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-struct TrieNode {
-    /// Children indexed by byte value
-    children: BTreeMap<u8, TrieNode>,
-    /// If this node represents a complete token, its ID
-    token_id: Option<usize>,
-}
-
 impl LLMVocabTrie {
-    /// Build a trie from a token map (bytes -> token_id).
+    /// Build from a token map (bytes -> token_id).
     pub fn from_token_map(token_map: &BTreeMap<Vec<u8>, LLMTokenID>) -> Self {
-        let mut root = TrieNode::default();
-        let mut max_id = 0usize;
+        let max_id = token_map.values().map(|id| id.0).max().unwrap_or(0);
         
-        for (bytes, id) in token_map {
-            max_id = max_id.max(id.0);
-            let mut node = &mut root;
-            for &byte in bytes {
-                node = node.children.entry(byte).or_default();
-            }
-            node.token_id = Some(id.0);
-        }
-        
-        // Build reverse lookup
         let mut id_to_bytes = vec![None; max_id + 1];
         for (bytes, id) in token_map {
             id_to_bytes[id.0] = Some(bytes.clone());
         }
         
         Self {
-            root,
             id_to_bytes,
             max_token_id: max_id,
         }
     }
     
-    /// Create an empty vocabulary trie.
+    /// Create an empty vocabulary.
     pub fn empty(max_token_id: usize) -> Self {
         Self {
-            root: TrieNode::default(),
             id_to_bytes: vec![None; max_token_id + 1],
             max_token_id,
         }
@@ -93,20 +71,7 @@ impl LLMVocabTrie {
             }
         }
         
-        // Build trie from id_to_bytes
-        let mut root = TrieNode::default();
-        for (id, bytes_opt) in id_to_bytes.iter().enumerate() {
-            if let Some(bytes) = bytes_opt {
-                let mut node = &mut root;
-                for &byte in bytes {
-                    node = node.children.entry(byte).or_default();
-                }
-                node.token_id = Some(id);
-            }
-        }
-        
         Self {
-            root,
             id_to_bytes,
             max_token_id: max_id,
         }
@@ -120,7 +85,7 @@ impl LLMVocabTrie {
     
     /// Check if the vocab is empty.
     pub fn is_empty(&self) -> bool {
-        self.root.children.is_empty() && self.root.token_id.is_none()
+        self.id_to_bytes.iter().all(|x| x.is_none())
     }
     
     /// Get the number of tokens in the vocab.
@@ -199,54 +164,52 @@ impl JSONConvertible for LLMVocabTrie {
                 }
             }
             
-            // Try legacy nested trie format
+            // Try legacy nested trie format (from earlier implementation)
             if let Some(trie_node) = obj.get("trie") {
-                fn json_to_node(json: &JSONNode) -> Result<TrieNode, String> {
+                let max_id = obj.get("max_id")
+                    .and_then(extract_usize)
+                    .ok_or("Missing or invalid 'max_id' field")?;
+                
+                // Parse nested trie directly into id_to_bytes without TrieNode struct
+                let mut id_to_bytes = vec![None; max_id + 1];
+                
+                fn collect_from_json(
+                    json: &JSONNode, 
+                    prefix: &mut Vec<u8>, 
+                    id_to_bytes: &mut Vec<Option<Vec<u8>>>,
+                    extract_usize: fn(&JSONNode) -> Option<usize>,
+                ) -> Result<(), String> {
                     match json {
                         JSONNode::Object(obj) => {
-                            let mut node = TrieNode::default();
-                            
-                            for (key, value) in obj {
-                                if key == "_" {
-                                    if let Some(id) = extract_usize(value) {
-                                        node.token_id = Some(id);
+                            // Check for token ID at this node
+                            if let Some(id_node) = obj.get("_") {
+                                if let Some(id) = extract_usize(id_node) {
+                                    if id < id_to_bytes.len() {
+                                        id_to_bytes[id] = Some(prefix.clone());
                                     }
-                                } else if let Ok(byte) = key.parse::<u8>() {
-                                    node.children.insert(byte, json_to_node(value)?);
                                 }
                             }
                             
-                            Ok(node)
+                            // Recurse into children
+                            for (key, value) in obj {
+                                if key != "_" {
+                                    if let Ok(byte) = key.parse::<u8>() {
+                                        prefix.push(byte);
+                                        collect_from_json(value, prefix, id_to_bytes, extract_usize)?;
+                                        prefix.pop();
+                                    }
+                                }
+                            }
+                            Ok(())
                         }
                         _ => Err("Expected object for trie node".to_string()),
                     }
                 }
                 
-                let max_id = obj.get("max_id")
-                    .and_then(extract_usize)
-                    .ok_or("Missing or invalid 'max_id' field")?;
-                
-                let root = json_to_node(trie_node)?;
-                
-                // Rebuild id_to_bytes from trie
-                let mut id_to_bytes = vec![None; max_id + 1];
-                fn collect_tokens(node: &TrieNode, prefix: &mut Vec<u8>, id_to_bytes: &mut Vec<Option<Vec<u8>>>) {
-                    if let Some(id) = node.token_id {
-                        if id < id_to_bytes.len() {
-                            id_to_bytes[id] = Some(prefix.clone());
-                        }
-                    }
-                    for (&byte, child) in &node.children {
-                        prefix.push(byte);
-                        collect_tokens(child, prefix, id_to_bytes);
-                        prefix.pop();
-                    }
-                }
                 let mut prefix = Vec::new();
-                collect_tokens(&root, &mut prefix, &mut id_to_bytes);
+                collect_from_json(trie_node, &mut prefix, &mut id_to_bytes, extract_usize)?;
                 
                 return Ok(Self {
-                    root,
                     id_to_bytes,
                     max_token_id: max_id,
                 });
