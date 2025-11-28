@@ -94,8 +94,6 @@ pub fn find_state_equivalence_classes(
     tokens: &[Vec<u8>],
     states: &[usize],
 ) -> Vec<usize> {
-    // TEMP: disable
-    return states.to_vec();
     // 1. Build Token Trie
     let mut trie = TokenTrie::new();
     for (i, token) in tokens.iter().enumerate() {

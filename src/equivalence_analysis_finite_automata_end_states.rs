@@ -130,7 +130,7 @@ pub fn find_equivalence_classes(
     initial_states: &[usize],
 ) -> BTreeMap<Vec<usize>, Vec<usize>> {
     // // TEMP: Disable
-    return strings.iter().enumerate().map(|(i, _)| (vec![i], vec![i])).collect();
+    // return strings.iter().enumerate().map(|(i, _)| (vec![i], vec![i])).collect();
     crate::debug!(3, "Analyzing string equivalence for {} strings.", strings.len());
     let pb = create_pb(4);
 
