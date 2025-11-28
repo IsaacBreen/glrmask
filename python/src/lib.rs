@@ -1,7 +1,7 @@
 #![recursion_limit = "256"]
 
 use std::collections::BTreeMap;
-use numpy::{IntoPyArray, PyArray1};
+use numpy::{IntoPyArray, PyArray1, PyReadwriteArray1};
 use ouroboros::self_referencing;
 use pyo3::basic::CompareOp;
 use pyo3::prelude::*;
@@ -1391,6 +1391,30 @@ impl PyGrammarConstraintState {
     fn get_mask_bv(&self) -> PyResult<PyBitset> {
         let bitset = self.inner.with_inner(|state| state.get_mask4());
         Ok(PyBitset { inner: bitset })
+    }
+
+    /// Fill a numpy int32 array with the token bitmask (llguidance-compatible format).
+    /// 
+    /// The array should have shape (vocab_size + 31) // 32.
+    /// Bits are packed in little-endian order within each int32.
+    /// This writes directly to the array without intermediate allocations.
+    fn fill_next_token_bitmask(&self, mut bitmask: PyReadwriteArray1<i32>) -> PyResult<()> {
+        let bitset = self.inner.with_inner(|state| state.get_mask4());
+        let slice = bitmask.as_slice_mut()
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("Array must be contiguous: {:?}", e)))?;
+        bitset.fill_bitmask_i32(slice);
+        Ok(())
+    }
+
+    /// Compute mask and fill bitmask via raw pointer (for maximum performance).
+    /// 
+    /// # Safety
+    /// The caller must ensure the pointer is valid for at least `size_bytes` bytes.
+    unsafe fn fill_next_token_bitmask_ptr(&self, ptr: usize, size_bytes: usize) -> PyResult<()> {
+        let bitset = self.inner.with_inner(|state| state.get_mask4());
+        let num_i32s = size_bytes / 4;
+        bitset.fill_bitmask_i32_ptr(ptr as *mut i32, num_i32s);
+        Ok(())
     }
 
     fn commit(&mut self, llm_token_id: usize) {

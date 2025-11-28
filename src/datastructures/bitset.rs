@@ -262,6 +262,47 @@ impl Bitset {
             words,
         }
     }
+    
+    /// Fill an i32 slice with the bitmask representation (compatible with llguidance format).
+    /// 
+    /// Each u64 word is split into two i32 values (little-endian order).
+    /// The output slice should have length `(vocab_size + 31) / 32`.
+    /// 
+    /// This method writes directly to the provided slice, making it suitable for
+    /// filling pre-allocated numpy arrays without intermediate allocations.
+    #[inline]
+    pub fn fill_bitmask_i32(&self, out: &mut [i32]) {
+        // Zero out the output first
+        out.fill(0);
+        
+        // Each u64 word contains 2 i32 values
+        let num_i32s = self.words.len() * 2;
+        let copy_len = num_i32s.min(out.len());
+        
+        // Convert u64 words to i32 pairs
+        for (word_idx, &word) in self.words.iter().enumerate() {
+            let i32_base = word_idx * 2;
+            if i32_base < out.len() {
+                out[i32_base] = word as i32;
+            }
+            if i32_base + 1 < out.len() {
+                out[i32_base + 1] = (word >> 32) as i32;
+            }
+        }
+    }
+    
+    /// Fill an i32 slice with the bitmask via a raw pointer.
+    /// 
+    /// # Safety
+    /// The caller must ensure that:
+    /// - `ptr` points to at least `len` i32 values of valid, writable memory
+    /// - The memory is properly aligned for i32
+    /// - No other references to this memory exist during the call
+    #[inline]
+    pub unsafe fn fill_bitmask_i32_ptr(&self, ptr: *mut i32, len: usize) {
+        let out = std::slice::from_raw_parts_mut(ptr, len);
+        self.fill_bitmask_i32(out);
+    }
 }
 
 // --- Iterator ---
