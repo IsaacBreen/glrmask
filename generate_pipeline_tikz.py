@@ -2,6 +2,7 @@
 """
 Generate TikZ visualization of the grammar compilation pipeline.
 Produces a rigid, fixed-size grid layout with orthogonal arrows.
+Now with FULL content in each box.
 """
 
 import json
@@ -10,11 +11,354 @@ import subprocess
 from typing import Dict, List, Set, Tuple, Any, Optional
 
 # ==============================================================================
-# LATEX GENERATION - STRUCTURE ONLY
+# CONTENT GENERATORS
+# ==============================================================================
+
+def generate_vocab_content():
+    """Generate LLM Vocab visualization."""
+    return r"""\tiny
+\textbf{LLM Vocab}\\
+\textbf{(50k tokens)}\\[0.2em]
+\begin{tabular}{|c|c|}
+\hline
+\textbf{ID} & \textbf{Token} \\ \hline
+0 & \texttt{<unk>} \\ \hline
+... & ... \\ \hline
+65 & \texttt{'a'} \\ \hline
+66 & \texttt{'b'} \\ \hline
+67 & \texttt{'c'} \\ \hline
+68 & \texttt{'d'} \\ \hline
+69 & \texttt{'z'} \\ \hline
+... & ... \\ \hline
+\end{tabular}"""
+
+def generate_grammar_content():
+    """Generate Input Grammar - Recursive Cyclic Example."""
+    return r"""\scriptsize
+\textbf{Input Grammar}\\
+\textbf{(Recursive)}\\[0.4em]
+$\begin{array}{rcl}
+\texttt{S} &\to& \texttt{A }\texttt{'\$'}\\
+\texttt{A} &\to& \texttt{'a' B 'z'}\\
+\texttt{B} &\to& \texttt{'b' C}\\
+\texttt{C} &\to& \texttt{'c' A}\\
+\texttt{C} &\to& \texttt{'d'}
+\end{array}$"""
+
+
+def generate_tokenizer_dfa():
+    """Generate Tokenizer DFA - Recursive Grammar Tokens."""
+    return r"""\resizebox{0.95\textw}{!}{
+\begin{tikzpicture}[>=Stealth,
+    node distance=1.5cm,
+    state/.style={circle, draw, thick, minimum size=0.5cm, font=\tiny},
+    accept/.style={circle, draw, double, thick, minimum size=0.5cm, font=\tiny}]
+\node[font=\bfseries\scriptsize] at (2, 1.5) {Tokenizer DFA};
+\node[state, initial, initial text=] (q0) at (0, 0) {0};
+\node[accept] (qa) at (2, 1.2) {a};
+\node[accept] (qb) at (2, 0.6) {b};
+\node[accept] (qc) at (2, 0) {c};
+\node[accept] (qd) at (2, -0.6) {d};
+\node[accept] (qz) at (2, -1.2) {z};
+
+\draw[->, thick] (q0) -- node[above,font=\tiny] {'a'} (qa);
+\draw[->, thick] (q0) -- node[above,pos=0.7,font=\tiny] {'b'} (qb);
+\draw[->, thick] (q0) -- node[above,pos=0.7,font=\tiny] {'c'} (qc);
+\draw[->, thick] (q0) -- node[below,pos=0.7,font=\tiny] {'d'} (qd);
+\draw[->, thick] (q0) -- node[below,font=\tiny] {'z'} (qz);
+\end{tikzpicture}
+}"""
+
+def generate_lalr_table():
+    """Generate LALR Parse Table - Recursive Grammar."""
+    return r"""\tiny
+\textbf{LALR Parse Table}\\[0.2em]
+\begin{tabular}{|c|c|c|c|c|c|c|c|c|}
+\hline
+\textbf{St} & \textbf{a} & \textbf{b} & \textbf{c} & \textbf{d} & \textbf{z} & \textbf{\$} & \textbf{A} & \textbf{B} \\ \hline
+0 & S1 & & & & & & G5 & \\ \hline
+1 & & S2 & & & & & & G6 \\ \hline
+2 & & & S3 & S4 & & & & \\ \hline
+3 & S1 & & & & & & G7 & \\ \hline
+4 & R(C) & R(C) & R(C) & R(C) & R(C) & R(C) & & \\ \hline
+5 & & & & & & Acc & & \\ \hline
+6 & & & & & S8 & & & \\ \hline
+7 & R(C) & & & & R(C) & & & \\ \hline
+8 & R(A) & & & & R(A) & & & \\ \hline
+\end{tabular}"""
+
+def generate_terminal_dwa():
+    """Generate Terminal DWA - Cyclic Grammar Tokens."""
+    return r"""\resizebox{0.95\textw}{!}{
+\begin{tikzpicture}[>=Stealth,
+    node distance=1.4cm and 1.6cm,
+    state/.style={circle, draw, thick, minimum size=0.65cm, font=\tiny},
+    accept/.style={circle, draw, double, thick, minimum size=0.65cm, font=\tiny}]
+\node[font=\bfseries\scriptsize] at (3, 1.8) {Terminal DWA};
+\node[font=\tiny] at (3, 1.4) {(with LLM token masks)};
+\node[state, fill=blue!15] (q0) at (0, 0) {0};
+\node[accept] (qa) at (3, 1.2) {'a'};
+\node[accept] (qb) at (3, 0.4) {'b'};
+\node[accept] (qc) at (3, -0.4) {'c'};
+\node[accept] (qd) at (3, -1.2) {'d'};
+
+\draw[->, thick, blue!70] (q0) -- node[above,font=\tiny] {\textbf{'a'}$|$\{65\}} (qa);
+\draw[->, thick, red!70] (q0) -- node[above,font=\tiny] {\textbf{'b'}$|$\{66\}} (qb);
+\draw[->, thick, green!70] (q0) -- node[above,font=\tiny] {\textbf{'c'}$|$\{67\}} (qc);
+\draw[->, thick, orange!70] (q0) -- node[above,font=\tiny] {\textbf{'d'}$|$\{68\}} (qd);
+\end{tikzpicture}
+}"""
+
+def generate_below_zero_chars():
+    """Generate below-zero characterizations with textual tables."""
+    return r"""\tiny
+\textbf{Below-Zero Characterizations}\\[0.2em]
+\resizebox{0.95\textw}{!}{
+\begin{tikzpicture}[>=Stealth,
+    node distance=1.1cm and 1.3cm,
+    state/.style={circle, draw, thick, minimum size=0.5cm, font=\tiny}]
+
+% --- 'a' (Expects B) ---
+\node[font=\tiny\bfseries] at (1.5, 2.5) {$\mathcal{C}_{\text{'a'}}$};
+\node[anchor=south] at (1.5, 2.7) {
+    \begin{tabular}{|l|l|l|}
+    \hline
+    \textbf{R} & \textbf{P} & \textbf{N} \\ \hline
+    0 & 0 & S1 \\ \hline
+    \end{tabular}
+};
+\node[state, fill=blue!15] (a0) at (0, 2) {0};
+\node[state] (a1) at (2, 2) {S1};
+\draw[->, thick, blue!70] (a0) -- node[above,font=\tiny] {R:0} (a1);
+
+% --- 'b' (Expects C) ---
+\node[font=\tiny\bfseries] at (5.5, 2.5) {$\mathcal{C}_{\text{'b'}}$};
+\node[anchor=south] at (5.5, 2.7) {
+    \begin{tabular}{|l|l|l|}
+    \hline
+    \textbf{R} & \textbf{P} & \textbf{N} \\ \hline
+    1 & 0 & S2 \\ \hline
+    \end{tabular}
+};
+\node[state, fill=blue!15] (b0) at (4, 2) {0};
+\node[state] (b1) at (6, 2) {S2};
+\draw[->, thick, red!70] (b0) -- node[above,font=\tiny] {R:1} (b1);
+
+% --- 'c' (Expects A) ---
+\node[font=\tiny\bfseries] at (1.5, 0.5) {$\mathcal{C}_{\text{'c'}}$};
+\node[anchor=south] at (1.5, 0.7) {
+    \begin{tabular}{|l|l|l|}
+    \hline
+    \textbf{R} & \textbf{P} & \textbf{N} \\ \hline
+    2 & 0 & S3 \\ \hline
+    \end{tabular}
+};
+\node[state, fill=blue!15] (c0) at (0, 0) {0};
+\node[state] (c1) at (2, 0) {S3};
+\draw[->, thick, green!70] (c0) -- node[above,font=\tiny] {R:2} (c1);
+
+% --- 'd' (Reduces C) ---
+\node[font=\tiny\bfseries] at (5.5, 0.5) {$\mathcal{C}_{\text{'d'}}$};
+\node[anchor=south] at (5.5, 0.7) {
+    \begin{tabular}{|l|l|l|}
+    \hline
+    \textbf{R} & \textbf{P} & \textbf{N} \\ \hline
+    2 & 0 & Esc \\ \hline
+    \end{tabular}
+};
+\node[state, fill=blue!15] (d0) at (4, 0) {0};
+\node[state] (d1) at (6, 0) {Esc};
+\draw[->, dashed, thick, orange!70] (d0) -- node[above,font=\tiny] {R:2,S:C} (d1);
+
+\end{tikzpicture}
+}"""
+
+def generate_template_dfas():
+    """Generate template DFAs - state IDs only."""
+    return r"""\tiny
+\textbf{Template DFAs}\\
+\textbf{(state IDs, push transitions)}\\[0.2em]
+\resizebox{0.95\textw}{!}{
+\begin{tikzpicture}[>=Stealth,
+    node distance=1.1cm and 1.3cm,
+    state/.style={circle, draw, thick, minimum size=0.5cm, font=\tiny},
+    accept/.style={circle, draw, double, thick, minimum size=0.5cm, font=\tiny}]
+% Template 'a'
+\node[font=\tiny\bfseries] at (1.5, 1.5) {$\mathcal{T}_{\text{'a'}}$};
+\node[state, fill=blue!15] (t0) at (0, 1) {0};
+\node[accept] (t1) at (2, 1) {1};
+\draw[->, thick, blue!70] (t0) -- node[above,font=\tiny] {S1} (t1);
+
+% Template 'b'
+\node[font=\tiny\bfseries] at (5.5, 1.5) {$\mathcal{T}_{\text{'b'}}$};
+\node[state, fill=blue!15] (u0) at (4, 1) {0};
+\node[accept] (u1) at (6, 1) {2};
+\draw[->, thick, red!70] (u0) -- node[above,font=\tiny] {S2} (u1);
+
+% Template 'c'
+\node[font=\tiny\bfseries] at (1.5, -0.5) {$\mathcal{T}_{\text{'c'}}$};
+\node[state, fill=blue!15] (v0) at (0, -1) {0};
+\node[accept] (v1) at (2, -1) {3};
+\draw[->, thick, green!70] (v0) -- node[above,font=\tiny] {S3} (v1);
+
+% Template 'd'
+\node[font=\tiny\bfseries] at (5.5, -0.5) {$\mathcal{T}_{\text{'d'}}$};
+\node[state, fill=blue!15] (w0) at (4, -1) {0};
+\node[accept] (w1) at (6, -1) {4};
+\draw[->, thick, orange!70] (w0) -- node[above,font=\tiny] {Esc} (w1);
+\end{tikzpicture}
+}"""
+
+def generate_dwa_with_templates():
+    """Terminal DWA with miniaturized template DFAs on edges."""
+    return r"""\resizebox{0.95\textw}{!}{
+\begin{tikzpicture}[>=Stealth,
+    node distance=2.5cm and 2cm,
+    state/.style={circle, draw, thick, minimum size=0.7cm, font=\tiny},
+    accept/.style={circle, draw, double, thick, minimum size=0.7cm, font=\tiny},
+    mini/.style={circle, draw, minimum size=0.2cm, font=\tiny, inner sep=0pt}]
+\node[font=\bfseries\scriptsize] at (3, 2.5) {DWA with Template DFAs};
+\node[font=\tiny] at (3, 2.15) {(miniaturized DFAs on edges)};
+\node[state, fill=blue!15] (q0) at (0, 0) {0};
+\node[accept] (q1) at (2, 1.5) {1};
+\node[accept] (q2) at (4, 0) {2};
+\node[accept] (q3) at (2, -1.5) {3};
+\node[accept] (q4) at (6, 0) {4};
+
+% 0 -> 1 ('a')
+\draw[->, thick, blue!70, opacity=0.3] (q0) to[bend left=10] (q1);
+\node[mini, fill=blue!10] (m00) at (0.8, 1.0) {};
+\node[mini] (m01) at (1.4, 1.3) {};
+\draw[->, thin] (m00) -- (m01);
+\node[font=\tiny, blue!70] at (0.5, 1.5) {$\mathcal{T}_{\text{'a'}}$};
+
+% 1 -> 2 ('b')
+\draw[->, thick, red!70, opacity=0.3] (q1) -- (q2);
+\node[mini, fill=blue!10] (m10) at (2.8, 0.9) {};
+\node[mini] (m11) at (3.4, 0.5) {};
+\draw[->, thin] (m10) -- (m11);
+\node[font=\tiny, red!70] at (3.2, 1.2) {$\mathcal{T}_{\text{'b'}}$};
+
+% 2 -> 3 ('c')
+\draw[->, thick, green!70, opacity=0.3] (q2) -- (q3);
+\node[mini, fill=blue!10] (m20) at (3.4, -0.5) {};
+\node[mini] (m21) at (2.8, -0.9) {};
+\draw[->, thin] (m20) -- (m21);
+\node[font=\tiny, green!70] at (3.5, -1.2) {$\mathcal{T}_{\text{'c'}}$};
+
+% 3 -> 1 ('a' - Cycle)
+\draw[->, thick, blue!70, opacity=0.3] (q3) -- (q1);
+\node[mini, fill=blue!10] (m30) at (1.8, -0.5) {};
+\node[mini] (m31) at (1.8, 0.5) {};
+\draw[->, thin] (m30) -- (m31);
+\node[font=\tiny, blue!70] at (1.4, 0) {$\mathcal{T}_{\text{'a'}}$};
+
+% 2 -> 4 ('d' - Exit)
+\draw[->, thick, orange!70, opacity=0.3] (q2) -- (q4);
+\node[mini, fill=blue!10] (m40) at (4.8, 0.2) {};
+\node[mini] (m41) at (5.4, 0.2) {};
+\draw[->, thin] (m40) -- (m41);
+\node[font=\tiny, orange!70] at (5, 0.5) {$\mathcal{T}_{\text{'d'}}$};
+
+\end{tikzpicture}
+}"""
+
+def generate_flattened_nwa():
+    """Flattened NWA after epsilon-linking template DFAs."""
+    return r"""\resizebox{0.95\textw}{!}{
+\begin{tikzpicture}[>=Stealth,
+    node distance=1.3cm and 1.4cm,
+    state/.style={circle, draw, thick, minimum size=0.55cm, font=\tiny},
+    accept/.style={circle, draw, double, thick, minimum size=0.55cm, font=\tiny}]
+\node[font=\bfseries\scriptsize] at (3.5, 2.5) {Flattened NWA};
+\node[font=\tiny] at (3.5, 2.15) {(epsilon transitions + weights)};
+\node[state, fill=blue!15] (s0) at (0, 0) {0};
+\node[accept] (s1) at (2, 1.5) {1};
+\node[accept] (s2) at (4, 0) {2};
+\node[accept] (s3) at (2, -1.5) {3};
+\node[accept] (s4) at (6, 0) {4};
+
+% 0 -> 1
+\draw[->, thick, blue!70] (s0) to[bend left=10] node[pos=0.5, above, font=\tiny] {$\varepsilon|\{65\}$} (s1);
+
+% 1 -> 2
+\draw[->, thick, red!70] (s1) -- node[above,font=\tiny] {$\varepsilon|\{66\}$} (s2);
+
+% 2 -> 3
+\draw[->, thick, green!70] (s2) -- node[below,font=\tiny] {$\varepsilon|\{67\}$} (s3);
+
+% 3 -> 1 (Cycle)
+\draw[->, thick, blue!70] (s3) -- node[left,font=\tiny] {$\varepsilon|\{65\}$} (s1);
+
+% 2 -> 4 (Exit)
+\draw[->, thick, orange!70] (s2) -- node[above,font=\tiny] {$\varepsilon|\{68\}$} (s4);
+
+\end{tikzpicture}
+}"""
+
+def generate_resolved_nwa():
+    """NWA with push transitions resolved to normal transitions."""
+    return r"""\resizebox{0.95\textw}{!}{
+\begin{tikzpicture}[>=Stealth,
+    node distance=1.3cm and 1.4cm,
+    state/.style={circle, draw, thick, minimum size=0.55cm, font=\tiny},
+    accept/.style={circle, draw, double, thick, minimum size=0.55cm, font=\tiny}]
+\node[font=\bfseries\scriptsize] at (3.5, 2.5) {Resolved NWA};
+\node[font=\tiny] at (3.5, 2.15) {(push replaced with state edges)};
+\node[state, fill=blue!15] (s0) at (0, 0) {0};
+\node[accept] (s1) at (2, 1.5) {1};
+\node[accept] (s2) at (4, 0) {2};
+\node[accept] (s3) at (2, -1.5) {3};
+\node[accept] (s4) at (6, 0) {4};
+
+% 0 -> 1
+\draw[->, thick, blue!70] (s0) to[bend left=10] node[pos=0.5, above, font=\tiny] {$\varepsilon|\{65\}$} (s1);
+
+% 1 -> 2
+\draw[->, thick, red!70] (s1) -- node[above,font=\tiny] {$\varepsilon|\{66\}$} (s2);
+
+% 2 -> 3
+\draw[->, thick, green!70] (s2) -- node[below,font=\tiny] {$\varepsilon|\{67\}$} (s3);
+
+% 3 -> 1 (Cycle)
+\draw[->, thick, blue!70] (s3) -- node[left,font=\tiny] {$\varepsilon|\{65\}$} (s1);
+
+% 2 -> 4 (Exit)
+\draw[->, thick, orange!70] (s2) -- node[above,font=\tiny] {$\varepsilon|\{68\}$} (s4);
+\end{tikzpicture}
+}"""
+
+def generate_final_dwa():
+    """Final DWA after determinization and simplification."""
+    return r"""\resizebox{0.95\textw}{!}{
+\begin{tikzpicture}[>=Stealth,
+    node distance=1.8cm and 1.8cm,
+    state/.style={circle, draw, thick, minimum size=0.7cm, font=\tiny},
+    accept/.style={circle, draw, double, thick, minimum size=0.7cm, font=\tiny}]
+\node[font=\bfseries\scriptsize] at (3.5, 2.2) {Final DWA};
+\node[font=\tiny] at (3.5, 1.85) {(determinized \& simplified)};
+\node[state, fill=blue!15] (q0) at (0, 0) {0};
+\node[state] (q1) at (2, 1.5) {1};
+\node[state] (q2) at (4, 0) {2};
+\node[state] (q3) at (2, -1.5) {3};
+\node[accept] (q4) at (6, 0) {4};
+
+\draw[->, thick, blue!70] (q0) to[bend left=10] node[above,font=\tiny] {'a'} (q1);
+\draw[->, thick, red!70] (q1) -- node[above,font=\tiny] {'b'} (q2);
+\draw[->, thick, green!70] (q2) -- node[below,font=\tiny] {'c'} (q3);
+\draw[->, thick, blue!70] (q3) -- node[left,font=\tiny] {'a'} (q1);
+\draw[->, thick, orange!70] (q2) -- node[above,font=\tiny] {'d'} (q4);
+
+\draw[->, thick, gray!70] (q4) to[loop right] node[right,font=\tiny] {$\star$} (q4);
+\end{tikzpicture}
+}"""
+
+# ==============================================================================
+# LATEX GENERATION - STRUCTURE WITH CONTENT
 # ==============================================================================
 
 def generate_latex_structure():
-    """Generate the macro structure first - components and arrows only."""
+    """Generate the complete structure with content."""
     
     latex = [
         r"\documentclass[tikz,border=10pt]{standalone}",
@@ -31,22 +375,15 @@ def generate_latex_structure():
         r"\definecolor{componentbg}{RGB}{236,240,241}",
         "",
         r"% --- DIMENSIONS (Global 'Constants') ---",
-        r"\def\boxwidth{6cm}",
-        r"\def\boxheight{4.5cm}",
+        r"\newlength{\boxwidth}",
+        r"\setlength{\boxwidth}{6cm}",
+        r"\newlength{\boxheight}",
+        r"\setlength{\boxheight}{4.5cm}",
         r"% Text area is slightly smaller than box to allow padding",
-        r"\def\textw{5.6cm}",
-        r"\def\texth{4.1cm}",
-        "",
-        r"% --- MACRO: Content Fitter ---",
-        r"% Usage: \node[box] { \fit{Your Long Content Here} };",
-        r"% This forces the content to shrink if it exceeds the box size.",
-        r"\newcommand{\fit}[1]{%",
-        r"  \resizebox{\textw}{!}{%",
-        r"    \begin{minipage}[c][\texth][c]{\textw}%",
-        r"      \centering\bfseries #1%",
-        r"    \end{minipage}%",
-        r"  }%",
-        r"}",
+        r"\newlength{\textw}",
+        r"\setlength{\textw}{5.6cm}",
+        r"\newlength{\texth}",
+        r"\setlength{\texth}{4.1cm}",
         "",
         r"% --- STYLES ---",
         r"\tikzset{",
@@ -80,8 +417,8 @@ def generate_latex_structure():
         r"  % ====================================================================",
         r"  % ROW 2: The Anchors (Defining the Grid Width)",
         r"  % ====================================================================",
-        r"  \node[box] (tokenizer) {\fit{Tokenizer DFA}};",
-        r"  \node[box, right=\colgap of tokenizer] (parsetable) {\fit{LALR Parse Table}};",
+        f"  \\node[box] (tokenizer) {{{generate_tokenizer_dfa()}}};",
+        f"  \\node[box, right=\\colgap of tokenizer] (parsetable) {{{generate_lalr_table()}}};",
         "",
         r"  % ====================================================================",
         r"  % ROW 1: Inputs (High above)",
@@ -91,20 +428,23 @@ def generate_latex_structure():
         r"  \coordinate (center_axis) at ($(tokenizer.east)!0.5!(parsetable.west)$);",
         r"  ",
         r"  % Place Grammar HIGH above the center axis",
-        r"  \node[box, above=\toprowgap of center_axis, anchor=south] (grammar) {\fit{Input Grammar\\(EBNF)}};",
+        f"  \\node[box, above=\\toprowgap of center_axis, anchor=south] (grammar) {{{generate_grammar_content()}}};",
         r"  ",
         r"  % Place Vocab to the left",
-        r"  \node[box, left=\colgap of grammar] (vocab) {\fit{LLM Vocab\\(50k tokens)}};",
+        f"  \\node[box, left=\\colgap of grammar] (vocab) {{{generate_vocab_content()}}};",
         "",
         r"  % ====================================================================",
-        r"  % ROW 3: Processing",
+        r"  % ROW 3 & 4: Processing (Split)",
         r"  % ====================================================================",
         r"  ",
-        r"  % Note: Even though 'Templates' has more text, it uses the same rigid 'box' style.",
-        r"  \node[box, below=\midrowgap of parsetable] (templates) {\fit{Below-Zero\\Characterizations\\+\\Template DFAs}};",
+        r"  % Characterizations below Parse Table",
+        f"  \\node[box, below=\\midrowgap of parsetable] (characterizations) {{{generate_below_zero_chars()}}};",
         r"  ",
-        r"  % Terminal DWA below Tokenizer, vertically aligned with Templates",
-        r"  \node[box] (terminal_dwa) at (tokenizer |- templates) {\fit{Terminal DWA\\(Precompute1)}};",
+        r"  % Template DFAs below Characterizations",
+        f"  \\node[box, below=2cm of characterizations] (template_dfas) {{{generate_template_dfas()}}};",
+        r"  ",
+        r"  % Terminal DWA below Tokenizer, vertically aligned with Template DFAs",
+        f"  \\node[box] (terminal_dwa) at (tokenizer |- template_dfas) {{{generate_terminal_dwa()}}};",
         "",
         r"  % ====================================================================",
         r"  % CENTRAL COLUMN: Merged Flow",
@@ -112,15 +452,15 @@ def generate_latex_structure():
         r"  ",
         r"  % Determine the Y-level for the bracket merge",
         r"  % We look at where the bottom of the previous row is, and go halfway to the next node",
-        r"  \path (templates.south) -- ++(0, -\midrowgap) coordinate (next_node_top);",
-        r"  \coordinate (merge_bar_y) at ($(templates.south)!0.5!(next_node_top)$);",
+        r"  \path (template_dfas.south) -- ++(0, -2cm) coordinate (next_node_top);",
+        r"  \coordinate (merge_bar_y) at ($(template_dfas.south)!0.5!(next_node_top)$);",
         r"  ",
         r"  % Center column nodes",
-        r"  \node[box] (dwa_with_templates) at (center_axis |- next_node_top) [anchor=north] {\fit{Terminal DWA\\with\\Template DFAs on Edges}};",
+        f"  \\node[box] (dwa_with_templates) at (center_axis |- next_node_top) [anchor=north] {{{generate_dwa_with_templates()}}};",
         r"  ",
-        r"  \node[box, below=2cm of dwa_with_templates] (flattened_nwa) {\fit{Flattened NWA}};",
-        r"  \node[box, below=2cm of flattened_nwa] (resolved_nwa) {\fit{NWA\\(Push Transitions Resolved)}};",
-        r"  \node[box, below=2cm of resolved_nwa] (final_dwa) {\fit{Final DWA}};",
+        f"  \\node[box, below=2cm of dwa_with_templates] (flattened_nwa) {{{generate_flattened_nwa()}}};",
+        f"  \\node[box, below=2cm of flattened_nwa] (resolved_nwa) {{{generate_resolved_nwa()}}};",
+        f"  \\node[box, below=2cm of resolved_nwa] (final_dwa) {{{generate_final_dwa()}}};",
         "",
         r"  % ====================================================================",
         r"  % ARROWS",
@@ -138,17 +478,18 @@ def generate_latex_structure():
         r"  % Goes down the far left side, then turns right into the box",
         r"  \draw[flowarrow] (vocab.south) |- (terminal_dwa.west);",
         r"  ",
-        r"  % --- 3. Vertical Connectors (Row 2 -> Row 3) ---",
+        r"  % --- 3. Vertical Connectors ---",
         r"  \draw[flowarrow] (tokenizer) -- (terminal_dwa);",
-        r"  \draw[flowarrow] (parsetable) -- (templates);",
+        r"  \draw[flowarrow] (parsetable) -- (characterizations);",
+        r"  \draw[flowarrow] (characterizations) -- (template_dfas);",
         r"  ",
-        r"  % --- 4. The Bracket Merge (Row 3 -> Central) ---",
+        r"  % --- 4. The Bracket Merge (Row 4 -> Central) ---",
         r"  % Left Arm",
         r"  \draw[connector] (terminal_dwa.south) -- (terminal_dwa.south |- merge_bar_y);",
         r"  % Right Arm",
-        r"  \draw[connector] (templates.south) -- (templates.south |- merge_bar_y);",
+        r"  \draw[connector] (template_dfas.south) -- (template_dfas.south |- merge_bar_y);",
         r"  % Crossbar",
-        r"  \draw[connector] (terminal_dwa.south |- merge_bar_y) -- (templates.south |- merge_bar_y);",
+        r"  \draw[connector] (terminal_dwa.south |- merge_bar_y) -- (template_dfas.south |- merge_bar_y);",
         r"  % Down Arrow",
         r"  \draw[flowarrow] (center_axis |- merge_bar_y) -- (dwa_with_templates.north);",
         "",
@@ -170,12 +511,11 @@ def generate_latex_structure():
 def main():
     latex_content = generate_latex_structure()
     
-    # Writing to a new filename to avoid overwriting your original while testing
-    filename = "pipeline_fixed.tex"
+    filename = "gcg-paper/paper/figures/pipeline_full.tex"
     with open(filename, "w") as f:
         f.write(latex_content)
     
-    print(f"Generated {filename} with rigid structure and orthogonal arrows")
+    print(f"Generated {filename} with complete content in all boxes")
 
 if __name__ == "__main__":
     main()
