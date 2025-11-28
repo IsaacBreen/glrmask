@@ -26,6 +26,11 @@ set -euo pipefail
 #   REPEAT:          Number of times to run each benchmark. (Default: 1)
 #   AGG_METHOD:      Aggregation method for analyzer (mean, median, min, max).
 #                    If unset, runs are plotted individually. (Default: "")
+#   VOCAB_URL:       URL to the vocabulary JSON file for tokenization.
+#                    If unset, uses the default GPT-2 vocabulary.
+#   VOCAB_PATH:      Path to a local vocabulary JSON file (mutually exclusive with VOCAB_URL).
+#   VOCAB_LIST:      Space-separated list of tokens to use (e.g., "{ } [ ]").
+#   TOKEN_LEN:       Space-separated token length filters (e.g., "1 3-5 8-").
 # ==============================================================================
 
 # --- Configuration ---
@@ -36,6 +41,10 @@ set -euo pipefail
 : "${REPEAT:=1}"
 : "${AGG_METHOD:=""}"
 : "${SKIP_PLOTS:=0}" # Set to 1 to skip plot generation
+: "${VOCAB_URL:=""}" # URL to vocabulary JSON (overrides default)
+: "${VOCAB_PATH:=""}" # Path to local vocabulary JSON (mutually exclusive with VOCAB_URL)
+: "${VOCAB_LIST:=""}" # Space-separated list of tokens (e.g., "{ } [ ] , :")
+: "${TOKEN_LEN:=""}" # Space-separated token length filters (e.g., "1 3-5 8-")
 
 # --- PYTHONPATH setup ---
 # The script is run from the project root. The python modules are in the 'python' directory.
@@ -232,6 +241,24 @@ for pair in "${ALL_PAIRS[@]}"; do
         --model "$MODEL_FILE"
         --output "$RESULTS_DIR"
         --repeat "$REPEAT")
+
+    # Add optional vocabulary arguments
+    if [[ -n "$VOCAB_URL" ]]; then
+      cmd+=(--vocab-url "$VOCAB_URL")
+    fi
+    if [[ -n "$VOCAB_PATH" ]]; then
+      cmd+=(--vocab-path "$VOCAB_PATH")
+    fi
+    if [[ -n "$VOCAB_LIST" ]]; then
+      # Split VOCAB_LIST by spaces and add each token
+      read -ra VOCAB_TOKENS <<< "$VOCAB_LIST"
+      cmd+=(--vocab-list "${VOCAB_TOKENS[@]}")
+    fi
+    if [[ -n "$TOKEN_LEN" ]]; then
+      # Split TOKEN_LEN by spaces and add each range
+      read -ra TOKEN_LENS <<< "$TOKEN_LEN"
+      cmd+=(--token-len "${TOKEN_LENS[@]}")
+    fi
     echo "${cmd[*]}"
     # Prepend the environment variable ONLY for the C++ model
     if [[ "$MODEL_FILE" == *"precompute3_model_cpp.py"* ]]; then
