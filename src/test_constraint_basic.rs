@@ -138,7 +138,7 @@ fn test_constraint_simple() {
     // In general, this should be true if all LLM tokens cleanly match grammar tokens (or, equivalently, if the only non-empty entry in the precompute tree is under the initial tokenizer state).
     let llm_token = b"ab".to_vec();
     let grammar_tokenss = vec![vec!["A", "B_OR_C"], vec!["AB"]];
-    let llm_token_id_for_comp = llm_token_map.get_by_left(&llm_token).unwrap();
+    let llm_token_id_for_comp = llm_token_map.get(&llm_token).unwrap();
 
     let mut constraint_state_for_comp = constraint.init(); // This is fine, it's a comment
     let parser = &constraint.parser;
@@ -224,7 +224,7 @@ fn test_constraint_simple_simplified() {
     // // Ensure the parse state after stepping the constraint with an LLM token is the same as the parse state after stepping the parser itself with tokens emitted by the tokenizer for that same LLM token.
     // let llm_token = b"a".to_vec();
     // let grammar_tokenss = vec![vec!["A"]];
-    // let llm_token_id_for_comp = llm_token_map.get_by_left(&llm_token).unwrap();
+    // let llm_token_id_for_comp = llm_token_map.get(&llm_token).unwrap();
     //
     // let mut constraint_state_for_comp = constraint.init();
     // constraint_state_for_comp.commit(*llm_token_id_for_comp);
@@ -297,7 +297,7 @@ fn test_constraint_expression() {
     // In general, this should be true if all LLM tokens cleanly match grammar tokens (or, equivalently, if the only non-empty entry in the precompute tree is under the initial tokenizer state).
     let llm_token = b"(i".to_vec();
     let grammar_tokens = vec!["LPAREN", "I"];
-    let llm_token_id_for_comp = llm_token_map.get_by_left(&llm_token).unwrap();
+    let llm_token_id_for_comp = llm_token_map.get(&llm_token).unwrap();
     let parser = &constraint.parser;
     let grammar_token_map = &parser.terminal_map;
     let grammar_token_ids = grammar_tokens.iter().map(|token| grammar_token_map.get_by_left(&regex_name(token)).unwrap()).collect::<Vec<_>>();
@@ -726,7 +726,7 @@ fn test_hideous_ambiguity() {
     let mut constraint_state = constraint.init();
 
     // 8. Step with LLM Token "a" repeatedly
-    let a_id = llm_token_map.get_by_left(&b"a"[..]).unwrap().0;
+    let a_id = llm_token_map.get(&b"a"[..]).unwrap().0;
     for i in 0..10 { // Reduced iterations for faster test, was 1000
         println!("{}. Committing LLM token ID {}", i, a_id);
         let mask = constraint_state.get_mask();
@@ -854,8 +854,8 @@ fn test_precompute_a_plus_tokenizer() {
 
     // The weight should contain tokens for "a" and "aa"
     let mut expected_tokens = RangeSet::zeros();
-    expected_tokens.insert(llm_token_map.get_by_left(b"a".as_ref()).unwrap().0);
-    expected_tokens.insert(llm_token_map.get_by_left(b"aa".as_ref()).unwrap().0);
+    expected_tokens.insert(llm_token_map.get(b"a".as_ref()).unwrap().0);
+    expected_tokens.insert(llm_token_map.get(b"aa".as_ref()).unwrap().0);
 
     let weight_tokens: RangeSet = weight.iter_up_to(internal_max_llm_token).collect();
     assert_eq!(weight_tokens, expected_tokens, "Weight on edge is incorrect");
@@ -935,8 +935,8 @@ fn test_precompute_x_eq() {
     let equals_tid = *grammar_token_map.get_by_left(&regex_name("EQUALS")).unwrap();
 
     // Get the LLM token IDs
-    let x_llm_id = llm_token_map.get_by_left(b"x".as_ref()).unwrap().0;
-    let space_equals_llm_id = llm_token_map.get_by_left(b" =".as_ref()).unwrap().0;
+    let x_llm_id = llm_token_map.get(b"x".as_ref()).unwrap().0;
+    let space_equals_llm_id = llm_token_map.get(b" =".as_ref()).unwrap().0;
 
     // 1. Verify the edge for 'X'
     let (x_dest_id, x_weight) = parsing_start_state

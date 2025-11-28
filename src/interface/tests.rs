@@ -1,5 +1,6 @@
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use crate::constraint::GrammarConstraint;
     use crate::datastructures::hybrid_bitset::RangeSet;
     use crate::finite_automata::{
@@ -176,7 +177,7 @@ mod tests {
         let compiled_grammar =
             CompiledGrammar::from_definition(std::sync::Arc::new(grammar_def));
 
-        let mut llm_token_map = bimap::BiBTreeMap::new();
+        let mut llm_token_map = BTreeMap::new();
         let mut llm_tokens_vec: Vec<Vec<u8>> = Vec::new();
         for i in 0..=9 {
             let digit_byte = b'0' + i;
@@ -312,12 +313,12 @@ mod tests {
             CompiledGrammar::from_definition(std::sync::Arc::new(grammar_def));
         println!("{}", compiled_grammar);
 
-        let mut llm_token_map = bimap::BiBTreeMap::new();
+        let mut llm_token_map = BTreeMap::new();
         let mut next_llm_id_val = 0;
 
         let mut add_token = |s: &str| {
             let token_bytes = s.as_bytes().to_vec();
-            if let Some(existing_id) = llm_token_map.get_by_left(&token_bytes) {
+            if let Some(existing_id) = llm_token_map.get(&token_bytes) {
                 return *existing_id;
             }
             let id = LLMTokenID(next_llm_id_val);
@@ -434,12 +435,12 @@ mod tests {
             CompiledGrammar::from_definition(std::sync::Arc::new(grammar_def));
         println!("{}", compiled_grammar);
 
-        let mut llm_token_map = bimap::BiBTreeMap::new();
+        let mut llm_token_map = BTreeMap::new();
         let mut next_llm_id_val = 0;
 
         let mut add_token = |s: &str| {
             let token_bytes = s.as_bytes().to_vec();
-            if let Some(existing_id) = llm_token_map.get_by_left(&token_bytes) {
+            if let Some(existing_id) = llm_token_map.get(&token_bytes) {
                 return *existing_id;
             }
             let id = LLMTokenID(next_llm_id_val);
@@ -499,7 +500,7 @@ mod tests {
             CompiledGrammar::from_definition(std::sync::Arc::new(grammar_def));
         println!("Compiled Grammar: {}", compiled_grammar);
 
-        let mut llm_token_map = BiBTreeMap::new();
+        let mut llm_token_map = BTreeMap::new();
         let tok_space_id = LLMTokenID(0);
         let tok_f_space_id = LLMTokenID(1);
 
