@@ -241,6 +241,12 @@ pub struct GrammarConstraint {
     // Precomputations
     pub precomputed4: Precomputed4,
 
+    /// LLM vocabulary stored as a trie for efficient lookup and compact serialization.
+    pub vocab_trie: Arc<LLMVocabTrie>,
+    
+    /// Legacy field - kept for backward compatibility during migration.
+    /// Will be removed in a future version.
+    #[deprecated(note = "Use vocab_trie instead")]
     pub commit_vocab: Arc<CommitVocab>,
     pub(crate) token_name_map: BiBTreeMap<Terminal, usize>,
 
@@ -258,7 +264,7 @@ impl GrammarConstraint {
         assert_eq!(self.token_name_map, other.token_name_map);
         assert_eq!(self.possible_matches, other.possible_matches);
         assert_eq!(self.precompute4_vocab, other.precompute4_vocab);
-        assert_eq!(self.commit_vocab, other.commit_vocab);
+        assert_eq!(self.vocab_trie, other.vocab_trie);
     }
 }
 
@@ -323,7 +329,7 @@ impl PossibleMatchesJSON {
 
 /// Intermediate JSON representation of GrammarConstraint.
 /// Uses struct field names for clear serialization.
-#[derive(Debug, Clone, JSONConvertible)]
+#[derive(Debug, Clone)]
 struct GrammarConstraintJSON {
     tokenizer_dfa: crate::finite_automata::DFA,
     dwa: DWA,
@@ -331,11 +337,88 @@ struct GrammarConstraintJSON {
     parser: GLRParser,
     token_name_map: BiBTreeMap<Terminal, usize>,
     possible_matches: PossibleMatchesJSON,
+    /// New trie-based vocab format (preferred)
+    vocab_trie: Option<LLMVocabTrie>,
+    /// Legacy commit_vocab format (for backward compatibility)
     commit_vocab: Option<CommitVocab>,
     /// Full original LLM vocab (optional for backward compat)
     original_llm_vocab: Option<LLMVocab>,
     /// Fallback: just max_original_llm_token_id if full vocab not available
     max_orig_id: Option<usize>,
+}
+
+impl JSONConvertible for GrammarConstraintJSON {
+    fn to_json(&self) -> JSONNode {
+        let mut obj = std::collections::BTreeMap::new();
+        obj.insert("tokenizer_dfa".to_string(), self.tokenizer_dfa.to_json());
+        obj.insert("dwa".to_string(), self.dwa.to_json());
+        obj.insert("vocab".to_string(), self.vocab.to_json());
+        obj.insert("parser".to_string(), self.parser.to_json());
+        obj.insert("token_name_map".to_string(), self.token_name_map.to_json());
+        obj.insert("possible_matches".to_string(), self.possible_matches.to_json());
+        
+        // Only serialize non-None optional fields
+        if let Some(ref trie) = self.vocab_trie {
+            obj.insert("vocab_trie".to_string(), trie.to_json());
+        }
+        if let Some(ref cv) = self.commit_vocab {
+            obj.insert("commit_vocab".to_string(), cv.to_json());
+        }
+        if let Some(ref llm_vocab) = self.original_llm_vocab {
+            obj.insert("original_llm_vocab".to_string(), llm_vocab.to_json());
+        }
+        if let Some(max_id) = self.max_orig_id {
+            obj.insert("max_orig_id".to_string(), JSONNode::UInt(max_id as u128));
+        }
+        
+        JSONNode::Object(obj)
+    }
+    
+    fn from_json(node: JSONNode) -> Result<Self, String> {
+        match node {
+            JSONNode::Object(obj) => {
+                Ok(Self {
+                    tokenizer_dfa: JSONConvertible::from_json(
+                        obj.get("tokenizer_dfa").ok_or("Missing tokenizer_dfa")?.clone()
+                    )?,
+                    dwa: JSONConvertible::from_json(
+                        obj.get("dwa").ok_or("Missing dwa")?.clone()
+                    )?,
+                    vocab: JSONConvertible::from_json(
+                        obj.get("vocab").ok_or("Missing vocab")?.clone()
+                    )?,
+                    parser: JSONConvertible::from_json(
+                        obj.get("parser").ok_or("Missing parser")?.clone()
+                    )?,
+                    token_name_map: JSONConvertible::from_json(
+                        obj.get("token_name_map").ok_or("Missing token_name_map")?.clone()
+                    )?,
+                    possible_matches: JSONConvertible::from_json(
+                        obj.get("possible_matches").ok_or("Missing possible_matches")?.clone()
+                    )?,
+                    // Optional fields
+                    vocab_trie: obj.get("vocab_trie")
+                        .map(|n| LLMVocabTrie::from_json(n.clone()))
+                        .transpose()?,
+                    commit_vocab: obj.get("commit_vocab")
+                        .filter(|n| !matches!(n, JSONNode::Null))
+                        .map(|n| CommitVocab::from_json(n.clone()))
+                        .transpose()?,
+                    original_llm_vocab: obj.get("original_llm_vocab")
+                        .filter(|n| !matches!(n, JSONNode::Null))
+                        .map(|n| LLMVocab::from_json(n.clone()))
+                        .transpose()?,
+                    max_orig_id: obj.get("max_orig_id")
+                        .and_then(|n| match n {
+                            JSONNode::UInt(v) => Some(*v as usize),
+                            JSONNode::Int(v) => Some(*v as usize),
+                            _ => None,
+                        }),
+                })
+            }
+            _ => Err("Expected object for GrammarConstraintJSON".to_string()),
+        }
+    }
 }
 
 impl JSONConvertible for GrammarConstraint {
@@ -347,7 +430,10 @@ impl JSONConvertible for GrammarConstraint {
             parser: self.parser.clone(),
             token_name_map: self.token_name_map.clone(),
             possible_matches: PossibleMatchesJSON::from_possible_matches(&self.possible_matches),
-            commit_vocab: Some((*self.commit_vocab).clone()),
+            // Serialize the new trie format
+            vocab_trie: Some((*self.vocab_trie).clone()),
+            // Don't serialize the legacy format anymore
+            commit_vocab: None,
             original_llm_vocab: None,
             max_orig_id: Some(self.precompute4_vocab.max_original_llm_token_id),
         };
@@ -360,8 +446,27 @@ impl JSONConvertible for GrammarConstraint {
         let tokenizer = Regex { dfa: intermediate.tokenizer_dfa };
         let possible_matches = intermediate.possible_matches.to_possible_matches()?;
 
-        let commit_vocab = if let Some(vocab) = intermediate.commit_vocab {
-            Arc::new(vocab)
+        // Load vocab_trie, with fallback to legacy formats
+        let vocab_trie = if let Some(trie) = intermediate.vocab_trie {
+            // New trie format
+            Arc::new(trie)
+        } else if let Some(ref cv) = intermediate.commit_vocab {
+            // Convert from legacy commit_vocab format
+            Arc::new(LLMVocabTrie::from_commit_vocab(cv))
+        } else if let Some(ref legacy_vocab) = intermediate.original_llm_vocab {
+            // Convert from very old full vocab format
+            Arc::new(LLMVocabTrie::from_token_map(&legacy_vocab.llm_token_map))
+        } else {
+            // Empty vocab fallback
+            let max_orig_id = intermediate.max_orig_id.unwrap_or(0);
+            Arc::new(LLMVocabTrie::empty(max_orig_id))
+        };
+        
+        // Build legacy commit_vocab for backward compatibility
+        // This can be removed once all code is migrated to use vocab_trie
+        #[allow(deprecated)]
+        let commit_vocab = if let Some(cv) = intermediate.commit_vocab {
+            Arc::new(cv)
         } else if let Some(legacy_vocab) = intermediate.original_llm_vocab {
             Arc::new(Self::build_commit_vocab(
                 &legacy_vocab.llm_token_map,
@@ -369,17 +474,19 @@ impl JSONConvertible for GrammarConstraint {
                 legacy_vocab.max_original_llm_token_id,
             ))
         } else {
-            let max_orig_id = intermediate.max_orig_id.ok_or("Missing commit_vocab and legacy vocab metadata")?;
+            let max_orig_id = intermediate.max_orig_id.ok_or("Missing vocab metadata")?;
             Arc::new(CommitVocab::new(
                 Vec::new(),
                 vec![CommitVocab::INVALID_REPRESENTATIVE; max_orig_id + 1],
             ))
         };
 
+        #[allow(deprecated)]
         Ok(GrammarConstraint {
             tokenizer,
             parser: intermediate.parser,
             precomputed4: intermediate.dwa,
+            vocab_trie,
             commit_vocab,
             token_name_map: intermediate.token_name_map,
             possible_matches,
@@ -948,11 +1055,16 @@ impl GrammarConstraint {
         vocab.max_original_llm_token_id = max_original_llm_token_id;
         vocab.internal_to_original_sparse_matrix = internal_to_original_sparse_matrix;
 
+        // Build the new trie-based vocab from the LLM token map
+        let vocab_trie = Arc::new(LLMVocabTrie::from_token_map(&llm_token_map));
+
+        #[allow(deprecated)]
         GrammarConstraint {
             tokenizer,
             parser,
             precomputed4,
             possible_matches: possible_matches_precompute1,
+            vocab_trie,
             commit_vocab,
             token_name_map,
             precompute4_vocab: vocab,
@@ -1428,9 +1540,9 @@ impl<'a> GrammarConstraintState<'a> {
     pub fn commit(&mut self, llm_token_id: LLMTokenID) {
         let token_bytes = self
             .parent
-            .commit_vocab
+            .vocab_trie
             .token_bytes(llm_token_id)
-            .expect_else(|| format!("LLM token ID {} not mapped to a representative token", llm_token_id.0));
+            .expect_else(|| format!("LLM token ID {} not found in vocabulary trie", llm_token_id.0));
         self.commit_bytes(token_bytes);
     }
 

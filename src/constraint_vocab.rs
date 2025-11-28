@@ -13,6 +13,251 @@ use crate::tokenizer::LLMTokenID;
 use crate::json_serialization::{JSONConvertible, JSONNode};
 
 // ---------------------------------------------------------------------------
+// LLM Vocabulary Trie
+// ---------------------------------------------------------------------------
+
+/// A trie-based vocabulary that stores LLM tokens efficiently.
+/// Uses a trie structure where each node maps byte values to child nodes,
+/// and leaf nodes store the token ID.
+/// 
+/// This is more compact than storing a flat mapping because BPE vocabularies
+/// have many shared prefixes, and the trie structure compresses very well with gzip.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LLMVocabTrie {
+    /// The trie root. Maps byte -> child node.
+    /// Token IDs are stored at leaf positions.
+    root: TrieNode,
+    /// Reverse lookup: token_id -> byte sequence (built lazily or on demand)
+    id_to_bytes: Vec<Option<Vec<u8>>>,
+    /// Maximum token ID in this vocab
+    pub max_token_id: usize,
+}
+
+/// A node in the vocabulary trie.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct TrieNode {
+    /// Children indexed by byte value
+    children: BTreeMap<u8, TrieNode>,
+    /// If this node represents a complete token, its ID
+    token_id: Option<usize>,
+}
+
+impl LLMVocabTrie {
+    /// Build a trie from a token map (bytes -> token_id).
+    pub fn from_token_map(token_map: &BTreeMap<Vec<u8>, LLMTokenID>) -> Self {
+        let mut root = TrieNode::default();
+        let mut max_id = 0usize;
+        
+        for (bytes, id) in token_map {
+            max_id = max_id.max(id.0);
+            let mut node = &mut root;
+            for &byte in bytes {
+                node = node.children.entry(byte).or_default();
+            }
+            node.token_id = Some(id.0);
+        }
+        
+        // Build reverse lookup
+        let mut id_to_bytes = vec![None; max_id + 1];
+        for (bytes, id) in token_map {
+            id_to_bytes[id.0] = Some(bytes.clone());
+        }
+        
+        Self {
+            root,
+            id_to_bytes,
+            max_token_id: max_id,
+        }
+    }
+    
+    /// Create an empty vocabulary trie.
+    pub fn empty(max_token_id: usize) -> Self {
+        Self {
+            root: TrieNode::default(),
+            id_to_bytes: vec![None; max_token_id + 1],
+            max_token_id,
+        }
+    }
+    
+    /// Build from the old CommitVocab format (for migration).
+    pub fn from_commit_vocab(cv: &CommitVocab) -> Self {
+        let mut id_to_bytes = vec![None; cv.original_to_representative.len()];
+        let mut max_id = 0usize;
+        
+        for (orig_id, &rep_idx) in cv.original_to_representative.iter().enumerate() {
+            if rep_idx != CommitVocab::INVALID_REPRESENTATIVE {
+                if let Some(bytes) = cv.representatives.get(rep_idx as usize) {
+                    id_to_bytes[orig_id] = Some(bytes.clone());
+                    max_id = max_id.max(orig_id);
+                }
+            }
+        }
+        
+        // Build trie from id_to_bytes
+        let mut root = TrieNode::default();
+        for (id, bytes_opt) in id_to_bytes.iter().enumerate() {
+            if let Some(bytes) = bytes_opt {
+                let mut node = &mut root;
+                for &byte in bytes {
+                    node = node.children.entry(byte).or_default();
+                }
+                node.token_id = Some(id);
+            }
+        }
+        
+        Self {
+            root,
+            id_to_bytes,
+            max_token_id: max_id,
+        }
+    }
+    
+    /// Look up token bytes by token ID.
+    #[inline]
+    pub fn token_bytes(&self, token_id: LLMTokenID) -> Option<&[u8]> {
+        self.id_to_bytes.get(token_id.0)?.as_ref().map(|v| v.as_slice())
+    }
+    
+    /// Check if the vocab is empty.
+    pub fn is_empty(&self) -> bool {
+        self.root.children.is_empty() && self.root.token_id.is_none()
+    }
+    
+    /// Get the number of tokens in the vocab.
+    pub fn len(&self) -> usize {
+        self.id_to_bytes.iter().filter(|x| x.is_some()).count()
+    }
+    
+    /// Iterate over all (token_id, bytes) pairs.
+    pub fn iter(&self) -> impl Iterator<Item = (usize, &[u8])> {
+        self.id_to_bytes.iter().enumerate().filter_map(|(id, opt)| {
+            opt.as_ref().map(|bytes| (id, bytes.as_slice()))
+        })
+    }
+}
+
+/// JSON serialization for LLMVocabTrie.
+/// JSON serialization for LLMVocabTrie.
+/// Stores as a flat object {"tokens": {hex_string: token_id, ...}, "max_id": N}
+/// This avoids deep nesting that can exceed JSON parser recursion limits.
+impl JSONConvertible for LLMVocabTrie {
+    fn to_json(&self) -> JSONNode {
+        let mut tokens = BTreeMap::new();
+        
+        // Serialize each token as hex_string -> id
+        for (id, bytes) in self.iter() {
+            let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
+            tokens.insert(hex, JSONNode::UInt(id as u128));
+        }
+        
+        let mut obj = BTreeMap::new();
+        obj.insert("tokens".to_string(), JSONNode::Object(tokens));
+        obj.insert("max_id".to_string(), JSONNode::UInt(self.max_token_id as u128));
+        JSONNode::Object(obj)
+    }
+    
+    fn from_json(node: JSONNode) -> Result<Self, String> {
+        fn extract_usize(value: &JSONNode) -> Option<usize> {
+            match value {
+                JSONNode::UInt(n) => Some(*n as usize),
+                JSONNode::Int(n) => Some(*n as usize),
+                JSONNode::Float(n) => Some(*n as usize),
+                _ => None,
+            }
+        }
+        
+        fn hex_to_bytes(hex: &str) -> Result<Vec<u8>, String> {
+            if hex.is_empty() {
+                return Ok(Vec::new());
+            }
+            if hex.len() % 2 != 0 {
+                return Err(format!("Hex string has odd length: {}", hex));
+            }
+            (0..hex.len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&hex[i..i+2], 16)
+                    .map_err(|e| format!("Invalid hex at {}: {}", i, e)))
+                .collect()
+        }
+        
+        // Try new flat format first
+        if let JSONNode::Object(ref obj) = node {
+            if let (Some(tokens_node), Some(max_id_node)) = (obj.get("tokens"), obj.get("max_id")) {
+                // New flat format: {"tokens": {hex: id, ...}, "max_id": N}
+                let max_id = extract_usize(max_id_node)
+                    .ok_or("Invalid max_id")?;
+                
+                if let JSONNode::Object(tokens_obj) = tokens_node {
+                    let mut token_map: BTreeMap<Vec<u8>, usize> = BTreeMap::new();
+                    for (hex, id_node) in tokens_obj {
+                        let bytes = hex_to_bytes(hex)?;
+                        let id = extract_usize(id_node)
+                            .ok_or_else(|| format!("Invalid token id for {}", hex))?;
+                        token_map.insert(bytes, id);
+                    }
+                    return Ok(Self::from_token_map(&token_map.into_iter().map(|(k, v)| (k, LLMTokenID(v))).collect()));
+                }
+            }
+            
+            // Try legacy nested trie format
+            if let Some(trie_node) = obj.get("trie") {
+                fn json_to_node(json: &JSONNode) -> Result<TrieNode, String> {
+                    match json {
+                        JSONNode::Object(obj) => {
+                            let mut node = TrieNode::default();
+                            
+                            for (key, value) in obj {
+                                if key == "_" {
+                                    if let Some(id) = extract_usize(value) {
+                                        node.token_id = Some(id);
+                                    }
+                                } else if let Ok(byte) = key.parse::<u8>() {
+                                    node.children.insert(byte, json_to_node(value)?);
+                                }
+                            }
+                            
+                            Ok(node)
+                        }
+                        _ => Err("Expected object for trie node".to_string()),
+                    }
+                }
+                
+                let max_id = obj.get("max_id")
+                    .and_then(extract_usize)
+                    .ok_or("Missing or invalid 'max_id' field")?;
+                
+                let root = json_to_node(trie_node)?;
+                
+                // Rebuild id_to_bytes from trie
+                let mut id_to_bytes = vec![None; max_id + 1];
+                fn collect_tokens(node: &TrieNode, prefix: &mut Vec<u8>, id_to_bytes: &mut Vec<Option<Vec<u8>>>) {
+                    if let Some(id) = node.token_id {
+                        if id < id_to_bytes.len() {
+                            id_to_bytes[id] = Some(prefix.clone());
+                        }
+                    }
+                    for (&byte, child) in &node.children {
+                        prefix.push(byte);
+                        collect_tokens(child, prefix, id_to_bytes);
+                        prefix.pop();
+                    }
+                }
+                let mut prefix = Vec::new();
+                collect_tokens(&root, &mut prefix, &mut id_to_bytes);
+                
+                return Ok(Self {
+                    root,
+                    id_to_bytes,
+                    max_token_id: max_id,
+                });
+            }
+        }
+        
+        Err("Expected object with 'tokens' and 'max_id', or legacy 'trie' format".to_string())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Basic aliases
 // ---------------------------------------------------------------------------
 
