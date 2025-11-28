@@ -23,6 +23,84 @@ use std::fs;
 type LLMToken<'a> = &'a [u8];
 type LLMTokenMap = BiBTreeMap<Vec<u8>, LLMTokenID>;
 
+// --- Nullability analysis for regex expressions ---
+#[derive(Copy, Clone, PartialEq, Debug)]
+pub enum ExprNullability {
+    NeverNull,
+    CanBeNull,
+    AlwaysNull,
+}
+
+/// Check the nullability of a regex expression.
+/// Returns whether the expression can/must/cannot match the empty string.
+pub fn get_expr_nullability(expr: &Expr) -> ExprNullability {
+    fn _get_nullability(
+        expr: &Expr,
+        cache: &mut HashMap<*const Expr, ExprNullability>,
+    ) -> ExprNullability {
+        match expr {
+            Expr::U8Seq(bytes) => {
+                if bytes.is_empty() {
+                    ExprNullability::AlwaysNull
+                } else {
+                    ExprNullability::NeverNull
+                }
+            }
+            Expr::U8Class(_) => ExprNullability::NeverNull,
+            Expr::Quantifier(inner, q_type) => match q_type {
+                QuantifierType::ZeroOrMore => ExprNullability::CanBeNull,
+                QuantifierType::OneOrMore => _get_nullability(inner, cache),
+                QuantifierType::ZeroOrOne => ExprNullability::CanBeNull,
+            },
+            Expr::Choice(exprs) => {
+                let nullabilities: Vec<ExprNullability> = exprs
+                    .iter()
+                    .map(|e| _get_nullability(e, cache))
+                    .collect();
+                if nullabilities.iter().any(|n| {
+                    matches!(n, ExprNullability::AlwaysNull | ExprNullability::CanBeNull)
+                }) {
+                    ExprNullability::CanBeNull
+                } else {
+                    ExprNullability::NeverNull
+                }
+            }
+            Expr::Seq(exprs) => {
+                let nullabilities: Vec<ExprNullability> = exprs
+                    .iter()
+                    .map(|e| _get_nullability(e, cache))
+                    .collect();
+                if nullabilities
+                    .iter()
+                    .all(|n| matches!(n, ExprNullability::AlwaysNull | ExprNullability::CanBeNull))
+                {
+                    ExprNullability::CanBeNull
+                } else if nullabilities
+                    .iter()
+                    .any(|n| *n == ExprNullability::NeverNull)
+                {
+                    ExprNullability::NeverNull
+                } else {
+                    ExprNullability::NeverNull
+                }
+            }
+            Expr::Epsilon => ExprNullability::AlwaysNull,
+            Expr::Shared(arc) => {
+                let ptr = Arc::as_ptr(arc) as *const Expr;
+                if let Some(&cached_nullability) = cache.get(&ptr) {
+                    cached_nullability
+                } else {
+                    let nullability = _get_nullability(arc.as_ref(), cache);
+                    cache.insert(ptr, nullability);
+                    nullability
+                }
+            }
+        }
+    }
+    let mut cache: HashMap<*const Expr, ExprNullability> = HashMap::new();
+    _get_nullability(expr, &mut cache)
+}
+
 // --- GrammarExpr: Definition of grammar structure before compilation ---
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum GrammarExpr {
@@ -459,6 +537,113 @@ impl GrammarDefinition {
         }
     }
 
+    /// Handles nullable terminals in the grammar by:
+    /// - Removing always-null terminals from production RHSs
+    /// - Replacing may-be-null terminals with optional non-terminals
+    /// 
+    /// If `already_processed` is provided, terminals in that set are skipped.
+    /// This is used when calling this after optimization to avoid re-processing
+    /// terminals that were already handled in from_exprs.
+    pub fn handle_nullable_terminals_except(&mut self, already_processed: &HashSet<String>) {
+        // Collect all existing names to avoid collisions when generating new non-terminal names
+        let mut all_names: HashSet<String> = self
+            .productions
+            .iter()
+            .map(|p| p.lhs.0.clone())
+            .collect();
+        for name in self.regex_name_to_group_id.left_values() {
+            all_names.insert(name.clone());
+        }
+        
+        let mut per_base_counters: HashMap<String, usize> = HashMap::new();
+        
+        // Identify nullable terminals
+        let mut always_null_terminals: HashSet<String> = HashSet::new();
+        let mut may_be_null_terminals: HashSet<String> = HashSet::new();
+
+        for (terminal_name, group_id) in self.regex_name_to_group_id.iter() {
+            // Skip terminals that were already processed
+            if already_processed.contains(terminal_name) {
+                continue;
+            }
+            
+            let expr = self
+                .group_id_to_expr
+                .get(group_id)
+                .expect("regex_name_to_group_id / group_id_to_expr out of sync");
+
+            match get_expr_nullability(expr) {
+                ExprNullability::AlwaysNull => {
+                    always_null_terminals.insert(terminal_name.clone());
+                }
+                ExprNullability::CanBeNull => {
+                    may_be_null_terminals.insert(terminal_name.clone());
+                }
+                ExprNullability::NeverNull => {}
+            }
+        }
+
+        if always_null_terminals.is_empty() && may_be_null_terminals.is_empty() {
+            return; // Nothing to do
+        }
+
+        debug!(
+            4,
+            "Removing {} always-null terminals after optimization",
+            always_null_terminals.len()
+        );
+        
+        // Remove always-null terminals from production RHSs
+        for prod in self.productions.iter_mut() {
+            prod.rhs.retain(|sym| match sym {
+                Symbol::Terminal(Terminal::RegexName(t)) => !always_null_terminals.contains(t),
+                _ => true,
+            });
+        }
+
+        debug!(
+            4,
+            "Processing {} may-be-null terminals after optimization",
+            may_be_null_terminals.len()
+        );
+        
+        // Replace may-be-null terminals with optional non-terminals
+        for terminal_name in &may_be_null_terminals {
+            let opt_nt_name = Self::generate_unique_indexed_name(
+                &format!("{}Opt", terminal_name.trim_matches('"')),
+                &mut per_base_counters,
+                &mut all_names,
+            );
+            let opt_nt = NonTerminal(opt_nt_name.clone());
+
+            for prod in self.productions.iter_mut() {
+                for sym in &mut prod.rhs {
+                    if let Symbol::Terminal(Terminal::RegexName(t)) = sym {
+                        if t == terminal_name {
+                            *sym = Symbol::NonTerminal(opt_nt.clone());
+                        }
+                    }
+                }
+            }
+
+            // Add the optional non-terminal productions: one with the terminal, one epsilon
+            self.productions.push(Production {
+                lhs: opt_nt.clone(),
+                rhs: vec![Symbol::Terminal(regex_name(terminal_name))],
+            });
+            self.productions.push(Production {
+                lhs: opt_nt.clone(),
+                rhs: Vec::new(), // epsilon
+            });
+        }
+    }
+    
+    /// Handles nullable terminals in the grammar. This processes ALL terminals.
+    /// Use `handle_nullable_terminals_except` if you want to skip already-processed terminals.
+    pub fn handle_nullable_terminals(&mut self) {
+        self.handle_nullable_terminals_except(&HashSet::new());
+    }
+
     /// Converts a `GrammarExpr` into a sequence of `Symbol`s and a list of newly created `Production`s.
     fn convert_grammar_expr_to_symbols(
         expr: &GrammarExpr,
@@ -893,80 +1078,6 @@ impl GrammarDefinition {
             group_id_to_expr.insert(group_id, expr);
         }
 
-        #[derive(Copy, Clone, PartialEq)]
-        enum Nullability {
-            NeverNull,
-            CanBeNull,
-            AlwaysNull,
-        }
-
-        fn get_nullability(expr: Expr) -> Nullability {
-            fn _get_nullability(
-                expr: Expr,
-                cache: &mut HashMap<Arc<Expr>, Nullability>,
-            ) -> Nullability {
-                match expr {
-                    Expr::U8Seq(bytes) => {
-                        if bytes.is_empty() {
-                            Nullability::AlwaysNull
-                        } else {
-                            Nullability::NeverNull
-                        }
-                    }
-                    Expr::U8Class(_) => Nullability::NeverNull,
-                    Expr::Quantifier(expr, q_type) => match q_type {
-                        QuantifierType::ZeroOrMore => Nullability::CanBeNull,
-                        QuantifierType::OneOrMore => _get_nullability(*expr, cache),
-                        QuantifierType::ZeroOrOne => Nullability::CanBeNull,
-                    },
-                    Expr::Choice(exprs) => {
-                        let nullabilities: Vec<Nullability> = exprs
-                            .iter()
-                            .map(|e| _get_nullability(e.clone(), cache))
-                            .collect();
-                        if nullabilities.iter().any(|n| {
-                            matches!(n, Nullability::AlwaysNull | Nullability::CanBeNull)
-                        }) {
-                            Nullability::CanBeNull
-                        } else {
-                            Nullability::NeverNull
-                        }
-                    }
-                    Expr::Seq(exprs) => {
-                        let nullabilities: Vec<Nullability> = exprs
-                            .iter()
-                            .map(|e| _get_nullability(e.clone(), cache))
-                            .collect();
-                        if nullabilities
-                            .iter()
-                            .all(|n| matches!(n, Nullability::AlwaysNull | Nullability::CanBeNull))
-                        {
-                            Nullability::CanBeNull
-                        } else if nullabilities
-                            .iter()
-                            .any(|n| *n == Nullability::NeverNull)
-                        {
-                            Nullability::NeverNull
-                        } else {
-                            Nullability::NeverNull
-                        }
-                    }
-                    Expr::Epsilon => Nullability::AlwaysNull,
-                    Expr::Shared(expr) => {
-                        if let Some(&cached_nullability) = cache.get(&expr) {
-                            cached_nullability
-                        } else {
-                            let nullability = _get_nullability(expr.as_ref().clone(), cache);
-                            cache.insert(expr.clone(), nullability);
-                            nullability
-                        }
-                    }
-                }
-            }
-            let mut cache: HashMap<Arc<Expr>, Nullability> = HashMap::new();
-            _get_nullability(expr, &mut cache)
-        }
-
         // Nullability analysis for terminals:
         //   - always-null terminals are removed from RHSs;
         //   - sometimes-null terminals are desugared into optional non-terminals.
@@ -976,17 +1087,16 @@ impl GrammarDefinition {
         for (terminal_name, group_id) in regex_name_to_group_id.iter() {
             let expr = group_id_to_expr
                 .get(group_id)
-                .expect("regex_name_to_group_id / group_id_to_expr out of sync")
-                .clone();
+                .expect("regex_name_to_group_id / group_id_to_expr out of sync");
 
-            match get_nullability(expr) {
-                Nullability::AlwaysNull => {
+            match get_expr_nullability(expr) {
+                ExprNullability::AlwaysNull => {
                     always_null_terminals.insert(terminal_name.clone());
                 }
-                Nullability::CanBeNull => {
+                ExprNullability::CanBeNull => {
                     may_be_null_terminals.insert(terminal_name.clone());
                 }
-                Nullability::NeverNull => {}
+                ExprNullability::NeverNull => {}
             }
         }
 
