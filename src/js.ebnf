@@ -1,7 +1,8 @@
 // Instruct the parser to ignore Whitespace and Comments between tokens.
 #![ignore(IGNORE)]
 
-program ::= statement_list? EOF;
+program ::= postfix_expression ';' postfix_expression EOF;
+//program ::= left_hand_side_expression ';' left_hand_side_expression EOF;
 EOF ::= '<|EOF|>';
 
 // Lexical Grammar: Whitespace and Comments
