@@ -22,6 +22,32 @@ from python.aug25.stats import Stats
 
 # --- Helper Functions (from former example_js.py) ---
 
+
+def bytes_to_unicode() -> dict[int, str]:
+    """
+    Returns a mapping from byte values to unicode strings for GPT-2 byte-level BPE.
+    See: https://github.com/openai/gpt-2/blob/master/src/encoder.py
+    """
+    bs = list(range(ord("!"), ord("~")+1)) + list(range(ord("¡"), ord("¬")+1)) + list(range(ord("®"), ord("ÿ")+1))
+    cs = bs[:]
+    n = 0
+    for b in range(2**8):
+        if b not in bs:
+            bs.append(b)
+            cs.append(2**8 + n)
+            n += 1
+    cs = [chr(n) for n in cs]
+    return dict(zip(bs, cs))
+
+# Build the inverse mapping: unicode char -> byte value
+_BYTE_TO_UNICODE = bytes_to_unicode()
+_UNICODE_TO_BYTE = {v: k for k, v in _BYTE_TO_UNICODE.items()}
+
+
+def gpt2_token_str_to_bytes(token_str: str) -> bytes:
+    """Convert a GPT-2 byte-level BPE token string to actual bytes."""
+    return bytes([_UNICODE_TO_BYTE[c] for c in token_str])
+
 def load_or_download_gpt2_vocab(cache_dir, file_name, url):
     cache_dir = Path(cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -35,10 +61,6 @@ def load_or_download_gpt2_vocab(cache_dir, file_name, url):
             f.write(response.text)
 
     vocab_map = json.loads(cache_path.read_text(encoding='utf-8'))
-
-    # Exclude tokens longer than 5
-    vocab_map = {k: v for k, v in vocab_map.items() if len(k.encode('utf-8')) <= 5}
-
     return vocab_map
 
 def greedy_tokenizer(text_bytes, id_to_token):
@@ -332,6 +354,8 @@ def main():
     parser.add_argument("-o", "--output", type=Path, help="Output JSON file or directory.")
     parser.add_argument('--print-stats', action='store_true', help="Print detailed statistics about the loaded models before running the benchmark.")
     parser.add_argument('--repeat', type=int, default=1, help="Number of times to repeat the benchmark run.")
+    parser.add_argument('--vocab-url', type=str, default="https://huggingface.co/openai-community/gpt2/raw/main/vocab.json",
+                        help="URL to the full vocabulary JSON for tokenization (default: GPT-2 from HuggingFace).")
 
     args = parser.parse_args()
 
@@ -364,8 +388,25 @@ def main():
 
     # Tokenize input code once
     print(f"Loading and tokenizing code from: {args.code}")
-    constraint_json = json.loads(constraint_json_str)
-    id_to_token = extract_id_to_token_map(constraint_json)
+    
+    # Load the full vocabulary from URL for tokenization
+    print(f"Loading vocabulary from: {args.vocab_url}")
+    vocab_cache_dir = Path(".cache/vocab_cache")
+    vocab_cache_dir.mkdir(parents=True, exist_ok=True)
+    vocab_file_name = args.vocab_url.split("/")[-1]
+    raw_vocab = load_or_download_gpt2_vocab(vocab_cache_dir, vocab_file_name, args.vocab_url)
+    
+    # Convert from {token_str: id} to {id: token_bytes} for greedy_tokenizer
+    # Use proper GPT-2 byte-level BPE decoding
+    id_to_token = {}
+    for token_str, token_id in raw_vocab.items():
+        try:
+            id_to_token[token_id] = gpt2_token_str_to_bytes(token_str)
+        except KeyError:
+            # Skip tokens with characters not in the GPT-2 byte mapping
+            pass
+    print(f"Vocabulary loaded with {len(id_to_token)} tokens.")
+    
     code_bytes = args.code.read_bytes()
     tokens_with_pos = greedy_tokenizer(code_bytes, id_to_token)
     print(f"Tokenized into {len(tokens_with_pos)} tokens.")
