@@ -20,8 +20,10 @@ impl<'a> GrammarConstraintState<'a> {
     fn compute_internal_mask(&self) -> RangeSet {
         let mut final_mask_internal = RangeSet::zeros();
         if self.state.is_empty() {
+            crate::debug!(2, "compute_internal_mask: state is empty");
             return final_mask_internal;
         }
+        crate::debug!(2, "compute_internal_mask: state has {} tokenizer states", self.state.len());
 
         let mut queue: BTreeMap<isize, BTreeMap<WAStateID, LeveledGSS<ParseStateEdgeContent, RangeSetBlaze<usize>>>> = BTreeMap::new();
         let dwa = &self.parent.precomputed4;
@@ -92,6 +94,7 @@ impl<'a> GrammarConstraintState<'a> {
                     if let Some(reduced_acc) = gss.reduce_acc() {
                         let final_tokens = &reduced_acc & &final_weight.rsb;
                         if !final_tokens.is_empty() {
+                            crate::debug!(2, "Adding {} tokens from final state {}", final_tokens.ranges_len(), current_wa_state_id);
                             final_mask_internal |= RangeSet::from(final_tokens);
                         }
                     }
@@ -145,6 +148,13 @@ impl<'a> GrammarConstraintState<'a> {
             }
         }
 
+        crate::debug!(2, "compute_internal_mask: final_mask_internal has some content: {}", !final_mask_internal.is_empty());
+        // Check if internal token 143 is in the mask
+        if final_mask_internal.contains(143) {
+            crate::debug!(2, "Internal token 143 IS in final_mask_internal");
+        } else {
+            crate::debug!(2, "Internal token 143 NOT in final_mask_internal");
+        }
         final_mask_internal
     }
 
@@ -191,8 +201,12 @@ impl<'a> GrammarConstraintState<'a> {
             return;
         }
         crate::debug!(6, "Committing bytes: {:?}", String::from_utf8_lossy(llm_token_bytes));
+        crate::debug!(6, "  Current state tokenizer IDs: {:?}", self.state.keys().map(|k| k.0).collect::<Vec<_>>());
+        crate::debug!(6, "  Current state stacks empty?: {:?}", self.state.iter().map(|(k, v)| (k.0, v.stack.is_empty())).collect::<Vec<_>>());
 
         let (state_map, terminals_map) = self.compute_commit_maps(llm_token_bytes);
+        crate::debug!(6, "  state_map: {:?}", state_map.iter().map(|(k, v)| (k.0, v.0)).collect::<Vec<_>>());
+        crate::debug!(6, "  terminals_map: {:?}", terminals_map.iter().map(|(k, v)| (k.0, format!("{:?}", v))).collect::<Vec<_>>());
 
         // Prune stacks based on matched terminals and remap tokenizer state constraints.
         for glr_state in self.state.values_mut() {
@@ -222,23 +236,30 @@ impl<'a> GrammarConstraintState<'a> {
             });
             glr_state.stack = gss;
         }
+        crate::debug!(6, "  After pruning/remapping, state tokenizer IDs: {:?}", self.state.keys().map(|k| k.0).collect::<Vec<_>>());
         self.state.retain(|_, s| !s.stack.is_empty());
+        crate::debug!(6, "  After retain, state tokenizer IDs: {:?}", self.state.keys().map(|k| k.0).collect::<Vec<_>>());
 
         let mut new_overall_state: BTreeMap<TokenizerStateID, GLRParserState<'a>> = BTreeMap::new();
         let mut processing_queue: BTreeMap<usize, BTreeMap<TokenizerStateID, ParserGSS>> = BTreeMap::new();
         
         let initial_states: BTreeMap<_,_> = self.state.iter().map(|(sid, s)| (*sid, s.stack.clone())).collect();
         processing_queue.insert(0, initial_states);
+        crate::debug!(6, "  Processing queue initial: {:?}", processing_queue.keys().collect::<Vec<_>>());
 
         while let Some((offset, states_to_process)) = processing_queue.pop_first() {
+            crate::debug!(6, "    Processing offset {}, tokenizer states: {:?}", offset, states_to_process.keys().map(|k| k.0).collect::<Vec<_>>());
             for (tokenizer_s_id_at_offset, gss_at_offset) in states_to_process {
                 let exec_result = self.parent.tokenizer.execute_from_state(&llm_token_bytes[offset..], tokenizer_s_id_at_offset);
+                crate::debug!(6, "      exec_result for tsid {}: end_state={:?}, matches={:?}", tokenizer_s_id_at_offset.0, exec_result.end_state, exec_result.matches.iter().map(|m| (m.id, m.width)).collect::<Vec<_>>());
 
                 for match_info in &exec_result.matches {
                     let mut gss = gss_at_offset.clone();
                     let terminal_id = TerminalID(match_info.id);
+                    crate::debug!(6, "        Processing terminal_id={}, width={}", terminal_id.0, match_info.width);
 
                     gss = self.parent.parser.process_token_gss(&gss, terminal_id);
+                    crate::debug!(6, "        After process_token_gss, gss.is_empty()={}", gss.is_empty());
 
                     if !gss.is_empty() {
                         if let Some(end_state_id) = exec_result.end_state {
