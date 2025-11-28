@@ -488,24 +488,37 @@ pub struct PyGrammarConstraint {
 
 #[pymethods]
 impl PyGrammarConstraint {
+    /// Create a new GrammarConstraint.
+    /// 
+    /// # Arguments
+    /// * `grammar` - The compiled grammar
+    /// * `token_to_id` - A dictionary mapping token bytes to token IDs
+    /// * `max_llm_token_id` - (Optional) The maximum token ID in the vocabulary.
+    ///   If not provided, this is inferred from the highest ID in token_to_id.
     #[new]
+    #[pyo3(signature = (grammar, token_to_id, max_llm_token_id=None))]
     fn new(
         py: Python,
         grammar: PyCompiledGrammar,
         token_to_id: &Bound<'_, PyDict>,
-        max_llm_token_id: usize,
+        max_llm_token_id: Option<usize>,
     ) -> PyResult<Self> {
         let mut llm_token_map: BTreeMap<Vec<u8>, LLMTokenID> = BTreeMap::new();
+        let mut highest_id = 0usize;
         for (key, value) in token_to_id.iter() {
             let token = key.extract::<&[u8]>()?;
             let id = value.extract::<usize>()?;
+            highest_id = highest_id.max(id);
             llm_token_map.insert(token.to_vec(), LLMTokenID(id));
         }
+        
+        // Use provided max_llm_token_id, or infer from vocab
+        let effective_max = max_llm_token_id.unwrap_or(highest_id);
 
         let constraint = GrammarConstraint::from_compiled_grammar(
             grammar.inner.clone(), // Clone the CompiledGrammar
             llm_token_map,
-            max_llm_token_id,
+            effective_max,
         );
 
         Ok(Self {
@@ -1399,10 +1412,9 @@ impl PyGrammarConstraintState {
     /// Bits are packed in little-endian order within each int32.
     /// This writes directly to the array without intermediate allocations.
     fn fill_next_token_bitmask(&self, mut bitmask: PyReadwriteArray1<i32>) -> PyResult<()> {
-        let bitset = self.inner.with_inner(|state| state.get_mask4());
         let slice = bitmask.as_slice_mut()
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("Array must be contiguous: {:?}", e)))?;
-        bitset.fill_bitmask_i32(slice);
+        self.inner.with_inner(|state| state.fill_mask4_i32(slice));
         Ok(())
     }
 
@@ -1411,10 +1423,14 @@ impl PyGrammarConstraintState {
     /// # Safety
     /// The caller must ensure the pointer is valid for at least `size_bytes` bytes.
     unsafe fn fill_next_token_bitmask_ptr(&self, ptr: usize, size_bytes: usize) -> PyResult<()> {
-        let bitset = self.inner.with_inner(|state| state.get_mask4());
         let num_i32s = size_bytes / 4;
-        bitset.fill_bitmask_i32_ptr(ptr as *mut i32, num_i32s);
+        self.inner.with_inner(|state| state.fill_mask4_i32_ptr(ptr as *mut i32, num_i32s));
         Ok(())
+    }
+
+    /// Returns the required buffer size in i32 elements for the mask.
+    fn mask_buffer_size_i32(&self) -> usize {
+        self.inner.with_inner(|state| state.mask_buffer_size_i32())
     }
 
     fn commit(&mut self, llm_token_id: usize) {

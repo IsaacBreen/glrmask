@@ -206,6 +206,71 @@ impl StageVocab {
         Bitset::from_words_vec(result_bitset_words)
     }
 
+    /// Fill an i32 slice with the mask converted from internal to original token IDs.
+    /// 
+    /// This is a zero-allocation version that writes directly to the provided buffer.
+    /// The output slice should have length `(max_original_llm_token_id + 32) / 32`.
+    /// 
+    /// This method zeros the buffer first, then ORs in the bits.
+    #[inline]
+    pub fn fill_internal_bv_to_original_i32(&self, internal_bv: &LLMTokenBV, out: &mut [i32]) {
+        // Zero the output first
+        out.fill(0);
+        
+        if internal_bv.is_all() {
+            let internal_bv_ones = RangeSet::ones(self.internal_max_llm_token + 1);
+            self.fill_internal_bv_to_original_i32_nozeroing(&internal_bv_ones, out);
+            return;
+        }
+        
+        self.fill_internal_bv_to_original_i32_nozeroing(internal_bv, out);
+    }
+    
+    /// Fill an i32 slice without zeroing first (for internal use when buffer is already zeroed).
+    #[inline]
+    fn fill_internal_bv_to_original_i32_nozeroing(&self, internal_bv: &LLMTokenBV, out: &mut [i32]) {
+        const WORD_BITS: usize = 64;
+        let num_internal_tokens = self.internal_max_llm_token + 1;
+        
+        for internal_id in internal_bv.iter_up_to(self.internal_max_llm_token) {
+            if internal_id >= num_internal_tokens {
+                continue;
+            }
+            if let Some(sparse_row) = self.internal_to_original_sparse_matrix.get(internal_id) {
+                // Each sparse row entry is (word_idx, word) where word is u64
+                // We need to convert to i32 pairs
+                for &(word_idx, word) in sparse_row {
+                    let i32_base = (word_idx as usize) * 2;
+                    if i32_base < out.len() {
+                        out[i32_base] |= word as i32;
+                    }
+                    if i32_base + 1 < out.len() {
+                        out[i32_base + 1] |= (word >> 32) as i32;
+                    }
+                }
+            }
+        }
+    }
+    
+    /// Fill an i32 slice with the mask via a raw pointer.
+    /// 
+    /// # Safety
+    /// The caller must ensure that:
+    /// - `ptr` points to at least `len` i32 values of valid, writable memory
+    /// - The memory is properly aligned for i32
+    /// - No other references to this memory exist during the call
+    #[inline]
+    pub unsafe fn fill_internal_bv_to_original_i32_ptr(&self, internal_bv: &LLMTokenBV, ptr: *mut i32, len: usize) {
+        let out = std::slice::from_raw_parts_mut(ptr, len);
+        self.fill_internal_bv_to_original_i32(internal_bv, out);
+    }
+
+    /// Returns the required buffer size in i32 elements for the mask.
+    #[inline]
+    pub fn mask_buffer_size_i32(&self) -> usize {
+        (self.max_original_llm_token_id + 32) / 32
+    }
+
     pub fn original_bv_to_internal(&self, original_bv: &LLMTokenBV) -> LLMTokenBV {
         let mut internal_bv = RangeSet::zeros();
         if original_bv.is_all() {

@@ -7,7 +7,6 @@ use crate::precompute4::weighted_automata::common::{Label, StateID as WAStateID}
 use crate::tokenizer::TokenizerStateID;
 use profiler_macro::time_it;
 use range_set_blaze::RangeSetBlaze;
-use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::ops::BitOrAssign;
 use crate::datastructures::bitset::Bitset;
@@ -16,10 +15,12 @@ use crate::datastructures::gss_acc::Acc;
 type ParserGSS = LeveledGSS<ParseStateEdgeContent, Acc>;
 
 impl<'a> GrammarConstraintState<'a> {
-    pub fn get_mask4(&self) -> Bitset {
-        let final_mask_internal = RefCell::new(RangeSet::zeros());
+    /// Compute the internal mask (RangeSet of internal token IDs) for the current state.
+    /// This is the core computation shared by get_mask4 and fill_mask4_i32.
+    fn compute_internal_mask(&self) -> RangeSet {
+        let mut final_mask_internal = RangeSet::zeros();
         if self.state.is_empty() {
-            return self.parent.precompute4_vocab.internal_bv_to_original(&final_mask_internal.into_inner());
+            return final_mask_internal;
         }
 
         let mut queue: BTreeMap<isize, BTreeMap<WAStateID, LeveledGSS<ParseStateEdgeContent, RangeSetBlaze<usize>>>> = BTreeMap::new();
@@ -83,7 +84,7 @@ impl<'a> GrammarConstraintState<'a> {
 
         // 2. Main worklist loop
         while let Some((_depth, states_at_depth)) = queue.pop_last() {
-            for (current_wa_state_id, mut gss) in states_at_depth {
+            for (current_wa_state_id, gss) in states_at_depth {
                 let dwa_state = &dwa.states[current_wa_state_id];
 
                 // Check for final state
@@ -91,7 +92,7 @@ impl<'a> GrammarConstraintState<'a> {
                     if let Some(reduced_acc) = gss.reduce_acc() {
                         let final_tokens = &reduced_acc & &final_weight.rsb;
                         if !final_tokens.is_empty() {
-                            *final_mask_internal.borrow_mut() |= RangeSet::from(final_tokens);
+                            final_mask_internal |= RangeSet::from(final_tokens);
                         }
                     }
                 }
@@ -144,7 +145,44 @@ impl<'a> GrammarConstraintState<'a> {
             }
         }
 
-        self.parent.precompute4_vocab.internal_bv_to_original(&final_mask_internal.into_inner())
+        final_mask_internal
+    }
+
+    pub fn get_mask4(&self) -> Bitset {
+        let final_mask_internal = self.compute_internal_mask();
+        self.parent.precompute4_vocab.internal_bv_to_original(&final_mask_internal)
+    }
+    
+    /// Fill an i32 slice with the token mask (compatible with llguidance format).
+    /// 
+    /// This is a zero-allocation version that writes directly to the provided buffer.
+    /// The output slice should have length `(vocab_size + 31) / 32`.
+    /// 
+    /// This is the most efficient way to get the mask when you have a pre-allocated
+    /// buffer (e.g., numpy array, torch tensor, or reused buffer).
+    #[inline]
+    pub fn fill_mask4_i32(&self, out: &mut [i32]) {
+        let final_mask_internal = self.compute_internal_mask();
+        self.parent.precompute4_vocab.fill_internal_bv_to_original_i32(&final_mask_internal, out);
+    }
+    
+    /// Fill an i32 slice with the token mask via a raw pointer.
+    /// 
+    /// # Safety
+    /// The caller must ensure that:
+    /// - `ptr` points to at least `len` i32 values of valid, writable memory
+    /// - The memory is properly aligned for i32
+    /// - No other references to this memory exist during the call
+    #[inline]
+    pub unsafe fn fill_mask4_i32_ptr(&self, ptr: *mut i32, len: usize) {
+        let out = std::slice::from_raw_parts_mut(ptr, len);
+        self.fill_mask4_i32(out);
+    }
+    
+    /// Returns the required buffer size in i32 elements for the mask.
+    #[inline]
+    pub fn mask_buffer_size_i32(&self) -> usize {
+        self.parent.precompute4_vocab.mask_buffer_size_i32()
     }
 
     #[time_it]
