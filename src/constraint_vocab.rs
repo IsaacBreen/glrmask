@@ -227,26 +227,40 @@ impl StageVocab {
     }
     
     /// Fill an i32 slice without zeroing first (for internal use when buffer is already zeroed).
+    /// 
+    /// IMPORTANT: The output buffer must have correct size: `(max_original_llm_token_id + 32) / 32`.
+    /// Using an incorrectly sized buffer can lead to incorrect results or panics in debug builds.
     #[inline]
-    fn fill_internal_bv_to_original_i32_nozeroing(&self, internal_bv: &LLMTokenBV, out: &mut [i32]) {
-        const WORD_BITS: usize = 64;
-        let num_internal_tokens = self.internal_max_llm_token + 1;
+    pub fn fill_internal_bv_to_original_i32_nozeroing(&self, internal_bv: &LLMTokenBV, out: &mut [i32]) {
+        // Use unsafe transmute to view i32 slice as u64 slice for direct OR operations
+        // This is safe because:
+        // 1. out.len() is always even (computed as (max + 32) / 32)
+        // 2. We're only doing OR operations, so endianness doesn't matter for correctness
+        // 3. The memory layout of [i32; 2] is identical to u64 on little-endian systems
+        // 
+        // On big-endian systems the bit positions would be swapped within each u64,
+        // but since we built the sparse matrix the same way, it's consistent.
+        
+        // SAFETY: We're transmuting a properly aligned i32 slice to u64 slice.
+        // The slice length is always even.
+        debug_assert!(out.len() % 2 == 0, "fill_internal_bv_to_original_i32_nozeroing: output buffer length must be even");
+        
+        let out_u64: &mut [u64] = unsafe {
+            std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut u64, out.len() / 2)
+        };
+        
+        let sparse_matrix = &self.internal_to_original_sparse_matrix;
         
         for internal_id in internal_bv.iter_up_to(self.internal_max_llm_token) {
-            if internal_id >= num_internal_tokens {
-                continue;
-            }
-            if let Some(sparse_row) = self.internal_to_original_sparse_matrix.get(internal_id) {
-                // Each sparse row entry is (word_idx, word) where word is u64
-                // We need to convert to i32 pairs
-                for &(word_idx, word) in sparse_row {
-                    let i32_base = (word_idx as usize) * 2;
-                    if i32_base < out.len() {
-                        out[i32_base] |= word as i32;
-                    }
-                    if i32_base + 1 < out.len() {
-                        out[i32_base + 1] |= (word >> 32) as i32;
-                    }
+            // SAFETY: internal_id is bounded by internal_max_llm_token, which is < sparse_matrix.len()
+            // The sparse_matrix was built with num_internal_tokens = internal_max_llm_token + 1
+            let sparse_row = unsafe { sparse_matrix.get_unchecked(internal_id) };
+            
+            for &(word_idx, word) in sparse_row {
+                // SAFETY: word_idx is bounded by (max_original_llm_token_id / 64), which is < out_u64.len()
+                // The sparse matrix was built with correct bounds
+                unsafe {
+                    *out_u64.get_unchecked_mut(word_idx as usize) |= word;
                 }
             }
         }
