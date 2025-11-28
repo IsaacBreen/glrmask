@@ -120,7 +120,7 @@ impl Trie {
         if let Some(orig_idx) = self.nodes[node_idx].terminal_string_idx {
             mapping.push(orig_idx as usize);
         }
-        // BTreeMap already maintains sorted order, no need to sort
+        // BTreeMap already maintains sorted order
         let children: Vec<_> = self.nodes[node_idx].transitions.values().copied().collect();
         for child_idx in children {
             self.dfs_linearize(child_idx as usize, mapping);

@@ -611,54 +611,28 @@ impl GrammarConstraint {
             }
         }
 
-        // Build CommitVocab from commit_classes
+        // Build CommitVocab from commit_classes - optimized version
         let effective_max = max_original_llm_token_id.max(highest_original_id);
         let mut original_to_representative =
             vec![CommitVocab::INVALID_REPRESENTATIVE; effective_max + 1];
         let mut representatives: Vec<Vec<u8>> = Vec::with_capacity(combined_result.commit_classes.len());
-        let mut assigned = vec![false; llm_token_strings.len()];
 
         for (_signature, string_indices) in combined_result.commit_classes {
             if string_indices.is_empty() {
                 continue;
             }
-            // Pick shortest representative
+            // Pick shortest representative (single pass)
             let rep_idx = string_indices
                 .iter()
                 .copied()
-                .min_by(|&a, &b| {
-                    llm_token_strings[a]
-                        .len()
-                        .cmp(&llm_token_strings[b].len())
-                        .then_with(|| llm_token_strings[a].cmp(&llm_token_strings[b]))
-                })
+                .min_by_key(|&idx| (llm_token_strings[idx].len(), &llm_token_strings[idx]))
                 .unwrap();
-            let representative_id = representatives.len();
+            let representative_id = representatives.len() as u32;
             representatives.push(llm_token_strings[rep_idx].clone());
             for idx in string_indices {
-                assigned[idx] = true;
                 let orig_id = original_ids[idx].0;
-                if orig_id >= original_to_representative.len() {
-                    original_to_representative
-                        .resize(orig_id + 1, CommitVocab::INVALID_REPRESENTATIVE);
-                }
-                original_to_representative[orig_id] = representative_id as u32;
+                original_to_representative[orig_id] = representative_id;
             }
-        }
-
-        // Handle any unassigned tokens (shouldn't happen, but safety)
-        for (idx, was_assigned) in assigned.iter().enumerate() {
-            if *was_assigned {
-                continue;
-            }
-            let representative_id = representatives.len();
-            representatives.push(llm_token_strings[idx].clone());
-            let orig_id = original_ids[idx].0;
-            if orig_id >= original_to_representative.len() {
-                original_to_representative
-                    .resize(orig_id + 1, CommitVocab::INVALID_REPRESENTATIVE);
-            }
-            original_to_representative[orig_id] = representative_id as u32;
         }
 
         crate::debug!(
