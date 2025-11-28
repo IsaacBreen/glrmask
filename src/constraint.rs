@@ -529,13 +529,14 @@ impl GrammarConstraint {
     /// Combined setup that computes both internal mappings and commit vocab in a single pass.
     /// This is more efficient than calling setup_llm_token_mappings and build_commit_vocab separately
     /// because we only run the equivalence analysis once.
+    /// Returns: (original_to_internal_map, commit_vocab, internal_llm_token_map)
     fn setup_combined(
         llm_token_map: &LLMTokenMap,
         tokenizer: &Regex,
         max_original_llm_token_id: usize,
-    ) -> (BTreeMap<usize, usize>, CommitVocab) {
+    ) -> (BTreeMap<usize, usize>, CommitVocab, BTreeMap<Vec<u8>, LLMTokenID>) {
         if llm_token_map.is_empty() {
-            return (BTreeMap::new(), CommitVocab::new(Vec::new(), Vec::new()));
+            return (BTreeMap::new(), CommitVocab::new(Vec::new(), Vec::new()), BTreeMap::new());
         }
 
         // For very small vocabs, skip equivalence analysis
@@ -557,12 +558,15 @@ impl GrammarConstraint {
             let mut representatives = Vec::with_capacity(sorted_tokens.len());
             let mut original_to_representative = vec![CommitVocab::INVALID_REPRESENTATIVE; effective_max + 1];
             
+            // For small vocab, each token is its own representative
+            let mut internal_token_map: BTreeMap<Vec<u8>, LLMTokenID> = BTreeMap::new();
             for (idx, (bytes, id)) in sorted_tokens.into_iter().enumerate() {
                 representatives.push(bytes.clone());
                 original_to_representative[id.0] = idx as u32;
+                internal_token_map.insert(bytes.clone(), LLMTokenID(id.0));
             }
             
-            return (identity_map, CommitVocab::new(representatives, original_to_representative));
+            return (identity_map, CommitVocab::new(representatives, original_to_representative), internal_token_map);
         }
 
         // Sort tokens by bytes for consistent ordering
@@ -599,12 +603,22 @@ impl GrammarConstraint {
             );
         }
 
-        // Build original_to_internal map from mask_classes
+        // Build original_to_internal map AND track best representative per class (combined)
         let mut original_to_internal_map = BTreeMap::new();
+        let mut best_rep_by_internal: Vec<usize> = Vec::with_capacity(combined_result.mask_classes.len());
         let mut internal_id_counter = 0;
         for (_signature, string_indices) in combined_result.mask_classes {
             let internal_id = internal_id_counter;
             internal_id_counter += 1;
+            
+            // Find shortest representative while iterating
+            let best_idx = string_indices
+                .iter()
+                .copied()
+                .min_by_key(|&idx| (llm_token_strings[idx].len(), &llm_token_strings[idx]))
+                .unwrap_or(string_indices[0]);
+            best_rep_by_internal.push(best_idx);
+            
             for string_index in string_indices {
                 let original_llm_id = original_ids[string_index];
                 original_to_internal_map.insert(original_llm_id.0, internal_id);
@@ -642,8 +656,25 @@ impl GrammarConstraint {
             llm_token_strings.len()
         );
 
+        // Build internal_llm_token_map using best representatives we already computed
+        // This avoids iterating 50K tokens again!
+        let internal_llm_token_map: BTreeMap<Vec<u8>, LLMTokenID> = best_rep_by_internal
+            .into_iter()
+            .enumerate()
+            .map(|(internal_id, string_idx)| {
+                (llm_token_strings[string_idx].clone(), LLMTokenID(internal_id))
+            })
+            .collect();
+        
+        crate::debug!(
+            3,
+            "internal_llm_token_map has {} representative entries (was {} total) - built in combined pass",
+            internal_llm_token_map.len(),
+            llm_token_strings.len()
+        );
+
         let commit_vocab = CommitVocab::new(representatives, original_to_representative);
-        (original_to_internal_map, commit_vocab)
+        (original_to_internal_map, commit_vocab, internal_llm_token_map)
     }
 
     fn build_commit_vocab(
@@ -753,7 +784,8 @@ impl GrammarConstraint {
         );
 
         // Combined equivalence analysis - computes both mask and commit classes in one pass
-        let (original_to_internal_map, commit_vocab_data) = Self::setup_combined(
+        // Also returns internal_llm_token_map to avoid another 50K token iteration
+        let (original_to_internal_map, commit_vocab_data, internal_llm_token_map) = Self::setup_combined(
             &llm_token_map,
             &tokenizer,
             max_original_llm_token_id,
@@ -781,34 +813,7 @@ impl GrammarConstraint {
             .collect();
         crate::debug!(3, "Done building internal_to_original_map in {:?}", t_i2o.elapsed());
 
-        // Build internal LLM token map with only ONE representative per internal ID.
-        // This dramatically reduces the vocab tree size from 50K to ~200 entries.
-        crate::debug!(3, "Building internal_llm_token_map");
-        
-        // Optimized: Instead of sorting all 50K tokens, group by internal ID and pick shortest
-        let t_map = std::time::Instant::now();
-        let mut best_by_internal: HashMap<usize, (&Vec<u8>, usize)> = HashMap::with_capacity(internal_to_original_map.len());
-        
-        for (bytes, original_id) in llm_token_map.iter() {
-            if let Some(&internal_id) = original_to_internal_map.get(&original_id.0) {
-                let entry = best_by_internal.entry(internal_id).or_insert((bytes, original_id.0));
-                // Keep the shortest token (or lexicographically first if same length)
-                if bytes.len() < entry.0.len() || (bytes.len() == entry.0.len() && bytes < entry.0) {
-                    *entry = (bytes, original_id.0);
-                }
-            }
-        }
-        
-        let internal_llm_token_map: BTreeMap<Vec<u8>, LLMTokenID> = best_by_internal
-            .into_iter()
-            .map(|(internal_id, (bytes, _orig))| (bytes.clone(), LLMTokenID(internal_id)))
-            .collect();
-        crate::debug!(3, "  internal_llm_token_map built in {:?}", t_map.elapsed());
-
-        crate::debug!(3, "internal_llm_token_map has {} representative entries (was {} total)",
-            internal_llm_token_map.len(),
-            llm_token_map.len()
-        );
+        // internal_llm_token_map was already computed in setup_combined - no need to iterate 50K tokens again!
 
         // Vocab tree for internal tokens.
         crate::debug!(3, "Building internal vocab prefix tree");

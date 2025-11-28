@@ -165,23 +165,32 @@ pub fn find_equivalence_classes_combined(
     let state_signatures = compute_state_signatures(regex);
     crate::debug!(3, "  Equiv: State signatures: {:?}", t0.elapsed());
     
-    // Precompute remainder hashes for BOTH mask and commit in one pass
-    let t1 = std::time::Instant::now();
-    let (remainder_hashes_mask, remainder_hashes_commit) = 
-        precompute_remainder_hashes_combined(regex, strings, &state_signatures);
-    crate::debug!(3, "  Equiv: Remainder hashes (parallel): {:?}", t1.elapsed());
-    pb.inc(1);
-
-    let t2 = std::time::Instant::now();
-    pb.set_message("Building Trie...");
-    let mut trie = Trie::new();
-    for (i, s) in strings.iter().enumerate() {
-        trie.insert(s, i as u32);
-    }
-    let t_insert = t2.elapsed();
-    let linearized_mapping = trie.linearize();
-    crate::debug!(3, "  Equiv: Trie build: {:?} (insert: {:?}, linearize: {:?})", t2.elapsed(), t_insert, t2.elapsed() - t_insert);
-    pb.inc(1);
+    // OPTIMIZATION: Build Trie and compute remainder hashes in parallel!
+    // They are independent operations.
+    let t_parallel = std::time::Instant::now();
+    pb.set_message("Building Trie & Computing Hashes (parallel)...");
+    
+    let (trie_result, hash_result) = rayon::join(
+        || {
+            // Build Trie
+            let mut trie = Trie::new();
+            for (i, s) in strings.iter().enumerate() {
+                trie.insert(s, i as u32);
+            }
+            let linearized_mapping = trie.linearize();
+            (trie, linearized_mapping)
+        },
+        || {
+            // Compute remainder hashes
+            precompute_remainder_hashes_combined(regex, strings, &state_signatures)
+        }
+    );
+    
+    let (mut trie, linearized_mapping) = trie_result;
+    let (remainder_hashes_mask, remainder_hashes_commit) = hash_result;
+    
+    crate::debug!(3, "  Equiv: Trie + Hashes (parallel): {:?}", t_parallel.elapsed());
+    pb.inc(2);
 
     let t3 = std::time::Instant::now();
     pb.set_message("Symbolic Execution...");
