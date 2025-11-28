@@ -10,6 +10,7 @@ mod r#macro;
 pub mod tokenizer;
 mod types;
 pub mod json_serialization;
+pub mod json_schema;
 mod test_constraint_basic;
 // mod test_constraint_python;
 mod profiler;

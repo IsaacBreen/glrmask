@@ -1,0 +1,857 @@
+//! JSON Schema to Grammar conversion.
+//!
+//! This module converts JSON Schema (draft-07 compatible) to Sep1's grammar representation.
+//! The goal is to generate grammars that are as permissive as the schema allows, without
+//! trying to enforce semantic constraints that are impossible for CFGs.
+//!
+//! # Supported features:
+//! - `type`: object, array, string, integer, number, boolean, null, and arrays of types
+//! - `properties`, `additionalProperties`
+//! - `items`, `prefixItems` (draft 2020-12)
+//! - `$ref`, `$defs`, `definitions`
+//! - `allOf`, `anyOf`, `oneOf`
+//! - `const`, `enum`
+//!
+//! # Unsupported (intentionally - these require semantic validation, not syntax):
+//! - minimum/maximum/exclusiveMinimum/exclusiveMaximum
+//! - minLength/maxLength
+//! - minItems/maxItems
+//! - minProperties/maxProperties
+//! - pattern, format, uniqueItems, dependencies, if/then/else, not
+
+use crate::interface::GrammarExpr;
+use serde_json::Value;
+use std::collections::{BTreeMap, HashSet};
+
+/// JSON Schema to Grammar converter.
+pub struct JsonSchemaConverter {
+    root_schema: Value,
+    rule_counter: usize,
+    /// Maps $ref paths to rule names
+    resolved_refs: BTreeMap<String, String>,
+    /// Set of refs that have been converted to rules
+    generated_refs: HashSet<String>,
+    /// Stack of refs currently being processed (for detecting self-references)
+    current_ref_stack: Vec<String>,
+    /// Rules to be emitted: (name, expr)
+    rules: Vec<(String, GrammarExpr)>,
+    /// Queue of pending refs to process: (ref_path, schema)
+    pending_refs: Vec<(String, Value)>,
+}
+
+impl JsonSchemaConverter {
+    /// Create a new converter from a JSON schema value.
+    pub fn new(schema: Value) -> Self {
+        Self {
+            root_schema: schema,
+            rule_counter: 0,
+            resolved_refs: BTreeMap::new(),
+            generated_refs: HashSet::new(),
+            current_ref_stack: Vec::new(),
+            rules: Vec::new(),
+            pending_refs: Vec::new(),
+        }
+    }
+
+    /// Generate a new unique rule name with the given prefix.
+    fn new_rule_name(&mut self, prefix: &str) -> String {
+        self.rule_counter += 1;
+        format!("_{}{}", prefix, self.rule_counter)
+    }
+
+    /// Add a rule to the grammar.
+    fn add_rule(&mut self, name: String, expr: GrammarExpr) {
+        self.rules.push((name, expr));
+    }
+
+    /// Convert the schema to a list of grammar rules.
+    /// Returns (rules, root_rule_name).
+    pub fn convert(mut self) -> Result<(Vec<(String, GrammarExpr)>, String), String> {
+        // Register all definitions first
+        self.register_definitions();
+
+        // Generate main rule from root schema
+        let root_rule = "root".to_string();
+        self.convert_schema(&self.root_schema.clone(), root_rule.clone())?;
+
+        // Process pending refs
+        while !self.pending_refs.is_empty() {
+            let (ref_path, def_schema) = self.pending_refs.remove(0);
+            if !self.generated_refs.contains(&ref_path) {
+                self.generated_refs.insert(ref_path.clone());
+                let rule_name = self.resolved_refs.get(&ref_path).cloned()
+                    .unwrap_or_else(|| {
+                        let name = self.new_rule_name("def");
+                        self.resolved_refs.insert(ref_path.clone(), name.clone());
+                        name
+                    });
+                self.current_ref_stack.push(ref_path.clone());
+                self.convert_schema(&def_schema, rule_name)?;
+                self.current_ref_stack.pop();
+            }
+        }
+
+        // Add primitive rules
+        self.add_primitive_rules();
+
+        Ok((self.rules, root_rule))
+    }
+
+    /// Pre-register all $defs/definitions for forward references.
+    fn register_definitions(&mut self) {
+        let keys = ["$defs", "definitions"];
+        for key in &keys {
+            if let Some(defs) = self.root_schema.get(*key).and_then(|v| v.as_object()).cloned() {
+                for (name, def_schema) in defs {
+                    let ref_path = format!("#/{}/{}", key, name);
+                    let rule_name = self.new_rule_name("def");
+                    self.resolved_refs.insert(ref_path.clone(), rule_name);
+                    self.pending_refs.push((ref_path, def_schema.clone()));
+                }
+            }
+        }
+    }
+
+    /// Resolve a $ref and return the rule name.
+    fn resolve_ref(&mut self, ref_path: &str) -> Option<String> {
+        if let Some(name) = self.resolved_refs.get(ref_path) {
+            return Some(name.clone());
+        }
+
+        // Try to resolve the reference
+        if ref_path.starts_with("#/") {
+            let parts: Vec<&str> = ref_path[2..].split('/').collect();
+            let mut target = self.root_schema.clone();
+            for part in &parts {
+                target = target.get(*part)?.clone();
+            }
+
+            let rule_name = self.new_rule_name("ref");
+            self.resolved_refs.insert(ref_path.to_string(), rule_name.clone());
+            self.pending_refs.push((ref_path.to_string(), target));
+            return Some(rule_name);
+        }
+
+        None // External ref - not supported
+    }
+
+    /// Convert a schema to grammar rules. Returns the rule name.
+    fn convert_schema(&mut self, schema: &Value, rule_name: String) -> Result<String, String> {
+        // Handle boolean schemas
+        if let Some(b) = schema.as_bool() {
+            if b {
+                self.add_rule(rule_name.clone(), GrammarExpr::Ref("_json_value".to_string()));
+            } else {
+                // false schema - nothing matches
+                self.add_rule(rule_name.clone(), GrammarExpr::Literal(b"<NEVER>".to_vec()));
+            }
+            return Ok(rule_name);
+        }
+
+        let obj = schema.as_object().ok_or("Invalid schema: expected object or boolean")?;
+
+        // Handle $ref
+        if let Some(ref_val) = obj.get("$ref").and_then(|v| v.as_str()) {
+            if let Some(ref_rule) = self.resolve_ref(ref_val) {
+                self.add_rule(rule_name.clone(), GrammarExpr::Ref(ref_rule));
+                return Ok(rule_name);
+            } else {
+                self.add_rule(rule_name.clone(), GrammarExpr::Ref("_json_value".to_string()));
+                return Ok(rule_name);
+            }
+        }
+
+        // Handle allOf
+        if let Some(all_of) = obj.get("allOf").and_then(|v| v.as_array()) {
+            let merged = self.merge_all_of(all_of, obj)?;
+            return self.convert_schema(&merged, rule_name);
+        }
+
+        // Handle anyOf / oneOf
+        if let Some(any_of) = obj.get("anyOf").or_else(|| obj.get("oneOf")).and_then(|v| v.as_array()) {
+            let mut alternatives = Vec::new();
+            for sub in any_of {
+                let sub_name = self.new_rule_name("alt");
+                self.convert_schema(sub, sub_name.clone())?;
+                alternatives.push(GrammarExpr::Ref(sub_name));
+            }
+            self.add_rule(rule_name.clone(), GrammarExpr::Choice(alternatives));
+            return Ok(rule_name);
+        }
+
+        // Handle const
+        if let Some(const_val) = obj.get("const") {
+            let literal = self.value_to_literal(const_val);
+            self.add_rule(rule_name.clone(), literal);
+            return Ok(rule_name);
+        }
+
+        // Handle enum
+        if let Some(enum_vals) = obj.get("enum").and_then(|v| v.as_array()) {
+            let alternatives: Vec<GrammarExpr> = enum_vals.iter()
+                .map(|v| self.value_to_literal(v))
+                .collect();
+            self.add_rule(rule_name.clone(), GrammarExpr::Choice(alternatives));
+            return Ok(rule_name);
+        }
+
+        // Handle type
+        let schema_type = obj.get("type");
+
+        if let Some(type_val) = schema_type {
+            if let Some(type_str) = type_val.as_str() {
+                return self.convert_typed_schema(type_str, obj, rule_name);
+            } else if let Some(types) = type_val.as_array() {
+                // Multiple types
+                let mut alternatives = Vec::new();
+                for t in types {
+                    if let Some(type_str) = t.as_str() {
+                        let alt_name = self.new_rule_name("type");
+                        self.convert_typed_schema(type_str, obj, alt_name.clone())?;
+                        alternatives.push(GrammarExpr::Ref(alt_name));
+                    }
+                }
+                self.add_rule(rule_name.clone(), GrammarExpr::Choice(alternatives));
+                return Ok(rule_name);
+            }
+        }
+
+        // No type specified - allow any JSON value
+        self.add_rule(rule_name.clone(), GrammarExpr::Ref("_json_value".to_string()));
+        Ok(rule_name)
+    }
+
+    /// Convert a schema with a known type.
+    fn convert_typed_schema(&mut self, type_str: &str, obj: &serde_json::Map<String, Value>, rule_name: String) -> Result<String, String> {
+        match type_str {
+            "object" => self.convert_object(obj, rule_name),
+            "array" => self.convert_array(obj, rule_name),
+            "string" => {
+                self.add_rule(rule_name.clone(), GrammarExpr::Ref("JSON_STRING".to_string()));
+                Ok(rule_name)
+            }
+            "integer" => {
+                self.add_rule(rule_name.clone(), GrammarExpr::Ref("JSON_INTEGER".to_string()));
+                Ok(rule_name)
+            }
+            "number" => {
+                self.add_rule(rule_name.clone(), GrammarExpr::Ref("JSON_NUMBER".to_string()));
+                Ok(rule_name)
+            }
+            "boolean" => {
+                self.add_rule(rule_name.clone(), GrammarExpr::Ref("JSON_BOOL".to_string()));
+                Ok(rule_name)
+            }
+            "null" => {
+                self.add_rule(rule_name.clone(), GrammarExpr::Ref("JSON_NULL".to_string()));
+                Ok(rule_name)
+            }
+            _ => {
+                self.add_rule(rule_name.clone(), GrammarExpr::Ref("_json_value".to_string()));
+                Ok(rule_name)
+            }
+        }
+    }
+
+    /// Convert an object schema.
+    fn convert_object(&mut self, obj: &serde_json::Map<String, Value>, rule_name: String) -> Result<String, String> {
+        let properties = obj.get("properties").and_then(|v| v.as_object());
+        let additional_props = obj.get("additionalProperties");
+
+        // If no properties defined and additional allowed, just use generic object
+        let has_properties = properties.map(|p| !p.is_empty()).unwrap_or(false);
+        if !has_properties && additional_props != Some(&Value::Bool(false)) {
+            self.add_rule(rule_name.clone(), GrammarExpr::Ref("_json_object".to_string()));
+            return Ok(rule_name);
+        }
+
+        // If no properties and no additional allowed, empty object only
+        if !has_properties && additional_props == Some(&Value::Bool(false)) {
+            self.add_rule(rule_name.clone(), GrammarExpr::Sequence(vec![
+                GrammarExpr::Literal(b"{".to_vec()),
+                GrammarExpr::Ref("WS".to_string()),
+                GrammarExpr::Literal(b"}".to_vec()),
+            ]));
+            return Ok(rule_name);
+        }
+
+        // Build member alternatives
+        let mut member_alternatives = Vec::new();
+
+        if let Some(props) = properties {
+            for (prop_name, prop_schema) in props {
+                let prop_value_rule = self.new_rule_name("pv");
+                self.convert_schema(prop_schema, prop_value_rule.clone())?;
+
+                // Build: '"propName"' WS ':' WS value
+                let escaped_name = self.escape_string_for_json(prop_name);
+                member_alternatives.push(GrammarExpr::Sequence(vec![
+                    GrammarExpr::Literal(format!("\"{}\"", escaped_name).into_bytes()),
+                    GrammarExpr::Ref("WS".to_string()),
+                    GrammarExpr::Literal(b":".to_vec()),
+                    GrammarExpr::Ref("WS".to_string()),
+                    GrammarExpr::Ref(prop_value_rule),
+                ]));
+            }
+        }
+
+        // If additional properties allowed, add generic kv
+        match additional_props {
+            None | Some(Value::Bool(true)) => {
+                member_alternatives.push(GrammarExpr::Ref("_json_kv".to_string()));
+            }
+            Some(Value::Object(ap_schema)) => {
+                let additional_rule = self.new_rule_name("ap");
+                self.convert_schema(&Value::Object(ap_schema.clone()), additional_rule.clone())?;
+                member_alternatives.push(GrammarExpr::Sequence(vec![
+                    GrammarExpr::Ref("JSON_STRING".to_string()),
+                    GrammarExpr::Ref("WS".to_string()),
+                    GrammarExpr::Literal(b":".to_vec()),
+                    GrammarExpr::Ref("WS".to_string()),
+                    GrammarExpr::Ref(additional_rule),
+                ]));
+            }
+            _ => {} // additionalProperties: false - don't add generic kv
+        }
+
+        // Create member rule
+        let member_rule = self.new_rule_name("mem");
+        if member_alternatives.len() == 1 {
+            self.add_rule(member_rule.clone(), member_alternatives.remove(0));
+        } else {
+            self.add_rule(member_rule.clone(), GrammarExpr::Choice(member_alternatives));
+        }
+
+        // Object rule: { member (, member)* }
+        // Build: '{' WS ( member ( ',' WS member )* )? WS '}'
+        let comma_member = GrammarExpr::Sequence(vec![
+            GrammarExpr::Literal(b",".to_vec()),
+            GrammarExpr::Ref("WS".to_string()),
+            GrammarExpr::Ref(member_rule.clone()),
+        ]);
+
+        let members_opt = GrammarExpr::Optional(Box::new(GrammarExpr::Sequence(vec![
+            GrammarExpr::Ref(member_rule),
+            GrammarExpr::Repeat(Box::new(comma_member)),
+        ])));
+
+        self.add_rule(rule_name.clone(), GrammarExpr::Sequence(vec![
+            GrammarExpr::Literal(b"{".to_vec()),
+            GrammarExpr::Ref("WS".to_string()),
+            members_opt,
+            GrammarExpr::Ref("WS".to_string()),
+            GrammarExpr::Literal(b"}".to_vec()),
+        ]));
+
+        Ok(rule_name)
+    }
+
+    /// Convert an array schema.
+    fn convert_array(&mut self, obj: &serde_json::Map<String, Value>, rule_name: String) -> Result<String, String> {
+        let items = obj.get("items");
+        let prefix_items = obj.get("prefixItems");
+
+        if items.is_none() && prefix_items.is_none() {
+            self.add_rule(rule_name.clone(), GrammarExpr::Ref("_json_array".to_string()));
+            return Ok(rule_name);
+        }
+
+        if let Some(pi) = prefix_items {
+            if let Some(pi_array) = pi.as_array() {
+                return self.convert_tuple_array(obj, rule_name, pi_array);
+            }
+        }
+
+        if let Some(item_schema) = items {
+            if let Some(b) = item_schema.as_bool() {
+                if b {
+                    self.add_rule(rule_name.clone(), GrammarExpr::Ref("_json_array".to_string()));
+                } else {
+                    // Empty array only
+                    self.add_rule(rule_name.clone(), GrammarExpr::Sequence(vec![
+                        GrammarExpr::Literal(b"[".to_vec()),
+                        GrammarExpr::Ref("WS".to_string()),
+                        GrammarExpr::Literal(b"]".to_vec()),
+                    ]));
+                }
+                return Ok(rule_name);
+            }
+
+            if let Some(_) = item_schema.as_object() {
+                // All items must match schema
+                let item_rule = self.new_rule_name("item");
+                self.convert_schema(item_schema, item_rule.clone())?;
+
+                // Build: '[' WS ( item ( ',' WS item )* )? WS ']'
+                let comma_item = GrammarExpr::Sequence(vec![
+                    GrammarExpr::Literal(b",".to_vec()),
+                    GrammarExpr::Ref("WS".to_string()),
+                    GrammarExpr::Ref(item_rule.clone()),
+                ]);
+
+                let items_opt = GrammarExpr::Optional(Box::new(GrammarExpr::Sequence(vec![
+                    GrammarExpr::Ref(item_rule),
+                    GrammarExpr::Repeat(Box::new(comma_item)),
+                ])));
+
+                self.add_rule(rule_name.clone(), GrammarExpr::Sequence(vec![
+                    GrammarExpr::Literal(b"[".to_vec()),
+                    GrammarExpr::Ref("WS".to_string()),
+                    items_opt,
+                    GrammarExpr::Ref("WS".to_string()),
+                    GrammarExpr::Literal(b"]".to_vec()),
+                ]));
+                return Ok(rule_name);
+            }
+
+            if let Some(items_arr) = item_schema.as_array() {
+                // Tuple-style (draft-07)
+                return self.convert_tuple_array(obj, rule_name, items_arr);
+            }
+        }
+
+        // Fallback
+        self.add_rule(rule_name.clone(), GrammarExpr::Ref("_json_array".to_string()));
+        Ok(rule_name)
+    }
+
+    /// Convert tuple-style array.
+    fn convert_tuple_array(&mut self, obj: &serde_json::Map<String, Value>, rule_name: String, prefix_items: &[Value]) -> Result<String, String> {
+        let additional_items = obj.get("additionalItems")
+            .or_else(|| obj.get("items"))
+            .cloned()
+            .unwrap_or(Value::Bool(true));
+
+        if prefix_items.is_empty() {
+            if additional_items.as_bool() == Some(true) || additional_items.is_object() {
+                self.add_rule(rule_name.clone(), GrammarExpr::Ref("_json_array".to_string()));
+            } else {
+                self.add_rule(rule_name.clone(), GrammarExpr::Sequence(vec![
+                    GrammarExpr::Literal(b"[".to_vec()),
+                    GrammarExpr::Ref("WS".to_string()),
+                    GrammarExpr::Literal(b"]".to_vec()),
+                ]));
+            }
+            return Ok(rule_name);
+        }
+
+        // Generate rules for each prefix item
+        let mut item_rules = Vec::new();
+        for item_schema in prefix_items {
+            let item_rule = self.new_rule_name("ti");
+            self.convert_schema(item_schema, item_rule.clone())?;
+            item_rules.push(item_rule);
+        }
+
+        // Build body: first item, then rest with commas
+        let mut body_parts = vec![GrammarExpr::Ref(item_rules[0].clone())];
+        for item_rule in &item_rules[1..] {
+            body_parts.push(GrammarExpr::Literal(b",".to_vec()));
+            body_parts.push(GrammarExpr::Ref("WS".to_string()));
+            body_parts.push(GrammarExpr::Ref(item_rule.clone()));
+        }
+
+        // Add additional items if allowed
+        match &additional_items {
+            Value::Bool(true) => {
+                body_parts.push(GrammarExpr::Repeat(Box::new(GrammarExpr::Sequence(vec![
+                    GrammarExpr::Literal(b",".to_vec()),
+                    GrammarExpr::Ref("WS".to_string()),
+                    GrammarExpr::Ref("_json_value".to_string()),
+                ]))));
+            }
+            Value::Object(ai_schema) => {
+                let add_rule = self.new_rule_name("ai");
+                self.convert_schema(&Value::Object(ai_schema.clone()), add_rule.clone())?;
+                body_parts.push(GrammarExpr::Repeat(Box::new(GrammarExpr::Sequence(vec![
+                    GrammarExpr::Literal(b",".to_vec()),
+                    GrammarExpr::Ref("WS".to_string()),
+                    GrammarExpr::Ref(add_rule),
+                ]))));
+            }
+            _ => {}
+        }
+
+        let body = GrammarExpr::Sequence(body_parts);
+        self.add_rule(rule_name.clone(), GrammarExpr::Sequence(vec![
+            GrammarExpr::Literal(b"[".to_vec()),
+            GrammarExpr::Ref("WS".to_string()),
+            GrammarExpr::Optional(Box::new(body)),
+            GrammarExpr::Ref("WS".to_string()),
+            GrammarExpr::Literal(b"]".to_vec()),
+        ]));
+
+        Ok(rule_name)
+    }
+
+    /// Merge allOf subschemas.
+    fn merge_all_of(&self, subschemas: &[Value], parent: &serde_json::Map<String, Value>) -> Result<Value, String> {
+        let mut merged: serde_json::Map<String, Value> = serde_json::Map::new();
+        let mut merged_props: serde_json::Map<String, Value> = serde_json::Map::new();
+        let mut merged_required: Vec<String> = Vec::new();
+
+        for sub in subschemas {
+            if let Some(obj) = sub.as_object() {
+                // Skip self-referential $refs
+                if let Some(ref_val) = obj.get("$ref") {
+                    if obj.len() == 1 {
+                        if let Some(ref_str) = ref_val.as_str() {
+                            if self.current_ref_stack.contains(&ref_str.to_string()) {
+                                continue;
+                            }
+                        }
+                    }
+                }
+
+                // Merge properties
+                if let Some(props) = obj.get("properties").and_then(|v| v.as_object()) {
+                    for (k, v) in props {
+                        merged_props.insert(k.clone(), v.clone());
+                    }
+                }
+
+                // Merge required
+                if let Some(req) = obj.get("required").and_then(|v| v.as_array()) {
+                    for r in req {
+                        if let Some(s) = r.as_str() {
+                            merged_required.push(s.to_string());
+                        }
+                    }
+                }
+
+                // Copy other keys
+                for (k, v) in obj {
+                    if k != "properties" && k != "required" {
+                        merged.insert(k.clone(), v.clone());
+                    }
+                }
+            }
+        }
+
+        // Add sibling keys from parent
+        for (k, v) in parent {
+            if k != "allOf" {
+                merged.insert(k.clone(), v.clone());
+            }
+        }
+
+        if !merged_props.is_empty() {
+            merged.insert("properties".to_string(), Value::Object(merged_props));
+        }
+        if !merged_required.is_empty() {
+            let unique: Vec<Value> = merged_required.into_iter()
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .map(Value::String)
+                .collect();
+            merged.insert("required".to_string(), Value::Array(unique));
+        }
+
+        Ok(Value::Object(merged))
+    }
+
+    /// Convert a JSON value to a grammar literal.
+    fn value_to_literal(&self, val: &Value) -> GrammarExpr {
+        match val {
+            Value::Null => GrammarExpr::Literal(b"null".to_vec()),
+            Value::Bool(true) => GrammarExpr::Literal(b"true".to_vec()),
+            Value::Bool(false) => GrammarExpr::Literal(b"false".to_vec()),
+            Value::Number(n) => GrammarExpr::Literal(n.to_string().into_bytes()),
+            Value::String(s) => {
+                let escaped = self.escape_string_for_json(s);
+                GrammarExpr::Literal(format!("\"{}\"", escaped).into_bytes())
+            }
+            Value::Array(_) | Value::Object(_) => {
+                // Serialize to compact JSON
+                let json_str = serde_json::to_string(val).unwrap_or_default();
+                GrammarExpr::Literal(json_str.into_bytes())
+            }
+        }
+    }
+
+    /// Escape a string for use in JSON.
+    fn escape_string_for_json(&self, s: &str) -> String {
+        let mut result = String::new();
+        for c in s.chars() {
+            match c {
+                '"' => result.push_str("\\\""),
+                '\\' => result.push_str("\\\\"),
+                '\n' => result.push_str("\\n"),
+                '\r' => result.push_str("\\r"),
+                '\t' => result.push_str("\\t"),
+                c if c.is_control() => {
+                    result.push_str(&format!("\\u{:04x}", c as u32));
+                }
+                _ => result.push(c),
+            }
+        }
+        result
+    }
+
+    /// Add primitive JSON grammar rules.
+    fn add_primitive_rules(&mut self) {
+        // Whitespace
+        self.add_rule("WS".to_string(), GrammarExpr::Repeat(Box::new(
+            GrammarExpr::Choice(vec![
+                GrammarExpr::Literal(b" ".to_vec()),
+                GrammarExpr::Literal(b"\t".to_vec()),
+                GrammarExpr::Literal(b"\n".to_vec()),
+                GrammarExpr::Literal(b"\r".to_vec()),
+            ])
+        )));
+
+        // JSON string
+        self.add_rule("JSON_STRING".to_string(), GrammarExpr::Sequence(vec![
+            GrammarExpr::Literal(b"\"".to_vec()),
+            GrammarExpr::Ref("STRING_CHARS".to_string()),
+            GrammarExpr::Literal(b"\"".to_vec()),
+        ]));
+
+        self.add_rule("STRING_CHARS".to_string(), GrammarExpr::Repeat(Box::new(
+            GrammarExpr::Choice(vec![
+                GrammarExpr::Ref("STRING_CHAR".to_string()),
+                GrammarExpr::Ref("ESCAPE_SEQ".to_string()),
+            ])
+        )));
+
+        // Any char except ", \, or control chars
+        self.add_rule("STRING_CHAR".to_string(), GrammarExpr::CharClass("[^\"\\\\\\x00-\\x1f]".to_string()));
+
+        // Escape sequences
+        self.add_rule("ESCAPE_SEQ".to_string(), GrammarExpr::Sequence(vec![
+            GrammarExpr::Literal(b"\\".to_vec()),
+            GrammarExpr::Choice(vec![
+                GrammarExpr::CharClass("[\"\\\\/bfnrt]".to_string()),
+                GrammarExpr::Sequence(vec![
+                    GrammarExpr::Literal(b"u".to_vec()),
+                    GrammarExpr::Ref("HEX".to_string()),
+                    GrammarExpr::Ref("HEX".to_string()),
+                    GrammarExpr::Ref("HEX".to_string()),
+                    GrammarExpr::Ref("HEX".to_string()),
+                ]),
+            ]),
+        ]));
+
+        self.add_rule("HEX".to_string(), GrammarExpr::CharClass("[0-9a-fA-F]".to_string()));
+
+        // JSON integer
+        self.add_rule("JSON_INTEGER".to_string(), GrammarExpr::Sequence(vec![
+            GrammarExpr::Optional(Box::new(GrammarExpr::Literal(b"-".to_vec()))),
+            GrammarExpr::Choice(vec![
+                GrammarExpr::Literal(b"0".to_vec()),
+                GrammarExpr::Sequence(vec![
+                    GrammarExpr::CharClass("[1-9]".to_string()),
+                    GrammarExpr::Repeat(Box::new(GrammarExpr::CharClass("[0-9]".to_string()))),
+                ]),
+            ]),
+        ]));
+
+        // JSON number
+        self.add_rule("JSON_NUMBER".to_string(), GrammarExpr::Sequence(vec![
+            GrammarExpr::Ref("JSON_INTEGER".to_string()),
+            GrammarExpr::Optional(Box::new(GrammarExpr::Sequence(vec![
+                GrammarExpr::Literal(b".".to_vec()),
+                GrammarExpr::Ref("DIGITS".to_string()),
+            ]))),
+            GrammarExpr::Optional(Box::new(GrammarExpr::Ref("EXPONENT".to_string()))),
+        ]));
+
+        self.add_rule("DIGITS".to_string(), GrammarExpr::Sequence(vec![
+            GrammarExpr::CharClass("[0-9]".to_string()),
+            GrammarExpr::Repeat(Box::new(GrammarExpr::CharClass("[0-9]".to_string()))),
+        ]));
+
+        self.add_rule("EXPONENT".to_string(), GrammarExpr::Sequence(vec![
+            GrammarExpr::CharClass("[eE]".to_string()),
+            GrammarExpr::Optional(Box::new(GrammarExpr::CharClass("[+-]".to_string()))),
+            GrammarExpr::Ref("DIGITS".to_string()),
+        ]));
+
+        // JSON bool
+        self.add_rule("JSON_BOOL".to_string(), GrammarExpr::Choice(vec![
+            GrammarExpr::Literal(b"true".to_vec()),
+            GrammarExpr::Literal(b"false".to_vec()),
+        ]));
+
+        // JSON null
+        self.add_rule("JSON_NULL".to_string(), GrammarExpr::Literal(b"null".to_vec()));
+
+        // Generic JSON value
+        self.add_rule("_json_value".to_string(), GrammarExpr::Choice(vec![
+            GrammarExpr::Ref("_json_object".to_string()),
+            GrammarExpr::Ref("_json_array".to_string()),
+            GrammarExpr::Ref("JSON_STRING".to_string()),
+            GrammarExpr::Ref("JSON_NUMBER".to_string()),
+            GrammarExpr::Ref("JSON_BOOL".to_string()),
+            GrammarExpr::Ref("JSON_NULL".to_string()),
+        ]));
+
+        // Generic JSON object: { (kv (, kv)*)? }
+        let comma_kv = GrammarExpr::Sequence(vec![
+            GrammarExpr::Literal(b",".to_vec()),
+            GrammarExpr::Ref("WS".to_string()),
+            GrammarExpr::Ref("_json_kv".to_string()),
+        ]);
+
+        self.add_rule("_json_object".to_string(), GrammarExpr::Sequence(vec![
+            GrammarExpr::Literal(b"{".to_vec()),
+            GrammarExpr::Ref("WS".to_string()),
+            GrammarExpr::Optional(Box::new(GrammarExpr::Sequence(vec![
+                GrammarExpr::Ref("_json_kv".to_string()),
+                GrammarExpr::Repeat(Box::new(comma_kv)),
+            ]))),
+            GrammarExpr::Ref("WS".to_string()),
+            GrammarExpr::Literal(b"}".to_vec()),
+        ]));
+
+        // JSON key-value pair
+        self.add_rule("_json_kv".to_string(), GrammarExpr::Sequence(vec![
+            GrammarExpr::Ref("JSON_STRING".to_string()),
+            GrammarExpr::Ref("WS".to_string()),
+            GrammarExpr::Literal(b":".to_vec()),
+            GrammarExpr::Ref("WS".to_string()),
+            GrammarExpr::Ref("_json_value".to_string()),
+        ]));
+
+        // Generic JSON array
+        let comma_val = GrammarExpr::Sequence(vec![
+            GrammarExpr::Literal(b",".to_vec()),
+            GrammarExpr::Ref("WS".to_string()),
+            GrammarExpr::Ref("_json_value".to_string()),
+        ]);
+
+        self.add_rule("_json_array".to_string(), GrammarExpr::Sequence(vec![
+            GrammarExpr::Literal(b"[".to_vec()),
+            GrammarExpr::Ref("WS".to_string()),
+            GrammarExpr::Optional(Box::new(GrammarExpr::Sequence(vec![
+                GrammarExpr::Ref("_json_value".to_string()),
+                GrammarExpr::Repeat(Box::new(comma_val)),
+            ]))),
+            GrammarExpr::Ref("WS".to_string()),
+            GrammarExpr::Literal(b"]".to_vec()),
+        ]));
+    }
+}
+
+/// Convert a JSON Schema string to EBNF string.
+pub fn json_schema_to_ebnf(schema_json: &str) -> Result<String, String> {
+    let schema: Value = serde_json::from_str(schema_json)
+        .map_err(|e| format!("Failed to parse JSON schema: {}", e))?;
+    
+    let (rules, root_rule) = JsonSchemaConverter::new(schema).convert()?;
+    
+    // Convert rules to EBNF format
+    let mut ebnf = String::new();
+    for (name, expr) in &rules {
+        if name == &root_rule {
+            // Put root rule first
+            ebnf = format!("{} ::= {} ;\n", name, grammar_expr_to_ebnf(expr)) + &ebnf;
+        } else {
+            ebnf.push_str(&format!("{} ::= {} ;\n", name, grammar_expr_to_ebnf(expr)));
+        }
+    }
+    
+    Ok(ebnf)
+}
+
+/// Convert a JSON Schema to a Vec<(String, GrammarExpr)>.
+pub fn json_schema_to_grammar_exprs(schema_json: &str) -> Result<Vec<(String, GrammarExpr)>, String> {
+    let schema: Value = serde_json::from_str(schema_json)
+        .map_err(|e| format!("Failed to parse JSON schema: {}", e))?;
+    
+    let (rules, _root_rule) = JsonSchemaConverter::new(schema).convert()?;
+    Ok(rules)
+}
+
+/// Convert a GrammarExpr to EBNF string.
+fn grammar_expr_to_ebnf(expr: &GrammarExpr) -> String {
+    match expr {
+        GrammarExpr::Ref(name) => name.clone(),
+        GrammarExpr::Literal(bytes) => {
+            let s = String::from_utf8_lossy(bytes);
+            format!("'{}'", s.replace('\\', "\\\\").replace('\'', "\\'"))
+        }
+        GrammarExpr::Sequence(exprs) => {
+            let parts: Vec<String> = exprs.iter().map(grammar_expr_to_ebnf).collect();
+            parts.join(" ")
+        }
+        GrammarExpr::Choice(exprs) => {
+            let parts: Vec<String> = exprs.iter().map(|e| grammar_expr_to_ebnf(e)).collect();
+            format!("( {} )", parts.join(" | "))
+        }
+        GrammarExpr::Optional(e) => {
+            format!("( {} )?", grammar_expr_to_ebnf(e))
+        }
+        GrammarExpr::Repeat(e) => {
+            format!("( {} )*", grammar_expr_to_ebnf(e))
+        }
+        GrammarExpr::CharClass(s) => s.clone(),
+        GrammarExpr::AnyChar => ".".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_simple_object() {
+        let schema = r#"{
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "age": {"type": "integer"}
+            }
+        }"#;
+        
+        let ebnf = json_schema_to_ebnf(schema).unwrap();
+        assert!(ebnf.contains("root"));
+        assert!(ebnf.contains("JSON_STRING"));
+        assert!(ebnf.contains("JSON_INTEGER"));
+    }
+
+    #[test]
+    fn test_any_of() {
+        let schema = r#"{
+            "anyOf": [
+                {"type": "string"},
+                {"type": "number"}
+            ]
+        }"#;
+        
+        let rules = json_schema_to_grammar_exprs(schema).unwrap();
+        // Should have root rule and alternatives
+        assert!(!rules.is_empty());
+    }
+
+    #[test]
+    fn test_enum() {
+        let schema = r#"{
+            "enum": ["red", "green", "blue"]
+        }"#;
+        
+        let ebnf = json_schema_to_ebnf(schema).unwrap();
+        assert!(ebnf.contains("\"red\""));
+        assert!(ebnf.contains("\"green\""));
+        assert!(ebnf.contains("\"blue\""));
+    }
+
+    #[test]
+    fn test_ref() {
+        let schema = r##"{
+            "$defs": {
+                "person": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"}
+                    }
+                }
+            },
+            "type": "array",
+            "items": {"$ref": "#/$defs/person"}
+        }"##;
+        
+        let rules = json_schema_to_grammar_exprs(schema).unwrap();
+        assert!(!rules.is_empty());
+    }
+}

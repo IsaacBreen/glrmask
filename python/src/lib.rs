@@ -25,6 +25,7 @@ use sep1::interface::{
     r#ref as grammar_ref, repeat as grammar_repeat, sequence as grammar_sequence, CompiledGrammar,
     GrammarDefinition, GrammarExpr,
 };
+use sep1::json_schema::{json_schema_to_ebnf, json_schema_to_grammar_exprs, JsonSchemaConverter};
 use sep1::json_serialization::{JSONConvertible, JSONNode};
 use sep1::tokenizer::LLMTokenID;
 use std::collections::hash_map::DefaultHasher;
@@ -1496,6 +1497,37 @@ impl PyIncrementalParser {
     }
 }
 
+/// Convert a JSON Schema (as JSON string) to EBNF grammar string.
+#[pyfunction]
+fn json_schema_to_ebnf_py(schema_json: &str) -> PyResult<String> {
+    json_schema_to_ebnf(schema_json)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))
+}
+
+/// Convert a JSON Schema (as JSON string) to a list of (name, GrammarExpr) pairs.
+#[pyfunction]
+fn json_schema_to_grammar_exprs_py(schema_json: &str) -> PyResult<Vec<(String, PyGrammarExpr)>> {
+    let rules = json_schema_to_grammar_exprs(schema_json)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+    
+    Ok(rules.into_iter()
+        .map(|(name, expr)| (name, PyGrammarExpr { inner: expr }))
+        .collect())
+}
+
+/// Create a GrammarDefinition from a JSON Schema (as JSON string).
+#[pyfunction]
+fn grammar_definition_from_json_schema(schema_json: &str) -> PyResult<PyGrammarDefinition> {
+    // First convert to EBNF, then parse it
+    let ebnf = json_schema_to_ebnf(schema_json)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+    
+    let grammar_def = GrammarDefinition::from_ebnf(&ebnf)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+    
+    Ok(PyGrammarDefinition { inner: grammar_def })
+}
+
 #[pymodule]
 fn _sep1(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyGrammarExpr>()?;
@@ -1528,6 +1560,10 @@ fn _sep1(m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     m.add_function(wrap_pyfunction!(gss_fuse_predecessors, m)?)?;
     m.add_function(wrap_pyfunction!(gss_popn_collect, m)?)?;
+    // JSON Schema conversion functions
+    m.add_function(wrap_pyfunction!(json_schema_to_ebnf_py, m)?)?;
+    m.add_function(wrap_pyfunction!(json_schema_to_grammar_exprs_py, m)?)?;
+    m.add_function(wrap_pyfunction!(grammar_definition_from_json_schema, m)?)?;
     m.add_class::<PyIncrementalParser>()?;
     Ok(())
 }
