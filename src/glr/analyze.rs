@@ -804,11 +804,22 @@ pub fn resolve_right_recursion(
         // Find right-recursive non-terminals
         // Skip NTs that:
         // 1. Are already right-recursion helpers (end with _rr or contain _rr_)
-        // 2. Have epsilon productions from the original grammar (they represent optional
-        //    constructs like A?, not unbounded repetition like A*)
+        // 2. Have epsilon productions AND no direct right-recursion 
+        //    (these are pure optional wrappers like A? -> A | ε)
+        // NTs with epsilon that ALSO have direct right-recursion (like A -> a A | ε)
+        // still need transformation to eliminate the unbounded a* repetition.
         let nts_with_epsilon: BTreeSet<_> = productions
             .iter()
             .filter(|p| p.rhs.is_empty())
+            .map(|p| p.lhs.clone())
+            .collect();
+        
+        // Check if an NT has DIRECT right-recursion (ends with itself)
+        let nts_with_direct_right_recursion: BTreeSet<_> = productions
+            .iter()
+            .filter(|p| {
+                matches!(p.rhs.last(), Some(Symbol::NonTerminal(nt)) if nt == &p.lhs)
+            })
             .map(|p| p.lhs.clone())
             .collect();
         
@@ -816,7 +827,10 @@ pub fn resolve_right_recursion(
             .iter()
             .filter(|(nt, reachable)| reachable.contains(*nt))
             .filter(|(nt, _)| !nt.0.ends_with("_rr") && !nt.0.contains("_rr_"))
-            .filter(|(nt, _)| !nts_with_epsilon.contains(*nt))
+            // Only skip epsilon NTs that don't have direct right-recursion
+            .filter(|(nt, _)| {
+                !nts_with_epsilon.contains(*nt) || nts_with_direct_right_recursion.contains(*nt)
+            })
             .map(|(nt, _)| nt.clone())
             .collect();
 
@@ -1086,12 +1100,36 @@ pub fn resolve_right_recursion(
                     // Inline unit productions involving right-recursive NTs to expose direct recursion
 
                     // A unit production is A → B where B is a single non-terminal
+                    // Also include "bridge" unit productions: B → A where:
+                    // - B is nullable (has epsilon production)
+                    // - B appears at the rightmost position in some A → ... B
+                    // - A is in right_recursive_nts
+                    
+                    // First, find bridge NTs: nullable NTs that connect right-recursive NTs to themselves
+                    let bridge_nts: BTreeSet<_> = productions
+                        .iter()
+                        .filter(|p| {
+                            // p is a unit production B → A
+                            p.rhs.len() == 1
+                            && matches!(p.rhs.first(), Some(Symbol::NonTerminal(nt)) if right_recursive_nts.contains(nt))
+                            && nts_with_epsilon.contains(&p.lhs)
+                        })
+                        .filter(|p| {
+                            // Check if B appears at rightmost position of some A → ... B
+                            productions.iter().any(|q| {
+                                right_recursive_nts.contains(&q.lhs)
+                                && matches!(q.rhs.last(), Some(Symbol::NonTerminal(nt)) if nt == &p.lhs)
+                            })
+                        })
+                        .map(|p| p.lhs.clone())
+                        .collect();
+                    
                     let unit_prods: Vec<_> = productions
                         .iter()
                         .filter(|p| {
                             p.rhs.len() == 1
                             && matches!(p.rhs.first(), Some(Symbol::NonTerminal(nt)) if right_recursive_nts.contains(nt))
-                            && right_recursive_nts.contains(&p.lhs)
+                            && (right_recursive_nts.contains(&p.lhs) || bridge_nts.contains(&p.lhs))
                         })
                         .cloned()
                         .collect();
@@ -1160,10 +1198,11 @@ pub fn resolve_right_recursion(
 
                         for prod in productions.iter() {
                             // Check if this is a unit production A → B where B is right-recursive
+                            // or a bridge unit production (bridge_nt → A where bridge_nt is nullable)
                             if prod.rhs.len() == 1 {
                                 if let Some(Symbol::NonTerminal(nt)) = prod.rhs.first() {
                                     if right_recursive_nts.contains(nt)
-                                        && right_recursive_nts.contains(&prod.lhs)
+                                        && (right_recursive_nts.contains(&prod.lhs) || bridge_nts.contains(&prod.lhs))
                                     {
                                         // Drop direct self-recursion A -> A
                                         if nt == &prod.lhs {
@@ -1346,18 +1385,21 @@ fn resolve_ternary_right_recursion(
             .cloned()
             .partition(is_direct_right_recursive_allowing_prefix_self);
 
-        // Transform recursive rules: A -> α A becomes A -> α A'
+        // Transform recursive rules: A -> α A becomes A -> A' α (left-recursive in original NT)
+        // This is the correct right-to-left transformation
         for rec_rule in &recursive_rules {
-            // Strip the trailing LHS and append helper
-            let mut new_rhs = rec_rule.rhs[..rec_rule.rhs.len() - 1].to_vec();
+            // Strip the trailing LHS and prepend helper
+            let prefix = &rec_rule.rhs[..rec_rule.rhs.len() - 1];
+            let mut new_rhs = Vec::with_capacity(prefix.len() + 1);
             new_rhs.push(Symbol::NonTerminal(helper_nt.clone()));
+            new_rhs.extend_from_slice(prefix);
             new_productions.push(Production {
                 lhs: rec_rule.lhs.clone(),
                 rhs: new_rhs,
             });
 
             // For the helper: A' -> (the trailing part after stripping prefix up to last A before the tail A)
-            // For A -> α β A, create A' -> β A' | ε
+            // For A -> α β A, create A' -> A' β | ε (LEFT-recursive helper)
             // We extract the "β" part (everything between the last non-tail A and the tail A)
             // But if there's no middle A, just use A' -> ε
             let rhs_without_tail = &rec_rule.rhs[..rec_rule.rhs.len() - 1];
@@ -1370,9 +1412,10 @@ fn resolve_ternary_right_recursion(
                 // Extract suffix after middle LHS: β
                 let beta = &rhs_without_tail[pos + 1..];
                 if !beta.is_empty() {
-                    // A' -> β A'
-                    let mut helper_rhs = beta.to_vec();
+                    // A' -> A' β (LEFT-recursive)
+                    let mut helper_rhs = Vec::with_capacity(beta.len() + 1);
                     helper_rhs.push(Symbol::NonTerminal(helper_nt.clone()));
+                    helper_rhs.extend_from_slice(beta);
                     new_productions.push(Production {
                         lhs: helper_nt.clone(),
                         rhs: helper_rhs,
@@ -1381,10 +1424,11 @@ fn resolve_ternary_right_recursion(
             }
         }
 
-        // Non-recursive rules: A -> γ becomes A -> γ A'
+        // Non-recursive rules: A -> γ becomes A -> A' γ (helper BEFORE base)
         for non_rec_rule in &non_recursive_rules {
-            let mut new_rhs = non_rec_rule.rhs.clone();
+            let mut new_rhs = Vec::with_capacity(non_rec_rule.rhs.len() + 1);
             new_rhs.push(Symbol::NonTerminal(helper_nt.clone()));
+            new_rhs.extend_from_slice(&non_rec_rule.rhs);
             new_productions.push(Production {
                 lhs: non_rec_rule.lhs.clone(),
                 rhs: new_rhs,
@@ -1416,12 +1460,20 @@ pub fn resolve_direct_right_recursion(
 
     // Identify all non-terminals that have right-recursive rules (considering nullable suffix).
     // Skip NTs that are already right-recursion helpers (those with _rr suffix).
-    // Also skip NTs that have epsilon productions (they represent optional constructs,
-    // not unbounded repetition).
+    // NTs with epsilon AND direct right-recursion should still be transformed.
     let nts_with_epsilon: BTreeSet<_> = prods_by_lhs
         .iter()
         .filter(|(_, prods)| prods.iter().any(|p| p.rhs.is_empty()))
         .map(|(nt, _)| nt.clone())
+        .collect();
+    
+    // Check if an NT has DIRECT right-recursion (ends with itself)
+    let nts_with_direct_right_recursion: BTreeSet<_> = productions
+        .iter()
+        .filter(|p| {
+            matches!(p.rhs.last(), Some(Symbol::NonTerminal(nt)) if nt == &p.lhs)
+        })
+        .map(|p| p.lhs.clone())
         .collect();
     
     let mut recursive_nts = BTreeSet::new();
@@ -1430,8 +1482,8 @@ pub fn resolve_direct_right_recursion(
         if nt.0.ends_with("_rr") || nt.0.contains("_rr_") {
             continue;
         }
-        // Skip NTs with epsilon productions (optional constructs)
-        if nts_with_epsilon.contains(nt) {
+        // Only skip epsilon NTs that don't have direct right-recursion
+        if nts_with_epsilon.contains(nt) && !nts_with_direct_right_recursion.contains(nt) {
             continue;
         }
         // Check for simple direct recursion OR recursion with nullable suffix
