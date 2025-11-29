@@ -456,7 +456,7 @@ impl DWA {
         if n == 0 {
             return;
         }
-        let mut class_to_new: HashMap<usize, StateID> = HashMap::new();
+        let mut class_to_new: FxHashMap<usize, StateID> = FxHashMap::default();
         let mut builders: Vec<DwaStateBuilder> = Vec::new();
 
         for s in 0..n {
@@ -821,7 +821,7 @@ fn minimize_nwa_partition(states: &NWAStates) -> Partition {
 
     let mut partition = Partition::new(n);
     loop {
-        let mut sig_to_class: HashMap<NwaStateSignature, usize> = HashMap::new();
+        let mut sig_to_class: FxHashMap<NwaStateSignature, usize> = FxHashMap::default();
         let mut new_classes = vec![0; n];
         let mut next_class = 0;
 
@@ -1228,7 +1228,7 @@ impl NWA {
             return;
         }
 
-        let mut class_to_new: HashMap<usize, NWAStateID> = HashMap::new();
+        let mut class_to_new: FxHashMap<usize, NWAStateID> = FxHashMap::default();
         let mut builders: Vec<NwaStateBuilder> = Vec::new();
 
         for s in 0..n {
