@@ -3,6 +3,7 @@ use crate::precompute4::weighted_automata::common::Label;
 use crate::precompute4::weighted_automata::{DWA, NWA, NWAStateID, NWAStates, Weight};
 use crate::profiler::PROGRESS_BAR_ENABLED;
 use indicatif::{ProgressBar, ProgressStyle};
+use rustc_hash::FxHashMap;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Instant;
 
@@ -281,9 +282,9 @@ fn compute_cancellations(states: &NWAStates, source_states_filter: &HashSet<NWAS
 fn compute_cancellations_range(states: &NWAStates, range: std::ops::Range<NWAStateID>) -> Vec<(NWAStateID, NWAStateID, Weight)> {
     let n = states.len();
     
-    let mut queries: HashMap<NWAStateID, HashMap<QueryKey, Weight>> = HashMap::new();
+    let mut queries: FxHashMap<NWAStateID, FxHashMap<QueryKey, Weight>> = FxHashMap::default();
     let mut worklist: VecDeque<(NWAStateID, NWAStateID, Code, Weight)> = VecDeque::new();
-    let mut new_eps_from: HashMap<NWAStateID, HashMap<NWAStateID, Weight>> = HashMap::new();
+    let mut new_eps_from: FxHashMap<NWAStateID, FxHashMap<NWAStateID, Weight>> = FxHashMap::default();
 
     // Seed from negative transitions in the range
     for a in range.clone() {
@@ -569,10 +570,10 @@ fn compute_finality_fixpoint(
 fn compute_finality_fixpoint_range(
     states: &NWAStates,
     range: std::ops::Range<NWAStateID>,
-) -> HashMap<NWAStateID, Weight> {
+) -> FxHashMap<NWAStateID, Weight> {
     let n = states.len();
     if n == 0 || range.is_empty() {
-        return HashMap::new();
+        return FxHashMap::default();
     }
 
     #[derive(Clone, Copy)]
@@ -584,7 +585,7 @@ fn compute_finality_fixpoint_range(
     let mut visited = vec![false; n];
     let mut queue: VecDeque<NWAStateID> = VecDeque::new();
     let mut reachable_states: Vec<NWAStateID> = Vec::new();
-    let mut preds: HashMap<NWAStateID, Vec<PredEdge>> = HashMap::new();
+    let mut preds: FxHashMap<NWAStateID, Vec<PredEdge>> = FxHashMap::default();
 
     // Seed BFS from the range
     for a in range.clone() {
@@ -644,7 +645,7 @@ fn compute_finality_fixpoint_range(
         }
     }
 
-    let mut future_final_all: HashMap<NWAStateID, Weight> = HashMap::new();
+    let mut future_final_all: FxHashMap<NWAStateID, Weight> = FxHashMap::default();
     let mut worklist: VecDeque<NWAStateID> = VecDeque::new();
 
     for &s in &reachable_states {
@@ -702,7 +703,7 @@ fn compute_finality_fixpoint_range(
         }
     }
 
-    let mut result: HashMap<NWAStateID, Weight> = HashMap::new();
+    let mut result: FxHashMap<NWAStateID, Weight> = FxHashMap::default();
     for a in range {
         if a >= n {
             continue;
