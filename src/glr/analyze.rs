@@ -802,10 +802,21 @@ pub fn resolve_right_recursion(
         }
 
         // Find right-recursive non-terminals
+        // Skip NTs that:
+        // 1. Are already right-recursion helpers (end with _rr or contain _rr_)
+        // 2. Have epsilon productions from the original grammar (they represent optional
+        //    constructs like A?, not unbounded repetition like A*)
+        let nts_with_epsilon: BTreeSet<_> = productions
+            .iter()
+            .filter(|p| p.rhs.is_empty())
+            .map(|p| p.lhs.clone())
+            .collect();
+        
         let right_recursive_nts: BTreeSet<_> = right_reachable
             .iter()
             .filter(|(nt, reachable)| reachable.contains(*nt))
             .filter(|(nt, _)| !nt.0.ends_with("_rr") && !nt.0.contains("_rr_"))
+            .filter(|(nt, _)| !nts_with_epsilon.contains(*nt))
             .map(|(nt, _)| nt.clone())
             .collect();
 
@@ -830,11 +841,18 @@ pub fn resolve_right_recursion(
         }
 
         // Check if any are directly right-recursive (can be handled by resolve_direct_right_recursion)
+        // This includes both simple direct recursion (A -> α A) and 
+        // recursion with nullable suffix (A -> α A B where B is nullable)
         let has_direct = productions.iter().any(|p| {
-            let is_direct =
-                right_recursive_nts.contains(&p.lhs) && is_simple_direct_right_recursive(p);
+            if !right_recursive_nts.contains(&p.lhs) {
+                return false;
+            }
+            let is_simple = is_simple_direct_right_recursive(p);
+            let is_nullable_suffix = is_right_recursive_with_nullable_suffix(p, &nullable);
+            let is_direct = is_simple || is_nullable_suffix;
             if is_direct {
-                crate::debug!(5, "Found direct right recursion for {}", p.lhs.0);
+                crate::debug!(5, "Found direct right recursion for {} (simple={}, nullable_suffix={})", 
+                    p.lhs.0, is_simple, is_nullable_suffix);
             }
             is_direct
         });
@@ -1188,6 +1206,81 @@ fn is_simple_direct_right_recursive(prod: &Production) -> bool {
     }
 }
 
+/// Check if production is right-recursive considering nullable suffixes.
+/// E.g., A -> ... A B where B is nullable is effectively A -> ... A
+fn is_right_recursive_with_nullable_suffix(prod: &Production, nullable: &BTreeSet<NonTerminal>) -> bool {
+    if prod.rhs.len() < 2 {
+        return false;
+    }
+    
+    // Find the rightmost non-terminal that equals LHS, considering nullable suffix
+    for (i, sym) in prod.rhs.iter().enumerate().rev() {
+        match sym {
+            Symbol::NonTerminal(nt) if nt == &prod.lhs => {
+                // Check that everything after this position is nullable
+                let suffix = &prod.rhs[i + 1..];
+                let suffix_all_nullable = suffix.iter().all(|s| {
+                    matches!(s, Symbol::NonTerminal(n) if nullable.contains(n))
+                });
+                if suffix_all_nullable {
+                    // Check that the prefix doesn't contain LHS (simple case)
+                    let prefix = &prod.rhs[..i];
+                    return !prefix.contains(&Symbol::NonTerminal(prod.lhs.clone()));
+                }
+                return false;
+            }
+            Symbol::NonTerminal(nt) if !nullable.contains(nt) => {
+                // Hit a non-nullable NT that's not LHS, stop looking
+                return false;
+            }
+            Symbol::Terminal(_) => {
+                // Hit a terminal, stop looking
+                return false;
+            }
+            _ => {
+                // Nullable NT, continue looking left
+            }
+        }
+    }
+    false
+}
+
+/// Find the position of LHS in RHS, considering nullable suffix.
+/// Returns the rightmost position where LHS appears with only nullable symbols after it.
+fn find_lhs_position_with_nullable_suffix(
+    rhs: &[Symbol],
+    lhs: &NonTerminal,
+    nullable: &BTreeSet<NonTerminal>,
+) -> Option<usize> {
+    for (i, sym) in rhs.iter().enumerate().rev() {
+        match sym {
+            Symbol::NonTerminal(nt) if nt == lhs => {
+                // Check that everything after this position is nullable
+                let suffix = &rhs[i + 1..];
+                let suffix_all_nullable = suffix.iter().all(|s| {
+                    matches!(s, Symbol::NonTerminal(n) if nullable.contains(n))
+                });
+                if suffix_all_nullable {
+                    return Some(i);
+                }
+                // Not a valid position (non-nullable suffix), keep looking left
+            }
+            Symbol::NonTerminal(nt) if !nullable.contains(nt) => {
+                // Hit a non-nullable NT that's not LHS, stop looking
+                return None;
+            }
+            Symbol::Terminal(_) => {
+                // Hit a terminal, stop looking
+                return None;
+            }
+            _ => {
+                // Nullable NT that's not LHS, continue looking left
+            }
+        }
+    }
+    None
+}
+
 /// Check if production ends with LHS, allowing LHS to appear in prefix (for ternary patterns)
 fn is_direct_right_recursive_allowing_prefix_self(prod: &Production) -> bool {
     if prod.rhs.len() < 2 {
@@ -1312,21 +1405,41 @@ pub fn resolve_direct_right_recursion(
     productions: &mut Vec<Production>,
     mut new_name_generator: impl FnMut(&str) -> String,
 ) {
+    // Compute nullable set first
+    let nullable = compute_nullable_nonterminals(productions);
+    
     // Group productions by LHS to easily access all rules for a given non-terminal.
     let mut prods_by_lhs: BTreeMap<NonTerminal, Vec<Production>> = BTreeMap::new();
     for prod in productions.iter().cloned() {
         prods_by_lhs.entry(prod.lhs.clone()).or_default().push(prod);
     }
 
-    // Identify all non-terminals that have simple direct right-recursive rules.
+    // Identify all non-terminals that have right-recursive rules (considering nullable suffix).
     // Skip NTs that are already right-recursion helpers (those with _rr suffix).
+    // Also skip NTs that have epsilon productions (they represent optional constructs,
+    // not unbounded repetition).
+    let nts_with_epsilon: BTreeSet<_> = prods_by_lhs
+        .iter()
+        .filter(|(_, prods)| prods.iter().any(|p| p.rhs.is_empty()))
+        .map(|(nt, _)| nt.clone())
+        .collect();
+    
     let mut recursive_nts = BTreeSet::new();
     for (nt, prods_for_nt) in &prods_by_lhs {
         // Skip helper NTs that were created by previous right-recursion elimination
         if nt.0.ends_with("_rr") || nt.0.contains("_rr_") {
             continue;
         }
-        if prods_for_nt.iter().any(is_simple_direct_right_recursive) {
+        // Skip NTs with epsilon productions (optional constructs)
+        if nts_with_epsilon.contains(nt) {
+            continue;
+        }
+        // Check for simple direct recursion OR recursion with nullable suffix
+        let has_simple = prods_for_nt.iter().any(is_simple_direct_right_recursive);
+        let has_nullable_suffix = prods_for_nt.iter().any(|p| is_right_recursive_with_nullable_suffix(p, &nullable));
+        
+        if has_simple || has_nullable_suffix {
+            crate::debug!(7, "NT '{}' is right-recursive (simple={}, nullable_suffix={})", nt.0, has_simple, has_nullable_suffix);
             recursive_nts.insert(nt.clone());
         }
     }
@@ -1349,10 +1462,14 @@ pub fn resolve_direct_right_recursion(
         processed_recursive_nts.insert(lhs.clone());
 
         let prods_for_nt = prods_by_lhs.get(lhs).expect("LHS group missing");
+        
+        // Partition into recursive (ends with LHS, considering nullable suffix) and non-recursive
         let (recursive_rules, other_rules): (Vec<_>, Vec<_>) = prods_for_nt
             .iter()
             .cloned()
-            .partition(is_simple_direct_right_recursive);
+            .partition(|p| {
+                is_simple_direct_right_recursive(p) || is_right_recursive_with_nullable_suffix(p, &nullable)
+            });
 
         // Check if we already have a helper NT for this LHS (from a previous resolution)
         // Look for a rule A -> ... A_rr
@@ -1410,23 +1527,53 @@ pub fn resolve_direct_right_recursion(
             new_productions.push(new_prod);
         }
 
-        // A' -> αᵢ A'
+        // A' -> αᵢ suffix A'
+        // For each recursive rule, find where LHS appears (considering nullable suffix)
+        // and create helper production with prefix + suffix + helper
         for rec_rule in &recursive_rules {
-            let alpha = &rec_rule.rhs[..rec_rule.rhs.len() - 1];
-            let mut new_rhs = Vec::with_capacity(alpha.len() + 1);
-            new_rhs.extend_from_slice(alpha);
-            new_rhs.push(Symbol::NonTerminal(new_nt.clone()));
-            let new_prod = Production {
-                lhs: new_nt.clone(),
-                rhs: new_rhs,
-            };
-            crate::debug!(
-                7,
-                "  Transforming recursive rule '{}' -> '{}'",
-                rec_rule,
-                new_prod
-            );
-            new_productions.push(new_prod);
+            // Find the position of LHS in the RHS (the rightmost occurrence considering nullable suffix)
+            let lhs_pos = find_lhs_position_with_nullable_suffix(&rec_rule.rhs, lhs, &nullable);
+            
+            if let Some(pos) = lhs_pos {
+                // Split: [prefix] [LHS at pos] [nullable suffix]
+                let prefix = &rec_rule.rhs[..pos];
+                let suffix = &rec_rule.rhs[pos + 1..];
+                
+                // Create A' -> prefix suffix A'
+                let mut new_rhs = Vec::with_capacity(prefix.len() + suffix.len() + 1);
+                new_rhs.extend_from_slice(prefix);
+                new_rhs.extend_from_slice(suffix);
+                new_rhs.push(Symbol::NonTerminal(new_nt.clone()));
+                
+                let new_prod = Production {
+                    lhs: new_nt.clone(),
+                    rhs: new_rhs,
+                };
+                crate::debug!(
+                    7,
+                    "  Transforming recursive rule '{}' -> '{}'",
+                    rec_rule,
+                    new_prod
+                );
+                new_productions.push(new_prod);
+            } else {
+                // Fallback: shouldn't happen if is_right_recursive_with_nullable_suffix is correct
+                let alpha = &rec_rule.rhs[..rec_rule.rhs.len() - 1];
+                let mut new_rhs = Vec::with_capacity(alpha.len() + 1);
+                new_rhs.extend_from_slice(alpha);
+                new_rhs.push(Symbol::NonTerminal(new_nt.clone()));
+                let new_prod = Production {
+                    lhs: new_nt.clone(),
+                    rhs: new_rhs,
+                };
+                crate::debug!(
+                    7,
+                    "  Transforming recursive rule (fallback) '{}' -> '{}'",
+                    rec_rule,
+                    new_prod
+                );
+                new_productions.push(new_prod);
+            }
         }
 
         // A' -> ε
