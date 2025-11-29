@@ -127,6 +127,7 @@ fn test_x_semicolon_x() {
     println!("\n--- After committing 'x' ---");
     state.commit(LLMTokenID(0));
     let mask1 = state.get_mask();
+    state.print_gss();
     println!("Mask after x: {:?}", mask1);
     
     // After x, semicolon should be allowed (for x;)
