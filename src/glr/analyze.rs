@@ -189,6 +189,177 @@ pub fn check_for_left_nullable_left_recursion(productions: &[Production]) -> Vec
     errors
 }
 
+/// Checks for indirect hidden left recursion: A -> B α where B is nullable and α can derive to A.
+/// This is more general than check_for_left_nullable_left_recursion which only checks direct appearances.
+pub fn check_for_indirect_hidden_left_recursion(productions: &[Production]) -> Vec<String> {
+    let nullable_nonterminals = compute_nullable_nonterminals(productions);
+    
+    // Build a graph of what each NT can derive to (left-of-nullable reachability)
+    // A "left-reaches" B if A has a production A -> N1 N2 ... B ... where all Ni are nullable
+    let mut left_reach_graph: BTreeMap<NonTerminal, BTreeSet<NonTerminal>> = BTreeMap::new();
+    
+    for prod in productions {
+        // Find the first non-nullable symbol or terminal
+        for symbol in &prod.rhs {
+            match symbol {
+                Symbol::NonTerminal(nt) => {
+                    left_reach_graph
+                        .entry(prod.lhs.clone())
+                        .or_default()
+                        .insert(nt.clone());
+                    if !nullable_nonterminals.contains(nt) {
+                        break;
+                    }
+                }
+                Symbol::Terminal(_) => break,
+            }
+        }
+    }
+    
+    // Compute transitive closure of left-reach
+    let all_nts: BTreeSet<_> = productions.iter().map(|p| p.lhs.clone()).collect();
+    let mut left_reach_transitive: BTreeMap<NonTerminal, BTreeSet<NonTerminal>> = left_reach_graph.clone();
+    
+    loop {
+        let mut changed = false;
+        for nt in &all_nts {
+            let reachable = left_reach_transitive.entry(nt.clone()).or_default().clone();
+            for reach_nt in &reachable {
+                if let Some(further) = left_reach_transitive.get(reach_nt).cloned() {
+                    let entry = left_reach_transitive.entry(nt.clone()).or_default();
+                    for f in further {
+                        if entry.insert(f) {
+                            changed = true;
+                        }
+                    }
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    
+    // Now check: for each production A -> B α where B is nullable,
+    // does α derive to A (via left-reach)?
+    let mut errors = Vec::new();
+    
+    for prod in productions {
+        let lhs = &prod.lhs;
+        
+        // Find position after all leading nullable NTs
+        let mut first_non_nullable_pos = 0;
+        for (i, symbol) in prod.rhs.iter().enumerate() {
+            match symbol {
+                Symbol::NonTerminal(nt) => {
+                    if nullable_nonterminals.contains(nt) {
+                        first_non_nullable_pos = i + 1;
+                    } else {
+                        break;
+                    }
+                }
+                Symbol::Terminal(_) => break,
+            }
+        }
+        
+        // Check if anything after the nullable prefix can reach back to lhs
+        for i in first_non_nullable_pos..prod.rhs.len() {
+            if let Symbol::NonTerminal(nt) = &prod.rhs[i] {
+                if let Some(reachable) = left_reach_transitive.get(nt) {
+                    if reachable.contains(lhs) || nt == lhs {
+                        let prefix: Vec<_> = prod.rhs[..first_non_nullable_pos].iter().collect();
+                        errors.push(format!(
+                            "Indirect hidden left recursion: '{}' can reach '{}' via '{}' after nullable prefix {:?}",
+                            lhs.0, lhs.0, nt.0, prefix
+                        ));
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    
+    errors
+}
+
+/// Checks for any remaining right recursion (direct or indirect) in the grammar.
+/// Right recursion is when A =>* α A for any α (A can derive to something ending with A).
+pub fn check_for_right_recursion(productions: &[Production]) -> Vec<String> {
+    let nullable_nonterminals = compute_nullable_nonterminals(productions);
+    
+    // Build right-reachability graph: A -> B if A has a production ending with B (after nullable suffix)
+    let right_graph = build_right_reachability_graph(productions, &nullable_nonterminals);
+    
+    // Compute transitive closure
+    let all_nts: BTreeSet<_> = productions.iter().map(|p| p.lhs.clone()).collect();
+    let mut right_reach_transitive = right_graph.clone();
+    
+    loop {
+        let mut changed = false;
+        for nt in &all_nts {
+            let reachable = right_reach_transitive.entry(nt.clone()).or_default().clone();
+            for reach_nt in &reachable {
+                if let Some(further) = right_reach_transitive.get(reach_nt).cloned() {
+                    let entry = right_reach_transitive.entry(nt.clone()).or_default();
+                    for f in further {
+                        if entry.insert(f) {
+                            changed = true;
+                        }
+                    }
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    
+    // Check for cycles (including self-loops)
+    let mut errors = Vec::new();
+    for (nt, reachable) in &right_reach_transitive {
+        if reachable.contains(nt) {
+            // Find the actual cycle path
+            let mut path = vec![nt.clone()];
+            let mut current = nt;
+            for _ in 0..100 {  // limit iterations
+                if let Some(nexts) = right_graph.get(current) {
+                    // Find next step towards the cycle
+                    let next = nexts.iter()
+                        .find(|n| {
+                            if *n == nt {
+                                true
+                            } else if let Some(r) = right_reach_transitive.get(*n) {
+                                r.contains(nt)
+                            } else {
+                                false
+                            }
+                        });
+                    if let Some(n) = next {
+                        if n == nt {
+                            break;
+                        }
+                        path.push(n.clone());
+                        current = n;
+                    } else {
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            }
+            path.push(nt.clone());
+            
+            let names: Vec<_> = path.iter().map(|n| n.0.as_str()).collect();
+            errors.push(format!(
+                "Right recursion detected: {}",
+                names.join(" -> ")
+            ));
+        }
+    }
+    
+    errors
+}
+
 /// Computes the set of productive non-terminals (those that can derive a terminal string).
 fn compute_productive_non_terminals(productions: &[Production]) -> BTreeSet<NonTerminal> {
     let mut productive_nts = BTreeSet::new();
@@ -594,27 +765,36 @@ pub fn create_unique_name_generator(
 /// Right recursion (direct or indirect) is when A =>* α A for any α.
 /// For example: A -> ... B, B -> ... A creates indirect right recursion.
 ///
-/// The transformation converts right recursion to left recursion, which GLR parsers handle well.
+/// The transformation uses inlining to convert indirect right recursion to direct,
+/// then relies on resolve_direct_right_recursion to handle the direct case.
 pub fn resolve_indirect_right_recursion(
     productions: &mut Vec<Production>,
-    new_name_generator: &mut impl FnMut(&str) -> String,
+    _new_name_generator: &mut impl FnMut(&str) -> String,
 ) {
-    // Iterate until no more cycles are found
+    // Track iterations to prevent infinite loops
+    let max_iterations = 100;
+    let mut iteration = 0;
+    
     loop {
+        iteration += 1;
+        if iteration > max_iterations {
+            crate::debug!(2, "Warning: resolve_indirect_right_recursion exceeded {} iterations", max_iterations);
+            break;
+        }
+        
         let nullable_nonterminals = compute_nullable_nonterminals(productions);
         
         // Build right-reachability graph: A -> B if A has a production ending with B
         // (possibly with nullable suffix)
         let right_graph = build_right_reachability_graph(productions, &nullable_nonterminals);
         
-        // Find cycles in the graph
-        if let Some(cycle) = find_right_recursion_cycle(&right_graph) {
-            crate::debug!(5, "Found right recursion cycle: {:?}", cycle.iter().map(|nt| &nt.0).collect::<Vec<_>>());
+        // Find cycles in the graph (excluding self-loops which are direct right recursion)
+        if let Some(cycle) = find_indirect_right_recursion_cycle(&right_graph) {
+            crate::debug!(5, "Found indirect right recursion cycle: {:?}", cycle.iter().map(|nt| &nt.0).collect::<Vec<_>>());
             
-            // Break the cycle by inlining one edge
-            if !break_one_cycle_edge(productions, &cycle, &nullable_nonterminals, new_name_generator) {
-                // If we couldn't break it, we're stuck
-                crate::debug!(3, "Warning: Could not break right recursion cycle");
+            // Break the cycle by inlining
+            if !inline_to_break_cycle(productions, &cycle, &nullable_nonterminals) {
+                crate::debug!(3, "Warning: Could not break indirect right recursion cycle");
                 break;
             }
         } else {
@@ -641,7 +821,8 @@ fn build_right_reachability_graph(
                         Symbol::NonTerminal(n) => nullable_nonterminals.contains(n),
                         Symbol::Terminal(_) => false,
                     });
-                    if suffix_nullable && nt != &prod.lhs {
+                    // Include self-loops (direct right recursion) as well as indirect
+                    if suffix_nullable {
                         right_graph.entry(prod.lhs.clone()).or_default().insert(nt.clone());
                     }
                     if !nullable_nonterminals.contains(nt) {
@@ -656,8 +837,9 @@ fn build_right_reachability_graph(
     right_graph
 }
 
-/// Find any cycle in the right-reachability graph using DFS
-fn find_right_recursion_cycle(
+/// Find a cycle in the right-reachability graph that is NOT a self-loop.
+/// Self-loops are direct right recursion which is handled separately.
+fn find_indirect_right_recursion_cycle(
     graph: &BTreeMap<NonTerminal, BTreeSet<NonTerminal>>,
 ) -> Option<Vec<NonTerminal>> {
     let mut visited = BTreeSet::new();
@@ -677,6 +859,11 @@ fn find_right_recursion_cycle(
         
         if let Some(neighbors) = graph.get(node) {
             for neighbor in neighbors {
+                // Skip self-loops (direct right recursion)
+                if neighbor == node {
+                    continue;
+                }
+                
                 if !visited.contains(neighbor) {
                     if let Some(cycle) = dfs(neighbor, graph, visited, in_stack, path) {
                         return Some(cycle);
@@ -686,7 +873,10 @@ fn find_right_recursion_cycle(
                     let start_idx = path.iter().position(|n| n == neighbor).unwrap();
                     let mut cycle = path[start_idx..].to_vec();
                     cycle.push(neighbor.clone());
-                    return Some(cycle);
+                    // Only return if cycle length > 1 (not a self-loop)
+                    if cycle.len() > 2 {
+                        return Some(cycle);
+                    }
                 }
             }
         }
@@ -707,36 +897,44 @@ fn find_right_recursion_cycle(
     None
 }
 
-/// Break one edge in the cycle by inlining
-fn break_one_cycle_edge(
+/// Inline productions to break a cycle.
+/// Given cycle [A, B, C, A], we inline B's productions into A where A -> ... B.
+/// This makes A directly reference C (or whatever B referenced), shortening the cycle.
+fn inline_to_break_cycle(
     productions: &mut Vec<Production>,
     cycle: &[NonTerminal],
     nullable_nonterminals: &BTreeSet<NonTerminal>,
-    new_name_generator: &mut impl FnMut(&str) -> String,
 ) -> bool {
-    if cycle.len() < 2 {
+    if cycle.len() < 3 {
+        // cycle is [A, B, A] at minimum for indirect recursion
         return false;
     }
     
-    // Find a production that creates an edge in the cycle and transform it
-    // Pick the first edge: cycle[0] -> cycle[1]
+    // Pick the first edge to inline: from_nt -> to_nt
     let from_nt = &cycle[0];
     let to_nt = &cycle[1];
     
+    // Gather all productions for to_nt
+    let to_nt_prods: Vec<_> = productions.iter()
+        .filter(|p| &p.lhs == to_nt)
+        .cloned()
+        .collect();
+    
+    if to_nt_prods.is_empty() {
+        return false;
+    }
+    
     let mut new_productions = Vec::new();
-    let mut removed_any = false;
+    let mut inlined_any = false;
     
-    let prods_to_process: Vec<_> = productions.iter().cloned().collect();
-    productions.clear();
-    
-    for prod in prods_to_process {
+    for prod in productions.iter() {
         if &prod.lhs != from_nt {
-            productions.push(prod);
+            new_productions.push(prod.clone());
             continue;
         }
         
-        // Check if this production ends with to_nt (with nullable suffix)
-        let mut found_to_nt_at = None;
+        // Find if this production ends with to_nt (with nullable suffix)
+        let mut to_nt_position = None;
         for i in (0..prod.rhs.len()).rev() {
             match &prod.rhs[i] {
                 Symbol::NonTerminal(nt) => {
@@ -745,7 +943,7 @@ fn break_one_cycle_edge(
                         Symbol::Terminal(_) => false,
                     });
                     if suffix_nullable && nt == to_nt {
-                        found_to_nt_at = Some(i);
+                        to_nt_position = Some(i);
                         break;
                     }
                     if !nullable_nonterminals.contains(nt) {
@@ -756,59 +954,55 @@ fn break_one_cycle_edge(
             }
         }
         
-        if let Some(pos) = found_to_nt_at {
-            // Transform: from_nt -> prefix to_nt suffix
-            // Into: from_nt -> from_nt_wrapper prefix suffix
-            //       from_nt_wrapper -> to_nt | ε
-            // This converts right recursion to left recursion
-            
+        if let Some(pos) = to_nt_position {
+            // Inline: replace to_nt with each of its productions
             let prefix = &prod.rhs[..pos];
             let suffix = &prod.rhs[pos + 1..];
             
-            let wrapper_nt = NonTerminal(new_name_generator(&from_nt.0));
-            
-            // from_nt -> wrapper_nt prefix suffix
-            let mut new_rhs = vec![Symbol::NonTerminal(wrapper_nt.clone())];
-            new_rhs.extend_from_slice(prefix);
-            new_rhs.extend_from_slice(suffix);
-            
-            productions.push(Production {
-                lhs: from_nt.clone(),
-                rhs: new_rhs,
-            });
-            
-            // wrapper_nt -> to_nt
-            new_productions.push(Production {
-                lhs: wrapper_nt.clone(),
-                rhs: vec![Symbol::NonTerminal(to_nt.clone())],
-            });
-            
-            // wrapper_nt -> ε  
-            new_productions.push(Production {
-                lhs: wrapper_nt,
-                rhs: vec![],
-            });
-            
-            removed_any = true;
-            crate::debug!(5, "Breaking right recursion edge: {} -> {}", from_nt.0, to_nt.0);
+            for to_prod in &to_nt_prods {
+                let mut new_rhs = Vec::new();
+                new_rhs.extend_from_slice(prefix);
+                new_rhs.extend_from_slice(&to_prod.rhs);
+                new_rhs.extend_from_slice(suffix);
+                
+                // Skip self-loop productions (e.g., A -> A)
+                // These occur when inlining creates a unit production back to the same NT
+                if new_rhs.len() == 1 {
+                    if let Symbol::NonTerminal(nt) = &new_rhs[0] {
+                        if nt == from_nt {
+                            crate::debug!(5, "Skipping self-loop production: {} -> {}", from_nt.0, nt.0);
+                            continue;
+                        }
+                    }
+                }
+                
+                new_productions.push(Production {
+                    lhs: from_nt.clone(),
+                    rhs: new_rhs,
+                });
+            }
+            inlined_any = true;
+            crate::debug!(5, "Inlined {} productions from {} into {}", to_nt_prods.len(), to_nt.0, from_nt.0);
         } else {
-            productions.push(prod);
+            new_productions.push(prod.clone());
         }
     }
     
-    productions.extend(new_productions);
-    removed_any
+    if inlined_any {
+        *productions = new_productions;
+    }
+    
+    inlined_any
 }
 
-fn is_simple_direct_right_recursive(prod: &Production) -> bool {
-    if prod.rhs.len() < 2 {
+/// Checks if a production has the LHS appearing at the rightmost position.
+/// This is direct right recursion, regardless of whether the LHS also appears in the prefix.
+fn is_direct_right_recursive(prod: &Production) -> bool {
+    if prod.rhs.is_empty() {
         return false;
     }
     match prod.rhs.last() {
-        Some(Symbol::NonTerminal(nt)) if nt == &prod.lhs => {
-            let prefix = &prod.rhs[..prod.rhs.len() - 1];
-            !prefix.contains(&Symbol::NonTerminal(prod.lhs.clone()))
-        }
+        Some(Symbol::NonTerminal(nt)) => nt == &prod.lhs,
         _ => false,
     }
 }
@@ -826,7 +1020,7 @@ pub fn resolve_direct_right_recursion(
     // Identify all non-terminals that have simple direct right-recursive rules.
     let mut recursive_nts = BTreeSet::new();
     for (nt, prods_for_nt) in &prods_by_lhs {
-        if prods_for_nt.iter().any(is_simple_direct_right_recursive) {
+        if prods_for_nt.iter().any(is_direct_right_recursive) {
             recursive_nts.insert(nt.clone());
         }
     }
@@ -850,7 +1044,7 @@ pub fn resolve_direct_right_recursion(
 
         let prods_for_nt = prods_by_lhs.get(lhs).expect("LHS group missing");
         let (recursive_rules, other_rules): (Vec<_>, Vec<_>) =
-            prods_for_nt.iter().cloned().partition(is_simple_direct_right_recursive);
+            prods_for_nt.iter().cloned().partition(is_direct_right_recursive);
 
         let new_nt = NonTerminal(new_name_generator(&lhs.0));
         crate::debug!(7, "Resolving direct right-recursion for '{}' -> '{}'", lhs.0, new_nt.0);

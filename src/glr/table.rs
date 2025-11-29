@@ -865,23 +865,79 @@ pub fn generate_glr_parser_with_maps(
     let nonterminals: BTreeSet<_> = productions.iter().map(|p| p.lhs.clone()).collect();
     let mut unique_name_generator = create_unique_name_generator(&nonterminals);
 
-    crate::debug!(3, "Resolving direct right recursion");
-    crate::glr::analyze::resolve_direct_right_recursion(
-        &mut productions,
-        &mut unique_name_generator,
-    );
-    print_memory_usage("After direct right recursion resolution");
+    // Iterate right recursion elimination until no more right recursion exists.
+    // This is needed because productions like A -> α A β A require multiple passes:
+    // Pass 1: A -> α A β A becomes A -> A'(α A β), A' -> A'(α A β) | ε
+    // But A'(α A β) still contains A!
+    // After inline_null_productions, we need to re-check for right recursion.
+    const MAX_RIGHT_RECURSION_PASSES: usize = 10;
+    for pass in 0..MAX_RIGHT_RECURSION_PASSES {
+        crate::debug!(3, "Right recursion elimination pass {}", pass + 1);
+        
+        // Check if any right recursion remains
+        let right_recursion_errors = crate::glr::analyze::check_for_right_recursion(&productions);
+        if right_recursion_errors.is_empty() {
+            crate::debug!(3, "No right recursion detected, done after {} passes", pass + 1);
+            break;
+        }
+        crate::debug!(3, "Found {} right recursion patterns, continuing...", right_recursion_errors.len());
+        for err in &right_recursion_errors {
+            crate::debug!(4, "  {}", err);
+        }
+        
+        // First resolve indirect right recursion by inlining
+        crate::debug!(4, "Resolving indirect right recursion (pass {})", pass + 1);
+        crate::glr::analyze::resolve_indirect_right_recursion(
+            &mut productions,
+            &mut unique_name_generator,
+        );
 
-    // Note: Indirect right recursion (cycles like A -> ... B, B -> ... A) is more complex
-    // to resolve and is currently handled by the template DWA construction phase which
-    // detects and handles cycles. Full indirect right recursion elimination is left for future work.
+        // Then resolve direct right recursion
+        crate::debug!(4, "Resolving direct right recursion (pass {})", pass + 1);
+        crate::glr::analyze::resolve_direct_right_recursion(
+            &mut productions,
+            &mut unique_name_generator,
+        );
 
-    // Inline null productions AGAIN because right recursion resolution
-    // may have introduced new nullable non-terminals (like A' -> ε).
-    // These need to be inlined into existing productions.
-    crate::debug!(3, "Inlining null productions (pass 2: inline new nullable NTs)");
-    productions = inline_null_productions(&productions);
-    print_memory_usage("After inlining null productions (pass 2)");
+        // Inline null productions because right recursion resolution
+        // may have introduced new nullable non-terminals (like A' -> ε).
+        crate::debug!(4, "Inlining null productions (pass {})", pass + 1);
+        productions = inline_null_productions(&productions);
+        
+        if pass == MAX_RIGHT_RECURSION_PASSES - 1 {
+            crate::debug!(2, "Warning: Right recursion elimination did not converge after {} passes", MAX_RIGHT_RECURSION_PASSES);
+        }
+    }
+    print_memory_usage("After right recursion elimination");
+
+    // Re-validate after transformations to catch any newly introduced issues
+    crate::debug!(3, "Validating grammar after transformations");
+    let post_transform_errors = crate::glr::analyze::check_for_length_1_recursion(&productions);
+    for err in &post_transform_errors {
+        crate::debug!(2, "Post-transformation validation error: {}", err);
+    }
+    let left_recursion_errors = crate::glr::analyze::check_for_left_nullable_left_recursion(&productions);
+    for err in &left_recursion_errors {
+        crate::debug!(2, "Post-transformation left-nullable recursion: {}", err);
+    }
+    // Check for indirect hidden left recursion
+    let indirect_errors = crate::glr::analyze::check_for_indirect_hidden_left_recursion(&productions);
+    for err in &indirect_errors {
+        crate::debug!(2, "Post-transformation hidden left recursion: {}", err);
+    }
+    // Check for any remaining right recursion
+    let right_recursion_errors = crate::glr::analyze::check_for_right_recursion(&productions);
+    for err in &right_recursion_errors {
+        crate::debug!(2, "Post-transformation right recursion: {}", err);
+    }
+    
+    // If there are any critical errors, we should panic
+    if !post_transform_errors.is_empty() || !right_recursion_errors.is_empty() {
+        panic!(
+            "Grammar transformations failed to eliminate problematic patterns:\n  Length-1: {:?}\n  Right recursion: {:?}",
+            post_transform_errors, right_recursion_errors
+        );
+    }
 
     let mut next_non_terminal_id = non_terminal_map.len();
     for p in &productions {

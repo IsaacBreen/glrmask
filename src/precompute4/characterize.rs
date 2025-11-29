@@ -188,10 +188,142 @@ pub fn compute_below_bottom_characterization(parser: &GLRParser, terminal_id: Te
         let cycle_names: Vec<_> = cycle.iter()
             .filter_map(|nt_id| parser.non_terminal_map.get_by_right(nt_id).map(|nt| nt.0.clone()))
             .collect();
-        // Note: Per the theorem in "Even Faster Generalized LR Parsing", cycles imply unbounded reductions.
-        // However, the template DWA construction handles cycles by detecting them during DWA construction.
-        // We warn but don't panic; cycles will be detected and handled during template construction.
-        crate::debug!(2, "BelowBottomCharacterization for terminal {} has a cycle: {:?}. The template DWA will handle this.", terminal_id.0, cycle_names);
+        
+        // Build detailed diagnostic information
+        let mut diagnostic = String::new();
+        diagnostic.push_str(&format!(
+            "\n\n=== CYCLE DETECTED IN REDUCTION GRAPH ===\n\
+             Terminal ID: {}\n\
+             Cycle: {:?}\n\n",
+            terminal_id.0, cycle_names
+        ));
+        
+        // Show the reveal_and_rereduces edges that form the cycle
+        diagnostic.push_str("=== EDGES IN THE REDUCTION GRAPH ===\n");
+        for nt_id in &cycle {
+            if let Some(rc) = result.reduce_characterizations.get(nt_id) {
+                let nt_name = parser.non_terminal_map.get_by_right(nt_id)
+                    .map(|nt| nt.0.as_str())
+                    .unwrap_or("???");
+                diagnostic.push_str(&format!("From NT '{}' (id={}):\n", nt_name, nt_id.0));
+                for &(revealed_state, len_minus_2, target_nt) in &rc.reveal_and_rereduces {
+                    let target_name = parser.non_terminal_map.get_by_right(&target_nt)
+                        .map(|nt| nt.0.as_str())
+                        .unwrap_or("???");
+                    diagnostic.push_str(&format!(
+                        "  -> '{}' (id={}) via revealed_state={}, reduction_len={}\n",
+                        target_name, target_nt.0, revealed_state.0, len_minus_2 + 2
+                    ));
+                }
+            }
+        }
+        
+        // Dump all productions involving the cycle NTs
+        diagnostic.push_str("\n=== PRODUCTIONS INVOLVING CYCLE NTs ===\n");
+        let cycle_nt_ids: BTreeSet<_> = cycle.iter().cloned().collect();
+        for (prod_idx, prod) in parser.productions.iter().enumerate() {
+            let lhs_id = parser.non_terminal_map.get_by_left(&prod.lhs);
+            let rhs_contains_cycle_nt = prod.rhs.iter().any(|sym| {
+                match sym {
+                    crate::glr::grammar::Symbol::NonTerminal(nt) => {
+                        parser.non_terminal_map.get_by_left(nt)
+                            .map(|id| cycle_nt_ids.contains(id))
+                            .unwrap_or(false)
+                    }
+                    _ => false
+                }
+            });
+            
+            let lhs_in_cycle = lhs_id.map(|id| cycle_nt_ids.contains(id)).unwrap_or(false);
+            
+            if lhs_in_cycle || rhs_contains_cycle_nt {
+                let lhs_marker = if lhs_in_cycle { " [CYCLE]" } else { "" };
+                diagnostic.push_str(&format!("  [{}]{} {} ::=", prod_idx, lhs_marker, prod.lhs.0));
+                for sym in &prod.rhs {
+                    match sym {
+                        crate::glr::grammar::Symbol::NonTerminal(nt) => {
+                            let nt_in_cycle = parser.non_terminal_map.get_by_left(nt)
+                                .map(|id| cycle_nt_ids.contains(id))
+                                .unwrap_or(false);
+                            let marker = if nt_in_cycle { "[*]" } else { "" };
+                            diagnostic.push_str(&format!(" {}{}", nt.0, marker));
+                        }
+                        crate::glr::grammar::Symbol::Terminal(t) => {
+                            diagnostic.push_str(&format!(" {:?}", t));
+                        }
+                    }
+                }
+                diagnostic.push_str(" ;\n");
+            }
+        }
+        
+        // Show nullable NTs in the cycle
+        diagnostic.push_str("\n=== NULLABLE STATUS OF CYCLE NTs ===\n");
+        let nullable_nts = crate::glr::automaton::compute_nullable_nonterminals(&parser.productions);
+        for nt_id in &cycle {
+            if let Some(nt) = parser.non_terminal_map.get_by_right(nt_id) {
+                let is_nullable = nullable_nts.contains(nt);
+                diagnostic.push_str(&format!("  '{}': {}\n", nt.0, if is_nullable { "NULLABLE" } else { "not nullable" }));
+            }
+        }
+        
+        // Check for right-recursive patterns in the cycle
+        diagnostic.push_str("\n=== RIGHT-RECURSIVE PATTERN ANALYSIS ===\n");
+        for nt_id in &cycle {
+            if let Some(nt) = parser.non_terminal_map.get_by_right(nt_id) {
+                // Find productions for this NT that end with a cycle NT
+                for prod in &parser.productions {
+                    if &prod.lhs != nt {
+                        continue;
+                    }
+                    // Check if production ends with a cycle NT (considering nullable suffix)
+                    for i in (0..prod.rhs.len()).rev() {
+                        match &prod.rhs[i] {
+                            crate::glr::grammar::Symbol::NonTerminal(rhs_nt) => {
+                                let rhs_in_cycle = parser.non_terminal_map.get_by_left(rhs_nt)
+                                    .map(|id| cycle_nt_ids.contains(id))
+                                    .unwrap_or(false);
+                                if rhs_in_cycle {
+                                    // Check if suffix is nullable
+                                    let suffix_nullable = prod.rhs[i+1..].iter().all(|s| {
+                                        match s {
+                                            crate::glr::grammar::Symbol::NonTerminal(n) => nullable_nts.contains(n),
+                                            crate::glr::grammar::Symbol::Terminal(_) => false,
+                                        }
+                                    });
+                                    if suffix_nullable {
+                                        diagnostic.push_str(&format!(
+                                            "  RIGHT-RECURSIVE: '{}' -> ... '{}' (suffix nullable: {})\n",
+                                            nt.0, rhs_nt.0, 
+                                            prod.rhs[i+1..].iter().map(|s| match s {
+                                                crate::glr::grammar::Symbol::NonTerminal(n) => n.0.clone(),
+                                                crate::glr::grammar::Symbol::Terminal(t) => format!("{:?}", t),
+                                            }).collect::<Vec<_>>().join(" ")
+                                        ));
+                                    }
+                                }
+                                if !nullable_nts.contains(rhs_nt) {
+                                    break;
+                                }
+                            }
+                            crate::glr::grammar::Symbol::Terminal(_) => break,
+                        }
+                    }
+                }
+            }
+        }
+        
+        diagnostic.push_str("\n=== END DIAGNOSTIC ===\n");
+        
+        // Per the theorem in "Even Faster Generalized LR Parsing", grammars without right 
+        // and hidden left recursion have bounded consecutive reductions. Cycles here indicate
+        // that right recursion elimination failed or was incomplete.
+        panic!(
+            "BelowBottomCharacterization for terminal {} has a cycle: {:?}. \
+             This indicates unbounded reduction chains which violate the bounded-reductions guarantee. \
+             Right recursion elimination should have removed these cycles.\n{}",
+            terminal_id.0, cycle_names, diagnostic
+        );
     }
 
     crate::debug!(6, "Computed Below-Bottom Characterization for terminal {}:\n{}", terminal_id.0, result);
