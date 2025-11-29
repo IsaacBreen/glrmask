@@ -4,6 +4,7 @@ use super::common::{BENCHMARK_DEBUG, Label, NWAStateID, StateID, Weight};
 use super::dwa::{DWAState, DWAStates, DWA};
 use super::nwa::{NWAState, NWAStates, NWA};
 use rustfst::algorithms::{minimize, minimize_with_config, MinimizeConfig};
+use rustc_hash::FxHashMap;
 use std::collections::{BTreeMap, VecDeque, HashSet, HashMap};
 use std::sync::Arc;
 
@@ -83,7 +84,7 @@ fn minimize_dwa_partition(states: &DWAStates) -> Partition {
         iter_count += 1;
         // Pre-size HashMap based on expected number of classes (previous + some growth)
         let expected_classes = partition.num_classes.max(n / 4);
-        let mut sig_to_class: HashMap<DwaStateSignature, usize> = HashMap::with_capacity(expected_classes);
+        let mut sig_to_class: FxHashMap<DwaStateSignature, usize> = FxHashMap::with_capacity_and_hasher(expected_classes, Default::default());
         let mut new_classes = vec![0; n];
         let mut next_class = 0;
 
