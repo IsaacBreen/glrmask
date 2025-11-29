@@ -27,8 +27,7 @@ fn is_zero(w: &Weight) -> bool { w.is_empty() }
 impl NWA {
     /// The primary entry point for determinization.
     ///
-    /// This defaults to the **Robust** strategy (Precomputed), which handles epsilon
-    /// closures upfront and includes safeguards against state explosion.
+    /// This defaults to the **Simple** strategy for performance.
     pub fn determinize(&self) -> DWA {
         self.determinize_simple()
     }

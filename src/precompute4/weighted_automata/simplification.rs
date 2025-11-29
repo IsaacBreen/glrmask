@@ -3,6 +3,7 @@
 use super::common::{BENCHMARK_DEBUG, Label, NWAStateID, StateID, Weight};
 use super::dwa::{DWAState, DWAStates, DWA};
 use super::nwa::{NWAState, NWAStates, NWA};
+use rayon::prelude::*;
 use rustfst::algorithms::{minimize, minimize_with_config, MinimizeConfig};
 use rustc_hash::FxHashMap;
 use std::collections::{BTreeMap, VecDeque, HashSet, HashMap};
@@ -72,6 +73,7 @@ impl DwaStateSignature {
     }
 }
 
+/// DWA minimization using partition refinement.
 fn minimize_dwa_partition(states: &DWAStates) -> Partition {
     let n = states.len();
     if n == 0 {
@@ -96,11 +98,14 @@ fn minimize_dwa_partition(states: &DWAStates) -> Partition {
     
     let mut partition = Partition { class_of, num_classes };
     let mut iter_count = 0;
+    
     loop {
         iter_count += 1;
+        
         // Pre-size HashMap based on expected number of classes (previous + some growth)
         let expected_classes = partition.num_classes.max(n / 4);
-        let mut sig_to_class: FxHashMap<DwaStateSignature, usize> = FxHashMap::with_capacity_and_hasher(expected_classes, Default::default());
+        let mut sig_to_class: FxHashMap<DwaStateSignature, usize> = 
+            FxHashMap::with_capacity_and_hasher(expected_classes, Default::default());
         let mut new_classes = vec![0; n];
         let mut next_class = 0;
 

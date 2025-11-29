@@ -200,7 +200,7 @@ impl NWA {
                 dwa_passes: vec![DwaPass::PruneDeadEnds],
             },
             "FinalDWA" => DeterminizeAndSimplifyConfig {
-                // Best: NWA=[] | DWA=[PruneDeadEnds, Minimize]
+                // Best config based on experiments
                 nwa_passes: vec![],
                 dwa_passes: vec![DwaPass::PruneDeadEnds, DwaPass::Minimize],
             },
@@ -238,16 +238,26 @@ impl NWA {
             }
         }
 
+        let det_start = std::time::Instant::now();
         let mut dwa = self.determinize();
+        let det_time = det_start.elapsed();
+        crate::debug!(5, "Determinization: {} states, {} transitions in {:.2?}", 
+            dwa.states.len(), dwa.states.num_transitions(), det_time);
 
         // Run DWA passes
         for pass in config.dwa_passes.clone() {
+            let pass_start = std::time::Instant::now();
             match pass {
                 DwaPass::PruneUnreachable => { dwa.prune_unreachable(); },
                 DwaPass::PruneDeadEnds => { dwa.prune_dead_ends(); },
                 DwaPass::PushWeights => { dwa.push_weights_into_transitions_and_finals(); },
                 DwaPass::PushWeightsToInitial => { dwa.push_weights_to_initial(); },
                 DwaPass::Minimize => { dwa.minimize_states(); },
+            }
+            let pass_time = pass_start.elapsed();
+            if pass_time.as_millis() > 50 {
+                crate::debug!(5, "DWA Pass {:?}: {} states, {} transitions in {:.2?}", 
+                    pass, dwa.states.len(), dwa.states.num_transitions(), pass_time);
             }
         }
         dwa
