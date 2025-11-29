@@ -5,6 +5,7 @@ use std::time::Instant;
 
 use rayon::prelude::*;
 use range_set_blaze::RangeSetBlaze;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use kdam::{tqdm, BarExt};
 
@@ -154,14 +155,14 @@ pub fn nwa_special_map<V, U, I>(
     V: Clone,
     I: IntoIterator<Item = (StateID, V)>,
 {
-    let mut values: HashMap<StateID, V> = HashMap::new();
-    let mut stopped_nodes: HashSet<StateID> = HashSet::new();
+    let mut values: FxHashMap<StateID, V> = FxHashMap::default();
+    let mut stopped_nodes: FxHashSet<StateID> = FxHashSet::default();
 
     for (state, v) in initial_values {
         values.entry(state).and_modify(|old| merge(old, v.clone())).or_insert(v);
     }
 
-    let mut in_queue = HashSet::new();
+    let mut in_queue = FxHashSet::default();
     let mut pb = tqdm!(total = nwa.states.len(), desc = "NWA Traversal", disable = !crate::profiler::PROGRESS_BAR_ENABLED, leave = false);
 
     for &scc_idx in &traversal_data.topo {
@@ -372,7 +373,7 @@ pub fn precompute4(parser: &GLRParser, input_nwa: &NWA) -> DWA {
         }
     }
 
-    let mut template_cache = HashMap::new();
+    let mut template_cache: FxHashMap<Signature, NWA> = FxHashMap::default();
 
     // OPTIMIZATION START: Split signatures into Simple (Direct Union) and Complex (Bitvector Derivation)
     let mut simple_signatures = Vec::new();
