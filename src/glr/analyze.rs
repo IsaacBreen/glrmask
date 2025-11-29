@@ -1089,15 +1089,34 @@ pub fn resolve_right_recursion(
                             productions,
                             &right_recursive_nts,
                         ) {
-                            crate::debug!(
-                                5,
-                                "Could not break right recursion cycle for: {:?}, giving up",
-                                right_recursive_nts
-                                    .iter()
-                                    .map(|nt| &nt.0)
-                                    .collect::<Vec<_>>()
-                            );
-                            break;
+                            // Last resort: check for ternary-style patterns like A -> ... A ... A
+                            // where LHS appears in prefix but still ends with LHS
+                            let has_ternary_style = productions.iter().any(|p| {
+                                right_recursive_nts.contains(&p.lhs)
+                                    && is_direct_right_recursive_allowing_prefix_self(p)
+                            });
+
+                            if has_ternary_style {
+                                crate::debug!(
+                                    5,
+                                    "Found ternary-style right recursion, applying permissive transformation"
+                                );
+                                resolve_ternary_right_recursion(
+                                    productions,
+                                    &right_recursive_nts,
+                                    &mut *new_name_generator,
+                                );
+                            } else {
+                                crate::debug!(
+                                    5,
+                                    "Could not break right recursion cycle for: {:?}, giving up",
+                                    right_recursive_nts
+                                        .iter()
+                                        .map(|nt| &nt.0)
+                                        .collect::<Vec<_>>()
+                                );
+                                break;
+                            }
                         }
                     } else {
                         // Inline unit productions
@@ -1169,6 +1188,126 @@ fn is_simple_direct_right_recursive(prod: &Production) -> bool {
     }
 }
 
+/// Check if production ends with LHS, allowing LHS to appear in prefix (for ternary patterns)
+fn is_direct_right_recursive_allowing_prefix_self(prod: &Production) -> bool {
+    if prod.rhs.len() < 2 {
+        return false;
+    }
+    matches!(prod.rhs.last(), Some(Symbol::NonTerminal(nt)) if nt == &prod.lhs)
+}
+
+/// Handle ternary-style right recursion like A -> ... A ... A
+/// Transform A -> α A β A into: A -> α A β A', A' -> β A' | ε
+fn resolve_ternary_right_recursion(
+    productions: &mut Vec<Production>,
+    right_recursive_nts: &BTreeSet<NonTerminal>,
+    new_name_generator: &mut impl FnMut(&str) -> String,
+) {
+    let mut prods_by_lhs: BTreeMap<NonTerminal, Vec<Production>> = BTreeMap::new();
+    for prod in productions.iter().cloned() {
+        prods_by_lhs.entry(prod.lhs.clone()).or_default().push(prod);
+    }
+
+    let mut new_productions = Vec::new();
+    let mut processed = BTreeSet::new();
+
+    for prod in productions.iter() {
+        if processed.contains(&prod.lhs) {
+            continue;
+        }
+
+        if !right_recursive_nts.contains(&prod.lhs) {
+            new_productions.push(prod.clone());
+            continue;
+        }
+
+        let prods_for_nt = prods_by_lhs.get(&prod.lhs).unwrap();
+
+        // Check if any production for this NT has ternary-style recursion
+        let has_ternary = prods_for_nt
+            .iter()
+            .any(is_direct_right_recursive_allowing_prefix_self);
+
+        if !has_ternary {
+            for p in prods_for_nt {
+                new_productions.push(p.clone());
+            }
+            processed.insert(prod.lhs.clone());
+            continue;
+        }
+
+        processed.insert(prod.lhs.clone());
+
+        // Create helper NT
+        let helper_nt = NonTerminal(new_name_generator(&prod.lhs.0));
+        crate::debug!(
+            5,
+            "Resolving ternary right-recursion for '{}' -> '{}'",
+            prod.lhs.0,
+            helper_nt.0
+        );
+
+        // Partition into recursive (ends with LHS) and non-recursive
+        let (recursive_rules, non_recursive_rules): (Vec<_>, Vec<_>) = prods_for_nt
+            .iter()
+            .cloned()
+            .partition(is_direct_right_recursive_allowing_prefix_self);
+
+        // Transform recursive rules: A -> α A becomes A -> α A'
+        for rec_rule in &recursive_rules {
+            // Strip the trailing LHS and append helper
+            let mut new_rhs = rec_rule.rhs[..rec_rule.rhs.len() - 1].to_vec();
+            new_rhs.push(Symbol::NonTerminal(helper_nt.clone()));
+            new_productions.push(Production {
+                lhs: rec_rule.lhs.clone(),
+                rhs: new_rhs,
+            });
+
+            // For the helper: A' -> (the trailing part after stripping prefix up to last A before the tail A)
+            // For A -> α β A, create A' -> β A' | ε
+            // We extract the "β" part (everything between the last non-tail A and the tail A)
+            // But if there's no middle A, just use A' -> ε
+            let rhs_without_tail = &rec_rule.rhs[..rec_rule.rhs.len() - 1];
+            // Find last occurrence of LHS in prefix (if any)
+            let last_middle_pos = rhs_without_tail
+                .iter()
+                .rposition(|s| matches!(s, Symbol::NonTerminal(nt) if nt == &rec_rule.lhs));
+
+            if let Some(pos) = last_middle_pos {
+                // Extract suffix after middle LHS: β
+                let beta = &rhs_without_tail[pos + 1..];
+                if !beta.is_empty() {
+                    // A' -> β A'
+                    let mut helper_rhs = beta.to_vec();
+                    helper_rhs.push(Symbol::NonTerminal(helper_nt.clone()));
+                    new_productions.push(Production {
+                        lhs: helper_nt.clone(),
+                        rhs: helper_rhs,
+                    });
+                }
+            }
+        }
+
+        // Non-recursive rules: A -> γ becomes A -> γ A'
+        for non_rec_rule in &non_recursive_rules {
+            let mut new_rhs = non_rec_rule.rhs.clone();
+            new_rhs.push(Symbol::NonTerminal(helper_nt.clone()));
+            new_productions.push(Production {
+                lhs: non_rec_rule.lhs.clone(),
+                rhs: new_rhs,
+            });
+        }
+
+        // A' -> ε
+        new_productions.push(Production {
+            lhs: helper_nt.clone(),
+            rhs: vec![],
+        });
+    }
+
+    *productions = new_productions;
+}
+
 pub fn resolve_direct_right_recursion(
     productions: &mut Vec<Production>,
     mut new_name_generator: impl FnMut(&str) -> String,
@@ -1180,8 +1319,13 @@ pub fn resolve_direct_right_recursion(
     }
 
     // Identify all non-terminals that have simple direct right-recursive rules.
+    // Skip NTs that are already right-recursion helpers (those with _rr suffix).
     let mut recursive_nts = BTreeSet::new();
     for (nt, prods_for_nt) in &prods_by_lhs {
+        // Skip helper NTs that were created by previous right-recursion elimination
+        if nt.0.ends_with("_rr") || nt.0.contains("_rr_") {
+            continue;
+        }
         if prods_for_nt.iter().any(is_simple_direct_right_recursive) {
             recursive_nts.insert(nt.clone());
         }
