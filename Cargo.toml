@@ -59,6 +59,10 @@ debug = true
 no_pbar = []
 pbar = []
 
+[profile.release]
+lto = "thin"
+codegen-units = 4
+
 [[bin]]
 name = "grammar-compiler"
 path = "src/bin/grammar_compiler.rs"
