@@ -1,4 +1,4 @@
-expr ::= term (('+' | '-') term)*;
-term ::= factor (('*' | '/') factor)*;
-factor ::= NUMBER | '(' expr ')';
-NUMBER ::= [0-9]+;
+expr    ::= term (('+' | '-') term)*
+term    ::= factor (('*' | '/') factor)*
+factor  ::= NUMBER | '(' expr ')'
+NUMBER  ::= /[0-9]+/
