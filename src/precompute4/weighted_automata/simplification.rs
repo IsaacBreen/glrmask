@@ -78,7 +78,23 @@ fn minimize_dwa_partition(states: &DWAStates) -> Partition {
         return Partition { class_of: vec![], num_classes: 0 };
     }
 
-    let mut partition = Partition::new(n);
+    // OPTIMIZATION: Initialize partition based on final weights to reduce iterations
+    // States with the same final weight start in the same class
+    let mut initial_class_map: FxHashMap<Option<Weight>, usize> = FxHashMap::default();
+    let mut class_of = Vec::with_capacity(n);
+    let mut num_classes = 0;
+    
+    for s in 0..n {
+        let fw = states[s].final_weight.clone();
+        let c = *initial_class_map.entry(fw).or_insert_with(|| {
+            let id = num_classes;
+            num_classes += 1;
+            id
+        });
+        class_of.push(c);
+    }
+    
+    let mut partition = Partition { class_of, num_classes };
     let mut iter_count = 0;
     loop {
         iter_count += 1;
