@@ -1102,9 +1102,9 @@ pub fn resolve_direct_right_recursion(
             prods_for_nt.iter().cloned().partition(is_simple_direct_right_recursive);
 
         // Check if we already have a helper NT for this LHS (from a previous resolution)
-        // Look for a rule A -> A_rr ...
+        // Look for a rule A -> ... A_rr
         let existing_helper = other_rules.iter().find_map(|p| {
-            if let Some(Symbol::NonTerminal(nt)) = p.rhs.first() {
+            if let Some(Symbol::NonTerminal(nt)) = p.rhs.last() {
                 if nt.0.starts_with(&format!("{}_rr", lhs.0)) {
                     return Some(nt.clone());
                 }
@@ -1123,13 +1123,13 @@ pub fn resolve_direct_right_recursion(
             crate::debug!(7, "Resolving direct right-recursion for '{}' -> '{}'", lhs.0, new_nt.0);
         }
 
-        // A -> A' βⱼ
+        // A -> βⱼ A'
         for non_rec_rule in &other_rules {
             // If reusing helper, check if this rule is already transformed
             if reused {
-                if let Some(Symbol::NonTerminal(first)) = non_rec_rule.rhs.first() {
-                    if first == &new_nt {
-                        // Already transformed: A -> A_rr ...
+                if let Some(Symbol::NonTerminal(last)) = non_rec_rule.rhs.last() {
+                    if last == &new_nt {
+                        // Already transformed: A -> ... A_rr
                         new_productions.push(non_rec_rule.clone());
                         continue;
                     }
@@ -1137,8 +1137,8 @@ pub fn resolve_direct_right_recursion(
             }
 
             let mut new_rhs = Vec::with_capacity(non_rec_rule.rhs.len() + 1);
-            new_rhs.push(Symbol::NonTerminal(new_nt.clone()));
             new_rhs.extend_from_slice(&non_rec_rule.rhs);
+            new_rhs.push(Symbol::NonTerminal(new_nt.clone()));
             let new_prod = Production {
                 lhs: lhs.clone(),
                 rhs: new_rhs,
@@ -1147,12 +1147,12 @@ pub fn resolve_direct_right_recursion(
             new_productions.push(new_prod);
         }
 
-        // A' -> A' αᵢ
+        // A' -> αᵢ A'
         for rec_rule in &recursive_rules {
             let alpha = &rec_rule.rhs[..rec_rule.rhs.len() - 1];
             let mut new_rhs = Vec::with_capacity(alpha.len() + 1);
-            new_rhs.push(Symbol::NonTerminal(new_nt.clone()));
             new_rhs.extend_from_slice(alpha);
+            new_rhs.push(Symbol::NonTerminal(new_nt.clone()));
             let new_prod = Production {
                 lhs: new_nt.clone(),
                 rhs: new_rhs,
