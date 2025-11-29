@@ -1534,7 +1534,7 @@ impl<'a> GrammarConstraintState<'a> {
         let mut memo = HashSet::new();
         for (tsid, state) in self.state.iter() {
             println!("Tokenizer State ID: {:?}", tsid);
-            state.stack.to_graph_string_with_memo(&mut memo, false);
+            println!("{}", state.stack.to_graph_string_with_memo(&mut memo, false));
         }
     }
 
