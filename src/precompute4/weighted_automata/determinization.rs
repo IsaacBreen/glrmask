@@ -3,6 +3,7 @@
 
 use chrono::Local;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use rustc_hash::FxHashMap;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use crate::precompute4::weighted_automata::test_weighted_automata;
@@ -148,7 +149,7 @@ impl NWA {
         let mut dwa = DWA::new();
         dwa.states.0.clear();
 
-        let mut subset_map: HashMap<BTreeMap<NWAStateID, Weight>, NWAStateID> = HashMap::new();
+        let mut subset_map: FxHashMap<BTreeMap<NWAStateID, Weight>, NWAStateID> = FxHashMap::default();
         let mut worklist: VecDeque<BTreeMap<NWAStateID, Weight>> = VecDeque::new();
 
         // Initial States
