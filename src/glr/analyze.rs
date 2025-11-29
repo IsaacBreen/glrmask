@@ -813,6 +813,22 @@ pub fn resolve_right_recursion(
             break;
         }
 
+        if right_recursive_nts.len() == 1 {
+            if let Some(nt) = right_recursive_nts.iter().next() {
+                let prods: Vec<_> = productions
+                    .iter()
+                    .filter(|p| &p.lhs == nt)
+                    .map(|p| format!("{}", p))
+                    .collect();
+                crate::debug!(
+                    5,
+                    "Inspecting remaining right recursion for {}: {:?}",
+                    nt.0,
+                    prods
+                );
+            }
+        }
+
         // Check if any are directly right-recursive (can be handled by resolve_direct_right_recursion)
         let has_direct = productions.iter().any(|p| {
             let is_direct =
