@@ -597,36 +597,44 @@ pub fn resolve_right_recursion(
     // 2. Inlining unit productions to expose direct recursion
     // 3. Applying the standard right-to-left recursion transformation
     
+    // Track previous right-recursive sets to detect when we're making no progress
+    let mut prev_right_recursive: Option<BTreeSet<NonTerminal>> = None;
+    let mut no_progress_count = 0;
+    const MAX_NO_PROGRESS: usize = 50;
+    
     loop {
         let nullable = compute_nullable_nonterminals(productions);
         
-        // Helper to find the rightmost non-terminal (considering nullable suffixes)
-        let get_rightmost_nt = |rhs: &[Symbol]| -> Option<NonTerminal> {
+        // Helper to find ALL potential rightmost non-terminals (considering nullable suffixes)
+        // Returns all NTs that could be the rightmost, depending on which optional elements are present
+        let get_rightmost_nts = |rhs: &[Symbol]| -> Vec<NonTerminal> {
+            let mut result = Vec::new();
             for symbol in rhs.iter().rev() {
                 match symbol {
                     Symbol::NonTerminal(nt) => {
-                        if nullable.contains(nt) {
-                            continue;
-                        } else {
-                            return Some(nt.clone());
+                        // This NT could be the rightmost (when symbols to its right are empty)
+                        result.push(nt.clone());
+                        if !nullable.contains(nt) {
+                            // This NT is non-nullable, so it's always present when reached
+                            // No need to look further left
+                            break;
                         }
+                        // NT is nullable, continue looking left for more possibilities
                     }
-                    Symbol::Terminal(_) => return None,
+                    Symbol::Terminal(_) => {
+                        // Hit a non-nullable terminal, stop looking left
+                        break;
+                    }
                 }
             }
-            // All were nullable, return the last NT if any
-            for symbol in rhs.iter().rev() {
-                if let Symbol::NonTerminal(nt) = symbol {
-                    return Some(nt.clone());
-                }
-            }
-            None
+            result
         };
         
         // Build right-reachability graph
+        // Add edges for ALL potential rightmost NTs (including nullable ones)
         let mut right_reachable: BTreeMap<NonTerminal, BTreeSet<NonTerminal>> = BTreeMap::new();
         for prod in productions.iter() {
-            if let Some(rightmost_nt) = get_rightmost_nt(&prod.rhs) {
+            for rightmost_nt in get_rightmost_nts(&prod.rhs) {
                 right_reachable
                     .entry(prod.lhs.clone())
                     .or_default()
@@ -667,13 +675,28 @@ pub fn resolve_right_recursion(
             break;
         }
         
-        crate::debug!(5, "Found right-recursive non-terminals: {:?}", 
-            right_recursive_nts.iter().map(|nt| &nt.0).collect::<Vec<_>>());
-        
         // Check if any are directly right-recursive (can be handled by resolve_direct_right_recursion)
         let has_direct = productions.iter().any(|p| {
             right_recursive_nts.contains(&p.lhs) && is_simple_direct_right_recursive(p)
         });
+
+        // Check if we're making progress
+        if let Some(ref prev) = prev_right_recursive {
+            if &right_recursive_nts == prev && !has_direct {
+                no_progress_count += 1;
+                if no_progress_count >= MAX_NO_PROGRESS {
+                    crate::debug!(5, "No progress in eliminating right recursion after {} iterations, giving up. Remaining: {:?}",
+                        MAX_NO_PROGRESS, right_recursive_nts.iter().map(|nt| &nt.0).collect::<Vec<_>>());
+                    break;
+                }
+            } else {
+                no_progress_count = 0;
+            }
+        }
+        prev_right_recursive = Some(right_recursive_nts.clone());
+        
+        crate::debug!(5, "Found right-recursive non-terminals: {:?}", 
+            right_recursive_nts.iter().map(|nt| &nt.0).collect::<Vec<_>>());
         
         if has_direct {
             // Apply the direct right recursion transformation
@@ -896,6 +919,15 @@ pub fn resolve_right_recursion(
                         // Try a more aggressive approach: inline any production that contributes to the cycle
                         crate::debug!(5, "No unit productions found, trying to break cycle differently");
                         
+                        // Debug: show productions for right-recursive NTs
+                        for nt in &right_recursive_nts {
+                            let prods: Vec<_> = productions.iter()
+                                .filter(|p| &p.lhs == nt)
+                                .collect();
+                            crate::debug!(5, "Productions for {}: {:?}", nt.0, 
+                                prods.iter().map(|p| format!("{}", p)).collect::<Vec<_>>());
+                        }
+                        
                         // Find the first production A → α B where both A and B are right-recursive (and A != B)
                         // and transform it
                         let mut found_and_transformed = false;
@@ -912,52 +944,52 @@ pub fn resolve_right_recursion(
                                 continue;
                             }
                             
-                            if let Some(rightmost_nt) = get_rightmost_nt(&prod.rhs) {
-                                if right_recursive_nts.contains(&rightmost_nt) && rightmost_nt != prod.lhs && prod.rhs.len() > 1 {
-                                    // This is A → α B γ where A and B are both right-recursive and γ is nullable
-                                    // Transform by inlining B's productions: A → α δ γ for each B → δ
-                                    crate::debug!(5, "Inlining {} into {} for production: {}", rightmost_nt.0, prod.lhs.0, prod);
-                                    
-                                    // Find the position of the rightmost NT
-                                    let mut rightmost_pos = None;
-                                    for (i, sym) in prod.rhs.iter().enumerate().rev() {
-                                        if let Symbol::NonTerminal(nt) = sym {
-                                            if nullable.contains(nt) {
-                                                continue;
-                                            } else {
-                                                rightmost_pos = Some(i);
-                                                break;
-                                            }
-                                        } else {
-                                            break; // Terminal, stop
+                            // Find the first rightmost NT that's right-recursive and different from prod.lhs
+                            let rightmost_candidates = get_rightmost_nts(&prod.rhs);
+                            let target_nt = rightmost_candidates.iter().find(|nt| {
+                                right_recursive_nts.contains(*nt) && **nt != prod.lhs && prod.rhs.len() > 1
+                            });
+                            
+                            if let Some(rightmost_nt) = target_nt {
+                                // This is A → α B γ where A and B are both right-recursive and γ is nullable
+                                // Transform by inlining B's productions: A → α δ γ for each B → δ
+                                crate::debug!(5, "Inlining {} into {} for production: {}", rightmost_nt.0, prod.lhs.0, prod);
+                                
+                                // Find the position of this specific NT in the production
+                                let mut target_pos = None;
+                                for (i, sym) in prod.rhs.iter().enumerate().rev() {
+                                    if let Symbol::NonTerminal(nt) = sym {
+                                        if nt == rightmost_nt {
+                                            target_pos = Some(i);
+                                            break;
                                         }
                                     }
-                                    
-                                    let pos = rightmost_pos.expect("Should have found rightmost NT position");
-                                    
-                                    // Find all productions for the rightmost NT
-                                    let b_prods: Vec<_> = productions
-                                        .iter()
-                                        .filter(|p| p.lhs == rightmost_nt)
-                                        .collect();
-                                    
-                                    // For each B → δ, create A → α δ γ where α is before B and γ is after B
-                                    let prefix: Vec<_> = prod.rhs[..pos].to_vec();
-                                    let suffix: Vec<_> = prod.rhs[pos + 1..].to_vec();
-                                    
-                                    for b_prod in b_prods {
-                                        let mut new_rhs = prefix.clone();
-                                        new_rhs.extend(b_prod.rhs.iter().cloned());
-                                        new_rhs.extend(suffix.iter().cloned());
-                                        new_prods.push(Production {
-                                            lhs: prod.lhs.clone(),
-                                            rhs: new_rhs,
-                                        });
-                                    }
-                                    
-                                    found_and_transformed = true;
-                                    continue;
                                 }
+                                
+                                let pos = target_pos.expect("Should have found rightmost NT position");
+                                
+                                // Find all productions for the rightmost NT
+                                let b_prods: Vec<_> = productions
+                                    .iter()
+                                    .filter(|p| &p.lhs == rightmost_nt)
+                                    .collect();
+                                
+                                // For each B → δ, create A → α δ γ where α is before B and γ is after B
+                                let prefix: Vec<_> = prod.rhs[..pos].to_vec();
+                                let suffix: Vec<_> = prod.rhs[pos + 1..].to_vec();
+                                
+                                for b_prod in b_prods {
+                                    let mut new_rhs = prefix.clone();
+                                    new_rhs.extend(b_prod.rhs.iter().cloned());
+                                    new_rhs.extend(suffix.iter().cloned());
+                                    new_prods.push(Production {
+                                        lhs: prod.lhs.clone(),
+                                        rhs: new_rhs,
+                                    });
+                                }
+                                
+                                found_and_transformed = true;
+                                continue;
                             }
                             
                             new_prods.push(prod.clone());

@@ -68,7 +68,8 @@ impl BelowBottomCharacterization {
     /// Check if there is any cycle in the reduce characterization graph.
     /// A cycle exists if following `reveal_and_rereduces` edges between non-terminals
     /// can lead back to a previously visited non-terminal.
-    pub fn has_cycle(&self) -> bool {
+    /// Returns Some(cycle_path) if a cycle exists, None otherwise.
+    pub fn find_cycle(&self) -> Option<Vec<NonTerminalID>> {
         // Build adjacency list: NT -> set of NTs reachable via reveal_and_rereduces
         let mut adj: BTreeMap<NonTerminalID, BTreeSet<NonTerminalID>> = BTreeMap::new();
         for (nt, rc) in &self.reduce_characterizations {
@@ -77,27 +78,34 @@ impl BelowBottomCharacterization {
             }
         }
 
-        // Also consider initial_reduces as potential starting points that lead to NTs
-        // which could be part of a cycle. We need to check if any NT is part of a cycle.
-        
         // DFS-based cycle detection using coloring:
         // White (0) = unvisited, Gray (1) = in current path, Black (2) = fully processed
         let mut color: BTreeMap<NonTerminalID, u8> = BTreeMap::new();
+        let mut path: Vec<NonTerminalID> = Vec::new();
         
         fn dfs(
             node: NonTerminalID,
             adj: &BTreeMap<NonTerminalID, BTreeSet<NonTerminalID>>,
             color: &mut BTreeMap<NonTerminalID, u8>,
-        ) -> bool {
+            path: &mut Vec<NonTerminalID>,
+        ) -> Option<Vec<NonTerminalID>> {
             color.insert(node, 1); // Gray - in current path
+            path.push(node);
             
             if let Some(neighbors) = adj.get(&node) {
                 for &neighbor in neighbors {
                     match color.get(&neighbor).copied().unwrap_or(0) {
-                        1 => return true, // Back edge found - cycle!
+                        1 => {
+                            // Back edge found - cycle!
+                            // Find where the cycle starts in the path
+                            let cycle_start = path.iter().position(|&n| n == neighbor).unwrap();
+                            let mut cycle = path[cycle_start..].to_vec();
+                            cycle.push(neighbor); // Close the cycle
+                            return Some(cycle);
+                        }
                         0 => {
-                            if dfs(neighbor, adj, color) {
-                                return true;
+                            if let Some(cycle) = dfs(neighbor, adj, color, path) {
+                                return Some(cycle);
                             }
                         }
                         _ => {} // Black - already fully processed, skip
@@ -105,20 +113,26 @@ impl BelowBottomCharacterization {
                 }
             }
             
+            path.pop();
             color.insert(node, 2); // Black - fully processed
-            false
+            None
         }
 
         // Check all NTs that have outgoing edges
         for &nt in adj.keys() {
             if color.get(&nt).copied().unwrap_or(0) == 0 {
-                if dfs(nt, &adj, &mut color) {
-                    return true;
+                if let Some(cycle) = dfs(nt, &adj, &mut color, &mut path) {
+                    return Some(cycle);
                 }
             }
         }
 
-        false
+        None
+    }
+    
+    /// Check if there is any cycle in the reduce characterization graph.
+    pub fn has_cycle(&self) -> bool {
+        self.find_cycle().is_some()
     }
 }
 
@@ -169,11 +183,13 @@ pub fn compute_below_bottom_characterization(parser: &GLRParser, terminal_id: Te
         all_nts,
     };
 
-    assert!(
-        !result.has_cycle(),
-        "BelowBottomCharacterization for terminal {} has a cycle, which should not happen",
-        terminal_id.0
-    );
+    if let Some(cycle) = result.find_cycle() {
+        // Get NT names for better debugging
+        let cycle_names: Vec<_> = cycle.iter()
+            .filter_map(|nt_id| parser.non_terminal_map.get_by_right(nt_id).map(|nt| nt.0.clone()))
+            .collect();
+        panic!("BelowBottomCharacterization for terminal {} has a cycle: {:?}. This implies unbounded reductions.", terminal_id.0, cycle_names);
+    }
 
     crate::debug!(6, "Computed Below-Bottom Characterization for terminal {}:\n{}", terminal_id.0, result);
     result
