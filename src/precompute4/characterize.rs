@@ -64,6 +64,64 @@ pub struct BelowBottomCharacterization {
     pub all_nts: BTreeSet<NonTerminalID>,
 }
 
+impl BelowBottomCharacterization {
+    /// Check if there is any cycle in the reduce characterization graph.
+    /// A cycle exists if following `reveal_and_rereduces` edges between non-terminals
+    /// can lead back to a previously visited non-terminal.
+    pub fn has_cycle(&self) -> bool {
+        // Build adjacency list: NT -> set of NTs reachable via reveal_and_rereduces
+        let mut adj: BTreeMap<NonTerminalID, BTreeSet<NonTerminalID>> = BTreeMap::new();
+        for (nt, rc) in &self.reduce_characterizations {
+            for &(_revealed_state, _len, target_nt) in &rc.reveal_and_rereduces {
+                adj.entry(*nt).or_default().insert(target_nt);
+            }
+        }
+
+        // Also consider initial_reduces as potential starting points that lead to NTs
+        // which could be part of a cycle. We need to check if any NT is part of a cycle.
+        
+        // DFS-based cycle detection using coloring:
+        // White (0) = unvisited, Gray (1) = in current path, Black (2) = fully processed
+        let mut color: BTreeMap<NonTerminalID, u8> = BTreeMap::new();
+        
+        fn dfs(
+            node: NonTerminalID,
+            adj: &BTreeMap<NonTerminalID, BTreeSet<NonTerminalID>>,
+            color: &mut BTreeMap<NonTerminalID, u8>,
+        ) -> bool {
+            color.insert(node, 1); // Gray - in current path
+            
+            if let Some(neighbors) = adj.get(&node) {
+                for &neighbor in neighbors {
+                    match color.get(&neighbor).copied().unwrap_or(0) {
+                        1 => return true, // Back edge found - cycle!
+                        0 => {
+                            if dfs(neighbor, adj, color) {
+                                return true;
+                            }
+                        }
+                        _ => {} // Black - already fully processed, skip
+                    }
+                }
+            }
+            
+            color.insert(node, 2); // Black - fully processed
+            false
+        }
+
+        // Check all NTs that have outgoing edges
+        for &nt in adj.keys() {
+            if color.get(&nt).copied().unwrap_or(0) == 0 {
+                if dfs(nt, &adj, &mut color) {
+                    return true;
+                }
+            }
+        }
+
+        false
+    }
+}
+
 impl Display for BelowBottomCharacterization {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         writeln!(f, "Characterization for Terminal {}:", self.terminal.0)?;
@@ -110,6 +168,12 @@ pub fn compute_below_bottom_characterization(parser: &GLRParser, terminal_id: Te
         reduce_characterizations,
         all_nts,
     };
+
+    assert!(
+        !result.has_cycle(),
+        "BelowBottomCharacterization for terminal {} has a cycle, which should not happen",
+        terminal_id.0
+    );
 
     crate::debug!(6, "Computed Below-Bottom Characterization for terminal {}:\n{}", terminal_id.0, result);
     result
