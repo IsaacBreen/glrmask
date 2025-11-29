@@ -1,6 +1,9 @@
 use crate::glr::automaton::{
-    compute_first_sets_for_nonterminals, compute_follow_sets_for_nonterminals,
-    compute_nonterminal_nullability, compute_nullable_nonterminals, Nullability,
+    compute_first_sets_for_nonterminals,
+    compute_follow_sets_for_nonterminals,
+    compute_nonterminal_nullability,
+    compute_nullable_nonterminals,
+    Nullability,
 };
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -75,133 +78,20 @@ fn detect_all_cycles_recursive(
     path.pop();
 }
 
-fn find_rightmost_position(
-    rhs: &[Symbol],
-    target: &NonTerminal,
-    nullable: &BTreeSet<NonTerminal>,
-) -> Option<usize> {
-    for (idx, symbol) in rhs.iter().enumerate().rev() {
-        if let Symbol::NonTerminal(nt) = symbol {
-            if nt == target {
-                let suffix_nullable = rhs[idx + 1..].iter().all(|s| match s {
-                    Symbol::NonTerminal(snt) => nullable.contains(snt),
-                    Symbol::Terminal(_) => false,
-                });
-                if suffix_nullable {
-                    return Some(idx);
-                }
-            }
-
-            if !nullable.contains(nt) {
-                break;
-            }
-        } else {
-            break;
-        }
-    }
-    None
-}
-
-fn break_right_recursion_with_ordered_inlining(
-    productions: &mut Vec<Production>,
-    right_recursive_nts: &BTreeSet<NonTerminal>,
-) -> bool {
-    let mut nullable = compute_nullable_nonterminals(productions);
-    let mut ordered_nts = Vec::new();
-    let mut seen = BTreeSet::new();
-    for prod in productions.iter() {
-        if right_recursive_nts.contains(&prod.lhs) && seen.insert(prod.lhs.clone()) {
-            ordered_nts.push(prod.lhs.clone());
-        }
-    }
-
-    if ordered_nts.len() < 2 {
-        return false;
-    }
-
-    let mut changed = false;
-
-    for idx in (0..ordered_nts.len()).rev() {
-        let ai = &ordered_nts[idx];
-        let mut ai_prods: Vec<_> = productions
-            .iter()
-            .filter(|p| &p.lhs == ai)
-            .cloned()
-            .collect();
-        let mut replaced_ai = false;
-
-        for aj_idx in idx + 1..ordered_nts.len() {
-            let aj = &ordered_nts[aj_idx];
-            if ai == aj {
-                continue;
-            }
-
-            let aj_prods: Vec<_> = productions
-                .iter()
-                .filter(|p| &p.lhs == aj)
-                .cloned()
-                .collect();
-            if aj_prods.is_empty() {
-                continue;
-            }
-
-            let mut next_ai_prods = Vec::with_capacity(ai_prods.len());
-            let mut replaced_pair = false;
-
-            for prod in ai_prods.into_iter() {
-                if let Some(pos) = find_rightmost_position(&prod.rhs, aj, &nullable) {
-                    replaced_pair = true;
-                    let prefix: Vec<_> = prod.rhs[..pos].to_vec();
-                    let suffix: Vec<_> = prod.rhs[pos + 1..].to_vec();
-
-                    for b_prod in &aj_prods {
-                        let mut rhs = prefix.clone();
-                        rhs.extend(b_prod.rhs.iter().cloned());
-                        rhs.extend(suffix.iter().cloned());
-                        next_ai_prods.push(Production {
-                            lhs: ai.clone(),
-                            rhs,
-                        });
-                    }
-                } else {
-                    next_ai_prods.push(prod);
-                }
-            }
-
-            if replaced_pair {
-                crate::debug!(
-                    5,
-                    "Ordered inlining fallback: expanded {} inside {}",
-                    aj.0,
-                    ai.0
-                );
-                replaced_ai = true;
-                ai_prods = next_ai_prods;
-            } else {
-                ai_prods = next_ai_prods;
-            }
-        }
-
-        if replaced_ai {
-            changed = true;
-            productions.retain(|p| &p.lhs != ai);
-            productions.extend(ai_prods.clone());
-            nullable = compute_nullable_nonterminals(productions);
-        }
-    }
-
-    changed
-}
 /// Checks for length-1 recursion (e.g., A ::= A, A ::= B; B ::= A), considering nullable prefixes.
 pub fn check_for_length_1_recursion(productions: &[Production]) -> Vec<String> {
     let nullable_nonterminals = compute_nullable_nonterminals(productions);
     let all_nonterminals: BTreeSet<NonTerminal> = productions
         .iter()
         .flat_map(|p| {
-            std::iter::once(p.lhs.clone()).chain(p.rhs.iter().filter_map(|s| match s {
-                Symbol::NonTerminal(nt) => Some(nt.clone()),
-                _ => None,
-            }))
+            std::iter::once(p.lhs.clone()).chain(
+                p.rhs
+                    .iter()
+                    .filter_map(|s| match s {
+                        Symbol::NonTerminal(nt) => Some(nt.clone()),
+                        _ => None,
+                    }),
+            )
         })
         .collect();
 
@@ -254,11 +144,7 @@ pub fn check_for_length_1_recursion(productions: &[Production]) -> Vec<String> {
         .map(|cycle| {
             let mut names: Vec<_> = cycle.iter().map(|n| n.0.as_str()).collect();
             names.push(cycle[0].0.as_str());
-            let recursion_type = if cycle.len() == 1 {
-                "Direct"
-            } else {
-                "Indirect"
-            };
+            let recursion_type = if cycle.len() == 1 { "Direct" } else { "Indirect" };
             format!(
                 "{recursion_type} length-1 recursion cycle detected: {}",
                 names.join(" -> ")
@@ -385,8 +271,10 @@ pub fn remove_productions_with_undefined_nonterminals(
         initial_productions.iter().cloned().enumerate().collect();
 
     loop {
-        let defined_lhs: BTreeSet<NonTerminal> =
-            current.iter().map(|(_, prod)| prod.lhs.clone()).collect();
+        let defined_lhs: BTreeSet<NonTerminal> = current
+            .iter()
+            .map(|(_, prod)| prod.lhs.clone())
+            .collect();
 
         let mut removed = Vec::new();
         let mut kept = Vec::new();
@@ -409,11 +297,7 @@ pub fn remove_productions_with_undefined_nonterminals(
             break;
         }
 
-        crate::debug!(
-            5,
-            "Removing {} productions with undefined non-terminals.",
-            removed.len()
-        );
+        crate::debug!(5, "Removing {} productions with undefined non-terminals.", removed.len());
 
         let all_rhs_nonterminals: BTreeSet<NonTerminal> = removed
             .iter()
@@ -425,11 +309,7 @@ pub fn remove_productions_with_undefined_nonterminals(
             })
             .collect();
 
-        crate::debug!(
-            4,
-            "Missing non-terminals ({}) in productions:",
-            all_rhs_nonterminals.len()
-        );
+        crate::debug!(4, "Missing non-terminals ({}) in productions:", all_rhs_nonterminals.len());
         for nt in all_rhs_nonterminals.difference(&defined_lhs) {
             crate::debug!(6, "  {}", nt.0);
         }
@@ -471,10 +351,7 @@ pub fn drop_dead(productions: &[Production]) -> Vec<Production> {
             let old_len = nt_reachables[nt].len();
             for reachable in reachables {
                 if let Some(reachable_reachables) = nt_reachables.get(reachable).cloned() {
-                    nt_reachables
-                        .get_mut(nt)
-                        .unwrap()
-                        .extend(reachable_reachables);
+                    nt_reachables.get_mut(nt).unwrap().extend(reachable_reachables);
                 }
             }
             if nt_reachables[nt].len() != old_len {
@@ -503,11 +380,7 @@ pub fn drop_dead(productions: &[Production]) -> Vec<Production> {
         .cloned()
         .collect();
 
-    crate::debug!(
-        4,
-        "Dropped {} productions",
-        productions.len() - new_productions.len()
-    );
+    crate::debug!(4, "Dropped {} productions", productions.len() - new_productions.len());
 
     new_productions
 }
@@ -587,28 +460,22 @@ pub fn filter_productions_by_reachability(
         return Vec::new();
     }
 
-    let can_derive_set = compute_can_derive_interesting(initial_productions, interesting_symbols);
-    crate::debug!(
-        5,
-        "filter_productions_by_reachability: CanDeriveInteresting set: {:?}",
-        can_derive_set.iter().map(|nt| &nt.0).collect::<Vec<_>>()
-    );
+    let can_derive_set =
+        compute_can_derive_interesting(initial_productions, interesting_symbols);
+    crate::debug!(5, "filter_productions_by_reachability: CanDeriveInteresting set: {:?}", can_derive_set.iter().map(|nt| &nt.0).collect::<Vec<_>>());
 
     let mut kept_productions = Vec::new();
     for production in initial_productions {
         let lhs_can_derive_interesting = can_derive_set.contains(&production.lhs);
 
         let rhs_can_derive_interesting_for_this_rule =
-            production
-                .rhs
-                .iter()
-                .any(|symbol_in_rhs| match symbol_in_rhs {
-                    Symbol::Terminal(_) => interesting_symbols.contains(symbol_in_rhs),
-                    Symbol::NonTerminal(nt_in_rhs) => {
-                        interesting_symbols.contains(symbol_in_rhs)
-                            || can_derive_set.contains(nt_in_rhs)
-                    }
-                });
+            production.rhs.iter().any(|symbol_in_rhs| match symbol_in_rhs {
+                Symbol::Terminal(_) => interesting_symbols.contains(symbol_in_rhs),
+                Symbol::NonTerminal(nt_in_rhs) => {
+                    interesting_symbols.contains(symbol_in_rhs)
+                        || can_derive_set.contains(nt_in_rhs)
+                }
+            });
 
         if lhs_can_derive_interesting && rhs_can_derive_interesting_for_this_rule {
             kept_productions.push(production.clone());
@@ -645,7 +512,8 @@ pub fn compute_terminal_follow_sets(
     productions: &[Production],
 ) -> BTreeMap<Terminal, BTreeSet<Terminal>> {
     let nullable_nonterminals = compute_nullable_nonterminals(productions);
-    let first_sets = compute_first_sets_for_nonterminals(productions, &nullable_nonterminals);
+    let first_sets =
+        compute_first_sets_for_nonterminals(productions, &nullable_nonterminals);
     let nonterminal_follow_sets =
         compute_follow_sets_for_nonterminals(productions, &first_sets, &nullable_nonterminals);
 
@@ -722,514 +590,9 @@ pub fn create_unique_name_generator(
 
 pub fn resolve_right_recursion(
     productions: &mut Vec<Production>,
-    new_name_generator: &mut impl FnMut(&str) -> String,
+    mut new_name_generator: impl FnMut(&str) -> String,
 ) {
-    // This function eliminates all right recursion (direct and indirect) by:
-    // 1. Finding all NTs that are right-recursive (can derive A →* ... A)
-    // 2. Inlining unit productions to expose direct recursion
-    // 3. Applying the standard right-to-left recursion transformation
-
-    // Track previous right-recursive sets to detect when we're making no progress
-    let mut prev_right_recursive: Option<BTreeSet<NonTerminal>> = None;
-    let mut no_progress_count = 0;
-    const MAX_NO_PROGRESS: usize = 50;
-
-    loop {
-        let nullable = compute_nullable_nonterminals(productions);
-
-        // Helper to find ALL potential rightmost non-terminals (considering nullable suffixes)
-        // Returns all NTs that could be the rightmost, depending on which optional elements are present
-        let get_rightmost_nts = |rhs: &[Symbol]| -> Vec<NonTerminal> {
-            let mut result = Vec::new();
-            for symbol in rhs.iter().rev() {
-                match symbol {
-                    Symbol::NonTerminal(nt) => {
-                        // This NT could be the rightmost (when symbols to its right are empty)
-                        result.push(nt.clone());
-                        if !nullable.contains(nt) {
-                            // This NT is non-nullable, so it's always present when reached
-                            // No need to look further left
-                            break;
-                        }
-                        // NT is nullable, continue looking left for more possibilities
-                    }
-                    Symbol::Terminal(_) => {
-                        // Hit a non-nullable terminal, stop looking left
-                        break;
-                    }
-                }
-            }
-            result
-        };
-
-        // Build right-reachability graph
-        // Add edges for ALL potential rightmost NTs (including nullable ones)
-        let mut right_reachable: BTreeMap<NonTerminal, BTreeSet<NonTerminal>> = BTreeMap::new();
-        for prod in productions.iter() {
-            for rightmost_nt in get_rightmost_nts(&prod.rhs) {
-                right_reachable
-                    .entry(prod.lhs.clone())
-                    .or_default()
-                    .insert(rightmost_nt);
-            }
-        }
-
-        // Compute transitive closure
-        loop {
-            let mut changed = false;
-            let keys: Vec<_> = right_reachable.keys().cloned().collect();
-            for a in &keys {
-                let reachable: Vec<_> = right_reachable
-                    .get(a)
-                    .cloned()
-                    .unwrap_or_default()
-                    .into_iter()
-                    .collect();
-                for b in reachable {
-                    if let Some(reachable_from_b) = right_reachable.get(&b).cloned() {
-                        let set = right_reachable.entry(a.clone()).or_default();
-                        for c in reachable_from_b {
-                            if set.insert(c) {
-                                changed = true;
-                            }
-                        }
-                    }
-                }
-            }
-            if !changed {
-                break;
-            }
-        }
-
-        // Find right-recursive non-terminals
-        // Skip NTs that:
-        // 1. Are already right-recursion helpers (end with _rr or contain _rr_)
-        // 2. Have epsilon productions AND no direct right-recursion 
-        //    (these are pure optional wrappers like A? -> A | ε)
-        // NTs with epsilon that ALSO have direct right-recursion (like A -> a A | ε)
-        // still need transformation to eliminate the unbounded a* repetition.
-        let nts_with_epsilon: BTreeSet<_> = productions
-            .iter()
-            .filter(|p| p.rhs.is_empty())
-            .map(|p| p.lhs.clone())
-            .collect();
-        
-        // Check if an NT has DIRECT right-recursion (ends with itself)
-        let nts_with_direct_right_recursion: BTreeSet<_> = productions
-            .iter()
-            .filter(|p| {
-                matches!(p.rhs.last(), Some(Symbol::NonTerminal(nt)) if nt == &p.lhs)
-            })
-            .map(|p| p.lhs.clone())
-            .collect();
-        
-        let right_recursive_nts: BTreeSet<_> = right_reachable
-            .iter()
-            .filter(|(nt, reachable)| reachable.contains(*nt))
-            .filter(|(nt, _)| !nt.0.ends_with("_rr") && !nt.0.contains("_rr_"))
-            // Only skip epsilon NTs that don't have direct right-recursion
-            .filter(|(nt, _)| {
-                !nts_with_epsilon.contains(*nt) || nts_with_direct_right_recursion.contains(*nt)
-            })
-            .map(|(nt, _)| nt.clone())
-            .collect();
-
-        if right_recursive_nts.is_empty() {
-            break;
-        }
-
-        if right_recursive_nts.len() == 1 {
-            if let Some(nt) = right_recursive_nts.iter().next() {
-                let prods: Vec<_> = productions
-                    .iter()
-                    .filter(|p| &p.lhs == nt)
-                    .map(|p| format!("{}", p))
-                    .collect();
-                crate::debug!(
-                    5,
-                    "Inspecting remaining right recursion for {}: {:?}",
-                    nt.0,
-                    prods
-                );
-            }
-        }
-
-        // Check if any are directly right-recursive (can be handled by resolve_direct_right_recursion)
-        // This includes both simple direct recursion (A -> α A) and 
-        // recursion with nullable suffix (A -> α A B where B is nullable)
-        let has_direct = productions.iter().any(|p| {
-            if !right_recursive_nts.contains(&p.lhs) {
-                return false;
-            }
-            let is_simple = is_simple_direct_right_recursive(p);
-            let is_nullable_suffix = is_right_recursive_with_nullable_suffix(p, &nullable);
-            let is_direct = is_simple || is_nullable_suffix;
-            if is_direct {
-                crate::debug!(5, "Found direct right recursion for {} (simple={}, nullable_suffix={})", 
-                    p.lhs.0, is_simple, is_nullable_suffix);
-            }
-            is_direct
-        });
-
-        // Check if we're making progress
-        if let Some(ref prev) = prev_right_recursive {
-            if &right_recursive_nts == prev && !has_direct {
-                no_progress_count += 1;
-                if no_progress_count >= MAX_NO_PROGRESS {
-                    crate::debug!(5, "No progress in eliminating right recursion after {} iterations, giving up. Remaining: {:?}",
-                        MAX_NO_PROGRESS, right_recursive_nts.iter().map(|nt| &nt.0).collect::<Vec<_>>());
-                    break;
-                }
-            } else {
-                no_progress_count = 0;
-            }
-        }
-        prev_right_recursive = Some(right_recursive_nts.clone());
-
-        crate::debug!(
-            5,
-            "Found right-recursive non-terminals: {:?}",
-            right_recursive_nts
-                .iter()
-                .map(|nt| &nt.0)
-                .collect::<Vec<_>>()
-        );
-
-        if has_direct {
-            // Apply the direct right recursion transformation
-            resolve_direct_right_recursion(productions, &mut *new_name_generator);
-        } else {
-            // Check for "hidden right recursion" like S → a S B where B is nullable
-            // This is effectively S → a S
-            let has_hidden_right_recursion = productions.iter().any(|p| {
-                if !right_recursive_nts.contains(&p.lhs) {
-                    return false;
-                }
-                // Check if there's a non-terminal equal to LHS followed only by nullable symbols
-                for (i, sym) in p.rhs.iter().enumerate() {
-                    if let Symbol::NonTerminal(nt) = sym {
-                        if nt == &p.lhs {
-                            // Check if all symbols after this are nullable
-                            let suffix = &p.rhs[i + 1..];
-                            if !suffix.is_empty() && suffix.iter().all(|s| {
-                                matches!(s, Symbol::NonTerminal(snt) if nullable.contains(snt))
-                            }) {
-                                // Also make sure this is not at the very end (that's simple direct)
-                                // and that there's something before it
-                                if i > 0 {
-                                    return true;
-                                }
-                            }
-                        }
-                    }
-                }
-                false
-            });
-
-            if has_hidden_right_recursion {
-                // Handle hidden right recursion by removing the nullable suffix
-                // S → a S B becomes S → a S (effectively)
-                // We'll inline the nullable NTs' empty productions
-                crate::debug!(5, "Handling hidden right recursion");
-
-                let mut new_prods = Vec::new();
-                for prod in productions.iter() {
-                    if !right_recursive_nts.contains(&prod.lhs) {
-                        new_prods.push(prod.clone());
-                        continue;
-                    }
-
-                    // Check if this production has hidden right recursion
-                    let mut has_hidden = false;
-                    let mut self_position = None;
-                    for (i, sym) in prod.rhs.iter().enumerate() {
-                        if let Symbol::NonTerminal(nt) = sym {
-                            if nt == &prod.lhs {
-                                let suffix = &prod.rhs[i + 1..];
-                                if !suffix.is_empty() && suffix.iter().all(|s| {
-                                    matches!(s, Symbol::NonTerminal(snt) if nullable.contains(snt))
-                                }) {
-                                    if i > 0 {
-                                        has_hidden = true;
-                                        self_position = Some(i);
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    if has_hidden {
-                        let pos = self_position.unwrap();
-                        // Create a new production without the nullable suffix
-                        // S → a S B becomes S → a S
-                        // This transforms hidden right recursion into direct right recursion
-                        // which will be handled in the next iteration
-                        let new_rhs: Vec<_> = prod.rhs[..=pos].to_vec();
-                        new_prods.push(Production {
-                            lhs: prod.lhs.clone(),
-                            rhs: new_rhs,
-                        });
-                        // NOTE: We do NOT keep the original. The nullable suffix productions
-                        // are handled by inline_null_productions elsewhere.
-                    } else {
-                        new_prods.push(prod.clone());
-                    }
-                }
-
-                *productions = new_prods;
-            } else {
-                // Check for "both-ends self-recursion" like E → E + E
-                // This pattern: LHS at position 0 AND at the end, with something in between
-                // These need special handling: we extract the middle operators
-                let has_both_ends_self_recursion = productions.iter().any(|p| {
-                    if !right_recursive_nts.contains(&p.lhs) {
-                        return false;
-                    }
-                    if p.rhs.len() < 3 {
-                        return false; // Need at least: E op E
-                    }
-                    // Check if RHS starts AND ends with the LHS
-                    let starts_with_self =
-                        matches!(p.rhs.first(), Some(Symbol::NonTerminal(nt)) if nt == &p.lhs);
-                    let ends_with_self =
-                        matches!(p.rhs.last(), Some(Symbol::NonTerminal(nt)) if nt == &p.lhs);
-                    starts_with_self && ends_with_self
-                });
-
-                if has_both_ends_self_recursion {
-                    // Handle E → E + E type recursion (both left and right recursive)
-                    // Transform to: E → E E', E' → + E E' | * E E' | ε
-                    crate::debug!(5, "Handling both-ends self-recursion (E → E + E pattern)");
-
-                    let mut new_prods = Vec::new();
-                    let mut processed = BTreeSet::new();
-
-                    // Group by LHS
-                    let prods_by_lhs: BTreeMap<NonTerminal, Vec<Production>> = {
-                        let mut map = BTreeMap::new();
-                        for prod in productions.iter() {
-                            map.entry(prod.lhs.clone())
-                                .or_insert_with(Vec::new)
-                                .push(prod.clone());
-                        }
-                        map
-                    };
-
-                    for prod in productions.iter() {
-                        if processed.contains(&prod.lhs) {
-                            continue;
-                        }
-
-                        if !right_recursive_nts.contains(&prod.lhs) {
-                            new_prods.push(prod.clone());
-                            continue;
-                        }
-
-                        // Check if this NT has both-ends self-recursion (E → E + E pattern)
-                        let prods_for_nt = prods_by_lhs.get(&prod.lhs).unwrap();
-                        let has_both_ends_recursion = prods_for_nt.iter().any(|p| {
-                            if p.rhs.len() < 3 {
-                                return false;
-                            }
-                            // Must start AND end with the LHS
-                            let starts_with_self = matches!(p.rhs.first(), Some(Symbol::NonTerminal(nt)) if nt == &p.lhs);
-                            let ends_with_self = matches!(p.rhs.last(), Some(Symbol::NonTerminal(nt)) if nt == &p.lhs);
-                            starts_with_self && ends_with_self
-                        });
-
-                        if !has_both_ends_recursion {
-                            new_prods.push(prod.clone());
-                            continue;
-                        }
-
-                        processed.insert(prod.lhs.clone());
-
-                        // Create new NT for the tail recursion
-                        let new_nt = NonTerminal(new_name_generator(&prod.lhs.0));
-                        crate::debug!(
-                            5,
-                            "Transforming {} with both-ends self-recursion, creating {}",
-                            prod.lhs.0,
-                            new_nt.0
-                        );
-
-                        // Partition productions into:
-                        // - Both-ends recursive (E → E + E): becomes E' → + E E'
-                        // - Simple right recursive (E → a E): becomes E' → a E E'
-                        // - Non-recursive (E → id): becomes E → id E'
-
-                        for p in prods_for_nt {
-                            let starts_with_self = matches!(p.rhs.first(), Some(Symbol::NonTerminal(nt)) if nt == &p.lhs);
-                            let ends_with_self = matches!(p.rhs.last(), Some(Symbol::NonTerminal(nt)) if nt == &p.lhs);
-
-                            if starts_with_self && ends_with_self && p.rhs.len() >= 3 {
-                                // E → E + E becomes E' → + E E'
-                                // Extract the middle part (between first E and last E)
-                                let middle: Vec<_> = p.rhs[1..p.rhs.len() - 1].to_vec();
-
-                                // E' → middle E E' (where middle is "+" for "E + E")
-                                let mut new_rhs = middle;
-                                new_rhs.push(Symbol::NonTerminal(p.lhs.clone()));
-                                new_rhs.push(Symbol::NonTerminal(new_nt.clone()));
-                                new_prods.push(Production {
-                                    lhs: new_nt.clone(),
-                                    rhs: new_rhs,
-                                });
-                            } else {
-                                // E → id becomes E → id E'
-                                let mut new_rhs = p.rhs.clone();
-                                new_rhs.push(Symbol::NonTerminal(new_nt.clone()));
-                                new_prods.push(Production {
-                                    lhs: p.lhs.clone(),
-                                    rhs: new_rhs,
-                                });
-                            }
-                        }
-
-                        // E' → ε
-                        new_prods.push(Production {
-                            lhs: new_nt.clone(),
-                            rhs: vec![],
-                        });
-                    }
-
-                    *productions = new_prods;
-                } else {
-                    // No direct recursion found - we have only indirect recursion through unit productions
-                    // Inline unit productions involving right-recursive NTs to expose direct recursion
-
-                    // A unit production is A → B where B is a single non-terminal
-                    // Also include "bridge" unit productions: B → A where:
-                    // - B is nullable (has epsilon production)
-                    // - B appears at the rightmost position in some A → ... B
-                    // - A is in right_recursive_nts
-                    
-                    // First, find bridge NTs: nullable NTs that connect right-recursive NTs to themselves
-                    let bridge_nts: BTreeSet<_> = productions
-                        .iter()
-                        .filter(|p| {
-                            // p is a unit production B → A
-                            p.rhs.len() == 1
-                            && matches!(p.rhs.first(), Some(Symbol::NonTerminal(nt)) if right_recursive_nts.contains(nt))
-                            && nts_with_epsilon.contains(&p.lhs)
-                        })
-                        .filter(|p| {
-                            // Check if B appears at rightmost position of some A → ... B
-                            productions.iter().any(|q| {
-                                right_recursive_nts.contains(&q.lhs)
-                                && matches!(q.rhs.last(), Some(Symbol::NonTerminal(nt)) if nt == &p.lhs)
-                            })
-                        })
-                        .map(|p| p.lhs.clone())
-                        .collect();
-                    
-                    let unit_prods: Vec<_> = productions
-                        .iter()
-                        .filter(|p| {
-                            p.rhs.len() == 1
-                            && matches!(p.rhs.first(), Some(Symbol::NonTerminal(nt)) if right_recursive_nts.contains(nt))
-                            && (right_recursive_nts.contains(&p.lhs) || bridge_nts.contains(&p.lhs))
-                        })
-                        .cloned()
-                        .collect();
-
-                    if unit_prods.is_empty() {
-                        // No unit productions to inline - fall back to deterministic ordered inlining
-                        crate::debug!(
-                            5,
-                            "No unit productions found, using ordered inlining fallback"
-                        );
-
-                        if !break_right_recursion_with_ordered_inlining(
-                            productions,
-                            &right_recursive_nts,
-                        ) {
-                            // Last resort: check for ternary-style patterns like A -> ... A ... A
-                            // where LHS appears in prefix but still ends with LHS
-                            let has_ternary_style = productions.iter().any(|p| {
-                                right_recursive_nts.contains(&p.lhs)
-                                    && is_direct_right_recursive_allowing_prefix_self(p)
-                            });
-
-                            if has_ternary_style {
-                                crate::debug!(
-                                    5,
-                                    "Found ternary-style right recursion, applying permissive transformation"
-                                );
-                                resolve_ternary_right_recursion(
-                                    productions,
-                                    &right_recursive_nts,
-                                    &mut *new_name_generator,
-                                );
-                            } else {
-                                crate::debug!(
-                                    5,
-                                    "Could not break right recursion cycle for: {:?}, giving up",
-                                    right_recursive_nts
-                                        .iter()
-                                        .map(|nt| &nt.0)
-                                        .collect::<Vec<_>>()
-                                );
-                                break;
-                            }
-                        }
-                    } else {
-                        // Inline unit productions
-                        crate::debug!(
-                            5,
-                            "Inlining unit productions: {:?}",
-                            unit_prods
-                                .iter()
-                                .map(|p| format!("{}", p))
-                                .collect::<Vec<_>>()
-                        );
-
-                        let mut new_prods = Vec::new();
-                        let prods_by_lhs: BTreeMap<NonTerminal, Vec<Production>> = {
-                            let mut map = BTreeMap::new();
-                            for prod in productions.iter() {
-                                map.entry(prod.lhs.clone())
-                                    .or_insert_with(Vec::new)
-                                    .push(prod.clone());
-                            }
-                            map
-                        };
-
-                        for prod in productions.iter() {
-                            // Check if this is a unit production A → B where B is right-recursive
-                            // or a bridge unit production (bridge_nt → A where bridge_nt is nullable)
-                            if prod.rhs.len() == 1 {
-                                if let Some(Symbol::NonTerminal(nt)) = prod.rhs.first() {
-                                    if right_recursive_nts.contains(nt)
-                                        && (right_recursive_nts.contains(&prod.lhs) || bridge_nts.contains(&prod.lhs))
-                                    {
-                                        // Drop direct self-recursion A -> A
-                                        if nt == &prod.lhs {
-                                            continue;
-                                        }
-                                        // Inline: replace A → B with A → γ for each B → γ
-                                        if let Some(b_prods) = prods_by_lhs.get(nt) {
-                                            for b_prod in b_prods {
-                                                new_prods.push(Production {
-                                                    lhs: prod.lhs.clone(),
-                                                    rhs: b_prod.rhs.clone(),
-                                                });
-                                            }
-                                        }
-                                        continue;
-                                    }
-                                }
-                            }
-                            new_prods.push(prod.clone());
-                        }
-
-                        *productions = new_prods;
-                    }
-                }
-            }
-        }
-    }
+    todo!("resolve_right_recursion");
 }
 
 fn is_simple_direct_right_recursive(prod: &Production) -> bool {
@@ -1245,253 +608,20 @@ fn is_simple_direct_right_recursive(prod: &Production) -> bool {
     }
 }
 
-/// Check if production is right-recursive considering nullable suffixes.
-/// E.g., A -> ... A B where B is nullable is effectively A -> ... A
-fn is_right_recursive_with_nullable_suffix(prod: &Production, nullable: &BTreeSet<NonTerminal>) -> bool {
-    if prod.rhs.len() < 2 {
-        return false;
-    }
-    
-    // Find the rightmost non-terminal that equals LHS, considering nullable suffix
-    for (i, sym) in prod.rhs.iter().enumerate().rev() {
-        match sym {
-            Symbol::NonTerminal(nt) if nt == &prod.lhs => {
-                // Check that everything after this position is nullable
-                let suffix = &prod.rhs[i + 1..];
-                let suffix_all_nullable = suffix.iter().all(|s| {
-                    matches!(s, Symbol::NonTerminal(n) if nullable.contains(n))
-                });
-                if suffix_all_nullable {
-                    // Check that the prefix doesn't contain LHS (simple case)
-                    let prefix = &prod.rhs[..i];
-                    return !prefix.contains(&Symbol::NonTerminal(prod.lhs.clone()));
-                }
-                return false;
-            }
-            Symbol::NonTerminal(nt) if !nullable.contains(nt) => {
-                // Hit a non-nullable NT that's not LHS, stop looking
-                return false;
-            }
-            Symbol::Terminal(_) => {
-                // Hit a terminal, stop looking
-                return false;
-            }
-            _ => {
-                // Nullable NT, continue looking left
-            }
-        }
-    }
-    false
-}
-
-/// Find the position of LHS in RHS, considering nullable suffix.
-/// Returns the rightmost position where LHS appears with only nullable symbols after it.
-fn find_lhs_position_with_nullable_suffix(
-    rhs: &[Symbol],
-    lhs: &NonTerminal,
-    nullable: &BTreeSet<NonTerminal>,
-) -> Option<usize> {
-    for (i, sym) in rhs.iter().enumerate().rev() {
-        match sym {
-            Symbol::NonTerminal(nt) if nt == lhs => {
-                // Check that everything after this position is nullable
-                let suffix = &rhs[i + 1..];
-                let suffix_all_nullable = suffix.iter().all(|s| {
-                    matches!(s, Symbol::NonTerminal(n) if nullable.contains(n))
-                });
-                if suffix_all_nullable {
-                    return Some(i);
-                }
-                // Not a valid position (non-nullable suffix), keep looking left
-            }
-            Symbol::NonTerminal(nt) if !nullable.contains(nt) => {
-                // Hit a non-nullable NT that's not LHS, stop looking
-                return None;
-            }
-            Symbol::Terminal(_) => {
-                // Hit a terminal, stop looking
-                return None;
-            }
-            _ => {
-                // Nullable NT that's not LHS, continue looking left
-            }
-        }
-    }
-    None
-}
-
-/// Check if production ends with LHS, allowing LHS to appear in prefix (for ternary patterns)
-fn is_direct_right_recursive_allowing_prefix_self(prod: &Production) -> bool {
-    if prod.rhs.len() < 2 {
-        return false;
-    }
-    matches!(prod.rhs.last(), Some(Symbol::NonTerminal(nt)) if nt == &prod.lhs)
-}
-
-/// Handle ternary-style right recursion like A -> ... A ... A
-/// Transform A -> α A β A into: A -> α A β A', A' -> β A' | ε
-fn resolve_ternary_right_recursion(
-    productions: &mut Vec<Production>,
-    right_recursive_nts: &BTreeSet<NonTerminal>,
-    new_name_generator: &mut impl FnMut(&str) -> String,
-) {
-    let mut prods_by_lhs: BTreeMap<NonTerminal, Vec<Production>> = BTreeMap::new();
-    for prod in productions.iter().cloned() {
-        prods_by_lhs.entry(prod.lhs.clone()).or_default().push(prod);
-    }
-
-    let mut new_productions = Vec::new();
-    let mut processed = BTreeSet::new();
-
-    for prod in productions.iter() {
-        if processed.contains(&prod.lhs) {
-            continue;
-        }
-
-        if !right_recursive_nts.contains(&prod.lhs) {
-            new_productions.push(prod.clone());
-            continue;
-        }
-
-        let prods_for_nt = prods_by_lhs.get(&prod.lhs).unwrap();
-
-        // Check if any production for this NT has ternary-style recursion
-        let has_ternary = prods_for_nt
-            .iter()
-            .any(is_direct_right_recursive_allowing_prefix_self);
-
-        if !has_ternary {
-            for p in prods_for_nt {
-                new_productions.push(p.clone());
-            }
-            processed.insert(prod.lhs.clone());
-            continue;
-        }
-
-        processed.insert(prod.lhs.clone());
-
-        // Create helper NT
-        let helper_nt = NonTerminal(new_name_generator(&prod.lhs.0));
-        crate::debug!(
-            5,
-            "Resolving ternary right-recursion for '{}' -> '{}'",
-            prod.lhs.0,
-            helper_nt.0
-        );
-
-        // Partition into recursive (ends with LHS) and non-recursive
-        let (recursive_rules, non_recursive_rules): (Vec<_>, Vec<_>) = prods_for_nt
-            .iter()
-            .cloned()
-            .partition(is_direct_right_recursive_allowing_prefix_self);
-
-        // Transform recursive rules: A -> α A becomes A -> A' α (left-recursive in original NT)
-        // This is the correct right-to-left transformation
-        for rec_rule in &recursive_rules {
-            // Strip the trailing LHS and prepend helper
-            let prefix = &rec_rule.rhs[..rec_rule.rhs.len() - 1];
-            let mut new_rhs = Vec::with_capacity(prefix.len() + 1);
-            new_rhs.push(Symbol::NonTerminal(helper_nt.clone()));
-            new_rhs.extend_from_slice(prefix);
-            new_productions.push(Production {
-                lhs: rec_rule.lhs.clone(),
-                rhs: new_rhs,
-            });
-
-            // For the helper: A' -> (the trailing part after stripping prefix up to last A before the tail A)
-            // For A -> α β A, create A' -> A' β | ε (LEFT-recursive helper)
-            // We extract the "β" part (everything between the last non-tail A and the tail A)
-            // But if there's no middle A, just use A' -> ε
-            let rhs_without_tail = &rec_rule.rhs[..rec_rule.rhs.len() - 1];
-            // Find last occurrence of LHS in prefix (if any)
-            let last_middle_pos = rhs_without_tail
-                .iter()
-                .rposition(|s| matches!(s, Symbol::NonTerminal(nt) if nt == &rec_rule.lhs));
-
-            if let Some(pos) = last_middle_pos {
-                // Extract suffix after middle LHS: β
-                let beta = &rhs_without_tail[pos + 1..];
-                if !beta.is_empty() {
-                    // A' -> A' β (LEFT-recursive)
-                    let mut helper_rhs = Vec::with_capacity(beta.len() + 1);
-                    helper_rhs.push(Symbol::NonTerminal(helper_nt.clone()));
-                    helper_rhs.extend_from_slice(beta);
-                    new_productions.push(Production {
-                        lhs: helper_nt.clone(),
-                        rhs: helper_rhs,
-                    });
-                }
-            }
-        }
-
-        // Non-recursive rules: A -> γ becomes A -> A' γ (helper BEFORE base)
-        for non_rec_rule in &non_recursive_rules {
-            let mut new_rhs = Vec::with_capacity(non_rec_rule.rhs.len() + 1);
-            new_rhs.push(Symbol::NonTerminal(helper_nt.clone()));
-            new_rhs.extend_from_slice(&non_rec_rule.rhs);
-            new_productions.push(Production {
-                lhs: non_rec_rule.lhs.clone(),
-                rhs: new_rhs,
-            });
-        }
-
-        // A' -> ε
-        new_productions.push(Production {
-            lhs: helper_nt.clone(),
-            rhs: vec![],
-        });
-    }
-
-    *productions = new_productions;
-}
-
 pub fn resolve_direct_right_recursion(
     productions: &mut Vec<Production>,
     mut new_name_generator: impl FnMut(&str) -> String,
 ) {
-    // Compute nullable set first
-    let nullable = compute_nullable_nonterminals(productions);
-    
     // Group productions by LHS to easily access all rules for a given non-terminal.
     let mut prods_by_lhs: BTreeMap<NonTerminal, Vec<Production>> = BTreeMap::new();
     for prod in productions.iter().cloned() {
         prods_by_lhs.entry(prod.lhs.clone()).or_default().push(prod);
     }
 
-    // Identify all non-terminals that have right-recursive rules (considering nullable suffix).
-    // Skip NTs that are already right-recursion helpers (those with _rr suffix).
-    // NTs with epsilon AND direct right-recursion should still be transformed.
-    let nts_with_epsilon: BTreeSet<_> = prods_by_lhs
-        .iter()
-        .filter(|(_, prods)| prods.iter().any(|p| p.rhs.is_empty()))
-        .map(|(nt, _)| nt.clone())
-        .collect();
-    
-    // Check if an NT has DIRECT right-recursion (ends with itself)
-    let nts_with_direct_right_recursion: BTreeSet<_> = productions
-        .iter()
-        .filter(|p| {
-            matches!(p.rhs.last(), Some(Symbol::NonTerminal(nt)) if nt == &p.lhs)
-        })
-        .map(|p| p.lhs.clone())
-        .collect();
-    
+    // Identify all non-terminals that have simple direct right-recursive rules.
     let mut recursive_nts = BTreeSet::new();
     for (nt, prods_for_nt) in &prods_by_lhs {
-        // Skip helper NTs that were created by previous right-recursion elimination
-        if nt.0.ends_with("_rr") || nt.0.contains("_rr_") {
-            continue;
-        }
-        // Only skip epsilon NTs that don't have direct right-recursion
-        if nts_with_epsilon.contains(nt) && !nts_with_direct_right_recursion.contains(nt) {
-            continue;
-        }
-        // Check for simple direct recursion OR recursion with nullable suffix
-        let has_simple = prods_for_nt.iter().any(is_simple_direct_right_recursive);
-        let has_nullable_suffix = prods_for_nt.iter().any(|p| is_right_recursive_with_nullable_suffix(p, &nullable));
-        
-        if has_simple || has_nullable_suffix {
-            crate::debug!(7, "NT '{}' is right-recursive (simple={}, nullable_suffix={})", nt.0, has_simple, has_nullable_suffix);
+        if prods_for_nt.iter().any(is_simple_direct_right_recursive) {
             recursive_nts.insert(nt.clone());
         }
     }
@@ -1514,133 +644,46 @@ pub fn resolve_direct_right_recursion(
         processed_recursive_nts.insert(lhs.clone());
 
         let prods_for_nt = prods_by_lhs.get(lhs).expect("LHS group missing");
-        
-        // Partition into recursive (ends with LHS, considering nullable suffix) and non-recursive
-        let (recursive_rules, other_rules): (Vec<_>, Vec<_>) = prods_for_nt
-            .iter()
-            .cloned()
-            .partition(|p| {
-                is_simple_direct_right_recursive(p) || is_right_recursive_with_nullable_suffix(p, &nullable)
-            });
+        let (recursive_rules, other_rules): (Vec<_>, Vec<_>) =
+            prods_for_nt.iter().cloned().partition(is_simple_direct_right_recursive);
 
-        // Check if we already have a helper NT for this LHS (from a previous resolution)
-        // Look for a rule A -> ... A_rr
-        let existing_helper = other_rules.iter().find_map(|p| {
-            if let Some(Symbol::NonTerminal(nt)) = p.rhs.last() {
-                if nt.0.starts_with(&format!("{}_rr", lhs.0)) {
-                    return Some(nt.clone());
-                }
-            }
-            None
-        });
+        let new_nt = NonTerminal(new_name_generator(&lhs.0));
+        crate::debug!(7, "Resolving direct right-recursion for '{}' -> '{}'", lhs.0, new_nt.0);
 
-        let (new_nt, reused) = if let Some(helper) = existing_helper {
-            crate::debug!(7, "Reusing existing helper '{}' for '{}'", helper.0, lhs.0);
-            (helper, true)
-        } else {
-            (NonTerminal(new_name_generator(&lhs.0)), false)
-        };
-
-        if !reused {
-            crate::debug!(
-                7,
-                "Resolving direct right-recursion for '{}' -> '{}'",
-                lhs.0,
-                new_nt.0
-            );
-        }
-
-        // Transform right recursion to left recursion:
-        // Original: A -> α A | β (derives α* β)
-        // Transformed: A -> A' β, A' -> A' α | ε (derives α* β via left recursion)
-        
-        // A -> A' βⱼ (helper BEFORE base, for correct right-to-left conversion)
+        // A -> A' βⱼ
         for non_rec_rule in &other_rules {
-            // If reusing helper, check if this rule is already transformed
-            if reused {
-                if let Some(Symbol::NonTerminal(first)) = non_rec_rule.rhs.first() {
-                    if first == &new_nt {
-                        // Already transformed: A -> A_rr ...
-                        new_productions.push(non_rec_rule.clone());
-                        continue;
-                    }
-                }
-            }
-
             let mut new_rhs = Vec::with_capacity(non_rec_rule.rhs.len() + 1);
-            new_rhs.push(Symbol::NonTerminal(new_nt.clone())); // helper first
-            new_rhs.extend_from_slice(&non_rec_rule.rhs);      // then base
+            new_rhs.push(Symbol::NonTerminal(new_nt.clone()));
+            new_rhs.extend_from_slice(&non_rec_rule.rhs);
             let new_prod = Production {
                 lhs: lhs.clone(),
                 rhs: new_rhs,
             };
-            crate::debug!(
-                7,
-                "  Transforming non-recursive rule '{}' -> '{}'",
-                non_rec_rule,
-                new_prod
-            );
+            crate::debug!(7, "  Transforming non-recursive rule '{}' -> '{}'", non_rec_rule, new_prod);
             new_productions.push(new_prod);
         }
 
-        // A' -> A' αᵢ suffix (LEFT-recursive helper for correct language)
-        // For each recursive rule, find where LHS appears (considering nullable suffix)
-        // and create helper production with helper + prefix + suffix
+        // A' -> A' αᵢ
         for rec_rule in &recursive_rules {
-            // Find the position of LHS in the RHS (the rightmost occurrence considering nullable suffix)
-            let lhs_pos = find_lhs_position_with_nullable_suffix(&rec_rule.rhs, lhs, &nullable);
-            
-            if let Some(pos) = lhs_pos {
-                // Split: [prefix] [LHS at pos] [nullable suffix]
-                let prefix = &rec_rule.rhs[..pos];
-                let suffix = &rec_rule.rhs[pos + 1..];
-                
-                // Create A' -> A' prefix suffix (left-recursive)
-                let mut new_rhs = Vec::with_capacity(prefix.len() + suffix.len() + 1);
-                new_rhs.push(Symbol::NonTerminal(new_nt.clone())); // helper first (left-recursive)
-                new_rhs.extend_from_slice(prefix);
-                new_rhs.extend_from_slice(suffix);
-                
-                let new_prod = Production {
-                    lhs: new_nt.clone(),
-                    rhs: new_rhs,
-                };
-                crate::debug!(
-                    7,
-                    "  Transforming recursive rule '{}' -> '{}'",
-                    rec_rule,
-                    new_prod
-                );
-                new_productions.push(new_prod);
-            } else {
-                // Fallback: shouldn't happen if is_right_recursive_with_nullable_suffix is correct
-                let alpha = &rec_rule.rhs[..rec_rule.rhs.len() - 1];
-                let mut new_rhs = Vec::with_capacity(alpha.len() + 1);
-                new_rhs.push(Symbol::NonTerminal(new_nt.clone())); // helper first (left-recursive)
-                new_rhs.extend_from_slice(alpha);
-                let new_prod = Production {
-                    lhs: new_nt.clone(),
-                    rhs: new_rhs,
-                };
-                crate::debug!(
-                    7,
-                    "  Transforming recursive rule (fallback) '{}' -> '{}'",
-                    rec_rule,
-                    new_prod
-                );
-                new_productions.push(new_prod);
-            }
+            let alpha = &rec_rule.rhs[..rec_rule.rhs.len() - 1];
+            let mut new_rhs = Vec::with_capacity(alpha.len() + 1);
+            new_rhs.push(Symbol::NonTerminal(new_nt.clone()));
+            new_rhs.extend_from_slice(alpha);
+            let new_prod = Production {
+                lhs: new_nt.clone(),
+                rhs: new_rhs,
+            };
+            crate::debug!(7, "  Transforming recursive rule '{}' -> '{}'", rec_rule, new_prod);
+            new_productions.push(new_prod);
         }
 
         // A' -> ε
-        if !reused {
-            let epsilon_prod = Production {
-                lhs: new_nt.clone(),
-                rhs: Vec::new(),
-            };
-            crate::debug!(7, "  Adding new epsilon rule: '{}'", epsilon_prod);
-            new_productions.push(epsilon_prod);
-        }
+        let epsilon_prod = Production {
+            lhs: new_nt.clone(),
+            rhs: Vec::new(),
+        };
+        crate::debug!(7, "  Adding new epsilon rule: '{}'", epsilon_prod);
+        new_productions.push(epsilon_prod);
     }
 
     productions.clear();
@@ -1674,28 +717,29 @@ pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {
     out.push(start_prod);
 
     for prod in &productions[1..] {
-        let rhs_variants: Vec<Vec<Symbol>> = prod.rhs.iter().fold(vec![vec![]], |acc, sym| {
-            let sym_options = match sym {
-                Symbol::Terminal(_) => vec![Some(sym.clone())],
-                Symbol::NonTerminal(nt) => match nullability.get(nt) {
-                    Some(Nullability::Null) => vec![None],
-                    Some(Nullability::Nullable) => vec![Some(sym.clone()), None],
-                    _ => vec![Some(sym.clone())],
-                },
-            };
+        let rhs_variants: Vec<Vec<Symbol>> =
+            prod.rhs.iter().fold(vec![vec![]], |acc, sym| {
+                let sym_options = match sym {
+                    Symbol::Terminal(_) => vec![Some(sym.clone())],
+                    Symbol::NonTerminal(nt) => match nullability.get(nt) {
+                        Some(Nullability::Null) => vec![None],
+                        Some(Nullability::Nullable) => vec![Some(sym.clone()), None],
+                        _ => vec![Some(sym.clone())],
+                    },
+                };
 
-            acc.into_iter()
-                .flat_map(|variant| {
-                    sym_options.iter().map(move |opt| {
-                        let mut new_variant = variant.clone();
-                        if let Some(s) = opt {
-                            new_variant.push(s.clone());
-                        }
-                        new_variant
+                acc.into_iter()
+                    .flat_map(|variant| {
+                        sym_options.iter().map(move |opt| {
+                            let mut new_variant = variant.clone();
+                            if let Some(s) = opt {
+                                new_variant.push(s.clone());
+                            }
+                            new_variant
+                        })
                     })
-                })
-                .collect()
-        });
+                    .collect()
+            });
 
         for rhs in rhs_variants {
             let new_prod = Production {
