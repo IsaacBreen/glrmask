@@ -849,17 +849,35 @@ pub fn generate_glr_parser_with_maps(
         remove_productions_with_undefined_nonterminals(&productions, &[start_production_id]);
     print_memory_usage("After removing undefined");
 
+    // Inline null productions FIRST to expose hidden right recursion.
+    // Hidden right recursion (A -> α A β where β is nullable) becomes
+    // direct right recursion (A -> α A) after this step.
+    crate::debug!(3, "Inlining null productions (pass 1: expose hidden right recursion)");
+    productions = inline_null_productions(&productions);
+    print_memory_usage("After inlining null productions (pass 1)");
+
+    // Now resolve direct right recursion (including formerly hidden ones).
+    // This transforms A -> α A into A -> A' α, A' -> ε | A' α,
+    // converting right recursion to left recursion.
+    // Per the theorem from "Even Faster Generalized LR Parsing",
+    // eliminating right recursion (along with hidden left recursion,
+    // which is checked during validation) guarantees bounded reductions.
     let nonterminals: BTreeSet<_> = productions.iter().map(|p| p.lhs.clone()).collect();
     let mut unique_name_generator = create_unique_name_generator(&nonterminals);
 
+    crate::debug!(3, "Resolving direct right recursion");
     crate::glr::analyze::resolve_direct_right_recursion(
         &mut productions,
         &mut unique_name_generator,
     );
     print_memory_usage("After right recursion resolution");
 
+    // Inline null productions AGAIN because resolve_direct_right_recursion
+    // may have introduced new nullable non-terminals (like A' -> ε).
+    // These need to be inlined into existing productions.
+    crate::debug!(3, "Inlining null productions (pass 2: inline new nullable NTs)");
     productions = inline_null_productions(&productions);
-    print_memory_usage("After inlining null productions");
+    print_memory_usage("After inlining null productions (pass 2)");
 
     let mut next_non_terminal_id = non_terminal_map.len();
     for p in &productions {
