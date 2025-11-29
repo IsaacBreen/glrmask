@@ -668,6 +668,7 @@ pub fn resolve_right_recursion(
         let right_recursive_nts: BTreeSet<_> = right_reachable
             .iter()
             .filter(|(nt, reachable)| reachable.contains(*nt))
+            .filter(|(nt, _)| !nt.0.ends_with("_rr") && !nt.0.contains("_rr_"))
             .map(|(nt, _)| nt.clone())
             .collect();
         
@@ -677,7 +678,11 @@ pub fn resolve_right_recursion(
         
         // Check if any are directly right-recursive (can be handled by resolve_direct_right_recursion)
         let has_direct = productions.iter().any(|p| {
-            right_recursive_nts.contains(&p.lhs) && is_simple_direct_right_recursive(p)
+            let is_direct = right_recursive_nts.contains(&p.lhs) && is_simple_direct_right_recursive(p);
+            if is_direct {
+                crate::debug!(5, "Found direct right recursion for {}", p.lhs.0);
+            }
+            is_direct
         });
 
         // Check if we're making progress
@@ -870,16 +875,6 @@ pub fn resolve_right_recursion(
                                     lhs: new_nt.clone(),
                                     rhs: new_rhs,
                                 });
-                            } else if ends_with_self {
-                                // E → a E becomes E' → a E E'
-                                let prefix = &p.rhs[..p.rhs.len() - 1];
-                                let mut new_rhs = prefix.to_vec();
-                                new_rhs.push(Symbol::NonTerminal(p.lhs.clone()));
-                                new_rhs.push(Symbol::NonTerminal(new_nt.clone()));
-                                new_prods.push(Production {
-                                    lhs: new_nt.clone(),
-                                    rhs: new_rhs,
-                                });
                             } else {
                                 // E → id becomes E → id E'
                                 let mut new_rhs = p.rhs.clone();
@@ -947,7 +942,10 @@ pub fn resolve_right_recursion(
                             // Find the first rightmost NT that's right-recursive and different from prod.lhs
                             let rightmost_candidates = get_rightmost_nts(&prod.rhs);
                             let target_nt = rightmost_candidates.iter().find(|nt| {
-                                right_recursive_nts.contains(*nt) && **nt != prod.lhs && prod.rhs.len() > 1
+                                right_recursive_nts.contains(*nt) 
+                                && **nt != prod.lhs 
+                                && prod.rhs.len() > 1
+                                && right_reachable.get(nt).map_or(false, |r| r.contains(&prod.lhs))
                             });
                             
                             if let Some(rightmost_nt) = target_nt {
@@ -1023,6 +1021,10 @@ pub fn resolve_right_recursion(
                             if prod.rhs.len() == 1 {
                                 if let Some(Symbol::NonTerminal(nt)) = prod.rhs.first() {
                                     if right_recursive_nts.contains(nt) && right_recursive_nts.contains(&prod.lhs) {
+                                        // Drop direct self-recursion A -> A
+                                        if nt == &prod.lhs {
+                                            continue;
+                                        }
                                         // Inline: replace A → B with A → γ for each B → γ
                                         if let Some(b_prods) = prods_by_lhs.get(nt) {
                                             for b_prod in b_prods {
@@ -1099,11 +1101,41 @@ pub fn resolve_direct_right_recursion(
         let (recursive_rules, other_rules): (Vec<_>, Vec<_>) =
             prods_for_nt.iter().cloned().partition(is_simple_direct_right_recursive);
 
-        let new_nt = NonTerminal(new_name_generator(&lhs.0));
-        crate::debug!(7, "Resolving direct right-recursion for '{}' -> '{}'", lhs.0, new_nt.0);
+        // Check if we already have a helper NT for this LHS (from a previous resolution)
+        // Look for a rule A -> A_rr ...
+        let existing_helper = other_rules.iter().find_map(|p| {
+            if let Some(Symbol::NonTerminal(nt)) = p.rhs.first() {
+                if nt.0.starts_with(&format!("{}_rr", lhs.0)) {
+                    return Some(nt.clone());
+                }
+            }
+            None
+        });
+
+        let (new_nt, reused) = if let Some(helper) = existing_helper {
+             crate::debug!(7, "Reusing existing helper '{}' for '{}'", helper.0, lhs.0);
+             (helper, true)
+        } else {
+             (NonTerminal(new_name_generator(&lhs.0)), false)
+        };
+
+        if !reused {
+            crate::debug!(7, "Resolving direct right-recursion for '{}' -> '{}'", lhs.0, new_nt.0);
+        }
 
         // A -> A' βⱼ
         for non_rec_rule in &other_rules {
+            // If reusing helper, check if this rule is already transformed
+            if reused {
+                if let Some(Symbol::NonTerminal(first)) = non_rec_rule.rhs.first() {
+                    if first == &new_nt {
+                        // Already transformed: A -> A_rr ...
+                        new_productions.push(non_rec_rule.clone());
+                        continue;
+                    }
+                }
+            }
+
             let mut new_rhs = Vec::with_capacity(non_rec_rule.rhs.len() + 1);
             new_rhs.push(Symbol::NonTerminal(new_nt.clone()));
             new_rhs.extend_from_slice(&non_rec_rule.rhs);
@@ -1130,12 +1162,14 @@ pub fn resolve_direct_right_recursion(
         }
 
         // A' -> ε
-        let epsilon_prod = Production {
-            lhs: new_nt.clone(),
-            rhs: Vec::new(),
-        };
-        crate::debug!(7, "  Adding new epsilon rule: '{}'", epsilon_prod);
-        new_productions.push(epsilon_prod);
+        if !reused {
+            let epsilon_prod = Production {
+                lhs: new_nt.clone(),
+                rhs: Vec::new(),
+            };
+            crate::debug!(7, "  Adding new epsilon rule: '{}'", epsilon_prod);
+            new_productions.push(epsilon_prod);
+        }
     }
 
     productions.clear();
