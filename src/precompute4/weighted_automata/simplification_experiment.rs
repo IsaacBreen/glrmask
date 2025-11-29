@@ -241,7 +241,7 @@ impl NWA {
         let mut dwa = self.determinize();
 
         // Run DWA passes
-        for pass in config.dwa_passes {
+        for pass in config.dwa_passes.clone() {
             match pass {
                 DwaPass::PruneUnreachable => { dwa.prune_unreachable(); },
                 DwaPass::PruneDeadEnds => { dwa.prune_dead_ends(); },
