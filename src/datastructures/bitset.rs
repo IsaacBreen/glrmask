@@ -152,6 +152,12 @@ impl Bitset {
             })
     }
     
+    /// Alias for iter_indices() - returns an iterator over the indices of set bits.
+    /// This is for API compatibility with RangeSet.
+    pub fn iter_bits(&self) -> impl Iterator<Item = usize> + '_ {
+        self.iter_indices()
+    }
+    
     /// Returns an efficient iterator over the indices of set bits.
     pub fn iter(&self) -> BitsetIter {
         BitsetIter {
@@ -258,9 +264,11 @@ impl Bitset {
     }
 
     pub fn from_words_vec(words: Vec<u64>) -> Self {
-        Bitset {
+        let mut bitset = Bitset {
             words,
-        }
+        };
+        bitset.trim();
+        bitset
     }
     
     /// Fill an i32 slice with the bitmask representation (compatible with llguidance format).

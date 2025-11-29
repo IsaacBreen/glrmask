@@ -8,6 +8,7 @@ use bimap::BiBTreeMap;
 use indoc::indoc;
 
 use crate::constraint::{GrammarConstraint, GrammarConstraintConfig, LLMTokenBV};
+use crate::datastructures::bitset::Bitset;
 use crate::datastructures::hybrid_bitset::RangeSet;
 use crate::finite_automata::{eat_u8, rep1};
 use crate::glr::grammar::{nt, prod, regex_name, t, Terminal};
@@ -64,7 +65,7 @@ fn test_trivial() {
 
     // Initial mask should allow "a"
     let mask1 = state.get_mask();
-    assert_eq!(mask1, RangeSet::from_iter(vec![0]));
+    assert_eq!(mask1, Bitset::from_iter(vec![0]));
 
     // Commit "a"
     state.commit(LLMTokenID(0));
@@ -72,7 +73,7 @@ fn test_trivial() {
 
     // Mask should now allow "$"
     let mask2 = state.get_mask();
-    assert_eq!(mask2, RangeSet::from_iter(vec![1]));
+    assert_eq!(mask2, Bitset::from_iter(vec![1]));
 
     // Commit "$"
     state.commit(LLMTokenID(1));
@@ -80,7 +81,7 @@ fn test_trivial() {
 
     // Mask should now be empty as we've reached the end of a valid parse
     let mask3 = state.get_mask();
-    assert_eq!(mask3, RangeSet::from_iter(vec![]));
+    assert_eq!(mask3, Bitset::from_iter(vec![]));
 }
 
 /// Test that x;x is correctly parsed as two expression statements.
@@ -190,7 +191,7 @@ fn test_constraint_simple() {
     // Initial mask
     let mask = constraint_state.get_mask();
     println!("Initial mask: {:?}", mask);
-    assert_eq!(mask, RangeSet::from_iter(vec![0, 1])); // Expect "ab" or "ac"
+    assert_eq!(mask, Bitset::from_iter(vec![0, 1])); // Expect "ab" or "ac"
 
     // Commit "ab" (LLMTokenID 0)
     println!("{}", &constraint_state);
@@ -200,7 +201,7 @@ fn test_constraint_simple() {
     // Mask after committing "ab"
     println!("Constraint state:\n{}", &constraint_state);
     let mask_after_commit = constraint_state.get_mask();
-    assert_eq!(mask_after_commit, RangeSet::from_iter(vec![2])); // Expect "$" (EOF)
+    assert_eq!(mask_after_commit, Bitset::from_iter(vec![2])); // Expect "$" (EOF)
 
     // Test Serialization/Deserialization
     let json = constraint.to_json();
@@ -277,7 +278,7 @@ fn test_constraint_simple_simplified() {
     // Initial mask
     let mask = constraint_state.get_mask();
     println!("Initial mask: {:?}", mask);
-    assert_eq!(mask, RangeSet::from_iter(vec![0])); // Expect "a"
+    assert_eq!(mask, Bitset::from_iter(vec![0])); // Expect "a"
 
     // // Commit "a" (LLMTokenID 0)
     // println!("{}", &constraint_state);
@@ -353,13 +354,13 @@ fn test_constraint_expression() {
     let mut state = constraint.init();
     let mask = state.get_mask();
     // Expect LLM tokens that can start an expression: i (0), '(' (3), "(i" (5)
-    assert_eq!(mask, RangeSet::from_iter(vec![0, 3, 5]));
+    assert_eq!(mask, Bitset::from_iter(vec![0, 3, 5]));
 
     // Commit "(i"
     state.commit(LLMTokenID(5));
     let mask = state.get_mask();
     // Now expect '+', '*', ')', '+i' => IDs 1,2,4,6
-    assert_eq!(mask, RangeSet::from_iter(vec![1, 2, 4, 6]));
+    assert_eq!(mask, Bitset::from_iter(vec![1, 2, 4, 6]));
 
     // Test Serialization/Deserialization
     let json = constraint.to_json();
@@ -424,13 +425,13 @@ fn test_constraint_expression_simplified_06_11_25() {
     // Initial state and step
     let mut state = constraint.init();
     let mask = state.get_mask();
-    assert_eq!(mask, RangeSet::from_iter(vec![]));
+    assert_eq!(mask, Bitset::from_iter(vec![]));
 
     // Commit "(i"
     state.commit_bytes(b"i");
     state.print_gss();
     let mask = state.get_mask();
-    assert_eq!(mask, RangeSet::from_iter(vec![0]));
+    assert_eq!(mask, Bitset::from_iter(vec![0]));
 }
 
 #[test]
@@ -759,11 +760,11 @@ fn test_ignore_token() {
     // --- Runtime check ---
     // Scenario 1: commit "a", then " ", then "b"
     let mut state1 = constraint.init();
-    assert_eq!(state1.get_mask(), RangeSet::from_iter(vec![llm_a.0, llm_ws.0, llm_a_b.0]), "Initial mask should allow 'a' or 'a b'");
+    assert_eq!(state1.get_mask(), Bitset::from_iter(vec![llm_a.0, llm_ws.0, llm_a_b.0]), "Initial mask should allow 'a' or 'a b'");
     state1.commit(llm_a);
-    assert_eq!(state1.get_mask(), RangeSet::from_iter(vec![llm_b.0, llm_ws.0, llm_ws.0]), "After 'a', mask should allow 'b' or ' '");
+    assert_eq!(state1.get_mask(), Bitset::from_iter(vec![llm_b.0, llm_ws.0, llm_ws.0]), "After 'a', mask should allow 'b' or ' '");
     state1.commit(llm_ws);
-    assert_eq!(state1.get_mask(), RangeSet::from_iter(vec![llm_b.0, llm_ws.0]), "After 'a ', mask should allow 'b'");
+    assert_eq!(state1.get_mask(), Bitset::from_iter(vec![llm_b.0, llm_ws.0]), "After 'a ', mask should allow 'b'");
     state1.commit(llm_b);
     // assert_eq!(state1.get_mask(), HybridBitset::from_iter(vec![llm_ws.0]), "After 'a b', mask should be empty (complete parse).");
 
@@ -849,8 +850,8 @@ fn test_simple_def_match_non_zero_llm_id() {
 
     // 9. Define the expected mask.
     //    It should contain the original LLMTokenID for "def".
-    let mut expected_mask = RangeSet::zeros();
-    expected_mask.insert(def_original_llm_id); // Expecting the original LLM ID
+    let mut expected_mask = Bitset::zeros();
+    expected_mask.insert(def_original_llm_id as usize); // Expecting the original LLM ID
 
     // 10. Assert that the mask matches the expected mask.
     //     This assertion is expected to fail if the bug in setup_llm_token_mappings exists.
@@ -1016,9 +1017,11 @@ fn test_precompute_x_eq() {
         .get_transition(x_tid.0 as Label)
         .expect("No transition for X");
     let x_weight_tokens: RangeSet = x_weight.iter_up_to(internal_max_llm_token).collect();
+    let mut expected_x_weight = RangeSet::zeros();
+    expected_x_weight.insert(x_llm_id);
     assert_eq!(
         x_weight_tokens,
-        RangeSet::from_iter(vec![x_llm_id]),
+        expected_x_weight,
         "Weight for X edge is wrong"
     );
     assert!(dwa.states[x_dest_id].final_weight.is_some(), "Destination for X edge should be final");
@@ -1028,9 +1031,11 @@ fn test_precompute_x_eq() {
         .get_transition(space_tid.0 as Label)
         .expect("No transition for SPACE");
     let space_weight_tokens: RangeSet = space_weight.iter_up_to(internal_max_llm_token).collect();
+    let mut expected_space_weight = RangeSet::zeros();
+    expected_space_weight.insert(space_equals_llm_id);
     assert_eq!(
         space_weight_tokens,
-        RangeSet::from_iter(vec![space_equals_llm_id]),
+        expected_space_weight,
         "Weight for SPACE edge is wrong"
     );
     let node_after_space = &dwa.states[space_dest_id];
@@ -1042,9 +1047,11 @@ fn test_precompute_x_eq() {
         .expect("No transition for EQUALS");
     let equals_weight_tokens: RangeSet =
         equals_weight.iter_up_to(internal_max_llm_token).collect();
+    let mut expected_equals_weight = RangeSet::zeros();
+    expected_equals_weight.insert(space_equals_llm_id);
     assert_eq!(
         equals_weight_tokens,
-        RangeSet::from_iter(vec![space_equals_llm_id]),
+        expected_equals_weight,
         "Weight for EQUALS edge is wrong"
     );
     assert!(dwa.states[equals_dest_id].final_weight.is_some(), "Destination for EQUALS edge should be final");
@@ -1107,13 +1114,13 @@ fn test_constraint_expression_no_times() {
     let mut state = constraint.init();
     let mask = state.get_mask();
     // Expect LLM tokens that can start an expression: i (0), '(' (2), "(i" (4)
-    assert_eq!(mask, RangeSet::from_iter(vec![0, 2, 4]));
+    assert_eq!(mask, Bitset::from_iter(vec![0, 2, 4]));
 
     // Commit "(i"
     state.commit(LLMTokenID(4));
     let mask = state.get_mask();
     // Now expect '+', ')', '+i' => IDs 1,3,5
-    assert_eq!(mask, RangeSet::from_iter(vec![1, 3, 5]));
+    assert_eq!(mask, Bitset::from_iter(vec![1, 3, 5]));
 }
 
 #[test]
@@ -1169,13 +1176,13 @@ fn test_constraint_expression_no_parens() {
     let mut state = constraint.init();
     let mask = state.get_mask();
     // Expect LLM tokens that can start an expression: i (0)
-    assert_eq!(mask, RangeSet::from_iter(vec![0]));
+    assert_eq!(mask, Bitset::from_iter(vec![0]));
 
     // Commit "i"
     state.commit(LLMTokenID(0));
     let mask = state.get_mask();
     // Now expect '+', '*', '+i' => IDs 1,2,3
-    assert_eq!(mask, RangeSet::from_iter(vec![1, 2, 3]));
+    assert_eq!(mask, Bitset::from_iter(vec![1, 2, 3]));
 }
 
 #[test]
@@ -1230,13 +1237,13 @@ fn test_constraint_expression_no_plus_times() {
     let mut state = constraint.init();
     let mask = state.get_mask();
     // Expect LLM tokens that can start an expression: i (0), '(' (1), "(i" (3)
-    assert_eq!(mask, RangeSet::from_iter(vec![0, 1, 3]));
+    assert_eq!(mask, Bitset::from_iter(vec![0, 1, 3]));
 
     // Commit "(i"
     state.commit(LLMTokenID(3));
     let mask = state.get_mask();
     // Now expect ')' => ID 2
-    assert_eq!(mask, RangeSet::from_iter(vec![2]));
+    assert_eq!(mask, Bitset::from_iter(vec![2]));
 }
 
 #[test]
@@ -1288,13 +1295,13 @@ fn test_constraint_expression_no_times_parens() {
     let mut state = constraint.init();
     let mask = state.get_mask();
     // Expect LLM tokens that can start an expression: i (0)
-    assert_eq!(mask, RangeSet::from_iter(vec![0]));
+    assert_eq!(mask, Bitset::from_iter(vec![0]));
 
     // Commit "i"
     state.commit(LLMTokenID(0));
     let mask = state.get_mask();
     // Now expect '+', '+i' => IDs 1,2
-    assert_eq!(mask, RangeSet::from_iter(vec![1, 2]));
+    assert_eq!(mask, Bitset::from_iter(vec![1, 2]));
 }
 
 #[test]
@@ -1352,19 +1359,19 @@ fn test_constraint_expression_unbalanced_parens() {
     let mut state = constraint.init();
     let mask = state.get_mask();
     // Expect LLM tokens that can start an expression: i (0), '(' (1), "(i" (2)
-    assert_eq!(mask, RangeSet::from_iter(vec![0, 1, 2]));
+    assert_eq!(mask, Bitset::from_iter(vec![0, 1, 2]));
 
     // Commit "("
     state.commit(LLMTokenID(1));
     let mask = state.get_mask();
     // After '(', we expect another E, so the mask should be the same
-    assert_eq!(mask, RangeSet::from_iter(vec![0, 1, 2]));
+    assert_eq!(mask, Bitset::from_iter(vec![0, 1, 2]));
 
     // Commit "i"
     state.commit(LLMTokenID(0));
     let mask = state.get_mask();
     // After "(i", the inner E is satisfied. The outer E is satisfied. We now expect EOF.
-    assert_eq!(mask, RangeSet::from_iter(vec![3]));
+    assert_eq!(mask, Bitset::from_iter(vec![3]));
 }
 
 #[test]
@@ -1418,7 +1425,7 @@ fn test_constraint_expression_unbalanced_parens2() {
     println!("state: {}", state);
     let mask = state.get_mask();
     // After "(i", the inner E is satisfied. The outer E is satisfied. We now expect EOF.
-    assert_eq!(mask, RangeSet::from_iter(vec![3]));
+    assert_eq!(mask, Bitset::from_iter(vec![3]));
 }
 
 #[test]
@@ -1470,20 +1477,20 @@ fn test_constraint_expression_cycle() {
     let mut state = constraint.init();
     let mask = state.get_mask();
     // Expect LLM tokens that can start an expression: i (0)
-    assert_eq!(mask, RangeSet::from_iter(vec![0]));
+    assert_eq!(mask, Bitset::from_iter(vec![0]));
 
     // Commit "i"
     state.commit(LLMTokenID(0));
     let mask = state.get_mask();
     // After "i", E is satisfied, so we expect EOF ($)
-    assert_eq!(mask, RangeSet::from_iter(vec![1]));
+    assert_eq!(mask, Bitset::from_iter(vec![1]));
 
     // Commit "$"
     state.commit(LLMTokenID(1));
     assert!(state.is_active());
     let mask = state.get_mask();
     // After "(i", the inner E is satisfied. The outer E is satisfied. We now expect EOF.
-    assert_eq!(mask, RangeSet::from_iter(vec![]));
+    assert_eq!(mask, Bitset::from_iter(vec![]));
 }
 
 #[test]
@@ -1633,7 +1640,7 @@ fn test_js_simplified_ebnf_string() -> Result<(), Box<dyn std::error::Error>> {
     // The grammar can start with an IDENTIFIER ("a"), a unary '!' ("!\""), or a STRING_LITERAL ("\"").
     // It can also start with other things like 'let', 'if', 'while', '{', '(', 'true', 'false', a number, or a unary '-'.
     // The LLM tokens provided match the start of IDENTIFIER, unary '!', and STRING_LITERAL.
-    let expected_mask1 = RangeSet::from_iter(vec![llm_a.0, llm_not_quote.0, llm_quote.0]);
+    let expected_mask1 = Bitset::from_iter(vec![llm_a.0, llm_not_quote.0, llm_quote.0]);
     assert_eq!(
         mask1,
         expected_mask1,
@@ -1645,7 +1652,7 @@ fn test_js_simplified_ebnf_string() -> Result<(), Box<dyn std::error::Error>> {
     state.print_gss();
     let mask2 = state.get_mask();
 
-    let expected_mask2 = RangeSet::from_iter(vec![]);
+    let expected_mask2 = Bitset::from_iter(vec![]);
     assert_eq!(
         mask2,
         expected_mask2,
@@ -1694,7 +1701,7 @@ fn test_js_like_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>>
     let mask2 = state.get_mask();
 
     assert!(state.is_active(), "State should be active after committing 'X'");
-    let expected_mask2 = RangeSet::from_iter(vec![llm_empty_string_semicolon.0]);
+    let expected_mask2 = Bitset::from_iter(vec![llm_empty_string_semicolon.0]);
     assert_eq!(
         mask2,
         expected_mask2,
@@ -1738,7 +1745,7 @@ fn test_js_like_grammar_initial_mask_simplified() -> Result<(), Box<dyn std::err
     let mask2 = state.get_mask();
 
     assert!(state.is_active(), "State should be active after committing 'X'");
-    let expected_mask2 = RangeSet::from_iter(vec![]);
+    let expected_mask2 = Bitset::from_iter(vec![]);
     assert_eq!(
         mask2,
         expected_mask2,
@@ -1795,7 +1802,7 @@ fn test_ebnf_ignore_directive_with_partial_match() -> Result<(), Box<dyn std::er
     // " =" starts with " ", which matches IGNORE, but is followed by "=", which is not
     // a valid token. Therefore, the entire LLM token " =" does not form a valid
     // sequence of grammar tokens and should not be in the mask.
-    let expected_mask1 = RangeSet::from_iter(vec![llm_comment.0]);
+    let expected_mask1 = Bitset::from_iter(vec![llm_comment.0]);
     assert_eq!(
         mask1,
         expected_mask1,
@@ -2068,7 +2075,7 @@ fn test_ebnf_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>> {
     let mask = state.get_mask();
 
     // 6. Assert the expected mask
-    let expected_mask = RangeSet::from_iter(vec![space_token_id.0]);
+    let expected_mask = Bitset::from_iter(vec![space_token_id.0]);
     assert_eq!(
         mask,
         expected_mask,
@@ -2112,7 +2119,7 @@ fn test_ebnf_grammar_initial_mask_mandatory_pass() -> Result<(), Box<dyn std::er
     let mask = state.get_mask();
 
     // 6. Assert the expected mask
-    let expected_mask = RangeSet::from_iter(vec![space_token_id.0]);
+    let expected_mask = Bitset::from_iter(vec![space_token_id.0]);
     assert_eq!(
         mask,
         expected_mask,
@@ -2523,19 +2530,19 @@ fn test_constraint_indirect_recursion_simplified() {
     let mut state = constraint.init();
     let mask = state.get_mask();
     // Expect 'a' or 'b'
-    assert_eq!(mask, RangeSet::from_iter(vec![0, 1]));
+    assert_eq!(mask, Bitset::from_iter(vec![0, 1]));
 
     // Commit "a"
     state.commit(LLMTokenID(0));
     let mask = state.get_mask();
     // After 'a', we expect E, which is S, so we expect 'a' or 'b' again.
-    assert_eq!(mask, RangeSet::from_iter(vec![0, 1]));
+    assert_eq!(mask, Bitset::from_iter(vec![0, 1]));
 
     // Commit "b"
     state.commit(LLMTokenID(1));
     let mask = state.get_mask();
     // After "ab", we have a complete S. Now we expect EOF.
-    assert_eq!(mask, RangeSet::from_iter(vec![2]));
+    assert_eq!(mask, Bitset::from_iter(vec![2]));
 }
 
 #[test]
@@ -2566,13 +2573,13 @@ fn test_constraint_repetition_a() {
     let mask = state.get_mask();
     // The grammar can accept 'a' or EOF. Since EOF is not in the LLM vocab,
     // we only expect "a" (0).
-    assert_eq!(mask, RangeSet::from_iter(vec![0]));
+    assert_eq!(mask, Bitset::from_iter(vec![0]));
 
     // Commit "a"
     state.commit(LLMTokenID(0));
     let mask = state.get_mask();
     // After 'a', we can have another 'a' or end with EOF. Again, only 'a' is in vocab.
-    assert_eq!(mask, RangeSet::from_iter(vec![0]));
+    assert_eq!(mask, Bitset::from_iter(vec![0]));
 }
 
 #[test]
@@ -2613,7 +2620,7 @@ fn test_constraint_expression_split_token() {
     // token is EOF, not LPAREN. Therefore, the sequence [I, LPAREN] is invalid.
     // The other LLM token "$" (EOF) is also not valid at the start.
     // Thus, the initial mask should be empty.
-    assert_eq!(mask, RangeSet::from_iter(vec![]));
+    assert_eq!(mask, Bitset::from_iter(vec![]));
 }
 
 #[test]
@@ -2649,19 +2656,19 @@ fn test_constraint_expression_trivial_indirect() {
     let mut state = constraint.init();
     let mask = state.get_mask();
     // Expect LLM tokens that can start an expression: i (0), '(' (1), "(i" (2)
-    assert_eq!(mask, RangeSet::from_iter(vec![0, 1, 2]));
+    assert_eq!(mask, Bitset::from_iter(vec![0, 1, 2]));
 
     // Commit "("
     state.commit(LLMTokenID(1));
     let mask = state.get_mask();
     // After '(', we expect another E, so the mask should be the same
-    assert_eq!(mask, RangeSet::from_iter(vec![0, 1, 2]));
+    assert_eq!(mask, Bitset::from_iter(vec![0, 1, 2]));
 
     // Commit "i"
     state.commit(LLMTokenID(0));
     let mask = state.get_mask();
     // After "(i", the inner E is satisfied. The outer E is satisfied. We now expect EOF.
-    assert_eq!(mask, RangeSet::from_iter(vec![3]));
+    assert_eq!(mask, Bitset::from_iter(vec![3]));
 }
 
 #[test]
@@ -2696,21 +2703,21 @@ fn test_constraint_expression_trivial_direct() {
     let mut state = constraint.init();
     let mask = state.get_mask();
     // Expect LLM tokens that can start an expression: i (0), '(' (1), "(i" (2)
-    assert_eq!(mask, RangeSet::from_iter(vec![0, 1, 2]));
+    assert_eq!(mask, Bitset::from_iter(vec![0, 1, 2]));
 
     // Commit "("
     state.commit(LLMTokenID(1));
     let mask = state.get_mask();
     state.print_gss();
     // After '(', we expect another E, so the mask should be the same
-    assert_eq!(mask, RangeSet::from_iter(vec![0, 1, 2]));
+    assert_eq!(mask, Bitset::from_iter(vec![0, 1, 2]));
 
     // Commit "i"
     state.commit(LLMTokenID(0));
     let mask = state.get_mask();
     state.print_gss();
     // After "(i", the inner E is satisfied. The outer E is satisfied. We now expect EOF.
-    assert_eq!(mask, RangeSet::from_iter(vec![3]));
+    assert_eq!(mask, Bitset::from_iter(vec![3]));
 }
 
 #[test]
@@ -2745,13 +2752,13 @@ fn test_constraint_expression_trivial_direct_limited_vocab() {
     let mut state = constraint.init();
     let mask = state.get_mask();
     // Expect LLM tokens that can start an expression: i (0), '(' (1), "(i" (2)
-    assert_eq!(mask, RangeSet::from_iter(vec![2]));
+    assert_eq!(mask, Bitset::from_iter(vec![2]));
 
     // Commit "(i"
     state.commit(LLMTokenID(2));
     let mask = state.get_mask();
     // After "(i", the inner E is satisfied. The outer E is satisfied. We now expect EOF.
-    assert_eq!(mask, RangeSet::from_iter(vec![]));
+    assert_eq!(mask, Bitset::from_iter(vec![]));
 }
 
 // #[ignore]

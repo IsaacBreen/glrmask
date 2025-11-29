@@ -1377,7 +1377,7 @@ impl PyGrammarConstraintState {
     }
 
     fn get_mask<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<bool>>> {
-        let bitset = self.inner.with_inner(|state| state.get_mask4());
+        let bitset = self.inner.with_inner(|state| state.get_mask());
 
         let bools: Vec<bool> = if bitset.is_empty() {
             vec![]
@@ -1393,7 +1393,7 @@ impl PyGrammarConstraintState {
     }
 
     fn get_mask_bv(&self) -> PyResult<PyBitset> {
-        let bitset = self.inner.with_inner(|state| state.get_mask4());
+        let bitset = self.inner.with_inner(|state| state.get_mask());
         Ok(PyBitset { inner: bitset })
     }
 
@@ -1405,7 +1405,7 @@ impl PyGrammarConstraintState {
     fn fill_next_token_bitmask(&self, mut bitmask: PyReadwriteArray1<i32>) -> PyResult<()> {
         let slice = bitmask.as_slice_mut()
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("Array must be contiguous: {:?}", e)))?;
-        self.inner.with_inner(|state| state.fill_mask4_i32(slice));
+        self.inner.with_inner(|state| state.fill_mask_i32(slice));
         Ok(())
     }
 
@@ -1415,7 +1415,7 @@ impl PyGrammarConstraintState {
     /// The caller must ensure the pointer is valid for at least `size_bytes` bytes.
     unsafe fn fill_next_token_bitmask_ptr(&self, ptr: usize, size_bytes: usize) -> PyResult<()> {
         let num_i32s = size_bytes / 4;
-        self.inner.with_inner(|state| state.fill_mask4_i32_ptr(ptr as *mut i32, num_i32s));
+        self.inner.with_inner(|state| state.fill_mask_i32_ptr(ptr as *mut i32, num_i32s));
         Ok(())
     }
 

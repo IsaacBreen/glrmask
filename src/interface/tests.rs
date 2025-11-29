@@ -2,6 +2,7 @@
 mod tests {
     use std::collections::BTreeMap;
     use crate::constraint::GrammarConstraint;
+    use crate::datastructures::bitset::Bitset;
     use crate::datastructures::hybrid_bitset::RangeSet;
     use crate::finite_automata::{
         eat_u8, eat_u8_seq, greedy_group, groups, Expr as RegexExpr, QuantifierType,
@@ -352,10 +353,10 @@ mod tests {
 
         let _eof_llm_token_id = LLMTokenID(next_llm_id_val);
 
-        let ids_to_mask = |ids: &[LLMTokenID]| -> RangeSet {
-            let mut bs = RangeSet::zeros();
+        let ids_to_mask = |ids: &[LLMTokenID]| -> Bitset {
+            let mut bs = Bitset::zeros();
             for id in ids {
-                bs.insert(id.0);
+                bs.insert(id.0 as usize);
             }
             bs
         };
@@ -401,7 +402,7 @@ mod tests {
 
         state.commit(tok_eats);
         current_mask = state.get_mask();
-        let expected_eof_mask = RangeSet::zeros();
+        let expected_eof_mask = Bitset::zeros();
         assert_eq!(current_mask, expected_eof_mask);
 
         println!("Sentence grammar test completed successfully.");
@@ -456,10 +457,10 @@ mod tests {
 
         let _eof_llm_token_id = LLMTokenID(next_llm_id_val);
 
-        let ids_to_mask = |ids: &[LLMTokenID]| -> RangeSet {
-            let mut bs = RangeSet::zeros();
+        let ids_to_mask = |ids: &[LLMTokenID]| -> Bitset {
+            let mut bs = Bitset::zeros();
             for id in ids {
-                bs.insert(id.0);
+                bs.insert(id.0 as usize);
             }
             bs
         };

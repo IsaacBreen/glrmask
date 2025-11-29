@@ -16,7 +16,7 @@ type ParserGSS = LeveledGSS<ParseStateEdgeContent, Acc>;
 
 impl<'a> GrammarConstraintState<'a> {
     /// Compute the internal mask (RangeSet of internal token IDs) for the current state.
-    /// This is the core computation shared by get_mask4 and fill_mask4_i32.
+    /// This is the core computation shared by get_mask and fill_mask_i32.
     fn compute_internal_mask(&self) -> RangeSet {
         let mut final_mask_internal = RangeSet::zeros();
         if self.state.is_empty() {
@@ -158,7 +158,14 @@ impl<'a> GrammarConstraintState<'a> {
         final_mask_internal
     }
 
-    pub fn get_mask4(&self) -> Bitset {
+    /// Get the allowed token mask as a dense bitvector.
+    ///
+    /// This is the main method for getting the allowed tokens mask. It returns
+    /// a dense `Bitset` which can be efficiently converted to formats used by
+    /// ML frameworks (numpy arrays, torch tensors, etc.).
+    ///
+    /// For zero-allocation mask filling, see `fill_mask_i32` and `fill_mask_i32_ptr`.
+    pub fn get_mask(&self) -> Bitset {
         let final_mask_internal = self.compute_internal_mask();
         self.parent.precompute4_vocab.internal_bv_to_original(&final_mask_internal)
     }
@@ -171,7 +178,7 @@ impl<'a> GrammarConstraintState<'a> {
     /// This is the most efficient way to get the mask when you have a pre-allocated
     /// buffer (e.g., numpy array, torch tensor, or reused buffer).
     #[inline]
-    pub fn fill_mask4_i32(&self, out: &mut [i32]) {
+    pub fn fill_mask_i32(&self, out: &mut [i32]) {
         let final_mask_internal = self.compute_internal_mask();
         self.parent.precompute4_vocab.fill_internal_bv_to_original_i32(&final_mask_internal, out);
     }
@@ -184,9 +191,9 @@ impl<'a> GrammarConstraintState<'a> {
     /// - The memory is properly aligned for i32
     /// - No other references to this memory exist during the call
     #[inline]
-    pub unsafe fn fill_mask4_i32_ptr(&self, ptr: *mut i32, len: usize) {
+    pub unsafe fn fill_mask_i32_ptr(&self, ptr: *mut i32, len: usize) {
         let out = std::slice::from_raw_parts_mut(ptr, len);
-        self.fill_mask4_i32(out);
+        self.fill_mask_i32(out);
     }
     
     /// Returns the required buffer size in i32 elements for the mask.

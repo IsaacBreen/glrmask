@@ -1517,8 +1517,13 @@ impl<'a> GrammarConstraintState<'a> {
         (state_map, terminals_map)
     }
 
-    pub fn get_mask(&self) -> LLMTokenBV {
-        self.get_mask4().into()
+    /// Returns the allowed token mask as a sparse range-based set.
+    ///
+    /// Note: For most use cases, prefer `get_mask()` which returns a dense `Bitset`
+    /// that is more efficient for ML framework integration.
+    #[deprecated(since = "0.2.0", note = "Use get_mask() which returns a dense Bitset. This method will be removed in a future version.")]
+    pub fn get_mask_rangeset(&self) -> LLMTokenBV {
+        self.get_mask().into()
     }
 
     pub fn print_gss_stats(&self) {
