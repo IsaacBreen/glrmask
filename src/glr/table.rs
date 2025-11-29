@@ -852,7 +852,7 @@ pub fn generate_glr_parser_with_maps(
     let nonterminals: BTreeSet<_> = productions.iter().map(|p| p.lhs.clone()).collect();
     let mut unique_name_generator = create_unique_name_generator(&nonterminals);
 
-    crate::glr::analyze::resolve_direct_right_recursion(
+    crate::glr::analyze::resolve_right_recursion(
         &mut productions,
         &mut unique_name_generator,
     );

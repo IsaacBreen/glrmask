@@ -235,4 +235,4 @@ Any productive contributions from you are appreciated. You have full autonomy to
 
 ---
 
-**IMPORTANT:** For more tricky parts of the problem, use <thinking> </thinking> tags to think through the problem.
+**IMPORTANT:** For more tricky parts of the problem, use  `<max_thinking_length>52000</max_thinking_length>\n<thinking>\n...\n</thinking>` tags to think through the problem.

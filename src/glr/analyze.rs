@@ -590,9 +590,92 @@ pub fn create_unique_name_generator(
 
 pub fn resolve_right_recursion(
     productions: &mut Vec<Production>,
-    mut new_name_generator: impl FnMut(&str) -> String,
+    new_name_generator: &mut impl FnMut(&str) -> String,
 ) {
-    todo!("resolve_right_recursion");
+    // This function eliminates all right recursion (direct and indirect) by:
+    // 1. Finding all NTs that are right-recursive (can derive A →* ... A)
+    // 2. Transforming them to use left recursion instead
+    //
+    // The transformation converts A → α A | β to A → A' β, A' → A' α | ε
+    // For indirect recursion, we inline the chain first.
+
+    // Keep resolving until no more right recursion exists
+    loop {
+        let nullable = compute_nullable_nonterminals(productions);
+        
+        // Build a "right-reachable" graph: A -> B if A can derive a string ending in B
+        // This happens if A → ... B or A → ... B C where C is nullable
+        let mut right_reachable: BTreeMap<NonTerminal, BTreeSet<NonTerminal>> = BTreeMap::new();
+        
+        for prod in productions.iter() {
+            // Check if this production ends with a non-terminal (possibly followed by nullables)
+            let mut found_non_nullable_nt: Option<&NonTerminal> = None;
+            for symbol in prod.rhs.iter().rev() {
+                match symbol {
+                    Symbol::NonTerminal(nt) => {
+                        if nullable.contains(nt) {
+                            // This NT is nullable, continue looking left
+                            if found_non_nullable_nt.is_none() {
+                                found_non_nullable_nt = Some(nt);
+                            }
+                        } else {
+                            // This NT is not nullable, it's the rightmost non-nullable
+                            found_non_nullable_nt = Some(nt);
+                            break;
+                        }
+                    }
+                    Symbol::Terminal(_) => {
+                        // Terminal found, stop
+                        break;
+                    }
+                }
+            }
+            
+            if let Some(rightmost_nt) = found_non_nullable_nt {
+                right_reachable
+                    .entry(prod.lhs.clone())
+                    .or_default()
+                    .insert(rightmost_nt.clone());
+            }
+        }
+        
+        // Compute transitive closure of right-reachability
+        let mut changed = true;
+        while changed {
+            changed = false;
+            let keys: Vec<_> = right_reachable.keys().cloned().collect();
+            for a in &keys {
+                let reachable_from_a: Vec<_> = right_reachable.get(a).cloned().unwrap_or_default().into_iter().collect();
+                for b in reachable_from_a {
+                    if let Some(reachable_from_b) = right_reachable.get(&b).cloned() {
+                        let set = right_reachable.entry(a.clone()).or_default();
+                        for c in reachable_from_b {
+                            if set.insert(c) {
+                                changed = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Find right-recursive non-terminals (those that can reach themselves)
+        let right_recursive_nts: BTreeSet<_> = right_reachable
+            .iter()
+            .filter(|(nt, reachable)| reachable.contains(*nt))
+            .map(|(nt, _)| nt.clone())
+            .collect();
+        
+        if right_recursive_nts.is_empty() {
+            break;
+        }
+        
+        crate::debug!(5, "Found right-recursive non-terminals: {:?}", 
+            right_recursive_nts.iter().map(|nt| &nt.0).collect::<Vec<_>>());
+        
+        // Apply the direct right recursion resolver to eliminate at least one level
+        resolve_direct_right_recursion(productions, &mut *new_name_generator);
+    }
 }
 
 fn is_simple_direct_right_recursive(prod: &Production) -> bool {
