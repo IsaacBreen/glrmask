@@ -1498,13 +1498,17 @@ pub fn resolve_direct_right_recursion(
             );
         }
 
-        // A -> βⱼ A'
+        // Transform right recursion to left recursion:
+        // Original: A -> α A | β (derives α* β)
+        // Transformed: A -> A' β, A' -> A' α | ε (derives α* β via left recursion)
+        
+        // A -> A' βⱼ (helper BEFORE base, for correct right-to-left conversion)
         for non_rec_rule in &other_rules {
             // If reusing helper, check if this rule is already transformed
             if reused {
-                if let Some(Symbol::NonTerminal(last)) = non_rec_rule.rhs.last() {
-                    if last == &new_nt {
-                        // Already transformed: A -> ... A_rr
+                if let Some(Symbol::NonTerminal(first)) = non_rec_rule.rhs.first() {
+                    if first == &new_nt {
+                        // Already transformed: A -> A_rr ...
                         new_productions.push(non_rec_rule.clone());
                         continue;
                     }
@@ -1512,8 +1516,8 @@ pub fn resolve_direct_right_recursion(
             }
 
             let mut new_rhs = Vec::with_capacity(non_rec_rule.rhs.len() + 1);
-            new_rhs.extend_from_slice(&non_rec_rule.rhs);
-            new_rhs.push(Symbol::NonTerminal(new_nt.clone()));
+            new_rhs.push(Symbol::NonTerminal(new_nt.clone())); // helper first
+            new_rhs.extend_from_slice(&non_rec_rule.rhs);      // then base
             let new_prod = Production {
                 lhs: lhs.clone(),
                 rhs: new_rhs,
@@ -1527,9 +1531,9 @@ pub fn resolve_direct_right_recursion(
             new_productions.push(new_prod);
         }
 
-        // A' -> αᵢ suffix A'
+        // A' -> A' αᵢ suffix (LEFT-recursive helper for correct language)
         // For each recursive rule, find where LHS appears (considering nullable suffix)
-        // and create helper production with prefix + suffix + helper
+        // and create helper production with helper + prefix + suffix
         for rec_rule in &recursive_rules {
             // Find the position of LHS in the RHS (the rightmost occurrence considering nullable suffix)
             let lhs_pos = find_lhs_position_with_nullable_suffix(&rec_rule.rhs, lhs, &nullable);
@@ -1539,11 +1543,11 @@ pub fn resolve_direct_right_recursion(
                 let prefix = &rec_rule.rhs[..pos];
                 let suffix = &rec_rule.rhs[pos + 1..];
                 
-                // Create A' -> prefix suffix A'
+                // Create A' -> A' prefix suffix (left-recursive)
                 let mut new_rhs = Vec::with_capacity(prefix.len() + suffix.len() + 1);
+                new_rhs.push(Symbol::NonTerminal(new_nt.clone())); // helper first (left-recursive)
                 new_rhs.extend_from_slice(prefix);
                 new_rhs.extend_from_slice(suffix);
-                new_rhs.push(Symbol::NonTerminal(new_nt.clone()));
                 
                 let new_prod = Production {
                     lhs: new_nt.clone(),
@@ -1560,8 +1564,8 @@ pub fn resolve_direct_right_recursion(
                 // Fallback: shouldn't happen if is_right_recursive_with_nullable_suffix is correct
                 let alpha = &rec_rule.rhs[..rec_rule.rhs.len() - 1];
                 let mut new_rhs = Vec::with_capacity(alpha.len() + 1);
+                new_rhs.push(Symbol::NonTerminal(new_nt.clone())); // helper first (left-recursive)
                 new_rhs.extend_from_slice(alpha);
-                new_rhs.push(Symbol::NonTerminal(new_nt.clone()));
                 let new_prod = Production {
                     lhs: new_nt.clone(),
                     rhs: new_rhs,
