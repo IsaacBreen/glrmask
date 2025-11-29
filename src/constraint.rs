@@ -1531,7 +1531,11 @@ impl<'a> GrammarConstraintState<'a> {
     }
 
     pub fn print_gss(&self) {
-        // Unimplemented
+        let mut memo = HashSet::new();
+        for (tsid, state) in self.state.iter() {
+            println!("Tokenizer State ID: {:?}", tsid);
+            state.stack.to_graph_string_with_memo(&mut memo, false);
+        }
     }
 
     pub fn explain_stack(&self) {
