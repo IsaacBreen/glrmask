@@ -1,6 +1,7 @@
 #![allow(clippy::too_many_arguments)]
 
 use crate::datastructures::hybrid_bitset::RangeSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fmt::{self, Debug, Display, Formatter},
@@ -103,7 +104,7 @@ fn optimize_dwa_and_vocab(
 
     let max_tok = vocab.internal_max_llm_token;
     let mut token_to_class: Vec<usize> = vec![0; max_tok + 1];
-    let mut class_to_tokens: HashMap<usize, Vec<usize>> = HashMap::with_capacity(unique_weights.len());
+    let mut class_to_tokens: FxHashMap<usize, Vec<usize>> = FxHashMap::default();
     class_to_tokens.insert(0, (0..=max_tok).collect());
     let mut num_classes = 1;
 
@@ -116,7 +117,7 @@ fn optimize_dwa_and_vocab(
 
     let t_partition = std::time::Instant::now();
     for w in weights_vec.iter() {
-        let mut tokens_in_w_by_class: HashMap<usize, Vec<usize>> = HashMap::with_capacity(num_classes);
+        let mut tokens_in_w_by_class: FxHashMap<usize, Vec<usize>> = FxHashMap::default();
         for t in w.iter_up_to(max_tok) {
             if t <= max_tok {
                 tokens_in_w_by_class.entry(token_to_class[t]).or_default().push(t);
@@ -127,7 +128,7 @@ fn optimize_dwa_and_vocab(
             if present_tokens.len() < old_group.len() {
                 let new_cid = num_classes;
                 num_classes += 1;
-                let present_set: HashSet<usize> = present_tokens.iter().cloned().collect();
+                let present_set: FxHashSet<usize> = present_tokens.iter().cloned().collect();
                 old_group.retain(|t| !present_set.contains(t));
                 for &t in &present_tokens { token_to_class[t] = new_cid; }
                 class_to_tokens.insert(new_cid, present_tokens);
@@ -138,7 +139,7 @@ fn optimize_dwa_and_vocab(
 
     // OPTIMIZATION: Skip expensive frequency counting and sorting - just renumber sequentially
     let t_renumber = std::time::Instant::now();
-    let mut old_to_new_map: HashMap<usize, usize> = HashMap::with_capacity(max_tok + 1);
+    let mut old_to_new_map: FxHashMap<usize, usize> = FxHashMap::default();
     let mut new_id = 0;
     for tokens in class_to_tokens.values() {
         for &t in tokens {
@@ -148,8 +149,8 @@ fn optimize_dwa_and_vocab(
     }
     let new_max_tok = num_classes.saturating_sub(1);
 
-    let mut weight_cache: HashMap<Weight, Weight> = HashMap::new();
-    let mut map_weight = |w: &Weight, cache: &mut HashMap<Weight, Weight>| -> Weight {
+    let mut weight_cache: FxHashMap<Weight, Weight> = FxHashMap::default();
+    let mut map_weight = |w: &Weight, cache: &mut FxHashMap<Weight, Weight>| -> Weight {
         if let Some(cached) = cache.get(w) { return cached.clone(); }
         if w.is_all_fast() { return Weight::all(); }
         let mut new_vals = Vec::new();
@@ -168,7 +169,7 @@ fn optimize_dwa_and_vocab(
     }
 
     // Remap possible_matches
-    let mut bv_cache: HashMap<LLMTokenBV, LLMTokenBV> = HashMap::new();
+    let mut bv_cache: FxHashMap<LLMTokenBV, LLMTokenBV> = FxHashMap::default();
     let mut map_bv = |bv: &LLMTokenBV| -> LLMTokenBV {
         if let Some(cached) = bv_cache.get(bv) { return cached.clone(); }
         if bv.is_all() { return LLMTokenBV::max_ones(); }
