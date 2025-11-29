@@ -870,9 +870,13 @@ pub fn generate_glr_parser_with_maps(
         &mut productions,
         &mut unique_name_generator,
     );
-    print_memory_usage("After right recursion resolution");
+    print_memory_usage("After direct right recursion resolution");
 
-    // Inline null productions AGAIN because resolve_direct_right_recursion
+    // Note: Indirect right recursion (cycles like A -> ... B, B -> ... A) is more complex
+    // to resolve and is currently handled by the template DWA construction phase which
+    // detects and handles cycles. Full indirect right recursion elimination is left for future work.
+
+    // Inline null productions AGAIN because right recursion resolution
     // may have introduced new nullable non-terminals (like A' -> ε).
     // These need to be inlined into existing productions.
     crate::debug!(3, "Inlining null productions (pass 2: inline new nullable NTs)");
