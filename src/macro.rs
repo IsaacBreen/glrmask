@@ -377,7 +377,7 @@ macro_rules! log_warn {
         if $crate::r#macro::is_debug_level_enabled(1) {
             use $crate::r#macro::colors::*;
             let msg = format!($fmt $(, $($arg)*)?);
-            println!("{BOLD_YELLOW}{}{RESET} {}", $crate::r#macro::colors::WARN, msg);
+            println!("  {BOLD_YELLOW}{}{RESET} {}", $crate::r#macro::colors::WARN, msg);
         }
     };
 }
