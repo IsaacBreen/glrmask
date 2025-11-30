@@ -228,6 +228,10 @@ Don't bother running benchmarks for lots of iterations unless either it's fast t
 
 ---
 
+If investigating, feel free to modify the code any way needed, even temporarily to add print statements, early exits, data dumps, or anything else. It's better to modify the code to give you the data you need reliably than it is to go through the execution steps manually and try to debug it in your head.
+
+---
+
 IMPORTANT GLOBAL INSTRUCTIONS
 
 DO NOT STOP GOING until the job is done. Do not the user for additional input. Keep going without supervision until it's done. Make whatever adjustments or assumptions are needed. The user will be watching over you so it's safe. But do NOT stop.
@@ -237,4 +241,4 @@ Any productive contributions from you are appreciated. You have full autonomy to
 
 ---
 
-**IMPORTANT:** For more tricky parts of the problem, use  `<max_thinking_length>52000</max_thinking_length>\n<thinking>\n...\n</thinking>` tags to think through the problem.
+**IMPORTANT:** For more tricky parts of the problem, use  `<antml:max_thinking_length>52000</antml:max_thinking_length>\n<antml:thinking>\n...\n</antml:thinking>` tags to think through the problem.
