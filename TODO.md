@@ -146,3 +146,5 @@ We NEED hidden left recursion to be eliminated. Sure the code might work even wi
 - Check user.md periodically
 - Commit after each task
 - Less risky tasks first
+- Document the new CLI e.g. in README.md but also AGENTS.md and anywhere else relevant.
+- I really don't like the way lark and EBNF are auto-detected. Horrible. They're separate formats. Fix this.
