@@ -910,6 +910,15 @@ pub fn generate_glr_parser_with_maps(
     }
     print_memory_usage("After right recursion elimination");
 
+    // Eliminate hidden left recursion
+    // This is required for the bounded reductions theorem (Aycock et al., 1999)
+    crate::debug!(4, "Eliminating hidden left recursion");
+    crate::glr::analyze::eliminate_hidden_left_recursion(&mut productions);
+    
+    // Re-inline null productions after hidden left recursion elimination
+    productions = inline_null_productions(&productions);
+    print_memory_usage("After hidden left recursion elimination");
+
     // Re-validate after transformations to catch any newly introduced issues
     crate::debug!(4, "Validating grammar after transformations");
     let post_transform_errors = crate::glr::analyze::check_for_length_1_recursion(&productions);
@@ -948,10 +957,10 @@ pub fn generate_glr_parser_with_maps(
     }
     
     // If there are any critical errors, we should panic
-    if !post_transform_errors.is_empty() || !right_recursion_errors.is_empty() {
+    if !post_transform_errors.is_empty() || !right_recursion_errors.is_empty() || !indirect_errors.is_empty() {
         panic!(
-            "Grammar transformations failed to eliminate problematic patterns:\n  Length-1: {:?}\n  Right recursion: {:?}",
-            post_transform_errors, right_recursion_errors
+            "Grammar transformations failed to eliminate problematic patterns:\n  Length-1: {:?}\n  Right recursion: {:?}\n  Hidden left recursion: {:?}",
+            post_transform_errors, right_recursion_errors, indirect_errors
         );
     }
 

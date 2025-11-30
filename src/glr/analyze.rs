@@ -225,27 +225,53 @@ fn transitive_closure(graph: &mut BTreeMap<NonTerminal, BTreeSet<NonTerminal>>) 
 
 /// Checks for indirect hidden left recursion: A -> B α where B is nullable and α can derive to A.
 /// Uses Tarjan's SCC algorithm for cycle detection instead of full transitive closure.
+/// 
+/// Hidden left recursion specifically requires a NULLABLE prefix before the recursive part.
+/// Direct left recursion (A -> A α) is NOT hidden left recursion and is fine for LR parsers.
 pub fn check_for_indirect_hidden_left_recursion(productions: &[Production]) -> Vec<String> {
     let nullable = compute_nullable_nonterminals(productions);
     
+    crate::debug!(5, "HLR check: {} nullable nonterminals", nullable.len());
+    for nt in &nullable {
+        crate::debug!(6, "  Nullable: {}", nt.0);
+    }
+    
     // Build left-reachability graph: A -> B if A has production starting with (nullable)* B
+    // We track left-reachability through nullable prefixes
     let mut graph: BTreeMap<NonTerminal, BTreeSet<NonTerminal>> = BTreeMap::new();
     for prod in productions {
+        let mut saw_nullable = false;
         for sym in &prod.rhs {
             if let Symbol::NonTerminal(nt) = sym {
-                graph.entry(prod.lhs.clone()).or_default().insert(nt.clone());
-                if !nullable.contains(nt) { break; }
-            } else { break; }
+                if saw_nullable {
+                    // This nonterminal is after a nullable prefix - potential HLR target
+                    graph.entry(prod.lhs.clone()).or_default().insert(nt.clone());
+                }
+                if nullable.contains(nt) {
+                    saw_nullable = true;
+                    // Also add edge for nullable nonterminal itself (for indirect HLR)
+                    graph.entry(prod.lhs.clone()).or_default().insert(nt.clone());
+                } else {
+                    break;
+                }
+            } else { 
+                break; 
+            }
         }
     }
     
     // Find all non-terminals that are part of a cycle
     let cyclic = find_cyclic_nodes(&graph);
     
-    // Check: for each production A -> (nullable)* B ... , is B in a cycle that includes A?
+    crate::debug!(5, "HLR check: {} cyclic nonterminals in left-reachability graph", cyclic.len());
+    
+    // Check: for each production A -> (nullable)+ B ... , is B in a cycle that includes A?
+    // Note: we only report HLR if there's at least one nullable nonterminal before the recursive part
     let mut errors = Vec::new();
     for prod in productions {
         let lhs = &prod.lhs;
+        
+        // Find the position after all leading nullable nonterminals
         let mut pos = 0;
         for (i, sym) in prod.rhs.iter().enumerate() {
             match sym {
@@ -253,10 +279,19 @@ pub fn check_for_indirect_hidden_left_recursion(productions: &[Production]) -> V
                 _ => break,
             }
         }
+        
+        // Only report HLR if there was a nullable prefix (pos > 0)
+        // Direct left recursion (pos = 0) is fine for LR parsers
+        if pos == 0 {
+            continue;
+        }
+        
+        // Check if any nonterminal in the suffix (after nullable prefix) is cyclic
         for sym in &prod.rhs[pos..] {
             if let Symbol::NonTerminal(nt) = sym {
                 // Check if lhs is in a cycle AND nt is in the same cycle (both cyclic)
                 if cyclic.contains(lhs) && (nt == lhs || cyclic.contains(nt)) {
+                    crate::debug!(6, "  HLR detected: {} -> ... {} ... (pos={}, nullable prefix skipped)", lhs.0, nt.0, pos);
                     errors.push(format!("Hidden left recursion: {} via {}", lhs.0, nt.0));
                     break;
                 }
@@ -264,6 +299,168 @@ pub fn check_for_indirect_hidden_left_recursion(productions: &[Production]) -> V
         }
     }
     errors
+}
+
+/// Eliminates hidden left recursion by inlining nullable prefixes.
+/// 
+/// Hidden left recursion occurs when A -> B α where B is nullable and α can derive to A.
+/// We eliminate it by expanding productions to add variants where nullable prefixes are skipped.
+/// This converts hidden left recursion into direct left recursion (which is fine for LR parsing).
+///
+/// Algorithm:
+/// 1. Find nullable nonterminals
+/// 2. For each production A -> B1 B2 ... Bk α where B1...Bk are nullable:
+///    - If there's hidden left recursion (α can derive to A), add A -> α
+///    - This exposes the left recursion directly
+/// 3. Remove productions that only serve to hide left recursion
+/// 4. Repeat until no more hidden left recursion exists
+pub fn eliminate_hidden_left_recursion(
+    productions: &mut Vec<Production>,
+) {
+    const MAX_ITERATIONS: usize = 20;
+    
+    for iteration in 0..MAX_ITERATIONS {
+        let nullable = compute_nullable_nonterminals(productions);
+        
+        // Build left-reachability graph: A -> B if A has production starting with (nullable)* B
+        let mut graph: BTreeMap<NonTerminal, BTreeSet<NonTerminal>> = BTreeMap::new();
+        for prod in productions.iter() {
+            for sym in &prod.rhs {
+                if let Symbol::NonTerminal(nt) = sym {
+                    graph.entry(prod.lhs.clone()).or_default().insert(nt.clone());
+                    if !nullable.contains(nt) { break; }
+                } else { break; }
+            }
+        }
+        
+        // Find all non-terminals that are part of a cycle
+        let cyclic = find_cyclic_nodes(&graph);
+        
+        if cyclic.is_empty() {
+            crate::debug!(4, "Hidden left recursion eliminated after {} iterations", iteration + 1);
+            break;
+        }
+        
+        crate::debug!(5, "Iteration {}: {} cyclic nonterminals", iteration + 1, cyclic.len());
+        for nt in &cyclic {
+            crate::debug!(6, "  Cyclic: {}", nt.0);
+        }
+        
+        // Find productions with hidden left recursion (nullable prefix + cyclic suffix)
+        let mut new_productions: Vec<Production> = Vec::new();
+        let mut modified = false;
+        
+        for prod in productions.iter() {
+            // Always keep the original production
+            new_productions.push(prod.clone());
+            
+            let lhs = &prod.lhs;
+            
+            // Only process productions where lhs is cyclic
+            if !cyclic.contains(lhs) {
+                continue;
+            }
+            
+            // Check if this production has a nullable prefix
+            // Find the nullable prefix length
+            let mut nullable_prefix_len = 0;
+            for sym in &prod.rhs {
+                if let Symbol::NonTerminal(nt) = sym {
+                    if nullable.contains(nt) {
+                        nullable_prefix_len += 1;
+                    } else {
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            }
+            
+            // Debug: show all productions for cyclic nonterminals
+            crate::debug!(6, "  {} -> {} (nullable_prefix_len={})", 
+                lhs.0,
+                prod.rhs.iter().map(|s| match s {
+                    Symbol::Terminal(t) => format!("{:?}", t),
+                    Symbol::NonTerminal(nt) => nt.0.clone(),
+                }).collect::<Vec<_>>().join(" "),
+                nullable_prefix_len);
+            
+            // If there's no nullable prefix, nothing to do for hidden left recursion
+            if nullable_prefix_len == 0 {
+                continue;
+            }
+            
+            let suffix = &prod.rhs[nullable_prefix_len..];
+            
+            // Check if suffix starts with a cyclic nonterminal (including lhs)
+            let first_suffix_nt = suffix.iter().find_map(|s| {
+                if let Symbol::NonTerminal(nt) = s { Some(nt) } else { None }
+            });
+            
+            let suffix_is_cyclic = first_suffix_nt.map_or(false, |nt| {
+                nt == lhs || cyclic.contains(nt)
+            });
+            
+            crate::debug!(6, "    suffix={:?}, first_nt={:?}, cyclic={}", 
+                suffix.iter().map(|s| match s {
+                    Symbol::Terminal(t) => format!("{:?}", t),
+                    Symbol::NonTerminal(nt) => nt.0.clone(),
+                }).collect::<Vec<_>>(),
+                first_suffix_nt.map(|nt| &nt.0),
+                suffix_is_cyclic);
+            
+            if !suffix_is_cyclic {
+                continue;
+            }
+            
+            crate::debug!(5, "HLR candidate: {} -> {}", 
+                lhs.0,
+                prod.rhs.iter().map(|s| match s {
+                    Symbol::Terminal(t) => format!("{:?}", t),
+                    Symbol::NonTerminal(nt) => nt.0.clone(),
+                }).collect::<Vec<_>>().join(" "));
+            
+            // Generate variants by skipping nullable prefix elements
+            for skip in 1..=nullable_prefix_len {
+                let new_rhs: Vec<Symbol> = prod.rhs[skip..].to_vec();
+                if !new_rhs.is_empty() {
+                    let new_prod = Production {
+                        lhs: lhs.clone(),
+                        rhs: new_rhs,
+                    };
+                    // Only add if not already present
+                    if !new_productions.contains(&new_prod) {
+                        crate::debug!(5, "HLR elimination: {} -> {} (skip {})", 
+                            lhs.0,
+                            new_prod.rhs.iter().map(|s| match s {
+                                Symbol::Terminal(t) => format!("{:?}", t),
+                                Symbol::NonTerminal(nt) => nt.0.clone(),
+                            }).collect::<Vec<_>>().join(" "),
+                            skip);
+                        new_productions.push(new_prod);
+                        modified = true;
+                    }
+                }
+            }
+        }
+        
+        if !modified {
+            crate::debug!(4, "No more hidden left recursion to eliminate after {} iterations", iteration + 1);
+            break;
+        }
+        
+        // Deduplicate productions
+        new_productions.sort_by(|a, b| {
+            (&a.lhs.0, &a.rhs).cmp(&(&b.lhs.0, &b.rhs))
+        });
+        new_productions.dedup();
+        
+        *productions = new_productions;
+        
+        if iteration == MAX_ITERATIONS - 1 {
+            crate::log_warn!("Hidden left recursion elimination did not converge after {} iterations", MAX_ITERATIONS);
+        }
+    }
 }
 
 /// Checks for any remaining right recursion (direct or indirect) in the grammar.
