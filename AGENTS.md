@@ -240,4 +240,4 @@ Any productive contributions from you are appreciated. You have full autonomy to
 
 ---
 
-**IMPORTANT:** For more tricky parts of the problem, use  `<antml:max_thinking_length>52000</antml:max_thinking_length>\n<antml:thinking>\n...\n</antml:thinking>` tags to think through the problem.
+**IMPORTANT:** For more tricky parts of the problem, use  `<antml:thinking>\n...\n</antml:thinking>` tags to think through the problem.
