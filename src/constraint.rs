@@ -617,7 +617,7 @@ impl GrammarConstraint {
         if is_debug_level_enabled(3) {
             let num_original_tokens = llm_token_strings.len();
             let num_classes = equivalence_classes.len();
-            crate::log_substep!("Equivalence Analysis: {} original tokens -> {} classes", num_original_tokens, num_classes);
+            crate::debug!(4, "Equivalence Analysis: {} original tokens -> {} classes", num_original_tokens, num_classes);
         }
 
         let mut original_to_internal_map = BTreeMap::new();
@@ -702,7 +702,8 @@ impl GrammarConstraint {
 
         if is_debug_level_enabled(3) {
             let num_original_tokens = llm_token_strings.len();
-            crate::log_substep!(
+            crate::debug!(
+                3,
                 "Combined Equivalence Analysis: {} tokens -> {} mask classes, {} commit classes",
                 num_original_tokens,
                 combined_result.mask_classes.len(),
@@ -763,7 +764,8 @@ impl GrammarConstraint {
             }
         }
 
-        crate::log_substep!(
+        crate::debug!(
+            4,
             "Commit vocab built with {} representatives for {} tokens",
             representatives.len(),
             llm_token_strings.len()
@@ -779,7 +781,8 @@ impl GrammarConstraint {
             })
             .collect();
         
-        crate::log_substep!(
+        crate::debug!(
+            4,
             "internal_llm_token_map has {} representative entries (was {} total) - built in combined pass",
             internal_llm_token_map.len(),
             llm_token_strings.len()
@@ -865,7 +868,8 @@ impl GrammarConstraint {
             original_to_representative[orig_id] = representative_id as u32;
         }
 
-        crate::log_substep!(
+        crate::debug!(
+            4,
             "Commit vocab built with {} representatives for {} tokens",
             representatives.len(),
             llm_token_strings.len()

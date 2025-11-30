@@ -342,11 +342,11 @@ pub fn canonicalize_bundle(terminal_map: BTreeMap<Option<TerminalID>, Weight>) -
 }
 
 pub fn precompute4(parser: &GLRParser, input_nwa: &NWA) -> DWA {
-    crate::log_stage!("Running Precompute4");
+    crate::debug!(4, "Starting precompute4 (DWA construction)");
     let now = Instant::now();
     let template_dwas = match build_template_dwas(parser) { Ok(m) => m, Err(e) => panic!("Failed to build template DWAs: {:?}", e), };
     let ignore_dwa = build_ignore_terminal_dwa();
-    crate::log_substep!("Built {} template DWAs in {:?}", template_dwas.len(), now.elapsed());
+    crate::debug!(4, "Built {} template DWAs in {:?}", template_dwas.len(), now.elapsed());
 
     let reversed_nwa = input_nwa.reverse();
     let traversal_data = reversed_nwa.compute_traversal_data();
@@ -361,7 +361,7 @@ pub fn precompute4(parser: &GLRParser, input_nwa: &NWA) -> DWA {
     let start_pass1 = Instant::now();
     let (node_tokens, mut unique_signatures) = precompute_token_bvs_and_signatures(&reversed_nwa, &traversal_data, initial_values_bv, offset);
     unique_signatures.insert(vec![vec![None]]);
-    crate::log_substep!("Pass 1: Tokens & Signatures ({} sigs, {:.2?})", unique_signatures.len(), start_pass1.elapsed());
+    crate::debug!(4, "Pass 1: Tokens & Signatures ({} sigs, {:.2?})", unique_signatures.len(), start_pass1.elapsed());
     let mut unique_term_ids_in_sigs = BTreeSet::new();
     for sig in &unique_signatures {
         for terms in sig {
@@ -387,7 +387,7 @@ pub fn precompute4(parser: &GLRParser, input_nwa: &NWA) -> DWA {
         }
     }
 
-    crate::log_substep!("Optimization: {} simple signatures (direct build), {} complex signatures (derivation)",
+    crate::debug!(4, "Optimization: {} simple signatures (direct build), {} complex signatures (derivation)",
         simple_signatures.len(), complex_signatures.len());
 
     // 1. FAST PATH: Handle simple signatures via direct Union
@@ -429,7 +429,7 @@ pub fn precompute4(parser: &GLRParser, input_nwa: &NWA) -> DWA {
     // 2. SLOW PATH: Handle complex signatures via Super DWA
     // Only run this logic if we actually have complex signatures.
     if !complex_signatures.is_empty() {
-        crate::log_substep!("Building Super DWA for {} complex signatures", complex_signatures.len());
+        crate::debug!(4, "Building Super DWA for {} complex signatures", complex_signatures.len());
 
         let mut used_terminals: BTreeSet<TerminalID> = BTreeSet::new();
         for sig in &complex_signatures {
@@ -534,7 +534,7 @@ pub fn precompute4(parser: &GLRParser, input_nwa: &NWA) -> DWA {
     }
     // OPTIMIZATION END
 
-    crate::log_substep!("Finished DWA specialization");
+    crate::debug!(4, "Finished DWA specialization");
 
     let states_arena = RefCell::new(NWAStates::default());
     let initial_body = {
@@ -549,7 +549,7 @@ pub fn precompute4(parser: &GLRParser, input_nwa: &NWA) -> DWA {
 
     let final_bodies_arc: Arc<Mutex<BTreeMap<TokenizerStateID, Vec<(NWABody, Weight)>>>> = Arc::new(Mutex::new(BTreeMap::new()));
 
-    crate::log_substep!("Beginning NWA traversal");
+    crate::debug!(4, "Beginning NWA traversal");
 
     nwa_special_map(
         &reversed_nwa, &traversal_data, initial_values_full,
@@ -620,7 +620,7 @@ pub fn precompute4(parser: &GLRParser, input_nwa: &NWA) -> DWA {
         },
     );
 
-    crate::log_substep!("Finished Pass 2");
+    crate::debug!(4, "Finished Pass 2");
     let final_bodies = Arc::try_unwrap(final_bodies_arc).unwrap().into_inner().unwrap();
     let mut combined_nwa_states = states_arena.into_inner();
     let combined_start_state = combined_nwa_states.add_state();
@@ -637,7 +637,7 @@ pub fn precompute4(parser: &GLRParser, input_nwa: &NWA) -> DWA {
     let mut final_dwa = resolve_negatives_and_optimize_and_determinize(parser, combined_nwa);
     // SKIP final simplification to test performance impact
     // final_dwa.simplify();
-    crate::log_substep!("Precomputation complete. Final DWA stats: {}", final_dwa.stats());
+    crate::debug!(4, "Precomputation complete. Final DWA stats: {}", final_dwa.stats());
     final_dwa
 }
 
@@ -698,14 +698,14 @@ pub fn precompute_token_bvs_and_signatures(reversed_nwa: &NWA, traversal_data: &
 }
 
 pub fn resolve_negatives_and_optimize_and_determinize(parser: &GLRParser, mut combined_nwa: NWA) -> DWA {
-    crate::log_substep!("Resolving negatives and optimizing for NWA with {} states and {} transitions...", combined_nwa.states.len(), combined_nwa.states.num_transitions());
+    crate::debug!(4, "Resolving negatives and optimizing for NWA with {} states and {} transitions...", combined_nwa.states.len(), combined_nwa.states.num_transitions());
     prune_continuations_from_final_states(&mut combined_nwa);
-    crate::log_substep!("Pruned continuations from final states. NWA with {} states and {} transitions remaining.", combined_nwa.states.len(), combined_nwa.states.num_transitions());
+    crate::debug!(4, "Pruned continuations from final states. NWA with {} states and {} transitions remaining.", combined_nwa.states.len(), combined_nwa.states.num_transitions());
     
     // Full simplify() is actually needed here to reduce the massive combined NWA (1M+ states).
     // Lightweight pruning left 144K states which caused worse performance downstream.
     let dwa = combined_nwa.determinize_and_simplify("FinalDWA");
-    crate::log_substep!("Simplified DWA. {} states and {} transitions remaining.", dwa.states.len(), dwa.states.num_transitions());
+    crate::debug!(4, "Simplified DWA. {} states and {} transitions remaining.", dwa.states.len(), dwa.states.num_transitions());
     dwa
 }
 

@@ -835,17 +835,16 @@ pub fn generate_glr_parser_with_maps(
     actions: BTreeMap<NonTerminal, ActionFn>,
     ignore_terminal_id: Option<TerminalID>,
 ) -> GLRParser {
-    crate::log_header!("GLR Parser Generation");
-    crate::log_kv!("Productions", productions.len());
+    crate::debug!(5, "Number of productions: {}", productions.len());
     print_memory_usage("Start of parser generation");
 
-    crate::log_substep!("Validating initial grammar");
+    crate::debug!(4, "Validating initial grammar");
     validate(productions).expect("Initial grammar validation failed");
     print_memory_usage("After validation");
 
     let start_production_id = 0;
 
-    crate::log_substep!("Removing productions with undefined non-terminals");
+    crate::debug!(4, "Removing productions with undefined non-terminals");
     let mut productions =
         remove_productions_with_undefined_nonterminals(&productions, &[start_production_id]);
     print_memory_usage("After removing undefined");
@@ -853,7 +852,7 @@ pub fn generate_glr_parser_with_maps(
     // Inline null productions FIRST to expose hidden right recursion.
     // Hidden right recursion (A -> α A β where β is nullable) becomes
     // direct right recursion (A -> α A) after this step.
-    crate::log_substep!("Inlining null productions (pass 1: expose hidden right recursion)");
+    crate::debug!(4, "Inlining null productions (pass 1: expose hidden right recursion)");
     productions = inline_null_productions(&productions);
     print_memory_usage("After inlining null productions (pass 1)");
 
@@ -873,28 +872,28 @@ pub fn generate_glr_parser_with_maps(
     // After inline_null_productions, we need to re-check for right recursion.
     const MAX_RIGHT_RECURSION_PASSES: usize = 10;
     for pass in 0..MAX_RIGHT_RECURSION_PASSES {
-        crate::log_substep!("Right recursion elimination pass {}", pass + 1);
+        crate::debug!(4, "Right recursion elimination pass {}", pass + 1);
         
         // Check if any right recursion remains
         let right_recursion_errors = crate::glr::analyze::check_for_right_recursion(&productions);
         if right_recursion_errors.is_empty() {
-            crate::log_substep!("No right recursion detected, done after {} passes", pass + 1);
+            crate::debug!(4, "No right recursion detected, done after {} passes", pass + 1);
             break;
         }
-        crate::log_substep!("Found {} right recursion patterns, continuing...", right_recursion_errors.len());
+        crate::debug!(4, "Found {} right recursion patterns, continuing...", right_recursion_errors.len());
         for err in &right_recursion_errors {
-            crate::log_detail!("  {}", err);
+            crate::debug!(5, "  {}", err);
         }
         
         // First resolve indirect right recursion by inlining
-        crate::log_detail!("Resolving indirect right recursion (pass {})", pass + 1);
+        crate::debug!(5, "Resolving indirect right recursion (pass {})", pass + 1);
         crate::glr::analyze::resolve_indirect_right_recursion(
             &mut productions,
             &mut unique_name_generator,
         );
 
         // Then resolve direct right recursion
-        crate::log_detail!("Resolving direct right recursion (pass {})", pass + 1);
+        crate::debug!(5, "Resolving direct right recursion (pass {})", pass + 1);
         crate::glr::analyze::resolve_direct_right_recursion(
             &mut productions,
             &mut unique_name_generator,
@@ -902,7 +901,7 @@ pub fn generate_glr_parser_with_maps(
 
         // Inline null productions because right recursion resolution
         // may have introduced new nullable non-terminals (like A' -> ε).
-        crate::log_detail!("Inlining null productions (pass {})", pass + 1);
+        crate::debug!(5, "Inlining null productions (pass {})", pass + 1);
         productions = inline_null_productions(&productions);
         
         if pass == MAX_RIGHT_RECURSION_PASSES - 1 {
@@ -912,7 +911,7 @@ pub fn generate_glr_parser_with_maps(
     print_memory_usage("After right recursion elimination");
 
     // Re-validate after transformations to catch any newly introduced issues
-    crate::log_substep!("Validating grammar after transformations");
+    crate::debug!(4, "Validating grammar after transformations");
     let post_transform_errors = crate::glr::analyze::check_for_length_1_recursion(&productions);
     let left_recursion_errors = crate::glr::analyze::check_for_left_nullable_left_recursion(&productions);
     let indirect_errors = crate::glr::analyze::check_for_indirect_hidden_left_recursion(&productions);
@@ -964,7 +963,7 @@ pub fn generate_glr_parser_with_maps(
         }
     }
 
-    crate::log_kv!("Productions (Final)", productions.len());
+    crate::debug!(5, "Number of productions: {}", productions.len());
     print_memory_usage("Before Stage 1");
 
     let num_terminals = terminal_map.len();
@@ -1013,12 +1012,12 @@ pub fn generate_glr_parser_with_maps(
 
     let start_nt_id = lhs_ids[0];
 
-    crate::log_stage!("Stage 1 (LR(0) Automaton)");
+    crate::debug!(4, "Stage 1 (LR(0) Automaton)");
     let (stage_1_table, item_set_map) =
         stage_1(&light_productions, &lhs_ids, num_terminals, num_nonterminals);
     print_memory_usage("After Stage 1");
 
-    crate::log_stage!("Computing First/Follow Sets");
+    crate::debug!(4, "Computing First/Follow Sets");
     let first_sets = compute_first_sets_ids_with_lhs(
         &light_productions,
         &lhs_ids,
@@ -1037,7 +1036,7 @@ pub fn generate_glr_parser_with_maps(
     );
     print_memory_usage("After First/Follow");
 
-    crate::log_stage!("Computing Final Table (Merging Stages 2-8)");
+    crate::debug!(4, "Computing Final Table (Merging Stages 2-8)");
     let (final_table_map, start_state_id, everything_state_id) = compute_final_table(
         stage_1_table,
         &item_set_map,
