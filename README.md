@@ -4,7 +4,7 @@
 
 ## Key Features
 
-- **Fast mask queries**: 78μs median on JavaScript grammar (35× faster than alternatives)
+- **Fast mask queries**: 70μs median on JavaScript grammar (40× faster than alternatives)
 - **Precomputed constraints**: One-time compilation, O(1) queries thereafter
 - **Sparse bitvector representation**: Memory-efficient mask storage
 - **Python bindings**: Easy integration via PyO3/Maturin
@@ -14,9 +14,9 @@
 
 | Grammar | Compile Time | Mask Query (p50) | Mask Query (p99) |
 |---------|-------------|------------------|------------------|
-| JSON | 70ms | 30μs | 46μs |
-| JavaScript | 4.4s | 78μs | 136μs |
-| Arithmetic | 90ms | 23μs | 30μs |
+| JSON | 70ms | 25μs | 261μs |
+| JavaScript | 4.0s | 70μs | 183μs |
+| Arithmetic | 90ms | 24μs | 222μs |
 
 Benchmarks on Apple M1 Max with GPT-2 tokenizer (50,257 tokens).
 
