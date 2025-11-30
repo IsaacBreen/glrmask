@@ -121,11 +121,12 @@ fn get_token_regex() -> &'static Regex {
     TOKEN_REGEX.get_or_init(|| {
         Regex::new(
             r#"(?x)
-        (?P<ident>[a-zA-Z_][a-zA-Z0-9_]*) |
+        (?P<directive>\#!) |
+        (?P<comment>//[^\r\n]*|/\*([^*]|\*[^/])*\*/|\#[^\r\n]*) |
+        (?P<ident>[a-zA-Z_][a-zA-Z0-9_\-]*) |
         (?P<literal>"([^"\\]|\\.)*"|'([^'\\]|\\.)*') |
         (?P<charclass>\[([^\]\[\(\)\{\}\\]|\\.)*\]) |
-        (?P<op>::=|;|\?|\*|\+|\||\(|\)|\[|\]|\{|\}|!|\.|\#) |
-        (?P<comment>//[^\r\n]*|/\*([^*]|\*[^/])*\*/) |
+        (?P<op>::=|;|\?|\*|\+|\||\(|\)|\[|\]|\{|\}|!|\.) |
         (?P<ws>\s+) |
         (?P<error>.)
         "#,
@@ -137,7 +138,18 @@ fn get_token_regex() -> &'static Regex {
 fn tokenize(source: &str) -> Result<Vec<EbnfToken>, ParseError> {
     let mut tokens = Vec::new();
     for cap in get_token_regex().captures_iter(source) {
-        if let Some(m) = cap.name("ident") {
+        if let Some(m) = cap.name("directive") {
+            // #! is tokenized as two separate ops: # and !
+            let start = m.start();
+            tokens.push(EbnfToken {
+                kind: EbnfTokenKind::Op("#".to_string()),
+                span: Span { start, end: start + 1 },
+            });
+            tokens.push(EbnfToken {
+                kind: EbnfTokenKind::Op("!".to_string()),
+                span: Span { start: start + 1, end: start + 2 },
+            });
+        } else if let Some(m) = cap.name("ident") {
             tokens.push(EbnfToken {
                 kind: EbnfTokenKind::Ident(m.as_str().to_string()),
                 span: Span { start: m.start(), end: m.end() },
@@ -288,6 +300,15 @@ impl<'a> EbnfParser<'a> {
                 seen_names.insert(rule_name.clone());
                 let rule_expr = self.parse_rule_body()?;
                 rules.push((rule_name, rule_expr));
+            }
+        }
+
+        // GBNF compatibility: if a 'root' rule exists but is not first,
+        // move it to the front (GBNF uses 'root' as the start rule)
+        if let Some(root_idx) = rules.iter().position(|(name, _)| name == "root") {
+            if root_idx > 0 {
+                let root_rule = rules.remove(root_idx);
+                rules.insert(0, root_rule);
             }
         }
 

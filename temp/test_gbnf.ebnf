@@ -1,0 +1,13 @@
+# GBNF-style grammar for testing compatibility
+# This uses hash comments and the 'root' rule
+
+WS ::= [ \t\n]+;
+
+# A simple arithmetic expression grammar
+NUMBER ::= [0-9]+;
+add-expr ::= mul-expr (("+" | "-") mul-expr)*;
+mul-expr ::= atom (("*" | "/") atom)*;
+atom ::= NUMBER | "(" add-expr ")";
+
+# The root rule comes after other rules (GBNF style)
+root ::= add-expr;
