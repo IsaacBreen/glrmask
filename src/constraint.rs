@@ -98,7 +98,7 @@ fn optimize_dwa_and_vocab(
 
     // OPTIMIZATION: Early exit if there are very few unique weights - optimization won't help much
     if unique_weights.len() < 10 {
-        crate::debug!(3, "DWA Vocab Optimization: Skipped (only {} unique weights). Time: {:.2?}", unique_weights.len(), start_time.elapsed());
+        crate::debug!(4, "DWA Vocab Optimization: Skipped (only {} unique weights). Time: {:.2?}", unique_weights.len(), start_time.elapsed());
         return;
     }
 
@@ -113,7 +113,7 @@ fn optimize_dwa_and_vocab(
     // tokens differed only in weights beyond the limit.
     let mut weights_vec: Vec<&Weight> = unique_weights.iter().filter(|w| !w.is_all_fast()).collect();
     weights_vec.sort_by_key(|w| w.rsb.ranges_len()); // Process smaller weights first for efficiency
-    crate::debug!(3, "DWA Vocab Optimization: Processing {} unique weights (max_tok={})", weights_vec.len(), max_tok);
+    crate::debug!(4, "DWA Vocab Optimization: Processing {} unique weights (max_tok={})", weights_vec.len(), max_tok);
 
     let t_partition = std::time::Instant::now();
     for w in weights_vec.iter() {
@@ -135,7 +135,7 @@ fn optimize_dwa_and_vocab(
             }
         }
     }
-    crate::debug!(3, "  DWA Vocab Partition: {:?}", t_partition.elapsed());
+    crate::debug!(5, "DWA Vocab Partition: {:?}", t_partition.elapsed());
 
     // OPTIMIZATION: Skip expensive frequency counting and sorting - just renumber sequentially
     let t_renumber = std::time::Instant::now();
@@ -184,7 +184,7 @@ fn optimize_dwa_and_vocab(
     for map in possible_matches.values_mut() {
         for bv in map.values_mut() { *bv = map_bv(bv); }
     }
-    crate::debug!(3, "  DWA Vocab Remap: {:?}", t_renumber.elapsed());
+    crate::debug!(5, "DWA Vocab Remap: {:?}", t_renumber.elapsed());
 
     let t_rebuild = std::time::Instant::now();
     let mut new_internal_to_original: BTreeMap<usize, LLMTokenBV> = BTreeMap::new();
@@ -193,7 +193,7 @@ fn optimize_dwa_and_vocab(
             new_internal_to_original.entry(new_id).or_insert_with(LLMTokenBV::zeros).union_with(original_bv);
         }
     }
-    crate::debug!(3, "  DWA Vocab internal_to_original: {:?}", t_rebuild.elapsed());
+    crate::debug!(5, "DWA Vocab internal_to_original: {:?}", t_rebuild.elapsed());
     
     // Instead of rebuilding original_to_internal from bitvectors (O(50K inserts)),
     // update the existing map in-place (O(n) value updates)
@@ -203,7 +203,7 @@ fn optimize_dwa_and_vocab(
             *val = new_id;
         }
     }
-    crate::debug!(3, "  DWA Vocab original_to_internal (in-place): {:?}", t_reverse.elapsed());
+    crate::debug!(5, "DWA Vocab original_to_internal (in-place): {:?}", t_reverse.elapsed());
     vocab.internal_to_original = new_internal_to_original;
     // vocab.original_to_internal is already updated in-place
     vocab.internal_max_llm_token = new_max_tok;
@@ -617,7 +617,7 @@ impl GrammarConstraint {
         if is_debug_level_enabled(3) {
             let num_original_tokens = llm_token_strings.len();
             let num_classes = equivalence_classes.len();
-            crate::debug!(3, "Equivalence Analysis: {} original tokens -> {} classes", num_original_tokens, num_classes);
+            crate::debug!(4, "Equivalence Analysis: {} original tokens -> {} classes", num_original_tokens, num_classes);
         }
 
         let mut original_to_internal_map = BTreeMap::new();
@@ -765,7 +765,7 @@ impl GrammarConstraint {
         }
 
         crate::debug!(
-            3,
+            4,
             "Commit vocab built with {} representatives for {} tokens",
             representatives.len(),
             llm_token_strings.len()
@@ -782,7 +782,7 @@ impl GrammarConstraint {
             .collect();
         
         crate::debug!(
-            3,
+            4,
             "internal_llm_token_map has {} representative entries (was {} total) - built in combined pass",
             internal_llm_token_map.len(),
             llm_token_strings.len()
@@ -869,7 +869,7 @@ impl GrammarConstraint {
         }
 
         crate::debug!(
-            3,
+            4,
             "Commit vocab built with {} representatives for {} tokens",
             representatives.len(),
             llm_token_strings.len()
@@ -913,7 +913,7 @@ impl GrammarConstraint {
             .max()
             .unwrap_or(0);
 
-        crate::debug!(3, "Building internal_to_original_map");
+        crate::debug!(4, "Building internal_to_original_map");
         let t_i2o = std::time::Instant::now();
         // Optimized: Batch collect then create RangeSets from iterators (faster than individual inserts)
         let mut groups: Vec<Vec<usize>> = vec![Vec::new(); internal_max_llm_token + 1];
@@ -926,12 +926,12 @@ impl GrammarConstraint {
             .filter(|(_, v)| !v.is_empty())
             .map(|(int_id, origs)| (int_id, LLMTokenBV::from_iter(origs)))
             .collect();
-        crate::debug!(3, "Done building internal_to_original_map in {:?}", t_i2o.elapsed());
+        crate::debug!(4, "Done building internal_to_original_map in {:?}", t_i2o.elapsed());
 
         // internal_llm_token_map was already computed in setup_combined - no need to iterate 50K tokens again!
 
         // Vocab tree for internal tokens.
-        crate::debug!(3, "Building internal vocab prefix tree");
+        crate::debug!(4, "Building internal vocab prefix tree");
         let internal_tokens_for_vocab: Vec<(usize, Vec<u8>)> =
             internal_llm_token_map.iter().map(|(b, id)| (id.0, b.clone())).collect();
         let vocab_tree = VocabPrefixTree::build(&internal_tokens_for_vocab);
@@ -939,7 +939,7 @@ impl GrammarConstraint {
 
         // Unified fast pass for maps and matches.
         // OPTIMIZATION: State Equivalence Analysis
-        crate::debug!(3, "Analyzing tokenizer state equivalence...");
+        crate::debug!(4, "Analyzing tokenizer state equivalence...");
         let all_states_list: Vec<usize> = tokenizer.iter_states().map(|s| s.0).collect();
         let state_representatives = find_state_equivalence_classes(
             &tokenizer,
@@ -950,14 +950,14 @@ impl GrammarConstraint {
         for (s, &r) in state_representatives.iter().enumerate() {
             state_to_rep.insert(TokenizerStateID(s), TokenizerStateID(r));
         }
-        crate::debug!(3, "Tokenizer state equivalence analysis complete. {} -> {} states", all_states_list.len(), state_representatives.iter().collect::<HashSet<_>>().len());
+        crate::debug!(4, "Tokenizer state equivalence analysis complete. {} -> {} states", all_states_list.len(), state_representatives.iter().collect::<HashSet<_>>().len());
 
-        crate::debug!(3, "Computing maps and possible_matches (fast parallel pass)");
+        crate::debug!(4, "Computing maps and possible_matches (fast parallel pass)");
         let computed_possible_matches =
             Self::build_maps_and_matches(&tokenizer, &vocab_tree.root);
 
         // Compute terminal follow sets, then map to IDs.
-        crate::debug!(3, "Computing terminal follow sets");
+        crate::debug!(4, "Computing terminal follow sets");
         let terminal_follow_sets_named = compute_terminal_follow_sets(&parser.productions);
         let mut terminal_follow_map: BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>> =
             BTreeMap::new();
@@ -1003,7 +1003,7 @@ impl GrammarConstraint {
         );
 
         // EXPAND DWA: Add transitions for non-representative states
-        crate::debug!(3, "Expanding DWA transitions for equivalent states...");
+        crate::debug!(4, "Expanding DWA transitions for equivalent states...");
         let start_state_id = skeleton_dwa.body.start_state;
         {
             let terminals_count = parser.terminal_map.len();

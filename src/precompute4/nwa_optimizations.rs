@@ -128,7 +128,7 @@ fn build_label_follower_map(parser: &GLRParser) -> BTreeMap<ParserStateID, State
 
 /// Propagate label weights along the NWA and prune transitions whose labels are never reachable.
 pub(crate) fn propagate_and_prune_labels(parser: &GLRParser, nwa: &mut NWA) {
-    crate::debug!(4, "Starting label propagation and pruning...");
+    crate::debug!(5, "Starting label propagation and pruning...");
     let now = std::time::Instant::now();
 
     let follower_map = build_label_follower_map(parser);
@@ -218,7 +218,7 @@ pub(crate) fn propagate_and_prune_labels(parser: &GLRParser, nwa: &mut NWA) {
             }
         }
     }
-    crate::debug!(4, "Label propagation fixpoint took: {:?}", now.elapsed());
+    crate::debug!(5, "Label propagation fixpoint took: {:?}", now.elapsed());
 
     let now_prune = std::time::Instant::now();
     let mut changed_count = 0;
@@ -274,5 +274,5 @@ pub(crate) fn propagate_and_prune_labels(parser: &GLRParser, nwa: &mut NWA) {
         }
         state.transitions.retain(|_, v| !v.is_empty());
     }
-    crate::debug!(4, "Pruning pass changed {} weights and took: {:?}", changed_count, now_prune.elapsed());
+    crate::debug!(5, "Pruning pass changed {} weights and took: {:?}", changed_count, now_prune.elapsed());
 }

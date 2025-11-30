@@ -157,13 +157,13 @@ pub fn find_equivalence_classes_combined(
     strings: &[Vec<u8>],
     initial_states: &[usize],
 ) -> CombinedEquivalenceResult {
-    crate::debug!(3, "Combined equivalence analysis for {} strings.", strings.len());
+    crate::debug!(3, "Combined equivalence analysis for {} strings", strings.len());
     let pb = create_pb(4);
 
     let t0 = std::time::Instant::now();
     pb.set_message("Precomputing signatures...");
     let state_signatures = compute_state_signatures(regex);
-    crate::debug!(3, "  Equiv: State signatures: {:?}", t0.elapsed());
+    crate::debug!(4, "Equiv: State signatures: {:?}", t0.elapsed());
     
     // OPTIMIZATION: Build Trie and compute remainder hashes in parallel!
     // They are independent operations.
@@ -189,7 +189,7 @@ pub fn find_equivalence_classes_combined(
     let (mut trie, linearized_mapping) = trie_result;
     let (remainder_hashes_mask, remainder_hashes_commit) = hash_result;
     
-    crate::debug!(3, "  Equiv: Trie + Hashes (parallel): {:?}", t_parallel.elapsed());
+    crate::debug!(4, "Equiv: Trie + Hashes (parallel): {:?}", t_parallel.elapsed());
     pb.inc(2);
 
     let t3 = std::time::Instant::now();
@@ -215,8 +215,7 @@ pub fn find_equivalence_classes_combined(
         &mut accumulators_commit, &mut diffs_commit,
         0
     );
-    crate::debug!(4, "  Symbolic execution: {:?}", t3.elapsed());
-    crate::debug!(3, "  Equiv: Symbolic execution: {:?}", t3.elapsed());
+    crate::debug!(4, "Equiv: Symbolic execution: {:?}", t3.elapsed());
     pb.inc(1);
 
     let t4 = std::time::Instant::now();
@@ -237,7 +236,7 @@ pub fn find_equivalence_classes_combined(
 
     let mask_classes = group_by_hash(&accumulators_mask);
     let commit_classes = group_by_hash(&accumulators_commit);
-    crate::debug!(3, "  Equiv: Grouping: {:?}", t4.elapsed());
+    crate::debug!(4, "Equiv: Grouping: {:?}", t4.elapsed());
 
     pb.finish_with_message("Done");
     

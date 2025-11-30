@@ -823,7 +823,7 @@ fn compute_final_table(
 fn print_memory_usage(label: &str) {
     if let Some(usage) = memory_stats() {
         let physical_mem_mb = usage.physical_mem / 1024 / 1024;
-        crate::debug!(4, "Mem: {} MB ({})", physical_mem_mb, label);
+        crate::debug!(5, "Mem: {} MB ({})", physical_mem_mb, label);
     }
 }
 
@@ -922,8 +922,8 @@ pub fn generate_glr_parser_with_maps(
                          indirect_errors.len() + right_recursion_errors.len();
     
     if total_warnings > 0 {
-        // At level 1-3: just show summary counts
-        if crate::r#macro::get_macro_debug_level() <= 3 {
+        // At level 1-4: just show summary counts
+        if crate::r#macro::get_macro_debug_level() <= 4 {
             if !indirect_errors.is_empty() {
                 crate::log_warn!("Grammar has {} hidden left recursion(s) (non-fatal)", indirect_errors.len());
             }
@@ -931,18 +931,18 @@ pub fn generate_glr_parser_with_maps(
                 crate::log_warn!("Grammar has {} left-nullable recursion(s)", left_recursion_errors.len());
             }
         } else {
-            // At level 4+: show full details
+            // At level 5+: show full details
             for err in &post_transform_errors {
-                crate::log_warn!("Post-transformation validation error: {}", err);
+                crate::log_warn!("Validation error: {}", err);
             }
             for err in &left_recursion_errors {
-                crate::log_warn!("Post-transformation left-nullable recursion: {}", err);
+                crate::log_warn!("Left-nullable recursion: {}", err);
             }
             for err in &indirect_errors {
-                crate::log_warn!("Post-transformation hidden left recursion: {}", err);
+                crate::log_warn!("Hidden left recursion: {}", err);
             }
             for err in &right_recursion_errors {
-                crate::log_warn!("Post-transformation right recursion: {}", err);
+                crate::log_warn!("Right recursion: {}", err);
             }
         }
     }

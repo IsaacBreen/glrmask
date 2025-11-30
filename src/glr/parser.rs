@@ -404,7 +404,7 @@ impl<'a> GLRParserState<'a> {
         debug!(2, "{} - token {} - GSS stats: {:?}", phase, token.0, stats);
         if let Some((path, _acc)) = self.stack.get_first_path() {
             let ids: Vec<_> = path.into_iter().map(|e| e.state_id.0).collect();
-            debug!(3, "Sample path: {:?}", ids);
+            debug!(5, "Sample path: {:?}", ids);
         }
     }
 

@@ -296,7 +296,7 @@ impl DWA {
 
         if !converged {
             let last_changes = history.last().map(|s| s.iter().copied().collect::<Vec<_>>()).unwrap_or_default();
-            crate::debug!(3, "DWA simplification did not converge after {} iterations. Still changing: {:?}", MAX_OPTIMIZE_ITERATIONS, last_changes);
+            crate::debug!(4, "DWA simplification did not converge after {} iterations. Still changing: {:?}", MAX_OPTIMIZE_ITERATIONS, last_changes);
         }
 
         if self.states.len() > 1000 {
@@ -1002,7 +1002,7 @@ impl NWA {
 
         if !converged {
             let last_changes = history.last().map(|s| s.iter().copied().collect::<Vec<_>>()).unwrap_or_default();
-            crate::debug!(3, "NWA simplification did not converge after {} iterations. Still changing: {:?}", MAX_OPTIMIZE_ITERATIONS, last_changes);
+            crate::debug!(4, "NWA simplification did not converge after {} iterations. Still changing: {:?}", MAX_OPTIMIZE_ITERATIONS, last_changes);
         }
 
         crate::debug!(6, "[NWA::simplify] Simplification finished. Total changed: {}. Final stats: {}", total_changed, self.stats());

@@ -206,21 +206,22 @@ macro_rules! __debug_impl {
                 let elapsed = $crate::r#macro::get_elapsed_suffix(now, 50);
                 
                 // Apply visual hierarchy based on the message's level
+                // Indentation: Level 3 = 2 spaces, Level 4 = 4 spaces, Level 5 = 6 spaces
                 match $level {
                     1 | 2 => {
                         // High-level info: no prefix
                         println!("{}{}", msg, elapsed);
                     }
                     3 => {
-                        // Pipeline stage: arrow prefix
+                        // Pipeline stage: arrow prefix (2-space indent)
                         println!("  {CYAN}{PLAY}{RESET} {}{}", msg, elapsed);
                     }
                     4 => {
-                        // Substep: bullet prefix, slightly indented
+                        // Substep: bullet prefix (4-space indent)
                         println!("    {DIM}{BULLET}{RESET} {}{}", msg, elapsed);
                     }
                     5 => {
-                        // Detail: dim, more indented
+                        // Detail: dim text (6-space indent)
                         println!("      {DIM}{}{}{RESET}", msg, elapsed);
                     }
                     _ => {

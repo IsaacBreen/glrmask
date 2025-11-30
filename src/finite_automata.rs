@@ -737,7 +737,7 @@ impl NFAState {
 impl ExprGroups {
     pub fn build(self) -> Regex {
         let stats = self.get_stats();
-        crate::debug!(3, "Expr Stats: {}", stats);
+        crate::debug!(5, "Expr Stats: {}", stats);
 
         crate::debug!(4, "Optimizing Regex (Strategy B)");
         let optimized = self.optimize();
@@ -774,7 +774,7 @@ impl ExprGroups {
         let (prefix, groups) = self.optimize_prefixes();
 
         let split_point = if let Some(prefix_expr) = prefix {
-            crate::debug!(3, "Factored out common prefix in NFA construction");
+            crate::debug!(4, "Factored out common prefix in NFA construction");
             // Build the prefix NFA from start_state
             let start_state = nfa.start_state;
             let prefix_end = Expr::handle_expr_cached(
@@ -1639,13 +1639,13 @@ impl NFA {
         let total_estimated_bytes = total_base_size + transitions_capacity_bytes + epsilon_capacity_bytes + finalizers_est_bytes + non_greedy_est_bytes;
         let to_mb = |bytes: usize| bytes as f64 / 1024.0 / 1024.0;
 
-        crate::debug!(4, "--- NFA Stats ---");
-        crate::debug!(4, "States: {}", num_states);
-        crate::debug!(4, "Estimated Size: {:.2} MB", to_mb(total_estimated_bytes));
-        crate::debug!(4, "  Base (Vec headers, etc): {:.2} MB", to_mb(total_base_size));
-        crate::debug!(4, "  Transitions Data: {:.2} MB", to_mb(transitions_capacity_bytes));
-        crate::debug!(4, "  Epsilon Data: {:.2} MB", to_mb(epsilon_capacity_bytes));
-        crate::debug!(4, "  Finalizers (est): {:.2} MB", to_mb(finalizers_est_bytes + non_greedy_est_bytes));
+        crate::debug!(5, "--- NFA Stats ---");
+        crate::debug!(5, "States: {}", num_states);
+        crate::debug!(5, "Estimated Size: {:.2} MB", to_mb(total_estimated_bytes));
+        crate::debug!(5, "  Base (Vec headers, etc): {:.2} MB", to_mb(total_base_size));
+        crate::debug!(5, "  Transitions Data: {:.2} MB", to_mb(transitions_capacity_bytes));
+        crate::debug!(5, "  Epsilon Data: {:.2} MB", to_mb(epsilon_capacity_bytes));
+        crate::debug!(5, "  Finalizers (est): {:.2} MB", to_mb(finalizers_est_bytes + non_greedy_est_bytes));
 
         // 1. Finalizer Sets -> Bitsets
         // Cost of Bitset: (max_group_id bits / 8) per set. Two sets per state.
@@ -1656,7 +1656,7 @@ impl NFA {
         let total_bitset_cost = num_states * 2 * (bytes_per_set + bitset_overhead);
         let current_finalizer_cost = finalizers_est_bytes + non_greedy_est_bytes;
         let savings_bitsets = (current_finalizer_cost as isize) - (total_bitset_cost as isize);
-        crate::debug!(4, "  [Savings] Finalizers -> Bitsets: {:.2} MB (current est: {:.2} MB, bitset: {:.2} MB)",
+        crate::debug!(5, "  [Savings] Finalizers -> Bitsets: {:.2} MB (current est: {:.2} MB, bitset: {:.2} MB)",
             to_mb(savings_bitsets.max(0) as usize), to_mb(current_finalizer_cost), to_mb(total_bitset_cost));
 
         // 2. State IDs u32
@@ -1666,14 +1666,14 @@ impl NFA {
         let current_eps_data_used = total_epsilon_count * std::mem::size_of::<usize>();
         let u32_eps_data_used = total_epsilon_count * 4;
         let savings_u32 = (current_trans_data_used + current_eps_data_used) - (u32_trans_data_used + u32_eps_data_used);
-        crate::debug!(4, "  [Savings] State IDs -> u32: {:.2} MB", to_mb(savings_u32));
+        crate::debug!(5, "  [Savings] State IDs -> u32: {:.2} MB", to_mb(savings_u32));
 
         // 3. Compact Transitions
         // Vec<(u8, usize)> [16 bytes] -> Vec<(U8Set, usize)> [48 bytes: 32(set) + 8(usize) + 8(pad)]
         let compact_item_size = 48;
         let compact_total_size = compacted_transitions_count * compact_item_size;
         let savings_compact = (current_trans_data_used as isize) - (compact_total_size as isize);
-        crate::debug!(4, "  [Savings] Compact Transitions: {:.2} MB (current: {:.2} MB, compacted: {:.2} MB)",
+        crate::debug!(5, "  [Savings] Compact Transitions: {:.2} MB (current: {:.2} MB, compacted: {:.2} MB)",
             savings_compact as f64 / 1024.0 / 1024.0, to_mb(current_trans_data_used), to_mb(compact_total_size));
 
         if num_states > 0 {
@@ -1767,10 +1767,10 @@ impl NFA {
             } else {
                 0.0
             };
-            crate::debug!(4, "  SCCs: {}, Non-trivial (size>1): {} ({} states, avg size {:.2})",
+            crate::debug!(5, "  SCCs: {}, Non-trivial (size>1): {} ({} states, avg size {:.2})",
                 num_sccs, num_non_trivial_sccs, total_states_in_non_trivial_sccs, avg_non_trivial_scc_size);
         }
-        crate::debug!(4, "-----------------");
+        crate::debug!(5, "-----------------");
     }
 
     fn condense_epsilon_sccs(&mut self) {
@@ -1833,7 +1833,7 @@ impl NFA {
             return;
         }
 
-        crate::debug!(3, "Condensing NFA: {} states -> {} states ({} SCCs)", num_states, scc_count, scc_count);
+        crate::debug!(4, "Condensing NFA: {} states -> {} states ({} SCCs)", num_states, scc_count, scc_count);
 
         let mut new_states = Vec::with_capacity(scc_count);
         for _ in 0..scc_count {
@@ -2170,14 +2170,14 @@ impl NFA {
         stats.total_time = start_time.elapsed();
         stats.dfa_states_created = dfa.states.len();
 
-        // Level 3: Brief summary. Level 4+: Full stats.
-        crate::debug!(3, "NFA → DFA: {} states ({:.2?})", dfa.states.len(), stats.total_time);
-        if crate::r#macro::is_debug_level_enabled(4) {
-            // Print detailed timing breakdown at level 4+
-            crate::debug!(4, "  └─ Class computation: {:.2?}", stats.class_computation_time);
-            crate::debug!(4, "  └─ Remap transitions: {:.2?}", stats.remapped_transitions_time);
-            crate::debug!(4, "  └─ Main loop: {:.2?}", stats.main_loop_time);
-            crate::debug!(4, "  └─ Metadata: {:.2?}", stats.dfa_metadata_time);
+        // Level 4: Brief summary. Level 5+: Full stats.
+        crate::debug!(4, "NFA → DFA: {} states ({:.2?})", dfa.states.len(), stats.total_time);
+        if crate::r#macro::is_debug_level_enabled(5) {
+            // Print detailed timing breakdown at level 5+
+            crate::debug!(5, "  └─ Class computation: {:.2?}", stats.class_computation_time);
+            crate::debug!(5, "  └─ Remap transitions: {:.2?}", stats.remapped_transitions_time);
+            crate::debug!(5, "  └─ Main loop: {:.2?}", stats.main_loop_time);
+            crate::debug!(5, "  └─ Metadata: {:.2?}", stats.dfa_metadata_time);
         }
 
         dfa

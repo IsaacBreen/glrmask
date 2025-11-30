@@ -158,7 +158,7 @@ impl<'r> Precomputer1<'r> {
             }
         }
         if duplicate_transitions > 0 {
-            crate::debug!(4, "NWA: Found {} duplicate transitions (same src, dst, label)", duplicate_transitions);
+            crate::debug!(5, "NWA: Found {} duplicate transitions (same src, dst, label)", duplicate_transitions);
         }
 
         // Find cases where there's multiple instances of same transition - regardless of symbol/epsilon transition - from one state to another, regardless of weight.
@@ -184,16 +184,16 @@ impl<'r> Precomputer1<'r> {
             crate::debug!(4, "NWA: Found {} pairs of states connected by multiple transitions", parallel_connections);
         }
 
-        crate::debug!(3, "{} states and {} transitions", self.nwa.states.len(), self.nwa.states.num_transitions());
+        crate::debug!(4, "{} states and {} transitions", self.nwa.states.len(), self.nwa.states.num_transitions());
         
         // OPTIMIZATION: Use lightweight operations instead of full simplify()
         // This skeleton DWA is only used as input to precompute4, so expensive minimization
         // provides little benefit. Just do basic cleanup.
         self.nwa.compress_transitions();
-        crate::debug!(3, "Compressed NWA with {} states and {} transitions", self.nwa.states.len(), self.nwa.states.num_transitions());
+        crate::debug!(4, "Compressed NWA with {} states and {} transitions", self.nwa.states.len(), self.nwa.states.num_transitions());
         
         let dwa = self.nwa.determinize_and_simplify("Precompute1");
-        crate::debug!(3, "Simplified DWA with {} states and {} transitions", dwa.states.len(), dwa.states.num_transitions());
+        crate::debug!(4, "Simplified DWA with {} states and {} transitions", dwa.states.len(), dwa.states.num_transitions());
 
         dwa
     }
@@ -313,14 +313,14 @@ impl<'r> Precomputer1<'r> {
 
     fn run_dfs(&mut self) {
         let assoc = self.roots.clone();
-        crate::debug!(3, "Starting precompute DFS for {} tokenizer states", self.roots.len());
+        crate::debug!(4, "Starting precompute DFS for {} tokenizer states", self.roots.len());
         profiler::reset();
         let vocab = std::mem::replace(&mut self.vocab, VocabPrefixTree::new());
         self.dfs(&vocab.root, assoc);
         self.vocab = vocab;
         self.pb.finish();
         profiler::print_summary();
-        crate::debug!(3, "Precomputation complete");
+        crate::debug!(4, "Precomputation complete");
     }
 
     fn dfs(
