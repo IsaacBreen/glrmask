@@ -1,9 +1,18 @@
+"""
+NOTE: This example uses an older API and needs updating.
+See example.py for the current API usage.
+
+This example demonstrates using a real HuggingFace tokenizer with sep1.
+Requires: pip install transformers
+"""
+
 from transformers import AutoTokenizer
 import _sep1
 import numpy as np
 
-# Define regexes using PyRegexExpr
-plus_regex = _sep1.PyRegexExpr.eat_u8(ord('+'))
+# NOTE: Old API - needs updating to use GrammarDefinition(rules, terminals)
+# Define regexes using RegexExpr (was PyRegexExpr)
+plus_regex = _sep1.RegexExpr.eat_u8(ord('+'))
 times_regex = _sep1.PyRegexExpr.eat_u8(ord('*'))
 open_paren_regex = _sep1.PyRegexExpr.eat_u8(ord('('))
 close_paren_regex = _sep1.PyRegexExpr.eat_u8(ord(')'))
