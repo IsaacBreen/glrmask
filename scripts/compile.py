@@ -175,7 +175,7 @@ def filter_vocab(vocab: dict[str, int], allowed_lengths: set[int], min_len_unbou
     return filtered
 
 
-def run_compiler(compiler_path: Path, grammar_path: Path, vocab_path: Path, output_path: Path | None, recompile: bool, disable_progress_bar: bool, build_profile: str = "release", save_pc0: Path | None = None, from_pc0: Path | None = None, pc0_only: bool = False):
+def run_compiler(compiler_path: Path, grammar_path: Path, vocab_path: Path, output_path: Path | None, recompile: bool, disable_progress_bar: bool, build_profile: str = "release", save_pc0: Path | None = None, from_pc0: Path | None = None, pc0_only: bool = False, format: str | None = None):
     """
     Runs the Rust grammar-compiler CLI tool, recompiling it first by default.
     """
@@ -220,6 +220,9 @@ def run_compiler(compiler_path: Path, grammar_path: Path, vocab_path: Path, outp
         "--grammar", str(grammar_path),
         "--vocab", str(vocab_path),
     ]
+
+    if format:
+        command.extend(["--format", format])
 
     if pc0_only:
         command.extend(["--save-precompute0", str(save_pc0)])
@@ -309,6 +312,8 @@ Examples:
 
     # Filtering options
     parser.add_argument("--token-len", type=str, nargs='+', help="Filter vocabulary to include tokens with specific byte lengths or ranges. E.g., '1' '3-5' '8-'.")
+    
+    parser.add_argument("--format", type=str, choices=["ebnf", "lark"], help="Grammar format (ebnf or lark). If not specified, inferred from file extension.")
 
     args = parser.parse_args()
     
@@ -392,6 +397,7 @@ Examples:
             save_pc0=args.save_precompute0,
             from_pc0=args.from_precompute0,
             pc0_only=args.precompute0_only,
+            format=args.format,
         )
     finally:
         # 6. Clean up the temporary file

@@ -40,6 +40,10 @@ struct Args {
     /// If specified, only compute and save the precompute0 cache, then exit.
     #[arg(long, requires = "save_precompute0", conflicts_with = "output")]
     precompute0_only: bool,
+
+    /// Grammar format: "ebnf" or "lark". If not specified, inferred from file extension.
+    #[arg(long)]
+    format: Option<String>,
 }
 
 fn format_bytes(bytes: u64) -> String {
@@ -74,7 +78,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     if show_output { println!("  {BOLD_WHITE}Loading grammar...{RESET}"); }
     
     let grammar_path_str = args.grammar.to_str().ok_or_else(|| format!("Path is not valid UTF-8: {:?}", args.grammar))?;
-    let mut grammar_definition = GrammarDefinition::from_ebnf_file(grammar_path_str)?;
+    
+    let format = args.format.as_deref().or_else(|| {
+        args.grammar.extension().and_then(|ext| ext.to_str()).map(|ext| {
+            if ext == "lark" { "lark" } else { "ebnf" }
+        })
+    }).unwrap_or("ebnf");
+
+    let mut grammar_definition = match format {
+        "lark" => GrammarDefinition::from_lark_file(grammar_path_str)?,
+        "ebnf" => GrammarDefinition::from_ebnf_file(grammar_path_str)?,
+        _ => return Err(format!("Unknown grammar format: {}", format).into()),
+    };
     
     let prod_count = grammar_definition.productions.len();
     let term_count = grammar_definition.terminal_to_group_id().len();

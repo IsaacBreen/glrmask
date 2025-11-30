@@ -130,3 +130,7 @@
 - Less risky tasks first
 - Document the new CLI e.g. in README.md but also AGENTS.md and anywhere else relevant.
 - I really don't like the way lark and EBNF are auto-detected. Horrible. They're separate formats. Fix this.
+- DONE: Added explicit `--format` argument to `grammar-compiler` and `compile.py`.
+  - Supports `ebnf` and `lark`.
+  - Auto-detects by file extension if not specified.
+  - No longer assumes EBNF by default without checking.
