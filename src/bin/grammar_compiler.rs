@@ -132,7 +132,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     if show_output {
-        println!("  {DIM}└─ Total build time: {}{RESET}", format_duration(build_start.elapsed()));
+        println!("  {CYAN}└─ Total build time: {}{RESET}", format_duration(build_start.elapsed()));
     }
 
     if let Some(path) = args.save_precompute0.as_ref() {
