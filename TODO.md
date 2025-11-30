@@ -110,10 +110,17 @@
     - Benchmarks showing correct mask generation (equivalent: ✅)
     - Theoretical guarantees via right recursion + hidden left recursion elimination
 
-### 11. [ ] Clean up project structure
+### 11. [x] Clean up project structure
 - Remove junk files
 - Reorganize as needed
 - Do this LAST
+- DONE: Comprehensive cleanup:
+  - Moved utility scripts to scripts/
+  - Moved minimal_vocab.json to examples/
+  - Moved prompt.md to docs/design_overview.md
+  - Removed tracked junk files (debug dumps, temp files, conversation logs)
+  - Deleted empty/stale directories (Users/, current version of src/, paper/)
+  - Updated .gitignore with comprehensive patterns
 
 ---
 
