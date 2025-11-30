@@ -6,7 +6,86 @@ use crate::glr::automaton::{
     Nullability,
 };
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+
+/// Find all non-terminals that are part of a cycle in the given graph using Tarjan's SCC algorithm.
+/// Returns a set of non-terminals that can reach themselves (directly or indirectly).
+fn find_cyclic_nodes(graph: &BTreeMap<NonTerminal, BTreeSet<NonTerminal>>) -> BTreeSet<NonTerminal> {
+    // Build index mapping
+    let all_nts: Vec<_> = graph.keys().cloned().collect();
+    let nt_to_idx: HashMap<&NonTerminal, usize> = all_nts.iter().enumerate().map(|(i, nt)| (nt, i)).collect();
+    let n = all_nts.len();
+    
+    // Build adjacency list with indices
+    let adj: Vec<Vec<usize>> = all_nts.iter().map(|nt| {
+        graph.get(nt).map(|targets| {
+            targets.iter().filter_map(|t| nt_to_idx.get(t).copied()).collect()
+        }).unwrap_or_default()
+    }).collect();
+    
+    // Tarjan's SCC algorithm
+    let mut ids = vec![-1i32; n];
+    let mut low = vec![0i32; n];
+    let mut on_stack = vec![false; n];
+    let mut stack = Vec::new();
+    let mut id_counter = 0i32;
+    let mut cyclic = BTreeSet::new();
+    
+    fn dfs(
+        at: usize,
+        adj: &[Vec<usize>],
+        ids: &mut [i32],
+        low: &mut [i32],
+        on_stack: &mut [bool],
+        stack: &mut Vec<usize>,
+        id_counter: &mut i32,
+        cyclic: &mut BTreeSet<usize>,
+    ) {
+        stack.push(at);
+        on_stack[at] = true;
+        ids[at] = *id_counter;
+        low[at] = *id_counter;
+        *id_counter += 1;
+        
+        for &to in &adj[at] {
+            if ids[to] == -1 {
+                dfs(to, adj, ids, low, on_stack, stack, id_counter, cyclic);
+                low[at] = low[at].min(low[to]);
+            } else if on_stack[to] {
+                low[at] = low[at].min(ids[to]);
+            }
+        }
+        
+        if ids[at] == low[at] {
+            let mut scc = Vec::new();
+            while let Some(node) = stack.pop() {
+                on_stack[node] = false;
+                scc.push(node);
+                if node == at { break; }
+            }
+            // An SCC with >1 node means cycles, or a single node with self-loop
+            if scc.len() > 1 {
+                for &node in &scc {
+                    cyclic.insert(node);
+                }
+            } else if scc.len() == 1 {
+                let node = scc[0];
+                if adj[node].contains(&node) {
+                    cyclic.insert(node);
+                }
+            }
+        }
+    }
+    
+    for i in 0..n {
+        if ids[i] == -1 {
+            dfs(i, &adj, &mut ids, &mut low, &mut on_stack, &mut stack, &mut id_counter, &mut cyclic);
+        }
+    }
+    
+    // Convert indices back to NonTerminals
+    cyclic.into_iter().map(|i| all_nts[i].clone()).collect()
+}
 
 /// Checks for non-terminals used in rule RHS but never defined in LHS.
 pub fn check_for_undefined_non_terminals(productions: &[Production]) -> Vec<String> {
@@ -145,6 +224,7 @@ fn transitive_closure(graph: &mut BTreeMap<NonTerminal, BTreeSet<NonTerminal>>) 
 }
 
 /// Checks for indirect hidden left recursion: A -> B α where B is nullable and α can derive to A.
+/// Uses Tarjan's SCC algorithm for cycle detection instead of full transitive closure.
 pub fn check_for_indirect_hidden_left_recursion(productions: &[Production]) -> Vec<String> {
     let nullable = compute_nullable_nonterminals(productions);
     
@@ -158,9 +238,11 @@ pub fn check_for_indirect_hidden_left_recursion(productions: &[Production]) -> V
             } else { break; }
         }
     }
-    transitive_closure(&mut graph);
     
-    // Check: for each production A -> (nullable)* B ... , does B reach A?
+    // Find all non-terminals that are part of a cycle
+    let cyclic = find_cyclic_nodes(&graph);
+    
+    // Check: for each production A -> (nullable)* B ... , is B in a cycle that includes A?
     let mut errors = Vec::new();
     for prod in productions {
         let lhs = &prod.lhs;
@@ -173,7 +255,8 @@ pub fn check_for_indirect_hidden_left_recursion(productions: &[Production]) -> V
         }
         for sym in &prod.rhs[pos..] {
             if let Symbol::NonTerminal(nt) = sym {
-                if nt == lhs || graph.get(nt).map_or(false, |r| r.contains(lhs)) {
+                // Check if lhs is in a cycle AND nt is in the same cycle (both cyclic)
+                if cyclic.contains(lhs) && (nt == lhs || cyclic.contains(nt)) {
                     errors.push(format!("Hidden left recursion: {} via {}", lhs.0, nt.0));
                     break;
                 }
@@ -184,14 +267,14 @@ pub fn check_for_indirect_hidden_left_recursion(productions: &[Production]) -> V
 }
 
 /// Checks for any remaining right recursion (direct or indirect) in the grammar.
+/// Uses Tarjan's SCC algorithm (O(V+E)) instead of transitive closure (O(n³)).
 pub fn check_for_right_recursion(productions: &[Production]) -> Vec<String> {
     let nullable = compute_nullable_nonterminals(productions);
-    let mut graph = build_right_reachability_graph(productions, &nullable);
-    transitive_closure(&mut graph);
+    let graph = build_right_reachability_graph(productions, &nullable);
+    let cyclic = find_cyclic_nodes(&graph);
     
-    graph.iter()
-        .filter(|(nt, reachable)| reachable.contains(*nt))
-        .map(|(nt, _)| format!("Right recursion: {}", nt.0))
+    cyclic.iter()
+        .map(|nt| format!("Right recursion: {}", nt.0))
         .collect()
 }
 
