@@ -2,6 +2,7 @@ mod interface;
 mod tokenizer_combinators;
 mod tests;
 mod ebnf;
+mod lark;
 mod optimization;
 
 pub use ebnf::*;

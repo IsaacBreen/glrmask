@@ -313,6 +313,35 @@ impl PyGrammarDefinition {
         Ok(PyGrammarDefinition { inner: grammar_def })
     }
 
+    /// Create a GrammarDefinition from a Lark grammar string.
+    /// 
+    /// Lark format uses `:` for rule definitions and newlines as terminators:
+    /// ```
+    /// rule: expr
+    /// ```
+    #[staticmethod]
+    fn from_lark(lark_source: &str) -> PyResult<Self> {
+        let grammar_def = GrammarDefinition::from_lark(lark_source).map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Failed to parse Lark grammar: {}",
+                e
+            ))
+        })?;
+        Ok(PyGrammarDefinition { inner: grammar_def })
+    }
+
+    /// Create a GrammarDefinition from a Lark grammar file.
+    #[staticmethod]
+    fn from_lark_file(path: &str) -> PyResult<Self> {
+        let grammar_def = GrammarDefinition::from_lark_file(path).map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyIOError, _>(format!(
+                "Failed to load or parse Lark file '{}': {}",
+                path, e
+            ))
+        })?;
+        Ok(PyGrammarDefinition { inner: grammar_def })
+    }
+
     fn optimize(&mut self) {
         self.inner.optimize();
     }

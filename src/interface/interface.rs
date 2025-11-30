@@ -5,6 +5,7 @@ use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::glr::parser::GLRParser;
 use crate::glr::table::{assign_non_terminal_ids, generate_glr_parser, generate_glr_parser_with_maps, generate_glr_parser_with_terminal_map, NonTerminalID, TerminalID};
 use crate::interface::ebnf::{EbnfParseResult, EbnfParser};
+use crate::interface::lark::{LarkParser, LarkParseResult};
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use crate::types::TerminalID as GrammarTokenID;
 use crate::datastructures::u8set::U8Set;
@@ -1170,11 +1171,12 @@ impl GrammarDefinition {
         })
     }
 
-    /// Constructs a `GrammarDefinition` from an EBNF string.
-    pub fn from_ebnf(ebnf_source: &str) -> Result<Self, String> {
-        let ebnf = EbnfParser::new(ebnf_source).and_then(|mut p| p.parse())?;
-        let grammar_exprs = ebnf.grammar_rules;
-
+    /// Constructs a `GrammarDefinition` from parsed grammar rules.
+    /// This is the common implementation used by both `from_ebnf` and `from_lark`.
+    fn from_parsed_rules(
+        grammar_exprs: Vec<(String, GrammarExpr)>,
+        ignore_symbol_name: Option<String>,
+    ) -> Result<Self, String> {
         fn is_terminal_name(name: &str) -> bool {
             name.chars().next().map_or(false, |c| c.is_uppercase())
         }
@@ -1217,7 +1219,7 @@ impl GrammarDefinition {
                 gather_referenced_terminals(expr, &terminals, &mut referenced_terminals);
             }
         }
-        if let Some(ignore_name) = &ebnf.ignore_symbol_name {
+        if let Some(ignore_name) = &ignore_symbol_name {
             if is_terminal_name(ignore_name) {
                 referenced_terminals.insert(ignore_name.clone());
             }
@@ -1248,7 +1250,7 @@ impl GrammarDefinition {
 
         let mut grammar_def = GrammarDefinition::from_exprs(non_terminal_rules, terminal_defs)?;
 
-        if let Some(ignore_name) = &ebnf.ignore_symbol_name {
+        if let Some(ignore_name) = &ignore_symbol_name {
             let group_id = grammar_def
                 .regex_name_to_group_id
                 .get_by_left(ignore_name)
@@ -1264,12 +1266,42 @@ impl GrammarDefinition {
         Ok(grammar_def)
     }
 
+    /// Constructs a `GrammarDefinition` from an EBNF string.
+    /// 
+    /// EBNF format uses `::=` for rule definitions and `;` terminators:
+    /// ```text
+    /// rule ::= expr;
+    /// ```
+    pub fn from_ebnf(ebnf_source: &str) -> Result<Self, String> {
+        let ebnf = EbnfParser::new(ebnf_source).and_then(|mut p| p.parse())?;
+        Self::from_parsed_rules(ebnf.grammar_rules, ebnf.ignore_symbol_name)
+    }
+
+    /// Constructs a `GrammarDefinition` from a Lark grammar string.
+    /// 
+    /// Lark format uses `:` for rule definitions and newlines as terminators:
+    /// ```text
+    /// rule: expr
+    /// ```
+    pub fn from_lark(lark_source: &str) -> Result<Self, String> {
+        let lark = LarkParser::new(lark_source).and_then(|mut p| p.parse())?;
+        Self::from_parsed_rules(lark.grammar_rules, lark.ignore_symbol_name)
+    }
+
     /// Constructs a `GrammarDefinition` from an EBNF file.
     pub fn from_ebnf_file(path: &str) -> Result<Self, String> {
         let content = fs::read_to_string(path)
             .map_err(|e| format!("Failed to read EBNF file '{}': {}", path, e))?;
         Self::from_ebnf(&content)
             .map_err(|e| format!("Failed to parse EBNF file '{}':\n{}", path, e))
+    }
+
+    /// Constructs a `GrammarDefinition` from a Lark grammar file.
+    pub fn from_lark_file(path: &str) -> Result<Self, String> {
+        let content = fs::read_to_string(path)
+            .map_err(|e| format!("Failed to read Lark file '{}': {}", path, e))?;
+        Self::from_lark(&content)
+            .map_err(|e| format!("Failed to parse Lark file '{}':\n{}", path, e))
     }
 
     /// Helper to get terminal expressions ordered by group ID for tokenizer construction.
