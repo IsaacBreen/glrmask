@@ -61,6 +61,22 @@
 ### 8.5 [ ] Add Lark grammar format support
 - Add Lark grammar format support
 
+### 8.6 [ ] Make it so compile.py just passes through all the Rust cargo command output
+- The user should get to see it all.
+
+
+
+ALSO:
+This gap
+```
+  Building constraint...
+
+  └─ Total build time: 68ms
+```
+The line gap there annoys me.
+
+
+
 ### 9. [x] Add stability safeguards for sep1
 - Memory limits
 - Stress testing
@@ -70,6 +86,10 @@
   - 500 iterations: no memory growth
   - 300 token sequences: work correctly
   - Error handling: graceful exceptions
+
+### 9.5 [ ] Investigate hidden left recursion warning with JS grammar
+- `Grammar has 64 hidden left recursion(s) (non-fatal)`
+- This should never happen. All hidden left recursion should always be removed, as should all right recursion (so that we satisfy the conditions of the theorem in "Even Faster Generalized LR Parsing")
 
 ### 10. [ ] Integrate IELR parser generator crate
 - Replace custom table generation
