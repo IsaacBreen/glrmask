@@ -203,21 +203,12 @@ impl<'a> GrammarOptimizer<'a> {
     }
 
     fn try_convert_scc(&mut self, scc_nts: &[NonTerminal]) -> Option<HashMap<NonTerminal, Expr>> {
-        // Skip SCCs that contain nullable non-terminals (those with epsilon productions).
-        // Converting them to regex terminals would create nullable terminals, which then
-        // need to be converted back to non-terminals with epsilon productions in the parser.
-        // It's simpler and more efficient to just leave them as-is.
+        // NOTE: We now allow SCCs with epsilon productions. The epsilon productions are handled
+        // correctly by try_convert_scc_right_linear/left_linear - they become final states.
+        // After optimization, nullable terminals need to be converted back to optional non-terminals,
+        // which is handled by handle_nullable_terminals_except in the main optimize() function.
         let empty_vec = Vec::new();
-        for nt in scc_nts {
-            let prod_indices = self.production_indices.get(nt).unwrap_or(&empty_vec);
-            let has_epsilon_production = prod_indices.iter().any(|&idx| {
-                self.grammar.productions[idx].rhs.is_empty()
-            });
-            if has_epsilon_production {
-                return None;
-            }
-        }
-        
+
         // Skip single-node SCCs with no self-recursion if they only reference other unresolved NTs
         // (they're just pass-through rules). But if they reference terminals or resolved NTs,
         // we should still optimize them to regex.
@@ -474,10 +465,40 @@ impl<'a> GrammarOptimizer<'a> {
     fn rewrite_grammar(&mut self) {
         let mut new_terminals: HashMap<NonTerminal, Terminal> = HashMap::new();
         
-        // Allocate group IDs and create Terminals
+        // First, determine which resolved NTs are actually referenced by non-resolved productions
+        let mut referenced_resolved_nts: HashSet<NonTerminal> = HashSet::new();
+        
+        // Also check the start symbol
+        let start_nt = if self.grammar.productions.len() > self.grammar.start_production_id {
+            self.grammar.productions[self.grammar.start_production_id].lhs.clone()
+        } else {
+            NonTerminal("".to_string())
+        };
+        
+        if self.resolved_nts.contains_key(&start_nt) {
+            referenced_resolved_nts.insert(start_nt.clone());
+        }
+        
+        for prod in &self.grammar.productions {
+            if self.resolved_nts.contains_key(&prod.lhs) {
+                // This production belongs to a resolved NT, skip it
+                continue;
+            }
+            // This production is kept - check what NTs it references
+            for symbol in &prod.rhs {
+                if let Symbol::NonTerminal(ref nt) = symbol {
+                    if self.resolved_nts.contains_key(nt) {
+                        referenced_resolved_nts.insert(nt.clone());
+                    }
+                }
+            }
+        }
+        
+        // Allocate group IDs and create Terminals ONLY for referenced resolved NTs
         let mut next_group_id = self.grammar.group_id_to_expr.keys().max().map(|&x| x + 1).unwrap_or(0);
         
-        for (nt, expr) in &self.resolved_nts {
+        for nt in &referenced_resolved_nts {
+            let expr = self.resolved_nts.get(nt).unwrap();
             let mut final_name = nt.0.clone();
             while self.grammar.regex_name_to_group_id.contains_left(&final_name) {
                 final_name.push('_');
@@ -489,14 +510,6 @@ impl<'a> GrammarOptimizer<'a> {
             new_terminals.insert(nt.clone(), Terminal::RegexName(final_name));
             next_group_id += 1;
         }
-        
-        // Identify start symbol
-        let start_nt = if self.grammar.productions.len() > self.grammar.start_production_id {
-            self.grammar.productions[self.grammar.start_production_id].lhs.clone()
-        } else {
-            // Should not happen in valid grammar
-            NonTerminal("".to_string())
-        };
 
         // Rewrite productions
         let mut new_productions = Vec::new();
