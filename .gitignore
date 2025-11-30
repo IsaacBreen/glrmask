@@ -4,6 +4,32 @@ llm_logs/
 restore-chat-history
 .temp*
 zzz_bash_agent.yaml
+temp/
+
+# === IDE ===
+.idea/
+
+# === Temporary/debug files ===
+nwa_dump_*.json
+compile_log.txt
+compile_timing.txt
+nohup.out
+pipeline_artifacts.json
+pipeline_*.tex
+results/
+benchmarking/results/
+*.js.tmp
+temp.js
+output*.log
+tee
+
+# === Old/backup directories ===
+Users/
+current version of src/
+paper/
+
+# === Large vocabulary files ===
+vocab.json
 
 # === Paper repository (separate git repo) ===
 gcg-paper/
@@ -392,4 +418,16 @@ scripts/__pycache__/
 
 # End of https://www.toptal.com/developers/gitignore/api/rust,jetbrains,macos,python
 
+.aider*
+conversation.yaml
+chatllm/
+special_stuff/
+
+# === Debug/log directories ===
+bisection_logs/
+maximal_set_logs/
+chatllm/
+special_stuff/
+
+# === Aider files ===
 .aider*

@@ -196,12 +196,11 @@ def run_compiler(compiler_path: Path, grammar_path: Path, vocab_path: Path, outp
             build_cmd.extend(["--profile", build_profile])
             log(Colors.info(f"Building compiler (profile: {build_profile})..."))
         try:
-            # Run without capturing output to stream compilation progress.
+            # Always stream cargo output to let user see compilation progress
             result = subprocess.run(
                 build_cmd,
                 check=True,
                 env=env,
-                capture_output=not _verbose,
             )
             log(Colors.success("Build complete"))
         except subprocess.CalledProcessError:
