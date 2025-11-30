@@ -105,7 +105,14 @@ impl<'a> GrammarOptimizer<'a> {
         self.stats.final_terminals = self.count_terminals();
         self.stats.interned_exprs = self.interner.cache.len();
 
-        debug!(3, "{}", self.stats);
+        // Level 3: Brief summary only
+        let prod_diff = self.stats.final_productions as isize - self.stats.initial_productions as isize;
+        let term_diff = self.stats.final_terminals as isize - self.stats.initial_terminals as isize;
+        debug!(3, "Grammar optimized: {} → {} prods ({:+}), {} → {} terms ({:+})", 
+            self.stats.initial_productions, self.stats.final_productions, prod_diff,
+            self.stats.initial_terminals, self.stats.final_terminals, term_diff);
+        debug!(4, "  └─ {} SCCs optimized, {} exprs interned", 
+            self.stats.sccs_optimized, self.stats.interned_exprs);
     }
 
     fn build_dependency_graph(&self) -> (Vec<Vec<usize>>, Vec<NonTerminal>) {

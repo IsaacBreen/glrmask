@@ -7,6 +7,49 @@ import tempfile
 from pathlib import Path
 import requests
 
+# ANSI color codes for terminal output
+class Colors:
+    RESET = "\033[0m"
+    BOLD = "\033[1m"
+    DIM = "\033[2m"
+    RED = "\033[31m"
+    GREEN = "\033[32m"
+    YELLOW = "\033[33m"
+    BLUE = "\033[34m"
+    CYAN = "\033[36m"
+    
+    @staticmethod
+    def success(msg: str) -> str:
+        return f"{Colors.GREEN}✓{Colors.RESET} {msg}"
+    
+    @staticmethod
+    def error(msg: str) -> str:
+        return f"{Colors.RED}✗{Colors.RESET} {msg}"
+    
+    @staticmethod
+    def warn(msg: str) -> str:
+        return f"{Colors.YELLOW}⚠{Colors.RESET} {msg}"
+    
+    @staticmethod
+    def info(msg: str) -> str:
+        return f"{Colors.CYAN}•{Colors.RESET} {msg}"
+    
+    @staticmethod
+    def dim(msg: str) -> str:
+        return f"{Colors.DIM}{msg}{Colors.RESET}"
+
+# Global verbosity level
+_verbose = False
+
+def log(msg: str, force: bool = False):
+    """Print a message if verbose mode is enabled or force is True."""
+    if _verbose or force:
+        print(msg)
+
+def log_error(msg: str):
+    """Print an error message (always shown)."""
+    print(Colors.error(msg), file=sys.stderr)
+
 # --- Helper Functions ---
 def get_vocab(url: str | None, path: Path | None, cache_dir: Path, force_download: bool) -> dict[str, int]:
     """
@@ -24,12 +67,12 @@ def get_vocab(url: str | None, path: Path | None, cache_dir: Path, force_downloa
         if isinstance(data, dict):
             return data
         if isinstance(data, list):
-            print(f"Loaded vocabulary is a list of strings, converting to a dictionary ({len(data)} tokens).")
+            log(Colors.info(f"Converting vocabulary list to dictionary ({len(data)} tokens)"))
             return {token: i for i, token in enumerate(data)}
         raise TypeError(f"Unsupported vocabulary format in {vocab_path}. Expected a dict[str, int] or a list[str], but got {type(data)}.")
 
     if path:
-        print(f"Loading vocabulary from local path: {path}")
+        log(Colors.info(f"Loading vocabulary from: {path}"))
         return _load_and_process_vocab(path)
 
     # Handle URL download and caching
@@ -38,20 +81,21 @@ def get_vocab(url: str | None, path: Path | None, cache_dir: Path, force_downloa
     cache_path = cache_dir / file_name
 
     if not cache_path.exists() or force_download:
-        print(f"Downloading vocabulary from: {url}")
+        log(Colors.info(f"Downloading vocabulary from URL..."))
         try:
             response = requests.get(url, timeout=30)
             response.raise_for_status()
             with open(cache_path, 'w', encoding='utf-8') as f:
                 f.write(response.text)
-            print(f"Saved vocabulary to cache: {cache_path}")
+            log(Colors.dim(f"  Cached to: {cache_path}"))
         except requests.RequestException as e:
-            print(f"Error downloading vocabulary: {e}", file=sys.stderr)
+            log_error(f"Failed to download vocabulary: {e}")
             sys.exit(1)
     else:
-        print(f"Loading vocabulary from cache: {cache_path}")
+        log(Colors.info(f"Using cached vocabulary: {cache_path}"))
 
     return _load_and_process_vocab(cache_path)
+
 
 def parse_len_ranges(ranges: list[str] | None) -> tuple[set[int], int | None]:
     """
@@ -107,7 +151,7 @@ def filter_vocab(vocab: dict[str, int], allowed_lengths: set[int], min_len_unbou
     if not allowed_lengths and min_len_unbounded is None:
         return vocab
 
-    print(f"Filtering vocabulary by token byte length...")
+    log(Colors.info(f"Filtering vocabulary by token byte length..."))
     
     filtered = {}
     for token_str, token_id in vocab.items():
@@ -127,7 +171,7 @@ def filter_vocab(vocab: dict[str, int], allowed_lengths: set[int], min_len_unbou
         if keep:
             filtered[token_str] = token_id
             
-    print(f"  -> Filtered vocabulary from {len(vocab)} to {len(filtered)} tokens.")
+    log(Colors.dim(f"  Filtered: {len(vocab)} → {len(filtered)} tokens"))
     return filtered
 
 
@@ -145,31 +189,31 @@ def run_compiler(compiler_path: Path, grammar_path: Path, vocab_path: Path, outp
         build_cmd = ["cargo", "build"]
         if build_profile == "release":
             build_cmd.append("--release")
-            print("Building compiler with 'cargo build --release'...")
+            log(Colors.info("Building compiler (release)..."))
         elif build_profile == "debug":
-            print("Building compiler with 'cargo build' (debug mode)...")
+            log(Colors.info("Building compiler (debug)..."))
         else:
             build_cmd.extend(["--profile", build_profile])
-            print(f"Building compiler with 'cargo build --profile {build_profile}'...")
+            log(Colors.info(f"Building compiler (profile: {build_profile})..."))
         try:
             # Run without capturing output to stream compilation progress.
-            subprocess.run(
+            result = subprocess.run(
                 build_cmd,
                 check=True,
-                env=env
+                env=env,
+                capture_output=not _verbose,
             )
-            print("Build successful.")
+            log(Colors.success("Build complete"))
         except subprocess.CalledProcessError:
-            # Cargo will have already printed its error to the console.
-            print("Cargo build failed.", file=sys.stderr)
+            log_error("Cargo build failed")
             sys.exit(1)
 
     if not compiler_path.exists():
-        print(f"Error: Compiler executable not found at '{compiler_path}'.", file=sys.stderr)
+        log_error(f"Compiler executable not found at '{compiler_path}'")
         if recompile:
-             print("The build process completed but the executable is not in the expected location.", file=sys.stderr)
+             log_error("Build completed but executable is not in expected location.")
         else:
-             print("Try running without '--no-recompile' to build it.", file=sys.stderr)
+             log_error("Try running without '--no-recompile' to build it.")
         sys.exit(1)
 
     command = [
@@ -185,27 +229,24 @@ def run_compiler(compiler_path: Path, grammar_path: Path, vocab_path: Path, outp
         if output_path:
             command.extend(["--output", str(output_path)])
         if from_pc0:
-            print(f"Loading from precompute0 cache: {from_pc0}")
+            log(Colors.info(f"Loading precompute0 cache: {from_pc0}"))
             command.extend(["--load-precompute0", str(from_pc0)])
         if save_pc0:
             # Ensure parent directory exists
             save_pc0.parent.mkdir(parents=True, exist_ok=True)
-            print(f"Will save precompute0 cache to: {save_pc0}")
+            log(Colors.dim(f"  Will save precompute0 cache to: {save_pc0}"))
             command.extend(["--save-precompute0", str(save_pc0)])
 
-    env_str = ""
-    if not disable_progress_bar:
-        env_str = "ENABLE_PROGRESS_BAR=1 "
-
-    print(f"\nRunning compiler: {env_str}{' '.join(command)}")
+    log(Colors.dim(f"  Command: {' '.join(command)}"))
+    
     try:
         # Run the compiler, passing through its output and the environment variable.
         subprocess.run(command, check=True, env=env)
     except subprocess.CalledProcessError as e:
-        print(f"Grammar compilation failed with exit code {e.returncode}", file=sys.stderr)
+        log_error(f"Compilation failed with exit code {e.returncode}")
         sys.exit(1)
     except FileNotFoundError:
-        print(f"Error: Could not find the compiler executable at '{compiler_path}'", file=sys.stderr)
+        log_error(f"Could not find compiler executable at '{compiler_path}'")
         sys.exit(1)
 
 
@@ -248,6 +289,7 @@ Examples:
     )
     parser.add_argument("-g", "--grammar", type=Path, required=True, help="Path to the EBNF grammar file.")
     parser.add_argument("-o", "--output", type=Path, help="Path for the output compressed constraint file (.json.gz).")
+    parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose output from the Python wrapper.")
 
     vocab_source_group = parser.add_mutually_exclusive_group()
     vocab_source_group.add_argument("--vocab-url", type=str, help="URL of the JSON vocabulary file to download.")
@@ -270,6 +312,10 @@ Examples:
     parser.add_argument("--token-len", type=str, nargs='+', help="Filter vocabulary to include tokens with specific byte lengths or ranges. E.g., '1' '3-5' '8-'.")
 
     args = parser.parse_args()
+    
+    # Set global verbose flag
+    global _verbose
+    _verbose = args.verbose
 
     # --- Argument Validation ---
     if args.precompute0_only and not args.save_precompute0:
@@ -309,7 +355,7 @@ Examples:
 
     # 3. Add tokens from vocab-list (filters do not apply to these)
     if args.vocab_list:
-        print(f"Adding {len(args.vocab_list)} tokens from --vocab-list.")
+        log(Colors.info(f"Adding {len(args.vocab_list)} tokens from --vocab-list"))
         max_id = -1
         if modified_vocab:
             max_id = max(modified_vocab.values())
@@ -318,21 +364,21 @@ Examples:
                 max_id += 1
                 modified_vocab[token] = max_id
 
-    # Print vocabulary if it's small (less than 1000 tokens)
-    if len(modified_vocab) < 1000:
-        print("\n--- Small Vocabulary (< 1000 tokens) ---\n")
+    # Print vocabulary if it's very small (less than 50 tokens) and verbose
+    if len(modified_vocab) < 50 and _verbose:
+        log(Colors.dim("\n--- Vocabulary ---"))
         # Sort by token ID for consistent output
         sorted_vocab = sorted(modified_vocab.items(), key=lambda item: item[1])
         printable_vocab = {token: id for token, id in sorted_vocab}
-        print(json.dumps(printable_vocab, indent=2, ensure_ascii=False))
-        print("\n-----------------------------------------\n")
+        log(Colors.dim(json.dumps(printable_vocab, indent=2, ensure_ascii=False)))
+        log(Colors.dim("------------------\n"))
 
     # 4. Write the (potentially modified) vocab to a temporary file
     with tempfile.NamedTemporaryFile(mode='w+', delete=False, suffix=".json", encoding='utf-8') as tmp_vocab_file:
         json.dump(modified_vocab, tmp_vocab_file)
         tmp_vocab_path = Path(tmp_vocab_file.name)
 
-    print(f"Temporary vocabulary saved to: {tmp_vocab_path}")
+    log(Colors.dim(f"  Temp vocabulary: {tmp_vocab_path}"))
 
     # 5. Run the Rust compiler
     try:
@@ -351,6 +397,8 @@ Examples:
     finally:
         # 6. Clean up the temporary file
         tmp_vocab_path.unlink()
-        print(f"Cleaned up temporary vocabulary file.")
+        log(Colors.dim("  Cleaned up temp files"))
+
+
 if __name__ == "__main__":
     main()

@@ -13,7 +13,8 @@ use crate::finite_automata::Regex;
 use crate::glr::parser::GLRParser;
 use crate::precompute4::weighted_automata::rangeset::RangeSet as WARangeSet;
 use crate::precompute4::weighted_automata::{DWA, NWA, NWAStateID, Weight};
-use crate::profiler::{self, PROGRESS_BAR_ENABLED};
+use crate::profiler::{self};
+use crate::r#macro::should_show_progress_bars;
 use crate::tokenizer::{LLMTokenID, TokenizerStateID};
 use crate::types::TerminalID as GrammarTokenID;
 use crate::precompute4::weighted_automata::common::Label;
@@ -83,7 +84,7 @@ impl<'r> Precomputer1<'r> {
                 )
                 .expect("progress-bar"),
         );
-        if !PROGRESS_BAR_ENABLED {
+        if !should_show_progress_bars() {
             pb.set_draw_target(ProgressDrawTarget::hidden());
         }
 

@@ -6,7 +6,7 @@ pub mod glr;
 pub mod constraint;
 pub mod datastructures;
 pub mod interface;
-mod r#macro;
+pub mod r#macro;
 pub mod tokenizer;
 mod types;
 pub mod json_serialization;

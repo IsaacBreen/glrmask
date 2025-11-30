@@ -5,6 +5,7 @@ use sep1::constraint::{GrammarConstraint, GrammarConstraintConfig};
 use sep1::interface::GrammarDefinition;
 use sep1::json_serialization::JSONConvertible;
 use sep1::tokenizer::{LLMTokenID, LLMTokenMap};
+use sep1::r#macro::{colors::*, is_debug_level_enabled, format_duration};
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Write};
@@ -41,38 +42,66 @@ struct Args {
     precompute0_only: bool,
 }
 
+fn format_bytes(bytes: u64) -> String {
+    if bytes >= 1024 * 1024 {
+        format!("{:.2} MB", bytes as f64 / (1024.0 * 1024.0))
+    } else if bytes >= 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{} bytes", bytes)
+    }
+}
+
 fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let instant = std::time::Instant::now();
+    let total_start = std::time::Instant::now();
     let args = Args::parse();
 
     if !args.precompute0_only && args.output.is_none() {
         return Err("Error: --output is required unless --precompute0-only is specified.".into());
     }
+    
+    // Convenience: check debug level once
+    let show_output = is_debug_level_enabled(1);
+
+    // Header (Level 1+)
+    if show_output {
+        println!("\n{BOLD_CYAN}Grammar Constraint Compiler{RESET}");
+        println!("{DIM}─────────────────────────────────────────{RESET}\n");
+    }
 
     // 1. Load and compile the grammar.
-    println!("Loading grammar from: {:?}", args.grammar);
+    let step = std::time::Instant::now();
+    if show_output { println!("  {BOLD_WHITE}Loading grammar...{RESET}"); }
+    
     let grammar_path_str = args.grammar.to_str().ok_or_else(|| format!("Path is not valid UTF-8: {:?}", args.grammar))?;
     let mut grammar_definition = GrammarDefinition::from_ebnf_file(grammar_path_str)?;
+    
+    let prod_count = grammar_definition.productions.len();
+    let term_count = grammar_definition.terminal_to_group_id().len();
+    
     grammar_definition.optimize();
-    println!("Grammar loaded successfully.");
+    
+    let opt_prod_count = grammar_definition.productions.len();
+    let opt_term_count = grammar_definition.terminal_to_group_id().len();
+    
+    if show_output {
+        println!("  {BOLD_GREEN}{CHECK}{RESET}  {DIM}{} → {} productions, {} → {} terminals{RESET} {MAGENTA}({}){RESET}", 
+            prod_count, opt_prod_count, term_count, opt_term_count,
+            format_duration(step.elapsed()));
+    }
 
     // 2. Load the vocabulary.
-    println!("Loading vocabulary from: {:?}", args.vocab);
-    let t0 = std::time::Instant::now();
+    let step = std::time::Instant::now();
+    if show_output { println!("  {BOLD_WHITE}Loading vocabulary...{RESET}"); }
+    
     let vocab_file = File::open(&args.vocab)?;
     let reader = BufReader::new(vocab_file);
     let vocab: BTreeMap<String, usize> = serde_json::from_reader(reader)?;
-    println!("  JSON parsing: {:?}", t0.elapsed());
 
-    let t1 = std::time::Instant::now();
     let mut llm_token_map = LLMTokenMap::new();
     let mut max_original_llm_token_id = 0;
 
     for (token_str, token_id) in vocab {
-        // Convert GPT-2 byte-level BPE Unicode characters to actual bytes
-        // See: https://github.com/openai/gpt-2/blob/master/src/encoder.py
-        // Ġ (U+0120) -> space, Ċ (U+010A) -> newline, ĉ (U+0109) -> tab, č (U+010D) -> CR
-        // Note: ą appears to be a legacy mapping that also represents newline in some contexts
         let processed_token_str = token_str
             .replace("Ġ", " ")
             .replace("ą", "\n")
@@ -83,11 +112,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         llm_token_map.insert(token_bytes, LLMTokenID(token_id));
         max_original_llm_token_id = max_original_llm_token_id.max(token_id);
     }
-    println!("  BiBTreeMap building: {:?}", t1.elapsed());
-    println!("Vocabulary loaded ({} tokens, max ID: {}).", llm_token_map.len(), max_original_llm_token_id);
+    
+    if show_output {
+        println!("  {BOLD_GREEN}{CHECK}{RESET}  {DIM}{} tokens{RESET} {MAGENTA}({}){RESET}", 
+            llm_token_map.len(), format_duration(step.elapsed()));
+    }
 
     // 3. Construct the GrammarConstraint.
-    println!("\nConstructing GrammarConstraint...");
+    if show_output { println!("\n  {BOLD_WHITE}Building constraint...{RESET}"); }
+    let build_start = std::time::Instant::now();
+    
     let config = GrammarConstraintConfig::default();
 
     let grammar_constraint = GrammarConstraint::new_from_grammar_definition(
@@ -97,56 +131,61 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         &config,
     );
 
-    println!("GrammarConstraint constructed successfully.");
+    if show_output {
+        println!("\n  {DIM}└─ Total build time: {}{RESET}", format_duration(build_start.elapsed()));
+    }
+
     if let Some(path) = args.save_precompute0.as_ref() {
-        println!("Saving precompute0 cache to: {:?}", path);
         let output_file = File::create(path)?;
         let _writer = BufWriter::new(output_file);
+        if show_output {
+            println!("  {DIM}└─ Saved precompute cache to {:?}{RESET}", path);
+        }
     }
 
     if args.precompute0_only {
-        println!("--precompute0-only specified. Exiting after saving cache.");
+        if show_output {
+            println!("\n{BOLD_GREEN}{CHECK} Done (precompute0 only){RESET}");
+        }
         return Ok(());
     }
 
     // 4. Save the GrammarConstraint to a file.
     if let Some(output_path) = args.output {
-        println!("Saving GrammarConstraint to: {:?}", output_path);
-        let save_instant = std::time::Instant::now();
+        let step = std::time::Instant::now();
+        if show_output { println!("\n  {BOLD_WHITE}Saving output...{RESET}"); }
 
         let output_file = File::create(&output_path)?;
         let buf_writer = BufWriter::new(output_file);
 
         let mut writer: Box<dyn Write> =
             if output_path.extension().and_then(|s| s.to_str()) == Some("gz") {
-                println!("Using gzip compression.");
                 Box::new(GzEncoder::new(buf_writer, Compression::default()))
             } else {
                 Box::new(buf_writer)
             };
 
         grammar_constraint.to_writer(&mut writer)?;
-        let save_duration = save_instant.elapsed();
-        println!(
-            "Successfully saved constraint in {:.2}s.",
-            save_duration.as_secs_f64()
-        );
-
-        let file_size = std::fs::metadata(&output_path)?.len();
-        println!(
-            "Final file size: {:.2} MiB ({} bytes)",
-            file_size as f64 / (1024.0 * 1024.0),
-            file_size
-        );
+        
+        if show_output {
+            let file_size = std::fs::metadata(&output_path)?.len();
+            println!("  {BOLD_GREEN}{CHECK}{RESET}  {DIM}{:?}{RESET} {CYAN}({}){RESET} {MAGENTA}({}){RESET}", 
+                output_path, format_bytes(file_size), format_duration(step.elapsed()));
+        }
     }
-    println!("Total time: {:.2}s.", instant.elapsed().as_secs_f64());
+
+    // Summary
+    if show_output {
+        println!("\n{DIM}─────────────────────────────────────────{RESET}");
+        println!("{BOLD_GREEN}{CHECK} Complete in {}{RESET}\n", format_duration(total_start.elapsed()));
+    }
 
     Ok(())
 }
 
 fn main() {
     if let Err(err) = run() {
-        eprintln!("Error: {}", err);
+        eprintln!("{BOLD_RED}Error:{RESET} {}", err);
         std::process::exit(1);
     }
 }

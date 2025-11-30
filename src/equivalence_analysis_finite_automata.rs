@@ -1,5 +1,5 @@
 use crate::finite_automata::{Regex, GroupID};
-use crate::profiler::PROGRESS_BAR_ENABLED;
+use crate::r#macro::should_show_progress_bars;
 use hashbrown::HashMap;
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use smallvec::SmallVec;
@@ -357,7 +357,7 @@ fn group_by_hash(accumulators: &[u128]) -> BTreeMap<Vec<usize>, Vec<usize>> {
 fn create_pb(len: u64) -> ProgressBar {
     let pb = ProgressBar::new(len);
     pb.set_style(ProgressStyle::default_bar().template("{spinner:.green} {msg}").unwrap());
-    if !PROGRESS_BAR_ENABLED { pb.set_draw_target(ProgressDrawTarget::hidden()); }
+    if !should_show_progress_bars() { pb.set_draw_target(ProgressDrawTarget::hidden()); }
     pb
 }
 

@@ -163,7 +163,7 @@ pub fn nwa_special_map<V, U, I>(
     }
 
     let mut in_queue = FxHashSet::default();
-    let mut pb = tqdm!(total = nwa.states.len(), desc = "NWA Traversal", disable = !crate::profiler::PROGRESS_BAR_ENABLED, leave = false);
+    let mut pb = tqdm!(total = nwa.states.len(), desc = "NWA Traversal", disable = !crate::r#macro::should_show_progress_bars(), leave = false);
 
     for &scc_idx in &traversal_data.topo {
         let scc_nodes = &traversal_data.sccs[scc_idx];
@@ -393,7 +393,7 @@ pub fn precompute4(parser: &GLRParser, input_nwa: &NWA) -> DWA {
     // 1. FAST PATH: Handle simple signatures via direct Union
     // A signature of length 1 means all terminals in it map to the same logical state transition.
     // We don't need bitmasks; we just Union the Templates.
-    let mut simple_pb = tqdm!(total = simple_signatures.len(), desc = "Processing Simple Sigs", disable = !crate::profiler::PROGRESS_BAR_ENABLED, leave = false);
+    let mut simple_pb = tqdm!(total = simple_signatures.len(), desc = "Processing Simple Sigs", disable = !crate::r#macro::should_show_progress_bars(), leave = false);
 
     for sig in simple_signatures {
         let terminals = &sig[0];

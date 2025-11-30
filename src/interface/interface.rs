@@ -1025,7 +1025,7 @@ impl GrammarDefinition {
         #[cfg(not(rustrover))]
         let it = tqdm!(
             grammar_exprs.iter(),
-            disable = !PROGRESS_BAR_ENABLED,
+            disable = !crate::r#macro::should_show_progress_bars(),
             leave = false,
             desc = "Converting grammar expressions to productions"
         );
@@ -1463,7 +1463,6 @@ impl Display for CompiledGrammar {
 
 // --- Incremental Parser ---
 use crate::glr::parser::GLRParserState;
-use crate::profiler::PROGRESS_BAR_ENABLED;
 use crate::tokenizer::{ExecuteResult, LLMTokenID, TokenizerStateID};
 
 #[derive(Clone)]

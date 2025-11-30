@@ -1,7 +1,7 @@
 use crate::precompute4::utils::DEFAULT_TRANSITION_SYMBOL;
 use crate::precompute4::weighted_automata::common::Label;
 use crate::precompute4::weighted_automata::{DWA, NWA, NWAStateID, NWAStates, Weight};
-use crate::profiler::PROGRESS_BAR_ENABLED;
+use crate::r#macro::should_show_progress_bars;
 use indicatif::{ProgressBar, ProgressStyle};
 use rustc_hash::FxHashMap;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -14,7 +14,7 @@ type QueryKey = (NWAStateID, Code);
 fn is_negative_symbol(label: Code) -> bool { label < 0 && label != DEFAULT_TRANSITION_SYMBOL }
 
 fn make_progress_bar(length: u64, template: &str) -> Option<ProgressBar> {
-    if !PROGRESS_BAR_ENABLED {
+    if !should_show_progress_bars() {
         return None;
     }
     let pb = ProgressBar::new(length);

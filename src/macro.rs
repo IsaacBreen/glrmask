@@ -18,337 +18,410 @@ use once_cell::sync::Lazy;
 use std::env;
 use std::sync::Mutex;
 
-/// Returns the current debug level, read from the `MACRO_DEBUG_LEVEL` environment variable.
+// =============================================================================
+// Debug Level System
+// =============================================================================
+//
+// Control via MACRO_DEBUG_LEVEL environment variable (default: 1)
+//
+// Level 0: Silent
+//   - Errors only (via eprintln!)
+//   - Use for: CI/CD, production, scripting
+//
+// Level 1: Milestones (default)
+//   - Major completion checkmarks (✓)
+//   - Key timing information
+//   - High-level warnings (summary counts)
+//   - Use for: Normal usage, quick runs
+//
+// Level 2: Summary Stats
+//   - Same as level 1, plus:
+//   - Aggregate stats (counts, sizes, compression ratios)
+//   - Use for: Understanding build characteristics
+//
+// Level 3: Pipeline Stages
+//   - Named pipeline phases (▸ arrow prefix)
+//   - Stage timing with deltas
+//   - Detailed warning messages
+//   - Use for: Debugging pipeline, understanding flow
+//
+// Level 4: Substeps
+//   - Operations within stages (• bullet prefix)
+//   - Progress bars enabled
+//   - Finer-grained timing
+//   - Use for: Debugging specific stages
+//
+// Level 5: Algorithm Details
+//   - Internal algorithm stats (dim text)
+//   - Data structure sizes
+//   - Intermediate results
+//   - Use for: Deep debugging, performance analysis
+//
+// Level 6+: Verbose Traces
+//   - File:line prefixes for every message
+//   - Full data structure dumps
+//   - Use for: Development, tracing execution
+//
+// =============================================================================
+
+// ANSI Color Codes
+pub mod colors {
+    pub const RESET: &str = "\x1b[0m";
+    pub const BOLD: &str = "\x1b[1m";
+    pub const DIM: &str = "\x1b[2m";
+    
+    // Regular colors
+    pub const RED: &str = "\x1b[31m";
+    pub const GREEN: &str = "\x1b[32m";
+    pub const YELLOW: &str = "\x1b[33m";
+    pub const BLUE: &str = "\x1b[34m";
+    pub const MAGENTA: &str = "\x1b[35m";
+    pub const CYAN: &str = "\x1b[36m";
+    pub const WHITE: &str = "\x1b[37m";
+    pub const GRAY: &str = "\x1b[90m";
+    
+    // Bold colors
+    pub const BOLD_GREEN: &str = "\x1b[1;32m";
+    pub const BOLD_CYAN: &str = "\x1b[1;36m";
+    pub const BOLD_YELLOW: &str = "\x1b[1;33m";
+    pub const BOLD_RED: &str = "\x1b[1;31m";
+    pub const BOLD_WHITE: &str = "\x1b[1;37m";
+    pub const BOLD_BLUE: &str = "\x1b[1;34m";
+    
+    // Symbols
+    pub const CHECK: &str = "✓";
+    pub const ARROW: &str = "→";
+    pub const BULLET: &str = "•";
+    pub const WARN: &str = "⚠";
+    pub const PLAY: &str = "▸";
+    pub const BOX: &str = "■";
+}
+
+/// Returns the current debug level from `MACRO_DEBUG_LEVEL` env var.
 pub fn get_macro_debug_level() -> usize {
     static MACRO_DEBUG_LEVEL: Lazy<usize> =
-        Lazy::new(|| env::var("MACRO_DEBUG_LEVEL").ok().and_then(|s| s.parse().ok()).unwrap_or(5));
+        Lazy::new(|| env::var("MACRO_DEBUG_LEVEL").ok().and_then(|s| s.parse().ok()).unwrap_or(1));
     *MACRO_DEBUG_LEVEL
 }
 
-/// Checks if a given debug level is enabled based on `MACRO_DEBUG_LEVEL`.
+/// Checks if a given debug level is enabled.
 pub fn is_debug_level_enabled(level: usize) -> bool {
     level <= get_macro_debug_level()
 }
 
-/// Tracks the last filename printed by the debug macro to avoid repetition.
+/// Returns true if progress bars should be shown (level 4+).
+pub fn should_show_progress_bars() -> bool {
+    get_macro_debug_level() >= 4
+}
+
+/// Tracks the last filename printed (for level 6+ file headers).
 pub static LAST_DEBUG_FILE: Lazy<Mutex<String>> = Lazy::new(|| Mutex::new(String::new()));
 
 /// Tracks the last time a debug message was printed.
 pub static LAST_DEBUG_TIME: Lazy<Mutex<Option<std::time::Instant>>> = Lazy::new(|| Mutex::new(None));
 
-/// Tracks if the last debug message was a 'start' message that didn't print a newline.
-pub static PENDING_INCOMPLETE_LINE: Lazy<Mutex<bool>> = Lazy::new(|| Mutex::new(false));
+/// A list of filenames to allow debug messages from. Empty = all allowed.
+pub const ALLOWED_FILES: &[&str] = &[];
 
-/// A list of filenames (not full paths) to allow debug messages from.
-pub const ALLOWED_FILES: &[&str] = &[
-    // "parser.rs",
-    // "constraint.rs",
-];
-
-/// Formats a duration as seconds if >= 1000ms, otherwise milliseconds.
+/// Formats a duration in a human-readable way.
 pub fn format_duration(d: std::time::Duration) -> String {
-    let millis = d.as_millis();
-    if millis >= 1000 {
-        format!("{:.2}s", millis as f64 / 1000.0)
+    let micros = d.as_micros();
+    if micros < 1000 {
+        format!("{}µs", micros)
     } else {
-        format!("{}ms", millis)
+        let millis = d.as_millis();
+        if millis < 1000 {
+            format!("{}ms", millis)
+        } else {
+            let secs = d.as_secs_f64();
+            if secs < 60.0 {
+                format!("{:.2}s", secs)
+            } else {
+                let mins = secs / 60.0;
+                format!("{:.1}m", mins)
+            }
+        }
     }
 }
 
-/// Internal implementation for the new grouped format (debug!).
-/// Uses ANSI colors: Bold Cyan for files.
-#[doc(hidden)]
-#[macro_export]
-macro_rules! __debug_grouped_impl {
-    ($level:expr, $user_fmt:expr, $($user_args:tt)*) => {{
-        if $level <= $crate::r#macro::get_macro_debug_level() {
-            let current_file_path = std::path::Path::new(file!());
-            let current_filename = current_file_path.file_name()
-                .map_or("", |os_str| os_str.to_str().unwrap_or(""));
+/// Formats a byte count in human-readable form.
+pub fn format_bytes(bytes: u64) -> String {
+    if bytes < 1024 {
+        format!("{} B", bytes)
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else if bytes < 1024 * 1024 * 1024 {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    } else {
+        format!("{:.2} GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+    }
+}
 
-            if $crate::r#macro::ALLOWED_FILES.is_empty() || $crate::r#macro::ALLOWED_FILES.contains(&current_filename) {
-                let mut last_file_guard = $crate::r#macro::LAST_DEBUG_FILE.lock().unwrap();
-                let mut last_time_guard = $crate::r#macro::LAST_DEBUG_TIME.lock().unwrap();
-                let mut pending_guard = $crate::r#macro::PENDING_INCOMPLETE_LINE.lock().unwrap();
-
-                if *pending_guard {
-                    println!();
-                    *pending_guard = false;
-                }
-                let now = std::time::Instant::now();
-
-                let elapsed_suffix = if let Some(last_time) = *last_time_guard {
-                    let diff = now.duration_since(last_time);
-                    if diff.as_millis() > 1 {
-                        format!(" \x1b[35m+{}\x1b[0m", $crate::r#macro::format_duration(diff))
-                    } else {
-                        String::new()
-                    }
-                } else {
-                    String::new()
-                };
-                *last_time_guard = Some(now);
-
-                let current_file_str = file!();
-                
-                // If filename changed, print it in Bold Cyan
-                if *last_file_guard != current_file_str {
-                    // \x1b[1;36m = Bold Cyan, \x1b[0m = Reset
-                    println!("\x1b[1;36m{}\x1b[0m", current_file_str);
-                    *last_file_guard = current_file_str.to_string();
-                }
-
-                // Print line number in Dark Gray, then the message
-                // \x1b[90m = Dark Gray (Bright Black)
-                let msg = format!($user_fmt, $($user_args)*);
-                let indented_msg = msg.replace('\n', "\n        ");
-                println!(
-                    concat!("\x1b[90m  {:>4}\x1b[0m  ", "{}", "{}"),
-                    line!(),
-                    indented_msg,
-                    elapsed_suffix
-                );
-            }
+/// Returns elapsed time since last debug message, if significant.
+pub fn get_elapsed_suffix(now: std::time::Instant, threshold_ms: u64) -> String {
+    let mut last_time_guard = LAST_DEBUG_TIME.lock().unwrap();
+    let suffix = if let Some(last_time) = *last_time_guard {
+        let diff = now.duration_since(last_time);
+        if diff.as_millis() >= threshold_ms as u128 {
+            format!(" \x1b[35m+{}\x1b[0m", format_duration(diff))
+        } else {
+            String::new()
         }
-    }};
+    } else {
+        String::new()
+    };
+    *last_time_guard = Some(now);
+    suffix
 }
 
-/// Internal implementation for the start of a debug span (debug_start!).
-/// Prints the message without a newline and sets the pending flag.
+// =============================================================================
+// Core Debug Macro - Level-based formatting
+// =============================================================================
+
 #[doc(hidden)]
 #[macro_export]
-macro_rules! __debug_start_impl {
+macro_rules! __debug_impl {
     ($level:expr, $user_fmt:expr, $($user_args:tt)*) => {{
         if $level <= $crate::r#macro::get_macro_debug_level() {
-            let current_file_path = std::path::Path::new(file!());
-            let current_filename = current_file_path.file_name()
-                .map_or("", |os_str| os_str.to_str().unwrap_or(""));
-
-            if $crate::r#macro::ALLOWED_FILES.is_empty() || $crate::r#macro::ALLOWED_FILES.contains(&current_filename) {
-                let mut last_file_guard = $crate::r#macro::LAST_DEBUG_FILE.lock().unwrap();
-                let mut last_time_guard = $crate::r#macro::LAST_DEBUG_TIME.lock().unwrap();
-                let mut pending_guard = $crate::r#macro::PENDING_INCOMPLETE_LINE.lock().unwrap();
-
-                if *pending_guard {
-                    println!();
-                    *pending_guard = false;
-                }
-                let now = std::time::Instant::now();
-
-                let elapsed_suffix = if let Some(last_time) = *last_time_guard {
-                    let diff = now.duration_since(last_time);
-                    if diff.as_millis() > 1 {
-                        format!(" \x1b[35m+{}\x1b[0m", $crate::r#macro::format_duration(diff))
-                    } else {
-                        String::new()
-                    }
-                } else {
-                    String::new()
-                };
-                *last_time_guard = Some(now);
-
-                let current_file_str = file!();
-
-                if *last_file_guard != current_file_str {
-                    println!("\x1b[1;36m{}\x1b[0m", current_file_str);
-                    *last_file_guard = current_file_str.to_string();
-                }
-
-                let msg = format!($user_fmt, $($user_args)*);
-                let indented_msg = msg.replace('\n', "\n        ");
-                print!(
-                    concat!("\x1b[90m  {:>4}\x1b[0m  ", "{}", "{}"),
-                    line!(),
-                    indented_msg,
-                    elapsed_suffix
-                );
-                use std::io::Write;
-                let _ = std::io::stdout().flush();
-                *pending_guard = true;
-                Some(())
-            } else { None }
-        } else { None }
-    }};
-}
-
-/// Internal implementation for the old format (debug_line!).
-/// Uses ANSI colors: Bold Yellow for the tag.
-#[doc(hidden)]
-#[macro_export]
-macro_rules! __debug_line_impl {
-    ($level:expr, $user_fmt:expr, $($user_args:tt)*) => {{
-        if $level <= $crate::r#macro::get_macro_debug_level() {
-            let current_file_path = std::path::Path::new(file!());
-            let current_filename = current_file_path.file_name()
-                .map_or("", |os_str| os_str.to_str().unwrap_or(""));
-
-            if $crate::r#macro::ALLOWED_FILES.is_empty() || $crate::r#macro::ALLOWED_FILES.contains(&current_filename) {
-                let mut pending_guard = $crate::r#macro::PENDING_INCOMPLETE_LINE.lock().unwrap();
-                if *pending_guard {
-                    println!();
-                    *pending_guard = false;
-                }
-
-                // \x1b[1;33m = Bold Yellow
-                println!(
-                    concat!("\x1b[1;33m[DEBUG] {}]\x1b[0m {}:{}: ", $user_fmt),
-                    $level,
-                    file!(),
-                    line!(),
-                    $($user_args)*
-                );
-            }
-        }
-    }};
-}
-
-/// Internal implementation for the timer end (debug_timer_end!).
-#[doc(hidden)]
-#[macro_export]
-macro_rules! __debug_timer_end_impl {
-    ($token:expr, $thresh:expr, $user_fmt:expr, $($user_args:tt)*) => {{
-        if let Some((start_time, start_msg, start_file, start_line)) = $token {
+            use $crate::r#macro::colors::*;
+            
+            let msg = format!($user_fmt, $($user_args)*);
             let now = std::time::Instant::now();
-            let elapsed = now.duration_since(start_time);
-            if elapsed.as_millis() >= $thresh as u128 {
+            
+            // Level 6+: Show file:line info with verbose output
+            if $crate::r#macro::get_macro_debug_level() >= 6 {
+                let current_file_str = file!();
                 let mut last_file_guard = $crate::r#macro::LAST_DEBUG_FILE.lock().unwrap();
-                let mut last_time_guard = $crate::r#macro::LAST_DEBUG_TIME.lock().unwrap();
-                let mut pending_guard = $crate::r#macro::PENDING_INCOMPLETE_LINE.lock().unwrap();
-
-                if *pending_guard {
-                    println!();
-                    *pending_guard = false;
-                }
-
-                let elapsed_suffix = if let Some(last_time) = *last_time_guard {
-                    let diff = now.duration_since(last_time);
-                    if diff.as_millis() > 1 {
-                        format!(" \x1b[35m+{}\x1b[0m", $crate::r#macro::format_duration(diff))
-                    } else {
-                        String::new()
-                    }
-                } else {
-                    String::new()
-                };
-                *last_time_guard = Some(now);
-
-                let current_file_str = start_file;
+                
+                // Print file header if changed
                 if *last_file_guard != current_file_str {
-                    println!("\x1b[1;36m{}\x1b[0m", current_file_str);
+                    println!("{GRAY}─── {}{RESET}", current_file_str);
                     *last_file_guard = current_file_str.to_string();
                 }
-
-                println!(
-                    concat!("\x1b[90m  {:>4}\x1b[0m  {} ... {} (\x1b[35m{}\x1b[0m){}"),
-                    start_line,
-                    start_msg,
-                    format!($user_fmt, $($user_args)*),
-                    $crate::r#macro::format_duration(elapsed),
-                    elapsed_suffix
-                );
+                
+                let elapsed = $crate::r#macro::get_elapsed_suffix(now, 10);
+                println!("{GRAY}{:>4}{RESET}  {}{}", line!(), msg, elapsed);
+            } else {
+                // Levels 1-5: Clean output with level-based formatting
+                let elapsed = $crate::r#macro::get_elapsed_suffix(now, 50);
+                
+                // Apply visual hierarchy based on the message's level
+                match $level {
+                    1 | 2 => {
+                        // High-level info: no prefix
+                        println!("{}{}", msg, elapsed);
+                    }
+                    3 => {
+                        // Pipeline stage: arrow prefix
+                        println!("  {CYAN}{PLAY}{RESET} {}{}", msg, elapsed);
+                    }
+                    4 => {
+                        // Substep: bullet prefix, slightly indented
+                        println!("    {DIM}{BULLET}{RESET} {}{}", msg, elapsed);
+                    }
+                    5 => {
+                        // Detail: dim, more indented
+                        println!("      {DIM}{}{}{RESET}", msg, elapsed);
+                    }
+                    _ => {
+                        // Level 6+ without verbose mode (shouldn't happen)
+                        println!("{}{}", msg, elapsed);
+                    }
+                }
             }
         }
     }};
 }
 
-/// The main debug macro.
-/// Prints filename (Bold Cyan) only when it changes.
-/// Prints line numbers (Dark Gray) indented.
+/// Generic debug macro. Use semantic helpers when possible.
 #[macro_export]
 macro_rules! debug {
     ($level:expr, $fmt:literal $(, $($arg:tt)*)?) => {
-        $crate::__debug_grouped_impl!($level, $fmt, $($($arg)*)?);
+        $crate::__debug_impl!($level, $fmt, $($($arg)*)?);
     };
     ($level:expr, $msg:expr) => {
-        $crate::__debug_grouped_impl!($level, "{:?}", $msg);
+        $crate::__debug_impl!($level, "{}", $msg);
     };
 }
 
-/// The legacy debug macro.
-/// Prints [DEBUG] (Yellow) level] file:line: msg.
+// =============================================================================
+// Semantic Output Helpers - Use these instead of raw debug!
+// =============================================================================
+
+/// Level 1: Major milestone with checkmark (always visible at level 1+)
+/// Usage: log_milestone!("Loaded grammar", "20 productions");
+#[macro_export]
+macro_rules! log_milestone {
+    ($name:expr, $detail:expr) => {
+        if $crate::r#macro::is_debug_level_enabled(1) {
+            use $crate::r#macro::colors::*;
+            println!("  {BOLD_GREEN}{CHECK}{RESET}  {} {DIM}({}){RESET}", $name, $detail);
+        }
+    };
+    ($name:expr) => {
+        if $crate::r#macro::is_debug_level_enabled(1) {
+            use $crate::r#macro::colors::*;
+            println!("  {BOLD_GREEN}{CHECK}{RESET}  {}", $name);
+        }
+    };
+}
+
+/// Level 2: Summary statistic (key metrics)
+/// Usage: log_stat!("States", 50);
+#[macro_export]
+macro_rules! log_stat {
+    ($name:expr, $value:expr) => {
+        if $crate::r#macro::is_debug_level_enabled(2) {
+            use $crate::r#macro::colors::*;
+            println!("     {DIM}└─{RESET} {}: {CYAN}{}{RESET}", $name, $value);
+        }
+    };
+    ($name:expr, $value:expr, $unit:expr) => {
+        if $crate::r#macro::is_debug_level_enabled(2) {
+            use $crate::r#macro::colors::*;
+            println!("     {DIM}└─{RESET} {}: {CYAN}{}{RESET} {}", $name, $value, $unit);
+        }
+    };
+}
+
+/// Level 3: Pipeline stage (major phase in the compilation)
+/// Usage: log_stage!("Building tokenizer");
+#[macro_export]
+macro_rules! log_stage {
+    ($fmt:literal $(, $($arg:tt)*)?) => {
+        if $crate::r#macro::is_debug_level_enabled(3) {
+            use $crate::r#macro::colors::*;
+            let msg = format!($fmt $(, $($arg)*)?);
+            let now = std::time::Instant::now();
+            let elapsed = $crate::r#macro::get_elapsed_suffix(now, 10);
+            println!("     {BOLD_BLUE}{}{RESET} {}{}", $crate::r#macro::colors::PLAY, msg, elapsed);
+        }
+    };
+}
+
+/// Level 3: Pipeline stage completion with timing
+#[macro_export]
+macro_rules! log_stage_done {
+    ($name:expr, $start:expr) => {
+        if $crate::r#macro::is_debug_level_enabled(3) {
+            use $crate::r#macro::colors::*;
+            let elapsed = $start.elapsed();
+            println!("     {BOLD_BLUE}{}{RESET} {} {MAGENTA}({}){RESET}", 
+                $crate::r#macro::colors::CHECK, $name, $crate::r#macro::format_duration(elapsed));
+        }
+    };
+    ($name:expr, $start:expr, $detail:expr) => {
+        if $crate::r#macro::is_debug_level_enabled(3) {
+            use $crate::r#macro::colors::*;
+            let elapsed = $start.elapsed();
+            println!("     {BOLD_BLUE}{}{RESET} {} {DIM}[{}]{RESET} {MAGENTA}({}){RESET}", 
+                $crate::r#macro::colors::CHECK, $name, $detail, $crate::r#macro::format_duration(elapsed));
+        }
+    };
+}
+
+/// Level 4: Substep within a stage (operation)
+/// Usage: log_substep!("Computing first sets");
+#[macro_export]
+macro_rules! log_substep {
+    ($fmt:literal $(, $($arg:tt)*)?) => {
+        if $crate::r#macro::is_debug_level_enabled(4) {
+            use $crate::r#macro::colors::*;
+            let msg = format!($fmt $(, $($arg)*)?);
+            println!("       {CYAN}{}{RESET} {}", $crate::r#macro::colors::BULLET, msg);
+        }
+    };
+}
+
+/// Level 4: Substep completion with timing
+#[macro_export]
+macro_rules! log_substep_done {
+    ($name:expr, $start:expr) => {
+        if $crate::r#macro::is_debug_level_enabled(4) {
+            use $crate::r#macro::colors::*;
+            let elapsed = $start.elapsed();
+            if elapsed.as_millis() >= 10 {
+                println!("       {CYAN}{}{RESET} {} {MAGENTA}({}){RESET}", 
+                    $crate::r#macro::colors::BULLET, $name, $crate::r#macro::format_duration(elapsed));
+            }
+        }
+    };
+    ($name:expr, $start:expr, $detail:expr) => {
+        if $crate::r#macro::is_debug_level_enabled(4) {
+            use $crate::r#macro::colors::*;
+            let elapsed = $start.elapsed();
+            println!("       {CYAN}{}{RESET} {} {DIM}[{}]{RESET} {MAGENTA}({}){RESET}", 
+                $crate::r#macro::colors::BULLET, $name, $detail, $crate::r#macro::format_duration(elapsed));
+        }
+    };
+}
+
+/// Level 5: Detail/algorithm info (dim, indented)
+/// Usage: log_detail!("DFA states: {}", 50);
+#[macro_export]
+macro_rules! log_detail {
+    ($fmt:literal $(, $($arg:tt)*)?) => {
+        if $crate::r#macro::is_debug_level_enabled(5) {
+            use $crate::r#macro::colors::*;
+            let msg = format!($fmt $(, $($arg)*)?);
+            println!("         {DIM}{}{RESET}", msg);
+        }
+    };
+}
+
+/// Level 1: Warning message (always visible at level 1+)
+#[macro_export]
+macro_rules! log_warn {
+    ($fmt:literal $(, $($arg:tt)*)?) => {
+        if $crate::r#macro::is_debug_level_enabled(1) {
+            use $crate::r#macro::colors::*;
+            let msg = format!($fmt $(, $($arg)*)?);
+            println!("{BOLD_YELLOW}{}{RESET} {}", $crate::r#macro::colors::WARN, msg);
+        }
+    };
+}
+
+/// Level 0: Error message (always shown)
+#[macro_export]
+macro_rules! log_error {
+    ($fmt:literal $(, $($arg:tt)*)?) => {{
+        use $crate::r#macro::colors::*;
+        let msg = format!($fmt $(, $($arg)*)?);
+        eprintln!("{BOLD_RED}Error:{RESET} {}", msg);
+    }};
+}
+
+/// Level 1: Success message with checkmark
+#[macro_export]
+macro_rules! log_success {
+    ($fmt:literal $(, $($arg:tt)*)?) => {
+        if $crate::r#macro::is_debug_level_enabled(1) {
+            use $crate::r#macro::colors::*;
+            let msg = format!($fmt $(, $($arg)*)?);
+            println!("{BOLD_GREEN}{} {}{RESET}", $crate::r#macro::colors::CHECK, msg);
+        }
+    };
+}
+
+// =============================================================================
+// Timer Helpers for measuring operations
+// =============================================================================
+
+/// Start a timer (returns Instant). Used with log_stage_done!, log_substep_done!
+#[macro_export]
+macro_rules! timer_start {
+    () => {
+        std::time::Instant::now()
+    };
+}
+
+// Backwards compatibility aliases
 #[macro_export]
 macro_rules! debug_line {
     ($level:expr, $fmt:literal $(, $($arg:tt)*)?) => {
-        $crate::__debug_line_impl!($level, $fmt, $($($arg)*)?);
+        $crate::debug!($level, $fmt $(, $($arg)*)?);
     };
     ($level:expr, $msg:expr) => {
-        $crate::__debug_line_impl!($level, "{:?}", $msg);
-    };
-}
-
-/// Starts a debug message that will be completed later.
-/// Returns a token that must be passed to `debug_end!`.
-#[macro_export]
-macro_rules! debug_start {
-    ($level:expr, $fmt:literal $(, $($arg:tt)*)?) => {
-        $crate::__debug_start_impl!($level, $fmt, $($($arg)*)?)
-    };
-    ($level:expr, $msg:expr) => {
-        $crate::__debug_start_impl!($level, "{:?}", $msg)
-    };
-}
-
-/// Completes a debug message started with `debug_start!`.
-/// If no other debug messages were printed in between, it appends to the same line.
-/// Otherwise, it prints the message on a new line with a continuation marker.
-#[macro_export]
-macro_rules! debug_end {
-    ($token:expr, $fmt:literal $(, $($arg:tt)*)?) => {
-        if $token.is_some() {
-            let mut pending_guard = $crate::r#macro::PENDING_INCOMPLETE_LINE.lock().unwrap();
-            if *pending_guard {
-                println!($fmt $(, $($arg)*)?);
-                *pending_guard = false;
-            } else {
-                println!(concat!("... ", $fmt) $(, $($arg)*)?);
-            }
-        }
-    };
-    ($token:expr, $msg:expr) => {
-        $crate::debug_end!($token, "{:?}", $msg);
-    };
-}
-
-/// Starts a debug timer. Returns a token to be passed to `debug_timer_end!`.
-/// Nothing is printed immediately.
-#[macro_export]
-macro_rules! debug_timer_start {
-    ($level:expr, $fmt:literal $(, $($arg:tt)*)?) => {
-        if $level <= $crate::r#macro::get_macro_debug_level() {
-            let current_file_path = std::path::Path::new(file!());
-            let current_filename = current_file_path.file_name()
-                .map_or("", |os_str| os_str.to_str().unwrap_or(""));
-
-            if $crate::r#macro::ALLOWED_FILES.is_empty() || $crate::r#macro::ALLOWED_FILES.contains(&current_filename) {
-                Some((std::time::Instant::now(), format!($fmt $(, $($arg)*)?), file!(), line!()))
-            } else {
-                None
-            }
-        } else {
-            None
-        }
-    };
-    ($level:expr, $msg:expr) => {
-        $crate::debug_timer_start!($level, "{:?}", $msg)
-    };
-}
-
-/// Ends a debug timer. Prints only if elapsed time >= threshold (default 10ms).
-/// Usage:
-/// debug_timer_end!(token, "Done"); // Default 10ms
-/// debug_timer_end!(token, thresh=50, "Done"); // 50ms threshold
-#[macro_export]
-macro_rules! debug_timer_end {
-    ($token:expr, thresh = $thresh:expr, $fmt:literal $(, $($arg:tt)*)?) => {
-        $crate::__debug_timer_end_impl!($token, $thresh, $fmt $(, $($arg)*)?)
-    };
-    ($token:expr, thresh = $thresh:expr, $msg:expr) => {
-        $crate::__debug_timer_end_impl!($token, $thresh, "{:?}", $msg)
-    };
-    ($token:expr, $fmt:literal $(, $($arg:tt)*)?) => {
-        $crate::__debug_timer_end_impl!($token, 10, $fmt $(, $($arg)*)?)
-    };
-    ($token:expr, $msg:expr) => {
-        $crate::__debug_timer_end_impl!($token, 10, "{:?}", $msg)
+        $crate::debug!($level, "{}", $msg);
     };
 }
