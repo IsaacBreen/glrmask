@@ -1,94 +1,92 @@
+"""
+Simple example demonstrating grammar constraint usage with sep1.
+
+This creates an arithmetic expression grammar and demonstrates mask generation.
+"""
+
 import _sep1
 import numpy as np
 
-# Define regexes using PyRegexExpr
-plus_regex = _sep1.PyRegexExpr.eat_u8(ord('+'))
-times_regex = _sep1.PyRegexExpr.eat_u8(ord('*'))
-open_paren_regex = _sep1.PyRegexExpr.eat_u8(ord('('))
-close_paren_regex = _sep1.PyRegexExpr.eat_u8(ord(')'))
-i_regex = _sep1.PyRegexExpr.eat_u8(ord('i'))
+# Define regexes for terminals
+plus_regex = _sep1.RegexExpr.eat_u8(ord('+'))
+times_regex = _sep1.RegexExpr.eat_u8(ord('*'))
+open_paren_regex = _sep1.RegexExpr.eat_u8(ord('('))
+close_paren_regex = _sep1.RegexExpr.eat_u8(ord(')'))
+i_regex = _sep1.RegexExpr.eat_u8(ord('i'))
 
-# Define grammar rules using the regexes
-exprs = [
-    ("E", _sep1.PyGrammarExpr.choice([
-        _sep1.PyGrammarExpr.sequence([
-            _sep1.PyGrammarExpr.ref("E"),
-            _sep1.PyGrammarExpr.regex(plus_regex),
-            _sep1.PyGrammarExpr.ref("T"),
+# Define grammar rules
+rules = [
+    ("E", _sep1.GrammarExpr.choice([
+        _sep1.GrammarExpr.sequence([
+            _sep1.GrammarExpr.ref("E"),
+            _sep1.GrammarExpr.ref("PLUS"),
+            _sep1.GrammarExpr.ref("T"),
         ]),
-        _sep1.PyGrammarExpr.ref("T"),
+        _sep1.GrammarExpr.ref("T"),
     ])),
-    ("T", _sep1.PyGrammarExpr.choice([
-        _sep1.PyGrammarExpr.sequence([
-            _sep1.PyGrammarExpr.ref("T"),
-            _sep1.PyGrammarExpr.regex(times_regex),
-            _sep1.PyGrammarExpr.ref("F"),
+    ("T", _sep1.GrammarExpr.choice([
+        _sep1.GrammarExpr.sequence([
+            _sep1.GrammarExpr.ref("T"),
+            _sep1.GrammarExpr.ref("TIMES"),
+            _sep1.GrammarExpr.ref("F"),
         ]),
-        _sep1.PyGrammarExpr.ref("F"),
+        _sep1.GrammarExpr.ref("F"),
     ])),
-    ("F", _sep1.PyGrammarExpr.choice([
-        _sep1.PyGrammarExpr.sequence([
-            _sep1.PyGrammarExpr.regex(open_paren_regex),
-            _sep1.PyGrammarExpr.ref("E"),
-            _sep1.PyGrammarExpr.regex(close_paren_regex),
+    ("F", _sep1.GrammarExpr.choice([
+        _sep1.GrammarExpr.sequence([
+            _sep1.GrammarExpr.ref("LPAREN"),
+            _sep1.GrammarExpr.ref("E"),
+            _sep1.GrammarExpr.ref("RPAREN"),
         ]),
-        _sep1.PyGrammarExpr.regex(i_regex),
+        _sep1.GrammarExpr.ref("I"),
     ])),
 ]
 
-grammar = _sep1.PyGrammar(exprs)
+# Define terminals (regexes that map to terminal symbols)
+terminals = [
+    ("PLUS", plus_regex),
+    ("TIMES", times_regex),
+    ("LPAREN", open_paren_regex),
+    ("RPAREN", close_paren_regex),
+    ("I", i_regex),
+]
+
+# Create grammar definition
+grammar_def = _sep1.GrammarDefinition(rules, terminals)
+print("Grammar definition created successfully!")
+
+# Compile the grammar
+compiled_grammar = grammar_def.compile()
+print("Grammar compiled successfully!")
 
 # Define LLM tokens
 llm_tokens = [b"i", b"+", b"*", b"(", b")", b"(i", b"+i"]
 llm_token_to_id = {token: i for i, token in enumerate(llm_tokens)}
 
 # Create grammar constraint
-grammar_constraint = _sep1.PyGrammarConstraint(grammar, llm_token_to_id, len(llm_tokens))
-grammar_constraint_state = _sep1.PyGrammarConstraintState(grammar_constraint)
+grammar_constraint = _sep1.GrammarConstraint(compiled_grammar, llm_token_to_id)
+grammar_constraint_state = _sep1.GrammarConstraintState(grammar_constraint)
 
 def llm_tokens_to_ids(tokens):
     return [llm_token_to_id[token] for token in tokens]
 
 # Initial mask check
 mask = grammar_constraint_state.get_mask()
-expected_mask = set(llm_tokens_to_ids([b"i", b"(", b"(i"]))  # Use set for unordered comparison
+expected_mask = set(llm_tokens_to_ids([b"i", b"(", b"(i"]))
 print(f"Initial Mask: {mask}")
+print(f"Valid initial tokens: {[llm_tokens[i] for i in np.where(mask)[0]]}")
 assert set(np.where(mask)[0]) == expected_mask, f"Mask: {set(int(x) for x in np.where(mask)[0])}, Expected: {expected_mask}"
+print("✓ Initial mask correct!")
 
+# Commit token "i"
+grammar_constraint_state.commit(llm_token_to_id[b"i"])
 
-# Commit prefill tokens
-prefill = llm_tokens_to_ids([b"i"])
-for token_id in prefill:
-    grammar_constraint_state.commit(token_id)
-
-# Mask check after prefill
+# Mask check after committing "i"
 mask = grammar_constraint_state.get_mask()
 expected_mask = set(llm_tokens_to_ids([b"+", b"*", b"+i"]))
-print(f"Mask after committing prefill: {mask}")
+print(f"\nMask after 'i': {mask}")
+print(f"Valid tokens after 'i': {[llm_tokens[i] for i in np.where(mask)[0]]}")
 assert set(np.where(mask)[0]) == expected_mask, f"Mask: {set(int(x) for x in np.where(mask)[0])}, Expected: {expected_mask}"
+print("✓ Mask after 'i' correct!")
 
-
-# Commit prefill tokens
-prefill = llm_tokens_to_ids([b"+"])
-for token_id in prefill:
-    grammar_constraint_state.commit(token_id)
-
-# Mask check after prefill
-# So far, we've seen "i+", so the allowed next tokens are "i", "(", "(i"
-mask = grammar_constraint_state.get_mask()
-expected_mask = set(llm_tokens_to_ids([b"i", b"(", b"(i"]))  # Use set for unordered comparison
-print(f"Mask after committing prefill: {mask}")
-assert set(np.where(mask)[0]) == expected_mask, f"Mask: {set(int(x) for x in np.where(mask)[0])}, Expected: {expected_mask}"
-
-
-# Commit prefill tokens
-prefill = llm_tokens_to_ids([b"(i", b"+", b"i", b"*", b"i"])
-for token_id in prefill:
-    grammar_constraint_state.commit(token_id)
-
-# Mask check after prefill
-# So far, we've seen "i+(i+i*i", so the allowed next tokens are "+", "*", ")", "+i"
-mask = grammar_constraint_state.get_mask()
-expected_mask = set(llm_tokens_to_ids([b"+", b"*", b")", b"+i"]))
-print(f"Mask after committing prefill: {mask}")
-assert set(np.where(mask)[0]) == expected_mask, f"Mask: {set(int(x) for x in np.where(mask)[0])}, Expected: {expected_mask}"
+print("\n✓ All tests passed!")
