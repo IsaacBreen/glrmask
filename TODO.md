@@ -77,9 +77,25 @@ The line gap there annoys me.
 
 
 
-ALSO these new ones:
-
-
+ALSO this new task:
+This is roughly what we have right now:
+```
+  Building constraint...
+  ▸ Running Precompute4
+    • Starting precompute4 (DWA construction)
+    • Built 1 template DWAs in 64.833µs
+  ▸ DWA Vocab Optimization: Tokens 290 -> 289, Ranges 531 -> 641. Time: 748.96µs
+  └─ Total build time: 68ms
+```
+I reckon it'd be nicer if we had something more like this:
+```
+  Building constraint...
+  │ Running Precompute4
+  │ • Starting precompute4 (DWA construction)
+  │ • Built 1 template DWAs in 64.833µs
+  │ DWA Vocab Optimization: Tokens 290 -> 289, Ranges 531 -> 641. Time: 748.96µs
+  └─ Total build time: 68ms
+```
 
 
 
@@ -108,6 +124,13 @@ ALSO these new ones:
     - Real inputs don't trigger worst-case behavior
   - Eliminating hidden left recursion would require significant grammar transformations
     that may not be worth the complexity
+
+
+
+IMPORTANT:
+I reject this.
+We NEED hidden left recursion to be eliminated. Sure the code might work even with it, but we want to make certain theoretical guarantees about the performance of our library, and for that we need the conditions of the theorem in Even Faster Generalized LR Parsing to hold. And for that we need to remove hidden left recursion (and of course right recursion).
+
 
 ### 10. [ ] Integrate IELR parser generator crate
 - Replace custom table generation
