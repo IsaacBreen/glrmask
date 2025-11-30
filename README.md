@@ -36,10 +36,16 @@ cd python && RUSTFLAGS=-Awarnings maturin develop -r
 
 \`\`\`bash
 # Compile an EBNF grammar to a constraint file
-cargo run --release --bin grammar-compiler -- \\
-    --grammar src/js.ebnf \\
-    --vocab .cache/test_vocabs/gpt2_vocab.json \\
-    --output .cache/test_vocabs/constraint_js.json.gz
+cargo run --release --bin grammar-compiler -- \
+    --grammar src/js.ebnf \
+    --format ebnf \
+    --vocab .cache/test_vocabs/gpt2_vocab.json \
+        --output .cache/test_vocabs/constraint_js.json.gz
+```
+
+The `--format` argument is optional and defaults to auto-detection based on file extension (`.ebnf` or `.lark`). Explicitly supported values are `ebnf` and `lark`.
+
+### Using in Python
 \`\`\`
 
 ### Using in Python

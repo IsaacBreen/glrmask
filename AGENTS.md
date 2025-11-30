@@ -8,6 +8,7 @@ cd python && RUSTFLAGS=-Awarnings maturin develop -r
 ```bash
 MACRO_DEBUG_LEVEL=5 timeout 120 python scripts/compile.py \
     --grammar src/js.ebnf \
+    --format ebnf \
     --output .cache/test_vocabs/constraint_js.json.gz \
     --vocab-url "https://huggingface.co/openai-community/gpt2/raw/main/vocab.json"
 
