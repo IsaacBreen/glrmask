@@ -142,7 +142,7 @@ fn format_mask_output(mask: &Bitset, format: &str, vocab_size: usize) -> String 
 
 fn cmd_initial_mask(constraint: &GrammarConstraint, timing: bool, format: &str) {
     let start = Instant::now();
-    let mut state = constraint.init();
+    let state = constraint.init();
     let init_time = start.elapsed();
     
     let start = Instant::now();
