@@ -22,8 +22,10 @@ REPEAT=3 AGG_METHOD="min" SKIP_CPP_BUILD=1 SKIP_RUST_BUILD=1 MACRO_DEBUG_LEVEL=2
 ```
 
 ```bash
-# Build a grammar constraint representing a valid git diff of some file (choosing src/constraint.rs here but could be anything).anything).
-python scripts/generate_diff_grammar.py .cache/test_vocabs/constraint.rs.old -o .cache/test_vocabs/example_diff_constraint.ebnf
+# Build a grammar constraint representing a valid git diff of some file.
+# NOTE: The source file should be small (<100 lines) to avoid very long compilation times.
+# Large files (1000+ lines) can take many minutes or even freeze due to the generated grammar size.
+python scripts/generate_diff_grammar.py .cache/test_vocabs/lib.rs.old -o .cache/test_vocabs/example_diff_constraint.ebnf
 MACRO_DEBUG_LEVEL=5 timeout 120 python scripts/compile.py \
     --grammar .cache/test_vocabs/example_diff_constraint.ebnf \
     --output .cache/test_vocabs/example_diff_constraint.json.gz \
