@@ -1547,13 +1547,14 @@ impl<'a> GrammarConstraintState<'a> {
         0
     }
 
-    pub fn commit(&mut self, llm_token_id: LLMTokenID) {
+    pub fn commit(&mut self, llm_token_id: LLMTokenID) -> Result<(), String> {
         let token_bytes = self
             .parent
             .vocab_trie
             .token_bytes(llm_token_id)
-            .expect_else(|| format!("LLM token ID {} not found in vocabulary trie", llm_token_id.0));
+            .ok_or_else(|| format!("LLM token ID {} not found in vocabulary trie", llm_token_id.0))?;
         self.commit_bytes(token_bytes);
+        Ok(())
     }
 
     pub fn is_active(&self) -> bool { !self.state.is_empty() }

@@ -68,7 +68,7 @@ fn test_trivial() {
     assert_eq!(mask1, Bitset::from_iter(vec![0]));
 
     // Commit "a"
-    state.commit(LLMTokenID(0));
+    state.commit(LLMTokenID(0)).unwrap();
     assert!(state.is_active());
 
     // Mask should now allow "$"
@@ -76,7 +76,7 @@ fn test_trivial() {
     assert_eq!(mask2, Bitset::from_iter(vec![1]));
 
     // Commit "$"
-    state.commit(LLMTokenID(1));
+    state.commit(LLMTokenID(1)).unwrap();
     assert!(state.is_active());
 
     // Mask should now be empty as we've reached the end of a valid parse
@@ -125,7 +125,7 @@ fn test_x_semicolon_x() {
     
     // Commit "x"
     println!("\n--- After committing 'x' ---");
-    state.commit(LLMTokenID(0));
+    state.commit(LLMTokenID(0)).unwrap();
     let mask1 = state.get_mask();
     state.print_gss();
     println!("Mask after x: {:?}", mask1);
@@ -139,7 +139,7 @@ fn test_x_semicolon_x() {
     
     // Commit ";"
     println!("\n--- After committing ';' ---");
-    state.commit(LLMTokenID(1));
+    state.commit(LLMTokenID(1)).unwrap();
     let mask2 = state.get_mask();
     println!("Mask after x;: {:?}", mask2);
     
@@ -150,7 +150,7 @@ fn test_x_semicolon_x() {
     
     // Commit "x"
     println!("\n--- After committing second 'x' ---");
-    state.commit(LLMTokenID(0));
+    state.commit(LLMTokenID(0)).unwrap();
     let mask3 = state.get_mask();
     println!("Mask after x;x: {:?}", mask3);
     
@@ -196,7 +196,7 @@ fn test_constraint_simple() {
 
     // Commit "ab" (LLMTokenID 0)
     println!("{}", &constraint_state);
-    constraint_state.commit(LLMTokenID(0));
+    constraint_state.commit(LLMTokenID(0)).unwrap();
     assert!(constraint_state.is_active());
 
     // Mask after committing "ab"
@@ -220,7 +220,7 @@ fn test_constraint_simple() {
     let grammar_token_map = &parser.terminal_map;
     // Mask before commit (optional, for debugging)
     let _mask_before = constraint_state_for_comp.get_mask();
-    constraint_state_for_comp.commit(*llm_token_id_for_comp);
+    constraint_state_for_comp.commit(*llm_token_id_for_comp).unwrap();
 
     let mut parser_state_for_comp = parser.init_glr_parser_null(None);
     for grammar_tokens in grammar_tokenss {
@@ -283,7 +283,7 @@ fn test_constraint_simple_simplified() {
 
     // // Commit "a" (LLMTokenID 0)
     // println!("{}", &constraint_state);
-    // constraint_state.commit(LLMTokenID(0));
+    // constraint_state.commit(LLMTokenID(0)).unwrap();
     // assert!(constraint_state.is_active_or_accepted());
     //
     // // Mask after committing "a"
@@ -302,7 +302,7 @@ fn test_constraint_simple_simplified() {
     // let llm_token_id_for_comp = llm_token_map.get(&llm_token).unwrap();
     //
     // let mut constraint_state_for_comp = constraint.init();
-    // constraint_state_for_comp.commit(*llm_token_id_for_comp);
+    // constraint_state_for_comp.commit(*llm_token_id_for_comp).unwrap();
     //
     // let mut parser_state_for_comp = parser.init_glr_parser(None);
     // let grammar_token_id = grammar_token_map.get_by_left(&regex_name("A")).unwrap();
@@ -358,7 +358,7 @@ fn test_constraint_expression() {
     assert_eq!(mask, Bitset::from_iter(vec![0, 3, 5]));
 
     // Commit "(i"
-    state.commit(LLMTokenID(5));
+    state.commit(LLMTokenID(5)).unwrap();
     let mask = state.get_mask();
     // Now expect '+', '*', ')', '+i' => IDs 1,2,4,6
     assert_eq!(mask, Bitset::from_iter(vec![1, 2, 4, 6]));
@@ -379,7 +379,7 @@ fn test_constraint_expression() {
 
     let mut constraint_state_for_comp = constraint.init();
     let _mask_before = constraint_state_for_comp.get_mask(); // Optional, for debugging
-    constraint_state_for_comp.commit(*llm_token_id_for_comp);
+    constraint_state_for_comp.commit(*llm_token_id_for_comp).unwrap();
 
     let mut parser_state_for_comp = parser.init_glr_parser(None);
     for grammar_token_id in grammar_token_ids {
@@ -563,14 +563,14 @@ fn test_aborted_tokenizer_restart_equivalence() {
     // Scenario 1: Commit "#", then "a"
     let mut constraint_state1 = constraint.init();
     println!("Scenario 1: Committing LLM Token '#' (ID {})", llm_hash.0);
-    constraint_state1.commit(llm_hash);
+    constraint_state1.commit(llm_hash).unwrap();
     println!("Scenario 1: State after committing '#': {:?}", constraint_state1.state().keys().map(|k|k.0).collect::<Vec<_>>());
     for (tid, glr_state) in constraint_state1.state() {
         // glr_state.log_gss(&format!("Scenario 1, after '#', GSS for tokenizer state {}", tid.0), TerminalID(0), false, false);
     }
 
     println!("\nScenario 1: Committing LLM Token 'a' (ID {})", llm_a.0);
-    constraint_state1.commit(llm_a);
+    constraint_state1.commit(llm_a).unwrap();
     println!("Scenario 1: State after committing 'a': {:?}", constraint_state1.state().keys().map(|k|k.0).collect::<Vec<_>>());
      for (tid, glr_state) in constraint_state1.state() {
         // glr_state.log_gss(&format!("Scenario 1, after 'a', GSS for tokenizer state {}", tid.0), TerminalID(0), false, false);
@@ -579,7 +579,7 @@ fn test_aborted_tokenizer_restart_equivalence() {
     // Scenario 2: Commit "#a"
     let mut constraint_state2 = constraint.init();
     println!("\nScenario 2: Committing LLM Token '#a' (ID {})", llm_hash_a.0);
-    constraint_state2.commit(llm_hash_a);
+    constraint_state2.commit(llm_hash_a).unwrap();
     println!("Scenario 2: State after committing '#a': {:?}", constraint_state2.state().keys().map(|k|k.0).collect::<Vec<_>>());
     for (tid, glr_state) in constraint_state2.state() {
         // glr_state.log_gss(&format!("Scenario 2, after '#a', GSS for tokenizer state {}", tid.0), TerminalID(0), false, false);
@@ -624,11 +624,11 @@ fn test_multi_commit_aborted_tokenizer_restart_equivalence() {
     // Scenario 1: Commit "#", then "a"
     let mut constraint_state3 = constraint.init();
     println!("Scenario 1: Committing LLM Token '#' (ID {})", llm_hash.0);
-    constraint_state3.commit(llm_hash);
+    constraint_state3.commit(llm_hash).unwrap();
     println!("{}", &constraint_state3);
 
     println!("\nScenario 1: Committing LLM Token 'a' (ID {})", llm_a.0);
-    constraint_state3.commit(llm_a);
+    constraint_state3.commit(llm_a).unwrap();
     println!("Scenario 1 state:\n{}", &constraint_state3);
 
     // Scenario 2: Commit "#a"
@@ -644,21 +644,21 @@ fn test_multi_commit_aborted_tokenizer_restart_equivalence() {
     // Scenario 3: Commit "#", then "a", then "a"
     let mut constraint_state1 = constraint.init();
     println!("Scenario 3: Committing LLM Token '#' (ID {})", llm_hash.0);
-    constraint_state1.commit(llm_hash);
+    constraint_state1.commit(llm_hash).unwrap();
     println!("{}", &constraint_state1);
 
     println!("\nScenario 3: Committing LLM Token 'a' (ID {})", llm_a.0);
-    constraint_state1.commit(llm_a);
+    constraint_state1.commit(llm_a).unwrap();
     println!("{}", &constraint_state1);
 
     println!("\nScenario 3: Committing LLM Token 'a' (ID {})", llm_a.0);
-    constraint_state1.commit(llm_a);
+    constraint_state1.commit(llm_a).unwrap();
     println!("{}", &constraint_state1);
 
     // Scenario 4: Commit "#aa"
     let mut constraint_state2 = constraint.init();
     println!("\nScenario 4: Committing LLM Token '#aa' (ID {})", llm_hash_aa.0);
-    constraint_state2.commit(llm_hash_aa);
+    constraint_state2.commit(llm_hash_aa).unwrap();
     println!("{}", &constraint_state2);
 
     // Assert equivalence
@@ -702,19 +702,19 @@ fn test_a_plus_commit_equivalence() {
     // Scenario 1: Commit "a" three times
     let mut state1 = constraint.init();
     println!("Scenario 1: Committing 'a' (ID {})", llm_a.0);
-    state1.commit(llm_a);
+    state1.commit(llm_a).unwrap();
     println!("{}", &state1);
     println!("Scenario 1: Committing 'a' (ID {}) again", llm_a.0);
-    state1.commit(llm_a);
+    state1.commit(llm_a).unwrap();
     println!("{}", &state1);
     println!("Scenario 1: Committing 'a' (ID {}) a third time", llm_a.0);
-    state1.commit(llm_a);
+    state1.commit(llm_a).unwrap();
     println!("{}", &state1);
 
     // Scenario 2: Commit "aaa" once
     let mut state2 = constraint.init();
     println!("\nScenario 2: Committing 'aaa' (ID {})", llm_aaa.0);
-    state2.commit(llm_aaa);
+    state2.commit(llm_aaa).unwrap();
     println!("{}", &state2);
 
     // Assert equivalence
@@ -762,16 +762,16 @@ fn test_ignore_token() {
     // Scenario 1: commit "a", then " ", then "b"
     let mut state1 = constraint.init();
     assert_eq!(state1.get_mask(), Bitset::from_iter(vec![llm_a.0, llm_ws.0, llm_a_b.0]), "Initial mask should allow 'a' or 'a b'");
-    state1.commit(llm_a);
+    state1.commit(llm_a).unwrap();
     assert_eq!(state1.get_mask(), Bitset::from_iter(vec![llm_b.0, llm_ws.0, llm_ws.0]), "After 'a', mask should allow 'b' or ' '");
-    state1.commit(llm_ws);
+    state1.commit(llm_ws).unwrap();
     assert_eq!(state1.get_mask(), Bitset::from_iter(vec![llm_b.0, llm_ws.0]), "After 'a ', mask should allow 'b'");
-    state1.commit(llm_b);
+    state1.commit(llm_b).unwrap();
     // assert_eq!(state1.get_mask(), HybridBitset::from_iter(vec![llm_ws.0]), "After 'a b', mask should be empty (complete parse).");
 
     // --- Equivalence check ---
     let mut state2 = constraint.init();
-    state2.commit(llm_a_b);
+    state2.commit(llm_a_b).unwrap();
     // assert_eq!(state2.get_mask(), HybridBitset::from_iter(vec![llm_ws.0]), "After committing 'a b', mask should be empty (complete parse).");
     assert_eq!(state1.state(), state2.state(), "States from ('a',' ','b') and ('a b') should be equivalent.");
 }
@@ -809,7 +809,7 @@ fn test_hideous_ambiguity() {
             println!("Token 'a' (ID {}) not in mask. Mask: {:?}. Stopping.", a_id, mask);
             break;
         }
-        constraint_state.commit(LLMTokenID(a_id));
+        constraint_state.commit(LLMTokenID(a_id)).unwrap();
         if !constraint_state.is_active() {
             println!("Constraint state became inactive at iteration {}.", i);
             break;
@@ -1118,7 +1118,7 @@ fn test_constraint_expression_no_times() {
     assert_eq!(mask, Bitset::from_iter(vec![0, 2, 4]));
 
     // Commit "(i"
-    state.commit(LLMTokenID(4));
+    state.commit(LLMTokenID(4)).unwrap();
     let mask = state.get_mask();
     // Now expect '+', ')', '+i' => IDs 1,3,5
     assert_eq!(mask, Bitset::from_iter(vec![1, 3, 5]));
@@ -1180,7 +1180,7 @@ fn test_constraint_expression_no_parens() {
     assert_eq!(mask, Bitset::from_iter(vec![0]));
 
     // Commit "i"
-    state.commit(LLMTokenID(0));
+    state.commit(LLMTokenID(0)).unwrap();
     let mask = state.get_mask();
     // Now expect '+', '*', '+i' => IDs 1,2,3
     assert_eq!(mask, Bitset::from_iter(vec![1, 2, 3]));
@@ -1241,7 +1241,7 @@ fn test_constraint_expression_no_plus_times() {
     assert_eq!(mask, Bitset::from_iter(vec![0, 1, 3]));
 
     // Commit "(i"
-    state.commit(LLMTokenID(3));
+    state.commit(LLMTokenID(3)).unwrap();
     let mask = state.get_mask();
     // Now expect ')' => ID 2
     assert_eq!(mask, Bitset::from_iter(vec![2]));
@@ -1299,7 +1299,7 @@ fn test_constraint_expression_no_times_parens() {
     assert_eq!(mask, Bitset::from_iter(vec![0]));
 
     // Commit "i"
-    state.commit(LLMTokenID(0));
+    state.commit(LLMTokenID(0)).unwrap();
     let mask = state.get_mask();
     // Now expect '+', '+i' => IDs 1,2
     assert_eq!(mask, Bitset::from_iter(vec![1, 2]));
@@ -1363,13 +1363,13 @@ fn test_constraint_expression_unbalanced_parens() {
     assert_eq!(mask, Bitset::from_iter(vec![0, 1, 2]));
 
     // Commit "("
-    state.commit(LLMTokenID(1));
+    state.commit(LLMTokenID(1)).unwrap();
     let mask = state.get_mask();
     // After '(', we expect another E, so the mask should be the same
     assert_eq!(mask, Bitset::from_iter(vec![0, 1, 2]));
 
     // Commit "i"
-    state.commit(LLMTokenID(0));
+    state.commit(LLMTokenID(0)).unwrap();
     let mask = state.get_mask();
     // After "(i", the inner E is satisfied. The outer E is satisfied. We now expect EOF.
     assert_eq!(mask, Bitset::from_iter(vec![3]));
@@ -1481,13 +1481,13 @@ fn test_constraint_expression_cycle() {
     assert_eq!(mask, Bitset::from_iter(vec![0]));
 
     // Commit "i"
-    state.commit(LLMTokenID(0));
+    state.commit(LLMTokenID(0)).unwrap();
     let mask = state.get_mask();
     // After "i", E is satisfied, so we expect EOF ($)
     assert_eq!(mask, Bitset::from_iter(vec![1]));
 
     // Commit "$"
-    state.commit(LLMTokenID(1));
+    state.commit(LLMTokenID(1)).unwrap();
     assert!(state.is_active());
     let mask = state.get_mask();
     // After "(i", the inner E is satisfied. The outer E is satisfied. We now expect EOF.
@@ -1572,7 +1572,7 @@ fn test_json_gpt2_initial_mask_bruteforce() -> Result<(), Box<dyn std::error::Er
     let mut errors = 0;
     for (bytes, id) in &llm_token_map {
         let mut temp_state = constraint.init();
-        temp_state.commit(*id);
+        temp_state.commit(*id).unwrap();
         let is_valid = temp_state.is_valid();
         let allowed = mask.contains(id.0);
 
@@ -1649,7 +1649,7 @@ fn test_js_simplified_ebnf_string() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // 5. Commit "a" and get the next mask
-    state.commit(llm_a);
+    state.commit(llm_a).unwrap();
     state.print_gss();
     let mask2 = state.get_mask();
 
@@ -2534,13 +2534,13 @@ fn test_constraint_indirect_recursion_simplified() {
     assert_eq!(mask, Bitset::from_iter(vec![0, 1]));
 
     // Commit "a"
-    state.commit(LLMTokenID(0));
+    state.commit(LLMTokenID(0)).unwrap();
     let mask = state.get_mask();
     // After 'a', we expect E, which is S, so we expect 'a' or 'b' again.
     assert_eq!(mask, Bitset::from_iter(vec![0, 1]));
 
     // Commit "b"
-    state.commit(LLMTokenID(1));
+    state.commit(LLMTokenID(1)).unwrap();
     let mask = state.get_mask();
     // After "ab", we have a complete S. Now we expect EOF.
     assert_eq!(mask, Bitset::from_iter(vec![2]));
@@ -2577,7 +2577,7 @@ fn test_constraint_repetition_a() {
     assert_eq!(mask, Bitset::from_iter(vec![0]));
 
     // Commit "a"
-    state.commit(LLMTokenID(0));
+    state.commit(LLMTokenID(0)).unwrap();
     let mask = state.get_mask();
     // After 'a', we can have another 'a' or end with EOF. Again, only 'a' is in vocab.
     assert_eq!(mask, Bitset::from_iter(vec![0]));
@@ -2660,13 +2660,13 @@ fn test_constraint_expression_trivial_indirect() {
     assert_eq!(mask, Bitset::from_iter(vec![0, 1, 2]));
 
     // Commit "("
-    state.commit(LLMTokenID(1));
+    state.commit(LLMTokenID(1)).unwrap();
     let mask = state.get_mask();
     // After '(', we expect another E, so the mask should be the same
     assert_eq!(mask, Bitset::from_iter(vec![0, 1, 2]));
 
     // Commit "i"
-    state.commit(LLMTokenID(0));
+    state.commit(LLMTokenID(0)).unwrap();
     let mask = state.get_mask();
     // After "(i", the inner E is satisfied. The outer E is satisfied. We now expect EOF.
     assert_eq!(mask, Bitset::from_iter(vec![3]));
@@ -2707,14 +2707,14 @@ fn test_constraint_expression_trivial_direct() {
     assert_eq!(mask, Bitset::from_iter(vec![0, 1, 2]));
 
     // Commit "("
-    state.commit(LLMTokenID(1));
+    state.commit(LLMTokenID(1)).unwrap();
     let mask = state.get_mask();
     state.print_gss();
     // After '(', we expect another E, so the mask should be the same
     assert_eq!(mask, Bitset::from_iter(vec![0, 1, 2]));
 
     // Commit "i"
-    state.commit(LLMTokenID(0));
+    state.commit(LLMTokenID(0)).unwrap();
     let mask = state.get_mask();
     state.print_gss();
     // After "(i", the inner E is satisfied. The outer E is satisfied. We now expect EOF.
@@ -2756,7 +2756,7 @@ fn test_constraint_expression_trivial_direct_limited_vocab() {
     assert_eq!(mask, Bitset::from_iter(vec![2]));
 
     // Commit "(i"
-    state.commit(LLMTokenID(2));
+    state.commit(LLMTokenID(2)).unwrap();
     let mask = state.get_mask();
     // After "(i", the inner E is satisfied. The outer E is satisfied. We now expect EOF.
     assert_eq!(mask, Bitset::from_iter(vec![]));

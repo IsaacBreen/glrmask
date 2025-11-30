@@ -5,6 +5,7 @@ use numpy::{IntoPyArray, PyArray1, PyReadwriteArray1};
 use ouroboros::self_referencing;
 use pyo3::basic::CompareOp;
 use pyo3::prelude::*;
+use pyo3::exceptions::PyValueError;
 use pyo3::types::{PyDict, PyIterator, PySet, PyTuple};
 use sep1::constraint::{GrammarConstraint, GrammarConstraintState, StageVocab};
 use sep1::datastructures::bitset::{Bitset as RustBitset, Bitset};
@@ -1453,10 +1454,10 @@ impl PyGrammarConstraintState {
         self.inner.with_inner(|state| state.mask_buffer_size_i32())
     }
 
-    fn commit(&mut self, llm_token_id: usize) {
+    fn commit(&mut self, llm_token_id: usize) -> PyResult<()> {
         self.inner.with_inner_mut(|state| {
-            state.commit(LLMTokenID(llm_token_id));
-        });
+            state.commit(LLMTokenID(llm_token_id))
+        }).map_err(|e| PyValueError::new_err(e))
     }
 
     fn commit_bytes(&mut self, llm_token_bytes: &[u8]) {
