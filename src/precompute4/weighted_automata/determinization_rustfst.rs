@@ -65,11 +65,18 @@ fn intern_weight(weight: Weight) -> Arc<Weight> {
 }
 
 /// Semiring over bitset weights: plus = union, times = intersection.
-#[derive(Clone, Debug, PartialOrd, Default, Eq, Hash)]
+#[derive(Clone, Debug, PartialOrd, Default, Eq)]
 pub struct BitsetWeight(pub Arc<Weight>);
 
 impl PartialEq for BitsetWeight {
     fn eq(&self, other: &Self) -> bool { Arc::ptr_eq(&self.0, &other.0) || *self.0 == *other.0 }
+}
+
+impl std::hash::Hash for BitsetWeight {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        // Hash the underlying weight value for consistency with PartialEq
+        self.0.hash(state);
+    }
 }
 
 impl Semiring for BitsetWeight {
