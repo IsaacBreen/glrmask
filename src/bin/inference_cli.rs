@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
 use flate2::read::GzDecoder;
-use sep1::constraint::{GrammarConstraint, GrammarConstraintState};
+use sep1::constraint::GrammarConstraint;
 use sep1::json_serialization::JSONConvertible;
 use sep1::datastructures::bitset::Bitset;
 use sep1::tokenizer::LLMTokenID;

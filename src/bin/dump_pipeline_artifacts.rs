@@ -14,7 +14,6 @@ use sep1::precompute4::weighted_automata::common::Label;
 use sep1::precompute4::full_dwa::{
     canonicalize_bundle, instantiate_nwa_template_into, nwa_special_map, 
     precompute_token_bvs_and_signatures, resolve_negatives_and_optimize_and_determinize,
-    Signature
 };
 use sep1::constraint_precompute::run_precompute1;
 use sep1::tokenizer::{LLMTokenID, TokenizerStateID};
@@ -68,7 +67,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             token_id_counter += 1;
         }
     }
-    let internal_max_llm_token = (token_id_counter - 1) as usize;
+    let internal_max_llm_token = token_id_counter - 1;
     let terminals_count = parser.terminal_map.len();
     let active_states = vec![tokenizer.initial_state_id()];
 
@@ -95,7 +94,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let offset = parser.terminal_map.len() as Label;
-    let (node_tokens, mut unique_signatures) = precompute_token_bvs_and_signatures(&reversed_nwa, &traversal_data, initial_values_bv, offset);
+    let (_node_tokens, mut unique_signatures) = precompute_token_bvs_and_signatures(&reversed_nwa, &traversal_data, initial_values_bv, offset);
     unique_signatures.insert(vec![vec![None]]);
 
     // Populate template cache
