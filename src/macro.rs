@@ -93,7 +93,7 @@ pub mod colors {
     pub const ARROW: &str = "→";
     pub const BULLET: &str = "•";
     pub const WARN: &str = "⚠";
-    pub const PLAY: &str = "▸";
+    pub const PLAY: &str = "│";  // Box-drawing vertical line for pipeline steps
     pub const BOX: &str = "■";
 }
 
