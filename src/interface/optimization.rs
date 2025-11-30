@@ -69,13 +69,6 @@ impl<'a> GrammarOptimizer<'a> {
     fn optimize(&mut self) {
         self.stats.initial_productions = self.grammar.productions.len();
         self.stats.initial_terminals = self.count_terminals();
-        
-        // Track existing terminal names before optimization
-        // These have already been processed for nullability in from_exprs
-        let existing_terminals: HashSet<String> = self.grammar.regex_name_to_group_id
-            .left_values()
-            .cloned()
-            .collect();
 
         // Index productions by LHS for O(1) lookup during SCC processing
         for (idx, prod) in self.grammar.productions.iter().enumerate() {
@@ -105,14 +98,7 @@ impl<'a> GrammarOptimizer<'a> {
         // 4. Rewrite grammar
         self.rewrite_grammar();
         
-        // 5. Handle nullable terminals created by optimization
-        // The optimizer may create new regex terminals from non-terminals that had
-        // epsilon productions (e.g., expression_statement[0] ::= ';' | ε becomes ';'?).
-        // These nullable terminals need the same treatment as nullable terminals in from_exprs.
-        // We pass the set of terminals that existed before optimization to skip them.
-        self.grammar.handle_nullable_terminals_except(&existing_terminals);
-        
-        // 6. Cleanup unused terminals
+        // 5. Cleanup unused terminals
         self.cleanup_terminals();
 
         self.stats.final_productions = self.grammar.productions.len();
@@ -203,12 +189,6 @@ impl<'a> GrammarOptimizer<'a> {
     }
 
     fn try_convert_scc(&mut self, scc_nts: &[NonTerminal]) -> Option<HashMap<NonTerminal, Expr>> {
-        // NOTE: We now allow SCCs with epsilon productions. The epsilon productions are handled
-        // correctly by try_convert_scc_right_linear/left_linear - they become final states.
-        // After optimization, nullable terminals need to be converted back to optional non-terminals,
-        // which is handled by handle_nullable_terminals_except in the main optimize() function.
-        let empty_vec = Vec::new();
-
         // Skip single-node SCCs with no self-recursion if they only reference other unresolved NTs
         // (they're just pass-through rules). But if they reference terminals or resolved NTs,
         // we should still optimize them to regex.
@@ -216,6 +196,7 @@ impl<'a> GrammarOptimizer<'a> {
             let nt = &scc_nts[0];
             
             // Use the index to avoid scanning all productions
+            let empty_vec = Vec::new();
             let prod_indices = self.production_indices.get(nt).unwrap_or(&empty_vec);
             // Note: we just iterate indices and access grammar.productions
             
@@ -465,40 +446,10 @@ impl<'a> GrammarOptimizer<'a> {
     fn rewrite_grammar(&mut self) {
         let mut new_terminals: HashMap<NonTerminal, Terminal> = HashMap::new();
         
-        // First, determine which resolved NTs are actually referenced by non-resolved productions
-        let mut referenced_resolved_nts: HashSet<NonTerminal> = HashSet::new();
-        
-        // Also check the start symbol
-        let start_nt = if self.grammar.productions.len() > self.grammar.start_production_id {
-            self.grammar.productions[self.grammar.start_production_id].lhs.clone()
-        } else {
-            NonTerminal("".to_string())
-        };
-        
-        if self.resolved_nts.contains_key(&start_nt) {
-            referenced_resolved_nts.insert(start_nt.clone());
-        }
-        
-        for prod in &self.grammar.productions {
-            if self.resolved_nts.contains_key(&prod.lhs) {
-                // This production belongs to a resolved NT, skip it
-                continue;
-            }
-            // This production is kept - check what NTs it references
-            for symbol in &prod.rhs {
-                if let Symbol::NonTerminal(ref nt) = symbol {
-                    if self.resolved_nts.contains_key(nt) {
-                        referenced_resolved_nts.insert(nt.clone());
-                    }
-                }
-            }
-        }
-        
-        // Allocate group IDs and create Terminals ONLY for referenced resolved NTs
+        // Allocate group IDs and create Terminals
         let mut next_group_id = self.grammar.group_id_to_expr.keys().max().map(|&x| x + 1).unwrap_or(0);
         
-        for nt in &referenced_resolved_nts {
-            let expr = self.resolved_nts.get(nt).unwrap();
+        for (nt, expr) in &self.resolved_nts {
             let mut final_name = nt.0.clone();
             while self.grammar.regex_name_to_group_id.contains_left(&final_name) {
                 final_name.push('_');
@@ -510,6 +461,14 @@ impl<'a> GrammarOptimizer<'a> {
             new_terminals.insert(nt.clone(), Terminal::RegexName(final_name));
             next_group_id += 1;
         }
+        
+        // Identify start symbol
+        let start_nt = if self.grammar.productions.len() > self.grammar.start_production_id {
+            self.grammar.productions[self.grammar.start_production_id].lhs.clone()
+        } else {
+            // Should not happen in valid grammar
+            NonTerminal("".to_string())
+        };
 
         // Rewrite productions
         let mut new_productions = Vec::new();
@@ -931,13 +890,8 @@ mod tests {
 
             optimize_grammar(&mut grammar);
 
-            let final_count = grammar.terminal_to_group_id().len();
-            // The optimizer should reduce or maintain the terminal count.
-            // Note: when nullable non-terminals are involved, we can't collapse everything
-            // to 1 terminal because nullable non-terminals must remain as-is.
-            assert!(final_count <= initial_count, 
-                "Optimization increased terminal count on iteration {} ({} -> {})", 
-                i, initial_count, final_count);
+            // println!("{grammar}");
+            assert_eq!(grammar.terminal_to_group_id().len(), 1, "Failed to collapse grammar on iteration {} (started with {} terminals)", i, initial_count);
         }
     }
 
