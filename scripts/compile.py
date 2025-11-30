@@ -131,7 +131,7 @@ def filter_vocab(vocab: dict[str, int], allowed_lengths: set[int], min_len_unbou
     return filtered
 
 
-def run_compiler(compiler_path: Path, grammar_path: Path, vocab_path: Path, output_path: Path | None, recompile: bool, disable_progress_bar: bool, save_pc0: Path | None = None, from_pc0: Path | None = None, pc0_only: bool = False):
+def run_compiler(compiler_path: Path, grammar_path: Path, vocab_path: Path, output_path: Path | None, recompile: bool, disable_progress_bar: bool, build_profile: str = "release", save_pc0: Path | None = None, from_pc0: Path | None = None, pc0_only: bool = False):
     """
     Runs the Rust grammar-compiler CLI tool, recompiling it first by default.
     """
@@ -142,11 +142,19 @@ def run_compiler(compiler_path: Path, grammar_path: Path, vocab_path: Path, outp
         env["ENABLE_PROGRESS_BAR"] = "1"
 
     if recompile:
-        print("Building compiler with 'cargo build --release'...")
+        build_cmd = ["cargo", "build"]
+        if build_profile == "release":
+            build_cmd.append("--release")
+            print("Building compiler with 'cargo build --release'...")
+        elif build_profile == "debug":
+            print("Building compiler with 'cargo build' (debug mode)...")
+        else:
+            build_cmd.extend(["--profile", build_profile])
+            print(f"Building compiler with 'cargo build --profile {build_profile}'...")
         try:
             # Run without capturing output to stream compilation progress.
             subprocess.run(
-                ["cargo", "build", "--release"],
+                build_cmd,
                 check=True,
                 env=env
             )
@@ -247,7 +255,8 @@ Examples:
     parser.add_argument("--vocab-list", type=str, nargs='+', help="A list of strings to use as the vocabulary. Can be combined with --vocab-url/--vocab-path.")
 
     parser.add_argument("--cache-dir", type=Path, default=Path(".cache/vocabs"), help="Directory to cache downloaded vocabularies.")
-    parser.add_argument("--compiler-path", type=Path, default=Path("target/release/grammar-compiler"), help="Path to the grammar-compiler executable.")
+    parser.add_argument("--compiler-path", type=Path, help="Path to the grammar-compiler executable. Defaults to target/{profile}/grammar-compiler based on --build-profile.")
+    parser.add_argument("--build-profile", type=str, default="release", help="Cargo build profile to use (e.g., 'release', 'debug'). Default: release.")
     parser.add_argument("--no-recompile", action="store_true", help="Skip recompiling the Rust grammar-compiler executable and use the existing one.")
     parser.add_argument("--force-download", action="store_true", help="Force re-downloading the vocabulary even if it exists in the cache.")
     parser.add_argument("--no-progress-bar", action="store_true", help="Disable the progress bar output during compilation.")
@@ -275,6 +284,15 @@ Examples:
         parser.error("At least one of --vocab-url, --vocab-path, or --vocab-list must be provided.")
     if args.token_len and not (args.vocab_url or args.vocab_path):
         parser.error("--token-len can only be used with --vocab-url or --vocab-path.")
+
+    # Determine compiler path based on build profile if not explicitly provided
+    if args.compiler_path is None:
+        if args.build_profile == "debug":
+            args.compiler_path = Path("target/debug/grammar-compiler")
+        elif args.build_profile == "release":
+            args.compiler_path = Path("target/release/grammar-compiler")
+        else:
+            args.compiler_path = Path(f"target/{args.build_profile}/grammar-compiler")
 
     # 1. Get the base vocabulary from a file/URL if provided
     base_vocab = {}
@@ -325,6 +343,7 @@ Examples:
             args.output,
             recompile=not args.no_recompile,
             disable_progress_bar=args.no_progress_bar,
+            build_profile=args.build_profile,
             save_pc0=args.save_precompute0,
             from_pc0=args.from_precompute0,
             pc0_only=args.precompute0_only,
