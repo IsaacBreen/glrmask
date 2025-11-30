@@ -58,11 +58,17 @@
   - `root` rule automatically used as start rule if present
   - Dashed identifiers (`add-expr`) now supported
 
-### 8.5 [ ] Add Lark grammar format support
-- Add Lark grammar format support
+### 8.5 [x] Add Lark grammar format support
+- DONE: Added separate Lark parser (not auto-detected)
+  - New `from_lark()` and `from_lark_file()` methods
+  - Supports `:` rule syntax, `/regex/` patterns, `%ignore` directive
+  - Multi-line rules with `|` continuation
+  - Python bindings included
 
 ### 8.6 [ ] Make it so compile.py just passes through all the Rust cargo command output
 - The user should get to see it all.
+- Also fix the newline gap in output
+- Also improve output formatting (use │ instead of ▸)
 
 
 
