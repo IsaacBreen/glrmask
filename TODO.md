@@ -77,6 +77,13 @@ The line gap there annoys me.
 
 
 
+ALSO these new ones:
+
+
+
+
+
+
 ### 9. [x] Add stability safeguards for sep1
 - Memory limits
 - Stress testing
