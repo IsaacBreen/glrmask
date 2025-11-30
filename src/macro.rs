@@ -87,6 +87,7 @@ pub mod colors {
     pub const BOLD_RED: &str = "\x1b[1;31m";
     pub const BOLD_WHITE: &str = "\x1b[1;37m";
     pub const BOLD_BLUE: &str = "\x1b[1;34m";
+    pub const BOLD_MAGENTA: &str = "\x1b[1;35m";
     
     // Symbols
     pub const CHECK: &str = "✓";
@@ -95,6 +96,9 @@ pub mod colors {
     pub const WARN: &str = "⚠";
     pub const PLAY: &str = "▸";
     pub const BOX: &str = "■";
+    pub const LINE: &str = "─";
+    pub const CORNER: &str = "└";
+    pub const PIPE: &str = "│";
 }
 
 /// Returns the current debug level from `MACRO_DEBUG_LEVEL` env var.
@@ -206,23 +210,23 @@ macro_rules! __debug_impl {
                 let elapsed = $crate::r#macro::get_elapsed_suffix(now, 50);
                 
                 // Apply visual hierarchy based on the message's level
-                // Indentation: Level 3 = 2 spaces, Level 4 = 4 spaces, Level 5 = 6 spaces
+                // Indentation: Level 3 = 3 spaces, Level 4 = 5 spaces, Level 5 = 7 spaces
                 match $level {
                     1 | 2 => {
                         // High-level info: no prefix
                         println!("{}{}", msg, elapsed);
                     }
                     3 => {
-                        // Pipeline stage: arrow prefix (2-space indent)
-                        println!("  {CYAN}{PLAY}{RESET} {}{}", msg, elapsed);
+                        // Pipeline stage: arrow prefix (3-space indent)
+                        println!("   {CYAN}{PLAY}{RESET} {}{}", msg, elapsed);
                     }
                     4 => {
-                        // Substep: bullet prefix (4-space indent)
-                        println!("    {DIM}{BULLET}{RESET} {}{}", msg, elapsed);
+                        // Substep: bullet prefix (5-space indent)
+                        println!("     {DIM}{BULLET}{RESET} {}{}", msg, elapsed);
                     }
                     5 => {
-                        // Detail: dim text (6-space indent)
-                        println!("      {DIM}{}{}{RESET}", msg, elapsed);
+                        // Detail: dim text (7-space indent)
+                        println!("       {DIM}{}{}{RESET}", msg, elapsed);
                     }
                     _ => {
                         // Level 6+ without verbose mode (shouldn't happen)
@@ -274,13 +278,13 @@ macro_rules! log_stat {
     ($name:expr, $value:expr) => {
         if $crate::r#macro::is_debug_level_enabled(2) {
             use $crate::r#macro::colors::*;
-            println!("     {DIM}└─{RESET} {}: {CYAN}{}{RESET}", $name, $value);
+            println!("   {DIM}{}{RESET} {:<25} {CYAN}{}{RESET}", $crate::r#macro::colors::PIPE, $name, $value);
         }
     };
     ($name:expr, $value:expr, $unit:expr) => {
         if $crate::r#macro::is_debug_level_enabled(2) {
             use $crate::r#macro::colors::*;
-            println!("     {DIM}└─{RESET} {}: {CYAN}{}{RESET} {}", $name, $value, $unit);
+            println!("   {DIM}{}{RESET} {:<25} {CYAN}{}{RESET} {}", $crate::r#macro::colors::PIPE, $name, $value, $unit);
         }
     };
 }
@@ -295,7 +299,7 @@ macro_rules! log_stage {
             let msg = format!($fmt $(, $($arg)*)?);
             let now = std::time::Instant::now();
             let elapsed = $crate::r#macro::get_elapsed_suffix(now, 10);
-            println!("     {BOLD_BLUE}{}{RESET} {}{}", $crate::r#macro::colors::PLAY, msg, elapsed);
+            println!("   {BOLD_BLUE}{}{RESET} {}{}", $crate::r#macro::colors::PLAY, msg, elapsed);
         }
     };
 }
@@ -307,7 +311,7 @@ macro_rules! log_stage_done {
         if $crate::r#macro::is_debug_level_enabled(3) {
             use $crate::r#macro::colors::*;
             let elapsed = $start.elapsed();
-            println!("     {BOLD_BLUE}{}{RESET} {} {MAGENTA}({}){RESET}", 
+            println!("   {BOLD_BLUE}{}{RESET} {} {MAGENTA}({}){RESET}", 
                 $crate::r#macro::colors::CHECK, $name, $crate::r#macro::format_duration(elapsed));
         }
     };
@@ -315,7 +319,7 @@ macro_rules! log_stage_done {
         if $crate::r#macro::is_debug_level_enabled(3) {
             use $crate::r#macro::colors::*;
             let elapsed = $start.elapsed();
-            println!("     {BOLD_BLUE}{}{RESET} {} {DIM}[{}]{RESET} {MAGENTA}({}){RESET}", 
+            println!("   {BOLD_BLUE}{}{RESET} {} {DIM}[{}]{RESET} {MAGENTA}({}){RESET}", 
                 $crate::r#macro::colors::CHECK, $name, $detail, $crate::r#macro::format_duration(elapsed));
         }
     };
@@ -329,7 +333,7 @@ macro_rules! log_substep {
         if $crate::r#macro::is_debug_level_enabled(4) {
             use $crate::r#macro::colors::*;
             let msg = format!($fmt $(, $($arg)*)?);
-            println!("       {CYAN}{}{RESET} {}", $crate::r#macro::colors::BULLET, msg);
+            println!("     {CYAN}{}{RESET} {}", $crate::r#macro::colors::BULLET, msg);
         }
     };
 }
@@ -342,7 +346,7 @@ macro_rules! log_substep_done {
             use $crate::r#macro::colors::*;
             let elapsed = $start.elapsed();
             if elapsed.as_millis() >= 10 {
-                println!("       {CYAN}{}{RESET} {} {MAGENTA}({}){RESET}", 
+                println!("     {CYAN}{}{RESET} {} {MAGENTA}({}){RESET}", 
                     $crate::r#macro::colors::BULLET, $name, $crate::r#macro::format_duration(elapsed));
             }
         }
@@ -351,7 +355,7 @@ macro_rules! log_substep_done {
         if $crate::r#macro::is_debug_level_enabled(4) {
             use $crate::r#macro::colors::*;
             let elapsed = $start.elapsed();
-            println!("       {CYAN}{}{RESET} {} {DIM}[{}]{RESET} {MAGENTA}({}){RESET}", 
+            println!("     {CYAN}{}{RESET} {} {DIM}[{}]{RESET} {MAGENTA}({}){RESET}", 
                 $crate::r#macro::colors::BULLET, $name, $detail, $crate::r#macro::format_duration(elapsed));
         }
     };
@@ -365,7 +369,7 @@ macro_rules! log_detail {
         if $crate::r#macro::is_debug_level_enabled(5) {
             use $crate::r#macro::colors::*;
             let msg = format!($fmt $(, $($arg)*)?);
-            println!("         {DIM}{}{RESET}", msg);
+            println!("       {DIM}{}{RESET}", msg);
         }
     };
 }
@@ -403,6 +407,42 @@ macro_rules! log_success {
         }
     };
 }
+
+/// Level 1: Section Header
+/// Usage: log_header!("Stage 1: Parsing");
+#[macro_export]
+macro_rules! log_header {
+    ($title:expr) => {
+        if $crate::r#macro::is_debug_level_enabled(1) {
+            use $crate::r#macro::colors::*;
+            println!("\n{BOLD_MAGENTA}═══ {} ═══{RESET}", $title);
+        }
+    };
+}
+
+/// Level 1: Separator Line
+#[macro_export]
+macro_rules! log_separator {
+    () => {
+        if $crate::r#macro::is_debug_level_enabled(1) {
+            use $crate::r#macro::colors::*;
+            println!("{DIM}────────────────────────────────────────{RESET}");
+        }
+    };
+}
+
+/// Level 2: Key-Value Table Row
+/// Usage: log_kv!("States", 50);
+#[macro_export]
+macro_rules! log_kv {
+    ($key:expr, $value:expr) => {
+        if $crate::r#macro::is_debug_level_enabled(2) {
+            use $crate::r#macro::colors::*;
+            println!("   {DIM}{}{RESET} {:<25} {CYAN}{}{RESET}", $crate::r#macro::colors::PIPE, $key, $value);
+        }
+    };
+}
+
 
 // =============================================================================
 // Timer Helpers for measuring operations
