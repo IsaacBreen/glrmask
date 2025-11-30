@@ -62,3 +62,8 @@ pbar = []
 [[bin]]
 name = "grammar-compiler"
 path = "src/bin/grammar_compiler.rs"
+
+[[bin]]
+name = "grammar-inference"
+path = "src/bin/inference_cli.rs"
+
