@@ -161,7 +161,7 @@ fn cmd_sequence(constraint: &GrammarConstraint, tokens: &[String], timing: bool)
     let token_ids = parse_token_ids(tokens)?;
     
     let mut state = constraint.init();
-    let vocab_size = constraint.precompute4_vocab.max_original_llm_token_id + 1;
+    let _vocab_size = constraint.precompute4_vocab.max_original_llm_token_id + 1;
     
     println!("Processing {} tokens...\n", token_ids.len());
     
@@ -193,7 +193,7 @@ fn cmd_sequence(constraint: &GrammarConstraint, tokens: &[String], timing: bool)
         }
         
         let start = Instant::now();
-        state.commit(LLMTokenID(token_id as usize));
+        state.commit(LLMTokenID(token_id as usize)).unwrap();
         if timing {
             eprintln!("{DIM}  Commit: {:.2?}{RESET}", start.elapsed());
         }
@@ -244,7 +244,7 @@ fn cmd_interactive(constraint: &GrammarConstraint) {
                     Ok(ids) => {
                         for id in ids {
                             if mask.contains(id as usize) {
-                                state.commit(LLMTokenID(id as usize));
+                                state.commit(LLMTokenID(id as usize)).unwrap();
                                 println!("{BOLD_GREEN}✓{RESET} Committed token {}", id);
                             } else {
                                 println!("{BOLD_RED}✗{RESET} Token {} not allowed!", id);
@@ -271,7 +271,7 @@ fn cmd_validate(constraint: &GrammarConstraint, tokens: &[String]) -> Result<(),
             println!("  ({} tokens were allowed)", count);
             return Err(format!("Validation failed at step {}", i));
         }
-        state.commit(LLMTokenID(token_id as usize));
+        state.commit(LLMTokenID(token_id as usize)).unwrap();
     }
     
     println!("{BOLD_GREEN}✓{RESET} All {} tokens are valid", token_ids.len());
