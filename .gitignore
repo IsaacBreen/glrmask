@@ -82,6 +82,27 @@ paper/figures/components/*_generated.pdf
 paper/figures/components/interactive_demo.html
 paper/figures/components/pipeline_visualization.html
 
+# === Analysis Artifacts ===
+analysis/results/
+
+# === Problems Artifacts ===
+problems/llm_logs/
+problems/**/*.aux
+problems/**/*.bbl
+problems/**/*.blg
+problems/**/*.log
+problems/**/*.out
+problems/**/*.pdf
+problems/**/*.toc
+problems/**/*.fdb_latexmk
+problems/**/*.fls
+problems/**/*.synctex.gz
+problems/**/REFERENCES.txt
+
+# === Generated Figures ===
+paper/figures/*.html
+paper/figures/*.png
+
 # Created by https://www.toptal.com/developers/gitignore/api/rust,jetbrains,macos,python
 # Edit at https://www.toptal.com/developers/gitignore?templates=rust,jetbrains,macos,python
 
