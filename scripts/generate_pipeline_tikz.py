@@ -731,11 +731,14 @@ def generate_below_zero_chars():
     \hline
     \textbf{R} & \textbf{P} & \textbf{N} \\ \hline
     0 & 0 & S1 \\ \hline
+    3 & 0 & S1 \\ \hline
     \end{tabular}
 };
-\node[state, fill=blue!15] (a0) at (0, 2) {0};
+\node[state, fill=blue!15] (a0) at (0, 2.3) {0};
+\node[state, fill=blue!15] (a3) at (0, 1.7) {3};
 \node[state] (a1) at (2, 2) {S1};
-\draw[->, thick, blue!70] (a0) -- node[above,font=\tiny] {R:0} (a1);
+\draw[->, thick, blue!70] (a0) -- node[above,font=\tiny, sloped] {R:0} (a1);
+\draw[->, thick, blue!70] (a3) -- node[below,font=\tiny, sloped] {R:3} (a1);
 
 % --- 'b' (Expects C) ---
 \node[font=\tiny\bfseries] at (5.5, 2.5) {$\mathcal{C}_{\text{'b'}}$};
@@ -793,25 +796,26 @@ def generate_template_dfas():
 \node[font=\tiny\bfseries] at (1.5, 1.5) {$\mathcal{T}_{\text{'a'}}$};
 \node[state, fill=blue!15] (t0) at (0, 1) {0};
 \node[accept] (t1) at (2, 1) {1};
-\draw[->, thick, blue!70] (t0) -- node[above,font=\tiny] {S1} (t1);
+\draw[->, thick, blue!70] (t0) to[bend left=20] node[above,font=\tiny] {0} (t1);
+\draw[->, thick, blue!70] (t0) to[bend right=20] node[below,font=\tiny] {3} (t1);
 
 % Template 'b'
 \node[font=\tiny\bfseries] at (5.5, 1.5) {$\mathcal{T}_{\text{'b'}}$};
 \node[state, fill=blue!15] (u0) at (4, 1) {0};
 \node[accept] (u1) at (6, 1) {2};
-\draw[->, thick, red!70] (u0) -- node[above,font=\tiny] {S2} (u1);
+\draw[->, thick, red!70] (u0) -- node[above,font=\tiny] {1} (u1);
 
 % Template 'c'
 \node[font=\tiny\bfseries] at (1.5, -0.5) {$\mathcal{T}_{\text{'c'}}$};
 \node[state, fill=blue!15] (v0) at (0, -1) {0};
 \node[accept] (v1) at (2, -1) {3};
-\draw[->, thick, green!70] (v0) -- node[above,font=\tiny] {S3} (v1);
+\draw[->, thick, green!70] (v0) -- node[above,font=\tiny] {2} (v1);
 
 % Template 'd'
 \node[font=\tiny\bfseries] at (5.5, -0.5) {$\mathcal{T}_{\text{'d'}}$};
 \node[state, fill=blue!15] (w0) at (4, -1) {0};
 \node[accept] (w1) at (6, -1) {4};
-\draw[->, thick, orange!70] (w0) -- node[above,font=\tiny] {Esc} (w1);
+\draw[->, thick, orange!70] (w0) -- node[above,font=\tiny] {2} (w1);
 \end{tikzpicture}
 }"""
 
@@ -885,19 +889,19 @@ def generate_flattened_nwa():
 \node[accept] (s4) at (6, 0) {4};
 
 % 0 -> 1
-\draw[->, thick, blue!70] (s0) to[bend left=10] node[pos=0.5, above, font=\tiny] {$\varepsilon|\{65\}$} (s1);
+\draw[->, thick, blue!70] (s0) to[bend left=10] node[pos=0.5, above, font=\tiny] {T0} (s1);
 
 % 1 -> 2
-\draw[->, thick, red!70] (s1) -- node[above,font=\tiny] {$\varepsilon|\{66\}$} (s2);
+\draw[->, thick, red!70] (s1) -- node[above,font=\tiny] {1} (s2);
 
 % 2 -> 3
-\draw[->, thick, green!70] (s2) -- node[below,font=\tiny] {$\varepsilon|\{67\}$} (s3);
+\draw[->, thick, green!70] (s2) -- node[below,font=\tiny] {2} (s3);
 
 % 3 -> 1 (Cycle)
-\draw[->, thick, blue!70] (s3) -- node[left,font=\tiny] {$\varepsilon|\{65\}$} (s1);
+\draw[->, thick, blue!70] (s3) -- node[left,font=\tiny] {3} (s1);
 
 % 2 -> 4 (Exit)
-\draw[->, thick, orange!70] (s2) -- node[above,font=\tiny] {$\varepsilon|\{68\}$} (s4);
+\draw[->, thick, orange!70] (s2) -- node[above,font=\tiny] {2} (s4);
 
 \end{tikzpicture}
 }"""
@@ -918,19 +922,19 @@ def generate_resolved_nwa():
 \node[accept] (s4) at (6, 0) {4};
 
 % 0 -> 1
-\draw[->, thick, blue!70] (s0) to[bend left=10] node[pos=0.5, above, font=\tiny] {$\varepsilon|\{65\}$} (s1);
+\draw[->, thick, blue!70] (s0) to[bend left=10] node[pos=0.5, above, font=\tiny] {T0} (s1);
 
 % 1 -> 2
-\draw[->, thick, red!70] (s1) -- node[above,font=\tiny] {$\varepsilon|\{66\}$} (s2);
+\draw[->, thick, red!70] (s1) -- node[above,font=\tiny] {1} (s2);
 
 % 2 -> 3
-\draw[->, thick, green!70] (s2) -- node[below,font=\tiny] {$\varepsilon|\{67\}$} (s3);
+\draw[->, thick, green!70] (s2) -- node[below,font=\tiny] {2} (s3);
 
 % 3 -> 1 (Cycle)
-\draw[->, thick, blue!70] (s3) -- node[left,font=\tiny] {$\varepsilon|\{65\}$} (s1);
+\draw[->, thick, blue!70] (s3) -- node[left,font=\tiny] {3} (s1);
 
 % 2 -> 4 (Exit)
-\draw[->, thick, orange!70] (s2) -- node[above,font=\tiny] {$\varepsilon|\{68\}$} (s4);
+\draw[->, thick, orange!70] (s2) -- node[above,font=\tiny] {2} (s4);
 \end{tikzpicture}
 }"""
 
@@ -949,11 +953,11 @@ def generate_final_dwa():
 \node[state] (q3) at (2, -1.5) {3};
 \node[accept] (q4) at (6, 0) {4};
 
-\draw[->, thick, blue!70] (q0) to[bend left=10] node[above,font=\tiny] {'a'} (q1);
-\draw[->, thick, red!70] (q1) -- node[above,font=\tiny] {'b'} (q2);
-\draw[->, thick, green!70] (q2) -- node[below,font=\tiny] {'c'} (q3);
-\draw[->, thick, blue!70] (q3) -- node[left,font=\tiny] {'a'} (q1);
-\draw[->, thick, orange!70] (q2) -- node[above,font=\tiny] {'d'} (q4);
+\draw[->, thick, blue!70] (q0) to[bend left=10] node[above,font=\tiny] {T0} (q1);
+\draw[->, thick, red!70] (q1) -- node[above,font=\tiny] {1} (q2);
+\draw[->, thick, green!70] (q2) -- node[below,font=\tiny] {2} (q3);
+\draw[->, thick, blue!70] (q3) -- node[left,font=\tiny] {3} (q1);
+\draw[->, thick, orange!70] (q2) -- node[above,font=\tiny] {2} (q4);
 
 \draw[->, thick, gray!70] (q4) to[loop right] node[right,font=\tiny] {$\star$} (q4);
 \end{tikzpicture}
