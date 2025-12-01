@@ -1,21 +1,25 @@
 # Research Project Makefile
 # Common commands for paper writing and research
 
-.PHONY: paper paper-watch paper-clean notes-today help build test ffi viz viz-clean
+.PHONY: paper paper-watch paper-clean notes-today help build test ffi viz viz-clean all
+
+# === Build All ===
+
+all: ffi viz paper ## Build all components: FFI, visualizations, and paper
 
 # === Paper Commands ===
 
 paper: ## Build the paper PDF
-	cd paper && latexmk -pdf main.tex
+	cd gcg-paper/paper && latexmk -pdf main.tex
 
 paper-watch: ## Build paper continuously (watch mode)
-	cd paper && latexmk -pdf -pvc main.tex
+	cd gcg-paper/paper && latexmk -pdf -pvc main.tex
 
 paper-clean: ## Clean paper build artifacts
-	cd paper && latexmk -C
+	cd gcg-paper/paper && latexmk -C
 
 paper-open: paper ## Build and open paper
-	open paper/main.pdf
+	open gcg-paper/paper/main.pdf
 
 # === Visualization Commands ===
 
