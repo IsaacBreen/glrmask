@@ -1,7 +1,7 @@
 # Research Project Makefile
 # Common commands for paper writing and research
 
-.PHONY: paper paper-watch paper-clean notes-today help
+.PHONY: paper paper-watch paper-clean notes-today help build test ffi viz viz-clean
 
 # === Paper Commands ===
 
@@ -16,6 +16,17 @@ paper-clean: ## Clean paper build artifacts
 
 paper-open: paper ## Build and open paper
 	open paper/main.pdf
+
+# === Visualization Commands ===
+
+ffi: ## Build the Python FFI binding (required for visualizations)
+	cd python && RUSTFLAGS=-Awarnings maturin develop -r
+
+viz: ffi ## Generate all visualization components
+	cd gcg-paper/paper/figures/components && make all
+
+viz-clean: ## Clean visualization artifacts
+	cd gcg-paper/paper/figures/components && make clean
 
 # === Notes Commands ===
 
