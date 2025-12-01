@@ -97,7 +97,7 @@ gcg-paper/             # Research paper and analysis
 
 ```bash
 # Run all tests
-RUST_TEST_THREADS=1 RUSTFLAGS=-Awarnings ENABLE_PROGRESS_BAR=0 \\
+RUST_TEST_THREADS=1 RUSTFLAGS=-Awarnings ENABLE_PROGRESS_BAR=0 \
     CARGO_PROFILE_DEV_OPT_LEVEL=1 cargo test --package sep1 --lib -- --nocapture
 
 # Run benchmarks
@@ -110,7 +110,7 @@ Sep1 supports JSON Schema constraints via EBNF conversion:
 
 ```bash
 # Test with a JSON schema from MaskBench
-SCHEMA_FILE="gcg-paper/downloads/repos/jsonschemabench/data/Github_easy/o10008.json" \\
+SCHEMA_FILE="gcg-paper/downloads/repos/jsonschemabench/data/Github_easy/o10008.json" \
     python3 scripts/test_json_schema.py
 ```
 
