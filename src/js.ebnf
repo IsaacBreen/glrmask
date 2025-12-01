@@ -2,7 +2,7 @@
 #![ignore(IGNORE)]
 
 program ::= statement_list? EOF;
-EOF ::= '<|EOF|>';
+EOF ::= '<|endoftext|>';
 
 // Lexical Grammar: Whitespace and Comments
 IGNORE ::= ( WS | COMMENT )+ ;
