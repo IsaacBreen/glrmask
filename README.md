@@ -24,17 +24,17 @@ Benchmarks on Apple M1 Max with GPT-2 tokenizer (50,257 tokens).
 
 ### Building
 
-\`\`\`bash
+```bash
 # Build the Rust library
 cargo build --release
 
 # Build Python bindings
 cd python && RUSTFLAGS=-Awarnings maturin develop -r
-\`\`\`
+```
 
 ### Compiling a Grammar
 
-\`\`\`bash
+```bash
 # Compile an EBNF grammar to a constraint file
 cargo run --release --bin grammar-compiler -- \
     --grammar src/js.ebnf \
@@ -46,11 +46,7 @@ cargo run --release --bin grammar-compiler -- \
 The `--format` argument is optional and defaults to auto-detection based on file extension (`.ebnf` or `.lark`). Explicitly supported values are `ebnf` and `lark`.
 
 ### Using in Python
-\`\`\`
-
-### Using in Python
-
-\`\`\`python
+```python
 import _sep1 as sep1
 import tiktoken
 
@@ -69,7 +65,7 @@ state = sep1.GrammarConstraintState(constraint)
 # Get valid token mask
 mask = state.get_mask_bv()
 valid_tokens = [i for i in range(enc.n_vocab) if mask.contains(i)]
-\`\`\`
+```
 
 ## How It Works
 
@@ -84,7 +80,7 @@ At runtime, mask queries reduce to single automaton transitions and weight reads
 
 ## Project Structure
 
-\`\`\`
+```
 src/                    # Rust source code
 ├── lib.rs             # Library entry point
 ├── precompute4/       # Core precomputation algorithms
@@ -95,28 +91,28 @@ src/                    # Rust source code
 python/                 # Python bindings
 scripts/               # Build and test scripts
 gcg-paper/             # Research paper and analysis
-\`\`\`
+```
 
 ## Testing
 
-\`\`\`bash
+```bash
 # Run all tests
 RUST_TEST_THREADS=1 RUSTFLAGS=-Awarnings ENABLE_PROGRESS_BAR=0 \\
     CARGO_PROFILE_DEV_OPT_LEVEL=1 cargo test --package sep1 --lib -- --nocapture
 
 # Run benchmarks
 cd python && bash run_benchmarks.sh
-\`\`\`
+```
 
 ## JSON Schema Support
 
 Sep1 supports JSON Schema constraints via EBNF conversion:
 
-\`\`\`bash
+```bash
 # Test with a JSON schema from MaskBench
 SCHEMA_FILE="gcg-paper/downloads/repos/jsonschemabench/data/Github_easy/o10008.json" \\
     python3 scripts/test_json_schema.py
-\`\`\`
+```
 
 ## Related Work
 
@@ -128,13 +124,13 @@ SCHEMA_FILE="gcg-paper/downloads/repos/jsonschemabench/data/Github_easy/o10008.j
 
 If you use Sep1 in your research, please cite:
 
-\`\`\`bibtex
+```bibtex
 @article{sep1,
   title={Efficient Grammar-Constrained Decoding via Precomputed Deterministic Weighted Automata},
   author={Breen, Isaac},
   year={2025}
 }
-\`\`\`
+```
 
 ## License
 
