@@ -76,6 +76,12 @@ paper/*-blx.bib
 paper/*.pdf
 !paper/figures/*.pdf
 
+# === Generated Pipeline Components ===
+paper/figures/components/*_generated.tex
+paper/figures/components/*_generated.pdf
+paper/figures/components/interactive_demo.html
+paper/figures/components/pipeline_visualization.html
+
 # Created by https://www.toptal.com/developers/gitignore/api/rust,jetbrains,macos,python
 # Edit at https://www.toptal.com/developers/gitignore?templates=rust,jetbrains,macos,python
 

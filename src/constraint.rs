@@ -934,6 +934,7 @@ impl GrammarConstraint {
         crate::debug!(4, "Building internal vocab prefix tree");
         let internal_tokens_for_vocab: Vec<(usize, Vec<u8>)> =
             internal_llm_token_map.iter().map(|(b, id)| (id.0, b.clone())).collect();
+        
         let vocab_tree = VocabPrefixTree::build(&internal_tokens_for_vocab);
         crate::debug!(4, "Done building internal vocab prefix tree");
 
@@ -953,8 +954,20 @@ impl GrammarConstraint {
         crate::debug!(4, "Tokenizer state equivalence analysis complete. {} -> {} states", all_states_list.len(), state_representatives.iter().collect::<HashSet<_>>().len());
 
         crate::debug!(4, "Computing maps and possible_matches (fast parallel pass)");
+        
+        // Build group_id -> terminal_index mapping
+        // token_name_map maps Terminal -> group_id (from tokenizer regex)
+        // parser.terminal_map maps Terminal -> TerminalID (index used in DWA)
+        // We need to convert tokenizer group_ids to parser terminal IDs
+        let group_id_to_terminal_idx: BTreeMap<usize, usize> = token_name_map
+            .iter()
+            .filter_map(|(terminal, group_id)| {
+                parser.terminal_map.get_by_left(terminal).map(|tid| (*group_id, tid.0))
+            })
+            .collect();
+        
         let computed_possible_matches =
-            Self::build_maps_and_matches(&tokenizer, &vocab_tree.root);
+            Self::build_maps_and_matches(&tokenizer, &vocab_tree.root, &group_id_to_terminal_idx);
 
         // Compute terminal follow sets, then map to IDs.
         crate::debug!(4, "Computing terminal follow sets");
@@ -1120,6 +1133,7 @@ impl GrammarConstraint {
     pub fn build_maps_and_matches(
         tokenizer: &Regex,
         vocab_root: &VocabPrefixTreeNode,
+        group_id_to_terminal_idx: &BTreeMap<usize, usize>,
     ) -> BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>> {
         // Flatten DFA for fast access (u32::MAX represents None)
         struct FastDFA {
@@ -1201,15 +1215,19 @@ impl GrammarConstraint {
         let mut transitions = vec![u32::MAX; num_states * 256];
         let mut finalizers = Vec::with_capacity(num_states);
 
-        let mut max_terminal_val = 0;
+        let mut max_terminal_idx = 0;
         for (i, state) in dfa.states.iter().enumerate() {
             for (byte, &next) in &state.transitions {
                 transitions[i * 256 + (byte as usize)] = next as u32;
             }
             let mut state_fins = Vec::new();
             for gid in &state.finalizers {
-                if gid > max_terminal_val { max_terminal_val = gid; }
-                state_fins.push(TerminalID(gid));
+                // Convert group_id to terminal_index using the mapping
+                if let Some(&terminal_idx) = group_id_to_terminal_idx.get(&gid) {
+                    if terminal_idx > max_terminal_idx { max_terminal_idx = terminal_idx; }
+                    state_fins.push(TerminalID(terminal_idx));
+                }
+                // If group_id is not in the mapping, it's not a grammar terminal, skip it
             }
             finalizers.push(state_fins);
         }
@@ -1219,7 +1237,7 @@ impl GrammarConstraint {
             finalizers,
         };
 
-        let num_terminals = max_terminal_val + 1;
+        let num_terminals = max_terminal_idx + 1;
         let matches_vec_len = num_states * num_terminals;
 
         // Group initial states by current state (identity mapping at root)

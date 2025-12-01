@@ -372,16 +372,22 @@ def generate_standalone_component(component_name: str, content_generator) -> str
     if needs_node_wrap:
         tikz_content = f"  \\node[font=\\bfseries] {{\n{content}\n  }};"
     else:
-        # Content is already a tikzpicture or needs minimal wrapping
-        tikz_content = content
+        # Content contains tikzpicture wrapped in resizebox - need to unwrap it
+        # Remove outer resizebox wrapper: \resizebox{0.95\textw}{!}{
+        import re
+        # Strip resizebox wrapper if present
+        unwrapped = re.sub(r'\\resizebox\{[^}]+\}\{[^}]+\}\{', '', content, count=1)
+        # Remove matching closing brace
+        unwrapped = unwrapped.rstrip()
+        if unwrapped.endswith('}'):
+            unwrapped = unwrapped[:-1]
+        tikz_content = unwrapped
     
     return f"""\\documentclass[tikz,border=10pt]{{standalone}}
 \\input{{shared_styles.tex}}
 
 \\begin{{document}}
-\\begin{{tikzpicture}}
 {tikz_content}
-\\end{{tikzpicture}}
 \\end{{document}}
 """
 
