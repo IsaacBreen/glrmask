@@ -1160,7 +1160,7 @@ impl GrammarDefinition {
             });
         }
 
-        Ok(GrammarDefinition {
+        let mut def = GrammarDefinition {
             productions,
             start_production_id,
             literal_to_group_id,
@@ -1168,7 +1168,11 @@ impl GrammarDefinition {
             group_id_to_expr,
             ignore_terminal_id: None,
             external_name_to_group_id: BiBTreeMap::new(),
-        })
+        };
+
+        def.optimize();
+
+        Ok(def)
     }
 
     /// Constructs a `GrammarDefinition` from parsed grammar rules.
