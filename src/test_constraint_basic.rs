@@ -2739,8 +2739,6 @@ fn test_constraint_expression_trivial_direct_limited_vocab() {
         EOF ::= '$';
     "#};
     let grammar_definition = GrammarDefinition::from_ebnf(ebnf_grammar).unwrap();
-    println!("{}", grammar_definition);
-    println!("{:?}", grammar_definition.group_id_to_expr);
 
     let constraint = GrammarConstraint::new_from_grammar_definition(
         Arc::new(grammar_definition),
