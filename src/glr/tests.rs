@@ -1250,3 +1250,22 @@ fn test_lr1_not_lalr1_grammar() {
 // 4. Validation Scope: The `analyze::validate` function currently checks for missing non-terminals
 //    and length-1 cycles. It doesn't detect all potential issues like useless rules (unreachable
 //    or non-productive non-terminals), which could be considered a limitation of the validation step.
+
+#[test]
+fn test_single_terminal_production() {
+    // Grammar: S -> T (where T is a single terminal)
+    // This is what happens when the optimization collapses the entire grammar to a regex.
+    let productions = vec![
+        prod("S", vec![t("x")]), // Single terminal production
+    ];
+
+    let parser = generate_glr_parser(&productions, None);
+    println!("Parser: {}", parser);
+    
+    let x_token = *parser.terminal_map.get_by_left(&regex_name("x")).unwrap();
+
+    // Test case 1: Valid input "x"
+    let mut state = parser.init_glr_parser(None);
+    state.step(x_token);
+    assert!(state.is_ok(), "Parse should succeed for 'x'");
+}

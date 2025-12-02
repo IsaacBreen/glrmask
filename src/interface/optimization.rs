@@ -8,6 +8,10 @@ use crate::types::TerminalID;
 use crate::debug;
 
 pub fn optimize_grammar(grammar: &mut GrammarDefinition) {
+    // Temporarily disabled for debugging
+    if std::env::var("DISABLE_GRAMMAR_OPTIMIZATION").is_ok() {
+        return;
+    }
     let mut optimizer = GrammarOptimizer::new(grammar);
     optimizer.optimize();
 }

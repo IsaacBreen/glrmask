@@ -977,6 +977,16 @@ impl GrammarDefinition {
         grammar_exprs: Vec<(String, GrammarExpr)>,
         regex_exprs: Vec<(String, Expr)>,
     ) -> Result<Self, String> {
+        Self::from_exprs_with_ignore(grammar_exprs, regex_exprs, None)
+    }
+
+    /// Constructs a `GrammarDefinition` from a list of `(name, GrammarExpr)` tuples
+    /// with optional ignore symbol.
+    pub fn from_exprs_with_ignore(
+        grammar_exprs: Vec<(String, GrammarExpr)>,
+        regex_exprs: Vec<(String, Expr)>,
+        ignore_symbol_name: Option<&str>,
+    ) -> Result<Self, String> {
         if grammar_exprs.is_empty() {
             return Err("Grammar expressions list cannot be empty.".to_string());
         }
@@ -1170,6 +1180,20 @@ impl GrammarDefinition {
             external_name_to_group_id: BiBTreeMap::new(),
         };
 
+        // Set ignore terminal before optimization so it's preserved
+        if let Some(ignore_name) = ignore_symbol_name {
+            let group_id = def
+                .regex_name_to_group_id
+                .get_by_left(ignore_name)
+                .ok_or_else(|| {
+                    format!(
+                        "Ignore symbol '{}' is not a defined terminal in the grammar.",
+                        ignore_name
+                    )
+                })?;
+            def.ignore_terminal_id = Some(TerminalID(*group_id));
+        }
+
         def.optimize();
 
         Ok(def)
@@ -1252,20 +1276,11 @@ impl GrammarDefinition {
             })
             .collect();
 
-        let mut grammar_def = GrammarDefinition::from_exprs(non_terminal_rules, terminal_defs)?;
-
-        if let Some(ignore_name) = &ignore_symbol_name {
-            let group_id = grammar_def
-                .regex_name_to_group_id
-                .get_by_left(ignore_name)
-                .ok_or_else(|| {
-                    format!(
-                        "Ignore symbol '{}' is not a defined terminal in the grammar.",
-                        ignore_name
-                    )
-                })?;
-            grammar_def.ignore_terminal_id = Some(TerminalID(*group_id));
-        }
+        let grammar_def = GrammarDefinition::from_exprs_with_ignore(
+            non_terminal_rules, 
+            terminal_defs,
+            ignore_symbol_name.as_deref(),
+        )?;
 
         Ok(grammar_def)
     }
