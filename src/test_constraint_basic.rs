@@ -2724,12 +2724,9 @@ fn test_constraint_expression_trivial_direct() {
 #[test]
 fn test_constraint_expression_trivial_direct_limited_vocab() {
     // Grammar: S -> E EOF; E -> LPAREN E | I
-    // LLM token vocabulary: i, (, (i, $
+    // LLM token vocabulary: only "(i"
     let mut llm_token_map = LLMTokenMap::new();
-    // llm_token_map.insert(b"i".to_vec(), LLMTokenID(0));
-    // llm_token_map.insert(b"(".to_vec(), LLMTokenID(1));
     llm_token_map.insert(b"(i".to_vec(), LLMTokenID(2));
-    // llm_token_map.insert(b"$".to_vec(), LLMTokenID(3));
 
     let ebnf_grammar = indoc! {r#"
         s ::= e EOF;
@@ -2754,15 +2751,17 @@ fn test_constraint_expression_trivial_direct_limited_vocab() {
     // Initial state and step
     let mut state = constraint.init();
     let mask = state.get_mask();
-    // Expect LLM tokens that can start an expression: i (0), '(' (1), "(i" (2)
+    // Expect LLM tokens that can start an expression: "(i" (2) is the only token
     assert_eq!(mask, Bitset::from_iter(vec![2]));
 
     // Commit "(i"
     state.commit(LLMTokenID(2)).unwrap();
     println!("After committing (i):");
     state.print_gss();
+    
     let mask = state.get_mask();
     // After "(i", the inner E is satisfied. The outer E is satisfied. We now expect EOF.
+    // But there's no EOF token in the vocab, so mask should be empty.
     assert_eq!(mask, Bitset::from_iter(vec![]));
 }
 

@@ -98,7 +98,8 @@ pub fn find_state_equivalence_classes(
     let mut trie = TokenTrie::new();
     for (i, token) in tokens.iter().enumerate() {
         // Assign a random weight to each token index to distinguish them
-        let w = mix_u128((i as u128).wrapping_mul(0x9E3779B97F4A7C15));
+        // Use i+1 to avoid zero weight for first token
+        let w = mix_u128(((i + 1) as u128).wrapping_mul(0x9E3779B97F4A7C15));
         trie.insert(token, w);
     }
     trie.compute_subtree_weights(0);
