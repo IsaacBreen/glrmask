@@ -992,7 +992,8 @@ mod tests {
         ];
         let regex_exprs = vec![];
 
-        let mut grammar = GrammarDefinition::from_exprs(grammar_exprs, regex_exprs).unwrap();
+        // Use from_exprs_no_optimize to get the unoptimized grammar first
+        let mut grammar = GrammarDefinition::from_exprs_no_optimize(grammar_exprs, regex_exprs).unwrap();
         let initial_terminals = grammar.terminal_to_group_id().len();
         println!("Initial terminals: {}", initial_terminals);
 

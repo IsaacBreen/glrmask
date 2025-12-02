@@ -120,31 +120,52 @@ mod tests {
             ]),
         )];
         let grammar_def = GrammarDefinition::from_exprs(rules, terminals).unwrap();
+        println!("Grammar: {}", grammar_def);
         let grammar = CompiledGrammar::from_definition(std::sync::Arc::new(grammar_def));
         let mut parser = IncrementalParser::new(&grammar);
 
         assert!(parser.is_valid());
 
         parser.feed(b"a");
+        println!("After 'a': is_valid={}, state.len()={}", parser.is_valid(), parser.state.len());
+        println!("Parser state keys: {:?}", parser.state.keys().collect::<Vec<_>>());
+        println!("Initial tokenizer state: {:?}", grammar.tokenizer().initial_state_id());
+        
         assert!(parser.is_valid());
         assert_eq!(parser.state.len(), 1, "Expected 1 state after feeding 'a'");
-        assert!(parser
-            .state
-            .contains_key(&grammar.tokenizer().initial_state_id()));
-
-        let mut parser_ab = parser.clone();
+        
+        // Check that we can continue parsing from this state
+        let parser_after_a = parser.clone();
+        
+        // Test 'ab' path
+        let mut parser_ab = parser_after_a.clone();
         parser_ab.feed(b"b");
-        assert!(parser_ab.is_valid());
+        println!("After 'ab': is_valid={}, state.len()={}", parser_ab.is_valid(), parser_ab.state.len());
+        assert!(parser_ab.is_valid(), "'ab' should be valid");
+        
+        // After completing 'ab', we should be at the initial tokenizer state
+        // (a complete terminal was matched)
+        println!("After 'ab' state keys: {:?}", parser_ab.state.keys().collect::<Vec<_>>());
+        assert!(
+            parser_ab.state.contains_key(&grammar.tokenizer().initial_state_id()),
+            "After complete input 'ab', should be at initial tokenizer state"
+        );
 
+        // Test 'ac' path  
         let mut parser_ac = IncrementalParser::new(&grammar);
         parser_ac.feed(b"a");
         parser_ac.feed(b"c");
-        assert!(parser_ac.is_valid());
+        assert!(parser_ac.is_valid(), "'ac' should be valid");
+        assert!(
+            parser_ac.state.contains_key(&grammar.tokenizer().initial_state_id()),
+            "After complete input 'ac', should be at initial tokenizer state"
+        );
 
+        // Test invalid path
         let mut parser_ad = IncrementalParser::new(&grammar);
         parser_ad.feed(b"a");
         parser_ad.feed(b"d");
-        assert!(!parser_ad.is_valid());
+        assert!(!parser_ad.is_valid(), "'ad' should be invalid");
     }
 
     #[test]
@@ -536,6 +557,8 @@ mod tests {
 
     #[test]
     fn test_nullability_handling_in_from_exprs() {
+        // This test verifies the raw grammar structure before optimization,
+        // so we use from_exprs_no_optimize to avoid terminal consolidation.
         let terminals = vec![
             (
                 "X_OPT".to_string(),
@@ -554,7 +577,7 @@ mod tests {
         )];
 
         let grammar_def =
-            GrammarDefinition::from_exprs(rules, terminals).expect("Failed to create GrammarDefinition");
+            GrammarDefinition::from_exprs_no_optimize(rules, terminals).expect("Failed to create GrammarDefinition");
 
         let name_term_x_opt = "X_OPT".to_string();
         let _term_x_opt_gid = *grammar_def

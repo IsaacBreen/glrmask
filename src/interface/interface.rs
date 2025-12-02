@@ -1397,6 +1397,20 @@ impl GrammarDefinition {
         Ok(def)
     }
 
+    /// Constructs a `GrammarDefinition` from expressions WITHOUT running optimization.
+    /// This is useful for tests that need to verify the raw grammar structure.
+    #[cfg(test)]
+    pub fn from_exprs_no_optimize(
+        grammar_exprs: Vec<(String, GrammarExpr)>,
+        regex_exprs: Vec<(String, Expr)>,
+    ) -> Result<Self, String> {
+        // Temporarily disable optimization
+        std::env::set_var("DISABLE_GRAMMAR_OPTIMIZATION", "1");
+        let result = Self::from_exprs(grammar_exprs, regex_exprs);
+        std::env::remove_var("DISABLE_GRAMMAR_OPTIMIZATION");
+        result
+    }
+
     /// Constructs a `GrammarDefinition` from parsed grammar rules.
     /// This is the common implementation used by both `from_ebnf` and `from_lark`.
     fn from_parsed_rules(
