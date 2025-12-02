@@ -384,26 +384,189 @@ impl JSONConvertible for GrammarDefinition {
 
 impl Display for GrammarDefinition {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        writeln!(f, "GrammarDefinition:")?;
-        writeln!(f, "  Start Production ID: {}", self.start_production_id)?;
-        writeln!(f, "  Productions ({}):", self.productions.len())?;
-        for production in &self.productions {
-            write!(f, "    {} -> ", production.lhs.0)?;
-            for (i, symbol) in production.rhs.iter().enumerate() {
-                match symbol {
-                    Symbol::Terminal(terminal) => write!(f, "{}", terminal.to_string())?,
-                    Symbol::NonTerminal(non_terminal) => write!(f, "{}", non_terminal.0)?,
-                }
-                if i < production.rhs.len() - 1 {
-                    write!(f, " ")?;
+        writeln!(f, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")?;
+        writeln!(f, "  GRAMMAR DEFINITION")?;
+        writeln!(f, "  {} productions  •  {} regex terminals  •  {} literal terminals  •  {} external terminals",
+            self.productions.len(),
+            self.regex_name_to_group_id.len(),
+            self.literal_to_group_id.len(),
+            self.external_name_to_group_id.len())?;
+        writeln!(f, "  Start production: #{}", self.start_production_id)?;
+        writeln!(f, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")?;
+        writeln!(f)?;
+
+        // Print regex terminals
+        if !self.regex_name_to_group_id.is_empty() {
+            writeln!(f, "REGEX TERMINALS:")?;
+            
+            // Collect and sort by group ID for consistent output
+            let mut sorted_regexes: Vec<_> = self.regex_name_to_group_id.iter().collect();
+            sorted_regexes.sort_by_key(|(_, gid)| *gid);
+            
+            for (name, group_id) in sorted_regexes {
+                let expr = self.group_id_to_expr.get(group_id);
+                write!(f, "  [{}] {:20}  =  ", group_id, name)?;
+                match expr {
+                    Some(e) => writeln!(f, "{}", Self::format_expr(e))?,
+                    None => writeln!(f, "<no expression>")?,
                 }
             }
             writeln!(f)?;
         }
-        writeln!(f)?;
+
+        // Print literal terminals
+        if !self.literal_to_group_id.is_empty() {
+            writeln!(f, "LITERAL TERMINALS:")?;
+            
+            // Collect and sort by group ID
+            let mut sorted_literals: Vec<_> = self.literal_to_group_id.iter().collect();
+            sorted_literals.sort_by_key(|(_, gid)| *gid);
+            
+            for (literal, group_id) in sorted_literals {
+                let display_str = String::from_utf8_lossy(literal);
+                writeln!(f, "  [{}] '{}'", group_id, display_str.escape_default())?;
+            }
+            writeln!(f)?;
+        }
+
+        // Print external terminals
+        if !self.external_name_to_group_id.is_empty() {
+            writeln!(f, "EXTERNAL TERMINALS:")?;
+            
+            let mut sorted_external: Vec<_> = self.external_name_to_group_id.iter().collect();
+            sorted_external.sort_by_key(|(_, gid)| *gid);
+            
+            for (name, group_id) in sorted_external {
+                writeln!(f, "  [{}] {} (external)", group_id, name)?;
+            }
+            writeln!(f)?;
+        }
+
+        // Print productions
+        writeln!(f, "PRODUCTIONS:")?;
+        for (i, production) in self.productions.iter().enumerate() {
+            let is_start = i == self.start_production_id;
+            let marker = if is_start { "*" } else { " " };
+            write!(f, "  {}{:2}. {}", marker, i, production)?;
+            writeln!(f)?;
+        }
+
         Ok(())
     }
 }
+
+impl GrammarDefinition {
+    /// Helper to format Expr for display (simplified readable format)
+    fn format_expr(expr: &Expr) -> String {
+        use crate::finite_automata::Expr::*;
+        
+        match expr {
+            U8Seq(bytes) => {
+                let s = String::from_utf8_lossy(bytes);
+                format!("\"{}\"", s.escape_default())
+            }
+            U8Class(set) => {
+                // Format as character class
+                format!("[{}]", Self::format_u8_class(set))
+            }
+            Quantifier(inner, qtype) => {
+                let inner_str = Self::format_expr(inner);
+                let suffix = match qtype {
+                    QuantifierType::ZeroOrMore => "*",
+                    QuantifierType::OneOrMore => "+",
+                    QuantifierType::ZeroOrOne => "?",
+                };
+                // Add parens if inner is complex
+                if matches!(**inner, Choice(_) | Seq(_)) {
+                    format!("({}){}", inner_str, suffix)
+                } else {
+                    format!("{}{}", inner_str, suffix)
+                }
+            }
+            Choice(exprs) => {
+                let parts: Vec<_> = exprs.iter().map(|e| Self::format_expr(e)).collect();
+                format!("({})", parts.join(" | "))
+            }
+            Seq(exprs) => {
+                let parts: Vec<_> = exprs.iter().map(|e| {
+                    let s = Self::format_expr(e);
+                    // Add parens around choices in sequences
+                    if matches!(e, Choice(_)) {
+                        format!("({})", s)
+                    } else {
+                        s
+                    }
+                }).collect();
+                parts.join(" ")
+            }
+            Epsilon => "ε".to_string(),
+            Shared(arc) => Self::format_expr(arc),
+        }
+    }
+
+    fn format_u8_class(set: &U8Set) -> String {
+        // Try to format as readable ranges
+        let mut result = String::new();
+        let mut i = 0u8;
+        let mut in_range = false;
+        let mut range_start = 0u8;
+        
+        loop {
+            if set.contains(i) {
+                if !in_range {
+                    range_start = i;
+                    in_range = true;
+                }
+            } else if in_range {
+                // End of range
+                if range_start == i.wrapping_sub(1) {
+                    // Single char
+                    result.push_str(&Self::escape_byte(range_start));
+                } else if range_start == i.wrapping_sub(2) {
+                    // Two chars, don't use range notation
+                    result.push_str(&Self::escape_byte(range_start));
+                    result.push_str(&Self::escape_byte(i.wrapping_sub(1)));
+                } else {
+                    // Actual range
+                    result.push_str(&Self::escape_byte(range_start));
+                    result.push('-');
+                    result.push_str(&Self::escape_byte(i.wrapping_sub(1)));
+                }
+                in_range = false;
+            }
+            
+            if i == 255 {
+                if in_range {
+                    if range_start == 255 {
+                        result.push_str(&Self::escape_byte(range_start));
+                    } else {
+                        result.push_str(&Self::escape_byte(range_start));
+                        result.push('-');
+                        result.push_str(&Self::escape_byte(255));
+                    }
+                }
+                break;
+            }
+            i = i.wrapping_add(1);
+        }
+        
+        result
+    }
+
+    fn escape_byte(b: u8) -> String {
+        match b {
+            b'\n' => "\\n".to_string(),
+            b'\r' => "\\r".to_string(),
+            b'\t' => "\\t".to_string(),
+            b'\\' => "\\\\".to_string(),
+            b']' => "\\]".to_string(),
+            b'-' => "\\-".to_string(),
+            32..=126 => (b as char).to_string(),
+            _ => format!("\\x{:02x}", b),
+        }
+    }
+}
+
 
 pub fn display_productions(productions: &[Production]) -> String {
     let mut result = String::new();
