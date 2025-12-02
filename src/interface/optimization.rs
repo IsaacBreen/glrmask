@@ -94,10 +94,13 @@ impl<'a> GrammarOptimizer<'a> {
                 self.stats.sccs_optimized += 1;
                 // Successful conversion
                 for (nt, expr) in resolved_map {
+                    debug!(4, "  Resolved NT '{}' to regex", nt.0);
                     self.resolved_nts.insert(nt, expr);
                 }
             }
         }
+        
+        debug!(4, "Resolved NTs: {:?}", self.resolved_nts.keys().map(|nt| &nt.0).collect::<Vec<_>>());
         
         // 4. Rewrite grammar
         self.rewrite_grammar();
@@ -480,6 +483,8 @@ impl<'a> GrammarOptimizer<'a> {
             // Should not happen in valid grammar
             NonTerminal("".to_string())
         };
+        
+        debug!(4, "new_terminals keys: {:?}", new_terminals.keys().map(|nt| &nt.0).collect::<Vec<_>>());
 
         // Rewrite productions
         let mut new_productions = Vec::new();

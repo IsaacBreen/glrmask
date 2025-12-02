@@ -173,14 +173,135 @@ impl JSONConvertible for GLRParser {
 
 impl Display for GLRParser {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "GLRParser(states: {}, prods: {}, terminals: {}, non_terminals: {})",
-            self.table.len(),
-            self.productions.len(),
-            self.terminal_map.len(),
-            self.non_terminal_map.len()
-        )
+        use crate::glr::table::Stage7ShiftsAndReducesLookaheadValue;
+        
+        writeln!(f, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")?;
+        writeln!(f, "  GLR PARSER")?;
+        writeln!(f, "  {} states  •  {} productions  •  {} terminals  •  {} non-terminals", 
+            self.table.len(), self.productions.len(), self.terminal_map.len(), self.non_terminal_map.len())?;
+        writeln!(f, "  Start: state {}", self.start_state_id.0)?;
+        writeln!(f, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")?;
+        writeln!(f)?;
+        
+        // Print Grammar Productions
+        writeln!(f, "GRAMMAR:")?;
+        for (i, prod) in self.productions.iter().enumerate() {
+            writeln!(f, "  {:2}. {}", i, prod)?;
+        }
+        writeln!(f)?;
+        
+        // Helper to get terminal name (clean, without Debug wrapper)
+        let get_terminal_name = |tid: &TerminalID| -> String {
+            self.terminal_map
+                .get_by_right(tid)
+                .map(|t| format!("{}", t))
+                .unwrap_or_else(|| format!("T{}", tid.0))
+        };
+        
+        // Helper to get non-terminal name (clean, without Debug wrapper)
+        let get_nonterminal_name = |ntid: &NonTerminalID| -> String {
+            self.non_terminal_map
+                .get_by_right(ntid)
+                .map(|nt| format!("{}", nt))
+                .unwrap_or_else(|| format!("NT{}", ntid.0))
+        };
+        
+        // Helper to format action
+        let format_action = |action: &Stage7ShiftsAndReducesLookaheadValue| -> String {
+            match action {
+                Stage7ShiftsAndReducesLookaheadValue::Shift(sid) => {
+                    format!("shift {}", sid.0)
+                }
+                Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids } => {
+                    let prod_info = if production_ids.len() == 1 {
+                        format!(" [#{}]", production_ids[0].0)
+                    } else if production_ids.len() > 1 {
+                        format!(" [{} prods]", production_ids.len())
+                    } else {
+                        String::new()
+                    };
+                    format!(
+                        "reduce {} (pop {}){}",
+                        get_nonterminal_name(nonterminal_id),
+                        len,
+                        prod_info
+                    )
+                }
+                Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
+                    let mut parts = Vec::new();
+                    if let Some(sid) = shift {
+                        parts.push(format!("shift {}", sid.0));
+                    }
+                    for (len, nts) in reduces {
+                        for (ntid, pids) in nts {
+                            let prod_info = if pids.len() == 1 {
+                                format!(" [#{}]", pids[0].0)
+                            } else if pids.len() > 1 {
+                                format!(" [{} prods]", pids.len())
+                            } else {
+                                String::new()
+                            };
+                            parts.push(format!(
+                                "reduce {} (pop {}){}",
+                                get_nonterminal_name(ntid),
+                                len,
+                                prod_info
+                            ));
+                        }
+                    }
+                    parts.join(" / ")
+                }
+            }
+        };
+        
+        // Print Parse Table
+        writeln!(f, "PARSE TABLE:")?;
+        for (state_id, row) in &self.table {
+            writeln!(f)?;
+            writeln!(f, "  State {}:", state_id.0)?;
+            
+            // Collect all actions for better formatting
+            let mut actions = Vec::new();
+            
+            // Collect shifts and reduces
+            let shifts_map = row.get_shifts_and_reduces_map();
+            for (tid, action) in &shifts_map {
+                actions.push((get_terminal_name(tid), format_action(action), false));
+            }
+            
+            // Add default reduce if present
+            if let Some(default) = &row.default_reduce {
+                actions.push(("<default>".to_string(), format_action(default), false));
+            }
+            
+            // Collect gotos
+            let gotos = row.get_gotos();
+            for (ntid, goto) in gotos {
+                if let Some(sid) = goto.state_id {
+                    let action_str = if goto.accept {
+                        format!("goto {} (ACCEPT)", sid.0)
+                    } else {
+                        format!("goto {}", sid.0)
+                    };
+                    actions.push((get_nonterminal_name(ntid), action_str, true));
+                } else if goto.accept {
+                    actions.push((get_nonterminal_name(ntid), "ACCEPT".to_string(), true));
+                }
+            }
+            
+            // Find max symbol width for alignment
+            let max_symbol_width = actions.iter()
+                .map(|(sym, _, _)| sym.len())
+                .max()
+                .unwrap_or(0);
+            
+            // Print all actions with alignment
+            for (symbol, action, is_goto) in actions {
+                writeln!(f, "    {:width$}  →  {}", symbol, action, width = max_symbol_width)?;
+            }
+        }
+        
+        Ok(())
     }
 }
 
