@@ -285,7 +285,7 @@ impl<'a> GrammarOptimizer<'a> {
                     }
                 }
                 
-                let prefix_expr = self.interner.seq(prefix_exprs);
+                let prefix_expr = self.seq_with_ignore(prefix_exprs);
                 if let Some(target) = target_scc_idx {
                     transitions[i].push((target, prefix_expr));
                 } else {
@@ -336,7 +336,7 @@ impl<'a> GrammarOptimizer<'a> {
                     }
                 }
                 
-                let suffix_expr = self.interner.seq(suffix_exprs);
+                let suffix_expr = self.seq_with_ignore(suffix_exprs);
                 let mut cache = HashMap::new();
                 let reversed_suffix = self.reverse_expr(&suffix_expr, &mut cache);
 
@@ -403,6 +403,37 @@ impl<'a> GrammarOptimizer<'a> {
         let group_id = group_id.expect("Terminal not found in grammar");
         let expr = self.grammar.group_id_to_expr.get(group_id).cloned().expect("Expr not found for group_id");
         self.interner.intern(expr)
+    }
+
+    /// Returns the ignore pattern as `ignore_expr*` if an ignore terminal is defined,
+    /// or None otherwise.
+    fn get_ignore_star_expr(&mut self) -> Option<Expr> {
+        let ignore_gid = self.grammar.ignore_terminal_id?.0;
+        let ignore_expr = self.grammar.group_id_to_expr.get(&ignore_gid)?.clone();
+        let interned = self.interner.intern(ignore_expr);
+        Some(self.interner.star(interned))
+    }
+
+    /// Build a sequence that interleaves ignore_pattern* between elements.
+    /// E.g., for [a, b, c] with ignore WS, produces: a WS* b WS* c
+    fn seq_with_ignore(&mut self, exprs: Vec<Expr>) -> Expr {
+        if exprs.is_empty() {
+            return Expr::Epsilon;
+        }
+        let ignore_star = self.get_ignore_star_expr();
+        match ignore_star {
+            Some(ign) => {
+                let mut interleaved = Vec::with_capacity(exprs.len() * 2 - 1);
+                for (i, e) in exprs.into_iter().enumerate() {
+                    if i > 0 {
+                        interleaved.push(ign.clone());
+                    }
+                    interleaved.push(e);
+                }
+                self.interner.seq(interleaved)
+            }
+            None => self.interner.seq(exprs),
+        }
     }
 
     fn solve_regular_system(&mut self, n: usize, transitions: &Vec<Vec<(usize, Expr)>>, finals: &Vec<Expr>) -> Vec<Expr> {
