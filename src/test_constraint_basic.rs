@@ -1666,9 +1666,10 @@ fn test_js_simplified_ebnf_string() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn test_js_like_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Define the EBNF grammar
+    // Note: Use lowercase for non-terminals (s, x) since uppercase names are treated as terminals.
     let ebnf_grammar = indoc! {r#"
-        S ::= X X '$';
-        X ::= ( '!' X | 'a' ) ';'?;
+        s ::= x x '$';
+        x ::= ( '!' x | 'a' ) ';'?;
     "#};
 
     // 2. Parse and compile the grammar
@@ -1692,6 +1693,7 @@ fn test_js_like_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>>
         max_original_llm_token_id,
         &GrammarConstraintConfig::default(),
     );
+    constraint.dump_precomputed4();
 
     // 5. Initialize state and get the initial mask
     let mut state = constraint.init();
