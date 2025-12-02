@@ -57,7 +57,7 @@ fn test_trivial() {
     );
     println!("Parser: {}", constraint.parser);
     // constraint.dump_precomputed2();
-    constraint.dump_precomputed4();
+    constraint.dump_parser_dwa();
 
     println!("Initializing constraint state...");
     let mut state = constraint.init();
@@ -113,7 +113,7 @@ fn test_x_semicolon_x() {
         2, // max_original_llm_token_id
         &GrammarConstraintConfig::default(),
     );
-    constraint.dump_precomputed4();
+    constraint.dump_parser_dwa();
 
     let mut state = constraint.init();
     
@@ -272,7 +272,7 @@ fn test_constraint_simple_simplified() {
     );
     // constraint.dump_precomputed1();
     // constraint.dump_precomputed2();
-    constraint.dump_precomputed4();
+    constraint.dump_parser_dwa();
 
     let mut constraint_state = constraint.init();
 
@@ -348,7 +348,7 @@ fn test_constraint_expression() {
         &GrammarConstraintConfig::default(),
     );
     // constraint.dump_precomputed2();
-    constraint.dump_precomputed4();
+    constraint.dump_parser_dwa();
     // constraint.dump_precomputed_special();
 
     // Initial state and step
@@ -421,7 +421,7 @@ fn test_constraint_expression_simplified_06_11_25() {
         &GrammarConstraintConfig::default(),
     );
     println!("Parser: {}", constraint.parser);
-    constraint.dump_precomputed4();
+    constraint.dump_parser_dwa();
 
     // Initial state and step
     let mut state = constraint.init();
@@ -757,7 +757,7 @@ fn test_ignore_token() {
     );
     println!("Parser: {}", constraint.parser);
     // constraint.dump_precomputed1();
-    constraint.dump_precomputed4();
+    constraint.dump_parser_dwa();
 
     // --- Runtime check ---
     // Scenario 1: commit "a", then " ", then "b"
@@ -1693,7 +1693,7 @@ fn test_js_like_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>>
         max_original_llm_token_id,
         &GrammarConstraintConfig::default(),
     );
-    constraint.dump_precomputed4();
+    constraint.dump_parser_dwa();
 
     // 5. Initialize state and get the initial mask
     let mut state = constraint.init();
@@ -2567,7 +2567,7 @@ fn test_constraint_repetition_a() {
         &GrammarConstraintConfig::default(),
     );
     println!("Parser: {}", constraint.parser);
-    constraint.dump_precomputed4();
+    constraint.dump_parser_dwa();
 
     // Initial state and step
     let mut state = constraint.init();
@@ -2698,7 +2698,7 @@ fn test_constraint_expression_trivial_direct() {
         &GrammarConstraintConfig::default(),
     );
     println!("Parser: {}", constraint.parser);
-    constraint.dump_precomputed4();
+    constraint.dump_parser_dwa();
 
     // Initial state and step
     let mut state = constraint.init();
@@ -2746,7 +2746,7 @@ fn test_constraint_expression_trivial_direct_limited_vocab() {
     );
     println!("Tokenizer: {}", constraint.tokenizer);
     println!("Parser: {}", constraint.parser);
-    constraint.dump_precomputed4();
+    constraint.dump_parser_dwa();
 
     // Initial state and step
     let mut state = constraint.init();

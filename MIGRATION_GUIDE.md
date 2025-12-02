@@ -4,10 +4,19 @@
 
 The JSON serialization format for `GrammarConstraint` has been overhauled to reduce size and improve parsing performance. **This is a breaking change** - old JSON files will not deserialize.
 
+### Terminology Changes (v0.3.0+)
+
+The following names have been updated for clarity:
+- `precomputed4` → `parser_dwa` (the precomputed deterministic weighted automaton)
+- `precompute4_vocab` → `parser_dwa_vocab` (vocabulary mappings for the Parser DWA)
+- `BelowBottomCharacterization` → `TerminalCharacterization` (in code)
+
+Backward-compatible aliases are provided but deprecated.
+
 ### Removed Fields
 
 The following fields are no longer serialized:
-- `precomputed1` (functionality replaced by `precomputed4`)
+- `precomputed1` (functionality replaced by `parser_dwa`)
 - `trie1_god` (runtime-only structure)
 - `run_precompute4` (always true)
 - `post_commit_allow_check_mode` (runtime-only)
@@ -65,7 +74,8 @@ The following types now use compact array formats instead of verbose objects:
 
 ### Changed Fields
 
-#### `precompute4_vocab` (StageVocab)
+#### `parser_dwa_vocab` (StageVocab)
+- **Old field name:** `precompute4_vocab`
 - **Old:** JSON object with all fields  
 - **New:** Only `internal_to_original` map serialized; other fields recomputed on load
 

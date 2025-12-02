@@ -121,8 +121,8 @@ def generate_terminal_dwa():
 \end{tikzpicture}
 }"""
 
-def generate_below_zero_chars():
-    """Generate below-zero characterizations - simplified for expression grammar."""
+def generate_terminal_characterizations():
+    """Generate terminal characterizations - simplified for expression grammar."""
     return r"""\tiny
 \textbf{Below-Zero Characterizations}\\[0.2em]
 \resizebox{0.95\textw}{!}{
@@ -186,7 +186,7 @@ def generate_below_zero_chars():
 }"""
 
 def generate_template_dfas():
-    """Generate template DFAs - state IDs for expression grammar."""
+    """Generate terminal DWAs - state IDs for expression grammar."""
     return r"""\tiny
 \textbf{Template DFAs}\\
 \textbf{(state IDs, push transitions)}\\[0.2em]
@@ -222,7 +222,7 @@ def generate_template_dfas():
 }"""
 
 def generate_dwa_with_templates():
-    """Terminal DWA with miniaturized template DFAs - simpler for expression grammar."""
+    """Terminal DWA with miniaturized terminal DWAs - simpler for expression grammar."""
     return r"""\resizebox{0.95\textw}{!}{
 \begin{tikzpicture}[>=Stealth,
     node distance=2.5cm and 2cm,
@@ -352,7 +352,7 @@ COMPONENT_GENERATORS = {
     'grammar': generate_grammar_content,
     'tokenizer_dfa': generate_tokenizer_dfa,
     'lalr_table': generate_lalr_table,
-    'below_zero_chars': generate_below_zero_chars,
+    'below_zero_chars': generate_terminal_characterizations,
     'template_dfas': generate_template_dfas,
     'terminal_dwa': generate_terminal_dwa,
     'dwa_with_templates': generate_dwa_with_templates,
@@ -476,7 +476,7 @@ def generate_latex_structure():
         r"  % ====================================================================",
         r"  ",
         r"  % Characterizations below Parse Table",
-        f"  \\node[box, below=\\midrowgap of parsetable] (characterizations) {{{generate_below_zero_chars()}}};",
+        f"  \\node[box, below=\\midrowgap of parsetable] (characterizations) {{{generate_terminal_characterizations()}}};",
         r"  ",
         r"  % Template DFAs below Characterizations",
         f"  \\node[box, below=2cm of characterizations] (template_dfas) {{{generate_template_dfas()}}};",
@@ -715,8 +715,8 @@ def generate_terminal_dwa():
 \end{tikzpicture}
 }"""
 
-def generate_below_zero_chars():
-    """Generate below-zero characterizations with textual tables."""
+def generate_terminal_characterizations():
+    """Generate terminal characterizations with textual tables."""
     return r"""\tiny
 \textbf{Below-Zero Characterizations}\\[0.2em]
 \resizebox{0.95\textw}{!}{
@@ -783,7 +783,7 @@ def generate_below_zero_chars():
 }"""
 
 def generate_template_dfas():
-    """Generate template DFAs - state IDs only."""
+    """Generate terminal DWAs - state IDs only."""
     return r"""\tiny
 \textbf{Template DFAs}\\
 \textbf{(state IDs, push transitions)}\\[0.2em]
@@ -820,7 +820,7 @@ def generate_template_dfas():
 }"""
 
 def generate_dwa_with_templates():
-    """Terminal DWA with miniaturized template DFAs on edges."""
+    """Terminal DWA with miniaturized terminal DWAs on edges."""
     return r"""\resizebox{0.95\textw}{!}{
 \begin{tikzpicture}[>=Stealth,
     node distance=2.5cm and 2cm,
@@ -874,7 +874,7 @@ def generate_dwa_with_templates():
 }"""
 
 def generate_flattened_nwa():
-    """Flattened NWA after epsilon-linking template DFAs."""
+    """Flattened NWA after epsilon-linking terminal DWAs."""
     return r"""\resizebox{0.95\textw}{!}{
 \begin{tikzpicture}[>=Stealth,
     node distance=1.3cm and 1.4cm,
@@ -1048,7 +1048,7 @@ def generate_latex_structure():
         r"  % ====================================================================",
         r"  ",
         r"  % Characterizations below Parse Table",
-        f"  \\node[box, below=\\midrowgap of parsetable] (characterizations) {{{generate_below_zero_chars()}}};",
+        f"  \\node[box, below=\\midrowgap of parsetable] (characterizations) {{{generate_terminal_characterizations()}}};",
         r"  ",
         r"  % Template DFAs below Characterizations",
         f"  \\node[box, below=2cm of characterizations] (template_dfas) {{{generate_template_dfas()}}};",

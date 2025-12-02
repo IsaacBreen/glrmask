@@ -1,6 +1,6 @@
 **Internal edges**
 `HashSet<(Some(NonTerminalID), StateID, TerminalID, (usize, NonTerminalID))>`
-*We've reduced by this nonterminal, now this is a possible revealed state. We keep parsing with this terminal ID and eventually we reduce below the bottom by this amount with this nonterminal.*
+*We've reduced by this nonterminal, now this is a possible revealed state. We keep parsing with this terminal ID and eventually we reduce through the stack by this amount with this nonterminal.*
 
 **Escape edges**
 `HashSet<(NonTerminalID, StateID, TerminalID, StateID, StateID)>`
@@ -8,7 +8,7 @@
 
 **Start reduce edges**
 `HashSet<(None(NonTerminalID), StateID, TerminalID, (usize, NonTerminalID))>`
-*We start in this state with this terminal. We keep parsing until eventually we reduce below the bottom by this amount with this nonterminal.*
+*We start in this state with this terminal. We keep parsing until eventually we reduce through the stack by this amount with this nonterminal.*
 
 **Start shift edges**
 `HashSet<(StateID, TerminalID, StateID)>`
@@ -47,12 +47,12 @@ The first stage is this. It doesn't use the precompute1 tree.
     - Initialize a stack with the state
     - Perform a goto for the nonterminal.
     - Continue parsing as normal.
-    - Once we pop below bottom of stack, note the nonterminal R2 we are reducing by and the pop number n *below the stack*.
+    - Once we pop through stack of stack, note the nonterminal R2 we are reducing by and the pop number n *below the stack*.
     - Add an edge to node R2 with (terminal, state, n)
 
 In implementing the parser, don't be fancy. Use a rudimentary approach. Just a queue of stacks, and when we hit a split we literally copy the stacks and put them into the queue.
 Process one queue item at a time.
-Once we pop below zero, we add an edge to the set.
+Once we pop through stack, we add an edge to the set.
 
 What about shift?
 Once we hit a shift, what should we do?
@@ -130,15 +130,15 @@ Ok let's redo the first stage
     - Initialize a stack with the state
     - Perform a goto for the nonterminal.
     - Continue parsing as normal.
-    - There are two ways this can end. Either we encounter a shift, or we eventually reduce below the bottom of the parse stack. (Or we don't find an action for this state.)
+    - There are two ways this can end. Either we encounter a shift, or we eventually reduce through the stack of the parse stack. (Or we don't find an action for this state.)
     - Once a shift is encountered:
         - Shift to the stack as normal.
         - Fun fact: At this point, the stack size can either be 2 or 3, because there are no zero-reductions in the table.
             - One item for the initial state, one for the goto, and one for the shift from the goto. OR
             - One item for the initial state, one for an immediate shift from the initial.
         - Add a shift edge `HashSet<(Option<NonTerminalID>, TerminalID, StateID, Vec<StateID>)>` with this nonterminal/terminal and initial state (top of the loop), and the 1 or 2 other items on the stack (excluding the bottom initial item - the vector is items that will be pushed to the stack, whereas the lone state is what'll be checked, a condition for using this edge).
-    - Once we pop below bottom of stack, note the nonterminal R2 we are reducing by and the pop number n *below the stack*.
-        - Add an edge `HashSet<(Option<NonTerminalID>, TerminalID, StateID, usize, NonTerminalID)>` with this nonterminal/terminal and initial state (top of the loop), the number of pops remaining to do below the bottom of the stack, and with the final nonterminal being the nonterminal R2 we're reducing with.
+    - Once we pop through stack of stack, note the nonterminal R2 we are reducing by and the pop number n *below the stack*.
+        - Add an edge `HashSet<(Option<NonTerminalID>, TerminalID, StateID, usize, NonTerminalID)>` with this nonterminal/terminal and initial state (top of the loop), the number of pops remaining to do through the stack of the stack, and with the final nonterminal being the nonterminal R2 we're reducing with.
 
 **Second stage**
 Use `Trie::special_map_grouped` on the precompute1 tree where the initial values are `HashSet<(Vec<StateID>, LLMTokenBV, PrecomputeNode1Index)>`.
