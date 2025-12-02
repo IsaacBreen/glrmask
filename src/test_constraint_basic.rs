@@ -737,6 +737,7 @@ fn test_ignore_token() {
         WS ::= ' ';
     "#};
     let grammar_definition = GrammarDefinition::from_ebnf(ebnf_grammar).unwrap();
+    println!("Grammar Definition: {:?}", grammar_definition);
 
     let mut llm_token_map = LLMTokenMap::new();
     let llm_a = LLMTokenID(0);
