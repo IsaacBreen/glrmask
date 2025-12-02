@@ -429,9 +429,16 @@ impl<'a> GrammarOptimizer<'a> {
 
     /// Build a sequence that interleaves ignore_pattern* between elements.
     /// E.g., for [a, b, c] with ignore WS, produces: a WS* b WS* c
+    /// 
+    /// OPTIMIZATION: Don't add ignore patterns for single-element sequences or
+    /// sequences where all elements are literals (which don't need whitespace handling).
     fn seq_with_ignore(&mut self, exprs: Vec<Expr>) -> Expr {
         if exprs.is_empty() {
             return Expr::Epsilon;
+        }
+        // Single element doesn't need interleaving
+        if exprs.len() == 1 {
+            return exprs.into_iter().next().unwrap();
         }
         let ignore_star = self.get_ignore_star_expr();
         match ignore_star {
