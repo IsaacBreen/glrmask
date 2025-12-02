@@ -1667,11 +1667,8 @@ fn test_js_simplified_ebnf_string() -> Result<(), Box<dyn std::error::Error>> {
 fn test_js_like_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Define the EBNF grammar
     let ebnf_grammar = indoc! {r#"
-        program ::= unary_expression unary_expression '$';
-        unary_expression ::= ( '!' unary_expression | 'X' ) ';'?;
-
-        // program ::= unary_expression ';'? unary_expression ';'? '$';
-        // unary_expression ::= '!' unary_expression | 'X' ;
+        S ::= X X '$';
+        X ::= ( '!' X | 'a' ) ';'?;
     "#};
 
     // 2. Parse and compile the grammar
@@ -1685,7 +1682,7 @@ fn test_js_like_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>>
     let llm_semicolons = LLMTokenID(0);
     let llm_empty_string_semicolon = LLMTokenID(1);
     llm_token_map.insert(b";;;".to_vec(), llm_semicolons);
-    llm_token_map.insert(b"X;".to_vec(), llm_empty_string_semicolon);
+    llm_token_map.insert(b"a;".to_vec(), llm_empty_string_semicolon);
     let max_original_llm_token_id = 1;
 
     // 4. Create the GrammarConstraint
@@ -1698,11 +1695,11 @@ fn test_js_like_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>>
 
     // 5. Initialize state and get the initial mask
     let mut state = constraint.init();
-    state.commit_bytes(b"X");
+    state.commit_bytes(b"a");
     state.print_gss();
     let mask2 = state.get_mask();
 
-    assert!(state.is_active(), "State should be active after committing 'X'");
+    assert!(state.is_active(), "State should be active after committing 'a'");
     let expected_mask2 = Bitset::from_iter(vec![llm_empty_string_semicolon.0]);
     assert_eq!(
         mask2,
