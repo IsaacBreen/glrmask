@@ -15,7 +15,7 @@ use crate::precompute4::nwa_optimizations::prune_continuations_from_final_states
 use crate::precompute4::resolve_negatives::{
     apply_cancellations_range, apply_finality_fixpoint_range, remove_negative_transitions_range
 };
-use crate::precompute4::template_nwa::{build_ignore_terminal_dwa, build_template_dwas};
+use crate::precompute4::template_nwa::{build_ignore_terminal_dwa, build_terminal_dwas};
 use crate::precompute4::weighted_automata::{
     common::Label, determinization_rustfst::determinize_nwa_to_dwa, DWA, NWA, NWABody, NWAStateID, NWAStates,
     StateID, Weight,
@@ -36,7 +36,15 @@ impl SimplifyRustfstConfig {
 
 pub use crate::precompute4::template_nwa::FullDWABuildError;
 
+/// The Parser DWA - the final precomputed artifact used for get_mask queries.
+/// This is a deterministic weighted automaton where weights are sparse bitvectors
+/// over LLM token equivalence classes.
+pub type ParserDWA = DWA;
+
+/// Type alias for backward compatibility
+#[deprecated(since = "0.3.0", note = "Use ParserDWA instead")]
 pub type Precomputed4 = DWA;
+
 pub type Signature = Vec<Vec<Option<TerminalID>>>;
 
 pub struct NwaTraversalData {
@@ -341,12 +349,20 @@ pub fn canonicalize_bundle(terminal_map: BTreeMap<Option<TerminalID>, Weight>) -
     (groups_vec.iter().map(|(_, terms)| terms.clone()).collect(), groups_vec.into_iter().map(|(w, _)| w).collect())
 }
 
-pub fn precompute4(parser: &GLRParser, input_nwa: &NWA) -> DWA {
-    crate::debug!(4, "Starting precompute4 (DWA construction)");
+/// Build the Parser DWA from the GLR parser and lexical NWA.
+/// 
+/// This is the main precomputation function that:
+/// 1. Builds terminal DWAs from terminal characterizations
+/// 2. Composes them with the lexical NWA
+/// 3. Determinizes the result into the final Parser DWA
+/// 
+/// The resulting DWA is used at runtime for O(1) mask queries.
+pub fn build_parser_dwa(parser: &GLRParser, input_nwa: &NWA) -> DWA {
+    crate::debug!(4, "Starting Parser DWA construction");
     let now = Instant::now();
-    let template_dwas = match build_template_dwas(parser) { Ok(m) => m, Err(e) => panic!("Failed to build template DWAs: {:?}", e), };
+    let terminal_dwas = match build_terminal_dwas(parser) { Ok(m) => m, Err(e) => panic!("Failed to build terminal DWAs: {:?}", e), };
     let ignore_dwa = build_ignore_terminal_dwa();
-    crate::debug!(4, "Built {} template DWAs in {:?}", template_dwas.len(), now.elapsed());
+    crate::debug!(4, "Built {} terminal DWAs in {:?}", terminal_dwas.len(), now.elapsed());
 
     let reversed_nwa = input_nwa.reverse();
     let traversal_data = reversed_nwa.compute_traversal_data();
@@ -402,18 +418,18 @@ pub fn precompute4(parser: &GLRParser, input_nwa: &NWA) -> DWA {
         // If there are many terminals, this might look expensive, but NWA union is cheap (just adding edges/start states).
         // Determinization handles the complexity.
         for term_opt in terminals {
-            let template = match term_opt {
+            let term_dwa = match term_opt {
                 Some(term_id) => {
                     if Some(*term_id) == parser.ignore_terminal_id {
                         &ignore_dwa
                     } else {
-                        template_dwas.get(term_id).unwrap_or(&ignore_dwa)
+                        terminal_dwas.get(term_id).unwrap_or(&ignore_dwa)
                     }
                 },
                 None => &ignore_dwa,
             };
             // We can convert DWA to NWA cheaply and union
-            NWA::union_assign(&mut combined_nwa, &NWA::from_dwa(template));
+            NWA::union_assign(&mut combined_nwa, &NWA::from_dwa(term_dwa));
         }
 
         // OPTIMIZATION: Skip NWA simplification for simple signatures.
@@ -443,7 +459,7 @@ pub fn precompute4(parser: &GLRParser, input_nwa: &NWA) -> DWA {
         // We ONLY include terminals relevant to the complex signatures to keep bitvectors small
         let mut all_terminals: BTreeSet<TerminalID> = used_terminals;
 
-        // Note: Unlike original code, we don't force ALL template_dwas keys into the Super DWA,
+        // Note: Unlike original code, we don't force ALL terminal_dwas keys into the Super DWA,
         // only those needed for the complex pool. This makes the Super DWA smaller.
 
         term_to_bit.insert(None, 0);
@@ -457,11 +473,11 @@ pub fn precompute4(parser: &GLRParser, input_nwa: &NWA) -> DWA {
         for (term_id_opt, bit) in &term_to_bit {
             let mut weight = Weight::zeros();
             weight.set(*bit, true);
-            let template_dwa = match term_id_opt {
-                Some(term_id) => if Some(*term_id) == parser.ignore_terminal_id { &ignore_dwa } else { template_dwas.get(term_id).unwrap_or(&ignore_dwa) },
+            let term_dwa = match term_id_opt {
+                Some(term_id) => if Some(*term_id) == parser.ignore_terminal_id { &ignore_dwa } else { terminal_dwas.get(term_id).unwrap_or(&ignore_dwa) },
                 None => &ignore_dwa,
             };
-            let mut weighted_dwa = template_dwa.clone();
+            let mut weighted_dwa = term_dwa.clone();
             weighted_dwa.apply_weight_inplace(&weight);
             NWA::union_assign(&mut super_nwa, &NWA::from_dwa(&weighted_dwa));
         }
@@ -601,10 +617,10 @@ pub fn precompute4(parser: &GLRParser, input_nwa: &NWA) -> DWA {
             let mut nwa_body = NWABody { start_states: vec![] };
             for (right_body, terminal_map) in nwa_bodies_map {
                 let (signature, concrete_weights) = canonicalize_bundle(terminal_map);
-                let template_nwa = template_cache.get(&signature).expect_else(|| format!("Template must exist for signature {:?}", signature));
+                let cached_nwa = template_cache.get(&signature).expect_else(|| format!("Template must exist for signature {:?}", signature));
                 let mut states = states_arena.borrow_mut();
                 let new_states_offset = states.len();
-                let composed_body = instantiate_nwa_template_into(template_nwa, &concrete_weights, &mut states, &right_body);
+                let composed_body = instantiate_nwa_template_into(cached_nwa, &concrete_weights, &mut states, &right_body);
                 let range = new_states_offset..states.len();
                 if !range.is_empty() {
                     apply_cancellations_range(&mut states, range.clone());
@@ -637,8 +653,14 @@ pub fn precompute4(parser: &GLRParser, input_nwa: &NWA) -> DWA {
     let mut final_dwa = resolve_negatives_and_optimize_and_determinize(parser, combined_nwa);
     // SKIP final simplification to test performance impact
     // final_dwa.simplify();
-    crate::debug!(4, "Precomputation complete. Final DWA stats: {}", final_dwa.stats());
+    crate::debug!(4, "Parser DWA construction complete. Stats: {}", final_dwa.stats());
     final_dwa
+}
+
+/// Deprecated alias for build_parser_dwa
+#[deprecated(since = "0.3.0", note = "Use build_parser_dwa instead")]
+pub fn precompute4(parser: &GLRParser, input_nwa: &NWA) -> DWA {
+    build_parser_dwa(parser, input_nwa)
 }
 
 pub fn precompute_token_bvs_and_signatures(reversed_nwa: &NWA, traversal_data: &NwaTraversalData, initial_values: Vec<(StateID, LLMTokenBV)>, offset: Label) -> (HashMap<StateID, LLMTokenBV>, HashSet<Signature>) {

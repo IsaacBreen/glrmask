@@ -69,7 +69,7 @@ valid_tokens = [i for i in range(enc.n_vocab) if mask.contains(i)]
 
 ## How It Works
 
-Sep1 uses a novel **below-zero characterization** of LR parsing:
+Sep1 uses a novel **terminal characterization** of LR parsing:
 
 1. **Grammar Analysis**: Compile grammar to GLR parser with per-terminal characterization automata
 2. **Tokenizer Integration**: Compose characterizations with tokenizer DFA  
@@ -84,8 +84,8 @@ At runtime, mask queries reduce to single automaton transitions and weight reads
 src/                    # Rust source code
 ├── lib.rs             # Library entry point
 ├── precompute4/       # Core precomputation algorithms
-│   ├── full_dwa.rs    # Deterministic weighted automaton
-│   └── below_zero.rs  # Below-zero characterization
+│   ├── full_dwa.rs    # Parser DWA construction
+│   └── characterize.rs # Terminal characterization
 └── constraint.rs      # Grammar constraint implementation
 
 python/                 # Python bindings

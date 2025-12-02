@@ -55,8 +55,21 @@ impl Display for ReduceCharacterization {
     }
 }
 
+/// Terminal Characterization: describes how a grammar terminal interacts with the parse stack.
+/// 
+/// For each terminal, this characterization captures:
+/// - Which parser states can directly shift the terminal (initial_shifts)
+/// - Which parser states trigger reductions when the terminal is lookahead (initial_reduces)
+/// - How reductions cascade through nonterminals (reduce_characterizations)
+///
+/// This is used to build weighted automata that can determine terminal validity
+/// by "probing" the existing parse stack without modifying it.
+///
+/// Note: In automata theory, this structure describes the behavior of a Weighted Pushdown
+/// System (WPDS) where transitions can "pop" stack symbols to reveal underlying states.
+/// After compilation, the push operations are resolved, yielding a true DWA.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BelowBottomCharacterization {
+pub struct TerminalCharacterization {
     pub terminal: TerminalID,
     pub initial_shifts: BTreeSet<InitialShift>,
     pub initial_reduces: BTreeSet<InitialReduce>,
@@ -64,7 +77,11 @@ pub struct BelowBottomCharacterization {
     pub all_nts: BTreeSet<NonTerminalID>,
 }
 
-impl BelowBottomCharacterization {
+/// Type alias for backward compatibility
+#[deprecated(since = "0.3.0", note = "Use TerminalCharacterization instead")]
+pub type BelowBottomCharacterization = TerminalCharacterization;
+
+impl TerminalCharacterization {
     /// Check if there is any cycle in the reduce characterization graph.
     /// A cycle exists if following `reveal_and_rereduces` edges between non-terminals
     /// can lead back to a previously visited non-terminal.
@@ -136,9 +153,9 @@ impl BelowBottomCharacterization {
     }
 }
 
-impl Display for BelowBottomCharacterization {
+impl Display for TerminalCharacterization {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        writeln!(f, "Characterization for Terminal {}:", self.terminal.0)?;
+        writeln!(f, "Terminal Characterization for Terminal {}:", self.terminal.0)?;
         if !self.initial_shifts.is_empty() {
             writeln!(f, "  Initial Shifts:")?;
             for (initial, shift) in &self.initial_shifts {
@@ -161,21 +178,28 @@ impl Display for BelowBottomCharacterization {
     }
 }
 
-pub fn compute_all_characterizations(parser: &GLRParser) -> BTreeMap<TerminalID, BelowBottomCharacterization> {
+/// Compute terminal characterizations for all terminals in the grammar.
+pub fn compute_all_characterizations(parser: &GLRParser) -> BTreeMap<TerminalID, TerminalCharacterization> {
     parser
         .terminal_map
         .right_values()
         .cloned()
-        .map(|terminal_id| (terminal_id, compute_below_bottom_characterization(parser, terminal_id)))
+        .map(|terminal_id| (terminal_id, compute_terminal_characterization(parser, terminal_id)))
         .collect()
 }
 
-pub fn compute_below_bottom_characterization(parser: &GLRParser, terminal_id: TerminalID) -> BelowBottomCharacterization {
+/// Compute the terminal characterization for a specific terminal.
+/// 
+/// This analyzes how the terminal would interact with the parse stack:
+/// - Which states can directly shift it
+/// - Which states trigger reductions
+/// - How reduction chains propagate
+pub fn compute_terminal_characterization(parser: &GLRParser, terminal_id: TerminalID) -> TerminalCharacterization {
     let all_nts: BTreeSet<_> = parser.non_terminal_map.right_values().cloned().collect();
     let (initial_shifts, initial_reduces) = collect_initial_actions(parser, terminal_id);
     let reduce_characterizations = collect_reduce_characterizations(parser, terminal_id);
 
-    let result = BelowBottomCharacterization {
+    let result = TerminalCharacterization {
         terminal: terminal_id,
         initial_shifts,
         initial_reduces,
@@ -319,15 +343,21 @@ pub fn compute_below_bottom_characterization(parser: &GLRParser, terminal_id: Te
         // and hidden left recursion have bounded consecutive reductions. Cycles here indicate
         // that right recursion elimination failed or was incomplete.
         panic!(
-            "BelowBottomCharacterization for terminal {} has a cycle: {:?}. \
+            "TerminalCharacterization for terminal {} has a cycle: {:?}. \
              This indicates unbounded reduction chains which violate the bounded-reductions guarantee. \
              Right recursion elimination should have removed these cycles.\n{}",
             terminal_id.0, cycle_names, diagnostic
         );
     }
 
-    crate::debug!(6, "Computed Below-Bottom Characterization for terminal {}:\n{}", terminal_id.0, result);
+    crate::debug!(6, "Computed Terminal Characterization for terminal {}:\n{}", terminal_id.0, result);
     result
+}
+
+/// Deprecated alias for compute_terminal_characterization
+#[deprecated(since = "0.3.0", note = "Use compute_terminal_characterization instead")]
+pub fn compute_below_bottom_characterization(parser: &GLRParser, terminal_id: TerminalID) -> TerminalCharacterization {
+    compute_terminal_characterization(parser, terminal_id)
 }
 
 fn collect_initial_actions(

@@ -28,7 +28,7 @@ use sep1::interface::{
 };
 use sep1::json_schema::{json_schema_to_ebnf, json_schema_to_grammar_exprs, JsonSchemaConverter};
 use sep1::json_serialization::{JSONConvertible, JSONNode};
-use sep1::precompute4::template_nwa::build_template_dwas;
+use sep1::precompute4::template_nwa::build_terminal_dwas;
 use sep1::precompute4::characterize::compute_all_characterizations;
 use sep1::tokenizer::LLMTokenID;
 use std::collections::hash_map::DefaultHasher;
@@ -519,7 +519,7 @@ impl PyGLRParser {
     /// 
     /// Returns a dict mapping terminal_id -> dict with DFA structure.
     fn get_template_dfas<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
-        let result = build_template_dwas(&self.inner).map_err(|e| {
+        let result = build_terminal_dwas(&self.inner).map_err(|e| {
             PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
                 "Failed to build template DWAs: {:?}",
                 e
@@ -748,24 +748,24 @@ impl PyGrammarConstraint {
     }
 
     pub fn internal_bv_to_original_bitset(&self, internal_bv: &PyHybridBitset) -> PyResult<PyBitset> {
-        let original_bv = self.inner.precompute4_vocab.internal_bv_to_original(&internal_bv.inner);
+        let original_bv = self.inner.parser_dwa_vocab.internal_bv_to_original(&internal_bv.inner);
         Ok(PyBitset { inner: original_bv })
     }
 
     pub fn internal_bv_to_original_hybrid_bitset(&self, internal_bv: &PyHybridBitset) -> PyResult<PyBitset> {
-        let original_bv = self.inner.precompute4_vocab.internal_bv_to_original(&internal_bv.inner);
+        let original_bv = self.inner.parser_dwa_vocab.internal_bv_to_original(&internal_bv.inner);
         Ok(PyBitset { inner: original_bv })
     }
 
     pub fn internal_bv_to_original(&self, it: Bound<'_, PyIterator>) -> PyResult<PyBitset> {
-        let original_bv = self.inner.precompute4_vocab.internal_bv_to_original(&RangeSet::from_iter(it.extract::<Vec<usize>>()?));
+        let original_bv = self.inner.parser_dwa_vocab.internal_bv_to_original(&RangeSet::from_iter(it.extract::<Vec<usize>>()?));
         Ok(PyBitset { inner: original_bv })
     }
 
     #[getter]
     fn vocab(&self) -> PyStageVocab {
         PyStageVocab {
-            inner: Arc::new(self.inner.precompute4_vocab.clone()),
+            inner: Arc::new(self.inner.parser_dwa_vocab.clone()),
         }
     }
 }

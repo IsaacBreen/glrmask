@@ -149,7 +149,7 @@ fn cmd_initial_mask(constraint: &GrammarConstraint, timing: bool, format: &str) 
     let mask = state.get_mask();
     let mask_time = start.elapsed();
     
-    let vocab_size = constraint.precompute4_vocab.max_original_llm_token_id + 1;
+    let vocab_size = constraint.parser_dwa_vocab.max_original_llm_token_id + 1;
     println!("{}", format_mask_output(&mask, format, vocab_size));
     
     if timing {
@@ -161,7 +161,7 @@ fn cmd_sequence(constraint: &GrammarConstraint, tokens: &[String], timing: bool)
     let token_ids = parse_token_ids(tokens)?;
     
     let mut state = constraint.init();
-    let _vocab_size = constraint.precompute4_vocab.max_original_llm_token_id + 1;
+    let _vocab_size = constraint.parser_dwa_vocab.max_original_llm_token_id + 1;
     
     println!("Processing {} tokens...\n", token_ids.len());
     
@@ -209,7 +209,7 @@ fn cmd_sequence(constraint: &GrammarConstraint, tokens: &[String], timing: bool)
 
 fn cmd_interactive(constraint: &GrammarConstraint) {
     let mut state = constraint.init();
-    let vocab_size = constraint.precompute4_vocab.max_original_llm_token_id + 1;
+    let vocab_size = constraint.parser_dwa_vocab.max_original_llm_token_id + 1;
     let stdin = io::stdin();
     
     println!("Interactive mode. Enter token IDs to commit, 'mask' to show current mask, 'reset' to restart, 'quit' to exit.\n");
@@ -280,9 +280,9 @@ fn cmd_validate(constraint: &GrammarConstraint, tokens: &[String]) -> Result<(),
 
 fn cmd_stats(constraint: &GrammarConstraint) {
     println!("Constraint Statistics:");
-    println!("  Vocabulary size: {}", constraint.precompute4_vocab.max_original_llm_token_id + 1);
-    println!("  Internal tokens: {}", constraint.precompute4_vocab.internal_to_original.len());
-    println!("  DWA states: {}", constraint.precomputed4.states.len());
+    println!("  Vocabulary size: {}", constraint.parser_dwa_vocab.max_original_llm_token_id + 1);
+    println!("  Internal tokens: {}", constraint.parser_dwa_vocab.internal_to_original.len());
+    println!("  DWA states: {}", constraint.parser_dwa.states.len());
     println!("  Parser productions: {}", constraint.parser.productions.len());
     println!("  Tokenizer DFA states: {}", constraint.tokenizer.dfa.states.len());
 }

@@ -2,12 +2,12 @@ use std::collections::BTreeMap;
 
 use crate::glr::parser::GLRParser;
 use crate::glr::table::{NonTerminalID, StateID as ParserStateID, TerminalID};
-use crate::precompute4::characterize::{compute_all_characterizations, BelowBottomCharacterization};
+use crate::precompute4::characterize::{compute_all_characterizations, TerminalCharacterization};
 use crate::precompute4::utils;
 use crate::precompute4::utils::DEFAULT_TRANSITION_SYMBOL;
 use crate::precompute4::weighted_automata::{DWA, NWA, NWABuildError, StateID, Weight};
 
-/// Error type for building the full DWA structures used in precompute4.
+/// Error type for building the Parser DWA structures.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FullDWABuildError {
     ParserStateIdOutOfRange { state_id: ParserStateID },
@@ -18,14 +18,23 @@ impl From<NWABuildError> for FullDWABuildError {
     fn from(e: NWABuildError) -> Self { FullDWABuildError::AutomatonBuild(e) }
 }
 
-/// Build a template NWA corresponding to the characterization of a single terminal.
-pub fn build_template_nwa_from_characterization(bb: &BelowBottomCharacterization) -> Result<NWA, FullDWABuildError> {
+/// Build a weighted NWA from a terminal characterization.
+/// 
+/// The resulting NWA encodes how the terminal interacts with the parse stack:
+/// - Initial shifts become labeled transitions
+/// - Initial reduces become chains with "pop" transitions (DEFAULT_TRANSITION_SYMBOL)
+/// - Reduction cascades are represented by nonterminal state nodes
+/// 
+/// Note: The "pop" transitions (DEFAULT_TRANSITION_SYMBOL) are what make this
+/// conceptually a Weighted Pushdown System - they consume stack symbols.
+/// After determinization, these are resolved into a true DWA.
+pub fn build_nwa_from_terminal_characterization(tc: &TerminalCharacterization) -> Result<NWA, FullDWABuildError> {
     let mut nwa = NWA::new();
     let w_all = Weight::all();
 
     // Node for each non-terminal.
     let mut nt_nodes: BTreeMap<NonTerminalID, StateID> = BTreeMap::new();
-    for &nt in &bb.all_nts {
+    for &nt in &tc.all_nts {
         let id = nwa.states.add_state();
         nt_nodes.insert(nt, id);
     }
@@ -34,7 +43,7 @@ pub fn build_template_nwa_from_characterization(bb: &BelowBottomCharacterization
     let start = nwa.body.start_states[0];
 
     // Initial shifts from start.
-    for &(initial_state, shift_state) in &bb.initial_shifts {
+    for &(initial_state, shift_state) in &tc.initial_shifts {
         let pos_initial = utils::encode_symbol_i16(initial_state)?;
         let neg_initial = utils::encode_negative_i16(initial_state)?;
         let neg_shift = utils::encode_negative_i16(shift_state)?;
@@ -53,7 +62,7 @@ pub fn build_template_nwa_from_characterization(bb: &BelowBottomCharacterization
     }
 
     // Initial reduces from start.
-    for &(initial_state, len, nt) in &bb.initial_reduces {
+    for &(initial_state, len, nt) in &tc.initial_reduces {
         let pos_initial = utils::encode_symbol_i16(initial_state)?;
         let target_nt_state = *nt_nodes.get(&nt).expect("nt_node must exist for initial_reduce");
 
@@ -73,7 +82,7 @@ pub fn build_template_nwa_from_characterization(bb: &BelowBottomCharacterization
     }
 
     // Actions from non-terminal states.
-    for (nt, rc) in &bb.reduce_characterizations {
+    for (nt, rc) in &tc.reduce_characterizations {
         let src_nt_state = *nt_nodes.get(nt).expect("nt_node must exist for reduce_char");
 
         for &(revealed_state, len, reduce_nt) in &rc.reveal_and_rereduces {
@@ -120,27 +129,36 @@ pub fn build_template_nwa_from_characterization(bb: &BelowBottomCharacterization
     Ok(nwa)
 }
 
-/// Build template DWAs for all terminals in the parser.
-pub fn build_template_dwas(parser: &GLRParser) -> Result<BTreeMap<TerminalID, DWA>, FullDWABuildError> {
+/// Deprecated alias for build_nwa_from_terminal_characterization
+#[deprecated(since = "0.3.0", note = "Use build_nwa_from_terminal_characterization instead")]
+pub fn build_template_nwa_from_characterization(tc: &TerminalCharacterization) -> Result<NWA, FullDWABuildError> {
+    build_nwa_from_terminal_characterization(tc)
+}
+
+/// Build terminal DWAs for all terminals in the parser.
+/// 
+/// Each terminal gets its own DWA that encodes how it interacts with the parse stack.
+/// These are later composed into the final Parser DWA.
+pub fn build_terminal_dwas(parser: &GLRParser) -> Result<BTreeMap<TerminalID, DWA>, FullDWABuildError> {
     // NOTE: Removed rayon parallelism - benchmarks showed single-threaded is 3x faster
     // (317ms vs 951ms) due to memory contention in dwa.simplify()/minimize operations.
     let all = compute_all_characterizations(parser);
-    crate::debug!(5, "Computed characterizations.");
+    crate::debug!(5, "Computed terminal characterizations.");
 
-    // Build templates sequentially - actually faster than parallel due to memory contention
-    let results: Result<Vec<_>, _> = all.into_iter().map(|(term, bb)| {
-        let nwa = build_template_nwa_from_characterization(&bb)?;
+    // Build terminal DWAs sequentially - actually faster than parallel due to memory contention
+    let results: Result<Vec<_>, _> = all.into_iter().map(|(term, tc)| {
+        let nwa = build_nwa_from_terminal_characterization(&tc)?;
         // Skip nwa.simplify() - let determinize handle it
         let mut dwa = nwa.determinize();
         dwa.simplify();
-        crate::debug!(7, "Built template DWA for terminal {:?}:", term);
+        crate::debug!(7, "Built terminal DWA for terminal {:?}:", term);
         Ok((term, dwa))
     }).collect();
 
     results.map(|vec| {
         let map: BTreeMap<TerminalID, DWA> = vec.into_iter().collect();
         
-        // Validation: Ensure at least one Template DFA has a merge (two incoming edges from different sources).
+        // Validation: Ensure at least one terminal DWA has a merge (two incoming edges from different sources).
         // This is a critical structural property for the complexity argument.
         let mut found_merge = false;
         for dwa in map.values() {
@@ -161,11 +179,17 @@ pub fn build_template_dwas(parser: &GLRParser) -> Result<BTreeMap<TerminalID, DW
         }
         
         if !found_merge {
-            println!("Validation Warning: No Template DFA exhibits the 'two incoming edges' rule (merge from different sources). This is expected for simple grammars but might be an issue for complex ones.");
+            println!("Validation Warning: No terminal DWA exhibits the 'two incoming edges' rule (merge from different sources). This is expected for simple grammars but might be an issue for complex ones.");
         }
 
         map
     })
+}
+
+/// Deprecated alias for build_terminal_dwas
+#[deprecated(since = "0.3.0", note = "Use build_terminal_dwas instead")]
+pub fn build_template_dwas(parser: &GLRParser) -> Result<BTreeMap<TerminalID, DWA>, FullDWABuildError> {
+    build_terminal_dwas(parser)
 }
 
 /// Identity DWA used for the "ignore" terminal: start is final and there are no transitions.

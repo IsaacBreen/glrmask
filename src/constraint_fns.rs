@@ -26,7 +26,7 @@ impl<'a> GrammarConstraintState<'a> {
         crate::debug!(7, "compute_internal_mask: state has {} tokenizer states", self.state.len());
 
         let mut queue: BTreeMap<isize, BTreeMap<WAStateID, LeveledGSS<ParseStateEdgeContent, RangeSetBlaze<usize>>>> = BTreeMap::new();
-        let dwa = &self.parent.precomputed4;
+        let dwa = &self.parent.parser_dwa;
         let dwa_start_state = &dwa.states[dwa.body.start_state];
 
         // 1. Seed initial states
@@ -167,7 +167,7 @@ impl<'a> GrammarConstraintState<'a> {
     /// For zero-allocation mask filling, see `fill_mask_i32` and `fill_mask_i32_ptr`.
     pub fn get_mask(&self) -> Bitset {
         let final_mask_internal = self.compute_internal_mask();
-        self.parent.precompute4_vocab.internal_bv_to_original(&final_mask_internal)
+        self.parent.parser_dwa_vocab.internal_bv_to_original(&final_mask_internal)
     }
     
     /// Fill an i32 slice with the token mask (compatible with llguidance format).
@@ -180,7 +180,7 @@ impl<'a> GrammarConstraintState<'a> {
     #[inline]
     pub fn fill_mask_i32(&self, out: &mut [i32]) {
         let final_mask_internal = self.compute_internal_mask();
-        self.parent.precompute4_vocab.fill_internal_bv_to_original_i32(&final_mask_internal, out);
+        self.parent.parser_dwa_vocab.fill_internal_bv_to_original_i32(&final_mask_internal, out);
     }
     
     /// Fill an i32 slice with the token mask via a raw pointer.
@@ -199,7 +199,7 @@ impl<'a> GrammarConstraintState<'a> {
     /// Returns the required buffer size in i32 elements for the mask.
     #[inline]
     pub fn mask_buffer_size_i32(&self) -> usize {
-        self.parent.precompute4_vocab.mask_buffer_size_i32()
+        self.parent.parser_dwa_vocab.mask_buffer_size_i32()
     }
 
     #[time_it]

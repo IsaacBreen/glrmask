@@ -30,7 +30,7 @@ use crate::{
     },
     interface::{CompiledGrammar, GrammarDefinition},
     json_serialization::{JSONConvertible, JSONNode},
-    precompute4::full_dwa::{precompute4, Precomputed4},
+    precompute4::full_dwa::{build_parser_dwa, ParserDWA},
     r#macro::is_debug_level_enabled,
     tokenizer::{LLMTokenID, LLMTokenMap, TokenizerStateID},
     types::{TerminalID as GrammarTokenID, TerminalID},
@@ -239,8 +239,12 @@ pub struct GrammarConstraint {
     pub tokenizer: Regex,
     pub parser: GLRParser,
 
-    // Precomputations
-    pub precomputed4: Precomputed4,
+    /// The Parser DWA - the core precomputed artifact for O(1) mask queries.
+    /// 
+    /// This deterministic weighted automaton encodes how grammar terminals
+    /// interact with parse stacks, with weights being sparse bitvectors
+    /// over LLM token equivalence classes.
+    pub parser_dwa: ParserDWA,
 
     /// LLM vocabulary stored as a trie for efficient lookup and compact serialization.
     pub vocab_trie: Arc<LLMVocabTrie>,
@@ -254,17 +258,30 @@ pub struct GrammarConstraint {
     /// Tokenizer state -> grammar terminal -> internal LLM token bitset.
     pub possible_matches: BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
 
-    pub precompute4_vocab: StageVocab,
+    /// Vocabulary mappings for the Parser DWA stage.
+    pub parser_dwa_vocab: StageVocab,
 }
 
 impl GrammarConstraint {
+    /// Backward compatibility accessor for precomputed4
+    #[deprecated(since = "0.3.0", note = "Use parser_dwa instead")]
+    pub fn precomputed4(&self) -> &ParserDWA {
+        &self.parser_dwa
+    }
+    
+    /// Backward compatibility accessor for precompute4_vocab
+    #[deprecated(since = "0.3.0", note = "Use parser_dwa_vocab instead")]
+    pub fn precompute4_vocab(&self) -> &StageVocab {
+        &self.parser_dwa_vocab
+    }
+
     pub fn assert_eq(&self, other: &Self) {
         assert_eq!(self.tokenizer, other.tokenizer);
         assert_eq!(self.parser, other.parser);
-        // Note: precomputed4 is skipped as it may differ due to runtime computation
+        // Note: parser_dwa is skipped as it may differ due to runtime computation
         assert_eq!(self.token_name_map, other.token_name_map);
         assert_eq!(self.possible_matches, other.possible_matches);
-        assert_eq!(self.precompute4_vocab, other.precompute4_vocab);
+        assert_eq!(self.parser_dwa_vocab, other.parser_dwa_vocab);
         assert_eq!(self.vocab_trie, other.vocab_trie);
     }
 }
@@ -426,8 +443,8 @@ impl JSONConvertible for GrammarConstraint {
     fn to_json(&self) -> JSONNode {
         let intermediate = GrammarConstraintJSON {
             tokenizer_dfa: self.tokenizer.dfa.clone(),
-            dwa: self.precomputed4.clone(),
-            vocab: self.precompute4_vocab.clone(),
+            dwa: self.parser_dwa.clone(),
+            vocab: self.parser_dwa_vocab.clone(),
             parser: self.parser.clone(),
             token_name_map: self.token_name_map.clone(),
             possible_matches: PossibleMatchesJSON::from_possible_matches(&self.possible_matches),
@@ -436,7 +453,7 @@ impl JSONConvertible for GrammarConstraint {
             // Don't serialize the legacy format anymore
             commit_vocab: None,
             original_llm_vocab: None,
-            max_orig_id: Some(self.precompute4_vocab.max_original_llm_token_id),
+            max_orig_id: Some(self.parser_dwa_vocab.max_original_llm_token_id),
         };
         intermediate.to_json()
     }
@@ -486,12 +503,12 @@ impl JSONConvertible for GrammarConstraint {
         Ok(GrammarConstraint {
             tokenizer,
             parser: intermediate.parser,
-            precomputed4: intermediate.dwa,
+            parser_dwa: intermediate.dwa,
             vocab_trie,
             commit_vocab,
             token_name_map: intermediate.token_name_map,
             possible_matches,
-            precompute4_vocab: intermediate.vocab,
+            parser_dwa_vocab: intermediate.vocab,
         })
     }
 }
@@ -1044,21 +1061,21 @@ impl GrammarConstraint {
         let mut possible_matches_precompute1 = computed_possible_matches;
 
         // OPTIMIZATION: Skip vocab optimization on skeleton_dwa.
-        // The precomputed4 DWA will be optimized below, and running optimization twice
+        // The Parser DWA will be optimized below, and running optimization twice
         // is redundant and expensive (was taking 2.4s).
         // optimize_dwa_and_vocab(&mut skeleton_dwa, &mut vocab, &mut possible_matches_precompute1);
 
-        // Precompute4 (DWA).
+        // Build Parser DWA
         let max_internal_llm_token_id = vocab.internal_max_llm_token;
         // Note: vocab.internal_max_llm_token might have changed due to optimization, which is fine.
 
-        // Convert the precompute1 Trie to NWA and run precompute4.
-        crate::debug!(3, "Running Precompute4");
+        // Convert the lexical DWA to NWA and build the Parser DWA.
+        crate::debug!(3, "Building Parser DWA");
         let nwa = NWA::from_dwa(&skeleton_dwa);
-        let mut precomputed4 = precompute4(&parser, &nwa);
+        let mut parser_dwa = build_parser_dwa(&parser, &nwa);
 
-        precomputed4.states.clip_weights(vocab.internal_max_llm_token);
-        optimize_dwa_and_vocab(&mut precomputed4, &mut vocab, &mut possible_matches_precompute1);
+        parser_dwa.states.clip_weights(vocab.internal_max_llm_token);
+        optimize_dwa_and_vocab(&mut parser_dwa, &mut vocab, &mut possible_matches_precompute1);
 
         let internal_to_original_sparse_matrix =
             StageVocab::build_internal_to_original_sparse_matrix(
@@ -1076,12 +1093,12 @@ impl GrammarConstraint {
         GrammarConstraint {
             tokenizer,
             parser,
-            precomputed4,
+            parser_dwa,
             possible_matches: possible_matches_precompute1,
             vocab_trie,
             commit_vocab,
             token_name_map,
-            precompute4_vocab: vocab,
+            parser_dwa_vocab: vocab,
         }
     }
 
@@ -1089,9 +1106,16 @@ impl GrammarConstraint {
     // Special precomputation
     // -----------------------------------------------------------------------
 
+    /// Dump the Parser DWA for debugging.
+    pub fn dump_parser_dwa(&self) {
+        println!("\n--- Parser DWA ---");
+        println!("{}", self.parser_dwa);
+    }
+    
+    /// Deprecated alias for dump_parser_dwa
+    #[deprecated(since = "0.3.0", note = "Use dump_parser_dwa instead")]
     pub fn dump_precomputed4(&self) {
-        println!("\n--- Precomputed4 DWA ---");
-        println!("{}", self.precomputed4);
+        self.dump_parser_dwa();
     }
 
     // -----------------------------------------------------------------------
@@ -1099,28 +1123,28 @@ impl GrammarConstraint {
     // -----------------------------------------------------------------------
 
     pub fn all_internal_llm_tokens_bitset(&self) -> LLMTokenBV {
-        LLMTokenBV::ones(self.precompute4_vocab.internal_max_llm_token + 1)
+        LLMTokenBV::ones(self.parser_dwa_vocab.internal_max_llm_token + 1)
     }
 
     pub fn internal_bv_to_original(&self, internal_bv: &LLMTokenBV) -> Bitset {
-        self.precompute4_vocab.internal_bv_to_original(internal_bv)
+        self.parser_dwa_vocab.internal_bv_to_original(internal_bv)
     }
 
     pub fn original_bv_to_internal(&self, original_bv: &LLMTokenBV) -> LLMTokenBV {
-        self.precompute4_vocab.original_bv_to_internal(original_bv)
+        self.parser_dwa_vocab.original_bv_to_internal(original_bv)
     }
 
     pub fn internal_to_original(&self, internal_id: LLMTokenID) -> Option<LLMTokenID> {
-        self.precompute4_vocab
+        self.parser_dwa_vocab
             .internal_to_original
             .get(&internal_id.0)
-            .and_then(|bv| bv.iter_up_to(self.precompute4_vocab.internal_max_llm_token).next())
+            .and_then(|bv| bv.iter_up_to(self.parser_dwa_vocab.internal_max_llm_token).next())
             .map(|v| LLMTokenID(v))
     }
 
     #[inline]
     pub fn original_id_to_internal(&self, original_id: LLMTokenID) -> Option<LLMTokenID> {
-        self.precompute4_vocab
+        self.parser_dwa_vocab
             .original_to_internal
             .get(&original_id.0)
             .map(|v| LLMTokenID(*v))
