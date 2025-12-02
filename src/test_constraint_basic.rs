@@ -2757,6 +2757,8 @@ fn test_constraint_expression_trivial_direct_limited_vocab() {
 
     // Commit "(i"
     state.commit(LLMTokenID(2)).unwrap();
+    println!("After committing (i):");
+    state.print_gss();
     let mask = state.get_mask();
     // After "(i", the inner E is satisfied. The outer E is satisfied. We now expect EOF.
     assert_eq!(mask, Bitset::from_iter(vec![]));
