@@ -28,6 +28,8 @@ use sep1::interface::{
 };
 use sep1::json_schema::{json_schema_to_ebnf, json_schema_to_grammar_exprs, JsonSchemaConverter};
 use sep1::json_serialization::{JSONConvertible, JSONNode};
+use sep1::precompute4::template_nwa::build_template_dwas;
+use sep1::precompute4::characterize::compute_all_characterizations;
 use sep1::tokenizer::LLMTokenID;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -507,6 +509,130 @@ impl PyGLRParser {
     #[getter]
     fn ignore_terminal_id(&self) -> Option<usize> {
         self.inner.ignore_terminal_id.map(|tid| tid.0)
+    }
+    
+    /// Get all template DFAs (one per terminal).
+    /// 
+    /// Template DFAs encode the "below-bottom characterization" - what parser
+    /// actions to take when we look below the stack. The edge labels are
+    /// encoded parser state IDs (positive = push, negative = pop).
+    /// 
+    /// Returns a dict mapping terminal_id -> dict with DFA structure.
+    fn get_template_dfas<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let result = build_template_dwas(&self.inner).map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "Failed to build template DWAs: {:?}",
+                e
+            ))
+        })?;
+        
+        let result_dict = PyDict::new_bound(py);
+        for (terminal_id, dwa) in result {
+            let dwa_dict = PyDict::new_bound(py);
+            
+            // Start state
+            dwa_dict.set_item("start_state", dwa.body.start_state)?;
+            
+            // States
+            let states_list = pyo3::types::PyList::empty_bound(py);
+            for (state_id, state) in dwa.states.0.iter().enumerate() {
+                let state_dict = PyDict::new_bound(py);
+                state_dict.set_item("id", state_id)?;
+                
+                // Final weight
+                if let Some(ref w) = state.final_weight {
+                    state_dict.set_item("is_final", true)?;
+                    state_dict.set_item("final_weight", format!("{}", w))?;
+                } else {
+                    state_dict.set_item("is_final", false)?;
+                }
+                
+                // Transitions: symbol -> target_state
+                let trans_dict = PyDict::new_bound(py);
+                for (&symbol, &target) in &state.transitions {
+                    // symbol is i32, encode as string showing +/- for push/pop
+                    // DEFAULT_TRANSITION_SYMBOL is i32::MAX - 1
+                    let symbol_str = if symbol == i32::MAX - 1 {
+                        "DEFAULT".to_string()
+                    } else if symbol >= 0 {
+                        format!("+{}", symbol)  // push (positive state ID)
+                    } else {
+                        format!("{}", symbol)  // pop (negative state ID)
+                    };
+                    trans_dict.set_item(symbol_str, target)?;
+                }
+                state_dict.set_item("transitions", trans_dict)?;
+                
+                states_list.append(state_dict)?;
+            }
+            dwa_dict.set_item("states", states_list)?;
+            
+            result_dict.set_item(terminal_id.0, dwa_dict)?;
+        }
+        
+        Ok(result_dict)
+    }
+    
+    /// Get all below-bottom characterizations (one per terminal).
+    /// 
+    /// Characterizations describe parser behavior when looking below the stack:
+    /// - initial_shifts: [(initial_state, shift_state), ...]
+    /// - initial_reduces: [(initial_state, len, nonterminal), ...]
+    /// - reduce_characterizations: {nt -> {reveal_and_rereduces, reveal_goto_shift_escapes}}
+    fn get_characterizations<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let all_chars = compute_all_characterizations(&self.inner);
+        
+        let result_dict = PyDict::new_bound(py);
+        for (terminal_id, bb) in all_chars {
+            let char_dict = PyDict::new_bound(py);
+            
+            // initial_shifts
+            let shifts_list = pyo3::types::PyList::empty_bound(py);
+            for &(initial, shift) in &bb.initial_shifts {
+                let tuple = PyTuple::new_bound(py, &[initial.0, shift.0]);
+                shifts_list.append(tuple)?;
+            }
+            char_dict.set_item("initial_shifts", shifts_list)?;
+            
+            // initial_reduces
+            let reduces_list = pyo3::types::PyList::empty_bound(py);
+            for &(initial, len, nt) in &bb.initial_reduces {
+                let tuple = PyTuple::new_bound(py, &[initial.0 as usize, len, nt.0]);
+                reduces_list.append(tuple)?;
+            }
+            char_dict.set_item("initial_reduces", reduces_list)?;
+            
+            // reduce_characterizations
+            let rc_dict = PyDict::new_bound(py);
+            for (nt, rc) in &bb.reduce_characterizations {
+                let nt_dict = PyDict::new_bound(py);
+                
+                let rereduces_list = pyo3::types::PyList::empty_bound(py);
+                for &(revealed, len, target_nt) in &rc.reveal_and_rereduces {
+                    let tuple = PyTuple::new_bound(py, &[revealed.0 as usize, len, target_nt.0]);
+                    rereduces_list.append(tuple)?;
+                }
+                nt_dict.set_item("reveal_and_rereduces", rereduces_list)?;
+                
+                let escapes_list = pyo3::types::PyList::empty_bound(py);
+                for &(revealed, goto, shift) in &rc.reveal_goto_shift_escapes {
+                    let tuple = PyTuple::new_bound(py, &[revealed.0 as usize, goto.0 as usize, shift.0 as usize]);
+                    escapes_list.append(tuple)?;
+                }
+                nt_dict.set_item("reveal_goto_shift_escapes", escapes_list)?;
+                
+                rc_dict.set_item(nt.0, nt_dict)?;
+            }
+            char_dict.set_item("reduce_characterizations", rc_dict)?;
+            
+            // all_nts
+            let nts_list: Vec<usize> = bb.all_nts.iter().map(|nt| nt.0).collect();
+            char_dict.set_item("all_nts", nts_list)?;
+            
+            result_dict.set_item(terminal_id.0, char_dict)?;
+        }
+        
+        Ok(result_dict)
     }
 }
 
