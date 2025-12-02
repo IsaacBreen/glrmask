@@ -254,10 +254,6 @@ pub struct GrammarConstraint {
     /// Tokenizer state -> grammar terminal -> internal LLM token bitset.
     pub possible_matches: BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
 
-    /// Tokenizer state -> internal LLM tokens that can start from this state.
-    /// This is used to filter DWA weights for non-representative tokenizer states.
-    pub tokens_startable_from_state: BTreeMap<TokenizerStateID, LLMTokenBV>,
-
     pub precompute4_vocab: StageVocab,
 }
 
@@ -268,7 +264,6 @@ impl GrammarConstraint {
         // Note: precomputed4 is skipped as it may differ due to runtime computation
         assert_eq!(self.token_name_map, other.token_name_map);
         assert_eq!(self.possible_matches, other.possible_matches);
-        assert_eq!(self.tokens_startable_from_state, other.tokens_startable_from_state);
         assert_eq!(self.precompute4_vocab, other.precompute4_vocab);
         assert_eq!(self.vocab_trie, other.vocab_trie);
     }
@@ -487,13 +482,6 @@ impl JSONConvertible for GrammarConstraint {
             ))
         };
 
-        // Recompute tokens_startable_from_state from tokenizer and vocab_trie
-        let tokens_startable_from_state = Self::compute_tokens_startable_from_state_from_trie(
-            &tokenizer,
-            &vocab_trie,
-            &intermediate.vocab,
-        );
-
         #[allow(deprecated)]
         Ok(GrammarConstraint {
             tokenizer,
@@ -503,7 +491,6 @@ impl JSONConvertible for GrammarConstraint {
             commit_vocab,
             token_name_map: intermediate.token_name_map,
             possible_matches,
-            tokens_startable_from_state,
             precompute4_vocab: intermediate.vocab,
         })
     }
@@ -1085,93 +1072,17 @@ impl GrammarConstraint {
         // Build the new trie-based vocab from the LLM token map
         let vocab_trie = Arc::new(LLMVocabTrie::from_token_map(&llm_token_map));
 
-        // Compute tokens_startable_from_state: for each tokenizer state, which tokens can begin
-        // processing from that state (i.e., have a first byte accepted by that state).
-        let tokens_startable_from_state = Self::compute_tokens_startable_from_state(
-            &tokenizer,
-            &internal_llm_token_map,
-        );
-
         #[allow(deprecated)]
         GrammarConstraint {
             tokenizer,
             parser,
             precomputed4,
             possible_matches: possible_matches_precompute1,
-            tokens_startable_from_state,
             vocab_trie,
             commit_vocab,
             token_name_map,
             precompute4_vocab: vocab,
         }
-    }
-
-    /// Compute which tokens can start from each tokenizer state.
-    /// A token can start from a state if its first byte is in the state's transition map.
-    fn compute_tokens_startable_from_state(
-        tokenizer: &Regex,
-        internal_llm_token_map: &BTreeMap<Vec<u8>, LLMTokenID>,
-    ) -> BTreeMap<TokenizerStateID, LLMTokenBV> {
-        let mut result: BTreeMap<TokenizerStateID, LLMTokenBV> = BTreeMap::new();
-        
-        for (token_bytes, token_id) in internal_llm_token_map {
-            if token_bytes.is_empty() {
-                // Empty tokens can "start" from any state (they don't consume bytes)
-                for state_idx in 0..tokenizer.dfa.states.len() {
-                    result.entry(TokenizerStateID(state_idx))
-                        .or_insert_with(LLMTokenBV::zeros)
-                        .insert(token_id.0);
-                }
-                continue;
-            }
-            
-            let first_byte = token_bytes[0];
-            for (state_idx, state) in tokenizer.dfa.states.iter().enumerate() {
-                if state.transitions.contains_key(first_byte) {
-                    result.entry(TokenizerStateID(state_idx))
-                        .or_insert_with(LLMTokenBV::zeros)
-                        .insert(token_id.0);
-                }
-            }
-        }
-        
-        result
-    }
-
-    /// Compute tokens_startable_from_state from vocab_trie (for deserialization).
-    fn compute_tokens_startable_from_state_from_trie(
-        tokenizer: &Regex,
-        vocab_trie: &LLMVocabTrie,
-        stage_vocab: &StageVocab,
-    ) -> BTreeMap<TokenizerStateID, LLMTokenBV> {
-        let mut result: BTreeMap<TokenizerStateID, LLMTokenBV> = BTreeMap::new();
-        
-        for (original_id, token_bytes) in vocab_trie.iter() {
-            let internal_id = match stage_vocab.original_to_internal.get(&original_id) {
-                Some(&id) => id,
-                None => continue,
-            };
-            
-            if token_bytes.is_empty() {
-                for state_idx in 0..tokenizer.dfa.states.len() {
-                    result.entry(TokenizerStateID(state_idx))
-                        .or_insert_with(LLMTokenBV::zeros)
-                        .insert(internal_id);
-                }
-                continue;
-            }
-            
-            let first_byte = token_bytes[0];
-            for (state_idx, state) in tokenizer.dfa.states.iter().enumerate() {
-                if state.transitions.contains_key(first_byte) {
-                    result.entry(TokenizerStateID(state_idx))
-                        .or_insert_with(LLMTokenBV::zeros)
-                        .insert(internal_id);
-                }
-            }
-        }
-        
-        result
     }
 
     // -----------------------------------------------------------------------
