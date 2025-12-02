@@ -45,6 +45,30 @@ cargo run --release --bin grammar-compiler -- \
 
 The `--format` argument is optional and defaults to auto-detection based on file extension (`.ebnf` or `.lark`). Explicitly supported values are `ebnf` and `lark`.
 
+### Using in Rust
+
+```rust
+use sep1::pipeline::{Pipeline, PipelineConfig};
+use sep1::constraint::GrammarConstraint;
+use std::collections::BTreeMap;
+
+// Simple: parse grammar and build constraint
+let constraint = Pipeline::from_ebnf_file("grammar.ebnf")?
+    .with_vocab_file("vocab.json")?
+    .build()?;
+
+// With custom config (e.g., skip optimization)
+let constraint = Pipeline::from_ebnf_file("grammar.ebnf")?
+    .with_config(PipelineConfig::no_optimization())
+    .with_vocab_file("vocab.json")?
+    .build()?;
+
+// Manual stage-by-stage building for advanced use cases
+let pipeline = Pipeline::from_ebnf_file("grammar.ebnf")?;
+let compiled = pipeline.build_compiled();  // Get CompiledGrammar
+// ... inspect or modify, then build constraint with vocabulary
+```
+
 ### Using in Python
 ```python
 import _sep1 as sep1
@@ -65,6 +89,24 @@ state = sep1.GrammarConstraintState(constraint)
 # Get valid token mask
 mask = state.get_mask_bv()
 valid_tokens = [i for i in range(enc.n_vocab) if mask.contains(i)]
+```
+
+## Pipeline Architecture
+
+The compilation pipeline has three stages:
+
+1. **Parsing**: Convert grammar source (EBNF, Lark, expressions) → `GrammarDefinition`
+2. **Compilation**: Build tokenizer + GLR parser → `CompiledGrammar`
+3. **Precomputation**: Build Parser DWA → `GrammarConstraint`
+
+Each stage can be customized or accessed independently:
+
+```rust
+// Access intermediate representations
+let pipeline = Pipeline::from_ebnf_file("grammar.ebnf")?;
+let definition = pipeline.definition();     // Stage 1 output
+let compiled = pipeline.build_compiled();   // Stage 2 output
+let constraint = pipeline.build()?;         // Stage 3 output
 ```
 
 ## How It Works
