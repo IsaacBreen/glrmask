@@ -460,6 +460,9 @@ impl GrammarDefinition {
     fn format_expr(expr: &Expr) -> String {
         use crate::finite_automata::Expr::*;
         
+        // Helper to check for empty sequence (epsilon)
+        let is_empty_seq = |e: &Expr| matches!(e, Seq(s) if s.is_empty()) || matches!(e, Epsilon);
+
         match expr {
             U8Seq(bytes) => {
                 let s = String::from_utf8_lossy(bytes);
@@ -484,6 +487,38 @@ impl GrammarDefinition {
                 }
             }
             Choice(exprs) => {
+                // Check for Optional pattern: P | epsilon or epsilon | P
+                if exprs.len() == 2 {
+                    let p = if is_empty_seq(&exprs[1]) {
+                        Some(&exprs[0])
+                    } else if is_empty_seq(&exprs[0]) {
+                        Some(&exprs[1])
+                    } else {
+                        None
+                    };
+
+                    if let Some(p) = p {
+                        // It is optional. Check if P is Quantifier(OneOrMore) -> P*
+                        if let Quantifier(inner, QuantifierType::OneOrMore) = p {
+                            let inner_str = Self::format_expr(inner);
+                            // Add parens if inner is complex
+                            if matches!(**inner, Choice(_) | Seq(_)) {
+                                return format!("({})*", inner_str);
+                            } else {
+                                return format!("{}*", inner_str);
+                            }
+                        } else {
+                            // Just P?
+                            let inner_str = Self::format_expr(p);
+                            if matches!(p, Choice(_) | Seq(_)) {
+                                return format!("({})?", inner_str);
+                            } else {
+                                return format!("{}?", inner_str);
+                            }
+                        }
+                    }
+                }
+
                 let parts: Vec<_> = exprs.iter().map(|e| Self::format_expr(e)).collect();
                 format!("({})", parts.join(" | "))
             }
