@@ -110,7 +110,7 @@ Sep1 supports JSON Schema constraints via EBNF conversion:
 
 ```bash
 # Test with a JSON schema from MaskBench
-SCHEMA_FILE="gcg-paper/downloads/repos/jsonschemabench/data/Github_easy/o10008.json" \
+SCHEMA_FILE="gcg-paper/downloads/repos/jsonschemabench/data/Github_ultra/o21378.json" \
     python3 scripts/test_json_schema.py
 ```
 
