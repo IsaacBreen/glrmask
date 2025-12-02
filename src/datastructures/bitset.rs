@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use std::fmt;
 use crate::datastructures::hybrid_bitset::RangeSet;
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use range_set_blaze::RangeSetBlaze;
@@ -11,9 +12,16 @@ use std::ops::{
 const WORD_SIZE: usize = 64;
 
 /// A bitset implementation using a vector of u64s.
-#[derive(Default, Clone, Eq, PartialEq, Hash, Ord, PartialOrd, Debug)]
+#[derive(Default, Clone, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub struct Bitset {
     pub(crate) words: Vec<u64>,
+}
+
+impl fmt::Debug for Bitset {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let indices: Vec<usize> = self.iter().collect();
+        f.debug_set().entries(indices.iter()).finish()
+    }
 }
 
 impl Bitset {
