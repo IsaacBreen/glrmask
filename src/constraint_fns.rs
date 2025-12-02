@@ -67,8 +67,25 @@ impl<'a> GrammarConstraintState<'a> {
             }
 
             if let Some((target_wa_state_id, weight)) = dwa_start_state.get_transition(tokenizer_state_id.0 as Label) {
+                // Note: We need to filter by tokens that can actually start from this tokenizer state.
+                // However, for the initial tokenizer state (state 0), all tokens in the DWA weight are valid.
+                // For non-initial states (mid-token), we need to filter by the first byte requirement.
+                let tokens_startable = self.parent.tokens_startable_from_state.get(&tokenizer_state_id);
+                let is_initial_state = tokenizer_state_id.0 == 0;
+                
                 let f = |acc: &Acc| {
-                    let new_rsb = acc.llm_tokens_union.inner.as_ref() & &weight.rsb;
+                    let intersected = acc.llm_tokens_union.inner.as_ref() & &weight.rsb;
+                    // Only filter for non-initial states (mid-token positions)
+                    let new_rsb = if !is_initial_state {
+                        if let Some(startable) = tokens_startable {
+                            &intersected & startable.inner.as_ref()
+                        } else {
+                            // No startable tokens means no tokens can start from this state
+                            return None;
+                        }
+                    } else {
+                        intersected
+                    };
                     if new_rsb.is_empty() { None } else { Some(new_rsb) }
                 };
                 let weighted_gss = gss.apply_and_prune(f);
