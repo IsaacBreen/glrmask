@@ -376,12 +376,27 @@ def main():
     else:
         constraint_json_str = args.constraint_file.read_text(encoding='utf-8')
 
-    # Initial model load
+    # Extract compilation time from the constraint JSON if available
+    # This is the GCT (Grammar Constraint Time) - the full time to compile grammar+vocab into constraint
+    compilation_time = None
+    try:
+        constraint_data = json.loads(constraint_json_str)
+        compilation_time = constraint_data.get('compilation_time_seconds')
+        if compilation_time:
+            print(f"GCT (Grammar Constraint Compilation Time): {compilation_time:.4f} seconds (from constraint file)")
+    except json.JSONDecodeError:
+        pass
+
+    # Initial model load (JSON deserialization time)
     print("Performing initial model load...")
     t_start_load = time.perf_counter()
     model = ModelClass.from_json_string(constraint_json_str)
-    load_time = time.perf_counter() - t_start_load
-    print(f"Model loaded in {load_time:.4f} seconds.")
+    deserialize_time = time.perf_counter() - t_start_load
+    print(f"Model loaded (JSON deserialization) in {deserialize_time:.4f} seconds.")
+    
+    # Use compilation_time if available, otherwise fall back to deserialize_time
+    # The compilation_time is the true GCT - it includes all compilation steps
+    load_time = compilation_time if compilation_time is not None else deserialize_time
 
     if args.print_stats:
         print_model_statistics(model, args.model.name)

@@ -146,6 +146,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         &config,
     );
 
+    // Record the total compilation time (grammar + vocab loading + constraint building)
+    let compilation_time_seconds = total_start.elapsed().as_secs_f64();
+    
     if show_output {
         println!("  {CYAN}└─ Total build time: {}{RESET}", format_duration(build_start.elapsed()));
     }
@@ -174,7 +177,22 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
         // Serialize to JSON in memory
         let json_node = grammar_constraint.to_json();
-        let json_bytes = serde_json::to_vec(&json_node).map_err(|e| e.to_string())?;
+        
+        // Add compilation metadata to the JSON
+        // The compilation_time_seconds includes everything: grammar parsing, vocab loading,
+        // tokenizer construction, parser table generation, DWA construction, etc.
+        let json_with_metadata = match json_node {
+            sep1::json_serialization::JSONNode::Object(mut obj) => {
+                obj.insert(
+                    "compilation_time_seconds".to_string(), 
+                    sep1::json_serialization::JSONNode::Float(compilation_time_seconds)
+                );
+                sep1::json_serialization::JSONNode::Object(obj)
+            },
+            other => other, // Shouldn't happen, but be safe
+        };
+        
+        let json_bytes = serde_json::to_vec(&json_with_metadata).map_err(|e| e.to_string())?;
 
         // Write to file (with optional compression)
         let output_file = File::create(&output_path)?;
