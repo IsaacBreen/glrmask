@@ -1170,11 +1170,7 @@ impl GrammarDefinition {
             external_name_to_group_id: BiBTreeMap::new(),
         };
 
-        // NOTE: Optimization is disabled by default because it can convert CFG grammars
-        // to regular expressions in cases where the CFG structure is needed for correct
-        // parsing behavior (e.g., grammars with optional elements that require lookahead).
-        // Call def.optimize() explicitly if you need terminal optimization.
-        // def.optimize();
+        def.optimize();
 
         Ok(def)
     }
