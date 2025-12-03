@@ -1397,7 +1397,7 @@ impl Expr {
                 }
             }
         }
-        crate::debug!(4, "optimize done: iter={} seq={} choice={} elapsed={:.2?}", 
+        crate::debug!(5, "optimize done: iter={} seq={} choice={} elapsed={:.2?}",
             iterations, seq_calls, choice_calls, start.elapsed());
         values.pop().unwrap()
     }
