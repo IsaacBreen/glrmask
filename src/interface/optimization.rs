@@ -59,7 +59,7 @@ impl<'a> GrammarOptimizer<'a> {
     }
 
     fn optimize(&mut self) {
-        todo!()
+        // todo
     }
 
     fn get_expr_for_terminal(&mut self, t: &Terminal) -> Expr {
