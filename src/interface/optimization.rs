@@ -1440,10 +1440,22 @@ mod tests {
             expression ::= 'x' ;
             EOF ::= '$';
         "#};
-
         let mut grammar = GrammarDefinition::from_ebnf(ebnf_grammar).unwrap();
         optimize_grammar(&mut grammar);
         println!("{grammar}");
         assert_eq!(grammar.terminal_to_group_id().len(), 1);
+
+        let x = Expr::U8Seq(b"x".to_vec());
+        let semi_opt = Expr::Quantifier(Box::new(Expr::U8Seq(b";".to_vec())), QuantifierType::ZeroOrOne);
+        let eof = Expr::U8Seq(b"$".to_vec());
+        let stmt = Expr::Seq(vec![x.clone(), semi_opt.clone()]);
+
+        let expected_regex = Expr::Seq(vec![
+            x, semi_opt,
+            Expr::Quantifier(Box::new(stmt), QuantifierType::ZeroOrOne),
+            eof
+        ]);
+
+        assert_eq!(grammar.group_id_to_expr.get(&0).unwrap(), &expected_regex);
     }
 }
