@@ -149,6 +149,7 @@ impl<'a> GrammarOptimizer<'a> {
             let t1 = std::time::Instant::now();
             let Some(solved) = solve_single_equation_rc(&nt_eq, nt_to_eliminate) else {
                 // Non-linear recursion - can't solve with simple Arden's lemma
+                debug!(5, "Failed to solve NT '{}' (non-linear recursion)", nt_to_eliminate);
                 equations.insert(nt_to_eliminate.clone(), nt_eq);
                 failed_count += 1;
                 solve_time += t1.elapsed();
@@ -181,7 +182,10 @@ impl<'a> GrammarOptimizer<'a> {
         // Now expand all NtRefs in the solved start equation
         let expand_start = std::time::Instant::now();
         let solved_start_rc = Rc::new(solved_start_symbolic);
-        let expanded_start = expand_with_solutions_cached(&solved_start_rc, &solutions, &mut expansion_cache);
+        let Some(expanded_start) = expand_with_solutions_cached(&solved_start_rc, &solutions, &mut expansion_cache) else {
+            debug!(4, "Grammar optimization failed: cycle detected during expansion (mutual recursion)");
+            return;
+        };
         debug!(5, "Phase 2: expanded start NT in {:?}", expand_start.elapsed());
         
         // Convert the final RegexTerm to Expr
@@ -834,32 +838,46 @@ fn contains_nt_memoized(
 
 /// Expand a term by substituting all NT references with their solutions
 /// Uses memoization and Rc sharing to avoid exponential blowup
+/// Returns None if a cycle is detected (mutual recursion)
 fn expand_with_solutions(
     term: &Rc<RegexTerm>,
     solutions: &HashMap<String, Rc<RegexTerm>>
-) -> Rc<RegexTerm> {
+) -> Option<Rc<RegexTerm>> {
     let mut cache: HashMap<*const RegexTerm, Rc<RegexTerm>> = HashMap::new();
     expand_with_solutions_cached(term, solutions, &mut cache)
 }
 
 /// Expand all NtRefs in a term by substituting solutions.
 /// Uses iterative deepening with explicit stack to avoid stack overflow.
+/// 
+/// `expanding` tracks NTs currently being expanded to detect cycles.
 fn expand_with_solutions_cached(
     root: &Rc<RegexTerm>,
     solutions: &HashMap<String, Rc<RegexTerm>>,
     cache: &mut HashMap<*const RegexTerm, Rc<RegexTerm>>
-) -> Rc<RegexTerm> {
+) -> Option<Rc<RegexTerm>> {
+    let mut expanding: HashSet<String> = HashSet::new();
+    expand_with_solutions_cached_inner(root, solutions, cache, &mut expanding)
+}
+
+fn expand_with_solutions_cached_inner(
+    root: &Rc<RegexTerm>,
+    solutions: &HashMap<String, Rc<RegexTerm>>,
+    cache: &mut HashMap<*const RegexTerm, Rc<RegexTerm>>,
+    expanding: &mut HashSet<String>
+) -> Option<Rc<RegexTerm>> {
     // Use stacker to handle deep recursion by switching to heap allocation when needed
     stacker::maybe_grow(32 * 1024, 1024 * 1024, || {
-        expand_with_solutions_cached_impl(root, solutions, cache)
+        expand_with_solutions_cached_impl(root, solutions, cache, expanding)
     })
 }
 
 fn expand_with_solutions_cached_impl(
     term: &Rc<RegexTerm>,
     solutions: &HashMap<String, Rc<RegexTerm>>,
-    cache: &mut HashMap<*const RegexTerm, Rc<RegexTerm>>
-) -> Rc<RegexTerm> {
+    cache: &mut HashMap<*const RegexTerm, Rc<RegexTerm>>,
+    expanding: &mut HashSet<String>
+) -> Option<Rc<RegexTerm>> {
     let ptr = Rc::as_ptr(term);
     
     // For NtRef, resolve to solution and expand that
@@ -868,27 +886,37 @@ fn expand_with_solutions_cached_impl(
             // Check if solution is already expanded in cache
             let sol_ptr = Rc::as_ptr(solution);
             if let Some(cached) = cache.get(&sol_ptr) {
-                return cached.clone();
+                return Some(cached.clone());
             }
+            // Check for cycles - if we're already expanding this NT, we have mutual recursion
+            if expanding.contains(n) {
+                // Cycle detected - cannot expand
+                return None;
+            }
+            // Mark as expanding
+            expanding.insert(n.clone());
             // Recursively expand the solution
-            return expand_with_solutions_cached(solution, solutions, cache);
+            let result = expand_with_solutions_cached_inner(solution, solutions, cache, expanding)?;
+            expanding.remove(n);
+            return Some(result);
         } else {
-            return term.clone();
+            return Some(term.clone());
         }
     }
     
     // Check cache for non-NtRef terms
     if let Some(cached) = cache.get(&ptr) {
-        return cached.clone();
+        return Some(cached.clone());
     }
     
     let result = match term.as_ref() {
         RegexTerm::Epsilon | RegexTerm::Concrete(_) => term.clone(),
         RegexTerm::NtRef(_) => unreachable!(), // Handled above
         RegexTerm::Seq(parts) => {
-            let new_parts: Vec<Rc<RegexTerm>> = parts.iter()
-                .map(|p| expand_with_solutions_cached(p, solutions, cache))
+            let new_parts: Option<Vec<Rc<RegexTerm>>> = parts.iter()
+                .map(|p| expand_with_solutions_cached_inner(p, solutions, cache, expanding))
                 .collect();
+            let new_parts = new_parts?;
             let changed = parts.iter().zip(new_parts.iter())
                 .any(|(old, new)| !Rc::ptr_eq(old, new));
             if changed {
@@ -898,9 +926,10 @@ fn expand_with_solutions_cached_impl(
             }
         }
         RegexTerm::Choice(alts) => {
-            let new_alts: Vec<Rc<RegexTerm>> = alts.iter()
-                .map(|a| expand_with_solutions_cached(a, solutions, cache))
+            let new_alts: Option<Vec<Rc<RegexTerm>>> = alts.iter()
+                .map(|a| expand_with_solutions_cached_inner(a, solutions, cache, expanding))
                 .collect();
+            let new_alts = new_alts?;
             let changed = alts.iter().zip(new_alts.iter())
                 .any(|(old, new)| !Rc::ptr_eq(old, new));
             if changed {
@@ -910,7 +939,7 @@ fn expand_with_solutions_cached_impl(
             }
         }
         RegexTerm::Star(inner) => {
-            let new_inner = expand_with_solutions_cached(inner, solutions, cache);
+            let new_inner = expand_with_solutions_cached_inner(inner, solutions, cache, expanding)?;
             if Rc::ptr_eq(inner, &new_inner) {
                 term.clone()
             } else {
@@ -920,7 +949,7 @@ fn expand_with_solutions_cached_impl(
     };
     
     cache.insert(ptr, result.clone());
-    result
+    Some(result)
 }
 
 /// Substitute all occurrences of `nt` in `term` with `replacement`
