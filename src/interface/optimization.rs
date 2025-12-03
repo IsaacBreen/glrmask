@@ -1408,10 +1408,7 @@ mod tests {
         println!("Scaled: n={}, time={:.4}s", n_scaled, t_scaled);
         println!("Ratio T({})/T({}): {:.2}", n_scaled, n, ratio);
 
-        // The algorithm is approximately O(n^2) due to the contains_nt checks during solve
-        // For 3x input, we expect roughly 9x time (with some variation)
-        // We use 20 as a generous upper bound to account for cache effects and system variance
-        assert!(ratio < 20.0, "Performance scaling looks worse than quadratic (ratio {:.2})", ratio);
+        assert!(ratio < 6.0, "Performance scaling looks worse than linear (ratio {:.2})", ratio);
     }
 
     #[test]
