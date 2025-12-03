@@ -297,7 +297,12 @@ impl<'a> GrammarOptimizer<'a> {
         let solved = self.solve_regular_system(scc_nts.len(), &transitions, &finals);
         let mut result = HashMap::new();
         for (i, expr) in solved.into_iter().enumerate() {
-            // We now allow nullable expressions and handle them in rewrite_grammar
+            // Don't convert nullable expressions to terminals - the parser needs
+            // epsilon productions to correctly handle empty matches.
+            if matches!(get_expr_nullability(&expr), ExprNullability::CanBeNull | ExprNullability::AlwaysNull) {
+                debug!(4, "  Skipping nullable NT '{}' conversion", scc_nts[i].0);
+                return None;
+            }
             result.insert(scc_nts[i].clone(), Expr::Shared(Arc::new(expr)));
         }
         Some(result)
@@ -358,7 +363,12 @@ impl<'a> GrammarOptimizer<'a> {
         let mut cache = HashMap::new();
         for (i, expr) in solved.into_iter().enumerate() {
             let reversed = self.reverse_expr(&expr, &mut cache);
-            // We now allow nullable expressions and handle them in rewrite_grammar
+            // Don't convert nullable expressions to terminals - the parser needs
+            // epsilon productions to correctly handle empty matches.
+            if matches!(get_expr_nullability(&reversed), ExprNullability::CanBeNull | ExprNullability::AlwaysNull) {
+                debug!(4, "  Skipping nullable NT '{}' conversion (left-linear)", scc_nts[i].0);
+                return None;
+            }
             result.insert(scc_nts[i].clone(), Expr::Shared(Arc::new(reversed)));
         }
         Some(result)
@@ -446,92 +456,6 @@ impl<'a> GrammarOptimizer<'a> {
         }
     }
 
-    fn make_non_nullable(&mut self, expr: &Expr, cache: &mut HashMap<Expr, Option<Expr>>) -> Option<Expr> {
-        if let Some(result) = cache.get(expr) {
-            return result.clone();
-        }
-
-        let result = match expr {
-            Expr::Epsilon => None,
-            Expr::U8Seq(bytes) => if bytes.is_empty() { None } else { Some(expr.clone()) },
-            Expr::U8Class(_) => Some(expr.clone()),
-            Expr::Shared(inner) => self.make_non_nullable(inner, cache),
-            Expr::Quantifier(inner, q_type) => {
-                let inner_nn = self.make_non_nullable(inner, cache)?;
-                // If we have inner_nn, then:
-                // * -> +
-                // + -> +
-                // ? -> inner_nn
-                match q_type {
-                    QuantifierType::ZeroOrMore | QuantifierType::OneOrMore => {
-                        Some(self.interner.intern(Expr::Quantifier(Box::new(inner_nn), QuantifierType::OneOrMore)))
-                    }
-                    QuantifierType::ZeroOrOne => Some(inner_nn),
-                }
-            }
-            Expr::Choice(exprs) => {
-                let mut nn_exprs = Vec::new();
-                for e in exprs {
-                    if let Some(nn) = self.make_non_nullable(e, cache) {
-                        nn_exprs.push(nn);
-                    }
-                }
-                if nn_exprs.is_empty() {
-                    None
-                } else {
-                    Some(self.interner.choice(nn_exprs))
-                }
-            }
-            Expr::Seq(exprs) => {
-                // E1 E2 ... En
-                // If E1 is not nullable: return Seq
-                // If E1 is nullable: Choice( E1_nn E2...En, make_non_nullable(E2...En) )
-                
-                if exprs.is_empty() { None }
-                else {
-                    let first = &exprs[0];
-                    let rest = exprs[1..].to_vec(); 
-                    
-                    let first_nullability = get_expr_nullability(first);
-                    
-                    match first_nullability {
-                        ExprNullability::NeverNull => Some(expr.clone()), // Whole sequence is non-nullable
-                        ExprNullability::AlwaysNull => {
-                            // E1 is epsilon. Result is make_non_nullable(rest)
-                            let rest_seq = self.interner.seq(rest);
-                            self.make_non_nullable(&rest_seq, cache)
-                        }
-                        ExprNullability::CanBeNull => {
-                            let mut choices = Vec::new();
-                            
-                            // Option 1: E1 contributes non-empty, followed by rest
-                            if let Some(first_nn) = self.make_non_nullable(first, cache) {
-                                let mut seq_parts = vec![first_nn];
-                                seq_parts.extend(rest.clone());
-                                choices.push(self.interner.seq(seq_parts));
-                            }
-                            
-                            // Option 2: E1 is empty, result depends on rest
-                            let rest_seq = self.interner.seq(rest);
-                            if let Some(rest_nn) = self.make_non_nullable(&rest_seq, cache) {
-                                choices.push(rest_nn);
-                            }
-                            
-                            if choices.is_empty() {
-                                None
-                            } else {
-                                Some(self.interner.choice(choices))
-                            }
-                        }
-                    }
-                }
-            }
-        };
-        
-        cache.insert(expr.clone(), result.clone());
-        result
-    }
-
     fn solve_regular_system(&mut self, n: usize, transitions: &Vec<Vec<(usize, Expr)>>, finals: &Vec<Expr>) -> Vec<Expr> {
         // Kleene's algorithm / Floyd-Warshall for Regex
         // R[k][i][j] = paths from i to j using only intermediate nodes < k
@@ -585,59 +509,22 @@ impl<'a> GrammarOptimizer<'a> {
     }
 
     fn rewrite_grammar(&mut self) {
-        let mut new_terminals: BTreeMap<NonTerminal, Terminal> = BTreeMap::new();
-        let mut nullable_nts: BTreeSet<NonTerminal> = BTreeSet::new();
-        let mut always_null_nts: BTreeSet<NonTerminal> = BTreeSet::new();
+        let mut new_terminals: HashMap<NonTerminal, Terminal> = HashMap::new();
         
         // Allocate group IDs and create Terminals
         let mut next_group_id = self.grammar.group_id_to_expr.keys().max().map(|&x| x + 1).unwrap_or(0);
         
-        let mut nn_cache = HashMap::new();
-        // Sort resolved NTs for deterministic iteration
-        let mut sorted_resolved_nts: Vec<_> = self.resolved_nts.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-        sorted_resolved_nts.sort_by(|(nt1, _), (nt2, _)| nt1.0.cmp(&nt2.0));
-
-        for (nt, expr) in sorted_resolved_nts {
-            let nullability = get_expr_nullability(&expr);
-            
-            match nullability {
-                ExprNullability::AlwaysNull => {
-                    always_null_nts.insert(nt.clone());
-                    continue;
-                }
-                ExprNullability::NeverNull => {
-                    // Standard case
-                    let mut final_name = nt.0.clone();
-                    while self.grammar.regex_name_to_group_id.contains_left(&final_name) {
-                        final_name.push('_');
-                    }
-                    
-                    self.grammar.regex_name_to_group_id.insert(final_name.clone(), next_group_id);
-                    self.grammar.group_id_to_expr.insert(next_group_id, expr.clone());
-                    
-                    new_terminals.insert(nt.clone(), Terminal::RegexName(final_name));
-                    next_group_id += 1;
-                }
-                ExprNullability::CanBeNull => {
-                    // Split into non-nullable part + epsilon
-                    if let Some(nn_expr) = self.make_non_nullable(&expr, &mut nn_cache) {
-                        let mut final_name = nt.0.clone();
-                        while self.grammar.regex_name_to_group_id.contains_left(&final_name) {
-                            final_name.push('_');
-                        }
-                        
-                        self.grammar.regex_name_to_group_id.insert(final_name.clone(), next_group_id);
-                        self.grammar.group_id_to_expr.insert(next_group_id, nn_expr);
-                        
-                        new_terminals.insert(nt.clone(), Terminal::RegexName(final_name));
-                        nullable_nts.insert(nt.clone());
-                        next_group_id += 1;
-                    } else {
-                        // Should not happen if CanBeNull, but treat as AlwaysNull if make_non_nullable fails
-                        always_null_nts.insert(nt.clone());
-                    }
-                }
+        for (nt, expr) in &self.resolved_nts {
+            let mut final_name = nt.0.clone();
+            while self.grammar.regex_name_to_group_id.contains_left(&final_name) {
+                final_name.push('_');
             }
+            
+            self.grammar.regex_name_to_group_id.insert(final_name.clone(), next_group_id);
+            self.grammar.group_id_to_expr.insert(next_group_id, expr.clone());
+            
+            new_terminals.insert(nt.clone(), Terminal::RegexName(final_name));
+            next_group_id += 1;
         }
         
         // Identify start symbol
@@ -652,16 +539,7 @@ impl<'a> GrammarOptimizer<'a> {
 
         // Rewrite productions
         let mut new_productions = Vec::new();
-        let mut used_wrappers = BTreeSet::new();
         
-        // Helper to generate unique names for optional NT wrappers
-        // let mut counters = HashMap::new();
-        let mut all_names: HashSet<String> = self.grammar.productions.iter().map(|p| p.lhs.0.clone()).collect();
-        // Add existing NTs to all_names to avoid collisions
-        for nt in self.resolved_nts.keys() {
-            all_names.insert(nt.0.clone());
-        }
-
         for prod in &self.grammar.productions {
             if self.resolved_nts.contains_key(&prod.lhs) {
                 // This production is now obsolete
@@ -672,21 +550,8 @@ impl<'a> GrammarOptimizer<'a> {
             for symbol in &prod.rhs {
                 match symbol {
                     Symbol::NonTerminal(nt) => {
-                        if always_null_nts.contains(nt) {
-                            // Skip (epsilon)
-                            continue;
-                        }
-                        
                         if let Some(term) = new_terminals.get(nt) {
-                            if nullable_nts.contains(nt) {
-                                // NT is nullable. We need to use a wrapper NT that is optional.
-                                let opt_nt_name = format!("{}_opt", nt.0);
-                                let opt_nt = NonTerminal(opt_nt_name);
-                                new_rhs.push(Symbol::NonTerminal(opt_nt.clone()));
-                                used_wrappers.insert(nt.clone());
-                            } else {
-                                new_rhs.push(Symbol::Terminal(term.clone()));
-                            }
+                            new_rhs.push(Symbol::Terminal(term.clone()));
                         } else {
                             new_rhs.push(symbol.clone());
                         }
@@ -701,62 +566,14 @@ impl<'a> GrammarOptimizer<'a> {
             });
         }
         
-        // Add productions for nullable wrappers
-        let mut added_wrappers = HashSet::new();
-        for nt in &used_wrappers {
-            if let Some(term) = new_terminals.get(nt) {
-                 let opt_nt_name = format!("{}_opt", nt.0);
-                 let opt_nt = NonTerminal(opt_nt_name);
-                 
-                 if added_wrappers.insert(opt_nt.clone()) {
-                     // A_opt -> T
-                     new_productions.push(Production {
-                         lhs: opt_nt.clone(),
-                         rhs: vec![Symbol::Terminal(term.clone())],
-                     });
-                     // A_opt -> epsilon
-                     new_productions.push(Production {
-                         lhs: opt_nt.clone(),
-                         rhs: vec![],
-                     });
-                 }
+        // If start symbol was resolved, add a production for it
+        if self.resolved_nts.contains_key(&start_nt) {
+            if let Some(term) = new_terminals.get(&start_nt) {
+                new_productions.insert(0, Production {
+                    lhs: start_nt.clone(),
+                    rhs: vec![Symbol::Terminal(term.clone())],
+                });
             }
-        }
-        
-        // If start symbol was resolved
-        if let Some(expr) = self.resolved_nts.get(&start_nt) {
-             // If start symbol is resolved, we need to add a production for it.
-             // If it's nullable, we add the optional wrapper productions using the start symbol name?
-             // Or we just add "Start -> T" and "Start -> epsilon".
-             
-             // Check if we already handled it via nullable_nts logic?
-             // No, because the original productions for start_nt were skipped.
-             // We need to re-introduce start_nt.
-             
-             if always_null_nts.contains(&start_nt) {
-                 new_productions.insert(0, Production {
-                     lhs: start_nt.clone(),
-                     rhs: vec![],
-                 });
-             } else if nullable_nts.contains(&start_nt) {
-                 if let Some(term) = new_terminals.get(&start_nt) {
-                     new_productions.insert(0, Production {
-                         lhs: start_nt.clone(),
-                         rhs: vec![Symbol::Terminal(term.clone())],
-                     });
-                     new_productions.insert(1, Production {
-                         lhs: start_nt.clone(),
-                         rhs: vec![],
-                     });
-                 }
-             } else {
-                 if let Some(term) = new_terminals.get(&start_nt) {
-                     new_productions.insert(0, Production {
-                         lhs: start_nt.clone(),
-                         rhs: vec![Symbol::Terminal(term.clone())],
-                     });
-                 }
-             }
         }
         
         // Update start_production_id
@@ -1333,7 +1150,7 @@ mod tests {
         // We dynamically find a size N that takes enough time to measure reliably,
         // then test 3N to check scaling behavior.
 
-        let mut n = 10;
+        let mut n = 100;
         let mut t_base = 0.0;
 
         // Find a baseline size that takes enough time to measure (> 5ms)
