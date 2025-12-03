@@ -861,8 +861,15 @@ impl ExprGroups {
         let stats = self.get_stats();
         crate::debug!(5, "Expr Stats: {}", stats);
 
-        crate::debug!(4, "Optimizing Regex (Strategy B)");
-        let optimized = self.optimize();
+        // Skip expensive optimization for very large expressions (> 1M nodes)
+        // The optimization loop is O(nodes) and becomes a bottleneck
+        let optimized = if stats.nodes > 1_000_000 {
+            crate::debug!(4, "Skipping Regex optimization (expression has {}M nodes)", stats.nodes / 1_000_000);
+            self
+        } else {
+            crate::debug!(4, "Optimizing Regex (Strategy B)");
+            self.optimize()
+        };
 
         crate::debug!(4, "Building NFA");
         let start = std::time::Instant::now();

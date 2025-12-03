@@ -79,13 +79,8 @@ impl<'a> GrammarOptimizer<'a> {
     /// This works for partial optimization - even if the whole grammar isn't regular,
     /// we can still optimize parts of it.
     fn optimize_regular_subgrammars(&mut self) {
-        // Skip optimization for very large grammars - the cost is prohibitive
-        // and they're unlikely to be fully optimizable anyway
-        if self.grammar.productions.len() > 10000 {
-            debug!(4, "Skipping optimization for grammar with {} productions (threshold: 10000)", 
-                self.grammar.productions.len());
-            return;
-        }
+        let total_start = std::time::Instant::now();
+        debug!(4, "Starting grammar optimization with {} productions", self.grammar.productions.len());
         
         // Collect all non-terminal names
         let nt_names: HashSet<String> = self.grammar.productions.iter()
@@ -104,9 +99,11 @@ impl<'a> GrammarOptimizer<'a> {
             Rc::new(RegexTerm::Star(Rc::new(RegexTerm::Concrete(e.clone()))))
         });
 
+        let eq_start = std::time::Instant::now();
         for prod in &self.grammar.productions {
             let Some(term) = self.production_rhs_to_regex_term(&prod.rhs, &nt_names, ignore_term.as_ref()) else {
                 // If any production can't be converted, skip optimization for now
+                debug!(4, "Grammar optimization failed: production cannot be converted");
                 return;
             };
             let term = Rc::new(term);
@@ -116,9 +113,12 @@ impl<'a> GrammarOptimizer<'a> {
                 })
                 .or_insert(term);
         }
+        debug!(5, "Built {} equations in {:?}", equations.len(), eq_start.elapsed());
         
         // Build dependency graph and compute elimination order (reverse topological)
+        let order_start = std::time::Instant::now();
         let elimination_order = compute_elimination_order(&equations, &start_nt);
+        debug!(5, "Computed elimination order ({} NTs) in {:?}", elimination_order.len(), order_start.elapsed());
         
         // PHASE 1: Build solution map (solve each NT's equation with Arden's lemma)
         // We DON'T substitute into other equations yet - just solve each NT in isolation
@@ -126,7 +126,15 @@ impl<'a> GrammarOptimizer<'a> {
         // Persistent cache for expansion - shared across all expand_with_solutions calls
         let mut expansion_cache: HashMap<*const RegexTerm, Rc<RegexTerm>> = HashMap::new();
         
-        for nt_to_eliminate in &elimination_order {
+        let phase1_start = std::time::Instant::now();
+        let mut solved_count = 0;
+        let mut failed_count = 0;
+        let mut solve_time = std::time::Duration::ZERO;
+        for (i, nt_to_eliminate) in elimination_order.iter().enumerate() {
+            if i > 0 && i % 5000 == 0 {
+                debug!(5, "Phase 1 progress: {}/{} NTs, solved={}, failed={}, solve={:?}", 
+                    i, elimination_order.len(), solved_count, failed_count, solve_time);
+            }
             if nt_to_eliminate == &start_nt {
                 continue;
             }
@@ -136,39 +144,53 @@ impl<'a> GrammarOptimizer<'a> {
             };
             
             // Solve for this NT (apply Arden's lemma if self-recursive)
-            // Note: At this point, nt_eq may contain references to OTHER NTs that we've already solved
-            // We need to substitute those first
-            let expanded_eq = expand_with_solutions_cached(&nt_eq, &solutions, &mut expansion_cache);
-            
-            let Some(solved) = solve_single_equation_rc(&expanded_eq, nt_to_eliminate) else {
+            // The equation is still in SYMBOLIC form - no expansion yet
+            // This is MUCH faster because the original equations are small
+            let t1 = std::time::Instant::now();
+            let Some(solved) = solve_single_equation_rc(&nt_eq, nt_to_eliminate) else {
                 // Non-linear recursion - can't solve with simple Arden's lemma
                 equations.insert(nt_to_eliminate.clone(), nt_eq);
+                failed_count += 1;
+                solve_time += t1.elapsed();
                 continue;
             };
+            solve_time += t1.elapsed();
             
-            // Store the solution and pre-populate the expansion cache with its structure
+            // Store the solution (still in symbolic form with NtRefs)
             let solved_rc = Rc::new(solved);
-            // Pre-expand the solution to populate cache with its structure
-            // (this is essentially a no-op since solutions have no NtRefs, but it adds to cache)
-            let _ = expand_with_solutions_cached(&solved_rc, &solutions, &mut expansion_cache);
             solutions.insert(nt_to_eliminate.clone(), solved_rc);
+            solved_count += 1;
         }
+        debug!(5, "Phase 1: solved {} NTs, failed {} in {:?} (solve={:?})", 
+            solved_count, failed_count, phase1_start.elapsed(), solve_time);
         
         // PHASE 2: Solve the start NT
+        let phase2_start = std::time::Instant::now();
         let Some(start_eq) = equations.remove(&start_nt) else {
+            debug!(4, "Grammar optimization failed: no start equation");
             return;
         };
         
-        // Expand the start equation with all solutions
-        let expanded_start = expand_with_solutions_cached(&start_eq, &solutions, &mut expansion_cache);
-        let Some(solved_start) = solve_single_equation_rc(&expanded_start, &start_nt) else {
+        // First solve the start equation symbolically (to handle self-recursion)
+        let Some(solved_start_symbolic) = solve_single_equation_rc(&start_eq, &start_nt) else {
+            debug!(4, "Grammar optimization failed: could not solve start NT");
             return;
         };
+        debug!(5, "Phase 2: solved start NT symbolically in {:?}", phase2_start.elapsed());
+        
+        // Now expand all NtRefs in the solved start equation
+        let expand_start = std::time::Instant::now();
+        let solved_start_rc = Rc::new(solved_start_symbolic);
+        let expanded_start = expand_with_solutions_cached(&solved_start_rc, &solutions, &mut expansion_cache);
+        debug!(5, "Phase 2: expanded start NT in {:?}", expand_start.elapsed());
         
         // Convert the final RegexTerm to Expr
-        let Some(final_expr) = regex_term_to_expr(&solved_start) else {
+        let convert_start = std::time::Instant::now();
+        let Some(final_expr) = regex_term_to_expr(&expanded_start) else {
+            debug!(4, "Grammar optimization failed: could not convert to Expr");
             return;
         };
+        debug!(5, "Converted to Expr in {:?}", convert_start.elapsed());
         
         // If we have an ignore terminal, wrap the final expression
         let final_expr = if let Some(expr) = ignore_expr {
@@ -179,6 +201,7 @@ impl<'a> GrammarOptimizer<'a> {
         };
 
         self.replace_grammar_with_single_terminal(final_expr);
+        debug!(4, "Grammar optimization complete in {:?}", total_start.elapsed());
     }
 
     /// Convert a production RHS to a RegexTerm
@@ -557,28 +580,107 @@ impl RegexTerm {
 /// Solve a single equation: X = equation, where equation may reference X.
 /// Uses Arden's lemma: X = αX | β => X = α*β (for right recursion)
 /// And: X = Xα | β => X = βα* (for left recursion)
+/// 
+/// IMPORTANT: This function is designed to work on SMALL, unexpanded equations.
+/// The equation should contain NtRefs to the current NT (for self-recursion)
+/// and possibly to other NTs (which will be substituted later).
+/// 
 /// Takes Rc<RegexTerm> to enable memoization for contains_nt checks
 fn solve_single_equation_rc(equation: &Rc<RegexTerm>, nt: &str) -> Option<RegexTerm> {
-    let mut contains_cache: HashMap<*const RegexTerm, bool> = HashMap::new();
+    // Use a simple, non-memoized contains check since equations are small
+    fn contains_nt_simple(term: &RegexTerm, nt: &str) -> bool {
+        match term {
+            RegexTerm::Epsilon | RegexTerm::Concrete(_) => false,
+            RegexTerm::NtRef(n) => n == nt,
+            RegexTerm::Seq(terms) | RegexTerm::Choice(terms) => {
+                terms.iter().any(|t| contains_nt_simple(t.as_ref(), nt))
+            }
+            RegexTerm::Star(inner) => contains_nt_simple(inner.as_ref(), nt),
+        }
+    }
     
-    if !contains_nt_memoized(equation, nt, &mut contains_cache) {
+    if !contains_nt_simple(equation.as_ref(), nt) {
         // No self-reference, just return as-is
         return Some((**equation).clone());
     }
     
     // Separate into recursive and non-recursive alternatives
-    let (recursive, base) = separate_recursive_alts_rc(equation, nt, &mut contains_cache);
+    fn separate_alts(term: &RegexTerm, nt: &str) -> (Vec<RegexTerm>, Vec<RegexTerm>) {
+        match term {
+            RegexTerm::Choice(alts) => {
+                let mut recursive = Vec::new();
+                let mut base = Vec::new();
+                for alt in alts {
+                    if contains_nt_simple(alt.as_ref(), nt) {
+                        recursive.push((**alt).clone());
+                    } else {
+                        base.push((**alt).clone());
+                    }
+                }
+                (recursive, base)
+            }
+            _ if contains_nt_simple(term, nt) => (vec![term.clone()], vec![]),
+            _ => (vec![], vec![term.clone()]),
+        }
+    }
+    
+    let (recursive, base) = separate_alts(equation.as_ref(), nt);
     
     if recursive.is_empty() {
-        return Some(RegexTerm::make_choice(base));
+        return Some(RegexTerm::make_choice(base.into_iter().map(Rc::new).collect()));
     }
     
     // Extract coefficients from recursive alternatives
+    fn extract_coef(term: &RegexTerm, nt: &str) -> Option<(RegexTerm, RegexTerm)> {
+        match term {
+            RegexTerm::NtRef(n) if n == nt => {
+                Some((RegexTerm::Epsilon, RegexTerm::Epsilon))
+            }
+            RegexTerm::Seq(parts) => {
+                // Find the position of the NT reference
+                let mut nt_pos = None;
+                for (i, p) in parts.iter().enumerate() {
+                    if contains_nt_simple(p.as_ref(), nt) {
+                        if nt_pos.is_some() {
+                            // Multiple occurrences - not linear
+                            return None;
+                        }
+                        nt_pos = Some(i);
+                    }
+                }
+                let pos = nt_pos?;
+                
+                // Check that the NT-containing element is just NtRef(nt)
+                if !matches!(parts[pos].as_ref(), RegexTerm::NtRef(n) if n == nt) {
+                    // NT is nested inside something - not simple linear form
+                    return None;
+                }
+                
+                let prefix = if pos == 0 {
+                    RegexTerm::Epsilon
+                } else {
+                    RegexTerm::make_seq(parts[..pos].iter().cloned().collect())
+                };
+                let suffix = if pos == parts.len() - 1 {
+                    RegexTerm::Epsilon
+                } else {
+                    RegexTerm::make_seq(parts[pos+1..].iter().cloned().collect())
+                };
+                Some((prefix, suffix))
+            }
+            _ => None,
+        }
+    }
+    
+    fn is_epsilon(t: &RegexTerm) -> bool {
+        matches!(t, RegexTerm::Epsilon)
+    }
+    
     let mut right_coefs: Vec<Rc<RegexTerm>> = Vec::new();
     let mut left_coefs: Vec<Rc<RegexTerm>> = Vec::new();
     
     for rec in &recursive {
-        if let Some((prefix, suffix)) = extract_coef_rc(rec, nt, &mut contains_cache) {
+        if let Some((prefix, suffix)) = extract_coef(rec, nt) {
             match (is_epsilon(&prefix), is_epsilon(&suffix)) {
                 (true, true) => {
                     // Just X alone - this means X = X | ... which is weird but valid
@@ -606,7 +708,7 @@ fn solve_single_equation_rc(equation: &Rc<RegexTerm>, nt: &str) -> Option<RegexT
     let base_term = if base.is_empty() {
         Rc::new(RegexTerm::Epsilon)
     } else {
-        Rc::new(RegexTerm::make_choice(base))
+        Rc::new(RegexTerm::make_choice(base.into_iter().map(Rc::new).collect()))
     };
     
     // Handle right recursion: X = αX | β => X = α*β
@@ -740,21 +842,35 @@ fn expand_with_solutions(
     expand_with_solutions_cached(term, solutions, &mut cache)
 }
 
+/// Expand all NtRefs in a term by substituting solutions.
+/// Uses iterative deepening with explicit stack to avoid stack overflow.
 fn expand_with_solutions_cached(
+    root: &Rc<RegexTerm>,
+    solutions: &HashMap<String, Rc<RegexTerm>>,
+    cache: &mut HashMap<*const RegexTerm, Rc<RegexTerm>>
+) -> Rc<RegexTerm> {
+    // Use stacker to handle deep recursion by switching to heap allocation when needed
+    stacker::maybe_grow(32 * 1024, 1024 * 1024, || {
+        expand_with_solutions_cached_impl(root, solutions, cache)
+    })
+}
+
+fn expand_with_solutions_cached_impl(
     term: &Rc<RegexTerm>,
     solutions: &HashMap<String, Rc<RegexTerm>>,
     cache: &mut HashMap<*const RegexTerm, Rc<RegexTerm>>
 ) -> Rc<RegexTerm> {
     let ptr = Rc::as_ptr(term);
     
-    // For NtRef, we must NOT use cache based on ptr because the NtRef Rc pointer
-    // is independent of the solution's Rc pointer. Different NtRefs with the same name
-    // could have different Rc pointers but should resolve to the same solution.
-    // The cache for NtRef resolution is implicitly handled via the solutions map.
+    // For NtRef, resolve to solution and expand that
     if let RegexTerm::NtRef(n) = term.as_ref() {
-        // If we have a solution for this NT, use it; otherwise keep the reference
         if let Some(solution) = solutions.get(n) {
-            // Recursively expand the solution in case it contains other NTs
+            // Check if solution is already expanded in cache
+            let sol_ptr = Rc::as_ptr(solution);
+            if let Some(cached) = cache.get(&sol_ptr) {
+                return cached.clone();
+            }
+            // Recursively expand the solution
             return expand_with_solutions_cached(solution, solutions, cache);
         } else {
             return term.clone();
@@ -773,7 +889,6 @@ fn expand_with_solutions_cached(
             let new_parts: Vec<Rc<RegexTerm>> = parts.iter()
                 .map(|p| expand_with_solutions_cached(p, solutions, cache))
                 .collect();
-            // Only create new Rc if something changed
             let changed = parts.iter().zip(new_parts.iter())
                 .any(|(old, new)| !Rc::ptr_eq(old, new));
             if changed {
@@ -903,6 +1018,16 @@ fn regex_term_to_expr_cached(
     term: &Rc<RegexTerm>,
     cache: &mut HashMap<*const RegexTerm, std::sync::Arc<Expr>>
 ) -> Option<std::sync::Arc<Expr>> {
+    // Use stacker to handle deep recursion
+    stacker::maybe_grow(32 * 1024, 1024 * 1024, || {
+        regex_term_to_expr_cached_impl(term, cache)
+    })
+}
+
+fn regex_term_to_expr_cached_impl(
+    term: &Rc<RegexTerm>,
+    cache: &mut HashMap<*const RegexTerm, std::sync::Arc<Expr>>
+) -> Option<std::sync::Arc<Expr>> {
     use std::sync::Arc;
     
     let ptr = Rc::as_ptr(term);
@@ -1009,6 +1134,13 @@ fn simplify_expr(expr: Expr) -> Expr {
 }
 
 fn simplify_expr_cached(expr: Expr, cache: &mut HashMap<*const Expr, Arc<Expr>>) -> Expr {
+    // Use stacker to handle deep recursion
+    stacker::maybe_grow(32 * 1024, 1024 * 1024, || {
+        simplify_expr_cached_impl(expr, cache)
+    })
+}
+
+fn simplify_expr_cached_impl(expr: Expr, cache: &mut HashMap<*const Expr, Arc<Expr>>) -> Expr {
     match expr {
         Expr::Seq(exprs) => {
             let mut simplified = Vec::new();
