@@ -79,6 +79,14 @@ impl<'a> GrammarOptimizer<'a> {
     /// This works for partial optimization - even if the whole grammar isn't regular,
     /// we can still optimize parts of it.
     fn optimize_regular_subgrammars(&mut self) {
+        // Skip optimization for very large grammars - the cost is prohibitive
+        // and they're unlikely to be fully optimizable anyway
+        if self.grammar.productions.len() > 10000 {
+            debug!(4, "Skipping optimization for grammar with {} productions (threshold: 10000)", 
+                self.grammar.productions.len());
+            return;
+        }
+        
         // Collect all non-terminal names
         let nt_names: HashSet<String> = self.grammar.productions.iter()
             .map(|p| p.lhs.0.clone())

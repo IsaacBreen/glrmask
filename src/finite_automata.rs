@@ -1320,8 +1320,19 @@ impl Expr {
         let mut values: Vec<Expr> = Vec::with_capacity(32);
         let mut cache: HashMap<usize, Expr> = HashMap::new();
         let mut visiting: HashSet<usize> = HashSet::new();
+        
+        let mut iterations: u64 = 0;
+        let mut seq_calls: u64 = 0;
+        let mut choice_calls: u64 = 0;
+        let start = std::time::Instant::now();
 
         while let Some(task) = stack.pop() {
+            iterations += 1;
+            if iterations % 100_000 == 0 {
+                crate::debug!(5, "optimize iter={} seq={} choice={} stack={} values={} elapsed={:.2?}", 
+                    iterations, seq_calls, choice_calls, stack.len(), values.len(), start.elapsed());
+            }
+            
             match task {
                 Task::Expand(expr) => match expr {
                     Expr::Seq(sub) => {
@@ -1355,6 +1366,7 @@ impl Expr {
                     leaf => values.push(leaf),
                 },
                 Task::Seq(len) => {
+                    seq_calls += 1;
                     let split_idx = values.len() - len;
                     let children = values.split_off(split_idx);
                     values.push(Self::make_seq(children));
@@ -1371,12 +1383,15 @@ impl Expr {
                     values.push(res);
                 }
                 Task::Choice(len) => {
+                    choice_calls += 1;
                     let split_idx = values.len() - len;
                     let children = values.split_off(split_idx);
                     values.push(Self::make_choice(children));
                 }
             }
         }
+        crate::debug!(4, "optimize done: iter={} seq={} choice={} elapsed={:.2?}", 
+            iterations, seq_calls, choice_calls, start.elapsed());
         values.pop().unwrap()
     }
 
@@ -1452,8 +1467,10 @@ impl Expr {
     }
 
     fn make_choice(exprs: Vec<Expr>) -> Expr {
-        // 1. Flatten choices and Distribute Seq(Choice, ...)
-        // We use a stack to handle nested structures resulting from distribution
+        // Simple implementation: just flatten and dedup (without expensive sorting)
+        // Sorting was causing O(n * depth) comparisons per element which is expensive
+        
+        // 1. Flatten nested choices
         let mut worklist = exprs;
         let mut flat = Vec::with_capacity(worklist.len());
 
@@ -1461,29 +1478,6 @@ impl Expr {
             match e {
                 Expr::Choice(subs) => {
                     worklist.extend(subs);
-                }
-                Expr::Seq(mut subs) if !subs.is_empty() => {
-                    // Check if the first element is a Choice, if so distribute
-                    // Note: We need to inspect the first element without removing it yet,
-                    // or remove and put back.
-                    let first = subs.remove(0);
-                    match first {
-                        Expr::Choice(choices) => {
-                            // Distribute: Seq(Choice(A, B), C...) -> Choice(Seq(A, C...), Seq(B, C...))
-                            // We push these back to worklist to flatten the resulting Choice implicitly
-                            for c in choices {
-                                let mut new_seq = Vec::with_capacity(subs.len() + 1);
-                                new_seq.push(c);
-                                new_seq.extend(subs.clone());
-                                worklist.push(Expr::Seq(new_seq));
-                            }
-                        }
-                        _ => {
-                            // Put it back and keep the Seq
-                            subs.insert(0, first);
-                            flat.push(Expr::Seq(subs));
-                        }
-                    }
                 }
                 _ => flat.push(e),
             }
@@ -1493,186 +1487,15 @@ impl Expr {
             return Expr::Choice(vec![]);
         }
         
-        // Sort and dedup to merge identical branches early
-        flat.sort();
-        flat.dedup();
-        
         if flat.len() == 1 {
             return flat.pop().unwrap();
         }
 
-        // NEW: Factor out common structural prefixes (e.g. "A B" | "A C" -> "A (B|C)")
-        // This handles cases like P* L0 | P* L1 -> P* (L0 | L1), preventing NFA explosion
-        // by sharing the P* subgraph.
-        let mut factored = Vec::with_capacity(flat.len());
-        let mut iter = flat.into_iter().peekable();
-
-        while let Some(e) = iter.next() {
-            let prefix = match &e {
-                Expr::Seq(s) if !s.is_empty() => s[0].clone(),
-                _ => e.clone(),
-            };
-
-            // Check next elements for the same prefix. Since 'flat' is sorted,
-            // identical prefixes will be adjacent.
-            let mut group = vec![e];
-            while let Some(next) = iter.peek() {
-                let next_p = match next {
-                    Expr::Seq(s) if !s.is_empty() => &s[0],
-                    _ => next,
-                };
-                if next_p == &prefix {
-                    group.push(iter.next().unwrap());
-                } else {
-                    break;
-                }
-            }
-
-            if group.len() > 1 {
-                let tails: Vec<Expr> = group.into_iter().map(|item| {
-                    match item {
-                        Expr::Seq(mut s) if !s.is_empty() && s[0] == prefix => {
-                            let mut iter = s.into_iter();
-                            iter.next(); // Skip prefix
-                            Expr::make_seq(iter.collect())
-                        }
-                        item if item == prefix => Expr::Epsilon,
-                        _ => unreachable!("Sorted grouping failed: prefix mismatch"),
-                    }
-                }).collect();
-
-                let tail_expr = Self::make_choice(tails);
-                if tail_expr == Expr::Epsilon {
-                    factored.push(prefix);
-                } else {
-                    factored.push(Expr::make_seq(vec![prefix, tail_expr]));
-                }
-            } else {
-                factored.push(group.pop().unwrap());
-            }
-        }
-        flat = factored;
-
-        // 2. Partitioning / Left Factoring
-        // We map each byte 0..255 to a list of indices in `flat` that cover it.
-
-        // OPTIMIZATION: Factor out common structural prefixes (e.g. "A B" | "A C" -> "A (B|C)")
-        // This is crucial for avoiding NFA state explosion on common complex prefixes like quantifiers.
-        // Since 'flat' is sorted, expressions with the same prefix are adjacent.
-        let mut factored = Vec::new();
-        let mut i = 0;
-        while i < flat.len() {
-            let mut j = i + 1;
-            // Determine prefix of flat[i]
-            let p = match &flat[i] {
-                Expr::Seq(s) if !s.is_empty() => Some(&s[0]),
-                e => Some(e),
-            };
-            
-            // Find run of identical prefixes
-            while j < flat.len() {
-                 let next_p = match &flat[j] {
-                     Expr::Seq(s) if !s.is_empty() => Some(&s[0]),
-                     e => Some(e),
-                 };
-                 if p != next_p { break; }
-                 j += 1;
-            }
-            
-            if j > i + 1 {
-                // Found a group of size > 1
-                let prefix = p.unwrap().clone();
-                let mut tails = Vec::with_capacity(j - i);
-                for k in i..j {
-                    match flat[k].clone() {
-                         Expr::Seq(mut s) if !s.is_empty() && &s[0] == &prefix => {
-                             s.remove(0);
-                             tails.push(Expr::make_seq(s));
-                         }
-                         e if e == prefix => tails.push(Expr::Epsilon),
-                         _ => unreachable!("Sorted grouping failed: prefix mismatch"),
-                    }
-                }
-                let tail_expr = Self::make_choice(tails);
-                if tail_expr == Expr::Epsilon {
-                    factored.push(prefix);
-                } else {
-                    factored.push(Expr::make_seq(vec![prefix, tail_expr]));
-                }
-            } else {
-                factored.push(flat[i].clone());
-            }
-            i = j;
-        }
-        flat = factored;
-
-        // 2. Partitioning / Left Factoring
-        // We map each byte 0..255 to a list of indices in `flat` that cover it.
-        // Tails are stored in `tails_storage`.
-        let mut overlap_map: Vec<Vec<usize>> = vec![Vec::with_capacity(2); 256];
-        let mut tails_storage: Vec<Option<Expr>> = Vec::with_capacity(flat.len());
-        let mut others = Vec::new();
-
-        // Iterate and split heads
-        for e in flat {
-            let (head, tail) = e.split_head();
-            match head {
-                Head::Class(set) => {
-                    let idx = tails_storage.len();
-                    tails_storage.push(tail);
-                    for b in set.iter() {
-                        overlap_map[b as usize].push(idx);
-                    }
-                }
-                Head::Other => {
-                    // tail is the full expression in this case
-                    others.push(tail.unwrap());
-                }
-            }
-        }
-
-        // 3. Group by signature
-        // Map Signature (Vec<usize>) -> Bytes (Vec<u8>)
-        let mut sig_to_bytes: BTreeMap<Vec<usize>, Vec<u8>> = BTreeMap::new();
-        for (b, sig) in overlap_map.into_iter().enumerate() {
-            if !sig.is_empty() {
-                sig_to_bytes.entry(sig).or_default().push(b as u8);
-            }
-        }
-
-        let mut final_choices = Vec::with_capacity(sig_to_bytes.len() + others.len());
-
-        // 4. Construct factored expressions
-        for (indices, bytes) in sig_to_bytes {
-            let class_set = U8Set::from_bytes(&bytes);
-            
-            // Collect tails for this signature
-            let mut current_tails = Vec::with_capacity(indices.len());
-            for idx in indices {
-                if let Some(t) = &tails_storage[idx] {
-                    current_tails.push(t.clone());
-                } else {
-                    current_tails.push(Expr::Epsilon);
-                }
-            }
-
-            // Recursively make choice for the tails
-            let tail_expr = Self::make_choice(current_tails);
-
-            if tail_expr == Expr::Epsilon {
-                final_choices.push(Expr::U8Class(class_set));
-            } else {
-                final_choices.push(Self::make_seq(vec![Expr::U8Class(class_set), tail_expr]));
-            }
-        }
-
-        final_choices.extend(others);
-
-        // Merge U8Class and single-byte U8Seq alternatives
+        // 2. Merge U8Class and single-byte U8Seq alternatives (quick dedup)
         let mut classes = U8Set::none();
-        let mut complex = Vec::with_capacity(final_choices.len());
+        let mut complex = Vec::with_capacity(flat.len());
         
-        for e in final_choices.into_iter() {
+        for e in flat.into_iter() {
             match e {
                 Expr::U8Class(c) => classes.update(&c),
                 Expr::U8Seq(s) if s.len() == 1 => { classes.insert(s[0]); },
@@ -1683,8 +1506,6 @@ impl Expr {
         if !classes.is_empty() {
             complex.push(Expr::U8Class(classes));
         }
-        
-        complex.sort();
         
         if complex.len() == 1 {
             complex.pop().unwrap()

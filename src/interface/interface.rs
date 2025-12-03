@@ -1379,6 +1379,7 @@ impl GrammarDefinition {
             });
         }
 
+        debug!(5, "Creating GrammarDefinition struct with {} productions", productions.len());
         let mut def = GrammarDefinition {
             productions,
             start_production_id,
@@ -1403,9 +1404,11 @@ impl GrammarDefinition {
             def.ignore_terminal_id = Some(TerminalID(*group_id));
         }
 
+        debug!(5, "Ignore terminal set, about to optimize (should_optimize={})", should_optimize);
         if should_optimize {
             def.optimize();
         }
+        debug!(5, "Optimization complete, returning");
 
         Ok(def)
     }

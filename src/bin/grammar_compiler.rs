@@ -85,16 +85,20 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         })
     }).unwrap_or("ebnf");
 
+    sep1::debug!(5, "Parsing grammar file...");
     let mut grammar_definition = match format {
         "lark" => GrammarDefinition::from_lark_file(grammar_path_str)?,
         "ebnf" => GrammarDefinition::from_ebnf_file(grammar_path_str)?,
         _ => return Err(format!("Unknown grammar format: {}", format).into()),
     };
+    sep1::debug!(5, "Grammar parsed");
     
     let prod_count = grammar_definition.productions.len();
     let term_count = grammar_definition.terminal_to_group_id().len();
     
+    sep1::debug!(5, "Optimizing grammar...");
     grammar_definition.optimize();
+    sep1::debug!(5, "Grammar optimized");
     
     let opt_prod_count = grammar_definition.productions.len();
     let opt_term_count = grammar_definition.terminal_to_group_id().len();
