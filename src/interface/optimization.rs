@@ -101,58 +101,46 @@ impl<'a> GrammarOptimizer<'a> {
         // Build dependency graph and compute elimination order (reverse topological)
         let elimination_order = compute_elimination_order(&equations, &start_nt);
         
-        // Maximum allowed size for expressions during substitution
-        // If exceeded, we abort optimization to avoid exponential blowup
-        const MAX_EXPRESSION_SIZE: usize = 100_000;
-        
         let total_nts = elimination_order.len();
-        let start_time = std::time::Instant::now();
-        let mut processed = 0;
         eprintln!("DEBUG: Starting elimination of {} NTs", total_nts);
         
-        // Gaussian elimination: eliminate NTs one by one
+        // PHASE 1: Build solution map (solve each NT's equation with Arden's lemma)
+        // We DON'T substitute into other equations yet - just solve each NT in isolation
+        let mut solutions: HashMap<String, Rc<RegexTerm>> = HashMap::new();
+        // Persistent cache for expansion - shared across all expand_with_solutions calls
+        let mut expansion_cache: HashMap<*const RegexTerm, Rc<RegexTerm>> = HashMap::new();
+        
         for nt_to_eliminate in &elimination_order {
             if nt_to_eliminate == &start_nt {
-                continue; // Keep the start NT for last
+                continue;
             }
             
-            processed += 1;
-            if processed % 10 == 0 || processed <= 10 {
-                eprintln!("DEBUG: Processing NT {} ({}/{}) at {:?}", nt_to_eliminate, processed, total_nts, start_time.elapsed());
-            }
-            
-            // Get the equation for this NT
             let Some(nt_eq) = equations.remove(nt_to_eliminate) else {
                 continue;
             };
             
-            // Check if expression is too large (only check before solving, not after every substitution)
-            if nt_eq.size() > MAX_EXPRESSION_SIZE {
-                eprintln!("DEBUG: Expression too large ({}), aborting optimization", nt_eq.size());
-                return;
-            }
-            
             // Solve for this NT (apply Arden's lemma if self-recursive)
-            let Some(solved) = solve_single_equation(&nt_eq, nt_to_eliminate) else {
-                // Can't solve this NT (non-linear recursion) - put it back and skip
+            // Note: At this point, nt_eq may contain references to OTHER NTs that we've already solved
+            // We need to substitute those first
+            let expanded_eq = expand_with_solutions_cached(&nt_eq, &solutions, &mut expansion_cache);
+            
+            let Some(solved) = solve_single_equation(&expanded_eq, nt_to_eliminate) else {
                 eprintln!("DEBUG: Can't solve NT {} - non-linear recursion", nt_to_eliminate);
                 equations.insert(nt_to_eliminate.clone(), nt_eq);
                 continue;
             };
-            let solved = Rc::new(solved);
             
-            // Substitute into all remaining equations that reference this NT
-            // The substitution function handles memoization internally
-            for (_other_nt, other_eq) in equations.iter_mut() {
-                *other_eq = substitute_nt_rc(other_eq, nt_to_eliminate, &solved);
-            }
+            solutions.insert(nt_to_eliminate.clone(), Rc::new(solved));
         }
         
-        // Now solve the start NT
+        // PHASE 2: Solve the start NT
         let Some(start_eq) = equations.remove(&start_nt) else {
             return;
         };
-        let Some(solved_start) = solve_single_equation(&start_eq, &start_nt) else {
+        
+        // Expand the start equation with all solutions
+        let expanded_start = expand_with_solutions_cached(&start_eq, &solutions, &mut expansion_cache);
+        let Some(solved_start) = solve_single_equation(&expanded_start, &start_nt) else {
             return;
         };
         
@@ -682,6 +670,78 @@ fn contains_nt_memoized(
     };
     
     visited.insert(ptr, result);
+    result
+}
+
+/// Expand a term by substituting all NT references with their solutions
+/// Uses memoization and Rc sharing to avoid exponential blowup
+fn expand_with_solutions(
+    term: &Rc<RegexTerm>,
+    solutions: &HashMap<String, Rc<RegexTerm>>
+) -> Rc<RegexTerm> {
+    let mut cache: HashMap<*const RegexTerm, Rc<RegexTerm>> = HashMap::new();
+    expand_with_solutions_cached(term, solutions, &mut cache)
+}
+
+fn expand_with_solutions_cached(
+    term: &Rc<RegexTerm>,
+    solutions: &HashMap<String, Rc<RegexTerm>>,
+    cache: &mut HashMap<*const RegexTerm, Rc<RegexTerm>>
+) -> Rc<RegexTerm> {
+    let ptr = Rc::as_ptr(term);
+    
+    // Check cache first
+    if let Some(cached) = cache.get(&ptr) {
+        return cached.clone();
+    }
+    
+    let result = match term.as_ref() {
+        RegexTerm::Epsilon | RegexTerm::Concrete(_) => term.clone(),
+        RegexTerm::NtRef(n) => {
+            // If we have a solution for this NT, use it; otherwise keep the reference
+            if let Some(solution) = solutions.get(n) {
+                // Recursively expand the solution in case it contains other NTs
+                expand_with_solutions_cached(solution, solutions, cache)
+            } else {
+                term.clone()
+            }
+        }
+        RegexTerm::Seq(parts) => {
+            let new_parts: Vec<Rc<RegexTerm>> = parts.iter()
+                .map(|p| expand_with_solutions_cached(p, solutions, cache))
+                .collect();
+            // Only create new Rc if something changed
+            let changed = parts.iter().zip(new_parts.iter())
+                .any(|(old, new)| !Rc::ptr_eq(old, new));
+            if changed {
+                Rc::new(RegexTerm::make_seq(new_parts))
+            } else {
+                term.clone()
+            }
+        }
+        RegexTerm::Choice(alts) => {
+            let new_alts: Vec<Rc<RegexTerm>> = alts.iter()
+                .map(|a| expand_with_solutions_cached(a, solutions, cache))
+                .collect();
+            let changed = alts.iter().zip(new_alts.iter())
+                .any(|(old, new)| !Rc::ptr_eq(old, new));
+            if changed {
+                Rc::new(RegexTerm::make_choice(new_alts))
+            } else {
+                term.clone()
+            }
+        }
+        RegexTerm::Star(inner) => {
+            let new_inner = expand_with_solutions_cached(inner, solutions, cache);
+            if Rc::ptr_eq(inner, &new_inner) {
+                term.clone()
+            } else {
+                Rc::new(RegexTerm::make_star(new_inner))
+            }
+        }
+    };
+    
+    cache.insert(ptr, result.clone());
     result
 }
 
@@ -1218,7 +1278,7 @@ mod tests {
             ));
         }
 
-        GrammarDefinition::from_exprs(grammar_exprs, regex_exprs).unwrap()
+        GrammarDefinition::from_exprs_no_optimize(grammar_exprs, regex_exprs).unwrap()
     }
 
     #[test]
