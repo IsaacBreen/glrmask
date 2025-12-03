@@ -104,13 +104,23 @@ impl<'a> GrammarOptimizer<'a> {
         let total_nts = elimination_order.len();
         eprintln!("DEBUG: Starting elimination of {} NTs", total_nts);
         
+        let timer = std::time::Instant::now();
+        let mut last_report = timer;
+        let mut expand_time: u128 = 0;
+        let mut solve_time: u128 = 0;
+        
         // PHASE 1: Build solution map (solve each NT's equation with Arden's lemma)
         // We DON'T substitute into other equations yet - just solve each NT in isolation
         let mut solutions: HashMap<String, Rc<RegexTerm>> = HashMap::new();
         // Persistent cache for expansion - shared across all expand_with_solutions calls
         let mut expansion_cache: HashMap<*const RegexTerm, Rc<RegexTerm>> = HashMap::new();
         
-        for nt_to_eliminate in &elimination_order {
+        for (i, nt_to_eliminate) in elimination_order.iter().enumerate() {
+            if i % 10 == 0 {
+                eprintln!("DEBUG: Progress {}/{}, expand_time={}ms, solve_time={}ms, cache_size={}", 
+                    i, total_nts, expand_time / 1000, solve_time / 1000, expansion_cache.len());
+            }
+            
             if nt_to_eliminate == &start_nt {
                 continue;
             }
@@ -122,16 +132,23 @@ impl<'a> GrammarOptimizer<'a> {
             // Solve for this NT (apply Arden's lemma if self-recursive)
             // Note: At this point, nt_eq may contain references to OTHER NTs that we've already solved
             // We need to substitute those first
+            let expand_start = std::time::Instant::now();
             let expanded_eq = expand_with_solutions_cached(&nt_eq, &solutions, &mut expansion_cache);
+            expand_time += expand_start.elapsed().as_micros();
             
+            let solve_start = std::time::Instant::now();
             let Some(solved) = solve_single_equation(&expanded_eq, nt_to_eliminate) else {
                 eprintln!("DEBUG: Can't solve NT {} - non-linear recursion", nt_to_eliminate);
                 equations.insert(nt_to_eliminate.clone(), nt_eq);
                 continue;
             };
+            solve_time += solve_start.elapsed().as_micros();
             
             solutions.insert(nt_to_eliminate.clone(), Rc::new(solved));
         }
+        
+        eprintln!("DEBUG: Phase 1 done. expand_time={}ms, solve_time={}ms, cache_size={}", 
+            expand_time / 1000, solve_time / 1000, expansion_cache.len());
         
         // PHASE 2: Solve the start NT
         let Some(start_eq) = equations.remove(&start_nt) else {
