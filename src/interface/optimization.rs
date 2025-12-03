@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::sync::Arc;
 use bimap::BiBTreeMap;
-use crate::finite_automata::{Expr, QuantifierType, rep};
+use crate::finite_automata::{Expr, QuantifierType};
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::interface::{GrammarDefinition, GrammarExpr, ExprNullability, get_expr_nullability};
 use crate::types::TerminalID;
@@ -41,25 +42,13 @@ impl std::fmt::Display for OptimizationStats {
 struct GrammarOptimizer<'a> {
     grammar: &'a mut GrammarDefinition,
     stats: OptimizationStats,
-    // Map from NonTerminal to its resolved Expr (if converted to terminal)
-    resolved_map: HashMap<NonTerminal, Expr>,
-    // Cache for ignore expression (as Option<Expr>)
-    ignore_expr: Option<Expr>,
 }
 
 impl<'a> GrammarOptimizer<'a> {
     fn new(grammar: &'a mut GrammarDefinition) -> Self {
-        let ignore_expr = if let Some(gid) = grammar.ignore_terminal_id {
-            grammar.group_id_to_expr.get(&gid.0).cloned().map(rep)
-        } else {
-            None
-        };
-
         Self {
             grammar,
             stats: OptimizationStats::default(),
-            resolved_map: HashMap::new(),
-            ignore_expr,
         }
     }
 
@@ -70,407 +59,7 @@ impl<'a> GrammarOptimizer<'a> {
     }
 
     fn optimize(&mut self) {
-        self.stats.initial_productions = self.grammar.productions.len();
-        self.stats.initial_terminals = self.count_terminals();
-
-        // 1. Compute SCCs of the non-terminals dependency graph
-        let sccs = self.compute_sccs();
-
-        // 2. Process SCCs in topological order (reverse of Tarjan's output usually, but we need bottom-up)
-        // Tarjan's algorithm returns SCCs in reverse topological order (leaves first), which is exactly what we want.
-        for scc in sccs {
-            // Try to resolve this SCC into regexes
-            if let Some(solution) = self.solve_regular_system(&scc) {
-                debug!(2, "Resolved SCC with {} non-terminals: {:?}", scc.len(), scc);
-                for (nt, expr) in solution {
-                    self.resolved_map.insert(nt, expr);
-                }
-            }
-        }
-
-        // 3. Apply resolutions and optimize productions
-        self.apply_optimizations();
-
-        self.stats.final_productions = self.grammar.productions.len();
-        self.stats.final_terminals = self.count_terminals();
-        debug!(2, "{}", self.stats);
-    }
-
-    fn compute_sccs(&self) -> Vec<Vec<NonTerminal>> {
-        let mut adj = HashMap::new();
-        let mut all_nts = HashSet::new();
-
-        for prod in &self.grammar.productions {
-            all_nts.insert(prod.lhs.clone());
-            let entry = adj.entry(prod.lhs.clone()).or_insert_with(HashSet::new);
-            for sym in &prod.rhs {
-                if let Symbol::NonTerminal(nt) = sym {
-                    entry.insert(nt.clone());
-                }
-            }
-        }
-
-        // Tarjan's algorithm
-        let mut index = 0;
-        let mut indices: HashMap<NonTerminal, usize> = HashMap::new();
-        let mut lowlink: HashMap<NonTerminal, usize> = HashMap::new();
-        let mut stack: Vec<NonTerminal> = Vec::new();
-        let mut on_stack: HashSet<NonTerminal> = HashSet::new();
-        let mut sccs: Vec<Vec<NonTerminal>> = Vec::new();
-
-        for nt in all_nts {
-            if !indices.contains_key(&nt) {
-                self.strongconnect(&nt, &adj, &mut index, &mut indices, &mut lowlink, &mut stack, &mut on_stack, &mut sccs);
-            }
-        }
-
-        sccs
-    }
-
-    fn strongconnect(
-        &self,
-        v: &NonTerminal,
-        adj: &HashMap<NonTerminal, HashSet<NonTerminal>>,
-        index: &mut usize,
-        indices: &mut HashMap<NonTerminal, usize>,
-        lowlink: &mut HashMap<NonTerminal, usize>,
-        stack: &mut Vec<NonTerminal>,
-        on_stack: &mut HashSet<NonTerminal>,
-        sccs: &mut Vec<Vec<NonTerminal>>
-    ) {
-        indices.insert(v.clone(), *index);
-        lowlink.insert(v.clone(), *index);
-        *index += 1;
-        stack.push(v.clone());
-        on_stack.insert(v.clone());
-
-        if let Some(neighbors) = adj.get(v) {
-            for w in neighbors {
-                if !indices.contains_key(w) {
-                    self.strongconnect(w, adj, index, indices, lowlink, stack, on_stack, sccs);
-                    let v_low = lowlink.get(v).cloned().unwrap();
-                    let w_low = lowlink.get(w).cloned().unwrap();
-                    lowlink.insert(v.clone(), std::cmp::min(v_low, w_low));
-                } else if on_stack.contains(w) {
-                    let v_low = lowlink.get(v).cloned().unwrap();
-                    let w_index = indices.get(w).cloned().unwrap();
-                    lowlink.insert(v.clone(), std::cmp::min(v_low, w_index));
-                }
-            }
-        }
-
-        if lowlink.get(v) == indices.get(v) {
-            let mut scc = Vec::new();
-            loop {
-                let w = stack.pop().unwrap();
-                on_stack.remove(&w);
-                scc.push(w.clone());
-                if w == *v {
-                    break;
-                }
-            }
-            sccs.push(scc);
-        }
-    }
-
-    // Try to solve the system of equations for the given SCC.
-    // Returns Some(Map) if the system is Right-Linear and solvable.
-    fn solve_regular_system(&mut self, scc: &[NonTerminal]) -> Option<HashMap<NonTerminal, Expr>> {
-        let scc_set: HashSet<&NonTerminal> = scc.iter().collect();
-        
-        // Equations: NT = (coeff * Neighbor) | constant
-        // Map NT -> (Map<Neighbor, Expr>, Expr)
-        // where constant is the union of all constant parts
-        let mut system: HashMap<NonTerminal, (HashMap<NonTerminal, Vec<Expr>>, Vec<Expr>)> = HashMap::new();
-
-        for nt in scc {
-            system.insert(nt.clone(), (HashMap::new(), Vec::new()));
-        }
-
-        // Populate system
-        for prod in &self.grammar.productions {
-            if !scc_set.contains(&prod.lhs) {
-                continue;
-            }
-
-            // Analyze production: is it linear?
-            // Form 1: [Terms...] [NT_in_SCC]
-            // Form 2: [Terms...]
-            // Note: [Terms...] includes resolved NTs.
-
-            let mut terms_prefix = Vec::new();
-            let mut tail_nt = None;
-
-            for sym in &prod.rhs {
-                if tail_nt.is_some() {
-                    // If we already saw an SCC NT, we shouldn't see anything else -> Center embedding
-                    // Exception: if the following symbols are nullable, but we ignore that complexity.
-                    return None; 
-                }
-
-                match sym {
-                    Symbol::Terminal(t) => {
-                        terms_prefix.push(self.get_expr_for_terminal(t));
-                    }
-                    Symbol::NonTerminal(nt) => {
-                        if scc_set.contains(nt) {
-                            tail_nt = Some(nt.clone());
-                        } else if let Some(resolved) = self.resolved_map.get(nt) {
-                            terms_prefix.push(resolved.clone());
-                        } else {
-                            // Unresolved dependency outside SCC? 
-                            // In bottom-up order, this shouldn't happen unless there's a dependency cycle we missed
-                            // or it's a separate component. 
-                            // If it's truly unresolved and not in SCC, we can't regularize it.
-                            return None;
-                        }
-                    }
-                }
-            }
-
-            let coeff_expr = self.seq_with_ignore(terms_prefix);
-            
-            let entry = system.get_mut(&prod.lhs).unwrap();
-            if let Some(tail) = tail_nt {
-                entry.0.entry(tail).or_default().push(coeff_expr);
-            } else {
-                entry.1.push(coeff_expr);
-            }
-        }
-
-        // Gaussian Elimination for Right-Linear System
-        // We have variables X_1 ... X_n
-        // Eliminate X_1, then X_2...
-        
-        // Use an ordered list to keep track of elimination
-        let mut variables = scc.to_vec();
-        
-        // Store final resolved expressions
-        let mut solutions: HashMap<NonTerminal, Expr> = HashMap::new();
-        
-        // Working system: We will modify coeff maps
-        // Map NT -> (Map<Neighbor, Expr>, Expr)
-        // We coalesce the Vec<Expr> into a single Choice expr
-        let mut working_system: HashMap<NonTerminal, (HashMap<NonTerminal, Expr>, Expr)> = HashMap::new();
-        
-        for (nt, (coeffs, consts)) in system {
-            let mut combined_coeffs = HashMap::new();
-            for (neighbor, exprs) in coeffs {
-                combined_coeffs.insert(neighbor, Expr::Choice(exprs).optimize());
-            }
-            let combined_const = if consts.is_empty() {
-                 // If no constant part, and it's recursive, it implies empty set unless nullable?
-                 // But for regex generation, empty choice is empty set.
-                 // However, we need to handle Epsilon if the rule produces nothing.
-                 // Wait, if production rhs is empty, terms_prefix is empty, seq_with_ignore is Epsilon.
-                 // So constant list will contain Epsilon.
-                 Expr::Choice(vec![]).optimize() // Matches nothing
-            } else {
-                Expr::Choice(consts).optimize()
-            };
-            working_system.insert(nt, (combined_coeffs, combined_const));
-        }
-
-        // Elimination Phase
-        // Eliminate variables from 0 to n-1
-        // When eliminating X_i:
-        //   Equation: X_i = A X_i | B X_j | ... | C
-        //   Solution: X_i = A* (B X_j | ... | C)
-        //   Substitute X_i in all other equations.
-
-        for i in 0..variables.len() {
-            let xi = variables[i].clone();
-            
-            // 1. Solve for X_i in terms of remaining variables
-            // X_i = self_coeff * X_i + other_parts
-            // X_i = self_coeff* other_parts
-            
-            let (mut xi_coeffs, mut xi_const) = working_system.remove(&xi).unwrap();
-            
-            let self_coeff = xi_coeffs.remove(&xi);
-            let star_expr = match self_coeff {
-                Some(expr) => Expr::Quantifier(Box::new(expr), QuantifierType::ZeroOrMore),
-                None => Expr::Epsilon, // Multiplicative identity is Epsilon? No. 
-                // If no self loop: X = others.
-                // Ideally we treat it as (epsilon)* which is epsilon.
-                // If we construct Seq(None, others) -> others.
-            };
-
-            // Helper to wrap A* B
-            let apply_star = |rest: Expr| -> Expr {
-                match &star_expr {
-                    Expr::Epsilon => rest,
-                    _ => Expr::Seq(vec![star_expr.clone(), rest]).optimize()
-                }
-            };
-
-            // Calculate the "substitution block": (A* (Sum(Coeff_k X_k) + Const))
-            // We need to distribute this into other equations.
-            
-            // For every other variable X_k (where k > i usually, but system is full map)
-            // Update X_k's equation.
-            // But wait, Gaussian elimination usually eliminates X_i from equations of X_{j} where j > i.
-            // We can leave X_i dependent on X_{j>i}.
-            // At the end we back-substitute.
-            
-            // For each X_j (j != i, remaining in map)
-            let remaining_vars: Vec<NonTerminal> = working_system.keys().cloned().collect();
-            for xj in remaining_vars {
-                // Get X_j's equation
-                let (xj_coeffs, xj_const) = working_system.get_mut(&xj).unwrap();
-                
-                // Does X_j depend on X_i?
-                if let Some(coeff_ji) = xj_coeffs.remove(&xi) {
-                    // X_j = ... + coeff_ji * X_i
-                    // X_i = A* (Sum(C_k X_k) + D)
-                    // X_j += coeff_ji * A* * (Sum(C_k X_k) + D)
-                    
-                    // Distribute to constants
-                    // X_j_const += coeff_ji * A* * xi_const
-                    let added_const = Expr::Seq(vec![coeff_ji.clone(), apply_star(xi_const.clone())]).optimize();
-                    *xj_const = Expr::Choice(vec![xj_const.clone(), added_const]).optimize();
-
-                    // Distribute to other coeffs
-                    for (xk, coeff_ik) in &xi_coeffs {
-                        // X_j_coeff_k += coeff_ji * A* * coeff_ik
-                        let term = Expr::Seq(vec![
-                            coeff_ji.clone(),
-                            apply_star(coeff_ik.clone())
-                        ]).optimize();
-                        
-                        let old_coeff = xj_coeffs.remove(xk).unwrap_or(Expr::Choice(vec![])); // Empty choice = null
-                        // If old_coeff was empty/null, Choice(null, term) = term? 
-                        // Expr::Choice([]) represents empty set (fail).
-                        // Regex algebra: 0 + A = A.
-                        let new_coeff = if matches!(old_coeff, Expr::Choice(ref v) if v.is_empty()) {
-                            term
-                        } else {
-                            Expr::Choice(vec![old_coeff, term]).optimize()
-                        };
-                        xj_coeffs.insert(xk.clone(), new_coeff);
-                    }
-                }
-            }
-
-            // Store the semi-solved equation for X_i to back-substitute later
-            // X_i = A* (Sum(coeffs X_k) + const)
-            // We can just store (A*, coeffs, const) or a closure-like structure?
-            // We'll store it in a separate list or put it back? 
-            // Standard Gaussian: put it in a stack.
-            // We need to resolve it fully later.
-            // Let's store the "row": (xi, star_expr, xi_coeffs, xi_const)
-            // Note: xi_coeffs only contains X_k where k > i.
-        }
-
-        // Now we have the system in upper-triangular form (conceptually)
-        // Wait, the loop above eliminated X_i from all *other* equations.
-        // Standard Gaussian elimination usually eliminates X_i from X_{j>i}.
-        // If we iterate i from 0..n, and for each i eliminate X_i from all remaining j,
-        // then the last variable X_n depends on nothing (or self).
-        // We handled self-loop inside the step.
-        // So the last variable equation is X_n = const_n (after self-loop resolution).
-        
-        // We need to reconstruct the stack or just re-run?
-        // Actually, if we modify `working_system` in place, removing `xi` effectively "stacks" it.
-        // But we need to keep the equation for `xi` to back-substitute.
-        
-        // Let's refine the loop to save the equation.
-        let mut stack: Vec<(NonTerminal, Expr, HashMap<NonTerminal, Expr>, Expr)> = Vec::new();
-
-        // Re-run the logic carefully
-        // Re-populate working system since I consumed it conceptually above?
-        // Ah, I wrote the loop but didn't actually push to stack.
-        // Let's rewrite the elimination loop correctly.
-        
-        // Reset working system
-        let mut working_system: HashMap<NonTerminal, (HashMap<NonTerminal, Expr>, Expr)> = HashMap::new();
-        for (nt, (coeffs, consts)) in system {
-            let mut combined_coeffs = HashMap::new();
-            for (neighbor, exprs) in coeffs {
-                combined_coeffs.insert(neighbor, Expr::Choice(exprs).optimize());
-            }
-            let combined_const = Expr::Choice(consts).optimize();
-            working_system.insert(nt, (combined_coeffs, combined_const));
-        }
-
-        for i in 0..variables.len() {
-            let xi = variables[i].clone();
-            let (mut xi_coeffs, mut xi_const) = working_system.remove(&xi).unwrap();
-            
-            let self_coeff = xi_coeffs.remove(&xi);
-            let star_expr = match self_coeff {
-                Some(expr) => Expr::Quantifier(Box::new(expr), QuantifierType::ZeroOrMore),
-                None => Expr::Epsilon,
-            };
-
-            // Save for back-substitution
-            stack.push((xi.clone(), star_expr.clone(), xi_coeffs.clone(), xi_const.clone()));
-
-            let apply_star = |rest: Expr| -> Expr {
-                match &star_expr {
-                    Expr::Epsilon => rest,
-                    _ => Expr::Seq(vec![star_expr.clone(), rest]).optimize()
-                }
-            };
-
-            // Substitute X_i into remaining equations
-            let remaining_vars: Vec<NonTerminal> = working_system.keys().cloned().collect();
-            for xj in remaining_vars {
-                let (xj_coeffs, xj_const) = working_system.get_mut(&xj).unwrap();
-                
-                if let Some(coeff_ji) = xj_coeffs.remove(&xi) {
-                    // Update const: X_j_const += coeff_ji * A* * xi_const
-                    let added_const = Expr::Seq(vec![coeff_ji.clone(), apply_star(xi_const.clone())]).optimize();
-                    *xj_const = Expr::Choice(vec![xj_const.clone(), added_const]).optimize();
-
-                    // Update coeffs: X_j_coeff_k += coeff_ji * A* * coeff_ik
-                    for (xk, coeff_ik) in &xi_coeffs {
-                        // Only care about k > i (remaining variables)
-                        if working_system.contains_key(xk) {
-                            let term = Expr::Seq(vec![
-                                coeff_ji.clone(),
-                                apply_star(coeff_ik.clone())
-                            ]).optimize();
-                            
-                            let old_coeff = xj_coeffs.remove(xk).unwrap_or(Expr::Choice(vec![]));
-                            let new_coeff = if matches!(old_coeff, Expr::Choice(ref v) if v.is_empty()) {
-                                term
-                            } else {
-                                Expr::Choice(vec![old_coeff, term]).optimize()
-                            };
-                            xj_coeffs.insert(xk.clone(), new_coeff);
-                        }
-                    }
-                }
-            }
-        }
-
-        // Back-substitution Phase
-        // Iterate stack in reverse
-        for (xi, star_expr, xi_coeffs, xi_const) in stack.into_iter().rev() {
-            // X_i = A* (Sum(coeffs X_k) + const)
-            // All X_k in xi_coeffs should be solved already (since k > i)
-            
-            let mut parts = Vec::new();
-            if !matches!(xi_const, Expr::Choice(ref v) if v.is_empty()) {
-                parts.push(xi_const);
-            }
-            
-            for (xk, coeff) in xi_coeffs {
-                let xk_sol = solutions.get(&xk).expect("Future variable not solved?");
-                parts.push(Expr::Seq(vec![coeff, xk_sol.clone()]).optimize());
-            }
-            
-            let sum = Expr::Choice(parts).optimize();
-            let sol = match star_expr {
-                Expr::Epsilon => sum,
-                _ => Expr::Seq(vec![star_expr, sum]).optimize()
-            };
-            
-            solutions.insert(xi, sol);
-        }
-
-        Some(solutions)
+        todo!()
     }
 
     fn get_expr_for_terminal(&mut self, t: &Terminal) -> Expr {
@@ -485,113 +74,30 @@ impl<'a> GrammarOptimizer<'a> {
 
     /// Returns the ignore pattern as `ignore_expr*` if an ignore terminal is defined,
     /// or None otherwise.
-
-    /// Returns the ignore pattern as `ignore_expr*` if an ignore terminal is defined,
-    /// or None otherwise.
-    fn get_ignore_star_expr(&self) -> Option<Expr> {
-        self.ignore_expr.clone()
+    fn get_ignore_star_expr(&mut self) -> Option<Expr> {
+        let ignore_gid = self.grammar.ignore_terminal_id?.0;
+        let ignore_expr = self.grammar.group_id_to_expr.get(&ignore_gid)?.clone();
+        Some(ignore_expr)
     }
 
     /// Build a sequence that interleaves ignore_pattern* between elements.
     /// E.g., for [a, b, c] with ignore WS, produces: a WS* b WS* c
     fn seq_with_ignore(&mut self, exprs: Vec<Expr>) -> Expr {
-        let mut exprs = exprs;
         if exprs.is_empty() {
             return Expr::Epsilon;
         }
-        
-        if let Some(ignore) = self.get_ignore_star_expr() {
-            let mut interleaved = Vec::with_capacity(exprs.len() * 2 - 1);
-            let mut it = exprs.drain(..);
-            if let Some(first) = it.next() {
-                interleaved.push(first);
-                for e in it {
-                    interleaved.push(ignore.clone());
-                    interleaved.push(e);
-                }
-            }
-            Expr::Seq(interleaved).optimize()
-        } else {
-            Expr::Seq(exprs).optimize()
+        // Single element doesn't need interleaving
+        if exprs.len() == 1 {
+            return exprs.into_iter().next().unwrap();
         }
+        let ignore_star = self.get_ignore_star_expr();
+        todo!()
     }
 
     fn get_group_id(&self, t: &Terminal) -> usize {
          match t {
             Terminal::Literal(bytes) => *self.grammar.literal_to_group_id.get_by_left(bytes).expect("Terminal missing"),
             Terminal::RegexName(name) => *self.grammar.regex_name_to_group_id.get_by_left(name).expect("Terminal missing"),
-        }
-    }
-
-    fn apply_optimizations(&mut self) {
-        // 1. Remove solved non-terminals from productions
-        self.grammar.productions.retain(|prod| !self.resolved_map.contains_key(&prod.lhs));
-
-        // 2. Register new terminals
-        let mut nt_to_terminal = HashMap::new();
-        
-        // Find max group id
-        let mut next_gid = self.grammar.group_id_to_expr.keys().max().map_or(0, |x| x + 1);
-
-        for (nt, expr) in &self.resolved_map {
-            let name = nt.0.clone();
-            // If name conflicts, it might be an issue, but usually NT names are disjoint from Terminal names 
-            // (uppercase convention often used for terminals, but not enforced here).
-            // We'll reuse the NT name as the terminal name.
-            
-            // Check collision
-            let final_name = if self.grammar.regex_name_to_group_id.contains_left(&name) {
-                format!("{}_REGEX", name)
-            } else {
-                name
-            };
-
-            self.grammar.regex_name_to_group_id.insert(final_name.clone(), next_gid);
-            self.grammar.group_id_to_expr.insert(next_gid, expr.clone());
-            nt_to_terminal.insert(nt.clone(), Terminal::RegexName(final_name));
-            next_gid += 1;
-        }
-
-        // 3. Update remaining productions
-        for prod in &mut self.grammar.productions {
-            let mut new_rhs = Vec::new();
-            let mut pending_terminals: Vec<Expr> = Vec::new();
-
-            for sym in &prod.rhs {
-                match sym {
-                    Symbol::NonTerminal(nt) => {
-                        if let Some(term) = nt_to_terminal.get(nt) {
-                            pending_terminals.push(self.get_expr_for_terminal(term));
-                        } else {
-                            // Flush pending terminals
-                            if !pending_terminals.is_empty() {
-                                let merged = self.seq_with_ignore(pending_terminals.drain(..).collect());
-                                let gid = next_gid;
-                                next_gid += 1;
-                                let name = format!("MERGED_{}", gid);
-                                self.grammar.regex_name_to_group_id.insert(name.clone(), gid);
-                                self.grammar.group_id_to_expr.insert(gid, merged);
-                                new_rhs.push(Symbol::Terminal(Terminal::RegexName(name)));
-                            }
-                            new_rhs.push(Symbol::NonTerminal(nt.clone()));
-                        }
-                    }
-                    Symbol::Terminal(t) => {
-                        pending_terminals.push(self.get_expr_for_terminal(t));
-                    }
-                }
-            }
-            // Flush remaining
-            if !pending_terminals.is_empty() {
-                let merged = self.seq_with_ignore(pending_terminals);
-                let gid = next_gid;
-                next_gid += 1;
-                let name = format!("MERGED_{}", gid);
-                self.grammar.regex_name_to_group_id.insert(name.clone(), gid);
-                self.grammar.group_id_to_expr.insert(gid, merged);
-                new_rhs.push(Symbol::Terminal(Terminal::RegexName(name)));
-            }
-            prod.rhs = new_rhs;
         }
     }
 }
