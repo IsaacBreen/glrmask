@@ -6,6 +6,8 @@ use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use rustc_hash::FxHashMap;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::hash::{Hash, Hasher};
+use std::ops::BitOrAssign;
 use crate::precompute4::weighted_automata::test_weighted_automata;
 use super::common::{DETERMINIZE_DEBUG, Label, NWAStateID, Weight};
 use super::dwa::DWA;
@@ -19,6 +21,50 @@ use super::nwa::{NWA, NWAStates};
 type WeightedSubset = Vec<(NWAStateID, Weight)>;
 
 fn is_zero(w: &Weight) -> bool { w.is_empty() }
+
+/// A pre-hashed wrapper for BTreeMap to avoid recomputing hash on every lookup.
+#[derive(Clone)]
+struct HashedSubset {
+    inner: BTreeMap<NWAStateID, Weight>,
+    hash: u64,
+}
+
+impl HashedSubset {
+    fn new(inner: BTreeMap<NWAStateID, Weight>) -> Self {
+        use rustc_hash::FxHasher;
+        let mut hasher = FxHasher::default();
+        for (k, v) in &inner {
+            k.hash(&mut hasher);
+            v.hash(&mut hasher);
+        }
+        let hash = hasher.finish();
+        Self { inner, hash }
+    }
+    
+    fn from_ref(inner: &BTreeMap<NWAStateID, Weight>) -> Self {
+        use rustc_hash::FxHasher;
+        let mut hasher = FxHasher::default();
+        for (k, v) in inner {
+            k.hash(&mut hasher);
+            v.hash(&mut hasher);
+        }
+        let hash = hasher.finish();
+        Self { inner: inner.clone(), hash }
+    }
+}
+
+impl PartialEq for HashedSubset {
+    fn eq(&self, other: &Self) -> bool {
+        self.hash == other.hash && self.inner == other.inner
+    }
+}
+impl Eq for HashedSubset {}
+
+impl Hash for HashedSubset {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.hash.hash(state);
+    }
+}
 
 // ============================================================================
 // NWA Determinization Interface
@@ -148,8 +194,20 @@ impl NWA {
         let mut dwa = DWA::new();
         dwa.states.0.clear();
 
-        let mut subset_map: FxHashMap<BTreeMap<NWAStateID, Weight>, NWAStateID> = FxHashMap::default();
-        let mut worklist: VecDeque<BTreeMap<NWAStateID, Weight>> = VecDeque::new();
+        // Use pre-hashed subset map for faster lookups
+        let mut subset_map: FxHashMap<HashedSubset, NWAStateID> = FxHashMap::default();
+        let mut worklist: VecDeque<HashedSubset> = VecDeque::new();
+
+        // Timing
+        let mut time_epsilon_closure = 0u64;
+        let mut time_collect_transitions = 0u64;
+        let mut time_final_weights = 0u64;
+        let mut time_build_edges = 0u64;
+        let mut time_map_lookup = 0u64;
+        let mut epsilon_closure_calls = 0u64;
+        let mut total_subset_size = 0u64;
+        let mut max_subset_size = 0usize;
+        let det_start = std::time::Instant::now();
 
         // Initial States
         let mut start_subset = BTreeMap::new();
@@ -164,8 +222,9 @@ impl NWA {
         if !initial_subset.is_empty() {
             let start_id = dwa.add_state();
             dwa.body.start_state = start_id;
-            subset_map.insert(initial_subset.clone(), start_id);
-            worklist.push_back(initial_subset);
+            let hashed_initial = HashedSubset::new(initial_subset);
+            subset_map.insert(hashed_initial.clone(), start_id);
+            worklist.push_back(hashed_initial);
         } else {
             let start_id = dwa.add_state();
             dwa.body.start_state = start_id;
@@ -174,10 +233,14 @@ impl NWA {
         // Expansion Loop
         while let Some(subset) = worklist.pop_front() {
             let from_dwa_id = *subset_map.get(&subset).unwrap();
+            total_subset_size += subset.inner.len() as u64;
+            max_subset_size = max_subset_size.max(subset.inner.len());
+
+            let t_final = std::time::Instant::now();
 
             // Compute Final Weights
             let mut final_weight = Weight::zeros();
-            for (nwa_id, path_weight) in &subset {
+            for (nwa_id, path_weight) in &subset.inner {
                 if let Some(fw) = &self.states[*nwa_id].final_weight {
                     final_weight |= &(path_weight & fw);
                 }
@@ -185,35 +248,65 @@ impl NWA {
             if !final_weight.is_empty() {
                 dwa.states[from_dwa_id].final_weight = Some(final_weight);
             }
+            time_final_weights += t_final.elapsed().as_nanos() as u64;
 
             // Collect Transitions
+            let t_collect = std::time::Instant::now();
+            
             let mut transitions: BTreeMap<Label, BTreeMap<NWAStateID, Weight>> = BTreeMap::new();
-            for (nwa_id, path_weight) in &subset {
+            for (nwa_id, path_weight) in &subset.inner {
                 for (label, targets) in &self.states[*nwa_id].transitions {
                     for (target_nwa_id, trans_weight) in targets {
                         let next_path_weight = path_weight & trans_weight;
                         if !next_path_weight.is_empty() {
                             let entry = transitions.entry(*label).or_default();
-                            *entry.entry(*target_nwa_id).or_insert_with(Weight::zeros) |= &next_path_weight;
+                            entry.entry(*target_nwa_id).or_insert_with(Weight::zeros).bitor_assign(&next_path_weight);
                         }
                     }
                 }
             }
+            time_collect_transitions += t_collect.elapsed().as_nanos() as u64;
 
             // Build Edges
+            let t_edges = std::time::Instant::now();
             for (label, next_subset_pre_closure) in transitions {
+                let t_eps = std::time::Instant::now();
                 let next_subset = self.epsilon_closure_simple(&next_subset_pre_closure);
+                time_epsilon_closure += t_eps.elapsed().as_nanos() as u64;
+                epsilon_closure_calls += 1;
+                
                 if next_subset.is_empty() {
                     continue;
                 }
-                let to_dwa_id = *subset_map.entry(next_subset.clone()).or_insert_with(|| {
+                let t_map = std::time::Instant::now();
+                let hashed_next = HashedSubset::new(next_subset);
+                let to_dwa_id = *subset_map.entry(hashed_next.clone()).or_insert_with(|| {
                     let new_id = dwa.add_state();
-                    worklist.push_back(next_subset);
+                    worklist.push_back(hashed_next);
                     new_id
                 });
+                time_map_lookup += t_map.elapsed().as_nanos() as u64;
                 dwa.add_transition(from_dwa_id, label, to_dwa_id, Weight::all()).unwrap();
             }
+            time_build_edges += t_edges.elapsed().as_nanos() as u64;
         }
+        
+        let total_time = det_start.elapsed().as_millis();
+        if total_time > 200 {
+            let num_dfa_states = dwa.states.len();
+            let avg_subset = if num_dfa_states > 0 { total_subset_size / num_dfa_states as u64 } else { 0 };
+            crate::debug!(5, "NWA determinize_simple timing: total={}ms, epsilon_closure={}ms ({} calls), collect_trans={}ms, final_weights={}ms, build_edges={}ms, map_lookup={}ms, avg_subset={}, max_subset={}",
+                total_time,
+                time_epsilon_closure / 1_000_000,
+                epsilon_closure_calls,
+                time_collect_transitions / 1_000_000,
+                time_final_weights / 1_000_000,
+                time_build_edges / 1_000_000,
+                time_map_lookup / 1_000_000,
+                avg_subset,
+                max_subset_size);
+        }
+        
         dwa
     }
 

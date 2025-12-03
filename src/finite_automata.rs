@@ -874,11 +874,12 @@ impl ExprGroups {
         crate::debug!(4, "Building NFA");
         let start = std::time::Instant::now();
         let mut nfa = crate::time!("build_nfa", optimized.build_nfa());
-        crate::debug!(5, "Built NFA in {:.2?}", start.elapsed());
+        crate::debug!(5, "Built NFA with {} states in {:.2?}", nfa.states.len(), start.elapsed());
 
         let start_condense = std::time::Instant::now();
+        let nfa_states_before = nfa.states.len();
         crate::time!("condense_epsilon_sccs", nfa.condense_epsilon_sccs());
-        crate::debug!(5, "Condensed NFA in {:.2?}", start_condense.elapsed());
+        crate::debug!(5, "Condensed NFA {} → {} states in {:.2?}", nfa_states_before, nfa.states.len(), start_condense.elapsed());
 
         crate::debug!(4, "Converting NFA to DFA");
         let start = std::time::Instant::now();
@@ -1856,6 +1857,156 @@ impl NFA {
         self.start_state = scc_map[self.start_state];
     }
 
+    /// Eliminate epsilon transitions by computing epsilon closures and inlining transitions.
+    /// This converts the NFA to an epsilon-free form, making DFA construction much faster.
+    fn eliminate_epsilon_transitions(&mut self) {
+        let num_states = self.states.len();
+        if num_states == 0 {
+            return;
+        }
+
+        // Count total epsilon transitions
+        let total_epsilon: usize = self.states.iter().map(|s| s.epsilon_transitions.len()).sum();
+        if total_epsilon == 0 {
+            return;
+        }
+        
+        crate::debug!(4, "Eliminating {} epsilon transitions from {} states", total_epsilon, num_states);
+        let start = std::time::Instant::now();
+
+        // Build compact epsilon closure representation for efficient BFS
+        let mut epsilon_offsets = Vec::with_capacity(num_states + 1);
+        let mut epsilon_targets = Vec::new();
+        for state in &self.states {
+            epsilon_offsets.push(epsilon_targets.len() as u32);
+            for &target in &state.epsilon_transitions {
+                epsilon_targets.push(target as u32);
+            }
+        }
+        epsilon_offsets.push(epsilon_targets.len() as u32);
+
+        // Compute epsilon closures for all states in parallel
+        use rayon::prelude::*;
+        let closures: Vec<Vec<usize>> = (0..num_states).into_par_iter().map(|state_idx| {
+            let mut closure = Vec::new();
+            let mut visited = vec![false; num_states];
+            let mut stack = vec![state_idx];
+            visited[state_idx] = true;
+            closure.push(state_idx);
+            
+            while let Some(u) = stack.pop() {
+                let start_offs = epsilon_offsets[u] as usize;
+                let end_offs = epsilon_offsets[u + 1] as usize;
+                for i in start_offs..end_offs {
+                    let v = epsilon_targets[i] as usize;
+                    if !visited[v] {
+                        visited[v] = true;
+                        closure.push(v);
+                        stack.push(v);
+                    }
+                }
+            }
+            closure
+        }).collect();
+
+        // Now update each state's transitions by unioning transitions from all states in its closure
+        let new_states: Vec<NFAState> = (0..num_states).into_par_iter().map(|state_idx| {
+            let closure = &closures[state_idx];
+            
+            // Collect all transitions from states in closure
+            let mut all_transitions: Vec<(U8Set, usize)> = Vec::new();
+            let mut new_finalizers = self.states[state_idx].finalizers.clone();
+            let mut new_non_greedy_finalizers = self.states[state_idx].non_greedy_finalizers.clone();
+            
+            for &closure_state in closure {
+                for (u8set, target) in &self.states[closure_state].transitions {
+                    all_transitions.push((u8set.clone(), *target));
+                }
+                new_finalizers.union_with(&self.states[closure_state].finalizers);
+                new_non_greedy_finalizers.union_with(&self.states[closure_state].non_greedy_finalizers);
+            }
+
+            NFAState {
+                transitions: all_transitions,
+                epsilon_transitions: Vec::new(), // Eliminated!
+                finalizers: new_finalizers,
+                non_greedy_finalizers: new_non_greedy_finalizers,
+            }
+        }).collect();
+
+        self.states = new_states;
+        crate::debug!(4, "Epsilon elimination completed in {:.2?}", start.elapsed());
+    }
+
+    /// Precompute all epsilon closures using DAG-aware incremental computation.
+    /// For states in topological order, closure(s) = {s} ∪ ⋃{closure(t) | s →ε t}
+    /// This is more efficient than computing each closure independently with BFS.
+    fn precompute_epsilon_closures_dag(compact_nfa: &CompactNFA, num_states: usize) -> Vec<Vec<u32>> {
+        // First, compute reverse topological order via DFS post-order
+        let mut visited = vec![false; num_states];
+        let mut post_order = Vec::with_capacity(num_states);
+        
+        fn dfs_postorder(
+            state: usize,
+            compact_nfa: &CompactNFA,
+            visited: &mut [bool],
+            post_order: &mut Vec<usize>,
+        ) {
+            if visited[state] {
+                return;
+            }
+            visited[state] = true;
+            
+            let start = compact_nfa.epsilon_offsets[state] as usize;
+            let end = compact_nfa.epsilon_offsets[state + 1] as usize;
+            for &target in &compact_nfa.epsilon_targets[start..end] {
+                dfs_postorder(target as usize, compact_nfa, visited, post_order);
+            }
+            post_order.push(state);
+        }
+        
+        // DFS from all states to handle disconnected components
+        for state in 0..num_states {
+            dfs_postorder(state, compact_nfa, &mut visited, &mut post_order);
+        }
+        
+        // post_order is in reverse topological order (sinks first, sources last)
+        // Process in this order so when we process state s, all its successors are done
+        let mut closures: Vec<Vec<u32>> = vec![Vec::new(); num_states];
+        let mut temp_set = SparseStateSet::new(num_states);
+        
+        for &state in &post_order {
+            temp_set.clear();
+            temp_set.insert(state);
+            
+            // Union in closures of all epsilon successors
+            let start = compact_nfa.epsilon_offsets[state] as usize;
+            let end = compact_nfa.epsilon_offsets[state + 1] as usize;
+            for &target in &compact_nfa.epsilon_targets[start..end] {
+                let target = target as usize;
+                // Add all states from target's closure
+                for &s in &closures[target] {
+                    temp_set.insert(s as usize);
+                }
+            }
+            
+            // Convert to sorted vec by iterating over dirty words
+            let mut closure_vec: Vec<u32> = Vec::new();
+            for &w_idx in &temp_set.dirty_words {
+                let mut w = temp_set.dense.words[w_idx];
+                while w != 0 {
+                    let t = w.trailing_zeros();
+                    w &= !(1u64 << t);
+                    closure_vec.push((w_idx * 64 + t as usize) as u32);
+                }
+            }
+            closure_vec.sort_unstable();
+            closures[state] = closure_vec;
+        }
+        
+        closures
+    }
+
     fn build_compact_nfa(&self) -> CompactNFA {
         let mut epsilon_offsets = Vec::with_capacity(self.states.len() + 1);
         let mut epsilon_targets = Vec::new();
@@ -1867,6 +2018,38 @@ impl NFA {
             }
         }
         epsilon_offsets.push(epsilon_targets.len() as u32);
+        
+        crate::debug!(5, "CompactNFA: {} states, {} epsilon transitions", self.states.len(), epsilon_targets.len());
+        
+        // Debug: analyze epsilon structure
+        let mut out_degrees: Vec<u32> = Vec::with_capacity(self.states.len());
+        let mut max_out_degree = 0u32;
+        let mut states_with_epsilon = 0;
+        for i in 0..self.states.len() {
+            let degree = epsilon_offsets[i + 1] - epsilon_offsets[i];
+            out_degrees.push(degree);
+            if degree > max_out_degree {
+                max_out_degree = degree;
+            }
+            if degree > 0 {
+                states_with_epsilon += 1;
+            }
+        }
+        crate::debug!(5, "Epsilon structure: {} states have outgoing epsilons, max out-degree {}", 
+            states_with_epsilon, max_out_degree);
+        
+        // Histogram of out-degrees
+        let mut histogram: std::collections::BTreeMap<u32, usize> = std::collections::BTreeMap::new();
+        for &d in &out_degrees {
+            *histogram.entry(d).or_insert(0) += 1;
+        }
+        let significant: Vec<_> = histogram.iter()
+            .filter(|(&d, _)| d >= 100)
+            .map(|(&d, &c)| format!("{}:{}", d, c))
+            .collect();
+        if !significant.is_empty() {
+            crate::debug!(5, "  High out-degree states: {}", significant.join(", "));
+        }
 
         CompactNFA {
             epsilon_offsets,
@@ -1960,28 +2143,118 @@ impl NFA {
 
         // Shared buffers
         let num_nfa_states = self.states.len();
-        let mut stack = Vec::with_capacity(num_nfa_states);
+        let mut stack: Vec<usize> = Vec::with_capacity(num_nfa_states);
         let mut closure_set = SparseStateSet::new(num_nfa_states);
 
         // Compact NFA for faster BFS
         let compact_nfa = self.build_compact_nfa();
-
-        // Compute start state closure
-        stack.push(self.start_state);
-        closure_set.insert(self.start_state);
-
-        crate::time!("initial_closure_bfs", {
+        
+        // Pre-compute the number of outgoing epsilons per state for fast-path detection
+        let out_degree: Vec<u32> = (0..num_nfa_states).map(|s| {
+            (compact_nfa.epsilon_offsets[s + 1] - compact_nfa.epsilon_offsets[s])
+        }).collect();
+        
+        // Precompute closures for high-out-degree states (threshold 50)
+        // This avoids repeated BFS traversal from these "hub" states
+        const HIGH_DEGREE_THRESHOLD: u32 = 50;
+        let precompute_start = std::time::Instant::now();
+        let mut high_degree_closures: Vec<Option<Vec<u32>>> = vec![None; num_nfa_states];
+        let mut num_precomputed = 0;
+        
+        // Process in reverse topological order for efficiency
+        let mut visited = vec![false; num_nfa_states];
+        let mut post_order = Vec::with_capacity(num_nfa_states);
+        
+        fn dfs_postorder_selective(
+            state: usize,
+            compact_nfa: &CompactNFA,
+            out_degree: &[u32],
+            visited: &mut [bool],
+            post_order: &mut Vec<usize>,
+        ) {
+            if visited[state] {
+                return;
+            }
+            visited[state] = true;
+            
+            let start = compact_nfa.epsilon_offsets[state] as usize;
+            let end = compact_nfa.epsilon_offsets[state + 1] as usize;
+            for &target in &compact_nfa.epsilon_targets[start..end] {
+                dfs_postorder_selective(target as usize, compact_nfa, out_degree, visited, post_order);
+            }
+            // Only add to post_order if this is a high-degree state
+            if out_degree[state] >= HIGH_DEGREE_THRESHOLD {
+                post_order.push(state);
+            }
+        }
+        
+        // DFS from all states that are high-degree
+        for state in 0..num_nfa_states {
+            if out_degree[state] >= HIGH_DEGREE_THRESHOLD {
+                dfs_postorder_selective(state, &compact_nfa, &out_degree, &mut visited, &mut post_order);
+            }
+        }
+        
+        // Compute closures for high-degree states in post-order (successors first)
+        let mut temp_set = SparseStateSet::new(num_nfa_states);
+        for &state in &post_order {
+            temp_set.clear();
+            temp_set.insert(state);
+            
+            // BFS from this state, but use precomputed closures when available
+            stack.push(state);
             while let Some(u) = stack.pop() {
-                let start = compact_nfa.epsilon_offsets[u] as usize;
-                let end = compact_nfa.epsilon_offsets[u + 1] as usize;
-                for &v in &compact_nfa.epsilon_targets[start..end] {
-                    let v = v as usize;
-                    if closure_set.insert(v) {
-                        stack.push(v);
+                let start_offs = compact_nfa.epsilon_offsets[u] as usize;
+                let end_offs = compact_nfa.epsilon_offsets[u + 1] as usize;
+                
+                for i in start_offs..end_offs {
+                    let v = compact_nfa.epsilon_targets[i] as usize;
+                    if temp_set.insert(v) {
+                        // If v has precomputed closure, use it (and don't recurse)
+                        if let Some(ref closure) = high_degree_closures[v] {
+                            for &s in closure {
+                                temp_set.insert(s as usize);
+                            }
+                        } else if out_degree[v] > 0 {
+                            stack.push(v);
+                        }
                     }
                 }
             }
-        });
+            
+            // Store closure
+            let mut closure_vec: Vec<u32> = Vec::new();
+            for &w_idx in &temp_set.dirty_words {
+                let mut w = temp_set.dense.words[w_idx];
+                while w != 0 {
+                    let t = w.trailing_zeros();
+                    w &= !(1u64 << t);
+                    closure_vec.push((w_idx * 64 + t as usize) as u32);
+                }
+            }
+            closure_vec.sort_unstable();
+            high_degree_closures[state] = Some(closure_vec);
+            num_precomputed += 1;
+        }
+        crate::debug!(5, "Precomputed {} high-degree closures in {:.2?}", num_precomputed, precompute_start.elapsed());
+
+        // Compute start state closure using BFS
+        closure_set.insert(self.start_state);
+        if out_degree[self.start_state] > 0 {
+            stack.push(self.start_state);
+            while let Some(u) = stack.pop() {
+                let start_offs = compact_nfa.epsilon_offsets[u] as usize;
+                let end_offs = compact_nfa.epsilon_offsets[u + 1] as usize;
+                for i in start_offs..end_offs {
+                    let v = compact_nfa.epsilon_targets[i] as usize;
+                    if closure_set.insert(v) {
+                        if out_degree[v] > 0 {
+                            stack.push(v);
+                        }
+                    }
+                }
+            }
+        }
 
         let start_state_set = crate::time!("compress_state_set", CompressedStateSet::from_sparse(&closure_set));
 
@@ -2014,6 +2287,19 @@ impl NFA {
         let mut sort_scratch: Vec<usize> = Vec::with_capacity(1024);
 
         let main_loop_start = std::time::Instant::now();
+        
+        // Additional stats for debugging
+        let mut total_transitions_processed = 0u64;
+        let mut total_input_classes_processed = 0u64;
+        let mut total_cache_hits = 0u64;
+        let mut total_cache_misses = 0u64;
+        
+        // Timing buckets (in nanoseconds)
+        let mut time_collect = 0u64;
+        let mut time_closure = 0u64;
+        let mut time_compress = 0u64;
+        let mut time_lookup = 0u64;
+        let mut time_insert = 0u64;
 
         let mut next_log_threshold = 20_000;
         while let Some(current_set) = worklist.pop() {
@@ -2031,6 +2317,7 @@ impl NFA {
                 .expect("DFA state set not found in map");
 
             // 1. Populate transition_targets for all inputs (COLLECT PHASE)
+            let t0 = std::time::Instant::now();
             for state in current_set.iter() {
                     for (class_set, next_state) in unsafe { remapped_transitions.get_unchecked(state) } {
                         for class_id in class_set.iter() {
@@ -2045,30 +2332,46 @@ impl NFA {
                         }
                     }
             }
+            time_collect += t0.elapsed().as_nanos() as u64;
 
             // 2. Process inputs (PROCESS PHASE)
             
             let mut dfa_transitions_vec: Vec<(u8, usize)> = Vec::with_capacity(used_classes.len() * 2);
+            total_input_classes_processed += used_classes.len() as u64;
             
                 for &class_id in &used_classes {
                     let target_set = unsafe { transition_targets.get_unchecked(class_id) };
                     
+                    let t1 = std::time::Instant::now();
                     closure_set.clear();
                     
-                    // Bitset iteration
-                        for &w_idx in &target_set.dirty_words {
-                            let mut w = target_set.dense.words[w_idx];
-                            while w != 0 {
-                                let t = w.trailing_zeros();
-                                w &= !(1u64 << t);
-                                let next_state = w_idx * 64 + t as usize;
-                                if closure_set.insert(next_state) {
+                    // Fast path: check if all states have no outgoing epsilons
+                    let mut needs_bfs = false;
+                    for &w_idx in &target_set.dirty_words {
+                        let mut w = target_set.dense.words[w_idx];
+                        while w != 0 {
+                            let t = w.trailing_zeros();
+                            w &= !(1u64 << t);
+                            let next_state = w_idx * 64 + t as usize;
+                            
+                            // Check if this state has a precomputed closure
+                            if let Some(ref closure) = unsafe { high_degree_closures.get_unchecked(next_state) } {
+                                // Use precomputed closure
+                                for &s in closure {
+                                    closure_set.insert(s as usize);
+                                }
+                            } else {
+                                closure_set.insert(next_state);
+                                if unsafe { *out_degree.get_unchecked(next_state) } > 0 {
+                                    needs_bfs = true;
                                     stack.push(next_state);
                                 }
                             }
                         }
-
-                    // BFS Closure
+                    }
+                    
+                    // BFS Closure - only if needed for non-precomputed states
+                    if needs_bfs {
                         while let Some(u) = stack.pop() {
                             let start_offs = unsafe { *compact_nfa.epsilon_offsets.get_unchecked(u) } as usize;
                             let end_offs = unsafe { *compact_nfa.epsilon_offsets.get_unchecked(u + 1) } as usize;
@@ -2076,48 +2379,67 @@ impl NFA {
                             for i in start_offs..end_offs {
                                 let v = unsafe { *compact_nfa.epsilon_targets.get_unchecked(i) } as usize;
                                 if closure_set.insert(v) {
-                                    stack.push(v);
+                                    // Check if v has precomputed closure
+                                    if let Some(ref closure) = unsafe { high_degree_closures.get_unchecked(v) } {
+                                        for &s in closure {
+                                            closure_set.insert(s as usize);
+                                        }
+                                    } else if unsafe { *out_degree.get_unchecked(v) } > 0 {
+                                        stack.push(v);
+                                    }
                                 }
                             }
                         }
+                    }
+                    
+                    time_closure += t1.elapsed().as_nanos() as u64;
 
                     // Compress state set
+                    let t2 = std::time::Instant::now();
                     CompressedStateSet::reuse_from_sparse(&closure_set, &mut scratch_closure, &mut sort_scratch);
+                    time_compress += t2.elapsed().as_nanos() as u64;
 
                     // Map lookup/insert
+                    let t3 = std::time::Instant::now();
                     let next_state_idx = {
-                        match dfa_state_map.entry(scratch_closure.clone()) {
-                            std::collections::hash_map::Entry::Occupied(e) => {
-                                *e.get()
-                            }
-                            std::collections::hash_map::Entry::Vacant(e) => {
-                                let new_state_index = dfa_states.len();
-                                
-                                let key = e.key().clone();
-                                e.insert(new_state_index);
-                                
-                                worklist.push(key.clone());
-                                stats.max_worklist_len = stats.max_worklist_len.max(worklist.len());
+                        // First try lookup without cloning
+                        if let Some(&existing) = dfa_state_map.get(&scratch_closure) {
+                            total_cache_hits += 1;
+                            time_lookup += t3.elapsed().as_nanos() as u64;
+                            existing
+                        } else {
+                            total_cache_misses += 1;
+                            time_lookup += t3.elapsed().as_nanos() as u64;
+                            // Only clone once, reuse for map and worklist
+                            let t4 = std::time::Instant::now();
+                            let new_state_index = dfa_states.len();
+                            
+                            // Compute finalizers before moving the key
+                            let (new_finalizers, new_non_greedy_finalizers) = {
+                                let mut new_finalizers = DenseStateSet::empty();
+                                let mut new_non_greedy_finalizers = DenseStateSet::empty();
+                                for state in scratch_closure.iter() {
+                                    new_finalizers.union_with(&self.states[state].finalizers);
+                                    new_non_greedy_finalizers.union_with(&self.states[state].non_greedy_finalizers);
+                                }
+                                (new_finalizers, new_non_greedy_finalizers)
+                            };
+                            
+                            // Clone once for map, once for worklist
+                            let key = scratch_closure.clone();
+                            worklist.push(key.clone());
+                            dfa_state_map.insert(key, new_state_index);
+                            stats.max_worklist_len = stats.max_worklist_len.max(worklist.len());
 
-                                let (new_finalizers, new_non_greedy_finalizers) = {
-                                    let mut new_finalizers = DenseStateSet::empty();
-                                    let mut new_non_greedy_finalizers = DenseStateSet::empty();
-                                    for state in key.iter() {
-                                        new_finalizers.union_with(&self.states[state].finalizers);
-                                        new_non_greedy_finalizers.union_with(&self.states[state].non_greedy_finalizers);
-                                    }
-                                    (new_finalizers, new_non_greedy_finalizers)
-                                };
+                            dfa_states.push(DFAState {
+                                transitions: CharTransitions::new(),
+                                finalizers: new_finalizers,
+                                possible_future_group_ids: BTreeSet::new(),
+                                group_id_to_u8set: BTreeMap::new(),
+                            });
 
-                                dfa_states.push(DFAState {
-                                    transitions: CharTransitions::new(),
-                                    finalizers: new_finalizers,
-                                    possible_future_group_ids: BTreeSet::new(),
-                                    group_id_to_u8set: BTreeMap::new(),
-                                });
-
-                                new_state_index
-                            }
+                            time_insert += t4.elapsed().as_nanos() as u64;
+                            new_state_index
                         }
                     };
 
@@ -2136,7 +2458,16 @@ impl NFA {
             }
             used_classes.clear();
         }
+        
         stats.main_loop_time = main_loop_start.elapsed();
+        
+        // Print timing breakdown
+        crate::debug!(5, "  └─ Timing breakdown (total ns):");
+        crate::debug!(5, "      - Collect: {}ms", time_collect / 1_000_000);
+        crate::debug!(5, "      - Closure: {}ms", time_closure / 1_000_000);
+        crate::debug!(5, "      - Compress: {}ms", time_compress / 1_000_000);
+        crate::debug!(5, "      - Lookup: {}ms", time_lookup / 1_000_000);
+        crate::debug!(5, "      - Insert: {}ms", time_insert / 1_000_000);
 
         let mut dfa = DFA {
             states: dfa_states,
@@ -2165,6 +2496,14 @@ impl NFA {
             crate::debug!(5, "  └─ Remap transitions: {:.2?}", stats.remapped_transitions_time);
             crate::debug!(5, "  └─ Main loop: {:.2?}", stats.main_loop_time);
             crate::debug!(5, "  └─ Metadata: {:.2?}", stats.dfa_metadata_time);
+            crate::debug!(5, "  └─ Input classes processed: {}, cache hits: {}, misses: {}", 
+                total_input_classes_processed, total_cache_hits, total_cache_misses);
+            let hit_rate = if total_input_classes_processed > 0 {
+                (total_cache_hits as f64 / total_input_classes_processed as f64) * 100.0
+            } else {
+                0.0
+            };
+            crate::debug!(5, "  └─ Cache hit rate: {:.1}%", hit_rate);
         }
 
         dfa
