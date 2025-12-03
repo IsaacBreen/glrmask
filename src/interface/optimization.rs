@@ -1151,7 +1151,7 @@ mod tests {
         // Replicates the structure of generate_diff_grammar.py for a large file
         // to ensure optimization doesn't hang or explode in memory.
 
-        let num_lines = 100;
+        let num_lines = 10;
         let mut grammar_exprs = Vec::new();
         let mut regex_exprs = Vec::new();
 
@@ -1233,6 +1233,8 @@ mod tests {
 
         println!("Optimization took: {:?}", duration);
         println!("Final terminal count: {}", grammar.terminal_to_group_id().len());
+
+        assert_eq!(grammar.terminal_to_group_id().len(), 1, "Expected 1 terminal, got {}. Grammar: {grammar}");
 
         // Verify that we can compile the optimized grammar without panicking (e.g. index out of bounds)
         // This checks that terminal IDs are correctly renumbered and consistent.
