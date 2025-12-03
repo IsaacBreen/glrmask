@@ -1175,7 +1175,7 @@ impl GrammarDefinition {
         grammar_exprs: Vec<(String, GrammarExpr)>,
         regex_exprs: Vec<(String, Expr)>,
     ) -> Result<Self, String> {
-        Self::from_exprs_with_ignore(grammar_exprs, regex_exprs, None)
+        Self::from_exprs_impl(grammar_exprs, regex_exprs, None, true)
     }
 
     /// Constructs a `GrammarDefinition` from a list of `(name, GrammarExpr)` tuples
@@ -1184,6 +1184,17 @@ impl GrammarDefinition {
         grammar_exprs: Vec<(String, GrammarExpr)>,
         regex_exprs: Vec<(String, Expr)>,
         ignore_symbol_name: Option<&str>,
+    ) -> Result<Self, String> {
+        Self::from_exprs_impl(grammar_exprs, regex_exprs, ignore_symbol_name, true)
+    }
+
+    /// Internal implementation that takes an explicit optimize flag.
+    /// This avoids race conditions from using environment variables.
+    fn from_exprs_impl(
+        grammar_exprs: Vec<(String, GrammarExpr)>,
+        regex_exprs: Vec<(String, Expr)>,
+        ignore_symbol_name: Option<&str>,
+        should_optimize: bool,
     ) -> Result<Self, String> {
         if grammar_exprs.is_empty() {
             return Err("Grammar expressions list cannot be empty.".to_string());
@@ -1392,7 +1403,9 @@ impl GrammarDefinition {
             def.ignore_terminal_id = Some(TerminalID(*group_id));
         }
 
-        def.optimize();
+        if should_optimize {
+            def.optimize();
+        }
 
         Ok(def)
     }
@@ -1404,11 +1417,7 @@ impl GrammarDefinition {
         grammar_exprs: Vec<(String, GrammarExpr)>,
         regex_exprs: Vec<(String, Expr)>,
     ) -> Result<Self, String> {
-        // Temporarily disable optimization
-        std::env::set_var("DISABLE_GRAMMAR_OPTIMIZATION", "1");
-        let result = Self::from_exprs(grammar_exprs, regex_exprs);
-        std::env::remove_var("DISABLE_GRAMMAR_OPTIMIZATION");
-        result
+        Self::from_exprs_impl(grammar_exprs, regex_exprs, None, false)
     }
 
     /// Constructs a `GrammarDefinition` from parsed grammar rules.
