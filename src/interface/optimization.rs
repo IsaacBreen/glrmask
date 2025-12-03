@@ -105,10 +105,20 @@ impl<'a> GrammarOptimizer<'a> {
         // If exceeded, we abort optimization to avoid exponential blowup
         const MAX_EXPRESSION_SIZE: usize = 100_000;
         
+        let total_nts = elimination_order.len();
+        let start_time = std::time::Instant::now();
+        let mut processed = 0;
+        eprintln!("DEBUG: Starting elimination of {} NTs", total_nts);
+        
         // Gaussian elimination: eliminate NTs one by one
         for nt_to_eliminate in &elimination_order {
             if nt_to_eliminate == &start_nt {
                 continue; // Keep the start NT for last
+            }
+            
+            processed += 1;
+            if processed % 10 == 0 || processed <= 10 {
+                eprintln!("DEBUG: Processing NT {} ({}/{}) at {:?}", nt_to_eliminate, processed, total_nts, start_time.elapsed());
             }
             
             // Get the equation for this NT
@@ -132,11 +142,9 @@ impl<'a> GrammarOptimizer<'a> {
             let solved = Rc::new(solved);
             
             // Substitute into all remaining equations that reference this NT
+            // The substitution function handles memoization internally
             for (_other_nt, other_eq) in equations.iter_mut() {
-                if other_eq.contains_nt(nt_to_eliminate) {
-                    // Use the Rc-aware version to preserve sharing
-                    *other_eq = substitute_nt_rc(other_eq, nt_to_eliminate, &solved);
-                }
+                *other_eq = substitute_nt_rc(other_eq, nt_to_eliminate, &solved);
             }
         }
         
@@ -433,6 +441,7 @@ impl RegexTerm {
     }
     
     fn contains_nt(&self, nt: &str) -> bool {
+        // Simple version without memoization - used for non-shared trees
         match self {
             RegexTerm::Epsilon | RegexTerm::Concrete(_) => false,
             RegexTerm::NtRef(n) => n == nt,
@@ -652,33 +661,102 @@ fn is_epsilon(term: &RegexTerm) -> bool {
     }
 }
 
-/// Substitute all occurrences of `nt` in `term` with `replacement`
-/// Returns an Rc to preserve sharing - crucial for avoiding exponential blowup
-fn substitute_nt_rc(term: &Rc<RegexTerm>, nt: &str, replacement: &Rc<RegexTerm>) -> Rc<RegexTerm> {
-    if !term.contains_nt(nt) {
-        return term.clone(); // Clone the Rc, not the data
+/// Check if term contains a reference to `nt`, using memoization to handle shared subterms
+fn contains_nt_memoized(
+    term: &Rc<RegexTerm>,
+    nt: &str,
+    visited: &mut HashMap<*const RegexTerm, bool>
+) -> bool {
+    let ptr = Rc::as_ptr(term);
+    if let Some(&result) = visited.get(&ptr) {
+        return result;
     }
     
-    match term.as_ref() {
+    let result = match term.as_ref() {
+        RegexTerm::Epsilon | RegexTerm::Concrete(_) => false,
+        RegexTerm::NtRef(n) => n == nt,
+        RegexTerm::Seq(terms) | RegexTerm::Choice(terms) => {
+            terms.iter().any(|t| contains_nt_memoized(t, nt, visited))
+        }
+        RegexTerm::Star(inner) => contains_nt_memoized(inner, nt, visited),
+    };
+    
+    visited.insert(ptr, result);
+    result
+}
+
+/// Substitute all occurrences of `nt` in `term` with `replacement`
+/// Returns an Rc to preserve sharing - crucial for avoiding exponential blowup
+/// Uses memoization to handle shared subterms efficiently
+fn substitute_nt_rc(term: &Rc<RegexTerm>, nt: &str, replacement: &Rc<RegexTerm>) -> Rc<RegexTerm> {
+    let mut cache: HashMap<*const RegexTerm, Rc<RegexTerm>> = HashMap::new();
+    let mut contains_cache: HashMap<*const RegexTerm, bool> = HashMap::new();
+    let result = substitute_nt_rc_cached(term, nt, replacement, &mut cache, &mut contains_cache);
+    result
+}
+
+fn substitute_nt_rc_cached(
+    term: &Rc<RegexTerm>,
+    nt: &str,
+    replacement: &Rc<RegexTerm>,
+    cache: &mut HashMap<*const RegexTerm, Rc<RegexTerm>>,
+    contains_cache: &mut HashMap<*const RegexTerm, bool>
+) -> Rc<RegexTerm> {
+    let ptr = Rc::as_ptr(term);
+    
+    // Check cache first
+    if let Some(cached) = cache.get(&ptr) {
+        return cached.clone();
+    }
+    
+    // Check if this term contains the NT at all (with memoization)
+    if !contains_nt_memoized(term, nt, contains_cache) {
+        cache.insert(ptr, term.clone());
+        return term.clone();
+    }
+    
+    let result = match term.as_ref() {
         RegexTerm::Epsilon | RegexTerm::Concrete(_) => term.clone(),
-        RegexTerm::NtRef(n) if n == nt => replacement.clone(), // KEY: clone the Rc, share the data!
+        RegexTerm::NtRef(n) if n == nt => replacement.clone(),
         RegexTerm::NtRef(_) => term.clone(),
         RegexTerm::Seq(parts) => {
             let new_parts: Vec<Rc<RegexTerm>> = parts.iter()
-                .map(|p| substitute_nt_rc(p, nt, replacement))
+                .map(|p| substitute_nt_rc_cached(p, nt, replacement, cache, contains_cache))
                 .collect();
-            Rc::new(RegexTerm::make_seq(new_parts))
+            // Only create a new Rc if something actually changed
+            let changed = parts.iter().zip(new_parts.iter())
+                .any(|(old, new)| !Rc::ptr_eq(old, new));
+            if changed {
+                Rc::new(RegexTerm::make_seq(new_parts))
+            } else {
+                term.clone()
+            }
         }
         RegexTerm::Choice(alts) => {
             let new_alts: Vec<Rc<RegexTerm>> = alts.iter()
-                .map(|a| substitute_nt_rc(a, nt, replacement))
+                .map(|a| substitute_nt_rc_cached(a, nt, replacement, cache, contains_cache))
                 .collect();
-            Rc::new(RegexTerm::make_choice(new_alts))
+            // Only create a new Rc if something actually changed
+            let changed = alts.iter().zip(new_alts.iter())
+                .any(|(old, new)| !Rc::ptr_eq(old, new));
+            if changed {
+                Rc::new(RegexTerm::make_choice(new_alts))
+            } else {
+                term.clone()
+            }
         }
         RegexTerm::Star(inner) => {
-            Rc::new(RegexTerm::make_star(substitute_nt_rc(inner, nt, replacement)))
+            let new_inner = substitute_nt_rc_cached(inner, nt, replacement, cache, contains_cache);
+            if Rc::ptr_eq(inner, &new_inner) {
+                term.clone()
+            } else {
+                Rc::new(RegexTerm::make_star(new_inner))
+            }
         }
-    }
+    };
+    
+    cache.insert(ptr, result.clone());
+    result
 }
 
 /// Wrapper for backward compatibility - converts result to non-Rc
