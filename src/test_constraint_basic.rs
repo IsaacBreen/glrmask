@@ -113,6 +113,7 @@ fn test_x_semicolon_x() {
         2, // max_original_llm_token_id
         &GrammarConstraintConfig::default(),
     );
+    println!("Tokenizer: {}", constraint.tokenizer);
     constraint.dump_parser_dwa();
 
     let mut state = constraint.init();
