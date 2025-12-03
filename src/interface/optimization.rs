@@ -84,6 +84,7 @@ impl<'a> GrammarOptimizer<'a> {
         
         // 2. Compute SCCs
         let sccs = self.compute_sccs(&graph, &nt_list);
+        debug!(4, "SCCs found: {}", sccs.len());
         self.stats.sccs_found = sccs.len();
         
         // 3. Process SCCs in topological order
@@ -230,7 +231,6 @@ impl<'a> GrammarOptimizer<'a> {
                         match sym {
                             Symbol::Terminal(_) => false, // Has terminals, should optimize
                             Symbol::NonTerminal(ref other) => {
-                                // If it's resolved or is self, we can optimize
                                 !self.resolved_nts.contains_key(other) && other != nt
                             }
                         }
@@ -238,6 +238,7 @@ impl<'a> GrammarOptimizer<'a> {
                 });
                 
                 if only_unresolved_nt_refs {
+                    debug!(5, "Skipping SCC {:?} (only unresolved refs)", scc_nts.iter().map(|n| &n.0).collect::<Vec<_>>());
                     return None;
                 }
             }
@@ -246,6 +247,7 @@ impl<'a> GrammarOptimizer<'a> {
         if let Some(res) = self.try_convert_scc_right_linear(scc_nts) {
             return Some(res);
         }
+        debug!(5, "SCC {:?} failed right-linear check, trying left-linear", scc_nts.iter().map(|n| &n.0).collect::<Vec<_>>());
         self.try_convert_scc_left_linear(scc_nts)
     }
 
@@ -271,6 +273,7 @@ impl<'a> GrammarOptimizer<'a> {
                         Symbol::NonTerminal(ref other_nt) => {
                             if let Some(&local_idx) = nt_to_local_idx.get(other_nt) {
                                 if idx != rhs.len() - 1 { 
+                                    debug!(5, "Right-linear check failed: recursive NT not at end in prod {}", prod_idx);
                                     return None; 
                                 }
                                 target_scc_idx = Some(local_idx);
@@ -278,6 +281,7 @@ impl<'a> GrammarOptimizer<'a> {
                                 if let Some(expr) = self.resolved_nts.get(other_nt) {
                                     prefix_exprs.push(expr.clone());
                                 } else {
+                                    debug!(5, "Right-linear check failed: unresolved NT ref {} in prod {}", other_nt.0, prod_idx);
                                     return None;
                                 }
                             }
