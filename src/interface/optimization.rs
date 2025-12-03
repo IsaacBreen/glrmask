@@ -1042,12 +1042,10 @@ mod tests {
         assert_eq!(grammar.terminal_to_group_id().len(), 1);
     }
 
-    #[test]
-    fn test_large_diff_grammar_optimization() {
-        // Replicates the structure of generate_diff_grammar.py for a large file
-        // to ensure optimization doesn't hang or explode in memory.
+    fn build_diff_grammar(num_lines: usize) -> GrammarDefinition {
+        use crate::finite_automata::Expr;
+        use crate::interface::{GrammarExpr, GrammarDefinition};
 
-        let num_lines = 10;
         let mut grammar_exprs = Vec::new();
         let mut regex_exprs = Vec::new();
 
@@ -1121,8 +1119,13 @@ mod tests {
             ));
         }
 
-        let mut grammar = GrammarDefinition::from_exprs(grammar_exprs, regex_exprs).unwrap();
+        GrammarDefinition::from_exprs(grammar_exprs, regex_exprs).unwrap()
+    }
 
+    #[test]
+    fn test_diff_grammar_optimization_correctness() {
+        let mut grammar = build_diff_grammar(10);
+        
         let start = std::time::Instant::now();
         optimize_grammar(&mut grammar);
         let duration = start.elapsed();
@@ -1130,7 +1133,6 @@ mod tests {
         println!("Optimization took: {:?}", duration);
         println!("Final terminal count: {}", grammar.terminal_to_group_id().len());
 
-        // assert_eq!(grammar.terminal_to_group_id().len(), 1, "Expected 1 terminal, got {}. Grammar: {}", grammar.terminal_to_group_id().len(), grammar);
         if grammar.terminal_to_group_id().len() != 1 {
             eprintln!("Grammar: {}", grammar);
             panic!("Expected 1 terminal, got {}.", grammar.terminal_to_group_id().len());
@@ -1140,6 +1142,40 @@ mod tests {
         // This checks that terminal IDs are correctly renumbered and consistent.
         use crate::interface::CompiledGrammar;
         let _ = CompiledGrammar::from_definition(std::sync::Arc::new(grammar));
+    }
+
+    #[test]
+    fn test_diff_grammar_optimization_performance() {
+        // Scale test: ensure time grows roughly linearly, not quadratically/exponentially
+        let sizes = [100, 200, 300];
+        let mut times = Vec::new();
+
+        for &n in &sizes {
+            let mut grammar = build_diff_grammar(n);
+            let start = std::time::Instant::now();
+            optimize_grammar(&mut grammar);
+            let duration = start.elapsed();
+            times.push(duration.as_secs_f64());
+            
+            // Basic correctness check
+            assert_eq!(grammar.terminal_to_group_id().len(), 1, "Failed reduction for n={}", n);
+        }
+
+        println!("Optimization times (s): {:?}", times);
+        
+        // Simple linearity check: T(3N) should not be vastly larger than 3*T(N).
+        // If it were quadratic, T(3N) ~ 9*T(N).
+        // We use a loose bound to account for overhead/noise.
+        let t_base = times[0]; // n=100
+        let t_scaled = times[2]; // n=300
+        
+        if t_base > 0.005 {
+            let ratio = t_scaled / t_base;
+            println!("Ratio T(300)/T(100): {:.2}", ratio);
+            // Linear would be ~3.0. Quadratic ~9.0.
+            // Assert < 6.0 to be safe against noise but catch bad complexity.
+            assert!(ratio < 6.0, "Performance scaling looks worse than linear (ratio {:.2})", ratio);
+        }
     }
 
     #[test]
