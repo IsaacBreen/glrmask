@@ -1456,6 +1456,6 @@ mod tests {
             eof
         ]);
 
-        assert_eq!(grammar.group_id_to_expr.get(&0).unwrap(), &expected_regex);
+        assert_eq!(grammar.group_id_to_expr.get(&0).unwrap(), &expected_regex, "Expected: {}, got {}", expected_regex, grammar.group_id_to_expr.get(&0).unwrap());
     }
 }
