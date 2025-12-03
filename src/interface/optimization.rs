@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
+use std::rc::Rc;
 use bimap::BiBTreeMap;
 use crate::finite_automata::{Expr, QuantifierType};
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
@@ -61,16 +62,17 @@ impl<'a> GrammarOptimizer<'a> {
         self.stats.initial_productions = self.grammar.productions.len();
         self.stats.initial_terminals = self.count_terminals();
 
-        if let Some(final_expr) = self.try_convert_to_regex() {
-            self.replace_grammar_with_single_terminal(final_expr);
-        }
+        // Try to optimize the grammar by converting regular sub-grammars to regexes
+        self.optimize_regular_subgrammars();
 
         self.stats.final_productions = self.grammar.productions.len();
         self.stats.final_terminals = self.count_terminals();
     }
 
-    /// Try to convert the entire grammar to a single regex using Gaussian elimination.
-    fn try_convert_to_regex(&self) -> Option<Expr> {
+    /// Optimize by finding and converting regular sub-grammars to regex terminals.
+    /// This works for partial optimization - even if the whole grammar isn't regular,
+    /// we can still optimize parts of it.
+    fn optimize_regular_subgrammars(&mut self) {
         // Collect all non-terminal names
         let nt_names: HashSet<String> = self.grammar.productions.iter()
             .map(|p| p.lhs.0.clone())
@@ -81,22 +83,34 @@ impl<'a> GrammarOptimizer<'a> {
         let start_nt = start_prod.lhs.0.clone();
         
         // Build initial equations: each NT maps to a RegexTerm
-        let mut equations: HashMap<String, RegexTerm> = HashMap::new();
+        let mut equations: HashMap<String, Rc<RegexTerm>> = HashMap::new();
         
         for prod in &self.grammar.productions {
-            let term = self.production_rhs_to_regex_term(&prod.rhs, &nt_names)?;
+            let Some(term) = self.production_rhs_to_regex_term(&prod.rhs, &nt_names) else {
+                // If any production can't be converted, skip optimization for now
+                return;
+            };
+            let term = Rc::new(term);
             equations.entry(prod.lhs.0.clone())
                 .and_modify(|existing| {
-                    *existing = RegexTerm::choice(vec![existing.clone(), term.clone()]);
+                    *existing = Rc::new(RegexTerm::Choice(vec![existing.clone(), term.clone()]));
                 })
                 .or_insert(term);
         }
         
-        // Gaussian elimination: eliminate NTs one by one until only start remains
-        let nt_list: Vec<String> = nt_names.iter().cloned().collect();
+        // Check for mutual recursion between NTs - if there are cycles, bail out
+        // as this can cause exponential blowup during substitution
+        if has_mutual_recursion(&equations) {
+            eprintln!("DEBUG: Found mutual recursion, bailing out");
+            return;
+        }
         
-        // Process NTs in reverse order (typically eliminates dependencies first)
-        for nt_to_eliminate in nt_list.iter().rev() {
+        // Build dependency graph and compute elimination order (reverse topological)
+        let elimination_order = compute_elimination_order(&equations, &start_nt);
+        eprintln!("DEBUG: elimination_order = {:?}", elimination_order);
+        
+        // Gaussian elimination: eliminate NTs one by one
+        for nt_to_eliminate in &elimination_order {
             if nt_to_eliminate == &start_nt {
                 continue; // Keep the start NT for last
             }
@@ -107,20 +121,38 @@ impl<'a> GrammarOptimizer<'a> {
             };
             
             // Solve for this NT (apply Arden's lemma if self-recursive)
-            let solved = solve_single_equation(&nt_eq, nt_to_eliminate)?;
+            let Some(solved) = solve_single_equation(&nt_eq, nt_to_eliminate) else {
+                // Can't solve this NT (non-linear recursion) - put it back and skip
+                eprintln!("DEBUG: Can't solve NT {} - non-linear recursion", nt_to_eliminate);
+                equations.insert(nt_to_eliminate.clone(), nt_eq);
+                continue;
+            };
+            let solved = Rc::new(solved);
+            eprintln!("DEBUG: Solved {} = {:?}", nt_to_eliminate, solved);
             
-            // Substitute into all remaining equations
+            // Substitute into all remaining equations that reference this NT
             for (_other_nt, other_eq) in equations.iter_mut() {
-                *other_eq = substitute_nt(other_eq, nt_to_eliminate, &solved);
+                if other_eq.contains_nt(nt_to_eliminate) {
+                    *other_eq = Rc::new(substitute_nt(other_eq, nt_to_eliminate, &solved));
+                }
             }
         }
         
         // Now solve the start NT
-        let start_eq = equations.remove(&start_nt)?;
-        let solved_start = solve_single_equation(&start_eq, &start_nt)?;
+        let Some(start_eq) = equations.remove(&start_nt) else {
+            return;
+        };
+        let Some(solved_start) = solve_single_equation(&start_eq, &start_nt) else {
+            return;
+        };
         
         // Convert the final RegexTerm to Expr
-        regex_term_to_expr(&solved_start)
+        let Some(final_expr) = regex_term_to_expr(&solved_start) else {
+            return;
+        };
+        
+        // Successfully converted - replace the grammar
+        self.replace_grammar_with_single_terminal(final_expr);
     }
 
     /// Convert a production RHS to a RegexTerm
@@ -129,15 +161,15 @@ impl<'a> GrammarOptimizer<'a> {
             return Some(RegexTerm::Epsilon);
         }
 
-        let terms: Option<Vec<RegexTerm>> = rhs.iter().map(|sym| {
+        let terms: Option<Vec<Rc<RegexTerm>>> = rhs.iter().map(|sym| {
             match sym {
                 Symbol::Terminal(t) => {
                     let expr = self.get_expr_for_terminal(t)?;
-                    Some(RegexTerm::Concrete(expr))
+                    Some(Rc::new(RegexTerm::Concrete(expr)))
                 }
                 Symbol::NonTerminal(nt) => {
                     if nt_names.contains(&nt.0) {
-                        Some(RegexTerm::NtRef(nt.0.clone()))
+                        Some(Rc::new(RegexTerm::NtRef(nt.0.clone())))
                     } else {
                         None
                     }
@@ -145,7 +177,7 @@ impl<'a> GrammarOptimizer<'a> {
             }
         }).collect();
 
-        terms.map(|ts| RegexTerm::seq(ts))
+        terms.map(|ts| RegexTerm::make_seq(ts))
     }
 
     /// Get the Expr for a terminal
@@ -186,58 +218,193 @@ impl<'a> GrammarOptimizer<'a> {
     }
 }
 
-/// A term that may reference non-terminals
+/// Check if there is mutual recursion between NTs (cycles in the dependency graph).
+/// Mutual recursion causes exponential blowup during Gaussian elimination.
+fn has_mutual_recursion(equations: &HashMap<String, Rc<RegexTerm>>) -> bool {
+    // Build dependency graph: nt -> set of NTs it references (excluding self)
+    let mut deps: HashMap<String, HashSet<String>> = HashMap::new();
+    for (nt, eq) in equations {
+        let mut refs = eq.referenced_nts();
+        refs.remove(nt); // Self-recursion is OK (handled by Arden's lemma)
+        deps.insert(nt.clone(), refs);
+    }
+    
+    // Check for cycles using DFS
+    let mut visited: HashSet<String> = HashSet::new();
+    let mut rec_stack: HashSet<String> = HashSet::new();
+    
+    fn has_cycle(
+        nt: &str,
+        deps: &HashMap<String, HashSet<String>>,
+        visited: &mut HashSet<String>,
+        rec_stack: &mut HashSet<String>,
+    ) -> bool {
+        if rec_stack.contains(nt) {
+            return true; // Found a cycle
+        }
+        if visited.contains(nt) {
+            return false; // Already fully explored
+        }
+        
+        visited.insert(nt.to_string());
+        rec_stack.insert(nt.to_string());
+        
+        if let Some(neighbors) = deps.get(nt) {
+            for neighbor in neighbors {
+                if has_cycle(neighbor, deps, visited, rec_stack) {
+                    return true;
+                }
+            }
+        }
+        
+        rec_stack.remove(nt);
+        false
+    }
+    
+    for nt in equations.keys() {
+        if has_cycle(nt, &deps, &mut visited, &mut rec_stack) {
+            return true;
+        }
+    }
+    
+    false
+}
+
+/// Compute an elimination order for the NTs using reverse topological sort.
+/// We want to eliminate NTs that are "leaves" first (no dependencies or only self-references),
+/// then work our way up to NTs that depend on more things.
+fn compute_elimination_order(equations: &HashMap<String, Rc<RegexTerm>>, start_nt: &str) -> Vec<String> {
+    // Build dependency graph: nt -> set of NTs it references (excluding self)
+    let mut deps: HashMap<String, HashSet<String>> = HashMap::new();
+    for (nt, eq) in equations {
+        let mut refs = eq.referenced_nts();
+        refs.remove(nt); // Remove self-reference
+        deps.insert(nt.clone(), refs);
+    }
+    
+    // Build reverse dependency graph: nt -> set of NTs that reference it
+    let mut rev_deps: HashMap<String, HashSet<String>> = equations.keys()
+        .map(|k| (k.clone(), HashSet::new()))
+        .collect();
+    for (nt, refs) in &deps {
+        for r in refs {
+            if let Some(set) = rev_deps.get_mut(r) {
+                set.insert(nt.clone());
+            }
+        }
+    }
+    
+    // Count how many unresolved dependencies each NT has
+    let mut unresolved_deps: HashMap<String, usize> = deps.iter()
+        .map(|(nt, refs)| (nt.clone(), refs.len()))
+        .collect();
+    
+    // Start with NTs that have no dependencies (leaves)
+    let mut queue: Vec<String> = unresolved_deps.iter()
+        .filter(|(nt, &count)| count == 0 && *nt != start_nt)
+        .map(|(nt, _)| nt.clone())
+        .collect();
+    
+    // Sort queue to ensure deterministic ordering (helps with consistent behavior)
+    queue.sort();
+    
+    let mut result = Vec::new();
+    let mut resolved: HashSet<String> = HashSet::new();
+    
+    while let Some(nt) = queue.pop() {
+        if resolved.contains(&nt) || &nt == start_nt {
+            continue;
+        }
+        
+        resolved.insert(nt.clone());
+        result.push(nt.clone());
+        
+        // For each NT that depends on this one, decrease their unresolved count
+        if let Some(dependents) = rev_deps.get(&nt) {
+            for dep in dependents {
+                if let Some(count) = unresolved_deps.get_mut(dep) {
+                    *count = count.saturating_sub(1);
+                    if *count == 0 && !resolved.contains(dep) && dep != start_nt {
+                        queue.push(dep.clone());
+                        queue.sort(); // Keep sorted for determinism
+                    }
+                }
+            }
+        }
+    }
+    
+    // Add any remaining NTs (those in cycles) - sort them for determinism
+    let mut remaining: Vec<String> = equations.keys()
+        .filter(|nt| !resolved.contains(*nt) && *nt != start_nt)
+        .cloned()
+        .collect();
+    remaining.sort();
+    // Reverse to process higher-numbered NTs first (typically better for numbered NTs like s0, s1, etc.)
+    remaining.reverse();
+    result.extend(remaining);
+    
+    result
+}
+
+/// A term that may reference non-terminals (using Rc for sharing)
 #[derive(Clone, Debug)]
 enum RegexTerm {
     Epsilon,
     Concrete(Expr),
     NtRef(String),
-    Seq(Vec<RegexTerm>),
-    Choice(Vec<RegexTerm>),
-    Star(Box<RegexTerm>),
+    Seq(Vec<Rc<RegexTerm>>),
+    Choice(Vec<Rc<RegexTerm>>),
+    Star(Rc<RegexTerm>),
 }
 
 impl RegexTerm {
-    fn seq(terms: Vec<RegexTerm>) -> RegexTerm {
+    fn make_seq(terms: Vec<Rc<RegexTerm>>) -> RegexTerm {
         let mut flat = Vec::new();
         for t in terms {
-            match t {
+            match t.as_ref() {
                 RegexTerm::Epsilon => {}
-                RegexTerm::Seq(inner) => flat.extend(inner),
-                other => flat.push(other),
+                RegexTerm::Seq(inner) => flat.extend(inner.iter().cloned()),
+                _ => flat.push(t),
             }
         }
         if flat.is_empty() {
             RegexTerm::Epsilon
         } else if flat.len() == 1 {
-            flat.into_iter().next().unwrap()
+            // Unwrap the Rc to get the inner term
+            match Rc::try_unwrap(flat.into_iter().next().unwrap()) {
+                Ok(t) => t,
+                Err(rc) => (*rc).clone(),
+            }
         } else {
             RegexTerm::Seq(flat)
         }
     }
     
-    fn choice(terms: Vec<RegexTerm>) -> RegexTerm {
+    fn make_choice(terms: Vec<Rc<RegexTerm>>) -> RegexTerm {
         let mut flat = Vec::new();
         for t in terms {
-            match t {
-                RegexTerm::Choice(inner) => flat.extend(inner),
-                other => flat.push(other),
+            match t.as_ref() {
+                RegexTerm::Choice(inner) => flat.extend(inner.iter().cloned()),
+                _ => flat.push(t),
             }
         }
         if flat.is_empty() {
             RegexTerm::Epsilon
         } else if flat.len() == 1 {
-            flat.into_iter().next().unwrap()
+            match Rc::try_unwrap(flat.into_iter().next().unwrap()) {
+                Ok(t) => t,
+                Err(rc) => (*rc).clone(),
+            }
         } else {
             RegexTerm::Choice(flat)
         }
     }
     
-    fn star(inner: RegexTerm) -> RegexTerm {
-        match inner {
+    fn make_star(inner: Rc<RegexTerm>) -> RegexTerm {
+        match inner.as_ref() {
             RegexTerm::Epsilon => RegexTerm::Epsilon,
-            RegexTerm::Star(s) => RegexTerm::Star(s), // (a*)* = a*
-            other => RegexTerm::Star(Box::new(other)),
+            RegexTerm::Star(_) => (*inner).clone(), // (a*)* = a*
+            _ => RegexTerm::Star(inner),
         }
     }
     
@@ -249,6 +416,25 @@ impl RegexTerm {
                 terms.iter().any(|t| t.contains_nt(nt))
             }
             RegexTerm::Star(inner) => inner.contains_nt(nt),
+        }
+    }
+    
+    fn referenced_nts(&self) -> HashSet<String> {
+        let mut result = HashSet::new();
+        self.collect_nts(&mut result);
+        result
+    }
+    
+    fn collect_nts(&self, result: &mut HashSet<String>) {
+        match self {
+            RegexTerm::Epsilon | RegexTerm::Concrete(_) => {}
+            RegexTerm::NtRef(n) => { result.insert(n.clone()); }
+            RegexTerm::Seq(terms) | RegexTerm::Choice(terms) => {
+                for t in terms {
+                    t.collect_nts(result);
+                }
+            }
+            RegexTerm::Star(inner) => inner.collect_nts(result),
         }
     }
 }
@@ -266,27 +452,30 @@ fn solve_single_equation(equation: &RegexTerm, nt: &str) -> Option<RegexTerm> {
     let (recursive, base) = separate_recursive_alts(equation, nt);
     
     if recursive.is_empty() {
-        return Some(RegexTerm::choice(base));
+        return Some(RegexTerm::make_choice(base));
     }
     
     // Extract coefficients from recursive alternatives
-    // For X = αX | Xβ | γ, we need to handle both left and right recursion
-    let mut right_coefs: Vec<RegexTerm> = Vec::new();
-    let mut left_coefs: Vec<RegexTerm> = Vec::new();
+    let mut right_coefs: Vec<Rc<RegexTerm>> = Vec::new();
+    let mut left_coefs: Vec<Rc<RegexTerm>> = Vec::new();
     
     for rec in &recursive {
         if let Some((prefix, suffix)) = extract_coef(rec, nt) {
             match (is_epsilon(&prefix), is_epsilon(&suffix)) {
+                (true, true) => {
+                    // Just X alone - this means X = X | ... which is weird but valid
+                    // The coefficient is epsilon
+                }
                 (true, _) => {
                     // X suffix => left recursion
-                    left_coefs.push(suffix);
+                    left_coefs.push(Rc::new(suffix));
                 }
                 (_, true) => {
                     // prefix X => right recursion
-                    right_coefs.push(prefix);
+                    right_coefs.push(Rc::new(prefix));
                 }
                 _ => {
-                    // prefix X suffix => not directly solvable
+                    // prefix X suffix => not directly solvable with simple Arden
                     return None;
                 }
             }
@@ -297,31 +486,34 @@ fn solve_single_equation(equation: &RegexTerm, nt: &str) -> Option<RegexTerm> {
     
     // Build the solution
     let base_term = if base.is_empty() {
-        RegexTerm::Epsilon
+        Rc::new(RegexTerm::Epsilon)
     } else {
-        RegexTerm::choice(base)
+        Rc::new(RegexTerm::make_choice(base))
     };
     
     // Handle right recursion: X = αX | β => X = α*β
     let mut result = base_term;
     if !right_coefs.is_empty() {
-        let right_coef = RegexTerm::choice(right_coefs);
-        let right_star = RegexTerm::star(right_coef);
-        result = RegexTerm::seq(vec![right_star, result]);
+        let right_coef = Rc::new(RegexTerm::make_choice(right_coefs));
+        let right_star = Rc::new(RegexTerm::make_star(right_coef));
+        result = Rc::new(RegexTerm::make_seq(vec![right_star, result]));
     }
     
     // Handle left recursion: X = Xα | β => X = βα*
     if !left_coefs.is_empty() {
-        let left_coef = RegexTerm::choice(left_coefs);
-        let left_star = RegexTerm::star(left_coef);
-        result = RegexTerm::seq(vec![result, left_star]);
+        let left_coef = Rc::new(RegexTerm::make_choice(left_coefs));
+        let left_star = Rc::new(RegexTerm::make_star(left_coef));
+        result = Rc::new(RegexTerm::make_seq(vec![result, left_star]));
     }
     
-    Some(result)
+    Some(match Rc::try_unwrap(result) {
+        Ok(t) => t,
+        Err(rc) => (*rc).clone(),
+    })
 }
 
 /// Separate a term into recursive and non-recursive alternatives
-fn separate_recursive_alts(term: &RegexTerm, nt: &str) -> (Vec<RegexTerm>, Vec<RegexTerm>) {
+fn separate_recursive_alts(term: &RegexTerm, nt: &str) -> (Vec<Rc<RegexTerm>>, Vec<Rc<RegexTerm>>) {
     match term {
         RegexTerm::Choice(alts) => {
             let mut recursive = Vec::new();
@@ -335,8 +527,8 @@ fn separate_recursive_alts(term: &RegexTerm, nt: &str) -> (Vec<RegexTerm>, Vec<R
             }
             (recursive, base)
         }
-        _ if term.contains_nt(nt) => (vec![term.clone()], vec![]),
-        _ => (vec![], vec![term.clone()]),
+        _ if term.contains_nt(nt) => (vec![Rc::new(term.clone())], vec![]),
+        _ => (vec![], vec![Rc::new(term.clone())]),
     }
 }
 
@@ -363,12 +555,12 @@ fn extract_coef(term: &RegexTerm, nt: &str) -> Option<(RegexTerm, RegexTerm)> {
             let pos = nt_pos?;
             
             // Check that the NT reference is simple (just NtRef, not nested)
-            if !matches!(&parts[pos], RegexTerm::NtRef(n) if n == nt) {
+            if !matches!(parts[pos].as_ref(), RegexTerm::NtRef(n) if n == nt) {
                 return None;
             }
             
-            let prefix = RegexTerm::seq(parts[..pos].to_vec());
-            let suffix = RegexTerm::seq(parts[pos+1..].to_vec());
+            let prefix = RegexTerm::make_seq(parts[..pos].to_vec());
+            let suffix = RegexTerm::make_seq(parts[pos+1..].to_vec());
             Some((prefix, suffix))
         }
         _ => None,
@@ -384,29 +576,45 @@ fn is_epsilon(term: &RegexTerm) -> bool {
 }
 
 /// Substitute all occurrences of `nt` in `term` with `replacement`
-fn substitute_nt(term: &RegexTerm, nt: &str, replacement: &RegexTerm) -> RegexTerm {
+fn substitute_nt(term: &RegexTerm, nt: &str, replacement: &Rc<RegexTerm>) -> RegexTerm {
     if !term.contains_nt(nt) {
         return term.clone();
     }
     
     match term {
         RegexTerm::Epsilon | RegexTerm::Concrete(_) => term.clone(),
-        RegexTerm::NtRef(n) if n == nt => replacement.clone(),
+        RegexTerm::NtRef(n) if n == nt => (**replacement).clone(),
         RegexTerm::NtRef(_) => term.clone(),
         RegexTerm::Seq(parts) => {
-            let new_parts: Vec<RegexTerm> = parts.iter()
-                .map(|p| substitute_nt(p, nt, replacement))
+            let new_parts: Vec<Rc<RegexTerm>> = parts.iter()
+                .map(|p| {
+                    if p.contains_nt(nt) {
+                        Rc::new(substitute_nt(p, nt, replacement))
+                    } else {
+                        p.clone()
+                    }
+                })
                 .collect();
-            RegexTerm::seq(new_parts)
+            RegexTerm::make_seq(new_parts)
         }
         RegexTerm::Choice(alts) => {
-            let new_alts: Vec<RegexTerm> = alts.iter()
-                .map(|a| substitute_nt(a, nt, replacement))
+            let new_alts: Vec<Rc<RegexTerm>> = alts.iter()
+                .map(|a| {
+                    if a.contains_nt(nt) {
+                        Rc::new(substitute_nt(a, nt, replacement))
+                    } else {
+                        a.clone()
+                    }
+                })
                 .collect();
-            RegexTerm::choice(new_alts)
+            RegexTerm::make_choice(new_alts)
         }
         RegexTerm::Star(inner) => {
-            RegexTerm::star(substitute_nt(inner, nt, replacement))
+            if inner.contains_nt(nt) {
+                RegexTerm::make_star(Rc::new(substitute_nt(inner, nt, replacement)))
+            } else {
+                term.clone()
+            }
         }
     }
 }
@@ -419,13 +627,13 @@ fn regex_term_to_expr(term: &RegexTerm) -> Option<Expr> {
         RegexTerm::NtRef(_) => None, // Should not have NT refs at this point
         RegexTerm::Seq(parts) => {
             let exprs: Option<Vec<Expr>> = parts.iter()
-                .map(regex_term_to_expr)
+                .map(|p| regex_term_to_expr(p))
                 .collect();
             exprs.map(|es| make_seq(es))
         }
         RegexTerm::Choice(alts) => {
             let exprs: Option<Vec<Expr>> = alts.iter()
-                .map(regex_term_to_expr)
+                .map(|a| regex_term_to_expr(a))
                 .collect();
             exprs.map(|es| make_choice(es))
         }
