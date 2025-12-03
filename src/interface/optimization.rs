@@ -568,7 +568,9 @@ impl<'a> GrammarOptimizer<'a> {
         // Allocate group IDs and create Terminals
         let mut next_group_id = self.grammar.group_id_to_expr.keys().max().map(|&x| x + 1).unwrap_or(0);
         
-        for (nt, expr) in &self.resolved_nts {
+        let resolved_nts = self.resolved_nts.clone();
+        
+        for (nt, expr) in &resolved_nts {
             let is_nullable = matches!(get_expr_nullability(expr), ExprNullability::CanBeNull | ExprNullability::AlwaysNull);
             
             let target_expr = if is_nullable {
@@ -582,9 +584,9 @@ impl<'a> GrammarOptimizer<'a> {
                 final_name.push('_');
             }
             
-            if let Some(e) = target_expr {
+            if let Some(ref e) = target_expr {
                 self.grammar.regex_name_to_group_id.insert(final_name.clone(), next_group_id);
-                self.grammar.group_id_to_expr.insert(next_group_id, e);
+                self.grammar.group_id_to_expr.insert(next_group_id, e.clone());
                 let term = Terminal::RegexName(final_name);
                 if is_nullable {
                     nullable_definitions.insert(nt.clone(), Some(term));
