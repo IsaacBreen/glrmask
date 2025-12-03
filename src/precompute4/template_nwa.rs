@@ -155,35 +155,7 @@ pub fn build_terminal_dwas(parser: &GLRParser) -> Result<BTreeMap<TerminalID, DW
         Ok((term, dwa))
     }).collect();
 
-    results.map(|vec| {
-        let map: BTreeMap<TerminalID, DWA> = vec.into_iter().collect();
-        
-        // Validation: Ensure at least one terminal DWA has a merge (two incoming edges from different sources).
-        // This is a critical structural property for the complexity argument.
-        let mut found_merge = false;
-        for dwa in map.values() {
-            let mut incoming: BTreeMap<StateID, std::collections::HashSet<StateID>> = BTreeMap::new();
-            for (src, state) in dwa.states.0.iter().enumerate() {
-                for (_, &dst) in &state.transitions {
-                    incoming.entry(dst).or_default().insert(src);
-                }
-            }
-            
-            for sources in incoming.values() {
-                if sources.len() >= 2 {
-                    found_merge = true;
-                    break;
-                }
-            }
-            if found_merge { break; }
-        }
-        
-        if !found_merge {
-            println!("Validation Warning: No terminal DWA exhibits the 'two incoming edges' rule (merge from different sources). This is expected for simple grammars but might be an issue for complex ones.");
-        }
-
-        map
-    })
+    results.map(|vec| vec.into_iter().collect())
 }
 
 /// Deprecated alias for build_terminal_dwas
