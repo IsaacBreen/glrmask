@@ -770,10 +770,20 @@ use std::hash::{Hash, Hasher};
 #[derive(Clone, Eq)]
 struct InternKey(Expr);
 
+fn peel_shared(expr: &Expr) -> &Expr {
+    let mut current = expr;
+    while let Expr::Shared(inner) = current {
+        current = inner;
+    }
+    current
+}
+
 impl PartialEq for InternKey {
     fn eq(&self, other: &Self) -> bool {
-        match (&self.0, &other.0) {
-            (Expr::Shared(a), Expr::Shared(b)) => Arc::ptr_eq(a, b),
+        let a = peel_shared(&self.0);
+        let b = peel_shared(&other.0);
+        match (a, b) {
+            (Expr::Shared(_), _) | (_, Expr::Shared(_)) => unreachable!(),
             (Expr::U8Seq(a), Expr::U8Seq(b)) => a == b,
             (Expr::U8Class(a), Expr::U8Class(b)) => a == b,
             (Expr::Quantifier(a, qa), Expr::Quantifier(b, qb)) => qa == qb && InternKey(*a.clone()) == InternKey(*b.clone()),
@@ -787,9 +797,10 @@ impl PartialEq for InternKey {
 
 impl Hash for InternKey {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        std::mem::discriminant(&self.0).hash(state);
-        match &self.0 {
-            Expr::Shared(arc) => Arc::as_ptr(arc).hash(state),
+        let inner = peel_shared(&self.0);
+        std::mem::discriminant(inner).hash(state);
+        match inner {
+            Expr::Shared(_) => unreachable!(),
             Expr::U8Seq(bytes) => bytes.hash(state),
             Expr::U8Class(set) => set.hash(state),
             Expr::Quantifier(expr, q) => {
@@ -818,16 +829,13 @@ impl ExprInterner {
     }
 
     fn intern(&mut self, expr: Expr) -> Expr {
-        if let Expr::Shared(_) = expr {
-            return expr;
-        }
-
-        let key = InternKey(expr.clone());
+        let inner = peel_shared(&expr);
+        let key = InternKey(inner.clone());
         if let Some(cached) = self.cache.get(&key) {
             return cached.clone();
         }
 
-        let shared = Expr::Shared(Arc::new(expr));
+        let shared = Expr::Shared(Arc::new(inner.clone()));
         self.cache.insert(key, shared.clone());
         shared
     }
@@ -1240,7 +1248,7 @@ mod tests {
 
         // assert_eq!(grammar.terminal_to_group_id().len(), 1, "Expected 1 terminal, got {}. Grammar: {}", grammar.terminal_to_group_id().len(), grammar);
         if grammar.terminal_to_group_id().len() != 1 {
-            eprintln!("Grammar: {}", grammar);
+            // eprintln!("Grammar: {}", grammar);
             panic!("Expected 1 terminal, got {}.", grammar.terminal_to_group_id().len());
         }
 
