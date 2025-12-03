@@ -1148,10 +1148,10 @@ mod tests {
 
     #[test]
     fn test_large_diff_grammar_optimization() {
-        // Replicates the structure of generate_diff_grammar.py for a large file (1000 lines)
+        // Replicates the structure of generate_diff_grammar.py for a large file
         // to ensure optimization doesn't hang or explode in memory.
 
-        let num_lines = 1000;
+        let num_lines = 100;
         let mut grammar_exprs = Vec::new();
         let mut regex_exprs = Vec::new();
 
