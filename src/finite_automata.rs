@@ -404,6 +404,128 @@ impl ExprJSON {
     }
 }
 
+impl Display for Expr {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Expr::U8Seq(bytes) => {
+                let s = String::from_utf8_lossy(bytes);
+                write!(f, "\"{}\"", s.escape_debug())
+            }
+            Expr::U8Class(set) => {
+                write!(f, "[{}]", format_u8_class(set))
+            }
+            Expr::Shared(inner) => write!(f, "{}", inner),
+            Expr::Quantifier(inner, q_type) => {
+                let suffix = match q_type {
+                    QuantifierType::ZeroOrMore => "*",
+                    QuantifierType::OneOrMore => "+",
+                    QuantifierType::ZeroOrOne => "?",
+                };
+                let needs_parens = matches!(**inner, Expr::Choice(_) | Expr::Seq(_));
+                if needs_parens {
+                    write!(f, "({}){}", inner, suffix)
+                } else {
+                    write!(f, "{}{}", inner, suffix)
+                }
+            }
+            Expr::Choice(exprs) => {
+                // Heuristic for Optional: P|ε or ε|P -> P?
+                if exprs.len() == 2 {
+                    let p = if exprs[1] == Expr::Epsilon {
+                        Some(&exprs[0])
+                    } else if exprs[0] == Expr::Epsilon {
+                        Some(&exprs[1])
+                    } else {
+                        None
+                    };
+                    if let Some(p) = p {
+                        if matches!(p, Expr::Choice(_) | Expr::Seq(_)) {
+                            return write!(f, "({})?", p);
+                        } else {
+                            return write!(f, "{}?", p);
+                        }
+                    }
+                }
+
+                for (i, e) in exprs.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, " | ")?;
+                    }
+                    write!(f, "{}", e)?;
+                }
+                Ok(())
+            }
+            Expr::Seq(exprs) => {
+                for (i, e) in exprs.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, " ")?;
+                    }
+                    if matches!(e, Expr::Choice(_)) {
+                        write!(f, "({})", e)?;
+                    } else {
+                        write!(f, "{}", e)?;
+                    }
+                }
+                Ok(())
+            }
+            Expr::Epsilon => write!(f, "ε"),
+        }
+    }
+}
+
+fn format_u8_class(set: &U8Set) -> String {
+    let mut result = String::new();
+    let mut i = 0u16; 
+    let mut in_range = false;
+    let mut range_start = 0u8;
+
+    while i <= 255 {
+        let b = i as u8;
+        if set.contains(b) {
+            if !in_range {
+                range_start = b;
+                in_range = true;
+            }
+        } else {
+            if in_range {
+                append_range(&mut result, range_start, (i - 1) as u8);
+                in_range = false;
+            }
+        }
+        i += 1;
+    }
+    if in_range {
+        append_range(&mut result, range_start, 255);
+    }
+    result
+}
+
+fn append_range(s: &mut String, start: u8, end: u8) {
+    if start == end {
+        s.push_str(&escape_byte(start));
+    } else if start == end.wrapping_sub(1) {
+        s.push_str(&escape_byte(start));
+        s.push_str(&escape_byte(end));
+    } else {
+        s.push_str(&escape_byte(start));
+        s.push('-');
+        s.push_str(&escape_byte(end));
+    }
+}
+
+fn escape_byte(b: u8) -> String {
+    match b {
+        b'\n' => "\\n".to_string(),
+        b'\r' => "\\r".to_string(),
+        b'\t' => "\\t".to_string(),
+        b'\\' => "\\\\".to_string(),
+        b']' => "\\]".to_string(),
+        b'-' => "\\-".to_string(),
+        32..=126 => (b as char).to_string(),
+        _ => format!("\\x{:02x}", b),
+    }
+}
+
 impl JSONConvertible for Expr {
     fn to_json(&self) -> JSONNode {
         ExprJSON::from_expr(self).to_json()
