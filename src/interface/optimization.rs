@@ -98,16 +98,12 @@ impl<'a> GrammarOptimizer<'a> {
                 .or_insert(term);
         }
         
-        // Check for mutual recursion between NTs - if there are cycles, bail out
-        // as this can cause exponential blowup during substitution
-        if has_mutual_recursion(&equations) {
-            eprintln!("DEBUG: Found mutual recursion, bailing out");
-            return;
-        }
-        
         // Build dependency graph and compute elimination order (reverse topological)
         let elimination_order = compute_elimination_order(&equations, &start_nt);
-        eprintln!("DEBUG: elimination_order = {:?}", elimination_order);
+        
+        // Maximum allowed size for expressions during substitution
+        // If exceeded, we abort optimization to avoid exponential blowup
+        const MAX_EXPRESSION_SIZE: usize = 100_000;
         
         // Gaussian elimination: eliminate NTs one by one
         for nt_to_eliminate in &elimination_order {
@@ -120,6 +116,12 @@ impl<'a> GrammarOptimizer<'a> {
                 continue;
             };
             
+            // Check if expression is too large (only check before solving, not after every substitution)
+            if nt_eq.size() > MAX_EXPRESSION_SIZE {
+                eprintln!("DEBUG: Expression too large ({}), aborting optimization", nt_eq.size());
+                return;
+            }
+            
             // Solve for this NT (apply Arden's lemma if self-recursive)
             let Some(solved) = solve_single_equation(&nt_eq, nt_to_eliminate) else {
                 // Can't solve this NT (non-linear recursion) - put it back and skip
@@ -128,12 +130,12 @@ impl<'a> GrammarOptimizer<'a> {
                 continue;
             };
             let solved = Rc::new(solved);
-            eprintln!("DEBUG: Solved {} = {:?}", nt_to_eliminate, solved);
             
             // Substitute into all remaining equations that reference this NT
             for (_other_nt, other_eq) in equations.iter_mut() {
                 if other_eq.contains_nt(nt_to_eliminate) {
-                    *other_eq = Rc::new(substitute_nt(other_eq, nt_to_eliminate, &solved));
+                    // Use the Rc-aware version to preserve sharing
+                    *other_eq = substitute_nt_rc(other_eq, nt_to_eliminate, &solved);
                 }
             }
         }
@@ -218,15 +220,37 @@ impl<'a> GrammarOptimizer<'a> {
     }
 }
 
-/// Check if there is mutual recursion between NTs (cycles in the dependency graph).
-/// Mutual recursion causes exponential blowup during Gaussian elimination.
-fn has_mutual_recursion(equations: &HashMap<String, Rc<RegexTerm>>) -> bool {
+/// Check if the grammar structure would cause exponential blowup during substitution.
+/// This happens when:
+/// 1. There are cycles in the dependency graph (mutual recursion)
+/// 2. An NT is referenced multiple times (would cause duplication)
+fn would_cause_exponential_blowup(equations: &HashMap<String, Rc<RegexTerm>>) -> bool {
     // Build dependency graph: nt -> set of NTs it references (excluding self)
     let mut deps: HashMap<String, HashSet<String>> = HashMap::new();
+    
+    // Count total references to each NT across all equations
+    let mut total_ref_counts: HashMap<String, usize> = HashMap::new();
+    
     for (nt, eq) in equations {
         let mut refs = eq.referenced_nts();
         refs.remove(nt); // Self-recursion is OK (handled by Arden's lemma)
+        
+        // Count references within THIS equation (excluding self)
+        for r in eq.count_nt_references() {
+            if &r.0 != nt {
+                *total_ref_counts.entry(r.0).or_insert(0) += r.1;
+            }
+        }
+        
         deps.insert(nt.clone(), refs);
+    }
+    
+    // Check if any NT is referenced multiple times across ALL equations
+    // This would cause duplication during substitution
+    for (_nt, count) in &total_ref_counts {
+        if *count > 1 {
+            return true;
+        }
     }
     
     // Check for cycles using DFS
@@ -437,6 +461,59 @@ impl RegexTerm {
             RegexTerm::Star(inner) => inner.collect_nts(result),
         }
     }
+    
+    /// Count the number of references to each NT in this term
+    fn count_nt_references(&self) -> Vec<(String, usize)> {
+        let mut counts: HashMap<String, usize> = HashMap::new();
+        self.collect_nt_counts(&mut counts);
+        counts.into_iter().collect()
+    }
+    
+    fn collect_nt_counts(&self, counts: &mut HashMap<String, usize>) {
+        match self {
+            RegexTerm::Epsilon | RegexTerm::Concrete(_) => {}
+            RegexTerm::NtRef(n) => { *counts.entry(n.clone()).or_insert(0) += 1; }
+            RegexTerm::Seq(terms) | RegexTerm::Choice(terms) => {
+                for t in terms {
+                    t.collect_nt_counts(counts);
+                }
+            }
+            RegexTerm::Star(inner) => inner.collect_nt_counts(counts),
+        }
+    }
+    
+    /// Calculate the size of this term (number of nodes in the tree)
+    /// This counts each node once, even if referenced via Rc multiple times
+    fn size(&self) -> usize {
+        let mut visited: HashSet<*const RegexTerm> = HashSet::new();
+        self.size_with_visited(&mut visited)
+    }
+    
+    fn size_with_visited(&self, visited: &mut HashSet<*const RegexTerm>) -> usize {
+        match self {
+            RegexTerm::Epsilon | RegexTerm::Concrete(_) | RegexTerm::NtRef(_) => 1,
+            RegexTerm::Seq(terms) | RegexTerm::Choice(terms) => {
+                1 + terms.iter().map(|t| {
+                    let ptr = Rc::as_ptr(t);
+                    if visited.contains(&ptr) {
+                        0 // Already counted this subtree
+                    } else {
+                        visited.insert(ptr);
+                        t.size_with_visited(visited)
+                    }
+                }).sum::<usize>()
+            }
+            RegexTerm::Star(inner) => {
+                let ptr = Rc::as_ptr(inner);
+                if visited.contains(&ptr) {
+                    1 // Just count the Star node, inner already counted
+                } else {
+                    visited.insert(ptr);
+                    1 + inner.size_with_visited(visited)
+                }
+            }
+        }
+    }
 }
 
 /// Solve a single equation: X = equation, where equation may reference X.
@@ -576,73 +653,108 @@ fn is_epsilon(term: &RegexTerm) -> bool {
 }
 
 /// Substitute all occurrences of `nt` in `term` with `replacement`
-fn substitute_nt(term: &RegexTerm, nt: &str, replacement: &Rc<RegexTerm>) -> RegexTerm {
+/// Returns an Rc to preserve sharing - crucial for avoiding exponential blowup
+fn substitute_nt_rc(term: &Rc<RegexTerm>, nt: &str, replacement: &Rc<RegexTerm>) -> Rc<RegexTerm> {
     if !term.contains_nt(nt) {
-        return term.clone();
+        return term.clone(); // Clone the Rc, not the data
     }
     
-    match term {
+    match term.as_ref() {
         RegexTerm::Epsilon | RegexTerm::Concrete(_) => term.clone(),
-        RegexTerm::NtRef(n) if n == nt => (**replacement).clone(),
+        RegexTerm::NtRef(n) if n == nt => replacement.clone(), // KEY: clone the Rc, share the data!
         RegexTerm::NtRef(_) => term.clone(),
         RegexTerm::Seq(parts) => {
             let new_parts: Vec<Rc<RegexTerm>> = parts.iter()
-                .map(|p| {
-                    if p.contains_nt(nt) {
-                        Rc::new(substitute_nt(p, nt, replacement))
-                    } else {
-                        p.clone()
-                    }
-                })
+                .map(|p| substitute_nt_rc(p, nt, replacement))
                 .collect();
-            RegexTerm::make_seq(new_parts)
+            Rc::new(RegexTerm::make_seq(new_parts))
         }
         RegexTerm::Choice(alts) => {
             let new_alts: Vec<Rc<RegexTerm>> = alts.iter()
-                .map(|a| {
-                    if a.contains_nt(nt) {
-                        Rc::new(substitute_nt(a, nt, replacement))
-                    } else {
-                        a.clone()
-                    }
-                })
+                .map(|a| substitute_nt_rc(a, nt, replacement))
                 .collect();
-            RegexTerm::make_choice(new_alts)
+            Rc::new(RegexTerm::make_choice(new_alts))
         }
         RegexTerm::Star(inner) => {
-            if inner.contains_nt(nt) {
-                RegexTerm::make_star(Rc::new(substitute_nt(inner, nt, replacement)))
-            } else {
-                term.clone()
-            }
+            Rc::new(RegexTerm::make_star(substitute_nt_rc(inner, nt, replacement)))
         }
     }
 }
 
+/// Wrapper for backward compatibility - converts result to non-Rc
+fn substitute_nt(term: &RegexTerm, nt: &str, replacement: &Rc<RegexTerm>) -> RegexTerm {
+    let rc_term = Rc::new(term.clone());
+    let result = substitute_nt_rc(&rc_term, nt, replacement);
+    // Try to unwrap the Rc if we're the only owner, otherwise clone
+    Rc::try_unwrap(result).unwrap_or_else(|rc| (*rc).clone())
+}
+
 /// Convert a RegexTerm (with no NT references) to an Expr
+/// Uses caching via Arc<Expr> to preserve sharing from Rc<RegexTerm>
 fn regex_term_to_expr(term: &RegexTerm) -> Option<Expr> {
-    match term {
-        RegexTerm::Epsilon => Some(Expr::Epsilon),
-        RegexTerm::Concrete(e) => Some(e.clone()),
+    use std::sync::Arc;
+    let mut cache: HashMap<*const RegexTerm, Arc<Expr>> = HashMap::new();
+    regex_term_to_expr_cached(&Rc::new(term.clone()), &mut cache)
+        .map(|arc| Arc::try_unwrap(arc).unwrap_or_else(|arc| (*arc).clone()))
+}
+
+fn regex_term_to_expr_cached(
+    term: &Rc<RegexTerm>,
+    cache: &mut HashMap<*const RegexTerm, std::sync::Arc<Expr>>
+) -> Option<std::sync::Arc<Expr>> {
+    use std::sync::Arc;
+    
+    let ptr = Rc::as_ptr(term);
+    if let Some(cached) = cache.get(&ptr) {
+        return Some(cached.clone());
+    }
+    
+    let result = match term.as_ref() {
+        RegexTerm::Epsilon => Some(Arc::new(Expr::Epsilon)),
+        RegexTerm::Concrete(e) => Some(Arc::new(e.clone())),
         RegexTerm::NtRef(_) => None, // Should not have NT refs at this point
         RegexTerm::Seq(parts) => {
             let exprs: Option<Vec<Expr>> = parts.iter()
-                .map(|p| regex_term_to_expr(p))
+                .map(|p| regex_term_to_expr_cached(p, cache).map(|arc| {
+                    // Use Shared(Arc<Expr>) to preserve sharing
+                    if Arc::strong_count(&arc) > 1 {
+                        Expr::Shared(arc)
+                    } else {
+                        Arc::try_unwrap(arc).unwrap_or_else(|a| (*a).clone())
+                    }
+                }))
                 .collect();
-            exprs.map(|es| make_seq(es))
+            exprs.map(|es| Arc::new(make_seq(es)))
         }
         RegexTerm::Choice(alts) => {
             let exprs: Option<Vec<Expr>> = alts.iter()
-                .map(|a| regex_term_to_expr(a))
+                .map(|a| regex_term_to_expr_cached(a, cache).map(|arc| {
+                    // Use Shared(Arc<Expr>) to preserve sharing
+                    if Arc::strong_count(&arc) > 1 {
+                        Expr::Shared(arc)
+                    } else {
+                        Arc::try_unwrap(arc).unwrap_or_else(|a| (*a).clone())
+                    }
+                }))
                 .collect();
-            exprs.map(|es| make_choice(es))
+            exprs.map(|es| Arc::new(make_choice(es)))
         }
         RegexTerm::Star(inner) => {
-            regex_term_to_expr(inner).map(|e| {
-                Expr::Quantifier(Box::new(e), QuantifierType::ZeroOrMore)
+            regex_term_to_expr_cached(inner, cache).map(|arc| {
+                let inner_expr = if Arc::strong_count(&arc) > 1 {
+                    Expr::Shared(arc)
+                } else {
+                    Arc::try_unwrap(arc).unwrap_or_else(|a| (*a).clone())
+                };
+                Arc::new(Expr::Quantifier(Box::new(inner_expr), QuantifierType::ZeroOrMore))
             })
         }
+    };
+    
+    if let Some(ref r) = result {
+        cache.insert(ptr, r.clone());
     }
+    result
 }
 
 /// Make a sequence Expr, handling Epsilon and flattening
