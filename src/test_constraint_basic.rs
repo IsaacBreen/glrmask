@@ -755,6 +755,7 @@ fn test_ignore_token() {
         3, // max_original_llm_token_id
         &GrammarConstraintConfig::default(),
     );
+    println!("Tokenizer: {}", constraint.tokenizer);
     println!("Parser: {}", constraint.parser);
     // constraint.dump_precomputed1();
     constraint.dump_parser_dwa();
