@@ -58,6 +58,12 @@ impl<'a> GrammarOptimizer<'a> {
         self.grammar.external_name_to_group_id.len()
     }
 
+    fn get_ignore_expr(&self) -> Option<Expr> {
+        self.grammar.ignore_terminal_id.and_then(|id| {
+            self.grammar.group_id_to_expr.get(&id.0).cloned()
+        })
+    }
+
     fn optimize(&mut self) {
         self.stats.initial_productions = self.grammar.productions.len();
         self.stats.initial_terminals = self.count_terminals();
@@ -85,8 +91,13 @@ impl<'a> GrammarOptimizer<'a> {
         // Build initial equations: each NT maps to a RegexTerm
         let mut equations: HashMap<String, Rc<RegexTerm>> = HashMap::new();
         
+        let ignore_expr = self.get_ignore_expr();
+        let ignore_term = ignore_expr.as_ref().map(|e| {
+            Rc::new(RegexTerm::Star(Rc::new(RegexTerm::Concrete(e.clone()))))
+        });
+
         for prod in &self.grammar.productions {
-            let Some(term) = self.production_rhs_to_regex_term(&prod.rhs, &nt_names) else {
+            let Some(term) = self.production_rhs_to_regex_term(&prod.rhs, &nt_names, ignore_term.as_ref()) else {
                 // If any production can't be converted, skip optimization for now
                 return;
             };
@@ -151,12 +162,19 @@ impl<'a> GrammarOptimizer<'a> {
             return;
         };
         
-        // Successfully converted - replace the grammar
+        // If we have an ignore terminal, wrap the final expression
+        let final_expr = if let Some(expr) = ignore_expr {
+            let ignore_star = Expr::Quantifier(Box::new(expr), QuantifierType::ZeroOrMore);
+            Expr::Seq(vec![ignore_star.clone(), final_expr, ignore_star])
+        } else {
+            final_expr
+        };
+
         self.replace_grammar_with_single_terminal(final_expr);
     }
 
     /// Convert a production RHS to a RegexTerm
-    fn production_rhs_to_regex_term(&self, rhs: &[Symbol], nt_names: &HashSet<String>) -> Option<RegexTerm> {
+    fn production_rhs_to_regex_term(&self, rhs: &[Symbol], nt_names: &HashSet<String>, ignore_term: Option<&Rc<RegexTerm>>) -> Option<RegexTerm> {
         if rhs.is_empty() {
             return Some(RegexTerm::Epsilon);
         }
@@ -177,7 +195,20 @@ impl<'a> GrammarOptimizer<'a> {
             }
         }).collect();
 
-        terms.map(|ts| RegexTerm::make_seq(ts))
+        terms.map(|ts| {
+            if let Some(ign) = ignore_term {
+                let mut with_ignore = Vec::with_capacity(ts.len() * 2);
+                for (i, t) in ts.into_iter().enumerate() {
+                    if i > 0 {
+                        with_ignore.push(ign.clone());
+                    }
+                    with_ignore.push(t);
+                }
+                RegexTerm::make_seq(with_ignore)
+            } else {
+                RegexTerm::make_seq(ts)
+            }
+        })
     }
 
     /// Get the Expr for a terminal
