@@ -1147,37 +1147,55 @@ mod tests {
     #[test]
     fn test_diff_grammar_optimization_performance() {
         // Scale test: ensure time grows roughly linearly, not quadratically/exponentially
-        let sizes = [100, 200, 300];
-        let mut times = Vec::new();
+        // We dynamically find a size N that takes enough time to measure reliably,
+        // then test 3N to check scaling behavior.
 
-        for &n in &sizes {
+        let mut n = 100;
+        let mut t_base = 0.0;
+
+        // Find a baseline size that takes enough time to measure (> 5ms)
+        loop {
             let mut grammar = build_diff_grammar(n);
             let start = std::time::Instant::now();
             optimize_grammar(&mut grammar);
             let duration = start.elapsed();
-            times.push(duration.as_secs_f64());
-            
+            t_base = duration.as_secs_f64();
+
             // Basic correctness check
             assert_eq!(grammar.terminal_to_group_id().len(), 1, "Failed reduction for n={}", n);
+
+            if t_base > 0.005 {
+                break;
+            }
+            n *= 2;
+
+            // Safety break for extremely fast machines or if logic is broken
+            if n > 10_000 {
+                println!("Warning: reached n={} without exceeding time threshold (got {:.4}s). Skipping perf check.", n, t_base);
+                return;
+            }
         }
 
-        println!("Optimization times (s): {:?}", times);
-        
-        // Simple linearity check: T(3N) should not be vastly larger than 3*T(N).
-        // If it were quadratic, T(3N) ~ 9*T(N).
-        // We use a loose bound to account for overhead/noise.
-        let t_base = times[0]; // n=100
-        let t_scaled = times[2]; // n=300
-        
-        if t_base > 0.005 {
-            let ratio = t_scaled / t_base;
-            println!("Ratio T(300)/T(100): {:.2}", ratio);
-            // Linear would be ~3.0. Quadratic ~9.0.
-            // Assert < 6.0 to be safe against noise but catch bad complexity.
-            assert!(ratio < 6.0, "Performance scaling looks worse than linear (ratio {:.2})", ratio);
-        } else {
-            panic!("Base time too small to measure reliably.");
-        }
+        println!("Baseline: n={}, time={:.4}s", n, t_base);
+
+        // Scale up by 3x
+        let n_scaled = n * 3;
+        let mut grammar = build_diff_grammar(n_scaled);
+        let start = std::time::Instant::now();
+        optimize_grammar(&mut grammar);
+        let duration = start.elapsed();
+        let t_scaled = duration.as_secs_f64();
+
+        assert_eq!(grammar.terminal_to_group_id().len(), 1, "Failed reduction for n={}", n_scaled);
+
+        let ratio = t_scaled / t_base;
+        println!("Scaled: n={}, time={:.4}s", n_scaled, t_scaled);
+        println!("Ratio T({})/T({}): {:.2}", n_scaled, n, ratio);
+
+        // Linear scaling would be ~3.0. Quadratic would be ~9.0.
+        // We use a loose bound of 6.0 to account for overhead/noise/cache effects,
+        // but it should definitely be less than 9.0 (quadratic).
+        assert!(ratio < 6.0, "Performance scaling looks worse than linear (ratio {:.2})", ratio);
     }
 
     #[test]
