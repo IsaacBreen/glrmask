@@ -137,14 +137,19 @@ impl<'a> GrammarOptimizer<'a> {
             expand_time += expand_start.elapsed().as_micros();
             
             let solve_start = std::time::Instant::now();
-            let Some(solved) = solve_single_equation(&expanded_eq, nt_to_eliminate) else {
+            let Some(solved) = solve_single_equation_rc(&expanded_eq, nt_to_eliminate) else {
                 eprintln!("DEBUG: Can't solve NT {} - non-linear recursion", nt_to_eliminate);
                 equations.insert(nt_to_eliminate.clone(), nt_eq);
                 continue;
             };
             solve_time += solve_start.elapsed().as_micros();
             
-            solutions.insert(nt_to_eliminate.clone(), Rc::new(solved));
+            // Store the solution and pre-populate the expansion cache with its structure
+            let solved_rc = Rc::new(solved);
+            // Pre-expand the solution to populate cache with its structure
+            // (this is essentially a no-op since solutions have no NtRefs, but it adds to cache)
+            let _ = expand_with_solutions_cached(&solved_rc, &solutions, &mut expansion_cache);
+            solutions.insert(nt_to_eliminate.clone(), solved_rc);
         }
         
         eprintln!("DEBUG: Phase 1 done. expand_time={}ms, solve_time={}ms, cache_size={}", 
@@ -155,19 +160,25 @@ impl<'a> GrammarOptimizer<'a> {
             return;
         };
         
+        eprintln!("DEBUG: Phase 2 - expanding start NT");
         // Expand the start equation with all solutions
         let expanded_start = expand_with_solutions_cached(&start_eq, &solutions, &mut expansion_cache);
-        let Some(solved_start) = solve_single_equation(&expanded_start, &start_nt) else {
+        eprintln!("DEBUG: Phase 2 - solving start NT");
+        let Some(solved_start) = solve_single_equation_rc(&expanded_start, &start_nt) else {
             return;
         };
         
+        eprintln!("DEBUG: Phase 2 - converting to Expr");
         // Convert the final RegexTerm to Expr
         let Some(final_expr) = regex_term_to_expr(&solved_start) else {
             return;
         };
         
+        eprintln!("DEBUG: Phase 2 - replacing grammar");
         // Successfully converted - replace the grammar
+        let simplify_start = std::time::Instant::now();
         self.replace_grammar_with_single_terminal(final_expr);
+        eprintln!("DEBUG: Done! (simplify/replace took {:?})", simplify_start.elapsed());
     }
 
     /// Convert a production RHS to a RegexTerm
@@ -206,7 +217,9 @@ impl<'a> GrammarOptimizer<'a> {
 
     /// Replace the entire grammar with a single terminal
     fn replace_grammar_with_single_terminal(&mut self, expr: Expr) {
+        eprintln!("DEBUG: Starting simplify_expr");
         let expr = simplify_expr(expr);
+        eprintln!("DEBUG: simplify_expr done");
         
         let new_terminal_name = "__optimized_terminal__".to_string();
         let new_group_id = 0;
@@ -533,14 +546,17 @@ impl RegexTerm {
 /// Solve a single equation: X = equation, where equation may reference X.
 /// Uses Arden's lemma: X = αX | β => X = α*β (for right recursion)
 /// And: X = Xα | β => X = βα* (for left recursion)
-fn solve_single_equation(equation: &RegexTerm, nt: &str) -> Option<RegexTerm> {
-    if !equation.contains_nt(nt) {
+/// Takes Rc<RegexTerm> to enable memoization for contains_nt checks
+fn solve_single_equation_rc(equation: &Rc<RegexTerm>, nt: &str) -> Option<RegexTerm> {
+    let mut contains_cache: HashMap<*const RegexTerm, bool> = HashMap::new();
+    
+    if !contains_nt_memoized(equation, nt, &mut contains_cache) {
         // No self-reference, just return as-is
-        return Some(equation.clone());
+        return Some((**equation).clone());
     }
     
     // Separate into recursive and non-recursive alternatives
-    let (recursive, base) = separate_recursive_alts(equation, nt);
+    let (recursive, base) = separate_recursive_alts_rc(equation, nt, &mut contains_cache);
     
     if recursive.is_empty() {
         return Some(RegexTerm::make_choice(base));
@@ -551,7 +567,7 @@ fn solve_single_equation(equation: &RegexTerm, nt: &str) -> Option<RegexTerm> {
     let mut left_coefs: Vec<Rc<RegexTerm>> = Vec::new();
     
     for rec in &recursive {
-        if let Some((prefix, suffix)) = extract_coef(rec, nt) {
+        if let Some((prefix, suffix)) = extract_coef_rc(rec, nt, &mut contains_cache) {
             match (is_epsilon(&prefix), is_epsilon(&suffix)) {
                 (true, true) => {
                     // Just X alone - this means X = X | ... which is weird but valid
@@ -603,14 +619,18 @@ fn solve_single_equation(equation: &RegexTerm, nt: &str) -> Option<RegexTerm> {
     })
 }
 
-/// Separate a term into recursive and non-recursive alternatives
-fn separate_recursive_alts(term: &RegexTerm, nt: &str) -> (Vec<Rc<RegexTerm>>, Vec<Rc<RegexTerm>>) {
-    match term {
+/// Separate a term into recursive and non-recursive alternatives (Rc version with memoization)
+fn separate_recursive_alts_rc(
+    term: &Rc<RegexTerm>, 
+    nt: &str,
+    contains_cache: &mut HashMap<*const RegexTerm, bool>
+) -> (Vec<Rc<RegexTerm>>, Vec<Rc<RegexTerm>>) {
+    match term.as_ref() {
         RegexTerm::Choice(alts) => {
             let mut recursive = Vec::new();
             let mut base = Vec::new();
             for alt in alts {
-                if alt.contains_nt(nt) {
+                if contains_nt_memoized(alt, nt, contains_cache) {
                     recursive.push(alt.clone());
                 } else {
                     base.push(alt.clone());
@@ -618,15 +638,19 @@ fn separate_recursive_alts(term: &RegexTerm, nt: &str) -> (Vec<Rc<RegexTerm>>, V
             }
             (recursive, base)
         }
-        _ if term.contains_nt(nt) => (vec![Rc::new(term.clone())], vec![]),
-        _ => (vec![], vec![Rc::new(term.clone())]),
+        _ if contains_nt_memoized(term, nt, contains_cache) => (vec![term.clone()], vec![]),
+        _ => (vec![], vec![term.clone()]),
     }
 }
 
-/// Extract (prefix, suffix) from a term of the form "prefix X suffix"
+/// Extract (prefix, suffix) from a term of the form "prefix X suffix" (Rc version)
 /// Returns None if the term is not linear in X
-fn extract_coef(term: &RegexTerm, nt: &str) -> Option<(RegexTerm, RegexTerm)> {
-    match term {
+fn extract_coef_rc(
+    term: &Rc<RegexTerm>, 
+    nt: &str,
+    contains_cache: &mut HashMap<*const RegexTerm, bool>
+) -> Option<(RegexTerm, RegexTerm)> {
+    match term.as_ref() {
         RegexTerm::NtRef(n) if n == nt => {
             Some((RegexTerm::Epsilon, RegexTerm::Epsilon))
         }
@@ -634,7 +658,7 @@ fn extract_coef(term: &RegexTerm, nt: &str) -> Option<(RegexTerm, RegexTerm)> {
             // Find the position of the NT reference
             let mut nt_pos = None;
             for (i, p) in parts.iter().enumerate() {
-                if p.contains_nt(nt) {
+                if contains_nt_memoized(p, nt, contains_cache) {
                     if nt_pos.is_some() {
                         // Multiple references - not linear
                         return None;
@@ -656,6 +680,11 @@ fn extract_coef(term: &RegexTerm, nt: &str) -> Option<(RegexTerm, RegexTerm)> {
         }
         _ => None,
     }
+}
+
+/// Legacy wrapper for solve_single_equation (converts &RegexTerm to Rc)
+fn solve_single_equation(equation: &RegexTerm, nt: &str) -> Option<RegexTerm> {
+    solve_single_equation_rc(&Rc::new(equation.clone()), nt)
 }
 
 fn is_epsilon(term: &RegexTerm) -> bool {
@@ -949,11 +978,16 @@ fn make_choice(exprs: Vec<Expr>) -> Expr {
 
 /// Simplify an expression
 fn simplify_expr(expr: Expr) -> Expr {
+    let mut cache: HashMap<*const Expr, Arc<Expr>> = HashMap::new();
+    simplify_expr_cached(expr, &mut cache)
+}
+
+fn simplify_expr_cached(expr: Expr, cache: &mut HashMap<*const Expr, Arc<Expr>>) -> Expr {
     match expr {
         Expr::Seq(exprs) => {
             let mut simplified = Vec::new();
             for e in exprs {
-                let e = simplify_expr(e);
+                let e = simplify_expr_cached(e, cache);
                 match e {
                     Expr::Epsilon => {}
                     Expr::Seq(inner) => simplified.extend(inner),
@@ -970,7 +1004,7 @@ fn simplify_expr(expr: Expr) -> Expr {
         }
         Expr::Choice(exprs) => {
             let simplified: Vec<Expr> = exprs.into_iter()
-                .map(simplify_expr)
+                .map(|e| simplify_expr_cached(e, cache))
                 .flat_map(|e| match e {
                     Expr::Choice(inner) => inner,
                     other => vec![other],
@@ -983,7 +1017,7 @@ fn simplify_expr(expr: Expr) -> Expr {
             }
         }
         Expr::Quantifier(inner, qtype) => {
-            let inner = simplify_expr(*inner);
+            let inner = simplify_expr_cached(*inner, cache);
             match (&inner, &qtype) {
                 (Expr::Epsilon, _) => Expr::Epsilon,
                 (Expr::Quantifier(inner2, QuantifierType::ZeroOrMore), QuantifierType::ZeroOrMore) |
@@ -994,7 +1028,20 @@ fn simplify_expr(expr: Expr) -> Expr {
                 _ => Expr::Quantifier(Box::new(inner), qtype),
             }
         }
-        Expr::Shared(inner) => simplify_expr((*inner).clone()),
+        Expr::Shared(inner) => {
+            let ptr = Arc::as_ptr(&inner);
+            // Check cache for this shared subtree
+            if let Some(cached) = cache.get(&ptr) {
+                // Return a Shared pointing to the cached result
+                return Expr::Shared(cached.clone());
+            }
+            // Simplify the inner expression
+            let simplified = simplify_expr_cached((*inner).clone(), cache);
+            // Cache and return
+            let result = Arc::new(simplified);
+            cache.insert(ptr, result.clone());
+            Expr::Shared(result)
+        }
         other => other,
     }
 }
