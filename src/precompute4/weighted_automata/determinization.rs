@@ -193,6 +193,13 @@ impl NWA {
     pub fn determinize_simple(&self) -> DWA {
         let mut dwa = DWA::new();
         dwa.states.0.clear();
+        
+        // Log NWA stats for large automata
+        let num_nwa_states = self.states.len();
+        let total_eps: usize = self.states.0.iter().map(|s| s.epsilons.len()).sum();
+        if num_nwa_states > 100_000 {
+            crate::debug!(5, "NWA determinize_simple: {} states, {} epsilon transitions", num_nwa_states, total_eps);
+        }
 
         // Use pre-hashed subset map for faster lookups
         let mut subset_map: FxHashMap<HashedSubset, NWAStateID> = FxHashMap::default();

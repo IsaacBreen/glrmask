@@ -200,7 +200,7 @@ impl NWA {
                 dwa_passes: vec![DwaPass::PruneDeadEnds],
             },
             "FinalDWA" => DeterminizeAndSimplifyConfig {
-                // Best config based on experiments
+                // NWA simplification too slow for this context - just determinize directly
                 nwa_passes: vec![],
                 dwa_passes: vec![DwaPass::PruneDeadEnds, DwaPass::Minimize],
             },
