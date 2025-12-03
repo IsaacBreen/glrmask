@@ -739,22 +739,28 @@ fn expand_with_solutions_cached(
 ) -> Rc<RegexTerm> {
     let ptr = Rc::as_ptr(term);
     
-    // Check cache first
+    // For NtRef, we must NOT use cache based on ptr because the NtRef Rc pointer
+    // is independent of the solution's Rc pointer. Different NtRefs with the same name
+    // could have different Rc pointers but should resolve to the same solution.
+    // The cache for NtRef resolution is implicitly handled via the solutions map.
+    if let RegexTerm::NtRef(n) = term.as_ref() {
+        // If we have a solution for this NT, use it; otherwise keep the reference
+        if let Some(solution) = solutions.get(n) {
+            // Recursively expand the solution in case it contains other NTs
+            return expand_with_solutions_cached(solution, solutions, cache);
+        } else {
+            return term.clone();
+        }
+    }
+    
+    // Check cache for non-NtRef terms
     if let Some(cached) = cache.get(&ptr) {
         return cached.clone();
     }
     
     let result = match term.as_ref() {
         RegexTerm::Epsilon | RegexTerm::Concrete(_) => term.clone(),
-        RegexTerm::NtRef(n) => {
-            // If we have a solution for this NT, use it; otherwise keep the reference
-            if let Some(solution) = solutions.get(n) {
-                // Recursively expand the solution in case it contains other NTs
-                expand_with_solutions_cached(solution, solutions, cache)
-            } else {
-                term.clone()
-            }
-        }
+        RegexTerm::NtRef(_) => unreachable!(), // Handled above
         RegexTerm::Seq(parts) => {
             let new_parts: Vec<Rc<RegexTerm>> = parts.iter()
                 .map(|p| expand_with_solutions_cached(p, solutions, cache))
@@ -979,6 +985,15 @@ fn make_choice(exprs: Vec<Expr>) -> Expr {
     }
 }
 
+/// Check if an Expr is epsilon (possibly through Shared wrappers)
+fn is_epsilon_expr(expr: &Expr) -> bool {
+    match expr {
+        Expr::Epsilon => true,
+        Expr::Shared(inner) => is_epsilon_expr(inner),
+        _ => false,
+    }
+}
+
 /// Simplify an expression
 fn simplify_expr(expr: Expr) -> Expr {
     let mut cache: HashMap<*const Expr, Arc<Expr>> = HashMap::new();
@@ -1015,6 +1030,16 @@ fn simplify_expr_cached(expr: Expr, cache: &mut HashMap<*const Expr, Arc<Expr>>)
                 .collect();
             if simplified.len() == 1 {
                 simplified.into_iter().next().unwrap()
+            } else if simplified.len() == 2 {
+                // Check for Choice([a, Epsilon]) or Choice([Epsilon, a]) -> a?
+                let (first, second) = (&simplified[0], &simplified[1]);
+                if is_epsilon_expr(second) {
+                    Expr::Quantifier(Box::new(first.clone()), QuantifierType::ZeroOrOne)
+                } else if is_epsilon_expr(first) {
+                    Expr::Quantifier(Box::new(second.clone()), QuantifierType::ZeroOrOne)
+                } else {
+                    Expr::Choice(simplified)
+                }
             } else {
                 Expr::Choice(simplified)
             }
@@ -1434,14 +1459,28 @@ mod tests {
 
     #[test]
     fn test_x_semicolon_x() {
-        let ebnf_grammar = indoc! {r#"
-            program ::= expression_statement expression_statement? EOF;
-            expression_statement ::= expression ';'? ;
-            expression ::= 'x' ;
-            EOF ::= '$';
-        "#};
-        let mut grammar = GrammarDefinition::from_ebnf(ebnf_grammar).unwrap();
+        // Build grammar manually to avoid from_ebnf internal optimization
+        let grammar_exprs = vec![
+            ("program".to_string(), GrammarExpr::Sequence(vec![
+                GrammarExpr::Ref("expression_statement".to_string()),
+                GrammarExpr::Optional(Box::new(GrammarExpr::Ref("expression_statement".to_string()))),
+                GrammarExpr::Ref("EOF".to_string()),
+            ])),
+            ("expression_statement".to_string(), GrammarExpr::Sequence(vec![
+                GrammarExpr::Ref("expression".to_string()),
+                GrammarExpr::Optional(Box::new(GrammarExpr::Literal(b";".to_vec()))),
+            ])),
+            ("expression".to_string(), GrammarExpr::Literal(b"x".to_vec())),
+        ];
+        let regex_exprs = vec![
+            ("EOF".to_string(), Expr::U8Seq(b"$".to_vec())),
+        ];
+        
+        let mut grammar = GrammarDefinition::from_exprs_no_optimize(grammar_exprs, regex_exprs).unwrap();
+        println!("=== BEFORE OPTIMIZATION ===");
+        println!("{grammar}");
         optimize_grammar(&mut grammar);
+        println!("=== AFTER OPTIMIZATION ===");
         println!("{grammar}");
         assert_eq!(grammar.terminal_to_group_id().len(), 1);
 
@@ -1456,6 +1495,18 @@ mod tests {
             eof
         ]);
 
-        assert_eq!(grammar.group_id_to_expr.get(&0).unwrap(), &expected_regex, "Expected: {}, got {}", expected_regex, grammar.group_id_to_expr.get(&0).unwrap());
+        // Strip Shared wrappers for comparison since the optimization uses Shared for deduplication
+        fn strip_shared(expr: &Expr) -> Expr {
+            match expr {
+                Expr::Shared(inner) => strip_shared(inner),
+                Expr::Seq(exprs) => Expr::Seq(exprs.iter().map(strip_shared).collect()),
+                Expr::Choice(exprs) => Expr::Choice(exprs.iter().map(strip_shared).collect()),
+                Expr::Quantifier(inner, qtype) => Expr::Quantifier(Box::new(strip_shared(inner)), qtype.clone()),
+                other => other.clone(),
+            }
+        }
+
+        let actual = strip_shared(grammar.group_id_to_expr.get(&0).unwrap());
+        assert_eq!(actual, expected_regex, "Expected: {}, got {}", expected_regex, actual);
     }
 }
