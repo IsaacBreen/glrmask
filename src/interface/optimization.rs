@@ -1052,6 +1052,7 @@ fn simplify_expr_cached(expr: Expr, cache: &mut HashMap<*const Expr, Arc<Expr>>)
 
 #[cfg(test)]
 mod tests {
+    use indoc::indoc;
     use super::*;
     use crate::datastructures::u8set::U8Set;
 
@@ -1429,5 +1430,20 @@ mod tests {
 
         use crate::interface::interface::CompiledGrammar;
         let _ = CompiledGrammar::from_definition(std::sync::Arc::new(grammar));
+    }
+
+    #[test]
+    fn test_x_semicolon_x() {
+        let ebnf_grammar = indoc! {r#"
+            program ::= expression_statement expression_statement? EOF;
+            expression_statement ::= expression ';'? ;
+            expression ::= 'x' ;
+            EOF ::= '$';
+        "#};
+
+        let mut grammar = GrammarDefinition::from_ebnf(ebnf_grammar).unwrap();
+        optimize_grammar(&mut grammar);
+        println!("{grammar}");
+        assert_eq!(grammar.terminal_to_group_id().len(), 1);
     }
 }
