@@ -832,6 +832,43 @@ impl Expr {
         .build()
     }
 
+    /// Calculates the total size of a slice of `Expr`s in bytes, accounting for shared subexpressions.
+    pub fn total_size_in_bytes(exprs: &[Expr]) -> usize {
+        let mut total_size = 0;
+        let mut visited = HashSet::new();
+        for expr in exprs {
+            expr.add_size_recursive(&mut total_size, &mut visited);
+        }
+        total_size
+    }
+
+    fn add_size_recursive(&self, total: &mut usize, visited: &mut HashSet<usize>) {
+        *total += std::mem::size_of::<Self>();
+
+        match self {
+            Expr::U8Seq(bytes) => {
+                *total += bytes.capacity() * std::mem::size_of::<u8>();
+            }
+            Expr::U8Class(_) => {}
+            Expr::Shared(inner) => {
+                let ptr = Arc::as_ptr(inner) as usize;
+                if visited.insert(ptr) {
+                    inner.add_size_recursive(total, visited);
+                }
+            }
+            Expr::Quantifier(expr, _) => {
+                expr.add_size_recursive(total, visited);
+            }
+            Expr::Choice(exprs) | Expr::Seq(exprs) => {
+                *total += exprs.capacity() * std::mem::size_of::<Expr>();
+                for expr in exprs {
+                    expr.add_size_recursive(total, visited);
+                }
+            }
+            Expr::Epsilon => {}
+        }
+    }
+
     fn handle_expr_cached(
         expr: Expr,
         nfa: &mut NFA,
