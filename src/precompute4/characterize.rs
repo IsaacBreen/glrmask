@@ -13,7 +13,7 @@ type RevealAndRereduce = (StateID, usize, NonTerminalID);
 /// (revealed_state, goto_state, shift_state)
 type RevealGotoShiftEscape = (StateID, StateID, StateID);
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ReduceCharacterization {
     pub terminal: TerminalID,
     pub nonterminal: NonTerminalID,
@@ -68,7 +68,7 @@ impl Display for ReduceCharacterization {
 /// Note: In automata theory, this structure describes the behavior of a Weighted Pushdown
 /// System (WPDS) where transitions can "pop" stack symbols to reveal underlying states.
 /// After compilation, the push operations are resolved, yielding a true DWA.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TerminalCharacterization {
     pub terminal: TerminalID,
     pub initial_shifts: BTreeSet<InitialShift>,

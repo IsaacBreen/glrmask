@@ -215,6 +215,19 @@ impl DWA {
         }
     }
 
+    /// Performs a single pass of all optimization passes including minimize.
+    /// Unlike simplify(), this does NOT iterate until fixpoint - it runs each pass once.
+    /// Useful for terminal DWAs where we want minimize but don't need full convergence.
+    pub fn simplify_single_pass(&mut self) {
+        // Order: clean graph, minimize, push weights, clean again
+        self.prune_dead_ends();
+        self.prune_unreachable();
+        self.minimize_states();
+        self.push_weights_into_transitions_and_finals();
+        self.prune_dead_ends();
+        self.prune_unreachable();
+    }
+
     pub fn minimize_with_rustfst(&mut self) {
         let mut fst = self.to_rustfst();
         minimize(&mut fst).unwrap();
@@ -239,13 +252,17 @@ impl DWA {
         // and benefit from this optimization (saves ~200ms for 78 templates).
         if self.states.len() < 1000 {
             let mut changed = false;
-            changed |= self.prune_dead_ends();
-            changed |= self.minimize_states();
-            changed |= self.push_weights_into_transitions_and_finals();
-            changed |= self.push_weights_to_initial();
-            changed |= self.prune_unreachable();
-            // Second pass to catch any newly exposed opportunities
-            if changed {
+            let prune1 = self.prune_dead_ends();
+            let min1 = self.minimize_states();
+            let push1 = self.push_weights_into_transitions_and_finals();
+            let push2 = self.push_weights_to_initial();
+            let prune2 = self.prune_unreachable();
+            changed = prune1 || min1 || push1 || push2 || prune2;
+            
+            // Second pass ONLY if pruning/pushing changed something (not just minimize)
+            // After minimize, the DWA is already minimal so re-minimizing won't help
+            // unless structure was changed by prune/push
+            if prune1 || push1 || push2 || prune2 {
                 self.prune_dead_ends();
                 self.minimize_states();
                 self.prune_unreachable();
@@ -263,11 +280,13 @@ impl DWA {
         ];
         
         // History of which passes changed things in the last 2 iterations.
-        // Initialized with all passes so we run everything at least twice before skipping.
-        let all_passes: HashSet<DwaPass> = ordering.iter().copied().collect();
-        let mut history: Vec<HashSet<DwaPass>> = vec![all_passes.clone(), all_passes];
+        // Start empty - first iteration will run all passes unconditionally.
+        let mut history: Vec<HashSet<DwaPass>> = vec![];
         
-        let mut force_all_passes = false;
+        // Track whether minimize has been run and found no improvement since last structure change
+        let mut minimize_fully_explored = false;
+        
+        let mut force_all_passes = true;  // Force all passes on first iteration
         let mut converged = false;
 
         for iter_num in 0..MAX_OPTIMIZE_ITERATIONS {
@@ -275,6 +294,12 @@ impl DWA {
             let mut changed_in_iteration = false;
             
             for &pass in ordering {
+                // Special handling for Minimize: skip if we've already determined it can't help
+                // This prevents the expensive partition computation when we know it won't reduce states
+                if pass == DwaPass::Minimize && minimize_fully_explored {
+                    continue;
+                }
+                
                 // Skip if:
                 // 1. Not forcing all passes
                 // 2. Pass didn't change anything in the last 2 iterations
@@ -289,10 +314,23 @@ impl DWA {
                     DwaPass::PruneDeadEnds => self.prune_dead_ends(),
                     DwaPass::PushWeights => self.push_weights_into_transitions_and_finals(),
                     DwaPass::PushWeightsToInitial => self.push_weights_to_initial(),
-                    DwaPass::Minimize => self.minimize_states(),
+                    DwaPass::Minimize => {
+                        let changed = self.minimize_states();
+                        if !changed {
+                            // Minimize found no improvement - mark as fully explored
+                            // It will only be tried again if a structure-modifying pass changes something
+                            minimize_fully_explored = true;
+                        }
+                        changed
+                    },
                 };
+                
                 if pass_changed {
                     current_changing_passes.insert(pass);
+                    // If a non-minimize pass changed something, minimize might have new opportunities
+                    if pass != DwaPass::Minimize {
+                        minimize_fully_explored = false;
+                    }
                 }
                 changed_in_iteration |= pass_changed;
             }
@@ -484,6 +522,22 @@ impl DWA {
         if n < 3 {
             return false;
         }
+        
+        // Quick check: count distinct final weights. If all states have distinct
+        // final weights, no merging is possible. This is a common case.
+        let mut fw_count = 0;
+        let mut seen_final_weights: rustc_hash::FxHashSet<Option<Weight>> = rustc_hash::FxHashSet::default();
+        for s in 0..n {
+            if seen_final_weights.insert(self.states[s].final_weight.clone()) {
+                fw_count += 1;
+            }
+        }
+        // If we have as many distinct final weight classes as states, minimize won't help
+        // (partition refinement starts from final weights, so at best we get fw_count classes)
+        if fw_count == n {
+            return false;
+        }
+        
         let partition = minimize_dwa_partition(&self.states);
         if partition.num_classes() >= n {
             return false;

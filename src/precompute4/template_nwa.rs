@@ -150,8 +150,12 @@ pub fn build_terminal_dwas(parser: &GLRParser) -> Result<BTreeMap<TerminalID, DW
         let nwa = build_nwa_from_terminal_characterization(&tc)?;
         // Skip nwa.simplify() - let determinize handle it
         let mut dwa = nwa.determinize();
-        dwa.simplify();
-        crate::debug!(7, "Built terminal DWA for terminal {:?}:", term);
+        crate::debug!(6, "Terminal {:?}: {} states before simplify", term, dwa.states.len());
+        // Use single pass simplification for terminal DWAs - includes minimize but
+        // doesn't iterate to full convergence. Terminal DWAs are intermediate artifacts
+        // and full convergence is overkill.
+        dwa.simplify_single_pass();
+        crate::debug!(6, "Terminal {:?}: {} states after simplify", term, dwa.states.len());
         Ok((term, dwa))
     }).collect();
 
