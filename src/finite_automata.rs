@@ -404,6 +404,121 @@ impl ExprJSON {
     }
 }
 
+fn format_u8_range(f: &mut Formatter<'_>, start: u8, end: u8) -> std::fmt::Result {
+    fn escape(f: &mut Formatter<'_>, b: u8) -> std::fmt::Result {
+        match b {
+            b'\n' => write!(f, "\\n"),
+            b'\r' => write!(f, "\\r"),
+            b'\t' => write!(f, "\\t"),
+            b'\\' => write!(f, "\\\\"),
+            b']' => write!(f, "\\]"),
+            b'-' => write!(f, "\\-"),
+            32..=126 => write!(f, "{}", b as char),
+            _ => write!(f, "\\x{:02x}", b),
+        }
+    }
+
+    escape(f, start)?;
+    if start < end {
+        if start + 1 < end {
+            write!(f, "-")?;
+        }
+        escape(f, end)?;
+    }
+    Ok(())
+}
+
+impl Display for Expr {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Expr::U8Seq(bytes) => {
+                let s = String::from_utf8_lossy(bytes);
+                write!(f, "\"{}\"", s.escape_default())
+            }
+            Expr::U8Class(set) => {
+                write!(f, "[")?;
+                let mut i = 0u16;
+                let mut range_start = None;
+                
+                while i < 256 {
+                    let present = set.contains(i as u8);
+                    if present {
+                        if range_start.is_none() {
+                            range_start = Some(i as u8);
+                        }
+                    } else {
+                        if let Some(start) = range_start {
+                            let end = (i - 1) as u8;
+                            format_u8_range(f, start, end)?;
+                            range_start = None;
+                        }
+                    }
+                    i += 1;
+                }
+                if let Some(start) = range_start {
+                    format_u8_range(f, start, 255)?;
+                }
+                write!(f, "]")
+            }
+            Expr::Shared(inner) => write!(f, "{}", inner),
+            Expr::Quantifier(inner, q_type) => {
+                let suffix = match q_type {
+                    QuantifierType::ZeroOrMore => "*",
+                    QuantifierType::OneOrMore => "+",
+                    QuantifierType::ZeroOrOne => "?",
+                };
+                let needs_parens = matches!(**inner, Expr::Choice(_) | Expr::Seq(_));
+                if needs_parens {
+                    write!(f, "({}){}", inner, suffix)
+                } else {
+                    write!(f, "{}{}", inner, suffix)
+                }
+            }
+            Expr::Choice(exprs) => {
+                let is_epsilon = |e: &Expr| matches!(e, Expr::Epsilon) || matches!(e, Expr::Seq(s) if s.is_empty());
+                if exprs.len() == 2 {
+                     if is_epsilon(&exprs[1]) {
+                         if let Expr::Quantifier(inner, QuantifierType::OneOrMore) = &exprs[0] {
+                             let needs_parens = matches!(**inner, Expr::Choice(_) | Expr::Seq(_));
+                             return if needs_parens { write!(f, "({})*", inner) } else { write!(f, "{}*", inner) };
+                         }
+                         let needs_parens = matches!(exprs[0], Expr::Choice(_) | Expr::Seq(_));
+                         return if needs_parens { write!(f, "({})?", exprs[0]) } else { write!(f, "{}?", exprs[0]) };
+                     } else if is_epsilon(&exprs[0]) {
+                          if let Expr::Quantifier(inner, QuantifierType::OneOrMore) = &exprs[1] {
+                             let needs_parens = matches!(**inner, Expr::Choice(_) | Expr::Seq(_));
+                             return if needs_parens { write!(f, "({})*", inner) } else { write!(f, "{}*", inner) };
+                         }
+                         let needs_parens = matches!(exprs[1], Expr::Choice(_) | Expr::Seq(_));
+                         return if needs_parens { write!(f, "({})?", exprs[1]) } else { write!(f, "{}?", exprs[1]) };
+                     }
+                }
+
+                for (i, expr) in exprs.iter().enumerate() {
+                    if i > 0 { write!(f, " | ")?; }
+                    write!(f, "{}", expr)?;
+                }
+                Ok(())
+            }
+            Expr::Seq(exprs) => {
+                if exprs.is_empty() {
+                    return write!(f, "ε");
+                }
+                for (i, expr) in exprs.iter().enumerate() {
+                    if i > 0 { write!(f, " ")?; }
+                    if matches!(expr, Expr::Choice(_)) {
+                         write!(f, "({})", expr)?;
+                    } else {
+                         write!(f, "{}", expr)?;
+                    }
+                }
+                Ok(())
+            }
+            Expr::Epsilon => write!(f, "ε"),
+        }
+    }
+}
+
 impl JSONConvertible for Expr {
     fn to_json(&self) -> JSONNode {
         ExprJSON::from_expr(self).to_json()
