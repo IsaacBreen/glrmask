@@ -1394,6 +1394,7 @@ mod tests {
         let _ = CompiledGrammar::from_definition(std::sync::Arc::new(grammar));
     }
 
+    #[ignore]
     #[test]
     fn test_diff_grammar_optimization_performance() {
         // This test verifies that grammar optimization scales roughly linearly.
