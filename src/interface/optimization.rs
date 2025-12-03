@@ -1175,6 +1175,8 @@ mod tests {
             // Linear would be ~3.0. Quadratic ~9.0.
             // Assert < 6.0 to be safe against noise but catch bad complexity.
             assert!(ratio < 6.0, "Performance scaling looks worse than linear (ratio {:.2})", ratio);
+        } else {
+            panic!("Base time too small to measure reliably.");
         }
     }
 
