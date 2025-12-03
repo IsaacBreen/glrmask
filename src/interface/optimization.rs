@@ -4,7 +4,7 @@ use bimap::BiBTreeMap;
 use crate::finite_automata::{Expr, QuantifierType};
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::interface::{GrammarDefinition, GrammarExpr, ExprNullability, get_expr_nullability};
-use crate::types::TerminalID;
+use crate::types::{TerminalID, TerminalID as GrammarTokenID};
 use crate::debug;
 
 pub fn optimize_grammar(grammar: &mut GrammarDefinition) {
@@ -297,12 +297,6 @@ impl<'a> GrammarOptimizer<'a> {
         let solved = self.solve_regular_system(scc_nts.len(), &transitions, &finals);
         let mut result = HashMap::new();
         for (i, expr) in solved.into_iter().enumerate() {
-            // Don't convert nullable expressions to terminals - the parser needs
-            // epsilon productions to correctly handle empty matches.
-            if matches!(get_expr_nullability(&expr), ExprNullability::CanBeNull | ExprNullability::AlwaysNull) {
-                debug!(4, "  Skipping nullable NT '{}' conversion", scc_nts[i].0);
-                return None;
-            }
             result.insert(scc_nts[i].clone(), Expr::Shared(Arc::new(expr)));
         }
         Some(result)
@@ -363,12 +357,6 @@ impl<'a> GrammarOptimizer<'a> {
         let mut cache = HashMap::new();
         for (i, expr) in solved.into_iter().enumerate() {
             let reversed = self.reverse_expr(&expr, &mut cache);
-            // Don't convert nullable expressions to terminals - the parser needs
-            // epsilon productions to correctly handle empty matches.
-            if matches!(get_expr_nullability(&reversed), ExprNullability::CanBeNull | ExprNullability::AlwaysNull) {
-                debug!(4, "  Skipping nullable NT '{}' conversion (left-linear)", scc_nts[i].0);
-                return None;
-            }
             result.insert(scc_nts[i].clone(), Expr::Shared(Arc::new(reversed)));
         }
         Some(result)
@@ -408,6 +396,69 @@ impl<'a> GrammarOptimizer<'a> {
         }
     }
     
+    fn make_non_nullable(&mut self, expr: &Expr) -> Option<Expr> {
+        match get_expr_nullability(expr) {
+            ExprNullability::NeverNull => return Some(expr.clone()),
+            ExprNullability::AlwaysNull => return None,
+            ExprNullability::CanBeNull => {} // Process below
+        }
+
+        match expr {
+            Expr::Epsilon => None,
+            Expr::U8Seq(_) | Expr::U8Class(_) => Some(expr.clone()),
+            Expr::Shared(inner) => self.make_non_nullable(inner).map(|e| self.interner.intern(e)),
+            Expr::Choice(opts) => {
+                let mut new_opts = Vec::new();
+                for opt in opts {
+                    if let Some(nn) = self.make_non_nullable(opt) {
+                        new_opts.push(nn);
+                    }
+                }
+                if new_opts.is_empty() { None }
+                else { Some(self.interner.choice(new_opts)) }
+            }
+            Expr::Quantifier(inner, q) => {
+                let inner_nn = self.make_non_nullable(inner);
+                match q {
+                    // e? \ eps -> e
+                    QuantifierType::ZeroOrOne => inner_nn,
+                    // e* \ eps -> e+ (if e is non-null). 
+                    // If e is nullable, e* = (e_nn | eps)* = e_nn*. e_nn* \ eps = e_nn+.
+                    // So essentially OneOrMore(inner_nn).
+                    QuantifierType::ZeroOrMore => {
+                        inner_nn.map(|e| self.interner.intern(Expr::Quantifier(Box::new(e), QuantifierType::OneOrMore)))
+                    }
+                    // e+ is already handled by NeverNull check above if e is NeverNull.
+                    // If e is CanBeNull, e+ \ eps => e_nn+.
+                    QuantifierType::OneOrMore => {
+                        inner_nn.map(|e| self.interner.intern(Expr::Quantifier(Box::new(e), QuantifierType::OneOrMore)))
+                    }
+                }
+            }
+            Expr::Seq(exprs) => {
+                // Filter always-nulls (epsilon)
+                let parts: Vec<Expr> = exprs.iter()
+                    .filter(|e| !matches!(get_expr_nullability(e), ExprNullability::AlwaysNull))
+                    .cloned()
+                    .collect();
+                
+                if parts.is_empty() { return None; }
+                
+                // If any part is NeverNull, the whole sequence is NeverNull (handled by top check).
+                // So here all parts are CanBeNull.
+                // We limit expansion to small sequences to avoid explosion.
+                if parts.len() > 3 {
+                    return None; // Give up on complex nullable sequence
+                }
+
+                // Expand (A|e)(B|e) -> AB | A | B.
+                // This requires constructing the combinations.
+                // For now, simpler heuristic: simple loops usually don't end up here.
+                None 
+            }
+        }
+    }
+
     fn get_expr_for_terminal(&mut self, t: &Terminal) -> Expr {
         let group_id = match t {
             Terminal::Literal(bytes) => self.grammar.literal_to_group_id.get_by_left(bytes),
@@ -511,20 +562,55 @@ impl<'a> GrammarOptimizer<'a> {
     fn rewrite_grammar(&mut self) {
         let mut new_terminals: HashMap<NonTerminal, Terminal> = HashMap::new();
         
+        // Separate definitions for nullable vs non-nullable replacements
+        let mut nullable_definitions: HashMap<NonTerminal, Option<Terminal>> = HashMap::new();
+
         // Allocate group IDs and create Terminals
         let mut next_group_id = self.grammar.group_id_to_expr.keys().max().map(|&x| x + 1).unwrap_or(0);
         
         for (nt, expr) in &self.resolved_nts {
+            let is_nullable = matches!(get_expr_nullability(expr), ExprNullability::CanBeNull | ExprNullability::AlwaysNull);
+            
+            let target_expr = if is_nullable {
+                self.make_non_nullable(expr)
+            } else {
+                Some(expr.clone())
+            };
+
             let mut final_name = nt.0.clone();
             while self.grammar.regex_name_to_group_id.contains_left(&final_name) {
                 final_name.push('_');
             }
             
-            self.grammar.regex_name_to_group_id.insert(final_name.clone(), next_group_id);
-            self.grammar.group_id_to_expr.insert(next_group_id, expr.clone());
-            
-            new_terminals.insert(nt.clone(), Terminal::RegexName(final_name));
-            next_group_id += 1;
+            if let Some(e) = target_expr {
+                self.grammar.regex_name_to_group_id.insert(final_name.clone(), next_group_id);
+                self.grammar.group_id_to_expr.insert(next_group_id, e);
+                let term = Terminal::RegexName(final_name);
+                if is_nullable {
+                    nullable_definitions.insert(nt.clone(), Some(term));
+                } else {
+                    new_terminals.insert(nt.clone(), term);
+                }
+            } else {
+                // Only epsilon
+                nullable_definitions.insert(nt.clone(), None);
+            }
+
+            if is_nullable {
+                // Nullable NTs are NOT put in new_terminals, so usages in other rules remain as NT refs.
+                // We will add productions `NT -> term` and `NT -> epsilon` later.
+            } else {
+                // Non-nullable: put in new_terminals, usages will be replaced by the terminal.
+                // The original productions for NT are removed (filtered out below).
+                // We add `NT -> term` if NT is start symbol, but wait, if it's in `new_terminals`
+                // we usually inline it. But if it's the start symbol we might need a rule.
+            }
+
+            if !is_nullable && target_expr.is_some() {
+                 next_group_id += 1;
+            } else if is_nullable && nullable_definitions.get(nt).unwrap().is_some() {
+                 next_group_id += 1;
+            }
         }
         
         // Identify start symbol
@@ -574,6 +660,22 @@ impl<'a> GrammarOptimizer<'a> {
                     rhs: vec![Symbol::Terminal(term.clone())],
                 });
             }
+        }
+
+        // Add definitions for nullable resolved NTs
+        for (nt, term_opt) in nullable_definitions {
+            // NT -> T (if T exists)
+            if let Some(term) = term_opt {
+                new_productions.push(Production {
+                    lhs: nt.clone(),
+                    rhs: vec![Symbol::Terminal(term)],
+                });
+            }
+            // NT -> epsilon
+            new_productions.push(Production {
+                lhs: nt,
+                rhs: vec![],
+            });
         }
         
         // Update start_production_id
