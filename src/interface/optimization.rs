@@ -1333,7 +1333,7 @@ mod tests {
         // We dynamically find a size N that takes enough time to measure reliably,
         // then test 3N to check scaling behavior.
 
-        let mut n = 100;
+        let mut n = 10;
         let mut t_base = 0.0;
 
         // Find a baseline size that takes enough time to measure (> 5ms)
