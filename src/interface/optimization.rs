@@ -1238,7 +1238,11 @@ mod tests {
         println!("Optimization took: {:?}", duration);
         println!("Final terminal count: {}", grammar.terminal_to_group_id().len());
 
-        assert_eq!(grammar.terminal_to_group_id().len(), 1, "Expected 1 terminal, got {}. Grammar: {}", grammar.terminal_to_group_id().len(), grammar);
+        // assert_eq!(grammar.terminal_to_group_id().len(), 1, "Expected 1 terminal, got {}. Grammar: {}", grammar.terminal_to_group_id().len(), grammar);
+        if grammar.terminal_to_group_id().len() != 1 {
+            eprintln!("Grammar: {}", grammar);
+            panic!("Expected 1 terminal, got {}.", grammar.terminal_to_group_id().len());
+        }
 
         // Verify that we can compile the optimized grammar without panicking (e.g. index out of bounds)
         // This checks that terminal IDs are correctly renumbered and consistent.
