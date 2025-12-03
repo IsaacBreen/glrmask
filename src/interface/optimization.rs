@@ -16,12 +16,6 @@ pub fn optimize_grammar(grammar: &mut GrammarDefinition) {
     optimizer.optimize();
 }
 
-impl GrammarDefinition {
-    pub fn optimize(&mut self) {
-        optimize_grammar(self);
-    }
-}
-
 #[derive(Default, Debug)]
 struct OptimizationStats {
     initial_productions: usize,
