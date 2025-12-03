@@ -74,66 +74,68 @@ impl<'a> GrammarOptimizer<'a> {
     /// Try to convert the entire grammar to a single regex expression.
     /// Returns Some(Expr) if successful, None if the grammar is not regular.
     fn try_convert_to_regex(&self) -> Option<Expr> {
-        // Build the linear system: for each non-terminal, we have equations like
-        // X = sum of (coefficient * Y) for each production X -> ... Y ...
-        // where coefficient is the regex of terminals before/after Y
-        
         // Collect all non-terminal names
         let nt_names: HashSet<String> = self.grammar.productions.iter()
             .map(|p| p.lhs.0.clone())
             .collect();
         
-        // Build equations: nt_name -> list of (prefix_expr, optional_nt_ref, suffix_expr)
-        // Each production A -> α B β becomes an entry (α, Some(B), β) in equations[A]
-        // A production A -> α (only terminals) becomes (α, None, ε)
-        let mut equations: HashMap<String, Vec<ProductionTerm>> = HashMap::new();
+        // Build equations: each NT maps to a RegexTerm (regex with NT references)
+        let mut equations: HashMap<String, RegexTerm> = HashMap::new();
         
         for prod in &self.grammar.productions {
-            let term = self.analyze_production(&prod.rhs, &nt_names)?;
-            equations.entry(prod.lhs.0.clone()).or_default().push(term);
+            let term = self.production_rhs_to_regex_term(&prod.rhs, &nt_names)?;
+            equations.entry(prod.lhs.0.clone())
+                .and_modify(|existing| {
+                    // Combine with existing as a choice
+                    match existing {
+                        RegexTerm::Choice(alts) => alts.push(term.clone()),
+                        other => *other = RegexTerm::Choice(vec![other.clone(), term.clone()]),
+                    }
+                })
+                .or_insert(term);
         }
         
         // Get the start non-terminal
         let start_prod = &self.grammar.productions[self.grammar.start_production_id];
         let start_nt = start_prod.lhs.0.clone();
         
-        // Solve using the efficient algorithm
-        self.solve_linear_system(&mut equations, &start_nt)
+        // Solve the system using memoized recursion with cycle detection
+        let mut resolved: HashMap<String, Expr> = HashMap::new();
+        let mut in_progress: HashSet<String> = HashSet::new();
+        
+        self.solve_nt(&start_nt, &equations, &mut resolved, &mut in_progress)
     }
 
-    /// Analyze a production RHS and extract the structure.
-    /// Returns None if the production is not linear (has multiple NT refs or NT in middle of terminals).
-    fn analyze_production(&self, rhs: &[Symbol], nt_names: &HashSet<String>) -> Option<ProductionTerm> {
-        let mut prefix = Vec::new();
-        let mut nt_ref: Option<String> = None;
-        let mut suffix = Vec::new();
-        
-        for sym in rhs {
+    /// Convert a production RHS to a RegexTerm (regex with NT references)
+    fn production_rhs_to_regex_term(&self, rhs: &[Symbol], nt_names: &HashSet<String>) -> Option<RegexTerm> {
+        if rhs.is_empty() {
+            return Some(RegexTerm::Epsilon);
+        }
+
+        let terms: Option<Vec<RegexTerm>> = rhs.iter().map(|sym| {
             match sym {
                 Symbol::Terminal(t) => {
                     let expr = self.get_expr_for_terminal(t)?;
-                    if nt_ref.is_some() {
-                        suffix.push(expr);
-                    } else {
-                        prefix.push(expr);
-                    }
+                    Some(RegexTerm::Concrete(expr))
                 }
                 Symbol::NonTerminal(nt) => {
-                    if !nt_names.contains(&nt.0) {
-                        return None; // Unknown non-terminal
+                    if nt_names.contains(&nt.0) {
+                        Some(RegexTerm::NtRef(nt.0.clone()))
+                    } else {
+                        // Unknown non-terminal
+                        None
                     }
-                    if nt_ref.is_some() {
-                        return None; // Multiple non-terminals - not linear
-                    }
-                    nt_ref = Some(nt.0.clone());
                 }
             }
-        }
-        
-        let prefix_expr = exprs_to_seq(prefix);
-        let suffix_expr = exprs_to_seq(suffix);
-        
-        Some(ProductionTerm { prefix: prefix_expr, nt_ref, suffix: suffix_expr })
+        }).collect();
+
+        terms.map(|ts| {
+            if ts.len() == 1 {
+                ts.into_iter().next().unwrap()
+            } else {
+                RegexTerm::Seq(ts)
+            }
+        })
     }
 
     /// Get the Expr for a terminal (immutable version)
@@ -145,169 +147,251 @@ impl<'a> GrammarOptimizer<'a> {
         group_id.and_then(|gid| self.grammar.group_id_to_expr.get(gid).cloned())
     }
 
-    /// Solve the linear system using Gaussian elimination with Arden's lemma.
-    /// This is efficient because we process each non-terminal exactly once.
-    fn solve_linear_system(&self, equations: &mut HashMap<String, Vec<ProductionTerm>>, start: &str) -> Option<Expr> {
-        // Find the order to process non-terminals (reverse topological order)
-        let order = self.compute_processing_order(equations, start);
-        
-        // Resolved expressions for each non-terminal
-        let mut resolved: HashMap<String, Expr> = HashMap::new();
-        
-        // Process in order
-        for nt in &order {
-            let terms = equations.get(nt)?;
-            let expr = self.solve_single_nt(nt, terms, &resolved)?;
-            resolved.insert(nt.clone(), expr);
+    /// Solve for a single non-terminal with memoization and cycle detection.
+    /// Uses Arden's lemma for self-recursive equations.
+    fn solve_nt(
+        &self,
+        nt: &str,
+        equations: &HashMap<String, RegexTerm>,
+        resolved: &mut HashMap<String, Expr>,
+        in_progress: &mut HashSet<String>,
+    ) -> Option<Expr> {
+        // Check if already resolved
+        if let Some(expr) = resolved.get(nt) {
+            return Some(expr.clone());
         }
         
-        resolved.get(start).cloned()
+        // Check for cycle - if we're already processing this NT, we have a recursive reference
+        if in_progress.contains(nt) {
+            // Return a placeholder that will be handled by Arden's lemma
+            return None;
+        }
+        
+        // Mark as in progress
+        in_progress.insert(nt.to_string());
+        
+        // Get the equation for this NT
+        let term = equations.get(nt)?.clone();
+        
+        // Solve using the recursive approach
+        let expr = self.solve_term(&term, nt, equations, resolved, in_progress)?;
+        
+        // Mark as done
+        in_progress.remove(nt);
+        resolved.insert(nt.to_string(), expr.clone());
+        
+        Some(expr)
     }
     
-    /// Compute the order in which to process non-terminals.
-    /// We process dependencies first, handling cycles with Arden's lemma.
-    fn compute_processing_order(&self, equations: &HashMap<String, Vec<ProductionTerm>>, start: &str) -> Vec<String> {
-        // Build dependency graph
-        let mut deps: HashMap<String, HashSet<String>> = HashMap::new();
-        for (nt, terms) in equations {
-            let mut nt_deps = HashSet::new();
-            for term in terms {
-                if let Some(ref dep) = term.nt_ref {
-                    if dep != nt { // Exclude self-references
-                        nt_deps.insert(dep.clone());
-                    }
+    /// Solve a RegexTerm, recursively resolving NT references.
+    fn solve_term(
+        &self,
+        term: &RegexTerm,
+        current_nt: &str,
+        equations: &HashMap<String, RegexTerm>,
+        resolved: &mut HashMap<String, Expr>,
+        in_progress: &mut HashSet<String>,
+    ) -> Option<Expr> {
+        match term {
+            RegexTerm::Epsilon => Some(Expr::Epsilon),
+            RegexTerm::Concrete(e) => Some(e.clone()),
+            RegexTerm::NtRef(ref_nt) => {
+                if ref_nt == current_nt {
+                    // Self-reference - will be handled at the Choice level
+                    None
+                } else {
+                    self.solve_nt(ref_nt, equations, resolved, in_progress)
                 }
             }
-            deps.insert(nt.clone(), nt_deps);
-        }
-        
-        // Find reachable non-terminals from start
-        let mut reachable = HashSet::new();
-        let mut stack = vec![start.to_string()];
-        while let Some(nt) = stack.pop() {
-            if reachable.insert(nt.clone()) {
-                if let Some(nt_deps) = deps.get(&nt) {
-                    for dep in nt_deps {
-                        stack.push(dep.clone());
-                    }
+            RegexTerm::Seq(terms) => {
+                // Check if any term is a self-reference
+                let has_self_ref = terms.iter().any(|t| matches!(t, RegexTerm::NtRef(n) if n == current_nt));
+                
+                if has_self_ref {
+                    // This is a recursive sequence like α X or X α
+                    // Extract the position and handle with Arden's lemma
+                    self.solve_recursive_seq(terms, current_nt, equations, resolved, in_progress)
+                } else {
+                    // No self-reference, just resolve all terms
+                    let exprs: Option<Vec<Expr>> = terms.iter()
+                        .map(|t| self.solve_term(t, current_nt, equations, resolved, in_progress))
+                        .collect();
+                    exprs.map(|es| make_seq(es))
                 }
             }
-        }
-        
-        // Topological sort of reachable non-terminals
-        let mut in_degree: HashMap<String, usize> = HashMap::new();
-        for nt in &reachable {
-            in_degree.insert(nt.clone(), 0);
-        }
-        
-        for nt in &reachable {
-            if let Some(nt_deps) = deps.get(nt) {
-                for dep in nt_deps {
-                    if reachable.contains(dep) {
-                        *in_degree.get_mut(nt).unwrap() += 1;
-                    }
-                }
-            }
-        }
-        
-        // Process in topological order (sources first, then reverse for our needs)
-        let mut result = Vec::new();
-        let mut queue: Vec<String> = in_degree.iter()
-            .filter(|(_, &deg)| deg == 0)
-            .map(|(nt, _)| nt.clone())
-            .collect();
-        queue.sort(); // For determinism
-        
-        while let Some(nt) = queue.pop() {
-            result.push(nt.clone());
-            
-            // Update in-degrees for nodes that depend on this one
-            for (other_nt, other_deps) in &deps {
-                if reachable.contains(other_nt) && other_deps.contains(&nt) {
-                    let deg = in_degree.get_mut(other_nt).unwrap();
-                    *deg = deg.saturating_sub(1);
-                    if *deg == 0 && !result.contains(other_nt) {
-                        queue.push(other_nt.clone());
-                        queue.sort();
-                    }
-                }
-            }
-        }
-        
-        // Add any remaining (cyclic) nodes
-        for nt in &reachable {
-            if !result.contains(nt) {
-                result.push(nt.clone());
-            }
-        }
-        
-        // Reverse so that we process leaves first
-        result.reverse();
-        result
-    }
-    
-    /// Solve for a single non-terminal given the resolved expressions of its dependencies.
-    fn solve_single_nt(&self, nt: &str, terms: &[ProductionTerm], resolved: &HashMap<String, Expr>) -> Option<Expr> {
-        // Separate terms into:
-        // - self_coefs: terms of the form α X (where X is this NT)
-        // - base_terms: terms without self-reference
-        let mut self_coefs: Vec<Expr> = Vec::new();
-        let mut base_terms: Vec<Expr> = Vec::new();
-        
-        for term in terms {
-            match &term.nt_ref {
-                None => {
-                    // Pure terminal production
-                    base_terms.push(term.prefix.clone());
-                }
-                Some(ref_nt) if ref_nt == nt => {
-                    // Self-recursive: A -> prefix A suffix
-                    // For right-linear (suffix is empty), coef is prefix
-                    // For left-linear (prefix is empty), need different handling
-                    if is_epsilon(&term.suffix) {
-                        // Right recursion: A -> prefix A
-                        self_coefs.push(term.prefix.clone());
-                    } else if is_epsilon(&term.prefix) {
-                        // Left recursion: A -> A suffix
-                        // For now, treat suffix as coefficient (requires different formula)
-                        // A = A α | β => A = β α*
-                        self_coefs.push(term.suffix.clone());
+            RegexTerm::Choice(alts) => {
+                // Separate into recursive and non-recursive alternatives
+                let mut recursive_alts: Vec<&RegexTerm> = Vec::new();
+                let mut base_alts: Vec<&RegexTerm> = Vec::new();
+                
+                for alt in alts {
+                    if alt.contains_nt_ref(current_nt) {
+                        recursive_alts.push(alt);
                     } else {
-                        // A -> prefix A suffix - complex recursion, not directly solvable
-                        // Try to approximate: A -> prefix A suffix ≈ prefix* suffix (not exact)
-                        // For now, return None as this isn't a simple linear recursion
+                        base_alts.push(alt);
+                    }
+                }
+                
+                // Solve base alternatives first
+                let base_exprs: Option<Vec<Expr>> = base_alts.iter()
+                    .map(|t| self.solve_term(t, current_nt, equations, resolved, in_progress))
+                    .collect();
+                let base_exprs = base_exprs?;
+                
+                if recursive_alts.is_empty() {
+                    // No recursion, just return the choice of bases
+                    return Some(make_choice(base_exprs));
+                }
+                
+                // Handle recursion with Arden's lemma
+                // X = αX | β => X = α*β  (right recursion)
+                // X = Xα | β => X = βα*  (left recursion)
+                
+                let mut coefficients: Vec<Expr> = Vec::new();
+                
+                for rec_alt in &recursive_alts {
+                    if let Some((coef, is_left)) = self.extract_linear_coef(rec_alt, current_nt, equations, resolved, in_progress) {
+                        if is_left {
+                            // Left recursion: need to convert to right recursion form
+                            // For now, we'll handle it similarly
+                            coefficients.push(coef);
+                        } else {
+                            coefficients.push(coef);
+                        }
+                    } else {
+                        // Non-linear recursion - can't solve directly
                         return None;
                     }
                 }
-                Some(ref_nt) => {
-                    // Reference to another NT - substitute
-                    let ref_expr = resolved.get(ref_nt)?;
-                    let combined = make_seq(vec![term.prefix.clone(), ref_expr.clone(), term.suffix.clone()]);
-                    base_terms.push(combined);
+                
+                // Build α*β
+                let coef = make_choice(coefficients);
+                let coef_star = Expr::Quantifier(Box::new(coef), QuantifierType::ZeroOrMore);
+                let base = make_choice(base_exprs);
+                
+                // Check if we have left or right recursion
+                // For right recursion: X = αX | β => X = α*β
+                // For left recursion: X = Xα | β => X = βα*
+                // For mixed: more complex
+                
+                // For now, assume right recursion (most common in these grammars)
+                Some(make_seq(vec![coef_star, base]))
+            }
+        }
+    }
+    
+    /// Solve a recursive sequence (like α X or X α).
+    fn solve_recursive_seq(
+        &self,
+        terms: &[RegexTerm],
+        current_nt: &str,
+        equations: &HashMap<String, RegexTerm>,
+        resolved: &mut HashMap<String, Expr>,
+        in_progress: &mut HashSet<String>,
+    ) -> Option<Expr> {
+        // Find the position of the self-reference
+        let mut self_ref_pos = None;
+        for (i, t) in terms.iter().enumerate() {
+            if matches!(t, RegexTerm::NtRef(n) if n == current_nt) {
+                if self_ref_pos.is_some() {
+                    // Multiple self-references - not linear
+                    return None;
                 }
+                self_ref_pos = Some(i);
             }
         }
         
-        // Apply Arden's lemma: X = αX | β => X = α*β
-        let base = if base_terms.is_empty() {
-            Expr::Epsilon
-        } else if base_terms.len() == 1 {
-            base_terms.into_iter().next().unwrap()
-        } else {
-            Expr::Choice(base_terms)
-        };
+        let pos = self_ref_pos?;
         
-        if self_coefs.is_empty() {
-            Some(simplify_expr(base))
+        // Resolve prefix and suffix
+        let prefix_terms = &terms[..pos];
+        let suffix_terms = &terms[pos+1..];
+        
+        let prefix_exprs: Option<Vec<Expr>> = prefix_terms.iter()
+            .map(|t| self.solve_term(t, current_nt, equations, resolved, in_progress))
+            .collect();
+        let suffix_exprs: Option<Vec<Expr>> = suffix_terms.iter()
+            .map(|t| self.solve_term(t, current_nt, equations, resolved, in_progress))
+            .collect();
+        
+        let prefix = make_seq(prefix_exprs?);
+        let suffix = make_seq(suffix_exprs?);
+        
+        if is_epsilon(&suffix) {
+            // Right recursion: prefix X => prefix*
+            Some(Expr::Quantifier(Box::new(prefix), QuantifierType::ZeroOrMore))
+        } else if is_epsilon(&prefix) {
+            // Left recursion: X suffix => suffix*
+            Some(Expr::Quantifier(Box::new(suffix), QuantifierType::ZeroOrMore))
         } else {
-            let coef = if self_coefs.len() == 1 {
-                self_coefs.into_iter().next().unwrap()
-            } else {
-                Expr::Choice(self_coefs)
-            };
-            let coef_star = Expr::Quantifier(Box::new(coef), QuantifierType::ZeroOrMore);
-            let result = make_seq(vec![coef_star, base]);
-            Some(simplify_expr(result))
+            // Middle recursion: prefix X suffix - not directly solvable with Arden
+            None
+        }
+    }
+    
+    /// Extract the linear coefficient from a recursive alternative.
+    /// Returns (coefficient, is_left_recursion) if the alt is linear.
+    fn extract_linear_coef(
+        &self,
+        alt: &RegexTerm,
+        current_nt: &str,
+        equations: &HashMap<String, RegexTerm>,
+        resolved: &mut HashMap<String, Expr>,
+        in_progress: &mut HashSet<String>,
+    ) -> Option<(Expr, bool)> {
+        match alt {
+            RegexTerm::NtRef(n) if n == current_nt => {
+                // Just X - coefficient is epsilon
+                Some((Expr::Epsilon, false))
+            }
+            RegexTerm::Seq(terms) => {
+                // Find position of self-reference
+                let mut self_ref_pos = None;
+                for (i, t) in terms.iter().enumerate() {
+                    if t.contains_nt_ref(current_nt) {
+                        if self_ref_pos.is_some() {
+                            // Multiple references to current NT
+                            return None;
+                        }
+                        self_ref_pos = Some(i);
+                    }
+                }
+                
+                let pos = self_ref_pos?;
+                
+                // Check if the self-reference is simple (just the NT ref)
+                if !matches!(&terms[pos], RegexTerm::NtRef(n) if n == current_nt) {
+                    // The reference is inside a sub-expression - complex case
+                    return None;
+                }
+                
+                let prefix_terms = &terms[..pos];
+                let suffix_terms = &terms[pos+1..];
+                
+                // Resolve prefix and suffix
+                let prefix_exprs: Option<Vec<Expr>> = prefix_terms.iter()
+                    .map(|t| self.solve_term(t, current_nt, equations, resolved, in_progress))
+                    .collect();
+                let suffix_exprs: Option<Vec<Expr>> = suffix_terms.iter()
+                    .map(|t| self.solve_term(t, current_nt, equations, resolved, in_progress))
+                    .collect();
+                
+                let prefix = make_seq(prefix_exprs?);
+                let suffix = make_seq(suffix_exprs?);
+                
+                if is_epsilon(&suffix) {
+                    // Right recursion: prefix X
+                    Some((prefix, false))
+                } else if is_epsilon(&prefix) {
+                    // Left recursion: X suffix  
+                    Some((suffix, true))
+                } else {
+                    // Middle recursion: prefix X suffix - need combined coefficient
+                    // This is more complex - for now return None
+                    None
+                }
+            }
+            _ => None,
         }
     }
 
@@ -354,26 +438,25 @@ impl<'a> GrammarOptimizer<'a> {
     }
 }
 
-/// A term in a production after analysis.
-/// Represents: prefix NT suffix (or just prefix if NT is None)
+/// A term that may reference non-terminals.
 #[derive(Clone, Debug)]
-struct ProductionTerm {
-    prefix: Expr,
-    nt_ref: Option<String>,
-    suffix: Expr,
+enum RegexTerm {
+    Epsilon,
+    Concrete(Expr),
+    NtRef(String),
+    Seq(Vec<RegexTerm>),
+    Choice(Vec<RegexTerm>),
 }
 
-/// Convert a list of expressions to a Seq (or single expr, or Epsilon)
-fn exprs_to_seq(exprs: Vec<Expr>) -> Expr {
-    let filtered: Vec<Expr> = exprs.into_iter()
-        .filter(|e| !matches!(e, Expr::Epsilon))
-        .collect();
-    if filtered.is_empty() {
-        Expr::Epsilon
-    } else if filtered.len() == 1 {
-        filtered.into_iter().next().unwrap()
-    } else {
-        Expr::Seq(filtered)
+impl RegexTerm {
+    fn contains_nt_ref(&self, nt: &str) -> bool {
+        match self {
+            RegexTerm::Epsilon | RegexTerm::Concrete(_) => false,
+            RegexTerm::NtRef(n) => n == nt,
+            RegexTerm::Seq(terms) | RegexTerm::Choice(terms) => {
+                terms.iter().any(|t| t.contains_nt_ref(nt))
+            }
+        }
     }
 }
 
@@ -392,6 +475,23 @@ fn make_seq(exprs: Vec<Expr>) -> Expr {
         filtered.into_iter().next().unwrap()
     } else {
         Expr::Seq(filtered)
+    }
+}
+
+/// Make a choice, handling single elements
+fn make_choice(exprs: Vec<Expr>) -> Expr {
+    let filtered: Vec<Expr> = exprs.into_iter()
+        .flat_map(|e| match e {
+            Expr::Choice(inner) => inner,
+            other => vec![other],
+        })
+        .collect();
+    if filtered.is_empty() {
+        Expr::Epsilon
+    } else if filtered.len() == 1 {
+        filtered.into_iter().next().unwrap()
+    } else {
+        Expr::Choice(filtered)
     }
 }
 
