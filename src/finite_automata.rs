@@ -561,6 +561,8 @@ pub struct ExprStats {
     pub u8seq: usize,
     pub u8class: usize,
     pub shared: usize,
+    pub shared_unique: usize,   // Unique Shared nodes (by Arc pointer)
+    pub shared_inlineable: usize, // Shared wrapping U8Seq/U8Class/Epsilon
     pub quantifier: usize,
     pub choice: usize,
     pub seq: usize,
@@ -570,8 +572,8 @@ pub struct ExprStats {
 
 impl std::fmt::Display for ExprStats {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Nodes: {}, Depth: {}, Seq: {}, Choice: {}, Quant: {}, Shared: {}, U8Seq: {}, U8Class: {}, Eps: {}",
-            self.nodes, self.max_depth, self.seq, self.choice, self.quantifier, self.shared, self.u8seq, self.u8class, self.epsilon)
+        write!(f, "Nodes: {}, Depth: {}, Seq: {}, Choice: {}, Quant: {}, Shared: {} (unique: {}, inlineable: {}), U8Seq: {}, U8Class: {}, Eps: {}",
+            self.nodes, self.max_depth, self.seq, self.choice, self.quantifier, self.shared, self.shared_unique, self.shared_inlineable, self.u8seq, self.u8class, self.epsilon)
     }
 }
 
@@ -629,8 +631,19 @@ impl ExprGroups {
                     Expr::U8Class(_) => stats.u8class += 1,
                     Expr::Shared(inner) => {
                         stats.shared += 1;
+                        // Check if this Shared is inlineable
+                        let is_inlineable = match inner.as_ref() {
+                            Expr::U8Seq(s) if s.len() <= 4 => true,
+                            Expr::U8Class(_) => true,
+                            Expr::Epsilon => true,
+                            _ => false,
+                        };
+                        if is_inlineable {
+                            stats.shared_inlineable += 1;
+                        }
                         let ptr = Arc::as_ptr(inner) as usize;
                         if visited.insert(ptr) {
+                            stats.shared_unique += 1;
                             stack.push((inner, depth + 1));
                         }
                     }
@@ -1052,24 +1065,43 @@ impl Expr {
                         return_value = Some(start_state);
                     }
                     Expr::Shared(ref inner) => {
-                        let key = Arc::as_ptr(inner) as usize;
-                        if let Some(&(entry, end)) = cache.get(&key) {
-                            nfa.add_epsilon_transition(start_state, entry);
-                            return_value = Some(end);
-                        } else {
-                            let entry = nfa.add_state();
-                            nfa.add_epsilon_transition(start_state, entry);
-                            state = FrameState::Shared { key, entry };
-                            stack.push(Frame {
-                                expr: Expr::Epsilon, // Placeholder
-                                start_state,
-                                state,
-                            });
+                        // For small leaf expressions, inline them to avoid epsilon transitions
+                        // This trades NFA size for fewer epsilon transitions
+                        let inline = match inner.as_ref() {
+                            Expr::U8Seq(s) if s.len() <= 4 => true,
+                            Expr::U8Class(_) => true,
+                            Expr::Epsilon => true,
+                            _ => false,
+                        };
+                        
+                        if inline {
+                            // Inline: just build the inner expression directly
                             stack.push(Frame {
                                 expr: (**inner).clone(),
-                                start_state: entry,
+                                start_state,
                                 state: FrameState::Start,
                             });
+                        } else {
+                            // Use caching for larger expressions
+                            let key = Arc::as_ptr(inner) as usize;
+                            if let Some(&(entry, end)) = cache.get(&key) {
+                                nfa.add_epsilon_transition(start_state, entry);
+                                return_value = Some(end);
+                            } else {
+                                let entry = nfa.add_state();
+                                nfa.add_epsilon_transition(start_state, entry);
+                                state = FrameState::Shared { key, entry };
+                                stack.push(Frame {
+                                    expr: Expr::Epsilon, // Placeholder
+                                    start_state,
+                                    state,
+                                });
+                                stack.push(Frame {
+                                    expr: (**inner).clone(),
+                                    start_state: entry,
+                                    state: FrameState::Start,
+                                });
+                            }
                         }
                     }
                     Expr::Seq(mut exprs) => {
@@ -2154,9 +2186,18 @@ impl NFA {
             (compact_nfa.epsilon_offsets[s + 1] - compact_nfa.epsilon_offsets[s])
         }).collect();
         
-        // Precompute closures for high-out-degree states (threshold 50)
-        // This avoids repeated BFS traversal from these "hub" states
-        const HIGH_DEGREE_THRESHOLD: u32 = 50;
+        // Count states with outgoing epsilons and total epsilon transitions
+        let states_with_eps = out_degree.iter().filter(|&&d| d > 0).count();
+        let total_eps = compact_nfa.epsilon_targets.len();
+        
+        // Use threshold of 2 for high-degree hub states
+        // Lower threshold means more precomputation but more cache hits in main loop
+        let precompute_threshold: u32 = 2;
+        crate::debug!(5, "Epsilon density: {} states with eps, {} total transitions ({}x states)", 
+            states_with_eps, total_eps, total_eps / num_nfa_states.max(1));
+        
+        // Precompute closures for states with out-degree >= precompute_threshold
+        // This avoids repeated BFS traversal from these states
         let precompute_start = std::time::Instant::now();
         let mut high_degree_closures: Vec<Option<Vec<u32>>> = vec![None; num_nfa_states];
         let mut num_precomputed = 0;
@@ -2169,6 +2210,7 @@ impl NFA {
             state: usize,
             compact_nfa: &CompactNFA,
             out_degree: &[u32],
+            threshold: u32,
             visited: &mut [bool],
             post_order: &mut Vec<usize>,
         ) {
@@ -2180,18 +2222,18 @@ impl NFA {
             let start = compact_nfa.epsilon_offsets[state] as usize;
             let end = compact_nfa.epsilon_offsets[state + 1] as usize;
             for &target in &compact_nfa.epsilon_targets[start..end] {
-                dfs_postorder_selective(target as usize, compact_nfa, out_degree, visited, post_order);
+                dfs_postorder_selective(target as usize, compact_nfa, out_degree, threshold, visited, post_order);
             }
-            // Only add to post_order if this is a high-degree state
-            if out_degree[state] >= HIGH_DEGREE_THRESHOLD {
+            // Only add to post_order if this meets threshold
+            if out_degree[state] >= threshold {
                 post_order.push(state);
             }
         }
         
-        // DFS from all states that are high-degree
+        // DFS from all states that meet threshold
         for state in 0..num_nfa_states {
-            if out_degree[state] >= HIGH_DEGREE_THRESHOLD {
-                dfs_postorder_selective(state, &compact_nfa, &out_degree, &mut visited, &mut post_order);
+            if out_degree[state] >= precompute_threshold {
+                dfs_postorder_selective(state, &compact_nfa, &out_degree, precompute_threshold, &mut visited, &mut post_order);
             }
         }
         
@@ -2236,7 +2278,9 @@ impl NFA {
             high_degree_closures[state] = Some(closure_vec);
             num_precomputed += 1;
         }
-        crate::debug!(5, "Precomputed {} high-degree closures in {:.2?}", num_precomputed, precompute_start.elapsed());
+        let total_closure_size: usize = high_degree_closures.iter().filter_map(|c| c.as_ref().map(|v| v.len())).sum();
+        let avg_closure_size = if num_precomputed > 0 { total_closure_size / num_precomputed } else { 0 };
+        crate::debug!(5, "Precomputed {} high-degree closures (avg size {}) in {:.2?}", num_precomputed, avg_closure_size, precompute_start.elapsed());
 
         // Compute start state closure using BFS
         closure_set.insert(self.start_state);
@@ -2294,6 +2338,12 @@ impl NFA {
         let mut total_cache_hits = 0u64;
         let mut total_cache_misses = 0u64;
         
+        // Enable detailed timing only for debug level 5+
+        let enable_timing = std::env::var("MACRO_DEBUG_LEVEL").ok()
+            .and_then(|s| s.parse::<i32>().ok())
+            .map(|l| l >= 5)
+            .unwrap_or(false);
+        
         // Timing buckets (in nanoseconds)
         let mut time_collect = 0u64;
         let mut time_closure = 0u64;
@@ -2317,7 +2367,7 @@ impl NFA {
                 .expect("DFA state set not found in map");
 
             // 1. Populate transition_targets for all inputs (COLLECT PHASE)
-            let t0 = std::time::Instant::now();
+            let t0 = if enable_timing { Some(std::time::Instant::now()) } else { None };
             for state in current_set.iter() {
                     for (class_set, next_state) in unsafe { remapped_transitions.get_unchecked(state) } {
                         for class_id in class_set.iter() {
@@ -2332,7 +2382,7 @@ impl NFA {
                         }
                     }
             }
-            time_collect += t0.elapsed().as_nanos() as u64;
+            if let Some(t) = t0 { time_collect += t.elapsed().as_nanos() as u64; }
 
             // 2. Process inputs (PROCESS PHASE)
             
@@ -2342,7 +2392,7 @@ impl NFA {
                 for &class_id in &used_classes {
                     let target_set = unsafe { transition_targets.get_unchecked(class_id) };
                     
-                    let t1 = std::time::Instant::now();
+                    let t1 = if enable_timing { Some(std::time::Instant::now()) } else { None };
                     closure_set.clear();
                     
                     // Fast path: check if all states have no outgoing epsilons
@@ -2356,10 +2406,8 @@ impl NFA {
                             
                             // Check if this state has a precomputed closure
                             if let Some(ref closure) = unsafe { high_degree_closures.get_unchecked(next_state) } {
-                                // Use precomputed closure
-                                for &s in closure {
-                                    closure_set.insert(s as usize);
-                                }
+                                // Use bulk insertion for precomputed closures
+                                closure_set.insert_many(closure);
                             } else {
                                 closure_set.insert(next_state);
                                 if unsafe { *out_degree.get_unchecked(next_state) } > 0 {
@@ -2381,9 +2429,7 @@ impl NFA {
                                 if closure_set.insert(v) {
                                     // Check if v has precomputed closure
                                     if let Some(ref closure) = unsafe { high_degree_closures.get_unchecked(v) } {
-                                        for &s in closure {
-                                            closure_set.insert(s as usize);
-                                        }
+                                        closure_set.insert_many(closure);
                                     } else if unsafe { *out_degree.get_unchecked(v) } > 0 {
                                         stack.push(v);
                                     }
@@ -2392,26 +2438,26 @@ impl NFA {
                         }
                     }
                     
-                    time_closure += t1.elapsed().as_nanos() as u64;
+                    if let Some(t) = t1 { time_closure += t.elapsed().as_nanos() as u64; }
 
                     // Compress state set
-                    let t2 = std::time::Instant::now();
+                    let t2 = if enable_timing { Some(std::time::Instant::now()) } else { None };
                     CompressedStateSet::reuse_from_sparse(&closure_set, &mut scratch_closure, &mut sort_scratch);
-                    time_compress += t2.elapsed().as_nanos() as u64;
+                    if let Some(t) = t2 { time_compress += t.elapsed().as_nanos() as u64; }
 
                     // Map lookup/insert
-                    let t3 = std::time::Instant::now();
+                    let t3 = if enable_timing { Some(std::time::Instant::now()) } else { None };
                     let next_state_idx = {
                         // First try lookup without cloning
                         if let Some(&existing) = dfa_state_map.get(&scratch_closure) {
                             total_cache_hits += 1;
-                            time_lookup += t3.elapsed().as_nanos() as u64;
+                            if let Some(t) = t3 { time_lookup += t.elapsed().as_nanos() as u64; }
                             existing
                         } else {
                             total_cache_misses += 1;
-                            time_lookup += t3.elapsed().as_nanos() as u64;
+                            if let Some(t) = t3 { time_lookup += t.elapsed().as_nanos() as u64; }
                             // Only clone once, reuse for map and worklist
-                            let t4 = std::time::Instant::now();
+                            let t4 = if enable_timing { Some(std::time::Instant::now()) } else { None };
                             let new_state_index = dfa_states.len();
                             
                             // Compute finalizers before moving the key
@@ -2438,7 +2484,7 @@ impl NFA {
                                 group_id_to_u8set: BTreeMap::new(),
                             });
 
-                            time_insert += t4.elapsed().as_nanos() as u64;
+                            if let Some(t) = t4 { time_insert += t.elapsed().as_nanos() as u64; }
                             new_state_index
                         }
                     };
@@ -2461,13 +2507,15 @@ impl NFA {
         
         stats.main_loop_time = main_loop_start.elapsed();
         
-        // Print timing breakdown
-        crate::debug!(5, "  └─ Timing breakdown (total ns):");
-        crate::debug!(5, "      - Collect: {}ms", time_collect / 1_000_000);
-        crate::debug!(5, "      - Closure: {}ms", time_closure / 1_000_000);
-        crate::debug!(5, "      - Compress: {}ms", time_compress / 1_000_000);
-        crate::debug!(5, "      - Lookup: {}ms", time_lookup / 1_000_000);
-        crate::debug!(5, "      - Insert: {}ms", time_insert / 1_000_000);
+        // Print timing breakdown only if detailed timing was enabled
+        if enable_timing {
+            crate::debug!(5, "  └─ Timing breakdown (total ns):");
+            crate::debug!(5, "      - Collect: {}ms", time_collect / 1_000_000);
+            crate::debug!(5, "      - Closure: {}ms", time_closure / 1_000_000);
+            crate::debug!(5, "      - Compress: {}ms", time_compress / 1_000_000);
+            crate::debug!(5, "      - Lookup: {}ms", time_lookup / 1_000_000);
+            crate::debug!(5, "      - Insert: {}ms", time_insert / 1_000_000);
+        }
 
         let mut dfa = DFA {
             states: dfa_states,

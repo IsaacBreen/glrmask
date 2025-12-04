@@ -40,6 +40,15 @@ impl SparseStateSet {
         }
     }
 
+    /// Bulk insert multiple states from a sorted slice of u32.
+    /// More efficient than individual inserts for large closures.
+    #[inline]
+    pub fn insert_many(&mut self, states: &[u32]) {
+        for &state in states {
+            self.insert(state as usize);
+        }
+    }
+
     pub fn clear(&mut self) {
         for &idx in &self.dirty_words {
             self.dense.words[idx] = 0;

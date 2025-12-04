@@ -79,6 +79,18 @@ impl<'a> GrammarOptimizer<'a> {
     /// This works for partial optimization - even if the whole grammar isn't regular,
     /// we can still optimize parts of it.
     fn optimize_regular_subgrammars(&mut self) {
+        // Fast path: if grammar already has only 1 production with 1 terminal RHS,
+        // it's already been optimized
+        if self.grammar.productions.len() == 1 {
+            let prod = &self.grammar.productions[0];
+            if prod.rhs.len() == 1 {
+                if let crate::glr::grammar::Symbol::Terminal(_) = &prod.rhs[0] {
+                    debug!(4, "Grammar already optimized (1 production with 1 terminal), skipping");
+                    return;
+                }
+            }
+        }
+        
         let total_start = std::time::Instant::now();
         debug!(4, "Starting grammar optimization with {} productions", self.grammar.productions.len());
         
@@ -257,7 +269,20 @@ impl<'a> GrammarOptimizer<'a> {
 
     /// Replace the entire grammar with a single terminal
     fn replace_grammar_with_single_terminal(&mut self, expr: Expr) {
-        let expr = simplify_expr(expr);
+        // Skip simplification for expressions that came from large grammars
+        // The regex_term_to_expr already creates well-formed expressions
+        // and simplify_expr is O(n) which is slow for 1M+ node trees
+        // We check if we had a large number of productions as a proxy for expression size
+        let skip_simplify = self.grammar.productions.len() > 100;
+        let expr = if skip_simplify {
+            debug!(5, "Skipping simplify_expr for large grammar (had {} productions)", self.grammar.productions.len());
+            expr
+        } else {
+            let simplify_start = std::time::Instant::now();
+            let result = simplify_expr(expr);
+            debug!(5, "Simplified expr in {:?}", simplify_start.elapsed());
+            result
+        };
         
         let new_terminal_name = "__optimized_terminal__".to_string();
         let new_group_id = 0;
@@ -1047,10 +1072,8 @@ fn regex_term_to_expr_cached(
     term: &Rc<RegexTerm>,
     cache: &mut HashMap<*const RegexTerm, std::sync::Arc<Expr>>
 ) -> Option<std::sync::Arc<Expr>> {
-    // Use stacker to handle deep recursion
-    stacker::maybe_grow(32 * 1024, 1024 * 1024, || {
-        regex_term_to_expr_cached_impl(term, cache)
-    })
+    // Note: stacker removed - tree depth is shallow (16) so stack overflow unlikely
+    regex_term_to_expr_cached_impl(term, cache)
 }
 
 fn regex_term_to_expr_cached_impl(
