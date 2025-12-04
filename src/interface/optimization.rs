@@ -91,6 +91,22 @@ impl<'a> GrammarOptimizer<'a> {
             }
         }
         
+        // Heuristic: Skip optimization for very large grammars where it would create
+        // too many terminals. The cutoff is based on empirical testing showing that
+        // grammars with >500 productions tend to create tokenizers with 100K+ states
+        // when optimized, leading to slow precomputation.
+        // 
+        // For these large grammars, it's faster to have a complex GLR parser (~5-6K states)
+        // and simple tokenizer (~12K states) than a simple parser (~700 states) and 
+        // complex tokenizer (~160K states).
+        const MAX_PRODUCTIONS_FOR_OPTIMIZATION: usize = 500;
+        if self.grammar.productions.len() > MAX_PRODUCTIONS_FOR_OPTIMIZATION {
+            debug!(4, "Skipping grammar optimization: {} productions exceeds threshold of {}",
+                self.grammar.productions.len(), MAX_PRODUCTIONS_FOR_OPTIMIZATION);
+            debug!(4, "Large grammars benefit more from a simple tokenizer than from optimization");
+            return;
+        }
+        
         let total_start = std::time::Instant::now();
         debug!(4, "Starting grammar optimization with {} productions", self.grammar.productions.len());
         
@@ -219,11 +235,15 @@ impl<'a> GrammarOptimizer<'a> {
         };
         debug!(5, "Phase 2: expanded start NT in {:?}", expand_start.elapsed());
         
-        // If there are remaining NtRefs, we need to keep those as productions
+        // If there are remaining NtRefs, we need to do partial optimization
         if has_remaining_ntrefs {
-            // For now, fall back to not optimizing if there are remaining NtRefs
-            // TODO: Implement partial optimization that keeps cyclic NTs as productions
-            debug!(4, "Grammar optimization skipped: cyclic NTs would remain (partial optimization not yet implemented)");
+            // Compute transitive closure of NTs that depend on cyclic NTs
+            let cyclic_dependent_nts = compute_cyclic_dependent_nts(&cyclic_nts, &self.grammar.productions);
+            debug!(4, "Found {} NTs that depend on cyclic NTs (out of {} total)", 
+                cyclic_dependent_nts.len(), nt_names.len());
+            
+            self.partial_optimize(&solutions, &mut expansion_cache, &cyclic_dependent_nts, ignore_term.as_ref());
+            debug!(4, "Partial grammar optimization complete in {:?}", total_start.elapsed());
             return;
         }
         
@@ -334,6 +354,261 @@ impl<'a> GrammarOptimizer<'a> {
         ];
         self.grammar.start_production_id = 0;
     }
+    
+    /// Partial optimization: convert non-cyclic NTs to regex terminals while keeping
+    /// cyclic NTs as grammar productions.
+    /// 
+    /// This is the key optimization for grammars with recursive structures (like JSON schemas
+    /// with recursive references). We convert all the "regular" parts (enums, simple objects, etc.)
+    /// to regex terminals, dramatically reducing the number of grammar productions the GLR
+    /// parser needs to handle.
+    fn partial_optimize(
+        &mut self,
+        solutions: &HashMap<String, Rc<RegexTerm>>,
+        expansion_cache: &mut HashMap<*const RegexTerm, Rc<RegexTerm>>,
+        cyclic_dependent_nts: &HashSet<String>,
+        ignore_term: Option<&Rc<RegexTerm>>,
+    ) {
+        let start = std::time::Instant::now();
+        
+        // Track which terminals already existed before optimization
+        // These should not be re-processed by handle_nullable_terminals_except
+        let pre_existing_terminals: HashSet<String> = self.grammar.regex_name_to_group_id
+            .left_values()
+            .cloned()
+            .collect();
+        
+        // For NTs that DON'T depend on cyclic NTs, we can fully expand and convert to terminals
+        // For NTs that DO depend on cyclic NTs, we keep them as productions but optimize their
+        // non-cyclic parts
+        
+        // Step 1: Collect all NTs that can be fully converted to regexes
+        let convertible_nts: HashSet<String> = solutions.keys()
+            .filter(|nt| !cyclic_dependent_nts.contains(*nt))
+            .cloned()
+            .collect();
+        
+        debug!(5, "Partial optimization: {} NTs can be fully converted, {} must stay as productions",
+            convertible_nts.len(), cyclic_dependent_nts.len());
+        
+        // Step 2: For each convertible NT, expand and convert to a terminal
+        let mut new_terminals: HashMap<String, (usize, Expr)> = HashMap::new();
+        let mut next_group_id = self.grammar.group_id_to_expr.keys().max().unwrap_or(&0) + 1;
+        
+        // We need to expand solutions in dependency order
+        // First, collect which convertible NTs each convertible NT depends on
+        let mut nt_expand_order: Vec<String> = Vec::new();
+        let mut expanded_solutions: HashMap<String, Rc<RegexTerm>> = HashMap::new();
+        
+        // Simple approach: iterate and expand NTs whose dependencies are all expanded
+        let mut remaining: HashSet<String> = convertible_nts.clone();
+        while !remaining.is_empty() {
+            let mut made_progress = false;
+            let to_process: Vec<String> = remaining.iter().cloned().collect();
+            
+            for nt in to_process {
+                let Some(solution) = solutions.get(&nt) else { continue };
+                let deps = solution.referenced_nts();
+                
+                // Check if all convertible dependencies are expanded
+                let all_deps_ready = deps.iter().all(|d| {
+                    !convertible_nts.contains(d) || expanded_solutions.contains_key(d)
+                });
+                
+                if all_deps_ready {
+                    // Expand this NT
+                    let expanded = expand_with_solutions_skip_cyclic(
+                        solution,
+                        &expanded_solutions,
+                        expansion_cache,
+                        cyclic_dependent_nts
+                    );
+                    expanded_solutions.insert(nt.clone(), expanded);
+                    remaining.remove(&nt);
+                    nt_expand_order.push(nt);
+                    made_progress = true;
+                }
+            }
+            
+            if !made_progress && !remaining.is_empty() {
+                // This shouldn't happen if our cyclic detection is correct
+                debug!(5, "Warning: {} NTs couldn't be expanded (circular deps in non-cyclic set?)", remaining.len());
+                break;
+            }
+        }
+        
+        debug!(5, "Expanded {} NTs in {:?}", expanded_solutions.len(), start.elapsed());
+        
+        // Step 3: Convert expanded solutions to terminal expressions
+        // Include nullable terminals - they'll be handled by handle_nullable_terminals_except later
+        // Deduplicate terminals with identical expressions
+        let convert_start = std::time::Instant::now();
+        let mut nullable_terminal_names: HashSet<String> = HashSet::new();
+        
+        // Map from expression to (canonical_nt_name, group_id)
+        // This allows us to share terminals for NTs with identical expressions
+        let mut expr_to_terminal: HashMap<Expr, (String, usize)> = HashMap::new();
+        // Map from NT name to the canonical NT name it should use
+        let mut nt_to_canonical: HashMap<String, String> = HashMap::new();
+        
+        for nt in &nt_expand_order {
+            if let Some(expanded) = expanded_solutions.get(nt) {
+                if let Some(expr) = regex_term_to_expr_rc(expanded) {
+                    // Check if we've already seen this expression
+                    if let Some((canonical_nt, _group_id)) = expr_to_terminal.get(&expr) {
+                        // Reuse existing terminal
+                        nt_to_canonical.insert(nt.clone(), canonical_nt.clone());
+                    } else {
+                        // Track nullable terminals for later handling
+                        if matches!(get_expr_nullability(&expr), ExprNullability::CanBeNull | ExprNullability::AlwaysNull) {
+                            nullable_terminal_names.insert(format!("__opt_{}__", nt));
+                        }
+                        
+                        let group_id = next_group_id;
+                        next_group_id += 1;
+                        new_terminals.insert(nt.clone(), (group_id, expr.clone()));
+                        expr_to_terminal.insert(expr, (nt.clone(), group_id));
+                        nt_to_canonical.insert(nt.clone(), nt.clone());
+                    }
+                }
+            }
+        }
+        
+        let deduped_count = nt_expand_order.len() - new_terminals.len();
+        if deduped_count > 0 {
+            debug!(4, "Deduplicated {} terminals with identical expressions", deduped_count);
+        }
+        
+        if !nullable_terminal_names.is_empty() {
+            debug!(5, "Created {} nullable terminals (will be wrapped in optional NTs)", nullable_terminal_names.len());
+        }
+        debug!(5, "Converted {} NTs to {} terminal expressions in {:?}", 
+            nt_expand_order.len(), new_terminals.len(), convert_start.elapsed());
+        
+        // Step 4: Update the grammar
+        // 4a: Add new terminals to the grammar
+        for (nt, (group_id, expr)) in &new_terminals {
+            let terminal_name = format!("__opt_{}__", nt);
+            self.grammar.regex_name_to_group_id.insert(terminal_name.clone(), *group_id);
+            self.grammar.group_id_to_expr.insert(*group_id, expr.clone());
+        }
+        
+        // 4b: Update productions to use new terminals instead of NTs
+        let update_start = std::time::Instant::now();
+        let mut new_productions: Vec<Production> = Vec::new();
+        
+        for prod in &self.grammar.productions {
+            let nt_name = &prod.lhs.0;
+            
+            // If this NT was converted to a terminal, we don't need its production
+            // (unless it's referenced by cyclic NTs)
+            // Check both direct and deduplicated cases
+            if (new_terminals.contains_key(nt_name) || nt_to_canonical.contains_key(nt_name)) 
+                && !cyclic_dependent_nts.contains(nt_name) {
+                continue;
+            }
+            
+            // Update the RHS to use new terminals where possible
+            let new_rhs: Vec<Symbol> = prod.rhs.iter().map(|sym| {
+                match sym {
+                    Symbol::NonTerminal(nt) => {
+                        // First check if this NT was deduplicated to another canonical NT
+                        let canonical_nt = nt_to_canonical.get(&nt.0).unwrap_or(&nt.0);
+                        if new_terminals.contains_key(canonical_nt) {
+                            let terminal_name = format!("__opt_{}__", canonical_nt);
+                            Symbol::Terminal(Terminal::RegexName(terminal_name))
+                        } else {
+                            sym.clone()
+                        }
+                    }
+                    _ => sym.clone(),
+                }
+            }).collect();
+            
+            new_productions.push(Production {
+                lhs: prod.lhs.clone(),
+                rhs: new_rhs,
+            });
+        }
+        
+        // Find the start production
+        let start_prod_lhs = self.grammar.productions[self.grammar.start_production_id].lhs.clone();
+        self.grammar.productions = new_productions;
+        self.grammar.start_production_id = self.grammar.productions.iter()
+            .position(|p| p.lhs == start_prod_lhs)
+            .unwrap_or(0);
+        
+        debug!(4, "Partial optimization: {} productions -> {}, {} new terminals (in {:?})",
+            self.stats.initial_productions, self.grammar.productions.len(), new_terminals.len(),
+            update_start.elapsed());
+        
+        // Step 5: Handle nullable terminals that were created during optimization
+        // This wraps nullable terminals in optional non-terminals (similar to from_exprs handling)
+        if !nullable_terminal_names.is_empty() {
+            debug!(4, "Handling {} nullable terminals created by optimization", nullable_terminal_names.len());
+            self.grammar.handle_nullable_terminals_except(&pre_existing_terminals);
+        }
+        
+        debug!(4, "After nullable handling: {} productions", self.grammar.productions.len());
+        
+        // Debug: print the remaining productions
+        debug!(5, "Remaining productions after partial optimization:");
+        for (i, prod) in self.grammar.productions.iter().enumerate() {
+            let rhs_str: Vec<String> = prod.rhs.iter().map(|sym| {
+                match sym {
+                    Symbol::Terminal(t) => format!("T({:?})", t),
+                    Symbol::NonTerminal(nt) => format!("NT({})", nt.0),
+                }
+            }).collect();
+            debug!(5, "  [{}] {} -> {}", i, prod.lhs.0, rhs_str.join(" "));
+        }
+    }
+}
+
+/// Compute the set of NTs that transitively depend on cyclic NTs.
+/// This includes the cyclic NTs themselves plus any NT that references them (directly or indirectly).
+fn compute_cyclic_dependent_nts(cyclic_nts: &HashSet<String>, productions: &[Production]) -> HashSet<String> {
+    // Build dependency graph: nt -> set of NTs it references
+    let mut deps: HashMap<String, HashSet<String>> = HashMap::new();
+    for prod in productions {
+        let nt = &prod.lhs.0;
+        let entry = deps.entry(nt.clone()).or_insert_with(HashSet::new);
+        for sym in &prod.rhs {
+            if let Symbol::NonTerminal(ref_nt) = sym {
+                entry.insert(ref_nt.0.clone());
+            }
+        }
+    }
+    
+    // Start with cyclic NTs
+    let mut result: HashSet<String> = cyclic_nts.clone();
+    
+    // Build reverse dependency graph for propagation
+    let mut rev_deps: HashMap<String, HashSet<String>> = HashMap::new();
+    for (nt, refs) in &deps {
+        for r in refs {
+            rev_deps.entry(r.clone()).or_insert_with(HashSet::new).insert(nt.clone());
+        }
+    }
+    
+    // Propagate: any NT that depends on a cyclic-dependent NT is also cyclic-dependent
+    let mut changed = true;
+    while changed {
+        changed = false;
+        let current: Vec<String> = result.iter().cloned().collect();
+        for nt in current {
+            // Any NT that references this one becomes cyclic-dependent
+            if let Some(dependents) = rev_deps.get(&nt) {
+                for dep in dependents {
+                    if result.insert(dep.clone()) {
+                        changed = true;
+                    }
+                }
+            }
+        }
+    }
+    
+    result
 }
 
 /// Check if the grammar structure would cause exponential blowup during substitution.
