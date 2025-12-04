@@ -202,7 +202,7 @@ impl<'a> GrammarOptimizer<'a> {
         
         // Convert the final RegexTerm to Expr
         let convert_start = std::time::Instant::now();
-        let Some(final_expr) = regex_term_to_expr(&expanded_start) else {
+        let Some(final_expr) = regex_term_to_expr_rc(&expanded_start) else {
             debug!(4, "Grammar optimization failed: could not convert to Expr");
             return;
         };
@@ -496,8 +496,13 @@ impl RegexTerm {
     fn make_choice(terms: Vec<Rc<RegexTerm>>) -> RegexTerm {
         let mut flat = Vec::new();
         for t in terms {
+            // Only flatten if this Rc is NOT shared (strong_count == 1)
+            // This avoids O(n²) blowup when flattening shared Choice subtrees
+            let should_flatten = Rc::strong_count(&t) == 1;
             match t.as_ref() {
-                RegexTerm::Choice(inner) => flat.extend(inner.iter().cloned()),
+                RegexTerm::Choice(inner) if should_flatten => {
+                    flat.extend(inner.iter().cloned())
+                }
                 _ => flat.push(t),
             }
         }
@@ -1062,16 +1067,23 @@ fn substitute_nt(term: &RegexTerm, nt: &str, replacement: &Rc<RegexTerm>) -> Reg
 /// Convert a RegexTerm (with no NT references) to an Expr
 /// Uses caching via Arc<Expr> to preserve sharing from Rc<RegexTerm>
 fn regex_term_to_expr(term: &RegexTerm) -> Option<Expr> {
+    // For backward compatibility, wrap in Rc (loses sharing info)
+    let term_rc = Rc::new(term.clone());
+    regex_term_to_expr_rc(&term_rc)
+}
+
+/// Convert a RegexTerm Rc to an Expr, preserving sharing information
+fn regex_term_to_expr_rc(term: &Rc<RegexTerm>) -> Option<Expr> {
     use std::sync::Arc;
+    
     let mut cache: HashMap<*const RegexTerm, Arc<Expr>> = HashMap::new();
-    regex_term_to_expr_cached(&Rc::new(term.clone()), &mut cache)
-        .map(|arc| Arc::try_unwrap(arc).unwrap_or_else(|arc| (*arc).clone()))
+    regex_term_to_expr_cached(term, &mut cache)
 }
 
 fn regex_term_to_expr_cached(
     term: &Rc<RegexTerm>,
     cache: &mut HashMap<*const RegexTerm, std::sync::Arc<Expr>>
-) -> Option<std::sync::Arc<Expr>> {
+) -> Option<Expr> {
     // Note: stacker removed - tree depth is shallow (16) so stack overflow unlikely
     regex_term_to_expr_cached_impl(term, cache)
 }
@@ -1079,60 +1091,56 @@ fn regex_term_to_expr_cached(
 fn regex_term_to_expr_cached_impl(
     term: &Rc<RegexTerm>,
     cache: &mut HashMap<*const RegexTerm, std::sync::Arc<Expr>>
-) -> Option<std::sync::Arc<Expr>> {
+) -> Option<Expr> {
     use std::sync::Arc;
     
     let ptr = Rc::as_ptr(term);
+    
+    // Always check cache first for efficiency
     if let Some(cached) = cache.get(&ptr) {
-        return Some(cached.clone());
+        return Some(Expr::Shared(cached.clone()));
     }
     
+    // Check if this Rc is shared (referenced multiple times in the original tree)
+    let is_shared = Rc::strong_count(term) > 1;
+    
     let result = match term.as_ref() {
-        RegexTerm::Epsilon => Some(Arc::new(Expr::Epsilon)),
-        RegexTerm::Concrete(e) => Some(Arc::new(e.clone())),
+        RegexTerm::Epsilon => Some(Expr::Epsilon),
+        RegexTerm::Concrete(e) => Some(e.clone()),
         RegexTerm::NtRef(_) => None, // Should not have NT refs at this point
         RegexTerm::Seq(parts) => {
             let exprs: Option<Vec<Expr>> = parts.iter()
-                .map(|p| regex_term_to_expr_cached(p, cache).map(|arc| {
-                    // Use Shared(Arc<Expr>) to preserve sharing
-                    if Arc::strong_count(&arc) > 1 {
-                        Expr::Shared(arc)
-                    } else {
-                        Arc::try_unwrap(arc).unwrap_or_else(|a| (*a).clone())
-                    }
-                }))
+                .map(|p| regex_term_to_expr_cached(p, cache))
                 .collect();
-            exprs.map(|es| Arc::new(make_seq(es)))
+            exprs.map(make_seq)
         }
         RegexTerm::Choice(alts) => {
             let exprs: Option<Vec<Expr>> = alts.iter()
-                .map(|a| regex_term_to_expr_cached(a, cache).map(|arc| {
-                    // Use Shared(Arc<Expr>) to preserve sharing
-                    if Arc::strong_count(&arc) > 1 {
-                        Expr::Shared(arc)
-                    } else {
-                        Arc::try_unwrap(arc).unwrap_or_else(|a| (*a).clone())
-                    }
-                }))
+                .map(|a| regex_term_to_expr_cached(a, cache))
                 .collect();
-            exprs.map(|es| Arc::new(make_choice(es)))
+            exprs.map(make_choice)
         }
         RegexTerm::Star(inner) => {
-            regex_term_to_expr_cached(inner, cache).map(|arc| {
-                let inner_expr = if Arc::strong_count(&arc) > 1 {
-                    Expr::Shared(arc)
-                } else {
-                    Arc::try_unwrap(arc).unwrap_or_else(|a| (*a).clone())
-                };
-                Arc::new(Expr::Quantifier(Box::new(inner_expr), QuantifierType::ZeroOrMore))
+            regex_term_to_expr_cached(inner, cache).map(|inner_expr| {
+                Expr::Quantifier(Box::new(inner_expr), QuantifierType::ZeroOrMore)
             })
         }
     };
     
-    if let Some(ref r) = result {
-        cache.insert(ptr, r.clone());
+    // Always cache the result to avoid re-processing
+    if let Some(ref e) = result {
+        cache.insert(ptr, Arc::new(e.clone()));
     }
-    result
+    
+    // Return Shared wrapper if this term is truly shared
+    if is_shared {
+        result.map(|e| match e {
+            Expr::Shared(_) => e,
+            _ => Expr::Shared(Arc::new(e)),
+        })
+    } else {
+        result
+    }
 }
 
 /// Make a sequence Expr, handling Epsilon and flattening
