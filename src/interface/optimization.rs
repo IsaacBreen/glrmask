@@ -127,6 +127,12 @@ impl<'a> GrammarOptimizer<'a> {
         }
         debug!(5, "Built {} equations in {:?}", equations.len(), eq_start.elapsed());
         
+        // Find NTs that are part of mutual recursion cycles
+        let cyclic_nts = find_cyclic_nts(&equations);
+        if !cyclic_nts.is_empty() {
+            debug!(5, "Found {} cyclic NTs: {:?}", cyclic_nts.len(), cyclic_nts);
+        }
+        
         // Build dependency graph and compute elimination order (reverse topological)
         let order_start = std::time::Instant::now();
         let elimination_order = compute_elimination_order(&equations, &start_nt);
@@ -194,11 +200,32 @@ impl<'a> GrammarOptimizer<'a> {
         // Now expand all NtRefs in the solved start equation
         let expand_start = std::time::Instant::now();
         let solved_start_rc = Rc::new(solved_start_symbolic);
-        let Some(expanded_start) = expand_with_solutions_cached(&solved_start_rc, &solutions, &mut expansion_cache) else {
-            debug!(4, "Grammar optimization failed: cycle detected during expansion (mutual recursion)");
-            return;
+        
+        // If there are cyclic NTs, use the skip_cyclic version
+        let (expanded_start, has_remaining_ntrefs) = if cyclic_nts.is_empty() {
+            // No cycles - use strict expansion
+            let Some(expanded) = expand_with_solutions_cached(&solved_start_rc, &solutions, &mut expansion_cache) else {
+                debug!(4, "Grammar optimization failed: cycle detected during expansion (mutual recursion)");
+                return;
+            };
+            (expanded, false)
+        } else {
+            // Has cycles - use lenient expansion that skips cyclic NTs
+            let expanded = expand_with_solutions_skip_cyclic(&solved_start_rc, &solutions, &mut expansion_cache, &cyclic_nts);
+            // Check if the result still has NtRefs
+            let remaining = expanded.referenced_nts();
+            debug!(5, "After expansion, {} NtRefs remain: {:?}", remaining.len(), remaining);
+            (expanded, !remaining.is_empty())
         };
         debug!(5, "Phase 2: expanded start NT in {:?}", expand_start.elapsed());
+        
+        // If there are remaining NtRefs, we need to keep those as productions
+        if has_remaining_ntrefs {
+            // For now, fall back to not optimizing if there are remaining NtRefs
+            // TODO: Implement partial optimization that keeps cyclic NTs as productions
+            debug!(4, "Grammar optimization skipped: cyclic NTs would remain (partial optimization not yet implemented)");
+            return;
+        }
         
         // Convert the final RegexTerm to Expr
         let convert_start = std::time::Instant::now();
@@ -381,6 +408,88 @@ fn would_cause_exponential_blowup(equations: &HashMap<String, Rc<RegexTerm>>) ->
     }
     
     false
+}
+
+/// Find all NTs that are part of a mutual recursion cycle.
+/// Self-recursion (NT -> NT) is NOT a cycle for our purposes (handled by Arden's lemma).
+/// Returns a set of NT names that are in cycles.
+fn find_cyclic_nts(equations: &HashMap<String, Rc<RegexTerm>>) -> HashSet<String> {
+    // Build dependency graph: nt -> set of NTs it references (excluding self)
+    let mut deps: HashMap<String, HashSet<String>> = HashMap::new();
+    for (nt, eq) in equations {
+        let mut refs = eq.referenced_nts();
+        refs.remove(nt); // Remove self-reference
+        deps.insert(nt.clone(), refs);
+    }
+    
+    // Use Tarjan's algorithm to find strongly connected components
+    let mut index = 0;
+    let mut stack: Vec<String> = Vec::new();
+    let mut on_stack: HashSet<String> = HashSet::new();
+    let mut indices: HashMap<String, usize> = HashMap::new();
+    let mut lowlinks: HashMap<String, usize> = HashMap::new();
+    let mut sccs: Vec<Vec<String>> = Vec::new();
+    
+    fn strongconnect(
+        v: &str,
+        deps: &HashMap<String, HashSet<String>>,
+        index: &mut usize,
+        stack: &mut Vec<String>,
+        on_stack: &mut HashSet<String>,
+        indices: &mut HashMap<String, usize>,
+        lowlinks: &mut HashMap<String, usize>,
+        sccs: &mut Vec<Vec<String>>,
+    ) {
+        indices.insert(v.to_string(), *index);
+        lowlinks.insert(v.to_string(), *index);
+        *index += 1;
+        stack.push(v.to_string());
+        on_stack.insert(v.to_string());
+        
+        if let Some(neighbors) = deps.get(v) {
+            for w in neighbors {
+                if !indices.contains_key(w) {
+                    strongconnect(w, deps, index, stack, on_stack, indices, lowlinks, sccs);
+                    let w_low = *lowlinks.get(w).unwrap();
+                    let v_low = lowlinks.get_mut(v).unwrap();
+                    *v_low = (*v_low).min(w_low);
+                } else if on_stack.contains(w) {
+                    let w_idx = *indices.get(w).unwrap();
+                    let v_low = lowlinks.get_mut(v).unwrap();
+                    *v_low = (*v_low).min(w_idx);
+                }
+            }
+        }
+        
+        if lowlinks.get(v) == indices.get(v) {
+            let mut scc = Vec::new();
+            loop {
+                let w = stack.pop().unwrap();
+                on_stack.remove(&w);
+                scc.push(w.clone());
+                if w == v {
+                    break;
+                }
+            }
+            sccs.push(scc);
+        }
+    }
+    
+    for v in equations.keys() {
+        if !indices.contains_key(v) {
+            strongconnect(v, &deps, &mut index, &mut stack, &mut on_stack, &mut indices, &mut lowlinks, &mut sccs);
+        }
+    }
+    
+    // SCCs with size > 1 are cycles
+    let mut cyclic = HashSet::new();
+    for scc in sccs {
+        if scc.len() > 1 {
+            cyclic.extend(scc);
+        }
+    }
+    
+    cyclic
 }
 
 /// Compute an elimination order for the NTs using reverse topological sort.
@@ -887,18 +996,34 @@ fn expand_with_solutions_cached(
     cache: &mut HashMap<*const RegexTerm, Rc<RegexTerm>>
 ) -> Option<Rc<RegexTerm>> {
     let mut expanding: HashSet<String> = HashSet::new();
-    expand_with_solutions_cached_inner(root, solutions, cache, &mut expanding)
+    let skip_nts: HashSet<String> = HashSet::new();
+    expand_with_solutions_cached_inner(root, solutions, cache, &mut expanding, &skip_nts)
+}
+
+/// Expand all NtRefs in a term, but skip certain NTs (leaving them as NtRefs).
+/// This is used when we know certain NTs are cyclic and shouldn't be expanded.
+fn expand_with_solutions_skip_cyclic(
+    root: &Rc<RegexTerm>,
+    solutions: &HashMap<String, Rc<RegexTerm>>,
+    cache: &mut HashMap<*const RegexTerm, Rc<RegexTerm>>,
+    skip_nts: &HashSet<String>
+) -> Rc<RegexTerm> {
+    let mut expanding: HashSet<String> = HashSet::new();
+    // This version always succeeds because we skip cyclic NTs
+    expand_with_solutions_cached_inner(root, solutions, cache, &mut expanding, skip_nts)
+        .expect("expand_with_solutions_skip_cyclic should not fail")
 }
 
 fn expand_with_solutions_cached_inner(
     root: &Rc<RegexTerm>,
     solutions: &HashMap<String, Rc<RegexTerm>>,
     cache: &mut HashMap<*const RegexTerm, Rc<RegexTerm>>,
-    expanding: &mut HashSet<String>
+    expanding: &mut HashSet<String>,
+    skip_nts: &HashSet<String>
 ) -> Option<Rc<RegexTerm>> {
     // Use stacker to handle deep recursion by switching to heap allocation when needed
     stacker::maybe_grow(32 * 1024, 1024 * 1024, || {
-        expand_with_solutions_cached_impl(root, solutions, cache, expanding)
+        expand_with_solutions_cached_impl(root, solutions, cache, expanding, skip_nts)
     })
 }
 
@@ -906,12 +1031,18 @@ fn expand_with_solutions_cached_impl(
     term: &Rc<RegexTerm>,
     solutions: &HashMap<String, Rc<RegexTerm>>,
     cache: &mut HashMap<*const RegexTerm, Rc<RegexTerm>>,
-    expanding: &mut HashSet<String>
+    expanding: &mut HashSet<String>,
+    skip_nts: &HashSet<String>
 ) -> Option<Rc<RegexTerm>> {
     let ptr = Rc::as_ptr(term);
     
     // For NtRef, resolve to solution and expand that
     if let RegexTerm::NtRef(n) = term.as_ref() {
+        // If this NT should be skipped (it's cyclic), leave it as NtRef
+        if skip_nts.contains(n) {
+            return Some(term.clone());
+        }
+        
         if let Some(solution) = solutions.get(n) {
             // Check if solution is already expanded in cache
             let sol_ptr = Rc::as_ptr(solution);
@@ -926,7 +1057,7 @@ fn expand_with_solutions_cached_impl(
             // Mark as expanding
             expanding.insert(n.clone());
             // Recursively expand the solution
-            let result = expand_with_solutions_cached_inner(solution, solutions, cache, expanding)?;
+            let result = expand_with_solutions_cached_inner(solution, solutions, cache, expanding, skip_nts)?;
             expanding.remove(n);
             return Some(result);
         } else {
@@ -944,7 +1075,7 @@ fn expand_with_solutions_cached_impl(
         RegexTerm::NtRef(_) => unreachable!(), // Handled above
         RegexTerm::Seq(parts) => {
             let new_parts: Option<Vec<Rc<RegexTerm>>> = parts.iter()
-                .map(|p| expand_with_solutions_cached_inner(p, solutions, cache, expanding))
+                .map(|p| expand_with_solutions_cached_inner(p, solutions, cache, expanding, skip_nts))
                 .collect();
             let new_parts = new_parts?;
             let changed = parts.iter().zip(new_parts.iter())
@@ -957,7 +1088,7 @@ fn expand_with_solutions_cached_impl(
         }
         RegexTerm::Choice(alts) => {
             let new_alts: Option<Vec<Rc<RegexTerm>>> = alts.iter()
-                .map(|a| expand_with_solutions_cached_inner(a, solutions, cache, expanding))
+                .map(|a| expand_with_solutions_cached_inner(a, solutions, cache, expanding, skip_nts))
                 .collect();
             let new_alts = new_alts?;
             let changed = alts.iter().zip(new_alts.iter())
@@ -969,7 +1100,7 @@ fn expand_with_solutions_cached_impl(
             }
         }
         RegexTerm::Star(inner) => {
-            let new_inner = expand_with_solutions_cached_inner(inner, solutions, cache, expanding)?;
+            let new_inner = expand_with_solutions_cached_inner(inner, solutions, cache, expanding, skip_nts)?;
             if Rc::ptr_eq(inner, &new_inner) {
                 term.clone()
             } else {

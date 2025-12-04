@@ -37,6 +37,11 @@ pub struct JsonSchemaConverter {
     rules: Vec<(String, GrammarExpr)>,
     /// Queue of pending refs to process: (ref_path, schema)
     pending_refs: Vec<(String, Value)>,
+    /// Track which primitive rules are needed
+    needs_json_value: bool,
+    needs_json_object: bool,
+    needs_json_array: bool,
+    needs_json_kv: bool,
 }
 
 impl JsonSchemaConverter {
@@ -50,6 +55,10 @@ impl JsonSchemaConverter {
             current_ref_stack: Vec::new(),
             rules: Vec::new(),
             pending_refs: Vec::new(),
+            needs_json_value: false,
+            needs_json_object: false,
+            needs_json_array: false,
+            needs_json_kv: false,
         }
     }
 
@@ -64,6 +73,29 @@ impl JsonSchemaConverter {
         self.rules.push((name, expr));
     }
 
+    /// Reference _json_value and mark it as needed
+    fn json_value_ref(&mut self) -> GrammarExpr {
+        self.needs_json_value = true;
+        GrammarExpr::Ref("_json_value".to_string())
+    }
+    
+    /// Reference _json_object and mark it as needed
+    fn json_object_ref(&mut self) -> GrammarExpr {
+        self.needs_json_object = true;
+        GrammarExpr::Ref("_json_object".to_string())
+    }
+    
+    /// Reference _json_array and mark it as needed
+    fn json_array_ref(&mut self) -> GrammarExpr {
+        self.needs_json_array = true;
+        GrammarExpr::Ref("_json_array".to_string())
+    }
+    
+    /// Reference _json_kv and mark it as needed
+    fn json_kv_ref(&mut self) -> GrammarExpr {
+        self.needs_json_kv = true;
+        GrammarExpr::Ref("_json_kv".to_string())
+    }
     /// Convert the schema to a list of grammar rules.
     /// Returns (rules, root_rule_name).
     pub fn convert(mut self) -> Result<(Vec<(String, GrammarExpr)>, String), String> {
@@ -140,7 +172,8 @@ impl JsonSchemaConverter {
         // Handle boolean schemas
         if let Some(b) = schema.as_bool() {
             if b {
-                self.add_rule(rule_name.clone(), GrammarExpr::Ref("_json_value".to_string()));
+                let ref_expr = self.json_value_ref();
+                self.add_rule(rule_name.clone(), ref_expr);
             } else {
                 // false schema - nothing matches
                 self.add_rule(rule_name.clone(), GrammarExpr::Literal(b"<NEVER>".to_vec()));
@@ -156,7 +189,8 @@ impl JsonSchemaConverter {
                 self.add_rule(rule_name.clone(), GrammarExpr::Ref(ref_rule));
                 return Ok(rule_name);
             } else {
-                self.add_rule(rule_name.clone(), GrammarExpr::Ref("_json_value".to_string()));
+                let ref_expr = self.json_value_ref();
+                self.add_rule(rule_name.clone(), ref_expr);
                 return Ok(rule_name);
             }
         }
@@ -217,7 +251,8 @@ impl JsonSchemaConverter {
         }
 
         // No type specified - allow any JSON value
-        self.add_rule(rule_name.clone(), GrammarExpr::Ref("_json_value".to_string()));
+        let ref_expr = self.json_value_ref();
+        self.add_rule(rule_name.clone(), ref_expr);
         Ok(rule_name)
     }
 
@@ -247,7 +282,8 @@ impl JsonSchemaConverter {
                 Ok(rule_name)
             }
             _ => {
-                self.add_rule(rule_name.clone(), GrammarExpr::Ref("_json_value".to_string()));
+                let ref_expr = self.json_value_ref();
+                self.add_rule(rule_name.clone(), ref_expr);
                 Ok(rule_name)
             }
         }
@@ -261,7 +297,8 @@ impl JsonSchemaConverter {
         // If no properties defined and additional allowed, just use generic object
         let has_properties = properties.map(|p| !p.is_empty()).unwrap_or(false);
         if !has_properties && additional_props != Some(&Value::Bool(false)) {
-            self.add_rule(rule_name.clone(), GrammarExpr::Ref("_json_object".to_string()));
+            let ref_expr = self.json_object_ref();
+            self.add_rule(rule_name.clone(), ref_expr);
             return Ok(rule_name);
         }
 
@@ -296,9 +333,12 @@ impl JsonSchemaConverter {
         }
 
         // If additional properties allowed, add generic kv
+        // Note: We treat unspecified additionalProperties as false (stricter interpretation)
+        // This avoids adding recursive _json_* rules which can slow down optimization.
+        // Only explicitly set additionalProperties: true will enable arbitrary properties.
         match additional_props {
-            None | Some(Value::Bool(true)) => {
-                member_alternatives.push(GrammarExpr::Ref("_json_kv".to_string()));
+            Some(Value::Bool(true)) => {
+                member_alternatives.push(self.json_kv_ref());
             }
             Some(Value::Object(ap_schema)) => {
                 let additional_rule = self.new_rule_name("ap");
@@ -352,7 +392,8 @@ impl JsonSchemaConverter {
         let prefix_items = obj.get("prefixItems");
 
         if items.is_none() && prefix_items.is_none() {
-            self.add_rule(rule_name.clone(), GrammarExpr::Ref("_json_array".to_string()));
+            let ref_expr = self.json_array_ref();
+            self.add_rule(rule_name.clone(), ref_expr);
             return Ok(rule_name);
         }
 
@@ -365,7 +406,8 @@ impl JsonSchemaConverter {
         if let Some(item_schema) = items {
             if let Some(b) = item_schema.as_bool() {
                 if b {
-                    self.add_rule(rule_name.clone(), GrammarExpr::Ref("_json_array".to_string()));
+                    let ref_expr = self.json_array_ref();
+                    self.add_rule(rule_name.clone(), ref_expr);
                 } else {
                     // Empty array only
                     self.add_rule(rule_name.clone(), GrammarExpr::Sequence(vec![
@@ -411,7 +453,8 @@ impl JsonSchemaConverter {
         }
 
         // Fallback
-        self.add_rule(rule_name.clone(), GrammarExpr::Ref("_json_array".to_string()));
+        let ref_expr = self.json_array_ref();
+        self.add_rule(rule_name.clone(), ref_expr);
         Ok(rule_name)
     }
 
@@ -424,7 +467,8 @@ impl JsonSchemaConverter {
 
         if prefix_items.is_empty() {
             if additional_items.as_bool() == Some(true) || additional_items.is_object() {
-                self.add_rule(rule_name.clone(), GrammarExpr::Ref("_json_array".to_string()));
+                let ref_expr = self.json_array_ref();
+                self.add_rule(rule_name.clone(), ref_expr);
             } else {
                 self.add_rule(rule_name.clone(), GrammarExpr::Sequence(vec![
                     GrammarExpr::Literal(b"[".to_vec()),
@@ -457,7 +501,7 @@ impl JsonSchemaConverter {
                 body_parts.push(GrammarExpr::Repeat(Box::new(GrammarExpr::Sequence(vec![
                     GrammarExpr::Literal(b",".to_vec()),
                     GrammarExpr::Ref("WS".to_string()),
-                    GrammarExpr::Ref("_json_value".to_string()),
+                    self.json_value_ref(),
                 ]))));
             }
             Value::Object(ai_schema) => {
@@ -675,6 +719,17 @@ impl JsonSchemaConverter {
 
         // JSON null
         self.add_rule("JSON_NULL".to_string(), GrammarExpr::Literal(b"null".to_vec()));
+
+        // Only add the mutually recursive _json_* rules if any of them are needed.
+        // These rules form a cycle: _json_value <-> _json_object <-> _json_kv
+        //                           _json_value <-> _json_array
+        // So if any is needed, all are needed.
+        let needs_recursive_json = self.needs_json_value || self.needs_json_object || 
+                                   self.needs_json_array || self.needs_json_kv;
+        
+        if !needs_recursive_json {
+            return; // Skip adding recursive rules - they're not used!
+        }
 
         // Generic JSON value
         self.add_rule("_json_value".to_string(), GrammarExpr::Choice(vec![
