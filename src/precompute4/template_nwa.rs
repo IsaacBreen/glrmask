@@ -166,8 +166,8 @@ impl CharacterizationKey {
 /// Each terminal gets its own DWA that encodes how it interacts with the parse stack.
 /// These are later composed into the final Parser DWA.
 pub fn build_terminal_dwas(parser: &GLRParser) -> Result<BTreeMap<TerminalID, DWA>, FullDWABuildError> {
-    // NOTE: Removed rayon parallelism - benchmarks showed single-threaded is 3x faster
-    // (317ms vs 951ms) due to memory contention in dwa.simplify()/minimize operations.
+    use rayon::prelude::*;
+    
     let all = compute_all_characterizations(parser);
     crate::debug!(5, "Computed terminal characterizations for {} terminals", all.len());
 
@@ -185,13 +185,20 @@ pub fn build_terminal_dwas(parser: &GLRParser) -> Result<BTreeMap<TerminalID, DW
     crate::debug!(5, "Found {} unique characterizations (sharing DWAs for {} groups)", 
         unique_chars, key_to_terms.values().filter(|v| v.len() > 1).count());
 
-    // Build one DWA per unique characterization
+    // Build NWAs in parallel (pure computation, no shared state)
+    let key_term_list: Vec<_> = key_to_terms.into_iter().collect();
+    let nwas_and_terms: Vec<_> = key_term_list
+        .par_iter()
+        .map(|(_key, terms)| {
+            let (first_term, first_tc) = &terms[0];
+            let nwa = build_nwa_from_terminal_characterization(first_tc).unwrap();
+            (*first_term, terms.clone(), nwa)
+        })
+        .collect();
+    
+    // Determinize and simplify serially (memory contention in parallel slows things down)
     let mut result = BTreeMap::new();
-    for (key, terms) in key_to_terms {
-        // Use the first terminal's characterization as the representative
-        let (first_term, first_tc) = &terms[0];
-        
-        let nwa = build_nwa_from_terminal_characterization(first_tc)?;
+    for (first_term, terms, nwa) in nwas_and_terms {
         let mut dwa = nwa.determinize();
         crate::debug!(6, "Terminal {:?} (and {} others): {} states before simplify", 
             first_term, terms.len() - 1, dwa.states.len());

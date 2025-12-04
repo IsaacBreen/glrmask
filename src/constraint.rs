@@ -965,10 +965,13 @@ impl GrammarConstraint {
             &all_states_list,
         );
         let mut state_to_rep: BTreeMap<TokenizerStateID, TokenizerStateID> = BTreeMap::new();
+        let mut representative_set: BTreeSet<usize> = BTreeSet::new();
         for (s, &r) in state_representatives.iter().enumerate() {
             state_to_rep.insert(TokenizerStateID(s), TokenizerStateID(r));
+            representative_set.insert(r);
         }
-        crate::debug!(4, "Tokenizer state equivalence analysis complete. {} -> {} states", all_states_list.len(), state_representatives.iter().collect::<HashSet<_>>().len());
+        let representative_states: Vec<usize> = representative_set.into_iter().collect();
+        crate::debug!(4, "Tokenizer state equivalence analysis complete. {} -> {} states", all_states_list.len(), representative_states.len());
 
         crate::debug!(4, "Computing maps and possible_matches (fast parallel pass)");
         
@@ -983,8 +986,17 @@ impl GrammarConstraint {
             })
             .collect();
         
-        let computed_possible_matches =
-            Self::build_maps_and_matches(&tokenizer, &vocab_tree.root, &group_id_to_terminal_idx);
+        // Only compute for representative states, then expand to non-representatives
+        let rep_possible_matches =
+            Self::build_maps_and_matches_for_reps(&tokenizer, &vocab_tree.root, &group_id_to_terminal_idx, &representative_states);
+        
+        // Expand results to all states via state_to_rep mapping
+        let mut computed_possible_matches: BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>> = BTreeMap::new();
+        for (s, rep) in &state_to_rep {
+            if let Some(rep_map) = rep_possible_matches.get(rep) {
+                computed_possible_matches.insert(*s, rep_map.clone());
+            }
+        }
 
         // Compute terminal follow sets, then map to IDs.
         crate::debug!(4, "Computing terminal follow sets");
@@ -1154,24 +1166,35 @@ impl GrammarConstraint {
     // Possible-matches-related helpers
     // -----------------------------------------------------------------------
 
-    pub fn build_maps_and_matches(
+    /// Optimized version that only computes for representative states
+    pub fn build_maps_and_matches_for_reps(
         tokenizer: &Regex,
         vocab_root: &VocabPrefixTreeNode,
         group_id_to_terminal_idx: &BTreeMap<usize, usize>,
+        representative_states: &[usize],
     ) -> BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>> {
+        let start_time = std::time::Instant::now();
+        
+        // Build mapping from representative state to index in our output array
+        let rep_to_idx: BTreeMap<usize, usize> = representative_states
+            .iter()
+            .enumerate()
+            .map(|(idx, &state)| (state, idx))
+            .collect();
+        let num_reps = representative_states.len();
+        
         // Flatten DFA for fast access (u32::MAX represents None)
         struct FastDFA {
             transitions: Vec<u32>,           // size = num_states * 256
             finalizers: Vec<Vec<TerminalID>>, // size = num_states
         }
 
-        // Recursive DFS helper
-        fn process_vocab_node_dfs(
+        // Recursive DFS helper - uses sparse HashMap storage
+        fn process_vocab_node_dfs_sparse(
             node: &VocabPrefixTreeNode,
             current_states: Vec<(u32, Vec<u32>)>,
             dfa: &FastDFA,
-            num_terminals: usize,
-            out_matches_vec: &mut [Option<LLMTokenBV>],
+            out_matches: &mut HashMap<(u32, u32), LLMTokenBV>,
         ) {
             for (edge_bytes, child) in node.iter_children() {
                 let reachable_bv: LLMTokenBV = child.reachable_token_ids().into();
@@ -1180,8 +1203,6 @@ impl GrammarConstraint {
                 for (start, sources) in &current_states {
                     let mut curr = *start;
                     let mut valid = true;
-                    // Optimization: Accumulate triggered terminals for this edge and apply them in batch.
-                    // This avoids repeated map lookups and bitset unions for every byte.
                     let mut triggered_terminals: Vec<TerminalID> = Vec::new();
 
                     for &b in edge_bytes.iter() {
@@ -1204,13 +1225,11 @@ impl GrammarConstraint {
                             triggered_terminals.sort_unstable();
                             triggered_terminals.dedup();
                             for &src in sources {
-                                let base_idx = (src as usize) * num_terminals;
                                 for &tid in &triggered_terminals {
-                                    let idx = base_idx + (tid.0 as usize);
-                                    match &mut out_matches_vec[idx] {
-                                        Some(existing) => existing.union_with(&reachable_bv),
-                                        None => out_matches_vec[idx] = Some(reachable_bv.clone()),
-                                    }
+                                    let key = (src, tid.0 as u32);
+                                    out_matches.entry(key)
+                                        .and_modify(|existing| existing.union_with(&reachable_bv))
+                                        .or_insert_with(|| reachable_bv.clone());
                                 }
                             }
                         }
@@ -1222,13 +1241,11 @@ impl GrammarConstraint {
                     next_grouped_map.into_iter().collect();
 
                 if !next_grouped.is_empty() {
-                    // Recurse
-                    process_vocab_node_dfs(
+                    process_vocab_node_dfs_sparse(
                         child,
                         next_grouped,
                         dfa,
-                        num_terminals,
-                        out_matches_vec,
+                        out_matches,
                     );
                 }
             }
@@ -1262,20 +1279,23 @@ impl GrammarConstraint {
         };
 
         let num_terminals = max_terminal_idx + 1;
-        let matches_vec_len = num_states * num_terminals;
+        
+        crate::debug!(4, "build_maps_and_matches_for_reps: num_states={}, num_reps={}, num_terminals={}",
+            num_states, num_reps, num_terminals);
 
-        // Group initial states by current state (identity mapping at root)
-        let mut initial_states: Vec<(u32, Vec<u32>)> = Vec::with_capacity(num_states);
-        for i in 0..num_states {
-            initial_states.push((i as u32, vec![i as u32]));
+        // Group initial states by current state - only include representative states
+        // sources are indices into representative_states (0..num_reps)
+        let mut initial_states: Vec<(u32, Vec<u32>)> = Vec::with_capacity(num_reps);
+        for (rep_idx, &rep_state) in representative_states.iter().enumerate() {
+            initial_states.push((rep_state as u32, vec![rep_idx as u32]));
         }
 
-        // Parallel processing of root children
+        // Parallel processing of root children using sparse storage
         let root_children: Vec<_> = vocab_root.iter_children().collect();
-        let final_matches_vec = root_children
+        let final_matches_map: HashMap<(u32, u32), LLMTokenBV> = root_children
             .par_iter()
             .map(|(edge_bytes, child_node)| {
-                let mut local_matches_vec: Vec<Option<LLMTokenBV>> = vec![None; matches_vec_len];
+                let mut local_matches: HashMap<(u32, u32), LLMTokenBV> = HashMap::new();
 
                 // Manually process the first edge to bootstrap recursion
                 let mut next_grouped_map: HashMap<u32, Vec<u32>> = HashMap::new();
@@ -1304,13 +1324,11 @@ impl GrammarConstraint {
                             triggered_terminals.sort_unstable();
                             triggered_terminals.dedup();
                             for &src in sources {
-                                let base_idx = (src as usize) * num_terminals;
                                 for &tid in &triggered_terminals {
-                                    let idx = base_idx + (tid.0 as usize);
-                                    match &mut local_matches_vec[idx] {
-                                        Some(existing) => existing.union_with(&reachable_bv),
-                                        None => local_matches_vec[idx] = Some(reachable_bv.clone()),
-                                    }
+                                    let key = (src, tid.0 as u32);
+                                    local_matches.entry(key)
+                                        .and_modify(|existing| existing.union_with(&reachable_bv))
+                                        .or_insert_with(|| reachable_bv.clone());
                                 }
                             }
                         }
@@ -1321,26 +1339,23 @@ impl GrammarConstraint {
                 let next_grouped: Vec<(u32, Vec<u32>)> =
                     next_grouped_map.into_iter().collect();
                 if !next_grouped.is_empty() {
-                    process_vocab_node_dfs(
+                    process_vocab_node_dfs_sparse(
                         child_node,
                         next_grouped,
                         &fast_dfa,
-                        num_terminals,
-                        &mut local_matches_vec,
+                        &mut local_matches,
                     );
                 }
 
-                local_matches_vec
+                local_matches
             })
             .reduce(
-                || vec![None; matches_vec_len],
+                HashMap::new,
                 |mut a, b| {
-                    for (acc, val) in a.iter_mut().zip(b.into_iter()) {
-                        match (acc, val) {
-                            (Some(acc_bv), Some(val_bv)) => acc_bv.union_with(&val_bv),
-                            (acc@None, Some(val_bv)) => *acc = Some(val_bv),
-                            _ => {}
-                        }
+                    for (key, val_bv) in b {
+                        a.entry(key)
+                            .and_modify(|existing| existing.union_with(&val_bv))
+                            .or_insert(val_bv);
                     }
                     a
                 },
@@ -1351,17 +1366,15 @@ impl GrammarConstraint {
             BTreeMap<TerminalID, LLMTokenBV>,
         > = BTreeMap::new();
 
-        for (idx, opt_bv) in final_matches_vec.into_iter().enumerate() {
-            if let Some(bv) = opt_bv {
-                let src = TokenizerStateID(idx / num_terminals);
-                let tid = TerminalID(idx % num_terminals);
-                possible_matches
-                    .entry(src)
-                    .or_default()
-                    .insert(tid, bv);
-            }
+        for ((rep_idx, tid), bv) in final_matches_map {
+            let src = TokenizerStateID(representative_states[rep_idx as usize]);
+            possible_matches
+                .entry(src)
+                .or_default()
+                .insert(TerminalID(tid as usize), bv);
         }
 
+        crate::debug!(4, "build_maps_and_matches_for_reps: completed in {:?}", start_time.elapsed());
         possible_matches
     }
 

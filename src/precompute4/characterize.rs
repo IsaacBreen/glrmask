@@ -180,12 +180,17 @@ impl Display for TerminalCharacterization {
 
 /// Compute terminal characterizations for all terminals in the grammar.
 pub fn compute_all_characterizations(parser: &GLRParser) -> BTreeMap<TerminalID, TerminalCharacterization> {
-    parser
-        .terminal_map
-        .right_values()
-        .cloned()
-        .map(|terminal_id| (terminal_id, compute_terminal_characterization(parser, terminal_id)))
-        .collect()
+    use rayon::prelude::*;
+    
+    let terminal_ids: Vec<_> = parser.terminal_map.right_values().cloned().collect();
+    
+    // Parallel characterization computation - this is pure computation with no shared mutable state
+    let chars: Vec<_> = terminal_ids
+        .par_iter()
+        .map(|&terminal_id| (terminal_id, compute_terminal_characterization(parser, terminal_id)))
+        .collect();
+    
+    chars.into_iter().collect()
 }
 
 /// Compute the terminal characterization for a specific terminal.
