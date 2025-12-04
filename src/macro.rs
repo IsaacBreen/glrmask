@@ -291,18 +291,12 @@ pub fn get_elapsed_suffix(now: std::time::Instant, threshold_ms: u64) -> String 
 }
 
 /// Build the line prefix string based on message level.
-/// When MACRO_DEBUG_LEVEL >= 4, all messages get the │ prefix for consistent visual hierarchy.
 /// Level 1-2: no indentation (top-level messages)
-/// Level 3: "│ " when debug level >= 4 to not break the flow
-/// Level 4: "│ " 
-/// Level 5+: "│ │ " (two levels of indentation)
+/// Level 3+: "│ " (single level of indentation)
 pub fn build_line_prefix(msg_level: usize) -> String {
-    let debug_level = get_macro_debug_level();
     match msg_level {
         0..=2 => String::new(),
-        3 => if debug_level >= 4 && level_draws_line(3) { "│ ".to_string() } else { String::new() },
-        4 => if level_draws_line(3) { "│ ".to_string() } else { "  ".to_string() },
-        _ => if level_draws_line(4) { "│ │ ".to_string() } else { "    ".to_string() },
+        _ => if level_draws_line(3) { "│ ".to_string() } else { "  ".to_string() },
     }
 }
 

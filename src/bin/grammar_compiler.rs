@@ -104,7 +104,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let opt_term_count = grammar_definition.terminal_to_group_id().len();
     
     if is_debug_level_enabled(2) {
-        sep1::debug!(2, "{BOLD_GREEN}{CHECK}{RESET}  {DIM}{} → {} productions, {} → {} terminals{RESET} {MAGENTA}({}){RESET}", 
+        sep1::debug!(2, "└─ {} → {} productions, {} → {} terminals {MAGENTA}({}){RESET}", 
             prod_count, opt_prod_count, term_count, opt_term_count,
             format_duration(step.elapsed()));
     }
@@ -133,7 +133,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     
     if is_debug_level_enabled(2) {
-        sep1::debug!(2, "{BOLD_GREEN}{CHECK}{RESET}  {DIM}{} tokens{RESET} {MAGENTA}({}){RESET}", 
+        sep1::debug!(2, "└─ {} tokens {MAGENTA}({}){RESET}", 
             llm_token_map.len(), format_duration(step.elapsed()));
     }
 
@@ -153,8 +153,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Record the total compilation time (grammar + vocab loading + constraint building)
     let compilation_time_seconds = total_start.elapsed().as_secs_f64();
     
-    if show_output {
-        println!("  {CYAN}└─ Total build time: {}{RESET}", format_duration(build_start.elapsed()));
+    if is_debug_level_enabled(2) {
+        sep1::debug!(2, "└─ Total build time: {}", format_duration(build_start.elapsed()));
     }
 
     if let Some(path) = args.save_precompute0.as_ref() {
@@ -215,7 +215,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         
         if is_debug_level_enabled(2) {
             let file_size = std::fs::metadata(&output_path)?.len();
-            sep1::debug!(2, "{BOLD_GREEN}{CHECK}{RESET}  {DIM}{:?}{RESET} {CYAN}({}){RESET} {MAGENTA}({}){RESET}", 
+            sep1::debug!(2, "└─ {:?} {CYAN}({}){RESET} {MAGENTA}({}){RESET}", 
                 output_path, format_bytes(file_size), format_duration(step.elapsed()));
         }
     }
