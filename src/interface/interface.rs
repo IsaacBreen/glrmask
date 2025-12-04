@@ -1482,23 +1482,24 @@ impl GrammarDefinition {
             .filter(|(name, _)| !is_terminal_name(name))
             .collect();
 
-        let terminal_defs: Vec<(String, Expr)> = terminals
+        // Share memo across all terminal conversions to avoid exponential re-expansion
+        let mut shared_memo = BTreeMap::new();
+        let mut terminal_defs = Vec::new();
+        for (name, grammar_expr) in terminals
             .clone()
             .into_iter()
             .filter(|(name, _)| referenced_terminals.contains(name))
-            .map(|(name, grammar_expr)| {
-                let mut memo = BTreeMap::new();
-                let mut resolving_stack = HashSet::new();
-                let regex_expr = Self::convert_grammar_expr_to_regex_expr(
-                    &grammar_expr,
-                    &terminals,
-                    &mut memo,
-                    &mut resolving_stack,
-                )
-                .unwrap();
-                (name, regex_expr)
-            })
-            .collect();
+        {
+            let mut resolving_stack = HashSet::new();
+            let regex_expr = Self::convert_grammar_expr_to_regex_expr(
+                &grammar_expr,
+                &terminals,
+                &mut shared_memo,
+                &mut resolving_stack,
+            )
+            .unwrap();
+            terminal_defs.push((name, regex_expr));
+        }
 
         let grammar_def = GrammarDefinition::from_exprs_with_ignore(
             non_terminal_rules, 
