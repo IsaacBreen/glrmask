@@ -1061,6 +1061,8 @@ pub fn generate_glr_parser_with_maps(
         item_set_map_bi.insert(k, v);
     }
 
+    crate::debug!(4, "GLR Parser generation complete. {} states.", final_table_map.len());
+
     GLRParser::new(
         final_table_map,
         productions,
