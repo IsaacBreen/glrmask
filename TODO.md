@@ -134,3 +134,29 @@
   - Supports `ebnf` and `lark`.
   - Auto-detects by file extension if not specified.
   - No longer assumes EBNF by default without checking.
+## JSON Schema Compilation (added 2025-12-04)
+
+### Done
+- ✓ Stricter additionalProperties interpretation (treats unspecified as false)
+- ✓ Cyclic NT detection using Tarjan's SCC algorithm
+- ✓ Log cyclic NTs for debugging
+
+### Performance Results
+- o84874.json: 2180ms → 384ms (5.7x faster) - no recursion after stricter additionalProperties
+- o21378.json: ~3000ms (unchanged - genuine recursive $ref)
+
+### TODO: Partial Optimization for Recursive Schemas
+For schemas with genuine recursion (like o21378.json with nested_headers → nested_headers):
+
+1. Instead of failing when cycles are detected, expand what we can
+2. Keep cyclic NTs as separate productions
+3. Convert RegexTerm with NtRefs to mixed productions:
+   - Concrete(Expr) parts become terminals
+   - NtRef parts become non-terminal references
+4. Resulting grammar has fewer productions but isn't single-terminal
+
+This would require:
+- New function: `regex_term_to_production_with_ntrefs()`
+- Modify `replace_grammar_with_single_terminal` to handle multiple productions
+- Keep cyclic NT equations as productions alongside the optimized start
+
