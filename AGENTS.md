@@ -5,6 +5,8 @@ To build the Rust binding for Python, run:
 cd python && RUSTFLAGS=-Awarnings maturin develop -r
 ```
 
+You don't always need to do this. For example, `python scripts/compile.py` doesn't actually use the Python bindings, so we don't need to build them before runnig it.
+
 ```bash
 MACRO_DEBUG_LEVEL=5 timeout 120 python scripts/compile.py \
     --grammar src/js.ebnf \
