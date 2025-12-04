@@ -1107,8 +1107,10 @@ impl GrammarDefinition {
                     resolving_stack.remove(name);
 
                     let resolved_expr = result?;
-                    memo.insert(name.clone(), resolved_expr.clone());
-                    Ok(resolved_expr)
+                // Wrap in Shared to allow cheap cloning of the result
+                let shared_expr = Expr::Shared(Arc::new(resolved_expr));
+                memo.insert(name.clone(), shared_expr.clone());
+                Ok(shared_expr)
                 } else {
                     Err(format!(
                         "Non-terminal reference '{}' found in a terminal definition. Terminal definitions cannot contain non-terminal references.",
@@ -1498,7 +1500,10 @@ impl GrammarDefinition {
                 &mut resolving_stack,
             )
             .unwrap();
-            terminal_defs.push((name, regex_expr));
+            // Wrap in Shared to allow cheap cloning of the result
+            let shared_expr = Expr::Shared(Arc::new(regex_expr));
+            shared_memo.insert(name.clone(), shared_expr.clone());
+            terminal_defs.push((name, shared_expr));
         }
 
         let grammar_def = GrammarDefinition::from_exprs_with_ignore(
