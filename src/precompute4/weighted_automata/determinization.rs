@@ -8,10 +8,24 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::ops::BitOrAssign;
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use crate::precompute4::weighted_automata::test_weighted_automata;
 use super::common::{DETERMINIZE_DEBUG, Label, NWAStateID, Weight};
 use super::dwa::DWA;
 use super::nwa::{NWA, NWAStates};
+
+// Global counter for determinizations
+static DETERMINIZE_COUNT: AtomicUsize = AtomicUsize::new(0);
+static TOTAL_DETERMINIZE_TIME_MS: AtomicUsize = AtomicUsize::new(0);
+
+pub fn reset_determinize_stats() {
+    DETERMINIZE_COUNT.store(0, AtomicOrdering::SeqCst);
+    TOTAL_DETERMINIZE_TIME_MS.store(0, AtomicOrdering::SeqCst);
+}
+
+pub fn get_determinize_stats() -> (usize, usize) {
+    (DETERMINIZE_COUNT.load(AtomicOrdering::SeqCst), TOTAL_DETERMINIZE_TIME_MS.load(AtomicOrdering::SeqCst))
+}
 
 // ============================================================================
 // Common Types & Helpers
@@ -22,16 +36,17 @@ type WeightedSubset = Vec<(NWAStateID, Weight)>;
 
 fn is_zero(w: &Weight) -> bool { w.is_empty() }
 
-/// A pre-hashed wrapper for BTreeMap to avoid recomputing hash on every lookup.
+/// A pre-hashed wrapper for a weighted subset using sorted Vec for fast iteration.
 #[derive(Clone)]
 struct HashedSubset {
-    inner: BTreeMap<NWAStateID, Weight>,
+    inner: Vec<(NWAStateID, Weight)>,  // Sorted by NWAStateID
     hash: u64,
 }
 
 impl HashedSubset {
-    fn new(inner: BTreeMap<NWAStateID, Weight>) -> Self {
+    fn from_btreemap(map: BTreeMap<NWAStateID, Weight>) -> Self {
         use rustc_hash::FxHasher;
+        let inner: Vec<_> = map.into_iter().collect();
         let mut hasher = FxHasher::default();
         for (k, v) in &inner {
             k.hash(&mut hasher);
@@ -41,15 +56,25 @@ impl HashedSubset {
         Self { inner, hash }
     }
     
-    fn from_ref(inner: &BTreeMap<NWAStateID, Weight>) -> Self {
+    fn from_fxhashmap(map: FxHashMap<NWAStateID, Weight>) -> Self {
         use rustc_hash::FxHasher;
+        let mut inner: Vec<_> = map.into_iter().collect();
+        inner.sort_unstable_by_key(|(k, _)| *k);
         let mut hasher = FxHasher::default();
-        for (k, v) in inner {
+        for (k, v) in &inner {
             k.hash(&mut hasher);
             v.hash(&mut hasher);
         }
         let hash = hasher.finish();
-        Self { inner: inner.clone(), hash }
+        Self { inner, hash }
+    }
+
+    fn new(inner: BTreeMap<NWAStateID, Weight>) -> Self {
+        Self::from_btreemap(inner)
+    }
+    
+    fn is_empty(&self) -> bool {
+        self.inner.is_empty()
     }
 }
 
@@ -191,6 +216,9 @@ impl NWA {
     /// - More prone to state explosion if epsilon chains are deep.
     /// - **Formerly:** `_determinize`
     pub fn determinize_simple(&self) -> DWA {
+        let call_count = DETERMINIZE_COUNT.fetch_add(1, AtomicOrdering::SeqCst) + 1;
+        let det_fn_start = std::time::Instant::now();
+        
         let mut dwa = DWA::new();
         dwa.states.0.clear();
         
@@ -198,7 +226,7 @@ impl NWA {
         let num_nwa_states = self.states.len();
         let total_eps: usize = self.states.0.iter().map(|s| s.epsilons.len()).sum();
         if num_nwa_states > 100_000 {
-            crate::debug!(5, "NWA determinize_simple: {} states, {} epsilon transitions", num_nwa_states, total_eps);
+            crate::debug!(5, "NWA determinize_simple #{}: {} states, {} epsilon transitions", call_count, num_nwa_states, total_eps);
         }
 
         // Use pre-hashed subset map for faster lookups
@@ -260,7 +288,8 @@ impl NWA {
             // Collect Transitions
             let t_collect = std::time::Instant::now();
             
-            let mut transitions: BTreeMap<Label, BTreeMap<NWAStateID, Weight>> = BTreeMap::new();
+            // Use FxHashMap for faster transition collection, then sort at the end
+            let mut transitions: FxHashMap<Label, FxHashMap<NWAStateID, Weight>> = FxHashMap::default();
             for (nwa_id, path_weight) in &subset.inner {
                 for (label, targets) in &self.states[*nwa_id].transitions {
                     for (target_nwa_id, trans_weight) in targets {
@@ -278,7 +307,7 @@ impl NWA {
             let t_edges = std::time::Instant::now();
             for (label, next_subset_pre_closure) in transitions {
                 let t_eps = std::time::Instant::now();
-                let next_subset = self.epsilon_closure_simple(&next_subset_pre_closure);
+                let next_subset = self.epsilon_closure_simple_fx(&next_subset_pre_closure);
                 time_epsilon_closure += t_eps.elapsed().as_nanos() as u64;
                 epsilon_closure_calls += 1;
                 
@@ -286,7 +315,7 @@ impl NWA {
                     continue;
                 }
                 let t_map = std::time::Instant::now();
-                let hashed_next = HashedSubset::new(next_subset);
+                let hashed_next = HashedSubset::from_fxhashmap(next_subset);
                 let to_dwa_id = *subset_map.entry(hashed_next.clone()).or_insert_with(|| {
                     let new_id = dwa.add_state();
                     worklist.push_back(hashed_next);
@@ -314,7 +343,35 @@ impl NWA {
                 max_subset_size);
         }
         
+        // Update global stats
+        TOTAL_DETERMINIZE_TIME_MS.fetch_add(det_fn_start.elapsed().as_millis() as usize, AtomicOrdering::SeqCst);
+        
         dwa
+    }
+
+    // Helper specific to the 'Simple' strategy - FxHashMap version for performance
+    fn epsilon_closure_simple_fx(&self, subset: &FxHashMap<NWAStateID, Weight>) -> FxHashMap<NWAStateID, Weight> {
+        let mut closure: FxHashMap<NWAStateID, Weight> = subset.clone();
+        let mut worklist: VecDeque<NWAStateID> = subset.keys().copied().collect();
+
+        while let Some(u) = worklist.pop_front() {
+            let u_weight = closure.get(&u).unwrap().clone();
+            if u >= self.states.len() {
+                continue;
+            }
+            for (v, eps_weight) in &self.states[u].epsilons {
+                let v_new_weight = &u_weight & eps_weight;
+                if !v_new_weight.is_empty() {
+                    let v_current_weight = closure.entry(*v).or_insert_with(Weight::zeros);
+                    let combined = &*v_current_weight | &v_new_weight;
+                    if combined != *v_current_weight {
+                        *v_current_weight = combined;
+                        worklist.push_back(*v);
+                    }
+                }
+            }
+        }
+        closure
     }
 
     // Helper specific to the 'Simple' strategy
