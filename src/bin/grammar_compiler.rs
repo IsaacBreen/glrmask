@@ -107,6 +107,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         sep1::debug!(2, "└─ {} → {} productions, {} → {} terminals {MAGENTA}({}){RESET}", 
             prod_count, opt_prod_count, term_count, opt_term_count,
             format_duration(step.elapsed()));
+        println!();
     }
 
     // 2. Load the vocabulary.
@@ -135,6 +136,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     if is_debug_level_enabled(2) {
         sep1::debug!(2, "└─ {} tokens {MAGENTA}({}){RESET}", 
             llm_token_map.len(), format_duration(step.elapsed()));
+        println!();
     }
 
     // 3. Construct the GrammarConstraint.
@@ -155,6 +157,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     
     if is_debug_level_enabled(2) {
         sep1::debug!(2, "└─ Total build time: {}", format_duration(build_start.elapsed()));
+        println!();
     }
 
     if let Some(path) = args.save_precompute0.as_ref() {
@@ -217,6 +220,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let file_size = std::fs::metadata(&output_path)?.len();
             sep1::debug!(2, "└─ {:?} {CYAN}({}){RESET} {MAGENTA}({}){RESET}", 
                 output_path, format_bytes(file_size), format_duration(step.elapsed()));
+            println!();
         }
     }
 
