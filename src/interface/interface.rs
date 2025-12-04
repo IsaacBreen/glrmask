@@ -912,6 +912,50 @@ impl GrammarDefinition {
                 if let Some(nt) = memo.get(expr) {
                     return Ok((vec![Symbol::NonTerminal(nt.clone())], Vec::new()));
                 }
+                
+                // OPTIMIZATION: If all alternatives are Literals, create a single regex terminal
+                // with alternation instead of N separate productions. This reduces grammar complexity
+                // significantly for JSON Schema enums.
+                let all_literals: Option<Vec<&[u8]>> = exprs.iter().map(|e| {
+                    if let GrammarExpr::Literal(bytes) = e {
+                        Some(bytes.as_slice())
+                    } else {
+                        None
+                    }
+                }).collect();
+                
+                if let Some(literals) = all_literals {
+                    if literals.len() >= 3 {
+                        // Create a regex alternation: (lit1|lit2|lit3|...)
+                        let choice_expr = Expr::Choice(
+                            literals.iter().map(|bytes| Expr::U8Seq(bytes.to_vec())).collect()
+                        );
+                        
+                        // Check if this exact expression already exists
+                        if let Some(&gid) = regex_expr_to_group_id.get_by_left(&choice_expr) {
+                            // Reuse existing terminal
+                            let term_name = regex_name_to_group_id.get_by_right(&gid)
+                                .cloned()
+                                .unwrap_or_else(|| format!("_enum{}", gid));
+                            return Ok((vec![Symbol::Terminal(regex_name(&term_name))], Vec::new()));
+                        }
+                        
+                        // Create new terminal for this enum
+                        let gid = *next_terminal_group_id;
+                        *next_terminal_group_id += 1;
+                        let term_name = Self::generate_unique_indexed_name(
+                            "_enum",
+                            per_base_counters,
+                            all_names,
+                        );
+                        regex_name_to_group_id.insert(term_name.clone(), gid);
+                        regex_expr_to_group_id.insert(choice_expr, gid);
+                        
+                        return Ok((vec![Symbol::Terminal(regex_name(&term_name))], Vec::new()));
+                    }
+                }
+                
+                // Fall through to standard Choice handling
                 let choice_nt_name = Self::generate_unique_indexed_name(
                     current_rule_name_or_path,
                     per_base_counters,
@@ -1250,6 +1294,60 @@ impl GrammarDefinition {
             let lhs_name_str = name;
 
             if let GrammarExpr::Choice(choices) = expr {
+                // OPTIMIZATION: If all alternatives in a top-level Choice are Literals,
+                // create a single regex terminal with alternation instead of N productions.
+                // This reduces grammar complexity significantly for JSON Schema enums.
+                let all_literals: Option<Vec<&[u8]>> = choices.iter().map(|e| {
+                    if let GrammarExpr::Literal(bytes) = e {
+                        Some(bytes.as_slice())
+                    } else {
+                        None
+                    }
+                }).collect();
+                
+                if let Some(literals) = all_literals {
+                    if literals.len() >= 3 {
+                        // Create a regex alternation: (lit1|lit2|lit3|...)
+                        let choice_expr = Expr::Choice(
+                            literals.iter().map(|bytes| Expr::U8Seq(bytes.to_vec())).collect()
+                        );
+                        
+                        // Check if this exact expression already exists
+                        if let Some(&existing_gid) = anon_regex_expr_to_group_id.get_by_left(&choice_expr) {
+                            // Reuse existing terminal - find its name from regex_name_to_group_id
+                            if let Some(existing_name) = regex_name_to_group_id.get_by_right(&existing_gid) {
+                                // Create single production: lhs -> terminal (using existing name)
+                                productions.push(Production {
+                                    lhs: lhs.clone(),
+                                    rhs: vec![Symbol::Terminal(regex_name(existing_name))],
+                                });
+                                continue;
+                            }
+                        }
+                        
+                        // Create new terminal for this enum
+                        let gid = next_terminal_group_id;
+                        next_terminal_group_id += 1;
+                        anon_regex_expr_to_group_id.insert(choice_expr, gid);
+                        
+                        // Generate a unique terminal name for this enum
+                        let term_name = Self::generate_unique_indexed_name(
+                            "_enum",
+                            &mut per_base_counters,
+                            &mut all_names,
+                        );
+                        regex_name_to_group_id.insert(term_name.clone(), gid);
+                        
+                        // Create single production: lhs -> terminal
+                        productions.push(Production {
+                            lhs: lhs.clone(),
+                            rhs: vec![Symbol::Terminal(regex_name(&term_name))],
+                        });
+                        continue;
+                    }
+                }
+                
+                // Fall through to standard Choice handling
                 for choice_expr in choices {
                     let (rhs_symbols_for_arm, new_productions_for_arm) =
                         Self::convert_grammar_expr_to_symbols(
