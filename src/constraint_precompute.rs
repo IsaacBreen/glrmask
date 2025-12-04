@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ops::BitOrAssign;
 use std::sync::Arc;
 
-use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
+
 use range_set_blaze::RangeSetBlaze;
 
 use crate::constraint_vocab::LLMTokenBV;
@@ -14,10 +14,17 @@ use crate::glr::parser::GLRParser;
 use crate::precompute4::weighted_automata::rangeset::RangeSet as WARangeSet;
 use crate::precompute4::weighted_automata::{DWA, NWA, NWAStateID, Weight};
 use crate::profiler::{self};
-use crate::r#macro::should_show_progress_bars;
+
 use crate::tokenizer::{LLMTokenID, TokenizerStateID};
 use crate::types::TerminalID as GrammarTokenID;
 use crate::precompute4::weighted_automata::common::Label;
+
+// No-op progress bar replacement
+struct NoOpPb;
+impl NoOpPb {
+    fn inc(&self, _: u64) {}
+    fn finish(&self) {}
+}
 
 // ---------------------------------------------------------------------------
 // Precomputer1
@@ -35,7 +42,7 @@ pub(crate) struct Precomputer1<'r> {
         >,
     >,
     pub(crate) all_llm_tokens: RangeSetBlaze<usize>,
-    pub(crate) pb: ProgressBar,
+    pub(crate) pb: NoOpPb,
     pub(crate) leaf_state: NWAStateID,
     pub(crate) nwa: NWA,
     pub(crate) terminals_count: usize,
@@ -72,21 +79,7 @@ impl<'r> Precomputer1<'r> {
         }
         crate::debug!(4, "Created trie1 roots ({} states)", roots.len());
 
-        crate::debug!(5, "Counting vocab nodes for progress bar...");
-        let total_nodes = count_vocab_nodes(&vocab.root);
-        crate::debug!(5, "Counted {} vocab nodes", total_nodes);
-        let pb = ProgressBar::new(total_nodes);
-        pb.set_style(
-            ProgressStyle::default_bar()
-                .template(
-                    "{spinner:.green} [{elapsed_precise}] \
-                     [{wide_bar:.cyan/blue}] {pos}/{len} ({percent}%, {eta})",
-                )
-                .expect("progress-bar"),
-        );
-        if !should_show_progress_bars() {
-            pb.set_draw_target(ProgressDrawTarget::hidden());
-        }
+        let pb = NoOpPb;
 
         let leaf_state = nwa.add_state();
         nwa.states[leaf_state].final_weight = Some(Weight::all());

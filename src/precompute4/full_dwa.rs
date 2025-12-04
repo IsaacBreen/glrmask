@@ -7,7 +7,7 @@ use rayon::prelude::*;
 use range_set_blaze::RangeSetBlaze;
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use kdam::{tqdm, BarExt};
+
 
 use crate::constraint::LLMTokenBV;
 use crate::glr::parser::{ExpectElse, GLRParser};
@@ -171,7 +171,7 @@ pub fn nwa_special_map<V, U, I>(
     }
 
     let mut in_queue = FxHashSet::default();
-    let mut pb = tqdm!(total = nwa.states.len(), desc = "NWA Traversal", disable = !crate::r#macro::should_show_progress_bars(), leave = false);
+
 
     for &scc_idx in &traversal_data.topo {
         let scc_nodes = &traversal_data.sccs[scc_idx];
@@ -187,7 +187,7 @@ pub fn nwa_special_map<V, U, I>(
 
         while let Some(u) = local_queue.pop_front() {
             in_queue.remove(&u);
-            let _ = pb.update(1);
+
             if stopped_nodes.contains(&u) { continue; }
 
             let agg_v = match values.remove(&u) { Some(v) => v, None => continue };
@@ -409,7 +409,7 @@ pub fn build_parser_dwa(parser: &GLRParser, input_nwa: &NWA) -> DWA {
     // 1. FAST PATH: Handle simple signatures via direct Union
     // A signature of length 1 means all terminals in it map to the same logical state transition.
     // We don't need bitmasks; we just Union the Templates.
-    let mut simple_pb = tqdm!(total = simple_signatures.len(), desc = "Processing Simple Sigs", disable = !crate::r#macro::should_show_progress_bars(), leave = false);
+
 
     for sig in simple_signatures {
         let terminals = &sig[0];
@@ -439,7 +439,7 @@ pub fn build_parser_dwa(parser: &GLRParser, input_nwa: &NWA) -> DWA {
         dwa.simplify_lightweight();
 
         template_cache.insert(sig, NWA::from_dwa(&dwa));
-        let _ = simple_pb.update(1);
+
     }
 
     // 2. SLOW PATH: Handle complex signatures via Super DWA

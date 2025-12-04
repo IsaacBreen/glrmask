@@ -1,8 +1,7 @@
 use crate::precompute4::utils::DEFAULT_TRANSITION_SYMBOL;
 use crate::precompute4::weighted_automata::common::Label;
 use crate::precompute4::weighted_automata::{DWA, NWA, NWAStateID, NWAStates, Weight};
-use crate::r#macro::should_show_progress_bars;
-use indicatif::{ProgressBar, ProgressStyle};
+
 use rustc_hash::FxHashMap;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Instant;
@@ -13,44 +12,24 @@ type QueryKey = (NWAStateID, Code);
 #[inline]
 fn is_negative_symbol(label: Code) -> bool { label < 0 && label != DEFAULT_TRANSITION_SYMBOL }
 
-fn make_progress_bar(length: u64, template: &str) -> Option<ProgressBar> {
-    if !should_show_progress_bars() {
-        return None;
-    }
-    let pb = ProgressBar::new(length);
-    pb.set_style(ProgressStyle::default_bar().template(template).expect("progress-bar"));
-    Some(pb)
-}
-
-fn progress_step(pb: &Option<ProgressBar>, step: u64, msg: &str) {
-    if let Some(p) = pb {
-        p.set_message(msg.to_string());
-        p.set_position(step);
-    }
+fn progress_step(_step: u64, msg: &str) {
+    crate::debug!(5, "{}", msg);
 }
 
 pub fn resolve_negative_codes_in_nwa(nwa: &mut NWA) {
-    let pb = make_progress_bar(
-        3,
-        "{spinner:.green} [Resolving negatives in NWA: {elapsed_precise}] \
-         [{wide_bar:.cyan/blue}] step {pos}/{len} ({msg})",
-    );
-
     let all_states: HashSet<NWAStateID> = (0..nwa.states.len()).collect();
 
-    progress_step(&pb, 1, "Compute cancellations");
+    progress_step(1, "Compute cancellations");
     apply_cancellations(&mut nwa.states, &all_states);
 
-    progress_step(&pb, 2, "Propagate finality");
+    progress_step(2, "Propagate finality");
     apply_finality_fixpoint(&mut nwa.states, &all_states);
 
-    progress_step(&pb, 3, "Apply changes & remove negatives");
+    progress_step(3, "Apply changes & remove negatives");
     remove_negative_transitions(&mut nwa.states, &all_states);
     crate::debug!(6, "Applied changes to NWA.");
 
-    if let Some(p) = &pb {
-        p.finish_with_message("Done");
-    }
+    crate::debug!(5, "Resolve negatives in NWA: Done");
 }
 
 pub fn apply_cancellations(states: &mut NWAStates, source_states_filter: &HashSet<NWAStateID>) {
@@ -123,33 +102,25 @@ pub fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
     let now = Instant::now();
     crate::debug!(6, "Resolving negative codes in DWA with {} states...", dwa.states.len());
 
-    let pb = make_progress_bar(
-        4,
-        "{spinner:.green} [Resolving negative codes: {elapsed_precise}] \
-         [{wide_bar:.cyan/blue}] step {pos}/{len} ({msg})",
-    );
-
-    progress_step(&pb, 1, "DWA -> NWA");
+    progress_step(1, "DWA -> NWA");
     let mut nwa = NWA::from_dwa(dwa);
     crate::debug!(6, "Converted to NWA with {} states.", nwa.states.len());
     crate::debug!(6, "Stats for NWA from DWA:\n{}", nwa.stats());
 
-    progress_step(&pb, 2, "Resolve negatives in NWA");
+    progress_step(2, "Resolve negatives in NWA");
     resolve_negative_codes_in_nwa(&mut nwa);
     crate::debug!(6, "Applied changes, NWA has {} states before determinization.", nwa.states.len());
     crate::debug!(6, "Stats for NWA after negative resolution:\n{}", nwa.stats());
 
-    progress_step(&pb, 3, "Determinize");
+    progress_step(3, "Determinize");
     let mut result = nwa.determinize();
 
-    progress_step(&pb, 4, "Simplify");
+    progress_step(4, "Simplify");
     result.simplify();
     *dwa = result;
     crate::debug!(6, "Stats for final DWA after negative resolution:\n{}", dwa.stats());
 
-    if let Some(p) = &pb {
-        p.finish_with_message("Done");
-    }
+    crate::debug!(5, "Resolve negative codes in DWA: Done");
     crate::debug!(6, "resolve_negative_codes_in_dwa took: {:?}", now.elapsed());
 }
 

@@ -19,48 +19,20 @@ use std::env;
 use std::sync::Mutex;
 
 // =============================================================================
-// Debug Level System
+// Hierarchical Debug Level System
 // =============================================================================
 //
-// Control via MACRO_DEBUG_LEVEL environment variable (default: 1)
+// Control via environment variables:
+//   MACRO_DEBUG_LEVEL - verbosity level (default: 1)
+//   MACRO_LINE_LEVELS - comma-separated levels that draw │ lines (default: "")
 //
-// Level 0: Silent
-//   - Errors only (via eprintln!)
-//   - Use for: CI/CD, production, scripting
-//
-// Level 1: Milestones (default)
-//   - Major completion checkmarks (✓)
-//   - Key timing information
-//   - High-level warnings (summary counts)
-//   - Use for: Normal usage, quick runs
-//
-// Level 2: Summary Stats
-//   - Same as level 1, plus:
-//   - Aggregate stats (counts, sizes, compression ratios)
-//   - Use for: Understanding build characteristics
-//
-// Level 3: Pipeline Stages
-//   - Named pipeline phases (▸ arrow prefix)
-//   - Stage timing with deltas
-//   - Detailed warning messages
-//   - Use for: Debugging pipeline, understanding flow
-//
-// Level 4: Substeps
-//   - Operations within stages (• bullet prefix)
-//   - Progress bars enabled
-//   - Finer-grained timing
-//   - Use for: Debugging specific stages
-//
-// Level 5: Algorithm Details
-//   - Internal algorithm stats (dim text)
-//   - Data structure sizes
-//   - Intermediate results
-//   - Use for: Deep debugging, performance analysis
-//
-// Level 6+: Verbose Traces
-//   - File:line prefixes for every message
-//   - Full data structure dumps
-//   - Use for: Development, tracing execution
+// Level 0: Errors only
+// Level 1: Major milestones (headings)
+// Level 2: Section headers (subheadings)
+// Level 3: Pipeline stages
+// Level 4: Substeps (• prefix)
+// Level 5: Algorithm details (dim)
+// Level 6+: Verbose traces with file:line
 //
 // =============================================================================
 
@@ -93,9 +65,120 @@ pub mod colors {
     pub const ARROW: &str = "→";
     pub const BULLET: &str = "•";
     pub const WARN: &str = "⚠";
-    pub const PLAY: &str = "│";  // Box-drawing vertical line for pipeline steps
+    pub const LINE: &str = "│";
+    pub const LINE_END: &str = "└─";
     pub const BOX: &str = "■";
 }
+
+// =============================================================================
+// Configuration for Each Debug Level
+// =============================================================================
+
+/// Configuration for a single debug level's output formatting.
+#[derive(Clone, Copy)]
+pub struct DebugLevelConfig {
+    /// Symbol at the start of messages at this level (e.g., "• ")
+    pub heading_symbol: &'static str,
+    /// Symbol that propagates to all HIGHER levels when this level draws a line (e.g., "│ ")
+    pub line_prefix: &'static str,
+    /// ANSI style codes for this level
+    pub style_start: &'static str,
+    pub style_end: &'static str,
+    /// Minimum milliseconds before showing +Xms timing suffix
+    pub timing_threshold_ms: u64,
+}
+
+/// Configuration for section-closing "alt" messages (e.g., "└─ Done in 1.5s")
+#[derive(Clone, Copy)]
+pub struct DebugAltConfig {
+    /// Symbol at the start (e.g., "└─ ")
+    pub heading_symbol: &'static str,
+    /// ANSI style codes
+    pub style_start: &'static str,
+    pub style_end: &'static str,
+}
+
+/// Default configurations for each level (indices 0-6)
+pub static LEVEL_CONFIGS: [DebugLevelConfig; 7] = [
+    // Level 0: Errors - no symbol, no line (handled separately)
+    DebugLevelConfig {
+        heading_symbol: "",
+        line_prefix: "",
+        style_start: "",
+        style_end: "",
+        timing_threshold_ms: 0,
+    },
+    // Level 1: Major milestones / outer sections
+    DebugLevelConfig {
+        heading_symbol: "",
+        line_prefix: "│ ",
+        style_start: "\x1b[1m", // Bold
+        style_end: "\x1b[0m",
+        timing_threshold_ms: 100,
+    },
+    // Level 2: Section headers / subsections  
+    DebugLevelConfig {
+        heading_symbol: "",
+        line_prefix: "│ ",
+        style_start: "\x1b[1m", // Bold
+        style_end: "\x1b[0m",
+        timing_threshold_ms: 50,
+    },
+    // Level 3: Pipeline stages
+    DebugLevelConfig {
+        heading_symbol: "",
+        line_prefix: "  ",
+        style_start: "",
+        style_end: "",
+        timing_threshold_ms: 50,
+    },
+    // Level 4: Substeps with bullet
+    DebugLevelConfig {
+        heading_symbol: "• ",
+        line_prefix: "  ",
+        style_start: "",
+        style_end: "",
+        timing_threshold_ms: 50,
+    },
+    // Level 5: Algorithm details - dim
+    DebugLevelConfig {
+        heading_symbol: "",
+        line_prefix: "  ",
+        style_start: "\x1b[2m", // Dim
+        style_end: "\x1b[0m",
+        timing_threshold_ms: 0,
+    },
+    // Level 6+: Verbose traces
+    DebugLevelConfig {
+        heading_symbol: "",
+        line_prefix: "",
+        style_start: "\x1b[90m", // Gray
+        style_end: "\x1b[0m",
+        timing_threshold_ms: 10,
+    },
+];
+
+/// Alt (section-closing) configurations for each level
+pub static ALT_CONFIGS: [DebugAltConfig; 7] = [
+    // Level 0
+    DebugAltConfig { heading_symbol: "", style_start: "", style_end: "" },
+    // Level 1
+    DebugAltConfig { heading_symbol: "└─ ", style_start: "\x1b[1m", style_end: "\x1b[0m" },
+    // Level 2
+    DebugAltConfig { heading_symbol: "└─ ", style_start: "\x1b[1m", style_end: "\x1b[0m" },
+    // Level 3
+    DebugAltConfig { heading_symbol: "└─ ", style_start: "", style_end: "" },
+    // Level 4
+    DebugAltConfig { heading_symbol: "└─ ", style_start: "", style_end: "" },
+    // Level 5
+    DebugAltConfig { heading_symbol: "", style_start: "\x1b[2m", style_end: "\x1b[0m" },
+    // Level 6+
+    DebugAltConfig { heading_symbol: "", style_start: "\x1b[90m", style_end: "\x1b[0m" },
+];
+
+// =============================================================================
+// Runtime State
+// =============================================================================
 
 /// Returns the current debug level from `MACRO_DEBUG_LEVEL` env var.
 pub fn get_macro_debug_level() -> usize {
@@ -104,14 +187,34 @@ pub fn get_macro_debug_level() -> usize {
     *MACRO_DEBUG_LEVEL
 }
 
+/// Returns which levels should draw lines, from `MACRO_LINE_LEVELS` env var.
+/// Format: comma-separated level numbers, e.g., "1,2" means levels 1 and 2 draw lines.
+pub fn get_line_levels() -> &'static [bool; 7] {
+    static LINE_LEVELS: Lazy<[bool; 7]> = Lazy::new(|| {
+        let mut levels = [false; 7];
+        if let Ok(val) = env::var("MACRO_LINE_LEVELS") {
+            for part in val.split(',') {
+                if let Ok(n) = part.trim().parse::<usize>() {
+                    if n < 7 {
+                        levels[n] = true;
+                    }
+                }
+            }
+        }
+        levels
+    });
+    &LINE_LEVELS
+}
+
+/// Returns true if a given level should draw a line (│).
+pub fn level_draws_line(level: usize) -> bool {
+    let levels = get_line_levels();
+    level < 7 && levels[level]
+}
+
 /// Checks if a given debug level is enabled.
 pub fn is_debug_level_enabled(level: usize) -> bool {
     level <= get_macro_debug_level()
-}
-
-/// Returns true if progress bars should be shown (level 4+).
-pub fn should_show_progress_bars() -> bool {
-    get_macro_debug_level() >= 4
 }
 
 /// Tracks the last filename printed (for level 6+ file headers).
@@ -120,8 +223,15 @@ pub static LAST_DEBUG_FILE: Lazy<Mutex<String>> = Lazy::new(|| Mutex::new(String
 /// Tracks the last time a debug message was printed.
 pub static LAST_DEBUG_TIME: Lazy<Mutex<Option<std::time::Instant>>> = Lazy::new(|| Mutex::new(None));
 
+// Stack of active section levels (for tracking nested sections)
+pub static SECTION_STACK: Lazy<Mutex<Vec<usize>>> = Lazy::new(|| Mutex::new(Vec::new()));
+
 /// A list of filenames to allow debug messages from. Empty = all allowed.
 pub const ALLOWED_FILES: &[&str] = &[];
+
+// =============================================================================
+// Formatting Helpers
+// =============================================================================
 
 /// Formats a duration in a human-readable way.
 pub fn format_duration(d: std::time::Duration) -> String {
@@ -174,67 +284,139 @@ pub fn get_elapsed_suffix(now: std::time::Instant, threshold_ms: u64) -> String 
     suffix
 }
 
+/// Build the line prefix string based on which levels are drawing lines.
+/// This collects `│ ` from all levels that: (a) are lower than `msg_level`, 
+/// and (b) have `draw_line` enabled.
+pub fn build_line_prefix(msg_level: usize) -> String {
+    let mut prefix = String::new();
+    for level in 1..msg_level.min(7) {
+        if level_draws_line(level) {
+            let cfg = &LEVEL_CONFIGS[level.min(6)];
+            prefix.push_str(cfg.line_prefix);
+        }
+    }
+    prefix
+}
+
+/// Build the line prefix for an alt (closing) message.
+/// This is the same as regular prefix, but we also need to handle the current level specially.
+pub fn build_alt_line_prefix(msg_level: usize) -> String {
+    let mut prefix = String::new();
+    // For levels below, draw their lines
+    for level in 1..msg_level.min(7) {
+        if level_draws_line(level) {
+            let cfg = &LEVEL_CONFIGS[level.min(6)];
+            prefix.push_str(cfg.line_prefix);
+        }
+    }
+    prefix
+}
+
 // =============================================================================
-// Core Debug Macro - Level-based formatting
+// Core Debug Implementation
 // =============================================================================
 
+/// Print a debug message at the given level.
+pub fn print_debug(level: usize, message: &str, file: &str, line: u32) {
+    if level > get_macro_debug_level() {
+        return;
+    }
+    
+    let now = std::time::Instant::now();
+    let cfg = &LEVEL_CONFIGS[level.min(6)];
+    
+    // Level 6+: Show file:line info
+    if get_macro_debug_level() >= 6 && level >= 6 {
+        let mut last_file_guard = LAST_DEBUG_FILE.lock().unwrap();
+        if *last_file_guard != file {
+            println!("\x1b[90m─── {}\x1b[0m", file);
+            *last_file_guard = file.to_string();
+        }
+        let elapsed = get_elapsed_suffix(now, cfg.timing_threshold_ms);
+        println!("\x1b[90m{:>4}\x1b[0m  {}{}", line, message, elapsed);
+        return;
+    }
+    
+    // Build the line prefix from lower levels
+    let line_prefix = build_line_prefix(level);
+    
+    // Get timing suffix
+    let elapsed = get_elapsed_suffix(now, cfg.timing_threshold_ms);
+    
+    // Print with styling
+    println!("{}{}{}{}{}{}", 
+        line_prefix,
+        cfg.style_start,
+        cfg.heading_symbol,
+        message,
+        cfg.style_end,
+        elapsed
+    );
+}
+
+/// Print an "alt" (section-closing) message at the given level.
+/// Only prints if the level has line drawing enabled.
+pub fn print_debug_alt(level: usize, message: &str, _file: &str, _line: u32) {
+    if level > get_macro_debug_level() {
+        return;
+    }
+    
+    // Alt messages only show if this level draws lines
+    if !level_draws_line(level) {
+        return;
+    }
+    
+    let now = std::time::Instant::now();
+    let alt_cfg = &ALT_CONFIGS[level.min(6)];
+    let level_cfg = &LEVEL_CONFIGS[level.min(6)];
+    
+    // Build prefix from levels BELOW this one
+    let line_prefix = build_alt_line_prefix(level);
+    
+    // Get timing suffix
+    let elapsed = get_elapsed_suffix(now, level_cfg.timing_threshold_ms);
+    
+    // Print with alt styling
+    println!("{}{}{}{}{}{}", 
+        line_prefix,
+        alt_cfg.style_start,
+        alt_cfg.heading_symbol,
+        message,
+        alt_cfg.style_end,
+        elapsed
+    );
+}
+
+// =============================================================================
+// Core Debug Macros
+// =============================================================================
+
+/// Internal implementation macro for debug printing.
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __debug_impl {
     ($level:expr, $user_fmt:expr, $($user_args:tt)*) => {{
         if $level <= $crate::r#macro::get_macro_debug_level() {
-            use $crate::r#macro::colors::*;
-            
             let msg = format!($user_fmt, $($user_args)*);
-            let now = std::time::Instant::now();
-            
-            // Level 6+: Show file:line info with verbose output
-            if $crate::r#macro::get_macro_debug_level() >= 6 {
-                let current_file_str = file!();
-                let mut last_file_guard = $crate::r#macro::LAST_DEBUG_FILE.lock().unwrap();
-                
-                // Print file header if changed
-                if *last_file_guard != current_file_str {
-                    println!("{GRAY}─── {}{RESET}", current_file_str);
-                    *last_file_guard = current_file_str.to_string();
-                }
-                
-                let elapsed = $crate::r#macro::get_elapsed_suffix(now, 10);
-                println!("{GRAY}{:>4}{RESET}  {}{}", line!(), msg, elapsed);
-            } else {
-                // Levels 1-5: Clean output with level-based formatting
-                let elapsed = $crate::r#macro::get_elapsed_suffix(now, 50);
-                
-                // Apply visual hierarchy based on the message's level
-                // All levels 3-5 show a continuous │ line on the left for visual continuity
-                match $level {
-                    1 | 2 => {
-                        // High-level info: no prefix
-                        println!("{}{}", msg, elapsed);
-                    }
-                    3 => {
-                        // Pipeline stage: line prefix (2-space indent)
-                        println!("  {CYAN}{PLAY}{RESET} {}{}", msg, elapsed);
-                    }
-                    4 => {
-                        // Substep: bullet prefix with continuation line
-                        println!("  {CYAN}{PLAY}{RESET}   {DIM}{BULLET}{RESET} {}{}", msg, elapsed);
-                    }
-                    5 => {
-                        // Detail: dim text with continuation line
-                        println!("  {CYAN}{PLAY}{RESET}     {DIM}{}{}{RESET}", msg, elapsed);
-                    }
-                    _ => {
-                        // Level 6+ without verbose mode (shouldn't happen)
-                        println!("{}{}", msg, elapsed);
-                    }
-                }
-            }
+            $crate::r#macro::print_debug($level, &msg, file!(), line!());
         }
     }};
 }
 
-/// Generic debug macro. Use semantic helpers when possible.
+/// Internal implementation macro for alt (section-closing) debug printing.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __debug_alt_impl {
+    ($level:expr, $user_fmt:expr, $($user_args:tt)*) => {{
+        if $level <= $crate::r#macro::get_macro_debug_level() {
+            let msg = format!($user_fmt, $($user_args)*);
+            $crate::r#macro::print_debug_alt($level, &msg, file!(), line!());
+        }
+    }};
+}
+
+/// Generic debug macro. Use for standard log messages.
+/// Usage: debug!(level, "message") or debug!(level, "format {}", args)
 #[macro_export]
 macro_rules! debug {
     ($level:expr, $fmt:literal $(, $($arg:tt)*)?) => {
@@ -245,58 +427,66 @@ macro_rules! debug {
     };
 }
 
+/// Alt debug macro for section-closing messages (e.g., "└─ Done in 1.5s").
+/// Only prints if the level has line drawing enabled.
+/// Usage: debug_alt!(level, "message") or debug_alt!(level, "format {}", args)
+#[macro_export]
+macro_rules! debug_alt {
+    ($level:expr, $fmt:literal $(, $($arg:tt)*)?) => {
+        $crate::__debug_alt_impl!($level, $fmt, $($($arg)*)?);
+    };
+    ($level:expr, $msg:expr) => {
+        $crate::__debug_alt_impl!($level, "{}", $msg);
+    };
+}
+
 // =============================================================================
-// Semantic Output Helpers - Use these instead of raw debug!
+// Semantic Output Helpers (Backwards Compatibility)
 // =============================================================================
 
-/// Level 1: Major milestone with checkmark (always visible at level 1+)
-/// Usage: log_milestone!("Loaded grammar", "20 productions");
+/// Level 1: Major milestone with checkmark
 #[macro_export]
 macro_rules! log_milestone {
     ($name:expr, $detail:expr) => {
         if $crate::r#macro::is_debug_level_enabled(1) {
             use $crate::r#macro::colors::*;
-            println!("  {BOLD_GREEN}{CHECK}{RESET}  {} {DIM}({}){RESET}", $name, $detail);
+            let prefix = $crate::r#macro::build_line_prefix(1);
+            println!("{}  {BOLD_GREEN}{CHECK}{RESET}  {} {DIM}({}){RESET}", prefix, $name, $detail);
         }
     };
     ($name:expr) => {
         if $crate::r#macro::is_debug_level_enabled(1) {
             use $crate::r#macro::colors::*;
-            println!("  {BOLD_GREEN}{CHECK}{RESET}  {}", $name);
+            let prefix = $crate::r#macro::build_line_prefix(1);
+            println!("{}  {BOLD_GREEN}{CHECK}{RESET}  {}", prefix, $name);
         }
     };
 }
 
-/// Level 2: Summary statistic (key metrics)
-/// Usage: log_stat!("States", 50);
+/// Level 2: Summary statistic
 #[macro_export]
 macro_rules! log_stat {
     ($name:expr, $value:expr) => {
         if $crate::r#macro::is_debug_level_enabled(2) {
             use $crate::r#macro::colors::*;
-            println!("     {DIM}└─{RESET} {}: {CYAN}{}{RESET}", $name, $value);
+            let prefix = $crate::r#macro::build_line_prefix(2);
+            println!("{}     {DIM}└─{RESET} {}: {CYAN}{}{RESET}", prefix, $name, $value);
         }
     };
     ($name:expr, $value:expr, $unit:expr) => {
         if $crate::r#macro::is_debug_level_enabled(2) {
             use $crate::r#macro::colors::*;
-            println!("     {DIM}└─{RESET} {}: {CYAN}{}{RESET} {}", $name, $value, $unit);
+            let prefix = $crate::r#macro::build_line_prefix(2);
+            println!("{}     {DIM}└─{RESET} {}: {CYAN}{}{RESET} {}", prefix, $name, $value, $unit);
         }
     };
 }
 
-/// Level 3: Pipeline stage (major phase in the compilation)
-/// Usage: log_stage!("Building tokenizer");
+/// Level 3: Pipeline stage
 #[macro_export]
 macro_rules! log_stage {
     ($fmt:literal $(, $($arg:tt)*)?) => {
-        if $crate::r#macro::is_debug_level_enabled(3) {
-            use $crate::r#macro::colors::*;
-            let msg = format!($fmt $(, $($arg)*)?);
-            let now = std::time::Instant::now();
-            let elapsed = $crate::r#macro::get_elapsed_suffix(now, 10);
-            println!("     {BOLD_BLUE}{}{RESET} {}{}", $crate::r#macro::colors::PLAY, msg, elapsed);
-        }
+        $crate::debug!(3, $fmt $(, $($arg)*)?);
     };
 }
 
@@ -307,30 +497,30 @@ macro_rules! log_stage_done {
         if $crate::r#macro::is_debug_level_enabled(3) {
             use $crate::r#macro::colors::*;
             let elapsed = $start.elapsed();
-            println!("     {BOLD_BLUE}{}{RESET} {} {MAGENTA}({}){RESET}", 
-                $crate::r#macro::colors::CHECK, $name, $crate::r#macro::format_duration(elapsed));
+            let prefix = $crate::r#macro::build_line_prefix(3);
+            if $crate::r#macro::level_draws_line(3) {
+                println!("{}└─ {} {MAGENTA}({}){RESET}", prefix, $name, $crate::r#macro::format_duration(elapsed));
+            }
         }
     };
     ($name:expr, $start:expr, $detail:expr) => {
         if $crate::r#macro::is_debug_level_enabled(3) {
             use $crate::r#macro::colors::*;
             let elapsed = $start.elapsed();
-            println!("     {BOLD_BLUE}{}{RESET} {} {DIM}[{}]{RESET} {MAGENTA}({}){RESET}", 
-                $crate::r#macro::colors::CHECK, $name, $detail, $crate::r#macro::format_duration(elapsed));
+            let prefix = $crate::r#macro::build_line_prefix(3);
+            if $crate::r#macro::level_draws_line(3) {
+                println!("{}└─ {} {DIM}[{}]{RESET} {MAGENTA}({}){RESET}", 
+                    prefix, $name, $detail, $crate::r#macro::format_duration(elapsed));
+            }
         }
     };
 }
 
-/// Level 4: Substep within a stage (operation)
-/// Usage: log_substep!("Computing first sets");
+/// Level 4: Substep
 #[macro_export]
 macro_rules! log_substep {
     ($fmt:literal $(, $($arg:tt)*)?) => {
-        if $crate::r#macro::is_debug_level_enabled(4) {
-            use $crate::r#macro::colors::*;
-            let msg = format!($fmt $(, $($arg)*)?);
-            println!("       {CYAN}{}{RESET} {}", $crate::r#macro::colors::BULLET, msg);
-        }
+        $crate::debug!(4, $fmt $(, $($arg)*)?);
     };
 }
 
@@ -342,8 +532,9 @@ macro_rules! log_substep_done {
             use $crate::r#macro::colors::*;
             let elapsed = $start.elapsed();
             if elapsed.as_millis() >= 10 {
-                println!("       {CYAN}{}{RESET} {} {MAGENTA}({}){RESET}", 
-                    $crate::r#macro::colors::BULLET, $name, $crate::r#macro::format_duration(elapsed));
+                let prefix = $crate::r#macro::build_line_prefix(4);
+                println!("{}  {CYAN}{}{RESET} {} {MAGENTA}({}){RESET}", 
+                    prefix, $crate::r#macro::colors::BULLET, $name, $crate::r#macro::format_duration(elapsed));
             }
         }
     };
@@ -351,33 +542,30 @@ macro_rules! log_substep_done {
         if $crate::r#macro::is_debug_level_enabled(4) {
             use $crate::r#macro::colors::*;
             let elapsed = $start.elapsed();
-            println!("       {CYAN}{}{RESET} {} {DIM}[{}]{RESET} {MAGENTA}({}){RESET}", 
-                $crate::r#macro::colors::BULLET, $name, $detail, $crate::r#macro::format_duration(elapsed));
+            let prefix = $crate::r#macro::build_line_prefix(4);
+            println!("{}  {CYAN}{}{RESET} {} {DIM}[{}]{RESET} {MAGENTA}({}){RESET}", 
+                prefix, $crate::r#macro::colors::BULLET, $name, $detail, $crate::r#macro::format_duration(elapsed));
         }
     };
 }
 
-/// Level 5: Detail/algorithm info (dim, indented)
-/// Usage: log_detail!("DFA states: {}", 50);
+/// Level 5: Detail/algorithm info
 #[macro_export]
 macro_rules! log_detail {
     ($fmt:literal $(, $($arg:tt)*)?) => {
-        if $crate::r#macro::is_debug_level_enabled(5) {
-            use $crate::r#macro::colors::*;
-            let msg = format!($fmt $(, $($arg)*)?);
-            println!("         {DIM}{}{RESET}", msg);
-        }
+        $crate::debug!(5, $fmt $(, $($arg)*)?);
     };
 }
 
-/// Level 1: Warning message (always visible at level 1+)
+/// Level 1: Warning message
 #[macro_export]
 macro_rules! log_warn {
     ($fmt:literal $(, $($arg:tt)*)?) => {
         if $crate::r#macro::is_debug_level_enabled(1) {
             use $crate::r#macro::colors::*;
             let msg = format!($fmt $(, $($arg)*)?);
-            println!("  {BOLD_YELLOW}{}{RESET} {}", $crate::r#macro::colors::WARN, msg);
+            let prefix = $crate::r#macro::build_line_prefix(1);
+            println!("{}  {BOLD_YELLOW}{}{RESET} {}", prefix, $crate::r#macro::colors::WARN, msg);
         }
     };
 }
@@ -399,13 +587,14 @@ macro_rules! log_success {
         if $crate::r#macro::is_debug_level_enabled(1) {
             use $crate::r#macro::colors::*;
             let msg = format!($fmt $(, $($arg)*)?);
-            println!("{BOLD_GREEN}{} {}{RESET}", $crate::r#macro::colors::CHECK, msg);
+            let prefix = $crate::r#macro::build_line_prefix(1);
+            println!("{}{BOLD_GREEN}{} {}{RESET}", prefix, $crate::r#macro::colors::CHECK, msg);
         }
     };
 }
 
 // =============================================================================
-// Timer Helpers for measuring operations
+// Timer and Section Helpers
 // =============================================================================
 
 /// Start a timer (returns Instant). Used with log_stage_done!, log_substep_done!
@@ -416,7 +605,7 @@ macro_rules! timer_start {
     };
 }
 
-// Backwards compatibility aliases
+/// Backwards compatibility alias
 #[macro_export]
 macro_rules! debug_line {
     ($level:expr, $fmt:literal $(, $($arg:tt)*)?) => {

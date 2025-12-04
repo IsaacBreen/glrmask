@@ -1244,13 +1244,6 @@ impl GrammarDefinition {
         let start_production_id = 0;
 
         let it = grammar_exprs.iter();
-        #[cfg(not(rustrover))]
-        let it = tqdm!(
-            grammar_exprs.iter(),
-            disable = !crate::r#macro::should_show_progress_bars(),
-            leave = false,
-            desc = "Converting grammar expressions to productions"
-        );
         let mut anon_regex_expr_to_group_id = BiBTreeMap::new();
         for (name, expr) in it {
             let lhs = NonTerminal(name.clone());
