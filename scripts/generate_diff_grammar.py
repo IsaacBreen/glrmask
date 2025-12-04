@@ -25,35 +25,35 @@ def generate_diff_grammar(source_path: str, grammar_path: str):
     # --- 1. Preamble and Top-Level Rules ---
     # REMOVED: #![ignore(IGNORE)] - Diffs are whitespace sensitive!
 
-    grammar_parts.append("root ::= diff;")
-    grammar_parts.append("diff ::= FILE_HEADER? ( HUNK_HEADER s0 )? EOF;")
+    grammar_parts.append("root ::= DIFF;")
+    grammar_parts.append("DIFF ::= FILE_HEADER? ( HUNK_HEADER S0 )? EOF;")
     grammar_parts.append("FILE_HEADER ::= GIT_LINE INDEX_LINE? MINUS_LINE PLUS_FILE_LINE;")
     grammar_parts.append("EOF  ::= '<|EOF|>';") # Ensure this matches your tokenizer's EOF
     grammar_parts.append("")
 
-    # --- 2. 's' Rules (Search for Hunk Start) ---
-    grammar_parts.append("// 's' rules: Find the start of a hunk")
+    # --- 2. 'S' Rules (Search for Hunk Start) ---
+    grammar_parts.append("// 'S' rules: Find the start of a hunk")
     for i in range(num_lines):
         # Try to match line i, or skip and try line i+1
-        grammar_parts.append(f"s{i} ::= l{i} | s{i+1};")
+        grammar_parts.append(f"S{i} ::= LINE{i} | S{i+1};")
 
     # If we reach the end of the file, we only allow trailing additions
-    grammar_parts.append(f"s{num_lines} ::= PLUS_LINE*;")
+    grammar_parts.append(f"S{num_lines} ::= PLUS_LINE*;")
     grammar_parts.append("")
 
-    # --- 3. 'l' Rules (Match Context/Deletion) ---
-    grammar_parts.append("// 'l' rules: Match content exactly, then continue or new hunk")
+    # --- 3. 'LINE' Rules (Match Context/Deletion) ---
+    grammar_parts.append("// 'LINE' rules: Match content exactly, then continue or new hunk")
     for i in range(num_lines):
         # After matching line i, we can:
         # 1. Continue immediately to line i+1
         # 2. Have some additions, then a Hunk Header, skipping to i+1
         if i < num_lines - 1:
-            continuation = f"( l{i+1} | PLUS_LINE* HUNK_HEADER s{i+1} )?"
+            continuation = f"( LINE{i+1} | PLUS_LINE* HUNK_HEADER S{i+1} )?"
         else:
-            continuation = f"( PLUS_LINE* HUNK_HEADER s{num_lines} )?"
+            continuation = f"( PLUS_LINE* HUNK_HEADER S{num_lines} )?"
 
         # NOTE: PLUS_LINE* allows insertions *before* the context/deletion line
-        grammar_parts.append(f"l{i} ::= PLUS_LINE* L{i} {continuation};")
+        grammar_parts.append(f"LINE{i} ::= PLUS_LINE* CONTENT{i} {continuation};")
     grammar_parts.append("")
 
     # --- 4. Terminal Definitions ---
@@ -76,11 +76,11 @@ def generate_diff_grammar(source_path: str, grammar_path: str):
 
         if not content:
             # Strict diffs require a space or minus even for empty lines
-            grammar_parts.append(f"L{i} ::= ( ' ' | '-' ) NEWLINE;")
+            grammar_parts.append(f"CONTENT{i} ::= ( ' ' | '-' ) NEWLINE;")
         else:
             # Escape backslashes and quotes for the EBNF string literal
             escaped_content = content.replace('\\', '\\\\').replace('"', '\\"')
-            grammar_parts.append(f'L{i} ::= ( " " | "-" ) "{escaped_content}" NEWLINE;')
+            grammar_parts.append(f'CONTENT{i} ::= ( " " | "-" ) "{escaped_content}" NEWLINE;')
 
     try:
         with open(grammar_path, 'w', encoding='utf-8') as f:
