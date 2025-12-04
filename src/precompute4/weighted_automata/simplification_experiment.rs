@@ -200,7 +200,8 @@ impl NWA {
                 dwa_passes: vec![DwaPass::PruneDeadEnds],
             },
             "FinalDWA" => DeterminizeAndSimplifyConfig {
-                // NWA simplification too slow for this context - just determinize directly
+                // NWA simplification doesn't help - the 77% NWA reduction only gives 1% reduction
+                // in DWA states because the determinization explores similar state space.
                 nwa_passes: vec![],
                 dwa_passes: vec![DwaPass::PruneDeadEnds, DwaPass::Minimize],
             },
