@@ -2190,9 +2190,9 @@ impl NFA {
         let states_with_eps = out_degree.iter().filter(|&&d| d > 0).count();
         let total_eps = compact_nfa.epsilon_targets.len();
         
-        // Use threshold of 2 for high-degree hub states
-        // Lower threshold means more precomputation but more cache hits in main loop
-        let precompute_threshold: u32 = 2;
+        // Use threshold of 10 for high-degree hub states
+        // Based on empirical testing, this balances precomputation cost vs main loop savings
+        let precompute_threshold: u32 = 10;
         crate::debug!(5, "Epsilon density: {} states with eps, {} total transitions ({}x states)", 
             states_with_eps, total_eps, total_eps / num_nfa_states.max(1));
         
