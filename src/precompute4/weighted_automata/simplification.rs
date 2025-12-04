@@ -121,7 +121,7 @@ fn minimize_dwa_partition(states: &DWAStates) -> Partition {
 
         if new_classes == partition.class_of {
             partition.num_classes = next_class;
-            crate::debug!(5, "Minimize converged after {} iterations with {} classes", iter_count, next_class);
+            crate::debug!(7, "Minimize converged after {} iterations with {} classes", iter_count, next_class);
             return partition;
         }
 
