@@ -25,7 +25,7 @@ def generate_diff_grammar(source_path: str, grammar_path: str):
     # --- 1. Preamble and Top-Level Rules ---
     # REMOVED: #![ignore(IGNORE)] - Diffs are whitespace sensitive!
 
-    grammar_parts.append("ROOT ::= DIFF;")
+    grammar_parts.append("root ::= DIFF;")
     grammar_parts.append("DIFF ::= FILE_HEADER? ( HUNK_HEADER S0 )? EOF;")
     grammar_parts.append("FILE_HEADER ::= GIT_LINE INDEX_LINE? MINUS_LINE PLUS_FILE_LINE;")
     grammar_parts.append("EOF  ::= '<|EOF|>';") # Ensure this matches your tokenizer's EOF
