@@ -137,29 +137,74 @@ pub fn build_template_nwa_from_characterization(tc: &TerminalCharacterization) -
 
 /// Build terminal DWAs for all terminals in the parser.
 /// 
+/// A characterization key that excludes the terminal ID, allowing us to share DWAs
+/// between terminals with identical grammatical behavior.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct CharacterizationKey {
+    initial_shifts: std::collections::BTreeSet<(ParserStateID, ParserStateID)>,
+    initial_reduces: std::collections::BTreeSet<(ParserStateID, usize, NonTerminalID)>,
+    reduce_characterizations: BTreeMap<NonTerminalID, (
+        std::collections::BTreeSet<(ParserStateID, usize, NonTerminalID)>,
+        std::collections::BTreeSet<(ParserStateID, ParserStateID, ParserStateID)>,
+    )>,
+    all_nts: std::collections::BTreeSet<NonTerminalID>,
+}
+
+impl CharacterizationKey {
+    fn from_characterization(tc: &TerminalCharacterization) -> Self {
+        CharacterizationKey {
+            initial_shifts: tc.initial_shifts.clone(),
+            initial_reduces: tc.initial_reduces.clone(),
+            reduce_characterizations: tc.reduce_characterizations.iter()
+                .map(|(nt, rc)| (*nt, (rc.reveal_and_rereduces.clone(), rc.reveal_goto_shift_escapes.clone())))
+                .collect(),
+            all_nts: tc.all_nts.clone(),
+        }
+    }
+}
+
 /// Each terminal gets its own DWA that encodes how it interacts with the parse stack.
 /// These are later composed into the final Parser DWA.
 pub fn build_terminal_dwas(parser: &GLRParser) -> Result<BTreeMap<TerminalID, DWA>, FullDWABuildError> {
     // NOTE: Removed rayon parallelism - benchmarks showed single-threaded is 3x faster
     // (317ms vs 951ms) due to memory contention in dwa.simplify()/minimize operations.
     let all = compute_all_characterizations(parser);
-    crate::debug!(5, "Computed terminal characterizations.");
+    crate::debug!(5, "Computed terminal characterizations for {} terminals", all.len());
 
-    // Build terminal DWAs sequentially - actually faster than parallel due to memory contention
-    let results: Result<Vec<_>, _> = all.into_iter().map(|(term, tc)| {
-        let nwa = build_nwa_from_terminal_characterization(&tc)?;
-        // Skip nwa.simplify() - let determinize handle it
+    // OPTIMIZATION: Group terminals by their characterization key (excluding terminal ID).
+    // Terminals with identical grammatical behavior can share the same DWA.
+    let mut key_to_terms: std::collections::HashMap<CharacterizationKey, Vec<(TerminalID, TerminalCharacterization)>> = 
+        std::collections::HashMap::new();
+    
+    for (term, tc) in all {
+        let key = CharacterizationKey::from_characterization(&tc);
+        key_to_terms.entry(key).or_default().push((term, tc));
+    }
+    
+    let unique_chars = key_to_terms.len();
+    crate::debug!(5, "Found {} unique characterizations (sharing DWAs for {} groups)", 
+        unique_chars, key_to_terms.values().filter(|v| v.len() > 1).count());
+
+    // Build one DWA per unique characterization
+    let mut result = BTreeMap::new();
+    for (key, terms) in key_to_terms {
+        // Use the first terminal's characterization as the representative
+        let (first_term, first_tc) = &terms[0];
+        
+        let nwa = build_nwa_from_terminal_characterization(first_tc)?;
         let mut dwa = nwa.determinize();
-        crate::debug!(6, "Terminal {:?}: {} states before simplify", term, dwa.states.len());
-        // Use single pass simplification for terminal DWAs - includes minimize but
-        // doesn't iterate to full convergence. Terminal DWAs are intermediate artifacts
-        // and full convergence is overkill.
+        crate::debug!(6, "Terminal {:?} (and {} others): {} states before simplify", 
+            first_term, terms.len() - 1, dwa.states.len());
         dwa.simplify_single_pass();
-        crate::debug!(6, "Terminal {:?}: {} states after simplify", term, dwa.states.len());
-        Ok((term, dwa))
-    }).collect();
+        crate::debug!(6, "Terminal {:?}: {} states after simplify", first_term, dwa.states.len());
+        
+        // Clone the DWA for all terminals with this characterization
+        for (term, _) in terms {
+            result.insert(term, dwa.clone());
+        }
+    }
 
-    results.map(|vec| vec.into_iter().collect())
+    Ok(result)
 }
 
 /// Deprecated alias for build_terminal_dwas
