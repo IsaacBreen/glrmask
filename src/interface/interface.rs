@@ -925,7 +925,10 @@ impl GrammarDefinition {
                 }).collect();
                 
                 if let Some(literals) = all_literals {
-                    if literals.len() >= 3 {
+                    // Only optimize small-to-medium enums (3-100 alternatives).
+                    // Very large enums (>100) create massive tokenizer DFAs, so it's better
+                    // to keep them as productions and let the grammar optimizer handle them.
+                    if literals.len() >= 3 && literals.len() <= 100 {
                         // Create a regex alternation: (lit1|lit2|lit3|...)
                         let choice_expr = Expr::Choice(
                             literals.iter().map(|bytes| Expr::U8Seq(bytes.to_vec())).collect()
@@ -1306,7 +1309,10 @@ impl GrammarDefinition {
                 }).collect();
                 
                 if let Some(literals) = all_literals {
-                    if literals.len() >= 3 {
+                    // Only optimize small-to-medium enums (3-100 alternatives).
+                    // Very large enums (>100) create massive tokenizer DFAs, so it's better
+                    // to keep them as productions and let the grammar optimizer handle them.
+                    if literals.len() >= 3 && literals.len() <= 100 {
                         // Create a regex alternation: (lit1|lit2|lit3|...)
                         let choice_expr = Expr::Choice(
                             literals.iter().map(|bytes| Expr::U8Seq(bytes.to_vec())).collect()

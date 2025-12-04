@@ -409,7 +409,7 @@ pub fn build_parser_dwa(parser: &GLRParser, input_nwa: &NWA) -> DWA {
     // 1. FAST PATH: Handle simple signatures via direct Union
     // A signature of length 1 means all terminals in it map to the same logical state transition.
     // We don't need bitmasks; we just Union the Templates.
-
+    // NOTE: Parallelizing this was tested but memory contention makes serial faster (143-169ms vs 121ms serial).
 
     for sig in simple_signatures {
         let terminals = &sig[0];

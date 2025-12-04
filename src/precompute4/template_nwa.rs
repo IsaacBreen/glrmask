@@ -197,6 +197,7 @@ pub fn build_terminal_dwas(parser: &GLRParser) -> Result<BTreeMap<TerminalID, DW
         .collect();
     
     // Determinize and simplify serially (memory contention in parallel slows things down)
+    // Tested parallel 2025: 467-494ms vs serial 380-400ms. Serial wins for many small DWAs.
     let mut result = BTreeMap::new();
     for (first_term, terms, nwa) in nwas_and_terms {
         let mut dwa = nwa.determinize();
