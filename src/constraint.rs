@@ -209,7 +209,7 @@ fn optimize_dwa_and_vocab(
     vocab.internal_max_llm_token = new_max_tok;
 
     let final_ranges = count_dwa_ranges(dwa);
-    crate::debug!(3, "DWA Vocab Optimization: Tokens {} -> {}, Ranges {} -> {}. Time: {:.2?}", initial_tokens, new_max_tok + 1, initial_ranges, final_ranges, start_time.elapsed());
+    crate::debug!(4, "DWA Vocab Optimization: Tokens {} -> {}, Ranges {} -> {}. Time: {:.2?}", initial_tokens, new_max_tok + 1, initial_ranges, final_ranges, start_time.elapsed());
 }
 // ---------------------------------------------------------------------------
 // Config

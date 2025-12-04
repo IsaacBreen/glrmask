@@ -75,7 +75,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     // 1. Load and compile the grammar.
     let step = std::time::Instant::now();
-    if show_output { println!("  {BOLD_WHITE}Loading grammar...{RESET}"); }
+    sep1::debug!(2, "Loading grammar...");
     
     let grammar_path_str = args.grammar.to_str().ok_or_else(|| format!("Path is not valid UTF-8: {:?}", args.grammar))?;
     
@@ -103,15 +103,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let opt_prod_count = grammar_definition.productions.len();
     let opt_term_count = grammar_definition.terminal_to_group_id().len();
     
-    if show_output {
-        println!("  {BOLD_GREEN}{CHECK}{RESET}  {DIM}{} → {} productions, {} → {} terminals{RESET} {MAGENTA}({}){RESET}", 
+    if is_debug_level_enabled(2) {
+        sep1::debug!(2, "{BOLD_GREEN}{CHECK}{RESET}  {DIM}{} → {} productions, {} → {} terminals{RESET} {MAGENTA}({}){RESET}", 
             prod_count, opt_prod_count, term_count, opt_term_count,
             format_duration(step.elapsed()));
     }
 
     // 2. Load the vocabulary.
     let step = std::time::Instant::now();
-    if show_output { println!("  {BOLD_WHITE}Loading vocabulary...{RESET}"); }
+    sep1::debug!(2, "Loading vocabulary...");
     
     let vocab_file = File::open(&args.vocab)?;
     let reader = BufReader::new(vocab_file);
@@ -132,13 +132,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         max_original_llm_token_id = max_original_llm_token_id.max(token_id);
     }
     
-    if show_output {
-        println!("  {BOLD_GREEN}{CHECK}{RESET}  {DIM}{} tokens{RESET} {MAGENTA}({}){RESET}", 
+    if is_debug_level_enabled(2) {
+        sep1::debug!(2, "{BOLD_GREEN}{CHECK}{RESET}  {DIM}{} tokens{RESET} {MAGENTA}({}){RESET}", 
             llm_token_map.len(), format_duration(step.elapsed()));
     }
 
     // 3. Construct the GrammarConstraint.
-    if show_output { println!("\n  {BOLD_WHITE}Building constraint...{RESET}"); }
+    sep1::debug!(2, "Building constraint...");
     let build_start = std::time::Instant::now();
     
     let config = GrammarConstraintConfig::default();
@@ -177,7 +177,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // This is ~6x faster than streaming JSON through the gzip encoder.
     if let Some(output_path) = args.output {
         let step = std::time::Instant::now();
-        if show_output { println!("\n  {BOLD_WHITE}Saving output...{RESET}"); }
+        sep1::debug!(2, "Saving output...");
 
         // Serialize to JSON in memory
         let json_node = grammar_constraint.to_json();
@@ -213,9 +213,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             writer.write_all(&json_bytes).map_err(|e| e.to_string())?;
         }
         
-        if show_output {
+        if is_debug_level_enabled(2) {
             let file_size = std::fs::metadata(&output_path)?.len();
-            println!("  {BOLD_GREEN}{CHECK}{RESET}  {DIM}{:?}{RESET} {CYAN}({}){RESET} {MAGENTA}({}){RESET}", 
+            sep1::debug!(2, "{BOLD_GREEN}{CHECK}{RESET}  {DIM}{:?}{RESET} {CYAN}({}){RESET} {MAGENTA}({}){RESET}", 
                 output_path, format_bytes(file_size), format_duration(step.elapsed()));
         }
     }

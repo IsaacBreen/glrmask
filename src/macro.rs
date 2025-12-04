@@ -189,10 +189,16 @@ pub fn get_macro_debug_level() -> usize {
 
 /// Returns which levels should draw lines, from `MACRO_LINE_LEVELS` env var.
 /// Format: comma-separated level numbers, e.g., "1,2" means levels 1 and 2 draw lines.
+/// If not set, defaults to levels 1-4 drawing lines for hierarchical output.
 pub fn get_line_levels() -> &'static [bool; 7] {
     static LINE_LEVELS: Lazy<[bool; 7]> = Lazy::new(|| {
-        let mut levels = [false; 7];
+        let mut levels = [true, true, true, true, true, false, false]; // default: 1-4 draw lines
         if let Ok(val) = env::var("MACRO_LINE_LEVELS") {
+            if val.is_empty() {
+                // Explicit empty = no lines at all
+                return [false; 7];
+            }
+            levels = [false; 7];
             for part in val.split(',') {
                 if let Ok(n) = part.trim().parse::<usize>() {
                     if n < 7 {
@@ -284,32 +290,26 @@ pub fn get_elapsed_suffix(now: std::time::Instant, threshold_ms: u64) -> String 
     suffix
 }
 
-/// Build the line prefix string based on which levels are drawing lines.
-/// This collects `│ ` from all levels that: (a) are lower than `msg_level`, 
-/// and (b) have `draw_line` enabled.
+/// Build the line prefix string based on message level.
+/// When MACRO_DEBUG_LEVEL >= 4, all messages get the │ prefix for consistent visual hierarchy.
+/// Level 1-2: no indentation (top-level messages)
+/// Level 3: "│ " when debug level >= 4 to not break the flow
+/// Level 4: "│ " 
+/// Level 5+: "│ │ " (two levels of indentation)
 pub fn build_line_prefix(msg_level: usize) -> String {
-    let mut prefix = String::new();
-    for level in 1..msg_level.min(7) {
-        if level_draws_line(level) {
-            let cfg = &LEVEL_CONFIGS[level.min(6)];
-            prefix.push_str(cfg.line_prefix);
-        }
+    let debug_level = get_macro_debug_level();
+    match msg_level {
+        0..=2 => String::new(),
+        3 => if debug_level >= 4 && level_draws_line(3) { "│ ".to_string() } else { String::new() },
+        4 => if level_draws_line(3) { "│ ".to_string() } else { "  ".to_string() },
+        _ => if level_draws_line(4) { "│ │ ".to_string() } else { "    ".to_string() },
     }
-    prefix
 }
 
 /// Build the line prefix for an alt (closing) message.
-/// This is the same as regular prefix, but we also need to handle the current level specially.
 pub fn build_alt_line_prefix(msg_level: usize) -> String {
-    let mut prefix = String::new();
-    // For levels below, draw their lines
-    for level in 1..msg_level.min(7) {
-        if level_draws_line(level) {
-            let cfg = &LEVEL_CONFIGS[level.min(6)];
-            prefix.push_str(cfg.line_prefix);
-        }
-    }
-    prefix
+    // For closing messages, use same prefix as regular messages at that level
+    build_line_prefix(msg_level)
 }
 
 // =============================================================================
