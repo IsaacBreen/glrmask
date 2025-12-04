@@ -876,7 +876,7 @@ impl ExprGroups {
 
         // Skip expensive optimization for very large expressions (> 1M nodes)
         // The optimization loop is O(nodes) and becomes a bottleneck
-        let optimized = if stats.nodes > 1_000_000 {
+        let optimized = if stats.nodes > 1_000_000_000 {
             crate::debug!(4, "Skipping Regex optimization (expression has {}M nodes)", stats.nodes / 1_000_000);
             self
         } else {
