@@ -1,6 +1,5 @@
 #![allow(warnings)]
 pub mod finite_automata;
-pub mod equivalence_analysis_finite_automata;
 mod equivalence_analysis_combined;
 pub mod glr;
 pub mod constraint;
@@ -23,7 +22,6 @@ mod state_equivalence_analysis_finite_automata;
 pub mod constraint_vocab;
 pub mod constraint_precompute;
 mod test_finite_automata;
-mod equivalence_analysis_finite_automata_end_states;
 mod fill_benchmark;
 
 // Pipeline module for staged constraint building

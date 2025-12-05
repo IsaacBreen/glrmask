@@ -19,8 +19,6 @@ use crate::{
         leveled_gss::{LeveledGSS, Merge},
         vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode},
     },
-    equivalence_analysis_finite_automata,
-    equivalence_analysis_finite_automata_end_states,
     equivalence_analysis_combined,
     finite_automata::Regex,
     glr::{
@@ -482,17 +480,12 @@ impl JSONConvertible for GrammarConstraint {
         
         // Build legacy commit_vocab for backward compatibility
         // This can be removed once all code is migrated to use vocab_trie
+        // Note: Commit equivalence analysis has been removed - just use stored data or empty fallback
         #[allow(deprecated)]
         let commit_vocab = if let Some(cv) = intermediate.commit_vocab {
             Arc::new(cv)
-        } else if let Some(legacy_vocab) = intermediate.original_llm_vocab {
-            Arc::new(Self::build_commit_vocab(
-                &legacy_vocab.llm_token_map,
-                &tokenizer,
-                legacy_vocab.max_original_llm_token_id,
-            ))
         } else {
-            let max_orig_id = intermediate.max_orig_id.ok_or("Missing vocab metadata")?;
+            let max_orig_id = intermediate.max_orig_id.unwrap_or(0);
             Arc::new(CommitVocab::new(
                 Vec::new(),
                 vec![CommitVocab::INVALID_REPRESENTATIVE; max_orig_id + 1],
@@ -600,65 +593,14 @@ impl GrammarConstraint {
         )
     }
 
-    pub(crate) fn setup_llm_token_mappings(
-        original_llm_token_map: &LLMTokenMap,
-        tokenizer: &Regex,
-    ) -> BTreeMap<usize, usize> {
-        if original_llm_token_map.len() < 10 {
-            return original_llm_token_map
-                .iter()
-                .map(|(_bytes, id)| (id.0, id.0))
-                .collect();
-        }
-
-        let mut sorted_tokens: Vec<_> = original_llm_token_map.iter().collect();
-        sorted_tokens.sort_by_key(|(bytes, _id)| *bytes);
-
-        let mut llm_token_strings: Vec<Vec<u8>> = Vec::with_capacity(sorted_tokens.len());
-        let mut original_ids: Vec<LLMTokenID> = Vec::with_capacity(sorted_tokens.len());
-
-        for (bytes, id) in sorted_tokens {
-            llm_token_strings.push(bytes.clone());
-            original_ids.push(*id);
-        }
-
-        let initial_states: Vec<usize> = tokenizer.iter_states().map(|s| s.0).collect();
-
-        let equivalence_classes =
-            equivalence_analysis_finite_automata::find_equivalence_classes(
-                tokenizer,
-                &llm_token_strings,
-                &initial_states,
-            );
-
-        if is_debug_level_enabled(3) {
-            let num_original_tokens = llm_token_strings.len();
-            let num_classes = equivalence_classes.len();
-            crate::debug!(4, "Equivalence Analysis: {} original tokens -> {} classes", num_original_tokens, num_classes);
-        }
-
-        let mut original_to_internal_map = BTreeMap::new();
-        let mut internal_id_counter = 0;
-        for (_signature, string_indices) in equivalence_classes {
-            let internal_id = internal_id_counter;
-            internal_id_counter += 1;
-            for string_index in string_indices {
-                let original_llm_id = original_ids[string_index];
-                original_to_internal_map.insert(original_llm_id.0, internal_id);
-            }
-        }
-
-        original_to_internal_map
-    }
-
     /// Combined setup that computes both internal mappings and commit vocab in a single pass.
-    /// This is more efficient than calling setup_llm_token_mappings and build_commit_vocab separately
     /// because we only run the equivalence analysis once.
     /// Returns: (original_to_internal_map, commit_vocab, internal_llm_token_map)
     fn setup_combined(
         llm_token_map: &LLMTokenMap,
         tokenizer: &Regex,
         max_original_llm_token_id: usize,
+        grammar_group_ids: &std::collections::BTreeSet<usize>,
     ) -> (BTreeMap<usize, usize>, CommitVocab, BTreeMap<Vec<u8>, LLMTokenID>) {
         if llm_token_map.is_empty() {
             return (BTreeMap::new(), CommitVocab::new(Vec::new(), Vec::new()), BTreeMap::new());
@@ -715,6 +657,7 @@ impl GrammarConstraint {
             tokenizer,
             &llm_token_strings,
             &initial_states,
+            grammar_group_ids,
         );
 
         if is_debug_level_enabled(3) {
@@ -809,92 +752,6 @@ impl GrammarConstraint {
         (original_to_internal_map, commit_vocab, internal_llm_token_map)
     }
 
-    fn build_commit_vocab(
-        llm_token_map: &LLMTokenMap,
-        tokenizer: &Regex,
-        max_original_llm_token_id: usize,
-    ) -> CommitVocab {
-        if llm_token_map.is_empty() {
-            return CommitVocab::new(Vec::new(), Vec::new());
-        }
-
-        let mut sorted_tokens: Vec<_> = llm_token_map.iter().collect();
-        sorted_tokens.sort_by_key(|(_, id)| id.0);
-
-        let mut llm_token_strings: Vec<Vec<u8>> = Vec::with_capacity(sorted_tokens.len());
-        let mut original_ids: Vec<LLMTokenID> = Vec::with_capacity(sorted_tokens.len());
-        let mut highest_original_id = 0usize;
-        for (bytes, id) in sorted_tokens {
-            highest_original_id = highest_original_id.max(id.0);
-            llm_token_strings.push(bytes.clone());
-            original_ids.push(*id);
-        }
-
-        let effective_max = max_original_llm_token_id.max(highest_original_id);
-        let mut original_to_representative =
-            vec![CommitVocab::INVALID_REPRESENTATIVE; effective_max + 1];
-
-        let initial_states: Vec<usize> = tokenizer.iter_states().map(|s| s.0).collect();
-        let equivalence_classes = equivalence_analysis_finite_automata_end_states::find_equivalence_classes(
-            tokenizer,
-            &llm_token_strings,
-            &initial_states,
-        );
-
-        let mut representatives: Vec<Vec<u8>> = Vec::with_capacity(equivalence_classes.len());
-        let mut assigned = vec![false; llm_token_strings.len()];
-
-        for (_signature, string_indices) in equivalence_classes {
-            if string_indices.is_empty() {
-                continue;
-            }
-            let rep_idx = string_indices
-                .iter()
-                .copied()
-                .min_by(|&a, &b| {
-                    llm_token_strings[a]
-                        .len()
-                        .cmp(&llm_token_strings[b].len())
-                        .then_with(|| llm_token_strings[a].cmp(&llm_token_strings[b]))
-                })
-                .unwrap();
-            let representative_id = representatives.len();
-            representatives.push(llm_token_strings[rep_idx].clone());
-            for idx in string_indices {
-                assigned[idx] = true;
-                let orig_id = original_ids[idx].0;
-                if orig_id >= original_to_representative.len() {
-                    original_to_representative
-                        .resize(orig_id + 1, CommitVocab::INVALID_REPRESENTATIVE);
-                }
-                original_to_representative[orig_id] = representative_id as u32;
-            }
-        }
-
-        for (idx, was_assigned) in assigned.iter().enumerate() {
-            if *was_assigned {
-                continue;
-            }
-            let representative_id = representatives.len();
-            representatives.push(llm_token_strings[idx].clone());
-            let orig_id = original_ids[idx].0;
-            if orig_id >= original_to_representative.len() {
-                original_to_representative
-                    .resize(orig_id + 1, CommitVocab::INVALID_REPRESENTATIVE);
-            }
-            original_to_representative[orig_id] = representative_id as u32;
-        }
-
-        crate::debug!(
-            4,
-            "Commit vocab built with {} representatives for {} tokens",
-            representatives.len(),
-            llm_token_strings.len()
-        );
-
-        CommitVocab::new(representatives, original_to_representative)
-    }
-
     fn build_with_config(
         tokenizer: Regex,
         parser: GLRParser,
@@ -915,12 +772,16 @@ impl GrammarConstraint {
             "Epsilon tokens are not supported."
         );
 
+        // Collect grammar-relevant group IDs from token_name_map
+        let grammar_group_ids: std::collections::BTreeSet<usize> = token_name_map.right_values().copied().collect();
+
         // Combined equivalence analysis - computes both mask and commit classes in one pass
         // Also returns internal_llm_token_map to avoid another 50K token iteration
         let (original_to_internal_map, commit_vocab_data, internal_llm_token_map) = Self::setup_combined(
             &llm_token_map,
             &tokenizer,
             max_original_llm_token_id,
+            &grammar_group_ids,
         );
         let commit_vocab = Arc::new(commit_vocab_data);
 
