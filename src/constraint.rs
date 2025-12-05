@@ -657,7 +657,6 @@ impl GrammarConstraint {
             tokenizer,
             &llm_token_strings,
             &initial_states,
-            grammar_group_ids,
         );
 
         if is_debug_level_enabled(3) {
