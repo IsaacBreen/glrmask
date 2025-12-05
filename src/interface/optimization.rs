@@ -14,6 +14,10 @@ pub fn optimize_grammar(grammar: &mut GrammarDefinition) {
     }
     let mut optimizer = GrammarOptimizer::new(grammar);
     optimizer.optimize();
+    if std::env::var("PRINT_OPTIMIZED_GRAMMAR").is_ok() {
+        crate::debug!(4, "Optimized grammar:\n{}", grammar);
+    }
+
 }
 
 impl GrammarDefinition {
