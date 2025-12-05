@@ -155,6 +155,11 @@ pub fn find_equivalence_classes_combined(
     strings: &[Vec<u8>],
     initial_states: &[usize],
 ) -> CombinedEquivalenceResult {
+    // TEMP: Disable
+    return CombinedEquivalenceResult {
+        mask_classes: strings.iter().enumerate().map(|(i, _)| (vec![i], vec![i])).collect(),
+        commit_classes: strings.iter().enumerate().map(|(i, _)| (vec![i], vec![i])).collect(),
+    };
     crate::debug!(3, "Combined equivalence analysis for {} strings", strings.len());
     let pb = create_pb(4);
 

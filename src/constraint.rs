@@ -77,6 +77,7 @@ fn optimize_dwa_and_vocab(
     vocab: &mut StageVocab,
     possible_matches: &mut BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
 ) {
+    dwa.simplify();
     let start_time = std::time::Instant::now();
     let initial_ranges = count_dwa_ranges(dwa);
     let initial_tokens = vocab.internal_max_llm_token + 1;
