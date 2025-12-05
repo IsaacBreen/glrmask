@@ -106,6 +106,28 @@ impl<'r> Precomputer1<'r> {
     }
 
     fn finish(mut self) -> DWA {
+        // Debug: Count transitions
+        let mut total_transitions = 0;
+        let mut transitions_to_leaf = 0;
+        for (src, labels) in &self.pending_transitions {
+            for (label, dsts) in labels {
+                for (dst, weight) in dsts {
+                    total_transitions += 1;
+                    if *dst == self.leaf_state {
+                        transitions_to_leaf += 1;
+                        // Check if token 6 and 31 are in the same weight
+                        if weight.contains(6) && weight.contains(31) {
+                            // Good - merged
+                        } else if weight.contains(6) || weight.contains(31) {
+                            crate::debug!(1, "SEPARATE: transition from {} on label {} has weight with 6={} 31={}",
+                                src, label, weight.contains(6), weight.contains(31));
+                        }
+                    }
+                }
+            }
+        }
+        crate::debug!(3, "Pending transitions: {} total, {} to leaf", total_transitions, transitions_to_leaf);
+        
         // Flush pending transitions and epsilons into the NWA
         for (src, labels) in std::mem::take(&mut self.pending_transitions) {
             for (label, dsts) in labels {
@@ -438,6 +460,17 @@ impl<'r> Precomputer1<'r> {
                         let single_token_weight = WARangeSet::from_item(child_token_id);
 
                         let end_idx = self.leaf_state;
+                        
+                        // Debug: Track what we're creating
+                        if child_token_id == 6 || child_token_id == 31 {
+                            // Verify the accessible terminals directly
+                            let direct_accessible: Vec<_> = self.tokenizer.dfa.states[exec_result.end_state.unwrap()].possible_future_group_ids.iter().copied().collect();
+                            let from_accessible: Vec<_> = self.tokenizer.dfa.states[tokenizer_state_id.0].possible_future_group_ids.iter().copied().collect();
+                            let segment: Vec<u8> = segment_bytes[pos..].to_vec();
+                            crate::debug!(1, "Creating leaf transitions for token {} ({:?}): segment={:?}, src_node={}, tokenizer_state={} (accessible={:?}), final_state={:?} (accessible={:?}), from_cache={:?}",
+                                child_token_id, String::from_utf8_lossy(child_vocab_node.prefix()), segment, src_node, tokenizer_state_id.0, from_accessible, exec_result.end_state, direct_accessible, accessible_terminals.as_slice());
+                        }
+                        
                         for terminal_id in accessible_terminals.iter() {
                             self.add_pending_transition(
                                     src_node,

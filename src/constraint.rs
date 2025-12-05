@@ -22,6 +22,7 @@ use crate::{
     },
     equivalence_analysis_bruteforce,
     equivalence_analysis_simple,
+    equivalence_analysis_simple_v3,
     equivalence_analysis_fast,
     finite_automata::Regex,
     glr::{
@@ -87,15 +88,42 @@ fn compute_dwa_partition(
 ) -> Vec<Vec<usize>> {
     // Collect unique weights
     let mut unique_weights = HashSet::with_capacity(dwa.states.0.len() * 3);
+    let mut dwa_weights = HashSet::new();
     for state in &dwa.states.0 {
-        if let Some(w) = &state.final_weight { unique_weights.insert(w.clone()); }
-        if let Some(w) = &state.state_weight { unique_weights.insert(w.clone()); }
-        for w in state.trans_weights.values() { unique_weights.insert(w.clone()); }
+        if let Some(w) = &state.final_weight { unique_weights.insert(w.clone()); dwa_weights.insert(w.clone()); }
+        if let Some(w) = &state.state_weight { unique_weights.insert(w.clone()); dwa_weights.insert(w.clone()); }
+        for w in state.trans_weights.values() { unique_weights.insert(w.clone()); dwa_weights.insert(w.clone()); }
     }
+    let mut possible_match_weights = HashSet::new();
     for inner_map in possible_matches.values() {
         for bv in inner_map.values() {
-            unique_weights.insert(Weight::from(bv.clone()));
+            let w = Weight::from(bv.clone());
+            unique_weights.insert(w.clone());
+            possible_match_weights.insert(w);
         }
+    }
+    
+    crate::debug!(2, "DWA partition: {} unique weights from DWA, {} from possible_matches", 
+                 dwa_weights.len(), possible_match_weights.len());
+    
+    // Debug: find weights that separate token 6 and 31
+    let tok_a = 6usize;
+    let tok_b = 31usize;
+    let mut separating_dwa = 0;
+    let mut separating_pm = 0;
+    for w in &unique_weights {
+        let has_a = w.contains(tok_a);
+        let has_b = w.contains(tok_b);
+        if has_a != has_b {
+            let in_dwa = dwa_weights.contains(w);
+            let in_pm = possible_match_weights.contains(w);
+            if in_dwa { separating_dwa += 1; }
+            if in_pm { separating_pm += 1; }
+        }
+    }
+    if separating_dwa > 0 || separating_pm > 0 {
+        crate::debug!(1, "Weights separating tokens {} and {}: {} from DWA, {} from possible_matches",
+            tok_a, tok_b, separating_dwa, separating_pm);
     }
 
     // Partition tokens
@@ -715,19 +743,25 @@ impl GrammarConstraint {
         // Later, we compare with optimize_dwa_and_vocab results
         let verify_equivalence = std::env::var("VERIFY_EQUIVALENCE").is_ok();
         
-        // Always run Simple equivalence to get expected class count for comparison
-        let simple_result = equivalence_analysis_simple::find_equivalence_classes_simple(
-            tokenizer,
-            &llm_token_strings,
-            &initial_states,
-        );
-        let simple_classes = simple_result.mask_classes.len();
-        crate::debug!(2, "Simple equivalence: {} classes for {} tokens", 
-                     simple_classes, llm_token_strings.len());
+        // Only run Simple equivalence when verifying (it's slower than Fast)
+        let simple_classes = if verify_equivalence {
+            let simple_result = equivalence_analysis_simple_v3::find_equivalence_classes_simple(
+                tokenizer,
+                &llm_token_strings,
+                &initial_states,
+            );
+            let classes = simple_result.mask_classes.len();
+            crate::debug!(2, "Simple equivalence: {} classes for {} tokens", 
+                         classes, llm_token_strings.len());
+            Some(classes)
+        } else {
+            None
+        };
         
         if verify_equivalence {
             // Return identity mapping (all tokens are distinct)
             // This will cause precompute1 to run on full vocab
+            let simple_classes = simple_classes.expect("Simple classes should be computed in verify mode");
             crate::debug!(2, "VERIFY_EQUIVALENCE mode: Using identity mapping (no equivalence reduction)");
             crate::debug!(2, "VERIFY_EQUIVALENCE mode: Expected {} classes from optimize_dwa_and_vocab", simple_classes);
             
@@ -774,7 +808,7 @@ impl GrammarConstraint {
                          llm_token_strings.len(), FULL_VALIDATION_THRESHOLD);
             
             // Run simple (no trie) version
-            let simple_result = equivalence_analysis_simple::find_equivalence_classes_simple(
+            let simple_result = equivalence_analysis_simple_v3::find_equivalence_classes_simple(
                 tokenizer,
                 &llm_token_strings,
                 &initial_states,
@@ -1113,13 +1147,11 @@ impl GrammarConstraint {
                 let sorted_tokens: Vec<_> = internal_llm_token_map.iter().collect();
                 let llm_token_strings: Vec<Vec<u8>> = sorted_tokens.iter().map(|(b, _)| (*b).clone()).collect();
                 let initial_states: Vec<usize> = tokenizer.iter_states().map(|s| s.0).collect();
-                let simple_result = equivalence_analysis_simple::find_equivalence_classes_simple(
-                    &tokenizer,
-                    &llm_token_strings,
-                    &initial_states,
-                );
-                
-                // Convert DWA partition to map: token_idx -> class_id
+            let simple_result = equivalence_analysis_simple_v3::find_equivalence_classes_simple(
+                &tokenizer,
+                &llm_token_strings,
+                &initial_states,
+            );                // Convert DWA partition to map: token_idx -> class_id
                 let mut dwa_token_to_class: Vec<usize> = vec![0; llm_token_strings.len()];
                 for (class_id, tokens) in dwa_partition.iter().enumerate() {
                     for &tok_id in tokens {
@@ -1226,12 +1258,18 @@ impl GrammarConstraint {
                             tokenizer.dfa.states[curr_j].possible_future_group_ids.iter().copied().collect::<Vec<_>>()
                         };
                         
+                        // Also check what terminals actually MATCH during processing
+                        let exec_i = tokenizer.execute_from_state(tok_i, TokenizerStateID(init_state));
+                        let exec_j = tokenizer.execute_from_state(tok_j, TokenizerStateID(init_state));
+                        let matches_i: Vec<(usize, usize)> = exec_i.matches.iter().map(|m| (m.id, m.width)).collect();
+                        let matches_j: Vec<(usize, usize)> = exec_j.matches.iter().map(|m| (m.id, m.width)).collect();
+                        
                         crate::debug!(1, "    From init_state {}, after prefix {:?}:", init_state,
                             String::from_utf8_lossy(&tok_i[..prefix_len]));
-                        crate::debug!(1, "      {:?} suffix {:?}: dead={}, final={}, accessible={:?}",
-                            s1, String::from_utf8_lossy(&tok_i[prefix_len..]), dead_i, curr_i, accessible_i);
-                        crate::debug!(1, "      {:?} suffix {:?}: dead={}, final={}, accessible={:?}",
-                            s2, String::from_utf8_lossy(&tok_j[prefix_len..]), dead_j, curr_j, accessible_j);
+                        crate::debug!(1, "      {:?} suffix {:?}: dead={}, final={}, accessible={:?}, MATCHES={:?}",
+                            s1, String::from_utf8_lossy(&tok_i[prefix_len..]), dead_i, curr_i, accessible_i, matches_i);
+                        crate::debug!(1, "      {:?} suffix {:?}: dead={}, final={}, accessible={:?}, MATCHES={:?}",
+                            s2, String::from_utf8_lossy(&tok_j[prefix_len..]), dead_j, curr_j, accessible_j, matches_j);
                     }
                 }
                 if !examples_dwa_coarser.is_empty() {

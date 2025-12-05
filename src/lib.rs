@@ -2,6 +2,8 @@
 pub mod finite_automata;
 mod equivalence_analysis_bruteforce;
 mod equivalence_analysis_simple;
+mod equivalence_analysis_simple_v2;
+mod equivalence_analysis_simple_v3;
 mod equivalence_analysis_fast;
 pub mod glr;
 pub mod constraint;
