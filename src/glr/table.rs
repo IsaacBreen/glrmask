@@ -343,12 +343,6 @@ impl Row {
             .or_else(|| self.default_reduce.clone())
     }
 
-    /// Check if this row has any action (shift or reduce) for the given terminal.
-    /// This is a fast check used for pruning unreachable terminals.
-    pub fn has_action_for_terminal(&self, terminal_id: TerminalID) -> bool {
-        self.shifts_and_reduces_full.contains_key(&terminal_id) || self.default_reduce.is_some()
-    }
-
     pub fn get_shifts_and_reduces_map(
         &self,
     ) -> BTreeMap<TerminalID, Stage7ShiftsAndReducesLookaheadValue> {
@@ -822,36 +816,6 @@ fn compute_final_table(
             },
         );
     }
-
-    // Create the "substring state" - a special state that represents being "anywhere" in the parse.
-    // This state has GOTOs for ALL nonterminals (union of all GOTOs across all states).
-    // It's used during substring parsing when a reduce pops below the stack bottom.
-    let substring_state_id = StateID(final_table_map.len());
-    let mut substring_gotos: BTreeMap<NonTerminalID, Goto> = BTreeMap::new();
-    
-    // Collect all nonterminals that have GOTO entries somewhere
-    for row in final_table_map.values() {
-        for (nt_id, goto) in &row.gotos {
-            // For substring state, we need some valid GOTO target for each NT.
-            // We use the first valid target we see (any is fine since we're "anywhere").
-            if goto.state_id.is_some() {
-                substring_gotos.entry(*nt_id).or_insert_with(|| Goto {
-                    state_id: goto.state_id,
-                    accept: false, // Substring state doesn't accept
-                });
-            }
-        }
-    }
-    
-    // Insert the substring state into the table
-    final_table_map.insert(
-        substring_state_id,
-        Row {
-            shifts_and_reduces_full: BTreeMap::new(), // No shifts from substring state
-            default_reduce: None, // No reduces from substring state
-            gotos: substring_gotos,
-        },
-    );
 
     (final_table_map, start_state_id, substring_state_id)
 }
