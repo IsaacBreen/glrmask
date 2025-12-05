@@ -8,7 +8,7 @@ use std::{
     sync::Arc,
 };
 use std::collections::BTreeMap as StdMap;
-use std::time::Instant;
+
 use bimap::BiBTreeMap;
 use json_convertible_derive::JSONConvertible;
 use range_set_blaze::RangeSetBlaze;
@@ -212,33 +212,31 @@ fn optimize_dwa_and_vocab(
     crate::debug!(4, "DWA Vocab Optimization: Tokens {} -> {}, Ranges {} -> {}. Time: {:.2?}", initial_tokens, new_max_tok + 1, initial_ranges, final_ranges, start_time.elapsed());
 }
 
-fn analyze_tokenizer_state_equivalence(dwa: &DWA) -> Vec<usize> {
+fn analyze_tokenizer_state_equivalence(dwa: &DWA) {
     // Tokenizer state IDs are the initial transitions of the DWA.
     // They're equal if the initial transition has the same weight and goes to the same state.
     let start_state_id = dwa.body.start_state;
+    if start_state_id >= dwa.states.0.len() {
+        crate::debug!(4, "analyze_tokenizer_state_equivalence: start_state_id out of range ({} >= {})", start_state_id, dwa.states.0.len());
+        return;
+    }
     let start_state = &dwa.states.0[start_state_id];
 
     // Map: (target_state, Option<Weight>) -> list of labels (as usize)
     let mut class_map: BTreeMap<(usize, Option<Weight>), Vec<usize>> = BTreeMap::new();
-
-    // Track maximum label we see so we can return a dense Vec indexed by label
-    let mut max_label: usize = 0;
 
     // Iterate over the weight map keys (labels) and use get_transition to obtain target+weight.
     // This mirrors how transitions are queried elsewhere in the codebase.
     for label in start_state.trans_weights.keys() {
         // label is a common::Label-like type; convert to usize for reporting.
         let label_usize = (*label) as usize;
-        max_label = max_label.max(label_usize);
         if let Some((target, w)) = start_state.get_transition(*label) {
-            class_map
-                .entry((target, Some(w.clone())))
+            class_map.entry((target, Some(w.clone())))
                 .or_default()
                 .push(label_usize);
         } else {
             // If no transition info is available via get_transition, group under None weight.
-            class_map
-                .entry((usize::MAX, None))
+            class_map.entry((usize::MAX, None))
                 .or_default()
                 .push(label_usize);
         }
@@ -252,31 +250,6 @@ fn analyze_tokenizer_state_equivalence(dwa: &DWA) -> Vec<usize> {
         class_map.len(),
         total_initial
     );
-
-    // Build result vector: default mapping is identity for all indices up to max_label.
-    if max_label == 0 && total_initial == 0 {
-        return Vec::new();
-    }
-    let mut total_states = 0;
-    for (_, labels) in &class_map {
-        total_states += labels.len();
-    }
-    assert_eq!(total_states, total_initial, "analyze_tokenizer_state_equivalence: total labels mismatch");
-
-    let mut mapping: Vec<usize> = vec![0; max_label + 1];
-
-    // For each equivalence class, pick the first label as representative and map all labels to it.
-    for (_key, labels) in class_map {
-        if labels.is_empty() {
-            continue;
-        }
-        let rep = labels[0];
-        for l in labels {
-            mapping[l] = rep;
-        }
-    }
-
-    mapping
 }
 
 
@@ -972,51 +945,6 @@ impl GrammarConstraint {
         max_original_llm_token_id: usize,
         config: &GrammarConstraintConfig,
     ) -> Self {
-        println!("----------------  BUILD PHASE 1 ----------------");
-        let instant = Instant::now();
-        let r = Self::_build_with_config(
-            tokenizer.clone(),
-            parser.clone(),
-            llm_token_map.clone(),
-            token_name_map.clone(),
-            max_original_llm_token_id,
-            config,
-            None,
-        );
-        println!("----------------  BUILD PHASE 1 DONE in {:?} ----------------", instant.elapsed());
-        println!("----------------  BUILD PHASE 2 ----------------");
-        let instant = Instant::now();
-        let m = analyze_tokenizer_state_equivalence(&r.parser_dwa);
-
-        let mut representative_set: BTreeSet<usize> = BTreeSet::new();
-        for (s, &r) in m.iter().enumerate() {
-            representative_set.insert(r);
-        }
-        let representative_states: Vec<usize> = representative_set.into_iter().collect();
-        crate::debug!(4, "TOKENIZER STATE REP ANALYSIS. {} -> {} states", tokenizer.max_state(), representative_states.len());
-
-        let r = Self::_build_with_config(
-            tokenizer,
-            parser,
-            llm_token_map,
-            token_name_map,
-            max_original_llm_token_id,
-            config,
-            Some(m),
-        );
-        println!("----------------  BUILD PHASE 2 DONE in {:?} ----------------", instant.elapsed());
-        r
-    }
-
-    fn _build_with_config(
-        tokenizer: Regex,
-        parser: GLRParser,
-        llm_token_map: LLMTokenMap,
-        token_name_map: BiBTreeMap<Terminal, usize>,
-        max_original_llm_token_id: usize,
-        config: &GrammarConstraintConfig,
-        temp: Option<Vec<usize>>,
-    ) -> Self {
         // Epsilon tokens are not supported.
         let epsilon_terminal_group_ids: BTreeSet<_> = tokenizer
             .execute_from_state(&[], tokenizer.initial_state_id())
@@ -1073,18 +1001,11 @@ impl GrammarConstraint {
         // OPTIMIZATION: State Equivalence Analysis
         crate::debug!(4, "Analyzing tokenizer state equivalence...");
         let all_states_list: Vec<usize> = tokenizer.iter_states().map(|s| s.0).collect();
-
-        let state_representatives;
-
-        if let Some(sr) = &temp {
-            state_representatives = sr.clone();
-        } else {
-            state_representatives = find_state_equivalence_classes(
-                &tokenizer,
-                &internal_tokens_for_vocab.iter().map(|(_, b)| b.clone()).collect::<Vec<_>>(),
-                &all_states_list,
-            );
-        }
+        let state_representatives = find_state_equivalence_classes(
+            &tokenizer,
+            &internal_tokens_for_vocab.iter().map(|(_, b)| b.clone()).collect::<Vec<_>>(),
+            &all_states_list,
+        );
         let mut state_to_rep: BTreeMap<TokenizerStateID, TokenizerStateID> = BTreeMap::new();
         let mut representative_set: BTreeSet<usize> = BTreeSet::new();
         for (s, &r) in state_representatives.iter().enumerate() {
