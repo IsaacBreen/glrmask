@@ -114,7 +114,7 @@ pub struct GLRParser {
     pub non_terminal_map: BiBTreeMap<NonTerminal, crate::glr::table::NonTerminalID>,
     pub item_set_map: BiBTreeMap<Vec<Item>, StateID>,
     pub start_state_id: StateID,
-    pub everything_state_id: StateID,
+    pub substring_state_id: StateID,
     pub ignore_terminal_id: Option<TerminalID>,
     pub actions: BTreeMap<crate::glr::table::NonTerminalID, ActionFn>,
 }
@@ -128,7 +128,7 @@ struct GLRParserJSON {
     non_terminal_map: BiBTreeMap<NonTerminal, crate::glr::table::NonTerminalID>,
     item_set_map: BiBTreeMap<Vec<Item>, StateID>,
     start_state_id: StateID,
-    everything_state_id: StateID,
+    substring_state_id: StateID,
     ignore_terminal_id: Option<TerminalID>,
 }
 
@@ -141,7 +141,7 @@ impl GLRParserJSON {
             non_terminal_map: p.non_terminal_map.clone(),
             item_set_map: p.item_set_map.clone(),
             start_state_id: p.start_state_id,
-            everything_state_id: p.everything_state_id,
+            substring_state_id: p.substring_state_id,
             ignore_terminal_id: p.ignore_terminal_id,
         }
     }
@@ -154,7 +154,7 @@ impl GLRParserJSON {
             self.non_terminal_map,
             self.item_set_map,
             self.start_state_id,
-            self.everything_state_id,
+            self.substring_state_id,
             BTreeMap::new(), // actions provided at runtime
             self.ignore_terminal_id,
         )
@@ -311,7 +311,7 @@ impl Debug for GLRParser {
             .field("table_len", &self.table.len())
             .field("productions_len", &self.productions.len())
             .field("start_state_id", &self.start_state_id)
-            .field("everything_state_id", &self.everything_state_id)
+            .field("substring_state_id", &self.substring_state_id)
             .field("ignore_terminal_id", &self.ignore_terminal_id)
             .field("actions_size", &self.actions.len())
             .finish()
@@ -326,7 +326,7 @@ impl PartialEq for GLRParser {
             && self.non_terminal_map == other.non_terminal_map
             && self.item_set_map == other.item_set_map
             && self.start_state_id == other.start_state_id
-            && self.everything_state_id == other.everything_state_id
+            && self.substring_state_id == other.substring_state_id
             && self.ignore_terminal_id == other.ignore_terminal_id
     }
 }
@@ -340,7 +340,7 @@ impl GLRParser {
         non_terminal_map: BiBTreeMap<NonTerminal, crate::glr::table::NonTerminalID>,
         item_set_map: BiBTreeMap<Vec<Item>, StateID>,
         start_state_id: StateID,
-        everything_state_id: StateID,
+        substring_state_id: StateID,
         actions: BTreeMap<NonTerminal, ActionFn>,
         ignore_terminal_id: Option<TerminalID>,
     ) -> Self {
@@ -364,7 +364,7 @@ impl GLRParser {
             non_terminal_map,
             item_set_map,
             start_state_id,
-            everything_state_id,
+            substring_state_id,
             ignore_terminal_id,
             actions: converted_actions,
         }

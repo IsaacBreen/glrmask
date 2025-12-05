@@ -653,7 +653,7 @@ fn compute_final_table(
     };
     let initial_item_set = vec![initial_item];
     let start_state_id = *item_set_map.get(&initial_item_set).unwrap();
-    let everything_state_id = start_state_id;
+    let substring_state_id = start_state_id;
 
     let mut final_table_map: Table = BTreeMap::new();
 
@@ -817,7 +817,7 @@ fn compute_final_table(
         );
     }
 
-    (final_table_map, start_state_id, everything_state_id)
+    (final_table_map, start_state_id, substring_state_id)
 }
 
 fn print_memory_usage(label: &str) {
@@ -1046,7 +1046,7 @@ pub fn generate_glr_parser_with_maps(
     print_memory_usage("After First/Follow");
 
     crate::debug!(4, "Computing Final Table (Merging Stages 2-8)");
-    let (final_table_map, start_state_id, everything_state_id) = compute_final_table(
+    let (final_table_map, start_state_id, substring_state_id) = compute_final_table(
         stage_1_table,
         &item_set_map,
         &productions,
@@ -1070,7 +1070,7 @@ pub fn generate_glr_parser_with_maps(
         non_terminal_map,
         item_set_map_bi,
         start_state_id,
-        everything_state_id,
+        substring_state_id,
         actions,
         ignore_terminal_id,
     )
