@@ -642,6 +642,14 @@ impl<'a> GrammarOptimizer<'a> {
             }
         }
         
+        // Also preserve the ignore terminal - it's not in productions but is used by the parser
+        if let Some(ignore_id) = self.grammar.ignore_terminal_id {
+            if let Some(name) = self.grammar.regex_name_to_group_id.get_by_right(&ignore_id.0) {
+                used_regex_terminals.insert(name.clone());
+                debug!(5, "Preserving ignore terminal '{}' (ID {})", name, ignore_id.0);
+            }
+        }
+        
         // Step 2: Remove unused terminals from the maps
         let initial_regex_count = self.grammar.regex_name_to_group_id.len();
         let initial_literal_count = self.grammar.literal_to_group_id.len();
@@ -724,6 +732,14 @@ impl<'a> GrammarOptimizer<'a> {
             for (lit, old_id) in literal_entries {
                 let new_id = old_to_new[&old_id];
                 self.grammar.literal_to_group_id.insert(lit, new_id);
+            }
+            
+            // Update ignore_terminal_id if it was renumbered
+            if let Some(old_ignore_id) = self.grammar.ignore_terminal_id {
+                if let Some(&new_ignore_id) = old_to_new.get(&old_ignore_id.0) {
+                    self.grammar.ignore_terminal_id = Some(TerminalID(new_ignore_id));
+                    debug!(5, "Updated ignore_terminal_id: {} -> {}", old_ignore_id.0, new_ignore_id);
+                }
             }
         }
         
