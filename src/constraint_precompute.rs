@@ -49,6 +49,8 @@ pub(crate) struct Precomputer1<'r> {
     pub(crate) pending_transitions: HashMap<NWAStateID, HashMap<Label, HashMap<NWAStateID, Weight>>>,
     pub(crate) pending_epsilons: HashMap<NWAStateID, HashMap<NWAStateID, Weight>>,
     pub(crate) live_tokens: HashMap<NWAStateID, Weight>,
+    // Cache for tokens_accessible_from_state - only 389 unique states but called 700k+ times
+    accessible_terminals_cache: HashMap<TokenizerStateID, std::rc::Rc<Vec<GrammarTokenID>>>,
 }
 
 impl<'r> Precomputer1<'r> {
@@ -99,6 +101,7 @@ impl<'r> Precomputer1<'r> {
             pending_transitions: HashMap::new(),
             pending_epsilons: HashMap::new(),
             live_tokens: HashMap::new(),
+            accessible_terminals_cache: HashMap::new(),
         }
     }
 
@@ -259,23 +262,19 @@ impl<'r> Precomputer1<'r> {
 
     fn get_or_create_next_state(
         &mut self,
-        src_node: NWAStateID,
+        _src_node: NWAStateID,
         tokenizer_state: TokenizerStateID,
         next_level_assoc: &mut BTreeMap<TokenizerStateID, NWAStateID>,
     ) -> NWAStateID {
         match next_level_assoc.entry(tokenizer_state) {
             std::collections::btree_map::Entry::Occupied(o) => *o.get(),
             std::collections::btree_map::Entry::Vacant(v) => {
-                let mut reuse = None;
-                if let Some(dsts) = self.pending_epsilons.get(&src_node) {
-                    for (dst, _) in dsts {
-                        if self.live_tokens.get(dst).map_or(true, |live| live.is_disjoint(&Weight::all())) {
-                            reuse = Some(*dst);
-                            break;
-                        }
-                    }
-                }
-                let t = reuse.unwrap_or_else(|| self.nwa.add_state());
+                // NOTE: The previous state reuse optimization was removed because it
+                // iterated through all pending_epsilons (~84 items on avg) but NEVER
+                // found a reusable state (0 reuses in 500k+ calls, 42M+ loop iterations).
+                // The check `live.is_disjoint(&Weight::all())` can only be true if the
+                // live_tokens entry is empty, which almost never happens.
+                let t = self.nwa.add_state();
                 v.insert(t);
                 t
             }
@@ -309,6 +308,11 @@ impl<'r> Precomputer1<'r> {
         crate::debug!(4, "Starting precompute DFS for {} tokenizer states", self.roots.len());
         profiler::reset();
         let vocab = std::mem::replace(&mut self.vocab, VocabPrefixTree::new());
+        
+        // Count vocab nodes for progress tracking
+        let vocab_node_count = count_vocab_nodes(&vocab.root);
+        crate::debug!(4, "Vocab tree has {} nodes", vocab_node_count);
+        
         self.dfs(&vocab.root, assoc);
         self.vocab = vocab;
         self.pb.finish();
@@ -376,26 +380,24 @@ impl<'r> Precomputer1<'r> {
 
                         // Leaf check: if match consumes remainder of segment
                         if next_pos == segment_bytes.len() {
-                            let mut edge_bv = RangeSetBlaze::new();
-                            edge_bv.insert(child_token_id);
-                            let final_bv = edge_bv;
-                            if !final_bv.is_empty() {
-                                let leaf = self.leaf_state;
-                                let weight = WARangeSet::from_rsb(final_bv);
-                                self.add_pending_transition(src_node, terminal_id.0 as Label, leaf, weight);
-                            }
+                            let leaf = self.leaf_state;
+                            let weight = WARangeSet::from_item(child_token_id);
+                            self.add_pending_transition(src_node, terminal_id.0 as Label, leaf, weight);
                         }
 
                         // Continuation logic
-                        let mut edge_bv = child_reachable.clone();
-                        if next_pos == segment_bytes.len() {
+                        // Avoid cloning if we don't need to modify the bitset
+                        let final_bv: std::borrow::Cow<RangeSetBlaze<usize>> = if next_pos == segment_bytes.len() {
+                            let mut edge_bv = child_reachable.clone();
                             edge_bv.remove(child_token_id);
                             if let Some(pm) = possible_matches_at_end.get(&terminal_id) {
                                 edge_bv = &edge_bv - pm.inner.as_ref();
                             }
-                        }
+                            std::borrow::Cow::Owned(edge_bv)
+                        } else {
+                            std::borrow::Cow::Borrowed(child_reachable)
+                        };
 
-                        let final_bv = edge_bv;
                         if final_bv.is_empty() {
                             continue;
                         }
@@ -403,7 +405,7 @@ impl<'r> Precomputer1<'r> {
                         let dest_map = pending.entry(next_pos).or_default();
 
                         let initial_tsid = self.tokenizer.initial_state_id();
-                        let weight = WARangeSet::from_rsb(final_bv);
+                        let weight = WARangeSet::from_rsb(final_bv.into_owned());
 
                         let target_entry = dest_map.entry(initial_tsid);
                         let target = match target_entry {
@@ -421,23 +423,28 @@ impl<'r> Precomputer1<'r> {
                     // 2. Handle End State -> Continuation
                     if let Some(end_state_val) = exec_result.end_state {
                         let final_tokenizer_state = TokenizerStateID(end_state_val);
-                        let accessible_terminals = self.tokenizer.tokens_accessible_from_state(final_tokenizer_state);
+                        
+                        // Use cached accessible terminals (389 unique states, but called 700k+ times)
+                        let accessible_terminals: std::rc::Rc<Vec<GrammarTokenID>> = if let Some(cached) = self.accessible_terminals_cache.get(&final_tokenizer_state) {
+                            cached.clone() // Rc clone is cheap
+                        } else {
+                            let result = std::rc::Rc::new(self.tokenizer.tokens_accessible_from_state(final_tokenizer_state)
+                                .into_iter().collect::<Vec<_>>());
+                            self.accessible_terminals_cache.insert(final_tokenizer_state, result.clone());
+                            result
+                        };
 
-                        let mut edge_bv = RangeSetBlaze::new();
-                        edge_bv.insert(child_token_id);
-                        let final_edge_bv = edge_bv;
+                        // Create weight once, it's just a single token
+                        let single_token_weight = WARangeSet::from_item(child_token_id);
 
-                        if !final_edge_bv.is_empty() {
-                            let end_idx = self.leaf_state;
-                            for terminal_id in &accessible_terminals {
-                                let weight = WARangeSet::from_rsb(final_edge_bv.clone());
-                                self.add_pending_transition(
-                                        src_node,
-                                        terminal_id.0 as Label,
-                                        end_idx,
-                                        weight,
-                                    );
-                            }
+                        let end_idx = self.leaf_state;
+                        for terminal_id in accessible_terminals.iter() {
+                            self.add_pending_transition(
+                                    src_node,
+                                    terminal_id.0 as Label,
+                                    end_idx,
+                                    single_token_weight.clone(),
+                                );
                         }
 
                         let next = self.get_or_create_next_state(src_node, final_tokenizer_state, &mut next_level_assoc);
