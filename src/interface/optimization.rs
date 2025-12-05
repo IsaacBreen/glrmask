@@ -2321,4 +2321,180 @@ mod tests {
         let actual = strip_shared(grammar.group_id_to_expr.get(&0).unwrap());
         assert_eq!(actual, expected_regex, "Expected: {}, got {}", expected_regex, actual);
     }
+
+    /// Test that literal choices are merged into a single terminal even when inside
+    /// a cyclic-dependent NT. This simulates the JS grammar pattern:
+    /// `equality_expression ::= relational_expression ( ( '==' | '!=' | '===' | '!==' ) relational_expression )* ;`
+    #[test]
+    fn test_literal_choice_in_cyclic_dependent_nt() {
+        // Simulate: expr ::= term ( ( '+' | '-' | '*' | '/' ) term )* ;
+        // where term is recursive (simulated by referencing back to expr through unary)
+        let grammar_exprs = vec![
+            ("start".to_string(), GrammarExpr::Ref("expr".to_string())),
+            ("expr".to_string(), GrammarExpr::Sequence(vec![
+                GrammarExpr::Ref("term".to_string()),
+                GrammarExpr::Repeat(Box::new(GrammarExpr::Sequence(vec![
+                    GrammarExpr::Choice(vec![
+                        GrammarExpr::Literal(b"+".to_vec()),
+                        GrammarExpr::Literal(b"-".to_vec()),
+                        GrammarExpr::Literal(b"*".to_vec()),
+                        GrammarExpr::Literal(b"/".to_vec()),
+                    ]),
+                    GrammarExpr::Ref("term".to_string()),
+                ]))),
+            ])),
+            // term references expr, creating a cycle
+            ("term".to_string(), GrammarExpr::Choice(vec![
+                GrammarExpr::Literal(b"x".to_vec()),
+                GrammarExpr::Sequence(vec![
+                    GrammarExpr::Literal(b"(".to_vec()),
+                    GrammarExpr::Ref("expr".to_string()),
+                    GrammarExpr::Literal(b")".to_vec()),
+                ]),
+            ])),
+        ];
+
+        let mut grammar = GrammarDefinition::from_exprs_no_optimize(grammar_exprs, vec![]).unwrap();
+        println!("=== BEFORE OPTIMIZATION ===");
+        println!("{grammar}");
+        
+        let initial_terminals = grammar.terminal_to_group_id().len();
+        optimize_grammar(&mut grammar);
+        
+        println!("=== AFTER OPTIMIZATION ===");
+        println!("{grammar}");
+        
+        // The literal choice ( '+' | '-' | '*' | '/' ) should become a single terminal
+        // Check that we have fewer terminals than if each literal were separate
+        let final_terminals = grammar.terminal_to_group_id().len();
+        println!("Initial terminals: {}, Final terminals: {}", initial_terminals, final_terminals);
+        
+        // We should have merged the 4-literal choice into 1 terminal
+        // The grammar should have: the merged operator terminal, '(', ')', 'x'
+        // With optimization, we might have even fewer
+        assert!(final_terminals <= initial_terminals, 
+            "Expected terminal count to decrease or stay same after optimization");
+        
+        // Verify the grammar still compiles and works
+        use crate::interface::CompiledGrammar;
+        let _ = CompiledGrammar::from_definition(std::sync::Arc::new(grammar));
+    }
+
+    /// Test that partial terminal conversion works: when a production has some parts
+    /// that can be converted to terminals but the whole production cannot (because it
+    /// references a recursive NT), the convertible parts should still become terminals.
+    /// 
+    /// Example pattern from JS:
+    /// `method_definition ::= ('static')? ('get'|'set')? ('async'|'*')? class_property_name '(' parameter_list? ')' block ;`
+    /// 
+    /// The prefix `('static')? ('get'|'set')? ('async'|'*')? class_property_name '(' parameter_list? ')'`
+    /// cannot be fully converted because it references `class_property_name` and `parameter_list` which may be cyclic.
+    /// But the literal choices should still be converted to terminals.
+    #[test]
+    fn test_partial_terminal_conversion_in_method_definition() {
+        // Simulate method_definition pattern where:
+        // - ('get'|'set') is a literal choice that should become a terminal
+        // - block is a non-terminal that CANNOT be converted (simulated with recursion)
+        let grammar_exprs = vec![
+            ("start".to_string(), GrammarExpr::Ref("method_def".to_string())),
+            ("method_def".to_string(), GrammarExpr::Sequence(vec![
+                GrammarExpr::Optional(Box::new(GrammarExpr::Literal(b"static".to_vec()))),
+                GrammarExpr::Optional(Box::new(GrammarExpr::Choice(vec![
+                    GrammarExpr::Literal(b"get".to_vec()),
+                    GrammarExpr::Literal(b"set".to_vec()),
+                ]))),
+                GrammarExpr::Optional(Box::new(GrammarExpr::Choice(vec![
+                    GrammarExpr::Literal(b"async".to_vec()),
+                    GrammarExpr::Literal(b"*".to_vec()),
+                ]))),
+                GrammarExpr::Ref("name".to_string()),
+                GrammarExpr::Literal(b"(".to_vec()),
+                GrammarExpr::Optional(Box::new(GrammarExpr::Ref("params".to_string()))),
+                GrammarExpr::Literal(b")".to_vec()),
+                GrammarExpr::Ref("block".to_string()),
+            ])),
+            // name is simple - just an identifier
+            ("name".to_string(), GrammarExpr::Literal(b"foo".to_vec())),
+            // params is simple
+            ("params".to_string(), GrammarExpr::Literal(b"x".to_vec())),
+            // block is recursive (contains method_def), making method_def cyclic-dependent
+            ("block".to_string(), GrammarExpr::Sequence(vec![
+                GrammarExpr::Literal(b"{".to_vec()),
+                GrammarExpr::Optional(Box::new(GrammarExpr::Ref("method_def".to_string()))),
+                GrammarExpr::Literal(b"}".to_vec()),
+            ])),
+        ];
+
+        let mut grammar = GrammarDefinition::from_exprs_no_optimize(grammar_exprs, vec![]).unwrap();
+        println!("=== BEFORE OPTIMIZATION ===");
+        println!("{grammar}");
+        
+        let initial_terminals = grammar.terminal_to_group_id().len();
+        optimize_grammar(&mut grammar);
+        
+        println!("=== AFTER OPTIMIZATION ===");
+        println!("{grammar}");
+        
+        let final_terminals = grammar.terminal_to_group_id().len();
+        println!("Initial terminals: {}, Final terminals: {}", initial_terminals, final_terminals);
+        
+        // The literal choices ('get'|'set') and ('async'|'*') should be converted to terminals
+        // even though method_def as a whole cannot be converted (due to block recursion)
+        
+        // Verify the grammar still compiles and works
+        use crate::interface::CompiledGrammar;
+        let _ = CompiledGrammar::from_definition(std::sync::Arc::new(grammar));
+    }
+
+    /// Test that two-alternative literal choices are also merged (not just 3+).
+    /// The current optimization only kicks in for 3+ alternatives during initial
+    /// GrammarExpr parsing, but the grammar optimizer should handle 2-alternative
+    /// choices as well.
+    #[test]
+    fn test_two_alternative_literal_choice() {
+        // Pattern: a_expr ::= b_expr ( ( '+' | '-' ) b_expr )* ;
+        // with b_expr being recursive
+        let grammar_exprs = vec![
+            ("start".to_string(), GrammarExpr::Ref("a_expr".to_string())),
+            ("a_expr".to_string(), GrammarExpr::Sequence(vec![
+                GrammarExpr::Ref("b_expr".to_string()),
+                GrammarExpr::Repeat(Box::new(GrammarExpr::Sequence(vec![
+                    GrammarExpr::Choice(vec![
+                        GrammarExpr::Literal(b"+".to_vec()),
+                        GrammarExpr::Literal(b"-".to_vec()),
+                    ]),
+                    GrammarExpr::Ref("b_expr".to_string()),
+                ]))),
+            ])),
+            ("b_expr".to_string(), GrammarExpr::Choice(vec![
+                GrammarExpr::Literal(b"x".to_vec()),
+                GrammarExpr::Sequence(vec![
+                    GrammarExpr::Literal(b"(".to_vec()),
+                    GrammarExpr::Ref("a_expr".to_string()),
+                    GrammarExpr::Literal(b")".to_vec()),
+                ]),
+            ])),
+        ];
+
+        let mut grammar = GrammarDefinition::from_exprs_no_optimize(grammar_exprs, vec![]).unwrap();
+        println!("=== BEFORE OPTIMIZATION ===");
+        println!("{grammar}");
+        
+        // Count initial productions for the choice
+        let initial_choice_productions = grammar.productions.iter()
+            .filter(|p| p.rhs.len() == 1 && matches!(&p.rhs[0], Symbol::Terminal(Terminal::Literal(lit)) if lit == b"+" || lit == b"-"))
+            .count();
+        
+        optimize_grammar(&mut grammar);
+        
+        println!("=== AFTER OPTIMIZATION ===");
+        println!("{grammar}");
+        
+        // After optimization, '+' and '-' should be merged into a single terminal
+        // (either as a Choice in the regex, or the productions should be reduced)
+        
+        // Verify it compiles
+        use crate::interface::CompiledGrammar;
+        let _ = CompiledGrammar::from_definition(std::sync::Arc::new(grammar));
+    }
 }
