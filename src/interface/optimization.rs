@@ -358,6 +358,25 @@ impl<'a> GrammarOptimizer<'a> {
         self.grammar.start_production_id = 0;
     }
     
+    /// Collect all terminals that are referenced in the grammar's productions.
+    fn collect_used_terminals(&self) -> HashSet<String> {
+        let mut used = HashSet::new();
+        for prod in &self.grammar.productions {
+            for sym in &prod.rhs {
+                match sym {
+                    Symbol::Terminal(Terminal::RegexName(name)) => {
+                        used.insert(name.clone());
+                    }
+                    Symbol::Terminal(Terminal::Literal(_)) => {
+                        // Literal terminals are in literal_to_group_id, not regex_name_to_group_id
+                    }
+                    Symbol::NonTerminal(_) => {}
+                }
+            }
+        }
+        used
+    }
+    
     /// Partial optimization: convert non-cyclic NTs to regex terminals while keeping
     /// cyclic NTs as grammar productions.
     /// 
@@ -373,6 +392,9 @@ impl<'a> GrammarOptimizer<'a> {
         ignore_term: Option<&Rc<RegexTerm>>,
     ) {
         let start = std::time::Instant::now();
+        
+        debug!(5, "Pre-existing terminals before partial_optimize: {}", 
+            self.grammar.regex_name_to_group_id.len());
         
         // Track which terminals already existed before optimization
         // These should not be re-processed by handle_nullable_terminals_except
@@ -489,16 +511,15 @@ impl<'a> GrammarOptimizer<'a> {
             nt_expand_order.len(), new_terminals.len(), convert_start.elapsed());
         
         // Step 4: Update the grammar
-        // 4a: Add new terminals to the grammar
-        for (nt, (group_id, expr)) in &new_terminals {
-            let terminal_name = format!("__opt_{}__", nt);
-            self.grammar.regex_name_to_group_id.insert(terminal_name.clone(), *group_id);
-            self.grammar.group_id_to_expr.insert(*group_id, expr.clone());
-        }
+        // IMPORTANT: We must determine which terminals are actually needed BEFORE adding them,
+        // otherwise we create unused terminals that bloat the tokenizer.
+        // Also, we must reassign group_ids to be contiguous starting from the current max.
         
-        // 4b: Update productions to use new terminals instead of NTs
+        // 4a: First, determine which new terminals will actually be referenced
+        // by building the new productions without adding them yet
         let update_start = std::time::Instant::now();
         let mut new_productions: Vec<Production> = Vec::new();
+        let mut referenced_terminals: HashSet<String> = HashSet::new();
         
         for prod in &self.grammar.productions {
             let nt_name = &prod.lhs.0;
@@ -519,6 +540,7 @@ impl<'a> GrammarOptimizer<'a> {
                         let canonical_nt = nt_to_canonical.get(&nt.0).unwrap_or(&nt.0);
                         if new_terminals.contains_key(canonical_nt) {
                             let terminal_name = format!("__opt_{}__", canonical_nt);
+                            referenced_terminals.insert(canonical_nt.clone());
                             Symbol::Terminal(Terminal::RegexName(terminal_name))
                         } else {
                             sym.clone()
@@ -534,6 +556,23 @@ impl<'a> GrammarOptimizer<'a> {
             });
         }
         
+        // 4b: Now add only the terminals that are actually referenced
+        // Use contiguous group_ids starting from the current max
+        let current_max_group_id = self.grammar.group_id_to_expr.keys().max().copied().unwrap_or(0);
+        let mut next_new_group_id = current_max_group_id + 1;
+        let mut terminals_added = 0;
+        for nt in referenced_terminals.iter() {
+            if let Some((_old_group_id, expr)) = new_terminals.get(nt) {
+                let terminal_name = format!("__opt_{}__", nt);
+                let new_group_id = next_new_group_id;
+                next_new_group_id += 1;
+                debug!(5, "Adding terminal '{}' with group_id {}", terminal_name, new_group_id);
+                self.grammar.regex_name_to_group_id.insert(terminal_name.clone(), new_group_id);
+                self.grammar.group_id_to_expr.insert(new_group_id, expr.clone());
+                terminals_added += 1;
+            }
+        }
+        
         // Find the start production
         let start_prod_lhs = self.grammar.productions[self.grammar.start_production_id].lhs.clone();
         self.grammar.productions = new_productions;
@@ -541,18 +580,33 @@ impl<'a> GrammarOptimizer<'a> {
             .position(|p| p.lhs == start_prod_lhs)
             .unwrap_or(0);
         
-        debug!(4, "Partial optimization: {} productions -> {}, {} new terminals (in {:?})",
-            self.stats.initial_productions, self.grammar.productions.len(), new_terminals.len(),
+        debug!(4, "Partial optimization: {} productions -> {}, {} terminals added (of {} candidates) (in {:?})",
+            self.stats.initial_productions, self.grammar.productions.len(), terminals_added, new_terminals.len(),
             update_start.elapsed());
         
         // Step 5: Handle nullable terminals that were created during optimization
-        // This wraps nullable terminals in optional non-terminals (similar to from_exprs handling)
-        if !nullable_terminal_names.is_empty() {
-            debug!(4, "Handling {} nullable terminals created by optimization", nullable_terminal_names.len());
+        // Only handle those that were actually added
+        let referenced_nullable_terminals: HashSet<String> = nullable_terminal_names
+            .into_iter()
+            .filter(|t| {
+                // Extract the NT name from __opt_NTname__
+                let nt_name = t.trim_start_matches("__opt_").trim_end_matches("__");
+                referenced_terminals.contains(nt_name)
+            })
+            .collect();
+        
+        if !referenced_nullable_terminals.is_empty() {
+            debug!(5, "Handling {} nullable terminals created by optimization", 
+                referenced_nullable_terminals.len());
             self.grammar.handle_nullable_terminals_except(&pre_existing_terminals);
         }
         
-        debug!(4, "After nullable handling: {} productions", self.grammar.productions.len());
+        debug!(5, "After nullable handling: {} productions, {} terminals", 
+            self.grammar.productions.len(), self.grammar.regex_name_to_group_id.len());
+        
+        // Remove unused terminals and compact IDs
+        // This is important because unused terminals bloat the tokenizer
+        self.remove_unused_terminals_and_compact();
         
         // Debug: print the remaining productions
         debug!(5, "Remaining productions after partial optimization:");
@@ -565,6 +619,117 @@ impl<'a> GrammarOptimizer<'a> {
             }).collect();
             debug!(5, "  [{}] {} -> {}", i, prod.lhs.0, rhs_str.join(" "));
         }
+    }
+    
+    /// Remove terminals that are not referenced by any production and compact terminal IDs.
+    /// This ensures terminals have contiguous group_ids starting from 0.
+    fn remove_unused_terminals_and_compact(&mut self) {
+        // Step 1: Collect all terminals that are actually used in productions
+        let mut used_regex_terminals: HashSet<String> = HashSet::new();
+        let mut used_literal_terminals: HashSet<Vec<u8>> = HashSet::new();
+        
+        for prod in &self.grammar.productions {
+            for sym in &prod.rhs {
+                match sym {
+                    Symbol::Terminal(Terminal::RegexName(name)) => {
+                        used_regex_terminals.insert(name.clone());
+                    }
+                    Symbol::Terminal(Terminal::Literal(lit)) => {
+                        used_literal_terminals.insert(lit.clone());
+                    }
+                    Symbol::NonTerminal(_) => {}
+                }
+            }
+        }
+        
+        // Step 2: Remove unused terminals from the maps
+        let initial_regex_count = self.grammar.regex_name_to_group_id.len();
+        let initial_literal_count = self.grammar.literal_to_group_id.len();
+        
+        let unused_regex: Vec<String> = self.grammar.regex_name_to_group_id
+            .left_values()
+            .filter(|name| !used_regex_terminals.contains(*name))
+            .cloned()
+            .collect();
+        
+        let unused_literals: Vec<Vec<u8>> = self.grammar.literal_to_group_id
+            .left_values()
+            .filter(|lit| !used_literal_terminals.contains(*lit))
+            .cloned()
+            .collect();
+        
+        // Remove unused entries
+        for name in &unused_regex {
+            debug!(5, "Removing unused regex terminal: {}", name);
+            if let Some((_name, group_id)) = self.grammar.regex_name_to_group_id.remove_by_left(name) {
+                self.grammar.group_id_to_expr.remove(&group_id);
+            }
+        }
+        
+        for lit in &unused_literals {
+            debug!(5, "Removing unused literal terminal: {:?}", lit);
+            if let Some((_lit, group_id)) = self.grammar.literal_to_group_id.remove_by_left(lit) {
+                self.grammar.group_id_to_expr.remove(&group_id);
+            }
+        }
+        
+        let removed_regex = initial_regex_count - self.grammar.regex_name_to_group_id.len();
+        let removed_literal = initial_literal_count - self.grammar.literal_to_group_id.len();
+        
+        if removed_regex > 0 || removed_literal > 0 {
+            debug!(4, "Removed {} unused regex terminals and {} unused literal terminals", 
+                removed_regex, removed_literal);
+        }
+        
+        // Step 3: Compact terminal IDs to be contiguous starting from 0
+        // Build mapping from old group_id -> new group_id
+        let mut all_old_ids: Vec<usize> = self.grammar.group_id_to_expr.keys().cloned().collect();
+        all_old_ids.sort();
+        
+        let mut old_to_new: HashMap<usize, usize> = HashMap::new();
+        for (new_id, old_id) in all_old_ids.iter().enumerate() {
+            old_to_new.insert(*old_id, new_id);
+        }
+        
+        // Check if renumbering is needed (if max_id != count - 1)
+        let needs_renumbering = all_old_ids.last().copied().unwrap_or(0) != all_old_ids.len().saturating_sub(1);
+        
+        if needs_renumbering && !all_old_ids.is_empty() {
+            debug!(4, "Compacting terminal IDs: renumbering {} terminals", all_old_ids.len());
+            
+            // Update group_id_to_expr
+            let old_expr_map = std::mem::take(&mut self.grammar.group_id_to_expr);
+            for (old_id, expr) in old_expr_map {
+                let new_id = old_to_new[&old_id];
+                self.grammar.group_id_to_expr.insert(new_id, expr);
+            }
+            
+            // Update regex_name_to_group_id
+            let regex_entries: Vec<(String, usize)> = self.grammar.regex_name_to_group_id
+                .iter()
+                .map(|(name, id)| (name.clone(), *id))
+                .collect();
+            self.grammar.regex_name_to_group_id.clear();
+            for (name, old_id) in regex_entries {
+                let new_id = old_to_new[&old_id];
+                self.grammar.regex_name_to_group_id.insert(name, new_id);
+            }
+            
+            // Update literal_to_group_id
+            let literal_entries: Vec<(Vec<u8>, usize)> = self.grammar.literal_to_group_id
+                .iter()
+                .map(|(lit, id)| (lit.clone(), *id))
+                .collect();
+            self.grammar.literal_to_group_id.clear();
+            for (lit, old_id) in literal_entries {
+                let new_id = old_to_new[&old_id];
+                self.grammar.literal_to_group_id.insert(lit, new_id);
+            }
+        }
+        
+        debug!(5, "After compaction: {} terminals with IDs 0..{}", 
+            self.grammar.group_id_to_expr.len(),
+            self.grammar.group_id_to_expr.len());
     }
 }
 
