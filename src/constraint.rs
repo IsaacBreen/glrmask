@@ -211,6 +211,48 @@ fn optimize_dwa_and_vocab(
     let final_ranges = count_dwa_ranges(dwa);
     crate::debug!(4, "DWA Vocab Optimization: Tokens {} -> {}, Ranges {} -> {}. Time: {:.2?}", initial_tokens, new_max_tok + 1, initial_ranges, final_ranges, start_time.elapsed());
 }
+
+fn analyze_tokenizer_state_equivalence(dwa: &DWA) {
+    // Tokenizer state IDs are the initial transitions of the DWA.
+    // They're equal if the initial transition has the same weight and goes to the same state.
+    let start_state_id = dwa.body.start_state;
+    if start_state_id >= dwa.states.0.len() {
+        crate::debug!(4, "analyze_tokenizer_state_equivalence: start_state_id out of range ({} >= {})", start_state_id, dwa.states.0.len());
+        return;
+    }
+    let start_state = &dwa.states.0[start_state_id];
+
+    // Map: (target_state, Option<Weight>) -> list of labels (as usize)
+    let mut class_map: BTreeMap<(usize, Option<Weight>), Vec<usize>> = BTreeMap::new();
+
+    // Iterate over the weight map keys (labels) and use get_transition to obtain target+weight.
+    // This mirrors how transitions are queried elsewhere in the codebase.
+    for label in start_state.trans_weights.keys() {
+        // label is a common::Label-like type; convert to usize for reporting.
+        let label_usize = (*label) as usize;
+        if let Some((target, w)) = start_state.get_transition(*label) {
+            class_map.entry((target, Some(w.clone())))
+                .or_default()
+                .push(label_usize);
+        } else {
+            // If no transition info is available via get_transition, group under None weight.
+            class_map.entry((usize::MAX, None))
+                .or_default()
+                .push(label_usize);
+        }
+    }
+
+    // Debug summary
+    let total_initial = start_state.trans_weights.len();
+    crate::debug!(
+        4,
+        "analyze_tokenizer_state_equivalence: found {} equivalence classes for {} initial transitions",
+        class_map.len(),
+        total_initial
+    );
+}
+
+
 // ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------
@@ -1075,7 +1117,8 @@ impl GrammarConstraint {
         // OPTIMIZATION: Skip vocab optimization on skeleton_dwa.
         // The Parser DWA will be optimized below, and running optimization twice
         // is redundant and expensive (was taking 2.4s).
-        // optimize_dwa_and_vocab(&mut skeleton_dwa, &mut vocab, &mut possible_matches_precompute1);
+        optimize_dwa_and_vocab(&mut skeleton_dwa, &mut vocab, &mut possible_matches_precompute1);
+        analyze_tokenizer_state_equivalence(&skeleton_dwa);
 
         // Build Parser DWA
         let max_internal_llm_token_id = vocab.internal_max_llm_token;
@@ -1088,6 +1131,7 @@ impl GrammarConstraint {
 
         parser_dwa.states.clip_weights(vocab.internal_max_llm_token);
         optimize_dwa_and_vocab(&mut parser_dwa, &mut vocab, &mut possible_matches_precompute1);
+        analyze_tokenizer_state_equivalence(&parser_dwa);
 
         let internal_to_original_sparse_matrix =
             StageVocab::build_internal_to_original_sparse_matrix(
