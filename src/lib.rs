@@ -1,6 +1,8 @@
 #![allow(warnings)]
 pub mod finite_automata;
-mod equivalence_analysis_combined;
+mod equivalence_analysis_bruteforce;
+mod equivalence_analysis_simple;
+mod equivalence_analysis_fast;
 pub mod glr;
 pub mod constraint;
 pub mod datastructures;

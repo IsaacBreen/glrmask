@@ -1,5 +1,38 @@
 # TODO List
 
+## URGENT: Equivalence Analysis Verification (2025-01-XX)
+
+### Problem
+The equivalence analysis has THREE implementations (bruteforce, simple, fast) but they don't agree!
+- Fast produces 7797 classes for JS grammar
+- Simple produces 1298 classes  
+- This causes build time issues (too many classes = slower NWA determinization)
+
+### The Correct Definition
+Equivalence analysis should be **precisely equivalent to doing precompute1 on full vocab and then merging equivalent LLM tokens**.
+
+Two tokens are equivalent iff they produce identical structures in the NWA skeleton.
+
+### TODO Steps
+1. [ ] **Do precompute1 on FULL vocab** (don't apply equivalence analysis, just compute)
+2. [ ] **Uncomment** `optimize_dwa_and_vocab(&mut skeleton_dwa, &mut vocab, &mut possible_matches_precompute1);`
+3. [ ] **Assert** that internal LLM tokens after `optimize_dwa_and_vocab` == equivalence classes from simple
+4. [ ] **Disable** fast and bruteforce implementations until simple is verified correct
+5. [ ] Then: Make fast implementation match simple exactly
+6. [ ] Then: Make bruteforce match simple exactly (or remove it if not needed)
+
+### Key Files
+- `src/equivalence_analysis_simple.rs` - Focus on this one
+- `src/equivalence_analysis_fast.rs` - Disable for now
+- `src/equivalence_analysis_bruteforce.rs` - Disable for now  
+- `src/constraint.rs` - Where equivalence analysis is called
+
+### Target
+JS grammar should produce ~2k equivalence classes (not 7.8k)
+Build time target: < 1 second
+
+---
+
 ## Tasks (in order of risk/complexity - less risky first)
 
 ### 1. [x] Add Makefile target for complexity analysis markdown compilation

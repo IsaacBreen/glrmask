@@ -298,12 +298,14 @@ fn process_string_node_combined(
                         for lin_idx in (child.range_start as usize)..(child.range_end as usize) {
                             let orig = linearized_mapping[lin_idx];
                             
-                            // Mask hash
-                            let rem_mask = remainder_hashes_mask[orig].get((depth + 1) as usize).copied().unwrap_or(0);
-                            let h_mask = hash_outcome_mask(KIND_MATCH, gid as u32, depth + 1, rem_mask, 0);
+                            // Mask hash - DON'T include remainder_hashes for mask equivalence
+                            // Only the (group_id, position) pair matters for determining what
+                            // terminals can follow this token. The suffix-specific remainder
+                            // would cause over-discrimination.
+                            let h_mask = hash_outcome_mask(KIND_MATCH, gid as u32, depth + 1, 0, 0);
                             accumulators_mask[orig] = accumulators_mask[orig].wrapping_add(weight.wrapping_mul(h_mask));
                             
-                            // Commit hash
+                            // Commit hash - DO include remainder_hashes since commit needs exact behavior
                             let rem_commit = remainder_hashes_commit[orig].get((depth + 1) as usize).copied().unwrap_or(0);
                             let h_commit = hash_outcome_commit(KIND_MATCH, gid as u32, depth + 1, rem_commit, 0);
                             accumulators_commit[orig] = accumulators_commit[orig].wrapping_add(weight.wrapping_mul(h_commit));

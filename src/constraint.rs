@@ -19,7 +19,9 @@ use crate::{
         leveled_gss::{LeveledGSS, Merge},
         vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode},
     },
-    equivalence_analysis_combined,
+    equivalence_analysis_bruteforce,
+    equivalence_analysis_simple,
+    equivalence_analysis_fast,
     finite_automata::Regex,
     glr::{
         analyze::compute_terminal_follow_sets,
@@ -652,12 +654,81 @@ impl GrammarConstraint {
 
         let initial_states: Vec<usize> = tokenizer.iter_states().map(|s| s.0).collect();
 
-        // Run combined equivalence analysis - THE KEY OPTIMIZATION
-        let combined_result = equivalence_analysis_combined::find_equivalence_classes_combined(
+        // Thresholds for validation
+        const FULL_VALIDATION_THRESHOLD: usize = 500;    // All 3 implementations
+        const SIMPLE_VALIDATION_THRESHOLD: usize = 60000; // Simple vs Fast only
+        
+        // Run fast (trie-based) equivalence analysis - the production version
+        let fast_result = equivalence_analysis_fast::find_equivalence_classes_combined(
             tokenizer,
             &llm_token_strings,
             &initial_states,
         );
+
+        // For small vocabularies, validate all three implementations
+        if llm_token_strings.len() <= FULL_VALIDATION_THRESHOLD {
+            crate::debug!(3, "Validating equivalence analysis ({} tokens <= {} threshold) - FULL validation",
+                         llm_token_strings.len(), FULL_VALIDATION_THRESHOLD);
+            
+            // Run simple (no trie) version
+            let simple_result = equivalence_analysis_simple::find_equivalence_classes_simple(
+                tokenizer,
+                &llm_token_strings,
+                &initial_states,
+            );
+            
+            // Run brute force version
+            let bruteforce_result = equivalence_analysis_bruteforce::find_equivalence_classes_bruteforce(
+                tokenizer,
+                &llm_token_strings,
+                &initial_states,
+            );
+            
+            // Compare brute force vs simple
+            if let Err(e) = equivalence_analysis_bruteforce::compare_partitions(
+                "bruteforce", &bruteforce_result.mask_classes,
+                "simple", &simple_result.mask_classes,
+                &llm_token_strings,
+            ) {
+                panic!("Equivalence analysis mismatch (bruteforce vs simple): {}", e);
+            }
+            crate::debug!(3, "✓ Bruteforce ({} classes) matches Simple ({} classes)",
+                         bruteforce_result.mask_classes.len(), simple_result.mask_classes.len());
+            
+            // Compare simple vs fast
+            if let Err(e) = equivalence_analysis_bruteforce::compare_partitions(
+                "simple", &simple_result.mask_classes,
+                "fast", &fast_result.mask_classes,
+                &llm_token_strings,
+            ) {
+                panic!("Equivalence analysis mismatch (simple vs fast): {}", e);
+            }
+            crate::debug!(3, "✓ Simple ({} classes) matches Fast ({} classes)",
+                         simple_result.mask_classes.len(), fast_result.mask_classes.len());
+        } else if llm_token_strings.len() <= SIMPLE_VALIDATION_THRESHOLD {
+            // For medium vocabularies, only validate simple vs fast (skip bruteforce)
+            crate::debug!(3, "Validating equivalence analysis ({} tokens <= {} threshold) - Simple vs Fast only",
+                         llm_token_strings.len(), SIMPLE_VALIDATION_THRESHOLD);
+            
+            let simple_result = equivalence_analysis_simple::find_equivalence_classes_simple(
+                tokenizer,
+                &llm_token_strings,
+                &initial_states,
+            );
+            
+            if let Err(e) = equivalence_analysis_bruteforce::compare_partitions(
+                "simple", &simple_result.mask_classes,
+                "fast", &fast_result.mask_classes,
+                &llm_token_strings,
+            ) {
+                panic!("Equivalence analysis mismatch (simple vs fast): {}", e);
+            }
+            crate::debug!(3, "✓ Simple ({} classes) matches Fast ({} classes)",
+                         simple_result.mask_classes.len(), fast_result.mask_classes.len());
+        }
+
+        // Use the fast result for actual processing
+        let combined_result = fast_result;
 
         if is_debug_level_enabled(3) {
             let num_original_tokens = llm_token_strings.len();
