@@ -1128,9 +1128,11 @@ impl GrammarConstraint {
         let terminals_count = parser.terminal_map.len();
         crate::debug!(4, "Simplifying skeleton DWA with substring parser ({} terminals)...", terminals_count);
         let removed = simplify_skeleton_dwa_with_parser(&mut skeleton_dwa, &parser, terminals_count);
+        skeleton_dwa.simplify();
         if removed > 0 {
-            crate::debug!(4, "Skeleton DWA simplification: {} transitions removed", removed);
+            crate::debug!(4, "Skeleton DWA simplification: {} transitions removed. Final DWA stats: {}", removed, skeleton_dwa.stats());
         }
+        analyze_tokenizer_state_equivalence(&skeleton_dwa);
 
         // Build Parser DWA
         let max_internal_llm_token_id = vocab.internal_max_llm_token;

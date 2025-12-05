@@ -243,14 +243,15 @@ impl DWA {
     }
 
     pub fn simplify_internal(&mut self) -> bool {
-        if self.states.len() > 1000 {
+        let initial_num_states = self.states.len();
+        if initial_num_states > 1000 {
             crate::debug!(6, "[DWA::simplify] Starting simplification. Initial stats: {}", self.stats());
         }
         
         // OPTIMIZATION: For small DWAs (< 1000 states), use a faster single-pass approach
         // instead of the iterative history-based algorithm. Template DWAs are typically small
         // and benefit from this optimization (saves ~200ms for 78 templates).
-        if self.states.len() < 1000 {
+        if initial_num_states < 1000 {
             let mut changed = false;
             let prune1 = self.prune_dead_ends();
             let min1 = self.minimize_states();
@@ -357,7 +358,7 @@ impl DWA {
             crate::debug!(4, "DWA simplification did not converge after {} iterations. Still changing: {:?}", MAX_OPTIMIZE_ITERATIONS, last_changes);
         }
 
-        if self.states.len() > 1000 {
+        if initial_num_states > 1000 {
             crate::debug!(6, "[DWA::simplify] Simplification finished. Total changed: {}. Final stats: {}", total_changed, self.stats());
         }
         total_changed

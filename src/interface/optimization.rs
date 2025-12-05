@@ -102,7 +102,7 @@ impl<'a> GrammarOptimizer<'a> {
         // 
         // UPDATE: With skeleton DWA simplification, grammar optimization can help, but
         // the tokenizer explosion still dominates. Keep threshold at 500 for now.
-        const MAX_PRODUCTIONS_FOR_OPTIMIZATION: usize = 500;
+        const MAX_PRODUCTIONS_FOR_OPTIMIZATION: usize = 50000;
         if self.grammar.productions.len() > MAX_PRODUCTIONS_FOR_OPTIMIZATION {
             debug!(4, "Skipping grammar optimization: {} productions exceeds threshold of {}",
                 self.grammar.productions.len(), MAX_PRODUCTIONS_FOR_OPTIMIZATION);
