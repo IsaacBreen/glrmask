@@ -99,7 +99,7 @@ impl<'a> GrammarOptimizer<'a> {
         // For these large grammars, it's faster to have a complex GLR parser (~5-6K states)
         // and simple tokenizer (~12K states) than a simple parser (~700 states) and 
         // complex tokenizer (~160K states).
-        const MAX_PRODUCTIONS_FOR_OPTIMIZATION: usize = 500;
+        const MAX_PRODUCTIONS_FOR_OPTIMIZATION: usize = 10000;
         if self.grammar.productions.len() > MAX_PRODUCTIONS_FOR_OPTIMIZATION {
             debug!(4, "Skipping grammar optimization: {} productions exceeds threshold of {}",
                 self.grammar.productions.len(), MAX_PRODUCTIONS_FOR_OPTIMIZATION);
