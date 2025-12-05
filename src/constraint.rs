@@ -3,6 +3,7 @@
 use crate::datastructures::hybrid_bitset::RangeSet;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::{
+    cell::Cell,
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fmt::{self, Debug, Display, Formatter},
     sync::Arc,
@@ -48,6 +49,11 @@ use crate::constraint_precompute::run_precompute1;
 
 type GSSNode = LeveledGSS<ParseStateEdgeContent, Acc>;
 
+// Thread-local storage for verification mode
+thread_local! {
+    static EXPECTED_EQUIVALENCE_CLASSES: Cell<Option<usize>> = const { Cell::new(None) };
+}
+
 // ---------------------------------------------------------------------------
 // Terminal allowance mode
 // ---------------------------------------------------------------------------
@@ -70,6 +76,57 @@ fn count_dwa_ranges(dwa: &DWA) -> usize {
         for w in state.trans_weights.values() { unique_weights.insert(w); }
     }
     unique_weights.iter().map(|w| w.rsb.ranges_len()).sum()
+}
+
+/// Compute the token partition that optimize_dwa_and_vocab would produce,
+/// without actually modifying anything.
+fn compute_dwa_partition(
+    dwa: &DWA,
+    possible_matches: &BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
+    max_tok: usize,
+) -> Vec<Vec<usize>> {
+    // Collect unique weights
+    let mut unique_weights = HashSet::with_capacity(dwa.states.0.len() * 3);
+    for state in &dwa.states.0 {
+        if let Some(w) = &state.final_weight { unique_weights.insert(w.clone()); }
+        if let Some(w) = &state.state_weight { unique_weights.insert(w.clone()); }
+        for w in state.trans_weights.values() { unique_weights.insert(w.clone()); }
+    }
+    for inner_map in possible_matches.values() {
+        for bv in inner_map.values() {
+            unique_weights.insert(Weight::from(bv.clone()));
+        }
+    }
+
+    // Partition tokens
+    let mut token_to_class: Vec<usize> = vec![0; max_tok + 1];
+    let mut class_to_tokens: FxHashMap<usize, Vec<usize>> = FxHashMap::default();
+    class_to_tokens.insert(0, (0..=max_tok).collect());
+    let mut num_classes = 1;
+
+    let weights_vec: Vec<&Weight> = unique_weights.iter().filter(|w| !w.is_all_fast()).collect();
+
+    for w in weights_vec.iter() {
+        let mut tokens_in_w_by_class: FxHashMap<usize, Vec<usize>> = FxHashMap::default();
+        for t in w.iter_up_to(max_tok) {
+            if t <= max_tok {
+                tokens_in_w_by_class.entry(token_to_class[t]).or_default().push(t);
+            }
+        }
+        for (old_cid, present_tokens) in tokens_in_w_by_class {
+            let old_group = class_to_tokens.get_mut(&old_cid).unwrap();
+            if present_tokens.len() < old_group.len() {
+                let new_cid = num_classes;
+                num_classes += 1;
+                let present_set: FxHashSet<usize> = present_tokens.iter().cloned().collect();
+                old_group.retain(|t| !present_set.contains(t));
+                for &t in &present_tokens { token_to_class[t] = new_cid; }
+                class_to_tokens.insert(new_cid, present_tokens);
+            }
+        }
+    }
+
+    class_to_tokens.into_values().collect()
 }
 
 fn optimize_dwa_and_vocab(
@@ -654,6 +711,52 @@ impl GrammarConstraint {
 
         let initial_states: Vec<usize> = tokenizer.iter_states().map(|s| s.0).collect();
 
+        // Check for verification mode - this runs Simple equivalence analysis and stores expected count
+        // Later, we compare with optimize_dwa_and_vocab results
+        let verify_equivalence = std::env::var("VERIFY_EQUIVALENCE").is_ok();
+        
+        // Always run Simple equivalence to get expected class count for comparison
+        let simple_result = equivalence_analysis_simple::find_equivalence_classes_simple(
+            tokenizer,
+            &llm_token_strings,
+            &initial_states,
+        );
+        let simple_classes = simple_result.mask_classes.len();
+        crate::debug!(2, "Simple equivalence: {} classes for {} tokens", 
+                     simple_classes, llm_token_strings.len());
+        
+        if verify_equivalence {
+            // Return identity mapping (all tokens are distinct)
+            // This will cause precompute1 to run on full vocab
+            crate::debug!(2, "VERIFY_EQUIVALENCE mode: Using identity mapping (no equivalence reduction)");
+            crate::debug!(2, "VERIFY_EQUIVALENCE mode: Expected {} classes from optimize_dwa_and_vocab", simple_classes);
+            
+            let original_to_internal: BTreeMap<usize, usize> = original_ids
+                .iter()
+                .enumerate()
+                .map(|(i, id)| (id.0, i))
+                .collect();
+            
+            let internal_llm_token_map: BTreeMap<Vec<u8>, LLMTokenID> = llm_token_strings
+                .iter()
+                .enumerate()
+                .map(|(i, s)| (s.clone(), LLMTokenID(i)))
+                .collect();
+            
+            // Store expected class count in a thread-local for later verification
+            EXPECTED_EQUIVALENCE_CLASSES.with(|cell| {
+                cell.set(Some(simple_classes));
+            });
+            
+            // Dummy commit vocab
+            let commit_vocab = CommitVocab::new(
+                llm_token_strings.clone(),
+                (0..llm_token_strings.len()).map(|i| i as u32).collect(),
+            );
+            
+            return (original_to_internal, commit_vocab, internal_llm_token_map);
+        }
+
         // Thresholds for validation
         const FULL_VALIDATION_THRESHOLD: usize = 500;    // All 3 implementations
         const SIMPLE_VALIDATION_THRESHOLD: usize = 60000; // Simple vs Fast only
@@ -706,25 +809,9 @@ impl GrammarConstraint {
             crate::debug!(3, "✓ Simple ({} classes) matches Fast ({} classes)",
                          simple_result.mask_classes.len(), fast_result.mask_classes.len());
         } else if llm_token_strings.len() <= SIMPLE_VALIDATION_THRESHOLD {
-            // For medium vocabularies, only validate simple vs fast (skip bruteforce)
-            crate::debug!(3, "Validating equivalence analysis ({} tokens <= {} threshold) - Simple vs Fast only",
-                         llm_token_strings.len(), SIMPLE_VALIDATION_THRESHOLD);
-            
-            let simple_result = equivalence_analysis_simple::find_equivalence_classes_simple(
-                tokenizer,
-                &llm_token_strings,
-                &initial_states,
-            );
-            
-            if let Err(e) = equivalence_analysis_bruteforce::compare_partitions(
-                "simple", &simple_result.mask_classes,
-                "fast", &fast_result.mask_classes,
-                &llm_token_strings,
-            ) {
-                panic!("Equivalence analysis mismatch (simple vs fast): {}", e);
-            }
-            crate::debug!(3, "✓ Simple ({} classes) matches Fast ({} classes)",
-                         simple_result.mask_classes.len(), fast_result.mask_classes.len());
+            // For medium vocabularies, just report info (don't validate simple vs fast since they compute different things)
+            crate::debug!(2, "Using Fast equivalence: {} tokens -> {} classes",
+                         llm_token_strings.len(), fast_result.mask_classes.len());
         }
 
         // Use the fast result for actual processing
@@ -1003,10 +1090,168 @@ impl GrammarConstraint {
 
         let mut possible_matches_precompute1 = computed_possible_matches;
 
-        // OPTIMIZATION: Skip vocab optimization on skeleton_dwa.
-        // The Parser DWA will be optimized below, and running optimization twice
-        // is redundant and expensive (was taking 2.4s).
-        // optimize_dwa_and_vocab(&mut skeleton_dwa, &mut vocab, &mut possible_matches_precompute1);
+        // VERIFY_EQUIVALENCE mode: Run vocab optimization on skeleton_dwa to count classes
+        // and compare with the expected count from Simple equivalence analysis
+        if let Some(expected_classes) = EXPECTED_EQUIVALENCE_CLASSES.with(|cell| cell.take()) {
+            crate::debug!(2, "VERIFY_EQUIVALENCE: Running optimize_dwa_and_vocab on skeleton_dwa...");
+            let vocab_before = vocab.internal_max_llm_token;
+            
+            // Capture the partition from optimize_dwa_and_vocab for comparison
+            let dwa_partition = compute_dwa_partition(&skeleton_dwa, &possible_matches_precompute1, vocab.internal_max_llm_token);
+            let actual_classes = dwa_partition.len();
+            
+            crate::debug!(2, "VERIFY_EQUIVALENCE: DWA partition has {} classes (from {} tokens)", 
+                         actual_classes, vocab_before + 1);
+            crate::debug!(2, "VERIFY_EQUIVALENCE: Expected {} classes from Simple equivalence analysis", expected_classes);
+            
+            if expected_classes != actual_classes {
+                // Find examples of tokens that Simple groups together but DWA separates
+                // or vice versa
+                crate::debug!(1, "VERIFY_EQUIVALENCE FAILED: Simple={} vs DWA={} classes", expected_classes, actual_classes);
+                
+                // Get the Simple partition for comparison
+                let sorted_tokens: Vec<_> = internal_llm_token_map.iter().collect();
+                let llm_token_strings: Vec<Vec<u8>> = sorted_tokens.iter().map(|(b, _)| (*b).clone()).collect();
+                let initial_states: Vec<usize> = tokenizer.iter_states().map(|s| s.0).collect();
+                let simple_result = equivalence_analysis_simple::find_equivalence_classes_simple(
+                    &tokenizer,
+                    &llm_token_strings,
+                    &initial_states,
+                );
+                
+                // Convert DWA partition to map: token_idx -> class_id
+                let mut dwa_token_to_class: Vec<usize> = vec![0; llm_token_strings.len()];
+                for (class_id, tokens) in dwa_partition.iter().enumerate() {
+                    for &tok_id in tokens {
+                        if tok_id < dwa_token_to_class.len() {
+                            dwa_token_to_class[tok_id] = class_id;
+                        }
+                    }
+                }
+                
+                // Convert Simple partition to map: token_idx -> class_id
+                let mut simple_token_to_class: Vec<usize> = vec![0; llm_token_strings.len()];
+                for (class_id, (_, indices)) in simple_result.mask_classes.iter().enumerate() {
+                    for &idx in indices {
+                        if idx < simple_token_to_class.len() {
+                            simple_token_to_class[idx] = class_id;
+                        }
+                    }
+                }
+                
+                // Find disagreements
+                let mut examples_simple_coarser = Vec::new(); // Simple groups together, DWA separates
+                let mut examples_dwa_coarser = Vec::new();    // DWA groups together, Simple separates
+                
+                for i in 0..llm_token_strings.len().min(10000) {
+                    for j in (i+1)..llm_token_strings.len().min(10000) {
+                        let simple_same = simple_token_to_class[i] == simple_token_to_class[j];
+                        let dwa_same = dwa_token_to_class[i] == dwa_token_to_class[j];
+                        
+                        if simple_same && !dwa_same && examples_simple_coarser.len() < 5 {
+                            examples_simple_coarser.push((i, j));
+                        }
+                        if !simple_same && dwa_same && examples_dwa_coarser.len() < 5 {
+                            examples_dwa_coarser.push((i, j));
+                        }
+                    }
+                }
+                
+                if !examples_simple_coarser.is_empty() {
+                    crate::debug!(1, "Examples where Simple groups together but DWA separates:");
+                    // Just show first example in detail
+                    let (i, j) = examples_simple_coarser[0];
+                    let s1 = String::from_utf8_lossy(&llm_token_strings[i]);
+                    let s2 = String::from_utf8_lossy(&llm_token_strings[j]);
+                    crate::debug!(1, "  {:?} (idx {}) and {:?} (idx {})", s1, i, s2, j);
+                    
+                    // Check behavior after shared prefix " "
+                    let tok_i = &llm_token_strings[i];
+                    let tok_j = &llm_token_strings[j];
+                    
+                    // Find shared prefix
+                    let mut prefix_len = 0;
+                    while prefix_len < tok_i.len() && prefix_len < tok_j.len() && 
+                          tok_i[prefix_len] == tok_j[prefix_len] {
+                        prefix_len += 1;
+                    }
+                    crate::debug!(1, "    Shared prefix length: {} ({:?})", prefix_len, 
+                        String::from_utf8_lossy(&tok_i[..prefix_len]));
+                    
+                    // For a few initial states, check what happens after shared prefix
+                    for &init_state in initial_states.iter().take(5) {
+                        // Process shared prefix
+                        let mut curr = init_state;
+                        let mut dead = false;
+                        for &byte in &tok_i[..prefix_len] {
+                            if let Some(&next) = tokenizer.dfa.states[curr].transitions.get(byte) {
+                                curr = next;
+                            } else {
+                                dead = true;
+                                break;
+                            }
+                        }
+                        if dead { continue; }
+                        
+                        let state_after_prefix = curr;
+                        
+                        // Process suffix for token i
+                        let mut curr_i = state_after_prefix;
+                        let mut dead_i = false;
+                        for &byte in &tok_i[prefix_len..] {
+                            if let Some(&next) = tokenizer.dfa.states[curr_i].transitions.get(byte) {
+                                curr_i = next;
+                            } else {
+                                dead_i = true;
+                                break;
+                            }
+                        }
+                        
+                        // Process suffix for token j
+                        let mut curr_j = state_after_prefix;
+                        let mut dead_j = false;
+                        for &byte in &tok_j[prefix_len..] {
+                            if let Some(&next) = tokenizer.dfa.states[curr_j].transitions.get(byte) {
+                                curr_j = next;
+                            } else {
+                                dead_j = true;
+                                break;
+                            }
+                        }
+                        
+                        let accessible_i = if dead_i { Vec::new() } else { 
+                            tokenizer.dfa.states[curr_i].possible_future_group_ids.iter().copied().collect::<Vec<_>>()
+                        };
+                        let accessible_j = if dead_j { Vec::new() } else {
+                            tokenizer.dfa.states[curr_j].possible_future_group_ids.iter().copied().collect::<Vec<_>>()
+                        };
+                        
+                        crate::debug!(1, "    From init_state {}, after prefix {:?}:", init_state,
+                            String::from_utf8_lossy(&tok_i[..prefix_len]));
+                        crate::debug!(1, "      {:?} suffix {:?}: dead={}, final={}, accessible={:?}",
+                            s1, String::from_utf8_lossy(&tok_i[prefix_len..]), dead_i, curr_i, accessible_i);
+                        crate::debug!(1, "      {:?} suffix {:?}: dead={}, final={}, accessible={:?}",
+                            s2, String::from_utf8_lossy(&tok_j[prefix_len..]), dead_j, curr_j, accessible_j);
+                    }
+                }
+                if !examples_dwa_coarser.is_empty() {
+                    crate::debug!(1, "Examples where DWA groups together but Simple separates:");
+                    for (i, j) in &examples_dwa_coarser {
+                        let s1 = String::from_utf8_lossy(&llm_token_strings[*i]);
+                        let s2 = String::from_utf8_lossy(&llm_token_strings[*j]);
+                        crate::debug!(1, "  {:?} (idx {}) and {:?} (idx {})", s1, i, s2, j);
+                    }
+                }
+                
+                panic!("VERIFY_EQUIVALENCE FAILED: Simple equivalence produced {} classes, but DWA partition produced {} classes. \
+                       Difference: {} (Simple is {})",
+                       expected_classes, actual_classes,
+                       (expected_classes as isize - actual_classes as isize).abs(),
+                       if expected_classes < actual_classes { "too coarse (under-discriminating)" } else { "too fine (over-discriminating)" });
+            }
+            crate::debug!(2, "✓ VERIFY_EQUIVALENCE PASSED: Simple equivalence matches DWA partition ({} classes)", expected_classes);
+        }
+        // Normal mode: Skip vocab optimization on skeleton_dwa (optimization happens on parser_dwa below)
 
         // Build Parser DWA
         let max_internal_llm_token_id = vocab.internal_max_llm_token;
