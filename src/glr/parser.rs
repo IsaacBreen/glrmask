@@ -399,6 +399,33 @@ impl GLRParser {
         self.init_glr_parser_with_acc()
     }
 
+    /// Initialize a parser state that is a superposition of ALL parser states.
+    /// This is used for substring parsing - determining what terminals can appear
+    /// at any position in a valid parse, not just from the start.
+    /// 
+    /// Returns a GSS where each state in the parser table has a single-node stack.
+    pub fn init_substring_parser(&self) -> GLRParserState {
+        let all_states: Vec<StateID> = self.table.keys().cloned().collect();
+        let stacks: Vec<_> = all_states.iter().map(|&state_id| {
+            let edge = ParseStateEdgeContent { state_id };
+            (vec![edge], Acc::new_fresh())
+        }).collect();
+        let gss = LeveledGSS::from_stacks(&stacks);
+        GLRParserState { parser: self, stack: gss }
+    }
+    
+    /// Check if a terminal can be accepted in ANY state of the parser.
+    /// This is a fast check used for pruning the skeleton DWA.
+    pub fn can_accept_terminal_anywhere(&self, terminal_id: TerminalID) -> bool {
+        // Check if the terminal has any shift or reduce action in any state
+        for (_state_id, row) in &self.table {
+            if row.has_action_for_terminal(terminal_id) {
+                return true;
+            }
+        }
+        false
+    }
+
     pub fn parse(&self, input: &[TerminalID], original_llm_vocab: Option<Arc<LLMVocab>>) -> GLRParserState {
         let mut state = self.init_glr_parser(original_llm_vocab);
         state.parse(input);
@@ -407,6 +434,17 @@ impl GLRParser {
 
     #[time_it]
     pub fn process_token_gss(&self, gss: &ParserGSS, token: TerminalID) -> ParserGSS {
+        self.process_token_gss_impl(gss, token, false)
+    }
+    
+    /// Process a token in substring parsing mode.
+    /// In substring mode, if a reduce pops below the stack, we use substring_state_id
+    /// as the fallback state for GOTO operations.
+    pub fn process_token_gss_substring(&self, gss: &ParserGSS, token: TerminalID) -> ParserGSS {
+        self.process_token_gss_impl(gss, token, true)
+    }
+    
+    fn process_token_gss_impl(&self, gss: &ParserGSS, token: TerminalID, substring_mode: bool) -> ParserGSS {
         if Some(token) == self.ignore_terminal_id {
             return gss.clone();
         }
@@ -432,7 +470,7 @@ impl GLRParser {
                     token,
                     |to| shifted.push(state_gss.push(ParseStateEdgeContent { state_id: *to })),
                     |nt_id, len, _pids| {
-                        self.apply_reduces(&state_gss, *len, *nt_id, &mut heads_by_state);
+                        self.apply_reduces_impl(&state_gss, *len, *nt_id, &mut heads_by_state, substring_mode);
                     },
                 );
             }
@@ -453,8 +491,41 @@ impl GLRParser {
         nt: NonTerminalID,
         heads_by_state: &mut BTreeMap<StateID, ParserGSS>,
     ) {
+        self.apply_reduces_impl(state_gss, len, nt, heads_by_state, false);
+    }
+    
+    /// Apply reduces with optional substring parsing mode.
+    /// In substring mode, if we pop below the stack bottom, we use the substring_state_id
+    /// as the revealed state for the GOTO operation.
+    fn apply_reduces_impl(
+        &self,
+        state_gss: &ParserGSS,
+        len: usize,
+        nt: NonTerminalID,
+        heads_by_state: &mut BTreeMap<StateID, ParserGSS>,
+        substring_mode: bool,
+    ) {
         let popped = state_gss.popn(len as isize);
+        
+        // Check if we've popped below the stack bottom
         if popped.is_empty() {
+            if substring_mode {
+                // In substring mode, use the substring_state_id for GOTO
+                if let Some(row) = get_row(&self.table, self.substring_state_id) {
+                    if let Some(goto) = row.gotos.get(&nt) {
+                        if let Some(next_id) = goto.state_id {
+                            // Create a new stack with just the substring state and the GOTO target
+                            let base_edge = ParseStateEdgeContent { state_id: self.substring_state_id };
+                            let base_gss = LeveledGSS::from_stacks(&[(vec![base_edge], Acc::new_fresh())]);
+                            let pushed = base_gss.push(ParseStateEdgeContent { state_id: next_id });
+                            heads_by_state
+                                .entry(next_id)
+                                .and_modify(|acc| *acc = acc.merge(&pushed))
+                                .or_insert(pushed);
+                        }
+                    }
+                }
+            }
             return;
         }
 

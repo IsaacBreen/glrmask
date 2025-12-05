@@ -494,3 +494,127 @@ pub fn run_precompute1(
 
     helper.finish()
 }
+
+/// Simplify a skeleton DWA by pruning transitions that cannot lead to valid parses.
+/// 
+/// Simplify a skeleton DWA by removing transitions that can never lead to valid parses.
+/// 
+/// This uses a fast state-set approach: track which parser states are reachable at each
+/// DWA state, and remove terminal transitions where no reachable parser state can
+/// shift that terminal.
+/// 
+/// The skeleton DWA has:
+/// - Start state with outgoing edges labeled (tokenizer_state_id + terminals_count) 
+/// - Internal transitions labeled 0..terminals_count (terminal IDs)
+/// 
+/// Returns the number of transitions removed.
+pub fn simplify_skeleton_dwa_with_parser(
+    dwa: &mut DWA,
+    parser: &GLRParser,
+    terminals_count: usize,
+) -> usize {
+    use std::collections::{HashSet, VecDeque};
+    use crate::glr::table::{TerminalID, StateID, get_row};
+    
+    let start = std::time::Instant::now();
+    
+    type DWAStateID = usize;
+    type ParserStateSet = HashSet<StateID>;
+    
+    // Precompute: for each terminal, which parser states can shift it?
+    let mut can_shift_terminal: HashMap<TerminalID, ParserStateSet> = HashMap::new();
+    let all_parser_states: ParserStateSet = parser.table.keys().cloned().collect();
+    
+    for &state_id in &all_parser_states {
+        if let Some(row) = get_row(&parser.table, state_id) {
+            for (term_id, action) in row.get_shifts_and_reduces_map() {
+                // Check if this action includes a shift
+                let has_shift = match action {
+                    crate::glr::table::Stage7ShiftsAndReducesLookaheadValue::Shift(_) => true,
+                    crate::glr::table::Stage7ShiftsAndReducesLookaheadValue::Split { shift, .. } => shift.is_some(),
+                    _ => false,
+                };
+                if has_shift {
+                    can_shift_terminal.entry(term_id).or_default().insert(state_id);
+                }
+            }
+        }
+    }
+    
+    // Now do BFS tracking only which terminals are possible (not parser states)
+    // We use a simplified model: at each DWA state, track which terminals could be accepted next
+    let mut visited: HashSet<DWAStateID> = HashSet::new();
+    let mut queue: VecDeque<DWAStateID> = VecDeque::new();
+    
+    let dwa_start = dwa.body.start_state;
+    queue.push_back(dwa_start);
+    visited.insert(dwa_start);
+    
+    let offset = terminals_count as Label;
+    
+    // Edges to remove
+    let mut edges_to_remove: Vec<(DWAStateID, Label)> = Vec::new();
+    
+    // First pass: collect all DWA states reachable from start via tokenizer state edges
+    let start_transitions: Vec<_> = dwa.states[dwa_start].transitions.iter()
+        .map(|(&label, &target)| (label, target))
+        .collect();
+    
+    for (label, target) in start_transitions {
+        if label >= offset {
+            if !visited.contains(&target) {
+                visited.insert(target);
+                queue.push_back(target);
+            }
+        }
+    }
+    
+    // BFS through the DWA
+    // For substring parsing, we consider ALL terminals valid initially
+    // But we mark terminals as "definitely invalid" if no parser state can shift them
+    let valid_terminals: HashSet<TerminalID> = can_shift_terminal.keys().cloned().collect();
+    
+    while let Some(dwa_state) = queue.pop_front() {
+        if dwa_state == dwa_start {
+            continue;
+        }
+        
+        let transitions: Vec<_> = dwa.states[dwa_state].transitions.iter()
+            .map(|(&label, &target)| (label, target))
+            .collect();
+        
+        for (label, target) in transitions {
+            if label >= offset {
+                // Tokenizer state edge - just continue traversal
+                if !visited.contains(&target) {
+                    visited.insert(target);
+                    queue.push_back(target);
+                }
+            } else {
+                // Terminal edge - check if this terminal is globally valid
+                let terminal_id = TerminalID(label as usize);
+                if !valid_terminals.contains(&terminal_id) {
+                    // No parser state can shift this terminal - remove it
+                    edges_to_remove.push((dwa_state, label));
+                } else {
+                    // Terminal is valid, continue traversal
+                    if !visited.contains(&target) {
+                        visited.insert(target);
+                        queue.push_back(target);
+                    }
+                }
+            }
+        }
+    }
+    
+    // Remove the marked edges
+    let removed_count = edges_to_remove.len();
+    for (state, label) in edges_to_remove {
+        dwa.states[state].transitions.remove(&label);
+        dwa.states[state].trans_weights.remove(&label);
+    }
+    
+    crate::debug!(4, "Substring parser simplification: removed {} transitions in {:?}", removed_count, start.elapsed());
+    
+    removed_count
+}

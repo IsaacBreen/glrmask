@@ -44,7 +44,7 @@ use crate::precompute4::weighted_automata::{RangeSet as WARangeSet, Weight};
 // Import from new modules
 use crate::state_equivalence_analysis_finite_automata::find_state_equivalence_classes;
 pub use crate::constraint_vocab::*;
-use crate::constraint_precompute::run_precompute1;
+use crate::constraint_precompute::{run_precompute1, simplify_skeleton_dwa_with_parser};
 
 type GSSNode = LeveledGSS<ParseStateEdgeContent, Acc>;
 
@@ -1119,6 +1119,18 @@ impl GrammarConstraint {
         // is redundant and expensive (was taking 2.4s).
         optimize_dwa_and_vocab(&mut skeleton_dwa, &mut vocab, &mut possible_matches_precompute1);
         analyze_tokenizer_state_equivalence(&skeleton_dwa);
+
+        // OPTIMIZATION: Simplify skeleton DWA using substring parsing.
+        // This prunes transitions that cannot lead to valid parses, reducing
+        // the work in Parser DWA construction.
+        // NOTE: This is especially important when grammar optimization is enabled,
+        // as the simplified grammar has fewer parser states to track.
+        let terminals_count = parser.terminal_map.len();
+        crate::debug!(4, "Simplifying skeleton DWA with substring parser ({} terminals)...", terminals_count);
+        let removed = simplify_skeleton_dwa_with_parser(&mut skeleton_dwa, &parser, terminals_count);
+        if removed > 0 {
+            crate::debug!(4, "Skeleton DWA simplification: {} transitions removed", removed);
+        }
 
         // Build Parser DWA
         let max_internal_llm_token_id = vocab.internal_max_llm_token;
