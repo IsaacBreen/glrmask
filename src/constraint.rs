@@ -705,8 +705,55 @@ impl GrammarConstraint {
             original_ids.push(**id);
         }
 
-        let initial_states: Vec<usize> = tokenizer.iter_states().map(|s| s.0).collect();
-        crate::debug!(3, "Equivalence analysis: {} initial states, {} tokens", initial_states.len(), llm_token_strings.len());
+        let mut initial_states: Vec<usize> = tokenizer.iter_states().map(|s| s.0).collect();
+
+        // Only keep tokenizer states that can ever yield grammar-relevant captures; this dramatically
+        // reduces the equivalence workload for large DFAs without changing observable behavior.
+        if !grammar_group_ids.is_empty() {
+            let filtered: Vec<usize> = initial_states
+                .iter()
+                .copied()
+                .filter(|&sid| {
+                    let st = &tokenizer.dfa.states[sid];
+                    st.finalizers.iter().any(|gid| grammar_group_ids.contains(&gid))
+                        || st.possible_future_group_ids.iter().any(|gid| grammar_group_ids.contains(&gid))
+                })
+                .collect();
+
+            if !filtered.is_empty() && filtered.len() < initial_states.len() {
+                if is_debug_level_enabled(3) {
+                    crate::debug!(
+                        3,
+                        "Pruned tokenizer states for equivalence: {} -> {} (grammar groups {})",
+                        initial_states.len(),
+                        filtered.len(),
+                        grammar_group_ids.len()
+                    );
+                }
+                initial_states = filtered;
+            }
+        }
+
+        // For massive DFAs, restrict equivalence analysis to the tokenizer start state by default.
+        if initial_states.len() > 10_000 && std::env::var("FULL_EQ_STATES").is_err() {
+            let start = tokenizer.initial_state_id().0;
+            if is_debug_level_enabled(3) {
+                crate::debug!(
+                    3,
+                    "Equivalence analysis: collapsing state set {} -> 1 (start state only)",
+                    initial_states.len()
+                );
+            }
+            initial_states.clear();
+            initial_states.push(start);
+        }
+
+        crate::debug!(
+            3,
+            "Equivalence analysis: {} initial states, {} tokens",
+            initial_states.len(),
+            llm_token_strings.len()
+        );
 
         let mask_classes = equivalence_analysis::find_equivalence_classes(
             tokenizer,

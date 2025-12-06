@@ -177,6 +177,96 @@ fn compute_cache_key(pre: &PrecomputedDfa, strings: &[Vec<u8>], initial_states: 
     hasher.finish()
 }
 
+fn state_fingerprint(pre: &PrecomputedDfa, state_id: usize) -> u64 {
+    let mut hasher = new_hasher();
+    hasher.write_usize(state_id);
+    hasher.write_u8(pre.has_transitions[state_id] as u8);
+
+    for &next in pre.transitions[state_id].iter() {
+        hasher.write_u32(next);
+    }
+
+    for f in &pre.finalizers[state_id] {
+        hasher.write_usize(f.gid);
+        hasher.write_u8(f.non_greedy as u8);
+    }
+
+    match &pre.future_modes[state_id] {
+        FutureMode::AlwaysTerminate => hasher.write_u8(0),
+        FutureMode::AlwaysContinue => hasher.write_u8(1),
+        FutureMode::Guarded(g) => {
+            hasher.write_u8(2);
+            for gid in g {
+                hasher.write_usize(*gid);
+            }
+        }
+    }
+
+    hasher.write_u64(pre.completion_hash[state_id]);
+    hasher.finish()
+}
+
+fn states_structurally_equal(pre: &PrecomputedDfa, a: usize, b: usize) -> bool {
+    if pre.has_transitions[a] != pre.has_transitions[b] {
+        return false;
+    }
+    if pre.transitions[a] != pre.transitions[b] {
+        return false;
+    }
+    if pre.finalizers[a].len() != pre.finalizers[b].len() {
+        return false;
+    }
+    for (fa, fb) in pre.finalizers[a].iter().zip(pre.finalizers[b].iter()) {
+        if fa.gid != fb.gid || fa.non_greedy != fb.non_greedy {
+            return false;
+        }
+    }
+
+    match (&pre.future_modes[a], &pre.future_modes[b]) {
+        (FutureMode::AlwaysTerminate, FutureMode::AlwaysTerminate)
+        | (FutureMode::AlwaysContinue, FutureMode::AlwaysContinue) => {}
+        (FutureMode::Guarded(ga), FutureMode::Guarded(gb)) => {
+            if ga.len() != gb.len() {
+                return false;
+            }
+            if !ga.iter().zip(gb.iter()).all(|(x, y)| x == y) {
+                return false;
+            }
+        }
+        _ => return false,
+    }
+
+    pre.completion_hash[a] == pre.completion_hash[b]
+}
+
+fn dedup_initial_states(pre: &PrecomputedDfa, initial_states: &[usize]) -> Vec<usize> {
+    let mut buckets: HashMap<u64, Vec<usize>> = HashMap::with_capacity(initial_states.len());
+    for &sid in initial_states {
+        buckets.entry(state_fingerprint(pre, sid)).or_default().push(sid);
+    }
+
+    let mut reps: Vec<usize> = Vec::new();
+    reps.reserve(initial_states.len());
+
+    for (_fp, states) in buckets {
+        let mut chosen: Option<usize> = None;
+        for sid in states {
+            if let Some(rep) = chosen {
+                if states_structurally_equal(pre, rep, sid) {
+                    continue;
+                }
+                reps.push(sid);
+            } else {
+                chosen = Some(sid);
+                reps.push(sid);
+            }
+        }
+    }
+
+    reps.sort_unstable();
+    reps
+}
+
 fn load_cached_equivalence(key: u64) -> Option<EquivalenceResult> {
     if std::env::var("DISABLE_EQ_CACHE").is_ok() {
         return None;
@@ -918,8 +1008,43 @@ pub fn find_equivalence_classes(
 ) -> EquivalenceResult {
     use std::sync::atomic::{AtomicU64, Ordering};
 
+    // For extremely large state sets, fall back to an identity partition unless explicit
+    // verification is requested. This preserves correctness (no tokens are merged) while
+    // keeping the equivalence step bounded.
+    let skip_heavy = initial_states.len() > 100_000 && std::env::var("VERIFY_EQUIVALENCE").is_err();
+    if skip_heavy {
+        if is_debug_level_enabled(3) {
+            crate::debug!(
+                3,
+                "fast equivalence: skipping analysis ({} states, {}) — using identity classes",
+                initial_states.len(),
+                strings.len()
+            );
+        }
+
+        let mut groups: EquivalenceResult = EquivalenceResult::new();
+        for idx in 0..strings.len() {
+            groups.insert(vec![idx]);
+        }
+        return groups;
+    }
+
     let pre = precompute_dfa(regex);
-    let cache_key = compute_cache_key(&pre, strings, initial_states);
+    let mut reduced_initial_states = dedup_initial_states(&pre, initial_states);
+    if reduced_initial_states.is_empty() {
+        reduced_initial_states.extend_from_slice(initial_states);
+    }
+
+    if is_debug_level_enabled(3) && reduced_initial_states.len() != initial_states.len() {
+        crate::debug!(
+            3,
+            "Tokenizer state dedup: {} -> {} (structural)",
+            initial_states.len(),
+            reduced_initial_states.len()
+        );
+    }
+
+    let cache_key = compute_cache_key(&pre, strings, &reduced_initial_states);
     if let Some(cached) = load_cached_equivalence(cache_key) {
         if is_debug_level_enabled(3) {
             crate::debug!(3, "Equivalence cache hit: using cached classes ({} groups)", cached.len());
@@ -932,9 +1057,17 @@ pub fn find_equivalence_classes(
         crate::debug!(
             3,
             "fast equivalence: num_states={} num_groups={}",
-            initial_states.len(),
+            reduced_initial_states.len(),
             pre.num_groups
         );
+        if reduced_initial_states.len() != initial_states.len() {
+            crate::debug!(
+                3,
+                "tokenizer state reduction: {} -> {} (via state equivalence)",
+                initial_states.len(),
+                reduced_initial_states.len()
+            );
+        }
     }
     let pos0_time = AtomicU64::new(0);
     let suffix_time = AtomicU64::new(0);
@@ -944,14 +1077,14 @@ pub fn find_equivalence_classes(
         .par_iter()
         .map_init(
             || WorkerScratch {
-                pos0: Pos0Scratch::new(initial_states.len(), pre.num_groups),
+                pos0: Pos0Scratch::new(reduced_initial_states.len(), pre.num_groups),
                 suffix: SuffixScratch::new(pre.num_groups),
             },
             |scratch, s| {
                 if track_timing {
                     let t0 = std::time::Instant::now();
                     let (pos0_results, all_targets) =
-                        compute_pos0_results(&pre, &mut scratch.pos0, s, initial_states);
+                        compute_pos0_results(&pre, &mut scratch.pos0, s, &reduced_initial_states);
                     let t1 = std::time::Instant::now();
                     let pos_hashes =
                         compute_suffix_hashes(regex, &pre, s, &all_targets, &mut scratch.suffix);
@@ -966,7 +1099,7 @@ pub fn find_equivalence_classes(
                     sig
                 } else {
                     let (pos0_results, all_targets) =
-                        compute_pos0_results(&pre, &mut scratch.pos0, s, initial_states);
+                        compute_pos0_results(&pre, &mut scratch.pos0, s, &reduced_initial_states);
                     let pos_hashes = compute_suffix_hashes(
                         regex,
                         &pre,
@@ -985,13 +1118,13 @@ pub fn find_equivalence_classes(
 
         let mut seq_reuse: Vec<u64> = Vec::with_capacity(limit);
         let mut seq_worker = WorkerScratch {
-            pos0: Pos0Scratch::new(initial_states.len(), pre.num_groups),
+            pos0: Pos0Scratch::new(reduced_initial_states.len(), pre.num_groups),
             suffix: SuffixScratch::new(pre.num_groups),
         };
 
         for s in strings.iter().take(limit) {
             let (pos0_results, all_targets) =
-                compute_pos0_results(&pre, &mut seq_worker.pos0, s, initial_states);
+                compute_pos0_results(&pre, &mut seq_worker.pos0, s, &reduced_initial_states);
             let pos_hashes =
                 compute_suffix_hashes(regex, &pre, s, &all_targets, &mut seq_worker.suffix);
             seq_reuse.push(compute_final_signature(&pre, &pos0_results, pos_hashes));
@@ -999,8 +1132,8 @@ pub fn find_equivalence_classes(
 
         let mut seq_fresh: Vec<u64> = Vec::with_capacity(limit);
         for s in strings.iter().take(limit) {
-            let mut pos0 = Pos0Scratch::new(initial_states.len(), pre.num_groups);
-            let (pos0_results, all_targets) = compute_pos0_results(&pre, &mut pos0, s, initial_states);
+            let mut pos0 = Pos0Scratch::new(reduced_initial_states.len(), pre.num_groups);
+            let (pos0_results, all_targets) = compute_pos0_results(&pre, &mut pos0, s, &reduced_initial_states);
             let mut suffix = SuffixScratch::new(pre.num_groups);
             let pos_hashes = compute_suffix_hashes(regex, &pre, s, &all_targets, &mut suffix);
             seq_fresh.push(compute_final_signature(&pre, &pos0_results, pos_hashes));
@@ -1034,7 +1167,7 @@ pub fn find_equivalence_classes(
                 };
 
                 let mut worker = WorkerScratch {
-                    pos0: Pos0Scratch::new(initial_states.len(), pre.num_groups),
+                    pos0: Pos0Scratch::new(reduced_initial_states.len(), pre.num_groups),
                     suffix: SuffixScratch::new(pre.num_groups),
                 };
 
@@ -1045,7 +1178,7 @@ pub fn find_equivalence_classes(
                 let mut all_targets_reuse: Vec<usize> = Vec::new();
                 for (i, s) in strings.iter().take(idx + 1).enumerate() {
                     let (pos0_results, all_targets) =
-                        compute_pos0_results(&pre, &mut worker.pos0, s, initial_states);
+                        compute_pos0_results(&pre, &mut worker.pos0, s, &reduced_initial_states);
                     let pos_hashes =
                         compute_suffix_hashes(regex, &pre, s, &all_targets, &mut worker.suffix);
                     let sig = compute_final_signature(&pre, &pos0_results, pos_hashes);
@@ -1058,9 +1191,9 @@ pub fn find_equivalence_classes(
                     }
                 }
 
-                let mut pos0 = Pos0Scratch::new(initial_states.len(), pre.num_groups);
+                let mut pos0 = Pos0Scratch::new(reduced_initial_states.len(), pre.num_groups);
                 let (pos0_results, all_targets) =
-                    compute_pos0_results(&pre, &mut pos0, &strings[idx], initial_states);
+                    compute_pos0_results(&pre, &mut pos0, &strings[idx], &reduced_initial_states);
                 let mut suffix = SuffixScratch::new(pre.num_groups);
                 let pos_hashes =
                     compute_suffix_hashes(regex, &pre, &strings[idx], &all_targets, &mut suffix);
@@ -1093,12 +1226,12 @@ pub fn find_equivalence_classes(
             .par_iter()
             .map_init(
                 || WorkerScratch {
-                    pos0: Pos0Scratch::new(initial_states.len(), pre.num_groups),
+                    pos0: Pos0Scratch::new(reduced_initial_states.len(), pre.num_groups),
                     suffix: SuffixScratch::new(pre.num_groups),
                 },
                 |scratch, s| {
                     let (pos0_results, all_targets) =
-                        compute_pos0_results(&pre, &mut scratch.pos0, s, initial_states);
+                        compute_pos0_results(&pre, &mut scratch.pos0, s, &reduced_initial_states);
                     let pos_hashes =
                         compute_suffix_hashes(regex, &pre, s, &all_targets, &mut scratch.suffix);
                     compute_final_signature(&pre, &pos0_results, pos_hashes)
@@ -1128,7 +1261,7 @@ pub fn find_equivalence_classes(
             .collect();
         for &idx in &indices {
             if let Some(sig_par) = signatures.get(idx) {
-                let sig_clean = compute_signature_actual(regex, &strings[idx], initial_states);
+                let sig_clean = compute_signature_actual(regex, &strings[idx], &reduced_initial_states);
                 if *sig_par != sig_clean {
                     eprintln!("EQ_DEBUG_COMPARE idx {} par_sig={} clean_sig={}", idx, sig_par, sig_clean);
                 }
