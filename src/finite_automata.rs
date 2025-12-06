@@ -3338,17 +3338,9 @@ impl Regex {
                     flat_trellis.insert(target_pos, (None, Vec::new()));
                 }
             }
-            flat_trellis.get_mut(&pos).unwrap().1 = new_edges;
-
-            if let Some(s) = result.end_state {
-                let end_pos = pos + slice.len();
-                if visited.insert(end_pos) {
-                    queue.push_back(end_pos);
-                    flat_trellis.insert(end_pos, (Some(s), Vec::new()));
-                } else if let Some(entry) = flat_trellis.get_mut(&end_pos) {
-                    entry.0 = Some(s);
-                }
-            }
+            let node = flat_trellis.get_mut(&pos).unwrap();
+            node.0 = result.end_state;
+            node.1 = new_edges;
         }
         flat_trellis
     }
