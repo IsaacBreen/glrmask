@@ -7,6 +7,7 @@ use ahash::{AHasher, RandomState};
 use hashbrown::HashMap;
 use rayon::prelude::*;
 use smallvec::SmallVec;
+use std::cell::UnsafeCell;
 use std::collections::BTreeSet;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{BuildHasher, Hash, Hasher};
@@ -73,12 +74,66 @@ struct Pos0Scratch {
     touched_groups: Vec<GroupList>,
     touched_positions: Vec<usize>,
     touched_states: Vec<usize>,
-    active_states: Vec<usize>,
-    next_active_states: Vec<usize>,
     base_offsets: Vec<usize>,
     results: Vec<(Option<usize>, EdgeList)>,
     seen_target: Vec<bool>,
     all_targets: Vec<usize>,
+}
+
+impl Pos0Scratch {
+    fn new(num_states: usize, num_groups: usize) -> Self {
+        let base_offsets: Vec<usize> = (0..num_states)
+            .map(|idx| idx.saturating_mul(num_groups))
+            .collect();
+        Pos0Scratch {
+            current_states: vec![0; num_states],
+            done: vec![false; num_states],
+            match_positions: vec![NONE_POS; num_states.saturating_mul(num_groups)],
+            touched_groups: vec![GroupList::new(); num_states],
+            touched_positions: Vec::new(),
+            touched_states: Vec::new(),
+            base_offsets,
+            results: Vec::with_capacity(num_states),
+            seen_target: Vec::new(),
+            all_targets: Vec::new(),
+        }
+    }
+
+    fn reset(&mut self, initial_states: &[usize], num_groups: usize) {
+        let len = initial_states.len();
+        if len > self.current_states.len() {
+            // If the scratch space is too small, we must resize everything.
+            // This can happen if the chunk size changes or if we initialized with a small size.
+            self.current_states.resize(len, 0);
+            self.done.resize(len, false);
+            self.match_positions.resize(len.saturating_mul(num_groups), NONE_POS);
+            self.touched_groups.resize(len, GroupList::new());
+            self.base_offsets.clear();
+            for i in 0..len {
+                self.base_offsets.push(i * num_groups);
+            }
+            self.results.resize(len, (None, EdgeList::new()));
+        }
+
+        self.current_states[..len].clone_from_slice(initial_states);
+        self.done.fill(false);
+        if !self.match_positions.is_empty() {
+            self.match_positions.fill(NONE_POS);
+        }
+        self.touched_positions.clear();
+        for groups in &mut self.touched_groups {
+            groups.clear();
+        }
+        self.touched_states.clear();
+        if num_groups == 0 {
+            return;
+        }
+
+        if self.results.len() < self.current_states.len() {
+            self.results
+                .resize_with(self.current_states.len(), || (None, EdgeList::new()));
+        }
+    }
 }
 
 struct SuffixScratch {
@@ -89,6 +144,25 @@ struct SuffixScratch {
     order: Vec<usize>,
     nodes: Vec<Option<(u64, EdgeList)>>,
     pos_hashes: Vec<u64>,
+}
+
+struct SuffixCache {
+    hashes: UnsafeCell<Vec<Option<u64>>>,
+}
+
+unsafe impl Sync for SuffixCache {}
+
+impl SuffixCache {
+    fn new(len: usize) -> Self {
+        Self {
+            hashes: UnsafeCell::new(vec![None; len + 1]),
+        }
+    }
+    
+    #[allow(clippy::mut_from_ref)]
+    fn get_mut(&self) -> &mut Vec<Option<u64>> {
+        unsafe { &mut *self.hashes.get() }
+    }
 }
 
 struct WorkerScratch {
@@ -300,51 +374,6 @@ fn precompute_dfa(regex: &Regex) -> PrecomputedDfa {
     }
 }
 
-impl Pos0Scratch {
-    fn new(num_states: usize, num_groups: usize) -> Self {
-        let base_offsets: Vec<usize> = (0..num_states)
-            .map(|idx| idx.saturating_mul(num_groups))
-            .collect();
-        Pos0Scratch {
-            current_states: vec![0; num_states],
-            done: vec![false; num_states],
-            match_positions: vec![NONE_POS; num_states.saturating_mul(num_groups)],
-            touched_groups: vec![GroupList::new(); num_states],
-            touched_positions: Vec::new(),
-            touched_states: Vec::new(),
-            active_states: Vec::with_capacity(num_states),
-            next_active_states: Vec::with_capacity(num_states),
-            base_offsets,
-            results: Vec::with_capacity(num_states),
-            seen_target: Vec::new(),
-            all_targets: Vec::new(),
-        }
-    }
-
-    fn reset(&mut self, initial_states: &[usize], num_groups: usize) {
-        debug_assert_eq!(self.current_states.len(), initial_states.len());
-        self.current_states.clone_from_slice(initial_states);
-        self.done.fill(false);
-        if !self.match_positions.is_empty() {
-            self.match_positions.fill(NONE_POS);
-        }
-        self.touched_positions.clear();
-        for groups in &mut self.touched_groups {
-            groups.clear();
-        }
-        self.touched_states.clear();
-        self.active_states.clear();
-        self.next_active_states.clear();
-        if num_groups == 0 {
-            return;
-        }
-
-        if self.results.len() < self.current_states.len() {
-            self.results
-                .resize_with(self.current_states.len(), || (None, EdgeList::new()));
-        }
-    }
-}
 
 impl SuffixScratch {
     fn new(num_groups: usize) -> Self {
@@ -438,8 +467,6 @@ fn compute_pos0_results<'a>(
     let touched_positions = &mut scratch.touched_positions;
     let touched_states = &mut scratch.touched_states;
     let base_offsets = &scratch.base_offsets;
-    let active_states = &mut scratch.active_states;
-    let next_active_states = &mut scratch.next_active_states;
 
     for (i, &state) in initial_states.iter().enumerate() {
         let base = base_offsets[i];
@@ -467,23 +494,16 @@ fn compute_pos0_results<'a>(
         }
     }
 
-    active_states.clear();
-    next_active_states.clear();
-    for i in 0..num_states {
-        if !done[i] {
-            active_states.push(i);
-        }
-    }
-
     for (pos, &byte) in slice.iter().enumerate() {
-        if active_states.is_empty() {
-            break;
-        }
         let position = (pos + 1) as u32;
+        let mut any_active = false;
 
-        next_active_states.clear();
+        for i in 0..num_states {
+            if done[i] {
+                continue;
+            }
+            any_active = true;
 
-        for &i in active_states.iter() {
             let base = base_offsets[i];
             let current = current_states[i];
             let next_state = pre.transitions[current][byte as usize];
@@ -535,15 +555,15 @@ fn compute_pos0_results<'a>(
 
                 if terminate {
                     done[i] = true;
-                } else {
-                    next_active_states.push(i);
                 }
             } else {
                 done[i] = true;
             }
         }
 
-        std::mem::swap(active_states, next_active_states);
+        if !any_active {
+            break;
+        }
     }
 
     for i in 0..num_states {
@@ -890,17 +910,119 @@ pub fn debug_pos0_edges(
         .collect()
 }
 
+fn compute_suffix_hashes_incremental<'a>(
+    pre: &PrecomputedDfa,
+    slice: &[u8],
+    new_targets: &[usize],
+    cache: &mut Vec<Option<u64>>,
+    scratch: &'a mut SuffixScratch,
+) {
+    scratch.ensure_capacity(slice.len());
+    
+    for &pos in new_targets {
+        if pos <= slice.len() && cache[pos].is_none() && !scratch.visited[pos] {
+            scratch.visited[pos] = true;
+            scratch.queue.push(pos);
+        }
+    }
+    
+    if scratch.queue.is_empty() {
+        return;
+    }
+    
+    let mut cursor = 0;
+    while cursor < scratch.queue.len() {
+        let pos = scratch.queue[cursor];
+        cursor += 1;
+        
+        let (end_state, edges) = execute_suffix(pre, &slice[pos..], pos, scratch);
+        
+        for &(_, target) in &edges {
+            if target <= slice.len() && cache[target].is_none() && !scratch.visited[target] {
+                scratch.visited[target] = true;
+                scratch.queue.push(target);
+            }
+        }
+        
+        let completion_hash = end_state
+            .map(|id| pre.completion_hash[id])
+            .unwrap_or(pre.none_completion_hash);
+        scratch.nodes[pos] = Some((completion_hash, edges));
+        scratch.order.push(pos);
+    }
+    
+    scratch.order.sort_unstable_by(|a, b| b.cmp(a));
+    
+    for pos in scratch.order.drain(..) {
+        if let Some((completion_hash, edges)) = scratch.nodes[pos].take() {
+            let mut hasher = new_hasher();
+            hasher.write_u64(completion_hash);
+            
+            for (group_id, target) in edges {
+                let target_hash = if let Some(h) = cache[target] {
+                    h
+                } else {
+                    0 
+                };
+                hasher.write_u64(group_id as u64);
+                hasher.write_u64(target_hash);
+            }
+            
+            cache[pos] = Some(hasher.finish());
+        }
+    }
+}
+
+fn compute_chunk_signature(
+    pre: &PrecomputedDfa,
+    token: &[u8],
+    chunk_states: &[usize],
+    pos0: &mut Pos0Scratch,
+    suffix_scratch: &mut SuffixScratch,
+    cache: &mut Vec<Option<u64>>,
+) -> u64 {
+    let (pos0_results, all_targets) = compute_pos0_results(pre, pos0, token, chunk_states);
+    
+    compute_suffix_hashes_incremental(pre, token, all_targets, cache, suffix_scratch);
+    
+    let mut hasher = new_hasher();
+    for (end_state, edges) in pos0_results {
+        let mut state_hasher = new_hasher();
+        let completion_hash = end_state
+            .map(|id| pre.completion_hash[id])
+            .unwrap_or(pre.none_completion_hash);
+        state_hasher.write_u64(completion_hash);
+        
+        for (gid, target) in edges {
+            let target_hash = cache[*target].unwrap_or(0);
+            state_hasher.write_u64(*gid as u64);
+            state_hasher.write_u64(target_hash);
+        }
+        
+        hasher.write_u64(state_hasher.finish());
+    }
+    
+    hasher.finish()
+}
+
 pub fn compute_signature_actual(
     regex: &Regex,
     slice: &[u8],
     initial_states: &[usize],
 ) -> u64 {
     let pre = precompute_dfa(regex);
-    let mut scratch = Pos0Scratch::new(initial_states.len(), pre.num_groups);
-    let (pos0_results, all_targets) = compute_pos0_results(&pre, &mut scratch, slice, initial_states);
+    let mut pos0 = Pos0Scratch::new(initial_states.len(), pre.num_groups);
     let mut suffix_scratch = SuffixScratch::new(pre.num_groups);
-    let pos_hashes = compute_suffix_hashes(regex, &pre, slice, &all_targets, &mut suffix_scratch);
-    compute_final_signature(&pre, &pos0_results, pos_hashes)
+    let mut cache = vec![None; slice.len() + 1];
+    
+    compute_chunk_signature(
+        &pre,
+        slice,
+        initial_states,
+        &mut pos0,
+        &mut suffix_scratch,
+        &mut cache
+    )
 }
 
 pub fn find_equivalence_classes(
@@ -908,261 +1030,125 @@ pub fn find_equivalence_classes(
     strings: &[Vec<u8>],
     initial_states: &[usize],
 ) -> EquivalenceResult {
-    use std::sync::atomic::{AtomicU64, Ordering};
-
     let pre = precompute_dfa(regex);
     let mut reduced_initial_states = dedup_initial_states(&pre, initial_states);
     if reduced_initial_states.is_empty() {
         reduced_initial_states.extend_from_slice(initial_states);
     }
 
-    if is_debug_level_enabled(3) && reduced_initial_states.len() != initial_states.len() {
-        crate::debug!(
-            3,
-            "Tokenizer state dedup: {} -> {} (structural)",
-            initial_states.len(),
-            reduced_initial_states.len()
-        );
-    }
-
-    let track_timing = is_debug_level_enabled(3);
-    if track_timing {
+    if is_debug_level_enabled(3) {
         crate::debug!(
             3,
             "fast equivalence: num_states={} num_groups={}",
             reduced_initial_states.len(),
             pre.num_groups
         );
-        if reduced_initial_states.len() != initial_states.len() {
-            crate::debug!(
-                3,
-                "tokenizer state reduction: {} -> {} (via state equivalence)",
-                initial_states.len(),
-                reduced_initial_states.len()
-            );
-        }
     }
-    let pos0_time = AtomicU64::new(0);
-    let suffix_time = AtomicU64::new(0);
-    let hash_time = AtomicU64::new(0);
 
-    let signatures: Vec<u64> = strings
-        .par_iter()
-        .map_init(
-            || WorkerScratch {
-                pos0: Pos0Scratch::new(reduced_initial_states.len(), pre.num_groups),
-                suffix: SuffixScratch::new(pre.num_groups),
-            },
-            |scratch, s| {
-                if track_timing {
-                    let t0 = std::time::Instant::now();
-                    let (pos0_results, all_targets) =
-                        compute_pos0_results(&pre, &mut scratch.pos0, s, &reduced_initial_states);
-                    let t1 = std::time::Instant::now();
-                    let pos_hashes =
-                        compute_suffix_hashes(regex, &pre, s, &all_targets, &mut scratch.suffix);
-                    let t2 = std::time::Instant::now();
-                    let sig = compute_final_signature(&pre, &pos0_results, pos_hashes);
-                    let t3 = std::time::Instant::now();
-
-                    pos0_time.fetch_add((t1 - t0).as_nanos() as u64, Ordering::Relaxed);
-                    suffix_time.fetch_add((t2 - t1).as_nanos() as u64, Ordering::Relaxed);
-                    hash_time.fetch_add((t3 - t2).as_nanos() as u64, Ordering::Relaxed);
-
-                    sig
-                } else {
-                    let (pos0_results, all_targets) =
-                        compute_pos0_results(&pre, &mut scratch.pos0, s, &reduced_initial_states);
-                    let pos_hashes = compute_suffix_hashes(
-                        regex,
-                        &pre,
-                        s,
-                        &all_targets,
-                        &mut scratch.suffix,
-                    );
-                    compute_final_signature(&pre, &pos0_results, pos_hashes)
-                }
-            },
-        )
+    let num_tokens = strings.len();
+    let suffix_caches: Vec<SuffixCache> = strings
+        .iter()
+        .map(|s| SuffixCache::new(s.len()))
         .collect();
 
-    if std::env::var("EQ_VERIFY_REPEAT").is_ok() {
-        let limit = strings.len().min(2000);
-
-        let mut seq_reuse: Vec<u64> = Vec::with_capacity(limit);
-        let mut seq_worker = WorkerScratch {
-            pos0: Pos0Scratch::new(reduced_initial_states.len(), pre.num_groups),
-            suffix: SuffixScratch::new(pre.num_groups),
-        };
-
-        for s in strings.iter().take(limit) {
-            let (pos0_results, all_targets) =
-                compute_pos0_results(&pre, &mut seq_worker.pos0, s, &reduced_initial_states);
-            let pos_hashes =
-                compute_suffix_hashes(regex, &pre, s, &all_targets, &mut seq_worker.suffix);
-            seq_reuse.push(compute_final_signature(&pre, &pos0_results, pos_hashes));
+    let mut active_indices: Vec<usize> = (0..num_tokens).collect();
+    let mut partition: Vec<usize> = vec![0; num_tokens];
+    let mut next_class_id = 1;
+    
+    let chunk_size = 64; 
+    
+    for chunk in reduced_initial_states.chunks(chunk_size) {
+        if active_indices.is_empty() {
+            break;
         }
-
-        let mut seq_fresh: Vec<u64> = Vec::with_capacity(limit);
-        for s in strings.iter().take(limit) {
-            let mut pos0 = Pos0Scratch::new(reduced_initial_states.len(), pre.num_groups);
-            let (pos0_results, all_targets) = compute_pos0_results(&pre, &mut pos0, s, &reduced_initial_states);
-            let mut suffix = SuffixScratch::new(pre.num_groups);
-            let pos_hashes = compute_suffix_hashes(regex, &pre, s, &all_targets, &mut suffix);
-            seq_fresh.push(compute_final_signature(&pre, &pos0_results, pos_hashes));
-        }
-
-        for idx in 0..limit {
-            if seq_reuse[idx] != seq_fresh[idx] {
-                eprintln!(
-                    "EQ_VERIFY_REPEAT sequential mismatch at {}: reuse={} fresh={}",
-                    idx, seq_reuse[idx], seq_fresh[idx]
-                );
-
-                let hash_pos0 = |results: &[(Option<usize>, EdgeList)]| {
-                    let mut h = new_hasher();
-                    for (end, edges) in results {
-                        h.write_u64(end.map(|v| v as u64 + 1).unwrap_or(0));
-                        for (gid, target) in edges {
-                            h.write_u64(*gid as u64);
-                            h.write_u64(*target as u64);
-                        }
-                    }
-                    h.finish()
-                };
-
-                let hash_slice = |vals: &[u64]| {
-                    let mut h = new_hasher();
-                    for v in vals {
-                        h.write_u64(*v);
-                    }
-                    h.finish()
-                };
-
-                let mut worker = WorkerScratch {
-                    pos0: Pos0Scratch::new(reduced_initial_states.len(), pre.num_groups),
-                    suffix: SuffixScratch::new(pre.num_groups),
-                };
-
-                let mut pos0_hash_reuse = 0u64;
-                let mut suffix_hash_reuse = 0u64;
-                let mut sig_reuse_detail = 0u64;
-                let mut pos_hashes_reuse_vec: Vec<u64> = Vec::new();
-                let mut all_targets_reuse: Vec<usize> = Vec::new();
-                for (i, s) in strings.iter().take(idx + 1).enumerate() {
-                    let (pos0_results, all_targets) =
-                        compute_pos0_results(&pre, &mut worker.pos0, s, &reduced_initial_states);
-                    let pos_hashes =
-                        compute_suffix_hashes(regex, &pre, s, &all_targets, &mut worker.suffix);
-                    let sig = compute_final_signature(&pre, &pos0_results, pos_hashes);
-                    if i == idx {
-                        pos0_hash_reuse = hash_pos0(pos0_results);
-                        suffix_hash_reuse = hash_slice(pos_hashes);
-                        sig_reuse_detail = sig;
-                        pos_hashes_reuse_vec = pos_hashes.to_vec();
-                        all_targets_reuse = all_targets.to_vec();
-                    }
-                }
-
-                let mut pos0 = Pos0Scratch::new(reduced_initial_states.len(), pre.num_groups);
-                let (pos0_results, all_targets) =
-                    compute_pos0_results(&pre, &mut pos0, &strings[idx], &reduced_initial_states);
-                let mut suffix = SuffixScratch::new(pre.num_groups);
-                let pos_hashes =
-                    compute_suffix_hashes(regex, &pre, &strings[idx], &all_targets, &mut suffix);
-                let pos_hashes_fresh_vec = pos_hashes.to_vec();
-                let sig_fresh_detail = compute_final_signature(&pre, &pos0_results, pos_hashes);
-                eprintln!(
-                    "pos0_hash reuse={} fresh={} suffix_hash reuse={} fresh={} sig reuse={} fresh={}",
-                    pos0_hash_reuse,
-                    hash_pos0(pos0_results),
-                    suffix_hash_reuse,
-                    hash_slice(pos_hashes),
-                    sig_reuse_detail,
-                    sig_fresh_detail
-                );
-
-                eprintln!("all_targets reuse={:?} fresh={:?}", all_targets_reuse, all_targets);
-
-                if pos_hashes_reuse_vec.len() <= 32 {
-                    eprintln!(
-                        "pos_hashes reuse={:?} fresh={:?}",
-                        pos_hashes_reuse_vec,
-                        pos_hashes_fresh_vec
-                    );
-                }
-                break;
-            }
-        }
-
-        let signatures_second: Vec<u64> = strings
+        
+        let signatures: Vec<u64> = active_indices
             .par_iter()
             .map_init(
-                || WorkerScratch {
-                    pos0: Pos0Scratch::new(reduced_initial_states.len(), pre.num_groups),
-                    suffix: SuffixScratch::new(pre.num_groups),
+                || {
+                    (
+                        Pos0Scratch::new(chunk_size, pre.num_groups),
+                        SuffixScratch::new(pre.num_groups),
+                    )
                 },
-                |scratch, s| {
-                    let (pos0_results, all_targets) =
-                        compute_pos0_results(&pre, &mut scratch.pos0, s, &reduced_initial_states);
-                    let pos_hashes =
-                        compute_suffix_hashes(regex, &pre, s, &all_targets, &mut scratch.suffix);
-                    compute_final_signature(&pre, &pos0_results, pos_hashes)
+                |state, &token_idx| {
+                    let (pos0, suffix_scratch) = state;
+                    let token = &strings[token_idx];
+                    let cache = suffix_caches[token_idx].get_mut();
+                    
+                    compute_chunk_signature(
+                        &pre,
+                        token,
+                        chunk,
+                        pos0,
+                        suffix_scratch,
+                        cache
+                    )
                 },
             )
             .collect();
-
-        if signatures_second != signatures {
-            for (idx, (a, b)) in signatures.iter().zip(signatures_second.iter()).enumerate() {
-                if a != b {
-                    eprintln!("EQ_VERIFY_REPEAT mismatch at index {}: first={} second={}", idx, a, b);
-                    let sample = &strings[idx];
-                    let sig_seq1 = compute_signature_actual(regex, sample, initial_states);
-                    let sig_seq2 = compute_signature_actual(regex, sample, initial_states);
-                    eprintln!("Sequential recompute for idx {} -> {} / {}", idx, sig_seq1, sig_seq2);
-                    break;
-                }
-            }
-            panic!("Non-deterministic signatures detected in fast equivalence");
-        }
-    }
-
-    if let Ok(list) = std::env::var("EQ_DEBUG_COMPARE") {
-        let indices: Vec<usize> = list
-            .split(',')
-            .filter_map(|s| s.trim().parse::<usize>().ok())
+            
+        let mut to_sort: Vec<(usize, u64)> = active_indices
+            .iter()
+            .copied()
+            .zip(signatures.into_iter())
             .collect();
-        for &idx in &indices {
-            if let Some(sig_par) = signatures.get(idx) {
-                let sig_clean = compute_signature_actual(regex, &strings[idx], &reduced_initial_states);
-                if *sig_par != sig_clean {
-                    eprintln!("EQ_DEBUG_COMPARE idx {} par_sig={} clean_sig={}", idx, sig_par, sig_clean);
+            
+        to_sort.sort_unstable_by(|&(idx_a, sig_a), &(idx_b, sig_b)| {
+            let class_a = partition[idx_a];
+            let class_b = partition[idx_b];
+            class_a.cmp(&class_b).then(sig_a.cmp(&sig_b))
+        });
+        
+        let mut new_active_indices = Vec::with_capacity(active_indices.len());
+        
+        let mut i = 0;
+        while i < to_sort.len() {
+            let old_class = partition[to_sort[i].0];
+            let class_start = i;
+            
+            while i < to_sort.len() && partition[to_sort[i].0] == old_class {
+                i += 1;
+            }
+            let class_end = i;
+            
+            let mut j = class_start;
+            while j < class_end {
+                let sig = to_sort[j].1;
+                let sig_start = j;
+                while j < class_end && to_sort[j].1 == sig {
+                    j += 1;
+                }
+                let sig_end = j;
+                
+                let count = sig_end - sig_start;
+                let assign_new_id = count < (class_end - class_start);
+                
+                let id_to_use = if assign_new_id {
+                    let id = next_class_id;
+                    next_class_id += 1;
+                    id
+                } else {
+                    old_class
+                };
+                
+                for k in sig_start..sig_end {
+                    let (idx, _) = to_sort[k];
+                    partition[idx] = id_to_use;
+                    if count > 1 {
+                        new_active_indices.push(idx);
+                    }
                 }
             }
         }
+        
+        active_indices = new_active_indices;
     }
-
-    if track_timing {
-        let total = pos0_time.load(Ordering::Relaxed)
-            + suffix_time.load(Ordering::Relaxed)
-            + hash_time.load(Ordering::Relaxed);
-
-        if total > 0 {
-            crate::debug!(
-                3,
-                "Time breakdown: pos0={:.0}% suffix={:.0}% hash={:.0}%",
-                pos0_time.load(Ordering::Relaxed) as f64 / total as f64 * 100.0,
-                suffix_time.load(Ordering::Relaxed) as f64 / total as f64 * 100.0,
-                hash_time.load(Ordering::Relaxed) as f64 / total as f64 * 100.0
-            );
-        }
-    }
-
+    
     let mut groups = HashMap::new();
-    for (index, sig) in signatures.into_iter().enumerate() {
-        groups.entry(sig).or_insert_with(Vec::new).push(index);
+    for (index, &class_id) in partition.iter().enumerate() {
+        groups.entry(class_id).or_insert_with(Vec::new).push(index);
     }
 
-    let result: EquivalenceResult = groups.into_values().collect();
-    result
+    groups.into_values().collect()
 }
