@@ -127,7 +127,7 @@ impl<'r> Precomputer1<'r> {
                 }
             }
         }
-        crate::debug!(3, "Pending transitions: {} total, {} to leaf", total_transitions, transitions_to_leaf);
+        // crate::debug!(4, "Pending transitions: {} total, {} to leaf", total_transitions, transitions_to_leaf);
         
         // Flush pending transitions and epsilons into the NWA
         for (src, labels) in std::mem::take(&mut self.pending_transitions) {
