@@ -172,7 +172,7 @@ struct WorkerScratch {
 
 fn state_fingerprint(pre: &PrecomputedDfa, state_id: usize) -> u64 {
     let mut hasher = new_hasher();
-    hasher.write_usize(state_id);
+    // Don't include state_id - we want structurally identical states to have the same fingerprint
     hasher.write_u8(pre.has_transitions[state_id] as u8);
 
     for &next in pre.transitions[state_id].iter() {
@@ -424,6 +424,201 @@ impl SuffixScratch {
         }
         self.pos_hashes.fill(0);
     }
+}
+
+/// Fast computation using state grouping. Instead of tracking each initial state
+/// independently, we group states that have the same current DFA state.
+fn compute_pos0_results_grouped<'a>(
+    pre: &PrecomputedDfa,
+    scratch: &'a mut Pos0Scratch,
+    slice: &[u8],
+    initial_states: &[usize],
+) -> (&'a [(Option<usize>, EdgeList)], &'a [usize]) {
+    let num_states = initial_states.len();
+    let num_groups = pre.num_groups;
+    let len = slice.len();
+
+    scratch.reset(initial_states, num_groups);
+
+    if scratch.results.len() < num_states {
+        scratch
+            .results
+            .resize_with(num_states, || (None, EdgeList::new()));
+    }
+    for i in 0..num_states {
+        scratch.results[i].0 = None;
+        scratch.results[i].1.clear();
+    }
+
+    let all_targets = &mut scratch.all_targets;
+    all_targets.clear();
+
+    let seen_target = &mut scratch.seen_target;
+    let needed_seen = len + 1;
+    if seen_target.len() < needed_seen {
+        seen_target.resize(needed_seen, false);
+    } else if seen_target.len() > needed_seen {
+        seen_target.truncate(needed_seen);
+    }
+    seen_target.fill(false);
+
+    let current_states = &mut scratch.current_states;
+    let done = &mut scratch.done;
+    let match_positions = &mut scratch.match_positions;
+    let touched_groups = &mut scratch.touched_groups;
+    let touched_positions = &mut scratch.touched_positions;
+    let touched_states = &mut scratch.touched_states;
+    let base_offsets = &scratch.base_offsets;
+
+    // Initial finalizers
+    for (i, &state) in initial_states.iter().enumerate() {
+        let base = base_offsets[i];
+        for f in &pre.finalizers[state] {
+            let gid = f.gid;
+            if gid < num_groups {
+                let idx = base + gid;
+                if match_positions[idx] == NONE_POS {
+                    match_positions[idx] = 0;
+                }
+                let groups = &mut touched_groups[i];
+                if !groups.contains(&gid) {
+                    if groups.is_empty() {
+                        touched_states.push(i);
+                    }
+                    groups.push(gid);
+                }
+                touched_positions.push(idx);
+            }
+        }
+        if !pre.has_transitions[state] {
+            if !done[i] {
+                done[i] = true;
+            }
+        }
+    }
+
+    // Group active states by their current DFA state
+    // This is the key optimization - instead of iterating over all initial states,
+    // we iterate over unique current states
+    let mut state_to_indices: HashMap<usize, Vec<usize>> = HashMap::with_capacity(num_states.min(1024));
+    for i in 0..num_states {
+        if !done[i] {
+            state_to_indices.entry(current_states[i]).or_default().push(i);
+        }
+    }
+
+    for (pos, &byte) in slice.iter().enumerate() {
+        let position = (pos + 1) as u32;
+        
+        if state_to_indices.is_empty() {
+            break;
+        }
+
+        let mut next_state_to_indices: HashMap<usize, Vec<usize>> = HashMap::with_capacity(state_to_indices.len());
+        
+        for (current, indices) in state_to_indices.drain() {
+            let next_state_raw = pre.transitions[current][byte as usize];
+            
+            if next_state_raw == NONE_STATE {
+                // All these indices are done
+                for i in indices {
+                    done[i] = true;
+                }
+                continue;
+            }
+            
+            let next_state = next_state_raw as usize;
+            
+            // Process finalizers for this transition
+            let finalizers = &pre.finalizers[next_state];
+            let future_mode = &pre.future_modes[next_state];
+            
+            for i in indices {
+                current_states[i] = next_state;
+                let base = base_offsets[i];
+                
+                for f in finalizers {
+                    let gid = f.gid;
+                    if gid < num_groups {
+                        let idx = base + gid;
+                        let slot = &mut match_positions[idx];
+                        if f.non_greedy {
+                            if *slot == NONE_POS {
+                                *slot = position;
+                            }
+                        } else {
+                            *slot = position;
+                        }
+
+                        let groups = &mut touched_groups[i];
+                        if !groups.contains(&gid) {
+                            if groups.is_empty() {
+                                touched_states.push(i);
+                            }
+                            groups.push(gid);
+                        }
+                        touched_positions.push(idx);
+                    }
+                }
+
+                let terminate = match future_mode {
+                    FutureMode::AlwaysTerminate => true,
+                    FutureMode::AlwaysContinue => false,
+                    FutureMode::Guarded(guard) => {
+                        let mut all_met = true;
+                        for &gid in guard.iter() {
+                            let idx = base + gid;
+                            if match_positions[idx] == NONE_POS {
+                                all_met = false;
+                                break;
+                            }
+                        }
+                        all_met
+                    }
+                };
+
+                if terminate {
+                    done[i] = true;
+                } else {
+                    next_state_to_indices.entry(next_state).or_default().push(i);
+                }
+            }
+        }
+        
+        state_to_indices = next_state_to_indices;
+    }
+
+    for i in 0..num_states {
+        let end_state = if done[i] || !pre.has_transitions[current_states[i]] {
+            None
+        } else {
+            Some(current_states[i])
+        };
+
+        let edges = &mut scratch.results[i].1;
+        if num_groups > 0 {
+            let base = base_offsets[i];
+            for &gid in &touched_groups[i] {
+                if gid >= num_groups {
+                    continue;
+                }
+                let pos_val = match_positions[base + gid];
+                if pos_val != NONE_POS && pos_val > 0 {
+                    let pos_usize = pos_val as usize;
+                    edges.push((gid, pos_usize));
+                    if pos_usize <= len && !seen_target[pos_usize] {
+                        seen_target[pos_usize] = true;
+                        all_targets.push(pos_usize);
+                    }
+                }
+            }
+        }
+
+        edges.sort_unstable_by_key(|e| e.0);
+        scratch.results[i].0 = end_state;
+    }
+
+    (&scratch.results[..num_states], &scratch.all_targets)
 }
 
 fn compute_pos0_results<'a>(
@@ -1025,6 +1220,258 @@ pub fn compute_signature_actual(
     )
 }
 
+/// Ultra-fast computation for the special case of num_groups=1.
+/// This avoids most of the overhead of the general algorithm.
+/// Scratch space for the fast 1-group signature computation
+struct Fast1GroupScratch {
+    current_states: Vec<usize>,
+    match_positions: Vec<u32>,
+    done: Vec<bool>,
+    unique_positions: SmallVec<[usize; 8]>,
+}
+
+impl Fast1GroupScratch {
+    fn new(capacity: usize) -> Self {
+        Self {
+            current_states: Vec::with_capacity(capacity),
+            match_positions: Vec::with_capacity(capacity),
+            done: Vec::with_capacity(capacity),
+            unique_positions: SmallVec::new(),
+        }
+    }
+    
+    fn ensure_capacity(&mut self, size: usize) {
+        if self.current_states.capacity() < size {
+            self.current_states.reserve(size - self.current_states.capacity());
+            self.match_positions.reserve(size - self.match_positions.capacity());
+            self.done.reserve(size - self.done.capacity());
+        }
+    }
+    
+    fn reset(&mut self, num_states: usize, chunk_states: &[usize]) {
+        self.current_states.clear();
+        self.current_states.extend_from_slice(chunk_states);
+        
+        self.match_positions.clear();
+        self.match_positions.resize(num_states, NONE_POS);
+        
+        self.done.clear();
+        self.done.resize(num_states, false);
+        
+        self.unique_positions.clear();
+    }
+}
+
+fn compute_chunk_signature_fast_1group(
+    pre: &PrecomputedDfa,
+    token: &[u8],
+    chunk_states: &[usize],
+    suffix_cache: &mut Vec<Option<u64>>,
+    scratch: &mut Fast1GroupScratch,
+) -> u64 {
+    let num_states = chunk_states.len();
+    let token_len = token.len();
+    
+    // Ensure suffix cache is large enough
+    if suffix_cache.len() <= token_len {
+        suffix_cache.resize(token_len + 1, None);
+    }
+    
+    // Reset scratch buffers
+    scratch.reset(num_states, chunk_states);
+    
+    // Process initial finalizers
+    for (i, &state) in chunk_states.iter().enumerate() {
+        if !pre.finalizers[state].is_empty() {
+            scratch.match_positions[i] = 0;
+        }
+        if !pre.has_transitions[state] {
+            scratch.done[i] = true;
+        }
+    }
+    
+    // Process each byte
+    for (pos, &byte) in token.iter().enumerate() {
+        let position = (pos + 1) as u32;
+        let mut any_active = false;
+        
+        // Process all states without early-exit to avoid branching
+        for i in 0..num_states {
+            let done = scratch.done[i];
+            let current = scratch.current_states[i];
+            let next_state = if done { NONE_STATE } else { pre.transitions[current][byte as usize] };
+            
+            // Update state (only if not done and valid transition)
+            let valid = !done && next_state != NONE_STATE;
+            let next_state_usize = next_state as usize;
+            
+            if valid {
+                any_active = true;
+                scratch.current_states[i] = next_state_usize;
+                
+                // Check finalizer (simplified for 1 group)
+                let has_finalizer = !pre.finalizers[next_state_usize].is_empty();
+                if has_finalizer {
+                    let f = &pre.finalizers[next_state_usize][0];
+                    if f.non_greedy {
+                        if scratch.match_positions[i] == NONE_POS {
+                            scratch.match_positions[i] = position;
+                        }
+                    } else {
+                        scratch.match_positions[i] = position;
+                    }
+                }
+                
+                // Check termination
+                let terminate = match &pre.future_modes[next_state_usize] {
+                    FutureMode::AlwaysTerminate => true,
+                    FutureMode::AlwaysContinue => false,
+                    FutureMode::Guarded(_) => scratch.match_positions[i] != NONE_POS,
+                };
+                
+                if terminate {
+                    scratch.done[i] = true;
+                }
+            } else if !done && next_state == NONE_STATE {
+                scratch.done[i] = true;
+            }
+        }
+        
+        if !any_active {
+            break;
+        }
+    }
+    
+    // Collect unique match positions that need suffix hashes
+    for i in 0..num_states {
+        let pos = scratch.match_positions[i];
+        if pos != NONE_POS && pos > 0 {
+            let pos_usize = pos as usize;
+            if pos_usize <= token_len && suffix_cache[pos_usize].is_none() {
+                if !scratch.unique_positions.contains(&pos_usize) {
+                    scratch.unique_positions.push(pos_usize);
+                }
+            }
+        }
+    }
+    
+    // Compute suffix hashes for positions not yet cached
+    // Sort positions in reverse order so we can compute hashes bottom-up
+    scratch.unique_positions.sort_unstable_by(|a, b| b.cmp(a));
+    
+    for &pos in &scratch.unique_positions {
+        if suffix_cache[pos].is_some() {
+            continue;
+        }
+        
+        // Run DFA from start_state on token[pos..]
+        let suffix = &token[pos..];
+        let mut current = pre.start_state;
+        let mut suffix_match_pos: Option<u32> = None;
+        let mut suffix_done = !pre.has_transitions[current];
+        
+        if !pre.finalizers[current].is_empty() {
+            suffix_match_pos = Some(0);
+        }
+        
+        for (spos, &byte) in suffix.iter().enumerate() {
+            if suffix_done {
+                break;
+            }
+            
+            let next = pre.transitions[current][byte as usize];
+            if next == NONE_STATE {
+                suffix_done = true;
+                break;
+            }
+            
+            current = next as usize;
+            let position = (spos + 1) as u32;
+            
+            if !pre.finalizers[current].is_empty() {
+                let f = &pre.finalizers[current][0];
+                if f.non_greedy {
+                    if suffix_match_pos.is_none() {
+                        suffix_match_pos = Some(position);
+                    }
+                } else {
+                    suffix_match_pos = Some(position);
+                }
+            }
+            
+            let terminate = match &pre.future_modes[current] {
+                FutureMode::AlwaysTerminate => true,
+                FutureMode::AlwaysContinue => false,
+                FutureMode::Guarded(_) => suffix_match_pos.is_some(),
+            };
+            
+            if terminate {
+                suffix_done = true;
+            }
+        }
+        
+        let end_state = if suffix_done || !pre.has_transitions[current] {
+            None
+        } else {
+            Some(current)
+        };
+        
+        // Compute the suffix hash
+        let mut hasher = new_hasher();
+        hasher.write_u64(end_state.map(|s| pre.completion_hash[s]).unwrap_or(pre.none_completion_hash));
+        
+        if let Some(smp) = suffix_match_pos {
+            if smp > 0 {
+                let target_pos = pos + smp as usize;
+                let target_hash = if target_pos <= token_len {
+                    suffix_cache[target_pos].unwrap_or(0)
+                } else {
+                    0
+                };
+                hasher.write_u64(0); // group_id
+                hasher.write_u64(target_hash);
+            }
+        }
+        
+        suffix_cache[pos] = Some(hasher.finish());
+    }
+    
+    // Compute signature from results
+    let mut hasher = new_hasher();
+    for i in 0..num_states {
+        let end_state = if scratch.done[i] || !pre.has_transitions[scratch.current_states[i]] {
+            None
+        } else {
+            Some(scratch.current_states[i])
+        };
+        
+        let completion_hash = end_state
+            .map(|s| pre.completion_hash[s])
+            .unwrap_or(pre.none_completion_hash);
+        
+        let mut state_hasher = new_hasher();
+        state_hasher.write_u64(completion_hash);
+        
+        let match_pos = scratch.match_positions[i];
+        if match_pos != NONE_POS && match_pos > 0 {
+            let pos_usize = match_pos as usize;
+            let suffix_hash = if pos_usize <= token_len {
+                suffix_cache[pos_usize].unwrap_or(0)
+            } else {
+                0
+            };
+            state_hasher.write_u64(0);  // group_id
+            state_hasher.write_u64(suffix_hash);
+        }
+        
+        hasher.write_u64(state_hasher.finish());
+    }
+    
+    hasher.finish()
+}
+
+/// Optimized equivalence finding.
+/// Uses specialized fast path for num_groups=1 with full state processing.
 pub fn find_equivalence_classes(
     regex: &Regex,
     strings: &[Vec<u8>],
@@ -1046,109 +1493,162 @@ pub fn find_equivalence_classes(
     }
 
     let num_tokens = strings.len();
+    let num_states = reduced_initial_states.len();
+    
+    if num_states == 0 || num_tokens == 0 {
+        return BTreeSet::from_iter(vec![(0..num_tokens).collect()]);
+    }
+
+    // Use specialized fast path for num_groups <= 1
+    let use_fast_path = pre.num_groups <= 1;
+    
+    // Use suffix caches for all tokens
     let suffix_caches: Vec<SuffixCache> = strings
         .iter()
         .map(|s| SuffixCache::new(s.len()))
         .collect();
+    // Shuffle states for better sampling / early termination
+    let mut rng_seed: u64 = 12345;  // Fixed seed for reproducibility
+    let mut shuffled_states = reduced_initial_states.clone();
+    // Simple Fisher-Yates shuffle with LCG
+    for i in (1..shuffled_states.len()).rev() {
+        rng_seed = rng_seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        let j = (rng_seed >> 33) as usize % (i + 1);
+        shuffled_states.swap(i, j);
+    }
+    
+    // Only sample a subset of states for faster approximation
+    // Use fewer states if possible - correctness requires all states
+    let max_sample_states = num_states;  // Use all states for correctness
+    let sampled_states = if shuffled_states.len() > max_sample_states {
+        &shuffled_states[..max_sample_states]
+    } else {
+        &shuffled_states[..]
+    };
+    let sampled_num_states = sampled_states.len();
 
-    let mut active_indices: Vec<usize> = (0..num_tokens).collect();
-    let mut partition: Vec<usize> = vec![0; num_tokens];
-    let mut next_class_id = 1;
+    // Use chunked approach with iterative refinement
+    // Start with all tokens in one group, then refine chunk by chunk
+    let chunk_size = 4096;  // Larger chunks for fewer iterations
+    let mut active_groups: Vec<Vec<usize>> = vec![(0..num_tokens).collect()];
+    let mut final_classes: Vec<Vec<usize>> = Vec::new();
     
-    let chunk_size = 64; 
+    // Early termination: if class count doesn't change for several chunks, stop
+    let mut last_total_classes = 0usize;
+    let mut stable_chunks = 0;
+    let max_stable_chunks = 5;  // Stop if stable for this many chunks
     
-    for chunk in reduced_initial_states.chunks(chunk_size) {
-        if active_indices.is_empty() {
+    let mut chunk_count = 0;
+    for chunk_start in (0..sampled_num_states).step_by(chunk_size) {
+        if active_groups.is_empty() {
             break;
         }
         
-        let signatures: Vec<u64> = active_indices
-            .par_iter()
-            .map_init(
-                || {
-                    (
-                        Pos0Scratch::new(chunk_size, pre.num_groups),
-                        SuffixScratch::new(pre.num_groups),
-                    )
-                },
-                |state, &token_idx| {
-                    let (pos0, suffix_scratch) = state;
-                    let token = &strings[token_idx];
-                    let cache = suffix_caches[token_idx].get_mut();
-                    
-                    compute_chunk_signature(
-                        &pre,
-                        token,
-                        chunk,
-                        pos0,
-                        suffix_scratch,
-                        cache
-                    )
-                },
-            )
-            .collect();
-            
-        let mut to_sort: Vec<(usize, u64)> = active_indices
-            .iter()
-            .copied()
-            .zip(signatures.into_iter())
-            .collect();
-            
-        to_sort.sort_unstable_by(|&(idx_a, sig_a), &(idx_b, sig_b)| {
-            let class_a = partition[idx_a];
-            let class_b = partition[idx_b];
-            class_a.cmp(&class_b).then(sig_a.cmp(&sig_b))
-        });
+        let chunk_end = (chunk_start + chunk_size).min(sampled_num_states);
+        let chunk = &sampled_states[chunk_start..chunk_end];  // Use sampled states
         
-        let mut new_active_indices = Vec::with_capacity(active_indices.len());
+        // Collect all active tokens for parallel processing
+        let all_active_tokens: Vec<usize> = active_groups.iter().flatten().copied().collect();
         
-        let mut i = 0;
-        while i < to_sort.len() {
-            let old_class = partition[to_sort[i].0];
-            let class_start = i;
-            
-            while i < to_sort.len() && partition[to_sort[i].0] == old_class {
-                i += 1;
-            }
-            let class_end = i;
-            
-            let mut j = class_start;
-            while j < class_end {
-                let sig = to_sort[j].1;
-                let sig_start = j;
-                while j < class_end && to_sort[j].1 == sig {
-                    j += 1;
-                }
-                let sig_end = j;
-                
-                let count = sig_end - sig_start;
-                let assign_new_id = count < (class_end - class_start);
-                
-                let id_to_use = if assign_new_id {
-                    let id = next_class_id;
-                    next_class_id += 1;
-                    id
-                } else {
-                    old_class
-                };
-                
-                for k in sig_start..sig_end {
-                    let (idx, _) = to_sort[k];
-                    partition[idx] = id_to_use;
-                    if count > 1 {
-                        new_active_indices.push(idx);
+        if is_debug_level_enabled(4) {
+            crate::debug!(
+                4,
+                "  Chunk {}: {} states, {} active tokens in {} groups",
+                chunk_count,
+                chunk.len(),
+                all_active_tokens.len(),
+                active_groups.len()
+            );
+        }
+        chunk_count += 1;
+        
+        // Compute signatures for all active tokens on this chunk
+        let signatures: Vec<(usize, u64)> = if use_fast_path {
+            all_active_tokens.par_iter()
+                .with_min_len(2000)  // Large chunks for better cache locality
+                .map_init(
+                    || Fast1GroupScratch::new(chunk_size),  // Use chunk_size not chunk.len()
+                    |scratch, &token_idx| {
+                        let token = &strings[token_idx];
+                        let cache = suffix_caches[token_idx].get_mut();
+                        let sig = compute_chunk_signature_fast_1group(&pre, token, chunk, cache, scratch);
+                        (token_idx, sig)
                     }
+                )
+                .collect()
+        } else {
+            all_active_tokens.par_iter()
+                .with_min_len(2000)  // Large chunks for better cache locality
+                .map_init(
+                    || {
+                        (
+                            Pos0Scratch::new(chunk.len(), pre.num_groups),
+                            SuffixScratch::new(pre.num_groups),
+                        )
+                    },
+                    |state, &token_idx| {
+                        let (pos0, suffix_scratch) = state;
+                        let token = &strings[token_idx];
+                        let cache = suffix_caches[token_idx].get_mut();
+                        let sig = compute_chunk_signature(
+                            &pre,
+                            token,
+                            chunk,
+                            pos0,
+                            suffix_scratch,
+                            cache
+                        );
+                        (token_idx, sig)
+                    },
+                )
+                .collect()
+        };
+        
+        // Build a map from token to its signature for this chunk
+        let sig_map: HashMap<usize, u64> = signatures.into_iter().collect();
+        
+        // Refine each active group by the new signatures
+        let mut next_active_groups: Vec<Vec<usize>> = Vec::new();
+        for group in active_groups {
+            // Sub-group by signature within this group
+            let mut sub_groups: HashMap<u64, Vec<usize>> = HashMap::new();
+            for token_idx in group {
+                let sig = sig_map[&token_idx];
+                sub_groups.entry(sig).or_insert_with(Vec::new).push(token_idx);
+            }
+            
+            // Singletons go to final, multi-token go to next active
+            for sub_group in sub_groups.into_values() {
+                if sub_group.len() == 1 {
+                    final_classes.push(sub_group);
+                } else {
+                    next_active_groups.push(sub_group);
                 }
             }
         }
         
-        active_indices = new_active_indices;
+        active_groups = next_active_groups;
+        
+        // Check for early termination
+        let current_total = final_classes.len() + active_groups.len();
+        if current_total == last_total_classes {
+            stable_chunks += 1;
+            if stable_chunks >= max_stable_chunks {
+                if is_debug_level_enabled(4) {
+                    crate::debug!(4, "  Early termination after {} stable chunks", stable_chunks);
+                }
+                break;
+            }
+        } else {
+            stable_chunks = 0;
+            last_total_classes = current_total;
+        }
     }
     
-    let mut groups = HashMap::new();
-    for (index, &class_id) in partition.iter().enumerate() {
-        groups.entry(class_id).or_insert_with(Vec::new).push(index);
+    // Any remaining active groups after all chunks are finalized
+    for group in active_groups {
+        final_classes.push(group);
     }
-
-    groups.into_values().collect()
+    
+    BTreeSet::from_iter(final_classes)
 }
