@@ -1,125 +1,67 @@
 use crate::finite_automata::Regex;
 use hashbrown::{HashMap, HashSet};
 use rayon::prelude::*;
-use std::collections::VecDeque;
-use std::hash::{Hash, Hasher};
+use std::collections::{BTreeSet, VecDeque};
 use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 
-pub type EquivalenceResult = std::collections::BTreeSet<Vec<usize>>;
+pub type EquivalenceResult = BTreeSet<Vec<usize>>;
 
-fn compute_structural_hash(
-    regex: &Regex,
-    slice: &[u8],
-    start_state: usize,
-    hasher: &mut DefaultHasher,
-) {
-    // Optimization: Replicate the structural hash of the trellis without allocating
-    // the heavy recursive Trellis/Arc/BTreeMap objects.
-    
-    // 1. Build a lightweight "flat" graph of the parse structure via BFS.
-    // Map: Position -> (EndStateCompletion, Edges)
-    // Edges: Vec<(GroupID, TargetPosition)>
-    let mut nodes = HashMap::new();
-    let mut queue = VecDeque::new();
-    let mut visited = HashSet::new();
+fn compute_hash(regex: &Regex, text: &[u8], start: usize) -> u64 {
+    let mut visited: HashSet<usize> = HashSet::from([0]);
+    let mut queue = VecDeque::from([0]);
 
-    queue.push_back(0);
-    visited.insert(0);
-
-    let dfa_start = regex.dfa.start_state;
-    let dfa_states = &regex.dfa.states;
-
+    // 1. Discover all reachable positions (BFS)
     while let Some(pos) = queue.pop_front() {
-        if pos > slice.len() {
-            continue;
-        }
+        if pos > text.len() { continue; }
+        let state = if pos == 0 { start } else { regex.dfa.start_state };
 
-        let sub_slice = &slice[pos..];
-        let exec_start = if pos == 0 { start_state } else { dfa_start };
-
-        // Reuse existing regex execution logic to find matches and completion states
-        let result = regex.execute_from_state_nonzero(sub_slice, exec_start);
-
-        let mut edges = Vec::with_capacity(result.matches.len());
-        for m in result.matches {
-            let target = pos + m.position;
-            edges.push((m.group_id, target));
-            if visited.insert(target) {
-                queue.push_back(target);
+        for m in regex.execute_from_state_nonzero(&text[pos..], state).matches {
+            if visited.insert(pos + m.position) {
+                queue.push_back(pos + m.position);
             }
         }
-
-        // We only track the completion set (future group IDs) for the hash
-        let completion = result.end_state.map(|sid| &dfa_states[sid].possible_future_group_ids);
-        nodes.insert(pos, (completion, edges));
     }
 
-    // 2. Compute hashes bottom-up (from the end of the string back to 0).
-    // Sorting positions descending ensures we process targets before sources.
-    let mut sorted_positions: Vec<usize> = nodes.keys().copied().collect();
-    sorted_positions.sort_unstable_by(|a, b| b.cmp(a));
+    // 2. Sort positions descending (leaves first) to hash bottom-up
+    let mut nodes: Vec<_> = visited.into_iter().collect();
+    nodes.sort_unstable_by(|a, b| b.cmp(a));
 
-    let mut node_hashes: HashMap<usize, u64> = HashMap::with_capacity(nodes.len());
+    // 3. Compute structural hashes
+    let mut hashes = HashMap::with_capacity(nodes.len());
+    for pos in nodes {
+        let state = if pos == 0 { start } else { regex.dfa.start_state };
+        let res = regex.execute_from_state_nonzero(&text[pos..], state);
 
-    for pos in sorted_positions {
-        let (completion, edges) = nodes.get(&pos).unwrap();
+        let mut edges: Vec<_> = res.matches.iter()
+            .map(|m| (m.group_id, *hashes.get(&(pos + m.position)).unwrap_or(&0)))
+            .collect();
+        edges.sort_unstable(); // Ensure deterministic hashing
+
+        let future = res.end_state.map(|id| &regex.dfa.states[id].possible_future_group_ids);
+
         let mut h = DefaultHasher::new();
-
-        // Hash Completion Set
-        if let Some(comp) = completion {
-            1u8.hash(&mut h);
-            comp.hash(&mut h);
-        } else {
-            0u8.hash(&mut h);
-        }
-
-        // Hash Edges
-        // Sort edges by GroupID to ensure the hash is deterministic (order-independent)
-        let mut sorted_edges = edges.clone();
-        sorted_edges.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-
-        for (gid, target) in sorted_edges {
-            gid.hash(&mut h);
-            if let Some(target_hash) = node_hashes.get(&target) {
-                target_hash.hash(&mut h);
-            } else {
-                // In a valid trellis (DAG), the target must be processed before the source 
-                // because matches always advance position (execute_from_state_nonzero filters 0-width).
-                panic!("Logic error: Target position {} not processed before source {}", target, pos);
-            }
-        }
-
-        node_hashes.insert(pos, h.finish());
+        (future, edges).hash(&mut h);
+        hashes.insert(pos, h.finish());
     }
 
-    // Mix the root node's hash into the final hasher
-    if let Some(root_hash) = node_hashes.get(&0) {
-        root_hash.hash(hasher);
-    } else {
-        0u64.hash(hasher);
-    }
+    *hashes.get(&0).unwrap_or(&0)
 }
 
-pub fn find_equivalence_classes(
-    regex: &Regex,
-    strings: &[Vec<u8>],
-    initial_states: &[usize],
-) -> EquivalenceResult {
-    let signatures: Vec<u64> = strings
-        .par_iter()
-        .map(|s| {
-            let mut h = DefaultHasher::new();
-            for &start in initial_states.iter() {
-                compute_structural_hash(regex, s, start, &mut h);
-            }
-            h.finish()
-        })
-        .collect();
+pub fn find_equivalence_classes(regex: &Regex, strings: &[Vec<u8>], starts: &[usize]) -> EquivalenceResult {
+    let mut map = HashMap::new();
 
-    let mut groups = HashMap::new();
-    for (idx, sig) in signatures.into_iter().enumerate() {
-        groups.entry(sig).or_insert_with(Vec::new).push(idx);
+    // Compute combined signature for every string in parallel
+    let computed: Vec<_> = strings.par_iter().enumerate().map(|(i, s)| {
+        let mut h = DefaultHasher::new();
+        starts.iter().for_each(|&st| compute_hash(regex, s, st).hash(&mut h));
+        (h.finish(), i)
+    }).collect();
+
+    // Group indices by signature
+    for (sig, i) in computed {
+        map.entry(sig).or_insert_with(Vec::new).push(i);
     }
 
-    groups.into_values().collect()
+    map.into_values().collect()
 }
