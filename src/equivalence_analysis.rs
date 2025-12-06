@@ -30,7 +30,9 @@ fn hash_suffix(regex: &Regex, token: &[u8], from: usize) -> u128 {
 
 fn compute_signature(regex: &Regex, token: &[u8], initial_states: &[usize]) -> u128 {
     initial_states.iter().enumerate().fold(0, |acc, (idx, &start_node)| {
-        let (mut curr, mut outcome, mut dead): (usize, u128, bool) = (start_node, 0, false);
+        let mut curr = start_node;
+        let mut outcome: u128 = 0;
+        let mut dead = false;
 
         for (i, &b) in token.iter().enumerate() {
             match regex.dfa.states[curr].transitions.get(b) {
