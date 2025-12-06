@@ -114,6 +114,7 @@ fn test_x_semicolon_x() {
         &GrammarConstraintConfig::default(),
     );
     println!("Tokenizer: {}", constraint.tokenizer);
+    constraint.dump_vocab();
     constraint.dump_parser_dwa();
 
     let mut state = constraint.init();
