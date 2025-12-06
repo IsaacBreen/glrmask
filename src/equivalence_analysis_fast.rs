@@ -6,7 +6,11 @@ use rayon::prelude::*;
 use smallvec::SmallVec;
 use std::collections::BTreeSet;
 use std::collections::hash_map::DefaultHasher;
+use std::fs;
 use std::hash::{BuildHasher, Hash, Hasher};
+use std::path::Path;
+use std::io::Write;
+use serde::{Deserialize, Serialize};
 
 pub type EquivalenceResult = BTreeSet<Vec<usize>>;
 
@@ -81,6 +85,113 @@ struct Pos0Scratch {
 struct SuffixScratch {
     match_positions: Vec<u32>,
     touched_positions: GroupList,
+    visited: Vec<bool>,
+    queue: Vec<usize>,
+    order: Vec<usize>,
+    nodes: Vec<Option<(u64, EdgeList)>>,
+    pos_hashes: Vec<u64>,
+}
+
+struct WorkerScratch {
+    pos0: Pos0Scratch,
+    suffix: SuffixScratch,
+}
+
+#[derive(Serialize, Deserialize)]
+struct EquivalenceCache {
+    key: u64,
+    classes: Vec<Vec<usize>>,
+}
+
+fn cache_dir() -> &'static Path {
+    Path::new(".cache/equiv_cache")
+}
+
+fn cache_path_for_key(key: u64) -> std::path::PathBuf {
+    cache_dir().join(format!("{:016x}.json", key))
+}
+
+fn legacy_cache_path() -> &'static Path {
+    Path::new(".cache/equiv_cache.json")
+}
+
+fn compute_dfa_fingerprint(pre: &PrecomputedDfa) -> u64 {
+    let mut hasher = new_hasher();
+    hasher.write_usize(pre.num_groups);
+    hasher.write_usize(pre.transitions.len());
+
+    for table in &pre.transitions {
+        for &next in table.iter() {
+            hasher.write_u32(next);
+        }
+    }
+
+    for finals in &pre.finalizers {
+        hasher.write_usize(finals.len());
+        for f in finals {
+            hasher.write_u64(f.gid as u64);
+            hasher.write_u8(f.non_greedy as u8);
+        }
+    }
+
+    for mode in &pre.future_modes {
+        match mode {
+            FutureMode::AlwaysTerminate => hasher.write_u8(0),
+            FutureMode::AlwaysContinue => hasher.write_u8(1),
+            FutureMode::Guarded(g) => {
+                hasher.write_u8(2);
+                hasher.write_usize(g.len());
+                for gid in g {
+                    hasher.write_usize(*gid);
+                }
+            }
+        }
+    }
+
+    hasher.write_u64(pre.none_completion_hash);
+    for &h in &pre.completion_hash {
+        hasher.write_u64(h);
+    }
+
+    hasher.finish()
+}
+
+fn compute_vocab_hash(strings: &[Vec<u8>]) -> u64 {
+    let mut hasher = new_hasher();
+    hasher.write_usize(strings.len());
+    for s in strings {
+        hasher.write_usize(s.len());
+        hasher.write(s);
+    }
+    hasher.finish()
+}
+
+fn compute_cache_key(pre: &PrecomputedDfa, strings: &[Vec<u8>], initial_states: &[usize]) -> u64 {
+    let mut hasher = new_hasher();
+    hasher.write_u64(compute_dfa_fingerprint(pre));
+    hasher.write_u64(compute_vocab_hash(strings));
+    hasher.write_usize(initial_states.len());
+    for state in initial_states {
+        hasher.write_usize(*state);
+    }
+    hasher.finish()
+}
+
+fn load_cached_equivalence(key: u64) -> Option<EquivalenceResult> {
+    if std::env::var("DISABLE_EQ_CACHE").is_ok() {
+        return None;
+    }
+
+    // Temporarily disable on-disk equivalence caching until a deterministic fast path is built.
+    let _ = key;
+    None
+}
+
+fn save_cached_equivalence(key: u64, groups: &EquivalenceResult) {
+    if std::env::var("DISABLE_EQ_CACHE").is_ok() {
+        return;
+    }
+    let _ = (key, groups);
 }
 
 fn precompute_dfa(regex: &Regex) -> PrecomputedDfa {
@@ -248,6 +359,11 @@ impl SuffixScratch {
         SuffixScratch {
             match_positions: vec![NONE_POS; num_groups],
             touched_positions: GroupList::new(),
+            visited: Vec::new(),
+            queue: Vec::new(),
+            order: Vec::new(),
+            nodes: Vec::new(),
+            pos_hashes: Vec::new(),
         }
     }
 
@@ -255,6 +371,37 @@ impl SuffixScratch {
     fn reset(&mut self) {
         self.match_positions.fill(NONE_POS);
         self.touched_positions.clear();
+    }
+
+    #[inline]
+    fn ensure_capacity(&mut self, len: usize) {
+        let needed = len + 1;
+
+        if self.visited.len() < needed {
+            self.visited.resize(needed, false);
+        } else if self.visited.len() > needed {
+            self.visited.truncate(needed);
+        }
+        self.visited.fill(false);
+
+        self.queue.clear();
+        self.order.clear();
+
+        if self.nodes.len() < needed {
+            self.nodes.resize(needed, None);
+        } else if self.nodes.len() > needed {
+            self.nodes.truncate(needed);
+        }
+        for slot in self.nodes.iter_mut() {
+            *slot = None;
+        }
+
+        if self.pos_hashes.len() < needed {
+            self.pos_hashes.resize(needed, 0);
+        } else if self.pos_hashes.len() > needed {
+            self.pos_hashes.truncate(needed);
+        }
+        self.pos_hashes.fill(0);
     }
 }
 
@@ -284,13 +431,13 @@ fn compute_pos0_results<'a>(
     all_targets.clear();
 
     let seen_target = &mut scratch.seen_target;
-    if seen_target.len() < len + 1 {
-        seen_target.resize(len + 1, false);
-    } else {
-        for slot in seen_target.iter_mut().take(len + 1) {
-            *slot = false;
-        }
+    let needed_seen = len + 1;
+    if seen_target.len() < needed_seen {
+        seen_target.resize(needed_seen, false);
+    } else if seen_target.len() > needed_seen {
+        seen_target.truncate(needed_seen);
     }
+    seen_target.fill(false);
 
     let current_states = &mut scratch.current_states;
     let done = &mut scratch.done;
@@ -552,129 +699,74 @@ fn execute_suffix(
     (end_state, edges)
 }
 
-fn compute_suffix_hashes(
+fn compute_suffix_hashes<'a>(
     regex: &Regex,
     pre: &PrecomputedDfa,
     slice: &[u8],
     all_targets: &[usize],
-) -> Vec<u64> {
+    scratch: &'a mut SuffixScratch,
+) -> &'a [u64] {
     if std::env::var("EQ_SUFFIX_REF").is_ok() {
-        use std::collections::VecDeque;
-
-        let len = slice.len();
-        let mut visited = vec![false; len + 1];
-        let mut queue: VecDeque<usize> = VecDeque::new();
-        let mut order: Vec<usize> = Vec::new();
-        let mut nodes: Vec<Option<(Option<usize>, Vec<(usize, usize)>)>> = vec![None; len + 1];
-
-        for &pos in all_targets {
-            if pos > 0 && pos <= len && !visited[pos] {
-                visited[pos] = true;
-                queue.push_back(pos);
-            }
-        }
-
-        while let Some(pos) = queue.pop_front() {
-            let result = regex.execute_from_state_nonzero(&slice[pos..], pre.start_state);
-
-            let mut edges: Vec<(usize, usize)> = result
-                .matches
-                .iter()
-                .map(|m| {
-                    let target = pos + m.position;
-                    if target <= len && !visited[target] {
-                        visited[target] = true;
-                        queue.push_back(target);
-                    }
-                    (m.group_id, target)
-                })
-                .collect();
-
-            edges.sort_unstable_by_key(|e| e.0);
-            nodes[pos] = Some((result.end_state, edges));
-            order.push(pos);
-        }
-
-        order.sort_unstable_by(|a, b| b.cmp(a));
-        let mut pos_hashes: Vec<u64> = vec![0; len + 1];
-
-        for pos in order {
-            if let Some((end_state, edges)) = &nodes[pos] {
-                let mut hasher = new_hasher();
-                let completion_hash = end_state
-                    .map(|id| pre.completion_hash[id])
-                    .unwrap_or(pre.none_completion_hash);
-                hasher.write_u64(completion_hash);
-
-                for (group_id, target) in edges {
-                    let target_hash = pos_hashes[*target];
-                    hasher.write_u64(*group_id as u64);
-                    hasher.write_u64(target_hash);
-                }
-
-                pos_hashes[pos] = hasher.finish();
-            }
-        }
-
-        return pos_hashes;
+        let debug_hashes = compute_suffix_hashes_debug(regex, slice, all_targets);
+        let len = debug_hashes.len();
+        scratch.ensure_capacity(len.saturating_sub(1));
+        scratch.pos_hashes[..len].clone_from_slice(&debug_hashes);
+        return &scratch.pos_hashes[..len];
     }
 
     let len = slice.len();
+    scratch.ensure_capacity(len);
+
     if all_targets.is_empty() {
-        return vec![0; len + 1];
+        return &scratch.pos_hashes[..=len];
     }
-    let mut visited = vec![false; len + 1];
-    let mut queue: Vec<usize> = Vec::new();
-    let mut cursor = 0usize;
-    let mut order: Vec<usize> = Vec::new();
-    let mut nodes: Vec<Option<(u64, EdgeList)>> = vec![None; len + 1];
-    let mut scratch = SuffixScratch::new(pre.num_groups);
 
     for &pos in all_targets {
-        if pos > 0 && pos <= len && !visited[pos] {
-            visited[pos] = true;
-            queue.push(pos);
+        if pos > 0 && pos <= len && !scratch.visited[pos] {
+            scratch.visited[pos] = true;
+            scratch.queue.push(pos);
         }
     }
 
-    while cursor < queue.len() {
-        let pos = queue[cursor];
+    let mut cursor = 0usize;
+    while cursor < scratch.queue.len() {
+        let pos = scratch.queue[cursor];
         cursor += 1;
-        let (end_state, edges) = execute_suffix(pre, &slice[pos..], pos, &mut scratch);
+
+        let (end_state, edges) = execute_suffix(pre, &slice[pos..], pos, scratch);
 
         for &(_, target) in &edges {
-            if target <= len && !visited[target] {
-                visited[target] = true;
-                queue.push(target);
+            if target <= len && !scratch.visited[target] {
+                scratch.visited[target] = true;
+                scratch.queue.push(target);
             }
         }
 
         let completion_hash = end_state
             .map(|id| pre.completion_hash[id])
             .unwrap_or(pre.none_completion_hash);
-        nodes[pos] = Some((completion_hash, edges));
-        order.push(pos);
+        scratch.nodes[pos] = Some((completion_hash, edges));
+        scratch.order.push(pos);
     }
 
-    order.sort_unstable_by(|a, b| b.cmp(a));
-    let mut pos_hashes: Vec<u64> = vec![0; len + 1];
+    scratch.order.sort_unstable_by(|a, b| b.cmp(a));
 
-    for pos in order {
-        if let Some((completion_hash, edges)) = nodes[pos].take() {
+    for pos in scratch.order.drain(..) {
+        if let Some((completion_hash, edges)) = scratch.nodes[pos].take() {
             let mut hasher = new_hasher();
             hasher.write_u64(completion_hash);
 
             for (group_id, target) in edges {
-                let target_hash = pos_hashes[target];
+                let target_hash = *scratch.pos_hashes.get(target).unwrap_or(&0);
                 hasher.write_u64(group_id as u64);
                 hasher.write_u64(target_hash);
             }
 
-            pos_hashes[pos] = hasher.finish();
+            scratch.pos_hashes[pos] = hasher.finish();
         }
     }
 
-    pos_hashes
+    &scratch.pos_hashes[..=len]
 }
 
 fn compute_final_signature(
@@ -814,8 +906,9 @@ pub fn compute_signature_actual(
     let pre = precompute_dfa(regex);
     let mut scratch = Pos0Scratch::new(initial_states.len(), pre.num_groups);
     let (pos0_results, all_targets) = compute_pos0_results(&pre, &mut scratch, slice, initial_states);
-    let pos_hashes = compute_suffix_hashes(regex, &pre, slice, &all_targets);
-    compute_final_signature(&pre, &pos0_results, &pos_hashes)
+    let mut suffix_scratch = SuffixScratch::new(pre.num_groups);
+    let pos_hashes = compute_suffix_hashes(regex, &pre, slice, &all_targets, &mut suffix_scratch);
+    compute_final_signature(&pre, &pos0_results, pos_hashes)
 }
 
 pub fn find_equivalence_classes(
@@ -826,6 +919,14 @@ pub fn find_equivalence_classes(
     use std::sync::atomic::{AtomicU64, Ordering};
 
     let pre = precompute_dfa(regex);
+    let cache_key = compute_cache_key(&pre, strings, initial_states);
+    if let Some(cached) = load_cached_equivalence(cache_key) {
+        if is_debug_level_enabled(3) {
+            crate::debug!(3, "Equivalence cache hit: using cached classes ({} groups)", cached.len());
+        }
+        return cached;
+    }
+
     let track_timing = is_debug_level_enabled(3);
     if track_timing {
         crate::debug!(
@@ -841,32 +942,184 @@ pub fn find_equivalence_classes(
 
     let signatures: Vec<u64> = strings
         .par_iter()
-        .map(|s| {
-            let mut scratch = Pos0Scratch::new(initial_states.len(), pre.num_groups);
+        .map_init(
+            || WorkerScratch {
+                pos0: Pos0Scratch::new(initial_states.len(), pre.num_groups),
+                suffix: SuffixScratch::new(pre.num_groups),
+            },
+            |scratch, s| {
+                if track_timing {
+                    let t0 = std::time::Instant::now();
+                    let (pos0_results, all_targets) =
+                        compute_pos0_results(&pre, &mut scratch.pos0, s, initial_states);
+                    let t1 = std::time::Instant::now();
+                    let pos_hashes =
+                        compute_suffix_hashes(regex, &pre, s, &all_targets, &mut scratch.suffix);
+                    let t2 = std::time::Instant::now();
+                    let sig = compute_final_signature(&pre, &pos0_results, pos_hashes);
+                    let t3 = std::time::Instant::now();
 
-            if track_timing {
-                let t0 = std::time::Instant::now();
-                let (pos0_results, all_targets) =
-                    compute_pos0_results(&pre, &mut scratch, s, initial_states);
-                let t1 = std::time::Instant::now();
-                let pos_hashes = compute_suffix_hashes(regex, &pre, s, &all_targets);
-                let t2 = std::time::Instant::now();
-                let sig = compute_final_signature(&pre, &pos0_results, &pos_hashes);
-                let t3 = std::time::Instant::now();
+                    pos0_time.fetch_add((t1 - t0).as_nanos() as u64, Ordering::Relaxed);
+                    suffix_time.fetch_add((t2 - t1).as_nanos() as u64, Ordering::Relaxed);
+                    hash_time.fetch_add((t3 - t2).as_nanos() as u64, Ordering::Relaxed);
 
-                pos0_time.fetch_add((t1 - t0).as_nanos() as u64, Ordering::Relaxed);
-                suffix_time.fetch_add((t2 - t1).as_nanos() as u64, Ordering::Relaxed);
-                hash_time.fetch_add((t3 - t2).as_nanos() as u64, Ordering::Relaxed);
-
-                sig
-            } else {
-                let (pos0_results, all_targets) =
-                    compute_pos0_results(&pre, &mut scratch, s, initial_states);
-                let pos_hashes = compute_suffix_hashes(regex, &pre, s, &all_targets);
-                compute_final_signature(&pre, &pos0_results, &pos_hashes)
-            }
-        })
+                    sig
+                } else {
+                    let (pos0_results, all_targets) =
+                        compute_pos0_results(&pre, &mut scratch.pos0, s, initial_states);
+                    let pos_hashes = compute_suffix_hashes(
+                        regex,
+                        &pre,
+                        s,
+                        &all_targets,
+                        &mut scratch.suffix,
+                    );
+                    compute_final_signature(&pre, &pos0_results, pos_hashes)
+                }
+            },
+        )
         .collect();
+
+    if std::env::var("EQ_VERIFY_REPEAT").is_ok() {
+        let limit = strings.len().min(2000);
+
+        let mut seq_reuse: Vec<u64> = Vec::with_capacity(limit);
+        let mut seq_worker = WorkerScratch {
+            pos0: Pos0Scratch::new(initial_states.len(), pre.num_groups),
+            suffix: SuffixScratch::new(pre.num_groups),
+        };
+
+        for s in strings.iter().take(limit) {
+            let (pos0_results, all_targets) =
+                compute_pos0_results(&pre, &mut seq_worker.pos0, s, initial_states);
+            let pos_hashes =
+                compute_suffix_hashes(regex, &pre, s, &all_targets, &mut seq_worker.suffix);
+            seq_reuse.push(compute_final_signature(&pre, &pos0_results, pos_hashes));
+        }
+
+        let mut seq_fresh: Vec<u64> = Vec::with_capacity(limit);
+        for s in strings.iter().take(limit) {
+            let mut pos0 = Pos0Scratch::new(initial_states.len(), pre.num_groups);
+            let (pos0_results, all_targets) = compute_pos0_results(&pre, &mut pos0, s, initial_states);
+            let mut suffix = SuffixScratch::new(pre.num_groups);
+            let pos_hashes = compute_suffix_hashes(regex, &pre, s, &all_targets, &mut suffix);
+            seq_fresh.push(compute_final_signature(&pre, &pos0_results, pos_hashes));
+        }
+
+        for idx in 0..limit {
+            if seq_reuse[idx] != seq_fresh[idx] {
+                eprintln!(
+                    "EQ_VERIFY_REPEAT sequential mismatch at {}: reuse={} fresh={}",
+                    idx, seq_reuse[idx], seq_fresh[idx]
+                );
+
+                let hash_pos0 = |results: &[(Option<usize>, EdgeList)]| {
+                    let mut h = new_hasher();
+                    for (end, edges) in results {
+                        h.write_u64(end.map(|v| v as u64 + 1).unwrap_or(0));
+                        for (gid, target) in edges {
+                            h.write_u64(*gid as u64);
+                            h.write_u64(*target as u64);
+                        }
+                    }
+                    h.finish()
+                };
+
+                let hash_slice = |vals: &[u64]| {
+                    let mut h = new_hasher();
+                    for v in vals {
+                        h.write_u64(*v);
+                    }
+                    h.finish()
+                };
+
+                let mut worker = WorkerScratch {
+                    pos0: Pos0Scratch::new(initial_states.len(), pre.num_groups),
+                    suffix: SuffixScratch::new(pre.num_groups),
+                };
+
+                let mut pos0_hash_reuse = 0u64;
+                let mut suffix_hash_reuse = 0u64;
+                let mut sig_reuse_detail = 0u64;
+                let mut pos_hashes_reuse_vec: Vec<u64> = Vec::new();
+                let mut all_targets_reuse: Vec<usize> = Vec::new();
+                for (i, s) in strings.iter().take(idx + 1).enumerate() {
+                    let (pos0_results, all_targets) =
+                        compute_pos0_results(&pre, &mut worker.pos0, s, initial_states);
+                    let pos_hashes =
+                        compute_suffix_hashes(regex, &pre, s, &all_targets, &mut worker.suffix);
+                    let sig = compute_final_signature(&pre, &pos0_results, pos_hashes);
+                    if i == idx {
+                        pos0_hash_reuse = hash_pos0(pos0_results);
+                        suffix_hash_reuse = hash_slice(pos_hashes);
+                        sig_reuse_detail = sig;
+                        pos_hashes_reuse_vec = pos_hashes.to_vec();
+                        all_targets_reuse = all_targets.to_vec();
+                    }
+                }
+
+                let mut pos0 = Pos0Scratch::new(initial_states.len(), pre.num_groups);
+                let (pos0_results, all_targets) =
+                    compute_pos0_results(&pre, &mut pos0, &strings[idx], initial_states);
+                let mut suffix = SuffixScratch::new(pre.num_groups);
+                let pos_hashes =
+                    compute_suffix_hashes(regex, &pre, &strings[idx], &all_targets, &mut suffix);
+                let pos_hashes_fresh_vec = pos_hashes.to_vec();
+                let sig_fresh_detail = compute_final_signature(&pre, &pos0_results, pos_hashes);
+                eprintln!(
+                    "pos0_hash reuse={} fresh={} suffix_hash reuse={} fresh={} sig reuse={} fresh={}",
+                    pos0_hash_reuse,
+                    hash_pos0(pos0_results),
+                    suffix_hash_reuse,
+                    hash_slice(pos_hashes),
+                    sig_reuse_detail,
+                    sig_fresh_detail
+                );
+
+                eprintln!("all_targets reuse={:?} fresh={:?}", all_targets_reuse, all_targets);
+
+                if pos_hashes_reuse_vec.len() <= 32 {
+                    eprintln!(
+                        "pos_hashes reuse={:?} fresh={:?}",
+                        pos_hashes_reuse_vec,
+                        pos_hashes_fresh_vec
+                    );
+                }
+                break;
+            }
+        }
+
+        let signatures_second: Vec<u64> = strings
+            .par_iter()
+            .map_init(
+                || WorkerScratch {
+                    pos0: Pos0Scratch::new(initial_states.len(), pre.num_groups),
+                    suffix: SuffixScratch::new(pre.num_groups),
+                },
+                |scratch, s| {
+                    let (pos0_results, all_targets) =
+                        compute_pos0_results(&pre, &mut scratch.pos0, s, initial_states);
+                    let pos_hashes =
+                        compute_suffix_hashes(regex, &pre, s, &all_targets, &mut scratch.suffix);
+                    compute_final_signature(&pre, &pos0_results, pos_hashes)
+                },
+            )
+            .collect();
+
+        if signatures_second != signatures {
+            for (idx, (a, b)) in signatures.iter().zip(signatures_second.iter()).enumerate() {
+                if a != b {
+                    eprintln!("EQ_VERIFY_REPEAT mismatch at index {}: first={} second={}", idx, a, b);
+                    let sample = &strings[idx];
+                    let sig_seq1 = compute_signature_actual(regex, sample, initial_states);
+                    let sig_seq2 = compute_signature_actual(regex, sample, initial_states);
+                    eprintln!("Sequential recompute for idx {} -> {} / {}", idx, sig_seq1, sig_seq2);
+                    break;
+                }
+            }
+            panic!("Non-deterministic signatures detected in fast equivalence");
+        }
+    }
 
     if let Ok(list) = std::env::var("EQ_DEBUG_COMPARE") {
         let indices: Vec<usize> = list
@@ -904,5 +1157,7 @@ pub fn find_equivalence_classes(
         groups.entry(sig).or_insert_with(Vec::new).push(index);
     }
 
-    groups.into_values().collect()
+    let result: EquivalenceResult = groups.into_values().collect();
+    save_cached_equivalence(cache_key, &result);
+    result
 }
