@@ -55,7 +55,7 @@ fn compute_signature(regex: &Regex, token: &[u8], initial_states: &[usize]) -> u
     })
 }
 
-pub fn find_equivalence_classes_simple(
+pub fn find_equivalence_classes(
     regex: &Regex,
     strings: &[Vec<u8>],
     initial_states: &[usize],

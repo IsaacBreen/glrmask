@@ -19,7 +19,7 @@ use crate::{
         leveled_gss::{LeveledGSS, Merge},
         vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode},
     },
-    equivalence_analysis_simple_v3,
+    equivalence_analysis,
     finite_automata::Regex,
     glr::{
         analyze::compute_terminal_follow_sets,
@@ -33,7 +33,7 @@ use crate::{
     tokenizer::{LLMTokenID, LLMTokenMap, TokenizerStateID},
     types::{TerminalID as GrammarTokenID, TerminalID},
 };
-use crate::equivalence_analysis_simple_v3::SimpleEquivalenceResult;
+use crate::equivalence_analysis::SimpleEquivalenceResult;
 use crate::datastructures::bitset::Bitset;
 use crate::datastructures::gss_acc::Acc;
 use crate::glr::parser::{ExpectElse, ParseStateEdgeContent};
@@ -723,7 +723,7 @@ impl GrammarConstraint {
             
             let llm_token_strings: Vec<Vec<u8>> = representatives.clone();
             let initial_states: Vec<usize> = tokenizer.iter_states().map(|s| s.0).collect();
-            let simple_result = equivalence_analysis_simple_v3::find_equivalence_classes_simple(
+            let simple_result = equivalence_analysis::find_equivalence_classes(
                 tokenizer,
                 &llm_token_strings,
                 &initial_states,
@@ -752,7 +752,7 @@ impl GrammarConstraint {
 
         let initial_states: Vec<usize> = tokenizer.iter_states().map(|s| s.0).collect();
 
-        let simple_result = equivalence_analysis_simple_v3::find_equivalence_classes_simple(
+        let simple_result = equivalence_analysis::find_equivalence_classes(
             tokenizer,
             &llm_token_strings,
             &initial_states,
