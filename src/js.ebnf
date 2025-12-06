@@ -14,9 +14,26 @@ MULTI_LINE_COMMENT ::= '/*' ( [^*] | '*' [^/] )* '*/' ; // Non-greedy match
 // Statements
 statement_list ::= statement+ ;
 
-statement ::= variable_statement | lexical_declaration | expression_statement | block | if_statement | function_declaration | export_statement | empty_statement | class_declaration | import_statement | return_statement | throw_statement | debugger_statement | break_statement | continue_statement | with_statement | labeled_statement | try_statement | switch_statement | do_statement | while_statement | for_statement;
-
-empty_statement ::= ';' ;
+statement ::=
+    block
+  | declaration_statement
+  | if_statement
+  | iteration_statement
+  | switch_statement
+  | with_statement
+  | try_statement
+  | function_declaration
+  | return_statement
+  | break_statement
+  | continue_statement
+  | throw_statement
+  | debugger_statement
+  | labeled_statement
+  | class_declaration
+  | import_statement
+  | export_statement
+  | expression_statement
+  ;
 
 // Note: Semicolon is optional to simulate Automatic Semicolon Insertion (ASI).
 // A real parser has complex rules for this.
@@ -26,8 +43,7 @@ block ::= '{' statement_list? '}' ;
 
 labeled_statement ::= IDENTIFIER ':' statement ;
 
-variable_statement ::= 'var' variable_declaration_list ';'? ;
-lexical_declaration ::= ( 'let' | 'const' ) variable_declaration_list ';'? ;
+declaration_statement ::= ( 'var' | 'let' | 'const' ) variable_declaration_list ';'? ;
 
 variable_declaration_list ::= variable_declaration ( ',' variable_declaration )* ;
 
@@ -35,9 +51,13 @@ variable_declaration ::= binding_pattern ( '=' expression )? ;
 
 if_statement ::= 'if' '(' expression ')' statement ( 'else' statement )? ;
 
-do_statement ::= 'do' statement 'while' '(' expression ')' ';'? ;
-while_statement ::= 'while' '(' expression ')' statement ;
-for_statement ::= 'for' '(' ( variable_statement | lexical_declaration | expression? ';' ) expression? ';' expression? ')' statement ;
+iteration_statement ::=
+    'while' '(' expression ')' statement
+  | 'do' statement 'while' '(' expression ')' ';'
+  | 'for' '(' ( ( 'var' | 'let' | 'const' ) variable_declaration_list )? ';' expression? ';' expression? ')' statement
+  | 'for' '(' ( 'var' | 'let' | 'const' )? binding_pattern ( 'in' | 'of' ) expression ')' statement
+  | 'for' '(' expression? ';' expression? ';' expression? ')' statement
+  ;
 
 switch_statement ::= 'switch' '(' expression ')' '{' case_clauses? ( default_clause case_clauses? )? '}' ;
 case_clauses ::= case_clause+ ;
@@ -50,9 +70,9 @@ try_statement ::= 'try' block ( catch_clause finally_clause? | finally_clause ) 
 catch_clause ::= 'catch' ( '(' binding_pattern ')' )? block ;
 finally_clause ::= 'finally' block ;
 
-function_declaration ::= 'async'? 'function' '*'? IDENTIFIER '(' parameter_list? ')' block ;
+function_declaration ::= 'async'? 'function' '*'? IDENTIFIER? '(' parameter_list? ')' block ;
 
-parameter_list ::= IDENTIFIER ;
+parameter_list ::= formal_parameter ( ',' formal_parameter )* ( ','? '...' binding_pattern )? ;
 
 formal_parameter ::= binding_pattern ( '=' expression )? ;
 
@@ -63,13 +83,11 @@ throw_statement ::= 'throw' expression ';'? ;
 debugger_statement ::= 'debugger' ';'? ;
 
 // Binding Patterns (for destructuring)
-binding_pattern ::= IDENTIFIER ;
+binding_pattern ::= IDENTIFIER | object_binding_pattern | array_binding_pattern ;
 object_binding_pattern ::= '{' ( property_binding ( ',' property_binding )* )? ( ','? '...' IDENTIFIER )? ','? '}' ;
 property_binding ::= (IDENTIFIER ('=' expression)?) | (property_name ':' binding_pattern ('=' expression)?) ;
 array_binding_pattern ::= '[' ( ELISION? binding_element )? ( ',' ELISION? binding_element )* (','? '...' binding_pattern)? ','? ELISION? ']' ;
 binding_element ::= binding_pattern ('=' expression)? ;
-
-ELISION ::= ','+ ;
 
 // ES6 Modules
 import_statement ::= 'import' ( import_clause 'from' STRING_LITERAL | STRING_LITERAL ) ';'? ;
@@ -79,18 +97,22 @@ named_imports ::= '{' ( import_specifier ( ',' import_specifier )* )? ','? '}' ;
 namespace_import ::= '*' 'as' IDENTIFIER ;
 import_specifier ::= IDENTIFIER ( 'as' IDENTIFIER )? ;
 
-export_statement ::= 'export' ( 'default' ( function_declaration | class_declaration | expression ) | '*' ( 'from' STRING_LITERAL )? | named_exports ( 'from' STRING_LITERAL )? | variable_statement | lexical_declaration ) ';'? ;
+export_statement ::= 'export' ( 'default' ( function_declaration | class_declaration | expression ) | '*' ( 'from' STRING_LITERAL )? | named_exports ( 'from' STRING_LITERAL )? | declaration_statement | class_declaration ) ';'? ;
 named_exports ::= '{' ( export_specifier ( ',' export_specifier )* )? ','? '}' ;
 export_specifier ::= IDENTIFIER ( 'as' IDENTIFIER )? ;
 
 // Expressions (Precedence from lowest to highest)
-expression ::= assignment_expression ( ',' assignment_expression )* ;
+expression ::= assignment_expression ;
 
 assignment_expression ::=
     yield_expression
+  | arrow_function
   | conditional_expression
-  | left_hand_side_expression '=' assignment_expression
+  | left_hand_side_expression ( '=' | '+=' | '-=' | '*=' | '/=' | '%=' | '<<=' | '>>=' | '>>>=' | '&=' | '^=' | '|=' | '**=' ) assignment_expression
   ;
+
+arrow_function ::= arrow_parameters '=>' ( block | expression ) ;
+arrow_parameters ::= IDENTIFIER | '(' parameter_list? ')' ;
 
 conditional_expression ::=
     coalesce_expression ( '?' assignment_expression ':' assignment_expression )?
@@ -99,14 +121,23 @@ conditional_expression ::=
 coalesce_expression ::= logical_or_expression ( '??' logical_or_expression )* ;
 
 logical_or_expression ::= logical_and_expression ( '||' logical_and_expression )* ;
+
 logical_and_expression ::= bitwise_or_expression ( '&&' bitwise_or_expression )* ;
+
 bitwise_or_expression ::= bitwise_xor_expression ( '|' bitwise_xor_expression )* ;
+
 bitwise_xor_expression ::= bitwise_and_expression ( '^' bitwise_and_expression )* ;
+
 bitwise_and_expression ::= equality_expression ( '&' equality_expression )* ;
+
 equality_expression ::= relational_expression ( ( '==' | '!=' | '===' | '!==' ) relational_expression )* ;
-relational_expression ::= shift_expression ( ( '<' | '>' | 'instanceof' | 'in' ) shift_expression )* ;
+
+relational_expression ::= shift_expression ( ( '<' | '>' | '<=' | '>=' | 'instanceof' | 'in' ) shift_expression )* ;
+
 shift_expression ::= additive_expression ( ( '<<' | '>>' | '>>>' ) additive_expression )* ;
+
 additive_expression ::= multiplicative_expression ( ( '+' | '-' ) multiplicative_expression )* ;
+
 multiplicative_expression ::= exponentiation_expression ( ( '*' | '/' | '%' ) exponentiation_expression )* ;
 
 exponentiation_expression ::= unary_expression ( '**' exponentiation_expression )? ;
@@ -117,7 +148,7 @@ unary_expression ::=
   ;
 
 postfix_expression ::=
-    left_hand_side_expression
+    left_hand_side_expression ( '++' | '--' )?
   ;
 
 left_hand_side_expression ::=
@@ -158,8 +189,6 @@ member_expression ::=
   | member_expression template_literal
   ;
 
-private_identifier ::= '#' IDENTIFIER ;
-
 primary_expression ::=
     'this'
   | 'super'
@@ -171,24 +200,31 @@ primary_expression ::=
   | '(' expression ')'
   ;
 
-yield_expression ::= 'yield' ;
-
-array_literal ::= '[' ( ELISION? assignment_expression )? ( ',' ELISION? assignment_expression )* ','? ELISION? ']' ;
 function_expression ::= 'async'? 'function' '*'? IDENTIFIER? '(' parameter_list? ')' block ;
 
-object_literal ::= '{' '}' | '{' property_assignment ( ',' property_assignment )* '}' ;
+yield_expression ::= 'yield' '*'? expression? ;
+
+array_literal ::= '[' ( ELISION? assignment_expression )? ( ',' ELISION? assignment_expression )* ','? ELISION? ']' ;
+ELISION ::= ','+ ;
+
+object_literal ::= '{' ( property_assignment ( ',' property_assignment )* )? ','? '}' ;
 property_assignment ::=
-    'async'? '*'? property_name '(' parameter_list? ')' block
+    'async'? '*'? property_name '(' parameter_list? ')' block // Method Definition
   | 'get' property_name '(' ')' block
   | 'set' property_name '(' IDENTIFIER ')' block
   | property_name ':' assignment_expression
   | '...' assignment_expression
-  | IDENTIFIER
+  | IDENTIFIER // Shorthand property
   ;
 property_name ::= IDENTIFIER | STRING_LITERAL | NUMERIC_LITERAL | '[' expression ']' ;
 
-class_declaration ::= 'class' IDENTIFIER class_tail ;
-class_tail ::= '{' '}' ;
+class_declaration ::= 'class' IDENTIFIER? ( 'extends' expression )? class_body ;
+class_body ::= '{' class_member* '}' ;
+class_member ::= (method_definition | field_definition) ';'? | ';' ;
+field_definition ::= ('static')? class_property_name ('=' expression)? ;
+method_definition ::= ('static')? ('get'|'set')? ('async'|'*')? class_property_name '(' parameter_list? ')' block ;
+class_property_name ::= property_name | private_identifier ;
+private_identifier ::= '#' IDENTIFIER ;
 
 // Literals
 literal ::=
