@@ -328,47 +328,19 @@ pub struct ExecutionResult {
     pub end_state: Option<usize>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TokenTrellisNode {
     pub end_state: Option<usize>,
     pub edges: BTreeMap<GroupID, Arc<TokenTrellisNode>>,
 }
 
-impl PartialEq for TokenTrellisNode {
-    fn eq(&self, other: &Self) -> bool {
-        self.end_state == other.end_state
-            && self.edges.len() == other.edges.len()
-            && self.edges.iter().all(|(k, v)| {
-                other
-                    .edges
-                    .get(k)
-                    .map_or(false, |v2| Arc::ptr_eq(v, v2))
-            })
-    }
-}
-impl Eq for TokenTrellisNode {}
-
 pub type TokenTrellis = Arc<TokenTrellisNode>;
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TokenTrellisWithCompletionNode {
     pub end_state: Option<BTreeSet<GroupID>>,
     pub edges: BTreeMap<GroupID, Arc<TokenTrellisWithCompletionNode>>,
 }
-
-impl PartialEq for TokenTrellisWithCompletionNode {
-    fn eq(&self, other: &Self) -> bool {
-        self.end_state == other.end_state
-            && self.edges.len() == other.edges.len()
-            && self.edges.iter().all(|(k, v)| {
-                other
-                    .edges
-                    .get(k)
-                    .map_or(false, |v2| Arc::ptr_eq(v, v2))
-            })
-    }
-}
-impl Eq for TokenTrellisWithCompletionNode {}
 
 pub type TokenTrellisWithCompletion = Arc<TokenTrellisWithCompletionNode>;
 
