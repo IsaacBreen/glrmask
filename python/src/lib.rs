@@ -857,19 +857,14 @@ impl PyHybridBitset {
 
     #[staticmethod]
     fn from_ranges(ranges: Vec<(usize, usize)>) -> Self {
-        let json_ranges: Vec<Vec<usize>> = ranges.into_iter().map(|(s, e)| vec![s, e]).collect();
-        let inner = RustHybridBitset::from_json(sep1::json_serialization::JSONNode::Array(
-            json_ranges
-                .into_iter()
-                .map(|p| {
-                    sep1::json_serialization::JSONNode::Array(vec![
-                        p[0].to_json(),
-                        p[1].to_json(),
-                    ])
-                })
-                .collect(),
-        ))
-        .expect("Bitset::from_ranges JSON");
+        // Flatten to match HybridBitset JSON format: [start1, end1, start2, end2, ...]
+        let mut flat = Vec::with_capacity(ranges.len() * 2);
+        for (start, end) in ranges {
+            flat.push(start.to_json());
+            flat.push(end.to_json());
+        }
+        let inner = RustHybridBitset::from_json(sep1::json_serialization::JSONNode::Array(flat))
+            .expect("Bitset::from_ranges JSON");
         Self { inner }
     }
 

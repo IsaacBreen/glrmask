@@ -332,13 +332,49 @@ class Model(GraphProvider):
             py_table[state_id] = py_row
         parser_table = ParserTable(parser_data['start_state_id'], py_table)
 
-        matches_pool = [RangeSet.from_ranges(ffi.HybridBitset(p).to_ranges()) for p in data['matches_pool']]
-        pmc_json = data['possible_matches']
+        pmc_json = data.get('possible_matches', {})
+        if isinstance(pmc_json, dict) and 'matches_pool' in pmc_json and 'state_terminal_indices' in pmc_json:
+            matches_pool_json = pmc_json.get('matches_pool', [])
+            state_term_map = pmc_json.get('state_terminal_indices', {})
+        else:
+            matches_pool_json = data.get('matches_pool')
+            state_term_map = pmc_json
+
+        if matches_pool_json is None:
+            raise KeyError("matches_pool missing from constraint JSON")
+
+        def parse_pool_entry(entry):
+            if isinstance(entry, list) and all(isinstance(x, int) for x in entry):
+                if len(entry) % 2 != 0:
+                    raise ValueError("HybridBitset JSON must have even length")
+                ranges = []
+                it = iter(entry)
+                for start in it:
+                    end = next(it)
+                    ranges.append((start, end))
+                return RangeSet.from_ranges(ranges)
+            return RangeSet.from_ranges(bs_from_json(json.dumps(entry)).to_ranges())
+
+        matches_pool = [parse_pool_entry(p) for p in matches_pool_json]
         possible_matches_cache = {}
-        for tsid_str, term_map_json in pmc_json.items():
+        def iter_state_maps(obj):
+            if isinstance(obj, dict):
+                return obj.items()
+            if isinstance(obj, list):
+                return obj
+            raise TypeError(f"Unexpected state_terminal_indices type: {type(obj)}")
+
+        for tsid_str, term_map_json in iter_state_maps(state_term_map):
             tsid = int(tsid_str)
             term_map = {}
-            for term_id_str, pool_idx in term_map_json.items():
+            if isinstance(term_map_json, dict):
+                items_iter = term_map_json.items()
+            elif isinstance(term_map_json, list):
+                items_iter = term_map_json
+            else:
+                raise TypeError(f"Unexpected terminal map type: {type(term_map_json)}")
+
+            for term_id_str, pool_idx in items_iter:
                 term_id = int(term_id_str)
                 term_map[term_id] = matches_pool[pool_idx]
             possible_matches_cache[tsid] = term_map
@@ -354,7 +390,7 @@ class Model(GraphProvider):
             tokenizer_initial_state=tokenizer.initial_state_id(),
             vocab=py_vocab,
             possible_matches_cache=possible_matches_cache,
-            id_to_token={v: bytes(k) for k, v in data['original_llm_vocab']},
+            id_to_token=Model._build_id_to_token_map(data),
             internal_to_original_map={int(k): RangeSetOut.from_indices(v) for k, v in dict(vocab['internal_to_original']).items()},
             all_internal_llm_tokens_bitset=all_internal_llm_tokens_bitset,
             ignore_terminal_id=parser_data.get('ignore_terminal_id'),
@@ -362,6 +398,38 @@ class Model(GraphProvider):
         )
 
         return model
+
+    @staticmethod
+    def _build_id_to_token_map(data: dict) -> Dict[int, bytes]:
+        vocab_trie = data.get('vocab_trie')
+        tokens_map = vocab_trie.get('tokens') if isinstance(vocab_trie, dict) else None
+
+        if tokens_map:
+            if isinstance(tokens_map, dict):
+                id_to_token = {}
+                for token_hex, tid in tokens_map.items():
+                    try:
+                        token_bytes = bytes.fromhex(token_hex)
+                    except ValueError:
+                        token_bytes = token_hex.encode('utf-8') if isinstance(token_hex, str) else bytes(token_hex)
+                    id_to_token[int(tid)] = token_bytes
+                return id_to_token
+            elif isinstance(tokens_map, list):
+                result = {}
+                for idx, token in enumerate(tokens_map):
+                    if isinstance(token, str):
+                        result[idx] = token.encode('utf-8')
+                    elif isinstance(token, bytes):
+                        result[idx] = token
+                    else:
+                        result[idx] = bytes(token)
+                return result
+
+        original_vocab = data.get('original_llm_vocab')
+        if original_vocab is not None:
+            return {v: bytes(k) for k, v in original_vocab}
+
+        raise KeyError("No vocab tokens found in constraint JSON")
 
     def _disallow_terminal_in_state(self, gss: GSS, state_id: int, terminal_id: int) -> GSS:
         term_rs = RangeSet.from_indices([terminal_id])
