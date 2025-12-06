@@ -3127,6 +3127,19 @@ impl Regex {
         max_gid.map(|m| m + 1).unwrap_or(0)
     }
 
+    pub fn execute_from_state_nonzero(&self, text: &[u8], state: usize) -> ExecutionResult {
+        let mut regex_state = self.init_to_state(state);
+        regex_state.execute(text);
+
+        let matches: Vec<_> = regex_state.matches.iter().map(|(&id, &width)| Match { group_id: id, position: width })
+            // Filter out zero-width tokens
+            .filter(|token| token.position != 0).collect();
+
+        let new_state = if regex_state.done { None } else { Some(regex_state.current_state) };
+
+        ExecutionResult { matches, end_state: new_state }
+    }
+
     pub fn execute_from_state2(&self, text: &[u8], state: usize) -> ExecutionResult {
         self.execute_from_state_fast(text, state)
     }
@@ -3286,7 +3299,7 @@ impl Regex {
             } else {
                 self.dfa.start_state
             };
-            let result = self.execute_from_state_fast(slice, exec_start_state);
+            let result = self.execute_from_state_nonzero(slice, exec_start_state);
 
             let mut edges = Vec::new();
             for m in result.matches {

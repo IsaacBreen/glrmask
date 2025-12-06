@@ -14,7 +14,7 @@ fn hash_u64<T: Hash>(t: T) -> u64 {
 }
 
 fn compute_structural_hash(regex: &Regex, slice: &[u8], start_state: usize) -> u64 {
-    let trellis = regex.generate_token_trellis_with_completion(slice, start_state);
+    let trellis = regex.generate_token_trellis(slice, start_state);
     // Trellis is hashable, so just hash it!
     hash_u64(trellis)
 }

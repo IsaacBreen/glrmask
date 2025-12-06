@@ -17,6 +17,7 @@ pub struct LLMTokenID(pub usize);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, JSONConvertible)]
 pub struct TokenizerStateID(pub usize);
 
+// TODO: Just use Match and ExecutionResult in finite_automata.rs
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, JSONConvertible)] // Added Ord for potential use in BTreeSet/Map
 pub struct Token {
     pub id: GroupID, // GroupID is usize
@@ -36,6 +37,7 @@ impl Regex {
     }
 
     pub fn execute_from_state(&self, text: &[u8], state: TokenizerStateID) -> ExecuteResult {
+        // TODO: redundant -- see finite_automata.rs
         let mut regex_state = self.init_to_state(state.0);
         regex_state.execute(text);
 
