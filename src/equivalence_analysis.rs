@@ -45,7 +45,7 @@ fn compute_signature(regex: &Regex, slice: &[u8], start_state: usize) -> u64 {
             let mut matches: BTreeMap<GroupID, usize> = regex.dfa.states[exec_start]
                 .finalizers
                 .iter()
-                .map(|group_id| (*group_id, 0))
+                .map(|group_id| (group_id, 0))
                 .collect();
             let mut position = 0;
 
@@ -62,12 +62,12 @@ fn compute_signature(regex: &Regex, slice: &[u8], start_state: usize) -> u64 {
                         current_state = next_state;
                         local_position += 1;
                         for group_id in &dfa.states[current_state].finalizers {
-                            if dfa.non_greedy_finalizers.contains(group_id) {
+                            if dfa.non_greedy_finalizers.contains(&group_id) {
                                 matches
-                                    .entry(*group_id)
+                                    .entry(group_id)
                                     .or_insert(position + local_position);
                             } else {
-                                matches.insert(*group_id, position + local_position);
+                                matches.insert(group_id, position + local_position);
                             }
                         }
 
