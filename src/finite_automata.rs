@@ -3321,7 +3321,7 @@ impl Regex {
             for (group_id, target_pos) in flat_edges {
                 grouped_edges
                     .entry(*group_id)
-                    .and_modify(|p| *p = (*p).min(*target_pos))
+                    .and_modify(|p| panic!("Multiple edges for the same group ID in trellis"))
                     .or_insert(*target_pos);
             }
 
