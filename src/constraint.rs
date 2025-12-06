@@ -687,7 +687,7 @@ impl GrammarConstraint {
                 BTreeMap::new(),
                 CommitVocab::new(Vec::new(), Vec::new()),
                 BTreeMap::new(),
-                BTreeMap::new(),
+                Vec::new(),
             );
         }
 
@@ -772,7 +772,7 @@ impl GrammarConstraint {
         let mut original_to_internal_vec: Vec<usize> = vec![usize::MAX; highest_original_id + 1];
         let mut best_rep_by_internal: Vec<usize> = Vec::with_capacity(mask_classes.len());
         let mut internal_id_counter = 0;
-        for string_indices in mask_classes.values() {
+        for string_indices in &mask_classes {
             if string_indices.is_empty() {
                 continue;
             }
@@ -1061,7 +1061,7 @@ impl GrammarConstraint {
                 }
 
                 let mut simple_token_to_class: Vec<usize> = vec![0; llm_token_strings.len()];
-                for (class_id, (_, indices)) in mask_classes.iter().enumerate() {
+                for (class_id, indices) in mask_classes.iter().enumerate() {
                     for &idx in indices {
                         if idx < simple_token_to_class.len() {
                             simple_token_to_class[idx] = class_id;

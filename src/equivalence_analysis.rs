@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
-pub type EquivalenceResult = BTreeMap<Vec<usize>, Vec<usize>>;
+pub type EquivalenceResult = Vec<Vec<usize>>;
 
 fn hash_u64<T: Hash>(t: T) -> u64 {
     let mut s = DefaultHasher::new();
@@ -40,8 +40,5 @@ pub fn find_equivalence_classes(
         groups.entry(sig).or_insert_with(Vec::new).push(idx);
     }
 
-    groups.into_iter()
-        .enumerate()
-        .map(|(id, (_, idxs))| (vec![id], idxs))
-        .collect()
+    groups.into_values().collect()
 }
