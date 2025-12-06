@@ -706,6 +706,7 @@ impl GrammarConstraint {
         }
 
         let initial_states: Vec<usize> = tokenizer.iter_states().map(|s| s.0).collect();
+        crate::debug!(3, "Equivalence analysis: {} initial states, {} tokens", initial_states.len(), llm_token_strings.len());
 
         let mask_classes = equivalence_analysis::find_equivalence_classes(
             tokenizer,
