@@ -107,11 +107,7 @@ pub fn find_equivalence_classes(
 ) -> EquivalenceResult {
     let signatures: Vec<u64> = strings
         .par_iter()
-        .enumerate()
-        .map(|(i, s)| {
-            if i > 0 && i % 1000 == 0 {
-                // Optional: println!("Computing equivalence signatures: processing string {}/{}", i, strings.len());
-            }
+        .map(|s| {
             let mut h = DefaultHasher::new();
             for &start in initial_states.iter() {
                 compute_structural_hash(regex, s, start, &mut h);
