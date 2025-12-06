@@ -761,7 +761,7 @@ impl GrammarConstraint {
             let num_original_tokens = llm_token_strings.len();
             crate::debug!(
                 3,
-                "Combined Equivalence Analysis: {} tokens -> {} mask classe",
+                "Combined Equivalence Analysis: {} tokens -> {} mask classes",
                 num_original_tokens,
                 mask_classes.len(),
             );
