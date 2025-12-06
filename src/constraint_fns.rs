@@ -169,12 +169,12 @@ impl<'a> GrammarConstraintState<'a> {
         let final_mask_internal = self.compute_internal_mask();
         self.parent.parser_dwa_vocab.internal_bv_to_original(&final_mask_internal)
     }
-    
+
     /// Fill an i32 slice with the token mask (compatible with llguidance format).
-    /// 
+    ///
     /// This is a zero-allocation version that writes directly to the provided buffer.
     /// The output slice should have length `(vocab_size + 31) / 32`.
-    /// 
+    ///
     /// This is the most efficient way to get the mask when you have a pre-allocated
     /// buffer (e.g., numpy array, torch tensor, or reused buffer).
     #[inline]
@@ -182,9 +182,9 @@ impl<'a> GrammarConstraintState<'a> {
         let final_mask_internal = self.compute_internal_mask();
         self.parent.parser_dwa_vocab.fill_internal_bv_to_original_i32(&final_mask_internal, out);
     }
-    
+
     /// Fill an i32 slice with the token mask via a raw pointer.
-    /// 
+    ///
     /// # Safety
     /// The caller must ensure that:
     /// - `ptr` points to at least `len` i32 values of valid, writable memory
@@ -195,7 +195,7 @@ impl<'a> GrammarConstraintState<'a> {
         let out = std::slice::from_raw_parts_mut(ptr, len);
         self.fill_mask_i32(out);
     }
-    
+
     /// Returns the required buffer size in i32 elements for the mask.
     #[inline]
     pub fn mask_buffer_size_i32(&self) -> usize {
@@ -249,7 +249,7 @@ impl<'a> GrammarConstraintState<'a> {
 
         let mut new_overall_state: BTreeMap<TokenizerStateID, GLRParserState<'a>> = BTreeMap::new();
         let mut processing_queue: BTreeMap<usize, BTreeMap<TokenizerStateID, ParserGSS>> = BTreeMap::new();
-        
+
         let initial_states: BTreeMap<_,_> = self.state.iter().map(|(sid, s)| (*sid, s.stack.clone())).collect();
         processing_queue.insert(0, initial_states);
         crate::debug!(8, "  Processing queue initial: {:?}", processing_queue.keys().collect::<Vec<_>>());
