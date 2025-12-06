@@ -3319,15 +3319,11 @@ impl Regex {
 
             let mut grouped_edges: BTreeMap<GroupID, usize> = BTreeMap::new();
             for (group_id, target_pos) in flat_edges {
-                use std::collections::hash_map::Entry;
+                use std::collections::btree_map::Entry;
                 match grouped_edges.entry(*group_id) {
-                    Entry::Occupied(_) => {
-                        panic!("Multiple edges for the same group ID in trellis");
-                    }
-                    Entry::Vacant(entry) => {
-                        entry.insert(*target_pos);
-                    }
-                }
+                    Entry::Occupied(_) => panic!("Multiple edges for the same group ID in trellis"),
+                    Entry::Vacant(entry) => entry.insert(*target_pos),
+                };
             }
 
             let mut edges = BTreeMap::new();
