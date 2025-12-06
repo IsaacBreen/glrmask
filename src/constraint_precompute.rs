@@ -106,6 +106,7 @@ impl<'r> Precomputer1<'r> {
     }
 
     fn finish(mut self) -> DWA {
+        // TODO: WTF is this
         // Debug: Count transitions
         let mut total_transitions = 0;
         let mut transitions_to_leaf = 0;
@@ -119,8 +120,8 @@ impl<'r> Precomputer1<'r> {
                         if weight.contains(6) && weight.contains(31) {
                             // Good - merged
                         } else if weight.contains(6) || weight.contains(31) {
-                            crate::debug!(1, "SEPARATE: transition from {} on label {} has weight with 6={} 31={}",
-                                src, label, weight.contains(6), weight.contains(31));
+                            // crate::debug!(1, "SEPARATE: transition from {} on label {} has weight with 6={} 31={}",
+                            //     src, label, weight.contains(6), weight.contains(31));
                         }
                     }
                 }
@@ -467,8 +468,8 @@ impl<'r> Precomputer1<'r> {
                             let direct_accessible: Vec<_> = self.tokenizer.dfa.states[exec_result.end_state.unwrap()].possible_future_group_ids.iter().copied().collect();
                             let from_accessible: Vec<_> = self.tokenizer.dfa.states[tokenizer_state_id.0].possible_future_group_ids.iter().copied().collect();
                             let segment: Vec<u8> = segment_bytes[pos..].to_vec();
-                            crate::debug!(1, "Creating leaf transitions for token {} ({:?}): segment={:?}, src_node={}, tokenizer_state={} (accessible={:?}), final_state={:?} (accessible={:?}), from_cache={:?}",
-                                child_token_id, String::from_utf8_lossy(child_vocab_node.prefix()), segment, src_node, tokenizer_state_id.0, from_accessible, exec_result.end_state, direct_accessible, accessible_terminals.as_slice());
+                            // crate::debug!(1, "Creating leaf transitions for token {} ({:?}): segment={:?}, src_node={}, tokenizer_state={} (accessible={:?}), final_state={:?} (accessible={:?}), from_cache={:?}",
+                            //     child_token_id, String::from_utf8_lossy(child_vocab_node.prefix()), segment, src_node, tokenizer_state_id.0, from_accessible, exec_result.end_state, direct_accessible, accessible_terminals.as_slice());
                         }
                         
                         for terminal_id in accessible_terminals.iter() {
