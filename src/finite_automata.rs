@@ -328,21 +328,49 @@ pub struct ExecutionResult {
     pub end_state: Option<usize>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug)]
 pub struct TokenTrellisNode {
     pub end_state: Option<usize>,
-    pub edges: Vec<(GroupID, usize)>,
+    pub edges: BTreeMap<GroupID, Arc<TokenTrellisNode>>,
 }
 
-pub type TokenTrellis = BTreeMap<usize, TokenTrellisNode>;
+impl PartialEq for TokenTrellisNode {
+    fn eq(&self, other: &Self) -> bool {
+        self.end_state == other.end_state
+            && self.edges.len() == other.edges.len()
+            && self.edges.iter().all(|(k, v)| {
+                other
+                    .edges
+                    .get(k)
+                    .map_or(false, |v2| Arc::ptr_eq(v, v2))
+            })
+    }
+}
+impl Eq for TokenTrellisNode {}
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub type TokenTrellis = Arc<TokenTrellisNode>;
+
+#[derive(Debug)]
 pub struct TokenTrellisWithCompletionNode {
     pub end_state: Option<BTreeSet<GroupID>>,
-    pub edges: Vec<(GroupID, usize)>,
+    pub edges: BTreeMap<GroupID, Arc<TokenTrellisWithCompletionNode>>,
 }
 
-pub type TokenTrellisWithCompletion = BTreeMap<usize, TokenTrellisWithCompletionNode>;
+impl PartialEq for TokenTrellisWithCompletionNode {
+    fn eq(&self, other: &Self) -> bool {
+        self.end_state == other.end_state
+            && self.edges.len() == other.edges.len()
+            && self.edges.iter().all(|(k, v)| {
+                other
+                    .edges
+                    .get(k)
+                    .map_or(false, |v2| Arc::ptr_eq(v, v2))
+            })
+    }
+}
+impl Eq for TokenTrellisWithCompletionNode {}
+
+pub type TokenTrellisWithCompletion = Arc<TokenTrellisWithCompletionNode>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RegexState<'a> {
@@ -3268,12 +3296,15 @@ impl Regex {
     }
 
     pub fn generate_token_trellis(&self, bytes: &[u8], start_state: usize) -> TokenTrellis {
-        let mut trellis = BTreeMap::new();
+        // A flat representation of the trellis, mapping position to (end_state, edges)
+        let mut flat_trellis: BTreeMap<usize, (Option<usize>, Vec<(GroupID, usize)>)> =
+            BTreeMap::new();
         let mut queue = VecDeque::new();
         let mut visited = HashSet::new();
 
         queue.push_back(0);
         visited.insert(0);
+        flat_trellis.insert(0, Default::default());
 
         while let Some(pos) = queue.pop_front() {
             let slice = if pos <= bytes.len() {
@@ -3290,54 +3321,90 @@ impl Regex {
                 edges.push((m.group_id, target_pos));
                 if visited.insert(target_pos) {
                     queue.push_back(target_pos);
+                    flat_trellis.insert(target_pos, Default::default());
                 }
             }
 
-            trellis
-                .entry(pos)
-                .or_insert_with(|| TokenTrellisNode {
-                    end_state: None,
-                    edges: Vec::new(),
-                })
-                .edges = edges;
+            flat_trellis.get_mut(&pos).unwrap().1 = edges;
 
             if let Some(s) = result.end_state {
                 let end_pos = pos + slice.len();
-                trellis
-                    .entry(end_pos)
-                    .or_insert_with(|| TokenTrellisNode {
-                        end_state: None,
-                        edges: Vec::new(),
-                    })
-                    .end_state = Some(s);
+                if visited.insert(end_pos) {
+                    queue.push_back(end_pos);
+                    flat_trellis.insert(end_pos, Default::default());
+                }
+                flat_trellis.get_mut(&end_pos).unwrap().0 = Some(s);
             }
         }
 
-        trellis
+        // Convert the flat representation to a graph of Arc<TokenTrellisNode>
+        let mut memo: HashMap<usize, TokenTrellis> = HashMap::new();
+        let positions: Vec<usize> = flat_trellis.keys().cloned().collect();
+
+        for &pos in positions.iter().rev() {
+            let (end_state, flat_edges) = flat_trellis.get(&pos).unwrap();
+
+            let mut grouped_edges: BTreeMap<GroupID, usize> = BTreeMap::new();
+            for (group_id, target_pos) in flat_edges {
+                grouped_edges
+                    .entry(*group_id)
+                    .and_modify(|p| *p = (*p).min(*target_pos))
+                    .or_insert(*target_pos);
+            }
+
+            let mut edges = BTreeMap::new();
+            for (group_id, target_pos) in grouped_edges {
+                let target_node = memo.get(&target_pos).expect("target node should exist").clone();
+                edges.insert(group_id, target_node);
+            }
+
+            let node = Arc::new(TokenTrellisNode {
+                end_state: *end_state,
+                edges,
+            });
+            memo.insert(pos, node);
+        }
+
+        memo.remove(&0).expect("root node must exist")
     }
 
     pub fn convert_token_trellis_into_completion(
         &self,
         trellis: TokenTrellis,
     ) -> TokenTrellisWithCompletion {
-        trellis
-            .into_iter()
-            .map(|(pos, node)| {
-                let end_state = node.end_state.map(|state_idx| {
-                    self.dfa.states[state_idx]
-                        .possible_future_group_ids
-                        .clone()
-                });
+        let mut memo: HashMap<*const TokenTrellisNode, TokenTrellisWithCompletion> = HashMap::new();
+        self.convert_node_recursive(trellis, &mut memo)
+    }
 
-                (
-                    pos,
-                    TokenTrellisWithCompletionNode {
-                        end_state,
-                        edges: node.edges,
-                    },
-                )
-            })
-            .collect()
+    fn convert_node_recursive(
+        &self,
+        node: Arc<TokenTrellisNode>,
+        memo: &mut HashMap<*const TokenTrellisNode, TokenTrellisWithCompletion>,
+    ) -> TokenTrellisWithCompletion {
+        let ptr = Arc::as_ptr(&node);
+        if let Some(converted) = memo.get(&ptr) {
+            return converted.clone();
+        }
+
+        let mut new_edges = BTreeMap::new();
+        for (group_id, target_node) in &node.edges {
+            let new_target_node = self.convert_node_recursive(target_node.clone(), memo);
+            new_edges.insert(*group_id, new_target_node);
+        }
+
+        let end_state = node.end_state.map(|state_idx| {
+            self.dfa.states[state_idx]
+                .possible_future_group_ids
+                .clone()
+        });
+
+        let new_node = Arc::new(TokenTrellisWithCompletionNode {
+            end_state,
+            edges: new_edges,
+        });
+
+        memo.insert(ptr, new_node.clone());
+        new_node
     }
 
     pub fn generate_token_trellis_with_completion(&self, bytes: &[u8], start_state: usize) -> TokenTrellisWithCompletion {
