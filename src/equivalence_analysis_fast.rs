@@ -1,3 +1,6 @@
+// PERMANENT WARNING: Do NOT add any form of caching or shortcuts that skip or restrict
+// states/tokens for equivalence analysis. Full correctness is mandatory; no "cheating"
+// optimizations that drop work are allowed here.
 use crate::finite_automata::Regex;
 use crate::r#macro::is_debug_level_enabled;
 use ahash::{AHasher, RandomState};
@@ -6,11 +9,7 @@ use rayon::prelude::*;
 use smallvec::SmallVec;
 use std::collections::BTreeSet;
 use std::collections::hash_map::DefaultHasher;
-use std::fs;
 use std::hash::{BuildHasher, Hash, Hasher};
-use std::path::Path;
-use std::io::Write;
-use serde::{Deserialize, Serialize};
 
 pub type EquivalenceResult = BTreeSet<Vec<usize>>;
 
@@ -95,86 +94,6 @@ struct SuffixScratch {
 struct WorkerScratch {
     pos0: Pos0Scratch,
     suffix: SuffixScratch,
-}
-
-#[derive(Serialize, Deserialize)]
-struct EquivalenceCache {
-    key: u64,
-    classes: Vec<Vec<usize>>,
-}
-
-fn cache_dir() -> &'static Path {
-    Path::new(".cache/equiv_cache")
-}
-
-fn cache_path_for_key(key: u64) -> std::path::PathBuf {
-    cache_dir().join(format!("{:016x}.json", key))
-}
-
-fn legacy_cache_path() -> &'static Path {
-    Path::new(".cache/equiv_cache.json")
-}
-
-fn compute_dfa_fingerprint(pre: &PrecomputedDfa) -> u64 {
-    let mut hasher = new_hasher();
-    hasher.write_usize(pre.num_groups);
-    hasher.write_usize(pre.transitions.len());
-
-    for table in &pre.transitions {
-        for &next in table.iter() {
-            hasher.write_u32(next);
-        }
-    }
-
-    for finals in &pre.finalizers {
-        hasher.write_usize(finals.len());
-        for f in finals {
-            hasher.write_u64(f.gid as u64);
-            hasher.write_u8(f.non_greedy as u8);
-        }
-    }
-
-    for mode in &pre.future_modes {
-        match mode {
-            FutureMode::AlwaysTerminate => hasher.write_u8(0),
-            FutureMode::AlwaysContinue => hasher.write_u8(1),
-            FutureMode::Guarded(g) => {
-                hasher.write_u8(2);
-                hasher.write_usize(g.len());
-                for gid in g {
-                    hasher.write_usize(*gid);
-                }
-            }
-        }
-    }
-
-    hasher.write_u64(pre.none_completion_hash);
-    for &h in &pre.completion_hash {
-        hasher.write_u64(h);
-    }
-
-    hasher.finish()
-}
-
-fn compute_vocab_hash(strings: &[Vec<u8>]) -> u64 {
-    let mut hasher = new_hasher();
-    hasher.write_usize(strings.len());
-    for s in strings {
-        hasher.write_usize(s.len());
-        hasher.write(s);
-    }
-    hasher.finish()
-}
-
-fn compute_cache_key(pre: &PrecomputedDfa, strings: &[Vec<u8>], initial_states: &[usize]) -> u64 {
-    let mut hasher = new_hasher();
-    hasher.write_u64(compute_dfa_fingerprint(pre));
-    hasher.write_u64(compute_vocab_hash(strings));
-    hasher.write_usize(initial_states.len());
-    for state in initial_states {
-        hasher.write_usize(*state);
-    }
-    hasher.finish()
 }
 
 fn state_fingerprint(pre: &PrecomputedDfa, state_id: usize) -> u64 {
@@ -265,23 +184,6 @@ fn dedup_initial_states(pre: &PrecomputedDfa, initial_states: &[usize]) -> Vec<u
 
     reps.sort_unstable();
     reps
-}
-
-fn load_cached_equivalence(key: u64) -> Option<EquivalenceResult> {
-    if std::env::var("DISABLE_EQ_CACHE").is_ok() {
-        return None;
-    }
-
-    // Temporarily disable on-disk equivalence caching until a deterministic fast path is built.
-    let _ = key;
-    None
-}
-
-fn save_cached_equivalence(key: u64, groups: &EquivalenceResult) {
-    if std::env::var("DISABLE_EQ_CACHE").is_ok() {
-        return;
-    }
-    let _ = (key, groups);
 }
 
 fn precompute_dfa(regex: &Regex) -> PrecomputedDfa {
@@ -1008,27 +910,6 @@ pub fn find_equivalence_classes(
 ) -> EquivalenceResult {
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    // For extremely large state sets, fall back to an identity partition unless explicit
-    // verification is requested. This preserves correctness (no tokens are merged) while
-    // keeping the equivalence step bounded.
-    let skip_heavy = initial_states.len() > 100_000 && std::env::var("VERIFY_EQUIVALENCE").is_err();
-    if skip_heavy {
-        if is_debug_level_enabled(3) {
-            crate::debug!(
-                3,
-                "fast equivalence: skipping analysis ({} states, {}) — using identity classes",
-                initial_states.len(),
-                strings.len()
-            );
-        }
-
-        let mut groups: EquivalenceResult = EquivalenceResult::new();
-        for idx in 0..strings.len() {
-            groups.insert(vec![idx]);
-        }
-        return groups;
-    }
-
     let pre = precompute_dfa(regex);
     let mut reduced_initial_states = dedup_initial_states(&pre, initial_states);
     if reduced_initial_states.is_empty() {
@@ -1042,14 +923,6 @@ pub fn find_equivalence_classes(
             initial_states.len(),
             reduced_initial_states.len()
         );
-    }
-
-    let cache_key = compute_cache_key(&pre, strings, &reduced_initial_states);
-    if let Some(cached) = load_cached_equivalence(cache_key) {
-        if is_debug_level_enabled(3) {
-            crate::debug!(3, "Equivalence cache hit: using cached classes ({} groups)", cached.len());
-        }
-        return cached;
     }
 
     let track_timing = is_debug_level_enabled(3);
@@ -1291,6 +1164,5 @@ pub fn find_equivalence_classes(
     }
 
     let result: EquivalenceResult = groups.into_values().collect();
-    save_cached_equivalence(cache_key, &result);
     result
 }

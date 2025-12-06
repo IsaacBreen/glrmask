@@ -734,20 +734,6 @@ impl GrammarConstraint {
             }
         }
 
-        // For massive DFAs, restrict equivalence analysis to the tokenizer start state by default.
-        if initial_states.len() > 10_000 && std::env::var("FULL_EQ_STATES").is_err() {
-            let start = tokenizer.initial_state_id().0;
-            if is_debug_level_enabled(3) {
-                crate::debug!(
-                    3,
-                    "Equivalence analysis: collapsing state set {} -> 1 (start state only)",
-                    initial_states.len()
-                );
-            }
-            initial_states.clear();
-            initial_states.push(start);
-        }
-
         crate::debug!(
             3,
             "Equivalence analysis: {} initial states, {} tokens",
