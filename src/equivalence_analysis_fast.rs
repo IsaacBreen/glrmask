@@ -1295,45 +1295,52 @@ fn compute_chunk_signature_fast_1group(
         let position = (pos + 1) as u32;
         let mut any_active = false;
         
-        // Process all states without early-exit to avoid branching
-        for i in 0..num_states {
-            let done = scratch.done[i];
-            let current = scratch.current_states[i];
-            let next_state = if done { NONE_STATE } else { pre.transitions[current][byte as usize] };
-            
-            // Update state (only if not done and valid transition)
-            let valid = !done && next_state != NONE_STATE;
-            let next_state_usize = next_state as usize;
-            
-            if valid {
+        // SAFETY: All indices are within bounds - we ensure scratch vectors have num_states elements,
+        // current_states[i] is always a valid DFA state index (< pre.transitions.len()),
+        // byte is in 0..256 so byte as usize is valid for the 256-element transition array.
+        // This removes bounds checking overhead in the hot loop.
+        unsafe {
+            for i in 0..num_states {
+                let done = *scratch.done.get_unchecked(i);
+                if done {
+                    continue;
+                }
+                
+                let current = *scratch.current_states.get_unchecked(i);
+                let next_state = *pre.transitions.get_unchecked(current).get_unchecked(byte as usize);
+                
+                if next_state == NONE_STATE {
+                    *scratch.done.get_unchecked_mut(i) = true;
+                    continue;
+                }
+                
                 any_active = true;
-                scratch.current_states[i] = next_state_usize;
+                let next_state_usize = next_state as usize;
+                *scratch.current_states.get_unchecked_mut(i) = next_state_usize;
                 
                 // Check finalizer (simplified for 1 group)
-                let has_finalizer = !pre.finalizers[next_state_usize].is_empty();
-                if has_finalizer {
-                    let f = &pre.finalizers[next_state_usize][0];
+                let finalizers = pre.finalizers.get_unchecked(next_state_usize);
+                if !finalizers.is_empty() {
+                    let f = finalizers.get_unchecked(0);
                     if f.non_greedy {
-                        if scratch.match_positions[i] == NONE_POS {
-                            scratch.match_positions[i] = position;
+                        if *scratch.match_positions.get_unchecked(i) == NONE_POS {
+                            *scratch.match_positions.get_unchecked_mut(i) = position;
                         }
                     } else {
-                        scratch.match_positions[i] = position;
+                        *scratch.match_positions.get_unchecked_mut(i) = position;
                     }
                 }
                 
                 // Check termination
-                let terminate = match &pre.future_modes[next_state_usize] {
+                let terminate = match pre.future_modes.get_unchecked(next_state_usize) {
                     FutureMode::AlwaysTerminate => true,
                     FutureMode::AlwaysContinue => false,
-                    FutureMode::Guarded(_) => scratch.match_positions[i] != NONE_POS,
+                    FutureMode::Guarded(_) => *scratch.match_positions.get_unchecked(i) != NONE_POS,
                 };
                 
                 if terminate {
-                    scratch.done[i] = true;
+                    *scratch.done.get_unchecked_mut(i) = true;
                 }
-            } else if !done && next_state == NONE_STATE {
-                scratch.done[i] = true;
             }
         }
         
