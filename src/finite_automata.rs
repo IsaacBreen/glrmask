@@ -3,7 +3,7 @@ use crate::datastructures::frozenset::FrozenSet;
 use crate::datastructures::u8set::U8Set;
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use json_convertible_derive::JSONConvertible;
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::collections::BTreeMap as StdMap;
 use std::collections::HashMap;
 use std::fmt::{Debug, Display, Formatter};
@@ -327,6 +327,14 @@ pub struct ExecutionResult {
     pub matches: Vec<Match>,
     pub end_state: Option<usize>,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TokenTrellisNode {
+    pub end_state: Option<usize>,
+    pub edges: Vec<(GroupID, usize)>,
+}
+
+pub type TokenTrellis = BTreeMap<usize, TokenTrellisNode>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RegexState<'a> {
@@ -3249,6 +3257,55 @@ impl Regex {
 
     pub fn could_fully_match(&self, text: &[u8]) -> bool {
         self.fully_matches(text).unwrap_or(true)
+    }
+
+    pub fn generate_token_trellis(&self, bytes: &[u8], start_state: usize) -> TokenTrellis {
+        let mut trellis = BTreeMap::new();
+        let mut queue = VecDeque::new();
+        let mut visited = HashSet::new();
+
+        queue.push_back(0);
+        visited.insert(0);
+
+        while let Some(pos) = queue.pop_front() {
+            let slice = if pos <= bytes.len() {
+                &bytes[pos..]
+            } else {
+                &[]
+            };
+
+            let result = self.execute_from_state_fast(slice, start_state);
+
+            let mut edges = Vec::new();
+            for m in result.matches {
+                let target_pos = pos + m.position;
+                edges.push((m.group_id, target_pos));
+                if visited.insert(target_pos) {
+                    queue.push_back(target_pos);
+                }
+            }
+
+            trellis
+                .entry(pos)
+                .or_insert_with(|| TokenTrellisNode {
+                    end_state: None,
+                    edges: Vec::new(),
+                })
+                .edges = edges;
+
+            if let Some(s) = result.end_state {
+                let end_pos = pos + slice.len();
+                trellis
+                    .entry(end_pos)
+                    .or_insert_with(|| TokenTrellisNode {
+                        end_state: None,
+                        edges: Vec::new(),
+                    })
+                    .end_state = Some(s);
+            }
+        }
+
+        trellis
     }
 }
 
