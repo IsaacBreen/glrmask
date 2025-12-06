@@ -18,7 +18,10 @@ pub fn find_equivalence_classes(
     strings: &[Vec<u8>],
     initial_states: &[usize],
 ) -> EquivalenceResult {
-    let signatures: Vec<u64> = strings.par_iter().map(|s| {
+    let signatures: Vec<u64> = strings.par_iter().enumerate().map(|(i, s)| {
+        if i%100 == 0 {
+            println!("Computing equivalence signatures: processing string {}/{}", i, strings.len());
+        }
         let mut h = DefaultHasher::new();
         for &start in initial_states.iter() {
             compute_structural_hash(regex, s, start, &mut h);
