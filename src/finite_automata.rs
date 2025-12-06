@@ -329,20 +329,16 @@ pub struct ExecutionResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct TokenTrellisNode {
+pub struct TokenTrellis {
     pub end_state: Option<usize>,
-    pub edges: BTreeMap<GroupID, Arc<TokenTrellisNode>>,
+    pub edges: BTreeMap<GroupID, Arc<TokenTrellis>>,
 }
-
-pub type TokenTrellis = Arc<TokenTrellisNode>;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct TokenTrellisWithCompletionNode {
+pub struct TokenTrellisWithCompletion {
     pub end_state: Option<BTreeSet<GroupID>>,
-    pub edges: BTreeMap<GroupID, Arc<TokenTrellisWithCompletionNode>>,
+    pub edges: BTreeMap<GroupID, Arc<TokenTrellisWithCompletion>>,
 }
-
-pub type TokenTrellisWithCompletion = Arc<TokenTrellisWithCompletionNode>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RegexState<'a> {
@@ -3309,8 +3305,8 @@ impl Regex {
             }
         }
 
-        // Convert the flat representation to a graph of Arc<TokenTrellisNode>
-        let mut memo: HashMap<usize, TokenTrellis> = HashMap::new();
+        // Convert the flat representation to a graph of Arc<TokenTrellis>
+        let mut memo: HashMap<usize, Arc<TokenTrellis>> = HashMap::new();
         let positions: Vec<usize> = flat_trellis.keys().cloned().collect();
 
         for &pos in positions.iter().rev() {
@@ -3330,29 +3326,45 @@ impl Regex {
                 edges.insert(group_id, target_node);
             }
 
-            let node = Arc::new(TokenTrellisNode {
+            let node = Arc::new(TokenTrellis {
                 end_state: *end_state,
                 edges,
             });
             memo.insert(pos, node);
         }
 
-        memo.remove(&0).expect("root node must exist")
+        Arc::try_unwrap(memo.remove(&0).expect("root node must exist")).unwrap_or_else(|arc| (*arc).clone())
     }
 
     pub fn convert_token_trellis_into_completion(
         &self,
         trellis: TokenTrellis,
     ) -> TokenTrellisWithCompletion {
-        let mut memo: HashMap<*const TokenTrellisNode, TokenTrellisWithCompletion> = HashMap::new();
-        self.convert_node_recursive(trellis, &mut memo)
+        let mut memo: HashMap<*const TokenTrellis, Arc<TokenTrellisWithCompletion>> = HashMap::new();
+
+        let mut new_edges = BTreeMap::new();
+        for (group_id, target_node) in &trellis.edges {
+            let new_target_node = self.convert_node_recursive(target_node.clone(), &mut memo);
+            new_edges.insert(*group_id, new_target_node);
+        }
+
+        let end_state = trellis.end_state.map(|state_idx| {
+            self.dfa.states[state_idx]
+                .possible_future_group_ids
+                .clone()
+        });
+
+        TokenTrellisWithCompletion {
+            end_state,
+            edges: new_edges,
+        }
     }
 
     fn convert_node_recursive(
         &self,
-        node: Arc<TokenTrellisNode>,
-        memo: &mut HashMap<*const TokenTrellisNode, TokenTrellisWithCompletion>,
-    ) -> TokenTrellisWithCompletion {
+        node: Arc<TokenTrellis>,
+        memo: &mut HashMap<*const TokenTrellis, Arc<TokenTrellisWithCompletion>>,
+    ) -> Arc<TokenTrellisWithCompletion> {
         let ptr = Arc::as_ptr(&node);
         if let Some(converted) = memo.get(&ptr) {
             return converted.clone();
@@ -3370,7 +3382,7 @@ impl Regex {
                 .clone()
         });
 
-        let new_node = Arc::new(TokenTrellisWithCompletionNode {
+        let new_node = Arc::new(TokenTrellisWithCompletion {
             end_state,
             edges: new_edges,
         });
@@ -3379,7 +3391,11 @@ impl Regex {
         new_node
     }
 
-    pub fn generate_token_trellis_with_completion(&self, bytes: &[u8], start_state: usize) -> TokenTrellisWithCompletion {
+    pub fn generate_token_trellis_with_completion(
+        &self,
+        bytes: &[u8],
+        start_state: usize,
+    ) -> TokenTrellisWithCompletion {
         let trellis = self.generate_token_trellis(bytes, start_state);
         self.convert_token_trellis_into_completion(trellis)
     }
