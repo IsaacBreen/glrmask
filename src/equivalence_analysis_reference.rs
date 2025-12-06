@@ -1,14 +1,14 @@
 use crate::finite_automata::Regex;
 use hashbrown::{HashMap, HashSet};
 use rayon::prelude::*;
+use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeSet, VecDeque};
 use std::hash::{Hash, Hasher};
-use std::collections::hash_map::DefaultHasher;
 
 pub type EquivalenceResult = BTreeSet<Vec<usize>>;
 
 /// Computes a deterministic hash representing the parsing structure of the string.
-fn compute_signature(regex: &Regex, slice: &[u8], start_state: usize) -> u64 {
+pub fn compute_signature(regex: &Regex, slice: &[u8], start_state: usize) -> u64 {
     // 1. Forward Pass: Build a graph of valid state transitions (nodes and edges).
     // We Map: Position -> (EndStateData, List of Outgoing Edges)
     let mut graph = HashMap::new();
@@ -16,9 +16,15 @@ fn compute_signature(regex: &Regex, slice: &[u8], start_state: usize) -> u64 {
     let mut visited: HashSet<usize> = HashSet::from([0]);
 
     while let Some(pos) = queue.pop_front() {
-        if pos > slice.len() { continue; }
+        if pos > slice.len() {
+            continue;
+        }
 
-        let exec_start = if pos == 0 { start_state } else { regex.dfa.start_state };
+        let exec_start = if pos == 0 {
+            start_state
+        } else {
+            regex.dfa.start_state
+        };
         let result = regex.execute_from_state_nonzero(&slice[pos..], exec_start);
 
         let mut edges = Vec::with_capacity(result.matches.len());
@@ -34,7 +40,9 @@ fn compute_signature(regex: &Regex, slice: &[u8], start_state: usize) -> u64 {
         // Sort edges by Group ID so the hash is consistent regardless of execution order
         edges.sort_unstable_by_key(|e| e.0);
 
-        let completion = result.end_state.map(|id| &regex.dfa.states[id].possible_future_group_ids);
+        let completion = result
+            .end_state
+            .map(|id| &regex.dfa.states[id].possible_future_group_ids);
         graph.insert(pos, (completion, edges));
     }
 
@@ -54,7 +62,9 @@ fn compute_signature(regex: &Regex, slice: &[u8], start_state: usize) -> u64 {
 
         // Hash the structural connections (outgoing edges + hash of target nodes)
         for (group_id, target) in edges {
-            let target_hash = node_hashes.get(target).expect("Target must be processed before Source");
+            let target_hash = node_hashes
+                .get(target)
+                .expect("Target must be processed before Source");
             (group_id, target_hash).hash(&mut hasher);
         }
 
