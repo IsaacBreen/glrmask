@@ -328,7 +328,7 @@ pub struct ExecutionResult {
     pub end_state: Option<usize>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TokenTrellisNode {
     pub end_state: Option<usize>,
     pub edges: Vec<(GroupID, usize)>,
