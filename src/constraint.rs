@@ -691,48 +691,6 @@ impl GrammarConstraint {
             );
         }
 
-        // For very small vocabs, skip equivalence analysis
-        if llm_token_map.len() < 10 {
-            let identity_map: BTreeMap<usize, usize> = llm_token_map
-                .iter()
-                .map(|(_bytes, id)| (id.0, id.0))
-                .collect();
-            
-            let mut sorted_tokens: Vec<_> = llm_token_map.iter().collect();
-            sorted_tokens.sort_by_key(|(_, id)| id.0);
-            
-            let mut highest_original_id = 0usize;
-            for (_, id) in &sorted_tokens {
-                highest_original_id = highest_original_id.max(id.0);
-            }
-            let effective_max = max_original_llm_token_id.max(highest_original_id);
-            
-            let mut representatives = Vec::with_capacity(sorted_tokens.len());
-            let mut original_to_representative = vec![CommitVocab::INVALID_REPRESENTATIVE; effective_max + 1];
-            
-            // For small vocab, each token is its own representative
-            let mut internal_token_map: BTreeMap<Vec<u8>, LLMTokenID> = BTreeMap::new();
-            for (idx, (bytes, id)) in sorted_tokens.into_iter().enumerate() {
-                representatives.push(bytes.clone());
-                original_to_representative[id.0] = idx as u32;
-                internal_token_map.insert(bytes.clone(), LLMTokenID(id.0));
-            }
-            
-            let llm_token_strings: Vec<Vec<u8>> = representatives.clone();
-            let initial_states: Vec<usize> = tokenizer.iter_states().map(|s| s.0).collect();
-            let simple_result = equivalence_analysis::find_equivalence_classes(
-                tokenizer,
-                &llm_token_strings,
-                &initial_states,
-            );
-            return (
-                identity_map,
-                CommitVocab::new(representatives, original_to_representative),
-                internal_token_map,
-                simple_result,
-            );
-        }
-
         // Sort tokens by bytes for consistent ordering
         let mut sorted_tokens: Vec<_> = llm_token_map.iter().collect();
         sorted_tokens.sort_by_key(|(bytes, _id)| *bytes);
