@@ -13,12 +13,13 @@ pub fn find_equivalence_classes(
     strings: &[Vec<u8>],
     initial_states: &[usize],
 ) -> EquivalenceResult {
+    if std::env::var("SKIP_EQUIVALENCE_ANALYSIS_TEST").is_ok() {
+        let fast = equivalence_analysis_fast::find_equivalence_classes(regex, strings, initial_states);
+        return fast;
+    }
     let instant = std::time::Instant::now();
     let reference = equivalence_analysis_reference::find_equivalence_classes(regex, strings, initial_states);
     crate::debug!(3, "Reference equivalence analysis took {:?}", instant.elapsed());
-    if std::env::var("SKIP_FAST_EQUIVALENCE_ANALYSIS_TEST").is_ok() {
-        return reference;
-    }
     let instant = std::time::Instant::now();
     let fast = equivalence_analysis_fast::find_equivalence_classes(regex, strings, initial_states);
     crate::debug!(3, "Fast equivalence analysis took {:?}", instant.elapsed());
