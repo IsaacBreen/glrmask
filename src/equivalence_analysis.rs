@@ -130,14 +130,17 @@ fn compute_combined_signature<'a>(
         let pos = queue[q_head];
         q_head += 1;
 
-        let node = nodes[pos].as_ref().expect("node must be present");
+        let (head, tail) = nodes.split_at_mut(pos + 1);
+        let node = head[pos].as_ref().expect("node must be present");
 
         for &(_, target) in &node.edges {
             // Edges always go strictly forward (target > pos).
             debug_assert!(target > pos && target <= len);
             if !seen[target] {
                 seen[target] = true;
-                nodes[target] = Some(build_node(regex, slice, target));
+                // `target` is an index into the original `nodes` slice.
+                // `tail` starts at index `pos + 1`, so we adjust the index.
+                tail[target - (pos + 1)] = Some(build_node(regex, slice, target));
                 queue.push(target);
             }
         }
