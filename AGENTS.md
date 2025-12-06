@@ -64,7 +64,7 @@ The `+1.35s` is the "gap" time. If you use `debug_timer_end!`, you will see an e
 To run the tests, run
 
 ```bash
-RUST_TEST_THREADS=1 RUSTFLAGS=-Awarnings ENABLE_PROGRESS_BAR=0 CARGO_PROFILE_DEV_OPT_LEVEL=1 cargo test --color=always --package sep1 --lib --profile test -- --nocapture
+RUST_TEST_THREADS=1 RUSTFLAGS=-Awarnings ENABLE_PROGRESS_BAR=0 cargo test --color=always --package sep1 --lib --profile test -- --nocapture
 ```
 
 ---
