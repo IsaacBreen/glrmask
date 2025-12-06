@@ -128,7 +128,7 @@ impl JSONConvertible for NFA {
 pub struct DFAState {
     pub transitions: CharTransitions<usize>,
     pub finalizers: DenseStateSet,
-    pub possible_future_group_ids: BTreeSet<GroupID>,
+    pub possible_future_group_ids: Vec<GroupID>,
     pub group_id_to_u8set: BTreeMap<GroupID, U8Set>,
 }
 
@@ -137,7 +137,7 @@ pub struct DFAState {
 struct DFAStateJSON {
     transitions: CharTransitions<usize>,
     finalizers: DenseStateSet,
-    possible_future_group_ids: BTreeSet<GroupID>,
+    possible_future_group_ids: Vec<GroupID>,
     group_id_to_u8set: BTreeMap<GroupID, U8Set>,
 }
 
@@ -191,7 +191,7 @@ struct DFAJSON {
     /// Each element is a list of (U8Set, target) pairs
     state_transitions: Vec<Vec<CompactTransitionEntry>>,
     state_finalizers: Vec<DenseStateSet>,
-    state_possible_future_group_ids: Vec<BTreeSet<GroupID>>,
+    state_possible_future_group_ids: Vec<Vec<GroupID>>,
     state_group_id_to_u8set: Vec<BTreeMap<GroupID, U8Set>>,
 }
 
@@ -335,7 +335,7 @@ pub struct Trellis<T> {
 }
 
 pub type TokenTrellis = Trellis<usize>;
-pub type TokenTrellisWithCompletion = Trellis<BTreeSet<GroupID>>;
+pub type TokenTrellisWithCompletion = Trellis<Vec<GroupID>>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RegexState<'a> {
@@ -2321,7 +2321,7 @@ impl NFA {
         dfa_states.push(DFAState {
             transitions: CharTransitions::new(),
             finalizers,
-            possible_future_group_ids: BTreeSet::new(),
+            possible_future_group_ids: Vec::new(),
             group_id_to_u8set: BTreeMap::new(),
         });
 
@@ -2482,7 +2482,7 @@ impl NFA {
                             dfa_states.push(DFAState {
                                 transitions: CharTransitions::new(),
                                 finalizers: new_finalizers,
-                                possible_future_group_ids: BTreeSet::new(),
+                                possible_future_group_ids: Vec::new(),
                                 group_id_to_u8set: BTreeMap::new(),
                             });
 
@@ -2603,7 +2603,7 @@ impl DFA {
 
     pub fn compute_possible_future_group_ids(&mut self) {
         for state in &mut self.states {
-            state.possible_future_group_ids = BTreeSet::new();
+            state.possible_future_group_ids = Vec::new();
         }
 
         let num_states = self.states.len();
@@ -2694,7 +2694,7 @@ impl DFA {
                     }
                 }
             }
-            state.possible_future_group_ids = set;
+            state.possible_future_group_ids = set.into_iter().collect();
         }
     }
 
@@ -2901,7 +2901,7 @@ impl DFA {
 }
 
 fn should_terminate_early(
-    possible_future_group_ids: &BTreeSet<GroupID>,
+    possible_future_group_ids: &Vec<GroupID>,
     non_greedy_finalizers: &BTreeSet<GroupID>,
     matched_groups: &BTreeSet<GroupID>,
 ) -> bool {
@@ -3098,7 +3098,7 @@ impl RegexState<'_> {
         self.matches.clear();
     }
 
-    pub fn possible_future_group_ids(&self) -> BTreeSet<GroupID> {
+    pub fn possible_future_group_ids(&self) -> Vec<GroupID> {
         let state = &self.regex.dfa.states[self.current_state];
         state.possible_future_group_ids.clone()
     }
