@@ -36,7 +36,7 @@ pub fn find_equivalence_classes(
 fn compute_signature(regex: &Regex, slice: &[u8], start_state: usize) -> u64 {
     // Graph maps: Position -> (StateHash, Edges)
     let mut graph = HashMap::new();
-    let mut visited = HashSet::from([0]);
+    let mut visited: HashSet<usize> = HashSet::from([0]);
     let mut queue = VecDeque::from([0]);
 
     // 1. Forward Pass: Build the parsing graph (BFS)
@@ -100,7 +100,7 @@ fn scan_transitions(
     let mut matches: BTreeMap<GroupID, usize> = dfa.states[current_state]
         .finalizers
         .iter()
-        .map(|&g| (g, 0))
+        .map(|g| (g, 0))
         .collect();
 
     let mut done = dfa.states[current_state].transitions.is_empty();
@@ -116,7 +116,7 @@ fn scan_transitions(
                 position += 1;
 
                 // Update matches
-                for &group_id in &dfa.states[current_state].finalizers {
+                for group_id in &dfa.states[current_state].finalizers {
                     if dfa.non_greedy_finalizers.contains(&group_id) {
                         matches.entry(group_id).or_insert(position);
                     } else {
