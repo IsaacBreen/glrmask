@@ -1141,8 +1141,6 @@ impl GrammarConstraint {
         let max_internal_llm_token_id = vocab.internal_max_llm_token;
         // Note: vocab.internal_max_llm_token might have changed due to optimization, which is fine.
 
-        optimize_dwa_and_vocab(&mut skeleton_dwa, &mut vocab, &mut possible_matches_precompute1);
-
         // Convert the lexical DWA to NWA and build the Parser DWA.
         crate::debug!(3, "Building Parser DWA");
         let nwa = NWA::from_dwa(&skeleton_dwa);

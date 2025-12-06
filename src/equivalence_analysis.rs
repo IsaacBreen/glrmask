@@ -105,8 +105,6 @@ pub fn find_equivalence_classes(
     strings: &[Vec<u8>],
     initial_states: &[usize],
 ) -> EquivalenceResult {
-    // TEMP: disable
-    return (0..strings.len()).map(|i| vec![i]).collect();
     let signatures: Vec<u64> = strings
         .par_iter()
         .enumerate()
