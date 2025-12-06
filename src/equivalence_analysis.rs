@@ -8,7 +8,7 @@ use std::hash::{Hash, Hasher};
 pub type EquivalenceResult = Vec<Vec<usize>>;
 
 fn compute_structural_hash(regex: &Regex, slice: &[u8], start_state: usize, hasher: &mut DefaultHasher) {
-    let trellis = regex.generate_token_trellis(slice, start_state);
+    let trellis = regex.generate_token_trellis_with_completion(slice, start_state);
     // Trellis is hashable, so just hash it!
     trellis.hash(hasher);
 }
