@@ -338,8 +338,8 @@ pub type TokenTrellis = BTreeMap<usize, TokenTrellisNode>;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TokenTrellisWithCompletionNode {
-    pub end_state: Option<usize>,
-    pub edges: Vec<(BTreeSet<GroupID>, usize)>,
+    pub end_state: Option<BTreeSet<GroupID>>,
+    pub edges: Vec<(GroupID, usize)>,
 }
 
 pub type TokenTrellisWithCompletion = BTreeMap<usize, TokenTrellisWithCompletionNode>;
@@ -3323,26 +3323,17 @@ impl Regex {
         trellis
             .into_iter()
             .map(|(pos, node)| {
-                let completions = node
-                    .end_state
-                    .map(|s| self.dfa.states[s].possible_future_group_ids.clone())
-                    .unwrap_or_default();
-
-                let mut edges_map: BTreeMap<usize, BTreeSet<GroupID>> = BTreeMap::new();
-                for (gid, target) in node.edges {
-                    edges_map.entry(target).or_default().insert(gid);
-                }
-
-                let edges = edges_map
-                    .into_iter()
-                    .map(|(target, gids)| (gids, target))
-                    .collect();
+                let end_state = node.end_state.map(|state_idx| {
+                    self.dfa.states[state_idx]
+                        .possible_future_group_ids
+                        .clone()
+                });
 
                 (
                     pos,
                     TokenTrellisWithCompletionNode {
-                        completions,
-                        edges,
+                        end_state,
+                        edges: node.edges,
                     },
                 )
             })
