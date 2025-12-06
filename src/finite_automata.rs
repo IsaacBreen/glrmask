@@ -3367,7 +3367,7 @@ impl Regex {
         flat_trellis
     }
 
-    fn hydrate_trellis<T, F>(
+    fn hydrate_trellis<T: Clone, F>(
         flat_trellis: BTreeMap<usize, (Option<usize>, Vec<(GroupID, usize)>)>,
         mut node_creator: F,
     ) -> T
