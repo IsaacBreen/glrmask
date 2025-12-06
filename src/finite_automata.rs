@@ -336,6 +336,14 @@ pub struct TokenTrellisNode {
 
 pub type TokenTrellis = BTreeMap<usize, TokenTrellisNode>;
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TokenTrellisWithCompletionNode {
+    pub end_state: Option<usize>,
+    pub edges: Vec<(BTreeSet<GroupID>, usize)>,
+}
+
+pub type TokenTrellisWithCompletion = BTreeMap<usize, TokenTrellisWithCompletionNode>;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RegexState<'a> {
     pub regex: &'a Regex,
@@ -3306,6 +3314,44 @@ impl Regex {
         }
 
         trellis
+    }
+
+    pub fn convert_token_trellis_into_completion(&self, trellis: TokenTrellis) -> TokenTrellisWithCompletion {
+        let mut result = BTreeMap::new();
+
+        for (position, node) in trellis {
+            // Group edges by target position to combine GroupIDs
+            let mut edges_by_target: BTreeMap<usize, BTreeSet<GroupID>> = BTreeMap::new();
+
+            for (group_id, target_pos) in node.edges {
+                edges_by_target
+                    .entry(target_pos)
+                    .or_default()
+                    .insert(group_id);
+            }
+
+            // Convert the grouped map into the vector format required by TokenTrellisWithCompletionNode
+            // The BTreeMap ensures edges are sorted by target_pos
+            let new_edges: Vec<(BTreeSet<GroupID>, usize)> = edges_by_target
+                .into_iter()
+                .map(|(target_pos, groups)| (groups, target_pos))
+                .collect();
+
+            result.insert(
+                position,
+                TokenTrellisWithCompletionNode {
+                    end_state: node.end_state,
+                    edges: new_edges,
+                },
+            );
+        }
+
+        result
+    }
+
+    pub fn generate_token_trellis_with_completion(&self, bytes: &[u8], start_state: usize) -> TokenTrellisWithCompletion {
+        let trellis = self.generate_token_trellis(bytes, start_state);
+        self.convert_token_trellis_into_completion(trellis)
     }
 }
 
