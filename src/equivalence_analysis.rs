@@ -7,16 +7,10 @@ use std::hash::{Hash, Hasher};
 
 pub type EquivalenceResult = Vec<Vec<usize>>;
 
-fn hash_u64<T: Hash>(t: T) -> u64 {
-    let mut s = DefaultHasher::new();
-    t.hash(&mut s);
-    s.finish()
-}
-
-fn compute_structural_hash(regex: &Regex, slice: &[u8], start_state: usize) -> u64 {
+fn compute_structural_hash(regex: &Regex, slice: &[u8], start_state: usize, hasher: &mut DefaultHasher) {
     let trellis = regex.generate_token_trellis(slice, start_state);
     // Trellis is hashable, so just hash it!
-    hash_u64(trellis)
+    trellis.hash(hasher);
 }
 
 pub fn find_equivalence_classes(
@@ -25,14 +19,11 @@ pub fn find_equivalence_classes(
     initial_states: &[usize],
 ) -> EquivalenceResult {
     let signatures: Vec<u64> = strings.par_iter().map(|s| {
-        let mut h: u64 = 0;
-        for (i, &start) in initial_states.iter().enumerate() {
-            // Mix index to separate contexts, add structurally
-            h = h.wrapping_add(
-                compute_structural_hash(regex, s, start).wrapping_mul(hash_u64(i) | 1)
-            );
+        let mut h = DefaultHasher::new();
+        for &start in initial_states.iter() {
+            compute_structural_hash(regex, s, start, &mut h);
         }
-        h
+        h.finish()
     }).collect();
 
     let mut groups = HashMap::new();
