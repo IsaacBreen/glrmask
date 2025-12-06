@@ -444,10 +444,11 @@ mod even_more_complex_tests {
 
 #[cfg(test)]
 mod possible_future_group_ids_tests {
+    use std::collections::BTreeSet;
     use crate::finite_automata::*;
     use crate::{choice, groups, seq};
 
-    fn run_test(expr: impl Into<ExprGroups>, expected_possible_future_group_ids: Vec<GroupID>) {
+    fn run_test(expr: impl Into<ExprGroups>, expected_possible_future_group_ids: BTreeSet<GroupID>) {
         let regex = expr.into().build();
         let state = regex.init();
         assert_eq!(
@@ -458,30 +459,30 @@ mod possible_future_group_ids_tests {
 
     #[test]
     fn test_possible_future_group_ids() {
-        run_test(seq![], Vec::new());
-        run_test(eat_u8(b'a'), Vec::from([0]));
+        run_test(seq![], BTreeSet::new());
+        run_test(eat_u8(b'a'), BTreeSet::from([0]));
         run_test(
             groups![eat_u8(b'a'), eat_u8(b'b')],
-            Vec::from([0, 1]),
+            BTreeSet::from([0, 1]),
         );
         run_test(
             seq![eat_u8(b'a'), eat_u8(b'b')],
-            Vec::from([0]),
+            BTreeSet::from([0]),
         );
-        run_test(rep(eat_u8(b'a')), Vec::from([0]));
+        run_test(rep(eat_u8(b'a')), BTreeSet::from([0]));
         run_test(
             groups![
                 choice![opt(eat_u8(b'a')), rep(eat_u8(b'b')), eat_u8(b'c')],
                 eat_u8(b'a'),
             ],
-            Vec::from([0, 1]),
+            BTreeSet::from([0, 1]),
         );
         run_test(
             groups![
                 eat_u8(b'a'),
                 seq![eat_u8(b'a'), eat_u8(b'a')],
             ],
-            Vec::from([0, 1]),
+            BTreeSet::from([0, 1]),
         );
     }
 
@@ -497,13 +498,14 @@ mod possible_future_group_ids_tests {
 
         assert_eq!(
             start_state_data.possible_future_group_ids,
-            Vec::from([1])
+            BTreeSet::from([1])
         );
     }
 }
 
 #[cfg(test)]
 mod group_id_to_u8set_tests {
+    use std::collections::BTreeSet;
     use crate::finite_automata::*;
     use crate::{choice, groups, seq};
 
@@ -683,7 +685,7 @@ mod group_id_to_u8set_tests {
 
         assert_eq!(
             regex.dfa.states[regex_state.current_state].possible_future_group_ids,
-            Vec::from([0, 1])
+            BTreeSet::from([0, 1])
         );
 
         let group_id_to_u8set_new =
@@ -727,7 +729,7 @@ mod group_id_to_u8set_tests {
 
         assert_eq!(
             regex.dfa.states[regex_state_a.current_state].possible_future_group_ids,
-            Vec::from([0, 1, 2])
+            BTreeSet::from([0, 1, 2])
         );
 
         let group_id_to_u8set_a =
@@ -750,7 +752,7 @@ mod group_id_to_u8set_tests {
 
         assert_eq!(
             regex.dfa.states[regex_state_ab.current_state].possible_future_group_ids,
-            Vec::from([0, 1, 2])
+            BTreeSet::from([0, 1, 2])
         );
 
         let group_id_to_u8set_ab =
@@ -788,7 +790,7 @@ mod group_id_to_u8set_tests {
         regex_state_a.execute(b"a");
         assert_eq!(
             regex.dfa.states[regex_state_a.current_state].possible_future_group_ids,
-            Vec::from([0])
+            BTreeSet::from([0])
         );
 
         let group_id_to_u8set_a =
@@ -859,28 +861,28 @@ mod group_u8set_tests {
         dfa.states.push(DFAState {
             transitions: CharTransitions::new(),
             finalizers: DenseStateSet::new(2),
-            possible_future_group_ids: Vec::new(),
+            possible_future_group_ids: BTreeSet::new(),
             group_id_to_u8set: BTreeMap::new(),
         });
 
         dfa.states.push(DFAState {
             transitions: CharTransitions::new(),
             finalizers: DenseStateSet::new(2),
-            possible_future_group_ids: Vec::new(),
+            possible_future_group_ids: BTreeSet::new(),
             group_id_to_u8set: BTreeMap::new(),
         });
 
         dfa.states.push(DFAState {
             transitions: CharTransitions::new(),
             finalizers: DenseStateSet::new_from_slice(2, &[0]),
-            possible_future_group_ids: Vec::new(),
+            possible_future_group_ids: BTreeSet::new(),
             group_id_to_u8set: BTreeMap::new(),
         });
 
         dfa.states.push(DFAState {
             transitions: CharTransitions::new(),
             finalizers: DenseStateSet::new_from_slice(2, &[1]),
-            possible_future_group_ids: Vec::new(),
+            possible_future_group_ids: BTreeSet::new(),
             group_id_to_u8set: BTreeMap::new(),
         });
 
