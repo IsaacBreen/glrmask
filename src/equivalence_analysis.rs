@@ -5,7 +5,6 @@ use std::collections::BTreeMap;
 
 pub struct SimpleEquivalenceResult {
     pub mask_classes: BTreeMap<Vec<usize>, Vec<usize>>,
-    pub commit_classes: BTreeMap<Vec<usize>, Vec<usize>>,
 }
 
 #[inline(always)]
@@ -76,5 +75,5 @@ pub fn find_equivalence_classes(
         .enumerate().map(|(id, (_, v))| (vec![id], v)).collect();
 
     crate::debug!(3, "Simple equiv v3 done in {:?}", t0.elapsed());
-    SimpleEquivalenceResult { mask_classes: classes.clone(), commit_classes: classes }
+    SimpleEquivalenceResult { mask_classes: classes.clone() }
 }

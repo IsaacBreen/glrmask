@@ -689,7 +689,7 @@ impl GrammarConstraint {
                 BTreeMap::new(),
                 SimpleEquivalenceResult {
                     mask_classes: BTreeMap::new(),
-                    commit_classes: BTreeMap::new(),
+                    // commit_classes: BTreeMap::new(),
                 },
             );
         }
@@ -764,10 +764,9 @@ impl GrammarConstraint {
             let num_original_tokens = llm_token_strings.len();
             crate::debug!(
                 3,
-                "Combined Equivalence Analysis: {} tokens -> {} mask classes, {} commit classes",
+                "Combined Equivalence Analysis: {} tokens -> {} mask classe",
                 num_original_tokens,
                 simple_result.mask_classes.len(),
-                simple_result.commit_classes.len()
             );
         }
 
@@ -801,34 +800,37 @@ impl GrammarConstraint {
             .collect();
 
         // Build CommitVocab from commit_classes - optimized version
-        let effective_max = max_original_llm_token_id.max(highest_original_id);
-        let mut original_to_representative =
-            vec![CommitVocab::INVALID_REPRESENTATIVE; effective_max + 1];
-        let mut representatives: Vec<Vec<u8>> = Vec::with_capacity(simple_result.commit_classes.len());
-
-        for string_indices in simple_result.commit_classes.values() {
-            if string_indices.is_empty() {
-                continue;
-            }
-            // Pick shortest representative (single pass)
-            let rep_idx = *string_indices
-                .iter()
-                .min_by_key(|&&idx| (llm_token_strings[idx].len(), &llm_token_strings[idx]))
-                .unwrap();
-            let representative_id = representatives.len() as u32;
-            representatives.push(llm_token_strings[rep_idx].clone());
-            for &idx in string_indices {
-                let orig_id = original_ids[idx].0;
-                original_to_representative[orig_id] = representative_id;
-            }
-        }
-
-        crate::debug!(
-            4,
-            "Commit vocab built with {} representatives for {} tokens",
-            representatives.len(),
-            llm_token_strings.len()
-        );
+        // let effective_max = max_original_llm_token_id.max(highest_original_id);
+        // let mut original_to_representative =
+        //     vec![CommitVocab::INVALID_REPRESENTATIVE; effective_max + 1];
+        // let mut representatives: Vec<Vec<u8>> = Vec::with_capacity(simple_result.commit_classes.len());
+        //
+        // for string_indices in simple_result.commit_classes.values() {
+        //     if string_indices.is_empty() {
+        //         continue;
+        //     }
+        //     // Pick shortest representative (single pass)
+        //     let rep_idx = *string_indices
+        //         .iter()
+        //         .min_by_key(|&&idx| (llm_token_strings[idx].len(), &llm_token_strings[idx]))
+        //         .unwrap();
+        //     let representative_id = representatives.len() as u32;
+        //     representatives.push(llm_token_strings[rep_idx].clone());
+        //     for &idx in string_indices {
+        //         let orig_id = original_ids[idx].0;
+        //         original_to_representative[orig_id] = representative_id;
+        //     }
+        // }
+        //
+        // crate::debug!(
+        //     4,
+        //     "Commit vocab built with {} representatives for {} tokens",
+        //     representatives.len(),
+        //     llm_token_strings.len()
+        // );
+        // TEMP: disable
+        let representatives: Vec<Vec<u8>> = (0..llm_token_strings.len()).map(|i| llm_token_strings[i].clone()).collect();
+        let original_to_representative = (0..llm_token_strings.len()).map(|i| i as u32).collect();
 
         // Build internal_llm_token_map using best representatives we already computed
         // This avoids iterating 50K tokens again!
