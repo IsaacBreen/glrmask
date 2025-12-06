@@ -78,5 +78,7 @@ pub fn find_equivalence_classes(
         .map(|(id, (_, indices))| (vec![id], indices))
         .collect();
 
+    crate::debug!(4, "Equiv Check: Found {} equivalence classes", mask_classes.len());
+
     SimpleEquivalenceResult { mask_classes }
 }
