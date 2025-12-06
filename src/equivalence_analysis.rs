@@ -1,11 +1,11 @@
 use crate::finite_automata::Regex;
 use hashbrown::HashMap;
 use rayon::prelude::*;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
-pub type EquivalenceResult = Vec<Vec<usize>>;
+pub type EquivalenceResult = BTreeSet<Vec<usize>>;
 
 fn compute_structural_hash(regex: &Regex, slice: &[u8], start_state: usize, hasher: &mut DefaultHasher) {
     let trellis = regex.generate_token_trellis_with_completion(slice, start_state);

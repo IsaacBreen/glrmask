@@ -687,7 +687,7 @@ impl GrammarConstraint {
                 BTreeMap::new(),
                 CommitVocab::new(Vec::new(), Vec::new()),
                 BTreeMap::new(),
-                Vec::new(),
+                Default::default(),
             );
         }
 
