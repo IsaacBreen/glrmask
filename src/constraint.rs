@@ -1177,7 +1177,7 @@ impl GrammarConstraint {
     pub fn dump_vocab(&self) {
         println!("\n--- Parser DWA Vocab ---");
         println!("Internal to original mapping:");
-        for (i, s) in self.parser_dwa_vocab.internal_to_original.iter().enumerate() {
+        for (i, s) in self.parser_dwa_vocab.internal_to_original.iter() {
             println!("  {}: {:?}", i, s);
         }
     }
