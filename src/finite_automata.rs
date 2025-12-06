@@ -3316,37 +3316,37 @@ impl Regex {
         trellis
     }
 
-    pub fn convert_token_trellis_into_completion(&self, trellis: TokenTrellis) -> TokenTrellisWithCompletion {
-        let mut result = BTreeMap::new();
+    pub fn convert_token_trellis_into_completion(
+        &self,
+        trellis: TokenTrellis,
+    ) -> TokenTrellisWithCompletion {
+        trellis
+            .into_iter()
+            .map(|(pos, node)| {
+                let completions = node
+                    .end_state
+                    .map(|s| self.dfa.states[s].possible_future_group_ids.clone())
+                    .unwrap_or_default();
 
-        for (position, node) in trellis {
-            // Group edges by target position to combine GroupIDs
-            let mut edges_by_target: BTreeMap<usize, BTreeSet<GroupID>> = BTreeMap::new();
+                let mut edges_map: BTreeMap<usize, BTreeSet<GroupID>> = BTreeMap::new();
+                for (gid, target) in node.edges {
+                    edges_map.entry(target).or_default().insert(gid);
+                }
 
-            for (group_id, target_pos) in node.edges {
-                edges_by_target
-                    .entry(target_pos)
-                    .or_default()
-                    .insert(group_id);
-            }
+                let edges = edges_map
+                    .into_iter()
+                    .map(|(target, gids)| (gids, target))
+                    .collect();
 
-            // Convert the grouped map into the vector format required by TokenTrellisWithCompletionNode
-            // The BTreeMap ensures edges are sorted by target_pos
-            let new_edges: Vec<(BTreeSet<GroupID>, usize)> = edges_by_target
-                .into_iter()
-                .map(|(target_pos, groups)| (groups, target_pos))
-                .collect();
-
-            result.insert(
-                position,
-                TokenTrellisWithCompletionNode {
-                    end_state: node.end_state,
-                    edges: new_edges,
-                },
-            );
-        }
-
-        result
+                (
+                    pos,
+                    TokenTrellisWithCompletionNode {
+                        completions,
+                        edges,
+                    },
+                )
+            })
+            .collect()
     }
 
     pub fn generate_token_trellis_with_completion(&self, bytes: &[u8], start_state: usize) -> TokenTrellisWithCompletion {
