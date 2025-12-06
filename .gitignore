@@ -5,6 +5,7 @@ restore-chat-history
 .temp*
 zzz_bash_agent.yaml
 temp/
+TODO.md
 
 # === IDE ===
 .idea/
