@@ -3281,7 +3281,12 @@ impl Regex {
                 &[]
             };
 
-            let result = self.execute_from_state_fast(slice, start_state);
+            let exec_start_state = if pos == 0 {
+                start_state
+            } else {
+                self.dfa.start_state
+            };
+            let result = self.execute_from_state_fast(slice, exec_start_state);
 
             let mut edges = Vec::new();
             for m in result.matches {
