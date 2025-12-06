@@ -10,8 +10,8 @@ pub type EquivalenceResult = BTreeSet<Vec<usize>>;
 // A node in our parse graph, stored in a flat Vec for cache efficiency.
 // The lifetime 'a is tied to the lifetime of the Regex object.
 struct GraphNode<'a> {
-    completion: Option<&'a BTreeSet<u16>>,
-    edges: Vec<(u16, usize)>,
+    completion: Option<&'a BTreeSet<usize>>,
+    edges: Vec<(usize, usize)>,
 }
 
 /// Computes a deterministic hash representing the parsing structure of the string.
@@ -21,7 +21,7 @@ fn compute_signature(regex: &Regex, slice: &[u8], start_state: usize) -> u64 {
     // Optimization: Use Vecs instead of HashMaps/HashSets for graph data.
     // Since our keys are string positions (0..=len), a Vec is a perfect,
     // cache-friendly replacement for a hash map. This is known as a direct-address table.
-    let mut graph: Vec<Option<GraphNode>> = vec![None; len + 1];
+    let mut graph: Vec<Option<GraphNode>> = std::iter::repeat_with(|| None).take(len + 1).collect();
     let mut queue = VecDeque::with_capacity(len + 1);
     // A Vec<bool> is significantly faster and more memory-efficient than a HashSet<usize>
     // for dense integer sets.
