@@ -5,9 +5,7 @@ use std::collections::BTreeMap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
-pub struct SimpleEquivalenceResult {
-    pub mask_classes: BTreeMap<Vec<usize>, Vec<usize>>,
-}
+pub type EquivalenceResult = BTreeMap<Vec<usize>, Vec<usize>>;
 
 fn hash_u64<T: Hash>(t: T) -> u64 {
     let mut s = DefaultHasher::new();
@@ -23,7 +21,7 @@ pub fn find_equivalence_classes(
     regex: &Regex,
     strings: &[Vec<u8>],
     initial_states: &[usize],
-) -> SimpleEquivalenceResult {
+) -> EquivalenceResult {
     let signatures: Vec<u64> = strings.par_iter().map(|s| {
         let mut h: u64 = 0;
         for (i, &start) in initial_states.iter().enumerate() {
@@ -40,10 +38,8 @@ pub fn find_equivalence_classes(
         groups.entry(sig).or_insert_with(Vec::new).push(idx);
     }
 
-    SimpleEquivalenceResult {
-        mask_classes: groups.into_iter()
-            .enumerate()
-            .map(|(id, (_, idxs))| (vec![id], idxs))
-            .collect(),
-    }
+    groups.into_iter()
+        .enumerate()
+        .map(|(id, (_, idxs))| (vec![id], idxs))
+        .collect()
 }

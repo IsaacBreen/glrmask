@@ -33,7 +33,7 @@ use crate::{
     tokenizer::{LLMTokenID, LLMTokenMap, TokenizerStateID},
     types::{TerminalID as GrammarTokenID, TerminalID},
 };
-use crate::equivalence_analysis::SimpleEquivalenceResult;
+use crate::equivalence_analysis::EquivalenceResult;
 use crate::datastructures::bitset::Bitset;
 use crate::datastructures::gss_acc::Acc;
 use crate::glr::parser::{ExpectElse, ParseStateEdgeContent};
@@ -681,16 +681,13 @@ impl GrammarConstraint {
         tokenizer: &Regex,
         max_original_llm_token_id: usize,
         grammar_group_ids: &std::collections::BTreeSet<usize>,
-    ) -> (BTreeMap<usize, usize>, CommitVocab, BTreeMap<Vec<u8>, LLMTokenID>, SimpleEquivalenceResult) {
+    ) -> (BTreeMap<usize, usize>, CommitVocab, BTreeMap<Vec<u8>, LLMTokenID>, EquivalenceResult) {
         if llm_token_map.is_empty() {
             return (
                 BTreeMap::new(),
                 CommitVocab::new(Vec::new(), Vec::new()),
                 BTreeMap::new(),
-                SimpleEquivalenceResult {
-                    mask_classes: BTreeMap::new(),
-                    // commit_classes: BTreeMap::new(),
-                },
+                BTreeMap::new(),
             );
         }
 
@@ -752,13 +749,13 @@ impl GrammarConstraint {
 
         let initial_states: Vec<usize> = tokenizer.iter_states().map(|s| s.0).collect();
 
-        let simple_result = equivalence_analysis::find_equivalence_classes(
+        let mask_classes = equivalence_analysis::find_equivalence_classes(
             tokenizer,
             &llm_token_strings,
             &initial_states,
         );
         crate::debug!(2, "Simple equivalence: {} classes for {} tokens",
-                     simple_result.mask_classes.len(), llm_token_strings.len());
+                     mask_classes.len(), llm_token_strings.len());
 
         if is_debug_level_enabled(3) {
             let num_original_tokens = llm_token_strings.len();
@@ -766,16 +763,16 @@ impl GrammarConstraint {
                 3,
                 "Combined Equivalence Analysis: {} tokens -> {} mask classe",
                 num_original_tokens,
-                simple_result.mask_classes.len(),
+                mask_classes.len(),
             );
         }
 
         // Build original_to_internal map AND track best representative per class (combined)
         // Use Vec for O(1) access instead of BTreeMap O(log n)
         let mut original_to_internal_vec: Vec<usize> = vec![usize::MAX; highest_original_id + 1];
-        let mut best_rep_by_internal: Vec<usize> = Vec::with_capacity(simple_result.mask_classes.len());
+        let mut best_rep_by_internal: Vec<usize> = Vec::with_capacity(mask_classes.len());
         let mut internal_id_counter = 0;
-        for string_indices in simple_result.mask_classes.values() {
+        for string_indices in mask_classes.values() {
             if string_indices.is_empty() {
                 continue;
             }
@@ -850,7 +847,7 @@ impl GrammarConstraint {
         );
 
         let commit_vocab = CommitVocab::new(representatives, original_to_representative);
-        (original_to_internal_map, commit_vocab, internal_llm_token_map, simple_result)
+        (original_to_internal_map, commit_vocab, internal_llm_token_map, mask_classes)
     }
 
     fn build_with_config(
@@ -879,7 +876,7 @@ impl GrammarConstraint {
 
         // Combined equivalence analysis - computes both mask and commit classes in one pass
         // Also returns internal_llm_token_map to avoid another 50K token iteration
-        let (original_to_internal_map, commit_vocab_data, internal_llm_token_map, simple_equivalence_result) = Self::setup_combined(
+        let (original_to_internal_map, commit_vocab_data, internal_llm_token_map, mask_classes) = Self::setup_combined(
             &llm_token_map,
             &tokenizer,
             max_original_llm_token_id,
@@ -1042,7 +1039,7 @@ impl GrammarConstraint {
             let dwa_partition = compute_dwa_partition(&skeleton_dwa, &possible_matches_precompute1, vocab.internal_max_llm_token);
             let actual_classes = dwa_partition.len();
 
-            let expected_classes = simple_equivalence_result.mask_classes.len();
+            let expected_classes = mask_classes.len();
             crate::debug!(2, "VERIFY_EQUIVALENCE: DWA partition has {} classes (from {} tokens)", 
                          actual_classes, vocab_before + 1);
             crate::debug!(2, "VERIFY_EQUIVALENCE: Expected {} classes from Simple equivalence analysis", expected_classes);
@@ -1064,7 +1061,7 @@ impl GrammarConstraint {
                 }
 
                 let mut simple_token_to_class: Vec<usize> = vec![0; llm_token_strings.len()];
-                for (class_id, (_, indices)) in simple_equivalence_result.mask_classes.iter().enumerate() {
+                for (class_id, (_, indices)) in mask_classes.iter().enumerate() {
                     for &idx in indices {
                         if idx < simple_token_to_class.len() {
                             simple_token_to_class[idx] = class_id;
