@@ -1,164 +1,131 @@
-use crate::finite_automata::{GroupID, Regex};
+use crate::finite_automata::Regex;
 use hashbrown::{HashMap, HashSet};
 use rayon::prelude::*;
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::collections::hash_map::DefaultHasher;
+use std::collections::{BTreeSet, VecDeque};
 use std::hash::{Hash, Hasher};
+use std::collections::hash_map::DefaultHasher;
 
 pub type EquivalenceResult = BTreeSet<Vec<usize>>;
+
+/// Compute the suffix hashes for positions > 0.
+/// This is the same for all initial states since positions > 0 always start from dfa.start_state.
+fn compute_suffix_hashes(regex: &Regex, slice: &[u8]) -> HashMap<usize, u64> {
+    // Build the graph for all positions >= 1
+    let mut graph: HashMap<usize, (Option<usize>, Vec<(usize, usize)>)> = HashMap::new();
+    let mut queue = VecDeque::new();
+    let mut visited: HashSet<usize> = HashSet::new();
+    
+    // Start from all positions 1..=slice.len()
+    for pos in 1..=slice.len() {
+        if visited.insert(pos) {
+            queue.push_back(pos);
+        }
+    }
+    
+    while let Some(pos) = queue.pop_front() {
+        if pos > slice.len() { continue; }
+        
+        let result = regex.execute_from_state_nonzero(&slice[pos..], regex.dfa.start_state);
+        
+        let mut edges: Vec<(usize, usize)> = result.matches.iter()
+            .map(|m| (m.group_id, pos + m.position))
+            .collect();
+        edges.sort_unstable_by_key(|e| e.0);
+        
+        for (_, target) in &edges {
+            if visited.insert(*target) {
+                queue.push_back(*target);
+            }
+        }
+        
+        graph.insert(pos, (result.end_state, edges));
+    }
+    
+    // Backward pass to compute hashes
+    let mut positions: Vec<_> = graph.keys().copied().collect();
+    positions.sort_unstable_by(|a, b| b.cmp(a));
+    
+    let mut node_hashes: HashMap<usize, u64> = HashMap::with_capacity(graph.len());
+    
+    for pos in positions {
+        let (end_state, edges) = &graph[&pos];
+        let mut hasher = DefaultHasher::new();
+        
+        // Hash completion info
+        let completion = end_state.map(|id| &regex.dfa.states[id].possible_future_group_ids);
+        completion.hash(&mut hasher);
+        
+        for (group_id, target) in edges {
+            let target_hash = node_hashes.get(target).copied().unwrap_or(0);
+            (group_id, target_hash).hash(&mut hasher);
+        }
+        
+        node_hashes.insert(pos, hasher.finish());
+    }
+    
+    node_hashes
+}
+
+/// Compute position-0 info for a given start_state.
+/// Returns a hash representing (completion, edges with suffix hashes).
+fn compute_pos0_hash(
+    regex: &Regex,
+    slice: &[u8],
+    start_state: usize,
+    suffix_hashes: &HashMap<usize, u64>
+) -> u64 {
+    let result = regex.execute_from_state_nonzero(slice, start_state);
+    
+    let completion = result.end_state.map(|id| &regex.dfa.states[id].possible_future_group_ids);
+    
+    let mut edges: Vec<(usize, usize)> = result.matches.iter()
+        .map(|m| (m.group_id, m.position))
+        .collect();
+    edges.sort_unstable_by_key(|e| e.0);
+    
+    let mut hasher = DefaultHasher::new();
+    completion.hash(&mut hasher);
+    
+    for (group_id, target) in &edges {
+        let target_hash = suffix_hashes.get(target).copied().unwrap_or(0);
+        (group_id, target_hash).hash(&mut hasher);
+    }
+    
+    hasher.finish()
+}
 
 pub fn find_equivalence_classes(
     regex: &Regex,
     strings: &[Vec<u8>],
     initial_states: &[usize],
 ) -> EquivalenceResult {
-    // 1. Compute signatures in parallel
+    // Compute signatures in parallel
     let signatures: Vec<u64> = strings
         .par_iter()
         .map(|s| {
-            let mut hasher = DefaultHasher::new();
-            for &state in initial_states {
-                compute_signature(regex, s, state).hash(&mut hasher);
+            // Precompute suffix hashes for this token (same for all initial states)
+            let suffix_hashes = compute_suffix_hashes(regex, s);
+            
+            // Compute pos0 hash for each initial state (caching to avoid recomputation)
+            let pos0_hashes: Vec<u64> = initial_states
+                .iter()
+                .map(|&state| compute_pos0_hash(regex, s, state, &suffix_hashes))
+                .collect();
+            
+            // Combine all pos0 hashes into final signature
+            let mut combined_hasher = DefaultHasher::new();
+            for hash in pos0_hashes {
+                hash.hash(&mut combined_hasher);
             }
-            hasher.finish()
+            combined_hasher.finish()
         })
         .collect();
 
-    // 2. Group indices by signature
-    let mut groups: HashMap<u64, Vec<usize>> = HashMap::with_capacity(signatures.len());
-    for (idx, sig) in signatures.into_iter().enumerate() {
-        groups.entry(sig).or_default().push(idx);
+    // Group string indices by their computed signature
+    let mut groups = HashMap::new();
+    for (index, sig) in signatures.into_iter().enumerate() {
+        groups.entry(sig).or_insert_with(Vec::new).push(index);
     }
 
     groups.into_values().collect()
-}
-
-fn compute_signature(regex: &Regex, slice: &[u8], start_state: usize) -> u64 {
-    // Graph maps: Position -> (StateHash, Edges)
-    let mut graph = HashMap::new();
-    let mut visited: HashSet<usize> = HashSet::from([0]);
-    let mut queue = VecDeque::from([0]);
-
-    // 1. Forward Pass: Build the parsing graph (BFS)
-    while let Some(pos) = queue.pop_front() {
-        if pos > slice.len() { continue; }
-
-        let exec_start = if pos == 0 { start_state } else { regex.dfa.start_state };
-        let (state_hash, mut edges) = scan_transitions(regex, &slice[pos..], exec_start);
-
-        // Convert relative offsets to absolute positions for the graph
-        for edge in &mut edges {
-            edge.1 += pos;
-            if visited.insert(edge.1) {
-                queue.push_back(edge.1);
-            }
-        }
-
-        // Sort for deterministic hashing
-        edges.sort_unstable_by_key(|e| e.0);
-        graph.insert(pos, (state_hash, edges));
-    }
-
-    // 2. Backward Pass: Compute deterministic hashes
-    // Sorting descending ensures we process children before parents
-    let mut positions: Vec<_> = graph.keys().copied().collect();
-    positions.sort_unstable_by(|a, b| b.cmp(a));
-
-    let mut node_hashes = HashMap::with_capacity(graph.len());
-
-    for pos in positions {
-        let (state_hash, edges) = &graph[&pos];
-        let mut hasher = DefaultHasher::new();
-
-        // Hash the local state info
-        state_hash.hash(&mut hasher);
-
-        // Hash outgoing edges + the hash of the target node
-        for (group_id, target_pos) in edges {
-            let target_hash = node_hashes.get(target_pos).expect("Broken DAG order");
-            (group_id, target_hash).hash(&mut hasher);
-        }
-
-        node_hashes.insert(pos, hasher.finish());
-    }
-
-    node_hashes.get(&0).copied().unwrap_or(0)
-}
-
-/// Simulates the DFA from a specific state and text slice.
-/// Returns: (Hash of potential future groups, List of matches/edges)
-#[inline(always)]
-fn scan_transitions(
-    regex: &Regex,
-    text: &[u8],
-    start_state: usize,
-) -> (Option<u64>, Vec<(GroupID, usize)>) {
-    let dfa = &regex.dfa;
-    let mut current_state = start_state;
-
-    // Initialize matches with 0-width for current state finalizers
-    let mut matches: BTreeMap<GroupID, usize> = dfa.states[current_state]
-        .finalizers
-        .iter()
-        .map(|g| (g, 0))
-        .collect();
-
-    let mut done = dfa.states[current_state].transitions.is_empty();
-    let mut position = 0;
-
-    // Run the DFA
-    if !done {
-        while position < text.len() {
-            let next_u8 = text[position];
-
-            if let Some(&next_state) = dfa.states[current_state].transitions.get(next_u8) {
-                current_state = next_state;
-                position += 1;
-
-                // Update matches
-                for group_id in &dfa.states[current_state].finalizers {
-                    if dfa.non_greedy_finalizers.contains(&group_id) {
-                        matches.entry(group_id).or_insert(position);
-                    } else {
-                        matches.insert(group_id, position);
-                    }
-                }
-
-                // Check early termination: if all future potentials are already satisfied non-greedily
-                let futures = &dfa.states[current_state].possible_future_group_ids;
-                let should_terminate = !futures.is_empty() && futures.iter().all(|gid| {
-                    dfa.non_greedy_finalizers.contains(gid) && matches.contains_key(gid)
-                });
-
-                if should_terminate {
-                    done = true;
-                    break;
-                }
-            } else {
-                done = true;
-                break;
-            }
-        }
-
-        // If ran out of text but state has nowhere to go, mark done
-        if !done && dfa.states[current_state].transitions.is_empty() {
-            done = true;
-        }
-    }
-
-    // Format output
-    let edges = matches
-        .into_iter()
-        .filter(|&(_, width)| width != 0) // Filter 0-width matches
-        .collect();
-
-    let state_hash = if done {
-        None
-    } else {
-        let mut h = DefaultHasher::new();
-        dfa.states[current_state].possible_future_group_ids.hash(&mut h);
-        Some(h.finish())
-    };
-
-    (state_hash, edges)
 }
