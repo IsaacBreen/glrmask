@@ -329,16 +329,13 @@ pub struct ExecutionResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct TokenTrellis {
-    pub end_state: Option<usize>,
-    pub edges: BTreeMap<GroupID, Arc<TokenTrellis>>,
+pub struct Trellis<T> {
+    pub end_state: Option<T>,
+    pub edges: BTreeMap<GroupID, Arc<Trellis<T>>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct TokenTrellisWithCompletion {
-    pub end_state: Option<BTreeSet<GroupID>>,
-    pub edges: BTreeMap<GroupID, Arc<TokenTrellisWithCompletion>>,
-}
+pub type TokenTrellis = Trellis<usize>;
+pub type TokenTrellisWithCompletion = Trellis<BTreeSet<GroupID>>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RegexState<'a> {
@@ -3278,7 +3275,7 @@ impl Regex {
 
     pub fn generate_token_trellis(&self, bytes: &[u8], start_state: usize) -> TokenTrellis {
         let flat = self.generate_flat_trellis(bytes, start_state);
-        Self::hydrate_trellis(flat, |end_state, edges| TokenTrellis { end_state, edges })
+        Self::hydrate_trellis(flat, |idx| idx)
     }
 
     pub fn convert_token_trellis_into_completion(
@@ -3286,20 +3283,12 @@ impl Regex {
         trellis: TokenTrellis,
     ) -> TokenTrellisWithCompletion {
         let mut memo = HashMap::new();
-        let end_state = trellis.end_state.map(|idx| {
-            self.dfa.states[idx].possible_future_group_ids.clone()
-        });
-
-        let mut new_edges = BTreeMap::new();
-        for (group_id, target_node) in trellis.edges {
-            let new_target_node = self.convert_trellis_node(target_node, &mut memo);
-            new_edges.insert(group_id, new_target_node);
+        let end_state = trellis.end_state.map(|idx| self.dfa.states[idx].possible_future_group_ids.clone());
+        let mut edges = BTreeMap::new();
+        for (gid, child) in trellis.edges {
+            edges.insert(gid, self.convert_trellis_node(&child, &mut memo));
         }
-
-        TokenTrellisWithCompletion {
-            end_state,
-            edges: new_edges,
-        }
+        Trellis { end_state, edges }
     }
 
     pub fn generate_token_trellis_with_completion(
@@ -3308,11 +3297,8 @@ impl Regex {
         start_state: usize,
     ) -> TokenTrellisWithCompletion {
         let flat = self.generate_flat_trellis(bytes, start_state);
-        Self::hydrate_trellis(flat, |end_state_idx, edges| {
-            let end_state = end_state_idx.map(|idx| {
-                self.dfa.states[idx].possible_future_group_ids.clone()
-            });
-            TokenTrellisWithCompletion { end_state, edges }
+        Self::hydrate_trellis(flat, |idx| {
+            self.dfa.states[idx].possible_future_group_ids.clone()
         })
     }
 
@@ -3367,14 +3353,15 @@ impl Regex {
         flat_trellis
     }
 
-    fn hydrate_trellis<T: Clone, F>(
+    fn hydrate_trellis<T, F>(
         flat_trellis: BTreeMap<usize, (Option<usize>, Vec<(GroupID, usize)>)>,
-        mut node_creator: F,
-    ) -> T
+        state_mapper: F,
+    ) -> Trellis<T>
     where
-        F: FnMut(Option<usize>, BTreeMap<GroupID, Arc<T>>) -> T,
+        T: Clone,
+        F: Fn(usize) -> T,
     {
-        let mut memo: HashMap<usize, Arc<T>> = HashMap::new();
+        let mut memo: HashMap<usize, Arc<Trellis<T>>> = HashMap::new();
         for (pos, (end_state, edges_list)) in flat_trellis.into_iter().rev() {
             let mut edges = BTreeMap::new();
             for (gid, target_pos) in edges_list {
@@ -3384,23 +3371,23 @@ impl Regex {
                     }
                 }
             }
-            let node = node_creator(end_state, edges);
+            let node = Trellis {
+                end_state: end_state.map(&state_mapper),
+                edges,
+            };
             memo.insert(pos, Arc::new(node));
         }
 
         let root = memo.remove(&0).expect("Root node must exist");
-        match Arc::try_unwrap(root) {
-            Ok(t) => t,
-            Err(arc) => (*arc).clone(),
-        }
+        Arc::try_unwrap(root).unwrap_or_else(|arc| (*arc).clone())
     }
 
     fn convert_trellis_node(
         &self,
-        node: Arc<TokenTrellis>,
+        node: &Arc<TokenTrellis>,
         memo: &mut HashMap<*const TokenTrellis, Arc<TokenTrellisWithCompletion>>,
     ) -> Arc<TokenTrellisWithCompletion> {
-        let key = Arc::as_ptr(&node);
+        let key = Arc::as_ptr(node);
         if let Some(res) = memo.get(&key) {
             return res.clone();
         }
@@ -3411,10 +3398,10 @@ impl Regex {
 
         let mut new_edges = BTreeMap::new();
         for (gid, child) in &node.edges {
-            new_edges.insert(*gid, self.convert_trellis_node(child.clone(), memo));
+            new_edges.insert(*gid, self.convert_trellis_node(child, memo));
         }
 
-        let new_node = Arc::new(TokenTrellisWithCompletion { end_state, edges: new_edges });
+        let new_node = Arc::new(Trellis { end_state, edges: new_edges });
         memo.insert(key, new_node.clone());
         new_node
     }
