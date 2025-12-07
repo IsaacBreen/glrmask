@@ -17,12 +17,12 @@ mod vocab_equivalence_analysis;
 pub mod vocab_equivalence_analysis_fast;
 mod vocab_equivalence_analysis_reference;
 mod combined_equivalence_analysis;
-pub mod vocab_equivalence_trie;
 
 pub use state_equivalence_analysis::find_state_equivalence_classes;
+pub use state_equivalence_analysis::mapping_to_equivalence_classes;
+pub use state_equivalence_analysis::StateEquivalenceResult;
 pub use vocab_equivalence_analysis::find_vocab_equivalence_classes;
 pub use vocab_equivalence_analysis::VocabEquivalenceResult;
 pub use combined_equivalence_analysis::compute_combined_equivalence;
 pub use combined_equivalence_analysis::CombinedEquivalenceResult;
 pub use combined_equivalence_analysis::find_vocab_equivalence_classes_with_state_reduction;
-pub use vocab_equivalence_trie::find_vocab_equivalence_classes_trie;

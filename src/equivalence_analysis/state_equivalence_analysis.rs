@@ -14,6 +14,9 @@
 use std::collections::BTreeSet;
 use crate::finite_automata::Regex;
 
+/// The result of state equivalence analysis: sets of state IDs that behave identically.
+pub type StateEquivalenceResult = BTreeSet<BTreeSet<usize>>;
+
 // -----------------------------------------------------------------------------
 // Hashing Utilities (128-bit)
 // -----------------------------------------------------------------------------
@@ -166,6 +169,24 @@ pub fn find_state_equivalence_classes(
                   instant.elapsed(), states.len(), hash_to_rep.len());
     
     mapping
+}
+
+/// Convert a state-to-representative mapping to StateEquivalenceResult format.
+///
+/// # Arguments
+/// * `states` - The original list of state IDs
+/// * `mapping` - The mapping where `mapping[i]` is the representative for `states[i]`
+///
+/// # Returns
+/// A set of equivalence classes, where each class is a set of state IDs.
+pub fn mapping_to_equivalence_classes(states: &[usize], mapping: &[usize]) -> StateEquivalenceResult {
+    let mut rep_to_class: std::collections::BTreeMap<usize, BTreeSet<usize>> = std::collections::BTreeMap::new();
+    
+    for (i, &rep) in mapping.iter().enumerate() {
+        rep_to_class.entry(rep).or_default().insert(states[i]);
+    }
+    
+    rep_to_class.into_values().collect()
 }
 
 fn process_node(

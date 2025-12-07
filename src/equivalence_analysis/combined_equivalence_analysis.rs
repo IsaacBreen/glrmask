@@ -16,21 +16,22 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::finite_automata::Regex;
 use crate::tokenizer::TokenizerStateID;
 
-use super::state_equivalence_analysis;
-use super::vocab_equivalence_analysis;
-use super::vocab_equivalence_trie;
-pub use super::vocab_equivalence_analysis::VocabEquivalenceResult;
+use super::state_equivalence_analysis::{self, StateEquivalenceResult};
+use super::vocab_equivalence_analysis::{self, VocabEquivalenceResult};
 
 /// Result of combined equivalence analysis.
 pub struct CombinedEquivalenceResult {
     /// Vocab equivalence classes: sets of token indices that behave identically.
     pub vocab_classes: VocabEquivalenceResult,
     
+    /// State equivalence classes: sets of state IDs that behave identically.
+    pub state_classes: StateEquivalenceResult,
+    
     /// Mapping from original state ID to representative state ID.
     /// States with the same representative are equivalent under the analyzed vocabulary.
     pub state_to_representative: BTreeMap<TokenizerStateID, TokenizerStateID>,
     
-    /// The set of representative states.
+    /// The set of representative states (one per equivalence class).
     pub representative_states: Vec<usize>,
 }
 
@@ -47,7 +48,7 @@ pub struct CombinedEquivalenceResult {
 /// * `state_reduction_threshold` - Minimum number of states before applying state reduction
 ///
 /// # Returns
-/// Combined result containing vocab classes, state-to-rep mapping, and representative states.
+/// Combined result containing vocab classes, state classes, state-to-rep mapping, and representative states.
 pub fn compute_combined_equivalence(
     regex: &Regex,
     tokens: &[Vec<u8>],
@@ -57,7 +58,7 @@ pub fn compute_combined_equivalence(
     let start = std::time::Instant::now();
     
     // Step 1: State equivalence analysis (if beneficial)
-    let (reduced_states, state_to_representative) = if initial_states.len() > state_reduction_threshold {
+    let (reduced_states, state_to_representative, state_classes) = if initial_states.len() > state_reduction_threshold {
         let state_reps = state_equivalence_analysis::find_state_equivalence_classes(
             regex,
             tokens,
@@ -76,6 +77,9 @@ pub fn compute_combined_equivalence(
         
         let reduced: Vec<usize> = rep_set.into_iter().collect();
         
+        // Convert to StateEquivalenceResult format
+        let state_classes = state_equivalence_analysis::mapping_to_equivalence_classes(initial_states, &state_reps);
+        
         crate::debug!(
             3,
             "Combined equiv: state reduction {} -> {} states in {:?}",
@@ -84,37 +88,31 @@ pub fn compute_combined_equivalence(
             start.elapsed(),
         );
         
-        (reduced, state_to_rep)
+        (reduced, state_to_rep, state_classes)
     } else {
         // No reduction needed - use all states as their own representatives
         let state_to_rep: BTreeMap<TokenizerStateID, TokenizerStateID> = initial_states
             .iter()
             .map(|&s| (TokenizerStateID(s), TokenizerStateID(s)))
             .collect();
-        (initial_states.to_vec(), state_to_rep)
+        
+        // Each state is its own equivalence class
+        let state_classes: StateEquivalenceResult = initial_states
+            .iter()
+            .map(|&s| std::iter::once(s).collect())
+            .collect();
+        
+        (initial_states.to_vec(), state_to_rep, state_classes)
     };
     
     // Step 2: Vocab equivalence analysis on reduced states
     let vocab_start = std::time::Instant::now();
     
-    // Choose algorithm based on environment variable (for testing)
-    let use_trie = std::env::var("USE_TRIE_VOCAB_EQUIV").is_ok();
-    
-    let vocab_classes = if use_trie {
-        let groups = vocab_equivalence_trie::find_vocab_equivalence_classes_trie(
-            regex,
-            tokens,
-            &reduced_states,
-        );
-        // Convert Vec<Vec<usize>> to VocabEquivalenceResult (BTreeSet<Vec<usize>>)
-        groups.into_iter().collect()
-    } else {
-        vocab_equivalence_analysis::find_vocab_equivalence_classes(
-            regex,
-            tokens,
-            &reduced_states,
-        )
-    };
+    let vocab_classes = vocab_equivalence_analysis::find_vocab_equivalence_classes(
+        regex,
+        tokens,
+        &reduced_states,
+    );
     
     crate::debug!(
         3,
@@ -134,6 +132,7 @@ pub fn compute_combined_equivalence(
     
     CombinedEquivalenceResult {
         vocab_classes,
+        state_classes,
         state_to_representative,
         representative_states: reduced_states,
     }
