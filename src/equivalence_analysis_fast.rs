@@ -4,6 +4,7 @@
 
 use crate::finite_automata::Regex;
 use crate::r#macro::is_debug_level_enabled;
+use crate::state_equivalence_analysis_finite_automata::find_state_equivalence_classes;
 use ahash::{AHasher, RandomState};
 use hashbrown::HashMap;
 use rayon::prelude::*;
@@ -860,10 +861,31 @@ pub fn find_equivalence_classes(
     let pre = precompute_dfa(regex);
     let precompute_time = total_start.elapsed();
     
+    // First apply shallow structural dedup
     let mut reduced_initial_states = dedup_initial_states(&pre, initial_states);
     if reduced_initial_states.is_empty() {
         reduced_initial_states.extend_from_slice(initial_states);
     }
+    let shallow_dedup_time = total_start.elapsed() - precompute_time;
+    let shallow_count = reduced_initial_states.len();
+
+    // For large state counts, use full state equivalence analysis
+    // This reduces states by grouping those that behave identically for ALL tokens
+    if reduced_initial_states.len() > 1000 {
+        let state_eq_start = Instant::now();
+        let reps = find_state_equivalence_classes(regex, strings, &reduced_initial_states);
+        let mut unique_reps: BTreeSet<usize> = reps.iter().copied().collect();
+        reduced_initial_states = unique_reps.into_iter().collect();
+        let state_eq_time = state_eq_start.elapsed();
+        crate::debug!(
+            3,
+            "State equivalence reduction: {} -> {} states in {:?}",
+            shallow_count,
+            reduced_initial_states.len(),
+            state_eq_time,
+        );
+    }
+
     let dedup_time = total_start.elapsed() - precompute_time;
 
     if is_debug_level_enabled(3) {

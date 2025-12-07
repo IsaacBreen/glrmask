@@ -1,5 +1,5 @@
 use crate::finite_automata::Regex;
-use crate::{equivalence_analysis_fast, equivalence_analysis_fast_new, equivalence_analysis_reference};
+use crate::{equivalence_analysis_fast, equivalence_analysis_trie, equivalence_analysis_reference};
 use hashbrown::{HashMap, HashSet};
 use rayon::prelude::*;
 use std::collections::hash_map::DefaultHasher;
