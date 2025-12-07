@@ -2,6 +2,7 @@
 pub mod finite_automata;
 mod equivalence_analysis_reference;
 mod equivalence_analysis_fast;
+mod equivalence_analysis_fast_new;
 mod equivalence_analysis;
 pub mod glr;
 pub mod constraint;

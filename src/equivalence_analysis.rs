@@ -1,5 +1,5 @@
 use crate::finite_automata::Regex;
-use crate::{equivalence_analysis_fast, equivalence_analysis_reference};
+use crate::{equivalence_analysis_fast, equivalence_analysis_fast_new, equivalence_analysis_reference};
 use hashbrown::{HashMap, HashSet};
 use rayon::prelude::*;
 use std::collections::hash_map::DefaultHasher;
@@ -14,6 +14,7 @@ pub fn find_equivalence_classes(
     initial_states: &[usize],
 ) -> EquivalenceResult {
     if std::env::var("SKIP_EQUIVALENCE_ANALYSIS_TEST").is_ok() {
+        // Use old fast implementation (known to be correct)
         let fast =
             equivalence_analysis_fast::find_equivalence_classes(regex, strings, initial_states);
         return fast;
@@ -27,6 +28,7 @@ pub fn find_equivalence_classes(
         instant.elapsed()
     );
     let instant = std::time::Instant::now();
+    // Use old fast implementation for now
     let fast = equivalence_analysis_fast::find_equivalence_classes(regex, strings, initial_states);
     crate::debug!(3, "Fast equivalence analysis took {:?}", instant.elapsed());
     if reference != fast {
