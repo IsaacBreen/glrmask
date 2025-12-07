@@ -185,8 +185,9 @@ pub fn find_state_equivalence_classes(
         groups.entry(state_hashes[i]).or_default().push(i);
     }
     
-    // Token batch size
-    let batch_size = 5000.min(tokens.len());
+    // Token batch size - larger batches reduce iteration overhead
+    // but may do more work on states that become inactive mid-batch
+    let batch_size = 10000.min(tokens.len());
     let mut tokens_tested = 0usize;
     let mut iteration = 0;
     

@@ -725,6 +725,15 @@ impl GrammarConstraint {
         let mut state_to_rep: BTreeMap<TokenizerStateID, TokenizerStateID> = BTreeMap::new();
         let mut representative_set: BTreeSet<usize> = BTreeSet::new();
         
+        // EXPERIMENTAL: Test intersection DFA approach for comparison
+        // DISABLED: Too slow for large grammars like diff (37K states)
+        // if crate::r#macro::is_debug_level_enabled(5) {
+        //     use crate::equivalence_analysis::vocab_dfa_approach::compute_equivalence_intersection_dfa;
+        //     let product_result = compute_equivalence_intersection_dfa(tokenizer, &llm_token_strings, &all_states);
+        //     crate::debug!(3, "Intersection DFA: {} state classes, {} token classes",
+        //                   product_result.num_state_classes, product_result.num_token_classes);
+        // }
+        
         if all_states.len() > 0 {  // TEMP: Always run state equiv for benchmarking
             let start = std::time::Instant::now();
             state_reps = find_state_equivalence_classes(tokenizer, &llm_token_strings, &all_states);
