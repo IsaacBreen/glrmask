@@ -1,12 +1,15 @@
-//! Fast Reference Implementation of Vocab Equivalence Analysis
+//! Reference Implementation of Vocab Equivalence Analysis
 //!
-//! This is a simple, correct implementation that is reasonably fast (< 1 second
-//! for most cases). It uses basic parallelism and straightforward hashing without
-//! the advanced optimizations of the main fast implementation.
+//! This is a simple, correct implementation for testing and validation.
+//! It properly computes token equivalence including recursive suffix behavior,
+//! matching the semantics of the optimized implementation.
 //!
-//! Use this as a reference for testing and validation against the optimized version.
+//! This implementation is SLOWER than the optimized version (vocab_equivalence_analysis_fast.rs)
+//! but serves as a reference for correctness testing. Use the environment variable
+//! `USE_FAST_REFERENCE_VOCAB=1` to enable this implementation instead of the optimized one.
 //!
-//! Complexity: O(tokens × states × avg_token_length) with parallelism
+//! Complexity: O(tokens × states × avg_token_length²) with parallelism
+//! The squared factor comes from computing suffix hashes from each finalization point.
 
 use crate::finite_automata::Regex;
 use rayon::prelude::*;
@@ -16,64 +19,128 @@ use std::collections::hash_map::DefaultHasher;
 
 pub type VocabEquivalenceResult = BTreeSet<Vec<usize>>;
 
+const NONE_STATE: u32 = u32::MAX;
+
+/// Compute a recursive suffix hash from a given position in the token.
+/// This captures what happens if the tokenizer resumes parsing from this position.
+///
+/// Returns (end_state_hash, edges_with_suffix_hashes)
+fn compute_suffix_hash(
+    dfa_transitions: &[[u32; 256]],
+    dfa_finalizers: &[Vec<usize>],
+    possible_futures: &[Vec<usize>],
+    token: &[u8],
+    start_pos: usize,
+    start_state: usize,
+    dfa_start_state: usize,  // The DFA's initial state for suffix computations
+    memo: &mut HashMap<usize, u64>,  // Keyed only by position for suffix hashes
+) -> u64 {
+    // For suffix hashes (pos > 0), we always start from dfa_start_state
+    // So the memo key only needs the position
+    if start_pos > 0 {
+        if let Some(&cached) = memo.get(&start_pos) {
+            return cached;
+        }
+    }
+    
+    let mut hasher = DefaultHasher::new();
+    
+    // Run DFA from start_state on token[start_pos..]
+    let mut current = start_state as u32;
+    let mut edges: Vec<(usize, usize)> = Vec::new(); // (group_id, position)
+    
+    for (rel_pos, &byte) in token[start_pos..].iter().enumerate() {
+        if current == NONE_STATE {
+            break;
+        }
+        let next = dfa_transitions[current as usize][byte as usize];
+        if next == NONE_STATE {
+            current = NONE_STATE;
+            break;
+        }
+        current = next;
+        let abs_pos = start_pos + rel_pos + 1;
+        
+        // Track finalizers at this position
+        let finalizers = &dfa_finalizers[current as usize];
+        for &gid in finalizers {
+            edges.push((gid, abs_pos));
+        }
+    }
+    
+    // Hash the end state
+    let end_hash = if current == NONE_STATE {
+        mix64(0xDEADBEEF_u64)
+    } else {
+        // Hash possible futures of end state
+        let futures = &possible_futures[current as usize];
+        let mut h: u64 = 0;
+        for &gid in futures {
+            h = h.wrapping_add(mix64(gid as u64));
+        }
+        h | (1 << 63)
+    };
+    end_hash.hash(&mut hasher);
+    
+    // For each edge, compute suffix hash recursively and include it
+    // Sort edges for determinism
+    edges.sort_unstable();
+    
+    for &(gid, pos) in &edges {
+        if pos <= token.len() {
+            // The suffix hash is computed from the DFA's start state
+            // because when the tokenizer resumes, it restarts from the initial state
+            let suffix_hash = compute_suffix_hash(
+                dfa_transitions,
+                dfa_finalizers,
+                possible_futures,
+                token,
+                pos,
+                dfa_start_state,
+                dfa_start_state,
+                memo,
+            );
+            (gid as u64).hash(&mut hasher);
+            suffix_hash.hash(&mut hasher);
+        }
+    }
+    
+    let result = hasher.finish();
+    if start_pos > 0 {
+        memo.insert(start_pos, result);
+    }
+    result
+}
+
 /// Compute a signature for a token based on its behavior from all initial states.
 ///
 /// The signature captures:
 /// - For each initial state, where does the token end up?
 /// - What finalizers are encountered along the way (with positions)?
+/// - Recursive suffix behavior from each finalization point
 fn compute_token_signature(
     dfa_transitions: &[[u32; 256]],
     dfa_finalizers: &[Vec<usize>],
     possible_futures: &[Vec<usize>],
     token: &[u8],
     initial_states: &[usize],
+    dfa_start_state: usize,
 ) -> u64 {
-    const NONE_STATE: u32 = u32::MAX;
-    
     let mut hasher = DefaultHasher::new();
+    let mut memo: HashMap<usize, u64> = HashMap::new();
     
     for &start_state in initial_states {
-        let mut current = start_state as u32;
-        let mut path_hash: u64 = 0;
-        
-        for (depth, &byte) in token.iter().enumerate() {
-            if current == NONE_STATE {
-                break;
-            }
-            let next = dfa_transitions[current as usize][byte as usize];
-            if next == NONE_STATE {
-                current = NONE_STATE;
-                break;
-            }
-            current = next;
-            
-            // Hash finalizers at this position
-            let finalizers = &dfa_finalizers[current as usize];
-            if !finalizers.is_empty() {
-                let depth_u64 = (depth + 1) as u64;
-                for &gid in finalizers {
-                    // Position-sensitive hash of finalizer
-                    path_hash = path_hash.wrapping_add(
-                        mix64(depth_u64 ^ ((gid as u64) << 32))
-                    );
-                }
-            }
-        }
-        
-        // Hash the end state's possible future groups
-        let end_hash = if current == NONE_STATE {
-            mix64(0xDEADBEEF_u64)
-        } else {
-            let futures = &possible_futures[current as usize];
-            let mut h: u64 = 0;
-            for &gid in futures {
-                h = h.wrapping_add(mix64(gid as u64));
-            }
-            h | (1 << 63)
-        };
-        
-        // Combine end state and path info for this initial state
-        let state_sig = end_hash.wrapping_add(path_hash);
+        // Compute suffix hash starting from position 0 with this initial state
+        let state_sig = compute_suffix_hash(
+            dfa_transitions,
+            dfa_finalizers,
+            possible_futures,
+            token,
+            0,
+            start_state,
+            dfa_start_state,
+            &mut memo,
+        );
         state_sig.hash(&mut hasher);
     }
     
@@ -107,9 +174,9 @@ pub fn find_vocab_equivalence_classes(
 ) -> VocabEquivalenceResult {
     let start = std::time::Instant::now();
     let dfa = &regex.dfa;
+    let dfa_start_state = dfa.start_state;
     
     // Precompute packed transition tables for cache efficiency
-    const NONE_STATE: u32 = u32::MAX;
     let dfa_transitions: Vec<[u32; 256]> = dfa.states
         .iter()
         .map(|state| {
@@ -141,6 +208,7 @@ pub fn find_vocab_equivalence_classes(
                 &possible_futures,
                 token,
                 initial_states,
+                dfa_start_state,
             )
         })
         .collect();
@@ -158,7 +226,7 @@ pub fn find_vocab_equivalence_classes(
     
     crate::debug!(
         3,
-        "Fast reference vocab equiv: {} tokens -> {} classes in {:?}",
+        "Reference vocab equiv: {} tokens -> {} classes in {:?}",
         tokens.len(),
         result.len(),
         start.elapsed(),
