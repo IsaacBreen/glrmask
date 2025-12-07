@@ -19,7 +19,12 @@ use crate::{
         leveled_gss::{LeveledGSS, Merge},
         vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode},
     },
-    equivalence_analysis,
+    equivalence_analysis::{
+        self,
+        find_state_equivalence_classes,
+        find_vocab_equivalence_classes,
+        VocabEquivalenceResult,
+    },
     finite_automata::Regex,
     glr::{
         analyze::compute_terminal_follow_sets,
@@ -33,15 +38,12 @@ use crate::{
     tokenizer::{LLMTokenID, LLMTokenMap, TokenizerStateID},
     types::{TerminalID as GrammarTokenID, TerminalID},
 };
-use crate::equivalence_analysis::EquivalenceResult;
 use crate::datastructures::bitset::Bitset;
 use crate::datastructures::gss_acc::Acc;
 use crate::glr::parser::{ExpectElse, ParseStateEdgeContent};
 use crate::precompute4::weighted_automata::{DWA, NWA};
 use crate::precompute4::weighted_automata::{RangeSet as WARangeSet, Weight};
 
-// Import from new modules
-use crate::state_equivalence_analysis_finite_automata::find_state_equivalence_classes;
 pub use crate::constraint_vocab::*;
 use crate::constraint_precompute::run_precompute1;
 
@@ -674,20 +676,29 @@ impl GrammarConstraint {
     }
 
     /// Combined setup that computes both internal mappings and commit vocab in a single pass.
-    /// because we only run the equivalence analysis once.
-    /// Returns: (original_to_internal_map, commit_vocab, internal_llm_token_map)
+    /// Also computes state equivalence analysis once for all states.
+    /// Returns: (original_to_internal_map, commit_vocab, internal_llm_token_map, mask_classes, state_to_rep)
     fn setup_combined(
         llm_token_map: &LLMTokenMap,
         tokenizer: &Regex,
         max_original_llm_token_id: usize,
         grammar_group_ids: &std::collections::BTreeSet<usize>,
-    ) -> (BTreeMap<usize, usize>, CommitVocab, BTreeMap<Vec<u8>, LLMTokenID>, EquivalenceResult) {
+    ) -> (
+        BTreeMap<usize, usize>,
+        CommitVocab,
+        BTreeMap<Vec<u8>, LLMTokenID>,
+        VocabEquivalenceResult,
+        BTreeMap<TokenizerStateID, TokenizerStateID>,
+        Vec<usize>,
+    ) {
         if llm_token_map.is_empty() {
             return (
                 BTreeMap::new(),
                 CommitVocab::new(Vec::new(), Vec::new()),
                 BTreeMap::new(),
                 Default::default(),
+                BTreeMap::new(),
+                Vec::new(),
             );
         }
 
@@ -696,21 +707,53 @@ impl GrammarConstraint {
         sorted_tokens.sort_by_key(|(bytes, _id)| *bytes);
 
         let mut llm_token_strings: Vec<Vec<u8>> = Vec::with_capacity(sorted_tokens.len());
-        let mut original_ids: Vec<LLMTokenID> = Vec::with_capacity(sorted_tokens.len());
+        let mut original_ids: Vec<usize> = Vec::with_capacity(sorted_tokens.len());
         let mut highest_original_id = 0usize;
 
         for (bytes, id) in &sorted_tokens {
             highest_original_id = highest_original_id.max(id.0);
             llm_token_strings.push((*bytes).clone());
-            original_ids.push(**id);
+            original_ids.push(id.0);
         }
 
-        let mut initial_states: Vec<usize> = tokenizer.iter_states().map(|s| s.0).collect();
+        // Get ALL states for state equivalence (not filtered)
+        let all_states: Vec<usize> = tokenizer.iter_states().map(|s| s.0).collect();
+        
+        // Compute state equivalence ONCE on ALL states with the full vocabulary.
+        // This mapping will be reused later for building maps and skeleton DWA.
+        let state_reps: Vec<usize>;
+        let mut state_to_rep: BTreeMap<TokenizerStateID, TokenizerStateID> = BTreeMap::new();
+        let mut representative_set: BTreeSet<usize> = BTreeSet::new();
+        
+        if all_states.len() > 2000 {
+            let start = std::time::Instant::now();
+            state_reps = find_state_equivalence_classes(tokenizer, &llm_token_strings, &all_states);
+            
+            for (i, &rep) in state_reps.iter().enumerate() {
+                state_to_rep.insert(TokenizerStateID(all_states[i]), TokenizerStateID(rep));
+                representative_set.insert(rep);
+            }
+            
+            crate::debug!(
+                3,
+                "State equivalence analysis: {} -> {} representative states in {:?}",
+                all_states.len(),
+                representative_set.len(),
+                start.elapsed(),
+            );
+        } else {
+            // No reduction - each state is its own representative
+            for &s in &all_states {
+                state_to_rep.insert(TokenizerStateID(s), TokenizerStateID(s));
+                representative_set.insert(s);
+            }
+        }
+        
+        let representative_states: Vec<usize> = representative_set.into_iter().collect();
 
-        // Only keep tokenizer states that can ever yield grammar-relevant captures; this dramatically
-        // reduces the equivalence workload for large DFAs without changing observable behavior.
-        if !grammar_group_ids.is_empty() {
-            let filtered: Vec<usize> = initial_states
+        // Filter states for vocab equivalence to only grammar-relevant ones
+        let initial_states_for_vocab: Vec<usize> = if !grammar_group_ids.is_empty() {
+            let filtered: Vec<usize> = representative_states
                 .iter()
                 .copied()
                 .filter(|&sid| {
@@ -720,53 +763,37 @@ impl GrammarConstraint {
                 })
                 .collect();
 
-            if !filtered.is_empty() && filtered.len() < initial_states.len() {
+            if !filtered.is_empty() && filtered.len() < representative_states.len() {
                 if is_debug_level_enabled(3) {
                     crate::debug!(
                         3,
-                        "Pruned tokenizer states for equivalence: {} -> {} (grammar groups {})",
-                        initial_states.len(),
+                        "Pruned states for vocab equivalence: {} -> {} (grammar groups {})",
+                        representative_states.len(),
                         filtered.len(),
                         grammar_group_ids.len()
                     );
                 }
-                initial_states = filtered;
+                filtered
+            } else {
+                representative_states.clone()
             }
-        }
-
-        // Apply state equivalence reduction for large state counts.
-        // States that behave identically for ALL tokens can be merged.
-        // Only apply when state count is large enough to justify the overhead.
-        let reduced_initial_states = if initial_states.len() > 2000 {
-            let start = std::time::Instant::now();
-            let reps = find_state_equivalence_classes(tokenizer, &llm_token_strings, &initial_states);
-            let unique_reps: BTreeSet<usize> = reps.iter().copied().collect();
-            let reduced: Vec<usize> = unique_reps.into_iter().collect();
-            crate::debug!(
-                3,
-                "State equivalence reduction: {} -> {} states in {:?}",
-                initial_states.len(),
-                reduced.len(),
-                start.elapsed(),
-            );
-            reduced
         } else {
-            initial_states
+            representative_states.clone()
         };
 
         crate::debug!(
             3,
-            "Equivalence analysis: {} initial states, {} tokens",
-            reduced_initial_states.len(),
+            "Vocab equivalence analysis: {} initial states, {} tokens",
+            initial_states_for_vocab.len(),
             llm_token_strings.len()
         );
 
-        let mask_classes = equivalence_analysis::find_equivalence_classes(
+        let mask_classes = find_vocab_equivalence_classes(
             tokenizer,
             &llm_token_strings,
-            &reduced_initial_states,
+            &initial_states_for_vocab,
         );
-        crate::debug!(2, "Simple equivalence: {} classes for {} tokens",
+        crate::debug!(2, "Vocab equivalence: {} classes for {} tokens",
                      mask_classes.len(), llm_token_strings.len());
 
         if is_debug_level_enabled(3) {
@@ -798,7 +825,7 @@ impl GrammarConstraint {
             best_rep_by_internal.push(best_idx);
             for &string_index in string_indices {
                 let original_llm_id = original_ids[string_index];
-                original_to_internal_vec[original_llm_id.0] = internal_id;
+                original_to_internal_vec[original_llm_id] = internal_id;
             }
         }
         // Convert to BTreeMap for compatibility with rest of code
@@ -808,36 +835,7 @@ impl GrammarConstraint {
             .filter(|&(_, v)| v != usize::MAX)
             .collect();
 
-        // Build CommitVocab from commit_classes - optimized version
-        // let effective_max = max_original_llm_token_id.max(highest_original_id);
-        // let mut original_to_representative =
-        //     vec![CommitVocab::INVALID_REPRESENTATIVE; effective_max + 1];
-        // let mut representatives: Vec<Vec<u8>> = Vec::with_capacity(simple_result.commit_classes.len());
-        //
-        // for string_indices in simple_result.commit_classes.values() {
-        //     if string_indices.is_empty() {
-        //         continue;
-        //     }
-        //     // Pick shortest representative (single pass)
-        //     let rep_idx = *string_indices
-        //         .iter()
-        //         .min_by_key(|&&idx| (llm_token_strings[idx].len(), &llm_token_strings[idx]))
-        //         .unwrap();
-        //     let representative_id = representatives.len() as u32;
-        //     representatives.push(llm_token_strings[rep_idx].clone());
-        //     for &idx in string_indices {
-        //         let orig_id = original_ids[idx].0;
-        //         original_to_representative[orig_id] = representative_id;
-        //     }
-        // }
-        //
-        // crate::debug!(
-        //     4,
-        //     "Commit vocab built with {} representatives for {} tokens",
-        //     representatives.len(),
-        //     llm_token_strings.len()
-        // );
-        // TEMP: disable
+        // TEMP: disable commit vocab optimization
         let representatives: Vec<Vec<u8>> = (0..llm_token_strings.len()).map(|i| llm_token_strings[i].clone()).collect();
         let original_to_representative = (0..llm_token_strings.len()).map(|i| i as u32).collect();
 
@@ -859,7 +857,7 @@ impl GrammarConstraint {
         );
 
         let commit_vocab = CommitVocab::new(representatives, original_to_representative);
-        (original_to_internal_map, commit_vocab, internal_llm_token_map, mask_classes)
+        (original_to_internal_map, commit_vocab, internal_llm_token_map, mask_classes, state_to_rep, representative_states)
     }
 
     fn build_with_config(
@@ -886,9 +884,16 @@ impl GrammarConstraint {
         let grammar_group_ids: std::collections::BTreeSet<usize> = token_name_map.right_values().copied().collect();
         let verify_equivalence = std::env::var("VERIFY_EQUIVALENCE").is_ok();
 
-        // Combined equivalence analysis - computes both mask and commit classes in one pass
-        // Also returns internal_llm_token_map to avoid another 50K token iteration
-        let (original_to_internal_map, commit_vocab_data, internal_llm_token_map, mask_classes) = Self::setup_combined(
+        // Combined equivalence analysis - computes state equivalence, vocab equivalence, and internal mappings
+        // State equivalence is computed ONCE and reused for both vocab analysis and building maps
+        let (
+            original_to_internal_map,
+            commit_vocab_data,
+            internal_llm_token_map,
+            mask_classes,
+            state_to_rep,
+            representative_states,
+        ) = Self::setup_combined(
             &llm_token_map,
             &tokenizer,
             max_original_llm_token_id,
@@ -927,23 +932,8 @@ impl GrammarConstraint {
         let vocab_tree = VocabPrefixTree::build(&internal_tokens_for_vocab);
         crate::debug!(4, "Done building internal vocab prefix tree");
 
-        // Unified fast pass for maps and matches.
-        // OPTIMIZATION: State Equivalence Analysis
-        crate::debug!(4, "Analyzing tokenizer state equivalence...");
-        let all_states_list: Vec<usize> = tokenizer.iter_states().map(|s| s.0).collect();
-        let state_representatives = find_state_equivalence_classes(
-            &tokenizer,
-            &internal_tokens_for_vocab.iter().map(|(_, b)| b.clone()).collect::<Vec<_>>(),
-            &all_states_list,
-        );
-        let mut state_to_rep: BTreeMap<TokenizerStateID, TokenizerStateID> = BTreeMap::new();
-        let mut representative_set: BTreeSet<usize> = BTreeSet::new();
-        for (s, &r) in state_representatives.iter().enumerate() {
-            state_to_rep.insert(TokenizerStateID(s), TokenizerStateID(r));
-            representative_set.insert(r);
-        }
-        let representative_states: Vec<usize> = representative_set.into_iter().collect();
-        crate::debug!(4, "Tokenizer state equivalence analysis complete. {} -> {} states", all_states_list.len(), representative_states.len());
+        // State equivalence already computed in setup_combined - reuse it
+        crate::debug!(4, "Using precomputed state equivalence: {} representative states", representative_states.len());
 
         crate::debug!(4, "Computing maps and possible_matches (fast parallel pass)");
         

@@ -1,8 +1,6 @@
 #![allow(warnings)]
 pub mod finite_automata;
-mod equivalence_analysis_reference;
-mod equivalence_analysis_fast;
-mod equivalence_analysis;
+pub mod equivalence_analysis;
 pub mod glr;
 pub mod constraint;
 pub mod datastructures;
@@ -19,7 +17,6 @@ mod profiler;
 // New lightweight pass framework for Trie3 optimization
 pub mod precompute4;
 mod constraint_fns;
-mod state_equivalence_analysis_finite_automata;
 
 pub mod constraint_vocab;
 pub mod constraint_precompute;

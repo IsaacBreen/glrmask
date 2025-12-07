@@ -1,5 +1,17 @@
+//! State Equivalence Analysis
+//!
+//! Determines which tokenizer states behave identically for all tokens in a vocabulary.
+//! States that are equivalent can be merged, reducing the workload for subsequent
+//! vocab equivalence analysis.
+//!
+//! The algorithm uses a trie-based approach with weighted contributions:
+//! - Build a trie from all vocabulary tokens
+//! - For each state, compute a hash signature by traversing the trie
+//! - States with identical signatures are equivalent
+//!
+//! Complexity: O(trie_size × unique_groups) where groups are DFA states reachable from initial states.
+
 use crate::finite_automata::Regex;
-use smallvec::SmallVec;
 
 // -----------------------------------------------------------------------------
 // Hashing Utilities (128-bit)
@@ -20,13 +32,6 @@ fn hash_match_event(gid: u32, depth: u32) -> u128 {
     let packed = ((depth as u128) << 64) | (gid as u128);
     mix_u128(packed)
 }
-
-#[inline(always)]
-fn hash_end_state(class_id: u64) -> u128 {
-    // Distinguish end state hash from match hash by setting high bit or using different mix
-    mix_u128((class_id as u128) | (1u128 << 127))
-}
-
 
 // -----------------------------------------------------------------------------
 // Trie Definition for Tokens
@@ -89,12 +94,23 @@ impl TokenTrie {
 // State Equivalence Analysis
 // -----------------------------------------------------------------------------
 
+/// Find state equivalence classes for a tokenizer.
+///
+/// # Arguments
+/// * `regex` - The tokenizer DFA
+/// * `tokens` - Vocabulary tokens to consider
+/// * `states` - List of state IDs to analyze
+///
+/// # Returns
+/// A vector where `result[i]` is the representative state for `states[i]`.
+/// States with the same representative are equivalent.
 pub fn find_state_equivalence_classes(
     regex: &Regex,
     tokens: &[Vec<u8>],
     states: &[usize],
 ) -> Vec<usize> {
     let instant = std::time::Instant::now();
+    
     // 1. Build Token Trie
     let mut trie = TokenTrie::new();
     for (i, token) in tokens.iter().enumerate() {
@@ -106,8 +122,8 @@ pub fn find_state_equivalence_classes(
     trie.compute_subtree_weights(0);
 
     // 2. Precompute end state hashes based on possible_future_group_ids
-    // The user specifies: "When we reach the end of a LLM token, it's not the end state that matters, 
-    // but the *possible terminals accessible from that end state*."
+    // When we reach the end of a token, it's not the end state that matters,
+    // but the possible terminals accessible from that end state.
     let mut end_state_hashes = Vec::with_capacity(regex.dfa.states.len());
     for state in &regex.dfa.states {
         let mut h = 0u128;
@@ -120,8 +136,6 @@ pub fn find_state_equivalence_classes(
     }
 
     // 3. Compute signatures (single pass)
-    // We don't need iterative refinement because the "end state behavior" is now defined statically
-    // by `possible_future_group_ids`.
     let mut accumulators = vec![0u128; states.len()];
 
     // Prepare initial groups for DFS
@@ -147,7 +161,8 @@ pub fn find_state_equivalence_classes(
         mapping[i] = rep;
     }
 
-    crate::debug!(3, "State equivalence analysis took {:.2?}. Reduced {} states to {}.", instant.elapsed(), states.len(), hash_to_rep.len());
+    crate::debug!(3, "State equivalence analysis took {:.2?}. Reduced {} states to {}.", 
+                  instant.elapsed(), states.len(), hash_to_rep.len());
     
     mapping
 }

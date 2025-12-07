@@ -1,3 +1,17 @@
+//! Fast Implementation of Vocab Equivalence Analysis
+//!
+//! This module provides a high-performance algorithm for computing vocabulary
+//! token equivalence classes. Two tokens are equivalent if they produce identical
+//! parsing behavior across all initial tokenizer states.
+//!
+//! The algorithm uses:
+//! - Batched iterative refinement over initial states
+//! - Parallel signature computation using rayon
+//! - Precomputed DFA with optimized memory layout
+//! - Incremental suffix hash caching
+//!
+//! Complexity: O(tokens × states × avg_token_length) with parallelism
+
 // PERMANENT WARNING: Do NOT add any form of caching or shortcuts that skip or restrict
 // states/tokens for equivalence analysis. Full correctness is mandatory; no "cheating"
 // optimizations that drop work are allowed here.
@@ -12,7 +26,7 @@ use std::collections::BTreeSet;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{BuildHasher, Hash, Hasher};
 
-pub type EquivalenceResult = BTreeSet<Vec<usize>>;
+pub type VocabEquivalenceResult = BTreeSet<Vec<usize>>;
 
 // =============================================================================
 // TYPE ALIASES AND CONSTANTS
@@ -109,7 +123,7 @@ fn hash_group_list(list: &[usize]) -> u64 {
 
 fn precompute_dfa(regex: &Regex) -> PrecomputedDfa {
     let dfa = &regex.dfa;
-    crate::debug!(3, "Precomputing DFA with {} states", dfa.states.len());
+    crate::debug!(4, "Precomputing DFA with {} states", dfa.states.len());
     assert!(
         dfa.states.len() <= u32::MAX as usize,
         "DFA too large for packed transitions"
@@ -212,109 +226,6 @@ fn precompute_dfa(regex: &Regex) -> PrecomputedDfa {
         completion_hash,
         none_completion_hash,
     }
-}
-
-// =============================================================================
-// STATE DEDUPLICATION
-// =============================================================================
-
-fn state_fingerprint(pre: &PrecomputedDfa, state_id: usize) -> u64 {
-    let mut hasher = new_hasher();
-    hasher.write_u8(pre.has_transitions[state_id] as u8);
-
-    for &next in pre.transitions[state_id].iter() {
-        hasher.write_u32(next);
-    }
-
-    for f in &pre.finalizers[state_id] {
-        hasher.write_usize(f.gid);
-        hasher.write_u8(f.non_greedy as u8);
-    }
-
-    match &pre.future_modes[state_id] {
-        FutureMode::AlwaysTerminate => hasher.write_u8(0),
-        FutureMode::AlwaysContinue => hasher.write_u8(1),
-        FutureMode::Guarded(g) => {
-            hasher.write_u8(2);
-            for gid in g {
-                hasher.write_usize(*gid);
-            }
-        }
-    }
-
-    hasher.write_u64(pre.completion_hash[state_id]);
-    hasher.finish()
-}
-
-fn states_structurally_equal(pre: &PrecomputedDfa, a: usize, b: usize) -> bool {
-    if pre.has_transitions[a] != pre.has_transitions[b] {
-        return false;
-    }
-    if pre.transitions[a] != pre.transitions[b] {
-        return false;
-    }
-    if pre.finalizers[a].len() != pre.finalizers[b].len() {
-        return false;
-    }
-    for (fa, fb) in pre.finalizers[a].iter().zip(pre.finalizers[b].iter()) {
-        if fa.gid != fb.gid || fa.non_greedy != fb.non_greedy {
-            return false;
-        }
-    }
-
-    match (&pre.future_modes[a], &pre.future_modes[b]) {
-        (FutureMode::AlwaysTerminate, FutureMode::AlwaysTerminate)
-        | (FutureMode::AlwaysContinue, FutureMode::AlwaysContinue) => {}
-        (FutureMode::Guarded(ga), FutureMode::Guarded(gb)) => {
-            if ga.len() != gb.len() || !ga.iter().zip(gb.iter()).all(|(x, y)| x == y) {
-                return false;
-            }
-        }
-        _ => return false,
-    }
-
-    pre.completion_hash[a] == pre.completion_hash[b]
-}
-
-fn dedup_initial_states(pre: &PrecomputedDfa, initial_states: &[usize]) -> Vec<usize> {
-    use std::time::Instant;
-    let start = Instant::now();
-    
-    let mut buckets: HashMap<u64, Vec<usize>> = HashMap::with_capacity(initial_states.len());
-    for &sid in initial_states {
-        buckets.entry(state_fingerprint(pre, sid)).or_default().push(sid);
-    }
-
-    let mut reps: Vec<usize> = Vec::with_capacity(initial_states.len());
-
-    for (_fp, states) in buckets {
-        let mut chosen: Option<usize> = None;
-        for sid in states {
-            if let Some(rep) = chosen {
-                if states_structurally_equal(pre, rep, sid) {
-                    continue;
-                }
-                reps.push(sid);
-            } else {
-                chosen = Some(sid);
-                reps.push(sid);
-            }
-        }
-    }
-
-    reps.sort_unstable();
-    
-    if is_debug_level_enabled(4) {
-        crate::debug!(
-            4,
-            "  dedup_initial_states: {} -> {} in {:?}",
-            initial_states.len(),
-            reps.len(),
-            start.elapsed()
-        );
-    }
-    
-    reps
 }
 
 // =============================================================================
@@ -847,17 +758,25 @@ fn compute_chunk_signature(
 // MAIN ENTRY POINT
 // =============================================================================
 
-/// Find equivalence classes of tokens based on DFA behavior.
+/// Find vocab equivalence classes of tokens based on DFA behavior.
 /// Uses iterative state-based refinement with batching and parallel processing.
 /// 
 /// Note: For large state counts, the caller should pre-reduce using
-/// `state_equivalence_analysis_finite_automata::find_state_equivalence_classes`
+/// `state_equivalence_analysis::find_state_equivalence_classes`
 /// before calling this function. This is typically done in constraint.rs.
-pub fn find_equivalence_classes(
+///
+/// # Arguments
+/// * `regex` - The tokenizer DFA
+/// * `strings` - Vocabulary tokens to analyze
+/// * `initial_states` - Tokenizer states to consider for equivalence
+///
+/// # Returns
+/// Sets of token indices that are equivalent (produce identical parsing behavior).
+pub fn find_vocab_equivalence_classes(
     regex: &Regex,
     strings: &[Vec<u8>],
     initial_states: &[usize],
-) -> EquivalenceResult {
+) -> VocabEquivalenceResult {
     use std::time::Instant;
     
     let total_start = Instant::now();
@@ -865,14 +784,12 @@ pub fn find_equivalence_classes(
     let precompute_time = total_start.elapsed();
 
     // Note: State equivalence reduction (if needed) should be done by the caller.
-    // The shallow structural dedup here catches obvious duplicates but the caller
-    // should use find_state_equivalence_classes for large state counts.
     let reduced_initial_states: Vec<usize> = initial_states.to_vec();
 
     if is_debug_level_enabled(3) {
         crate::debug!(
             3,
-            "fast equivalence: num_states={} num_groups={} precompute={:?}",
+            "fast vocab equivalence: num_states={} num_groups={} precompute={:?}",
             reduced_initial_states.len(),
             pre.num_groups,
             precompute_time,
@@ -1056,7 +973,7 @@ pub fn find_equivalence_classes(
     if is_debug_level_enabled(4) {
         crate::debug!(
             4,
-            "  Computed {} equivalence classes in {} batches",
+            "  Computed {} vocab equivalence classes in {} batches",
             groups.len(),
             batch_count
         );
@@ -1068,6 +985,7 @@ pub fn find_equivalence_classes(
 // =============================================================================
 // DEBUG/TEST UTILITIES
 // =============================================================================
+
 fn compute_suffix_hashes_debug(
     regex: &Regex,
     slice: &[u8],

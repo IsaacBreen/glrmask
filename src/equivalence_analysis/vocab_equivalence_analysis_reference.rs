@@ -1,3 +1,11 @@
+//! Reference Implementation of Vocab Equivalence Analysis
+//!
+//! This is a slow but correct reference implementation used for testing
+//! and validation. It computes token signatures by building and hashing
+//! the full parse graph for each token.
+//!
+//! Complexity: O(tokens × states × token_length × graph_size)
+
 use crate::finite_automata::Regex;
 use hashbrown::{HashMap, HashSet};
 use rayon::prelude::*;
@@ -5,7 +13,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeSet, VecDeque};
 use std::hash::{Hash, Hasher};
 
-pub type EquivalenceResult = BTreeSet<Vec<usize>>;
+pub type VocabEquivalenceResult = BTreeSet<Vec<usize>>;
 
 /// Computes a deterministic hash representing the parsing structure of the string.
 pub fn compute_signature(regex: &Regex, slice: &[u8], start_state: usize) -> u64 {
@@ -75,11 +83,20 @@ pub fn compute_signature(regex: &Regex, slice: &[u8], start_state: usize) -> u64
     node_hashes.get(&0).copied().unwrap_or(0)
 }
 
-pub fn find_equivalence_classes(
+/// Find vocab equivalence classes using the reference algorithm.
+///
+/// # Arguments
+/// * `regex` - The tokenizer DFA
+/// * `strings` - Vocabulary tokens to analyze
+/// * `initial_states` - Tokenizer states to consider for equivalence
+///
+/// # Returns
+/// Sets of token indices that are equivalent (produce identical parsing behavior).
+pub fn find_vocab_equivalence_classes(
     regex: &Regex,
     strings: &[Vec<u8>],
     initial_states: &[usize],
-) -> EquivalenceResult {
+) -> VocabEquivalenceResult {
     // Compute a unique signature for every string in parallel
     let signatures: Vec<u64> = strings
         .par_iter()
