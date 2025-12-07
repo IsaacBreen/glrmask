@@ -4,7 +4,6 @@
 
 use crate::finite_automata::Regex;
 use crate::r#macro::is_debug_level_enabled;
-use crate::state_equivalence_analysis_finite_automata::find_state_equivalence_classes;
 use ahash::{AHasher, RandomState};
 use hashbrown::HashMap;
 use rayon::prelude::*;
@@ -850,6 +849,10 @@ fn compute_chunk_signature(
 
 /// Find equivalence classes of tokens based on DFA behavior.
 /// Uses iterative state-based refinement with batching and parallel processing.
+/// 
+/// Note: For large state counts, the caller should pre-reduce using
+/// `state_equivalence_analysis_finite_automata::find_state_equivalence_classes`
+/// before calling this function. This is typically done in constraint.rs.
 pub fn find_equivalence_classes(
     regex: &Regex,
     strings: &[Vec<u8>],
@@ -860,42 +863,19 @@ pub fn find_equivalence_classes(
     let total_start = Instant::now();
     let pre = precompute_dfa(regex);
     let precompute_time = total_start.elapsed();
-    
-    // First apply shallow structural dedup
-    let mut reduced_initial_states = dedup_initial_states(&pre, initial_states);
-    if reduced_initial_states.is_empty() {
-        reduced_initial_states.extend_from_slice(initial_states);
-    }
-    let shallow_dedup_time = total_start.elapsed() - precompute_time;
-    let shallow_count = reduced_initial_states.len();
 
-    // For large state counts, use full state equivalence analysis
-    // This reduces states by grouping those that behave identically for ALL tokens
-    if reduced_initial_states.len() > 1000 {
-        let state_eq_start = Instant::now();
-        let reps = find_state_equivalence_classes(regex, strings, &reduced_initial_states);
-        let mut unique_reps: BTreeSet<usize> = reps.iter().copied().collect();
-        reduced_initial_states = unique_reps.into_iter().collect();
-        let state_eq_time = state_eq_start.elapsed();
-        crate::debug!(
-            3,
-            "State equivalence reduction: {} -> {} states in {:?}",
-            shallow_count,
-            reduced_initial_states.len(),
-            state_eq_time,
-        );
-    }
-
-    let dedup_time = total_start.elapsed() - precompute_time;
+    // Note: State equivalence reduction (if needed) should be done by the caller.
+    // The shallow structural dedup here catches obvious duplicates but the caller
+    // should use find_state_equivalence_classes for large state counts.
+    let reduced_initial_states: Vec<usize> = initial_states.to_vec();
 
     if is_debug_level_enabled(3) {
         crate::debug!(
             3,
-            "fast equivalence: num_states={} num_groups={} precompute={:?} dedup={:?}",
+            "fast equivalence: num_states={} num_groups={} precompute={:?}",
             reduced_initial_states.len(),
             pre.num_groups,
             precompute_time,
-            dedup_time,
         );
     }
 
@@ -930,7 +910,8 @@ pub fn find_equivalence_classes(
     }
 
     // Process states in batches for memory efficiency
-    let batch_size = 1024;
+    // Use a larger batch size when state count is small, single batch when < 3000 states
+    let batch_size = if num_states < 3000 { num_states } else { 2048 };
 
     let mut active_indices: Vec<usize> = (0..num_tokens).collect();
     let mut partition: Vec<usize> = vec![0; num_tokens];

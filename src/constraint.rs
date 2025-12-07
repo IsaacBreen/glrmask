@@ -734,17 +734,37 @@ impl GrammarConstraint {
             }
         }
 
+        // Apply state equivalence reduction for large state counts.
+        // States that behave identically for ALL tokens can be merged.
+        // Only apply when state count is large enough to justify the overhead.
+        let reduced_initial_states = if initial_states.len() > 2000 {
+            let start = std::time::Instant::now();
+            let reps = find_state_equivalence_classes(tokenizer, &llm_token_strings, &initial_states);
+            let unique_reps: BTreeSet<usize> = reps.iter().copied().collect();
+            let reduced: Vec<usize> = unique_reps.into_iter().collect();
+            crate::debug!(
+                3,
+                "State equivalence reduction: {} -> {} states in {:?}",
+                initial_states.len(),
+                reduced.len(),
+                start.elapsed(),
+            );
+            reduced
+        } else {
+            initial_states
+        };
+
         crate::debug!(
             3,
             "Equivalence analysis: {} initial states, {} tokens",
-            initial_states.len(),
+            reduced_initial_states.len(),
             llm_token_strings.len()
         );
 
         let mask_classes = equivalence_analysis::find_equivalence_classes(
             tokenizer,
             &llm_token_strings,
-            &initial_states,
+            &reduced_initial_states,
         );
         crate::debug!(2, "Simple equivalence: {} classes for {} tokens",
                      mask_classes.len(), llm_token_strings.len());
