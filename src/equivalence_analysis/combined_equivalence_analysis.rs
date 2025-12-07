@@ -52,9 +52,20 @@ pub fn compute_combined_equivalence(
     // Check which state equivalence algorithm to use
     let use_trie = std::env::var("USE_TRIE_STATE_EQUIV").map(|v| v == "1").unwrap_or(false);
     let use_discriminating = std::env::var("USE_DISC_STATE_EQUIV").map(|v| v == "1").unwrap_or(false);
+    let use_transposed = std::env::var("USE_TRANSPOSED_STATE_EQUIV").map(|v| v == "1").unwrap_or(false);
+    let use_optimized = std::env::var("USE_OPTIMIZED_STATE_EQUIV").map(|v| v == "1").unwrap_or(false);
+    let skip_state_equiv = std::env::var("SKIP_STATE_EQUIV").map(|v| v == "1").unwrap_or(false);
     
     // Step 1: State equivalence analysis (if beneficial)
-    let (reduced_states, state_classes) = if initial_states.len() > state_reduction_threshold {
+    let (reduced_states, state_classes) = if skip_state_equiv {
+        // Skip state equivalence - use all states directly
+        crate::debug!(3, "Skipping state equivalence (SKIP_STATE_EQUIV=1)");
+        let state_classes: StateEquivalenceResult = initial_states
+            .iter()
+            .map(|&s| std::iter::once(s).collect())
+            .collect();
+        (initial_states.to_vec(), state_classes)
+    } else if initial_states.len() > state_reduction_threshold {
         let state_reps = if use_trie {
             crate::debug!(3, "Using trie-based state equivalence analysis");
             super::state_equivalence_trie::find_state_equivalence_classes_trie(
@@ -65,6 +76,27 @@ pub fn compute_combined_equivalence(
         } else if use_discriminating {
             crate::debug!(3, "Using discriminating token state equivalence analysis");
             super::state_equivalence_discriminating::find_state_equivalence_classes_discriminating(
+                regex,
+                tokens,
+                initial_states,
+            )
+        } else if use_transposed {
+            crate::debug!(3, "Using transposed DFA state equivalence analysis");
+            super::state_equivalence_transposed::find_state_equivalence_classes_transposed(
+                regex,
+                tokens,
+                initial_states,
+            )
+        } else if use_optimized {
+            crate::debug!(3, "Using optimized state equivalence analysis");
+            super::state_equivalence_optimized::find_state_equivalence_classes_optimized(
+                regex,
+                tokens,
+                initial_states,
+            )
+        } else if std::env::var("USE_U16_STATE_EQUIV").map(|v| v == "1").unwrap_or(false) {
+            crate::debug!(3, "Using u16 state equivalence analysis");
+            super::state_equivalence_u16::find_state_equivalence_classes_u16(
                 regex,
                 tokens,
                 initial_states,

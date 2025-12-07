@@ -118,6 +118,15 @@ pub fn find_state_equivalence_classes(
     let instant = std::time::Instant::now();
     let dfa = &regex.dfa;
     
+    // Note: Token sampling (STATE_EQUIV_MAX_TOKENS) was tested but causes correctness issues.
+    // Sampled state equivalence doesn't fully capture distinguishing states,
+    // leading to incorrect vocab class merging. Keep this disabled.
+    // 
+    // let max_tokens = std::env::var("STATE_EQUIV_MAX_TOKENS")
+    //     .ok()
+    //     .and_then(|s| s.parse::<usize>().ok())
+    //     .unwrap_or(tokens.len());
+    
     // Precompute packed transition tables and finalizers for cache efficiency
     const NONE_STATE: u32 = u32::MAX;
     let dfa_transitions: Vec<[u32; 256]> = dfa.states
@@ -135,6 +144,13 @@ pub fn find_state_equivalence_classes(
         .iter()
         .map(|state| state.finalizers.iter().collect())
         .collect();
+    
+    // Count states with finalizers for optimization insight
+    let states_with_finalizers = dfa_finalizers.iter().filter(|f| !f.is_empty()).count();
+    crate::debug!(5, "DFA stats: {} states, {} with finalizers ({:.1}%)", 
+                  dfa.states.len(), 
+                  states_with_finalizers, 
+                  100.0 * states_with_finalizers as f64 / dfa.states.len() as f64);
     
     // Extract possible_future_group_ids for semantic hashing
     let possible_future_groups: Vec<Vec<usize>> = dfa.states
@@ -186,12 +202,10 @@ pub fn find_state_equivalence_classes(
     }
     
     // Token batch size - larger batches reduce iteration overhead
-    // but may do more work on states that become inactive mid-batch.
-    // For very large state counts (>10K), use larger batches to reduce overhead.
     let batch_size = if states.len() > 10000 { 
-        25000.min(tokens.len()) 
+        25000.min(tokens.len())
     } else { 
-        10000.min(tokens.len()) 
+        10000.min(tokens.len())
     };
     let mut tokens_tested = 0usize;
     let mut iteration = 0;
@@ -201,18 +215,21 @@ pub fn find_state_equivalence_classes(
         iteration += 1;
         
         // Mark singletons as inactive
+        let t_mark_start = std::time::Instant::now();
         for (hash, indices) in &groups {
             if indices.len() == 1 {
                 active_mask[indices[0]] = false;
             }
         }
         num_active = active_mask.iter().filter(|&&x| x).count();
+        let t_mark = t_mark_start.elapsed();
         
         if num_active == 0 {
             break; // All singletons
         }
         
         // Prepare next batch of tokens
+        let t_prep_start = std::time::Instant::now();
         let batch_end = (tokens_tested + batch_size).min(tokens.len());
         let batch_tokens: Vec<&Vec<u8>> = (tokens_tested..batch_end)
             .map(|i| &tokens[i])
@@ -220,8 +237,10 @@ pub fn find_state_equivalence_classes(
         let batch_weights: Vec<u128> = (0..batch_tokens.len())
             .map(|i| mix_u128(((tokens_tested + i + 1) as u128).wrapping_mul(0x9E3779B97F4A7C15)))
             .collect();
+        let t_prep = t_prep_start.elapsed();
         
         // Update hashes for ACTIVE states only
+        let t_compute_start = std::time::Instant::now();
         let updates: Vec<(usize, u128)> = (0..states.len())
             .into_par_iter()
             .filter_map(|i| {
@@ -269,20 +288,25 @@ pub fn find_state_equivalence_classes(
                 Some((i, hash_delta))
             })
             .collect();
+        let t_compute = t_compute_start.elapsed();
         
         // Apply updates
+        let t_apply_start = std::time::Instant::now();
         for (i, delta) in updates {
             state_hashes[i] = state_hashes[i].wrapping_add(delta);
         }
+        let t_apply = t_apply_start.elapsed();
         
         tokens_tested = batch_end;
         
         // Recompute groups
+        let t_group_start = std::time::Instant::now();
         let prev_num_groups = groups.len();
         groups.clear();
         for (i, &_state) in states.iter().enumerate() {
             groups.entry(state_hashes[i]).or_default().push(i);
         }
+        let t_group = t_group_start.elapsed();
         
         // Track convergence
         if groups.len() == prev_num_groups {
@@ -291,8 +315,8 @@ pub fn find_state_equivalence_classes(
             unchanged_iterations = 0;
         }
         
-        crate::debug!(5, "State equiv iteration {}: {} tokens, {} groups (was {}), {} active, {} unchanged", 
-                      iteration, tokens_tested, groups.len(), prev_num_groups, num_active, unchanged_iterations);
+        crate::debug!(5, "State equiv iter {}: mark={:?} prep={:?} compute={:?} apply={:?} group={:?} | {} tokens, {} groups, {} active", 
+                      iteration, t_mark, t_prep, t_compute, t_apply, t_group, tokens_tested, groups.len(), num_active);
         
         // Early convergence: if groups haven't changed for 2 iterations, likely stable
         if unchanged_iterations >= 2 {
