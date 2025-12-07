@@ -11,6 +11,7 @@
 //!
 //! Complexity: O(trie_size × unique_groups) where groups are DFA states reachable from initial states.
 
+use std::collections::BTreeSet;
 use crate::finite_automata::Regex;
 
 // -----------------------------------------------------------------------------
