@@ -32,6 +32,9 @@ MACRO_DEBUG_LEVEL=5 timeout 120 python scripts/compile.py \
     --grammar .cache/test_vocabs/example_diff_constraint.ebnf \
     --output .cache/test_vocabs/example_diff_constraint.json.gz \
     --vocab-url "https://huggingface.co/openai-community/gpt2/raw/main/vocab.json"
+
+python scripts/generate_diff_random.py .cache/test_vocabs/lib.rs.old -o .cache/test_vocabs/lib.rs.old.patch
+SKIP_PLOTS=1 REPEAT=1 AGG_METHOD="min" SKIP_CPP_BUILD=1 SKIP_RUST_BUILD=1 MACRO_DEBUG_LEVEL=2 CONSTRAINT_FILE=".cache/test_vocabs/example_diff_constraint.json.gz" CODE_FILE=.cache/test_vocabs/lib.rs.old bash python/run_benchmarks.sh python/aug25/models/bruteforce_fast_rust_model.py python/aug25/models/rust_model.py
 ```
 
 ---
