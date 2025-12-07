@@ -2787,10 +2787,21 @@ impl DFA {
     }
 
     fn minimize(&mut self) {
+        let instant = std::time::Instant::now();
         if self.states.is_empty() {
             return;
         }
-
+        
+        // Skip minimization for large DFAs - state equivalence analysis will handle it
+        // Benchmarks show minimization doesn't pay off for >10K states
+        const MAX_MINIMIZATION_STATES: usize = 10_000;
+        if self.states.len() > MAX_MINIMIZATION_STATES {
+            crate::debug!(3, "Skipping DFA minimization for {} states (>{} threshold)", 
+                         self.states.len(), MAX_MINIMIZATION_STATES);
+            return;
+        }
+        
+        let initial_states = self.states.len();
         self.remove_unreachable_states();
 
         let mut partitions_map: BTreeMap<BTreeSet<GroupID>, BTreeSet<usize>> = BTreeMap::new();
@@ -2856,6 +2867,8 @@ impl DFA {
         self.start_state = state_mapping[self.start_state];
 
         self.recompute_metadata();
+        
+        crate::debug!(3, "Minimized DFA {} → {} states in {:.2?}", initial_states, self.states.len(), instant.elapsed());
     }
 
     fn rebuild_from_partitions(

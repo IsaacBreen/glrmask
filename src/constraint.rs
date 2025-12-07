@@ -23,6 +23,7 @@ use crate::{
         self,
         find_state_equivalence_classes,
         find_vocab_equivalence_classes,
+        find_equivalence_alternating,
         VocabEquivalenceResult,
     },
     finite_automata::Regex,
@@ -719,22 +720,42 @@ impl GrammarConstraint {
         // Get ALL states for state equivalence (not filtered)
         let all_states: Vec<usize> = tokenizer.iter_states().map(|s| s.0).collect();
         
+        // Check if alternating refinement is enabled via environment variable
+        let use_alternating = std::env::var("USE_ALTERNATING_REFINEMENT").is_ok();
+        
         // Compute state equivalence ONCE on ALL states with the full vocabulary.
         // This mapping will be reused later for building maps and skeleton DWA.
         let state_reps: Vec<usize>;
         let mut state_to_rep: BTreeMap<TokenizerStateID, TokenizerStateID> = BTreeMap::new();
         let mut representative_set: BTreeSet<usize> = BTreeSet::new();
         
-        // EXPERIMENTAL: Test intersection DFA approach for comparison
-        // DISABLED: Too slow for large grammars like diff (37K states)
-        // if crate::r#macro::is_debug_level_enabled(5) {
-        //     use crate::equivalence_analysis::vocab_dfa_approach::compute_equivalence_intersection_dfa;
-        //     let product_result = compute_equivalence_intersection_dfa(tokenizer, &llm_token_strings, &all_states);
-        //     crate::debug!(3, "Intersection DFA: {} state classes, {} token classes",
-        //                   product_result.num_state_classes, product_result.num_token_classes);
-        // }
+        // Store alternating refinement results if used
+        let mut alternating_token_classes: Option<Vec<usize>> = None;
         
-        if all_states.len() > 0 {  // TEMP: Always run state equiv for benchmarking
+        if use_alternating && all_states.len() > 0 {
+            // Use alternating refinement for faster combined analysis
+            let start = std::time::Instant::now();
+            let alt_result = find_equivalence_alternating(tokenizer, &llm_token_strings, &all_states);
+            
+            // Build state-to-rep mapping from alternating result
+            for (i, &rep) in alt_result.state_to_representative.iter().enumerate() {
+                state_to_rep.insert(TokenizerStateID(all_states[i]), TokenizerStateID(rep));
+                representative_set.insert(rep);
+            }
+            
+            state_reps = alt_result.state_to_representative.clone();
+            alternating_token_classes = Some(alt_result.token_to_class);
+            
+            crate::debug!(
+                3,
+                "Alternating refinement: {} -> {} representative states, {} token classes in {:?}",
+                all_states.len(),
+                representative_set.len(),
+                alt_result.num_token_groups,
+                start.elapsed(),
+            );
+        } else if all_states.len() > 0 {
+            // Use standard state equivalence
             let start = std::time::Instant::now();
             state_reps = find_state_equivalence_classes(tokenizer, &llm_token_strings, &all_states);
             
@@ -751,6 +772,7 @@ impl GrammarConstraint {
                 start.elapsed(),
             );
         } else {
+            state_reps = vec![];
             // No reduction - each state is its own representative
             for &s in &all_states {
                 state_to_rep.insert(TokenizerStateID(s), TokenizerStateID(s));
@@ -797,13 +819,27 @@ impl GrammarConstraint {
             llm_token_strings.len()
         );
 
-        let mask_classes = find_vocab_equivalence_classes(
-            tokenizer,
-            &llm_token_strings,
-            &initial_states_for_vocab,
-        );
-        crate::debug!(2, "Vocab equivalence: {} classes for {} tokens",
-                     mask_classes.len(), llm_token_strings.len());
+        // Either use alternating refinement results or standard vocab equivalence
+        let mask_classes: VocabEquivalenceResult = if let Some(token_classes) = alternating_token_classes {
+            // Convert alternating refinement token classes to mask classes format
+            use std::collections::HashMap;
+            let mut class_to_indices: HashMap<usize, Vec<usize>> = HashMap::new();
+            for (token_idx, &class_id) in token_classes.iter().enumerate() {
+                class_to_indices.entry(class_id).or_default().push(token_idx);
+            }
+            let result: VocabEquivalenceResult = class_to_indices.into_values().collect();
+            crate::debug!(2, "Using alternating refinement: {} token classes", result.len());
+            result
+        } else {
+            let result = find_vocab_equivalence_classes(
+                tokenizer,
+                &llm_token_strings,
+                &initial_states_for_vocab,
+            );
+            crate::debug!(2, "Vocab equivalence: {} classes for {} tokens",
+                         result.len(), llm_token_strings.len());
+            result
+        };
 
         if is_debug_level_enabled(3) {
             let num_original_tokens = llm_token_strings.len();

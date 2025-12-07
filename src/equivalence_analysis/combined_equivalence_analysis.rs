@@ -16,8 +16,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::finite_automata::Regex;
 use crate::tokenizer::TokenizerStateID;
 
-use super::state_equivalence_analysis::{self, StateEquivalenceResult};
-use super::vocab_equivalence_analysis::{self, VocabEquivalenceResult};
+use super::state_equivalence_analysis_fast::{self as state_equivalence_analysis, StateEquivalenceResult};
+use super::vocab_equivalence_analysis_fast::{self as vocab_equivalence_analysis, VocabEquivalenceResult};
 
 /// Result of combined equivalence analysis.
 pub struct CombinedEquivalenceResult {

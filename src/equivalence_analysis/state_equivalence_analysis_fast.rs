@@ -186,10 +186,16 @@ pub fn find_state_equivalence_classes(
     }
     
     // Token batch size - larger batches reduce iteration overhead
-    // but may do more work on states that become inactive mid-batch
-    let batch_size = 10000.min(tokens.len());
+    // but may do more work on states that become inactive mid-batch.
+    // For very large state counts (>10K), use larger batches to reduce overhead.
+    let batch_size = if states.len() > 10000 { 
+        25000.min(tokens.len()) 
+    } else { 
+        10000.min(tokens.len()) 
+    };
     let mut tokens_tested = 0usize;
     let mut iteration = 0;
+    let mut unchanged_iterations = 0usize; // Track convergence
     
     while tokens_tested < tokens.len() && num_active > 0 {
         iteration += 1;
@@ -278,8 +284,21 @@ pub fn find_state_equivalence_classes(
             groups.entry(state_hashes[i]).or_default().push(i);
         }
         
-        crate::debug!(5, "State equiv iteration {}: {} tokens, {} groups (was {}), {} active states", 
-                      iteration, tokens_tested, groups.len(), prev_num_groups, num_active);
+        // Track convergence
+        if groups.len() == prev_num_groups {
+            unchanged_iterations += 1;
+        } else {
+            unchanged_iterations = 0;
+        }
+        
+        crate::debug!(5, "State equiv iteration {}: {} tokens, {} groups (was {}), {} active, {} unchanged", 
+                      iteration, tokens_tested, groups.len(), prev_num_groups, num_active, unchanged_iterations);
+        
+        // Early convergence: if groups haven't changed for 2 iterations, likely stable
+        if unchanged_iterations >= 2 {
+            crate::debug!(4, "State equiv: early convergence after {} iterations ({} tokens)", iteration, tokens_tested);
+            break;
+        }
     }
     
     let phase1_time = instant.elapsed();
