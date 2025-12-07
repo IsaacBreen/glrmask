@@ -9,7 +9,7 @@ use hashbrown::HashMap;
 use std::collections::BTreeSet;
 
 pub use super::vocab_equivalence_analysis_fast::VocabEquivalenceResult;
-use super::{vocab_equivalence_analysis_fast, vocab_equivalence_analysis_reference};
+use super::{vocab_equivalence_analysis_fast, vocab_equivalence_analysis_reference, vocab_equivalence_trie};
 
 /// Find vocab equivalence classes of tokens based on DFA behavior.
 ///
@@ -27,11 +27,18 @@ use super::{vocab_equivalence_analysis_fast, vocab_equivalence_analysis_referenc
 /// # Testing
 /// Set the environment variable `VOCAB_EQUIVALENCE_ANALYSIS_TEST=1` to enable
 /// validation against the reference implementation.
+///
+/// # Algorithm Selection
+/// Set the environment variable `USE_TRIE_VOCAB_EQUIV=1` to use the trie-based
+/// algorithm instead of the batch-based algorithm.
 pub fn find_vocab_equivalence_classes(
     regex: &Regex,
     strings: &[Vec<u8>],
     initial_states: &[usize],
 ) -> VocabEquivalenceResult {
+    // Check if trie-based algorithm is requested
+    let use_trie = std::env::var("USE_TRIE_VOCAB_EQUIV").is_ok();
+    
     // Skip validation unless explicitly requested via ENV var
     if std::env::var("VOCAB_EQUIVALENCE_ANALYSIS_TEST").is_ok() {
         let instant = std::time::Instant::now();
@@ -88,6 +95,12 @@ pub fn find_vocab_equivalence_classes(
             panic!("Mismatch between reference and fast vocab equivalence analysis results");
         }
         return fast;
+    }
+
+    // Use trie-based algorithm if requested
+    if use_trie {
+        let groups = vocab_equivalence_trie::find_vocab_equivalence_classes_trie(regex, strings, initial_states);
+        return groups.into_iter().collect();
     }
 
     // Default: use fast implementation (state reduction should be done by caller)

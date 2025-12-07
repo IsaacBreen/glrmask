@@ -18,6 +18,7 @@ use crate::tokenizer::TokenizerStateID;
 
 use super::state_equivalence_analysis;
 use super::vocab_equivalence_analysis;
+use super::vocab_equivalence_trie;
 pub use super::vocab_equivalence_analysis::VocabEquivalenceResult;
 
 /// Result of combined equivalence analysis.
@@ -95,11 +96,25 @@ pub fn compute_combined_equivalence(
     
     // Step 2: Vocab equivalence analysis on reduced states
     let vocab_start = std::time::Instant::now();
-    let vocab_classes = vocab_equivalence_analysis::find_vocab_equivalence_classes(
-        regex,
-        tokens,
-        &reduced_states,
-    );
+    
+    // Choose algorithm based on environment variable (for testing)
+    let use_trie = std::env::var("USE_TRIE_VOCAB_EQUIV").is_ok();
+    
+    let vocab_classes = if use_trie {
+        let groups = vocab_equivalence_trie::find_vocab_equivalence_classes_trie(
+            regex,
+            tokens,
+            &reduced_states,
+        );
+        // Convert Vec<Vec<usize>> to VocabEquivalenceResult (BTreeSet<Vec<usize>>)
+        groups.into_iter().collect()
+    } else {
+        vocab_equivalence_analysis::find_vocab_equivalence_classes(
+            regex,
+            tokens,
+            &reduced_states,
+        )
+    };
     
     crate::debug!(
         3,
