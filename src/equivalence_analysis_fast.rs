@@ -109,9 +109,7 @@ fn hash_group_list(list: &[usize]) -> u64 {
 
 fn precompute_dfa(regex: &Regex) -> PrecomputedDfa {
     let dfa = &regex.dfa;
-    if is_debug_level_enabled(4) {
-        crate::debug!(4, "  Precomputing DFA with {} states", dfa.states.len());
-    }
+    crate::debug!(3, "Precomputing DFA with {} states", dfa.states.len());
     assert!(
         dfa.states.len() <= u32::MAX as usize,
         "DFA too large for packed transitions"
@@ -279,6 +277,9 @@ fn states_structurally_equal(pre: &PrecomputedDfa, a: usize, b: usize) -> bool {
 }
 
 fn dedup_initial_states(pre: &PrecomputedDfa, initial_states: &[usize]) -> Vec<usize> {
+    use std::time::Instant;
+    let start = Instant::now();
+    
     let mut buckets: HashMap<u64, Vec<usize>> = HashMap::with_capacity(initial_states.len());
     for &sid in initial_states {
         buckets.entry(state_fingerprint(pre, sid)).or_default().push(sid);
@@ -302,6 +303,17 @@ fn dedup_initial_states(pre: &PrecomputedDfa, initial_states: &[usize]) -> Vec<u
     }
 
     reps.sort_unstable();
+    
+    if is_debug_level_enabled(4) {
+        crate::debug!(
+            4,
+            "  dedup_initial_states: {} -> {} in {:?}",
+            initial_states.len(),
+            reps.len(),
+            start.elapsed()
+        );
+    }
+    
     reps
 }
 
@@ -870,6 +882,29 @@ pub fn find_equivalence_classes(
 
     if num_states == 0 || num_tokens == 0 {
         return BTreeSet::from_iter(vec![(0..num_tokens).collect()]);
+    }
+
+    // Analyze state transition sparsity for large state sets
+    if num_states > 2000 {
+        let mut total_transitions = 0usize;
+        let mut states_with_few_transitions = 0usize;
+        for &sid in &reduced_initial_states {
+            let trans = &pre.transitions[sid];
+            let count = trans.iter().filter(|&&t| t != NONE_STATE).count();
+            total_transitions += count;
+            if count < 10 {
+                states_with_few_transitions += 1;
+            }
+        }
+        let avg_transitions = total_transitions as f64 / num_states as f64;
+        crate::debug!(
+            3,
+            "State transition analysis: avg_transitions={:.1}, sparse_states={}/{} ({:.1}%)",
+            avg_transitions,
+            states_with_few_transitions,
+            num_states,
+            100.0 * states_with_few_transitions as f64 / num_states as f64
+        );
     }
 
     // Process states in batches for memory efficiency
