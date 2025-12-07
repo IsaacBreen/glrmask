@@ -90,13 +90,14 @@ fn compute_state_signature(
 }
 
 // -----------------------------------------------------------------------------
-// State Equivalence Analysis (Two-Phase)
+// State Equivalence Analysis (Two-Phase with Sample-based Token Testing)
 // -----------------------------------------------------------------------------
 
 /// Find state equivalence classes for a tokenizer.
 ///
 /// Uses a two-phase approach:
-/// 1. Quick semantic hash to group states by their immediate behavior.
+/// 1. Sample-based token hash: Test a sample of tokens to group states by their
+///    observed behavior. This captures TOKEN-LEVEL behavior, not just byte structure.
 /// 2. Full token analysis only for groups with multiple states.
 ///
 /// # Arguments
@@ -142,113 +143,12 @@ pub fn find_state_equivalence_classes(
         .collect();
     
     // =========================================================================
-    // PHASE 1: Quick dual hash (structural + semantic)
+    // PHASE 1: Token testing with early exit for singletons
     // =========================================================================
-    // For diff-like grammars: structural hash gives many unique groups
-    // For JS-like grammars: semantic hash gives meaningful groups
-    // We compute both and use whichever gives FEWER ambiguous states.
+    // We test tokens in batches, but only on states that haven't been uniquely
+    // identified yet. Once a state is in a singleton group, it stays there.
     
-    let hashes: Vec<(u128, u128)> = states
-        .par_iter()
-        .map(|&state| {
-            let trans = &dfa_transitions[state];
-            let fin = &dfa_finalizers[state];
-            let pfg = &possible_future_groups[state];
-            
-            let mut structural_h = 0u128;
-            let mut semantic_h = 0u128;
-            
-            // Hash this state's own behavior (same for both)
-            for &gid in fin {
-                structural_h = mix_u128(structural_h ^ ((gid as u128) << 64));
-                semantic_h = mix_u128(semantic_h ^ ((gid as u128) << 64));
-            }
-            for &gid in pfg {
-                structural_h = mix_u128(structural_h ^ ((gid as u128) << 32));
-                semantic_h = mix_u128(semantic_h ^ ((gid as u128) << 32));
-            }
-            
-            // Hash each byte transition
-            const NONE_STATE: u32 = u32::MAX;
-            for (byte, &target) in trans.iter().enumerate() {
-                if target != NONE_STATE {
-                    // Structural: use target ID
-                    structural_h = mix_u128(structural_h ^ ((byte as u128) << 40) ^ (target as u128));
-                    
-                    // Semantic: use target's behavior
-                    let target_fin = &dfa_finalizers[target as usize];
-                    let target_pfg = &possible_future_groups[target as usize];
-                    
-                    let mut target_hash = byte as u128;
-                    for &gid in target_fin {
-                        target_hash = mix_u128(target_hash ^ ((gid as u128) << 64));
-                    }
-                    for &gid in target_pfg {
-                        target_hash = mix_u128(target_hash ^ (gid as u128));
-                    }
-                    semantic_h = mix_u128(semantic_h ^ target_hash);
-                }
-            }
-            (structural_h, semantic_h)
-        })
-        .collect();
-    
-    // Group by structural hash
-    let mut structural_groups: HashMap<u128, Vec<usize>> = HashMap::new();
-    for (i, &state) in states.iter().enumerate() {
-        structural_groups.entry(hashes[i].0).or_default().push(state);
-    }
-    let structural_ambiguous: usize = structural_groups.values().filter(|g| g.len() > 1).map(|g| g.len()).sum();
-    
-    // Group by semantic hash
-    let mut semantic_groups: HashMap<u128, Vec<usize>> = HashMap::new();
-    for (i, &state) in states.iter().enumerate() {
-        semantic_groups.entry(hashes[i].1).or_default().push(state);
-    }
-    let semantic_ambiguous: usize = semantic_groups.values().filter(|g| g.len() > 1).map(|g| g.len()).sum();
-    
-    // Use whichever hash gives fewer ambiguous states, BUT:
-    // - If semantic would be fast (< 5000 states), prefer it because it may find more equivalences
-    // - Only prefer structural if semantic would be very expensive
-    let semantic_threshold = 5000; // ~100ms for 5000 states
-    let (groups, hash_type) = if structural_ambiguous < semantic_ambiguous && semantic_ambiguous > semantic_threshold {
-        // Semantic is expensive and structural is cheaper -> use structural
-        (structural_groups, "structural")
-    } else if structural_ambiguous == 0 && semantic_ambiguous > 0 && semantic_ambiguous <= semantic_threshold {
-        // Structural gives no info but semantic is cheap -> use semantic
-        (semantic_groups, "semantic")
-    } else if structural_ambiguous <= semantic_ambiguous {
-        (structural_groups, "structural")
-    } else {
-        (semantic_groups, "semantic")
-    };
-    
-    let phase1_time = instant.elapsed();
-    let num_groups = groups.len();
-    let singleton_groups = groups.values().filter(|g| g.len() == 1).count();
-    let ambiguous_states: usize = groups.values().filter(|g| g.len() > 1).map(|g| g.len()).sum();
-    
-    crate::debug!(4, "State equiv phase 1 ({}): {} groups ({} singletons, {} states need full analysis) in {:?}", 
-                  hash_type, num_groups, singleton_groups, ambiguous_states, phase1_time);
-    
-    // If all groups are singletons, we're done (no states are equivalent)
-    if ambiguous_states == 0 {
-        let mapping: Vec<usize> = states.to_vec();
-        crate::debug!(3, "State equivalence analysis took {:.2?}. Reduced {} states to {} (all unique).", 
-                      instant.elapsed(), states.len(), states.len());
-        return mapping;
-    }
-    
-    // =========================================================================
-    // PHASE 2: Full token analysis for ambiguous states
-    // =========================================================================
-    // Compute full signatures for all ambiguous states in parallel.
-    
-    // Precompute token weights and end state hashes
-    let token_weights: Vec<u128> = (0..tokens.len())
-        .map(|i| mix_u128(((i + 1) as u128).wrapping_mul(0x9E3779B97F4A7C15)))
-        .collect();
-    
+    // Precompute end state hashes
     let end_state_hashes: Vec<u128> = dfa.states
         .iter()
         .map(|state| {
@@ -260,25 +160,225 @@ pub fn find_state_equivalence_classes(
         })
         .collect();
     
+    // Initialize state hashes with state's own properties
+    let mut state_hashes: Vec<u128> = states
+        .par_iter()
+        .map(|&state| {
+            let mut hash: u128 = 0;
+            for &gid in &dfa_finalizers[state] {
+                hash = mix_u128(hash ^ ((gid as u128) << 64));
+            }
+            for &gid in &possible_future_groups[state] {
+                hash = mix_u128(hash ^ ((gid as u128) << 32));
+            }
+            hash
+        })
+        .collect();
+    
+    // Track which state indices are "active" (not yet in singletons)
+    let mut active_mask: Vec<bool> = vec![true; states.len()];
+    let mut num_active = states.len();
+    
+    // Group by hash
+    let mut groups: HashMap<u128, Vec<usize>> = HashMap::new();
+    for (i, &_state) in states.iter().enumerate() {
+        groups.entry(state_hashes[i]).or_default().push(i);
+    }
+    
+    // Token batch size
+    let batch_size = 5000.min(tokens.len());
+    let mut tokens_tested = 0usize;
+    let mut iteration = 0;
+    
+    while tokens_tested < tokens.len() && num_active > 0 {
+        iteration += 1;
+        
+        // Mark singletons as inactive
+        for (hash, indices) in &groups {
+            if indices.len() == 1 {
+                active_mask[indices[0]] = false;
+            }
+        }
+        num_active = active_mask.iter().filter(|&&x| x).count();
+        
+        if num_active == 0 {
+            break; // All singletons
+        }
+        
+        // Prepare next batch of tokens
+        let batch_end = (tokens_tested + batch_size).min(tokens.len());
+        let batch_tokens: Vec<&Vec<u8>> = (tokens_tested..batch_end)
+            .map(|i| &tokens[i])
+            .collect();
+        let batch_weights: Vec<u128> = (0..batch_tokens.len())
+            .map(|i| mix_u128(((tokens_tested + i + 1) as u128).wrapping_mul(0x9E3779B97F4A7C15)))
+            .collect();
+        
+        // Update hashes for ACTIVE states only
+        let updates: Vec<(usize, u128)> = (0..states.len())
+            .into_par_iter()
+            .filter_map(|i| {
+                if !active_mask[i] {
+                    return None;
+                }
+                
+                let state = states[i];
+                let mut hash_delta: u128 = 0;
+                
+                for (token_idx, token) in batch_tokens.iter().enumerate() {
+                    let mut current = state as u32;
+                    let mut finalizers_hash: u128 = 0;
+                    let mut depth: u32 = 0;
+                    
+                    for &byte in *token {
+                        let next = dfa_transitions[current as usize][byte as usize];
+                        if next == NONE_STATE {
+                            current = NONE_STATE;
+                            break;
+                        }
+                        current = next;
+                        depth += 1;
+                        
+                        let finalizers = &dfa_finalizers[current as usize];
+                        if !finalizers.is_empty() {
+                            for &gid in finalizers {
+                                finalizers_hash = finalizers_hash.wrapping_add(
+                                    mix_u128((depth as u128) ^ ((gid as u128) << 32))
+                                );
+                            }
+                        }
+                    }
+                    
+                    let end_hash = if current == NONE_STATE {
+                        mix_u128(0xDEADBEEF_u128)
+                    } else {
+                        end_state_hashes[current as usize]
+                    };
+                    
+                    let token_hash = end_hash.wrapping_add(finalizers_hash);
+                    hash_delta = hash_delta.wrapping_add(token_hash.wrapping_mul(batch_weights[token_idx]));
+                }
+                
+                Some((i, hash_delta))
+            })
+            .collect();
+        
+        // Apply updates
+        for (i, delta) in updates {
+            state_hashes[i] = state_hashes[i].wrapping_add(delta);
+        }
+        
+        tokens_tested = batch_end;
+        
+        // Recompute groups
+        let prev_num_groups = groups.len();
+        groups.clear();
+        for (i, &_state) in states.iter().enumerate() {
+            groups.entry(state_hashes[i]).or_default().push(i);
+        }
+        
+        crate::debug!(5, "State equiv iteration {}: {} tokens, {} groups (was {}), {} active states", 
+                      iteration, tokens_tested, groups.len(), prev_num_groups, num_active);
+    }
+    
+    let phase1_time = instant.elapsed();
+    let num_groups = groups.len();
+    let singleton_groups = groups.values().filter(|g| g.len() == 1).count();
+    let ambiguous_states: usize = groups.values().filter(|g| g.len() > 1).map(|g| g.len()).sum();
+    
+    crate::debug!(4, "State equiv phase 1: {} groups ({} singletons, {} ambiguous) in {:?} ({} tokens)", 
+                  num_groups, singleton_groups, ambiguous_states, phase1_time, tokens_tested);
+    
+    // If all groups are singletons, we're done (no states are equivalent)
+    if ambiguous_states == 0 {
+        // Convert from state index to state ID
+        let mapping: Vec<usize> = states.to_vec();
+        crate::debug!(3, "State equivalence analysis took {:.2?}. Reduced {} states to {} (all unique).", 
+                      instant.elapsed(), states.len(), states.len());
+        return mapping;
+    }
+    
+    // If we've tested ALL tokens in phase 1, the groups are already correct.
+    // Phase 2 would just recompute the same result.
+    // All non-singleton states have seen all tokens (singletons stopped early but are already unique).
+    if tokens_tested >= tokens.len() {
+        // Build mapping from phase 1 groups
+        let mut state_to_rep: HashMap<usize, usize> = HashMap::with_capacity(states.len());
+        for group in groups.values() {
+            let rep = group[0]; // First state in group is representative
+            for &state in group {
+                state_to_rep.insert(state, rep);
+            }
+        }
+        let mapping: Vec<usize> = states.iter().map(|&s| state_to_rep[&s]).collect();
+        let num_representatives: usize = mapping.iter().collect::<std::collections::HashSet<_>>().len();
+        crate::debug!(3, "State equivalence analysis took {:.2?}. Reduced {} states to {} (phase 1 complete).", 
+                      instant.elapsed(), states.len(), num_representatives);
+        return mapping;
+    }
+    
+    // =========================================================================
+    // PHASE 2: Full token analysis for ambiguous states
+    // =========================================================================
+    // Only needed when phase 1 didn't test all tokens (early exit due to all singletons).
+    // Use full token analysis for correctness.
+    
     // Collect all ambiguous states
     let ambiguous_state_list: Vec<usize> = groups.values()
         .filter(|g| g.len() > 1)
         .flat_map(|g| g.iter().copied())
         .collect();
     
+    // Full analysis: use all tokens
+    let phase2_tokens: Vec<&Vec<u8>> = tokens.iter().collect();
+    let phase2_token_weights: Vec<u128> = (0..tokens.len())
+        .map(|i| mix_u128(((i + 1) as u128).wrapping_mul(0x9E3779B97F4A7C15)))
+        .collect();
+    
+    crate::debug!(4, "State equiv phase 2: analyzing {} states with {} tokens (full)", 
+                  ambiguous_states, phase2_tokens.len());
     // Compute signatures for all ambiguous states in parallel
     let ambiguous_signatures: Vec<(usize, u128)> = ambiguous_state_list
         .par_iter()
         .map(|&state| {
-            let sig = compute_state_signature(
-                &dfa_transitions,
-                &dfa_finalizers,
-                &end_state_hashes,
-                &token_weights,
-                tokens,
-                state,
-            );
-            (state, sig)
+            let mut hash: u128 = 0;
+            
+            for (token_idx, token) in phase2_tokens.iter().enumerate() {
+                let mut current = state as u32;
+                let mut finalizers_hash: u128 = 0;
+                let mut depth: u32 = 0;
+                
+                const NONE_STATE: u32 = u32::MAX;
+                for &byte in *token {
+                    let next = dfa_transitions[current as usize][byte as usize];
+                    if next == NONE_STATE {
+                        current = NONE_STATE;
+                        break;
+                    }
+                    current = next;
+                    depth += 1;
+                    
+                    let finalizers = &dfa_finalizers[current as usize];
+                    if !finalizers.is_empty() {
+                        for &gid in finalizers {
+                            finalizers_hash = finalizers_hash.wrapping_add(
+                                mix_u128((depth as u128) ^ ((gid as u128) << 32))
+                            );
+                        }
+                    }
+                }
+                
+                let end_hash = if current == NONE_STATE {
+                    mix_u128(0xDEADBEEF_u128)
+                } else {
+                    end_state_hashes[current as usize]
+                };
+                
+                let token_hash = end_hash.wrapping_add(finalizers_hash);
+                hash = hash.wrapping_add(token_hash.wrapping_mul(phase2_token_weights[token_idx]));
+            }
+            
+            (state, hash)
         })
         .collect();
     

@@ -12,9 +12,9 @@
 //!
 //! Complexity: O(tokens × states × avg_token_length) with parallelism
 
-// PERMANENT WARNING: Do NOT add any form of caching or shortcuts that skip or restrict
-// states/tokens for equivalence analysis. Full correctness is mandatory; no "cheating"
-// optimizations that drop work are allowed here.
+// PERMANENT WARNING: Do NOT add caching to file or shortcuts that skip/restrict
+// states/tokens for equivalence analysis. Full correctness is mandatory.
+// In-memory memoization is fine, but no "cheating" optimizations that drop work.
 
 use crate::finite_automata::Regex;
 use crate::r#macro::is_debug_level_enabled;

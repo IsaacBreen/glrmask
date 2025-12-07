@@ -725,7 +725,7 @@ impl GrammarConstraint {
         let mut state_to_rep: BTreeMap<TokenizerStateID, TokenizerStateID> = BTreeMap::new();
         let mut representative_set: BTreeSet<usize> = BTreeSet::new();
         
-        if all_states.len() > 2000 {
+        if all_states.len() > 0 {  // TEMP: Always run state equiv for benchmarking
             let start = std::time::Instant::now();
             state_reps = find_state_equivalence_classes(tokenizer, &llm_token_strings, &all_states);
             
