@@ -16,9 +16,6 @@
 //!
 //! - **Combined Equivalence Analysis**: Orchestrates both analyses efficiently,
 //!   applying state reduction before vocab analysis for optimal performance.
-//!
-//! - **Alternating Refinement**: An experimental algorithm that alternates between
-//!   state and token refinement (not yet optimized).
 
 // State equivalence
 mod state_equivalence_analysis_fast;
@@ -32,9 +29,6 @@ mod vocab_equivalence_analysis_reference;
 // Combined analysis
 mod combined_equivalence_analysis;
 
-// Experimental
-pub mod alternating_refinement;
-
 // Re-exports: use the fast versions by default
 pub use state_equivalence_analysis_fast::find_state_equivalence_classes;
 pub use state_equivalence_analysis_fast::mapping_to_equivalence_classes;
@@ -44,4 +38,3 @@ pub use vocab_equivalence_analysis_fast::VocabEquivalenceResult;
 pub use combined_equivalence_analysis::compute_combined_equivalence;
 pub use combined_equivalence_analysis::CombinedEquivalenceResult;
 pub use combined_equivalence_analysis::find_vocab_equivalence_classes_with_state_reduction;
-pub use alternating_refinement::{find_equivalence_alternating, AlternatingRefinementResult};

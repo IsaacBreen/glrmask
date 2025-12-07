@@ -21,9 +21,8 @@ use crate::{
     },
     equivalence_analysis::{
         self,
-        find_state_equivalence_classes,
-        find_vocab_equivalence_classes,
-        find_equivalence_alternating,
+        compute_combined_equivalence,
+        CombinedEquivalenceResult,
         VocabEquivalenceResult,
     },
     finite_automata::Regex,
@@ -678,7 +677,7 @@ impl GrammarConstraint {
 
     /// Combined setup that computes both internal mappings and commit vocab in a single pass.
     /// Also computes state equivalence analysis once for all states.
-    /// Returns: (original_to_internal_map, commit_vocab, internal_llm_token_map, mask_classes, state_to_rep)
+    /// Returns: (original_to_internal_map, commit_vocab, internal_llm_token_map, mask_classes, state_to_rep, representative_states)
     fn setup_combined(
         llm_token_map: &LLMTokenMap,
         tokenizer: &Regex,
@@ -717,72 +716,37 @@ impl GrammarConstraint {
             original_ids.push(id.0);
         }
 
-        // Get ALL states for state equivalence (not filtered)
+        // Get ALL states for equivalence analysis
         let all_states: Vec<usize> = tokenizer.iter_states().map(|s| s.0).collect();
         
-        // Check if alternating refinement is enabled via environment variable
-        let use_alternating = std::env::var("USE_ALTERNATING_REFINEMENT").is_ok();
+        // Use combined equivalence analysis
+        // State reduction threshold of 0 means always apply state reduction
+        let combined_result = compute_combined_equivalence(
+            tokenizer,
+            &llm_token_strings,
+            &all_states,
+            0, // Always apply state reduction
+        );
         
-        // Compute state equivalence ONCE on ALL states with the full vocabulary.
-        // This mapping will be reused later for building maps and skeleton DWA.
-        let state_reps: Vec<usize>;
+        // Derive state_to_rep and representative_states from state_classes
         let mut state_to_rep: BTreeMap<TokenizerStateID, TokenizerStateID> = BTreeMap::new();
         let mut representative_set: BTreeSet<usize> = BTreeSet::new();
         
-        // Store alternating refinement results if used
-        let mut alternating_token_classes: Option<Vec<usize>> = None;
-        
-        if use_alternating && all_states.len() > 0 {
-            // Use alternating refinement for faster combined analysis
-            let start = std::time::Instant::now();
-            let alt_result = find_equivalence_alternating(tokenizer, &llm_token_strings, &all_states);
-            
-            // Build state-to-rep mapping from alternating result
-            for (i, &rep) in alt_result.state_to_representative.iter().enumerate() {
-                state_to_rep.insert(TokenizerStateID(all_states[i]), TokenizerStateID(rep));
+        for class in &combined_result.state_classes {
+            // Pick the first (smallest) state as representative
+            if let Some(&rep) = class.iter().next() {
                 representative_set.insert(rep);
-            }
-            
-            state_reps = alt_result.state_to_representative.clone();
-            alternating_token_classes = Some(alt_result.token_to_class);
-            
-            crate::debug!(
-                3,
-                "Alternating refinement: {} -> {} representative states, {} token classes in {:?}",
-                all_states.len(),
-                representative_set.len(),
-                alt_result.num_token_groups,
-                start.elapsed(),
-            );
-        } else if all_states.len() > 0 {
-            // Use standard state equivalence
-            let start = std::time::Instant::now();
-            state_reps = find_state_equivalence_classes(tokenizer, &llm_token_strings, &all_states);
-            
-            for (i, &rep) in state_reps.iter().enumerate() {
-                state_to_rep.insert(TokenizerStateID(all_states[i]), TokenizerStateID(rep));
-                representative_set.insert(rep);
-            }
-            
-            crate::debug!(
-                3,
-                "State equivalence analysis: {} -> {} representative states in {:?}",
-                all_states.len(),
-                representative_set.len(),
-                start.elapsed(),
-            );
-        } else {
-            state_reps = vec![];
-            // No reduction - each state is its own representative
-            for &s in &all_states {
-                state_to_rep.insert(TokenizerStateID(s), TokenizerStateID(s));
-                representative_set.insert(s);
+                for &state in class {
+                    state_to_rep.insert(TokenizerStateID(state), TokenizerStateID(rep));
+                }
             }
         }
         
         let representative_states: Vec<usize> = representative_set.into_iter().collect();
 
         // Filter states for vocab equivalence to only grammar-relevant ones
+        // (This filtering was already done inside compute_combined_equivalence? Let's check)
+        // Actually the combined analysis used all_states, so we need to filter here for logging
         let initial_states_for_vocab: Vec<usize> = if !grammar_group_ids.is_empty() {
             let filtered: Vec<usize> = representative_states
                 .iter()
@@ -795,7 +759,7 @@ impl GrammarConstraint {
                 .collect();
 
             if !filtered.is_empty() && filtered.len() < representative_states.len() {
-                if is_debug_level_enabled(3) {
+                if crate::r#macro::is_debug_level_enabled(3) {
                     crate::debug!(
                         3,
                         "Pruned states for vocab equivalence: {} -> {} (grammar groups {})",
@@ -804,10 +768,8 @@ impl GrammarConstraint {
                         grammar_group_ids.len()
                     );
                 }
-                filtered
-            } else {
-                representative_states.clone()
             }
+            filtered
         } else {
             representative_states.clone()
         };
@@ -819,29 +781,9 @@ impl GrammarConstraint {
             llm_token_strings.len()
         );
 
-        // Either use alternating refinement results or standard vocab equivalence
-        let mask_classes: VocabEquivalenceResult = if let Some(token_classes) = alternating_token_classes {
-            // Convert alternating refinement token classes to mask classes format
-            use std::collections::HashMap;
-            let mut class_to_indices: HashMap<usize, Vec<usize>> = HashMap::new();
-            for (token_idx, &class_id) in token_classes.iter().enumerate() {
-                class_to_indices.entry(class_id).or_default().push(token_idx);
-            }
-            let result: VocabEquivalenceResult = class_to_indices.into_values().collect();
-            crate::debug!(2, "Using alternating refinement: {} token classes", result.len());
-            result
-        } else {
-            let result = find_vocab_equivalence_classes(
-                tokenizer,
-                &llm_token_strings,
-                &initial_states_for_vocab,
-            );
-            crate::debug!(2, "Vocab equivalence: {} classes for {} tokens",
-                         result.len(), llm_token_strings.len());
-            result
-        };
+        let mask_classes = combined_result.vocab_classes;
 
-        if is_debug_level_enabled(3) {
+        if crate::r#macro::is_debug_level_enabled(3) {
             let num_original_tokens = llm_token_strings.len();
             crate::debug!(
                 3,

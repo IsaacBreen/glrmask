@@ -11,10 +11,9 @@
 //! This combined approach significantly improves performance for grammars with
 //! large DFAs by reducing the workload of the expensive vocab analysis.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use crate::finite_automata::Regex;
-use crate::tokenizer::TokenizerStateID;
 
 use super::state_equivalence_analysis_fast::{self as state_equivalence_analysis, StateEquivalenceResult};
 use super::vocab_equivalence_analysis_fast::{self as vocab_equivalence_analysis, VocabEquivalenceResult};
@@ -26,13 +25,6 @@ pub struct CombinedEquivalenceResult {
     
     /// State equivalence classes: sets of state IDs that behave identically.
     pub state_classes: StateEquivalenceResult,
-    
-    /// Mapping from original state ID to representative state ID.
-    /// States with the same representative are equivalent under the analyzed vocabulary.
-    pub state_to_representative: BTreeMap<TokenizerStateID, TokenizerStateID>,
-    
-    /// The set of representative states (one per equivalence class).
-    pub representative_states: Vec<usize>,
 }
 
 /// Compute combined state and vocab equivalence analysis.
@@ -48,7 +40,7 @@ pub struct CombinedEquivalenceResult {
 /// * `state_reduction_threshold` - Minimum number of states before applying state reduction
 ///
 /// # Returns
-/// Combined result containing vocab classes, state classes, state-to-rep mapping, and representative states.
+/// Combined result containing vocab classes and state classes.
 pub fn compute_combined_equivalence(
     regex: &Regex,
     tokens: &[Vec<u8>],
@@ -58,20 +50,16 @@ pub fn compute_combined_equivalence(
     let start = std::time::Instant::now();
     
     // Step 1: State equivalence analysis (if beneficial)
-    let (reduced_states, state_to_representative, state_classes) = if initial_states.len() > state_reduction_threshold {
+    let (reduced_states, state_classes) = if initial_states.len() > state_reduction_threshold {
         let state_reps = state_equivalence_analysis::find_state_equivalence_classes(
             regex,
             tokens,
             initial_states,
         );
         
-        // Build state-to-rep mapping
-        let mut state_to_rep: BTreeMap<TokenizerStateID, TokenizerStateID> = BTreeMap::new();
+        // Build reduced state set
         let mut rep_set: BTreeSet<usize> = BTreeSet::new();
-        
-        for (i, &rep) in state_reps.iter().enumerate() {
-            let state_id = initial_states[i];
-            state_to_rep.insert(TokenizerStateID(state_id), TokenizerStateID(rep));
+        for &rep in &state_reps {
             rep_set.insert(rep);
         }
         
@@ -88,21 +76,16 @@ pub fn compute_combined_equivalence(
             start.elapsed(),
         );
         
-        (reduced, state_to_rep, state_classes)
+        (reduced, state_classes)
     } else {
         // No reduction needed - use all states as their own representatives
-        let state_to_rep: BTreeMap<TokenizerStateID, TokenizerStateID> = initial_states
-            .iter()
-            .map(|&s| (TokenizerStateID(s), TokenizerStateID(s)))
-            .collect();
-        
         // Each state is its own equivalence class
         let state_classes: StateEquivalenceResult = initial_states
             .iter()
             .map(|&s| std::iter::once(s).collect())
             .collect();
         
-        (initial_states.to_vec(), state_to_rep, state_classes)
+        (initial_states.to_vec(), state_classes)
     };
     
     // Step 2: Vocab equivalence analysis on reduced states
@@ -133,8 +116,6 @@ pub fn compute_combined_equivalence(
     CombinedEquivalenceResult {
         vocab_classes,
         state_classes,
-        state_to_representative,
-        representative_states: reduced_states,
     }
 }
 
