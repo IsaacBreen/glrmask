@@ -30,16 +30,31 @@ def extract_id_to_token_map(data: _t.Mapping[str, _t.Any]) -> dict[int, bytes]:
     """Return a mapping from original LLM token ID to token bytes.
     
     Supports multiple formats:
-    - New trie format (vocab_trie)
+    - New trie format (vocab_trie with "trie" key)
+    - Hex tokens format (vocab_trie with "tokens" dict mapping hex bytes to token ID)
     - Legacy commit_vocab format (representatives + original_to_representative)
     - Very old original_llm_vocab format
     """
     # Try new trie format first
     vocab_trie = data.get("vocab_trie")
-    if vocab_trie and "trie" in vocab_trie:
-        result: dict[int, bytes] = {}
-        _extract_from_trie(vocab_trie["trie"], [], result)
-        return result
+    if vocab_trie:
+        # New trie format with nested structure
+        if "trie" in vocab_trie:
+            result: dict[int, bytes] = {}
+            _extract_from_trie(vocab_trie["trie"], [], result)
+            return result
+        
+        # Hex tokens format: tokens is a dict mapping hex-encoded bytes to token IDs
+        if "tokens" in vocab_trie:
+            tokens = vocab_trie["tokens"]
+            result: dict[int, bytes] = {}
+            for hex_bytes, token_id in tokens.items():
+                try:
+                    byte_seq = bytes.fromhex(hex_bytes)
+                    result[token_id] = byte_seq
+                except ValueError:
+                    continue
+            return result
     
     # Fall back to legacy commit_vocab format
     commit_vocab = data.get("commit_vocab")
