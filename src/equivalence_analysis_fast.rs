@@ -6,6 +6,7 @@ use crate::finite_automata::Regex;
 use crate::r#macro::is_debug_level_enabled;
 use ahash::{AHasher, RandomState};
 use hashbrown::HashMap;
+use rayon::prelude::*;
 use smallvec::SmallVec;
 use std::collections::BTreeSet;
 use std::collections::hash_map::DefaultHasher;
@@ -80,55 +81,6 @@ struct SuffixScratch {
     order: Vec<usize>,
     nodes: Vec<Option<(u64, EdgeList)>>,
     pos_hashes: Vec<u64>,
-}
-
-// =============================================================================
-// TRIE DATA STRUCTURES
-// =============================================================================
-
-/// A node in the token trie. Children are stored inline for common bytes.
-struct TrieNode {
-    /// Children indexed by byte value. u32::MAX means no child.
-    children: [u32; 256],
-    /// Token indices that end at this node (empty for internal nodes).
-    token_indices: SmallVec<[usize; 2]>,
-    /// Depth of this node (0 = root, 1 = after first byte, etc.)
-    depth: u16,
-}
-
-impl TrieNode {
-    fn new(depth: u16) -> Self {
-        Self {
-            children: [u32::MAX; 256],
-            token_indices: SmallVec::new(),
-            depth,
-        }
-    }
-}
-
-/// Build a trie from a list of tokens.
-fn build_token_trie(tokens: &[Vec<u8>]) -> Vec<TrieNode> {
-    let mut nodes = vec![TrieNode::new(0)];  // Root node
-    
-    for (token_idx, token) in tokens.iter().enumerate() {
-        let mut node_idx = 0u32;
-        
-        for (depth, &byte) in token.iter().enumerate() {
-            let child_idx = nodes[node_idx as usize].children[byte as usize];
-            if child_idx == u32::MAX {
-                let new_idx = nodes.len() as u32;
-                nodes[node_idx as usize].children[byte as usize] = new_idx;
-                nodes.push(TrieNode::new((depth + 1) as u16));
-                node_idx = new_idx;
-            } else {
-                node_idx = child_idx;
-            }
-        }
-        
-        nodes[node_idx as usize].token_indices.push(token_idx);
-    }
-    
-    nodes
 }
 
 // =============================================================================
@@ -500,16 +452,20 @@ fn compute_pos0_results<'a>(
 
     // Prepare all_targets tracking
     let all_targets = &mut scratch.all_targets;
-    all_targets.clear();
-
+    
+    // Clear seen_target only for positions we saw last time
     let seen_target = &mut scratch.seen_target;
+    for &pos in all_targets.iter() {
+        if pos < seen_target.len() {
+            seen_target[pos] = false;
+        }
+    }
+    all_targets.clear();
+    
     let needed_seen = len + 1;
     if seen_target.len() < needed_seen {
         seen_target.resize(needed_seen, false);
-    } else if seen_target.len() > needed_seen {
-        seen_target.truncate(needed_seen);
     }
-    seen_target.fill(false);
 
     let current_states = &mut scratch.current_states;
     let done = &mut scratch.done;
@@ -544,23 +500,10 @@ fn compute_pos0_results<'a>(
         }
     }
 
-    // Build initial list of active states - use scratch space to avoid allocations
-    let mut active_list: Vec<usize> = Vec::with_capacity(num_states);
-    let mut next_active: Vec<usize> = Vec::with_capacity(num_states);
-    for i in 0..num_states {
-        if !done[i] {
-            active_list.push(i);
-        }
-    }
-
     // Process each byte of the token
     for (pos, &byte) in slice.iter().enumerate() {
-        if active_list.is_empty() {
-            break;
-        }
-        
         let position = (pos + 1) as u32;
-        next_active.clear();
+        let mut any_active = false;
 
         // SAFETY: All indices are pre-validated:
         // - i < num_states, and all arrays are sized to num_states
@@ -568,7 +511,12 @@ fn compute_pos0_results<'a>(
         // - byte is u8, so byte as usize < 256 (valid for transition table)
         // - base + gid is valid because base_offsets and match_positions are properly sized
         unsafe {
-            for &i in &active_list {
+            for i in 0..num_states {
+                if *done.get_unchecked(i) {
+                    continue;
+                }
+                any_active = true;
+
                 let base = *base_offsets.get_unchecked(i);
                 let current = *current_states.get_unchecked(i);
                 let next_state = *pre.transitions.get_unchecked(current).get_unchecked(byte as usize);
@@ -617,9 +565,7 @@ fn compute_pos0_results<'a>(
                         }
                     };
 
-                    if !terminate {
-                        next_active.push(i);
-                    } else {
+                    if terminate {
                         *done.get_unchecked_mut(i) = true;
                     }
                 } else {
@@ -627,8 +573,10 @@ fn compute_pos0_results<'a>(
                 }
             }
         }
-        
-        std::mem::swap(&mut active_list, &mut next_active);
+
+        if !any_active {
+            break;
+        }
     }
 
     // Collect results
@@ -883,128 +831,12 @@ fn compute_chunk_signature(
     hasher.finish()
 }
 
-/// State vector snapshot for trie-based processing.
-/// Stores the DFA state for each initial state after processing a prefix.
-struct TrieStateSnapshot {
-    /// Current DFA state for each initial state
-    current_states: Vec<usize>,
-    /// Whether each initial state is "done" (terminated)
-    done: Vec<bool>,
-    /// Match positions: match_positions[state_idx * num_groups + gid] = position
-    match_positions: Vec<u32>,
-    /// Which groups were touched for each state (for efficient iteration)
-    touched_groups: Vec<GroupList>,
-}
-
-impl TrieStateSnapshot {
-    fn new(num_states: usize, num_groups: usize, initial_states: &[usize], pre: &PrecomputedDfa) -> Self {
-        let mut current_states = initial_states.to_vec();
-        let mut done = vec![false; num_states];
-        let mut match_positions = vec![NONE_POS; num_states * num_groups];
-        let mut touched_groups = vec![GroupList::new(); num_states];
-        
-        // Process initial finalizers
-        for (i, &state) in initial_states.iter().enumerate() {
-            let base = i * num_groups;
-            for f in &pre.finalizers[state] {
-                let gid = f.gid;
-                if gid < num_groups {
-                    let idx = base + gid;
-                    if match_positions[idx] == NONE_POS {
-                        match_positions[idx] = 0;
-                    }
-                    if !touched_groups[i].contains(&gid) {
-                        touched_groups[i].push(gid);
-                    }
-                }
-            }
-            if !pre.has_transitions[state] {
-                done[i] = true;
-            }
-        }
-        
-        Self { current_states, done, match_positions, touched_groups }
-    }
-    
-    fn clone_from(&mut self, other: &TrieStateSnapshot) {
-        self.current_states.clone_from(&other.current_states);
-        self.done.clone_from(&other.done);
-        self.match_positions.clone_from(&other.match_positions);
-        self.touched_groups.clone_from(&other.touched_groups);
-    }
-    
-    /// Advance all states by one byte.
-    fn advance(&mut self, byte: u8, pre: &PrecomputedDfa, num_groups: usize) {
-        let num_states = self.current_states.len();
-        let position = 1u32;  // We'll adjust this in the caller
-        
-        unsafe {
-            for i in 0..num_states {
-                if *self.done.get_unchecked(i) {
-                    continue;
-                }
-                
-                let base = i * num_groups;
-                let current = *self.current_states.get_unchecked(i);
-                let next_state = *pre.transitions.get_unchecked(current).get_unchecked(byte as usize);
-                
-                if next_state != NONE_STATE {
-                    let next_state = next_state as usize;
-                    *self.current_states.get_unchecked_mut(i) = next_state;
-                    
-                    for f in pre.finalizers.get_unchecked(next_state) {
-                        let gid = f.gid;
-                        if gid < num_groups {
-                            let idx = base + gid;
-                            let slot = self.match_positions.get_unchecked_mut(idx);
-                            if f.non_greedy {
-                                if *slot == NONE_POS {
-                                    *slot = position;
-                                }
-                            } else {
-                                *slot = position;
-                            }
-                            
-                            let groups = self.touched_groups.get_unchecked_mut(i);
-                            if !groups.contains(&gid) {
-                                groups.push(gid);
-                            }
-                        }
-                    }
-                    
-                    let terminate = match pre.future_modes.get_unchecked(next_state) {
-                        FutureMode::AlwaysTerminate => true,
-                        FutureMode::AlwaysContinue => false,
-                        FutureMode::Guarded(guard) => {
-                            let mut all_met = true;
-                            for &gid in guard.iter() {
-                                let idx = base + gid;
-                                if *self.match_positions.get_unchecked(idx) == NONE_POS {
-                                    all_met = false;
-                                    break;
-                                }
-                            }
-                            all_met
-                        }
-                    };
-                    
-                    if terminate {
-                        *self.done.get_unchecked_mut(i) = true;
-                    }
-                } else {
-                    *self.done.get_unchecked_mut(i) = true;
-                }
-            }
-        }
-    }
-}
-
 // =============================================================================
 // MAIN ENTRY POINT
 // =============================================================================
 
 /// Find equivalence classes of tokens based on DFA behavior.
-/// Uses iterative state-based refinement with batching.
+/// Uses iterative state-based refinement with batching and parallel processing.
 pub fn find_equivalence_classes(
     regex: &Regex,
     strings: &[Vec<u8>],
@@ -1061,16 +893,7 @@ pub fn find_equivalence_classes(
     let mut batch_count = 0;
     
     // Timing accumulators
-    let mut total_pos0_time = std::time::Duration::ZERO;
-    let mut total_suffix_time = std::time::Duration::ZERO;
-    let mut total_hash_time = std::time::Duration::ZERO;
     let mut total_refine_time = std::time::Duration::ZERO;
-    let mut total_cache_clear_time = std::time::Duration::ZERO;
-
-    // Scratch space reused across batches and tokens
-    let mut scratch_pos0 = Pos0Scratch::new(batch_size, num_groups);
-    let mut scratch_suffix = SuffixScratch::new(num_groups);
-    let mut scratch_cache: Vec<Option<u64>> = vec![None; 256];
 
     for batch_start in (0..num_states).step_by(batch_size) {
         if active_indices.is_empty() {
@@ -1080,49 +903,34 @@ pub fn find_equivalence_classes(
         let batch_end = (batch_start + batch_size).min(num_states);
         let batch = &reduced_initial_states[batch_start..batch_end];
 
-        // Compute partial signatures for active tokens
-        let mut active_sigs: Vec<(usize, u64)> = Vec::with_capacity(active_indices.len());
-
-        for &token_idx in &active_indices {
-            let token = &strings[token_idx];
-            if scratch_cache.len() <= token.len() {
-                scratch_cache.resize(token.len() + 1, None);
-            }
-            let cache_start = Instant::now();
-            scratch_cache.iter_mut().for_each(|x| *x = None);
-            total_cache_clear_time += cache_start.elapsed();
-            
-            // Inline compute_chunk_signature with timing
-            let pos0_start = Instant::now();
-            let (pos0_results, all_targets) = compute_pos0_results(&pre, &mut scratch_pos0, token, batch);
-            total_pos0_time += pos0_start.elapsed();
-            
-            let suffix_start = Instant::now();
-            compute_suffix_hashes_incremental(&pre, token, all_targets, &mut scratch_cache, &mut scratch_suffix);
-            total_suffix_time += suffix_start.elapsed();
-            
-            let hash_start = Instant::now();
-            let mut hasher = new_hasher();
-            for (end_state, edges) in pos0_results {
-                let mut state_hasher = new_hasher();
-                let completion_hash = end_state
-                    .map(|id| pre.completion_hash[id])
-                    .unwrap_or(pre.none_completion_hash);
-                state_hasher.write_u64(completion_hash);
-
-                for (gid, target) in edges {
-                    let target_hash = scratch_cache[*target].unwrap_or(0);
-                    state_hasher.write_u64(*gid as u64);
-                    state_hasher.write_u64(target_hash);
-                }
-
-                hasher.write_u64(state_hasher.finish());
-            }
-            let sig = hasher.finish();
-            total_hash_time += hash_start.elapsed();
-            
-            active_sigs.push((token_idx, sig));
-        }
+        // Compute partial signatures for active tokens in PARALLEL
+        let batch_start_time = Instant::now();
+        let active_sigs: Vec<(usize, u64)> = active_indices
+            .par_iter()
+            .map_init(
+                || {
+                    (
+                        Pos0Scratch::new(batch.len(), num_groups),
+                        SuffixScratch::new(num_groups),
+                        vec![None; 256],
+                    )
+                },
+                |state, &token_idx| {
+                    let (scratch_pos0, scratch_suffix, scratch_cache) = state;
+                    let token = &strings[token_idx];
+                    
+                    // Ensure cache is large enough
+                    if scratch_cache.len() <= token.len() {
+                        scratch_cache.resize(token.len() + 1, None);
+                    }
+                    scratch_cache.iter_mut().for_each(|x| *x = None);
+                    
+                    let sig = compute_chunk_signature(&pre, token, batch, scratch_pos0, scratch_suffix, scratch_cache);
+                    (token_idx, sig)
+                },
+            )
+            .collect();
+        let batch_compute_time = batch_start_time.elapsed();
 
         // Group by (old_class, new_signature) to refine partition
         let refine_start = Instant::now();
@@ -1184,10 +992,11 @@ pub fn find_equivalence_classes(
             };
             crate::debug!(
                 5,
-                "    Batch {}: {} active tokens, {} classes",
+                "    Batch {}: {} active tokens, {} classes, compute={:?}",
                 batch_count,
                 active_indices.len(),
-                num_classes
+                num_classes,
+                batch_compute_time,
             );
         }
     }
@@ -1195,12 +1004,8 @@ pub fn find_equivalence_classes(
     if is_debug_level_enabled(4) {
         crate::debug!(
             4,
-            "  Timing breakdown: pos0={:?} suffix={:?} hash={:?} refine={:?} cache_clear={:?}",
-            total_pos0_time,
-            total_suffix_time,
-            total_hash_time,
+            "  Timing: refine={:?}",
             total_refine_time,
-            total_cache_clear_time,
         );
     }
 
@@ -1225,7 +1030,6 @@ pub fn find_equivalence_classes(
 // =============================================================================
 // DEBUG/TEST UTILITIES
 // =============================================================================
-
 fn compute_suffix_hashes_debug(
     regex: &Regex,
     slice: &[u8],
