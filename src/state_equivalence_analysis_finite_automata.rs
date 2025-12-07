@@ -94,6 +94,7 @@ pub fn find_state_equivalence_classes(
     tokens: &[Vec<u8>],
     states: &[usize],
 ) -> Vec<usize> {
+    let instant = std::time::Instant::now();
     // 1. Build Token Trie
     let mut trie = TokenTrie::new();
     for (i, token) in tokens.iter().enumerate() {
@@ -145,6 +146,8 @@ pub fn find_state_equivalence_classes(
         let rep = *hash_to_rep.entry(h).or_insert(s);
         mapping[i] = rep;
     }
+
+    crate::debug!(3, "State equivalence analysis took {:.2?}. Reduced {} states to {}.", instant.elapsed(), states.len(), hash_to_rep.len());
     
     mapping
 }
