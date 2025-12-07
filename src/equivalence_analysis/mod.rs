@@ -11,16 +11,12 @@
 //!
 //! - **Combined Equivalence Analysis**: Orchestrates both analyses efficiently,
 //!   applying state reduction before vocab analysis for optimal performance.
-//!
-//! - **Vocab DFA Approach**: Experimental approach using product construction
-//!   to compute both state and token equivalence simultaneously.
 
 mod state_equivalence_analysis;
 mod vocab_equivalence_analysis;
 pub mod vocab_equivalence_analysis_fast;
 mod vocab_equivalence_analysis_reference;
 mod combined_equivalence_analysis;
-pub mod vocab_dfa_approach;
 
 pub use state_equivalence_analysis::find_state_equivalence_classes;
 pub use state_equivalence_analysis::mapping_to_equivalence_classes;
