@@ -20,6 +20,8 @@
 // State equivalence
 mod state_equivalence_analysis_fast;
 pub mod state_equivalence_analysis_reference;
+pub mod state_equivalence_trie;
+pub mod state_equivalence_discriminating;
 
 // Vocab equivalence
 pub mod vocab_equivalence_analysis_fast;
