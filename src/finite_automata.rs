@@ -2791,14 +2791,6 @@ impl DFA {
             return;
         }
 
-        // Skip minimization for large DFAs - state equivalence analysis will handle it
-        const MAX_MINIMIZATION_STATES: usize = 10_000;
-        if self.states.len() > MAX_MINIMIZATION_STATES {
-            crate::debug!(3, "Skipping DFA minimization for {} states (>{} threshold)", 
-                         self.states.len(), MAX_MINIMIZATION_STATES);
-            return;
-        }
-
         self.remove_unreachable_states();
 
         let mut partitions_map: BTreeMap<BTreeSet<GroupID>, BTreeSet<usize>> = BTreeMap::new();
