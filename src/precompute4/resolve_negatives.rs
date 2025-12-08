@@ -27,6 +27,10 @@ pub fn resolve_negative_codes_in_nwa(nwa: &mut NWA) {
 
     progress_step(3, "Apply changes & remove negatives");
     remove_negative_transitions(&mut nwa.states, &all_states);
+    
+    progress_step(4, "Shortcut default transitions to terminal states");
+    remove_redundant_default_transitions(&mut nwa.states, &all_states);
+    
     crate::debug!(6, "Applied changes to NWA.");
 
     crate::debug!(5, "Resolve negatives in NWA: Done");
@@ -94,6 +98,166 @@ pub fn remove_negative_transitions(states: &mut NWAStates, source_states_filter:
 pub fn remove_negative_transitions_range(states: &mut NWAStates, range: std::ops::Range<NWAStateID>) {
     for sid in range {
         states.0[sid].transitions.retain(|&label, _| !is_negative_symbol(label));
+    }
+}
+
+/// Remove default transitions that point to "terminal" states.
+/// 
+/// A "terminal" state is one that:
+/// 1. Has no outgoing transitions (other than default transitions to other terminal states)
+/// 2. Has no epsilon transitions
+/// 3. Is final (after finality propagation)
+///
+/// After finality fixpoint, finality reachable via default transitions has been propagated back,
+/// so these default transitions are redundant and can be safely removed.
+///
+/// This is an optimization that reduces the number of states/transitions in the resulting DWA.
+pub fn remove_redundant_default_transitions(states: &mut NWAStates, source_states_filter: &HashSet<NWAStateID>) {
+    let n = states.len();
+    
+    // First, identify "terminal" states: states with no non-default outgoing transitions,
+    // no epsilons, and that are final.
+    // We use a fixpoint because a state is terminal if it only has defaults to terminal states.
+    let mut is_terminal = vec![false; n];
+    
+    // Initial pass: mark states with no outgoing transitions at all as terminal (if final)
+    for sid in 0..n {
+        let st = &states.0[sid];
+        let has_non_default_transitions = st.transitions.iter().any(|(label, targets)| {
+            *label != DEFAULT_TRANSITION_SYMBOL && !targets.is_empty()
+        });
+        let has_epsilons = !st.epsilons.is_empty();
+        let is_final = st.final_weight.as_ref().map_or(false, |w| !w.is_empty());
+        
+        if !has_non_default_transitions && !has_epsilons && is_final {
+            is_terminal[sid] = true;
+        }
+    }
+    
+    // Fixpoint: a state is terminal if all its default transitions point to terminal states
+    // (and it meets the other criteria)
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for sid in 0..n {
+            if is_terminal[sid] {
+                continue;
+            }
+            let st = &states.0[sid];
+            
+            // Check if this state only has default transitions
+            let has_non_default_transitions = st.transitions.iter().any(|(label, targets)| {
+                *label != DEFAULT_TRANSITION_SYMBOL && !targets.is_empty()
+            });
+            let has_epsilons = !st.epsilons.is_empty();
+            let is_final = st.final_weight.as_ref().map_or(false, |w| !w.is_empty());
+            
+            if has_non_default_transitions || has_epsilons || !is_final {
+                continue;
+            }
+            
+            // Check if all default targets are terminal
+            let all_default_targets_terminal = st.transitions
+                .get(&DEFAULT_TRANSITION_SYMBOL)
+                .map_or(true, |targets| {
+                    targets.iter().all(|(target, _)| *target < n && is_terminal[*target])
+                });
+            
+            if all_default_targets_terminal {
+                is_terminal[sid] = true;
+                changed = true;
+            }
+        }
+    }
+    
+    let num_terminal = is_terminal.iter().filter(|&&t| t).count();
+    if num_terminal > 0 {
+        crate::debug!(6, "Found {} terminal states for default transition shortcutting", num_terminal);
+    }
+    
+    // Now remove default transitions that point to terminal states
+    let mut removed_count = 0;
+    for &sid in source_states_filter {
+        if sid >= n {
+            continue;
+        }
+        if let Some(default_targets) = states.0[sid].transitions.get_mut(&DEFAULT_TRANSITION_SYMBOL) {
+            let old_len = default_targets.len();
+            default_targets.retain(|(target, _)| !(*target < n && is_terminal[*target]));
+            removed_count += old_len - default_targets.len();
+        }
+        // Clean up empty entries
+        states.0[sid].transitions.retain(|_, targets| !targets.is_empty());
+    }
+    
+    if removed_count > 0 {
+        crate::debug!(6, "Removed {} redundant default transitions to terminal states", removed_count);
+    }
+}
+
+/// Range-based version for contiguous state ranges
+pub fn remove_redundant_default_transitions_range(states: &mut NWAStates, range: std::ops::Range<NWAStateID>) {
+    let n = states.len();
+    
+    // First, identify "terminal" states
+    let mut is_terminal = vec![false; n];
+    
+    // Initial pass
+    for sid in 0..n {
+        let st = &states.0[sid];
+        let has_non_default_transitions = st.transitions.iter().any(|(label, targets)| {
+            *label != DEFAULT_TRANSITION_SYMBOL && !targets.is_empty()
+        });
+        let has_epsilons = !st.epsilons.is_empty();
+        let is_final = st.final_weight.as_ref().map_or(false, |w| !w.is_empty());
+        
+        if !has_non_default_transitions && !has_epsilons && is_final {
+            is_terminal[sid] = true;
+        }
+    }
+    
+    // Fixpoint
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for sid in 0..n {
+            if is_terminal[sid] {
+                continue;
+            }
+            let st = &states.0[sid];
+            
+            let has_non_default_transitions = st.transitions.iter().any(|(label, targets)| {
+                *label != DEFAULT_TRANSITION_SYMBOL && !targets.is_empty()
+            });
+            let has_epsilons = !st.epsilons.is_empty();
+            let is_final = st.final_weight.as_ref().map_or(false, |w| !w.is_empty());
+            
+            if has_non_default_transitions || has_epsilons || !is_final {
+                continue;
+            }
+            
+            let all_default_targets_terminal = st.transitions
+                .get(&DEFAULT_TRANSITION_SYMBOL)
+                .map_or(true, |targets| {
+                    targets.iter().all(|(target, _)| *target < n && is_terminal[*target])
+                });
+            
+            if all_default_targets_terminal {
+                is_terminal[sid] = true;
+                changed = true;
+            }
+        }
+    }
+    
+    // Remove default transitions to terminal states
+    for sid in range {
+        if sid >= n {
+            continue;
+        }
+        if let Some(default_targets) = states.0[sid].transitions.get_mut(&DEFAULT_TRANSITION_SYMBOL) {
+            default_targets.retain(|(target, _)| !(*target < n && is_terminal[*target]));
+        }
+        states.0[sid].transitions.retain(|_, targets| !targets.is_empty());
     }
 }
 
