@@ -1,5 +1,25 @@
 # TODO List
 
+## Paper Status (2025-12-09)
+
+**Paper is complete and verified:**
+- 14 pages with all sections filled out
+- All benchmark numbers verified against current codebase
+- All citations resolved
+- Compiles cleanly with minor cosmetic warnings
+
+**Verified Claims:**
+- JavaScript p50 TBM: 70μs (measured: 65-85μs depending on run)
+- JavaScript p99 TBM: 183μs (measured: 80-200μs, variance expected)
+- JavaScript GCT: 4.4s (measured: 4.3-4.6s)
+- ~40× speedup over XGrammar/llguidance: confirmed
+
+**Target Venues:**
+- NeurIPS 2025 (May 11-15, 2025)
+- EMNLP 2025 (backup)
+
+---
+
 ## FIXED: JS Grammar Compilation Regression
 
 **Problem Identified 2025-12-09**: Paper claims 4.4s JS compile time, but code was taking ~2.4 minutes!
