@@ -13,8 +13,9 @@ use crate::constraint::LLMTokenBV;
 use crate::glr::parser::{ExpectElse, GLRParser};
 use crate::precompute4::nwa_optimizations::prune_continuations_from_final_states;
 use crate::precompute4::resolve_negatives::{
-    apply_cancellations_range, apply_finality_fixpoint_range, remove_negative_transitions_range,
-    remove_redundant_default_transitions_range
+    apply_cancellations_range, apply_finality_fixpoint_range, remove_negative_transitions_range
+    // Note: remove_redundant_default_transitions is called once at the end in finalize_and_optimize_and_determinize,
+    // not per-range here, since it requires a global pass over all states.
 };
 use crate::precompute4::template_nwa::{build_ignore_terminal_dwa, build_terminal_dwas};
 use crate::precompute4::weighted_automata::{
@@ -626,8 +627,9 @@ pub fn build_parser_dwa(parser: &GLRParser, input_nwa: &NWA) -> DWA {
                 if !range.is_empty() {
                     apply_cancellations_range(&mut states, range.clone());
                     apply_finality_fixpoint_range(&mut states, range.clone());
-                    remove_negative_transitions_range(&mut states, range.clone());
-                    remove_redundant_default_transitions_range(&mut states, range);
+                    remove_negative_transitions_range(&mut states, range);
+                    // Note: remove_redundant_default_transitions is NOT called here because it 
+                    // requires a global pass over all states. It's called once at the end.
                 }
                 nwa_body = NWABody::union(&nwa_body, &composed_body);
             }
