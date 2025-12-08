@@ -386,11 +386,13 @@ fn compute_finality_fixpoint(
     enum PredEdge {
         Epsilon { from: NWAStateID, eps_idx: usize },
         Negative { from: NWAStateID, label: Code, trans_idx: usize },
+        Default { from: NWAStateID, trans_idx: usize },
     }
 
     // Phase 1: forward exploration from the filtered sources,
-    // restricted to epsilon edges everywhere and negative edges
-    // only from states in `source_states_filter`. While exploring we
+    // restricted to epsilon edges everywhere, negative edges
+    // only from states in `source_states_filter`, and default transitions
+    // (which can be shortcut because they match any symbol). While exploring we
     // also build the reverse adjacency (predecessor lists) restricted
     // to this reachable subgraph.
     let mut visited = vec![false; n];
@@ -455,11 +457,32 @@ fn compute_finality_fixpoint(
                 }
             }
         }
+        
+        // Default transitions can be shortcut: if we can reach a final state via a default
+        // transition, we can propagate the finality backwards. This is valid because
+        // default transitions match "any symbol not explicitly listed", so they are
+        // always traversable.
+        if let Some(default_targets) = state.transitions.get(&DEFAULT_TRANSITION_SYMBOL) {
+            for (trans_idx, &(target, ref w)) in default_targets.iter().enumerate() {
+                if target >= n || w.is_empty() {
+                    continue;
+                }
+                preds
+                    .entry(target)
+                    .or_insert_with(Vec::new)
+                    .push(PredEdge::Default { from: s, trans_idx });
+                if !visited[target] {
+                    visited[target] = true;
+                    queue.push_back(target);
+                    reachable_states.push(target);
+                }
+            }
+        }
     }
 
     // Phase 2: backward fixpoint over the reachable subgraph.
     //
-    // future_final_all[s] = summary weight of all allowed epsilon/negative
+    // future_final_all[s] = summary weight of all allowed epsilon/negative/default
     // paths from `s` to any final state (including the zero-length path
     // when `s` itself is final).
     let mut future_final_all: HashMap<NWAStateID, Weight> = HashMap::new();
@@ -498,6 +521,15 @@ fn compute_finality_fixpoint(
                             .transitions
                             .get(&label)
                             .expect("stored negative edge must exist");
+                        let &(target, ref w) = &targets[trans_idx];
+                        debug_assert_eq!(target, s);
+                        (from, w)
+                    }
+                    PredEdge::Default { from, trans_idx } => {
+                        let targets = states[from]
+                            .transitions
+                            .get(&DEFAULT_TRANSITION_SYMBOL)
+                            .expect("stored default edge must exist");
                         let &(target, ref w) = &targets[trans_idx];
                         debug_assert_eq!(target, s);
                         (from, w)
@@ -551,6 +583,7 @@ fn compute_finality_fixpoint_range(
     enum PredEdge {
         Epsilon { from: NWAStateID, eps_idx: usize },
         Negative { from: NWAStateID, label: Code, trans_idx: usize },
+        Default { from: NWAStateID, trans_idx: usize },
     }
 
     let mut visited = vec![false; n];
@@ -614,6 +647,24 @@ fn compute_finality_fixpoint_range(
                 }
             }
         }
+        
+        // Default transitions can be shortcut
+        if let Some(default_targets) = state.transitions.get(&DEFAULT_TRANSITION_SYMBOL) {
+            for (trans_idx, &(target, ref w)) in default_targets.iter().enumerate() {
+                if target >= n || w.is_empty() {
+                    continue;
+                }
+                preds
+                    .entry(target)
+                    .or_insert_with(Vec::new)
+                    .push(PredEdge::Default { from: s, trans_idx });
+                if !visited[target] {
+                    visited[target] = true;
+                    queue.push_back(target);
+                    reachable_states.push(target);
+                }
+            }
+        }
     }
 
     let mut future_final_all: FxHashMap<NWAStateID, Weight> = FxHashMap::default();
@@ -651,6 +702,15 @@ fn compute_finality_fixpoint_range(
                             .transitions
                             .get(&label)
                             .expect("stored negative edge must exist");
+                        let &(target, ref w) = &targets[trans_idx];
+                        debug_assert_eq!(target, s);
+                        (from, w)
+                    }
+                    PredEdge::Default { from, trans_idx } => {
+                        let targets = states[from]
+                            .transitions
+                            .get(&DEFAULT_TRANSITION_SYMBOL)
+                            .expect("stored default edge must exist");
                         let &(target, ref w) = &targets[trans_idx];
                         debug_assert_eq!(target, s);
                         (from, w)
