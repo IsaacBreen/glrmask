@@ -650,7 +650,7 @@ pub fn build_parser_dwa(parser: &GLRParser, input_nwa: &NWA) -> DWA {
     }
 
     let combined_nwa = NWA { states: combined_nwa_states, body: NWABody { start_states: vec![combined_start_state] } };
-    let mut final_dwa = resolve_negatives_and_optimize_and_determinize(parser, combined_nwa);
+    let mut final_dwa = finalize_and_optimize_and_determinize(parser, combined_nwa);
     // SKIP final simplification to test performance impact
     // final_dwa.simplify();
     crate::debug!(4, "Parser DWA construction complete. Stats: {}", final_dwa.stats());
@@ -719,7 +719,7 @@ pub fn precompute_token_bvs_and_signatures(reversed_nwa: &NWA, traversal_data: &
     (Arc::try_unwrap(node_tokens).unwrap().into_inner().unwrap(), Arc::try_unwrap(signatures).unwrap().into_inner().unwrap())
 }
 
-pub fn resolve_negatives_and_optimize_and_determinize(parser: &GLRParser, mut combined_nwa: NWA) -> DWA {
+pub fn finalize_and_optimize_and_determinize(parser: &GLRParser, mut combined_nwa: NWA) -> DWA {
     crate::debug!(4, "Resolving negatives and optimizing for NWA with {} states and {} transitions...", combined_nwa.states.len(), combined_nwa.states.num_transitions());
     prune_continuations_from_final_states(&mut combined_nwa);
     crate::debug!(4, "Pruned continuations from final states. NWA with {} states and {} transitions remaining.", combined_nwa.states.len(), combined_nwa.states.num_transitions());

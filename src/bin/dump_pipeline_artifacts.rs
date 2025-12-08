@@ -12,8 +12,8 @@ use sep1::precompute4::template_nwa::{build_template_dwas, build_ignore_terminal
 use sep1::precompute4::weighted_automata::{NWA, NWABody, NWAStates, Weight};
 use sep1::precompute4::weighted_automata::common::Label;
 use sep1::precompute4::full_dwa::{
-    canonicalize_bundle, instantiate_nwa_template_into, nwa_special_map, 
-    precompute_token_bvs_and_signatures, resolve_negatives_and_optimize_and_determinize,
+    canonicalize_bundle, instantiate_nwa_template_into, nwa_special_map,
+    precompute_token_bvs_and_signatures, finalize_and_optimize_and_determinize,
 };
 use sep1::constraint_precompute::run_precompute1;
 use sep1::tokenizer::{LLMTokenID, TokenizerStateID};
@@ -213,7 +213,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 6. Build Final DWA
     println!("Building Final DWA...");
-    let mut final_dwa = resolve_negatives_and_optimize_and_determinize(parser, flattened_nwa.clone());
+    let mut final_dwa = finalize_and_optimize_and_determinize(parser, flattened_nwa.clone());
     final_dwa.simplify();
 
     // 7. Dump Everything
