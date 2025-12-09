@@ -176,7 +176,7 @@ impl DWA {
                             if target < reachable.len() {
                                 let old_reach = &reachable[target];
                                 if !new_reach.is_subset_of(old_reach) {
-                                    reachable[target] |= new_reach;
+                                    reachable[target] |= &new_reach;
                                     changed = true;
                                 }
                             }
@@ -237,7 +237,7 @@ impl DWA {
                              let u_t = &useful[target];
                              let contribution = w & u_t;
                              if !contribution.is_subset_of(&u_s) {
-                                 u_s |= contribution;
+                                 u_s |= &contribution;
                                  local_changed = true;
                              }
                         }
