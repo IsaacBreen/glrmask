@@ -273,6 +273,13 @@ atom ::= 'a' | 'ab'
 - Template region boxes changed from filled rectangles to dashed outlines
 - Each template region gets a distinct color
 
+**NWA Layout Improvements (2025-12-11):**
+- Body states now laid out using algorithmic graph layout (vertical flow)
+- Template regions arranged in 3-column grid to the right of body
+- Balanced dimensions: ~40 x 20 units (was 30 x 51)
+- Each template region maintains clean internal layout
+- Graphviz support added (but not currently used - can be enabled for alternative layouts)
+
 ---
 
 ## Edge Style Consistency Work (2025-12-09)
@@ -293,6 +300,32 @@ atom ::= 'a' | 'ab'
 - [x] Fixed Final DWA parallel edges with varying bend angles
 - [x] Increased Final DWA spacing from 3.0x1.2 to 4.0x2.0
 - [x] Below-zero label spacing from -3pt to +2pt
+
+---
+
+## NWA/Terminal DWA Node Mapping Fix (2025-12-11)
+
+**Bug:** The unresolved NWA had MORE outer nodes (9) than the terminal DWA had nodes (4).
+
+**Root Cause:** In `dump_full_pipeline.rs`, during `nwa_special_map` traversal, we created a new `entry_node_a` every time the process function was called. The process function could be called multiple times for the same terminal DWA state (when new values flow in and we revisit the state), creating duplicate entry nodes.
+
+**Additionally:** The reversal operation creates a "super_start" state that doesn't correspond to any real terminal DWA state. We were creating an entry node for it.
+
+**Fixes Implemented:**
+1. Added `entry_nodes_for_tdwa_state` HashMap to track and reuse entry nodes per terminal DWA state
+2. Skip creating entry nodes for the super_start state (artifact of reversal)
+3. Export entry node mapping to pipeline artifacts for validation
+
+**Result:**
+- Terminal DWA: 4 nodes (0, 1, 2, 3)
+- NWA outer: 5 nodes (0, 1, 3, 11, 64)
+- Mapping: TDWA 1→NWA 11, TDWA 2→NWA 1, TDWA 3→NWA 3, TDWA 0→NWA 64
+
+**Validation Added:**
+- Position consistency check: mapped nodes maintain relative above/below and left/right positions
+- Rectangle positioning check: DISABLED for now (NWA templates "loop back" to body states)
+
+**Status:** COMPLETE
 
 ---
 
