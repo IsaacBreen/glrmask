@@ -219,3 +219,20 @@ atom ::= 'a' | 'ab'
 
 **Visual Fixes (2025-12-10):**
 - Increased tokenizer DFA node spacing from 1.2 to 1.8 (nodes were touching)
+
+---
+
+## Edge Style Consistency Work (2025-12-09)
+
+**Issues to fix (from user feedback):**
+1. PUSH edges (⊕p0, ⊕p1, etc.) have inconsistent styles between graphs:
+   - Flattened NWA: dashed green edges (via pushedge style)
+   - Resolved NWA: normal edges
+   - Terminal DFAs: edges not showing push style at all
+2. Default edges (⊕p*) are dotted, should be normal solid
+3. PUSH edges shouldn't be dashed (confuses with t0, t1, t2 initial edges)
+
+**Fix plan:**
+- Make PUSH edges solid, red/crimson colored (using cUp color)
+- Make default edges normal solid (not dotted)
+- Add proper push edge handling in terminal DWA builder
