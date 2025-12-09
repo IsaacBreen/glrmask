@@ -263,6 +263,16 @@ atom ::= 'a' | 'ab'
 **Visual Fixes (2025-12-10):**
 - Increased tokenizer DFA node spacing from 1.2 to 1.8 (nodes were touching)
 
+**NWA Visualization Overhaul (2025-12-10):**
+- Renamed "NWA" to "Unresolved NWA" throughout (NWA = Nondeterministic Weighted Automaton)
+- Consolidated all NWA builders into single `unresolved_nwa_builder.py`
+- Removed obsolete: `flattened_nwa_builder.py`, `resolved_nwa_builder.py`, `expanded_nwa_builder.py`, `nwa_builder.py`
+- Updated IR output from `flattened_nwa.json` to `unresolved_nwa.json`
+- Fixed label type interpretation: neg(X) = PUSH operation (was incorrectly "pop")
+- Added template-region-aware layout: regions now stacked vertically with no overlap
+- Template region boxes changed from filled rectangles to dashed outlines
+- Each template region gets a distinct color
+
 ---
 
 ## Edge Style Consistency Work (2025-12-09)
