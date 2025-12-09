@@ -200,3 +200,22 @@
 4. `grammar_v22` - 14 rules, 217 NWA states, 12 vocab tokens
 
 **Recommendation:** `grammar_v19` is the simplest passing candidate with the fewest NWA states (183), making it most readable for paper figures. However, the current `grammar_literals` works well too.
+
+**Scoring System Rewrite (2025-12-10):**
+- Changed from 0-100 scale to unbounded score
+- Penalties: -0.3 per NWA state, -2.0 per Final DWA state, -0.1 per edge, etc.
+- Bonuses: +5 for passing validation, +10 if NWA states < 100
+- Best candidate: `grammar_v27` with score -53.5, 55 NWA states
+
+**Best Grammar Found: v27**
+```ebnf
+start ::= expr
+expr ::= expr '+' atom | atom | '(' expr ')'
+atom ::= 'a' | 'ab'
+```
+- 6 rules, 6 terminals
+- 55 NWA states (vs 183-200 for previous candidates)
+- Minimal, clean, readable
+
+**Visual Fixes (2025-12-10):**
+- Increased tokenizer DFA node spacing from 1.2 to 1.8 (nodes were touching)
