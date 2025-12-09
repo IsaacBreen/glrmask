@@ -164,3 +164,25 @@
   - Supports `ebnf` and `lark`.
   - Auto-detects by file extension if not specified.
   - No longer assumes EBNF by default without checking.
+
+---
+
+## Figure Optimization Work (2025-12-10)
+
+**Goal:** Find the best grammar/vocab combination for paper figures.
+
+**Findings:**
+- Created `temp/evaluate_candidates.py` in figures/components/ for systematic evaluation
+- Evaluated 20+ candidate grammars
+- Passing candidates must have specific structure:
+  - Three nonterminal levels: `expr -> term -> factor -> atom`
+  - The `factor` level must have unary operators (`-`) and parentheses (`()`)
+  - Atoms must have prefix-sharing (e.g., 'a'/'ab'/'abc' or '1'/'12')
+
+**Passing Candidates (all score 95.0):**
+1. `grammar_literals` (current) - 13 rules, 200 NWA states, 13 vocab tokens
+2. `grammar_v12` - 14 rules, 217 NWA states, 12 vocab tokens (adds '123')
+3. `grammar_v19` - 12 rules, 183 NWA states, 10 vocab tokens (simplest!)
+4. `grammar_v22` - 14 rules, 217 NWA states, 12 vocab tokens
+
+**Recommendation:** `grammar_v19` is the simplest passing candidate with the fewest NWA states (183), making it most readable for paper figures. However, the current `grammar_literals` works well too.
