@@ -1,5 +1,47 @@
 # TODO List
 
+## NWA Layout Improvement (2025-12-09) - COMPLETED ✓
+
+### Problem:
+The unresolved NWA graph should look similar to the terminal DWA, but with edges replaced by template DFA subgraphs. Previously:
+- Template subgraphs looked good individually
+- BUT the "outer" nodes (body states) were not laid out properly relative to each other
+- The layout didn't mimic the terminal DWA structure
+
+### Solution Implemented:
+1. **Scaled TDWA positions** for outer nodes - outer nodes now preserve the relative positions from terminal DWA
+2. **Templates positioned between entry and exit** - templates are horizontally centered between their entry and exit outer nodes
+3. **Vertical stacking** - multiple templates sharing an entry are stacked vertically
+
+### Results:
+- Before: Outer nodes scattered (64@0,5; 11@2,5; 1@27,10; 3@2,0)
+- After: Outer nodes follow TDWA structure (64@0,3; 11@48,3; 1@96,6; 3@96,0)
+- Validation still passes
+
+---
+
+## NWA Layout and Validation (2025-12-09)
+
+### Completed:
+- [x] Fixed NWA entry node deduplication (Rust dumper was creating duplicate entry nodes)
+- [x] Added entry_node_mapping and combined_start_mapping to pipeline artifacts
+- [x] Implemented `validate_nwa_layout_sanity()` with position and rectangle checks
+- [x] Fixed layout algorithm to position entry states LEFT, templates MIDDLE, exit states RIGHT
+- [x] Fixed validation to skip unnamed template regions (terminal_id=None)
+- [x] Terminal DWA positions now properly cached and used for NWA Y positioning
+
+### Layout Structure:
+- Start state (64) at x=0
+- Entry states (11, 3) at x=2
+- Templates at x=4-24
+- Exit states (1, 0) at x=27-30
+
+### Validation Rules:
+1. **Position consistency**: NWA outer nodes preserve relative positions from terminal DWA
+2. **Rectangle positioning**: Named template regions must be between their entry and exit nodes
+
+---
+
 ## Candidate Scoring Update (2025-12-09)
 
 Added structural bonuses to incentivize good visualization properties:
