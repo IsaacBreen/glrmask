@@ -522,7 +522,6 @@ impl JSONConvertible for GrammarConstraintJSON {
 impl JSONConvertible for GrammarConstraint {
     fn to_json(&self) -> JSONNode {
         let mut dwa = self.parser_dwa.clone();
-        dwa.optimize_for_visualization();
 
         let intermediate = GrammarConstraintJSON {
             tokenizer_dfa: self.tokenizer.dfa.clone(),

@@ -116,7 +116,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let terminals_count = parser.terminal_map.len();
     let active_states = vec![tokenizer.initial_state_id()];
 
-    let skeleton_dwa = run_precompute1(
+    let mut skeleton_dwa = run_precompute1(
         tokenizer,
         Some(parser),
         &internal_llm_token_map,
@@ -257,7 +257,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let flattened_nwa = NWA { states: combined_nwa_states, body: NWABody { start_states: vec![combined_start_state] } };
+    let mut flattened_nwa = NWA { states: combined_nwa_states, body: NWABody { start_states: vec![combined_start_state] } };
     if is_debug_level_enabled(4) {
         println!("Flattened NWA:");
         println!("{}", flattened_nwa);
@@ -277,6 +277,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("Final DWA:");
         println!("{}", final_dwa);
     }
+
+    // Optimize DWA/NWA for visualization
+    skeleton_dwa.optimize_for_visualization();
+    flattened_nwa.optimize_for_visualization();
+    resolved_nwa.optimize_for_visualization();
+    final_dwa.optimize_for_visualization();
 
     // 7. Dump Everything
     println!("Dumping artifacts to {:?}...", cli.output);
