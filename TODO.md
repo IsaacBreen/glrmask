@@ -371,9 +371,21 @@ atom ::= 'a' | 'ab'
 
 ---
 
-## Next Candidate Exploration (2025-12-09)
+## Next Candidate Exploration (2025-12-09) - COMPLETED ✓
 
 - [x] Refresh baseline by running `make evaluate` to record latest scores and bonus coverage.
-- [ ] Design and add at least 3 new "outside-the-box" grammars (e.g., unary-only operator, mixed prefix/infix, asymmetric prefix chains) with matching vocabs in `candidates/`.
-- [ ] Evaluate new candidates and compare scores/validation; target beating `grammar_v27` while keeping NWA state count low.
-- [ ] Switch `inputs/` to the best new candidate (or revert to `grammar_v27`) and rebuild figures to verify validation passes.
+- [x] Design and add at least 3 new "outside-the-box" grammars (e.g., unary-only operator, mixed prefix/infix, asymmetric prefix chains) with matching vocabs in `candidates/`.
+- [x] Evaluate new candidates and compare scores/validation; target beating `grammar_v27` while keeping NWA state count low.
+- [x] Switch `inputs/` to the best new candidate (or revert to `grammar_v27`) and rebuild figures to verify validation passes.
+
+**Results:**
+- Created 5 new candidates: grammar_v51 (numeric), v52 (triple prefix), v53 (unary only), v54 (cross), v55 (ultra-minimal)
+- **Best candidate: grammar_v55** with score **-16.5** (vs v27's -31.9)
+- grammar_v55 structure:
+  ```
+  start ::= expr '$';
+  expr ::= atom | '(' expr ')';
+  atom ::= 'a' | 'ab';
+  ```
+- Only 36 NWA states, 5 vocab tokens
+- Switched to v55 and rebuilt pipeline - validation passes
