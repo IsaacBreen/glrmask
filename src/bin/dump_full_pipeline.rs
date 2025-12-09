@@ -279,6 +279,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Optimize DWA/NWA for visualization
+    skeleton_dwa.simplify();
+    flattened_nwa.simplify();
+    resolved_nwa.simplify();
+    final_dwa.simplify();
     skeleton_dwa.optimize_for_visualization();
     flattened_nwa.optimize_for_visualization();
     resolved_nwa.optimize_for_visualization();
