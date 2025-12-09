@@ -271,6 +271,15 @@ impl DWA {
                     }
                 }
             }
+
+            let mut dead_keys = Vec::new();
+            for (lbl, w) in &self.states[s].trans_weights {
+                if w.is_empty() { dead_keys.push(*lbl); }
+            }
+            for k in dead_keys {
+                self.states[s].trans_weights.remove(&k);
+                self.states[s].transitions.remove(&k);
+            }
         }
     }
 }
