@@ -196,6 +196,18 @@ Current best candidates: `grammar_literals` and `grammar_v27` (tied at -35.1)
 
 **Goal:** Find the best grammar/vocab combination for paper figures.
 
+**Parallel Edge Visualization Fix (2025-12-10):**
+- Added `\RenderLabelMask` macro to shared_styles.tex for grouped labels
+- Updated ALL builders to group parallel edges:
+  - terminal_dwa_builder.py
+  - final_dwa_builder.py
+  - flattened_nwa_builder.py
+  - resolved_nwa_builder.py
+  - tokenizer_dfa_builder.py
+- Added helper functions to base.py: `group_parallel_edges()`, `render_grouped_labels()`, `render_grouped_simple_labels()`
+- Now renders multiple labels side-by-side instead of overlapping
+- Each label has its own text above and barcode below
+
 **Makefile Targets Added:**
 - `make evaluate` - Evaluate ALL candidates and rank them
 - `make evaluate-current` - Evaluate only current inputs/
