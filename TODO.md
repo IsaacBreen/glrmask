@@ -201,12 +201,18 @@ Current best candidates: `grammar_literals` and `grammar_v27` (tied at -35.1)
 - Updated ALL builders to group parallel edges:
   - terminal_dwa_builder.py
   - final_dwa_builder.py
-  - flattened_nwa_builder.py
-  - resolved_nwa_builder.py
   - tokenizer_dfa_builder.py
-- Added helper functions to base.py: `group_parallel_edges()`, `render_grouped_labels()`, `render_grouped_simple_labels()`
+  - nwa_builder.py (NEW - replaces flattened_nwa and resolved_nwa)
+- Added helper functions to base.py: `group_edges_by_pair()`, `render_grouped_labels()`, `render_grouped_simple_labels()`
 - Now renders multiple labels side-by-side instead of overlapping
 - Each label has its own text above and barcode below
+
+**NWA Visualization Consolidation (2025-12-10):**
+- Created `nwa_builder.py` - merges flattened_nwa and resolved_nwa into single "NWA (Weighted Automaton)"
+- Removed `flattened_nwa_builder.py` and `resolved_nwa_builder.py` from active use
+- Updated Makefile: COMPONENTS now has `nwa` instead of `flattened_nwa resolved_nwa`
+- Component count reduced from 9 to 8
+- Also created `expanded_nwa_builder.py` (terminal DWA with inlined template DFAs) - available but not in default pipeline
 
 **Makefile Targets Added:**
 - `make evaluate` - Evaluate ALL candidates and rank them
