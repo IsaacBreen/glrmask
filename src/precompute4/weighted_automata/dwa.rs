@@ -151,27 +151,34 @@ impl DWA {
     }
 
     pub fn optimize_for_visualization(&mut self) {
-        let n = self.states.len();
         // 1. Forward reachability
-        let mut reachable = vec![Weight::zeros(); n];
-        if self.body.start_state < n {
+        // reachable[s] = set of tokens that can reach state s
+        let mut reachable: Vec<Weight> = vec![Weight::zeros(); self.states.len()];
+        
+        if self.body.start_state < self.states.len() {
             reachable[self.body.start_state] = Weight::all();
         }
 
         let mut changed = true;
         while changed {
             changed = false;
-            for s in 0..n {
+            for s in 0..self.states.len() {
                 let r_s = reachable[s].clone();
                 if r_s.is_empty() { continue; }
                 
-                for (lbl, &target) in &self.states[s].transitions {
-                    if let Some(w) = self.states[s].trans_weights.get(lbl) {
-                        if target < n {
-                            let flow = &r_s & w;
-                            if !flow.is_subset_of(&reachable[target]) {
-                                reachable[target] |= &flow;
-                                changed = true;
+                // We need to iterate transitions. We can't hold a reference to self.states while modifying reachable if we needed to,
+                // but reachable is separate.
+                let state = &self.states[s];
+                for (lbl, &target) in &state.transitions {
+                    if let Some(w) = state.trans_weights.get(lbl) {
+                        let new_reach = &r_s & w;
+                        if !new_reach.is_empty() {
+                            if target < reachable.len() {
+                                let old_reach = &reachable[target];
+                                if !new_reach.is_subset_of(old_reach) {
+                                    reachable[target] |= &new_reach;
+                                    changed = true;
+                                }
                             }
                         }
                     }
@@ -179,52 +186,87 @@ impl DWA {
             }
         }
         
-        // 2. Backward reachability
-        let mut useful = vec![Weight::zeros(); n];
+        // Apply forward reachability to weights
+        for s in 0..self.states.len() {
+            let r_s = &reachable[s];
+            if r_s.is_empty() {
+                self.states[s].final_weight = None;
+                self.states[s].state_weight = None;
+                self.states[s].trans_weights.clear();
+                self.states[s].transitions.clear();
+                continue;
+            }
+            
+            if let Some(fw) = &mut self.states[s].final_weight {
+                *fw &= r_s;
+                if fw.is_empty() { self.states[s].final_weight = None; }
+            }
+            if let Some(sw) = &mut self.states[s].state_weight {
+                *sw &= r_s;
+                if sw.is_empty() { self.states[s].state_weight = None; }
+            }
+            
+            for w in self.states[s].trans_weights.values_mut() {
+                *w &= r_s;
+            }
+        }
+        
+        // 2. Backward reachability (Useful tokens)
+        // useful[s] = set of tokens that can reach a final state from s
+        let mut useful: Vec<Weight> = vec![Weight::zeros(); self.states.len()];
+        
         changed = true;
         while changed {
             changed = false;
-            for s in 0..n {
+            for s in 0..self.states.len() {
                 let mut u_s = useful[s].clone();
-                
+                let mut local_changed = false;
+
+                // Base case: final weight
                 if let Some(fw) = &self.states[s].final_weight {
-                    u_s |= fw;
+                    if !fw.is_subset_of(&u_s) {
+                        u_s |= fw;
+                        local_changed = true;
+                    }
                 }
                 
+                // Recursive step
                 for (lbl, &target) in &self.states[s].transitions {
                     if let Some(w) = self.states[s].trans_weights.get(lbl) {
-                        if target < n {
-                            let contribution = w & &useful[target];
-                            u_s |= &contribution;
+                        if target < useful.len() {
+                             let u_t = &useful[target];
+                             let contribution = w & u_t;
+                             if !contribution.is_subset_of(&u_s) {
+                                 u_s |= &contribution;
+                                 local_changed = true;
+                             }
                         }
                     }
                 }
                 
-                if !u_s.is_subset_of(&useful[s]) {
+                if local_changed {
                     useful[s] = u_s;
                     changed = true;
                 }
             }
         }
         
-        // 3. Apply weights
-        for s in 0..n {
+        // Apply backward reachability
+        for s in 0..self.states.len() {
+            let u_s = &useful[s];
+            
             if let Some(sw) = &mut self.states[s].state_weight {
-                *sw &= &reachable[s];
-                *sw &= &useful[s];
+                *sw &= u_s;
                 if sw.is_empty() { self.states[s].state_weight = None; }
             }
             
-            if let Some(fw) = &mut self.states[s].final_weight {
-                *fw &= &reachable[s];
-                if fw.is_empty() { self.states[s].final_weight = None; }
-            }
-            
+            // Update transition weights: w_new = w & useful[target]
+            // We need to collect targets first to avoid borrow issues if we were modifying structure,
+            // but here we modify values in trans_weights.
             let targets: Vec<(Label, StateID)> = self.states[s].transitions.iter().map(|(&l, &t)| (l, t)).collect();
             for (lbl, target) in targets {
-                if target < n {
+                if target < useful.len() {
                     if let Some(w) = self.states[s].trans_weights.get_mut(&lbl) {
-                        *w &= &reachable[s];
                         *w &= &useful[target];
                     }
                 }

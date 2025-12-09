@@ -282,8 +282,9 @@ impl NWA {
 
     pub fn optimize_for_visualization(&mut self) {
         let n = self.states.len();
-        // 1. Forward Reachability
         let mut reachable = vec![Weight::zeros(); n];
+
+        // 1. Forward Reachability
         for &s in &self.body.start_states {
             if s < n { reachable[s] = Weight::all(); }
         }
@@ -318,17 +319,14 @@ impl NWA {
             }
         }
 
-        // 2. Backward Reachability
+        // 2. Backward Reachability (Useful tokens)
         let mut useful = vec![Weight::zeros(); n];
         changed = true;
         while changed {
             changed = false;
             for u in 0..n {
                 let mut u_new = useful[u].clone();
-                
-                if let Some(fw) = &self.states[u].final_weight {
-                    u_new |= fw;
-                }
+                if let Some(fw) = &self.states[u].final_weight { u_new |= fw; }
                 
                 for (v, w) in &self.states[u].epsilons {
                     if *v < n { u_new |= &(w & &useful[*v]); }
@@ -340,13 +338,13 @@ impl NWA {
                 }
                 
                 if !u_new.is_subset_of(&useful[u]) {
-                    useful[u] = u_new;
+                    useful[u] |= &u_new;
                     changed = true;
                 }
             }
         }
 
-        // 3. Apply weights
+        // 3. Prune
         for u in 0..n {
             if let Some(fw) = &mut self.states[u].final_weight {
                 *fw &= &reachable[u];
