@@ -224,15 +224,19 @@ atom ::= 'a' | 'ab'
 
 ## Edge Style Consistency Work (2025-12-09)
 
-**Issues to fix (from user feedback):**
-1. PUSH edges (⊕p0, ⊕p1, etc.) have inconsistent styles between graphs:
-   - Flattened NWA: dashed green edges (via pushedge style)
-   - Resolved NWA: normal edges
-   - Terminal DFAs: edges not showing push style at all
-2. Default edges (⊕p*) are dotted, should be normal solid
-3. PUSH edges shouldn't be dashed (confuses with t0, t1, t2 initial edges)
+**Issues (from user feedback):**
+1. PUSH edges (⊕p0, ⊕p1, etc.) had inconsistent styles between graphs
+2. Default edges (⊕p*) were dotted, should be solid
+3. Pop edges were also red (only push should be red)
+4. Edges were going underneath nodes (background layer issue)
+5. Below-zero characterizations had squashed multi-line labels
 
-**Fix plan:**
-- Make PUSH edges solid, red/crimson colored (using cUp color)
-- Make default edges normal solid (not dotted)
-- Add proper push edge handling in terminal DWA builder
+**Fixes implemented:**
+- [x] PUSH edges now solid red (cUp color)
+- [x] Default edges now normal solid (cText!70)
+- [x] Pop edges now gray (cText!70), not red
+- [x] Removed background layer from NWA edge rendering
+- [x] Added push/pop detection from edge labels (not just style field)
+- [x] Fixed Final DWA parallel edges with varying bend angles
+- [x] Increased Final DWA spacing from 3.0x1.2 to 4.0x2.0
+- [x] Below-zero label spacing from -3pt to +2pt
