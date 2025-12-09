@@ -265,3 +265,12 @@ atom ::= 'a' | 'ab'
 - [x] Fixed Final DWA parallel edges with varying bend angles
 - [x] Increased Final DWA spacing from 3.0x1.2 to 4.0x2.0
 - [x] Below-zero label spacing from -3pt to +2pt
+
+---
+
+## Next Candidate Exploration (2025-12-09)
+
+- [x] Refresh baseline by running `make evaluate` to record latest scores and bonus coverage.
+- [ ] Design and add at least 3 new "outside-the-box" grammars (e.g., unary-only operator, mixed prefix/infix, asymmetric prefix chains) with matching vocabs in `candidates/`.
+- [ ] Evaluate new candidates and compare scores/validation; target beating `grammar_v27` while keeping NWA state count low.
+- [ ] Switch `inputs/` to the best new candidate (or revert to `grammar_v27`) and rebuild figures to verify validation passes.
