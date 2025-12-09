@@ -124,6 +124,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         terminals_count,
         active_states,
     );
+    skeleton_dwa.simplify();
     if is_debug_level_enabled(4) {
         println!("Skeleton DWA (Terminal DWA):");
         println!("{}", skeleton_dwa);
@@ -279,9 +280,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Optimize DWA/NWA for visualization
-    skeleton_dwa.simplify();
-    flattened_nwa.simplify();
-    resolved_nwa.simplify();
     final_dwa.simplify();
     skeleton_dwa.optimize_for_visualization();
     flattened_nwa.optimize_for_visualization();
