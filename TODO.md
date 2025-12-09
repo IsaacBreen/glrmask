@@ -1,5 +1,30 @@
 # TODO List
 
+## Candidate Scoring Update (2025-12-09)
+
+Added structural bonuses to incentivize good visualization properties:
+
+**Tokenizer DFA bonuses (+15 max):**
+- [x] Has node not directly connected to root (+5)
+- [x] Has at least one cycle (+5)
+- [x] Has merge point (2+ incoming edges) (+5)
+
+**Terminal DWA bonuses (+10 max):**
+- [x] Has node at distance 3+ from root (+5)
+- [x] Has merge point (+5)
+
+**Final DWA bonuses (+10 max):**
+- [x] Has node at distance 3+ from root (+5)
+- [x] Has merge point (+5)
+
+**Below-zero bonuses (+10 max):**
+- [x] Has path of 3+ edges (+5)
+- [x] Has merge point (+5)
+
+Current best candidates: `grammar_literals` and `grammar_v27` (tied at -35.1)
+
+---
+
 ## Paper Status (2025-12-09)
 
 **Paper is complete and verified:**
