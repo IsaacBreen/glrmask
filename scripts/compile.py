@@ -1,3 +1,23 @@
+#!/usr/bin/env python3
+"""
+Grammar Constraint Compiler
+
+Compiles a context-free grammar and LLM vocabulary into a precomputed constraint
+file for fast grammar-constrained decoding.
+
+Usage:
+    python scripts/compile.py --grammar src/js.ebnf --output constraint.json.gz \\
+        --vocab-url "https://huggingface.co/openai-community/gpt2/raw/main/vocab.json"
+    
+    python scripts/compile.py --grammar grammar.lark --format lark \\
+        --output constraint.json.gz --vocab vocab.json
+
+Outputs a gzip-compressed JSON file containing the deterministic weighted
+automaton and vocabulary mappings needed for fast mask generation.
+
+See README.md for more details.
+"""
+
 import argparse
 import json
 import os
