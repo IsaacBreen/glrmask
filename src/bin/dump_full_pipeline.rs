@@ -22,6 +22,7 @@ use sep1::tokenizer::{LLMTokenID, TokenizerStateID};
 use sep1::constraint::LLMTokenBV;
 use serde_json::json;
 use sep1::precompute4::resolve_negatives::resolve_negative_codes_in_nwa;
+use sep1::r#macro::is_debug_level_enabled;
 
 #[derive(Parser)]
 #[command(author, version, about = "Dump full pipeline artifacts for visualization")]
@@ -78,6 +79,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let template_dwas = build_template_dwas(parser).expect("Failed to build template DWAs");
     let ignore_dwa = build_ignore_terminal_dwa();
     
+    if is_debug_level_enabled(4) {
+        println!("Template DFAs:");
+        for (tid, dwa) in &template_dwas {
+            let default_name = format!("t{}", tid.0);
+            let name = terminal_names.get(&tid.0).unwrap_or(&default_name);
+            println!("  Template for {} ({:?}):", name, tid);
+            for line in format!("{}", dwa).lines() {
+                println!("    {}", line);
+            }
+        }
+    }
+    
     let template_map: BTreeMap<String, String> = template_dwas.iter()
         .map(|(tid, dwa)| (format!("{:?}", tid), format!("{}", dwa)))
         .collect();
@@ -111,6 +124,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         terminals_count,
         active_states,
     );
+    if is_debug_level_enabled(4) {
+        println!("Skeleton DWA (Terminal DWA):");
+        println!("{}", skeleton_dwa);
+    }
 
     // 5. Build Flattened NWA (Replicating Precompute4 Pass 2)
     println!("Building Flattened NWA...");
@@ -241,13 +258,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let flattened_nwa = NWA { states: combined_nwa_states, body: NWABody { start_states: vec![combined_start_state] } };
+    if is_debug_level_enabled(4) {
+        println!("Flattened NWA:");
+        println!("{}", flattened_nwa);
+    }
 
     // 6. Build Final DWA
     println!("Building Final DWA...");
     let mut resolved_nwa = flattened_nwa.clone();
     resolve_negative_codes_in_nwa(&mut resolved_nwa);
+    if is_debug_level_enabled(4) {
+        println!("Resolved NWA:");
+        println!("{}", resolved_nwa);
+    }
     let mut final_dwa = finalize_and_optimize_and_determinize(parser, resolved_nwa.clone());
     final_dwa.simplify();
+    if is_debug_level_enabled(4) {
+        println!("Final DWA:");
+        println!("{}", final_dwa);
+    }
 
     // 7. Dump Everything
     println!("Dumping artifacts to {:?}...", cli.output);
