@@ -171,8 +171,22 @@
 
 **Goal:** Find the best grammar/vocab combination for paper figures.
 
+**Makefile Targets Added:**
+- `make evaluate` - Evaluate ALL candidates and rank them
+- `make evaluate-current` - Evaluate only current inputs/
+- `make candidate CANDIDATE=grammar_v19` - Build & validate a specific candidate
+- `make use-candidate CANDIDATE=grammar_v19` - Use a candidate as active input
+- `make candidates` - List available candidates
+
+**Code Reorganization (2025-12-10):**
+- Moved `temp/evaluate_candidates.py` to `evaluate_candidates.py` (at component root)
+- Moved `temp/evaluate_single.py` to `evaluate_single.py`
+- Removed obsolete files: `temp/candidate_search.py`, `temp/check_weights.py`
+- Removed temp build artifacts: `temp/temp*.tex`
+- Updated Makefile to reference new script locations
+- Removed temp/ directory entirely
+
 **Findings:**
-- Created `temp/evaluate_candidates.py` in figures/components/ for systematic evaluation
 - Evaluated 20+ candidate grammars
 - Passing candidates must have specific structure:
   - Three nonterminal levels: `expr -> term -> factor -> atom`
