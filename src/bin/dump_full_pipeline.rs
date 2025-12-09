@@ -42,7 +42,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let grammar_text = std::fs::read_to_string(&cli.grammar)?;
     
     println!("Compiling grammar from {:?}...", cli.grammar);
-    let grammar_def = GrammarDefinition::from_ebnf(&grammar_text).expect("Failed to parse EBNF");
+    // Use from_ebnf_no_optimize to preserve original grammar structure for visualization
+    let grammar_def = GrammarDefinition::from_ebnf_no_optimize(&grammar_text).expect("Failed to parse EBNF");
     let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_def));
     let parser = &compiled_grammar.glr_parser;
     let tokenizer = &compiled_grammar.tokenizer;

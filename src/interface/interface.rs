@@ -855,6 +855,7 @@ impl GrammarDefinition {
         per_base_counters: &mut HashMap<String, usize>,
         all_names: &mut HashSet<String>,
         memo: &mut BTreeMap<GrammarExpr, NonTerminal>,
+        should_optimize: bool,
     ) -> Result<(Vec<Symbol>, Vec<Production>), String> {
         match expr {
             GrammarExpr::AnyChar => Err(
@@ -902,6 +903,7 @@ impl GrammarDefinition {
                         per_base_counters,
                         all_names,
                         memo,
+                        should_optimize,
                     )?;
                     combined_symbols.extend(symbols);
                     combined_productions.extend(new_productions);
@@ -928,7 +930,8 @@ impl GrammarDefinition {
                     // Only optimize small-to-medium enums (3-100 alternatives).
                     // Very large enums (>100) create massive tokenizer DFAs, so it's better
                     // to keep them as productions and let the grammar optimizer handle them.
-                    if literals.len() >= 3 && literals.len() <= 100 {
+                    // Skip this optimization entirely if should_optimize is false.
+                    if should_optimize && literals.len() >= 3 && literals.len() <= 100 {
                         // Create a regex alternation: (lit1|lit2|lit3|...)
                         let choice_expr = Expr::Choice(
                             literals.iter().map(|bytes| Expr::U8Seq(bytes.to_vec())).collect()
@@ -982,6 +985,7 @@ impl GrammarDefinition {
                             per_base_counters,
                             all_names,
                             memo,
+                            should_optimize,
                         )?;
                     choice_defining_productions.push(Production {
                         lhs: nt.clone(),
@@ -1008,6 +1012,7 @@ impl GrammarDefinition {
                     per_base_counters,
                     all_names,
                     memo,
+                    should_optimize,
                 )
             }
             GrammarExpr::Repeat(expr_box) => {
@@ -1033,6 +1038,7 @@ impl GrammarDefinition {
                         per_base_counters,
                         all_names,
                         memo,
+                        should_optimize,
                     )?;
 
                 let mut current_level_productions = Vec::new();
@@ -1312,7 +1318,8 @@ impl GrammarDefinition {
                     // Only optimize small-to-medium enums (3-100 alternatives).
                     // Very large enums (>100) create massive tokenizer DFAs, so it's better
                     // to keep them as productions and let the grammar optimizer handle them.
-                    if literals.len() >= 3 && literals.len() <= 100 {
+                    // Skip this optimization entirely if should_optimize is false.
+                    if should_optimize && literals.len() >= 3 && literals.len() <= 100 {
                         // Create a regex alternation: (lit1|lit2|lit3|...)
                         let choice_expr = Expr::Choice(
                             literals.iter().map(|bytes| Expr::U8Seq(bytes.to_vec())).collect()
@@ -1367,6 +1374,7 @@ impl GrammarDefinition {
                             &mut per_base_counters,
                             &mut all_names,
                             &mut memo,
+                            should_optimize,
                         )?;
                     productions.push(Production {
                         lhs: lhs.clone(),
@@ -1387,6 +1395,7 @@ impl GrammarDefinition {
                         &mut per_base_counters,
                         &mut all_names,
                         &mut memo,
+                        should_optimize,
                     )?;
                 productions.push(Production { lhs, rhs: rhs_symbols });
                 productions.extend(new_productions_for_rhs);
@@ -1528,6 +1537,24 @@ impl GrammarDefinition {
         grammar_exprs: Vec<(String, GrammarExpr)>,
         ignore_symbol_name: Option<String>,
     ) -> Result<Self, String> {
+        Self::from_parsed_rules_impl(grammar_exprs, ignore_symbol_name, true)
+    }
+
+    /// Like `from_parsed_rules` but without grammar optimization.
+    /// Useful for visualization/debugging where you want to see the original grammar structure.
+    fn from_parsed_rules_no_optimize(
+        grammar_exprs: Vec<(String, GrammarExpr)>,
+        ignore_symbol_name: Option<String>,
+    ) -> Result<Self, String> {
+        Self::from_parsed_rules_impl(grammar_exprs, ignore_symbol_name, false)
+    }
+
+    /// Internal implementation with explicit optimize flag.
+    fn from_parsed_rules_impl(
+        grammar_exprs: Vec<(String, GrammarExpr)>,
+        ignore_symbol_name: Option<String>,
+        should_optimize: bool,
+    ) -> Result<Self, String> {
         fn is_terminal_name(name: &str) -> bool {
             name.chars().next().map_or(false, |c| c.is_uppercase())
         }
@@ -1603,10 +1630,11 @@ impl GrammarDefinition {
             terminal_defs.push((name, shared_expr));
         }
 
-        let grammar_def = GrammarDefinition::from_exprs_with_ignore(
+        let grammar_def = GrammarDefinition::from_exprs_impl(
             non_terminal_rules, 
             terminal_defs,
             ignore_symbol_name.as_deref(),
+            should_optimize,
         )?;
 
         Ok(grammar_def)
@@ -1621,6 +1649,13 @@ impl GrammarDefinition {
     pub fn from_ebnf(ebnf_source: &str) -> Result<Self, String> {
         let ebnf = EbnfParser::new(ebnf_source).and_then(|mut p| p.parse())?;
         Self::from_parsed_rules(ebnf.grammar_rules, ebnf.ignore_symbol_name)
+    }
+
+    /// Like `from_ebnf` but without grammar optimization.
+    /// Useful for visualization/debugging where you want to see the original grammar structure.
+    pub fn from_ebnf_no_optimize(ebnf_source: &str) -> Result<Self, String> {
+        let ebnf = EbnfParser::new(ebnf_source).and_then(|mut p| p.parse())?;
+        Self::from_parsed_rules_no_optimize(ebnf.grammar_rules, ebnf.ignore_symbol_name)
     }
 
     /// Constructs a `GrammarDefinition` from a Lark grammar string.
