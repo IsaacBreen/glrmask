@@ -282,94 +282,136 @@ impl NWA {
 
     pub fn optimize_for_visualization(&mut self) {
         let n = self.states.len();
-        let mut reachable = vec![Weight::zeros(); n];
+        if n == 0 {
+            return;
+        }
 
-        // 1. Forward Reachability
+        // 1. Forward tokens: tokens that can reach each state from some start state.
+        let mut forward: Vec<Weight> = vec![Weight::zeros(); n];
         for &s in &self.body.start_states {
-            if s < n { reachable[s] = Weight::all(); }
+            if s < n {
+                forward[s] |= &Weight::all();
+            }
         }
 
         let mut changed = true;
         while changed {
             changed = false;
             for u in 0..n {
-                let r_u = reachable[u].clone();
-                if r_u.is_empty() { continue; }
-                
+                let fu = forward[u].clone();
+                if fu.is_empty() {
+                    continue;
+                }
+
+                // Epsilon transitions
                 for (v, w) in &self.states[u].epsilons {
-                    if *v < n {
-                        let flow = &r_u & w;
-                        if !flow.is_subset_of(&reachable[*v]) {
-                            reachable[*v] |= &flow;
-                            changed = true;
-                        }
+                    if *v >= n {
+                        continue;
+                    }
+                    let flow = &fu & w;
+                    if !flow.is_subset_of(&forward[*v]) {
+                        forward[*v] |= &flow;
+                        changed = true;
                     }
                 }
+
+                // Labeled transitions
                 for targets in self.states[u].transitions.values() {
                     for (v, w) in targets {
-                        if *v < n {
-                            let flow = &r_u & w;
-                            if !flow.is_subset_of(&reachable[*v]) {
-                                reachable[*v] |= &flow;
-                                changed = true;
-                            }
+                        if *v >= n {
+                            continue;
+                        }
+                        let flow = &fu & w;
+                        if !flow.is_subset_of(&forward[*v]) {
+                            forward[*v] |= &flow;
+                            changed = true;
                         }
                     }
                 }
             }
         }
 
-        // 2. Backward Reachability (Useful tokens)
-        let mut useful = vec![Weight::zeros(); n];
+        // 2. Backward tokens: tokens that can go from each state to some final state.
+        let mut backward: Vec<Weight> = vec![Weight::zeros(); n];
+
         changed = true;
         while changed {
             changed = false;
             for u in 0..n {
-                let mut u_new = useful[u].clone();
-                if let Some(fw) = &self.states[u].final_weight { u_new |= fw; }
-                
-                for (v, w) in &self.states[u].epsilons {
-                    if *v < n { u_new |= &(w & &useful[*v]); }
-                }
-                for targets in self.states[u].transitions.values() {
-                    for (v, w) in targets {
-                        if *v < n { u_new |= &(w & &useful[*v]); }
+                let mut b_new = backward[u].clone();
+
+                if let Some(fw) = &self.states[u].final_weight {
+                    if !fw.is_subset_of(&b_new) {
+                        b_new |= fw;
                     }
                 }
-                
-                if !u_new.is_subset_of(&useful[u]) {
-                    useful[u] |= &u_new;
+
+                for (v, w) in &self.states[u].epsilons {
+                    if *v >= n {
+                        continue;
+                    }
+                    let contrib = w & &backward[*v];
+                    if !contrib.is_subset_of(&b_new) {
+                        b_new |= &contrib;
+                    }
+                }
+
+                for targets in self.states[u].transitions.values() {
+                    for (v, w) in targets {
+                        if *v >= n {
+                            continue;
+                        }
+                        let contrib = w & &backward[*v];
+                        if !contrib.is_subset_of(&b_new) {
+                            b_new |= &contrib;
+                        }
+                    }
+                }
+
+                if !b_new.is_subset_of(&backward[u]) {
+                    backward[u] |= &b_new;
                     changed = true;
                 }
             }
         }
 
-        // 3. Prune
+        // 3. Prune weights using forward & backward information.
         for u in 0..n {
+            // Final weights: tokens must be reachable from some start.
             if let Some(fw) = &mut self.states[u].final_weight {
-                *fw &= &reachable[u];
-                if fw.is_empty() { self.states[u].final_weight = None; }
+                *fw &= &forward[u];
+                if fw.is_empty() {
+                    self.states[u].final_weight = None;
+                }
             }
 
+            // Epsilon transitions
             let mut new_eps = Vec::new();
             for (v, w) in &self.states[u].epsilons {
-                if *v < n {
-                    let mut new_w = w.clone();
-                    new_w &= &reachable[u];
-                    new_w &= &useful[*v];
-                    if !new_w.is_empty() { new_eps.push((*v, new_w)); }
+                if *v >= n {
+                    continue;
+                }
+                let mut new_w = w.clone();
+                new_w &= &forward[u];
+                new_w &= &backward[*v];
+                if !new_w.is_empty() {
+                    new_eps.push((*v, new_w));
                 }
             }
             self.states[u].epsilons = new_eps;
 
+            // Labeled transitions
             for targets in self.states[u].transitions.values_mut() {
                 let mut new_targets = Vec::new();
                 for (v, w) in targets.iter() {
-                    if *v < n {
-                        let mut new_w = w.clone();
-                        new_w &= &reachable[u];
-                        new_w &= &useful[*v];
-                        if !new_w.is_empty() { new_targets.push((*v, new_w)); }
+                    if *v >= n {
+                        continue;
+                    }
+                    let mut new_w = w.clone();
+                    new_w &= &forward[u];
+                    new_w &= &backward[*v];
+                    if !new_w.is_empty() {
+                        new_targets.push((*v, new_w));
                     }
                 }
                 *targets = new_targets;
