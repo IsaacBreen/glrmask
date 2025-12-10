@@ -8,7 +8,7 @@ use clap::Parser;
 
 use sep1::interface::{CompiledGrammar, GrammarDefinition};
 use sep1::glr::grammar::Terminal;
-use sep1::glr::table::TerminalID;
+use sep1::glr::table::{TerminalID, Stage7ShiftsAndReducesLookaheadValue};
 use sep1::precompute4::characterize::compute_all_characterizations;
 use sep1::precompute4::template_nwa::{build_terminal_dwas, build_ignore_terminal_dwa};
 use sep1::precompute4::weighted_automata::{NWA, NWABody, NWAState, NWAStates, Weight};
@@ -420,6 +420,82 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "nwa_entry_node": combined_start_state
     });
     
+    // Build parse table representation for visualization
+    let parse_table_data: Vec<serde_json::Value> = parser.table.iter()
+        .map(|(state_id, row)| {
+            // Build action map (terminals -> shift/reduce)
+            let actions: BTreeMap<String, serde_json::Value> = row.get_shifts_and_reduces_map()
+                .iter()
+                .map(|(term_id, action)| {
+                    let term_name = terminal_names.get(&term_id.0)
+                        .cloned()
+                        .unwrap_or_else(|| format!("t{}", term_id.0));
+                    let action_val = match action {
+                        Stage7ShiftsAndReducesLookaheadValue::Shift(target) => {
+                            json!({"type": "shift", "target": target.0})
+                        },
+                        Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids: _ } => {
+                            let nt_name = nonterminal_names.get(&nonterminal_id.0)
+                                .cloned()
+                                .unwrap_or_else(|| format!("N{}", nonterminal_id.0));
+                            json!({"type": "reduce", "nonterminal": nt_name, "len": len})
+                        },
+                        Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
+                            // GLR split - both shift and reduce possible
+                            let mut parts = Vec::new();
+                            if let Some(target) = shift {
+                                parts.push(json!({"type": "shift", "target": target.0}));
+                            }
+                            for (len, nts) in reduces {
+                                for (nt_id, _) in nts {
+                                    let nt_name = nonterminal_names.get(&nt_id.0)
+                                        .cloned()
+                                        .unwrap_or_else(|| format!("N{}", nt_id.0));
+                                    parts.push(json!({"type": "reduce", "nonterminal": nt_name, "len": len}));
+                                }
+                            }
+                            json!({"type": "split", "actions": parts})
+                        },
+                    };
+                    (term_name, action_val)
+                })
+                .collect();
+            
+            // Build goto map (nonterminals -> goto state)
+            let gotos: BTreeMap<String, serde_json::Value> = row.get_gotos()
+                .iter()
+                .filter_map(|(nt_id, goto)| {
+                    goto.state_id.map(|sid| {
+                        let nt_name = nonterminal_names.get(&nt_id.0)
+                            .cloned()
+                            .unwrap_or_else(|| format!("N{}", nt_id.0));
+                        (nt_name, json!({"target": sid.0, "accept": goto.accept}))
+                    })
+                })
+                .collect();
+            
+            // Handle default reduce
+            let default_reduce = row.default_reduce.as_ref().map(|action| {
+                match action {
+                    Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids: _ } => {
+                        let nt_name = nonterminal_names.get(&nonterminal_id.0)
+                            .cloned()
+                            .unwrap_or_else(|| format!("N{}", nonterminal_id.0));
+                        json!({"type": "reduce", "nonterminal": nt_name, "len": len})
+                    },
+                    _ => json!(null)
+                }
+            });
+            
+            json!({
+                "state_id": state_id.0,
+                "actions": actions,
+                "gotos": gotos,
+                "default_reduce": default_reduce
+            })
+        })
+        .collect();
+    
     let output = json!({
         "grammar_text": grammar_text,
         "terminal_names": terminal_names,
@@ -433,6 +509,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "combined_start_mapping": combined_start_mapping,
         "final_dwa": format!("{}", final_dwa),
         "terminal_map": terminal_to_token_id.iter().map(|(k, v)| (format!("{:?}", k), v.0)).collect::<BTreeMap<_, _>>(),
+        "parse_table": parse_table_data,
     });
 
     let mut file = File::create(&cli.output)?;
