@@ -434,11 +434,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         Stage7ShiftsAndReducesLookaheadValue::Shift(target) => {
                             json!({"type": "shift", "target": target.0})
                         }
-                        Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids: _ } => {
+                        Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids } => {
                             let nt_name = nonterminal_names.get(&nonterminal_id.0)
                                 .cloned()
                                 .unwrap_or_else(|| format!("N{}", nonterminal_id.0));
-                            json!({"type": "reduce", "nonterminal": nt_name, "len": len})
+                            let prod_ids: Vec<usize> = production_ids.iter().map(|p| p.0).collect();
+                            json!({"type": "reduce", "nonterminal": nt_name, "len": len, "production_ids": prod_ids})
                         }
                         Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
                             // GLR split - both shift and reduce possible
@@ -447,11 +448,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 parts.push(json!({"type": "shift", "target": target.0}));
                             }
                             for (len, nts) in reduces {
-                                for (nt_id, _) in nts {
+                                for (nt_id, prod_ids) in nts {
                                     let nt_name = nonterminal_names.get(&nt_id.0)
                                         .cloned()
                                         .unwrap_or_else(|| format!("N{}", nt_id.0));
-                                    parts.push(json!({"type": "reduce", "nonterminal": nt_name, "len": len}));
+                                    let pids: Vec<usize> = prod_ids.iter().map(|p| p.0).collect();
+                                    parts.push(json!({"type": "reduce", "nonterminal": nt_name, "len": len, "production_ids": pids}));
                                 }
                             }
                             json!({"type": "split", "actions": parts})
@@ -477,11 +479,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Handle default reduce
             let default_reduce = row.default_reduce.as_ref().map(|action| {
                 match action {
-                    Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids: _ } => {
+                    Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids } => {
                         let nt_name = nonterminal_names.get(&nonterminal_id.0)
                             .cloned()
                             .unwrap_or_else(|| format!("N{}", nonterminal_id.0));
-                        json!({"type": "reduce", "nonterminal": nt_name, "len": len})
+                        let pids: Vec<usize> = production_ids.iter().map(|p| p.0).collect();
+                        json!({"type": "reduce", "nonterminal": nt_name, "len": len, "production_ids": pids})
                     }
                     _ => json!(null)
                 }
@@ -496,10 +499,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .collect();
 
+    // Build productions list for visualization (indexed by production ID)
+    let productions_data: Vec<serde_json::Value> = parser.productions.iter()
+        .enumerate()
+        .map(|(idx, prod)| {
+            let lhs = prod.lhs.0.clone();
+            let rhs: Vec<String> = prod.rhs.iter().map(|sym| {
+                match sym {
+                    sep1::glr::grammar::Symbol::Terminal(t) => match t {
+                        Terminal::Literal(bytes) => format!("'{}'", String::from_utf8_lossy(bytes)),
+                        Terminal::RegexName(name) => name.clone(),
+                    },
+                    sep1::glr::grammar::Symbol::NonTerminal(nt) => nt.0.clone(),
+                }
+            }).collect();
+            json!({
+                "id": idx,
+                "lhs": lhs,
+                "rhs": rhs
+            })
+        })
+        .collect();
+
     let output = json!({
         "grammar_text": grammar_text,
         "terminal_names": terminal_names,
         "nonterminal_names": nonterminal_names,
+        "productions": productions_data,
         "characterizations": char_map,
         "template_dfas": template_map,
         "skeleton_dwa": format!("{}", skeleton_dwa),
