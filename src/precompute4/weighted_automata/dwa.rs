@@ -301,6 +301,34 @@ impl DWA {
                     self.states[s].trans_weights.insert(lbl, new_w);
                 }
             }
+
+            // Default transitions: weights that exist without an explicit target.
+            // We treat these as staying in state `s` and narrow them using the
+            // same forward/backward information as for state weights.
+            let default_labels: Vec<Label> = self.states[s]
+                .trans_weights
+                .keys()
+                .filter(|lbl| !self.states[s].transitions.contains_key(lbl))
+                .copied()
+                .collect();
+
+            for lbl in default_labels {
+                let old_w = self.states[s]
+                    .trans_weights
+                    .get(&lbl)
+                    .cloned()
+                    .unwrap_or_else(Weight::all);
+
+                let mut new_w = old_w;
+                new_w &= &forward[s];
+                new_w &= &backward[s];
+
+                if new_w.is_empty() {
+                    self.states[s].trans_weights.remove(&lbl);
+                } else if let Some(w_mut) = self.states[s].trans_weights.get_mut(&lbl) {
+                    *w_mut = new_w;
+                }
+            }
         }
     }
 }
