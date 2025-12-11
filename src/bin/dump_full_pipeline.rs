@@ -29,7 +29,7 @@ struct Cli {
     /// Path to grammar file (.ebnf)
     #[arg(short, long)]
     grammar: PathBuf,
-    
+
     /// Output JSON file
     #[arg(short, long, default_value = "pipeline_full_artifacts.json")]
     output: PathBuf,
@@ -37,10 +37,10 @@ struct Cli {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
-    
+
     // 1. Load Grammar
     let grammar_text = std::fs::read_to_string(&cli.grammar)?;
-    
+
     println!("Compiling grammar from {:?}...", cli.grammar);
     // Use from_ebnf_no_optimize to preserve original grammar structure for visualization
     let grammar_def = GrammarDefinition::from_ebnf_no_optimize(&grammar_text).expect("Failed to parse EBNF");
@@ -54,7 +54,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let name = match term {
             Terminal::Literal(bytes) => {
                 format!("'{}'", String::from_utf8_lossy(bytes))
-            },
+            }
             Terminal::RegexName(name) => name.clone(),
         };
         terminal_names.insert(tid.0, name);
@@ -77,7 +77,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Building all Template DFAs...");
     let template_dwas = build_terminal_dwas(parser).expect("Failed to build template DWAs");
     let ignore_dwa = build_ignore_terminal_dwa();
-    
+
     if is_debug_level_enabled(4) {
         println!("Template DFAs:");
         for (tid, dwa) in &template_dwas {
@@ -89,14 +89,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
-    
+
     let template_map: BTreeMap<String, String> = template_dwas.iter()
         .map(|(tid, dwa)| (format!("{:?}", tid), format!("{}", dwa)))
         .collect();
 
     // 4. Build Skeleton DWA (Terminal DWA / Precompute1)
     println!("Building Skeleton DWA (Terminal DWA / Precompute1)...");
-    
+
     let mut internal_llm_token_map: BTreeMap<Vec<u8>, LLMTokenID> = BTreeMap::new();
     let mut token_id_counter = 0;
     let mut terminal_to_token_id: BTreeMap<TerminalID, LLMTokenID> = BTreeMap::new();
@@ -109,7 +109,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             token_id_counter += 1;
         }
     }
-    
+
     // Handle case where there are no literal terminals
     let internal_max_llm_token = if token_id_counter > 0 { token_id_counter - 1 } else { 0 };
     let terminals_count = parser.terminal_map.len();
@@ -133,11 +133,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // This creates a cleaner NWA where each terminal's template DFA is copied directly,
     // with epsilon edges connecting entry nodes to template starts and template ends to bodies.
     println!("Building Unresolved NWA...");
-    
+
     let input_nwa = NWA::from_dwa(&skeleton_dwa);
     let reversed_nwa = input_nwa.reverse();
     let traversal_data = reversed_nwa.compute_traversal_data();
-    
+
     // The super_start state (created by reverse()) is at index skeleton_dwa.states.len()
     // We don't want to create entry nodes for this artificial state
     let super_start_state = skeleton_dwa.states.len();
@@ -165,11 +165,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         states[start].final_weight = Some(Weight::all());
         NWABody { start_states: vec![start] }
     };
-    
+
     // Initial: terminal=None maps to initial_body with full weight
-    let initial_term_body_map: BTreeMap<Option<TerminalID>, BTreeMap<NWABody, Weight>> = 
+    let initial_term_body_map: BTreeMap<Option<TerminalID>, BTreeMap<NWABody, Weight>> =
         BTreeMap::from([(None, BTreeMap::from([(initial_body.clone(), Weight::all())]))]);
-    
+
     let initial_values_full: Vec<(usize, (BTreeMap<Option<TerminalID>, BTreeMap<NWABody, Weight>>, LLMTokenBV))> =
         reversed_nwa.body.start_states.iter()
             .map(|&s| (s, (initial_term_body_map.clone(), LLMTokenBV::max_ones())))
@@ -177,7 +177,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let final_bodies_arc: Arc<Mutex<BTreeMap<TokenizerStateID, Vec<(NWABody, Weight)>>>> = Arc::new(Mutex::new(BTreeMap::new()));
     let template_regions_clone = template_regions.clone();
-    
+
     // Track which terminal DWA states we've created entry nodes for
     // Maps terminal DWA state ID -> entry node ID in combined NWA
     let entry_nodes_for_tdwa_state: RefCell<HashMap<usize, usize>> = RefCell::new(HashMap::new());
@@ -214,7 +214,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let edge_bv: LLMTokenBV = weight.clone().into();
                 let next_tokens = current_tokens & &edge_bv;
                 if next_tokens.is_empty() { continue; }
-                
+
                 // New structure: BTreeMap<Option<TerminalID>, BTreeMap<NWABody, Weight>>
                 let mut new_term_bodies = BTreeMap::new();
                 // For each existing body across all terminals, record it under this terminal
@@ -246,50 +246,50 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // - Create entry node A (or reuse if we've already created one for this terminal DWA state)
             // - For each terminal_id: copy template DFA, connect A -> S (full weight), E -> B (weight W)
             let (term_bodies_map, tokens) = val;
-            
+
             // Skip creating entry nodes for the super_start state (it's just an artifact of reversal)
             if tdwa_state_id == super_start_state {
                 // Just propagate values forward without creating structure
                 if !tokens.is_empty() {
                     // Return the same term_bodies_map but packaged for propagation
                     return Some((term_bodies_map.clone(), tokens));
-                } else { 
-                    return None 
+                } else {
+                    return None;
                 }
             }
-            
+
             let mut states = states_arena.borrow_mut();
             let mut entry_nodes_map = entry_nodes_for_tdwa_state.borrow_mut();
-            
+
             // Get or create entry node A for this terminal DWA state
             let is_new = !entry_nodes_map.contains_key(&tdwa_state_id);
             let entry_node_a = *entry_nodes_map.entry(tdwa_state_id).or_insert_with(|| states.add_state());
             if is_new && is_debug_level_enabled(4) {
                 println!("  Created entry node {} for terminal DWA state {}", entry_node_a, tdwa_state_id);
             }
-            
+
             // Loop over (Option<TerminalID>, BTreeMap<NWABody, Weight>) entries
             for (term_id, body_weight_map) in term_bodies_map {
                 // Get the template DFA for this terminal
                 let template_nwa = individual_template_nwas.get(&term_id)
                     .expect("Template must exist for terminal");
-                
+
                 // Copy template into NWA states, returning its start/end nodes
                 // The "start" is template_nwa.body.start_states
                 // The "end" nodes are those with final_weight
                 let template_offset = states.len();
                 let template_end = template_offset + template_nwa.states.len();
-                
+
                 // Record this template region for visualization
                 {
                     let mut regions = template_regions_clone.lock().unwrap();
                     regions.push((template_offset, template_end, term_id.map(|t| t.0)));
                 }
-                
+
                 // Copy all template states
                 for old_state in &template_nwa.states.0 {
                     let mut new_state = NWAState::default();
-                    
+
                     // Copy transitions (adjusting state indices)
                     for (lbl, targets) in &old_state.transitions {
                         let new_targets: Vec<(usize, Weight)> = targets.iter()
@@ -299,12 +299,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             new_state.transitions.insert(*lbl, new_targets);
                         }
                     }
-                    
+
                     // Copy epsilons (adjusting state indices)
                     for (target, w) in &old_state.epsilons {
                         new_state.epsilons.push((*target + template_offset, w.clone()));
                     }
-                    
+
                     // For final states: instead of copying final_weight,
                     // create epsilon edges to each NWA body B with weight W
                     if old_state.final_weight.is_some() {
@@ -314,10 +314,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                     }
-                    
+
                     states.0.push(new_state);
                 }
-                
+
                 // Create epsilon edge A -> S (template start) with FULL weight
                 let template_start_states: Vec<usize> = template_nwa.body.start_states.iter()
                     .map(|s| s + template_offset)
@@ -326,18 +326,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     states[entry_node_a].epsilons.push((s, Weight::all()));
                 }
             }
-            
+
             if !tokens.is_empty() {
                 let result_body = NWABody { start_states: vec![entry_node_a] };
                 let mut next_term_bodies = BTreeMap::new();
                 next_term_bodies.insert(None, BTreeMap::from([(result_body, Weight::all())]));
                 Some((next_term_bodies, tokens))
-            } else { 
-                None 
+            } else {
+                None
             }
         },
     );
-    
+
     // Output the entry node mapping for debugging
     if is_debug_level_enabled(4) {
         let entry_map = entry_nodes_for_tdwa_state.borrow();
@@ -389,7 +389,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 7. Dump Everything
     println!("Dumping artifacts to {:?}...", cli.output);
-    
+
     // Convert template regions to serializable format
     let template_regions_data: Vec<serde_json::Value> = template_regions.lock().unwrap()
         .iter()
@@ -401,7 +401,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             })
         })
         .collect();
-    
+
     // Build entry node mapping for validation
     // Maps terminal DWA state ID -> NWA entry node ID
     let entry_node_mapping: Vec<serde_json::Value> = entry_nodes_for_tdwa_state.borrow()
@@ -413,13 +413,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             })
         })
         .collect();
-    
+
     // Also include the combined_start mapping (terminal DWA state 0 -> NWA combined_start)
     let combined_start_mapping = json!({
         "terminal_dwa_state": 0,
         "nwa_entry_node": combined_start_state
     });
-    
+
     // Build parse table representation for visualization
     let parse_table_data: Vec<serde_json::Value> = parser.table.iter()
         .map(|(state_id, row)| {
@@ -433,13 +433,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let action_val = match action {
                         Stage7ShiftsAndReducesLookaheadValue::Shift(target) => {
                             json!({"type": "shift", "target": target.0})
-                        },
+                        }
                         Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids: _ } => {
                             let nt_name = nonterminal_names.get(&nonterminal_id.0)
                                 .cloned()
                                 .unwrap_or_else(|| format!("N{}", nonterminal_id.0));
                             json!({"type": "reduce", "nonterminal": nt_name, "len": len})
-                        },
+                        }
                         Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
                             // GLR split - both shift and reduce possible
                             let mut parts = Vec::new();
@@ -455,12 +455,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             }
                             json!({"type": "split", "actions": parts})
-                        },
+                        }
                     };
                     (term_name, action_val)
                 })
                 .collect();
-            
+
             // Build goto map (nonterminals -> goto state)
             let gotos: BTreeMap<String, serde_json::Value> = row.get_gotos()
                 .iter()
@@ -473,7 +473,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     })
                 })
                 .collect();
-            
+
             // Handle default reduce
             let default_reduce = row.default_reduce.as_ref().map(|action| {
                 match action {
@@ -482,11 +482,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             .cloned()
                             .unwrap_or_else(|| format!("N{}", nonterminal_id.0));
                         json!({"type": "reduce", "nonterminal": nt_name, "len": len})
-                    },
+                    }
                     _ => json!(null)
                 }
             });
-            
+
             json!({
                 "state_id": state_id.0,
                 "actions": actions,
@@ -495,7 +495,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             })
         })
         .collect();
-    
+
     let output = json!({
         "grammar_text": grammar_text,
         "terminal_names": terminal_names,
