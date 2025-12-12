@@ -280,7 +280,128 @@ impl NWA {
         st
     }
 
+    /// Eliminate epsilon chains for visualization.
+    /// 
+    /// A state is "epsilon-only" if it has:
+    /// - No final_weight
+    /// - No labeled transitions
+    /// - Only epsilon transitions (to other states)
+    /// 
+    /// For such states, we replace all incoming edges with direct edges to their
+    /// epsilon targets, effectively collapsing epsilon chains.
+    pub fn eliminate_epsilon_chains(&mut self) {
+        let n = self.states.len();
+        if n == 0 {
+            return;
+        }
+
+        // Identify epsilon-only states
+        let mut epsilon_only: Vec<bool> = vec![false; n];
+        for (i, state) in self.states.0.iter().enumerate() {
+            if state.final_weight.is_none() 
+                && state.transitions.is_empty()
+                && !state.epsilons.is_empty() {
+                epsilon_only[i] = true;
+            }
+        }
+
+        // For each epsilon-only state, compute its epsilon closure (reachable via epsilon).
+        // This gives us the "resolved" targets to replace incoming edges with.
+        let mut epsilon_closure: Vec<Vec<(usize, Weight)>> = vec![Vec::new(); n];
+        for start in 0..n {
+            if !epsilon_only[start] {
+                continue;
+            }
+            // BFS/DFS through epsilon edges
+            let mut visited: std::collections::HashSet<usize> = std::collections::HashSet::new();
+            let mut stack: Vec<(usize, Weight)> = vec![(start, Weight::all())];
+            while let Some((state, w)) = stack.pop() {
+                if !visited.insert(state) {
+                    continue;
+                }
+                if !epsilon_only[state] || state != start {
+                    // This is a non-epsilon-only state, add to closure
+                    epsilon_closure[start].push((state, w.clone()));
+                    if !epsilon_only[state] {
+                        continue; // Don't follow its epsilons
+                    }
+                }
+                // Follow epsilon transitions
+                for (target, eps_w) in &self.states[state].epsilons {
+                    let combined = &w & eps_w;
+                    if !combined.is_empty() {
+                        stack.push((*target, combined));
+                    }
+                }
+            }
+        }
+
+        // Now update all epsilon edges: if they point to an epsilon-only state,
+        // replace with edges to that state's closure
+        for i in 0..n {
+            let mut new_epsilons: Vec<(usize, Weight)> = Vec::new();
+            for (target, w) in std::mem::take(&mut self.states.0[i].epsilons) {
+                if epsilon_only[target] && !epsilon_closure[target].is_empty() {
+                    // Replace with closure targets
+                    for (final_target, closure_w) in &epsilon_closure[target] {
+                        let combined = &w & closure_w;
+                        if !combined.is_empty() {
+                            new_epsilons.push((*final_target, combined));
+                        }
+                    }
+                } else {
+                    // Keep original
+                    new_epsilons.push((target, w));
+                }
+            }
+            self.states.0[i].epsilons = new_epsilons;
+        }
+
+        // Similarly for labeled transitions
+        for i in 0..n {
+            for targets in self.states.0[i].transitions.values_mut() {
+                let mut new_targets: Vec<(usize, Weight)> = Vec::new();
+                for (target, w) in std::mem::take(targets) {
+                    if epsilon_only[target] && !epsilon_closure[target].is_empty() {
+                        for (final_target, closure_w) in &epsilon_closure[target] {
+                            let combined = &w & closure_w;
+                            if !combined.is_empty() {
+                                new_targets.push((*final_target, combined));
+                            }
+                        }
+                    } else {
+                        new_targets.push((target, w));
+                    }
+                }
+                *targets = new_targets;
+            }
+        }
+
+        // Update start states if needed
+        let mut new_starts: Vec<usize> = Vec::new();
+        for &s in &self.body.start_states {
+            if epsilon_only[s] && !epsilon_closure[s].is_empty() {
+                for (target, _) in &epsilon_closure[s] {
+                    if !new_starts.contains(target) {
+                        new_starts.push(*target);
+                    }
+                }
+            } else {
+                if !new_starts.contains(&s) {
+                    new_starts.push(s);
+                }
+            }
+        }
+        self.body.start_states = new_starts;
+
+        // Note: We don't remove the epsilon-only states themselves to preserve state IDs
+        // (which are used for template region mapping). They just become unreachable.
+    }
+
     pub fn optimize_for_visualization(&mut self) {
+        // First eliminate epsilon chains
+        self.eliminate_epsilon_chains();
+
         let n = self.states.len();
         if n == 0 {
             return;
