@@ -521,6 +521,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .collect();
 
+    // Build internal_to_token mapping for vocab ID lookup
+    // Maps internal LLM token ID -> token string
+    let internal_to_token: BTreeMap<usize, String> = internal_llm_token_map.iter()
+        .map(|(bytes, llm_id)| (llm_id.0, String::from_utf8_lossy(bytes).to_string()))
+        .collect();
+
     let output = json!({
         "grammar_text": grammar_text,
         "terminal_names": terminal_names,
@@ -536,6 +542,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "final_dwa": format!("{}", final_dwa),
         "terminal_map": terminal_to_token_id.iter().map(|(k, v)| (format!("{:?}", k), v.0)).collect::<BTreeMap<_, _>>(),
         "parse_table": parse_table_data,
+        "internal_to_token": internal_to_token,
     });
 
     let mut file = File::create(&cli.output)?;
