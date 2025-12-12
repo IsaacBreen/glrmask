@@ -206,7 +206,7 @@ impl<'r> Precomputer1<'r> {
         crate::debug!(4, "{} states and {} transitions", self.nwa.states.len(), self.nwa.states.num_transitions());
         
         // OPTIMIZATION: Use lightweight operations instead of full simplify()
-        // This skeleton DWA is only used as input to precompute4, so expensive minimization
+        // This terminal DWA is only used as input to precompute4, so expensive minimization
         // provides little benefit. Just do basic cleanup.
         self.nwa.compress_transitions();
         crate::debug!(4, "Compressed NWA with {} states and {} transitions", self.nwa.states.len(), self.nwa.states.num_transitions());

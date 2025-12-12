@@ -104,7 +104,7 @@ impl<'a> GrammarOptimizer<'a> {
         // and simple tokenizer (~12K states) than a simple parser (~700 states) and 
         // complex tokenizer (~160K states).
         // 
-        // UPDATE: With skeleton DWA simplification, grammar optimization can help, but
+        // UPDATE: With terminal DWA simplification, grammar optimization can help, but
         // the tokenizer explosion still dominates. Keep threshold at 500 for now.
         const MAX_PRODUCTIONS_FOR_OPTIMIZATION: usize = 50000;
         if self.grammar.productions.len() > MAX_PRODUCTIONS_FOR_OPTIMIZATION {

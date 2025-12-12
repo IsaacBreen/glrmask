@@ -980,13 +980,13 @@ impl GrammarConstraint {
             internal_to_original_sparse_matrix: vec![],
         };
 
-        // Precompute1 - generate skeleton DWA using only representative states
+        // Precompute1 - generate terminal DWA using only representative states
         let mut representative_states_set: BTreeSet<TokenizerStateID> = BTreeSet::new();
         for rep in state_to_rep.values() {
             representative_states_set.insert(*rep);
         }
 
-        let mut skeleton_dwa = run_precompute1(
+        let mut terminal_dwa = run_precompute1(
             &tokenizer,
             Some(&parser),
             &internal_llm_token_map,
@@ -997,7 +997,7 @@ impl GrammarConstraint {
 
         // EXPAND DWA: Add transitions for non-representative states
         crate::debug!(4, "Expanding DWA transitions for equivalent states...");
-        let start_state_id = skeleton_dwa.body.start_state;
+        let start_state_id = terminal_dwa.body.start_state;
         {
             let terminals_count = parser.terminal_map.len();
             
@@ -1010,24 +1010,24 @@ impl GrammarConstraint {
                     let state_label = (state.0 + terminals_count) as crate::precompute4::weighted_automata::common::Label;
                     
                     // Find where the representative points to
-                    if let Some((target, weight)) = skeleton_dwa.states[start_state_id].get_transition(rep_label) {
+                    if let Some((target, weight)) = terminal_dwa.states[start_state_id].get_transition(rep_label) {
                         transitions_to_add.push((state_label, target, weight.clone()));
                     }
                 }
             }
 
             for (label, target, weight) in transitions_to_add {
-                skeleton_dwa.add_transition(start_state_id, label, target, weight).unwrap();
+                terminal_dwa.add_transition(start_state_id, label, target, weight).unwrap();
             }
         }
 
         let mut possible_matches_precompute1 = computed_possible_matches;
 
         if verify_equivalence {
-            crate::debug!(2, "VERIFY_EQUIVALENCE: Running optimize_dwa_and_vocab on skeleton_dwa...");
+            crate::debug!(2, "VERIFY_EQUIVALENCE: Running optimize_dwa_and_vocab on terminal_dwa...");
             let vocab_before = vocab.internal_max_llm_token;
 
-            let dwa_partition = compute_dwa_partition(&skeleton_dwa, &possible_matches_precompute1, vocab.internal_max_llm_token);
+            let dwa_partition = compute_dwa_partition(&terminal_dwa, &possible_matches_precompute1, vocab.internal_max_llm_token);
             let actual_classes = dwa_partition.len();
 
             let expected_classes = mask_classes.len();
@@ -1168,7 +1168,7 @@ impl GrammarConstraint {
             }
             crate::debug!(2, "✓ VERIFY_EQUIVALENCE PASSED: Simple equivalence matches DWA partition ({} classes)", expected_classes);
         }
-        // Normal mode: Skip vocab optimization on skeleton_dwa (optimization happens on parser_dwa below)
+        // Normal mode: Skip vocab optimization on terminal_dwa (optimization happens on parser_dwa below)
 
         // Build Parser DWA
         let max_internal_llm_token_id = vocab.internal_max_llm_token;
@@ -1176,7 +1176,7 @@ impl GrammarConstraint {
 
         // Convert the lexical DWA to NWA and build the Parser DWA.
         crate::debug!(3, "Building Parser DWA");
-        let nwa = NWA::from_dwa(&skeleton_dwa);
+        let nwa = NWA::from_dwa(&terminal_dwa);
         let mut parser_dwa = build_parser_dwa(&parser, &nwa);
 
         parser_dwa.states.clip_weights(vocab.internal_max_llm_token);

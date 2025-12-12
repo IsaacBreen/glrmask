@@ -94,8 +94,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|(tid, dwa)| (format!("{:?}", tid), format!("{}", dwa)))
         .collect();
 
-    // 4. Build Skeleton DWA (Terminal DWA / Precompute1)
-    println!("Building Skeleton DWA (Terminal DWA / Precompute1)...");
+    // 4. Build Terminal DWA (Precompute1)
+    println!("Building Terminal DWA (Precompute1)...");
 
     let mut internal_llm_token_map: BTreeMap<Vec<u8>, LLMTokenID> = BTreeMap::new();
     let mut token_id_counter = 0;
@@ -115,7 +115,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let terminals_count = parser.terminal_map.len();
     let active_states = vec![tokenizer.initial_state_id()];
 
-    let mut skeleton_dwa = run_precompute1(
+    let mut terminal_dwa = run_precompute1(
         tokenizer,
         Some(parser),
         &internal_llm_token_map,
@@ -123,10 +123,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         terminals_count,
         active_states,
     );
-    skeleton_dwa.simplify();
+    terminal_dwa.simplify();
     if is_debug_level_enabled(4) {
-        println!("Skeleton DWA (Terminal DWA):");
-        println!("{}", skeleton_dwa);
+        println!("Terminal DWA:");
+        println!("{}", terminal_dwa);
     }
 
     // 5. Build Unresolved NWA (WITHOUT canonicalize_bundle)
@@ -134,13 +134,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // with epsilon edges connecting entry nodes to template starts and template ends to bodies.
     println!("Building Unresolved NWA...");
 
-    let input_nwa = NWA::from_dwa(&skeleton_dwa);
+    let input_nwa = NWA::from_dwa(&terminal_dwa);
     let reversed_nwa = input_nwa.reverse();
     let traversal_data = reversed_nwa.compute_traversal_data();
 
-    // The super_start state (created by reverse()) is at index skeleton_dwa.states.len()
+    // The super_start state (created by reverse()) is at index terminal_dwa.states.len()
     // We don't want to create entry nodes for this artificial state
-    let super_start_state = skeleton_dwa.states.len();
+    let super_start_state = terminal_dwa.states.len();
 
     let offset = parser.terminal_map.len() as Label;
 
@@ -382,7 +382,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Optimize DWA/NWA for visualization
     final_dwa.simplify();
-    skeleton_dwa.optimize_for_visualization();
+    terminal_dwa.optimize_for_visualization();
     unresolved_nwa.optimize_for_visualization();
     resolved_nwa.optimize_for_visualization();
     final_dwa.optimize_for_visualization();
@@ -534,7 +534,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "productions": productions_data,
         "characterizations": char_map,
         "template_dfas": template_map,
-        "skeleton_dwa": format!("{}", skeleton_dwa),
+        "terminal_dwa": format!("{}", terminal_dwa),
         "unresolved_nwa": format!("{}", unresolved_nwa),
         "template_regions": template_regions_data,
         "entry_node_mapping": entry_node_mapping,
