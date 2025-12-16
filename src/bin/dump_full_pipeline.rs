@@ -278,14 +278,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // The "start" is template_nwa.body.start_states
                 // The "end" nodes are those with final_weight
                 let template_offset = states.len();
-                
-                // Create funnel exit node E for this template
-                // This ensures each template has exactly ONE exit node
-                let exit_node_e = states.add_state();
-                
-                let template_end = states.len() + template_nwa.states.len();
+                let template_end = template_offset + template_nwa.states.len();
 
-                // Record this template region for visualization (includes exit node)
+                // Record this template region for visualization
                 {
                     let mut regions = template_regions_clone.lock().unwrap();
                     regions.push((template_offset, template_end, term_id.map(|t| t.0)));
@@ -295,41 +290,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 for old_state in &template_nwa.states.0 {
                     let mut new_state = NWAState::default();
 
-                    // Copy transitions (adjusting state indices - account for exit node)
+                    // Copy transitions (adjusting state indices)
                     for (lbl, targets) in &old_state.transitions {
                         let new_targets: Vec<(usize, Weight)> = targets.iter()
-                            .map(|(t, w)| (*t + template_offset + 1, w.clone()))
+                            .map(|(t, w)| (*t + template_offset, w.clone()))
                             .collect();
                         if !new_targets.is_empty() {
                             new_state.transitions.insert(*lbl, new_targets);
                         }
                     }
 
-                    // Copy epsilons (adjusting state indices - account for exit node)
+                    // Copy epsilons (adjusting state indices)
                     for (target, w) in &old_state.epsilons {
-                        new_state.epsilons.push((*target + template_offset + 1, w.clone()));
+                        new_state.epsilons.push((*target + template_offset, w.clone()));
                     }
 
-                    // For final states: connect to exit node E with full weight
-                    // (instead of directly to each body)
+                    // For final states: instead of copying final_weight,
+                    // create epsilon edges to each NWA body B with weight W
                     if old_state.final_weight.is_some() {
-                        new_state.epsilons.push((exit_node_e, Weight::all()));
+                        for (body, weight) in &body_weight_map {
+                            for &b_start in &body.start_states {
+                                new_state.epsilons.push((b_start, weight.clone()));
+                            }
+                        }
                     }
 
                     states.0.push(new_state);
                 }
 
-                // Connect exit node E to all destination bodies
-                for (body, weight) in &body_weight_map {
-                    for &b_start in &body.start_states {
-                        states[exit_node_e].epsilons.push((b_start, weight.clone()));
-                    }
-                }
-
                 // Create epsilon edge A -> S (template start) with FULL weight
-                // Account for exit node offset (+1)
                 let template_start_states: Vec<usize> = template_nwa.body.start_states.iter()
-                    .map(|s| s + template_offset + 1)
+                    .map(|s| s + template_offset)
                     .collect();
                 for s in template_start_states {
                     states[entry_node_a].epsilons.push((s, Weight::all()));
@@ -374,81 +365,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("{}", unresolved_nwa);
     }
 
-    // Validate: each template region should have exactly 1 entry node receiving incoming edges
-    // and exactly 1 exit node sending outgoing edges
-    {
-        let regions = template_regions.lock().unwrap();
-        for (start, end, term_id) in regions.iter() {
-            if term_id.is_none() {
-                continue; // Skip non-terminal regions
-            }
-            
-            // Count incoming edges to nodes in this region (from outside)
-            let mut entry_node_incoming: HashMap<usize, usize> = HashMap::new();
-            // Count outgoing edges from nodes in this region (to outside)
-            let mut exit_node_outgoing: HashMap<usize, usize> = HashMap::new();
-            
-            for (state_id, state) in unresolved_nwa.states.0.iter().enumerate() {
-                let src_in_region = state_id >= *start && state_id < *end;
-                
-                // Check epsilon edges
-                for (target, _weight) in &state.epsilons {
-                    let dst_in_region = *target >= *start && *target < *end;
-                    
-                    if !src_in_region && dst_in_region {
-                        // Incoming edge to region
-                        *entry_node_incoming.entry(*target).or_insert(0) += 1;
-                    } else if src_in_region && !dst_in_region {
-                        // Outgoing edge from region
-                        *exit_node_outgoing.entry(state_id).or_insert(0) += 1;
-                    }
-                }
-                
-                // Check labeled transitions
-                for (_label, targets) in &state.transitions {
-                    for (target, _weight) in targets {
-                        let dst_in_region = *target >= *start && *target < *end;
-                        
-                        if !src_in_region && dst_in_region {
-                            *entry_node_incoming.entry(*target).or_insert(0) += 1;
-                        } else if src_in_region && !dst_in_region {
-                            *exit_node_outgoing.entry(state_id).or_insert(0) += 1;
-                        }
-                    }
-                }
-            }
-            
-            // Validate: exactly 1 entry node and 1 exit node
-            let entry_nodes: Vec<_> = entry_node_incoming.keys().collect();
-            let exit_nodes: Vec<_> = exit_node_outgoing.keys().collect();
-            
-            if entry_nodes.len() != 1 {
-                panic!(
-                    "Template region {:?} (states {}-{}) has {} entry nodes (expected 1): {:?}",
-                    term_id, start, end, entry_nodes.len(), entry_nodes
-                );
-            }
-            
-            if exit_nodes.len() != 1 {
-                panic!(
-                    "Template region {:?} (states {}-{}) has {} exit nodes (expected 1): {:?}",
-                    term_id, start, end, exit_nodes.len(), exit_nodes
-                );
-            }
-            
-            if is_debug_level_enabled(4) {
-                println!(
-                    "  Template {:?} (states {}-{}): entry node {:?}, exit node {:?}",
-                    term_id, start, end, entry_nodes[0], exit_nodes[0]
-                );
-            }
-        }
-        
-        if is_debug_level_enabled(3) {
-            println!("✓ All template regions have exactly 1 entry and 1 exit node");
-        }
-    }
-
     // 6. Build Final DWA
     println!("Building Final DWA...");
     let mut resolved_nwa = unresolved_nwa.clone();
@@ -467,46 +383,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Optimize DWA/NWA for visualization
     final_dwa.simplify();
     terminal_dwa.optimize_for_visualization();
-    // NOTE: We do NOT call optimize_for_visualization() on unresolved_nwa because
-    // it would eliminate epsilon chains, breaking the funnel exit node structure
-    // that we carefully constructed. Each template region has exactly 1 entry and 1 exit node.
-    // unresolved_nwa.optimize_for_visualization();
+    unresolved_nwa.optimize_for_visualization();
     resolved_nwa.optimize_for_visualization();
     final_dwa.optimize_for_visualization();
 
     // 7. Dump Everything
     println!("Dumping artifacts to {:?}...", cli.output);
-
-    // NEW: Build explicit Stack-Based Structure for Visualization
-    // Group transitions by (src, dst)
-    let mut stacks_map: BTreeMap<(usize, usize), Vec<usize>> = BTreeMap::new();
-    for (src_idx, state) in terminal_dwa.states.iter().enumerate() {
-        for (label, target) in &state.transitions {
-            let term_id = *label as usize;
-            stacks_map.entry((src_idx, *target))
-                .or_default()
-                .push(term_id);
-        }
-    }
-
-    let stacks_json: Vec<serde_json::Value> = stacks_map.into_iter()
-        .map(|((src, dst), terms)| {
-            json!({
-                "src": src,
-                "dst": dst,
-                "terminals": terms
-            })
-        }).collect();
-
-    let nodes_json: Vec<serde_json::Value> = terminal_dwa.states.iter().enumerate()
-        .map(|(idx, s)| {
-            json!({
-                "id": idx,
-                "is_start": idx == 0, // Assuming 0 is start? No, check initial_state_id
-                "final_weight": s.final_weight.is_some()
-            })
-        })
-        .collect();
 
     // Convert template regions to serializable format
     let template_regions_data: Vec<serde_json::Value> = template_regions.lock().unwrap()
@@ -661,10 +543,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "terminal_map": terminal_to_token_id.iter().map(|(k, v)| (format!("{:?}", k), v.0)).collect::<BTreeMap<_, _>>(),
         "parse_table": parse_table_data,
         "internal_to_token": internal_to_token,
-        "nwa_structure": {
-             "nodes": nodes_json,
-             "stacks": stacks_json
-        }
     });
 
     let mut file = File::create(&cli.output)?;
