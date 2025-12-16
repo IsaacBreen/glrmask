@@ -477,6 +477,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 7. Dump Everything
     println!("Dumping artifacts to {:?}...", cli.output);
 
+    // NEW: Build explicit Stack-Based Structure for Visualization
+    // Group transitions by (src, dst)
+    let mut stacks_map: BTreeMap<(usize, usize), Vec<usize>> = BTreeMap::new();
+    for (src_idx, state) in terminal_dwa.states.iter().enumerate() {
+        for (label, target) in &state.transitions {
+            let term_id = *label as usize;
+            stacks_map.entry((src_idx, *target))
+                .or_default()
+                .push(term_id);
+        }
+    }
+
+    let stacks_json: Vec<serde_json::Value> = stacks_map.into_iter()
+        .map(|((src, dst), terms)| {
+            json!({
+                "src": src,
+                "dst": dst,
+                "terminals": terms
+            })
+        }).collect();
+
+    let nodes_json: Vec<serde_json::Value> = terminal_dwa.states.iter().enumerate()
+        .map(|(idx, s)| {
+            json!({
+                "id": idx,
+                "is_start": idx == 0, // Assuming 0 is start? No, check initial_state_id
+                "final_weight": s.final_weight.is_some()
+            })
+        })
+        .collect();
+
     // Convert template regions to serializable format
     let template_regions_data: Vec<serde_json::Value> = template_regions.lock().unwrap()
         .iter()
@@ -630,6 +661,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "terminal_map": terminal_to_token_id.iter().map(|(k, v)| (format!("{:?}", k), v.0)).collect::<BTreeMap<_, _>>(),
         "parse_table": parse_table_data,
         "internal_to_token": internal_to_token,
+        "nwa_structure": {
+             "nodes": nodes_json,
+             "stacks": stacks_json
+        }
     });
 
     let mut file = File::create(&cli.output)?;
