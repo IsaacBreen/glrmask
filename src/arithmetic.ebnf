@@ -1,0 +1,5 @@
+// Simple arithmetic expressions grammar
+expr ::= term (('+' | '-') term)*;
+term ::= factor (('*' | '/') factor)*;
+factor ::= NUMBER | '(' expr ')';
+NUMBER ::= [0-9]+;

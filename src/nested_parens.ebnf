@@ -1,0 +1,2 @@
+// Nested parentheses grammar
+parens ::= '(' parens ')' | '(' ')';
