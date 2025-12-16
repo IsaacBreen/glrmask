@@ -26,6 +26,11 @@ import sys
 import tempfile
 from pathlib import Path
 import requests
+from typing import Optional, List
+import time
+
+_start_time = time.time()
+
 
 # ANSI color codes for terminal output
 class Colors:
@@ -60,6 +65,21 @@ class Colors:
 
 # Global verbosity level
 _verbose = False
+_timings = []
+
+def log_timing(desc: str):
+    global _start_time
+    now = time.time()
+    elapsed = (now - _start_time) * 1000
+    _timings.append((desc, elapsed))
+    _start_time = now
+
+def print_timings():
+    if not _timings: return
+    print(f"\n{Colors.BOLD}Python Wrapper Timings:{Colors.RESET}")
+    for desc, ms in _timings:
+        print(f"  {desc:<30} : {ms:.2f}ms")
+
 
 def log(msg: str, force: bool = False):
     """Print a message if verbose mode is enabled or force is True."""
@@ -71,131 +91,54 @@ def log_error(msg: str):
     print(Colors.error(msg), file=sys.stderr)
 
 # --- Helper Functions ---
-def get_vocab(url: str | None, path: Path | None, cache_dir: Path, force_download: bool) -> dict[str, int]:
+def resolve_vocab_path(url: Optional[str], path: Optional[Path], vocab_list: Optional[List[str]], cache_dir: Path, force_download: bool) -> Path:
     """
-    Loads a vocabulary from a local path or a URL.
-    The vocabulary can be a JSON dictionary (token -> id) or a JSON list of strings.
+    Resolves the vocabulary file path.
+    - If URL: downloads to cache and returns cache path.
+    - If Path: returns the path.
+    - If List: writes to a temp file and returns temp path (caller must cleanup, but we use a known location or just leak for now as it's rare).
     """
-    if not url and not path:
-        raise ValueError("Either --vocab-url or --vocab-path must be provided.")
-    if url and path:
-        raise ValueError("Provide either --vocab-url or --vocab-path, not both.")
-
-    def _load_and_process_vocab(vocab_path: Path) -> dict[str, int]:
-        with open(vocab_path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-        if isinstance(data, dict):
-            return data
-        if isinstance(data, list):
-            log(Colors.info(f"Converting vocabulary list to dictionary ({len(data)} tokens)"))
-            return {token: i for i, token in enumerate(data)}
-        raise TypeError(f"Unsupported vocabulary format in {vocab_path}. Expected a dict[str, int] or a list[str], but got {type(data)}.")
+    if vocab_list:
+        # Create a temp file for list-based vocab
+        # We effectively create a simple dict mapping
+        vocab_dict = {token: i for i, token in enumerate(vocab_list)}
+        
+        # We use a temp file that persists until the script ends (or we'd need to manage lifecycle)
+        # Using NamedTemporaryFile with delete=False is easiest, we can print a warning or try to cleanup in main
+        fd, tmp_path = tempfile.mkstemp(suffix=".json", text=True)
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            json.dump(vocab_dict, f)
+        log(Colors.info(f"Created temporary vocabulary file from list: {tmp_path}"))
+        return Path(tmp_path)
 
     if path:
-        log(Colors.info(f"Loading vocabulary from: {path}"))
-        return _load_and_process_vocab(path)
+        return path
 
-    # Handle URL download and caching
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    file_name = url.split("/")[-1]
-    cache_path = cache_dir / file_name
+    if url:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        file_name = url.split("/")[-1]
+        cache_path = cache_dir / file_name
 
-    if not cache_path.exists() or force_download:
-        log(Colors.info(f"Downloading vocabulary from URL..."))
-        try:
-            response = requests.get(url, timeout=30)
-            response.raise_for_status()
-            with open(cache_path, 'w', encoding='utf-8') as f:
-                f.write(response.text)
-            log(Colors.dim(f"  Cached to: {cache_path}"))
-        except requests.RequestException as e:
-            log_error(f"Failed to download vocabulary: {e}")
-            sys.exit(1)
-    else:
-        log(Colors.info(f"Using cached vocabulary: {cache_path}"))
-
-    return _load_and_process_vocab(cache_path)
-
-
-def parse_len_ranges(ranges: list[str] | None) -> tuple[set[int], int | None]:
-    """
-    Parses a list of string representations of integer ranges.
-    e.g., ["1", "3-5", "8-"] -> ({1, 3, 4, 5}, 8)
-    """
-    if not ranges:
-        return set(), None
-    
-    allowed_lengths = set()
-    min_len_unbounded = None
-
-    for r in ranges:
-        if '-' in r:
-            parts = r.split('-', 1)
-            if len(parts) != 2:
-                raise ValueError(f"Invalid range format: {r}")
-            start_str, end_str = parts
-            
-            if not start_str:
-                raise ValueError(f"Invalid range format: {r}. Start must be specified.")
-
+        if not cache_path.exists() or force_download:
+            log(Colors.info(f"Downloading vocabulary from URL..."))
             try:
-                start = int(start_str)
-            except ValueError:
-                raise ValueError(f"Invalid start of range in '{r}'")
-
-            if not end_str: # e.g. "8-"
-                if min_len_unbounded is not None:
-                    min_len_unbounded = min(min_len_unbounded, start)
-                else:
-                    min_len_unbounded = start
-            else: # e.g. "3-5"
-                try:
-                    end = int(end_str)
-                except ValueError:
-                    raise ValueError(f"Invalid end of range in '{r}'")
-                if start > end:
-                    raise ValueError(f"Invalid range: start ({start}) > end ({end}) in '{r}'")
-                allowed_lengths.update(range(start, end + 1))
+                response = requests.get(url, timeout=30)
+                response.raise_for_status()
+                with open(cache_path, 'w', encoding='utf-8') as f:
+                    f.write(response.text)
+                log(Colors.dim(f"  Cached to: {cache_path}"))
+            except requests.RequestException as e:
+                log_error(f"Failed to download vocabulary: {e}")
+                sys.exit(1)
         else:
-            try:
-                allowed_lengths.add(int(r))
-            except ValueError:
-                raise ValueError(f"Invalid length value: {r}")
-            
-    return allowed_lengths, min_len_unbounded
-
-def filter_vocab(vocab: dict[str, int], allowed_lengths: set[int], min_len_unbounded: int | None) -> dict[str, int]:
-    """
-    Applies filters to the vocabulary based on token byte length.
-    """
-    if not allowed_lengths and min_len_unbounded is None:
-        return vocab
-
-    log(Colors.info(f"Filtering vocabulary by token byte length..."))
-    
-    filtered = {}
-    for token_str, token_id in vocab.items():
-        # Convert GPT-2 byte-level BPE Unicode characters to actual bytes
-        # See: https://github.com/openai/gpt-2/blob/master/src/encoder.py
-        # Ġ (U+0120) -> space, Ċ (U+010A) -> newline, ĉ (U+0109) -> tab, č (U+010D) -> CR
-        # Note: ą appears to be a legacy mapping that also represents newline in some contexts
-        processed_str = token_str.replace("Ġ", " ").replace("ą", "\n").replace("Ċ", "\n").replace("ĉ", "\t").replace("č", "\r")
-        token_len = len(processed_str.encode('utf-8'))
+            log(Colors.info(f"Using cached vocabulary: {cache_path}"))
         
-        keep = False
-        if token_len in allowed_lengths:
-            keep = True
-        elif min_len_unbounded is not None and token_len >= min_len_unbounded:
-            keep = True
-            
-        if keep:
-            filtered[token_str] = token_id
-            
-    log(Colors.dim(f"  Filtered: {len(vocab)} → {len(filtered)} tokens"))
-    return filtered
+        return cache_path
+
+    raise ValueError("No vocabulary source provided")
 
 
-def run_compiler(compiler_path: Path, grammar_path: Path, vocab_path: Path, output_path: Path | None, recompile: bool, disable_progress_bar: bool, build_profile: str = "release", save_pc0: Path | None = None, from_pc0: Path | None = None, pc0_only: bool = False, format: str | None = None):
+def run_compiler(compiler_path: Path, grammar_path: Path, vocab_path: Path, output_path: Optional[Path], recompile: bool, disable_progress_bar: bool, token_lens: Optional[List[str]], build_profile: str = "release", save_pc0: Optional[Path] = None, from_pc0: Optional[Path] = None, pc0_only: bool = False, format: Optional[str] = None):
     """
     Runs the Rust grammar-compiler CLI tool, recompiling it first by default.
     """
@@ -243,6 +186,10 @@ def run_compiler(compiler_path: Path, grammar_path: Path, vocab_path: Path, outp
 
     if format:
         command.extend(["--format", format])
+
+    if token_lens:
+        command.append("--token-len")
+        command.extend(token_lens)
 
     if pc0_only:
         command.extend(["--save-precompute0", str(save_pc0)])
@@ -352,8 +299,8 @@ Examples:
         parser.error(f"The path specified for --from-precompute0 does not exist: {args.from_precompute0}")
     if not args.vocab_url and not args.vocab_path and not args.vocab_list:
         parser.error("At least one of --vocab-url, --vocab-path, or --vocab-list must be provided.")
-    if args.token_len and not (args.vocab_url or args.vocab_path):
-        parser.error("--token-len can only be used with --vocab-url or --vocab-path.")
+    if args.token_len and not (args.vocab_url or args.vocab_path or args.vocab_list):
+        parser.error("--token-len can only be used with --vocab-url, --vocab-path or --vocab-list.")
 
     # Determine compiler path based on build profile if not explicitly provided
     if args.compiler_path is None:
@@ -364,66 +311,42 @@ Examples:
         else:
             args.compiler_path = Path(f"target/{args.build_profile}/grammar-compiler")
 
-    # 1. Get the base vocabulary from a file/URL if provided
-    base_vocab = {}
-    if args.vocab_url or args.vocab_path:
-        base_vocab = get_vocab(args.vocab_url, args.vocab_path, args.cache_dir, args.force_download)
+    # 1. Resolve vocabulary path
+    # This might download the file if needed, but won't load it into memory if not needed.
+    vocab_path = resolve_vocab_path(args.vocab_url, args.vocab_path, args.vocab_list, args.cache_dir, args.force_download)
+    log_timing("Resolve Vocabulary Path")
 
-    # 2. Apply filters to the base vocabulary
-    try:
-        allowed_lengths, min_len_unbounded = parse_len_ranges(args.token_len)
-    except ValueError as e:
-        parser.error(f"Invalid --token-len value: {e}")
-
-    modified_vocab = filter_vocab(base_vocab, allowed_lengths, min_len_unbounded)
-
-    # 3. Add tokens from vocab-list (filters do not apply to these)
-    if args.vocab_list:
-        log(Colors.info(f"Adding {len(args.vocab_list)} tokens from --vocab-list"))
-        max_id = -1
-        if modified_vocab:
-            max_id = max(modified_vocab.values())
-        for token in args.vocab_list:
-            if token not in modified_vocab:
-                max_id += 1
-                modified_vocab[token] = max_id
-
-    # Print vocabulary if it's very small (less than 50 tokens) and verbose
-    if len(modified_vocab) < 50 and _verbose:
-        log(Colors.dim("\n--- Vocabulary ---"))
-        # Sort by token ID for consistent output
-        sorted_vocab = sorted(modified_vocab.items(), key=lambda item: item[1])
-        printable_vocab = {token: id for token, id in sorted_vocab}
-        log(Colors.dim(json.dumps(printable_vocab, indent=2, ensure_ascii=False)))
-        log(Colors.dim("------------------\n"))
-
-    # 4. Write the (potentially modified) vocab to a temporary file
-    with tempfile.NamedTemporaryFile(mode='w+', delete=False, suffix=".json", encoding='utf-8') as tmp_vocab_file:
-        json.dump(modified_vocab, tmp_vocab_file)
-        tmp_vocab_path = Path(tmp_vocab_file.name)
-
-    log(Colors.dim(f"  Temp vocabulary: {tmp_vocab_path}"))
-
-    # 5. Run the Rust compiler
+    # 2. Run the Rust compiler
+    # Filtering is now handled by the Rust compiler directly, so we just pass the args.
     try:
         run_compiler(
             args.compiler_path,
             args.grammar,
-            tmp_vocab_path,
+            vocab_path,
             args.output,
             recompile=not args.no_recompile,
             disable_progress_bar=args.no_progress_bar,
+            token_lens=args.token_len,
             build_profile=args.build_profile,
             save_pc0=args.save_precompute0,
             from_pc0=args.from_precompute0,
             pc0_only=args.precompute0_only,
             format=args.format,
         )
+        log_timing("Run Rust Compiler")
     finally:
-        # 6. Clean up the temporary file
-        tmp_vocab_path.unlink()
-        log(Colors.dim("  Cleaned up temp files"))
+        # Clean up if we created a temporary file for vocab-list
+        if args.vocab_list and vocab_path.exists():
+            try:
+                # Basic check to avoid deleting user files: if it's in temp
+                if str(vocab_path).startswith(tempfile.gettempdir()):
+                    vocab_path.unlink()
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    finally:
+        print_timings()

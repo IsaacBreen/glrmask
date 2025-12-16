@@ -44,6 +44,32 @@ struct Args {
     /// Grammar format: "ebnf" or "lark". If not specified, inferred from file extension.
     #[arg(long)]
     format: Option<String>,
+
+    /// Filter vocabulary to include tokens with specific byte lengths or ranges.
+    #[arg(long, value_delimiter = ' ', num_args = 1..)]
+    token_len: Option<Vec<String>>,
+}
+
+fn parse_len_ranges(ranges: &[String]) -> Result<(std::collections::HashSet<usize>, Option<usize>), String> {
+    let mut allowed = std::collections::HashSet::new();
+    let mut min_unbounded = None;
+
+    for r in ranges {
+        if let Some((start, end)) = r.split_once('-') {
+             let start: usize = start.parse().map_err(|_| format!("Invalid start: {}", start))?;
+             if end.is_empty() {
+                 min_unbounded = Some(min_unbounded.map_or(start, |m| m.min(start)));
+             } else {
+                 let end: usize = end.parse().map_err(|_| format!("Invalid end: {}", end))?;
+                 if start > end { return Err(format!("Invalid range {} > {}", start, end)); }
+                 for i in start..=end { allowed.insert(i); }
+             }
+        } else {
+             let val: usize = r.parse().map_err(|_| format!("Invalid value: {}", r))?;
+             allowed.insert(val);
+        }
+    }
+    Ok((allowed, min_unbounded))
 }
 
 fn format_bytes(bytes: u64) -> String {
@@ -107,7 +133,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         sep1::debug!(2, "└─ {} → {} productions, {} → {} terminals {MAGENTA}({}){RESET}", 
             prod_count, opt_prod_count, term_count, opt_term_count,
             format_duration(step.elapsed()));
-        println!();
+        // println!(); // Removed debug print
     }
 
     // 2. Load the vocabulary.
@@ -117,6 +143,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let vocab_file = File::open(&args.vocab)?;
     let reader = BufReader::new(vocab_file);
     let vocab: BTreeMap<String, usize> = serde_json::from_reader(reader)?;
+
+    // Parse filters
+    let (allowed_lengths, min_len_unbounded) = if let Some(ranges) = &args.token_len {
+        parse_len_ranges(ranges).map_err(|e| e.to_string())?
+    } else {
+        (std::collections::HashSet::new(), None)
+    };
+    let has_filter = !allowed_lengths.is_empty() || min_len_unbounded.is_some();
 
     let mut llm_token_map = LLMTokenMap::new();
     let mut max_original_llm_token_id = 0;
@@ -129,6 +163,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             .replace("ĉ", "\t")
             .replace("č", "\r");
         let token_bytes = processed_token_str.as_bytes().to_vec();
+
+        if has_filter {
+            let len = token_bytes.len();
+            let keep = allowed_lengths.contains(&len) || min_len_unbounded.map_or(false, |m| len >= m);
+            if !keep { continue; }
+        }
+
         llm_token_map.insert(token_bytes, LLMTokenID(token_id));
         max_original_llm_token_id = max_original_llm_token_id.max(token_id);
     }
@@ -220,7 +261,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let file_size = std::fs::metadata(&output_path)?.len();
             sep1::debug!(2, "└─ {:?} {CYAN}({}){RESET} {MAGENTA}({}){RESET}", 
                 output_path, format_bytes(file_size), format_duration(step.elapsed()));
-            println!();
+            // println!(); // Removed debug print
         }
     }
 
@@ -238,4 +279,6 @@ fn main() {
         eprintln!("{BOLD_RED}Error:{RESET} {}", err);
         std::process::exit(1);
     }
+    // Optimization: fast exit to skip destructors of large graph structures
+    std::process::exit(0);
 }
