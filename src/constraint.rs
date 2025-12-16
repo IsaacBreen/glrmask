@@ -1176,8 +1176,8 @@ impl GrammarConstraint {
 
         // Convert the lexical DWA to NWA and build the Parser DWA.
         crate::debug!(3, "Building Parser DWA");
-        let nwa = NWA::from_dwa(&terminal_dwa);
-        let mut parser_dwa = build_parser_dwa(&parser, &nwa);
+        let terminal_nwa = NWA::from_dwa(&terminal_dwa);
+        let mut parser_dwa = build_parser_dwa(&parser, &terminal_nwa);
 
         parser_dwa.states.clip_weights(vocab.internal_max_llm_token);
         optimize_dwa_and_vocab(&mut parser_dwa, &mut vocab, &mut possible_matches_precompute1);
