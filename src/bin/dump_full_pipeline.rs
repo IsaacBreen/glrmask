@@ -134,8 +134,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // with epsilon edges connecting entry nodes to template starts and template ends to bodies.
     println!("Building Unresolved NWA...");
 
-    let input_nwa = NWA::from_dwa(&terminal_dwa);
-    let reversed_nwa = input_nwa.reverse();
+    let terminal_nwa = NWA::from_dwa(&terminal_dwa);
+    let reversed_nwa = terminal_nwa.reverse();
     let traversal_data = reversed_nwa.compute_traversal_data();
 
     // The super_start state (created by reverse()) is at index terminal_dwa.states.len()

@@ -359,14 +359,14 @@ pub fn canonicalize_bundle(terminal_map: BTreeMap<Option<TerminalID>, Weight>) -
 /// 3. Determinizes the result into the final Parser DWA
 /// 
 /// The resulting DWA is used at runtime for O(1) mask queries.
-pub fn build_parser_dwa(parser: &GLRParser, input_nwa: &NWA) -> DWA {
+pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
     crate::debug!(4, "Starting Parser DWA construction");
     let now = Instant::now();
     let terminal_dwas = match build_terminal_dwas(parser) { Ok(m) => m, Err(e) => panic!("Failed to build terminal DWAs: {:?}", e), };
     let ignore_dwa = build_ignore_terminal_dwa();
     crate::debug!(4, "Built {} terminal DWAs in {:?}", terminal_dwas.len(), now.elapsed());
 
-    let reversed_nwa = input_nwa.reverse();
+    let reversed_nwa = terminal_nwa.reverse();
     let traversal_data = reversed_nwa.compute_traversal_data();
 
     let initial_tokens = LLMTokenBV::max_ones();
@@ -663,8 +663,8 @@ pub fn build_parser_dwa(parser: &GLRParser, input_nwa: &NWA) -> DWA {
 
 /// Deprecated alias for build_parser_dwa
 #[deprecated(since = "0.3.0", note = "Use build_parser_dwa instead")]
-pub fn precompute4(parser: &GLRParser, input_nwa: &NWA) -> DWA {
-    build_parser_dwa(parser, input_nwa)
+pub fn precompute4(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
+    build_parser_dwa(parser, terminal_nwa)
 }
 
 pub fn precompute_token_bvs_and_signatures(reversed_nwa: &NWA, traversal_data: &NwaTraversalData, initial_values: Vec<(StateID, LLMTokenBV)>, offset: Label) -> (HashMap<StateID, LLMTokenBV>, HashSet<Signature>) {
