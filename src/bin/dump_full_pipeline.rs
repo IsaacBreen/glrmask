@@ -72,7 +72,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if is_debug_level_enabled(4) {
         println!("Characterizations:");
         for (tid, c) in &all_chars {
-            println!("  {:?}: {}", tid, c);
+            println!("{}", c);
         }
     }
 
