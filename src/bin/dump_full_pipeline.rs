@@ -69,6 +69,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|(tid, c)| (format!("{:?}", tid), format!("{:?}", c)))
         .collect();
 
+    if is_debug_level_enabled(4) {
+        println!("Characterizations:");
+        for (tid, c) in &all_chars {
+            println!("  {}: {}", tid, c);
+        }
+    }
+
     // 3. Build ALL Template DFAs
     println!("Building all Template DFAs...");
     let template_dwas = build_terminal_dwas(parser).expect("Failed to build template DWAs");
