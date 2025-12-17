@@ -8,7 +8,7 @@ use sep1::tokenizer::{LLMTokenID, LLMTokenMap};
 use sep1::r#macro::{colors::*, is_debug_level_enabled, format_duration};
 use std::collections::BTreeMap;
 use std::fs::File;
-use std::io::{BufReader, BufWriter, Write};
+use std::io::{BufReader, BufWriter, Write, Read};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -58,7 +58,7 @@ fn parse_len_ranges(ranges: &[String]) -> Result<(std::collections::HashSet<usiz
         if let Some((start, end)) = r.split_once('-') {
              let start: usize = start.parse().map_err(|_| format!("Invalid start: {}", start))?;
              if end.is_empty() {
-                 min_unbounded = Some(min_unbounded.map_or(start, |m| m.min(start)));
+                 min_unbounded = Some(min_unbounded.map_or(start, |m: usize| m.min(start)));
              } else {
                  let end: usize = end.parse().map_err(|_| format!("Invalid end: {}", end))?;
                  if start > end { return Err(format!("Invalid range {} > {}", start, end)); }
@@ -140,9 +140,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let step = std::time::Instant::now();
     sep1::debug!(2, "Loading vocabulary...");
     
-    let vocab_file = File::open(&args.vocab)?;
-    let reader = BufReader::new(vocab_file);
-    let vocab: BTreeMap<String, usize> = serde_json::from_reader(reader)?;
+    let mut vocab_file = File::open(&args.vocab)?;
+    let mut vocab_bytes = Vec::new(); // Read to memory for faster parsing
+    vocab_file.read_to_end(&mut vocab_bytes)?;
+    let vocab: BTreeMap<String, usize> = serde_json::from_slice(&vocab_bytes)?;
 
     // Parse filters
     let (allowed_lengths, min_len_unbounded) = if let Some(ranges) = &args.token_len {
