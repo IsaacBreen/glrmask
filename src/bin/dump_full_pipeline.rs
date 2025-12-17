@@ -71,12 +71,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if is_debug_level_enabled(4) {
         println!("Terminals:");
-        for (tid, term) in &parser.terminal_map {
-            println!("  {:?}: {:?}", tid, term);
+        for (term, tid) in &parser.terminal_map {
+            println!("  {}: {}", tid.0, term);
         }
         println!("Nonterminals:");
-        for (ntid, nt) in &parser.non_terminal_map {
-            println!("  {:?}: {:?}", ntid, nt);
+        for (nt, ntid) in &parser.non_terminal_map {
+            println!("  {:?}: {}", ntid.0, nt);
         }
         println!("Characterizations:");
         for (tid, c) in &all_chars {
