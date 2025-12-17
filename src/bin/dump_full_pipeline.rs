@@ -70,6 +70,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .collect();
 
     if is_debug_level_enabled(4) {
+        println!("Terminals:");
+        for (tid, term) in &parser.terminal_map {
+            println!("  {:?}: {:?}", tid, term);
+        }
+        println!("Nonterminals:");
+        for (ntid, nt) in &parser.non_terminal_map {
+            println!("  {:?}: {:?}", ntid, nt);
+        }
         println!("Characterizations:");
         for (tid, c) in &all_chars {
             println!("{}", c);
