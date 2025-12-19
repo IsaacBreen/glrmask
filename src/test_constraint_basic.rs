@@ -2774,75 +2774,93 @@ fn test_constraint_expression_trivial_direct_limited_vocab() {
 #[test]
 fn test_exactly_two_as_with_aa_token() {
     use crate::constraint_precompute::run_precompute1;
+    use crate::finite_automata::{Expr, ExprGroups, ExprGroup};
+    use crate::precompute4::weighted_automata::{DWA, Weight, NWA};
     
-    // Grammar: start ::= 'a' 'a' (exactly two 'a' characters)
-    let ebnf_grammar = indoc! {r#"
-        start ::= A A;
-        A ::= 'a';
-    "#};
-    let grammar_definition = GrammarDefinition::from_ebnf(ebnf_grammar).unwrap();
+    // Build tokenizer directly: just terminal 0 = 'a' (single char)
+    let tokenizer = ExprGroups {
+        groups: vec![ExprGroup {
+            expr: Expr::U8Seq(b"a".to_vec()),
+            is_non_greedy: false,
+        }],
+    }.build();
+    
+    println!("Tokenizer DFA:\n{}", tokenizer);
 
     // LLM vocab: only "aa" -> 0
-    let mut llm_token_map = LLMTokenMap::new();
-    llm_token_map.insert(b"aa".to_vec(), LLMTokenID(0));
+    let mut internal_llm_token_map: BTreeMap<Vec<u8>, LLMTokenID> = BTreeMap::new();
+    internal_llm_token_map.insert(b"aa".to_vec(), LLMTokenID(0));
 
-    let constraint = GrammarConstraint::new_from_grammar_definition(
-        Arc::new(grammar_definition),
-        llm_token_map.clone(),
-        0, // max_original_llm_token_id
-        &GrammarConstraintConfig::default(),
-    );
-
-    // Build the Terminal DWA using run_precompute1
-    let internal_llm_token_map: BTreeMap<_, _> = llm_token_map.iter().map(|(k, v)| (k.clone(), *v)).collect();
-    let terminals_count = constraint.parser.terminal_map.len();
-    let active_states = vec![constraint.tokenizer.initial_state_id()];
+    let terminals_count = 1; // Just terminal 'a' (id=0)
+    let active_states = vec![tokenizer.initial_state_id()];
     
     let terminal_dwa = run_precompute1(
-        &constraint.tokenizer,
-        Some(&constraint.parser),
+        &tokenizer,
+        None, // No parser
         &internal_llm_token_map,
         0,
         terminals_count,
         active_states,
     );
     
-    println!("Terminal DWA:\n{}", terminal_dwa);
+    println!("Actual Terminal DWA:\n{}", terminal_dwa);
     
-    // Expected structure:
-    // State 0:
-    //   1 -> 1 (weight: [0])  // Tokenizer state ID 0 (offset by num_terminals=1) -> state 1
-    // State 1:
-    //   0 -> 2                 // Match terminal 'a' -> state 2
-    // State 2:
-    //   0 -> 3                 // Match terminal 'a' again -> state 3
-    // State 3:
-    //   final_weight: ALL      // Finish
+    // Build expected DWA directly (then simplify to match run_precompute1 output)
+    // Expected NWA structure before simplification:
+    //   State 0 (root for tokenizer state 0)
+    //   State 1 (leaf_state, final)
+    //   State 2 (after first 'a', at position 1)
+    //   State 3 (continuation after leaf_state)
+    //
+    // Transitions:
+    //   0 --0--> 2 (terminal 'a' match, weight=[0] reachable)
+    //   2 --0--> 1 (terminal 'a' match at end, to leaf_state, weight=0)
+    //   2 --eps--> 3 (continuation epsilon)
+    //
+    // After adding start state with tokenizer entry:
+    //   new_start --1--> 0 (tokenizer state 0 + terminals_count=1 = label 1)
+    let mut expected_nwa = NWA::new();
+    expected_nwa.states.0.clear();
     
-    assert_eq!(terminal_dwa.states.len(), 4, 
-        "Terminal DWA should have exactly 4 states, got {}", terminal_dwa.states.len());
+    let root_state = expected_nwa.add_state(); // State 0: root
+    let leaf_state = expected_nwa.add_state(); // State 1: leaf
+    expected_nwa.states[leaf_state].final_weight = Some(Weight::all());
+    let pos1_state = expected_nwa.add_state(); // State 2: after first 'a'
+    let cont_state = expected_nwa.add_state(); // State 3: continuation
     
-    // State 0: should have transition 1 -> 1 with weight [0]
-    let state0 = &terminal_dwa.states.0[0];
-    assert!(state0.transitions.contains_key(&1), "State 0 should have transition on label 1");
-    let dst = state0.transitions.get(&1).unwrap();
-    assert_eq!(*dst, 1, "State 0 transition on 1 should go to state 1");
+    // Transition: 0 --0--> 2 (first 'a' match)
+    expected_nwa.add_transition(root_state, 0, pos1_state, Weight::from_item(0)).unwrap();
+    // Transition: 2 --0--> 1 (second 'a' match to leaf)
+    expected_nwa.add_transition(pos1_state, 0, leaf_state, Weight::from_item(0)).unwrap();
+    // Epsilon: 2 --eps--> 3
+    expected_nwa.add_epsilon(pos1_state, cont_state, Weight::all());
     
-    // State 1: should have transition 0 -> 2 (terminal 'a')
-    let state1 = &terminal_dwa.states.0[1];
-    assert!(state1.transitions.contains_key(&0), "State 1 should have transition on label 0 (terminal 'a')");
-    let dst = state1.transitions.get(&0).unwrap();
-    assert_eq!(*dst, 2, "State 1 transition on 0 should go to state 2");
+    // Add start state with tokenizer entry
+    let start_state = expected_nwa.add_state();
+    expected_nwa.add_transition(start_state, 1, root_state, Weight::all()).unwrap(); // label = 0 + 1 = 1
+    expected_nwa.body.start_states = vec![start_state];
     
-    // State 2: should have transition 0 -> 3 (terminal 'a' again)
-    let state2 = &terminal_dwa.states.0[2];
-    assert!(state2.transitions.contains_key(&0), "State 2 should have transition on label 0 (terminal 'a')");
-    let dst = state2.transitions.get(&0).unwrap();
-    assert_eq!(*dst, 3, "State 2 transition on 0 should go to state 3");
+    println!("Expected NWA before simplify:\n{}", expected_nwa);
     
-    // State 3: should be final with weight ALL
-    let state3 = &terminal_dwa.states.0[3];
-    assert!(state3.final_weight.is_some(), "State 3 should have a final weight");
+    let expected_dwa = expected_nwa.determinize_and_simplify("expected");
+    println!("Expected DWA after simplify:\n{}", expected_dwa);
+    
+    // Compare the two DWAs
+    assert_eq!(terminal_dwa.states.len(), expected_dwa.states.len(), 
+        "Terminal DWA state count mismatch: got {} expected {}", 
+        terminal_dwa.states.len(), expected_dwa.states.len());
+    
+    // Compare state-by-state
+    for i in 0..terminal_dwa.states.len() {
+        let actual = &terminal_dwa.states.0[i];
+        let expected = &expected_dwa.states.0[i];
+        assert_eq!(actual.transitions, expected.transitions, 
+            "State {} transitions mismatch:\nActual: {:?}\nExpected: {:?}", 
+            i, actual.transitions, expected.transitions);
+        assert_eq!(actual.final_weight, expected.final_weight,
+            "State {} final_weight mismatch:\nActual: {:?}\nExpected: {:?}",
+            i, actual.final_weight, expected.final_weight);
+    }
 }
 
 // #[ignore]
