@@ -89,6 +89,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    if is_debug_level(4) {
+        println!("Internal LLM token map:");
+        for (bytes, llm_id) in &internal_llm_token_map {
+            println!("  {} -> {}", String::from_utf8_lossy(bytes), llm_id.0);
+        }
+    }
+
     let internal_max_llm_token = max_token_id;
     let terminals_count = parser.terminal_map.len();
     let active_states = tokenizer.iter_states().collect();
@@ -101,10 +108,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         active_states,
     );
     if is_debug_level_enabled(5) {
-        println!("Internal LLM token map:");
-        for (bytes, llm_id) in &internal_llm_token_map {
-            println!("  {} -> {}", String::from_utf8_lossy(bytes), llm_id.0);
-        }
         println!("Terminal DWA (before simplify):");
         println!("{}", terminal_dwa);
     }
