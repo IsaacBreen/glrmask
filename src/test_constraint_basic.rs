@@ -2844,6 +2844,108 @@ fn test_tokenizer_vocab_to_terminal_dwa_aa() {
     }
 }
 
+/// Test grammar b07: Two atoms with shared suffix 'a'.
+/// 'a' and 'xa' share suffix 'a' - testing tokenizer merge behavior.
+#[test]
+fn test_grammar_to_terminal_dwa_b07_shared_suffix() {
+    use crate::constraint::{GrammarConstraint, GrammarConstraintConfig};
+    use crate::constraint_precompute::run_precompute1;
+    use crate::interface::GrammarDefinition;
+    use crate::precompute4::weighted_automata::{DWA, Weight};
+    use indoc::indoc;
+
+    // Grammar b07 - Two atoms with shared suffix
+    // 'a' and 'xa' share suffix 'a' - hoping for tokenizer merge
+    let ebnf_grammar = indoc! {r#"
+        start ::= expr '$';
+        expr ::= expr '+' atom | atom | '(' expr ')';
+        atom ::= 'a' | 'xa';
+    "#};
+    let grammar_definition = GrammarDefinition::from_ebnf_no_optimize(ebnf_grammar).unwrap();
+
+    // LLM vocab matching the grammar terminals exactly
+    // "a": 0, "xa": 1, "+": 2, "(": 3, ")": 4, "$": 5
+    let mut internal_llm_token_map: BTreeMap<Vec<u8>, LLMTokenID> = BTreeMap::new();
+    internal_llm_token_map.insert(b"a".to_vec(), LLMTokenID(0));
+    internal_llm_token_map.insert(b"xa".to_vec(), LLMTokenID(1));
+    internal_llm_token_map.insert(b"+".to_vec(), LLMTokenID(2));
+    internal_llm_token_map.insert(b"(".to_vec(), LLMTokenID(3));
+    internal_llm_token_map.insert(b")".to_vec(), LLMTokenID(4));
+    internal_llm_token_map.insert(b"$".to_vec(), LLMTokenID(5));
+
+    // Build the constraint to get the tokenizer
+    let constraint = GrammarConstraint::new_from_grammar_definition(
+        Arc::new(grammar_definition),
+        internal_llm_token_map.clone(),
+        5, // max internal token id
+        &GrammarConstraintConfig::default(),
+    );
+
+    println!("Tokenizer:\n{}", constraint.tokenizer);
+
+    let terminals_count = constraint.tokenizer.num_groups();
+    let active_states = constraint.tokenizer.iter_states().collect();
+
+    let terminal_dwa = run_precompute1(
+        &constraint.tokenizer,
+        &internal_llm_token_map,
+        5, // max internal token id
+        terminals_count,
+        active_states,
+    );
+
+    println!("Actual Terminal DWA from Grammar b07:\n{}", terminal_dwa);
+
+    // Build expected DWA directly.
+    // The structure depends on how the tokenizer handles 'a' and 'xa' sharing suffix 'a'.
+    // Terminals: 'a'=0, 'xa'=1, '+'=2, '('=3, ')'=4, '$'=5
+    let mut expected_dwa = DWA::new();
+    
+    // State 0 is the start state (created by default)
+    let s1 = expected_dwa.add_state(); // State 1
+    let s2 = expected_dwa.add_state(); // State 2
+    
+    // From start (0), first transition is tokenizer_state (0) + num_terminals
+    // This encodes the entry into the tokenizer
+    let num_terminals = terminals_count as i32;
+    expected_dwa.add_transition(0, num_terminals, s1, Weight::all()).unwrap();
+    
+    // From s1, we can match any of the terminals
+    // Each terminal leads to s2 with Weight containing the LLM tokens that match
+    // Terminal 'a' (0) -> LLM token 0
+    expected_dwa.add_transition(s1, 0, s2, Weight::from_item(0)).unwrap();
+    // Terminal 'xa' (1) -> LLM token 1  
+    expected_dwa.add_transition(s1, 1, s2, Weight::from_item(1)).unwrap();
+    // Terminal '+' (2) -> LLM token 2
+    expected_dwa.add_transition(s1, 2, s2, Weight::from_item(2)).unwrap();
+    // Terminal '(' (3) -> LLM token 3
+    expected_dwa.add_transition(s1, 3, s2, Weight::from_item(3)).unwrap();
+    // Terminal ')' (4) -> LLM token 4
+    expected_dwa.add_transition(s1, 4, s2, Weight::from_item(4)).unwrap();
+    // Terminal '$' (5) -> LLM token 5
+    expected_dwa.add_transition(s1, 5, s2, Weight::from_item(5)).unwrap();
+    
+    // Final weight includes all LLM tokens that can complete
+    expected_dwa.set_final_weight(s2, Weight::all()).unwrap();
+
+    println!("Expected DWA:\n{}", expected_dwa);
+
+    // Compare the two DWAs
+    assert_eq!(terminal_dwa.states.len(), expected_dwa.states.len(), 
+        "Terminal DWA state count mismatch");
+    
+    for i in 0..terminal_dwa.states.len() {
+        let actual = &terminal_dwa.states.0[i];
+        let expected = &expected_dwa.states.0[i];
+        assert_eq!(actual.transitions, expected.transitions, 
+            "State {} transitions mismatch", i);
+        assert_eq!(actual.trans_weights, expected.trans_weights,
+            "State {} transition weights mismatch", i);
+        assert_eq!(actual.final_weight, expected.final_weight,
+            "State {} final_weight mismatch", i);
+    }
+}
+
 /// Test that building the terminal DWA using a tokenizer built from an EBNF grammar
 /// results in the same DWA as building it from a directly constructed tokenizer.
 #[test]
