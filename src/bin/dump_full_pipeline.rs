@@ -26,6 +26,10 @@ struct Cli {
     #[arg(short, long)]
     grammar: PathBuf,
 
+    /// Path to vocabulary file (.json)
+    #[arg(short, long)]
+    vocab: PathBuf,
+
     /// Output JSON file
     #[arg(short, long, default_value = "pipeline_full_artifacts.json")]
     output: PathBuf,
@@ -72,41 +76,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 2. Build Terminal DWA (Precompute1)
     println!("Building Terminal DWA (Precompute1)...");
 
+    println!("Loading vocabulary from {:?}...", cli.vocab);
+    let vocab_text = std::fs::read_to_string(&cli.vocab)?;
+    let vocab_json: BTreeMap<String, usize> = serde_json::from_str(&vocab_text)?;
+
     let mut internal_llm_token_map: BTreeMap<Vec<u8>, LLMTokenID> = BTreeMap::new();
-    let mut token_id_counter = 0;
-
-    // Add all literal terminals as LLM tokens to ensure we have some hits
-    for (term, _) in parser.terminal_map.iter() {
-        if let Terminal::Literal(bytes) = term {
-            if !internal_llm_token_map.contains_key(bytes) {
-                internal_llm_token_map.insert(bytes.clone(), LLMTokenID(token_id_counter));
-                token_id_counter += 1;
-            }
+    let mut max_token_id = 0;
+    for (token_str, id) in vocab_json {
+        internal_llm_token_map.insert(token_str.as_bytes().to_vec(), LLMTokenID(id));
+        if id > max_token_id {
+            max_token_id = id;
         }
     }
 
-    // Add some common tokens to make the DWA more realistic
-    let common_tokens = vec![
-        b" ".to_vec(),
-        b"\n".to_vec(),
-        b"  ".to_vec(),
-        b"\"".to_vec(),
-        b"{".to_vec(),
-        b"}".to_vec(),
-        b":".to_vec(),
-        b",".to_vec(),
-        b"true".to_vec(),
-        b"false".to_vec(),
-        b"null".to_vec(),
-    ];
-    for bytes in common_tokens {
-        if !internal_llm_token_map.contains_key(&bytes) {
-            internal_llm_token_map.insert(bytes, LLMTokenID(token_id_counter));
-            token_id_counter += 1;
-        }
-    }
-
-    let internal_max_llm_token = if token_id_counter > 0 { token_id_counter - 1 } else { 0 };
+    let internal_max_llm_token = max_token_id;
     let terminals_count = parser.terminal_map.len();
     let active_states = tokenizer.iter_states().collect();
 
