@@ -2768,6 +2768,83 @@ fn test_constraint_expression_trivial_direct_limited_vocab() {
     assert_eq!(mask, Bitset::from_iter(vec![]));
 }
 
+/// Test grammar `start ::= 'a' 'a'` (exactly two 'a's) with vocab `{"aa": 0}`.
+/// 
+/// This test verifies the Terminal DWA has the expected 4-state structure.
+#[test]
+fn test_exactly_two_as_with_aa_token() {
+    use crate::constraint_precompute::run_precompute1;
+    
+    // Grammar: start ::= 'a' 'a' (exactly two 'a' characters)
+    let ebnf_grammar = indoc! {r#"
+        start ::= A A;
+        A ::= 'a';
+    "#};
+    let grammar_definition = GrammarDefinition::from_ebnf(ebnf_grammar).unwrap();
+
+    // LLM vocab: only "aa" -> 0
+    let mut llm_token_map = LLMTokenMap::new();
+    llm_token_map.insert(b"aa".to_vec(), LLMTokenID(0));
+
+    let constraint = GrammarConstraint::new_from_grammar_definition(
+        Arc::new(grammar_definition),
+        llm_token_map.clone(),
+        0, // max_original_llm_token_id
+        &GrammarConstraintConfig::default(),
+    );
+
+    // Build the Terminal DWA using run_precompute1
+    let internal_llm_token_map: BTreeMap<_, _> = llm_token_map.iter().map(|(k, v)| (k.clone(), *v)).collect();
+    let terminals_count = constraint.parser.terminal_map.len();
+    let active_states = vec![constraint.tokenizer.initial_state_id()];
+    
+    let terminal_dwa = run_precompute1(
+        &constraint.tokenizer,
+        Some(&constraint.parser),
+        &internal_llm_token_map,
+        0,
+        terminals_count,
+        active_states,
+    );
+    
+    println!("Terminal DWA:\n{}", terminal_dwa);
+    
+    // Expected structure:
+    // State 0:
+    //   1 -> 1 (weight: [0])  // Tokenizer state ID 0 (offset by num_terminals=1) -> state 1
+    // State 1:
+    //   0 -> 2                 // Match terminal 'a' -> state 2
+    // State 2:
+    //   0 -> 3                 // Match terminal 'a' again -> state 3
+    // State 3:
+    //   final_weight: ALL      // Finish
+    
+    assert_eq!(terminal_dwa.states.len(), 4, 
+        "Terminal DWA should have exactly 4 states, got {}", terminal_dwa.states.len());
+    
+    // State 0: should have transition 1 -> 1 with weight [0]
+    let state0 = &terminal_dwa.states.0[0];
+    assert!(state0.transitions.contains_key(&1), "State 0 should have transition on label 1");
+    let dst = state0.transitions.get(&1).unwrap();
+    assert_eq!(*dst, 1, "State 0 transition on 1 should go to state 1");
+    
+    // State 1: should have transition 0 -> 2 (terminal 'a')
+    let state1 = &terminal_dwa.states.0[1];
+    assert!(state1.transitions.contains_key(&0), "State 1 should have transition on label 0 (terminal 'a')");
+    let dst = state1.transitions.get(&0).unwrap();
+    assert_eq!(*dst, 2, "State 1 transition on 0 should go to state 2");
+    
+    // State 2: should have transition 0 -> 3 (terminal 'a' again)
+    let state2 = &terminal_dwa.states.0[2];
+    assert!(state2.transitions.contains_key(&0), "State 2 should have transition on label 0 (terminal 'a')");
+    let dst = state2.transitions.get(&0).unwrap();
+    assert_eq!(*dst, 3, "State 2 transition on 0 should go to state 3");
+    
+    // State 3: should be final with weight ALL
+    let state3 = &terminal_dwa.states.0[3];
+    assert!(state3.final_weight.is_some(), "State 3 should have a final weight");
+}
+
 // #[ignore]
 // #[test]
 // fn test_gss_explosion_from_ambiguity() -> Result<(), Box<dyn std::error::Error>> {
