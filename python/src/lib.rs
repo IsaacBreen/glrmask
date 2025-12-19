@@ -316,6 +316,25 @@ impl PyGrammarDefinition {
         Ok(PyGrammarDefinition { inner: grammar_def })
     }
 
+    /// Load an EBNF grammar from a file without optimization.
+    /// Useful for visualization/debugging where you want to see the original grammar structure.
+    #[staticmethod]
+    fn from_ebnf_file_no_optimize(path: &str) -> PyResult<Self> {
+        let content = std::fs::read_to_string(path).map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyIOError, _>(format!(
+                "Failed to read EBNF file '{}': {}",
+                path, e
+            ))
+        })?;
+        let grammar_def = GrammarDefinition::from_ebnf_no_optimize(&content).map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Failed to parse EBNF file '{}': {}",
+                path, e
+            ))
+        })?;
+        Ok(PyGrammarDefinition { inner: grammar_def })
+    }
+
     /// Create a GrammarDefinition from a Lark grammar string.
     /// 
     /// Lark format uses `:` for rule definitions and newlines as terminators:

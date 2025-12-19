@@ -134,6 +134,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         terminals_count,
         active_states,
     );
+    if is_debug_level_enabled(5) {
+        println!("Terminal DWA (before simplify):");
+        println!("{}", terminal_dwa);
+    }
     terminal_dwa.simplify();
     if is_debug_level_enabled(4) {
         println!("Terminal DWA:");
