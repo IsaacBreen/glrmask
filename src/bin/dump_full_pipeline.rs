@@ -9,7 +9,7 @@ use sep1::interface::{CompiledGrammar, GrammarDefinition};
 use sep1::glr::grammar::Terminal;
 use sep1::glr::table::{TerminalID, Stage7ShiftsAndReducesLookaheadValue};
 use sep1::precompute4::characterize::compute_all_characterizations;
-use sep1::precompute4::template_nwa::{build_terminal_dwas, build_ignore_terminal_dwa};
+use sep1::precompute4::template_nwa::{build_template_dwas, build_ignore_terminal_dwa};
 use sep1::precompute4::weighted_automata::{NWA, NWABody, NWAState, NWAStates, Weight};
 use sep1::precompute4::weighted_automata::common::Label;
 use sep1::precompute4::full_dwa::finalize_and_optimize_and_determinize;
@@ -86,7 +86,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 3. Build ALL Template DFAs
     println!("Building all Template DFAs...");
-    let template_dwas = build_terminal_dwas(parser).expect("Failed to build template DWAs");
+    let template_dwas = build_template_dwas(parser).expect("Failed to build template DWAs");
     let ignore_dwa = build_ignore_terminal_dwa();
 
     if is_debug_level_enabled(4) {

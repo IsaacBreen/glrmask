@@ -17,7 +17,7 @@ use crate::precompute4::resolve_negatives::{
     // Note: remove_redundant_default_transitions is called once at the end in finalize_and_optimize_and_determinize,
     // not per-range here, since it requires a global pass over all states.
 };
-use crate::precompute4::template_nwa::{build_ignore_terminal_dwa, build_terminal_dwas};
+use crate::precompute4::template_nwa::{build_ignore_terminal_dwa, build_template_dwas};
 use crate::precompute4::weighted_automata::{
     common::Label, determinization_rustfst::determinize_nwa_to_dwa, DWA, NWA, NWABody, NWAStateID, NWAStates,
     StateID, Weight,
@@ -362,7 +362,7 @@ pub fn canonicalize_bundle(terminal_map: BTreeMap<Option<TerminalID>, Weight>) -
 pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
     crate::debug!(4, "Starting Parser DWA construction");
     let now = Instant::now();
-    let terminal_dwas = match build_terminal_dwas(parser) { Ok(m) => m, Err(e) => panic!("Failed to build terminal DWAs: {:?}", e), };
+    let terminal_dwas = match build_template_dwas(parser) { Ok(m) => m, Err(e) => panic!("Failed to build terminal DWAs: {:?}", e), };
     let ignore_dwa = build_ignore_terminal_dwa();
     crate::debug!(4, "Built {} terminal DWAs in {:?}", terminal_dwas.len(), now.elapsed());
 

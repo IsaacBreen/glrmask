@@ -165,7 +165,7 @@ impl CharacterizationKey {
 
 /// Each terminal gets its own DWA that encodes how it interacts with the parse stack.
 /// These are later composed into the final Parser DWA.
-pub fn build_terminal_dwas(parser: &GLRParser) -> Result<BTreeMap<TerminalID, DWA>, FullDWABuildError> {
+pub fn build_template_dwas(parser: &GLRParser) -> Result<BTreeMap<TerminalID, DWA>, FullDWABuildError> {
     use rayon::prelude::*;
     
     let all = compute_all_characterizations(parser);
@@ -213,12 +213,6 @@ pub fn build_terminal_dwas(parser: &GLRParser) -> Result<BTreeMap<TerminalID, DW
     }
 
     Ok(result)
-}
-
-/// Deprecated alias for build_terminal_dwas
-#[deprecated(since = "0.3.0", note = "Use build_terminal_dwas instead")]
-pub fn build_template_dwas(parser: &GLRParser) -> Result<BTreeMap<TerminalID, DWA>, FullDWABuildError> {
-    build_terminal_dwas(parser)
 }
 
 /// Identity DWA used for the "ignore" terminal: start is final and there are no transitions.
