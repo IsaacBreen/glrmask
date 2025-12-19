@@ -65,9 +65,9 @@ impl<'r> Precomputer1<'r> {
             .map(|(bytes, id)| (id.0 as usize, bytes.clone()))
             .collect();
 
-        crate::debug!(5, "Building vocab prefix tree");
+        crate::debug!(6, "Building vocab prefix tree");
         let vocab = VocabPrefixTree::build(&tokens);
-        crate::debug!(5, "Done building vocab prefix tree");
+        crate::debug!(6, "Done building vocab prefix tree");
 
         let mut nwa = NWA::new();
         nwa.states.0.clear(); // Clear default start state
@@ -77,13 +77,13 @@ impl<'r> Precomputer1<'r> {
             let root_state = nwa.add_state();
             roots.insert(sid, root_state);
         }
-        crate::debug!(4, "Created trie1 roots ({} states)", roots.len());
+        crate::debug!(5, "Created trie1 roots ({} states)", roots.len());
 
         let pb = NoOpPb;
 
         let leaf_state = nwa.add_state();
         nwa.states[leaf_state].final_weight = Some(Weight::all());
-        crate::debug!(5, "Created trie1 leaf state");
+        crate::debug!(6, "Created trie1 leaf state");
 
         Self {
             tokenizer,
@@ -147,7 +147,7 @@ impl<'r> Precomputer1<'r> {
                 }
             }
         }
-        // crate::debug!(4, "Pending transitions: {} total, {} to leaf", total_transitions, transitions_to_leaf);
+        // crate::debug!(5, "Pending transitions: {} total, {} to leaf", total_transitions, transitions_to_leaf);
         
         // Flush pending transitions and epsilons into the NWA
         for (src, labels) in std::mem::take(&mut self.pending_transitions) {
@@ -197,7 +197,7 @@ impl<'r> Precomputer1<'r> {
             }
         }
         if duplicate_transitions > 0 {
-            crate::debug!(5, "NWA: Found {} duplicate transitions (same src, dst, label)", duplicate_transitions);
+            crate::debug!(6, "NWA: Found {} duplicate transitions (same src, dst, label)", duplicate_transitions);
         }
 
         // Find cases where there's multiple instances of same transition - regardless of symbol/epsilon transition - from one state to another, regardless of weight.
@@ -220,19 +220,19 @@ impl<'r> Precomputer1<'r> {
             }
         }
         if parallel_connections > 0 {
-            crate::debug!(4, "NWA: Found {} pairs of states connected by multiple transitions", parallel_connections);
+            crate::debug!(5, "NWA: Found {} pairs of states connected by multiple transitions", parallel_connections);
         }
 
-        crate::debug!(4, "{} states and {} transitions", self.nwa.states.len(), self.nwa.states.num_transitions());
+        crate::debug!(5, "{} states and {} transitions", self.nwa.states.len(), self.nwa.states.num_transitions());
         
         // OPTIMIZATION: Use lightweight operations instead of full simplify()
         // This terminal DWA is only used as input to precompute4, so expensive minimization
         // provides little benefit. Just do basic cleanup.
         self.nwa.compress_transitions();
-        crate::debug!(4, "Compressed NWA with {} states and {} transitions", self.nwa.states.len(), self.nwa.states.num_transitions());
+        crate::debug!(5, "Compressed NWA with {} states and {} transitions", self.nwa.states.len(), self.nwa.states.num_transitions());
         
         let dwa = self.nwa.determinize_and_simplify("Precompute1");
-        crate::debug!(4, "Simplified DWA with {} states and {} transitions", dwa.states.len(), dwa.states.num_transitions());
+        crate::debug!(5, "Simplified DWA with {} states and {} transitions", dwa.states.len(), dwa.states.num_transitions());
 
         dwa
     }
@@ -348,19 +348,19 @@ impl<'r> Precomputer1<'r> {
 
     fn run_dfs(&mut self) {
         let assoc = self.roots.clone();
-        crate::debug!(4, "Starting precompute DFS for {} tokenizer states", self.roots.len());
+        crate::debug!(5, "Starting precompute DFS for {} tokenizer states", self.roots.len());
         profiler::reset();
         let vocab = std::mem::replace(&mut self.vocab, VocabPrefixTree::new());
         
         // Count vocab nodes for progress tracking
         let vocab_node_count = count_vocab_nodes(&vocab.root);
-        crate::debug!(4, "Vocab tree has {} nodes", vocab_node_count);
+        crate::debug!(5, "Vocab tree has {} nodes", vocab_node_count);
         
         self.dfs(&vocab.root, assoc);
         self.vocab = vocab;
         self.pb.finish();
         profiler::print_summary();
-        crate::debug!(4, "Precomputation complete");
+        crate::debug!(5, "Precomputation complete");
     }
 
     fn dfs(
