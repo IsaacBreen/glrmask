@@ -904,7 +904,6 @@ fn test_precompute_a_plus_tokenizer() {
 
     let dwa = run_precompute1(
         &tokenizer,
-        Some(&parser),
         &internal_llm_token_map,
         internal_max_llm_token,
         terminals_count,
@@ -989,7 +988,6 @@ fn test_precompute_x_eq() {
 
     let dwa = run_precompute1(
         &tokenizer,
-        Some(&parser),
         &internal_llm_token_map,
         internal_max_llm_token,
         terminals_count,
@@ -2799,7 +2797,6 @@ fn test_tokenizer_vocab_to_terminal_dwa_aa() {
     
     let terminal_dwa = run_precompute1(
         &tokenizer,
-        None, // No parser
         &internal_llm_token_map,
         0, // max internal token id
         terminals_count,
@@ -2880,7 +2877,6 @@ fn test_grammar_to_terminal_dwa_aplus() {
 
     let terminal_dwa = run_precompute1(
         &constraint.tokenizer,
-        None, // No parser
         &internal_llm_token_map,
         0, // max internal token id
         terminals_count,

@@ -69,7 +69,65 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         nonterminal_names.insert(ntid.0, nt.0.clone());
     }
 
-    // 2. Compute ALL Characterizations
+    // 2. Build Terminal DWA (Precompute1)
+    println!("Building Terminal DWA (Precompute1)...");
+
+    let mut internal_llm_token_map: BTreeMap<Vec<u8>, LLMTokenID> = BTreeMap::new();
+    let mut token_id_counter = 0;
+
+    // Add all literal terminals as LLM tokens to ensure we have some hits
+    for (term, _) in parser.terminal_map.iter() {
+        if let Terminal::Literal(bytes) = term {
+            if !internal_llm_token_map.contains_key(bytes) {
+                internal_llm_token_map.insert(bytes.clone(), LLMTokenID(token_id_counter));
+                token_id_counter += 1;
+            }
+        }
+    }
+
+    // Add some common tokens to make the DWA more realistic
+    let common_tokens = vec![
+        b" ".to_vec(),
+        b"\n".to_vec(),
+        b"  ".to_vec(),
+        b"\"".to_vec(),
+        b"{".to_vec(),
+        b"}".to_vec(),
+        b":".to_vec(),
+        b",".to_vec(),
+        b"true".to_vec(),
+        b"false".to_vec(),
+        b"null".to_vec(),
+    ];
+    for bytes in common_tokens {
+        if !internal_llm_token_map.contains_key(&bytes) {
+            internal_llm_token_map.insert(bytes, LLMTokenID(token_id_counter));
+            token_id_counter += 1;
+        }
+    }
+
+    let internal_max_llm_token = if token_id_counter > 0 { token_id_counter - 1 } else { 0 };
+    let terminals_count = parser.terminal_map.len();
+    let active_states = tokenizer.iter_states().collect();
+
+    let mut terminal_dwa = run_precompute1(
+        tokenizer,
+        &internal_llm_token_map,
+        internal_max_llm_token,
+        terminals_count,
+        active_states,
+    );
+    if is_debug_level_enabled(5) {
+        println!("Terminal DWA (before simplify):");
+        println!("{}", terminal_dwa);
+    }
+    terminal_dwa.simplify();
+    if is_debug_level_enabled(4) {
+        println!("Terminal DWA:");
+        println!("{}", terminal_dwa);
+    }
+
+    // 3. Compute ALL Characterizations
     println!("Computing all characterizations...");
     let all_chars = compute_all_characterizations(parser);
     let char_map: BTreeMap<String, String> = all_chars.iter()
@@ -86,12 +144,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("  {:?}: {}", ntid.0, nt);
         }
         println!("Characterizations:");
-        for (tid, c) in &all_chars {
+        for (_tid, c) in &all_chars {
             println!("{}", c);
         }
     }
 
-    // 3. Build ALL Template DFAs
+    // 4. Build ALL Template DFAs
     println!("Building all Template DFAs...");
     let template_dwas = build_template_dwas(parser).expect("Failed to build template DWAs");
     let ignore_dwa = build_ignore_terminal_dwa();
@@ -111,45 +169,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let template_map: BTreeMap<String, String> = template_dwas.iter()
         .map(|(tid, dwa)| (format!("{:?}", tid), format!("{}", dwa)))
         .collect();
-
-    // 4. Build Terminal DWA (Precompute1)
-    println!("Building Terminal DWA (Precompute1)...");
-
-    let mut internal_llm_token_map: BTreeMap<Vec<u8>, LLMTokenID> = BTreeMap::new();
-    let mut token_id_counter = 0;
-    let mut terminal_to_token_id: BTreeMap<TerminalID, LLMTokenID> = BTreeMap::new();
-
-    for (term, tid) in parser.terminal_map.iter() {
-        if let Terminal::Literal(bytes) = term {
-            let token_id = LLMTokenID(token_id_counter);
-            internal_llm_token_map.insert(bytes.clone(), token_id);
-            terminal_to_token_id.insert(*tid, token_id);
-            token_id_counter += 1;
-        }
-    }
-
-    // Handle case where there are no literal terminals
-    let internal_max_llm_token = if token_id_counter > 0 { token_id_counter - 1 } else { 0 };
-    let terminals_count = parser.terminal_map.len();
-    let active_states = tokenizer.iter_states().collect();
-
-    let mut terminal_dwa = run_precompute1(
-        tokenizer,
-        Some(parser),
-        &internal_llm_token_map,
-        internal_max_llm_token,
-        terminals_count,
-        active_states,
-    );
-    if is_debug_level_enabled(5) {
-        println!("Terminal DWA (before simplify):");
-        println!("{}", terminal_dwa);
-    }
-    terminal_dwa.simplify();
-    if is_debug_level_enabled(4) {
-        println!("Terminal DWA:");
-        println!("{}", terminal_dwa);
-    }
 
     // 5. Build Unresolved NWA (Simple Edge-Based Construction)
     // For each edge in the terminal DWA labeled with a terminal ID,
@@ -438,7 +457,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "entry_node_mapping": entry_node_mapping,
         "combined_start_mapping": combined_start_mapping,
         "final_dwa": format!("{}", final_dwa),
-        "terminal_map": terminal_to_token_id.iter().map(|(k, v)| (format!("{:?}", k), v.0)).collect::<BTreeMap<_, _>>(),
         "parse_table": parse_table_data,
         "internal_to_token": internal_to_token,
     });

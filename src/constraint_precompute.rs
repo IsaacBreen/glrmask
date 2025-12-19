@@ -32,7 +32,6 @@ impl NoOpPb {
 
 pub(crate) struct Precomputer1<'r> {
     pub(crate) tokenizer: &'r Regex,
-    pub(crate) parser: Option<&'r GLRParser>,
     pub(crate) vocab: VocabPrefixTree,
     pub(crate) roots: BTreeMap<TokenizerStateID, NWAStateID>,
     pub(crate) possible_matches: RefCell<
@@ -56,7 +55,6 @@ pub(crate) struct Precomputer1<'r> {
 impl<'r> Precomputer1<'r> {
     fn new(
         tokenizer: &'r Regex,
-        parser: Option<&'r GLRParser>,
         internal_llm_token_map: &BTreeMap<Vec<u8>, LLMTokenID>,
         internal_max_llm_token: usize,
         terminals_count: usize,
@@ -89,7 +87,6 @@ impl<'r> Precomputer1<'r> {
 
         Self {
             tokenizer,
-            parser,
             vocab,
             roots,
             possible_matches: RefCell::new(BTreeMap::new()),
@@ -554,7 +551,6 @@ pub(crate) fn count_vocab_nodes(node: &VocabPrefixTreeNode) -> u64 {
 // Public entry point wrapper
 pub fn run_precompute1(
     tokenizer: &Regex,
-    parser: Option<&GLRParser>,
     internal_llm_token_map: &BTreeMap<Vec<u8>, LLMTokenID>,
     internal_max_llm_token: usize,
     terminals_count: usize,
@@ -572,7 +568,6 @@ pub fn run_precompute1(
 
     let mut helper = Precomputer1::new(
         tokenizer,
-        parser,
         &representative_llm_token_map,
         internal_max_llm_token,
         terminals_count,
