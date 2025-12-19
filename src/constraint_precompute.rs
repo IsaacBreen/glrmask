@@ -32,7 +32,6 @@ impl NoOpPb {
 
 pub(crate) struct Precomputer1<'r> {
     pub(crate) tokenizer: &'r Regex,
-    pub(crate) parser: Option<&'r GLRParser>,
     pub(crate) vocab: VocabPrefixTree,
     pub(crate) roots: BTreeMap<TokenizerStateID, NWAStateID>,
     pub(crate) possible_matches: RefCell<
@@ -56,7 +55,6 @@ pub(crate) struct Precomputer1<'r> {
 impl<'r> Precomputer1<'r> {
     fn new(
         tokenizer: &'r Regex,
-        parser: Option<&'r GLRParser>,
         internal_llm_token_map: &BTreeMap<Vec<u8>, LLMTokenID>,
         internal_max_llm_token: usize,
         terminals_count: usize,
@@ -67,9 +65,9 @@ impl<'r> Precomputer1<'r> {
             .map(|(bytes, id)| (id.0 as usize, bytes.clone()))
             .collect();
 
-        crate::debug!(5, "Building vocab prefix tree");
+        crate::debug!(6, "Building vocab prefix tree");
         let vocab = VocabPrefixTree::build(&tokens);
-        crate::debug!(5, "Done building vocab prefix tree");
+        crate::debug!(6, "Done building vocab prefix tree");
 
         let mut nwa = NWA::new();
         nwa.states.0.clear(); // Clear default start state
@@ -79,17 +77,16 @@ impl<'r> Precomputer1<'r> {
             let root_state = nwa.add_state();
             roots.insert(sid, root_state);
         }
-        crate::debug!(4, "Created trie1 roots ({} states)", roots.len());
+        crate::debug!(5, "Created trie1 roots ({} states)", roots.len());
 
         let pb = NoOpPb;
 
         let leaf_state = nwa.add_state();
         nwa.states[leaf_state].final_weight = Some(Weight::all());
-        crate::debug!(5, "Created trie1 leaf state");
+        crate::debug!(6, "Created trie1 leaf state");
 
         Self {
             tokenizer,
-            parser,
             vocab,
             roots,
             possible_matches: RefCell::new(BTreeMap::new()),
@@ -106,6 +103,29 @@ impl<'r> Precomputer1<'r> {
     }
 
     fn finish(mut self) -> DWA {
+        // Debug: print all states and transitions before processing
+        crate::debug!(1, "=== NWA before flush (leaf_state={}, roots={:?}) ===", self.leaf_state, self.roots);
+        for (i, state) in self.nwa.states.0.iter().enumerate() {
+            let trans_count = state.transitions.values().map(|v| v.len()).sum::<usize>();
+            let eps_count = state.epsilons.len();
+            let is_final = state.final_weight.is_some();
+            crate::debug!(1, "State {}: {} transitions, {} epsilons, final={}", i, trans_count, eps_count, is_final);
+        }
+        crate::debug!(1, "Pending transitions:");
+        for (src, labels) in &self.pending_transitions {
+            for (label, dsts) in labels {
+                for (dst, weight) in dsts {
+                    crate::debug!(1, "  {} --{}--> {} (weight: {:?})", src, label, dst, weight);
+                }
+            }
+        }
+        crate::debug!(1, "Pending epsilons:");
+        for (src, dsts) in &self.pending_epsilons {
+            for (dst, weight) in dsts {
+                crate::debug!(1, "  {} --eps--> {} (weight: {:?})", src, dst, weight);
+            }
+        }
+        
         // TODO: WTF is this
         // Debug: Count transitions
         let mut total_transitions = 0;
@@ -127,7 +147,7 @@ impl<'r> Precomputer1<'r> {
                 }
             }
         }
-        // crate::debug!(4, "Pending transitions: {} total, {} to leaf", total_transitions, transitions_to_leaf);
+        // crate::debug!(5, "Pending transitions: {} total, {} to leaf", total_transitions, transitions_to_leaf);
         
         // Flush pending transitions and epsilons into the NWA
         for (src, labels) in std::mem::take(&mut self.pending_transitions) {
@@ -177,7 +197,7 @@ impl<'r> Precomputer1<'r> {
             }
         }
         if duplicate_transitions > 0 {
-            crate::debug!(5, "NWA: Found {} duplicate transitions (same src, dst, label)", duplicate_transitions);
+            crate::debug!(6, "NWA: Found {} duplicate transitions (same src, dst, label)", duplicate_transitions);
         }
 
         // Find cases where there's multiple instances of same transition - regardless of symbol/epsilon transition - from one state to another, regardless of weight.
@@ -200,19 +220,19 @@ impl<'r> Precomputer1<'r> {
             }
         }
         if parallel_connections > 0 {
-            crate::debug!(4, "NWA: Found {} pairs of states connected by multiple transitions", parallel_connections);
+            crate::debug!(5, "NWA: Found {} pairs of states connected by multiple transitions", parallel_connections);
         }
 
-        crate::debug!(4, "{} states and {} transitions", self.nwa.states.len(), self.nwa.states.num_transitions());
+        crate::debug!(5, "{} states and {} transitions", self.nwa.states.len(), self.nwa.states.num_transitions());
         
         // OPTIMIZATION: Use lightweight operations instead of full simplify()
         // This terminal DWA is only used as input to precompute4, so expensive minimization
         // provides little benefit. Just do basic cleanup.
         self.nwa.compress_transitions();
-        crate::debug!(4, "Compressed NWA with {} states and {} transitions", self.nwa.states.len(), self.nwa.states.num_transitions());
+        crate::debug!(5, "Compressed NWA with {} states and {} transitions", self.nwa.states.len(), self.nwa.states.num_transitions());
         
         let dwa = self.nwa.determinize_and_simplify("Precompute1");
-        crate::debug!(4, "Simplified DWA with {} states and {} transitions", dwa.states.len(), dwa.states.num_transitions());
+        crate::debug!(5, "Simplified DWA with {} states and {} transitions", dwa.states.len(), dwa.states.num_transitions());
 
         dwa
     }
@@ -328,19 +348,19 @@ impl<'r> Precomputer1<'r> {
 
     fn run_dfs(&mut self) {
         let assoc = self.roots.clone();
-        crate::debug!(4, "Starting precompute DFS for {} tokenizer states", self.roots.len());
+        crate::debug!(5, "Starting precompute DFS for {} tokenizer states", self.roots.len());
         profiler::reset();
         let vocab = std::mem::replace(&mut self.vocab, VocabPrefixTree::new());
         
         // Count vocab nodes for progress tracking
         let vocab_node_count = count_vocab_nodes(&vocab.root);
-        crate::debug!(4, "Vocab tree has {} nodes", vocab_node_count);
+        crate::debug!(5, "Vocab tree has {} nodes", vocab_node_count);
         
         self.dfs(&vocab.root, assoc);
         self.vocab = vocab;
         self.pb.finish();
         profiler::print_summary();
-        crate::debug!(4, "Precomputation complete");
+        crate::debug!(5, "Precomputation complete");
     }
 
     fn dfs(
@@ -350,6 +370,10 @@ impl<'r> Precomputer1<'r> {
     ) {
         self.pb.inc(1);
         for (segment_bytes, child_vocab_node) in vocab_node.iter_children() {
+            crate::debug!(1, "=== Processing vocab segment: {:?} (token_id={}) ===",
+                String::from_utf8_lossy(segment_bytes), child_vocab_node.token_id());
+            crate::debug!(1, "Initial assoc_by_state: {:?}", assoc_by_state);
+            
             let mut next_level_assoc: BTreeMap<TokenizerStateID, NWAStateID> =
                 BTreeMap::new();
 
@@ -370,19 +394,28 @@ impl<'r> Precomputer1<'r> {
             > = HashMap::new();
 
             while let Some((pos, states_at_pos)) = pending.pop_first() {
+                crate::debug!(1, "--- Position {} (segment len={}) ---", pos, segment_bytes.len());
+                crate::debug!(1, "States at pos: {:?}", states_at_pos);
+                
                 // If we reached the end of the segment, these states are ready for the next vocab node
                 if pos == segment_bytes.len() {
+                    crate::debug!(1, "  -> End of segment, adding epsilons to next level");
                     for (tokenizer_state_id, node) in states_at_pos {
                         let next = self.get_or_create_next_state(node, tokenizer_state_id, &mut next_level_assoc);
+                        crate::debug!(1, "     State {} (tsid={:?}) -> epsilon to state {}", node, tokenizer_state_id, next);
                         self.add_pending_epsilon(node, next, Weight::all());
                     }
                     continue;
                 }
 
                 for (tokenizer_state_id, src_node) in states_at_pos {
+                    let slice = &segment_bytes[pos..];
                     let exec_result = self
                         .tokenizer
-                        .execute_from_state(&segment_bytes[pos..], tokenizer_state_id);
+                        .execute_from_state(slice, tokenizer_state_id);
+                    
+                    crate::debug!(1, "  Tokenizer on {:?} from state {:?} (src_node={}): matches={:?}, end_state={:?}",
+                        String::from_utf8_lossy(slice), tokenizer_state_id, src_node, exec_result.matches, exec_result.end_state);
 
                     let possible_matches_at_end = if let Some(end_val) = exec_result.end_state {
                         let ts = TokenizerStateID(end_val);
@@ -400,11 +433,15 @@ impl<'r> Precomputer1<'r> {
                     for match_info in &exec_result.matches {
                         let terminal_id = GrammarTokenID(match_info.id);
                         let next_pos = pos + match_info.width;
+                        crate::debug!(1, "    Match: terminal_id={}, width={}, next_pos={}", terminal_id.0, match_info.width, next_pos);
 
                         // Leaf check: if match consumes remainder of segment
                         if next_pos == segment_bytes.len() {
                             let leaf = self.leaf_state;
-                            let weight = WARangeSet::from_item(child_token_id);
+                            // Use ALL weight for leaf transitions - the token has been fully matched
+                            let weight = Weight::all();
+                            crate::debug!(1, "      -> LEAF transition: {} --{}--> {} (leaf_state), weight={:?}", 
+                                src_node, terminal_id.0, leaf, weight);
                             self.add_pending_transition(src_node, terminal_id.0 as Label, leaf, weight);
                         }
 
@@ -416,12 +453,16 @@ impl<'r> Precomputer1<'r> {
                             if let Some(pm) = possible_matches_at_end.get(&terminal_id) {
                                 edge_bv = &edge_bv - pm.inner.as_ref();
                             }
+                            crate::debug!(1, "      Continuation at end of segment: edge_bv={:?} (removed child_token_id={}, pm={:?})",
+                                edge_bv.iter().collect::<Vec<_>>(), child_token_id, possible_matches_at_end.get(&terminal_id).map(|pm| &pm.inner));
                             std::borrow::Cow::Owned(edge_bv)
                         } else {
+                            crate::debug!(1, "      Continuation (not end): using child_reachable={:?}", child_reachable.iter().collect::<Vec<_>>());
                             std::borrow::Cow::Borrowed(child_reachable)
                         };
 
                         if final_bv.is_empty() {
+                            crate::debug!(1, "      -> Skip continuation (empty edge_bv)");
                             continue;
                         }
 
@@ -432,18 +473,25 @@ impl<'r> Precomputer1<'r> {
 
                         let target_entry = dest_map.entry(initial_tsid);
                         let target = match target_entry {
-                            std::collections::btree_map::Entry::Occupied(o) => *o.get(),
+                            std::collections::btree_map::Entry::Occupied(o) => {
+                                crate::debug!(1, "      -> Continuation to existing state: target={}", *o.get());
+                                *o.get()
+                            }
                             std::collections::btree_map::Entry::Vacant(v) => {
                                 let t = self.nwa.add_state();
+                                crate::debug!(1, "      -> Created new continuation state: target={}", t);
                                 v.insert(t);
                                 t
                             }
                         };
 
+                        crate::debug!(1, "      -> CONT transition: {} --{}--> {}, weight={:?}", 
+                            src_node, terminal_id.0, target, weight);
                         self.add_pending_transition(src_node, terminal_id.0 as Label, target, weight);
                     }
 
                     // 2. Handle End State -> Continuation
+                    crate::debug!(1, "  End state handling: end_state={:?}", exec_result.end_state);
                     if let Some(end_state_val) = exec_result.end_state {
                         let final_tokenizer_state = TokenizerStateID(end_state_val);
                         
@@ -456,23 +504,17 @@ impl<'r> Precomputer1<'r> {
                             self.accessible_terminals_cache.insert(final_tokenizer_state, result.clone());
                             result
                         };
+                        
+                        crate::debug!(1, "    accessible_terminals={:?}", accessible_terminals.as_slice());
 
                         // Create weight once, it's just a single token
                         let single_token_weight = WARangeSet::from_item(child_token_id);
 
                         let end_idx = self.leaf_state;
                         
-                        // Debug: Track what we're creating
-                        if child_token_id == 6 || child_token_id == 31 {
-                            // Verify the accessible terminals directly
-                            let direct_accessible: Vec<_> = self.tokenizer.dfa.states[exec_result.end_state.unwrap()].possible_future_group_ids.iter().copied().collect();
-                            let from_accessible: Vec<_> = self.tokenizer.dfa.states[tokenizer_state_id.0].possible_future_group_ids.iter().copied().collect();
-                            let segment: Vec<u8> = segment_bytes[pos..].to_vec();
-                            // crate::debug!(1, "Creating leaf transitions for token {} ({:?}): segment={:?}, src_node={}, tokenizer_state={} (accessible={:?}), final_state={:?} (accessible={:?}), from_cache={:?}",
-                            //     child_token_id, String::from_utf8_lossy(child_vocab_node.prefix()), segment, src_node, tokenizer_state_id.0, from_accessible, exec_result.end_state, direct_accessible, accessible_terminals.as_slice());
-                        }
-                        
                         for terminal_id in accessible_terminals.iter() {
+                            crate::debug!(1, "    -> END_STATE transition: {} --{}--> {} (leaf_state), weight={:?}",
+                                src_node, terminal_id.0, end_idx, single_token_weight);
                             self.add_pending_transition(
                                     src_node,
                                     terminal_id.0 as Label,
@@ -482,10 +524,14 @@ impl<'r> Precomputer1<'r> {
                         }
 
                         let next = self.get_or_create_next_state(src_node, final_tokenizer_state, &mut next_level_assoc);
+                        crate::debug!(1, "    -> END_STATE epsilon: {} --eps--> {}", src_node, next);
                         self.add_pending_epsilon(src_node, next, Weight::all());
                     }
                 }
             }
+
+            crate::debug!(1, "=== Done processing segment {:?}, next_level_assoc={:?} ===",
+                String::from_utf8_lossy(segment_bytes), next_level_assoc);
 
             if !next_level_assoc.is_empty() {
                 self.dfs(child_vocab_node, next_level_assoc);
@@ -505,7 +551,6 @@ pub(crate) fn count_vocab_nodes(node: &VocabPrefixTreeNode) -> u64 {
 // Public entry point wrapper
 pub fn run_precompute1(
     tokenizer: &Regex,
-    parser: Option<&GLRParser>,
     internal_llm_token_map: &BTreeMap<Vec<u8>, LLMTokenID>,
     internal_max_llm_token: usize,
     terminals_count: usize,
@@ -523,7 +568,6 @@ pub fn run_precompute1(
 
     let mut helper = Precomputer1::new(
         tokenizer,
-        parser,
         &representative_llm_token_map,
         internal_max_llm_token,
         terminals_count,
