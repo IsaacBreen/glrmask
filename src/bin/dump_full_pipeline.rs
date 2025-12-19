@@ -44,6 +44,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let parser = &compiled_grammar.glr_parser;
     let tokenizer = &compiled_grammar.tokenizer;
 
+    if is_debug_level_enabled(4) {
+        println!("Tokenizer:");
+        println!("{}", tokenizer);
+        println!("Parser:");
+        println!("{}", parser);
+    }
+
     // Build terminal name map
     let mut terminal_names: BTreeMap<usize, String> = BTreeMap::new();
     for (term, tid) in parser.terminal_map.iter() {
@@ -124,7 +131,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Handle case where there are no literal terminals
     let internal_max_llm_token = if token_id_counter > 0 { token_id_counter - 1 } else { 0 };
     let terminals_count = parser.terminal_map.len();
-    let active_states = vec![tokenizer.initial_state_id()];
+    let active_states = tokenizer.iter_states().collect();
 
     let mut terminal_dwa = run_precompute1(
         tokenizer,

@@ -62,7 +62,7 @@ impl Regex {
         self.dfa.states.len()
     }
 
-    pub(crate) fn iter_states(&self) -> impl Iterator<Item=TokenizerStateID> {
+    pub fn iter_states(&self) -> impl Iterator<Item=TokenizerStateID> {
         (0..self.max_state()).map(|id| TokenizerStateID(id))
     }
 }
