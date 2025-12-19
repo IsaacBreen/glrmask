@@ -2795,7 +2795,7 @@ fn test_tokenizer_vocab_to_terminal_dwa_aa() {
     internal_llm_token_map.insert(b"aa".to_vec(), LLMTokenID(0));
 
     let terminals_count = 1; // Just terminal 'a' (id=0)
-    let active_states = vec![tokenizer.initial_state_id()];
+    let active_states = tokenizer.iter_states().collect();
     
     let terminal_dwa = run_precompute1(
         &tokenizer,
@@ -2876,7 +2876,7 @@ fn test_grammar_to_terminal_dwa_aplus() {
     );
 
     let terminals_count = 1; // Just terminal 'a'
-    let active_states = vec![constraint.tokenizer.initial_state_id()];
+    let active_states = constraint.tokenizer.iter_states().collect();
 
     let terminal_dwa = run_precompute1(
         &constraint.tokenizer,
