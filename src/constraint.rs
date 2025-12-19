@@ -988,6 +988,7 @@ impl GrammarConstraint {
 
         let mut terminal_dwa = run_precompute1(
             &tokenizer,
+            Some(&parser),
             &internal_llm_token_map,
             vocab.internal_max_llm_token,
             parser.terminal_map.len(),
