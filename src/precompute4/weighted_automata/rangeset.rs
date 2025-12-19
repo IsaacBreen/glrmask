@@ -306,6 +306,8 @@ impl Display for RangeSet {
         while let Some(range) = ranges.next() {
             if range.start() == range.end() {
                 write!(f, "{}", range.start())?;
+            } else if *range.end() == usize::MAX {
+                write!(f, "{}..", range.start())?;
             } else {
                 write!(f, "{}..={}", range.start(), range.end())?;
             }

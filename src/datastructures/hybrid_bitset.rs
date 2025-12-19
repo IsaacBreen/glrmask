@@ -123,6 +123,8 @@ impl Display for RangeSet {
 
             if start == end {
                 write!(f, "{}", start)?;
+            } else if end == usize::MAX {
+                write!(f, "{}..", start)?;
             } else {
                 write!(f, "{}..{}", start, end)?;
             }
