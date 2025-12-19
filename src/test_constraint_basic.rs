@@ -2850,7 +2850,7 @@ fn test_tokenizer_vocab_to_terminal_dwa_aa() {
 /// Test that building the terminal DWA using a tokenizer built from an EBNF grammar
 /// results in the same DWA as building it from a directly constructed tokenizer.
 #[test]
-fn test_grammar_to_terminal_dwa_aa() {
+fn test_grammar_to_terminal_dwa_aplus() {
     use crate::constraint::{GrammarConstraint, GrammarConstraintConfig};
     use crate::constraint_precompute::run_precompute1;
     use crate::interface::GrammarDefinition;
