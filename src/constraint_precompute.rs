@@ -438,8 +438,7 @@ impl<'r> Precomputer1<'r> {
                         // Leaf check: if match consumes remainder of segment
                         if next_pos == segment_bytes.len() {
                             let leaf = self.leaf_state;
-                            // Use ALL weight for leaf transitions - the token has been fully matched
-                            let weight = Weight::all();
+                            let weight = WARangeSet::from_item(child_token_id);
                             crate::debug!(1, "      -> LEAF transition: {} --{}--> {} (leaf_state), weight={:?}", 
                                 src_node, terminal_id.0, leaf, weight);
                             self.add_pending_transition(src_node, terminal_id.0 as Label, leaf, weight);
