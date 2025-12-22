@@ -164,12 +164,22 @@ class Sep1System(BaseSystem):
         if ebnf_path:
             compiled_json_path.unlink()
 
-        elapsed = time.perf_counter() - start_time
+        # Parse JSON to check for metadata
+        try:
+            data = json.loads(json_str)
+            if "compilation_time_seconds" in data:
+                # Use the internal time from the binary (excludes IO)
+                compilation_time = data["compilation_time_seconds"]
+            else:
+                # Fallback to python measured time (includes IO)
+                compilation_time = time.perf_counter() - start_time
+        except Exception:
+             compilation_time = time.perf_counter() - start_time
         
         return CompilationResult(
             compiled=json_str,
-            compilation_time_sec=elapsed,
-            metadata={"source": str(grammar_path)}
+            compilation_time_sec=compilation_time,
+            metadata={"source": str(grammar_path), "internal_time_used": "compilation_time_seconds" in data if 'data' in locals() else False}
         )
 
     def create_state(self, compiled: Any) -> Any:

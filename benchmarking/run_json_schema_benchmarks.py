@@ -181,13 +181,13 @@ def main():
     
     systems = []
     
-    # sep1 - BLOCKED: Rust panic bug in constraint.rs:1148
-    # try:
-    #     from benchmarking.systems.sep1 import Sep1System
-    #     print("✓ sep1 available")
-    #     systems.append(Sep1System())
-    # except Exception as e:
-    #     print(f"✗ sep1 error: {e}")
+    # sep1
+    try:
+        from benchmarking.systems.sep1 import Sep1System
+        print("✓ sep1 available")
+        systems.append(Sep1System())
+    except Exception as e:
+        print(f"✗ sep1 error: {e}")
 
     # XGrammar
     try:
