@@ -172,15 +172,6 @@ def run_single_benchmark(system, schema_name: str, schema: Dict, max_tokens: int
         )
 
 
-def main():
-    """Run all benchmarks."""
-    print("=" * 80)
-    print("JSON Schema Benchmarking Suite")
-    print("=" * 80)
-    print()
-    
-    systems = []
-    
     # sep1
     try:
         from benchmarking.systems.sep1 import Sep1System
