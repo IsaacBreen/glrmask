@@ -1100,6 +1100,19 @@ impl GrammarDefinition {
                                         'f' => '\u{000C}',
                                         'v' => '\u{000B}',
                                         '\\' => '\\',
+                                        'x' => {
+                                            // Parse \xNN hex escape
+                                            let hex1 = it.next().ok_or_else(|| {
+                                                format!("Incomplete hex escape in char class: {}", class_def)
+                                            })?;
+                                            let hex2 = it.next().ok_or_else(|| {
+                                                format!("Incomplete hex escape in char class: {}", class_def)
+                                            })?;
+                                            let hex_str = format!("{}{}", hex1, hex2);
+                                            u8::from_str_radix(&hex_str, 16)
+                                                .map(|b| b as char)
+                                                .map_err(|_| format!("Invalid hex escape \\x{} in char class: {}", hex_str, class_def))?
+                                        }
                                         other => other,
                                     }))
                                 } else {
