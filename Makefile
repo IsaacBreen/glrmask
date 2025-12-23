@@ -1,7 +1,7 @@
 # Research Project Makefile
 # Common commands for paper writing and research
 
-.PHONY: paper paper-watch paper-clean notes-today help build test test-js test-json-schema test-schema-packagejson test-schema-github test-schema-sarif test-schema-meta test-schema-extra ffi viz viz-clean all
+.PHONY: paper paper-watch paper-clean notes-today help build test test-js test-json-schema test-schema-packagejson test-schema-github test-schema-sarif test-schema-meta test-schema-extra test-schema-kestra ffi viz viz-clean all
 
 # === Build All ===
 
@@ -103,6 +103,12 @@ test-schema-extra: build ## Compile bamboo-spec from SchemaStore_Extra
 		--json-schema gcg-paper/hard_schemas/data/SchemaStore_Extra---bamboo-spec.json \
 		--vocab .cache/test_vocabs/gpt2_vocab.json \
 		--output .cache/test_vocabs/constraint_bamboo.json.gz
+
+test-schema-kestra: build ## Compile Kestra schema (WARNING: ~8MB, very slow)
+	MACRO_DEBUG_LEVEL=2 ./target/release/grammar-compiler \
+		--json-schema gcg-paper/hard_schemas/data/Kestra---kestra-0.19.0.json \
+		--vocab .cache/test_vocabs/gpt2_vocab.json \
+		--output .cache/test_vocabs/constraint_kestra.json.gz
 
 build: ## Build the Rust project
 	cargo build --release
