@@ -20,7 +20,7 @@ mod tests {
     use crate::{choice_fast, groups, seq_fast};
     use bimap::BiBTreeMap;
     use bitvec::prelude::*;
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeSet, HashSet};
     use crate::glr::table::generate_glr_parser;
 
     fn bitvec_with_capacity_and_values(capacity: usize, values: Vec<usize>) -> RangeSet {
@@ -93,7 +93,7 @@ mod tests {
             lhs: NT("S".to_string()),
             rhs: vec![],
         }];
-        let dummy_glr_parser = generate_glr_parser(&dummy_productions, None);
+        let dummy_glr_parser = generate_glr_parser(&dummy_productions, &HashSet::new(), None);
 
         let constraint = GrammarConstraint::new(
             tokenizer,

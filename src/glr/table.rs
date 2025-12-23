@@ -18,6 +18,98 @@ use std::collections::BTreeMap as StdMap;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::hash::{BuildHasherDefault, Hasher};
 
+/// Transform nullable terminals into optional non-terminals.
+/// 
+/// For each terminal in `nullable_terminals`, this creates a new non-terminal
+/// `{TerminalName}Opt` with two productions:
+/// - `{TerminalName}Opt -> terminal`
+/// - `{TerminalName}Opt -> ε`
+/// 
+/// Then replaces all occurrences of the terminal in productions with the new non-terminal.
+/// 
+/// This is required because the tokenizer can produce zero-width matches for nullable
+/// terminals, and the GLR parser needs to handle these as optional non-terminals to
+/// correctly parse inputs where the nullable terminal matches empty string.
+fn transform_nullable_terminals(
+    productions: &[Production],
+    nullable_terminals: &HashSet<Terminal>,
+    existing_nonterminals: &BTreeSet<NonTerminal>,
+) -> (Vec<Production>, HashMap<Terminal, NonTerminal>) {
+    if nullable_terminals.is_empty() {
+        return (productions.to_vec(), HashMap::new());
+    }
+    
+    crate::debug!(4, "Transforming {} nullable terminals into optional non-terminals", nullable_terminals.len());
+    
+    // Generate unique names for optional non-terminals
+    let mut all_names: HashSet<String> = existing_nonterminals.iter().map(|nt| nt.0.clone()).collect();
+    let mut terminal_to_opt_nt: HashMap<Terminal, NonTerminal> = HashMap::new();
+    let mut new_productions: Vec<Production> = Vec::new();
+    
+    for terminal in nullable_terminals {
+        // Generate a unique name for this terminal's optional wrapper
+        let base_name = match terminal {
+            Terminal::RegexName(name) => name.trim_matches('"').to_string(),
+            Terminal::Literal(bytes) => {
+                // For literals, create a readable name
+                if bytes.iter().all(|&b| b.is_ascii_alphanumeric() || b == b'_') {
+                    String::from_utf8_lossy(bytes).to_string()
+                } else {
+                    format!("Lit{:x}", bytes.iter().fold(0u64, |acc, &b| acc.wrapping_mul(31).wrapping_add(b as u64)))
+                }
+            }
+        };
+        
+        let mut opt_name = format!("{}Opt", base_name);
+        let mut counter = 0;
+        while all_names.contains(&opt_name) {
+            counter += 1;
+            opt_name = format!("{}Opt{}", base_name, counter);
+        }
+        all_names.insert(opt_name.clone());
+        
+        let opt_nt = NonTerminal(opt_name);
+        terminal_to_opt_nt.insert(terminal.clone(), opt_nt.clone());
+        
+        // Add productions for the optional non-terminal:
+        // OptNT -> terminal
+        new_productions.push(Production {
+            lhs: opt_nt.clone(),
+            rhs: vec![Symbol::Terminal(terminal.clone())],
+        });
+        // OptNT -> ε
+        new_productions.push(Production {
+            lhs: opt_nt,
+            rhs: vec![],
+        });
+        
+        crate::debug!(5, "  {} -> {}", terminal, terminal_to_opt_nt.get(terminal).unwrap().0);
+    }
+    
+    // Transform existing productions: replace nullable terminals with their optional non-terminals
+    let transformed_productions: Vec<Production> = productions.iter().map(|prod| {
+        let transformed_rhs: Vec<Symbol> = prod.rhs.iter().map(|sym| {
+            if let Symbol::Terminal(t) = sym {
+                if let Some(opt_nt) = terminal_to_opt_nt.get(t) {
+                    return Symbol::NonTerminal(opt_nt.clone());
+                }
+            }
+            sym.clone()
+        }).collect();
+        
+        Production {
+            lhs: prod.lhs.clone(),
+            rhs: transformed_rhs,
+        }
+    }).collect();
+    
+    // Combine transformed productions with new optional productions
+    let mut all_productions = transformed_productions;
+    all_productions.extend(new_productions);
+    
+    (all_productions, terminal_to_opt_nt)
+}
+
 // --- Fast Hasher & BitSet ---
 
 pub struct FxHasher {
@@ -828,7 +920,7 @@ fn print_memory_usage(label: &str) {
 }
 
 #[time_it]
-pub fn generate_glr_parser_with_maps(
+fn generate_glr_parser_with_maps(
     productions: &[Production],
     terminal_map: BiBTreeMap<Terminal, TerminalID>,
     mut non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>,
@@ -1078,20 +1170,30 @@ pub fn generate_glr_parser_with_maps(
 
 pub fn generate_glr_parser(
     productions: &[Production],
+    nullable_terminals: &HashSet<Terminal>,
     ignore_terminal_id: Option<TerminalID>,
 ) -> crate::glr::parser::GLRParser {
     let terminal_map = assign_terminal_ids(productions);
-    generate_glr_parser_with_terminal_map(productions, terminal_map, ignore_terminal_id)
+    generate_glr_parser_with_terminal_map(productions, terminal_map, nullable_terminals, ignore_terminal_id)
 }
 
 pub fn generate_glr_parser_with_terminal_map(
     productions: &[Production],
     terminal_map: BiBTreeMap<Terminal, TerminalID>,
+    nullable_terminals: &HashSet<Terminal>,
     ignore_terminal_id: Option<TerminalID>,
 ) -> crate::glr::parser::GLRParser {
-    let non_terminal_map = assign_non_terminal_ids(productions);
-    generate_glr_parser_with_maps(
+    // Transform nullable terminals into optional non-terminals BEFORE generating the parser
+    let existing_nonterminals: BTreeSet<NonTerminal> = productions.iter().map(|p| p.lhs.clone()).collect();
+    let (transformed_productions, _terminal_to_opt_nt) = transform_nullable_terminals(
         productions,
+        nullable_terminals,
+        &existing_nonterminals,
+    );
+    
+    let non_terminal_map = assign_non_terminal_ids(&transformed_productions);
+    generate_glr_parser_with_maps(
+        &transformed_productions,
         terminal_map,
         non_terminal_map,
         BTreeMap::new(),

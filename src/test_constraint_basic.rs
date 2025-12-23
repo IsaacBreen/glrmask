@@ -1,5 +1,5 @@
 // src/test_constraint_basic.rs
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::sync::Arc;
 use std::time::Instant;
@@ -893,7 +893,7 @@ fn test_precompute_a_plus_tokenizer() {
     let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
     grammar_token_map.insert(regex_name("A_PLUS"), TerminalID(0));
 
-    let parser = generate_glr_parser_with_terminal_map(&productions, grammar_token_map.clone(), None);
+    let parser = generate_glr_parser_with_terminal_map(&productions, grammar_token_map.clone(), &HashSet::new(), None);
 
     // In this test, original and internal are the same.
     let internal_llm_token_map: BTreeMap<_, _> =
@@ -978,7 +978,7 @@ fn test_precompute_x_eq() {
     grammar_token_map.insert(regex_name("EQUALS"), TerminalID(2)); // '=' is group 2
     grammar_token_map.insert(regex_name("ANY"), TerminalID(3));    // Anything else is group 3
 
-    let parser = generate_glr_parser_with_terminal_map(&productions, grammar_token_map.clone(), None);
+    let parser = generate_glr_parser_with_terminal_map(&productions, grammar_token_map.clone(), &HashSet::new(), None);
 
     let internal_llm_token_map: BTreeMap<_, _> =
         llm_token_map.iter().map(|(k, v)| (k.clone(), *v)).collect();
@@ -1099,7 +1099,7 @@ fn test_constraint_expression_no_times() {
     grammar_token_map.insert(regex_name("I"), TerminalID(3));
     grammar_token_map.insert(regex_name("EOF"), TerminalID(4));
 
-    let parser = generate_glr_parser_with_terminal_map(&productions, grammar_token_map.clone(), None);
+    let parser = generate_glr_parser_with_terminal_map(&productions, grammar_token_map.clone(), &HashSet::new(), None);
 
     let mut token_name_map = BiBTreeMap::new();
      for (term, id) in &grammar_token_map {
@@ -1161,7 +1161,7 @@ fn test_constraint_expression_no_parens() {
     grammar_token_map.insert(regex_name("I"), TerminalID(2));
     grammar_token_map.insert(regex_name("EOF"), TerminalID(3));
 
-    let parser = generate_glr_parser_with_terminal_map(&productions, grammar_token_map.clone(), None);
+    let parser = generate_glr_parser_with_terminal_map(&productions, grammar_token_map.clone(), &HashSet::new(), None);
 
     let mut token_name_map = BiBTreeMap::new();
      for (term, id) in &grammar_token_map {
@@ -1222,7 +1222,7 @@ fn test_constraint_expression_no_plus_times() {
     grammar_token_map.insert(regex_name("I"), TerminalID(2));
     grammar_token_map.insert(regex_name("EOF"), TerminalID(3));
 
-    let parser = generate_glr_parser_with_terminal_map(&productions, grammar_token_map.clone(), None);
+    let parser = generate_glr_parser_with_terminal_map(&productions, grammar_token_map.clone(), &HashSet::new(), None);
 
     let mut token_name_map = BiBTreeMap::new();
      for (term, id) in &grammar_token_map {
@@ -1280,7 +1280,7 @@ fn test_constraint_expression_no_times_parens() {
     grammar_token_map.insert(regex_name("I"), TerminalID(1));
     grammar_token_map.insert(regex_name("EOF"), TerminalID(2));
 
-    let parser = generate_glr_parser_with_terminal_map(&productions, grammar_token_map.clone(), None);
+    let parser = generate_glr_parser_with_terminal_map(&productions, grammar_token_map.clone(), &HashSet::new(), None);
 
     let mut token_name_map = BiBTreeMap::new();
      for (term, id) in &grammar_token_map {
@@ -1342,7 +1342,7 @@ fn test_constraint_expression_unbalanced_parens() {
     grammar_token_map.insert(regex_name("I"), TerminalID(1));
     grammar_token_map.insert(regex_name("EOF"), TerminalID(2));
 
-    let parser = generate_glr_parser_with_terminal_map(&productions, grammar_token_map.clone(), None);
+    let parser = generate_glr_parser_with_terminal_map(&productions, grammar_token_map.clone(), &HashSet::new(), None);
 
     let mut token_name_map = BiBTreeMap::new();
      for (term, id) in &grammar_token_map {
@@ -1405,7 +1405,7 @@ fn test_constraint_expression_unbalanced_parens2() {
     grammar_token_map.insert(regex_name("I"), TerminalID(1));
     grammar_token_map.insert(regex_name("EOF"), TerminalID(2));
 
-    let parser = generate_glr_parser_with_terminal_map(&productions, grammar_token_map.clone(), None);
+    let parser = generate_glr_parser_with_terminal_map(&productions, grammar_token_map.clone(), &HashSet::new(), None);
     println!("Parser: {}", parser);
 
     let mut token_name_map = BiBTreeMap::new();
@@ -1460,7 +1460,7 @@ fn test_constraint_expression_cycle() {
     grammar_token_map.insert(regex_name("I"), TerminalID(0));
     grammar_token_map.insert(regex_name("EOF"), TerminalID(1));
 
-    let parser = generate_glr_parser_with_terminal_map(&productions, grammar_token_map.clone(), None);
+    let parser = generate_glr_parser_with_terminal_map(&productions, grammar_token_map.clone(), &HashSet::new(), None);
 
     let mut token_name_map = BiBTreeMap::new();
      for (term, id) in &grammar_token_map {
@@ -2446,7 +2446,7 @@ fn test_ambiguous_tokenizer_no_gss_explosion() {
     token_name_map.insert(regex_name("ANYTHING"), 2);
 
     // 5. Parser and Constraint
-    let parser = generate_glr_parser_with_terminal_map(&productions, grammar_token_map.clone(), None);
+    let parser = generate_glr_parser_with_terminal_map(&productions, grammar_token_map.clone(), &HashSet::new(), None);
     let constraint = GrammarConstraint::new(
         tokenizer,
         parser,

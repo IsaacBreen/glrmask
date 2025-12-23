@@ -227,6 +227,36 @@ impl GrammarDefinition {
         }
         terminal_to_group_id
     }
+    
+    /// Returns the set of terminals that can match the empty string (nullable terminals).
+    /// This includes both "may be null" (like `a*`) and "always null" terminals.
+    pub fn get_nullable_terminals(&self) -> HashSet<Terminal> {
+        let mut nullable = HashSet::new();
+        
+        // Check regex terminals
+        for (name, group_id) in &self.regex_name_to_group_id {
+            if let Some(expr) = self.group_id_to_expr.get(group_id) {
+                match get_expr_nullability(expr) {
+                    ExprNullability::CanBeNull | ExprNullability::AlwaysNull => {
+                        nullable.insert(Terminal::RegexName(name.clone()));
+                    }
+                    ExprNullability::NeverNull => {}
+                }
+            }
+        }
+        
+        // Check literal terminals - only empty literals are nullable
+        for (bytes, _group_id) in &self.literal_to_group_id {
+            if bytes.is_empty() {
+                nullable.insert(Terminal::Literal(bytes.clone()));
+            }
+        }
+        
+        // External terminals - we don't have expressions for them, so we can't determine nullability
+        // They are assumed to be non-nullable unless explicitly marked otherwise
+        
+        nullable
+    }
 }
 
 impl JSONConvertible for GrammarDefinition {
@@ -1816,9 +1846,20 @@ impl CompiledGrammar {
                 TerminalID(*group_id),
             );
         }
+        
+        // Get nullable terminals from the definition
+        let nullable_terminals = definition.get_nullable_terminals();
+        if !nullable_terminals.is_empty() {
+            debug!(3, "Found {} nullable terminals that will be transformed", nullable_terminals.len());
+            for t in &nullable_terminals {
+                debug!(4, "  Nullable terminal: {:?}", t);
+            }
+        }
+        
         let glr_parser = generate_glr_parser_with_terminal_map(
             &definition.productions,
             terminal_map,
+            &nullable_terminals,
             definition.ignore_terminal_id,
         );
 
