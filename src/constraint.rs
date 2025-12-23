@@ -1533,9 +1533,7 @@ impl GrammarConstraint {
             self.tokenizer.initial_state_id(),
             self.parser.init_glr_parser(None),
         );
-        let constraint_state = GrammarConstraintState { parent: self, state };
-        
-        constraint_state
+        GrammarConstraintState { parent: self, state }
     }
 
     pub fn state_with_nodes(
@@ -1556,9 +1554,7 @@ impl GrammarConstraint {
                 self.parser.init_parse_state_with_gss(node.clone()),
             );
         }
-        let constraint_state = GrammarConstraintState { parent: self, state };
-        
-        constraint_state
+        GrammarConstraintState { parent: self, state }
     }
 
     pub fn print_gss_nodes(
