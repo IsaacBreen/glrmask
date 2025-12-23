@@ -400,13 +400,6 @@ impl<'a> GrammarOptimizer<'a> {
         debug!(5, "Pre-existing terminals before partial_optimize: {}", 
             self.grammar.regex_name_to_group_id.len());
         
-        // Track which terminals already existed before optimization
-        // These should not be re-processed by handle_nullable_terminals_except
-        let pre_existing_terminals: HashSet<String> = self.grammar.regex_name_to_group_id
-            .left_values()
-            .cloned()
-            .collect();
-        
         // For NTs that DON'T depend on cyclic NTs, we can fully expand and convert to terminals
         // For NTs that DO depend on cyclic NTs, we keep them as productions but optimize their
         // non-cyclic parts
@@ -469,10 +462,9 @@ impl<'a> GrammarOptimizer<'a> {
         debug!(5, "Expanded {} NTs in {:?}", expanded_solutions.len(), start.elapsed());
         
         // Step 3: Convert expanded solutions to terminal expressions
-        // Include nullable terminals - they'll be handled by handle_nullable_terminals_except later
+        // Nullable terminals will be handled by transform_nullable_terminals in table.rs
         // Deduplicate terminals with identical expressions
         let convert_start = std::time::Instant::now();
-        let mut nullable_terminal_names: HashSet<String> = HashSet::new();
         
         // Map from expression to (canonical_nt_name, group_id)
         // This allows us to share terminals for NTs with identical expressions
@@ -488,11 +480,6 @@ impl<'a> GrammarOptimizer<'a> {
                         // Reuse existing terminal
                         nt_to_canonical.insert(nt.clone(), canonical_nt.clone());
                     } else {
-                        // Track nullable terminals for later handling
-                        if matches!(get_expr_nullability(&expr), ExprNullability::CanBeNull | ExprNullability::AlwaysNull) {
-                            nullable_terminal_names.insert(format!("__opt_{}__", nt));
-                        }
-                        
                         let group_id = next_group_id;
                         next_group_id += 1;
                         new_terminals.insert(nt.clone(), (group_id, expr.clone()));
@@ -508,9 +495,6 @@ impl<'a> GrammarOptimizer<'a> {
             debug!(4, "Deduplicated {} terminals with identical expressions", deduped_count);
         }
         
-        if !nullable_terminal_names.is_empty() {
-            debug!(5, "Created {} nullable terminals (will be wrapped in optional NTs)", nullable_terminal_names.len());
-        }
         debug!(5, "Converted {} NTs to {} terminal expressions in {:?}", 
             nt_expand_order.len(), new_terminals.len(), convert_start.elapsed());
         
@@ -588,24 +572,10 @@ impl<'a> GrammarOptimizer<'a> {
             self.stats.initial_productions, self.grammar.productions.len(), terminals_added, new_terminals.len(),
             update_start.elapsed());
         
-        // Step 5: Handle nullable terminals that were created during optimization
-        // Only handle those that were actually added
-        let referenced_nullable_terminals: HashSet<String> = nullable_terminal_names
-            .into_iter()
-            .filter(|t| {
-                // Extract the NT name from __opt_NTname__
-                let nt_name = t.trim_start_matches("__opt_").trim_end_matches("__");
-                referenced_terminals.contains(nt_name)
-            })
-            .collect();
+        // Note: Nullable terminals are now handled in table.rs during GLR parser generation
+        // by transform_nullable_terminals(), so we don't need to handle them here
         
-        if !referenced_nullable_terminals.is_empty() {
-            debug!(5, "Handling {} nullable terminals created by optimization", 
-                referenced_nullable_terminals.len());
-            self.grammar.handle_nullable_terminals_except(&pre_existing_terminals);
-        }
-        
-        debug!(5, "After nullable handling: {} productions, {} terminals", 
+        debug!(5, "After optimization: {} productions, {} terminals", 
             self.grammar.productions.len(), self.grammar.regex_name_to_group_id.len());
         
         // Remove unused terminals and compact IDs
