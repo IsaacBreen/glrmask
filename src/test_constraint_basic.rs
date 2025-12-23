@@ -28,6 +28,7 @@ use crate::interface::{
     GrammarDefinition,
 };
 use crate::json_serialization::JSONConvertible;
+use crate::json_schema::json_schema_to_ebnf;
 use crate::tokenizer::{LLMTokenID, LLMTokenMap};
 use crate::types::TerminalID;
 use crate::{choice_fast, groups, seq_fast};
@@ -2913,3 +2914,120 @@ fn test_tokenizer_vocab_to_terminal_dwa_aa() {
 //
 //     Ok(())
 // }
+
+#[test]
+fn test_json_schema_mask_generation() {
+    // 1. Define minimal JSON schema mimicking PackageJson structure
+    let schema_json = r#"{
+        "type": "object",
+        "properties": {
+            "name": { "type": "string" }
+        },
+        "additionalProperties": true
+    }"#;
+    
+    // 2. Convert to EBNF
+    let ebnf = json_schema_to_ebnf(schema_json).unwrap();
+    println!("Generated EBNF:\n{}", ebnf);
+    
+    let grammar_definition = GrammarDefinition::from_ebnf(&ebnf).unwrap();
+
+    // 3. Setup Token Map (mimic PackageJson failure trace)
+    let mut llm_token_map = LLMTokenMap::new();
+    llm_token_map.insert(b"{".to_vec(), LLMTokenID(90));
+    llm_token_map.insert(b"\n".to_vec(), LLMTokenID(198));
+    llm_token_map.insert(b" ".to_vec(), LLMTokenID(220));
+    llm_token_map.insert(b" \"".to_vec(), LLMTokenID(366));
+    llm_token_map.insert(b"name".to_vec(), LLMTokenID(3672));
+    
+    // 4. Init Constraint
+    let constraint = GrammarConstraint::new_from_grammar_definition(
+        Arc::new(grammar_definition),
+        llm_token_map,
+        5000,
+        &GrammarConstraintConfig::default(),
+    );
+    
+    let mut state = constraint.init();
+    
+    // 5. Commit sequence: { \n "
+    println!("Commit '{{'");
+    state.commit(LLMTokenID(90)).expect("Commit {");
+    
+    println!("Commit '\\n'");
+    state.commit(LLMTokenID(198)).expect("Commit \\n");
+    
+    println!("Commit ' '");
+    state.commit(LLMTokenID(220)).expect("Commit space");
+    
+    println!("Commit ' \"'");
+    state.commit(LLMTokenID(366)).expect("Commit \""); 
+    
+    // 6. Check if "name" is allowed
+    let mask = state.get_mask();
+    println!("Mask contains 3672 ('name')? {}", mask.contains(3672));
+    assert!(mask.contains(3672), "Token 'name' (3672) should be allowed!");
+}
+
+#[test]
+fn test_json_schema_gpt2_vocab_simulation() {
+    // 1. Define minimal JSON schema
+    let schema_json = r#"{
+        "type": "object",
+        "properties": {
+            "name": { "type": "string" }
+        },
+        "required": ["name"],
+        "additionalProperties": true
+    }"#;
+    let ebnf = json_schema_to_ebnf(schema_json).unwrap();
+    let grammar_definition = GrammarDefinition::from_ebnf(&ebnf).unwrap();
+
+    // 2. Setup Large Token Map (simulate GPT-2 size ~50k)
+    let mut llm_token_map = LLMTokenMap::new();
+    
+    // Fill with dummy tokens to reach ~50257
+    // We use a prefix "token_" + id to ensure uniqueness
+    // Avoid collisions with reserved IDs
+    let reserved_ids = [90, 198, 220, 366, 3672];
+    for i in 0..50257 {
+        if reserved_ids.contains(&i) {
+            continue;
+        }
+        let bytes = format!("token_{}", i).into_bytes();
+        llm_token_map.insert(bytes, LLMTokenID(i));
+    }
+    
+    // Overwrite the specific tokens we care about with their actual bytes/IDs
+    // 90: '{'
+    llm_token_map.insert(b"{".to_vec(), LLMTokenID(90));
+    // 198: '\n'
+    llm_token_map.insert(b"\n".to_vec(), LLMTokenID(198));
+    // 220: ' '
+    llm_token_map.insert(b" ".to_vec(), LLMTokenID(220));
+    // 366: ' "'
+    llm_token_map.insert(b" \"".to_vec(), LLMTokenID(366));
+    // 3672: 'name'
+    llm_token_map.insert(b"name".to_vec(), LLMTokenID(3672));
+    
+    // 3. Init Constraint
+    let constraint = GrammarConstraint::new_from_grammar_definition(
+        Arc::new(grammar_definition),
+        llm_token_map,
+        50257,
+        &GrammarConstraintConfig::default(),
+    );
+     
+    let mut state = constraint.init();
+    
+    // 4. Commit sequence: { \n "
+    state.commit(LLMTokenID(90)).expect("Commit {");
+    state.commit(LLMTokenID(198)).expect("Commit \\n");
+    state.commit(LLMTokenID(220)).expect("Commit space");
+    state.commit(LLMTokenID(366)).expect("Commit \""); 
+    
+    // 5. Verify 'name' (3672) is allowed
+    let mask = state.get_mask();
+    println!("Simulated GPT-2 Mask contains 3672? {}", mask.contains(3672));
+    assert!(mask.contains(3672), "'name' token should be allowed in large vocab!");
+}
