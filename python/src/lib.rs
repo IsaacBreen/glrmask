@@ -526,8 +526,8 @@ impl PyGLRParser {
     }
 
     #[getter]
-    fn ignore_terminal_id(&self) -> Option<usize> {
-        self.inner.ignore_terminal_id.map(|tid| tid.0)
+    fn ignore_terminal_ids(&self) -> Vec<usize> {
+        self.inner.ignore_terminal_ids.iter().map(|tid| tid.0).collect()
     }
     
     /// Get all template DFAs (one per terminal).
