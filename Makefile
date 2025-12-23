@@ -1,7 +1,7 @@
 # Research Project Makefile
 # Common commands for paper writing and research
 
-.PHONY: paper paper-watch paper-clean notes-today help build test test-js test-json-schema test-schema-packagejson test-schema-github test-schema-sarif test-schema-meta test-schema-extra test-schema-kestra ffi viz viz-clean all
+.PHONY: paper paper-watch paper-clean notes-today help build test test-js test-json-schema test-schema-packagejson test-schema-github test-schema-sarif test-schema-meta test-schema-extra test-schema-kestra test-schema-vegalite test-schema-apollo test-schema-liquibase ffi viz viz-clean all
 
 # === Build All ===
 
@@ -109,6 +109,24 @@ test-schema-kestra: build ## Compile Kestra schema (WARNING: ~8MB, very slow)
 		--json-schema gcg-paper/hard_schemas/data/Kestra---kestra-0.19.0.json \
 		--vocab .cache/test_vocabs/gpt2_vocab.json \
 		--output .cache/test_vocabs/constraint_kestra.json.gz
+
+test-schema-vegalite: build ## Compile VegaLite schema (very_high complexity)
+	MACRO_DEBUG_LEVEL=2 ./target/release/grammar-compiler \
+		--json-schema gcg-paper/hard_schemas/data/VegaLite---vega-lite.json \
+		--vocab .cache/test_vocabs/gpt2_vocab.json \
+		--output .cache/test_vocabs/constraint_vegalite.json.gz
+
+test-schema-apollo: build ## Compile ApolloRouter schema (very_high complexity)
+	MACRO_DEBUG_LEVEL=2 ./target/release/grammar-compiler \
+		--json-schema gcg-paper/hard_schemas/data/ApolloRouter---apollo-router-2.9.0.json \
+		--vocab .cache/test_vocabs/gpt2_vocab.json \
+		--output .cache/test_vocabs/constraint_apollo.json.gz
+
+test-schema-liquibase: build ## Compile Liquibase schema (high complexity)
+	MACRO_DEBUG_LEVEL=2 ./target/release/grammar-compiler \
+		--json-schema gcg-paper/hard_schemas/data/Liquibase---liquibase.json \
+		--vocab .cache/test_vocabs/gpt2_vocab.json \
+		--output .cache/test_vocabs/constraint_liquibase.json.gz
 
 build: ## Build the Rust project
 	cargo build --release
