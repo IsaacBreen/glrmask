@@ -18,8 +18,6 @@ impl<'a> GrammarConstraintState<'a> {
     /// Compute the internal mask (RangeSet of internal token IDs) for the current state.
     /// This is the core computation shared by get_mask and fill_mask_i32.
     fn compute_internal_mask(&self) -> RangeSet {
-        crate::debug!(5, ">>> compute_internal_mask START");
-        
         let mut final_mask_internal = RangeSet::zeros();
         if self.state.is_empty() {
             crate::debug!(7, "compute_internal_mask: state is empty");
@@ -27,15 +25,11 @@ impl<'a> GrammarConstraintState<'a> {
         }
         crate::debug!(7, "compute_internal_mask: state has {} tokenizer states", self.state.len());
 
-        crate::debug!(5, ">>> Allocating queue");
         let mut queue: BTreeMap<isize, BTreeMap<WAStateID, LeveledGSS<ParseStateEdgeContent, RangeSetBlaze<usize>>>> = BTreeMap::new();
-        crate::debug!(5, ">>> Queue allocated");
-        
         let dwa = &self.parent.parser_dwa;
         let dwa_start_state = &dwa.states[dwa.body.start_state];
 
         // 1. Seed initial states
-        crate::debug!(5, ">>> Seeding initial states");
         for (&tokenizer_state_id, glr_state) in &self.state {
             if glr_state.stack.is_empty() {
                 continue;
@@ -89,13 +83,9 @@ impl<'a> GrammarConstraintState<'a> {
                 }
             }
         }
-        crate::debug!(5, ">>> Initial states seeded");
 
         // 2. Main worklist loop
-        crate::debug!(5, ">>> Starting main worklist loop");
-        let mut loop_iterations = 0;
         while let Some((_depth, states_at_depth)) = queue.pop_last() {
-            loop_iterations += 1;
             for (current_wa_state_id, gss) in states_at_depth {
                 let dwa_state = &dwa.states[current_wa_state_id];
 
@@ -157,7 +147,6 @@ impl<'a> GrammarConstraintState<'a> {
                 }
             }
         }
-        crate::debug!(5, ">>> Main worklist loop DONE ({} iterations)", loop_iterations);
 
         crate::debug!(7, "compute_internal_mask: final_mask_internal has some content: {}", !final_mask_internal.is_empty());
         // Check if internal token 143 is in the mask
@@ -166,7 +155,6 @@ impl<'a> GrammarConstraintState<'a> {
         } else {
             crate::debug!(7, "Internal token 143 NOT in final_mask_internal");
         }
-        crate::debug!(5, ">>> compute_internal_mask END");
         final_mask_internal
     }
 
@@ -178,12 +166,8 @@ impl<'a> GrammarConstraintState<'a> {
     ///
     /// For zero-allocation mask filling, see `fill_mask_i32` and `fill_mask_i32_ptr`.
     pub fn get_mask(&self) -> Bitset {
-        crate::debug!(5, ">>> get_mask START");
         let final_mask_internal = self.compute_internal_mask();
-        crate::debug!(5, ">>> Converting internal BV to original");
-        let result = self.parent.parser_dwa_vocab.internal_bv_to_original(&final_mask_internal);
-        crate::debug!(5, ">>> get_mask END");
-        result
+        self.parent.parser_dwa_vocab.internal_bv_to_original(&final_mask_internal)
     }
 
     /// Fill an i32 slice with the token mask (compatible with llguidance format).
