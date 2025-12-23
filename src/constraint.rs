@@ -1538,8 +1538,11 @@ impl GrammarConstraint {
         // Pre-warm the allocator to avoid 100× first-call penalty
         // The first call to get_mask() triggers memory allocator
         // initialization which can be 100× slower than steady state.
-        // By calling it once during state creation, we amortize this cost.
-        let _ = constraint_state.get_mask();
+        // By calling it multiple times during state creation, we ensure
+        // full warmup and amortize this cost.
+        for _ in 0..3 {
+            let _ = constraint_state.get_mask();
+        }
         
         constraint_state
     }
@@ -1565,7 +1568,9 @@ impl GrammarConstraint {
         let constraint_state = GrammarConstraintState { parent: self, state };
         
         // Pre-warm the allocator (see init() for explanation)
-        let _ = constraint_state.get_mask();
+        for _ in 0..3 {
+            let _ = constraint_state.get_mask();
+        }
         
         constraint_state
     }
