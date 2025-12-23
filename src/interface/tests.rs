@@ -93,7 +93,7 @@ mod tests {
             lhs: NT("S".to_string()),
             rhs: vec![],
         }];
-        let dummy_glr_parser = generate_glr_parser(&dummy_productions, &HashSet::new(), None);
+        let dummy_glr_parser = generate_glr_parser(&dummy_productions, &HashSet::new(), HashSet::new());
 
         let constraint = GrammarConstraint::new(
             tokenizer,

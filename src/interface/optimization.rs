@@ -62,10 +62,10 @@ impl<'a> GrammarOptimizer<'a> {
         self.grammar.external_name_to_group_id.len()
     }
 
-    fn get_ignore_expr(&self) -> Option<Expr> {
-        self.grammar.ignore_terminal_id.and_then(|id| {
-            self.grammar.group_id_to_expr.get(&id.0).cloned()
-        })
+    fn get_ignore_exprs(&self) -> Vec<Expr> {
+        self.grammar.ignore_terminal_ids.iter()
+            .filter_map(|id| self.grammar.group_id_to_expr.get(&id.0).cloned())
+            .collect()
     }
 
     fn optimize(&mut self) {
@@ -129,10 +129,19 @@ impl<'a> GrammarOptimizer<'a> {
         // Build initial equations: each NT maps to a RegexTerm
         let mut equations: HashMap<String, Rc<RegexTerm>> = HashMap::new();
         
-        let ignore_expr = self.get_ignore_expr();
-        let ignore_term = ignore_expr.as_ref().map(|e| {
-            Rc::new(RegexTerm::Star(Rc::new(RegexTerm::Concrete(e.clone()))))
-        });
+        // Build a combined ignore term from all ignore expressions
+        let ignore_exprs = self.get_ignore_exprs();
+        let ignore_term = if ignore_exprs.is_empty() {
+            None
+        } else if ignore_exprs.len() == 1 {
+            Some(Rc::new(RegexTerm::Star(Rc::new(RegexTerm::Concrete(ignore_exprs[0].clone())))))
+        } else {
+            // Multiple ignore terminals: (ignore1 | ignore2 | ...)*
+            let choices: Vec<Rc<RegexTerm>> = ignore_exprs.iter()
+                .map(|e| Rc::new(RegexTerm::Concrete(e.clone())))
+                .collect();
+            Some(Rc::new(RegexTerm::Star(Rc::new(RegexTerm::Choice(choices)))))
+        };
 
         let eq_start = std::time::Instant::now();
         for prod in &self.grammar.productions {
@@ -262,9 +271,14 @@ impl<'a> GrammarOptimizer<'a> {
         };
         debug!(5, "Converted to Expr in {:?}", convert_start.elapsed());
         
-        // If we have an ignore terminal, wrap the final expression
-        let final_expr = if let Some(expr) = ignore_expr {
-            let ignore_star = Expr::Quantifier(Box::new(expr), QuantifierType::ZeroOrMore);
+        // If we have ignore terminals, wrap the final expression
+        let final_expr = if !ignore_exprs.is_empty() {
+            let ignore_choice = if ignore_exprs.len() == 1 {
+                ignore_exprs[0].clone()
+            } else {
+                Expr::Choice(ignore_exprs.clone())
+            };
+            let ignore_star = Expr::Quantifier(Box::new(ignore_choice), QuantifierType::ZeroOrMore);
             Expr::Seq(vec![ignore_star.clone(), final_expr, ignore_star])
         } else {
             final_expr
@@ -348,9 +362,8 @@ impl<'a> GrammarOptimizer<'a> {
         self.grammar.regex_name_to_group_id.insert(new_terminal_name.clone(), new_group_id);
         self.grammar.group_id_to_expr.insert(new_group_id, expr);
 
-        if self.grammar.ignore_terminal_id.is_some() {
-            self.grammar.ignore_terminal_id = None;
-        }
+        // Clear ignore terminal IDs since we're replacing the entire grammar
+        self.grammar.ignore_terminal_ids.clear();
 
         let start_nt = NonTerminal("start'".to_string());
         self.grammar.productions = vec![
@@ -616,8 +629,8 @@ impl<'a> GrammarOptimizer<'a> {
             }
         }
         
-        // Also preserve the ignore terminal - it's not in productions but is used by the parser
-        if let Some(ignore_id) = self.grammar.ignore_terminal_id {
+        // Also preserve ignore terminals - they're not in productions but are used by the parser
+        for ignore_id in &self.grammar.ignore_terminal_ids {
             if let Some(name) = self.grammar.regex_name_to_group_id.get_by_right(&ignore_id.0) {
                 used_regex_terminals.insert(name.clone());
                 debug!(5, "Preserving ignore terminal '{}' (ID {})", name, ignore_id.0);
@@ -708,11 +721,12 @@ impl<'a> GrammarOptimizer<'a> {
                 self.grammar.literal_to_group_id.insert(lit, new_id);
             }
             
-            // Update ignore_terminal_id if it was renumbered
-            if let Some(old_ignore_id) = self.grammar.ignore_terminal_id {
-                if let Some(&new_ignore_id) = old_to_new.get(&old_ignore_id.0) {
-                    self.grammar.ignore_terminal_id = Some(TerminalID(new_ignore_id));
-                    debug!(5, "Updated ignore_terminal_id: {} -> {}", old_ignore_id.0, new_ignore_id);
+            // Update ignore_terminal_ids if any were renumbered
+            let old_ignore_ids: HashSet<TerminalID> = self.grammar.ignore_terminal_ids.drain().collect();
+            for old_id in old_ignore_ids {
+                if let Some(&new_id) = old_to_new.get(&old_id.0) {
+                    self.grammar.ignore_terminal_ids.insert(TerminalID(new_id));
+                    debug!(5, "Updated ignore_terminal_id: {} -> {}", old_id.0, new_id);
                 }
             }
         }

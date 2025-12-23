@@ -110,6 +110,36 @@ fn transform_nullable_terminals(
     (all_productions, terminal_to_opt_nt)
 }
 
+/// Detect terminals that are "whitespace-like" (always optional).
+/// 
+/// A terminal T is whitespace-like if for every production `A → α T β`,
+/// there exists another production `A → α β`. In other words, T can always
+/// be skipped without changing the grammar's accepted language.
+/// 
+/// These terminals can be treated as "ignore" terminals by the parser,
+/// allowing them to appear anywhere without affecting parsing.
+/// 
+/// Returns the set of terminal IDs that are whitespace-like.
+/// 
+/// NOTE: This function is currently disabled (returns empty set) because
+/// the simple heuristic of "always optional" is too broad - it incorrectly
+/// classifies meaningful optional content (like in `A*` patterns) as whitespace.
+/// 
+/// A better heuristic would need to distinguish between:
+/// 1. True whitespace (appears ubiquitously, has no semantic meaning)
+/// 2. Optional content (meaningful but happens to be optional in some positions)
+/// 
+/// For now, ignore terminals must be explicitly specified via the grammar
+/// (e.g., `#![ignore(WS)]` directive) rather than auto-detected.
+#[allow(unused_variables)]
+pub fn detect_whitespace_like_terminals(
+    productions: &[Production],
+    terminal_map: &BiBTreeMap<Terminal, TerminalID>,
+) -> HashSet<TerminalID> {
+    // Auto-detection disabled - see NOTE above
+    HashSet::new()
+}
+
 // --- Fast Hasher & BitSet ---
 
 pub struct FxHasher {
@@ -925,7 +955,7 @@ fn generate_glr_parser_with_maps(
     terminal_map: BiBTreeMap<Terminal, TerminalID>,
     mut non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>,
     actions: BTreeMap<NonTerminal, ActionFn>,
-    ignore_terminal_id: Option<TerminalID>,
+    ignore_terminal_ids: HashSet<TerminalID>,
 ) -> GLRParser {
     crate::debug!(5, "Number of productions: {}", productions.len());
     print_memory_usage("Start of parser generation");
@@ -1164,24 +1194,28 @@ fn generate_glr_parser_with_maps(
         start_state_id,
         substring_state_id,
         actions,
-        ignore_terminal_id,
+        ignore_terminal_ids,
     )
 }
 
+/// Generate a GLR parser from productions, with automatic detection of ignore terminals.
+/// 
+/// This function auto-detects whitespace-like terminals (terminals that are always optional)
+/// and adds them to the ignore set. Additional explicit ignore terminals can be provided.
 pub fn generate_glr_parser(
     productions: &[Production],
     nullable_terminals: &HashSet<Terminal>,
-    ignore_terminal_id: Option<TerminalID>,
+    explicit_ignore_terminal_ids: HashSet<TerminalID>,
 ) -> crate::glr::parser::GLRParser {
     let terminal_map = assign_terminal_ids(productions);
-    generate_glr_parser_with_terminal_map(productions, terminal_map, nullable_terminals, ignore_terminal_id)
+    generate_glr_parser_with_terminal_map(productions, terminal_map, nullable_terminals, explicit_ignore_terminal_ids)
 }
 
 pub fn generate_glr_parser_with_terminal_map(
     productions: &[Production],
     terminal_map: BiBTreeMap<Terminal, TerminalID>,
     nullable_terminals: &HashSet<Terminal>,
-    ignore_terminal_id: Option<TerminalID>,
+    explicit_ignore_terminal_ids: HashSet<TerminalID>,
 ) -> crate::glr::parser::GLRParser {
     // Transform nullable terminals into optional non-terminals BEFORE generating the parser
     let existing_nonterminals: BTreeSet<NonTerminal> = productions.iter().map(|p| p.lhs.clone()).collect();
@@ -1191,13 +1225,26 @@ pub fn generate_glr_parser_with_terminal_map(
         &existing_nonterminals,
     );
     
+    // Auto-detect whitespace-like terminals and combine with explicit ignore terminals
+    let detected_ignore = detect_whitespace_like_terminals(&transformed_productions, &terminal_map);
+    let explicit_count = explicit_ignore_terminal_ids.len();
+    let mut all_ignore_ids = explicit_ignore_terminal_ids;
+    all_ignore_ids.extend(detected_ignore.iter());
+    
+    if !all_ignore_ids.is_empty() {
+        crate::debug!(3, "Using {} ignore terminals ({} explicit, {} auto-detected)", 
+            all_ignore_ids.len(), 
+            explicit_count,
+            detected_ignore.len());
+    }
+    
     let non_terminal_map = assign_non_terminal_ids(&transformed_productions);
     generate_glr_parser_with_maps(
         &transformed_productions,
         terminal_map,
         non_terminal_map,
         BTreeMap::new(),
-        ignore_terminal_id,
+        all_ignore_ids,
     )
 }
 

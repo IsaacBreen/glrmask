@@ -206,7 +206,9 @@ pub struct GrammarDefinition {
     pub literal_to_group_id: BiBTreeMap<Vec<u8>, usize>,
     pub regex_name_to_group_id: BiBTreeMap<String, usize>,
     pub group_id_to_expr: BTreeMap<usize, Expr>,
-    pub ignore_terminal_id: Option<TerminalID>,
+    /// Set of terminal IDs that should be ignored by the parser.
+    /// These are typically whitespace-like terminals that can appear anywhere.
+    pub ignore_terminal_ids: HashSet<TerminalID>,
     pub external_name_to_group_id: BiBTreeMap<String, usize>,
 }
 
@@ -268,8 +270,8 @@ impl JSONConvertible for GrammarDefinition {
             self.start_production_id.to_json(),
         );
         obj.insert(
-            "ignore_terminal_id".to_string(),
-            self.ignore_terminal_id.to_json(),
+            "ignore_terminal_ids".to_string(),
+            self.ignore_terminal_ids.to_json(),
         );
         obj.insert(
             "external_name_to_group_id".to_string(),
@@ -339,12 +341,16 @@ impl JSONConvertible for GrammarDefinition {
                         "Missing field start_production_id for GrammarDefinition".to_string()
                     })
                     .and_then(usize::from_json)?;
-                let ignore_terminal_id = obj
-                    .remove("ignore_terminal_id")
-                    .ok_or_else(|| {
-                        "Missing field ignore_terminal_id for GrammarDefinition".to_string()
-                    })
-                    .and_then(Option::<TerminalID>::from_json)?;
+                // Support both old format (ignore_terminal_id) and new format (ignore_terminal_ids)
+                let ignore_terminal_ids = if let Some(node) = obj.remove("ignore_terminal_ids") {
+                    HashSet::<TerminalID>::from_json(node)?
+                } else if let Some(node) = obj.remove("ignore_terminal_id") {
+                    // Legacy format: single optional terminal ID
+                    let opt_id = Option::<TerminalID>::from_json(node)?;
+                    opt_id.into_iter().collect()
+                } else {
+                    HashSet::new()
+                };
                 let external_name_to_group_id = obj
                     .remove("external_name_to_group_id")
                     .map(|node| BiBTreeMap::<String, usize>::from_json(node))
@@ -403,7 +409,7 @@ impl JSONConvertible for GrammarDefinition {
                     regex_name_to_group_id: new_regex_name_to_group_id,
                     literal_to_group_id: new_literal_to_group_id,
                     group_id_to_expr: new_group_id_to_expr,
-                    ignore_terminal_id,
+                    ignore_terminal_ids,
                     external_name_to_group_id,
                 })
             }
@@ -1430,7 +1436,7 @@ impl GrammarDefinition {
             literal_to_group_id,
             regex_name_to_group_id,
             group_id_to_expr,
-            ignore_terminal_id: None,
+            ignore_terminal_ids: HashSet::new(),
             external_name_to_group_id: BiBTreeMap::new(),
         };
 
@@ -1445,7 +1451,7 @@ impl GrammarDefinition {
                         ignore_name
                     )
                 })?;
-            def.ignore_terminal_id = Some(TerminalID(*group_id));
+            def.ignore_terminal_ids.insert(TerminalID(*group_id));
         }
 
         debug!(5, "Ignore terminal set, about to optimize (should_optimize={})", should_optimize);
@@ -1753,7 +1759,7 @@ impl CompiledGrammar {
             &definition.productions,
             terminal_map,
             &nullable_terminals,
-            definition.ignore_terminal_id,
+            definition.ignore_terminal_ids.clone(),
         );
 
         Self {
