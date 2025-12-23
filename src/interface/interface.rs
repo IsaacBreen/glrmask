@@ -1,16 +1,16 @@
 use crate::constraint::GrammarConstraint;
+use crate::datastructures::u8set::U8Set;
 use crate::debug;
 use crate::finite_automata::{greedy_group, groups, Expr, ExprGroup, GroupID, QuantifierType, Regex};
-use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
-use crate::glr::parser::GLRParser;
-use crate::glr::table::{assign_non_terminal_ids, generate_glr_parser, generate_glr_parser_with_maps, generate_glr_parser_with_terminal_map, NonTerminalID, TerminalID};
-use crate::interface::ebnf::{EbnfParseResult, EbnfParser};
-use crate::interface::lark::{LarkParser, LarkParseResult};
-use crate::json_serialization::{JSONConvertible, JSONNode};
-use crate::types::TerminalID as GrammarTokenID;
-use crate::datastructures::u8set::U8Set;
 use crate::glr::analyze::simplify_grammar;
 use crate::glr::grammar::regex_name;
+use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
+use crate::glr::parser::GLRParser;
+use crate::glr::table::{assign_non_terminal_ids, generate_glr_parser, generate_glr_parser_with_terminal_map, NonTerminalID, TerminalID};
+use crate::interface::ebnf::{EbnfParseResult, EbnfParser};
+use crate::interface::lark::{LarkParseResult, LarkParser};
+use crate::json_serialization::{JSONConvertible, JSONNode};
+use crate::types::TerminalID as GrammarTokenID;
 // May not be used directly here anymore
 use bimap::BiBTreeMap;
 use json_convertible_derive::JSONConvertible;
@@ -18,8 +18,8 @@ use kdam::tqdm;
 use std::collections::BTreeMap as StdMap;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::{Debug, Display, Formatter};
-use std::sync::Arc;
 use std::fs;
+use std::sync::Arc;
 
 type LLMToken<'a> = &'a [u8];
 type LLMTokenMap = BiBTreeMap<Vec<u8>, LLMTokenID>;
