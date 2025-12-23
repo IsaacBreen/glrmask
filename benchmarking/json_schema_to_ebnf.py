@@ -44,10 +44,15 @@ class JsonSchemaToEbnf:
 
     def _process_definitions(self, defs: Dict[str, Any], prefix: str):
         for name, schema in defs.items():
+            safe_name = self._sanitize(name)
             ref = f"{prefix}{name}"
-            rule_name = f"def_{name}_{self._next_id()}"
+            rule_name = f"def_{safe_name}_{self._next_id()}"
             self.definitions[ref] = rule_name
             self.pending_definitions.append((rule_name, schema))
+
+    def _sanitize(self, name: str) -> str:
+        import re
+        return re.sub(r'[^a-zA-Z0-9_]', '_', name)
 
     def _next_id(self) -> int:
         self.rule_counter += 1
@@ -147,7 +152,8 @@ class JsonSchemaToEbnf:
         
         member_options = []
         for prop_name, prop_schema in properties.items():
-            val_rule = self._generate_rule_for_schema(prop_schema, f"{rule_name}_val_{prop_name}")
+            safe_prop_name = self._sanitize(prop_name)
+            val_rule = self._generate_rule_for_schema(prop_schema, f"{rule_name}_val_{safe_prop_name}_{self._next_id()}")
             key_str = json.dumps(prop_name)
             member_options.append(f"'{key_str}' ':' {val_rule}")
             
