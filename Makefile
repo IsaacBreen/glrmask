@@ -1,7 +1,7 @@
 # Research Project Makefile
 # Common commands for paper writing and research
 
-.PHONY: paper paper-watch paper-clean notes-today help build test ffi viz viz-clean all
+.PHONY: paper paper-watch paper-clean notes-today help build test test-js test-json-schema test-schema-packagejson test-schema-github test-schema-sarif test-schema-meta test-schema-extra ffi viz viz-clean all
 
 # === Build All ===
 
@@ -59,6 +59,50 @@ download-arxiv: ## Download arXiv paper: make download-arxiv ID=2305.13971 NAME=
 
 test: ## Run Rust tests
 	RUST_TEST_THREADS=1 RUSTFLAGS=-Awarnings ENABLE_PROGRESS_BAR=0 CARGO_PROFILE_DEV_OPT_LEVEL=1 cargo test --color=always --package sep1 --lib --profile test -- --nocapture
+
+test-js: ## Compile the JavaScript grammar (verifies it compiles)
+	MACRO_DEBUG_LEVEL=5 timeout 120 python scripts/compile.py \
+		--grammar src/js.ebnf \
+		--format ebnf \
+		--output .cache/test_vocabs/constraint_js.json.gz \
+		--vocab-url "https://huggingface.co/openai-community/gpt2/raw/main/vocab.json"
+
+test-json-schema: ## Compile a JSON schema grammar (verifies schema-to-EBNF works)
+	SCHEMA_FILE="gcg-paper/downloads/repos/jsonschemabench/data/Github_ultra/o21378.json" \
+		python3 scripts/test_json_schema.py
+
+# === Hard Schema Compilation Tests ===
+# These use the Rust grammar_compiler binary directly with --json-schema
+
+test-schema-packagejson: build ## Compile PackageJson schema
+	MACRO_DEBUG_LEVEL=2 ./target/release/grammar-compiler \
+		--json-schema gcg-paper/hard_schemas/data/PackageJson---package.json \
+		--vocab .cache/test_vocabs/gpt2_vocab.json \
+		--output .cache/test_vocabs/constraint_packagejson.json.gz
+
+test-schema-github: build ## Compile GithubWorkflow schema
+	MACRO_DEBUG_LEVEL=2 ./target/release/grammar-compiler \
+		--json-schema gcg-paper/hard_schemas/data/GithubWorkflow---github-workflow.json \
+		--vocab .cache/test_vocabs/gpt2_vocab.json \
+		--output .cache/test_vocabs/constraint_github.json.gz
+
+test-schema-sarif: build ## Compile SARIF schema
+	MACRO_DEBUG_LEVEL=2 ./target/release/grammar-compiler \
+		--json-schema gcg-paper/hard_schemas/data/SARIF---sarif-2.1.0-rtm.1.json \
+		--vocab .cache/test_vocabs/gpt2_vocab.json \
+		--output .cache/test_vocabs/constraint_sarif.json.gz
+
+test-schema-meta: build ## Compile JSON Schema meta-schema (draft v4)
+	MACRO_DEBUG_LEVEL=2 ./target/release/grammar-compiler \
+		--json-schema gcg-paper/hard_schemas/data/JsonSchemaMeta---schema-draft-v4.json \
+		--vocab .cache/test_vocabs/gpt2_vocab.json \
+		--output .cache/test_vocabs/constraint_meta.json.gz
+
+test-schema-extra: build ## Compile bamboo-spec from SchemaStore_Extra
+	MACRO_DEBUG_LEVEL=2 ./target/release/grammar-compiler \
+		--json-schema gcg-paper/hard_schemas/data/SchemaStore_Extra---bamboo-spec.json \
+		--vocab .cache/test_vocabs/gpt2_vocab.json \
+		--output .cache/test_vocabs/constraint_bamboo.json.gz
 
 build: ## Build the Rust project
 	cargo build --release

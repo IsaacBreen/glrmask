@@ -16,9 +16,13 @@ use std::sync::Arc;
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    /// Path to the EBNF grammar file.
-    #[arg(short, long)]
-    grammar: PathBuf,
+    /// Path to the EBNF or Lark grammar file.
+    #[arg(short, long, conflicts_with = "json_schema")]
+    grammar: Option<PathBuf>,
+
+    /// Path to a JSON Schema file (alternative to --grammar).
+    #[arg(long, conflicts_with = "grammar")]
+    json_schema: Option<PathBuf>,
 
     /// Path to the JSON vocabulary file.
     /// The file should be a JSON object mapping token strings to integer IDs.
@@ -101,23 +105,39 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     // 1. Load and compile the grammar.
     let step = std::time::Instant::now();
-    sep1::debug!(2, "Loading grammar...");
     
-    let grammar_path_str = args.grammar.to_str().ok_or_else(|| format!("Path is not valid UTF-8: {:?}", args.grammar))?;
-    
-    let format = args.format.as_deref().or_else(|| {
-        args.grammar.extension().and_then(|ext| ext.to_str()).map(|ext| {
-            if ext == "lark" { "lark" } else { "ebnf" }
-        })
-    }).unwrap_or("ebnf");
+    let mut grammar_definition = if let Some(json_schema_path) = &args.json_schema {
+        // Load from JSON Schema
+        sep1::debug!(2, "Loading JSON schema...");
+        let schema_path_str = json_schema_path.to_str().ok_or_else(|| format!("Path is not valid UTF-8: {:?}", json_schema_path))?;
+        sep1::debug!(5, "Reading schema file...");
+        let schema_content = std::fs::read_to_string(schema_path_str)?;
+        sep1::debug!(5, "Converting schema to EBNF...");
+        let ebnf = sep1::json_schema::json_schema_to_ebnf(&schema_content).map_err(|e| format!("Failed to convert JSON schema: {}", e))?;
+        sep1::debug!(5, "Parsing generated EBNF ({} chars)...", ebnf.len());
+        GrammarDefinition::from_ebnf(&ebnf).map_err(|e| format!("Failed to parse generated EBNF: {}", e))?
+    } else if let Some(grammar_path) = &args.grammar {
+        // Load from EBNF/Lark grammar file
+        sep1::debug!(2, "Loading grammar...");
+        let grammar_path_str = grammar_path.to_str().ok_or_else(|| format!("Path is not valid UTF-8: {:?}", grammar_path))?;
+        
+        let format = args.format.as_deref().or_else(|| {
+            grammar_path.extension().and_then(|ext| ext.to_str()).map(|ext| {
+                if ext == "lark" { "lark" } else { "ebnf" }
+            })
+        }).unwrap_or("ebnf");
 
-    sep1::debug!(5, "Parsing grammar file...");
-    let mut grammar_definition = match format {
-        "lark" => GrammarDefinition::from_lark_file(grammar_path_str)?,
-        "ebnf" => GrammarDefinition::from_ebnf_file(grammar_path_str)?,
-        _ => return Err(format!("Unknown grammar format: {}", format).into()),
+        sep1::debug!(5, "Parsing grammar file...");
+        let gd = match format {
+            "lark" => GrammarDefinition::from_lark_file(grammar_path_str)?,
+            "ebnf" => GrammarDefinition::from_ebnf_file(grammar_path_str)?,
+            _ => return Err(format!("Unknown grammar format: {}", format).into()),
+        };
+        sep1::debug!(5, "Grammar parsed");
+        gd
+    } else {
+        return Err("Error: either --grammar or --json-schema must be specified.".into());
     };
-    sep1::debug!(5, "Grammar parsed");
     
     let prod_count = grammar_definition.productions.len();
     let term_count = grammar_definition.terminal_to_group_id().len();
