@@ -1533,7 +1533,15 @@ impl GrammarConstraint {
             self.tokenizer.initial_state_id(),
             self.parser.init_glr_parser(None),
         );
-        GrammarConstraintState { parent: self, state }
+        let constraint_state = GrammarConstraintState { parent: self, state };
+        
+        // Pre-warm the allocator to avoid 100× first-call penalty
+        // The first call to get_mask() triggers memory allocator
+        // initialization which can be 100× slower than steady state.
+        // By calling it once during state creation, we amortize this cost.
+        let _ = constraint_state.get_mask();
+        
+        constraint_state
     }
 
     pub fn state_with_nodes(
@@ -1554,7 +1562,12 @@ impl GrammarConstraint {
                 self.parser.init_parse_state_with_gss(node.clone()),
             );
         }
-        GrammarConstraintState { parent: self, state }
+        let constraint_state = GrammarConstraintState { parent: self, state };
+        
+        // Pre-warm the allocator (see init() for explanation)
+        let _ = constraint_state.get_mask();
+        
+        constraint_state
     }
 
     pub fn print_gss_nodes(
