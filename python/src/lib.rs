@@ -1765,6 +1765,24 @@ fn _sep1(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(json_schema_to_ebnf_py, m)?)?;
     m.add_function(wrap_pyfunction!(json_schema_to_grammar_exprs_py, m)?)?;
     m.add_function(wrap_pyfunction!(grammar_definition_from_json_schema, m)?)?;
+    // Benchmark functions
+    m.add_function(wrap_pyfunction!(set_benchmark_mode, m)?)?;
+    m.add_function(wrap_pyfunction!(get_last_mask_time_ns, m)?)?;
     m.add_class::<PyIncrementalParser>()?;
     Ok(())
+}
+
+/// Enable benchmark mode to capture Rust-native timings.
+/// When enabled, fill_next_token_bitmask will record its execution time
+/// which can be retrieved via get_last_mask_time_ns().
+#[pyfunction]
+fn set_benchmark_mode(enabled: bool) {
+    sep1::constraint_fns::set_benchmark_mode(enabled);
+}
+
+/// Get the last mask computation time in nanoseconds.
+/// Only valid if benchmark mode is enabled.
+#[pyfunction]
+fn get_last_mask_time_ns() -> u64 {
+    sep1::constraint_fns::get_last_mask_time_ns()
 }

@@ -8,6 +8,7 @@ use once_cell::sync::Lazy;
 use range_set_blaze::RangeSetBlaze;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::HashMap;
+use std::env;
 use std::fmt::{Debug, Display, Formatter};
 use std::hash::{Hash, Hasher};
 use std::iter::FromIterator;
@@ -15,6 +16,12 @@ use std::num::NonZeroUsize;
 use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Deref, Not, Sub, SubAssign};
 use std::sync::{Arc, Mutex};
 use crate::datastructures::hybrid_bitset::RangeSet as OtherRangeSet;
+
+/// Check if interning/caching is disabled via environment variable.
+/// Set SEP1_DISABLE_INTERNING=1 to disable interning and operation caches.
+static DISABLE_INTERNING: Lazy<bool> = Lazy::new(|| {
+    env::var("SEP1_DISABLE_INTERNING").map(|v| v == "1" || v.to_lowercase() == "true").unwrap_or(false)
+});
 
 /// Thin wrapper around `RangeSetBlaze<usize>` with cached fingerprint and `is_all` flag.
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd)]
@@ -138,6 +145,11 @@ fn intern(rsb: RangeSetBlaze<usize>) -> RangeSet {
     let (is_all, fp) = calc_is_all_and_fp(&rsb);
     if is_all {
         return ALL.clone();
+    }
+
+    // If interning is disabled, just create a fresh RangeSet
+    if *DISABLE_INTERNING {
+        return RangeSet(Arc::new(RangeSetInner { rsb, fp, is_all }));
     }
 
     let mut interner = INTERNER.get(fp).lock().unwrap();
@@ -359,6 +371,11 @@ impl<'a> BitAnd<&'a RangeSet> for &'a RangeSet {
             return self.clone();
         }
 
+        // Skip cache if interning is disabled
+        if *DISABLE_INTERNING {
+            return intern(&self.rsb & &rhs.rsb);
+        }
+
         let p1 = Arc::as_ptr(&self.0) as usize;
         let p2 = Arc::as_ptr(&rhs.0) as usize;
         let key = if p1 < p2 { (p1, p2) } else { (p2, p1) };
@@ -388,6 +405,11 @@ impl<'a> BitOr<&'a RangeSet> for &'a RangeSet {
         }
         if rhs.is_empty() {
             return self.clone();
+        }
+
+        // Skip cache if interning is disabled
+        if *DISABLE_INTERNING {
+            return intern(&self.rsb | &rhs.rsb);
         }
 
         let p1 = Arc::as_ptr(&self.0) as usize;
@@ -473,6 +495,15 @@ impl<'a> Sub<&'a RangeSet> for &'a RangeSet {
         }
         if rhs.is_all_fast() {
             return RangeSet::zeros();
+        }
+
+        // Skip cache if interning is disabled
+        if *DISABLE_INTERNING {
+            return if self.is_all_fast() {
+                rhs.complement()
+            } else {
+                intern(&self.rsb - &rhs.rsb)
+            };
         }
 
         let p1 = Arc::as_ptr(&self.0) as usize;
