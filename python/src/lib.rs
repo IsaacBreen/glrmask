@@ -1729,6 +1729,23 @@ fn grammar_definition_from_json_schema(schema_json: &str) -> PyResult<PyGrammarD
     Ok(PyGrammarDefinition { inner: grammar_def })
 }
 
+/// Create a GrammarDefinition from an EBNF string.
+/// This also supports GBNF (llama.cpp grammar format) as GBNF is a subset of EBNF.
+#[pyfunction]
+fn grammar_definition_from_ebnf(ebnf_source: &str) -> PyResult<PyGrammarDefinition> {
+    let grammar_def = GrammarDefinition::from_ebnf(ebnf_source)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+    
+    Ok(PyGrammarDefinition { inner: grammar_def })
+}
+
+/// Alias for grammar_definition_from_ebnf for GBNF compatibility.
+/// GBNF (GGML BNF) is the grammar format used by llama.cpp.
+#[pyfunction]
+fn grammar_definition_from_gbnf(gbnf_source: &str) -> PyResult<PyGrammarDefinition> {
+    grammar_definition_from_ebnf(gbnf_source)
+}
+
 #[pymodule]
 fn _sep1(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyGrammarExpr>()?;
@@ -1765,6 +1782,9 @@ fn _sep1(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(json_schema_to_ebnf_py, m)?)?;
     m.add_function(wrap_pyfunction!(json_schema_to_grammar_exprs_py, m)?)?;
     m.add_function(wrap_pyfunction!(grammar_definition_from_json_schema, m)?)?;
+    // EBNF/GBNF parsing functions
+    m.add_function(wrap_pyfunction!(grammar_definition_from_ebnf, m)?)?;
+    m.add_function(wrap_pyfunction!(grammar_definition_from_gbnf, m)?)?;
     // Benchmark functions
     m.add_function(wrap_pyfunction!(set_benchmark_mode, m)?)?;
     m.add_function(wrap_pyfunction!(get_last_mask_time_ns, m)?)?;

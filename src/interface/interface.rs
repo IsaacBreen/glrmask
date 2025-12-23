@@ -1572,9 +1572,27 @@ impl GrammarDefinition {
             name.chars().next().map_or(false, |c| c.is_uppercase())
         }
 
+        /// Check if an expression contains character classes or AnyChar directly.
+        /// These require the rule to be treated as a terminal.
+        fn contains_regex_features(expr: &GrammarExpr) -> bool {
+            match expr {
+                GrammarExpr::AnyChar => true,
+                GrammarExpr::CharClass(_) => true,
+                GrammarExpr::Literal(_) => false,
+                GrammarExpr::Ref(_) => false,
+                GrammarExpr::Sequence(exprs) | GrammarExpr::Choice(exprs) => {
+                    exprs.iter().any(contains_regex_features)
+                }
+                GrammarExpr::Optional(inner) | GrammarExpr::Repeat(inner) => {
+                    contains_regex_features(inner)
+                }
+            }
+        }
+
         let mut terminals: BTreeMap<String, GrammarExpr> = BTreeMap::new();
         for (name, expr) in &grammar_exprs {
-            if is_terminal_name(name) {
+            // GBNF compatibility: auto-detect terminals by content, not just name
+            if is_terminal_name(name) || contains_regex_features(expr) {
                 terminals.insert(name.clone(), expr.clone());
             }
         }
@@ -1611,14 +1629,14 @@ impl GrammarDefinition {
             }
         }
         if let Some(ignore_name) = &ignore_symbol_name {
-            if is_terminal_name(ignore_name) {
+            if is_terminal_name(ignore_name) || terminals.contains_key(ignore_name) {
                 referenced_terminals.insert(ignore_name.clone());
             }
         }
 
         let non_terminal_rules: Vec<(String, GrammarExpr)> = grammar_exprs
             .into_iter()
-            .filter(|(name, _)| !is_terminal_name(name))
+            .filter(|(name, _)| !terminals.contains_key(name))
             .collect();
 
         // Share memo across all terminal conversions to avoid exponential re-expansion
