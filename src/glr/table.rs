@@ -1235,6 +1235,9 @@ pub fn generate_glr_parser_with_terminal_map(
             all_ignore_ids.len(), 
             explicit_count,
             detected_ignore.len());
+        for t in &detected_ignore {
+            crate::debug!(5, "  {}", terminal_map.get_by_right(t).unwrap());
+        }
     }
     
     // Simplify grammar by eliminating unit productions (A → B → X becomes A → X)
