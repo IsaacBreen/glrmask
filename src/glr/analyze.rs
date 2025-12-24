@@ -1056,27 +1056,16 @@ pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {
     }
 
     let nullability = compute_nonterminal_nullability(productions);
-    let nullable_nonterminals: BTreeSet<_> = nullability
-        .iter()
-        .filter_map(|(nt, status)| {
-            if *status == Nullability::Nullable || *status == Nullability::Null {
-                Some(nt.clone())
-            } else {
-                None
-            }
-        })
-        .collect();
-    let start_symbol = &productions[0].lhs;
-    let start_symbol_is_nullable = nullable_nonterminals.contains(start_symbol);
-
+    
+    // We process ALL productions, including the start production.
+    // This ensures that if the start production uses a nullable nonterminal, 
+    // it gets expanded (e.g. S -> A, A -> epsilon  becomes  S -> A | epsilon).
+    // This allows us to subsequently remove ALL epsilon productions safely.
+    
     let mut seen = BTreeSet::<Production>::new();
     let mut out = Vec::<Production>::new();
 
-    let start_prod = productions[0].clone();
-    seen.insert(start_prod.clone());
-    out.push(start_prod);
-
-    for prod in &productions[1..] {
+    for prod in productions {
         let rhs_variants: Vec<Vec<Symbol>> =
             prod.rhs.iter().fold(vec![vec![]], |acc, sym| {
                 let sym_options = match sym {
@@ -1112,27 +1101,9 @@ pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {
         }
     }
 
-    let start_rhs_nts: BTreeSet<_> = productions[0]
-        .rhs
-        .iter()
-        .filter_map(|s| {
-            if let Symbol::NonTerminal(nt) = s {
-                Some(nt.clone())
-            } else {
-                None
-            }
-        })
-        .collect();
-
+    // Now strict filtering: remove ALL epsilon productions.
     out.into_iter()
-        .filter(|p| {
-            if !p.rhs.is_empty() {
-                true
-            } else {
-                start_rhs_nts.contains(&p.lhs)
-                    || (p.lhs == *start_symbol && start_symbol_is_nullable)
-            }
-        })
+        .filter(|p| !p.rhs.is_empty())
         .collect()
 }
 

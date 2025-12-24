@@ -1210,6 +1210,18 @@ fn generate_glr_parser_with_maps(
     print_memory_usage("After grammar normalization loop");
 
     // ============================================================
+    // Final epsilon elimination
+    // ============================================================
+    // The optimization loop may have created new epsilon productions
+    // (e.g., from right recursion elimination: A' → ε). We need to
+    // inline these so that no epsilon productions remain.
+    // inline_null_productions now guarantees elimination of ALL
+    // epsilon productions by inlining into the start production as well.
+    crate::debug!(4, "Final epsilon production elimination");
+    productions = inline_null_productions(&productions);
+    print_memory_usage("After final epsilon elimination");
+
+    // ============================================================
     // Phase 5: DECORATIVE - Whitespace detection (after inlining)
     // ============================================================
     // Auto-detect whitespace-like terminals and combine with explicit ignore terminals.
