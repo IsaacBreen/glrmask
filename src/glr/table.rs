@@ -1063,6 +1063,61 @@ fn generate_glr_parser_with_maps(
     print_memory_usage("After removing undefined");
 
     // ============================================================
+    // Phase 0: Start symbol isolation
+    // ============================================================
+    // If the first production's LHS nonterminal appears in the RHS of ANY
+    // production (including itself), we need to create a new initial production
+    // with a fresh nonterminal to isolate the start symbol.
+    if !productions.is_empty() {
+        let original_start_nt = productions[0].lhs.clone();
+        let start_appears_in_rhs = productions.iter().any(|p| {
+            p.rhs.iter().any(|sym| {
+                if let Symbol::NonTerminal(nt) = sym {
+                    *nt == original_start_nt
+                } else {
+                    false
+                }
+            })
+        });
+
+        if start_appears_in_rhs {
+            crate::debug!(4, "Start symbol '{}' appears in RHS, creating isolated start", original_start_nt.0);
+            // Generate a unique name for the new start nonterminal
+            let existing_nonterminals: BTreeSet<NonTerminal> = productions.iter().map(|p| p.lhs.clone()).collect();
+            let mut new_start_name = format!("{}_Start", original_start_nt.0);
+            let mut counter = 0;
+            while existing_nonterminals.iter().any(|nt| nt.0 == new_start_name) {
+                counter += 1;
+                new_start_name = format!("{}_Start_{}", original_start_nt.0, counter);
+            }
+            let new_start_nt = NonTerminal(new_start_name);
+
+            // Create new initial production: NewStart → OriginalStartRHS
+            let new_initial_production = Production {
+                lhs: new_start_nt,
+                rhs: productions[0].rhs.clone(),
+            };
+
+            // Insert the new production at the beginning
+            productions.insert(0, new_initial_production);
+            crate::debug!(5, "Created new start production: {} → {:?}", productions[0].lhs.0, productions[0].rhs);
+        }
+    }
+
+    // Note the current start nonterminal (LHS of the first production)
+    let start_nonterminal = if productions.is_empty() {
+        NonTerminal("__empty__".to_string())
+    } else {
+        productions[0].lhs.clone()
+    };
+    crate::debug!(5, "Start nonterminal: {}", start_nonterminal.0);
+
+    // Determine if the grammar as a whole is nullable (start symbol can derive ε)
+    let initial_nullable_nonterminals = crate::glr::automaton::compute_nullable_nonterminals(&productions);
+    let grammar_is_nullable = initial_nullable_nonterminals.contains(&start_nonterminal);
+    crate::debug!(4, "Grammar is nullable: {}", grammar_is_nullable);
+
+    // ============================================================
     // Phase 1: ESSENTIAL - Transform nullable terminals
     // ============================================================
     // This must happen EARLY before any null production inlining.
@@ -1155,6 +1210,35 @@ fn generate_glr_parser_with_maps(
     print_memory_usage("After grammar normalization loop");
 
     // ============================================================
+    // Final epsilon elimination
+    // ============================================================
+    // The optimization loop may have created new epsilon productions
+    // (e.g., from right recursion elimination: A' → ε). We need to
+    // inline these so that no epsilon productions remain. We run
+    // inline_null_productions in a loop until no epsilon productions
+    // remain, then explicitly filter out any remaining ones.
+    crate::debug!(4, "Final epsilon production elimination");
+    const MAX_EPSILON_ELIMINATION_PASSES: usize = 10;
+    for pass in 0..MAX_EPSILON_ELIMINATION_PASSES {
+        let epsilon_count = productions.iter().filter(|p| p.rhs.is_empty()).count();
+        if epsilon_count == 0 {
+            crate::debug!(5, "All epsilon productions eliminated after {} passes", pass);
+            break;
+        }
+        crate::debug!(5, "Epsilon elimination pass {}: {} epsilon productions", pass + 1, epsilon_count);
+        productions = inline_null_productions(&productions);
+    }
+    // Force filter out any remaining epsilon productions
+    // inline_null_productions keeps some by design (for start symbol), but we
+    // will re-add nullability in a controlled way below
+    let epsilon_before = productions.iter().filter(|p| p.rhs.is_empty()).count();
+    if epsilon_before > 0 {
+        crate::debug!(5, "Force-removing {} remaining epsilon productions", epsilon_before);
+        productions = productions.into_iter().filter(|p| !p.rhs.is_empty()).collect();
+    }
+    print_memory_usage("After final epsilon elimination");
+
+    // ============================================================
     // Phase 5: DECORATIVE - Whitespace detection (after inlining)
     // ============================================================
     // Auto-detect whitespace-like terminals and combine with explicit ignore terminals.
@@ -1197,6 +1281,86 @@ fn generate_glr_parser_with_maps(
     }
     productions = simplified_productions;
     print_memory_usage("After unit production elimination");
+
+    // ============================================================
+    // Epsilon Production Assertion
+    // ============================================================
+    // After all optimizations, there should be NO epsilon productions.
+    // They should all have been eliminated by inline_null_productions.
+    let epsilon_productions: Vec<_> = productions.iter()
+        .filter(|p| p.rhs.is_empty())
+        .collect();
+    assert!(
+        epsilon_productions.is_empty(),
+        "Epsilon productions should have been eliminated, but found: {:?}",
+        epsilon_productions.iter().map(|p| &p.lhs.0).collect::<Vec<_>>()
+    );
+
+    // ============================================================
+    // Phase 7: Restore grammar nullability (if needed)
+    // ============================================================
+    // If the original grammar was nullable, it won't be anymore since we
+    // eliminated all epsilon productions. We need to re-introduce nullability
+    // in a controlled way:
+    // 1. Create a new nonterminal B with two productions: B → StartNT | ε
+    // 2. Create another new nonterminal A with a single production: A → B
+    // 3. A becomes the new initial production
+    if grammar_is_nullable {
+        crate::debug!(4, "Re-introducing nullability for grammar");
+        
+        // Get current start nonterminal
+        let current_start_nt = productions[0].lhs.clone();
+        
+        // Generate unique names for the new nonterminals
+        let existing_nonterminals: BTreeSet<NonTerminal> = productions.iter().map(|p| p.lhs.clone()).collect();
+        
+        // Generate unique name for B (nullable wrapper)
+        let mut b_name = format!("{}_Nullable", current_start_nt.0);
+        let mut counter = 0;
+        while existing_nonterminals.iter().any(|nt| nt.0 == b_name) {
+            counter += 1;
+            b_name = format!("{}_Nullable_{}", current_start_nt.0, counter);
+        }
+        let b_nt = NonTerminal(b_name);
+        
+        // Generate unique name for A (new start)
+        let mut a_name = format!("{}_NullableStart", current_start_nt.0);
+        counter = 0;
+        let mut all_names: BTreeSet<String> = existing_nonterminals.iter().map(|nt| nt.0.clone()).collect();
+        all_names.insert(b_nt.0.clone());
+        while all_names.contains(&a_name) {
+            counter += 1;
+            a_name = format!("{}_NullableStart_{}", current_start_nt.0, counter);
+        }
+        let a_nt = NonTerminal(a_name);
+
+        // Create B → StartNT (the non-epsilon case)
+        let b_prod_non_empty = Production {
+            lhs: b_nt.clone(),
+            rhs: vec![Symbol::NonTerminal(current_start_nt.clone())],
+        };
+        
+        // Create B → ε (the epsilon case)
+        let b_prod_epsilon = Production {
+            lhs: b_nt.clone(),
+            rhs: vec![],
+        };
+        
+        // Create A → B (the new start)
+        let a_prod = Production {
+            lhs: a_nt.clone(),
+            rhs: vec![Symbol::NonTerminal(b_nt.clone())],
+        };
+        
+        // Insert the new productions at the beginning
+        // Order: A → B first (as the new start), then B → StartNT, then B → ε
+        productions.insert(0, a_prod);
+        productions.insert(1, b_prod_non_empty);
+        productions.insert(2, b_prod_epsilon);
+        
+        crate::debug!(5, "Created nullable wrapper: {} → {} | ε", b_nt.0, current_start_nt.0);
+        crate::debug!(5, "Created new start: {} → {}", a_nt.0, b_nt.0);
+    }
 
     // ============================================================
     // Validation - Ensure all essential transformations completed
