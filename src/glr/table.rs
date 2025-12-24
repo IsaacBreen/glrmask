@@ -1332,7 +1332,91 @@ fn generate_glr_parser_with_maps(
 
 
     // ============================================================
-    // Validation - Ensure all essential transformations completed
+    // CRITICAL GRAMMAR INVARIANTS VALIDATION
+    // ============================================================
+    // ╔═══════════════════════════════════════════════════════════════════════════╗
+    // ║  WARNING: This validation function MUST NEVER be weakened or removed!     ║
+    // ║                                                                           ║
+    // ║  These invariants are essential for correct GLR parser operation.         ║
+    // ║  Violating them will cause subtle parsing bugs that are hard to debug.    ║
+    // ║                                                                           ║
+    // ║  If a grammar transformation breaks these invariants, FIX THE             ║
+    // ║  TRANSFORMATION, do not weaken the validation!                            ║
+    // ╚═══════════════════════════════════════════════════════════════════════════╝
+    fn validate_critical_grammar_invariants(productions: &[Production]) {
+        if productions.is_empty() {
+            return;
+        }
+
+        let start_prod = &productions[0];
+        let start_nt = &start_prod.lhs;
+
+        // INVARIANT 1: Production at index 0 is the start production.
+        // (This is implicit by the position, but we document it here.)
+
+        // INVARIANT 2: The start nonterminal must NOT appear in any production
+        // other than the start production itself - neither on LHS nor RHS.
+        for (idx, prod) in productions.iter().enumerate().skip(1) {
+            // Check LHS
+            assert!(
+                prod.lhs != *start_nt,
+                "CRITICAL INVARIANT VIOLATION: Start nonterminal '{}' appears as LHS in production {} (should only be in production 0). \
+                 Production: {} -> {:?}",
+                start_nt.0, idx, prod.lhs.0, prod.rhs
+            );
+            
+            // Check RHS
+            for sym in &prod.rhs {
+                if let Symbol::NonTerminal(nt) = sym {
+                    assert!(
+                        nt != start_nt,
+                        "CRITICAL INVARIANT VIOLATION: Start nonterminal '{}' appears in RHS of production {} (should not appear anywhere except as LHS of production 0). \
+                         Production: {} -> {:?}",
+                        start_nt.0, idx, prod.lhs.0, prod.rhs
+                    );
+                }
+            }
+        }
+
+        // INVARIANT 3: No epsilon productions, with ONE exception:
+        // If the start production has exactly 1 symbol and that symbol is a nonterminal A,
+        // then A is allowed to have an epsilon production (this is the "nullable wrapper" pattern).
+        let allowed_epsilon_nt: Option<&NonTerminal> = if start_prod.rhs.len() == 1 {
+            if let Symbol::NonTerminal(nt) = &start_prod.rhs[0] {
+                Some(nt)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        for (idx, prod) in productions.iter().enumerate() {
+            if prod.rhs.is_empty() {
+                // This is an epsilon production
+                if let Some(allowed_nt) = allowed_epsilon_nt {
+                    if prod.lhs == *allowed_nt {
+                        // This epsilon is allowed (nullable wrapper pattern)
+                        continue;
+                    }
+                }
+                
+                panic!(
+                    "CRITICAL INVARIANT VIOLATION: Epsilon production found at index {} for nonterminal '{}'. \
+                     Epsilon productions are only allowed for the nullable wrapper nonterminal. \
+                     Start production: {} -> {:?}",
+                    idx, prod.lhs.0, start_nt.0, start_prod.rhs
+                );
+            }
+        }
+    }
+
+    // Run the critical invariant validation
+    crate::debug!(4, "Validating critical grammar invariants");
+    validate_critical_grammar_invariants(&productions);
+
+    // ============================================================
+    // Additional Validation - Check for remaining grammar issues
     // ============================================================
     crate::debug!(4, "Validating grammar after transformations");
     let post_transform_errors = crate::glr::analyze::check_for_length_1_recursion(&productions);
