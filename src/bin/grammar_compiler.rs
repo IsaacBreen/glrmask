@@ -139,20 +139,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         return Err("Error: either --grammar or --json-schema must be specified.".into());
     };
     
+    // NOTE: Grammar is already optimized by from_ebnf()/from_lark() internally.
+    // Calling optimize() again here would cause double-processing of nullable
+    // terminals, creating additional wrapper non-terminals that bloat the grammar
+    // (e.g., 446 productions instead of 228, causing 2-3x slower builds).
     let prod_count = grammar_definition.productions.len();
     let term_count = grammar_definition.terminal_to_group_id().len();
     
-    sep1::debug!(5, "Optimizing grammar...");
-    grammar_definition.optimize();
-    sep1::debug!(5, "Grammar optimized");
-    
-    let opt_prod_count = grammar_definition.productions.len();
-    let opt_term_count = grammar_definition.terminal_to_group_id().len();
-    
     if is_debug_level_enabled(2) {
-        sep1::debug!(2, "└─ {} → {} productions, {} → {} terminals {MAGENTA}({}){RESET}", 
-            prod_count, opt_prod_count, term_count, opt_term_count,
-            format_duration(step.elapsed()));
+        sep1::debug!(2, "└─ {} productions, {} terminals {MAGENTA}({}){RESET}", 
+            prod_count, term_count, format_duration(step.elapsed()));
     }
 
     // 2. Load the vocabulary.
