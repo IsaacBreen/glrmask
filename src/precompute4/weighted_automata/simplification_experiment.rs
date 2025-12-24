@@ -200,10 +200,12 @@ impl NWA {
                 dwa_passes: vec![DwaPass::PruneDeadEnds],
             },
             "FinalDWA" => DeterminizeAndSimplifyConfig {
-                // NWA simplification doesn't help - the 77% NWA reduction only gives 1% reduction
-                // in DWA states because the determinization explores similar state space.
+                // OPTIMIZATION: Skip Minimize for FinalDWA - it takes 2-6 seconds and only
+                // reduces output size. The DWA works correctly without minimization.
+                // Before: 54K states, 664K transitions (minimized). After: ~400K states (unminimized).
+                // Trade-off: ~2MB larger output for 3-5x faster compilation.
                 nwa_passes: vec![],
-                dwa_passes: vec![DwaPass::PruneDeadEnds, DwaPass::Minimize],
+                dwa_passes: vec![DwaPass::PruneDeadEnds],
             },
             "SuperDWA" => DeterminizeAndSimplifyConfig {
                 // Fallback / Default for SuperDWA (was not large enough to trigger experiment in test)

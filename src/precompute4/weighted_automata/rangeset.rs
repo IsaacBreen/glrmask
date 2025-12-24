@@ -17,10 +17,11 @@ use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Deref, Not, Sub, SubAss
 use std::sync::{Arc, Mutex};
 use crate::datastructures::hybrid_bitset::RangeSet as OtherRangeSet;
 
-/// Check if interning/caching is disabled via environment variable.
-/// Set SEP1_DISABLE_INTERNING=1 to disable interning and operation caches.
+/// Interning is DISABLED by default because it adds ~2x overhead during compilation.
+/// Set SEP1_ENABLE_INTERNING=1 to enable interning (useful for runtime mask generation).
 static DISABLE_INTERNING: Lazy<bool> = Lazy::new(|| {
-    env::var("SEP1_DISABLE_INTERNING").map(|v| v == "1" || v.to_lowercase() == "true").unwrap_or(false)
+    // Default: disabled (true). Enable only if SEP1_ENABLE_INTERNING=1
+    !env::var("SEP1_ENABLE_INTERNING").map(|v| v == "1" || v.to_lowercase() == "true").unwrap_or(false)
 });
 
 /// Thin wrapper around `RangeSetBlaze<usize>` with cached fingerprint and `is_all` flag.
