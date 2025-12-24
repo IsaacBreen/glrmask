@@ -3,6 +3,7 @@ use crate::glr::analyze::{
     create_unique_name_generator, inline_null_productions,
     remove_productions_with_undefined_nonterminals, validate,
 };
+use crate::glr::minimizer::{substitute_single_productions_and_report, remove_productions_for_nts};
 use crate::glr::automaton::{
     compute_first_sets_ids_with_lhs, compute_follow_sets_ids, compute_nullable_nonterminals,
 };
@@ -1236,9 +1237,27 @@ pub fn generate_glr_parser_with_terminal_map(
             detected_ignore.len());
     }
     
-    let non_terminal_map = assign_non_terminal_ids(&transformed_productions);
-    generate_glr_parser_with_maps(
+    // Simplify grammar by eliminating unit productions (A → B → X becomes A → X)
+    // This reduces parser construction time for grammars with many trivial chains.
+    let start_nt = &transformed_productions.get(0).map(|p| p.lhs.clone()).unwrap_or(NonTerminal("start".to_string()));
+    const MAX_SUBSTITUTION_RHS_LEN: usize = usize::MAX;
+    let (simplified_with_defs, substituted_nts) = substitute_single_productions_and_report(
         &transformed_productions,
+        start_nt,
+        MAX_SUBSTITUTION_RHS_LEN,
+    );
+    let simplified_productions = remove_productions_for_nts(&simplified_with_defs, &substituted_nts);
+    
+    if simplified_productions.len() < transformed_productions.len() {
+        crate::debug!(4, "Grammar simplification: {} → {} productions (eliminated {} unit productions)",
+            transformed_productions.len(),
+            simplified_productions.len(),
+            transformed_productions.len() - simplified_productions.len());
+    }
+    
+    let non_terminal_map = assign_non_terminal_ids(&simplified_productions);
+    generate_glr_parser_with_maps(
+        &simplified_productions,
         terminal_map,
         non_terminal_map,
         BTreeMap::new(),
