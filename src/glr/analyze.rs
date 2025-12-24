@@ -1005,6 +1005,22 @@ pub fn resolve_direct_right_recursion(
     productions: &mut Vec<Production>,
     mut new_name_generator: impl FnMut(&str) -> String,
 ) {
+    // Right recursion elimination WITHOUT epsilon productions.
+    //
+    // For a right-recursive non-terminal A with:
+    //   A → α₁ A | α₂ A | ... (recursive productions where αᵢ is prefix)
+    //   A → β₁ | β₂ | ...     (non-recursive base cases)
+    //
+    // Traditional transformation creates epsilon:
+    //   A → A' β₁ | A' β₂ | ...
+    //   A' → α₁ A' | α₂ A' | ... | ε
+    //
+    // Epsilon-free transformation:
+    //   A → β₁ | β₂ | ... | A' β₁ | A' β₂ | ...  (base cases + recursive cases)
+    //   A' → α₁ | α₂ | ... | A' α₁ | A' α₂ | ... (one-or-more αs via left recursion)
+    //
+    // This avoids epsilon productions by ensuring A' always produces at least one prefix.
+    
     let prods_by_lhs: BTreeMap<_, Vec<_>> = productions.iter().cloned()
         .fold(BTreeMap::new(), |mut m, p| { m.entry(p.lhs.clone()).or_default().push(p); m });
 
@@ -1028,26 +1044,272 @@ pub fn resolve_direct_right_recursion(
         let (recursive, non_recursive): (Vec<_>, Vec<_>) = prods_for_nt.iter().cloned()
             .partition(is_direct_right_recursive);
 
-        let new_nt = NonTerminal(new_name_generator(&prod.lhs.0));
-        crate::debug!(7, "Right-recursion {} -> {}", prod.lhs.0, new_nt.0);
+        // Must have both recursive and non-recursive productions to transform
+        if non_recursive.is_empty() || recursive.is_empty() {
+            // Edge case: only recursive or only non-recursive
+            // Keep as-is (though this is unusual)
+            for rule in prods_for_nt {
+                new_productions.push(rule.clone());
+            }
+            continue;
+        }
 
-        // A -> A' β  (for each non-recursive A -> β)
+        let new_nt = NonTerminal(new_name_generator(&prod.lhs.0));
+        crate::debug!(7, "Right-recursion {} -> {} (epsilon-free)", prod.lhs.0, new_nt.0);
+
+        // A → β  (non-recursive base cases stay as-is)
+        for rule in &non_recursive {
+            new_productions.push(rule.clone());
+        }
+        
+        // A → A' β  (recursive case: prefix(es) followed by base case)
         for rule in &non_recursive {
             let mut rhs = vec![Symbol::NonTerminal(new_nt.clone())];
             rhs.extend(rule.rhs.clone());
             new_productions.push(Production { lhs: prod.lhs.clone(), rhs });
         }
-        // A' -> A' α  (for each recursive A -> α A)
+        
+        // A' → α  (base case for A': just the prefix, no recursion)
         for rule in &recursive {
+            // Extract prefix: everything except the final self-reference
+            let prefix = rule.rhs[..rule.rhs.len() - 1].to_vec();
+            new_productions.push(Production { lhs: new_nt.clone(), rhs: prefix });
+        }
+        
+        // A' → A' α  (recursive case for A': left-recursive accumulation of prefixes)
+        for rule in &recursive {
+            let prefix = rule.rhs[..rule.rhs.len() - 1].to_vec();
             let mut rhs = vec![Symbol::NonTerminal(new_nt.clone())];
-            rhs.extend(rule.rhs[..rule.rhs.len() - 1].to_vec());
+            rhs.extend(prefix);
             new_productions.push(Production { lhs: new_nt.clone(), rhs });
         }
-        // A' -> ε
-        new_productions.push(Production { lhs: new_nt.clone(), rhs: vec![] });
     }
 
     *productions = new_productions;
+}
+
+/// Left-factor the grammar to share common prefixes.
+/// 
+/// For productions with the same LHS that share a common prefix:
+///   A → α β₁ | α β₂ | α β₃
+/// Transform to:
+///   A → α A'
+///   A' → β₁ | β₂ | β₃
+/// 
+/// This can reduce the number of parser states by sharing the prefix parsing.
+/// 
+/// IMPORTANT: This transformation is only applied when it doesn't create epsilon
+/// productions. If one alternative IS the common prefix (empty suffix), we skip
+/// factoring that group.
+/// 
+/// Note: This is a single-pass left factoring. Multiple passes may be needed
+/// for deeply nested common prefixes.
+pub fn left_factor_grammar(
+    productions: &[Production],
+    name_generator: &mut impl FnMut(&str) -> String,
+) -> Vec<Production> {
+    // Group productions by LHS
+    let mut prods_by_lhs: BTreeMap<NonTerminal, Vec<&Production>> = BTreeMap::new();
+    for p in productions {
+        prods_by_lhs.entry(p.lhs.clone()).or_default().push(p);
+    }
+    
+    let mut new_productions = Vec::new();
+    
+    for (lhs, prods) in &prods_by_lhs {
+        if prods.len() < 2 {
+            // No factoring possible with single production
+            for p in prods {
+                new_productions.push((*p).clone());
+            }
+            continue;
+        }
+        
+        // Find the longest common prefix among all productions for this LHS
+        let common_prefix = find_longest_common_prefix(&prods.iter().map(|p| &p.rhs[..]).collect::<Vec<_>>());
+        
+        if common_prefix.is_empty() {
+            // No common prefix, keep as-is
+            for p in prods {
+                new_productions.push((*p).clone());
+            }
+            continue;
+        }
+        
+        // Check if ALL productions share this prefix (otherwise it's not a useful factoring)
+        let all_share_prefix = prods.iter().all(|p| {
+            p.rhs.len() >= common_prefix.len() && p.rhs[..common_prefix.len()] == common_prefix[..]
+        });
+        
+        if !all_share_prefix {
+            // Only some productions share the prefix - find groups
+            // Group productions by their first symbol
+            let mut groups: BTreeMap<Option<Symbol>, Vec<&Production>> = BTreeMap::new();
+            for p in prods {
+                let key = p.rhs.first().cloned();
+                groups.entry(key).or_default().push(p);
+            }
+            
+            // For each group, check if we can factor
+            for (first_sym, group) in groups {
+                if group.len() >= 2 && first_sym.is_some() {
+                    // Find common prefix within this group
+                    let group_prefix = find_longest_common_prefix(&group.iter().map(|p| &p.rhs[..]).collect::<Vec<_>>());
+                    
+                    // Check if factoring would create an epsilon production
+                    let would_create_epsilon = group.iter().any(|p| p.rhs.len() == group_prefix.len());
+                    
+                    if !would_create_epsilon && (group_prefix.len() >= 2 || (group_prefix.len() == 1 && group.len() >= 3)) {
+                        // Worth factoring - create new non-terminal
+                        let new_nt = NonTerminal(name_generator(&lhs.0));
+                        
+                        // A → prefix A'
+                        let mut factored_rhs = group_prefix.clone();
+                        factored_rhs.push(Symbol::NonTerminal(new_nt.clone()));
+                        new_productions.push(Production { lhs: lhs.clone(), rhs: factored_rhs });
+                        
+                        // A' → suffix for each original
+                        for p in &group {
+                            let suffix = p.rhs[group_prefix.len()..].to_vec();
+                            debug_assert!(!suffix.is_empty(), "Left factoring should not create epsilon");
+                            new_productions.push(Production { lhs: new_nt.clone(), rhs: suffix });
+                        }
+                    } else {
+                        // Not worth factoring (or would create epsilon)
+                        for p in group {
+                            new_productions.push((*p).clone());
+                        }
+                    }
+                } else {
+                    // Single production or empty first symbol
+                    for p in group {
+                        new_productions.push((*p).clone());
+                    }
+                }
+            }
+        } else {
+            // All productions share the prefix - factor them all
+            // But first check if factoring would create an epsilon production
+            let would_create_epsilon = prods.iter().any(|p| p.rhs.len() == common_prefix.len());
+            
+            if would_create_epsilon {
+                // Skip factoring to avoid epsilon
+                for p in prods {
+                    new_productions.push((*p).clone());
+                }
+            } else {
+                let new_nt = NonTerminal(name_generator(&lhs.0));
+                
+                // A → prefix A'
+                let mut factored_rhs = common_prefix.clone();
+                factored_rhs.push(Symbol::NonTerminal(new_nt.clone()));
+                new_productions.push(Production { lhs: lhs.clone(), rhs: factored_rhs });
+                
+                // A' → suffix for each original
+                for p in prods {
+                    let suffix = p.rhs[common_prefix.len()..].to_vec();
+                    debug_assert!(!suffix.is_empty(), "Left factoring should not create epsilon");
+                    new_productions.push(Production { lhs: new_nt.clone(), rhs: suffix });
+                }
+            }
+        }
+    }
+    
+    new_productions
+}
+
+/// Find the longest common prefix among a set of sequences.
+fn find_longest_common_prefix(sequences: &[&[Symbol]]) -> Vec<Symbol> {
+    if sequences.is_empty() {
+        return Vec::new();
+    }
+    if sequences.len() == 1 {
+        return sequences[0].to_vec();
+    }
+    
+    let min_len = sequences.iter().map(|s| s.len()).min().unwrap_or(0);
+    let mut prefix_len = 0;
+    
+    for i in 0..min_len {
+        let first_sym = &sequences[0][i];
+        if sequences.iter().all(|s| &s[i] == first_sym) {
+            prefix_len = i + 1;
+        } else {
+            break;
+        }
+    }
+    
+    sequences[0][..prefix_len].to_vec()
+}
+
+/// Merge identical non-terminals in the grammar.
+/// 
+/// If two non-terminals A and B have exactly the same set of productions
+/// (modulo renaming A↔B), merge them into one.
+/// 
+/// This reduces the grammar size and number of parser states.
+pub fn merge_identical_nonterminals(
+    productions: &[Production],
+    start_nt: &NonTerminal,
+) -> Vec<Production> {
+    // Group productions by LHS and collect RHS sets
+    let mut prods_by_lhs: BTreeMap<NonTerminal, BTreeSet<Vec<Symbol>>> = BTreeMap::new();
+    for p in productions {
+        prods_by_lhs.entry(p.lhs.clone()).or_default().insert(p.rhs.clone());
+    }
+    
+    // Find pairs of non-terminals with identical production sets
+    let nts: Vec<_> = prods_by_lhs.keys().cloned().collect();
+    let mut merge_map: BTreeMap<NonTerminal, NonTerminal> = BTreeMap::new();
+    
+    for i in 0..nts.len() {
+        if merge_map.contains_key(&nts[i]) {
+            continue;
+        }
+        for j in (i + 1)..nts.len() {
+            if merge_map.contains_key(&nts[j]) {
+                continue;
+            }
+            // Check if nts[i] and nts[j] have the same productions
+            if prods_by_lhs.get(&nts[i]) == prods_by_lhs.get(&nts[j]) {
+                // Prefer to keep the start NT
+                let (keep, remove) = if nts[j] == *start_nt {
+                    (nts[j].clone(), nts[i].clone())
+                } else {
+                    (nts[i].clone(), nts[j].clone())
+                };
+                crate::debug!(5, "Merging identical non-terminals: {} -> {}", remove.0, keep.0);
+                merge_map.insert(remove, keep);
+            }
+        }
+    }
+    
+    if merge_map.is_empty() {
+        return productions.to_vec();
+    }
+    
+    // Apply the merge: rename all occurrences of merged NTs
+    let apply_merge = |nt: &NonTerminal| -> NonTerminal {
+        merge_map.get(nt).cloned().unwrap_or_else(|| nt.clone())
+    };
+    
+    let mut result: Vec<Production> = Vec::new();
+    let mut seen: BTreeSet<(NonTerminal, Vec<Symbol>)> = BTreeSet::new();
+    
+    for p in productions {
+        let new_lhs = apply_merge(&p.lhs);
+        let new_rhs: Vec<Symbol> = p.rhs.iter().map(|s| match s {
+            Symbol::NonTerminal(nt) => Symbol::NonTerminal(apply_merge(nt)),
+            Symbol::Terminal(t) => Symbol::Terminal(t.clone()),
+        }).collect();
+        
+        let key = (new_lhs.clone(), new_rhs.clone());
+        if seen.insert(key) {
+            result.push(Production { lhs: new_lhs, rhs: new_rhs });
+        }
+    }
+    
+    result
 }
 
 pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {

@@ -1223,16 +1223,6 @@ fn generate_glr_parser_with_maps(
                 &mut productions,
                 &mut unique_name_generator,
             );
-            
-            // Debug: print productions after right recursion elimination
-            crate::debug!(5, "After right recursion elimination ({} productions):", productions.len());
-            for (i, p) in productions.iter().enumerate() {
-                crate::debug!(5, "  [{}] {} -> {}", i, p.lhs.0, 
-                    p.rhs.iter().map(|s| match s {
-                        Symbol::Terminal(t) => format!("T({})", t),
-                        Symbol::NonTerminal(nt) => format!("NT({})", nt.0),
-                    }).collect::<Vec<_>>().join(" "));
-            }
         }
 
         // Phase 4: Hidden left recursion elimination (best effort)
