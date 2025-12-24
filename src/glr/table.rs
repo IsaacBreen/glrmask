@@ -989,23 +989,40 @@ fn compute_final_table(
 /// Returns the optimized table and updated start/substring state IDs.
 #[time_it]
 fn optimize_table(
-    table: Table,
-    start_state_id: StateID,
-    substring_state_id: StateID,
+    mut table: Table,
+    mut start_state_id: StateID,
+    mut substring_state_id: StateID,
 ) -> (Table, StateID, StateID) {
     let initial_count = table.len();
     
     // Step 1: Eliminate unreachable states
-    let (table, start_state_id, substring_state_id) = 
-        eliminate_unreachable_states(table, start_state_id, substring_state_id);
+    let (t, s, sub) = eliminate_unreachable_states(table, start_state_id, substring_state_id);
+    table = t;
+    start_state_id = s;
+    substring_state_id = sub;
+    
     let after_unreachable = table.len();
     
     // Step 2: Merge identical rows (LALR-style state merging)
-    let (table, start_state_id, substring_state_id) = 
-        merge_identical_rows(table, start_state_id, substring_state_id);
+    // Loop until convergence to handle cascading merges
+    loop {
+        let before_merge_count = table.len();
+        let (t, s, sub) = merge_identical_rows(table, start_state_id, substring_state_id);
+        table = t;
+        start_state_id = s;
+        substring_state_id = sub;
+        
+        if table.len() == before_merge_count {
+            break;
+        }
+    }
     let after_merge = table.len();
     
-    // Step 3: Compact default reduces (remove redundant entries)
+    // Step 3: Promote most frequent reduce to default_reduce
+    // This allows us to remove even more explicit entries in Step 4
+    promote_common_reduces(&mut table);
+    
+    // Step 4: Compact default reduces (remove redundant entries)
     let table = compact_default_reduces(table);
     
     if initial_count != after_merge {
@@ -1016,6 +1033,75 @@ fn optimize_table(
     }
     
     (table, start_state_id, substring_state_id)
+}
+
+/// For each row, identify the most frequent Reduce action and promote it to default_reduce.
+/// This significantly reduces the size of the table map.
+fn promote_common_reduces(table: &mut Table) {
+    for row in table.values_mut() {
+        // If we already have a default, we might still want to check if another reduce is MORE common
+        // combined with the existing default coverage? 
+        // For simplicity, let's count all reduces in the map.
+        
+        let mut reduce_counts: BTreeMap<Stage7ShiftsAndReducesLookaheadValue, usize> = BTreeMap::new();
+        
+        for action in row.shifts_and_reduces_full.values() {
+            if let Stage7ShiftsAndReducesLookaheadValue::Reduce { .. } = action {
+                *reduce_counts.entry(action.clone()).or_default() += 1;
+            }
+        }
+        
+        if let Some(current_default) = &row.default_reduce {
+            // Count virtual entries covered by default? 
+            // It's hard to know how many "None" entries effectively became default.
+            // But usually default_reduce is used for "everything else".
+            // If we switch default, we must ensure correctness.
+            // 
+            // Strategy: Only promote if NO default exists yet, OR if we are overriding.
+            // Actually, safe strategy:
+            // 1. Find most frequent reduce in `shifts_and_reduces_full`.
+            // 2. If its count > threshold, make it default.
+            // 3. BUT: What about "Error" entries?
+            //    If we set default_reduce, then ANY lookahead not in the map becomes that reduce.
+            //    This effectively eliminates syntax errors for that state! 
+            //    GLR parsers CAN strictly rely on the table for errors.
+            //    
+            //    CRITICAL: setting default_reduce implies that for ALL terminals not in the map,
+            //    we perform this reduction. This changes behavior if those terminals should be errors.
+            //    
+            //    HOWEVER: In standard LR parsing, "Default Reduce" is valid if the reduction 
+            //    action doesn't consume lookahead (it doesn't). The parser will reduce, 
+            //    pop stack, and retry the same lookahead in the new state.
+            //    Eventually it shifts or errors.
+            //    So "default reduce" is generally semantics-preserving for LR parsers
+            //    because it just delays the error detection to the next state (after reduction).
+            //    
+            //    So YES, we can promote the most frequent reduce to default.
+        }
+        
+        // Find the reduce with max count
+        let best_reduce = reduce_counts.into_iter().max_by_key(|(_, count)| *count);
+        
+        if let Some((reduce_action, count)) = best_reduce {
+            // Threshold: only worth it if we save entries.
+            // Let's say count > 1.
+            if count > 1 {
+                // Determine if we should replace existing default
+                // If we replace, the old default (if any) is lost -> potentially risky?
+                // Actually, if we have a default, it applies to "holes".
+                // If we change it, "holes" change behavior.
+                //
+                // SAFE APPROACH: Only set default if it is currently None.
+                // Existing logic in `compute_final_table` sets default based on EOF often.
+                // Overriding it might handle EOF incorrectly if EOF relied on default?
+                // No, explicit EOF entries are usually in the map.
+                
+                if row.default_reduce.is_none() {
+                     row.default_reduce = Some(reduce_action);
+                }
+            }
+        }
+    }
 }
 
 /// Eliminate states that are not reachable from the start state.
