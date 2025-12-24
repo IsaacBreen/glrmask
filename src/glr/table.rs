@@ -1280,54 +1280,76 @@ fn generate_glr_parser_with_maps(
     // ============================================================
     // ASSERTION: Epsilon productions are ONLY allowed for the inner start nonterminal.
     // 
-    // The grammar structure after all transformations should be:
-    //   S' -> A       (augmented start production, production 0)
+    // After all transformations, the grammar structure should be:
+    //   S' -> A       (augmented start production, production 0, where A is a nonterminal)
     //   A  -> ...     (inner start symbol, may have epsilon production)
     //   X  -> ...     (other nonterminals, MUST NOT have epsilon productions)
     //
-    // The original_start_symbol (captured earlier) is `A`.
-    // Any epsilon production with LHS != A is an error.
+    // OR, if unit production elimination inlined away A:
+    //   S' -> t       (augmented start production with terminal)
+    //   (no other productions with epsilon allowed)
+    //
+    // Note: We use `original_start_symbol` which was captured before any optimizations.
+    // After unit production elimination, this nonterminal may no longer exist in the grammar.
     {
+        let augmented_prod = &productions[0];
+        
+        // Verify the augmented start production has the right LHS and exactly one RHS symbol
+        assert!(
+            augmented_prod.lhs == augmented_start && augmented_prod.rhs.len() == 1,
+            "Augmented start production must have form S' -> X (one symbol), but got {} -> {:?}",
+            augmented_prod.lhs.0, augmented_prod.rhs
+        );
+        
+        // Determine the inner start nonterminal (if it's still a nonterminal after substitution)
+        let allowed_epsilon_lhs: Option<NonTerminal> = match &augmented_prod.rhs[0] {
+            Symbol::NonTerminal(nt) => {
+                // Inner start is still a nonterminal - this is the only NT allowed to have epsilon
+                Some(nt.clone())
+            }
+            Symbol::Terminal(_) => {
+                // Inner start was substituted away - no nonterminal is allowed to have epsilon
+                None
+            }
+        };
+        
+        // Check for invalid epsilon productions
         let invalid_epsilon_productions: Vec<_> = productions.iter()
-            .filter(|p| p.rhs.is_empty() && p.lhs != original_start_symbol)
+            .filter(|p| {
+                if p.rhs.is_empty() {
+                    // This is an epsilon production. Is it allowed?
+                    match &allowed_epsilon_lhs {
+                        Some(allowed_nt) => p.lhs != *allowed_nt,  // Only allowed for this NT
+                        None => true,  // No epsilon productions allowed at all
+                    }
+                } else {
+                    false
+                }
+            })
             .collect();
         
         if !invalid_epsilon_productions.is_empty() {
-            eprintln!("ERROR: Found epsilon productions for nonterminals other than the inner start symbol '{}':", 
-                original_start_symbol.0);
+            let allowed_msg = match &allowed_epsilon_lhs {
+                Some(nt) => format!("inner start symbol '{}'", nt.0),
+                None => "no nonterminal (inner start was inlined to a terminal)".to_string(),
+            };
+            eprintln!("ERROR: Found epsilon productions for nonterminals other than {}:", allowed_msg);
             for p in &invalid_epsilon_productions {
                 eprintln!("  {} -> ε (INVALID)", p.lhs.0);
             }
             panic!(
-                "Epsilon productions are only allowed for the inner start nonterminal '{}'. \
-                Found {} invalid epsilon production(s) for other nonterminals.",
-                original_start_symbol.0,
+                "Epsilon productions are only allowed for {}. \
+                Found {} invalid epsilon production(s).",
+                allowed_msg,
                 invalid_epsilon_productions.len()
             );
         }
         
-        // Also verify the augmented start production structure
-        let augmented_prod = &productions[0];
-        assert!(
-            augmented_prod.lhs == augmented_start && augmented_prod.rhs.len() == 1,
-            "Augmented start production must have form S' -> A, but got {} -> {:?}",
-            augmented_prod.lhs.0, augmented_prod.rhs
-        );
-        if let Symbol::NonTerminal(inner_start) = &augmented_prod.rhs[0] {
-            assert!(
-                *inner_start == original_start_symbol,
-                "Augmented start must point to original start '{}', but points to '{}'",
-                original_start_symbol.0, inner_start.0
-            );
-        } else {
-            panic!(
-                "Augmented start production RHS must be a nonterminal, got {:?}",
-                augmented_prod.rhs[0]
-            );
-        }
-        
-        crate::debug!(4, "Epsilon production constraint satisfied: only '{}' may have epsilon productions",
-            original_start_symbol.0);
+        crate::debug!(4, "Epsilon production constraint satisfied: {}",
+            match &allowed_epsilon_lhs {
+                Some(nt) => format!("only '{}' may have epsilon productions", nt.0),
+                None => "no epsilon productions (inner start was inlined)".to_string(),
+            });
     }
 
     // ============================================================
