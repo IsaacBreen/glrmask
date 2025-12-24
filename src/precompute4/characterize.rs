@@ -183,6 +183,10 @@ pub fn compute_all_characterizations(parser: &GLRParser) -> BTreeMap<TerminalID,
     use rayon::prelude::*;
     
     let terminal_ids: Vec<_> = parser.terminal_map.right_values().cloned().collect();
+    // Keep only non-ignored
+    let terminal_ids = terminal_ids.iter().filter(|&&tid| {
+        !parser.ignore_terminal_ids.contains(&tid)
+    }).cloned().collect::<Vec<_>>();
     
     // Parallel characterization computation - this is pure computation with no shared mutable state
     let chars: Vec<_> = terminal_ids
