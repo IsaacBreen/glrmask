@@ -117,7 +117,7 @@ fn compute_dwa_partition(
         }
     }
     if separating_dwa > 0 || separating_pm > 0 {
-        crate::debug!(1, "Weights separating tokens {} and {}: {} from DWA, {} from possible_matches",
+        crate::debug!(7, "Weights separating tokens {} and {}: {} from DWA, {} from possible_matches",
             tok_a, tok_b, separating_dwa, separating_pm);
     }
 
@@ -1035,7 +1035,7 @@ impl GrammarConstraint {
             crate::debug!(2, "VERIFY_EQUIVALENCE: Expected {} classes from Simple equivalence analysis", expected_classes);
 
             if expected_classes != actual_classes {
-                crate::debug!(1, "VERIFY_EQUIVALENCE FAILED: Simple={} vs DWA={} classes", expected_classes, actual_classes);
+                crate::debug!(7, "VERIFY_EQUIVALENCE FAILED: Simple={} vs DWA={} classes", expected_classes, actual_classes);
 
                 let sorted_tokens: Vec<_> = internal_llm_token_map.iter().collect();
                 let llm_token_strings: Vec<Vec<u8>> = sorted_tokens.iter().map(|(b, _)| (*b).clone()).collect();
@@ -1077,11 +1077,11 @@ impl GrammarConstraint {
                 }
 
                 if !examples_simple_coarser.is_empty() {
-                    crate::debug!(1, "Examples where Simple groups together but DWA separates:");
+                    crate::debug!(7, "Examples where Simple groups together but DWA separates:");
                     let (i, j) = examples_simple_coarser[0];
                     let s1 = String::from_utf8_lossy(&llm_token_strings[i]);
                     let s2 = String::from_utf8_lossy(&llm_token_strings[j]);
-                    crate::debug!(1, "  {:?} (idx {}) and {:?} (idx {})", s1, i, s2, j);
+                    crate::debug!(7, "  {:?} (idx {}) and {:?} (idx {})", s1, i, s2, j);
 
                     let tok_i = &llm_token_strings[i];
                     let tok_j = &llm_token_strings[j];
@@ -1090,7 +1090,7 @@ impl GrammarConstraint {
                           tok_i[prefix_len] == tok_j[prefix_len] {
                         prefix_len += 1;
                     }
-                    crate::debug!(1, "    Shared prefix length: {} ({:?})", prefix_len,
+                    crate::debug!(7, "    Shared prefix length: {} ({:?})", prefix_len,
                         String::from_utf8_lossy(&tok_i[..prefix_len]));
 
                     for &init_state in initial_states.iter().take(5) {
@@ -1142,20 +1142,20 @@ impl GrammarConstraint {
                         let matches_i: Vec<(usize, usize)> = exec_i.matches.iter().map(|m| (m.id, m.width)).collect();
                         let matches_j: Vec<(usize, usize)> = exec_j.matches.iter().map(|m| (m.id, m.width)).collect();
 
-                        crate::debug!(1, "    From init_state {}, after prefix {:?}:", init_state,
+                        crate::debug!(7, "    From init_state {}, after prefix {:?}:", init_state,
                             String::from_utf8_lossy(&tok_i[..prefix_len]));
-                        crate::debug!(1, "      {:?} suffix {:?}: dead={}, final={}, accessible={:?}, MATCHES={:?}",
+                        crate::debug!(7, "      {:?} suffix {:?}: dead={}, final={}, accessible={:?}, MATCHES={:?}",
                             s1, String::from_utf8_lossy(&tok_i[prefix_len..]), dead_i, curr_i, accessible_i, matches_i);
-                        crate::debug!(1, "      {:?} suffix {:?}: dead={}, final={}, accessible={:?}, MATCHES={:?}",
+                        crate::debug!(7, "      {:?} suffix {:?}: dead={}, final={}, accessible={:?}, MATCHES={:?}",
                             s2, String::from_utf8_lossy(&tok_j[prefix_len..]), dead_j, curr_j, accessible_j, matches_j);
                     }
                 }
                 if !examples_dwa_coarser.is_empty() {
-                    crate::debug!(1, "Examples where DWA groups together but Simple separates:");
+                    crate::debug!(7, "Examples where DWA groups together but Simple separates:");
                     for (i, j) in &examples_dwa_coarser {
                         let s1 = String::from_utf8_lossy(&llm_token_strings[*i]);
                         let s2 = String::from_utf8_lossy(&llm_token_strings[*j]);
-                        crate::debug!(1, "  {:?} (idx {}) and {:?} (idx {})", s1, i, s2, j);
+                        crate::debug!(7, "  {:?} (idx {}) and {:?} (idx {})", s1, i, s2, j);
                     }
                 }
 

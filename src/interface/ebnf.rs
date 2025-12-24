@@ -69,6 +69,8 @@ enum EbnfTokenKind {
     Literal(String),
     CharClass(String),
     Op(String),
+    /// Repetition specification: {m}, {m,}, {m,n}, {,n}
+    Repetition { min: usize, max: Option<usize> },
 }
 #[derive(Debug, Clone, PartialEq)]
 struct EbnfToken {
@@ -126,6 +128,7 @@ fn get_token_regex() -> &'static Regex {
         (?P<ident>[a-zA-Z_][a-zA-Z0-9_\-]*) |
         (?P<literal>"([^"\\]|\\.)*"|'([^'\\]|\\.)*') |
         (?P<charclass>\[([^\]\[\(\)\{\}\\]|\\.)*\]) |
+        (?P<repetition>\{[0-9]*,[0-9]*\}|\{[0-9]+\}) |
         (?P<op>::=|;|\?|\*|\+|\||\(|\)|\[|\]|\{|\}|!|\.) |
         (?P<ws>\s+) |
         (?P<error>.)
@@ -195,6 +198,28 @@ fn tokenize(source: &str) -> Result<Vec<EbnfToken>, ParseError> {
                 kind: EbnfTokenKind::CharClass(m.as_str().to_string()),
                 span: Span { start: m.start(), end: m.end() },
             });
+        } else if let Some(m) = cap.name("repetition") {
+            // Parse {m,n} or {m} or {,n} or {m,}
+            let s = m.as_str();
+            let inner = &s[1..s.len()-1]; // Remove { and }
+            let (min, max) = if inner.contains(',') {
+                let parts: Vec<&str> = inner.split(',').collect();
+                let min_val = if parts[0].is_empty() { 0 } else { parts[0].parse().unwrap() };
+                let max_val = if parts.len() > 1 && !parts[1].is_empty() {
+                    Some(parts[1].parse().unwrap())
+                } else {
+                    None
+                };
+                (min_val, max_val)
+            } else {
+                // {m} means exactly m times
+                let n: usize = inner.parse().unwrap();
+                (n, Some(n))
+            };
+            tokens.push(EbnfToken {
+                kind: EbnfTokenKind::Repetition { min, max },
+                span: Span { start: m.start(), end: m.end() },
+            });
         } else if let Some(m) = cap.name("op") {
             tokens.push(EbnfToken {
                 kind: EbnfTokenKind::Op(m.as_str().to_string()),
@@ -253,7 +278,10 @@ impl<'a> EbnfParser<'a> {
     fn parse_rule_body(&mut self) -> Result<GrammarExpr, ParseError> {
         self.expect_grammar_op("::=")?;
         let expr = self.parse_grammar_expression()?;
-        self.expect_grammar_op(";")?;
+        // GBNF compatibility: semicolon is optional (GBNF uses newlines)
+        if self.peek_grammar_op(";") {
+            self.consume_grammar_op(";")?;
+        }
         Ok(expr)
     }
 
@@ -340,6 +368,7 @@ impl<'a> EbnfParser<'a> {
             && !self.peek_grammar_op("}")
             && !self.peek_grammar_op("|")
             && !self.peek_grammar_op(";")
+            && !self.at_rule_start()  // GBNF compatibility: stop at new rule
         {
             terms.push(self.parse_grammar_term()?);
         }
@@ -363,6 +392,41 @@ impl<'a> EbnfParser<'a> {
         } else if self.peek_grammar_op("+") {
             self.consume_grammar_op("+")?;
             Ok(sequence(vec![factor.clone(), repeat(factor)]))
+        } else if let Some(EbnfToken { kind: EbnfTokenKind::Repetition { min, max }, .. }) = self.tokens.peek().cloned() {
+            self.tokens.next();
+            // Build repetition expression:
+            // {0,} or {0,None} -> repeat(factor)  (same as *)
+            // {1,} or {1,None} -> factor repeat(factor) (same as +)
+            // {m,} -> factor^m repeat(factor)
+            // {m,n} -> factor^m (factor?)^(n-m)
+            // {0,n} -> (factor?)^n
+            if min == 0 && max.is_none() {
+                Ok(repeat(factor))
+            } else if min == 1 && max.is_none() {
+                Ok(sequence(vec![factor.clone(), repeat(factor)]))
+            } else if max.is_none() {
+                // {m,} -> m copies of factor followed by repeat(factor)
+                let mut parts: Vec<GrammarExpr> = (0..min).map(|_| factor.clone()).collect();
+                parts.push(repeat(factor));
+                Ok(sequence(parts))
+            } else {
+                let max_val = max.unwrap();
+                if min == max_val {
+                    // {m} -> exactly m copies
+                    if min == 0 {
+                        Ok(sequence(vec![]))
+                    } else {
+                        Ok(sequence((0..min).map(|_| factor.clone()).collect()))
+                    }
+                } else {
+                    // {m,n} -> m copies followed by (n-m) optional copies
+                    let mut parts: Vec<GrammarExpr> = (0..min).map(|_| factor.clone()).collect();
+                    for _ in 0..(max_val - min) {
+                        parts.push(optional(factor.clone()));
+                    }
+                    Ok(sequence(parts))
+                }
+            }
         } else {
             Ok(factor)
         }
@@ -420,6 +484,18 @@ impl<'a> EbnfParser<'a> {
     fn eof_span(&self) -> Span {
         let end = self.source.len();
         Span { start: end, end }
+    }
+
+    /// GBNF compatibility: check if we're at the start of a new rule (ident ::=)
+    /// Used to detect rule boundaries when there's no semicolon terminator.
+    fn at_rule_start(&self) -> bool {
+        let mut iter = self.tokens.clone();
+        if let Some(EbnfToken { kind: EbnfTokenKind::Ident(_), .. }) = iter.next() {
+            if let Some(EbnfToken { kind: EbnfTokenKind::Op(s), .. }) = iter.next() {
+                return s == "::=";
+            }
+        }
+        false
     }
 
     fn peek_grammar_op(&mut self, op: &str) -> bool {

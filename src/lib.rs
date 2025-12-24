@@ -16,12 +16,13 @@ mod profiler;
 
 // New lightweight pass framework for Trie3 optimization
 pub mod precompute4;
-mod constraint_fns;
+pub mod constraint_fns;
 
 pub mod constraint_vocab;
 pub mod constraint_precompute;
 mod test_finite_automata;
 mod fill_benchmark;
+mod test_json;
 
 // Pipeline module for staged constraint building
 pub mod pipeline;

@@ -526,8 +526,8 @@ impl PyGLRParser {
     }
 
     #[getter]
-    fn ignore_terminal_id(&self) -> Option<usize> {
-        self.inner.ignore_terminal_id.map(|tid| tid.0)
+    fn ignore_terminal_ids(&self) -> Vec<usize> {
+        self.inner.ignore_terminal_ids.iter().map(|tid| tid.0).collect()
     }
     
     /// Get all template DFAs (one per terminal).
@@ -1729,6 +1729,23 @@ fn grammar_definition_from_json_schema(schema_json: &str) -> PyResult<PyGrammarD
     Ok(PyGrammarDefinition { inner: grammar_def })
 }
 
+/// Create a GrammarDefinition from an EBNF string.
+/// This also supports GBNF (llama.cpp grammar format) as GBNF is a subset of EBNF.
+#[pyfunction]
+fn grammar_definition_from_ebnf(ebnf_source: &str) -> PyResult<PyGrammarDefinition> {
+    let grammar_def = GrammarDefinition::from_ebnf(ebnf_source)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e))?;
+    
+    Ok(PyGrammarDefinition { inner: grammar_def })
+}
+
+/// Alias for grammar_definition_from_ebnf for GBNF compatibility.
+/// GBNF (GGML BNF) is the grammar format used by llama.cpp.
+#[pyfunction]
+fn grammar_definition_from_gbnf(gbnf_source: &str) -> PyResult<PyGrammarDefinition> {
+    grammar_definition_from_ebnf(gbnf_source)
+}
+
 #[pymodule]
 fn _sep1(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyGrammarExpr>()?;
@@ -1765,6 +1782,27 @@ fn _sep1(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(json_schema_to_ebnf_py, m)?)?;
     m.add_function(wrap_pyfunction!(json_schema_to_grammar_exprs_py, m)?)?;
     m.add_function(wrap_pyfunction!(grammar_definition_from_json_schema, m)?)?;
+    // EBNF/GBNF parsing functions
+    m.add_function(wrap_pyfunction!(grammar_definition_from_ebnf, m)?)?;
+    m.add_function(wrap_pyfunction!(grammar_definition_from_gbnf, m)?)?;
+    // Benchmark functions
+    m.add_function(wrap_pyfunction!(set_benchmark_mode, m)?)?;
+    m.add_function(wrap_pyfunction!(get_last_mask_time_ns, m)?)?;
     m.add_class::<PyIncrementalParser>()?;
     Ok(())
+}
+
+/// Enable benchmark mode to capture Rust-native timings.
+/// When enabled, fill_next_token_bitmask will record its execution time
+/// which can be retrieved via get_last_mask_time_ns().
+#[pyfunction]
+fn set_benchmark_mode(enabled: bool) {
+    sep1::constraint_fns::set_benchmark_mode(enabled);
+}
+
+/// Get the last mask computation time in nanoseconds.
+/// Only valid if benchmark mode is enabled.
+#[pyfunction]
+fn get_last_mask_time_ns() -> u64 {
+    sep1::constraint_fns::get_last_mask_time_ns()
 }

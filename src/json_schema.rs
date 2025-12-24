@@ -202,11 +202,26 @@ impl JsonSchemaConverter {
         }
 
         // Handle anyOf / oneOf
+        // For anyOf, we need to merge parent properties into each alternative.
+        // This handles cases like PackageJson where the top-level has properties
+        // but also has anyOf for additional constraints.
         if let Some(any_of) = obj.get("anyOf").or_else(|| obj.get("oneOf")).and_then(|v| v.as_array()) {
+            // Check if parent has properties or type that should be merged
+            let has_parent_props = obj.contains_key("properties") || 
+                                   obj.contains_key("type") ||
+                                   obj.contains_key("additionalProperties");
+            
             let mut alternatives = Vec::new();
             for sub in any_of {
                 let sub_name = self.new_rule_name("alt");
-                self.convert_schema(sub, sub_name.clone())?;
+                
+                if has_parent_props {
+                    // Merge parent properties into this alternative
+                    let merged = self.merge_anyof_with_parent(sub, obj)?;
+                    self.convert_schema(&merged, sub_name.clone())?;
+                } else {
+                    self.convert_schema(sub, sub_name.clone())?;
+                }
                 alternatives.push(GrammarExpr::Ref(sub_name));
             }
             self.add_rule(rule_name.clone(), GrammarExpr::Choice(alternatives));
@@ -306,7 +321,6 @@ impl JsonSchemaConverter {
         if !has_properties && additional_props == Some(&Value::Bool(false)) {
             self.add_rule(rule_name.clone(), GrammarExpr::Sequence(vec![
                 GrammarExpr::Literal(b"{".to_vec()),
-                GrammarExpr::Ref("WS".to_string()),
                 GrammarExpr::Literal(b"}".to_vec()),
             ]));
             return Ok(rule_name);
@@ -320,13 +334,12 @@ impl JsonSchemaConverter {
                 let prop_value_rule = self.new_rule_name("pv");
                 self.convert_schema(prop_schema, prop_value_rule.clone())?;
 
-                // Build: '"propName"' WS ':' WS value
+                // Build: '"propName"' ':' value
+                // WS is handled by the ignore terminal, no need to include it explicitly
                 let escaped_name = self.escape_string_for_json(prop_name);
                 member_alternatives.push(GrammarExpr::Sequence(vec![
                     GrammarExpr::Literal(format!("\"{}\"", escaped_name).into_bytes()),
-                    GrammarExpr::Ref("WS".to_string()),
                     GrammarExpr::Literal(b":".to_vec()),
-                    GrammarExpr::Ref("WS".to_string()),
                     GrammarExpr::Ref(prop_value_rule),
                 ]));
             }
@@ -345,9 +358,7 @@ impl JsonSchemaConverter {
                 self.convert_schema(&Value::Object(ap_schema.clone()), additional_rule.clone())?;
                 member_alternatives.push(GrammarExpr::Sequence(vec![
                     GrammarExpr::Ref("JSON_STRING".to_string()),
-                    GrammarExpr::Ref("WS".to_string()),
                     GrammarExpr::Literal(b":".to_vec()),
-                    GrammarExpr::Ref("WS".to_string()),
                     GrammarExpr::Ref(additional_rule),
                 ]));
             }
@@ -363,10 +374,10 @@ impl JsonSchemaConverter {
         }
 
         // Object rule: { member (, member)* }
-        // Build: '{' WS ( member ( ',' WS member )* )? WS '}'
+        // Build: '{' ( member ( ',' member )* )? '}'
+        // WS is handled by the ignore terminal
         let comma_member = GrammarExpr::Sequence(vec![
             GrammarExpr::Literal(b",".to_vec()),
-            GrammarExpr::Ref("WS".to_string()),
             GrammarExpr::Ref(member_rule.clone()),
         ]);
 
@@ -377,9 +388,7 @@ impl JsonSchemaConverter {
 
         self.add_rule(rule_name.clone(), GrammarExpr::Sequence(vec![
             GrammarExpr::Literal(b"{".to_vec()),
-            GrammarExpr::Ref("WS".to_string()),
             members_opt,
-            GrammarExpr::Ref("WS".to_string()),
             GrammarExpr::Literal(b"}".to_vec()),
         ]));
 
@@ -412,7 +421,6 @@ impl JsonSchemaConverter {
                     // Empty array only
                     self.add_rule(rule_name.clone(), GrammarExpr::Sequence(vec![
                         GrammarExpr::Literal(b"[".to_vec()),
-                        GrammarExpr::Ref("WS".to_string()),
                         GrammarExpr::Literal(b"]".to_vec()),
                     ]));
                 }
@@ -424,10 +432,10 @@ impl JsonSchemaConverter {
                 let item_rule = self.new_rule_name("item");
                 self.convert_schema(item_schema, item_rule.clone())?;
 
-                // Build: '[' WS ( item ( ',' WS item )* )? WS ']'
+                // Build: '[' ( item ( ',' item )* )? ']'
+                // WS is handled by the ignore terminal
                 let comma_item = GrammarExpr::Sequence(vec![
                     GrammarExpr::Literal(b",".to_vec()),
-                    GrammarExpr::Ref("WS".to_string()),
                     GrammarExpr::Ref(item_rule.clone()),
                 ]);
 
@@ -438,9 +446,7 @@ impl JsonSchemaConverter {
 
                 self.add_rule(rule_name.clone(), GrammarExpr::Sequence(vec![
                     GrammarExpr::Literal(b"[".to_vec()),
-                    GrammarExpr::Ref("WS".to_string()),
                     items_opt,
-                    GrammarExpr::Ref("WS".to_string()),
                     GrammarExpr::Literal(b"]".to_vec()),
                 ]));
                 return Ok(rule_name);
@@ -472,7 +478,6 @@ impl JsonSchemaConverter {
             } else {
                 self.add_rule(rule_name.clone(), GrammarExpr::Sequence(vec![
                     GrammarExpr::Literal(b"[".to_vec()),
-                    GrammarExpr::Ref("WS".to_string()),
                     GrammarExpr::Literal(b"]".to_vec()),
                 ]));
             }
@@ -488,10 +493,10 @@ impl JsonSchemaConverter {
         }
 
         // Build body: first item, then rest with commas
+        // WS is handled by the ignore terminal
         let mut body_parts = vec![GrammarExpr::Ref(item_rules[0].clone())];
         for item_rule in &item_rules[1..] {
             body_parts.push(GrammarExpr::Literal(b",".to_vec()));
-            body_parts.push(GrammarExpr::Ref("WS".to_string()));
             body_parts.push(GrammarExpr::Ref(item_rule.clone()));
         }
 
@@ -500,7 +505,6 @@ impl JsonSchemaConverter {
             Value::Bool(true) => {
                 body_parts.push(GrammarExpr::Repeat(Box::new(GrammarExpr::Sequence(vec![
                     GrammarExpr::Literal(b",".to_vec()),
-                    GrammarExpr::Ref("WS".to_string()),
                     self.json_value_ref(),
                 ]))));
             }
@@ -509,7 +513,6 @@ impl JsonSchemaConverter {
                 self.convert_schema(&Value::Object(ai_schema.clone()), add_rule.clone())?;
                 body_parts.push(GrammarExpr::Repeat(Box::new(GrammarExpr::Sequence(vec![
                     GrammarExpr::Literal(b",".to_vec()),
-                    GrammarExpr::Ref("WS".to_string()),
                     GrammarExpr::Ref(add_rule),
                 ]))));
             }
@@ -519,9 +522,7 @@ impl JsonSchemaConverter {
         let body = GrammarExpr::Sequence(body_parts);
         self.add_rule(rule_name.clone(), GrammarExpr::Sequence(vec![
             GrammarExpr::Literal(b"[".to_vec()),
-            GrammarExpr::Ref("WS".to_string()),
             GrammarExpr::Optional(Box::new(body)),
-            GrammarExpr::Ref("WS".to_string()),
             GrammarExpr::Literal(b"]".to_vec()),
         ]));
 
@@ -576,6 +577,85 @@ impl JsonSchemaConverter {
         for (k, v) in parent {
             if k != "allOf" {
                 merged.insert(k.clone(), v.clone());
+            }
+        }
+
+        if !merged_props.is_empty() {
+            merged.insert("properties".to_string(), Value::Object(merged_props));
+        }
+        if !merged_required.is_empty() {
+            let unique: Vec<Value> = merged_required.into_iter()
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .map(Value::String)
+                .collect();
+            merged.insert("required".to_string(), Value::Array(unique));
+        }
+
+        Ok(Value::Object(merged))
+    }
+
+    /// Merge an anyOf/oneOf subschema with parent properties.
+    /// This handles cases like PackageJson where the parent has properties/type
+    /// but also has anyOf for additional constraints.
+    fn merge_anyof_with_parent(&self, subschema: &Value, parent: &serde_json::Map<String, Value>) -> Result<Value, String> {
+        let mut merged: serde_json::Map<String, Value> = serde_json::Map::new();
+        let mut merged_props: serde_json::Map<String, Value> = serde_json::Map::new();
+        let mut merged_required: Vec<String> = Vec::new();
+
+        // First, add parent properties (type, properties, additionalProperties, etc.)
+        for (k, v) in parent {
+            // Skip anyOf/oneOf - we're merging into it
+            if k == "anyOf" || k == "oneOf" {
+                continue;
+            }
+            // Skip meta keys
+            if k == "$schema" || k == "$id" || k == "title" || k == "description" {
+                continue;
+            }
+            if k == "properties" {
+                if let Some(props) = v.as_object() {
+                    for (pk, pv) in props {
+                        merged_props.insert(pk.clone(), pv.clone());
+                    }
+                }
+            } else if k == "required" {
+                if let Some(req) = v.as_array() {
+                    for r in req {
+                        if let Some(s) = r.as_str() {
+                            merged_required.push(s.to_string());
+                        }
+                    }
+                }
+            } else {
+                merged.insert(k.clone(), v.clone());
+            }
+        }
+
+        // Then add/override with subschema
+        if let Some(obj) = subschema.as_object() {
+            for (k, v) in obj {
+                // Skip 'not' - we can't represent negation in CFG
+                if k == "not" {
+                    continue;
+                }
+                if k == "properties" {
+                    if let Some(props) = v.as_object() {
+                        for (pk, pv) in props {
+                            merged_props.insert(pk.clone(), pv.clone());
+                        }
+                    }
+                } else if k == "required" {
+                    if let Some(req) = v.as_array() {
+                        for r in req {
+                            if let Some(s) = r.as_str() {
+                                merged_required.push(s.to_string());
+                            }
+                        }
+                    }
+                } else {
+                    merged.insert(k.clone(), v.clone());
+                }
             }
         }
 
@@ -742,47 +822,42 @@ impl JsonSchemaConverter {
         ]));
 
         // Generic JSON object: { (kv (, kv)*)? }
+        // WS is handled by the ignore terminal
         let comma_kv = GrammarExpr::Sequence(vec![
             GrammarExpr::Literal(b",".to_vec()),
-            GrammarExpr::Ref("WS".to_string()),
             GrammarExpr::Ref("_json_kv".to_string()),
         ]);
 
         self.add_rule("_json_object".to_string(), GrammarExpr::Sequence(vec![
             GrammarExpr::Literal(b"{".to_vec()),
-            GrammarExpr::Ref("WS".to_string()),
             GrammarExpr::Optional(Box::new(GrammarExpr::Sequence(vec![
                 GrammarExpr::Ref("_json_kv".to_string()),
                 GrammarExpr::Repeat(Box::new(comma_kv)),
             ]))),
-            GrammarExpr::Ref("WS".to_string()),
             GrammarExpr::Literal(b"}".to_vec()),
         ]));
 
         // JSON key-value pair
+        // WS is handled by the ignore terminal
         self.add_rule("_json_kv".to_string(), GrammarExpr::Sequence(vec![
             GrammarExpr::Ref("JSON_STRING".to_string()),
-            GrammarExpr::Ref("WS".to_string()),
             GrammarExpr::Literal(b":".to_vec()),
-            GrammarExpr::Ref("WS".to_string()),
             GrammarExpr::Ref("_json_value".to_string()),
         ]));
 
         // Generic JSON array
+        // WS is handled by the ignore terminal
         let comma_val = GrammarExpr::Sequence(vec![
             GrammarExpr::Literal(b",".to_vec()),
-            GrammarExpr::Ref("WS".to_string()),
             GrammarExpr::Ref("_json_value".to_string()),
         ]);
 
         self.add_rule("_json_array".to_string(), GrammarExpr::Sequence(vec![
             GrammarExpr::Literal(b"[".to_vec()),
-            GrammarExpr::Ref("WS".to_string()),
             GrammarExpr::Optional(Box::new(GrammarExpr::Sequence(vec![
                 GrammarExpr::Ref("_json_value".to_string()),
                 GrammarExpr::Repeat(Box::new(comma_val)),
             ]))),
-            GrammarExpr::Ref("WS".to_string()),
             GrammarExpr::Literal(b"]".to_vec()),
         ]));
     }
@@ -796,11 +871,12 @@ pub fn json_schema_to_ebnf(schema_json: &str) -> Result<String, String> {
     let (rules, root_rule) = JsonSchemaConverter::new(schema).convert()?;
     
     // Convert rules to EBNF format
-    let mut ebnf = String::new();
+    // Start with the ignore directive for whitespace
+    let mut ebnf = String::from("#![ignore(WS)]\n\n");
     for (name, expr) in &rules {
         if name == &root_rule {
-            // Put root rule first
-            ebnf = format!("{} ::= {} ;\n", name, grammar_expr_to_ebnf(expr)) + &ebnf;
+            // Put root rule first (after ignore directive)
+            ebnf = format!("#![ignore(WS)]\n\n{} ::= {} ;\n", name, grammar_expr_to_ebnf(expr)) + &ebnf[16..]; // Skip the initial "#![ignore(WS)]\n\n"
         } else {
             ebnf.push_str(&format!("{} ::= {} ;\n", name, grammar_expr_to_ebnf(expr)));
         }
