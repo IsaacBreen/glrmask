@@ -62,6 +62,10 @@ pub struct PipelineConfig {
     /// Default: true
     pub optimize_grammar: bool,
     
+    /// Whether to handle nullable terminals by wrapping them in optionals.
+    /// Default: true
+    pub handle_nullable_terminals: bool,
+    
     /// Whether to simplify the grammar (inline single-use rules, etc.).
     /// Default: true
     pub simplify_grammar: bool,
@@ -71,6 +75,7 @@ impl Default for PipelineConfig {
     fn default() -> Self {
         Self {
             optimize_grammar: true,
+            handle_nullable_terminals: true,
             simplify_grammar: true,
         }
     }
@@ -81,6 +86,7 @@ impl PipelineConfig {
     pub fn no_optimization() -> Self {
         Self {
             optimize_grammar: false,
+            handle_nullable_terminals: false,
             simplify_grammar: false,
         }
     }
@@ -304,6 +310,7 @@ mod tests {
     fn test_pipeline_config_default() {
         let config = PipelineConfig::default();
         assert!(config.optimize_grammar);
+        assert!(config.handle_nullable_terminals);
         assert!(config.simplify_grammar);
     }
 
@@ -311,6 +318,7 @@ mod tests {
     fn test_pipeline_config_no_optimization() {
         let config = PipelineConfig::no_optimization();
         assert!(!config.optimize_grammar);
+        assert!(!config.handle_nullable_terminals);
         assert!(!config.simplify_grammar);
     }
 

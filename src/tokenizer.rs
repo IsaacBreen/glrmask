@@ -45,10 +45,7 @@ impl Regex {
         // println!("Executed from state {} with text {:?}. Matches: {:?}", state.0, text, regex_state.matches);
 
         let matches: Vec<_> = regex_state.matches.iter().map(|(&id, &width)| Token { id, width })
-            // Filter out zero-width tokens. Zero-width tokens would indicate a nullable
-            // terminal (can match epsilon). Nullable terminals are handled at the GLR parser
-            // level by transforming them into optional non-terminals with epsilon alternatives.
-            // Keeping zero-width matches here would interfere with that handling.
+            // Filter out zero-width tokens
             .filter(|token| token.width != 0).collect();
 
         let new_state = if regex_state.done { None } else { Some(regex_state.current_state) };

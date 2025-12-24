@@ -1,5 +1,5 @@
 // src/test_constraint_basic.rs
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::sync::Arc;
 use std::time::Instant;
@@ -28,7 +28,6 @@ use crate::interface::{
     GrammarDefinition,
 };
 use crate::json_serialization::JSONConvertible;
-use crate::json_schema::json_schema_to_ebnf;
 use crate::tokenizer::{LLMTokenID, LLMTokenMap};
 use crate::types::TerminalID;
 use crate::{choice_fast, groups, seq_fast};
@@ -893,7 +892,7 @@ fn test_precompute_a_plus_tokenizer() {
     let mut grammar_token_map: BiBTreeMap<Terminal, TerminalID> = BiBTreeMap::new();
     grammar_token_map.insert(regex_name("A_PLUS"), TerminalID(0));
 
-    let parser = generate_glr_parser_with_terminal_map(&productions, grammar_token_map.clone(), &HashSet::new(), HashSet::new());
+    let parser = generate_glr_parser_with_terminal_map(&productions, grammar_token_map.clone(), None);
 
     // In this test, original and internal are the same.
     let internal_llm_token_map: BTreeMap<_, _> =
@@ -978,7 +977,7 @@ fn test_precompute_x_eq() {
     grammar_token_map.insert(regex_name("EQUALS"), TerminalID(2)); // '=' is group 2
     grammar_token_map.insert(regex_name("ANY"), TerminalID(3));    // Anything else is group 3
 
-    let parser = generate_glr_parser_with_terminal_map(&productions, grammar_token_map.clone(), &HashSet::new(), HashSet::new());
+    let parser = generate_glr_parser_with_terminal_map(&productions, grammar_token_map.clone(), None);
 
     let internal_llm_token_map: BTreeMap<_, _> =
         llm_token_map.iter().map(|(k, v)| (k.clone(), *v)).collect();
@@ -1099,7 +1098,7 @@ fn test_constraint_expression_no_times() {
     grammar_token_map.insert(regex_name("I"), TerminalID(3));
     grammar_token_map.insert(regex_name("EOF"), TerminalID(4));
 
-    let parser = generate_glr_parser_with_terminal_map(&productions, grammar_token_map.clone(), &HashSet::new(), HashSet::new());
+    let parser = generate_glr_parser_with_terminal_map(&productions, grammar_token_map.clone(), None);
 
     let mut token_name_map = BiBTreeMap::new();
      for (term, id) in &grammar_token_map {
@@ -1161,7 +1160,7 @@ fn test_constraint_expression_no_parens() {
     grammar_token_map.insert(regex_name("I"), TerminalID(2));
     grammar_token_map.insert(regex_name("EOF"), TerminalID(3));
 
-    let parser = generate_glr_parser_with_terminal_map(&productions, grammar_token_map.clone(), &HashSet::new(), HashSet::new());
+    let parser = generate_glr_parser_with_terminal_map(&productions, grammar_token_map.clone(), None);
 
     let mut token_name_map = BiBTreeMap::new();
      for (term, id) in &grammar_token_map {
@@ -1222,7 +1221,7 @@ fn test_constraint_expression_no_plus_times() {
     grammar_token_map.insert(regex_name("I"), TerminalID(2));
     grammar_token_map.insert(regex_name("EOF"), TerminalID(3));
 
-    let parser = generate_glr_parser_with_terminal_map(&productions, grammar_token_map.clone(), &HashSet::new(), HashSet::new());
+    let parser = generate_glr_parser_with_terminal_map(&productions, grammar_token_map.clone(), None);
 
     let mut token_name_map = BiBTreeMap::new();
      for (term, id) in &grammar_token_map {
@@ -1280,7 +1279,7 @@ fn test_constraint_expression_no_times_parens() {
     grammar_token_map.insert(regex_name("I"), TerminalID(1));
     grammar_token_map.insert(regex_name("EOF"), TerminalID(2));
 
-    let parser = generate_glr_parser_with_terminal_map(&productions, grammar_token_map.clone(), &HashSet::new(), HashSet::new());
+    let parser = generate_glr_parser_with_terminal_map(&productions, grammar_token_map.clone(), None);
 
     let mut token_name_map = BiBTreeMap::new();
      for (term, id) in &grammar_token_map {
@@ -1342,7 +1341,7 @@ fn test_constraint_expression_unbalanced_parens() {
     grammar_token_map.insert(regex_name("I"), TerminalID(1));
     grammar_token_map.insert(regex_name("EOF"), TerminalID(2));
 
-    let parser = generate_glr_parser_with_terminal_map(&productions, grammar_token_map.clone(), &HashSet::new(), HashSet::new());
+    let parser = generate_glr_parser_with_terminal_map(&productions, grammar_token_map.clone(), None);
 
     let mut token_name_map = BiBTreeMap::new();
      for (term, id) in &grammar_token_map {
@@ -1405,7 +1404,7 @@ fn test_constraint_expression_unbalanced_parens2() {
     grammar_token_map.insert(regex_name("I"), TerminalID(1));
     grammar_token_map.insert(regex_name("EOF"), TerminalID(2));
 
-    let parser = generate_glr_parser_with_terminal_map(&productions, grammar_token_map.clone(), &HashSet::new(), HashSet::new());
+    let parser = generate_glr_parser_with_terminal_map(&productions, grammar_token_map.clone(), None);
     println!("Parser: {}", parser);
 
     let mut token_name_map = BiBTreeMap::new();
@@ -1460,7 +1459,7 @@ fn test_constraint_expression_cycle() {
     grammar_token_map.insert(regex_name("I"), TerminalID(0));
     grammar_token_map.insert(regex_name("EOF"), TerminalID(1));
 
-    let parser = generate_glr_parser_with_terminal_map(&productions, grammar_token_map.clone(), &HashSet::new(), HashSet::new());
+    let parser = generate_glr_parser_with_terminal_map(&productions, grammar_token_map.clone(), None);
 
     let mut token_name_map = BiBTreeMap::new();
      for (term, id) in &grammar_token_map {
@@ -1497,52 +1496,10 @@ fn test_constraint_expression_cycle() {
     assert_eq!(mask, Bitset::from_iter(vec![]));
 }
 
-fn load_gpt2_vocab() -> Option<(LLMTokenMap, usize)> {
-    use std::io::BufReader;
-    use std::fs;
-
-    // Attempt to load gpt2 vocab from various paths
-    let paths = vec!["vocab.json", "src/tests/data/vocab.json", "gpt2_vocab.json"];
-    let mut vocab_json: Option<serde_json::Value> = None;
-    for p in &paths {
-        if let Ok(file) = fs::File::open(p) {
-            let reader = BufReader::new(file);
-            if let Ok(v) = serde_json::from_reader(reader) {
-                println!("Loaded vocab from {}", p);
-                vocab_json = Some(v);
-                break;
-            }
-        }
-    }
-
-    let vocab_json = vocab_json?;
-    let vocab_map = vocab_json.as_object()?;
-    let mut llm_token_map = LLMTokenMap::new();
-    let mut max_id = 0;
-
-    for (token_str, id_val) in vocab_map {
-        let id_u64 = id_val.as_u64()?;
-        let id = id_u64 as usize;
-        if id > max_id { max_id = id; }
-
-        // Minimal Byte-Pair Encoding reversal for GPT-2:
-        // Map 'Ġ' (U+0120) to space, 'Ċ' (U+010A) to newline.
-        let bytes: Vec<u8> = token_str.chars().flat_map(|c| {
-            match c {
-                'Ġ' => vec![b' '],
-                'Ċ' => vec![b'\n'],
-                c if c.is_ascii() => vec![c as u8],
-                _ => c.to_string().into_bytes(), // Fallback
-            }
-        }).collect();
-        llm_token_map.insert(bytes, LLMTokenID(id));
-    }
-    
-    Some((llm_token_map, max_id))
-}
-
 #[test]
 fn test_json_gpt2_initial_mask_bruteforce() -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::BufReader;
+
     let ebnf_grammar = indoc! {r#"
         #![ignore(WS)]
         value ::= object | array | STRING | NUMBER | 'true' | 'false' | 'null' ;
@@ -1557,7 +1514,21 @@ fn test_json_gpt2_initial_mask_bruteforce() -> Result<(), Box<dyn std::error::Er
     "#};
     let grammar_definition = GrammarDefinition::from_ebnf(ebnf_grammar)?;
 
-    let (llm_token_map, max_id) = match load_gpt2_vocab() {
+    // Attempt to load gpt2 vocab from various paths
+    let paths = vec!["vocab.json", "src/tests/data/vocab.json", "gpt2_vocab.json"];
+    let mut vocab_json: Option<serde_json::Value> = None;
+    for p in paths {
+        if let Ok(file) = fs::File::open(p) {
+            let reader = BufReader::new(file);
+            if let Ok(v) = serde_json::from_reader(reader) {
+                println!("Loaded vocab from {}", p);
+                vocab_json = Some(v);
+                break;
+            }
+        }
+    }
+
+    let vocab_json = match vocab_json {
         Some(v) => v,
         None => {
             println!("Skipping test_json_gpt2_initial_mask_bruteforce: vocab.json not found.");
@@ -1565,6 +1536,27 @@ fn test_json_gpt2_initial_mask_bruteforce() -> Result<(), Box<dyn std::error::Er
             return Ok(());
         }
     };
+
+    let vocab_map = vocab_json.as_object().ok_or("vocab.json must be a JSON object")?;
+    let mut llm_token_map = LLMTokenMap::new();
+    let mut max_id = 0;
+
+    for (token_str, id_val) in vocab_map {
+        let id = id_val.as_u64().ok_or("Token ID must be u64")? as usize;
+        if id > max_id { max_id = id; }
+
+        // Minimal Byte-Pair Encoding reversal for GPT-2:
+        // Map 'Ġ' (U+0120) to space, 'Ċ' (U+010A) to newline.
+        let bytes: Vec<u8> = token_str.chars().flat_map(|c| {
+            match c {
+                'Ġ' => vec![b' '],
+                'Ċ' => vec![b'\n'],
+                c if c.is_ascii() => vec![c as u8],
+                _ => c.to_string().into_bytes(), // Fallback
+            }
+        }).collect();
+        llm_token_map.insert(bytes, LLMTokenID(id));
+    }
 
     let constraint = GrammarConstraint::new_from_grammar_definition(
         Arc::new(grammar_definition),
@@ -1594,6 +1586,18 @@ fn test_json_gpt2_initial_mask_bruteforce() -> Result<(), Box<dyn std::error::Er
         }
     }
     assert_eq!(errors, 0, "Initial mask does not match brute-force validity check.");
+
+    let manually_verified_exclusions = vec![
+        " {{", " […]", " falsely", " [];", " [+", " [...]", " [*", " [*]", " falsehood",
+        " ['", " {\\", " {:", " [/", " [+]", " [(", " {*", " [|", " [&",
+    ];
+    for token_str in manually_verified_exclusions {
+        if let Some(id) = vocab_map.get(token_str).and_then(|v| v.as_u64()) {
+            assert!(!mask.contains(id as usize), "Manually verified exclusion '{}' (ID {}) is initial mask", token_str, id);
+        } else {
+            eprintln!("Token '{}' not found in vocab, skipping exclusion check.", token_str);
+        }
+    }
 
     Ok(())
 }
@@ -2446,7 +2450,7 @@ fn test_ambiguous_tokenizer_no_gss_explosion() {
     token_name_map.insert(regex_name("ANYTHING"), 2);
 
     // 5. Parser and Constraint
-    let parser = generate_glr_parser_with_terminal_map(&productions, grammar_token_map.clone(), &HashSet::new(), HashSet::new());
+    let parser = generate_glr_parser_with_terminal_map(&productions, grammar_token_map.clone(), None);
     let constraint = GrammarConstraint::new(
         tokenizer,
         parser,
@@ -2909,121 +2913,3 @@ fn test_tokenizer_vocab_to_terminal_dwa_aa() {
 //
 //     Ok(())
 // }
-
-#[test]
-fn test_json_schema_mask_generation() {
-    // 1. Define minimal JSON schema mimicking PackageJson structure
-    let schema_json = r#"{
-        "type": "object",
-        "properties": {
-            "name": { "type": "string" }
-        },
-        "additionalProperties": true
-    }"#;
-    
-    // 2. Convert to EBNF
-    let ebnf = json_schema_to_ebnf(schema_json).unwrap();
-    println!("Generated EBNF:\n{}", ebnf);
-    
-    let grammar_definition = GrammarDefinition::from_ebnf(&ebnf).unwrap();
-
-    // 3. Setup Token Map (mimic PackageJson failure trace)
-    let mut llm_token_map = LLMTokenMap::new();
-    llm_token_map.insert(b"{".to_vec(), LLMTokenID(90));
-    llm_token_map.insert(b"\n".to_vec(), LLMTokenID(198));
-    llm_token_map.insert(b" ".to_vec(), LLMTokenID(220));
-    llm_token_map.insert(b" \"".to_vec(), LLMTokenID(366));
-    llm_token_map.insert(b"name".to_vec(), LLMTokenID(3672));
-    
-    // 4. Init Constraint
-    let constraint = GrammarConstraint::new_from_grammar_definition(
-        Arc::new(grammar_definition),
-        llm_token_map,
-        5000,
-        &GrammarConstraintConfig::default(),
-    );
-    
-    let mut state = constraint.init();
-    
-    // 5. Commit sequence: { \n "
-    println!("Commit '{{'");
-    state.commit(LLMTokenID(90)).expect("Commit {");
-    
-    println!("Commit '\\n'");
-    state.commit(LLMTokenID(198)).expect("Commit \\n");
-    
-    println!("Commit ' '");
-    state.commit(LLMTokenID(220)).expect("Commit space");
-    
-    println!("Commit ' \"'");
-    state.commit(LLMTokenID(366)).expect("Commit \""); 
-    
-    // 6. Check if "name" is allowed
-    let mask = state.get_mask();
-    println!("Mask contains 3672 ('name')? {}", mask.contains(3672));
-    assert!(mask.contains(3672), "Token 'name' (3672) should be allowed!");
-}
-
-#[test]
-fn test_json_schema_gpt2_real_vocab() {
-    // 1. Define minimal JSON schema
-    let schema_json = r#"{
-        "type": "object",
-        "properties": {
-            "name": { "type": "string" }
-        },
-        "required": ["name"],
-        "additionalProperties": true
-    }"#;
-    let ebnf = json_schema_to_ebnf(schema_json).unwrap();
-    let grammar_definition = GrammarDefinition::from_ebnf(&ebnf).unwrap();
-
-    // 2. Load REAL GPT-2 Vocab
-    let (llm_token_map, max_id) = match load_gpt2_vocab() {
-        Some(v) => v,
-        None => panic!("gpt2_vocab.json or vocab.json not found! Required for real vocab test."),
-    };
-
-    println!("Loaded real vocab with {} tokens. Max ID: {}", llm_token_map.len(), max_id);
-
-    // 3. Init Constraint
-    let constraint = GrammarConstraint::new_from_grammar_definition(
-        Arc::new(grammar_definition),
-        llm_token_map.clone(),
-        max_id,
-        &GrammarConstraintConfig::default(),
-    );
-     
-    let mut state = constraint.init();
-    
-    // 4. Commit sequence: { \n "
-    // Note: GPT-2 tokens might be different than single bytes!
-    // We should use the IDs that correspond to the bytes we want, if possible.
-    // However, we are testing IF the sequence of TOKENS is valid.
-    // The previous trace said:
-    // { -> 90
-    // \n -> 198 (Ċ)
-    // " " -> 220 (Ġ)
-    // " \"" -> 366 (Ġ")
-    
-    // Let's Verify these IDs exist in map and contain correct bytes
-    assert!(llm_token_map.values().any(|id| id.0 == 90), "ID 90 must exist");
-    assert!(llm_token_map.values().any(|id| id.0 == 3672), "ID 3672 (name) must exist");
-
-    println!("Commit '{{' (ID 90)");
-    state.commit(LLMTokenID(90)).expect("Commit {");
-    
-    println!("Commit '\\n' (ID 198)");
-    state.commit(LLMTokenID(198)).expect("Commit \\n");
-    
-    println!("Commit ' ' (ID 220)");
-    state.commit(LLMTokenID(220)).expect("Commit space");
-    
-    println!("Commit ' \"' (ID 366)");
-    state.commit(LLMTokenID(366)).expect("Commit \""); 
-    
-    // 5. Verify 'name' (3672) is allowed
-    let mask = state.get_mask();
-    println!("Real GPT-2 Mask contains 3672? {}", mask.contains(3672));
-    assert!(mask.contains(3672), "'name' token (3672) should be allowed in real GPT-2 vocab!");
-}

@@ -9,28 +9,10 @@ use profiler_macro::time_it;
 use range_set_blaze::RangeSetBlaze;
 use std::collections::BTreeMap;
 use std::ops::BitOrAssign;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::Instant;
 use crate::datastructures::bitset::Bitset;
 use crate::datastructures::gss_acc::Acc;
 
 type ParserGSS = LeveledGSS<ParseStateEdgeContent, Acc>;
-
-// Benchmark mode for capturing Rust-native timings without Python overhead
-static BENCHMARK_MODE: AtomicBool = AtomicBool::new(false);
-static LAST_MASK_TIME_NS: AtomicU64 = AtomicU64::new(0);
-
-/// Enable benchmark mode which captures precise timing inside Rust.
-/// Call get_last_mask_time_ns() after each fill_mask_i32 call.
-pub fn set_benchmark_mode(enabled: bool) {
-    BENCHMARK_MODE.store(enabled, Ordering::Relaxed);
-}
-
-/// Get the last mask computation time in nanoseconds.
-/// Only valid if benchmark mode is enabled.
-pub fn get_last_mask_time_ns() -> u64 {
-    LAST_MASK_TIME_NS.load(Ordering::Relaxed)
-}
 
 impl<'a> GrammarConstraintState<'a> {
     /// Compute the internal mask (RangeSet of internal token IDs) for the current state.
@@ -41,13 +23,12 @@ impl<'a> GrammarConstraintState<'a> {
             crate::debug!(7, "compute_internal_mask: state is empty");
             return final_mask_internal;
         }
+        crate::debug!(7, "compute_internal_mask: state has {} tokenizer states", self.state.len());
 
         let mut queue: BTreeMap<isize, BTreeMap<WAStateID, LeveledGSS<ParseStateEdgeContent, RangeSetBlaze<usize>>>> = BTreeMap::new();
         let dwa = &self.parent.parser_dwa;
         let dwa_start_state = &dwa.states[dwa.body.start_state];
 
-
-        crate::debug!(5, ">>> Seeding initial states");
         // 1. Seed initial states
         for (&tokenizer_state_id, glr_state) in &self.state {
             if glr_state.stack.is_empty() {
@@ -167,6 +148,13 @@ impl<'a> GrammarConstraintState<'a> {
             }
         }
 
+        crate::debug!(7, "compute_internal_mask: final_mask_internal has some content: {}", !final_mask_internal.is_empty());
+        // Check if internal token 143 is in the mask
+        if final_mask_internal.contains(143) {
+            crate::debug!(7, "Internal token 143 IS in final_mask_internal");
+        } else {
+            crate::debug!(7, "Internal token 143 NOT in final_mask_internal");
+        }
         final_mask_internal
     }
 
@@ -191,18 +179,8 @@ impl<'a> GrammarConstraintState<'a> {
     /// buffer (e.g., numpy array, torch tensor, or reused buffer).
     #[inline]
     pub fn fill_mask_i32(&self, out: &mut [i32]) {
-        let start = if BENCHMARK_MODE.load(Ordering::Relaxed) {
-            Some(Instant::now())
-        } else {
-            None
-        };
-        
         let final_mask_internal = self.compute_internal_mask();
         self.parent.parser_dwa_vocab.fill_internal_bv_to_original_i32(&final_mask_internal, out);
-        
-        if let Some(start) = start {
-            LAST_MASK_TIME_NS.store(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
-        }
     }
 
     /// Fill an i32 slice with the token mask via a raw pointer.
