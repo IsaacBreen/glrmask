@@ -1240,7 +1240,7 @@ pub fn generate_glr_parser_with_terminal_map(
     // Simplify grammar by eliminating unit productions (A → B → X becomes A → X)
     // This reduces parser construction time for grammars with many trivial chains.
     let start_nt = &transformed_productions.get(0).map(|p| p.lhs.clone()).unwrap_or(NonTerminal("start".to_string()));
-    const MAX_SUBSTITUTION_RHS_LEN: usize = usize::MAX;
+    const MAX_SUBSTITUTION_RHS_LEN: usize = 1;
     let (simplified_with_defs, substituted_nts) = substitute_single_productions_and_report(
         &transformed_productions,
         start_nt,
