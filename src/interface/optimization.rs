@@ -606,7 +606,6 @@ impl<'a> GrammarOptimizer<'a> {
         // Handle nullable terminals that were created during optimization.
         // By doing this early (in optimization.rs), we enable better downstream optimizations.
         // We only handle the newly created terminals, not pre-existing ones.
-        
         // NOTE: Disabled to avoid grammar bloat (combinatorial explosion in later phases).
         // Matches fast commit behavior.
         // self.grammar.handle_nullable_terminals_except(&pre_existing_terminals);
@@ -1072,8 +1071,34 @@ impl RegexTerm {
         }
     }
     
+    fn make_star(inner: Rc<RegexTerm>) -> RegexTerm {
+        match inner.as_ref() {
+            RegexTerm::Epsilon => RegexTerm::Epsilon,
+            RegexTerm::Star(_) => (*inner).clone(), // (a*)* = a*
+            _ => RegexTerm::Star(inner),
+        }
+    }
+    
+    // Check if this term matches the empty string
+    fn is_nullable(&self) -> bool {
+        match self {
+            RegexTerm::Epsilon => true,
+            RegexTerm::Star(_) => true,
+            RegexTerm::Concrete(e) => {
+                matches!(get_expr_nullability(e), ExprNullability::AlwaysNull | ExprNullability::CanBeNull)
+            }
+            // Non-terminals nullability is unknown here (requires solving), assume false to be safe
+            // for local simplification.
+            RegexTerm::NtRef(_) => false,
+            RegexTerm::Seq(terms) => terms.iter().all(|t| t.is_nullable()),
+            RegexTerm::Choice(terms) => terms.iter().any(|t| t.is_nullable()),
+        }
+    }
+
     fn make_choice(terms: Vec<Rc<RegexTerm>>) -> RegexTerm {
         let mut flat = Vec::new();
+        let mut has_epsilon = false;
+        
         for t in terms {
             // Only flatten if this Rc is NOT shared (strong_count == 1)
             // This avoids O(n²) blowup when flattening shared Choice subtrees
@@ -1082,9 +1107,31 @@ impl RegexTerm {
                 RegexTerm::Choice(inner) if should_flatten => {
                     flat.extend(inner.iter().cloned())
                 }
+                RegexTerm::Epsilon => {
+                    has_epsilon = true;
+                }
                 _ => flat.push(t),
             }
         }
+        
+        // Epsilon Absorption:
+        // If we have an Epsilon alternative, check if any OTHER alternative is nullable.
+        // If so, the Epsilon is redundant because the nullable alternative already covers it.
+        // e.g., (A | ε) where A matches ε -> A
+        if has_epsilon {
+            // Check if any existing term is nullable
+            let any_nullable = flat.iter().any(|t| t.is_nullable());
+            if !any_nullable {
+                // If no other nullable term, we must keep Epsilon
+                // Add it at the end for canonical ordering (or beginning, doesn't matter much)
+                // We'll treat it as just another term for now, maybe explicit handling is better?
+                
+                // Let's create an explicit Epsilon term
+                 flat.push(Rc::new(RegexTerm::Epsilon));
+            }
+            // If any_nullable is true, we DROP the explicit Epsilon!
+        }
+
         if flat.is_empty() {
             RegexTerm::Epsilon
         } else if flat.len() == 1 {
@@ -1094,14 +1141,6 @@ impl RegexTerm {
             }
         } else {
             RegexTerm::Choice(flat)
-        }
-    }
-    
-    fn make_star(inner: Rc<RegexTerm>) -> RegexTerm {
-        match inner.as_ref() {
-            RegexTerm::Epsilon => RegexTerm::Epsilon,
-            RegexTerm::Star(_) => (*inner).clone(), // (a*)* = a*
-            _ => RegexTerm::Star(inner),
         }
     }
     
