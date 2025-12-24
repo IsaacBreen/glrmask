@@ -1210,35 +1210,6 @@ fn generate_glr_parser_with_maps(
     print_memory_usage("After grammar normalization loop");
 
     // ============================================================
-    // Final epsilon elimination
-    // ============================================================
-    // The optimization loop may have created new epsilon productions
-    // (e.g., from right recursion elimination: A' → ε). We need to
-    // inline these so that no epsilon productions remain. We run
-    // inline_null_productions in a loop until no epsilon productions
-    // remain, then explicitly filter out any remaining ones.
-    crate::debug!(4, "Final epsilon production elimination");
-    const MAX_EPSILON_ELIMINATION_PASSES: usize = 10;
-    for pass in 0..MAX_EPSILON_ELIMINATION_PASSES {
-        let epsilon_count = productions.iter().filter(|p| p.rhs.is_empty()).count();
-        if epsilon_count == 0 {
-            crate::debug!(5, "All epsilon productions eliminated after {} passes", pass);
-            break;
-        }
-        crate::debug!(5, "Epsilon elimination pass {}: {} epsilon productions", pass + 1, epsilon_count);
-        productions = inline_null_productions(&productions);
-    }
-    // Force filter out any remaining epsilon productions
-    // inline_null_productions keeps some by design (for start symbol), but we
-    // will re-add nullability in a controlled way below
-    let epsilon_before = productions.iter().filter(|p| p.rhs.is_empty()).count();
-    if epsilon_before > 0 {
-        crate::debug!(5, "Force-removing {} remaining epsilon productions", epsilon_before);
-        productions = productions.into_iter().filter(|p| !p.rhs.is_empty()).collect();
-    }
-    print_memory_usage("After final epsilon elimination");
-
-    // ============================================================
     // Phase 5: DECORATIVE - Whitespace detection (after inlining)
     // ============================================================
     // Auto-detect whitespace-like terminals and combine with explicit ignore terminals.
