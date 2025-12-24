@@ -1749,9 +1749,9 @@ impl CompiledGrammar {
         // Get nullable terminals from the definition
         let nullable_terminals = definition.get_nullable_terminals();
         if !nullable_terminals.is_empty() {
-            debug!(3, "Found {} nullable terminals that will be transformed", nullable_terminals.len());
+            debug!(4, "Found {} nullable terminals that will be transformed", nullable_terminals.len());
             for t in &nullable_terminals {
-                debug!(4, "  Nullable terminal: {:?}", t);
+                debug!(5, "  Nullable terminal: {:?}", t);
             }
         }
         

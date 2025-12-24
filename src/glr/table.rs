@@ -39,8 +39,6 @@ fn transform_nullable_terminals(
         return (productions.to_vec(), HashMap::new());
     }
     
-    crate::debug!(4, "Transforming {} nullable terminals into optional non-terminals", nullable_terminals.len());
-    
     // Generate unique names for optional non-terminals
     let mut all_names: HashSet<String> = existing_nonterminals.iter().map(|nt| nt.0.clone()).collect();
     let mut terminal_to_opt_nt: HashMap<Terminal, NonTerminal> = HashMap::new();
@@ -1232,7 +1230,7 @@ pub fn generate_glr_parser_with_terminal_map(
     all_ignore_ids.extend(detected_ignore.iter());
     
     if !all_ignore_ids.is_empty() {
-        crate::debug!(3, "Using {} ignore terminals ({} explicit, {} auto-detected)", 
+        crate::debug!(4, "Using {} ignore terminals ({} explicit, {} auto-detected)",
             all_ignore_ids.len(), 
             explicit_count,
             detected_ignore.len());
