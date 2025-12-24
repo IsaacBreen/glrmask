@@ -142,7 +142,7 @@ pub static LEVEL_CONFIGS: [DebugLevelConfig; 7] = [
     },
     // Level 5: Algorithm details - dim
     DebugLevelConfig {
-        heading_symbol: "",
+        heading_symbol: "  ",
         line_prefix: "  ",
         style_start: "\x1b[2m", // Dim
         style_end: "\x1b[0m",
