@@ -949,12 +949,12 @@ fn print_memory_usage(label: &str) {
 }
 
 #[time_it]
-fn generate_glr_parser_with_maps(
+pub fn generate_glr_parser_with_maps(
     productions: &[Production],
     terminal_map: BiBTreeMap<Terminal, TerminalID>,
     mut non_terminal_map: BiBTreeMap<NonTerminal, NonTerminalID>,
     actions: BTreeMap<NonTerminal, ActionFn>,
-    ignore_terminal_ids: HashSet<TerminalID>,
+    ignore_terminal_id: Option<TerminalID>,
 ) -> GLRParser {
     crate::debug!(5, "Number of productions: {}", productions.len());
     print_memory_usage("Start of parser generation");
@@ -1193,75 +1193,30 @@ fn generate_glr_parser_with_maps(
         start_state_id,
         substring_state_id,
         actions,
-        ignore_terminal_ids,
+        ignore_terminal_id,
     )
 }
 
-/// Generate a GLR parser from productions, with automatic detection of ignore terminals.
-/// 
-/// This function auto-detects whitespace-like terminals (terminals that are always optional)
-/// and adds them to the ignore set. Additional explicit ignore terminals can be provided.
 pub fn generate_glr_parser(
     productions: &[Production],
-    nullable_terminals: &HashSet<Terminal>,
-    explicit_ignore_terminal_ids: HashSet<TerminalID>,
+    ignore_terminal_id: Option<TerminalID>,
 ) -> crate::glr::parser::GLRParser {
     let terminal_map = assign_terminal_ids(productions);
-    generate_glr_parser_with_terminal_map(productions, terminal_map, nullable_terminals, explicit_ignore_terminal_ids)
+    generate_glr_parser_with_terminal_map(productions, terminal_map, ignore_terminal_id)
 }
 
 pub fn generate_glr_parser_with_terminal_map(
     productions: &[Production],
     terminal_map: BiBTreeMap<Terminal, TerminalID>,
-    nullable_terminals: &HashSet<Terminal>,
-    explicit_ignore_terminal_ids: HashSet<TerminalID>,
+    ignore_terminal_id: Option<TerminalID>,
 ) -> crate::glr::parser::GLRParser {
-    // Transform nullable terminals into optional non-terminals BEFORE generating the parser
-    let existing_nonterminals: BTreeSet<NonTerminal> = productions.iter().map(|p| p.lhs.clone()).collect();
-    let (transformed_productions, _terminal_to_opt_nt) = transform_nullable_terminals(
-        productions,
-        nullable_terminals,
-        &existing_nonterminals,
-    );
-    
-    // Auto-detect whitespace-like terminals and combine with explicit ignore terminals
-    let detected_ignore = detect_whitespace_like_terminals(&transformed_productions, &terminal_map);
-    let explicit_count = explicit_ignore_terminal_ids.len();
-    let mut all_ignore_ids = explicit_ignore_terminal_ids;
-    all_ignore_ids.extend(detected_ignore.iter());
-    
-    if !all_ignore_ids.is_empty() {
-        crate::debug!(4, "Using {} ignore terminals ({} explicit, {} auto-detected)",
-            all_ignore_ids.len(), 
-            explicit_count,
-            detected_ignore.len());
-    }
-    
-    // Simplify grammar by eliminating unit productions (A → B → X becomes A → X)
-    // This reduces parser construction time for grammars with many trivial chains.
-    let start_nt = &transformed_productions.get(0).map(|p| p.lhs.clone()).unwrap_or(NonTerminal("start".to_string()));
-    const MAX_SUBSTITUTION_RHS_LEN: usize = 1;
-    let (simplified_with_defs, substituted_nts) = substitute_single_productions_and_report(
-        &transformed_productions,
-        start_nt,
-        MAX_SUBSTITUTION_RHS_LEN,
-    );
-    let simplified_productions = remove_productions_for_nts(&simplified_with_defs, &substituted_nts);
-    
-    if simplified_productions.len() < transformed_productions.len() {
-        crate::debug!(4, "Grammar simplification: {} → {} productions (eliminated {} unit productions)",
-            transformed_productions.len(),
-            simplified_productions.len(),
-            transformed_productions.len() - simplified_productions.len());
-    }
-    
-    let non_terminal_map = assign_non_terminal_ids(&simplified_productions);
+    let non_terminal_map = assign_non_terminal_ids(productions);
     generate_glr_parser_with_maps(
-        &simplified_productions,
+        productions,
         terminal_map,
         non_terminal_map,
         BTreeMap::new(),
-        all_ignore_ids,
+        ignore_terminal_id,
     )
 }
 
