@@ -1152,7 +1152,8 @@ fn generate_glr_parser_with_maps(
     const MAX_OPTIMIZATION_PASSES: usize = usize::MAX;
     for pass in 0..MAX_OPTIMIZATION_PASSES {
         crate::debug!(4, "Grammar optimization pass {}", pass + 1);
-        let initial_production_count = productions.len();
+        let initial_productions = productions.clone();
+        let initial_production_count = productions.len(); // Keep for logging if needed, or remove
 
         // Phase 2: ESSENTIAL - Inline null productions
         // This exposes hidden right recursion: A → α A β where β is nullable
@@ -1232,7 +1233,7 @@ fn generate_glr_parser_with_maps(
         let final_production_count = productions.len();
         let right_recursion_remaining = crate::glr::analyze::check_for_right_recursion(&productions);
 
-        if right_recursion_remaining.is_empty() && initial_production_count == final_production_count {
+        if right_recursion_remaining.is_empty() && productions == initial_productions {
             crate::debug!(4, "Grammar optimization converged after {} passes", pass + 1);
             break;
         }
