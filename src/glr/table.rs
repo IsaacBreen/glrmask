@@ -1282,7 +1282,24 @@ fn generate_glr_parser_with_maps(
     // ============================================================
     // Phase 7: Restore grammar nullability / Finalize Structure
     // ============================================================
-    if !productions.is_empty() {
+    // Handle edge case: grammar was nullable but all productions were eliminated
+    // (e.g., grammar was just "S → ε"). We need to restore a minimal nullable structure.
+    if productions.is_empty() && grammar_is_nullable {
+        crate::debug!(4, "Phase 7: Restoring nullable grammar from empty productions");
+        // Create: Start_nullable → ε (this is the only production)
+        // Then: Start_final → Start_nullable
+        let null_nt = NonTerminal(format!("{}_nullable", start_nonterminal.0));
+        let final_nt = NonTerminal(format!("{}_start", start_nonterminal.0));
+        
+        // Create the nullable wrapper's epsilon production
+        let null_prod_eps = Production { lhs: null_nt.clone(), rhs: vec![] };
+        
+        // Create the final start production
+        let final_prod = Production { lhs: final_nt.clone(), rhs: vec![Symbol::NonTerminal(null_nt)] };
+        
+        productions.push(final_prod);
+        productions.push(null_prod_eps);
+    } else if !productions.is_empty() {
         let current_start_nt = start_nonterminal.clone();
         let existing_nonterminals: BTreeSet<NonTerminal> = productions.iter().map(|p| p.lhs.clone()).collect();
         // Simple unique name generator
