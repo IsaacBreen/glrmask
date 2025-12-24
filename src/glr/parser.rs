@@ -429,23 +429,12 @@ impl GLRParser {
 
         let mut shifted: Vec<ParserGSS> = Vec::new();
 
-        let mut iteration = 0;
-        const MAX_ITERATIONS: usize = 1000;
         while let Some((state_id, state_gss)) = heads_by_state.pop_first() {
-            iteration += 1;
-            if iteration > MAX_ITERATIONS {
-                eprintln!("DEBUG: process_token_gss hit {} iterations, breaking!", MAX_ITERATIONS);
-                break;
-            }
-            if iteration <= 20 || iteration % 100 == 0 {
-                eprintln!("DEBUG: iter={}, state_id={:?}, heads_by_state.len()={}", iteration, state_id, heads_by_state.len());
-            }
             if let Some(row) = get_row(&self.table, state_id) {
                 row.handle_shifts_and_reduces_for_terminal(
                     token,
                     |to| shifted.push(state_gss.push(ParseStateEdgeContent { state_id: *to })),
                     |nt_id, len, _pids| {
-                        eprintln!("DEBUG: reduce nt_id={:?}, len={}", nt_id, len);
                         self.apply_reduces(&state_gss, *len, *nt_id, &mut heads_by_state);
                     },
                 );

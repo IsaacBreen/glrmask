@@ -1124,20 +1124,13 @@ fn generate_glr_parser_with_maps(
     const MAX_OPTIMIZATION_PASSES: usize = 10;
     const MAX_PRODUCTIONS: usize = 10000; // Safety limit
     
-    // Print grammar before optimization
-    eprintln!("DEBUG: Grammar BEFORE optimization ({} productions):", productions.len());
-    for (i, p) in productions.iter().enumerate() {
-        eprintln!("  [{}] {} -> {:?}", i, p.lhs, p.rhs);
-    }
-    
     for pass in 0..MAX_OPTIMIZATION_PASSES {
         crate::debug!(4, "Grammar optimization pass {}", pass + 1);
         let initial_production_count = productions.len();
-        eprintln!("DEBUG: Pass {} start, {} productions", pass + 1, initial_production_count);
         
         // Safety check
         if productions.len() > MAX_PRODUCTIONS {
-            eprintln!("DEBUG: SAFETY LIMIT - {} productions exceeds limit of {}", productions.len(), MAX_PRODUCTIONS);
+            crate::log_warn!("Grammar has {} productions, exceeding limit of {}", productions.len(), MAX_PRODUCTIONS);
             break;
         }
 
@@ -1146,13 +1139,9 @@ fn generate_glr_parser_with_maps(
         // becomes A → α A | A → α A β
         crate::debug!(5, "  Phase 2: Inlining null productions");
         productions = inline_null_productions(&productions);
-        eprintln!("DEBUG: After inline_null, {} productions:", productions.len());
-        for (i, p) in productions.iter().enumerate().take(3) {
-            eprintln!("  [{}] {} -> {:?}", i, p.lhs, p.rhs);
-        }
         
         if productions.len() > MAX_PRODUCTIONS {
-            eprintln!("DEBUG: SAFETY LIMIT after inline - {} productions exceeds limit", productions.len());
+            crate::log_warn!("Grammar has {} productions after inlining, exceeding limit", productions.len());
             break;
         }
 
@@ -1162,10 +1151,8 @@ fn generate_glr_parser_with_maps(
         let right_recursion_errors = crate::glr::analyze::check_for_right_recursion(&productions);
         if !right_recursion_errors.is_empty() {
             crate::debug!(5, "  Phase 3: Eliminating {} right recursion patterns", right_recursion_errors.len());
-            eprintln!("DEBUG: {} right recursion patterns", right_recursion_errors.len());
             for err in &right_recursion_errors {
                 crate::debug!(6, "    {}", err);
-                eprintln!("DEBUG:   {}", err);
             }
 
             let nonterminals: BTreeSet<_> = productions.iter().map(|p| p.lhs.clone()).collect();
@@ -1176,20 +1163,12 @@ fn generate_glr_parser_with_maps(
                 &mut productions,
                 &mut unique_name_generator,
             );
-            eprintln!("DEBUG: After indirect right recursion, {} productions:", productions.len());
-            for (i, p) in productions.iter().enumerate().take(3) {
-                eprintln!("  [{}] {} -> {:?}", i, p.lhs, p.rhs);
-            }
 
             // Then resolve direct right recursion
             crate::glr::analyze::resolve_direct_right_recursion(
                 &mut productions,
                 &mut unique_name_generator,
             );
-            eprintln!("DEBUG: After direct right recursion, {} productions:", productions.len());
-            for (i, p) in productions.iter().enumerate().take(3) {
-                eprintln!("  [{}] {} -> {:?}", i, p.lhs, p.rhs);
-            }
         }
 
         // Phase 4: Hidden left recursion elimination (best effort)
@@ -1199,37 +1178,23 @@ fn generate_glr_parser_with_maps(
         // don't require it to be fully eliminated.
         crate::debug!(5, "  Phase 4: Checking for hidden left recursion");
         crate::glr::analyze::eliminate_hidden_left_recursion(&mut productions);
-        eprintln!("DEBUG: After hidden left recursion elimination, {} productions:", productions.len());
-        for (i, p) in productions.iter().enumerate().take(3) {
-            eprintln!("  [{}] {} -> {:?}", i, p.lhs, p.rhs);
-        }
 
         // Check if we've reached a fixed point
         // Note: We only require right_recursion to be empty (essential for bounded reductions).
         // Hidden left recursion may persist in some grammars (it's non-fatal).
         let final_production_count = productions.len();
         let right_recursion_remaining = crate::glr::analyze::check_for_right_recursion(&productions);
-        eprintln!("DEBUG: End of pass {}: {} right recursion remaining, {} -> {} productions", 
-            pass + 1, right_recursion_remaining.len(), initial_production_count, final_production_count);
 
         if right_recursion_remaining.is_empty() && initial_production_count == final_production_count {
             crate::debug!(4, "Grammar optimization converged after {} passes", pass + 1);
-            eprintln!("DEBUG: Converged after {} passes", pass + 1);
             break;
         }
 
         if pass == MAX_OPTIMIZATION_PASSES - 1 {
             crate::log_warn!("Grammar optimization did not converge after {} passes", MAX_OPTIMIZATION_PASSES);
-            eprintln!("DEBUG: Did not converge after {} passes", MAX_OPTIMIZATION_PASSES);
         }
     }
     print_memory_usage("After grammar normalization loop");
-    
-    // Print grammar after optimization
-    eprintln!("DEBUG: Grammar AFTER optimization ({} productions):", productions.len());
-    for (i, p) in productions.iter().enumerate() {
-        eprintln!("  [{}] {} -> {:?}", i, p.lhs, p.rhs);
-    }
 
     // ============================================================
     // Phase 5: DECORATIVE - Whitespace detection (after inlining)
@@ -1257,11 +1222,18 @@ fn generate_glr_parser_with_maps(
     // ============================================================
     // Simplify grammar by eliminating unit productions (A → B → X becomes A → X).
     // This reduces parser construction time but doesn't affect correctness.
-    let start_nt = &productions.get(0).map(|p| p.lhs.clone()).unwrap_or(NonTerminal("start".to_string()));
+    // 
+    // IMPORTANT: We must protect BOTH the augmented start AND the original start
+    // from substitution, to maintain the S' -> A structure required for the
+    // epsilon production constraint.
+    let protected_nts: BTreeSet<NonTerminal> = [
+        augmented_start.clone(),
+        original_start_symbol.clone(),
+    ].into_iter().collect();
     const MAX_SUBSTITUTION_RHS_LEN: usize = 1;
     let (simplified_with_defs, substituted_nts) = substitute_single_productions_and_report(
         &productions,
-        start_nt,
+        &protected_nts,
         MAX_SUBSTITUTION_RHS_LEN,
     );
     let simplified_productions = remove_productions_for_nts(&simplified_with_defs, &substituted_nts);
@@ -1276,81 +1248,59 @@ fn generate_glr_parser_with_maps(
     print_memory_usage("After unit production elimination");
 
     // ============================================================
-    // Validation - Epsilon Production Constraint
+    // CRITICAL ASSERTION: Epsilon production restriction
     // ============================================================
-    // ASSERTION: Epsilon productions are ONLY allowed for the inner start nonterminal.
-    // 
-    // After all transformations, the grammar structure should be:
-    //   S' -> A       (augmented start production, production 0, where A is a nonterminal)
-    //   A  -> ...     (inner start symbol, may have epsilon production)
-    //   X  -> ...     (other nonterminals, MUST NOT have epsilon productions)
+    // The start production (S' -> A) has one RHS symbol: A.
+    // Epsilon productions (X -> ε) are ONLY allowed when X = A.
+    // This is essential for bounded reductions in the GLR parser.
     //
-    // OR, if unit production elimination inlined away A:
-    //   S' -> t       (augmented start production with terminal)
-    //   (no other productions with epsilon allowed)
-    //
-    // Note: We use `original_start_symbol` which was captured before any optimizations.
-    // After unit production elimination, this nonterminal may no longer exist in the grammar.
-    {
-        let augmented_prod = &productions[0];
-        
-        // Verify the augmented start production has the right LHS and exactly one RHS symbol
-        assert!(
-            augmented_prod.lhs == augmented_start && augmented_prod.rhs.len() == 1,
-            "Augmented start production must have form S' -> X (one symbol), but got {} -> {:?}",
-            augmented_prod.lhs.0, augmented_prod.rhs
-        );
-        
-        // Determine the inner start nonterminal (if it's still a nonterminal after substitution)
-        let allowed_epsilon_lhs: Option<NonTerminal> = match &augmented_prod.rhs[0] {
-            Symbol::NonTerminal(nt) => {
-                // Inner start is still a nonterminal - this is the only NT allowed to have epsilon
-                Some(nt.clone())
-            }
-            Symbol::Terminal(_) => {
-                // Inner start was substituted away - no nonterminal is allowed to have epsilon
-                None
-            }
-        };
-        
-        // Check for invalid epsilon productions
-        let invalid_epsilon_productions: Vec<_> = productions.iter()
-            .filter(|p| {
-                if p.rhs.is_empty() {
-                    // This is an epsilon production. Is it allowed?
-                    match &allowed_epsilon_lhs {
-                        Some(allowed_nt) => p.lhs != *allowed_nt,  // Only allowed for this NT
-                        None => true,  // No epsilon productions allowed at all
-                    }
-                } else {
-                    false
-                }
-            })
+    // NOTE: DO NOT REMOVE THIS ASSERTION.
+    // The augmented start production MUST derive a non-terminal, not a terminal.
+    // If this assertion fails, it means unit production elimination inlined
+    // the inner start symbol, which breaks the grammar structure we need.
+    // Fix by ensuring both the augmented start AND the inner start are protected
+    // from unit production substitution (see the protected_nts set above).
+    let start_prod = productions.get(0).expect("Grammar must have productions");
+    assert_eq!(start_prod.lhs, augmented_start, 
+        "Start production LHS must be the augmented start symbol");
+    assert_eq!(start_prod.rhs.len(), 1, 
+        "Augmented start production must have exactly one RHS symbol");
+    
+    let allowed_epsilon_nt = match &start_prod.rhs[0] {
+        Symbol::NonTerminal(nt) => nt.clone(),
+        Symbol::Terminal(_) => panic!(
+            "Augmented start production must derive a non-terminal, not a terminal.\n\
+             This likely means the inner start symbol was inlined during unit production elimination.\n\
+             Ensure both augmented_start and original_start_symbol are in protected_nts."
+        ),
+    };
+    
+    // Verify that the inner start is the original_start_symbol
+    assert_eq!(allowed_epsilon_nt, original_start_symbol,
+        "Inner start should be '{}' but is '{}'. \
+         Grammar structure was corrupted during optimization.",
+        original_start_symbol.0, allowed_epsilon_nt.0
+    );
+    
+    // Check all productions for illegal epsilon productions
+    let illegal_epsilon_productions: Vec<_> = productions.iter()
+        .filter(|p| p.rhs.is_empty() && p.lhs != allowed_epsilon_nt)
+        .collect();
+    
+    if !illegal_epsilon_productions.is_empty() {
+        let violation_details: Vec<String> = illegal_epsilon_productions.iter()
+            .map(|p| format!("{} -> ε", p.lhs.0))
             .collect();
-        
-        if !invalid_epsilon_productions.is_empty() {
-            let allowed_msg = match &allowed_epsilon_lhs {
-                Some(nt) => format!("inner start symbol '{}'", nt.0),
-                None => "no nonterminal (inner start was inlined to a terminal)".to_string(),
-            };
-            eprintln!("ERROR: Found epsilon productions for nonterminals other than {}:", allowed_msg);
-            for p in &invalid_epsilon_productions {
-                eprintln!("  {} -> ε (INVALID)", p.lhs.0);
-            }
-            panic!(
-                "Epsilon productions are only allowed for {}. \
-                Found {} invalid epsilon production(s).",
-                allowed_msg,
-                invalid_epsilon_productions.len()
-            );
-        }
-        
-        crate::debug!(4, "Epsilon production constraint satisfied: {}",
-            match &allowed_epsilon_lhs {
-                Some(nt) => format!("only '{}' may have epsilon productions", nt.0),
-                None => "no epsilon productions (inner start was inlined)".to_string(),
-            });
+        panic!(
+            "Grammar has illegal epsilon productions. Only {} is allowed to have epsilon productions.\n\
+             Violations:\n  {}", 
+            allowed_epsilon_nt.0,
+            violation_details.join("\n  ")
+        );
     }
+    
+    crate::debug!(4, "Grammar passes epsilon production restriction (only {} may be nullable)", 
+        allowed_epsilon_nt.0);
 
     // ============================================================
     // Validation - Ensure all essential transformations completed
@@ -1400,43 +1350,6 @@ fn generate_glr_parser_with_maps(
             post_transform_errors, right_recursion_errors
         );
     }
-
-    // ============================================================
-    // CRITICAL ASSERTION: Epsilon production restriction
-    // ============================================================
-    // The start production (S' -> A) has one RHS symbol: A.
-    // Epsilon productions (X -> ε) are ONLY allowed when X = A.
-    // This is essential for bounded reductions in the GLR parser.
-    let start_prod = productions.get(0).expect("Grammar must have productions");
-    assert_eq!(start_prod.lhs, augmented_start, 
-        "Start production LHS must be the augmented start symbol");
-    assert_eq!(start_prod.rhs.len(), 1, 
-        "Augmented start production must have exactly one RHS symbol");
-    
-    let allowed_epsilon_nt = match &start_prod.rhs[0] {
-        Symbol::NonTerminal(nt) => nt.clone(),
-        Symbol::Terminal(_) => panic!("Augmented start production must derive a non-terminal, not a terminal"),
-    };
-    
-    // Check all productions for illegal epsilon productions
-    let illegal_epsilon_productions: Vec<_> = productions.iter()
-        .filter(|p| p.rhs.is_empty() && p.lhs != allowed_epsilon_nt)
-        .collect();
-    
-    if !illegal_epsilon_productions.is_empty() {
-        let violation_details: Vec<String> = illegal_epsilon_productions.iter()
-            .map(|p| format!("{} -> ε", p.lhs.0))
-            .collect();
-        panic!(
-            "Grammar has illegal epsilon productions. Only {} is allowed to have epsilon productions.\n\
-             Violations:\n  {}", 
-            allowed_epsilon_nt.0,
-            violation_details.join("\n  ")
-        );
-    }
-    
-    crate::debug!(4, "Grammar passes epsilon production restriction (only {} may be nullable)", 
-        allowed_epsilon_nt.0);
 
     eprintln!("DEBUG: After validation, proceeding with {} productions", productions.len());
 
