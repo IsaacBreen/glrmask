@@ -979,6 +979,305 @@ fn compute_final_table(
     (final_table_map, start_state_id, substring_state_id)
 }
 
+// ============================================================
+// Table State Reduction Optimizations
+// ============================================================
+// These optimizations run AFTER the table is constructed to reduce
+// the number of states through merging and elimination.
+
+/// Optimize the LR table by eliminating unreachable states and merging identical rows.
+/// Returns the optimized table and updated start/substring state IDs.
+#[time_it]
+fn optimize_table(
+    table: Table,
+    start_state_id: StateID,
+    substring_state_id: StateID,
+) -> (Table, StateID, StateID) {
+    let initial_count = table.len();
+    
+    // Step 1: Eliminate unreachable states
+    let (table, start_state_id, substring_state_id) = 
+        eliminate_unreachable_states(table, start_state_id, substring_state_id);
+    let after_unreachable = table.len();
+    
+    // Step 2: Merge identical rows (LALR-style state merging)
+    let (table, start_state_id, substring_state_id) = 
+        merge_identical_rows(table, start_state_id, substring_state_id);
+    let after_merge = table.len();
+    
+    // Step 3: Compact default reduces (remove redundant entries)
+    let table = compact_default_reduces(table);
+    
+    if initial_count != after_merge {
+        crate::debug!(4, "Table optimization: {} → {} states ({} unreachable, {} merged)",
+            initial_count, after_merge, 
+            initial_count - after_unreachable,
+            after_unreachable - after_merge);
+    }
+    
+    (table, start_state_id, substring_state_id)
+}
+
+/// Eliminate states that are not reachable from the start state.
+fn eliminate_unreachable_states(
+    table: Table,
+    start_state_id: StateID,
+    substring_state_id: StateID,
+) -> (Table, StateID, StateID) {
+    // Find all reachable states via BFS from start
+    let mut reachable: HashSet<StateID> = HashSet::new();
+    let mut worklist: VecDeque<StateID> = VecDeque::new();
+    
+    reachable.insert(start_state_id);
+    worklist.push_back(start_state_id);
+    
+    // Also include substring_state_id as a root if different
+    if substring_state_id != start_state_id {
+        reachable.insert(substring_state_id);
+        worklist.push_back(substring_state_id);
+    }
+    
+    while let Some(state_id) = worklist.pop_front() {
+        if let Some(row) = table.get(&state_id) {
+            // Follow shift transitions
+            for (_terminal, action) in &row.shifts_and_reduces_full {
+                collect_target_states(action, &mut reachable, &mut worklist);
+            }
+            if let Some(ref default) = row.default_reduce {
+                collect_target_states(default, &mut reachable, &mut worklist);
+            }
+            // Follow goto transitions
+            for (_nt, goto) in &row.gotos {
+                if let Some(target) = goto.state_id {
+                    if reachable.insert(target) {
+                        worklist.push_back(target);
+                    }
+                }
+            }
+        }
+    }
+    
+    // Filter to only reachable states
+    let filtered: Table = table.into_iter()
+        .filter(|(state_id, _)| reachable.contains(state_id))
+        .collect();
+    
+    (filtered, start_state_id, substring_state_id)
+}
+
+/// Helper to collect target states from an action
+fn collect_target_states(
+    action: &Stage7ShiftsAndReducesLookaheadValue,
+    reachable: &mut HashSet<StateID>,
+    worklist: &mut VecDeque<StateID>,
+) {
+    match action {
+        Stage7ShiftsAndReducesLookaheadValue::Shift(target) => {
+            if reachable.insert(*target) {
+                worklist.push_back(*target);
+            }
+        }
+        Stage7ShiftsAndReducesLookaheadValue::Split { shift, .. } => {
+            if let Some(target) = shift {
+                if reachable.insert(*target) {
+                    worklist.push_back(*target);
+                }
+            }
+        }
+        Stage7ShiftsAndReducesLookaheadValue::Reduce { .. } => {
+            // Reduces don't have direct state targets
+        }
+    }
+}
+
+/// Merge states that have identical action and goto tables.
+/// This is similar to LALR state merging but operates on the final table.
+fn merge_identical_rows(
+    table: Table,
+    start_state_id: StateID,
+    substring_state_id: StateID,
+) -> (Table, StateID, StateID) {
+    // Group states by their row content (excluding the state ID key)
+    // We need a way to hash/compare Row content
+    let mut canonical: BTreeMap<RowSignature, StateID> = BTreeMap::new();
+    let mut state_mapping: BTreeMap<StateID, StateID> = BTreeMap::new();
+    
+    // First pass: identify canonical representatives for each unique row
+    for (state_id, row) in &table {
+        let sig = compute_row_signature(row);
+        
+        if let Some(&canonical_id) = canonical.get(&sig) {
+            // This row is identical to an existing one
+            state_mapping.insert(*state_id, canonical_id);
+        } else {
+            // This is a new unique row
+            canonical.insert(sig, *state_id);
+            state_mapping.insert(*state_id, *state_id);
+        }
+    }
+    
+    // Check if any merging happened
+    let unique_states: HashSet<StateID> = state_mapping.values().cloned().collect();
+    if unique_states.len() == table.len() {
+        // No merging possible
+        return (table, start_state_id, substring_state_id);
+    }
+    
+    // Second pass: create new table with merged states and remapped references
+    let mut new_table: Table = BTreeMap::new();
+    
+    for (state_id, row) in table {
+        let canonical_id = state_mapping[&state_id];
+        
+        // Only include canonical representatives
+        if canonical_id != state_id {
+            continue;
+        }
+        
+        // Remap all state references in the row
+        let remapped_row = remap_row_states(&row, &state_mapping);
+        new_table.insert(canonical_id, remapped_row);
+    }
+    
+    // Remap start and substring state IDs
+    let new_start = state_mapping.get(&start_state_id).copied().unwrap_or(start_state_id);
+    let new_substring = state_mapping.get(&substring_state_id).copied().unwrap_or(substring_state_id);
+    
+    (new_table, new_start, new_substring)
+}
+
+/// A signature that uniquely identifies a row's behavior (for merging identical rows).
+/// We use a serialized representation that can be compared/ordered.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct RowSignature {
+    // We serialize to a comparable format
+    // The key insight: two rows are "mergeable" if they have the same actions
+    // for all terminals and same gotos for all non-terminals
+    shifts_and_reduces: Vec<(TerminalID, ActionSignature)>,
+    default_reduce: Option<ActionSignature>,
+    gotos: Vec<(NonTerminalID, GotoSignature)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum ActionSignature {
+    Shift(StateID),
+    Reduce { nonterminal_id: NonTerminalID, len: usize, production_ids: Vec<ProductionID> },
+    Split { 
+        shift: Option<StateID>, 
+        reduces: Vec<(usize, Vec<(NonTerminalID, Vec<ProductionID>)>)>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct GotoSignature {
+    state_id: Option<StateID>,
+    accept: bool,
+}
+
+fn compute_row_signature(row: &Row) -> RowSignature {
+    let shifts_and_reduces: Vec<_> = row.shifts_and_reduces_full
+        .iter()
+        .map(|(tid, action)| (*tid, compute_action_signature(action)))
+        .collect();
+    
+    let default_reduce = row.default_reduce
+        .as_ref()
+        .map(compute_action_signature);
+    
+    let gotos: Vec<_> = row.gotos
+        .iter()
+        .map(|(ntid, goto)| (*ntid, GotoSignature { 
+            state_id: goto.state_id, 
+            accept: goto.accept 
+        }))
+        .collect();
+    
+    RowSignature { shifts_and_reduces, default_reduce, gotos }
+}
+
+fn compute_action_signature(action: &Stage7ShiftsAndReducesLookaheadValue) -> ActionSignature {
+    match action {
+        Stage7ShiftsAndReducesLookaheadValue::Shift(s) => ActionSignature::Shift(*s),
+        Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids } => {
+            ActionSignature::Reduce { 
+                nonterminal_id: *nonterminal_id, 
+                len: *len, 
+                production_ids: production_ids.clone() 
+            }
+        }
+        Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
+            let reduces_vec: Vec<_> = reduces
+                .iter()
+                .map(|(len, nt_map)| {
+                    let nt_vec: Vec<_> = nt_map
+                        .iter()
+                        .map(|(nt, pids)| (*nt, pids.clone()))
+                        .collect();
+                    (*len, nt_vec)
+                })
+                .collect();
+            ActionSignature::Split { shift: *shift, reduces: reduces_vec }
+        }
+    }
+}
+
+fn remap_row_states(row: &Row, mapping: &BTreeMap<StateID, StateID>) -> Row {
+    let shifts_and_reduces_full: ShiftsAndReducesFull = row.shifts_and_reduces_full
+        .iter()
+        .map(|(tid, action)| (*tid, remap_action_states(action, mapping)))
+        .collect();
+    
+    let default_reduce = row.default_reduce
+        .as_ref()
+        .map(|action| remap_action_states(action, mapping));
+    
+    let gotos: BTreeMap<NonTerminalID, Goto> = row.gotos
+        .iter()
+        .map(|(ntid, goto)| {
+            let new_state_id = goto.state_id.map(|s| mapping.get(&s).copied().unwrap_or(s));
+            (*ntid, Goto { state_id: new_state_id, accept: goto.accept })
+        })
+        .collect();
+    
+    Row { shifts_and_reduces_full, default_reduce, gotos }
+}
+
+fn remap_action_states(
+    action: &Stage7ShiftsAndReducesLookaheadValue, 
+    mapping: &BTreeMap<StateID, StateID>
+) -> Stage7ShiftsAndReducesLookaheadValue {
+    match action {
+        Stage7ShiftsAndReducesLookaheadValue::Shift(s) => {
+            Stage7ShiftsAndReducesLookaheadValue::Shift(mapping.get(s).copied().unwrap_or(*s))
+        }
+        Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, production_ids } => {
+            Stage7ShiftsAndReducesLookaheadValue::Reduce { 
+                nonterminal_id: *nonterminal_id, 
+                len: *len, 
+                production_ids: production_ids.clone() 
+            }
+        }
+        Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
+            Stage7ShiftsAndReducesLookaheadValue::Split { 
+                shift: shift.map(|s| mapping.get(&s).copied().unwrap_or(s)), 
+                reduces: reduces.clone() 
+            }
+        }
+    }
+}
+
+/// Compact default reduces by removing entries from shifts_and_reduces_full
+/// that are identical to the default_reduce.
+fn compact_default_reduces(mut table: Table) -> Table {
+    for (_state_id, row) in table.iter_mut() {
+        if let Some(ref default) = row.default_reduce {
+            // Remove entries that are identical to the default
+            row.shifts_and_reduces_full.retain(|_tid, action| action != default);
+        }
+    }
+    table
+}
+
 fn print_memory_usage(label: &str) {
     if let Some(usage) = memory_stats() {
         let physical_mem_mb = usage.physical_mem / 1024 / 1024;
@@ -1817,6 +2116,15 @@ fn generate_glr_parser_with_maps(
         num_terminals,
     );
     print_memory_usage("After Final Table");
+
+    // Post-construction table optimization
+    crate::debug!(4, "Optimizing Table (state reduction)");
+    let (final_table_map, start_state_id, substring_state_id) = optimize_table(
+        final_table_map,
+        start_state_id,
+        substring_state_id,
+    );
+    print_memory_usage("After Table Optimization");
 
     let mut item_set_map_bi = BiBTreeMap::new();
     for (k, v) in item_set_map {
