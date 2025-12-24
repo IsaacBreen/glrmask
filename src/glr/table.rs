@@ -1147,7 +1147,7 @@ fn generate_glr_parser_with_maps(
     //
     // We loop until no more changes occur (fixed point).
 
-    const MAX_OPTIMIZATION_PASSES: usize = 10;
+    const MAX_OPTIMIZATION_PASSES: usize = usize::MAX;
     for pass in 0..MAX_OPTIMIZATION_PASSES {
         crate::debug!(4, "Grammar optimization pass {}", pass + 1);
         let initial_production_count = productions.len();
