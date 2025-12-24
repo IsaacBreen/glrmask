@@ -1001,6 +1001,15 @@ fn is_direct_right_recursive(prod: &Production) -> bool {
     matches!(prod.rhs.last(), Some(Symbol::NonTerminal(nt)) if nt == &prod.lhs)
 }
 
+/// Resolve direct right recursion by transforming:
+///   A -> α A | β
+/// into:
+///   A -> β | A' β    (both forms needed to preserve language)
+///   A' -> α | A' α   (no epsilon production!)
+/// 
+/// This differs from the standard transformation which would create A' -> ε.
+/// By avoiding epsilon productions, we prevent infinite reduce loops in the
+/// GLR parser.
 pub fn resolve_direct_right_recursion(
     productions: &mut Vec<Production>,
     mut new_name_generator: impl FnMut(&str) -> String,
@@ -1031,20 +1040,41 @@ pub fn resolve_direct_right_recursion(
         let new_nt = NonTerminal(new_name_generator(&prod.lhs.0));
         crate::debug!(7, "Right-recursion {} -> {}", prod.lhs.0, new_nt.0);
 
-        // A -> A' β  (for each non-recursive A -> β)
+        // For each non-recursive A -> β:
+        // Add both A -> β and A -> A' β
+        // This ensures we can derive β directly (without going through A')
+        // and also derive α₁ α₂ ... αₙ β (by going through A')
         for rule in &non_recursive {
+            // A -> β (the base case, matches zero recursive steps)
+            new_productions.push(rule.clone());
+            
+            // A -> A' β (matches one or more recursive steps)
             let mut rhs = vec![Symbol::NonTerminal(new_nt.clone())];
             rhs.extend(rule.rhs.clone());
             new_productions.push(Production { lhs: prod.lhs.clone(), rhs });
         }
-        // A' -> A' α  (for each recursive A -> α A)
+        
+        // For each recursive A -> α A:
+        // Add both A' -> α and A' -> A' α
+        // A' -> α is the base case (one recursive step)
+        // A' -> A' α allows chaining (multiple recursive steps)
         for rule in &recursive {
+            let alpha = &rule.rhs[..rule.rhs.len() - 1]; // α from A -> α A
+            
+            // A' -> α (base case for A')
+            new_productions.push(Production { 
+                lhs: new_nt.clone(), 
+                rhs: alpha.to_vec() 
+            });
+            
+            // A' -> A' α (recursive case for A')
             let mut rhs = vec![Symbol::NonTerminal(new_nt.clone())];
-            rhs.extend(rule.rhs[..rule.rhs.len() - 1].to_vec());
+            rhs.extend(alpha.to_vec());
             new_productions.push(Production { lhs: new_nt.clone(), rhs });
         }
-        // A' -> ε
-        new_productions.push(Production { lhs: new_nt.clone(), rhs: vec![] });
+        
+        // NOTE: We intentionally do NOT add A' -> ε
+        // This avoids infinite reduce loops in the GLR parser
     }
 
     *productions = new_productions;

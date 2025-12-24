@@ -1055,6 +1055,35 @@ fn generate_glr_parser_with_maps(
     validate(productions).expect("Initial grammar validation failed");
     print_memory_usage("After validation");
 
+    // ============================================================
+    // Phase 0: Create augmented start production
+    // ============================================================
+    // ALWAYS create an augmented start: S' -> <old_start_symbol>
+    // This simplifies the grammar structure and ensures we have a single 
+    // entry point with a known form.
+    let original_start_symbol = productions.get(0)
+        .expect("Grammar must have at least one production")
+        .lhs.clone();
+    
+    // Generate a unique name for the augmented start
+    let existing_nonterminals: BTreeSet<NonTerminal> = productions.iter().map(|p| p.lhs.clone()).collect();
+    let mut augmented_start_name = format!("{}'", original_start_symbol.0);
+    while existing_nonterminals.contains(&NonTerminal(augmented_start_name.clone())) {
+        augmented_start_name = format!("{}'", augmented_start_name);
+    }
+    let augmented_start = NonTerminal(augmented_start_name);
+    
+    // Create the augmented start production and prepend it
+    let mut productions: Vec<Production> = std::iter::once(Production {
+        lhs: augmented_start.clone(),
+        rhs: vec![Symbol::NonTerminal(original_start_symbol.clone())],
+    })
+    .chain(productions.iter().cloned())
+    .collect();
+    
+    crate::debug!(4, "Created augmented start production: {} -> {}", 
+        augmented_start.0, original_start_symbol.0);
+
     let start_production_id = 0;
 
     crate::debug!(4, "Removing productions with undefined non-terminals");
@@ -1247,6 +1276,61 @@ fn generate_glr_parser_with_maps(
     print_memory_usage("After unit production elimination");
 
     // ============================================================
+    // Validation - Epsilon Production Constraint
+    // ============================================================
+    // ASSERTION: Epsilon productions are ONLY allowed for the inner start nonterminal.
+    // 
+    // The grammar structure after all transformations should be:
+    //   S' -> A       (augmented start production, production 0)
+    //   A  -> ...     (inner start symbol, may have epsilon production)
+    //   X  -> ...     (other nonterminals, MUST NOT have epsilon productions)
+    //
+    // The original_start_symbol (captured earlier) is `A`.
+    // Any epsilon production with LHS != A is an error.
+    {
+        let invalid_epsilon_productions: Vec<_> = productions.iter()
+            .filter(|p| p.rhs.is_empty() && p.lhs != original_start_symbol)
+            .collect();
+        
+        if !invalid_epsilon_productions.is_empty() {
+            eprintln!("ERROR: Found epsilon productions for nonterminals other than the inner start symbol '{}':", 
+                original_start_symbol.0);
+            for p in &invalid_epsilon_productions {
+                eprintln!("  {} -> ε (INVALID)", p.lhs.0);
+            }
+            panic!(
+                "Epsilon productions are only allowed for the inner start nonterminal '{}'. \
+                Found {} invalid epsilon production(s) for other nonterminals.",
+                original_start_symbol.0,
+                invalid_epsilon_productions.len()
+            );
+        }
+        
+        // Also verify the augmented start production structure
+        let augmented_prod = &productions[0];
+        assert!(
+            augmented_prod.lhs == augmented_start && augmented_prod.rhs.len() == 1,
+            "Augmented start production must have form S' -> A, but got {} -> {:?}",
+            augmented_prod.lhs.0, augmented_prod.rhs
+        );
+        if let Symbol::NonTerminal(inner_start) = &augmented_prod.rhs[0] {
+            assert!(
+                *inner_start == original_start_symbol,
+                "Augmented start must point to original start '{}', but points to '{}'",
+                original_start_symbol.0, inner_start.0
+            );
+        } else {
+            panic!(
+                "Augmented start production RHS must be a nonterminal, got {:?}",
+                augmented_prod.rhs[0]
+            );
+        }
+        
+        crate::debug!(4, "Epsilon production constraint satisfied: only '{}' may have epsilon productions",
+            original_start_symbol.0);
+    }
+
+    // ============================================================
     // Validation - Ensure all essential transformations completed
     // ============================================================
     crate::debug!(4, "Validating grammar after transformations");
@@ -1294,6 +1378,43 @@ fn generate_glr_parser_with_maps(
             post_transform_errors, right_recursion_errors
         );
     }
+
+    // ============================================================
+    // CRITICAL ASSERTION: Epsilon production restriction
+    // ============================================================
+    // The start production (S' -> A) has one RHS symbol: A.
+    // Epsilon productions (X -> ε) are ONLY allowed when X = A.
+    // This is essential for bounded reductions in the GLR parser.
+    let start_prod = productions.get(0).expect("Grammar must have productions");
+    assert_eq!(start_prod.lhs, augmented_start, 
+        "Start production LHS must be the augmented start symbol");
+    assert_eq!(start_prod.rhs.len(), 1, 
+        "Augmented start production must have exactly one RHS symbol");
+    
+    let allowed_epsilon_nt = match &start_prod.rhs[0] {
+        Symbol::NonTerminal(nt) => nt.clone(),
+        Symbol::Terminal(_) => panic!("Augmented start production must derive a non-terminal, not a terminal"),
+    };
+    
+    // Check all productions for illegal epsilon productions
+    let illegal_epsilon_productions: Vec<_> = productions.iter()
+        .filter(|p| p.rhs.is_empty() && p.lhs != allowed_epsilon_nt)
+        .collect();
+    
+    if !illegal_epsilon_productions.is_empty() {
+        let violation_details: Vec<String> = illegal_epsilon_productions.iter()
+            .map(|p| format!("{} -> ε", p.lhs.0))
+            .collect();
+        panic!(
+            "Grammar has illegal epsilon productions. Only {} is allowed to have epsilon productions.\n\
+             Violations:\n  {}", 
+            allowed_epsilon_nt.0,
+            violation_details.join("\n  ")
+        );
+    }
+    
+    crate::debug!(4, "Grammar passes epsilon production restriction (only {} may be nullable)", 
+        allowed_epsilon_nt.0);
 
     eprintln!("DEBUG: After validation, proceeding with {} productions", productions.len());
 
