@@ -1162,18 +1162,126 @@ fn generate_glr_parser_with_maps(
     // Nullable terminals (terminals that can match empty string) create
     // zero-width matches in the tokenizer. We transform them into optional
     // non-terminals: T → OptT, OptT → T | ε
-    if !nullable_terminals.is_empty() {
-        crate::debug!(4, "Phase 1: Transforming {} nullable terminals into optional non-terminals",
-            nullable_terminals.len());
+    //
+    // IMPORTANT: Only transform terminals that are used in "real" productions,
+    // not in wrapper definitions created by optimization.rs.
+    // A wrapper definition looks like: T_Opt -> T (and T_Opt -> ε).
+    // We detect these by checking if a terminal is ONLY used in productions
+    // where LHS ends with "Opt" and RHS is exactly [T].
+    
+    // First, find terminals that appear in wrapper definitions
+    let mut wrapper_terminals: HashSet<Terminal> = HashSet::new();
+    for p in productions.iter() {
+        // Check if this looks like a wrapper: LHS ends with "Opt", RHS is single terminal
+        if p.lhs.0.ends_with("Opt") && p.rhs.len() == 1 {
+            if let Some(Symbol::Terminal(t)) = p.rhs.first() {
+                wrapper_terminals.insert(t.clone());
+            }
+        }
+    }
+    
+    // Find terminals used in NON-wrapper productions
+    let mut non_wrapper_terminal_usage: HashSet<Terminal> = HashSet::new();
+    for p in productions.iter() {
+        // Skip wrapper definitions (LHS ends with Opt, RHS is single terminal)
+        let is_wrapper = p.lhs.0.ends_with("Opt") && p.rhs.len() == 1 
+            && matches!(p.rhs.first(), Some(Symbol::Terminal(_)));
+        // Also skip epsilon wrappers (LHS ends with Opt, RHS is empty)
+        let is_epsilon_wrapper = p.lhs.0.ends_with("Opt") && p.rhs.is_empty();
+        
+        if !is_wrapper && !is_epsilon_wrapper {
+            for sym in &p.rhs {
+                if let Symbol::Terminal(t) = sym {
+                    non_wrapper_terminal_usage.insert(t.clone());
+                }
+            }
+        }
+    }
+    
+    // Only transform nullable terminals that are used in non-wrapper productions
+    let actual_nullable: HashSet<Terminal> = nullable_terminals.iter()
+        .filter(|t| non_wrapper_terminal_usage.contains(*t))
+        .cloned()
+        .collect();
+    
+    if !actual_nullable.is_empty() {
+        crate::debug!(4, "Phase 1: Transforming {} nullable terminals into optional non-terminals (of {} passed)",
+            actual_nullable.len(), nullable_terminals.len());
         let existing_nonterminals: BTreeSet<NonTerminal> = productions.iter().map(|p| p.lhs.clone()).collect();
         let (transformed, _terminal_map) = transform_nullable_terminals(
             &productions,
-            &nullable_terminals,
+            &actual_nullable,
             &existing_nonterminals,
         );
         productions = transformed;
         print_memory_usage("After nullable terminal transformation");
     }
+    
+    // ============================================================
+    // Phase 1.5: ESSENTIAL - Simplify redundant nullable wrappers
+    // ============================================================
+    // Nullable wrapper productions (T_Opt -> T | ε) can be created by:
+    //   - Phase 1 above (transform_nullable_terminals)
+    //   - optimization.rs (handle_nullable_terminals)
+    //
+    // If T is a nullable terminal (matches empty string), then T | ε = T.
+    // So we can simplify T_Opt -> T | ε to just T_Opt -> T.
+    // This prevents combinatorial explosion in inline_null_productions later.
+    //
+    // Detection: For each NT with exactly 2 productions:
+    //   - One production with RHS = [Terminal(T)] where T is nullable
+    //   - One production with RHS = [] (epsilon)
+    // Action: Remove the epsilon production.
+    let nullable_terminal_ids: HashSet<TerminalID> = nullable_terminals.iter()
+        .filter_map(|t| terminal_map.get_by_left(t).copied())
+        .collect();
+    
+    // Group productions by LHS
+    let mut by_lhs: BTreeMap<NonTerminal, Vec<usize>> = BTreeMap::new();
+    for (i, p) in productions.iter().enumerate() {
+        by_lhs.entry(p.lhs.clone()).or_default().push(i);
+    }
+    
+    let mut to_remove: HashSet<usize> = HashSet::new();
+    for (_nt, indices) in &by_lhs {
+        if indices.len() != 2 {
+            continue;
+        }
+        let p0 = &productions[indices[0]];
+        let p1 = &productions[indices[1]];
+        
+        // Check if one is epsilon (empty RHS) and one is single nullable terminal
+        let (epsilon_idx, term_idx) = if p0.rhs.is_empty() && p1.rhs.len() == 1 {
+            (indices[0], indices[1])
+        } else if p1.rhs.is_empty() && p0.rhs.len() == 1 {
+            (indices[1], indices[0])
+        } else {
+            continue;
+        };
+        
+        // Check if the single-symbol production is a nullable terminal
+        let term_prod = &productions[term_idx];
+        if let Some(Symbol::Terminal(t)) = term_prod.rhs.first() {
+            if let Some(tid) = terminal_map.get_by_left(t) {
+                if nullable_terminal_ids.contains(tid) {
+                    // T is nullable, so T_Opt -> T | ε simplifies to T_Opt -> T
+                    to_remove.insert(epsilon_idx);
+                }
+            }
+        }
+    }
+    
+    if !to_remove.is_empty() {
+        crate::debug!(4, "Phase 1.5: Simplified {} redundant epsilon productions from nullable wrappers",
+            to_remove.len());
+        productions = productions.into_iter()
+            .enumerate()
+            .filter(|(i, _)| !to_remove.contains(i))
+            .map(|(_, p)| p)
+            .collect();
+    }
+    print_memory_usage("After nullable wrapper simplification");
+
 
     // ============================================================
     // Phase 2-4: ESSENTIAL - Grammar normalization loop

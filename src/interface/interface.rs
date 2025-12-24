@@ -1875,20 +1875,19 @@ impl CompiledGrammar {
             );
         }
         
-        // NOTE: We do NOT pass nullable_terminals to table.rs anymore.
-        // Nullable terminals are already transformed into optional non-terminals 
-        // (e.g., WSOpt -> WS | ε) during the optimization phase in optimization.rs 
-        // (handle_nullable_terminals). Passing them again would cause table.rs to 
-        // re-transform them, leading to double expansion and severe grammar bloat
-        // (e.g., 459 productions instead of 228, causing 3x slower builds).
-        //
-        // The original nullable terminal expressions still exist in group_id_to_expr
-        // (so get_nullable_terminals() still returns them), but the PRODUCTIONS have
-        // already been updated to use the wrapper non-terminals.
+        // Get nullable terminals from the definition
+        let nullable_terminals = definition.get_nullable_terminals();
+        if !nullable_terminals.is_empty() {
+            debug!(4, "Found {} nullable terminals that will be transformed", nullable_terminals.len());
+            for t in &nullable_terminals {
+                debug!(5, "  Nullable terminal: {:?}", t);
+            }
+        }
+        
         let glr_parser = generate_glr_parser_with_terminal_map(
             &definition.productions,
             terminal_map,
-            &HashSet::new(),  // Empty - nullable terminals already handled in optimization.rs
+            &nullable_terminals,
             definition.ignore_terminal_ids.clone(),
         );
 

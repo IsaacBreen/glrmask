@@ -606,9 +606,7 @@ impl<'a> GrammarOptimizer<'a> {
         // Handle nullable terminals that were created during optimization.
         // By doing this early (in optimization.rs), we enable better downstream optimizations.
         // We only handle the newly created terminals, not pre-existing ones.
-        // NOTE: Disabled to avoid grammar bloat (combinatorial explosion in later phases).
-        // Matches fast commit behavior.
-        // self.grammar.handle_nullable_terminals_except(&pre_existing_terminals);
+        self.grammar.handle_nullable_terminals_except(&pre_existing_terminals);
         
         debug!(5, "After nullable handling: {} productions, {} terminals", 
             self.grammar.productions.len(), self.grammar.regex_name_to_group_id.len());
