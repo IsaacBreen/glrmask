@@ -1147,6 +1147,8 @@ fn generate_glr_parser_with_maps(
     //
     // We loop until no more changes occur (fixed point).
 
+    let mut detected_ignore = HashSet::new();
+
     const MAX_OPTIMIZATION_PASSES: usize = usize::MAX;
     for pass in 0..MAX_OPTIMIZATION_PASSES {
         crate::debug!(4, "Grammar optimization pass {}", pass + 1);
@@ -1192,6 +1194,38 @@ fn generate_glr_parser_with_maps(
         crate::debug!(5, "  Phase 4: Checking for hidden left recursion");
         crate::glr::analyze::eliminate_hidden_left_recursion(&mut productions);
 
+        // Phase 5: DECORATIVE - Whitespace detection and removal
+        // ============================================================
+        // Auto-detect whitespace-like terminals and remove productions using them.
+        // We run this in the loop so it stabilizes with the grammar.
+        let newly_detected = detect_whitespace_like_terminals(&productions, &terminal_map);
+        detected_ignore.extend(newly_detected);
+
+        let all_ignored: HashSet<_> = explicit_ignore_terminal_ids.iter()
+            .chain(detected_ignore.iter())
+            .cloned()
+            .collect();
+
+        // Remove productions that use any ignored terminal
+        let pre_filter_count = productions.len();
+        productions.retain(|p| {
+            !p.rhs.iter().any(|s| {
+                if let Symbol::Terminal(t) = s {
+                    if let Some(tid) = terminal_map.get_by_left(t) {
+                        all_ignored.contains(tid)
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            })
+        });
+
+        if productions.len() < pre_filter_count {
+            crate::debug!(4, "Phase 5: Removed {} productions containing ignored terminals", pre_filter_count - productions.len());
+        }
+
         // Check if we've reached a fixed point
         // Note: We only require right_recursion to be empty (essential for bounded reductions).
         // Hidden left recursion may persist in some grammars (it's non-fatal).
@@ -1220,14 +1254,22 @@ fn generate_glr_parser_with_maps(
     crate::debug!(4, "Final epsilon production elimination");
     productions = inline_null_productions(&productions);
     print_memory_usage("After final epsilon elimination");
+    
+    // Assertion: Ensure NO explicitly ignored terminals appear in final productions
+    for (i, p) in productions.iter().enumerate() {
+        for s in &p.rhs {
+            if let Symbol::Terminal(t) = s {
+                if let Some(tid) = terminal_map.get_by_left(t) {
+                    assert!(
+                        !explicit_ignore_terminal_ids.contains(tid),
+                        "CRITICAL INVARIANT VIOLATION: Explicitly ignored terminal '{}' found in production {}: {}",
+                        t, i, p
+                    );
+                }
+            }
+        }
+    }
 
-    // ============================================================
-    // Phase 5: DECORATIVE - Whitespace detection (after inlining)
-    // ============================================================
-    // Auto-detect whitespace-like terminals and combine with explicit ignore terminals.
-    // This happens AFTER inline_null_productions as per user request.
-    // NOTE: Currently disabled - see detect_whitespace_like_terminals() docstring.
-    let detected_ignore = detect_whitespace_like_terminals(&productions, &terminal_map);
     let explicit_count = explicit_ignore_terminal_ids.len();
     let mut ignore_terminal_ids = explicit_ignore_terminal_ids;
     ignore_terminal_ids.extend(detected_ignore.iter());
