@@ -1117,7 +1117,10 @@ fn generate_glr_parser_with_maps(
         // becomes A → α A | A → α A β
         crate::debug!(5, "  Phase 2: Inlining null productions");
         productions = inline_null_productions(&productions);
-        eprintln!("DEBUG: After inline_null, {} productions", productions.len());
+        eprintln!("DEBUG: After inline_null, {} productions:", productions.len());
+        for (i, p) in productions.iter().enumerate().take(3) {
+            eprintln!("  [{}] {} -> {:?}", i, p.lhs, p.rhs);
+        }
         
         if productions.len() > MAX_PRODUCTIONS {
             eprintln!("DEBUG: SAFETY LIMIT after inline - {} productions exceeds limit", productions.len());
@@ -1144,14 +1147,20 @@ fn generate_glr_parser_with_maps(
                 &mut productions,
                 &mut unique_name_generator,
             );
-            eprintln!("DEBUG: After indirect right recursion, {} productions", productions.len());
+            eprintln!("DEBUG: After indirect right recursion, {} productions:", productions.len());
+            for (i, p) in productions.iter().enumerate().take(3) {
+                eprintln!("  [{}] {} -> {:?}", i, p.lhs, p.rhs);
+            }
 
             // Then resolve direct right recursion
             crate::glr::analyze::resolve_direct_right_recursion(
                 &mut productions,
                 &mut unique_name_generator,
             );
-            eprintln!("DEBUG: After direct right recursion, {} productions", productions.len());
+            eprintln!("DEBUG: After direct right recursion, {} productions:", productions.len());
+            for (i, p) in productions.iter().enumerate().take(3) {
+                eprintln!("  [{}] {} -> {:?}", i, p.lhs, p.rhs);
+            }
         }
 
         // Phase 4: Hidden left recursion elimination (best effort)
@@ -1161,7 +1170,10 @@ fn generate_glr_parser_with_maps(
         // don't require it to be fully eliminated.
         crate::debug!(5, "  Phase 4: Checking for hidden left recursion");
         crate::glr::analyze::eliminate_hidden_left_recursion(&mut productions);
-        eprintln!("DEBUG: After hidden left recursion elimination, {} productions", productions.len());
+        eprintln!("DEBUG: After hidden left recursion elimination, {} productions:", productions.len());
+        for (i, p) in productions.iter().enumerate().take(3) {
+            eprintln!("  [{}] {} -> {:?}", i, p.lhs, p.rhs);
+        }
 
         // Check if we've reached a fixed point
         // Note: We only require right_recursion to be empty (essential for bounded reductions).
