@@ -1,9 +1,9 @@
 use super::items::Item;
 use crate::glr::analyze::{
     create_unique_name_generator, inline_null_productions,
-    remove_productions_with_undefined_nonterminals, validate,
+    remove_productions_with_undefined_nonterminals, validate, merge_identical_nonterminals,
 };
-use crate::glr::minimizer::{substitute_single_productions_and_report, remove_productions_for_nts, left_factor_grammar};
+use crate::glr::minimizer::{substitute_single_productions_and_report, remove_productions_for_nts, left_factor_grammar, eliminate_unreachable_productions};
 use crate::glr::automaton::{
     compute_first_sets_ids_with_lhs, compute_follow_sets_ids, compute_nullable_nonterminals,
 };
@@ -1294,6 +1294,23 @@ fn generate_glr_parser_with_maps(
     productions = inline_null_productions(&productions);
     print_memory_usage("After final epsilon elimination");
     
+    // ============================================================
+    // Unreachable Production Elimination
+    // ============================================================
+    // After grammar transformations (especially right recursion elimination),
+    // some non-terminals may become unreachable from the start symbol.
+    // Remove these to simplify the grammar and reduce parser states.
+    let start_nt_for_unreachable = productions.get(0).map(|p| p.lhs.clone()).unwrap_or(NonTerminal("start".to_string()));
+    let before_unreachable = productions.len();
+    productions = eliminate_unreachable_productions(&productions, &start_nt_for_unreachable);
+    if productions.len() < before_unreachable {
+        crate::debug!(4, "Eliminated {} unreachable productions ({} → {})",
+            before_unreachable - productions.len(),
+            before_unreachable,
+            productions.len());
+    }
+    print_memory_usage("After unreachable elimination");
+    
     // Assertion: Ensure NO explicitly ignored terminals appear in final productions
     for (i, p) in productions.iter().enumerate() {
         for s in &p.rhs {
@@ -1343,7 +1360,22 @@ fn generate_glr_parser_with_maps(
     print_memory_usage("After left factoring");
 
     // ============================================================
-    // Phase 7: DECORATIVE - Unit production elimination
+    // Phase 7: DECORATIVE - Merge identical nonterminals
+    // ============================================================
+    // If two nonterminals have exactly the same set of productions,
+    // merge them into one to reduce grammar size and parser states.
+    let start_nt_for_merge = productions.get(0).map(|p| p.lhs.clone()).unwrap_or(NonTerminal("start".to_string()));
+    let before_merge = productions.len();
+    productions = merge_identical_nonterminals(&productions, &start_nt_for_merge);
+    if productions.len() < before_merge {
+        crate::debug!(4, "Phase 7: Merged identical nonterminals ({} → {} productions)",
+            before_merge,
+            productions.len());
+    }
+    print_memory_usage("After merge identical nonterminals");
+
+    // ============================================================
+    // Phase 8: DECORATIVE - Unit production elimination
     // ============================================================
     // Simplify grammar by eliminating unit productions (A → B → X becomes A → X).
     // This reduces parser construction time but doesn't affect correctness.
@@ -1357,7 +1389,7 @@ fn generate_glr_parser_with_maps(
     let simplified_productions = remove_productions_for_nts(&simplified_with_defs, &substituted_nts);
 
     if simplified_productions.len() < productions.len() {
-        crate::debug!(4, "Phase 7: Eliminated {} unit productions ({} → {})",
+        crate::debug!(4, "Phase 8: Eliminated {} unit productions ({} → {})",
             productions.len() - simplified_productions.len(),
             productions.len(),
             simplified_productions.len());
@@ -1380,12 +1412,12 @@ fn generate_glr_parser_with_maps(
     );
 
     // ============================================================
-    // Phase 8: Restore grammar nullability / Finalize Structure
+    // Phase 9: Restore grammar nullability / Finalize Structure
     // ============================================================
     // Handle edge case: grammar was nullable but all productions were eliminated
     // (e.g., grammar was just "S → ε"). We need to restore a minimal nullable structure.
     if productions.is_empty() && grammar_is_nullable {
-        crate::debug!(4, "Phase 8: Restoring nullable grammar from empty productions");
+        crate::debug!(4, "Phase 9: Restoring nullable grammar from empty productions");
         // Create: Start_nullable → ε (this is the only production)
         // Then: Start_final → Start_nullable
         let null_nt = NonTerminal(format!("{}_nullable", start_nonterminal.0));
@@ -1417,7 +1449,7 @@ fn generate_glr_parser_with_maps(
         let mut working_start = current_start_nt.clone();
         
         if grammar_is_nullable {
-             crate::debug!(4, "Phase 8: Re-introducing nullability");
+             crate::debug!(4, "Phase 9: Re-introducing nullability");
              let null_wrapper_nt = name_gen(&format!("{}_nullable", start_nonterminal.0));
              
              // Create StartNullable -> CurrentStart
@@ -1437,7 +1469,7 @@ fn generate_glr_parser_with_maps(
         let start_prod_count = productions.iter().filter(|p| p.lhs == working_start).count();
         
         if first_prod_lhs != &working_start || start_prod_count > 1 {
-             crate::debug!(4, "Phase 8: Creating final unique start production");
+             crate::debug!(4, "Phase 9: Creating final unique start production");
              
              let final_start_nt = name_gen(&format!("{}_start", start_nonterminal.0));
              
