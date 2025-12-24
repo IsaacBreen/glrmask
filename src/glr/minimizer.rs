@@ -199,6 +199,176 @@ pub fn eliminate_unreachable_productions(
         .collect()
 }
 
+/// Left-factor productions to extract common prefixes.
+/// 
+/// For productions like:
+///   A → α β
+///   A → α γ
+/// 
+/// Creates:
+///   A → α A'
+///   A' → β | γ
+/// 
+/// This reduces LR states by delaying the decision point until after the common prefix.
+/// 
+/// Returns the modified productions and the set of new nonterminals created.
+pub fn left_factor_grammar(
+    productions: &[Production],
+    unique_name_gen: &mut impl FnMut(&str) -> String,
+) -> (Vec<Production>, BTreeSet<NonTerminal>) {
+    if productions.is_empty() {
+        return (Vec::new(), BTreeSet::new());
+    }
+    
+    let mut result_prods: Vec<Production> = Vec::new();
+    let mut new_nonterminals: BTreeSet<NonTerminal> = BTreeSet::new();
+    
+    // Remember the start production's LHS
+    let start_lhs = productions[0].lhs.clone();
+    
+    // Group productions by LHS, using BTreeMap for deterministic ordering
+    let mut prods_by_lhs: BTreeMap<NonTerminal, Vec<Vec<Symbol>>> = BTreeMap::new();
+    for prod in productions {
+        prods_by_lhs.entry(prod.lhs.clone())
+            .or_default()
+            .push(prod.rhs.clone());
+    }
+    
+    // Process start production first to ensure it remains at index 0
+    if let Some(start_alts) = prods_by_lhs.remove(&start_lhs) {
+        let factored = factor_alternatives(&start_lhs, start_alts, unique_name_gen, &mut new_nonterminals);
+        result_prods.extend(factored);
+    }
+    
+    // Process remaining productions
+    for (lhs, alternatives) in prods_by_lhs {
+        let factored = factor_alternatives(&lhs, alternatives, unique_name_gen, &mut new_nonterminals);
+        result_prods.extend(factored);
+    }
+    
+    (result_prods, new_nonterminals)
+}
+
+/// Factor alternatives for a single nonterminal.
+/// 
+/// This function avoids creating epsilon productions by:
+/// 1. Only factoring when ALL alternatives have a non-empty suffix after the common prefix
+/// 2. Grouping alternatives by their first symbol and factoring each group separately
+fn factor_alternatives(
+    lhs: &NonTerminal,
+    alternatives: Vec<Vec<Symbol>>,
+    unique_name_gen: &mut impl FnMut(&str) -> String,
+    new_nonterminals: &mut BTreeSet<NonTerminal>,
+) -> Vec<Production> {
+    if alternatives.len() <= 1 {
+        // Nothing to factor
+        return alternatives.into_iter()
+            .map(|rhs| Production { lhs: lhs.clone(), rhs })
+            .collect();
+    }
+    
+    // Group alternatives by their first symbol
+    let mut groups: BTreeMap<Option<Symbol>, Vec<Vec<Symbol>>> = BTreeMap::new();
+    for alt in alternatives {
+        let first = alt.first().cloned();
+        groups.entry(first).or_default().push(alt);
+    }
+    
+    // If there's only one group, or one of the groups is epsilon, 
+    // we can't factor without creating epsilon productions
+    if groups.len() == 1 {
+        // All alternatives start with the same symbol, try to factor
+        let (first_sym, alts) = groups.into_iter().next().unwrap();
+        
+        if first_sym.is_none() {
+            // All alternatives are epsilon - just return them
+            return alts.into_iter()
+                .map(|rhs| Production { lhs: lhs.clone(), rhs })
+                .collect();
+        }
+        
+        // Check: would factoring create an epsilon production?
+        // This happens if any alternative is exactly the common prefix (suffix would be empty)
+        let min_len = alts.iter().map(|a| a.len()).min().unwrap_or(0);
+        if min_len == 0 {
+            // One of the alternatives is empty - can't factor
+            return alts.into_iter()
+                .map(|rhs| Production { lhs: lhs.clone(), rhs })
+                .collect();
+        }
+        
+        // Find the actual longest common prefix
+        let common_prefix_len = find_longest_common_prefix(&alts);
+        
+        // Don't factor if it would create an epsilon production
+        // (i.e., if any alternative's length equals the common prefix length)
+        if alts.iter().any(|alt| alt.len() == common_prefix_len) {
+            // Factoring would create epsilon - don't factor
+            return alts.into_iter()
+                .map(|rhs| Production { lhs: lhs.clone(), rhs })
+                .collect();
+        }
+        
+        if common_prefix_len == 0 {
+            // No common prefix - return as-is
+            return alts.into_iter()
+                .map(|rhs| Production { lhs: lhs.clone(), rhs })
+                .collect();
+        }
+        
+        // Safe to factor - all suffixes will be non-empty
+        let common_prefix: Vec<Symbol> = alts[0][..common_prefix_len].to_vec();
+        
+        // Create new nonterminal for the factored part
+        let new_nt_name = unique_name_gen(&lhs.0);
+        let new_nt = NonTerminal(new_nt_name);
+        new_nonterminals.insert(new_nt.clone());
+        
+        // Create main production: A → prefix A'
+        let mut main_rhs = common_prefix;
+        main_rhs.push(Symbol::NonTerminal(new_nt.clone()));
+        
+        // Create factored alternatives (suffixes after common prefix)
+        let suffixes: Vec<Vec<Symbol>> = alts.into_iter()
+            .map(|alt| alt[common_prefix_len..].to_vec())
+            .collect();
+        
+        // Recursively factor the suffixes (there may be more common prefixes)
+        let mut result = vec![Production { lhs: lhs.clone(), rhs: main_rhs }];
+        let factored_suffixes = factor_alternatives(&new_nt, suffixes, unique_name_gen, new_nonterminals);
+        result.extend(factored_suffixes);
+        
+        return result;
+    }
+    
+    // Multiple groups with different first symbols - process each group separately
+    // and emit all resulting productions
+    let mut result: Vec<Production> = Vec::new();
+    for (_first, alts) in groups {
+        let factored = factor_alternatives(lhs, alts, unique_name_gen, new_nonterminals);
+        result.extend(factored);
+    }
+    result
+}
+
+/// Find the length of the longest common prefix among all alternatives.
+fn find_longest_common_prefix(alternatives: &[Vec<Symbol>]) -> usize {
+    if alternatives.is_empty() {
+        return 0;
+    }
+    
+    let min_len = alternatives.iter().map(|a| a.len()).min().unwrap_or(0);
+    
+    for i in 0..min_len {
+        let first = &alternatives[0][i];
+        if !alternatives.iter().all(|alt| alt.get(i) == Some(first)) {
+            return i;
+        }
+    }
+    
+    min_len
+}
+
 /// Applies a series of simplification steps to a grammar to reduce it for a specific test case.
 pub fn simplify_grammar_for_test_case(
     productions: &[Production],
