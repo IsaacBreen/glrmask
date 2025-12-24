@@ -507,6 +507,7 @@ fn test_ambiguous_arithmetic() {
         prod("E", vec![t("id")]),
     ];
     let parser = generate_glr_parser(&productions, &HashSet::new(), HashSet::new());
+    println!("Parser: {}", parser);
     let eof = *parser.terminal_map.get_by_left(&regex_name("$")).unwrap();
     let tokens = vec![
         *parser.terminal_map.get_by_left(&regex_name("id")).unwrap(),
