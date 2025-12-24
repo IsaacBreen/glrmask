@@ -119,24 +119,62 @@ fn transform_nullable_terminals(
 /// allowing them to appear anywhere without affecting parsing.
 /// 
 /// Returns the set of terminal IDs that are whitespace-like.
-/// 
-/// NOTE: This function is currently disabled (returns empty set) because
-/// the simple heuristic of "always optional" is too broad - it incorrectly
-/// classifies meaningful optional content (like in `A*` patterns) as whitespace.
-/// 
-/// A better heuristic would need to distinguish between:
-/// 1. True whitespace (appears ubiquitously, has no semantic meaning)
-/// 2. Optional content (meaningful but happens to be optional in some positions)
-/// 
-/// For now, ignore terminals must be explicitly specified via the grammar
-/// (e.g., `#![ignore(WS)]` directive) rather than auto-detected.
-#[allow(unused_variables)]
 pub fn detect_whitespace_like_terminals(
     productions: &[Production],
     terminal_map: &BiBTreeMap<Terminal, TerminalID>,
 ) -> HashSet<TerminalID> {
-    // Auto-detection disabled - see NOTE above
-    HashSet::new()
+    // Collect all terminals that appear in the grammar
+    let mut all_terminals: HashSet<Terminal> = HashSet::new();
+    for prod in productions {
+        for sym in &prod.rhs {
+            if let Symbol::Terminal(t) = sym {
+                all_terminals.insert(t.clone());
+            }
+        }
+    }
+    
+    // For each terminal, check if it's always optional
+    // A terminal T is whitespace-like if for every occurrence of T in a production,
+    // there exists a corresponding production without T at that position
+    let mut whitespace_like: HashSet<TerminalID> = HashSet::new();
+    
+    // Build a set of all (LHS, RHS) pairs for quick lookup
+    let production_set: HashSet<(NonTerminal, Vec<Symbol>)> = productions
+        .iter()
+        .map(|p| (p.lhs.clone(), p.rhs.clone()))
+        .collect();
+    
+    'terminal_loop: for terminal in &all_terminals {
+        let terminal_sym = Symbol::Terminal(terminal.clone());
+        
+        // Check every production to see if this terminal appears
+        for prod in productions {
+            // Find all positions where this terminal appears in this production
+            for (pos, sym) in prod.rhs.iter().enumerate() {
+                if *sym == terminal_sym {
+                    // This terminal appears at position `pos` in production `prod`
+                    // Check if there's a corresponding production without this terminal
+                    let mut rhs_without_terminal = prod.rhs.clone();
+                    rhs_without_terminal.remove(pos);
+                    
+                    // Check if the production A → α β (without T at this position) exists
+                    if !production_set.contains(&(prod.lhs.clone(), rhs_without_terminal)) {
+                        // This terminal is NOT always optional - skip to next terminal
+                        continue 'terminal_loop;
+                    }
+                }
+            }
+        }
+        
+        // If we get here, every occurrence of this terminal has a corresponding
+        // production without it - this terminal is whitespace-like
+        if let Some(tid) = terminal_map.get_by_left(terminal) {
+            whitespace_like.insert(*tid);
+            crate::debug!(5, "Detected whitespace-like terminal: {:?} (ID {})", terminal, tid.0);
+        }
+    }
+    
+    whitespace_like
 }
 
 // --- Fast Hasher & BitSet ---
