@@ -1093,15 +1093,36 @@ fn generate_glr_parser_with_maps(
     // We loop until no more changes occur (fixed point).
 
     const MAX_OPTIMIZATION_PASSES: usize = 10;
+    const MAX_PRODUCTIONS: usize = 10000; // Safety limit
+    
+    // Print grammar before optimization
+    eprintln!("DEBUG: Grammar BEFORE optimization ({} productions):", productions.len());
+    for (i, p) in productions.iter().enumerate() {
+        eprintln!("  [{}] {} -> {:?}", i, p.lhs, p.rhs);
+    }
+    
     for pass in 0..MAX_OPTIMIZATION_PASSES {
         crate::debug!(4, "Grammar optimization pass {}", pass + 1);
         let initial_production_count = productions.len();
+        eprintln!("DEBUG: Pass {} start, {} productions", pass + 1, initial_production_count);
+        
+        // Safety check
+        if productions.len() > MAX_PRODUCTIONS {
+            eprintln!("DEBUG: SAFETY LIMIT - {} productions exceeds limit of {}", productions.len(), MAX_PRODUCTIONS);
+            break;
+        }
 
         // Phase 2: ESSENTIAL - Inline null productions
         // This exposes hidden right recursion: A → α A β where β is nullable
         // becomes A → α A | A → α A β
         crate::debug!(5, "  Phase 2: Inlining null productions");
         productions = inline_null_productions(&productions);
+        eprintln!("DEBUG: After inline_null, {} productions", productions.len());
+        
+        if productions.len() > MAX_PRODUCTIONS {
+            eprintln!("DEBUG: SAFETY LIMIT after inline - {} productions exceeds limit", productions.len());
+            break;
+        }
 
         // Phase 3: ESSENTIAL - Right recursion elimination
         // Transforms A → α A into A → A' α, A' → ε | A' α
@@ -1109,8 +1130,10 @@ fn generate_glr_parser_with_maps(
         let right_recursion_errors = crate::glr::analyze::check_for_right_recursion(&productions);
         if !right_recursion_errors.is_empty() {
             crate::debug!(5, "  Phase 3: Eliminating {} right recursion patterns", right_recursion_errors.len());
+            eprintln!("DEBUG: {} right recursion patterns", right_recursion_errors.len());
             for err in &right_recursion_errors {
                 crate::debug!(6, "    {}", err);
+                eprintln!("DEBUG:   {}", err);
             }
 
             let nonterminals: BTreeSet<_> = productions.iter().map(|p| p.lhs.clone()).collect();
@@ -1121,12 +1144,14 @@ fn generate_glr_parser_with_maps(
                 &mut productions,
                 &mut unique_name_generator,
             );
+            eprintln!("DEBUG: After indirect right recursion, {} productions", productions.len());
 
             // Then resolve direct right recursion
             crate::glr::analyze::resolve_direct_right_recursion(
                 &mut productions,
                 &mut unique_name_generator,
             );
+            eprintln!("DEBUG: After direct right recursion, {} productions", productions.len());
         }
 
         // Phase 4: Hidden left recursion elimination (best effort)
@@ -1136,23 +1161,34 @@ fn generate_glr_parser_with_maps(
         // don't require it to be fully eliminated.
         crate::debug!(5, "  Phase 4: Checking for hidden left recursion");
         crate::glr::analyze::eliminate_hidden_left_recursion(&mut productions);
+        eprintln!("DEBUG: After hidden left recursion elimination, {} productions", productions.len());
 
         // Check if we've reached a fixed point
         // Note: We only require right_recursion to be empty (essential for bounded reductions).
         // Hidden left recursion may persist in some grammars (it's non-fatal).
         let final_production_count = productions.len();
         let right_recursion_remaining = crate::glr::analyze::check_for_right_recursion(&productions);
+        eprintln!("DEBUG: End of pass {}: {} right recursion remaining, {} -> {} productions", 
+            pass + 1, right_recursion_remaining.len(), initial_production_count, final_production_count);
 
         if right_recursion_remaining.is_empty() && initial_production_count == final_production_count {
             crate::debug!(4, "Grammar optimization converged after {} passes", pass + 1);
+            eprintln!("DEBUG: Converged after {} passes", pass + 1);
             break;
         }
 
         if pass == MAX_OPTIMIZATION_PASSES - 1 {
             crate::log_warn!("Grammar optimization did not converge after {} passes", MAX_OPTIMIZATION_PASSES);
+            eprintln!("DEBUG: Did not converge after {} passes", MAX_OPTIMIZATION_PASSES);
         }
     }
     print_memory_usage("After grammar normalization loop");
+    
+    // Print grammar after optimization
+    eprintln!("DEBUG: Grammar AFTER optimization ({} productions):", productions.len());
+    for (i, p) in productions.iter().enumerate() {
+        eprintln!("  [{}] {} -> {:?}", i, p.lhs, p.rhs);
+    }
 
     // ============================================================
     // Phase 5: DECORATIVE - Whitespace detection (after inlining)
@@ -1247,6 +1283,8 @@ fn generate_glr_parser_with_maps(
         );
     }
 
+    eprintln!("DEBUG: After validation, proceeding with {} productions", productions.len());
+
     let mut next_non_terminal_id = non_terminal_map.len();
     for p in &productions {
         if !non_terminal_map.contains_left(&p.lhs) {
@@ -1254,6 +1292,8 @@ fn generate_glr_parser_with_maps(
             next_non_terminal_id += 1;
         }
     }
+
+    eprintln!("DEBUG: {} terminals, {} non-terminals", terminal_map.len(), non_terminal_map.len());
 
     crate::debug!(5, "Number of productions: {}", productions.len());
     print_memory_usage("Before Stage 1");
@@ -1304,11 +1344,14 @@ fn generate_glr_parser_with_maps(
 
     let start_nt_id = lhs_ids[0];
 
+    eprintln!("DEBUG: Starting Stage 1 (LR(0) Automaton)");
     crate::debug!(4, "Stage 1 (LR(0) Automaton)");
     let (stage_1_table, item_set_map) =
         stage_1(&light_productions, &lhs_ids, num_terminals, num_nonterminals);
+    eprintln!("DEBUG: Stage 1 complete, {} states", stage_1_table.len());
     print_memory_usage("After Stage 1");
 
+    eprintln!("DEBUG: Computing First/Follow Sets");
     crate::debug!(4, "Computing First/Follow Sets");
     let first_sets = compute_first_sets_ids_with_lhs(
         &light_productions,
@@ -1317,6 +1360,7 @@ fn generate_glr_parser_with_maps(
         num_nonterminals,
         &nullable_nts_ids,
     );
+    eprintln!("DEBUG: First sets computed");
     let follow_sets = compute_follow_sets_ids(
         &light_productions,
         &lhs_ids,
@@ -1326,8 +1370,10 @@ fn generate_glr_parser_with_maps(
         num_nonterminals,
         start_nt_id,
     );
+    eprintln!("DEBUG: Follow sets computed");
     print_memory_usage("After First/Follow");
 
+    eprintln!("DEBUG: Computing Final Table (Merging Stages 2-8)");
     crate::debug!(4, "Computing Final Table (Merging Stages 2-8)");
     let (final_table_map, start_state_id, substring_state_id) = compute_final_table(
         stage_1_table,
@@ -1337,16 +1383,20 @@ fn generate_glr_parser_with_maps(
         &follow_sets,
         num_terminals,
     );
+    eprintln!("DEBUG: Final table computed, {} states", final_table_map.len());
     print_memory_usage("After Final Table");
 
+    eprintln!("DEBUG: Building item_set_map_bi");
     let mut item_set_map_bi = BiBTreeMap::new();
     for (k, v) in item_set_map {
         item_set_map_bi.insert(k, v);
     }
+    eprintln!("DEBUG: item_set_map_bi built");
 
     crate::debug!(4, "GLR Parser generation complete. {} states.", final_table_map.len());
 
-    GLRParser::new(
+    eprintln!("DEBUG: Creating GLRParser");
+    let parser = GLRParser::new(
         final_table_map,
         productions,
         terminal_map,
@@ -1356,7 +1406,9 @@ fn generate_glr_parser_with_maps(
         substring_state_id,
         actions,
         ignore_terminal_ids,
-    )
+    );
+    eprintln!("DEBUG: GLRParser created");
+    parser
 }
 
 /// Generate a GLR parser from productions, with automatic detection of ignore terminals.
