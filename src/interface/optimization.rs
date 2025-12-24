@@ -13,16 +13,15 @@ pub fn optimize_grammar(grammar: &mut GrammarDefinition) {
         return;
     }
     
-    // STEP 1: Handle nullable terminals FIRST
-    // This transforms terminals like `WS ::= (...)*` into optional non-terminals
-    // early, giving the downstream optimizer cleaner grammar to work with.
-    // Without this, the grammar optimizer may create terminals that are nullable,
-    // and then table.rs has to deal with them again.
-    let nullable_terminals = grammar.get_nullable_terminals();
-    if !nullable_terminals.is_empty() {
-        debug!(4, "Handling {} nullable terminals early in optimization", nullable_terminals.len());
-        grammar.handle_nullable_terminals();
-    }
+    // NOTE: We do NOT call handle_nullable_terminals() here anymore.
+    // Nullable terminals are already handled in from_exprs_impl() during
+    // GrammarDefinition construction. Calling it again here would cause
+    // double-processing, creating additional wrapper non-terminals and
+    // epsilon productions that lead to severe grammar bloat (e.g., 459
+    // productions instead of 228, causing 3x slower builds).
+    //
+    // The optimizer (partial_optimize) will call handle_nullable_terminals_except()
+    // at line 610 to handle any NEW nullable terminals created during optimization.
     
     let mut optimizer = GrammarOptimizer::new(grammar);
     optimizer.optimize();
@@ -607,7 +606,10 @@ impl<'a> GrammarOptimizer<'a> {
         // Handle nullable terminals that were created during optimization.
         // By doing this early (in optimization.rs), we enable better downstream optimizations.
         // We only handle the newly created terminals, not pre-existing ones.
-        self.grammar.handle_nullable_terminals_except(&pre_existing_terminals);
+        
+        // NOTE: Disabled to avoid grammar bloat (combinatorial explosion in later phases).
+        // Matches fast commit behavior.
+        // self.grammar.handle_nullable_terminals_except(&pre_existing_terminals);
         
         debug!(5, "After nullable handling: {} productions, {} terminals", 
             self.grammar.productions.len(), self.grammar.regex_name_to_group_id.len());
