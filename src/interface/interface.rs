@@ -1,16 +1,16 @@
 use crate::constraint::GrammarConstraint;
+use crate::datastructures::u8set::U8Set;
 use crate::debug;
 use crate::finite_automata::{greedy_group, groups, Expr, ExprGroup, GroupID, QuantifierType, Regex};
-use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
-use crate::glr::parser::GLRParser;
-use crate::glr::table::{assign_non_terminal_ids, generate_glr_parser, generate_glr_parser_with_maps, generate_glr_parser_with_terminal_map, NonTerminalID, TerminalID};
-use crate::interface::ebnf::{EbnfParseResult, EbnfParser};
-use crate::interface::lark::{LarkParser, LarkParseResult};
-use crate::json_serialization::{JSONConvertible, JSONNode};
-use crate::types::TerminalID as GrammarTokenID;
-use crate::datastructures::u8set::U8Set;
 use crate::glr::analyze::simplify_grammar;
 use crate::glr::grammar::regex_name;
+use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
+use crate::glr::parser::GLRParser;
+use crate::glr::table::{assign_non_terminal_ids, generate_glr_parser, generate_glr_parser_with_terminal_map, NonTerminalID, TerminalID};
+use crate::interface::ebnf::{EbnfParseResult, EbnfParser};
+use crate::interface::lark::{LarkParseResult, LarkParser};
+use crate::json_serialization::{JSONConvertible, JSONNode};
+use crate::types::TerminalID as GrammarTokenID;
 // May not be used directly here anymore
 use bimap::BiBTreeMap;
 use json_convertible_derive::JSONConvertible;
@@ -18,8 +18,8 @@ use kdam::tqdm;
 use std::collections::BTreeMap as StdMap;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::{Debug, Display, Formatter};
-use std::sync::Arc;
 use std::fs;
+use std::sync::Arc;
 
 type LLMToken<'a> = &'a [u8];
 type LLMTokenMap = BiBTreeMap<Vec<u8>, LLMTokenID>;
@@ -206,7 +206,9 @@ pub struct GrammarDefinition {
     pub literal_to_group_id: BiBTreeMap<Vec<u8>, usize>,
     pub regex_name_to_group_id: BiBTreeMap<String, usize>,
     pub group_id_to_expr: BTreeMap<usize, Expr>,
-    pub ignore_terminal_id: Option<TerminalID>,
+    /// Set of terminal IDs that should be ignored by the parser.
+    /// These are typically whitespace-like terminals that can appear anywhere.
+    pub ignore_terminal_ids: HashSet<TerminalID>,
     pub external_name_to_group_id: BiBTreeMap<String, usize>,
 }
 
@@ -227,6 +229,36 @@ impl GrammarDefinition {
         }
         terminal_to_group_id
     }
+    
+    /// Returns the set of terminals that can match the empty string (nullable terminals).
+    /// This includes both "may be null" (like `a*`) and "always null" terminals.
+    pub fn get_nullable_terminals(&self) -> HashSet<Terminal> {
+        let mut nullable = HashSet::new();
+        
+        // Check regex terminals
+        for (name, group_id) in &self.regex_name_to_group_id {
+            if let Some(expr) = self.group_id_to_expr.get(group_id) {
+                match get_expr_nullability(expr) {
+                    ExprNullability::CanBeNull | ExprNullability::AlwaysNull => {
+                        nullable.insert(Terminal::RegexName(name.clone()));
+                    }
+                    ExprNullability::NeverNull => {}
+                }
+            }
+        }
+        
+        // Check literal terminals - only empty literals are nullable
+        for (bytes, _group_id) in &self.literal_to_group_id {
+            if bytes.is_empty() {
+                nullable.insert(Terminal::Literal(bytes.clone()));
+            }
+        }
+        
+        // External terminals - we don't have expressions for them, so we can't determine nullability
+        // They are assumed to be non-nullable unless explicitly marked otherwise
+        
+        nullable
+    }
 }
 
 impl JSONConvertible for GrammarDefinition {
@@ -238,8 +270,8 @@ impl JSONConvertible for GrammarDefinition {
             self.start_production_id.to_json(),
         );
         obj.insert(
-            "ignore_terminal_id".to_string(),
-            self.ignore_terminal_id.to_json(),
+            "ignore_terminal_ids".to_string(),
+            self.ignore_terminal_ids.to_json(),
         );
         obj.insert(
             "external_name_to_group_id".to_string(),
@@ -309,12 +341,16 @@ impl JSONConvertible for GrammarDefinition {
                         "Missing field start_production_id for GrammarDefinition".to_string()
                     })
                     .and_then(usize::from_json)?;
-                let ignore_terminal_id = obj
-                    .remove("ignore_terminal_id")
-                    .ok_or_else(|| {
-                        "Missing field ignore_terminal_id for GrammarDefinition".to_string()
-                    })
-                    .and_then(Option::<TerminalID>::from_json)?;
+                // Support both old format (ignore_terminal_id) and new format (ignore_terminal_ids)
+                let ignore_terminal_ids = if let Some(node) = obj.remove("ignore_terminal_ids") {
+                    HashSet::<TerminalID>::from_json(node)?
+                } else if let Some(node) = obj.remove("ignore_terminal_id") {
+                    // Legacy format: single optional terminal ID
+                    let opt_id = Option::<TerminalID>::from_json(node)?;
+                    opt_id.into_iter().collect()
+                } else {
+                    HashSet::new()
+                };
                 let external_name_to_group_id = obj
                     .remove("external_name_to_group_id")
                     .map(|node| BiBTreeMap::<String, usize>::from_json(node))
@@ -373,7 +409,7 @@ impl JSONConvertible for GrammarDefinition {
                     regex_name_to_group_id: new_regex_name_to_group_id,
                     literal_to_group_id: new_literal_to_group_id,
                     group_id_to_expr: new_group_id_to_expr,
-                    ignore_terminal_id,
+                    ignore_terminal_ids,
                     external_name_to_group_id,
                 })
             }
@@ -736,113 +772,6 @@ impl GrammarDefinition {
         }
     }
 
-    /// Handles nullable terminals in the grammar by:
-    /// - Removing always-null terminals from production RHSs
-    /// - Replacing may-be-null terminals with optional non-terminals
-    /// 
-    /// If `already_processed` is provided, terminals in that set are skipped.
-    /// This is used when calling this after optimization to avoid re-processing
-    /// terminals that were already handled in from_exprs.
-    pub fn handle_nullable_terminals_except(&mut self, already_processed: &HashSet<String>) {
-        // Collect all existing names to avoid collisions when generating new non-terminal names
-        let mut all_names: HashSet<String> = self
-            .productions
-            .iter()
-            .map(|p| p.lhs.0.clone())
-            .collect();
-        for name in self.regex_name_to_group_id.left_values() {
-            all_names.insert(name.clone());
-        }
-        
-        let mut per_base_counters: HashMap<String, usize> = HashMap::new();
-        
-        // Identify nullable terminals
-        let mut always_null_terminals: HashSet<String> = HashSet::new();
-        let mut may_be_null_terminals: HashSet<String> = HashSet::new();
-
-        for (terminal_name, group_id) in self.regex_name_to_group_id.iter() {
-            // Skip terminals that were already processed
-            if already_processed.contains(terminal_name) {
-                continue;
-            }
-            
-            let expr = self
-                .group_id_to_expr
-                .get(group_id)
-                .expect("regex_name_to_group_id / group_id_to_expr out of sync");
-
-            match get_expr_nullability(expr) {
-                ExprNullability::AlwaysNull => {
-                    always_null_terminals.insert(terminal_name.clone());
-                }
-                ExprNullability::CanBeNull => {
-                    may_be_null_terminals.insert(terminal_name.clone());
-                }
-                ExprNullability::NeverNull => {}
-            }
-        }
-
-        if always_null_terminals.is_empty() && may_be_null_terminals.is_empty() {
-            return; // Nothing to do
-        }
-
-        debug!(
-            4,
-            "Removing {} always-null terminals after optimization",
-            always_null_terminals.len()
-        );
-        
-        // Remove always-null terminals from production RHSs
-        for prod in self.productions.iter_mut() {
-            prod.rhs.retain(|sym| match sym {
-                Symbol::Terminal(Terminal::RegexName(t)) => !always_null_terminals.contains(t),
-                _ => true,
-            });
-        }
-
-        debug!(
-            4,
-            "Processing {} may-be-null terminals after optimization",
-            may_be_null_terminals.len()
-        );
-        
-        // Replace may-be-null terminals with optional non-terminals
-        for terminal_name in &may_be_null_terminals {
-            let opt_nt_name = Self::generate_unique_indexed_name(
-                &format!("{}Opt", terminal_name.trim_matches('"')),
-                &mut per_base_counters,
-                &mut all_names,
-            );
-            let opt_nt = NonTerminal(opt_nt_name.clone());
-
-            for prod in self.productions.iter_mut() {
-                for sym in &mut prod.rhs {
-                    if let Symbol::Terminal(Terminal::RegexName(t)) = sym {
-                        if t == terminal_name {
-                            *sym = Symbol::NonTerminal(opt_nt.clone());
-                        }
-                    }
-                }
-            }
-
-            // Add the optional non-terminal productions: one with the terminal, one epsilon
-            self.productions.push(Production {
-                lhs: opt_nt.clone(),
-                rhs: vec![Symbol::Terminal(regex_name(terminal_name))],
-            });
-            self.productions.push(Production {
-                lhs: opt_nt.clone(),
-                rhs: Vec::new(), // epsilon
-            });
-        }
-    }
-    
-    /// Handles nullable terminals in the grammar. This processes ALL terminals.
-    /// Use `handle_nullable_terminals_except` if you want to skip already-processed terminals.
-    pub fn handle_nullable_terminals(&mut self) {
-        self.handle_nullable_terminals_except(&HashSet::new());
-    }
-
     /// Converts a `GrammarExpr` into a sequence of `Symbol`s and a list of newly created `Production`s.
     fn convert_grammar_expr_to_symbols(
         expr: &GrammarExpr,
@@ -1100,6 +1029,19 @@ impl GrammarDefinition {
                                         'f' => '\u{000C}',
                                         'v' => '\u{000B}',
                                         '\\' => '\\',
+                                        'x' => {
+                                            // Parse \xNN hex escape
+                                            let hex1 = it.next().ok_or_else(|| {
+                                                format!("Incomplete hex escape in char class: {}", class_def)
+                                            })?;
+                                            let hex2 = it.next().ok_or_else(|| {
+                                                format!("Incomplete hex escape in char class: {}", class_def)
+                                            })?;
+                                            let hex_str = format!("{}{}", hex1, hex2);
+                                            u8::from_str_radix(&hex_str, 16)
+                                                .map(|b| b as char)
+                                                .map_err(|_| format!("Invalid hex escape \\x{} in char class: {}", hex_str, class_def))?
+                                        }
                                         other => other,
                                     }))
                                 } else {
@@ -1494,7 +1436,7 @@ impl GrammarDefinition {
             literal_to_group_id,
             regex_name_to_group_id,
             group_id_to_expr,
-            ignore_terminal_id: None,
+            ignore_terminal_ids: HashSet::new(),
             external_name_to_group_id: BiBTreeMap::new(),
         };
 
@@ -1509,7 +1451,7 @@ impl GrammarDefinition {
                         ignore_name
                     )
                 })?;
-            def.ignore_terminal_id = Some(TerminalID(*group_id));
+            def.ignore_terminal_ids.insert(TerminalID(*group_id));
         }
 
         debug!(5, "Ignore terminal set, about to optimize (should_optimize={})", should_optimize);
@@ -1559,9 +1501,27 @@ impl GrammarDefinition {
             name.chars().next().map_or(false, |c| c.is_uppercase())
         }
 
+        /// Check if an expression contains character classes or AnyChar directly.
+        /// These require the rule to be treated as a terminal.
+        fn contains_regex_features(expr: &GrammarExpr) -> bool {
+            match expr {
+                GrammarExpr::AnyChar => true,
+                GrammarExpr::CharClass(_) => true,
+                GrammarExpr::Literal(_) => false,
+                GrammarExpr::Ref(_) => false,
+                GrammarExpr::Sequence(exprs) | GrammarExpr::Choice(exprs) => {
+                    exprs.iter().any(contains_regex_features)
+                }
+                GrammarExpr::Optional(inner) | GrammarExpr::Repeat(inner) => {
+                    contains_regex_features(inner)
+                }
+            }
+        }
+
         let mut terminals: BTreeMap<String, GrammarExpr> = BTreeMap::new();
         for (name, expr) in &grammar_exprs {
-            if is_terminal_name(name) {
+            // GBNF compatibility: auto-detect terminals by content, not just name
+            if is_terminal_name(name) || contains_regex_features(expr) {
                 terminals.insert(name.clone(), expr.clone());
             }
         }
@@ -1598,14 +1558,14 @@ impl GrammarDefinition {
             }
         }
         if let Some(ignore_name) = &ignore_symbol_name {
-            if is_terminal_name(ignore_name) {
+            if is_terminal_name(ignore_name) || terminals.contains_key(ignore_name) {
                 referenced_terminals.insert(ignore_name.clone());
             }
         }
 
         let non_terminal_rules: Vec<(String, GrammarExpr)> = grammar_exprs
             .into_iter()
-            .filter(|(name, _)| !is_terminal_name(name))
+            .filter(|(name, _)| !terminals.contains_key(name))
             .collect();
 
         // Share memo across all terminal conversions to avoid exponential re-expansion
@@ -1785,10 +1745,21 @@ impl CompiledGrammar {
                 TerminalID(*group_id),
             );
         }
+        
+        // Get nullable terminals from the definition
+        let nullable_terminals = definition.get_nullable_terminals();
+        if !nullable_terminals.is_empty() {
+            debug!(4, "Found {} nullable terminals that will be transformed", nullable_terminals.len());
+            for t in &nullable_terminals {
+                debug!(5, "  Nullable terminal: {:?}", t);
+            }
+        }
+        
         let glr_parser = generate_glr_parser_with_terminal_map(
             &definition.productions,
             terminal_map,
-            definition.ignore_terminal_id,
+            &nullable_terminals,
+            definition.ignore_terminal_ids.clone(),
         );
 
         Self {

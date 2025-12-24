@@ -422,7 +422,7 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
         for term_opt in terminals {
             let term_dwa = match term_opt {
                 Some(term_id) => {
-                    if Some(*term_id) == parser.ignore_terminal_id {
+                    if parser.ignore_terminal_ids.contains(term_id) {
                         &ignore_dwa
                     } else {
                         terminal_dwas.get(term_id).unwrap_or(&ignore_dwa)
@@ -476,7 +476,7 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
             let mut weight = Weight::zeros();
             weight.set(*bit, true);
             let term_dwa = match term_id_opt {
-                Some(term_id) => if Some(*term_id) == parser.ignore_terminal_id { &ignore_dwa } else { terminal_dwas.get(term_id).unwrap_or(&ignore_dwa) },
+                Some(term_id) => if parser.ignore_terminal_ids.contains(term_id) { &ignore_dwa } else { terminal_dwas.get(term_id).unwrap_or(&ignore_dwa) },
                 None => &ignore_dwa,
             };
             let mut weighted_dwa = term_dwa.clone();
