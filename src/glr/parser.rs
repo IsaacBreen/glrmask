@@ -13,7 +13,7 @@ use profiler_macro::time_it;
 use std::any::Any;
 use std::cmp::Ordering;
 use std::collections::BTreeMap as StdMap;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fmt::{self, Debug, Display, Formatter};
 use std::sync::Arc;
 
@@ -115,7 +115,9 @@ pub struct GLRParser {
     pub item_set_map: BiBTreeMap<Vec<Item>, StateID>,
     pub start_state_id: StateID,
     pub substring_state_id: StateID,
-    pub ignore_terminal_id: Option<TerminalID>,
+    /// Set of terminal IDs to ignore (skip without consuming).
+    /// These are typically whitespace-like terminals that are always optional.
+    pub ignore_terminal_ids: HashSet<TerminalID>,
     pub actions: BTreeMap<crate::glr::table::NonTerminalID, ActionFn>,
 }
 
@@ -129,7 +131,7 @@ struct GLRParserJSON {
     item_set_map: BiBTreeMap<Vec<Item>, StateID>,
     start_state_id: StateID,
     substring_state_id: StateID,
-    ignore_terminal_id: Option<TerminalID>,
+    ignore_terminal_ids: HashSet<TerminalID>,
 }
 
 impl GLRParserJSON {
@@ -142,7 +144,7 @@ impl GLRParserJSON {
             item_set_map: p.item_set_map.clone(),
             start_state_id: p.start_state_id,
             substring_state_id: p.substring_state_id,
-            ignore_terminal_id: p.ignore_terminal_id,
+            ignore_terminal_ids: p.ignore_terminal_ids.clone(),
         }
     }
 
@@ -156,7 +158,7 @@ impl GLRParserJSON {
             self.start_state_id,
             self.substring_state_id,
             BTreeMap::new(), // actions provided at runtime
-            self.ignore_terminal_id,
+            self.ignore_terminal_ids,
         )
     }
 }
@@ -312,7 +314,7 @@ impl Debug for GLRParser {
             .field("productions_len", &self.productions.len())
             .field("start_state_id", &self.start_state_id)
             .field("substring_state_id", &self.substring_state_id)
-            .field("ignore_terminal_id", &self.ignore_terminal_id)
+            .field("ignore_terminal_ids", &self.ignore_terminal_ids)
             .field("actions_size", &self.actions.len())
             .finish()
     }
@@ -327,7 +329,7 @@ impl PartialEq for GLRParser {
             && self.item_set_map == other.item_set_map
             && self.start_state_id == other.start_state_id
             && self.substring_state_id == other.substring_state_id
-            && self.ignore_terminal_id == other.ignore_terminal_id
+            && self.ignore_terminal_ids == other.ignore_terminal_ids
     }
 }
 impl Eq for GLRParser {}
@@ -342,7 +344,7 @@ impl GLRParser {
         start_state_id: StateID,
         substring_state_id: StateID,
         actions: BTreeMap<NonTerminal, ActionFn>,
-        ignore_terminal_id: Option<TerminalID>,
+        ignore_terminal_ids: HashSet<TerminalID>,
     ) -> Self {
         let converted_actions: BTreeMap<crate::glr::table::NonTerminalID, ActionFn> = actions
             .into_iter()
@@ -365,7 +367,7 @@ impl GLRParser {
             item_set_map,
             start_state_id,
             substring_state_id,
-            ignore_terminal_id,
+            ignore_terminal_ids,
             actions: converted_actions,
         }
     }
@@ -407,7 +409,8 @@ impl GLRParser {
 
     #[time_it]
     pub fn process_token_gss(&self, gss: &ParserGSS, token: TerminalID) -> ParserGSS {
-        if Some(token) == self.ignore_terminal_id {
+        // Skip tokens that are in the ignore set
+        if self.ignore_terminal_ids.contains(&token) {
             return gss.clone();
         }
         if gss.is_empty() {
