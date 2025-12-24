@@ -259,6 +259,135 @@ impl GrammarDefinition {
         
         nullable
     }
+    
+    /// Helper to generate a unique name given a base, existing names set, and counters.
+    /// Uses underscore format (e.g., Base_0, Base_1).
+    fn generate_unique_name_underscore(
+        base: &str,
+        per_base_counters: &mut HashMap<String, usize>,
+        all_names: &mut HashSet<String>,
+    ) -> String {
+        let counter = per_base_counters.entry(base.to_string()).or_insert(0);
+        loop {
+            let name = if *counter == 0 {
+                base.to_string()
+            } else {
+                format!("{}_{}", base, counter)
+            };
+            *counter += 1;
+            if !all_names.contains(&name) {
+                all_names.insert(name.clone());
+                return name;
+            }
+        }
+    }
+    
+    /// Handles nullable terminals in the grammar, skipping terminals that were already processed.
+    /// 
+    /// For always-null terminals: removes them from production RHSs.
+    /// For may-be-null terminals: replaces them with optional non-terminals (NT -> T | ε).
+    /// 
+    /// This transformation happens EARLY in the optimization pipeline, enabling better
+    /// optimizations downstream by giving the grammar optimizer a cleaner grammar to work with.
+    pub fn handle_nullable_terminals_except(&mut self, already_processed: &HashSet<String>) {
+        // Collect all existing names to avoid collisions when generating new non-terminal names
+        let mut all_names: HashSet<String> = self
+            .productions
+            .iter()
+            .map(|p| p.lhs.0.clone())
+            .collect();
+        for name in self.regex_name_to_group_id.left_values() {
+            all_names.insert(name.clone());
+        }
+        
+        let mut per_base_counters: HashMap<String, usize> = HashMap::new();
+        
+        // Identify nullable terminals
+        let mut always_null_terminals: HashSet<String> = HashSet::new();
+        let mut may_be_null_terminals: HashSet<String> = HashSet::new();
+
+        for (terminal_name, group_id) in self.regex_name_to_group_id.iter() {
+            // Skip terminals that were already processed
+            if already_processed.contains(terminal_name) {
+                continue;
+            }
+            
+            let expr = self
+                .group_id_to_expr
+                .get(group_id)
+                .expect("regex_name_to_group_id / group_id_to_expr out of sync");
+
+            match get_expr_nullability(expr) {
+                ExprNullability::AlwaysNull => {
+                    always_null_terminals.insert(terminal_name.clone());
+                }
+                ExprNullability::CanBeNull => {
+                    may_be_null_terminals.insert(terminal_name.clone());
+                }
+                ExprNullability::NeverNull => {}
+            }
+        }
+
+        if always_null_terminals.is_empty() && may_be_null_terminals.is_empty() {
+            return; // Nothing to do
+        }
+
+        debug!(
+            4,
+            "Removing {} always-null terminals",
+            always_null_terminals.len()
+        );
+        
+        // Remove always-null terminals from production RHSs
+        for prod in self.productions.iter_mut() {
+            prod.rhs.retain(|sym| match sym {
+                Symbol::Terminal(Terminal::RegexName(t)) => !always_null_terminals.contains(t),
+                _ => true,
+            });
+        }
+
+        debug!(
+            4,
+            "Processing {} may-be-null terminals",
+            may_be_null_terminals.len()
+        );
+        
+        // Replace may-be-null terminals with optional non-terminals
+        for terminal_name in &may_be_null_terminals {
+            let opt_nt_name = Self::generate_unique_name_underscore(
+                &format!("{}Opt", terminal_name.trim_matches('"')),
+                &mut per_base_counters,
+                &mut all_names,
+            );
+            let opt_nt = NonTerminal(opt_nt_name.clone());
+
+            for prod in self.productions.iter_mut() {
+                for sym in &mut prod.rhs {
+                    if let Symbol::Terminal(Terminal::RegexName(t)) = sym {
+                        if t == terminal_name {
+                            *sym = Symbol::NonTerminal(opt_nt.clone());
+                        }
+                    }
+                }
+            }
+
+            // Add the optional non-terminal productions: one with the terminal, one epsilon
+            self.productions.push(Production {
+                lhs: opt_nt.clone(),
+                rhs: vec![Symbol::Terminal(Terminal::RegexName(terminal_name.clone()))],
+            });
+            self.productions.push(Production {
+                lhs: opt_nt.clone(),
+                rhs: Vec::new(), // epsilon
+            });
+        }
+    }
+    
+    /// Handles all nullable terminals in the grammar.
+    /// Use `handle_nullable_terminals_except` if you want to skip already-processed terminals.
+    pub fn handle_nullable_terminals(&mut self) {
+        self.handle_nullable_terminals_except(&HashSet::new());
+    }
 }
 
 impl JSONConvertible for GrammarDefinition {

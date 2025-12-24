@@ -12,6 +12,18 @@ pub fn optimize_grammar(grammar: &mut GrammarDefinition) {
     if std::env::var("DISABLE_GRAMMAR_OPTIMIZATION").is_ok() {
         return;
     }
+    
+    // STEP 1: Handle nullable terminals FIRST
+    // This transforms terminals like `WS ::= (...)*` into optional non-terminals
+    // early, giving the downstream optimizer cleaner grammar to work with.
+    // Without this, the grammar optimizer may create terminals that are nullable,
+    // and then table.rs has to deal with them again.
+    let nullable_terminals = grammar.get_nullable_terminals();
+    if !nullable_terminals.is_empty() {
+        debug!(4, "Handling {} nullable terminals early in optimization", nullable_terminals.len());
+        grammar.handle_nullable_terminals();
+    }
+    
     let mut optimizer = GrammarOptimizer::new(grammar);
     optimizer.optimize();
     if std::env::var("PRINT_OPTIMIZED_GRAMMAR").is_ok() {
@@ -413,6 +425,13 @@ impl<'a> GrammarOptimizer<'a> {
         debug!(5, "Pre-existing terminals before partial_optimize: {}", 
             self.grammar.regex_name_to_group_id.len());
         
+        // Track which terminals already existed before optimization.
+        // These should not be re-processed by handle_nullable_terminals_except.
+        let pre_existing_terminals: HashSet<String> = self.grammar.regex_name_to_group_id
+            .left_values()
+            .cloned()
+            .collect();
+        
         // For NTs that DON'T depend on cyclic NTs, we can fully expand and convert to terminals
         // For NTs that DO depend on cyclic NTs, we keep them as productions but optimize their
         // non-cyclic parts
@@ -585,10 +604,12 @@ impl<'a> GrammarOptimizer<'a> {
             self.stats.initial_productions, self.grammar.productions.len(), terminals_added, new_terminals.len(),
             update_start.elapsed());
         
-        // Note: Nullable terminals are now handled in table.rs during GLR parser generation
-        // by transform_nullable_terminals(), so we don't need to handle them here
+        // Handle nullable terminals that were created during optimization.
+        // By doing this early (in optimization.rs), we enable better downstream optimizations.
+        // We only handle the newly created terminals, not pre-existing ones.
+        self.grammar.handle_nullable_terminals_except(&pre_existing_terminals);
         
-        debug!(5, "After optimization: {} productions, {} terminals", 
+        debug!(5, "After nullable handling: {} productions, {} terminals", 
             self.grammar.productions.len(), self.grammar.regex_name_to_group_id.len());
         
         // Remove unused terminals and compact IDs
