@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use sep1::glr::grammar::{prod, nt, t};
 
 fn main() {
@@ -25,7 +26,7 @@ fn main() {
     ];
     
     // Build the parser
-    let parser = sep1::glr::table::generate_glr_parser(&productions, None);
+    let parser = sep1::glr::table::generate_glr_parser(&productions, &HashSet::new(), HashSet::new());
     
     // Display the parser with pretty-printed parse table
     println!("{}", parser);
