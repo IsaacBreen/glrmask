@@ -1236,7 +1236,7 @@ pub fn generate_glr_parser_with_terminal_map(
             explicit_count,
             detected_ignore.len());
         for t in &detected_ignore {
-            crate::debug!(5, "  {}", terminal_map.get_by_right(t).unwrap());
+            crate::debug!(5, "  Detected: {}", terminal_map.get_by_right(t).unwrap());
         }
     }
     
