@@ -1160,47 +1160,52 @@ fn generate_glr_parser_with_maps(
     // ============================================================
     // This must happen EARLY before any null production inlining.
     // Nullable terminals (terminals that can match empty string) create
-    // zero-width matches in the tokenizer. We transform them into optional
-    // non-terminals: T → OptT, OptT → T | ε
-    //
     // IMPORTANT: Only transform terminals that are used in "real" productions,
     // not in wrapper definitions created by optimization.rs.
-    // A wrapper definition looks like: T_Opt -> T (and T_Opt -> ε).
-    // We detect these by checking if a terminal is ONLY used in productions
-    // where LHS ends with "Opt" and RHS is exactly [T].
+    // We use a STRUCTURAL check:
+    // 1. Identify "nullable-capable" non-terminals (those that have an epsilon production N -> ε)
+    // 2. A terminal T is "already wrapped" if ALL its usages are in productions N -> T
+    //    where N is nullable-capable.
     
-    // First, find terminals that appear in wrapper definitions
-    let mut wrapper_terminals: HashSet<Terminal> = HashSet::new();
+    // First, find nullable-capable non-terminals (have explicit epsilon production)
+    let mut nullable_capable_nts: HashSet<NonTerminal> = HashSet::new();
     for p in productions.iter() {
-        // Check if this looks like a wrapper: LHS ends with "Opt", RHS is single terminal
-        if p.lhs.0.ends_with("Opt") && p.rhs.len() == 1 {
-            if let Some(Symbol::Terminal(t)) = p.rhs.first() {
-                wrapper_terminals.insert(t.clone());
+        if p.rhs.is_empty() {
+            nullable_capable_nts.insert(p.lhs.clone());
+        }
+    }
+    
+    // Collect all usages of each terminal
+    // We Map Terminal -> List of (LHS, is_sole_rhs_symbol)
+    let mut terminal_usages: HashMap<Terminal, Vec<(NonTerminal, bool)>> = HashMap::new();
+    
+    for p in productions.iter() {
+        for sym in &p.rhs {
+            if let Symbol::Terminal(t) = sym {
+                let is_sole = p.rhs.len() == 1;
+                terminal_usages.entry(t.clone())
+                    .or_default()
+                    .push((p.lhs.clone(), is_sole));
             }
         }
     }
     
-    // Find terminals used in NON-wrapper productions
-    let mut non_wrapper_terminal_usage: HashSet<Terminal> = HashSet::new();
-    for p in productions.iter() {
-        // Skip wrapper definitions (LHS ends with Opt, RHS is single terminal)
-        let is_wrapper = p.lhs.0.ends_with("Opt") && p.rhs.len() == 1 
-            && matches!(p.rhs.first(), Some(Symbol::Terminal(_)));
-        // Also skip epsilon wrappers (LHS ends with Opt, RHS is empty)
-        let is_epsilon_wrapper = p.lhs.0.ends_with("Opt") && p.rhs.is_empty();
-        
-        if !is_wrapper && !is_epsilon_wrapper {
-            for sym in &p.rhs {
-                if let Symbol::Terminal(t) = sym {
-                    non_wrapper_terminal_usage.insert(t.clone());
-                }
-            }
-        }
-    }
-    
-    // Only transform nullable terminals that are used in non-wrapper productions
+    // Filter nullable terminals: Keep only those that have at least one "unwrapped" usage
     let actual_nullable: HashSet<Terminal> = nullable_terminals.iter()
-        .filter(|t| non_wrapper_terminal_usage.contains(*t))
+        .filter(|t| {
+            if let Some(usages) = terminal_usages.get(t) {
+                // Check if ALL usages are wrapped
+                // A usage is wrapped if:
+                // 1. It is the sole symbol in RHS (N -> T)
+                // 2. The LHS (N) is nullable-capable (N -> ε exists)
+                let all_wrapped = usages.iter().all(|(lhs, is_sole)| {
+                    *is_sole && nullable_capable_nts.contains(lhs)
+                });
+                !all_wrapped // Keep if NOT all wrapped (i.e., has exposed usage)
+            } else {
+                false // Unused terminals don't need wrapping (removed later)
+            }
+        })
         .cloned()
         .collect();
     
