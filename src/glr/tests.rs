@@ -506,10 +506,7 @@ fn test_ambiguous_arithmetic() {
         prod("E", vec![nt("E"), t("*"), nt("E")]),
         prod("E", vec![t("id")]),
     ];
-    eprintln!("TEST DEBUG: calling generate_glr_parser");
     let parser = generate_glr_parser(&productions, &HashSet::new(), HashSet::new());
-    eprintln!("TEST DEBUG: parser created");
-    eprintln!("Table: {}", parser);
     let eof = *parser.terminal_map.get_by_left(&regex_name("$")).unwrap();
     let tokens = vec![
         *parser.terminal_map.get_by_left(&regex_name("id")).unwrap(),
@@ -518,15 +515,10 @@ fn test_ambiguous_arithmetic() {
         *parser.terminal_map.get_by_left(&regex_name("*")).unwrap(),
         *parser.terminal_map.get_by_left(&regex_name("id")).unwrap(),
     ];
-    eprintln!("TEST DEBUG: tokens prepared");
 
-    eprintln!("TEST DEBUG: init_glr_parser");
     let mut state: GLRParserState<'_> = parser.init_glr_parser(None);
-    eprintln!("TEST DEBUG: parsing");
     state.parse(&tokens);
-    eprintln!("TEST DEBUG: stepping");
     state.step(eof);
-    eprintln!("TEST DEBUG: step done");
 
     // Limitation/Capability: GLR succeeds on ambiguous arithmetic.
     assert!(state.is_ok(), "GLR parser should accept ambiguous arithmetic input");

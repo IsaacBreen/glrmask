@@ -1055,35 +1055,6 @@ fn generate_glr_parser_with_maps(
     validate(productions).expect("Initial grammar validation failed");
     print_memory_usage("After validation");
 
-    // ============================================================
-    // Phase 0: Create augmented start production
-    // ============================================================
-    // ALWAYS create an augmented start: S' -> <old_start_symbol>
-    // This simplifies the grammar structure and ensures we have a single 
-    // entry point with a known form.
-    let original_start_symbol = productions.get(0)
-        .expect("Grammar must have at least one production")
-        .lhs.clone();
-    
-    // Generate a unique name for the augmented start
-    let existing_nonterminals: BTreeSet<NonTerminal> = productions.iter().map(|p| p.lhs.clone()).collect();
-    let mut augmented_start_name = format!("{}'", original_start_symbol.0);
-    while existing_nonterminals.contains(&NonTerminal(augmented_start_name.clone())) {
-        augmented_start_name = format!("{}'", augmented_start_name);
-    }
-    let augmented_start = NonTerminal(augmented_start_name);
-    
-    // Create the augmented start production and prepend it
-    let mut productions: Vec<Production> = std::iter::once(Production {
-        lhs: augmented_start.clone(),
-        rhs: vec![Symbol::NonTerminal(original_start_symbol.clone())],
-    })
-    .chain(productions.iter().cloned())
-    .collect();
-    
-    crate::debug!(4, "Created augmented start production: {} -> {}", 
-        augmented_start.0, original_start_symbol.0);
-
     let start_production_id = 0;
 
     crate::debug!(4, "Removing productions with undefined non-terminals");
@@ -1122,28 +1093,15 @@ fn generate_glr_parser_with_maps(
     // We loop until no more changes occur (fixed point).
 
     const MAX_OPTIMIZATION_PASSES: usize = 10;
-    const MAX_PRODUCTIONS: usize = 10000; // Safety limit
-    
     for pass in 0..MAX_OPTIMIZATION_PASSES {
         crate::debug!(4, "Grammar optimization pass {}", pass + 1);
         let initial_production_count = productions.len();
-        
-        // Safety check
-        if productions.len() > MAX_PRODUCTIONS {
-            crate::log_warn!("Grammar has {} productions, exceeding limit of {}", productions.len(), MAX_PRODUCTIONS);
-            break;
-        }
 
         // Phase 2: ESSENTIAL - Inline null productions
         // This exposes hidden right recursion: A → α A β where β is nullable
         // becomes A → α A | A → α A β
         crate::debug!(5, "  Phase 2: Inlining null productions");
         productions = inline_null_productions(&productions);
-        
-        if productions.len() > MAX_PRODUCTIONS {
-            crate::log_warn!("Grammar has {} productions after inlining, exceeding limit", productions.len());
-            break;
-        }
 
         // Phase 3: ESSENTIAL - Right recursion elimination
         // Transforms A → α A into A → A' α, A' → ε | A' α
@@ -1222,18 +1180,11 @@ fn generate_glr_parser_with_maps(
     // ============================================================
     // Simplify grammar by eliminating unit productions (A → B → X becomes A → X).
     // This reduces parser construction time but doesn't affect correctness.
-    // 
-    // IMPORTANT: We must protect BOTH the augmented start AND the original start
-    // from substitution, to maintain the S' -> A structure required for the
-    // epsilon production constraint.
-    let protected_nts: BTreeSet<NonTerminal> = [
-        augmented_start.clone(),
-        original_start_symbol.clone(),
-    ].into_iter().collect();
+    let start_nt = &productions.get(0).map(|p| p.lhs.clone()).unwrap_or(NonTerminal("start".to_string()));
     const MAX_SUBSTITUTION_RHS_LEN: usize = 1;
     let (simplified_with_defs, substituted_nts) = substitute_single_productions_and_report(
         &productions,
-        &protected_nts,
+        start_nt,
         MAX_SUBSTITUTION_RHS_LEN,
     );
     let simplified_productions = remove_productions_for_nts(&simplified_with_defs, &substituted_nts);
@@ -1246,61 +1197,6 @@ fn generate_glr_parser_with_maps(
     }
     productions = simplified_productions;
     print_memory_usage("After unit production elimination");
-
-    // ============================================================
-    // CRITICAL ASSERTION: Epsilon production restriction
-    // ============================================================
-    // The start production (S' -> A) has one RHS symbol: A.
-    // Epsilon productions (X -> ε) are ONLY allowed when X = A.
-    // This is essential for bounded reductions in the GLR parser.
-    //
-    // NOTE: DO NOT REMOVE THIS ASSERTION.
-    // The augmented start production MUST derive a non-terminal, not a terminal.
-    // If this assertion fails, it means unit production elimination inlined
-    // the inner start symbol, which breaks the grammar structure we need.
-    // Fix by ensuring both the augmented start AND the inner start are protected
-    // from unit production substitution (see the protected_nts set above).
-    let start_prod = productions.get(0).expect("Grammar must have productions");
-    assert_eq!(start_prod.lhs, augmented_start, 
-        "Start production LHS must be the augmented start symbol");
-    assert_eq!(start_prod.rhs.len(), 1, 
-        "Augmented start production must have exactly one RHS symbol");
-    
-    let allowed_epsilon_nt = match &start_prod.rhs[0] {
-        Symbol::NonTerminal(nt) => nt.clone(),
-        Symbol::Terminal(_) => panic!(
-            "Augmented start production must derive a non-terminal, not a terminal.\n\
-             This likely means the inner start symbol was inlined during unit production elimination.\n\
-             Ensure both augmented_start and original_start_symbol are in protected_nts."
-        ),
-    };
-    
-    // Verify that the inner start is the original_start_symbol
-    assert_eq!(allowed_epsilon_nt, original_start_symbol,
-        "Inner start should be '{}' but is '{}'. \
-         Grammar structure was corrupted during optimization.",
-        original_start_symbol.0, allowed_epsilon_nt.0
-    );
-    
-    // Check all productions for illegal epsilon productions
-    let illegal_epsilon_productions: Vec<_> = productions.iter()
-        .filter(|p| p.rhs.is_empty() && p.lhs != allowed_epsilon_nt)
-        .collect();
-    
-    if !illegal_epsilon_productions.is_empty() {
-        let violation_details: Vec<String> = illegal_epsilon_productions.iter()
-            .map(|p| format!("{} -> ε", p.lhs.0))
-            .collect();
-        panic!(
-            "Grammar has illegal epsilon productions. Only {} is allowed to have epsilon productions.\n\
-             Violations:\n  {}", 
-            allowed_epsilon_nt.0,
-            violation_details.join("\n  ")
-        );
-    }
-    
-    crate::debug!(4, "Grammar passes epsilon production restriction (only {} may be nullable)", 
-        allowed_epsilon_nt.0);
 
     // ============================================================
     // Validation - Ensure all essential transformations completed
@@ -1351,8 +1247,6 @@ fn generate_glr_parser_with_maps(
         );
     }
 
-    eprintln!("DEBUG: After validation, proceeding with {} productions", productions.len());
-
     let mut next_non_terminal_id = non_terminal_map.len();
     for p in &productions {
         if !non_terminal_map.contains_left(&p.lhs) {
@@ -1360,8 +1254,6 @@ fn generate_glr_parser_with_maps(
             next_non_terminal_id += 1;
         }
     }
-
-    eprintln!("DEBUG: {} terminals, {} non-terminals", terminal_map.len(), non_terminal_map.len());
 
     crate::debug!(5, "Number of productions: {}", productions.len());
     print_memory_usage("Before Stage 1");
@@ -1412,14 +1304,11 @@ fn generate_glr_parser_with_maps(
 
     let start_nt_id = lhs_ids[0];
 
-    eprintln!("DEBUG: Starting Stage 1 (LR(0) Automaton)");
     crate::debug!(4, "Stage 1 (LR(0) Automaton)");
     let (stage_1_table, item_set_map) =
         stage_1(&light_productions, &lhs_ids, num_terminals, num_nonterminals);
-    eprintln!("DEBUG: Stage 1 complete, {} states", stage_1_table.len());
     print_memory_usage("After Stage 1");
 
-    eprintln!("DEBUG: Computing First/Follow Sets");
     crate::debug!(4, "Computing First/Follow Sets");
     let first_sets = compute_first_sets_ids_with_lhs(
         &light_productions,
@@ -1428,7 +1317,6 @@ fn generate_glr_parser_with_maps(
         num_nonterminals,
         &nullable_nts_ids,
     );
-    eprintln!("DEBUG: First sets computed");
     let follow_sets = compute_follow_sets_ids(
         &light_productions,
         &lhs_ids,
@@ -1438,10 +1326,8 @@ fn generate_glr_parser_with_maps(
         num_nonterminals,
         start_nt_id,
     );
-    eprintln!("DEBUG: Follow sets computed");
     print_memory_usage("After First/Follow");
 
-    eprintln!("DEBUG: Computing Final Table (Merging Stages 2-8)");
     crate::debug!(4, "Computing Final Table (Merging Stages 2-8)");
     let (final_table_map, start_state_id, substring_state_id) = compute_final_table(
         stage_1_table,
@@ -1451,20 +1337,16 @@ fn generate_glr_parser_with_maps(
         &follow_sets,
         num_terminals,
     );
-    eprintln!("DEBUG: Final table computed, {} states", final_table_map.len());
     print_memory_usage("After Final Table");
 
-    eprintln!("DEBUG: Building item_set_map_bi");
     let mut item_set_map_bi = BiBTreeMap::new();
     for (k, v) in item_set_map {
         item_set_map_bi.insert(k, v);
     }
-    eprintln!("DEBUG: item_set_map_bi built");
 
     crate::debug!(4, "GLR Parser generation complete. {} states.", final_table_map.len());
 
-    eprintln!("DEBUG: Creating GLRParser");
-    let parser = GLRParser::new(
+    GLRParser::new(
         final_table_map,
         productions,
         terminal_map,
@@ -1474,9 +1356,7 @@ fn generate_glr_parser_with_maps(
         substring_state_id,
         actions,
         ignore_terminal_ids,
-    );
-    eprintln!("DEBUG: GLRParser created");
-    parser
+    )
 }
 
 /// Generate a GLR parser from productions, with automatic detection of ignore terminals.

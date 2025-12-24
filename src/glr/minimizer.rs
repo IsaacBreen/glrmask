@@ -88,13 +88,9 @@ fn find_all_nts_in_cycles(productions: &[Production]) -> BTreeSet<NonTerminal> {
 }
 
 /// Iteratively substitutes non-terminals that have only one production rule.
-/// 
-/// The `protected_nts` set contains nonterminals that should NOT be substituted,
-/// even if they have only one production. This is typically used to protect the
-/// augmented start symbol and the inner start symbol.
 pub fn substitute_single_productions_and_report(
     productions: &[Production],
-    protected_nts: &BTreeSet<NonTerminal>,
+    start_nt: &NonTerminal,
     max_rhs_len: usize,
 ) -> (Vec<Production>, BTreeSet<NonTerminal>) {
     let mut current_prods = productions.to_vec();
@@ -113,7 +109,7 @@ pub fn substitute_single_productions_and_report(
         let mut substitutions: BTreeMap<NonTerminal, Vec<Symbol>> = BTreeMap::new();
         for (nt, prods) in &prods_by_lhs {
             if prods.len() == 1
-                && !protected_nts.contains(nt)
+                && nt != start_nt
                 && !nts_in_cycle.contains(nt)
                 && prods[0].rhs.len() <= max_rhs_len
             {
@@ -230,9 +226,8 @@ pub fn simplify_grammar_for_test_case(
         let before_count = current_productions.len();
 
         const MAX_SUBSTITUTION_RHS_LEN: usize = 10;
-        let protected = std::iter::once(start_nt.clone()).collect();
         let (substituted_with_defs, substituted_nts) =
-            substitute_single_productions_and_report(&current_productions, &protected, MAX_SUBSTITUTION_RHS_LEN);
+            substitute_single_productions_and_report(&current_productions, start_nt, MAX_SUBSTITUTION_RHS_LEN);
         let substituted = remove_productions_for_nts(&substituted_with_defs, &substituted_nts);
         if substituted.len() != current_productions.len() {
             println!(
