@@ -1283,7 +1283,7 @@ fn generate_glr_parser_with_maps(
     // Phase 7: Restore grammar nullability / Finalize Structure
     // ============================================================
     if !productions.is_empty() {
-        let current_start_nt = productions[0].lhs.clone();
+        let current_start_nt = start_nonterminal.clone();
         let existing_nonterminals: BTreeSet<NonTerminal> = productions.iter().map(|p| p.lhs.clone()).collect();
         // Simple unique name generator
         let mut name_gen = |base: &str| -> NonTerminal {
