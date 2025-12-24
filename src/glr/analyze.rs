@@ -1104,6 +1104,10 @@ pub fn resolve_direct_right_recursion(
 /// 
 /// Note: This is a single-pass left factoring. Multiple passes may be needed
 /// for deeply nested common prefixes.
+/// 
+/// DEPRECATED: Use `crate::glr::minimizer::left_factor_grammar` instead.
+/// This version has a bug where it doesn't preserve the start production at index 0.
+#[deprecated(note = "Use crate::glr::minimizer::left_factor_grammar instead")]
 pub fn left_factor_grammar(
     productions: &[Production],
     name_generator: &mut impl FnMut(&str) -> String,
