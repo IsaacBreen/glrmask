@@ -1608,69 +1608,38 @@ fn generate_glr_parser_with_maps(
     }
     
     // ============================================================
-    // Phase 1.5: ESSENTIAL - Simplify redundant nullable wrappers
+    // Phase 1.5: DISABLED - This optimization was incorrect
     // ============================================================
-    // Nullable wrapper productions (T_Opt -> T | ε) can be created by:
-    //   - Phase 1 above (transform_nullable_terminals)
-    //   - optimization.rs (handle_nullable_terminals)
+    // The original reasoning was: "If T is a nullable terminal (matches empty string),
+    // then T | ε = T." However, this is WRONG at the parser level because:
     //
-    // If T is a nullable terminal (matches empty string), then T | ε = T.
-    // So we can simplify T_Opt -> T | ε to just T_Opt -> T.
-    // This prevents combinatorial explosion in inline_null_productions later.
+    // 1. The tokenizer FILTERS OUT zero-width matches (see tokenizer.rs:48-51)
+    // 2. So if T matches epsilon, the tokenizer emits NOTHING (not a zero-width T)
+    // 3. Therefore T | ε ≠ T at the parser level:
+    //    - T requires the tokenizer to emit terminal T (with non-zero width)
+    //    - ε requires nothing to be emitted
+    //    - When T would match epsilon, the tokenizer emits nothing, so we need the ε alternative
     //
-    // Detection: For each NT with exactly 2 productions:
-    //   - One production with RHS = [Terminal(T)] where T is nullable
-    //   - One production with RHS = [] (epsilon)
-    // Action: Remove the epsilon production.
-    let nullable_terminal_ids: HashSet<TerminalID> = nullable_terminals.iter()
-        .filter_map(|t| terminal_map.get_by_left(t).copied())
-        .collect();
+    // Removing the epsilon alternative breaks parsing when a nullable terminal
+    // should match empty string but is followed by content that matches a different terminal.
+    //
+    // Example: Grammar `x ::= 'a' ';'?` with token "a;"
+    // - After 'a', parser expects ';'? (which is __opt__Opt -> ';' | ε)
+    // - Token "a;" first produces 'a' (a second 'a' in the grammar)
+    // - Before 'a', the ';'? should take epsilon path (since 'a' doesn't match ';')
+    // - If epsilon alternative is removed, parser has no valid path
+    //
+    // DO NOT remove epsilon productions from nullable wrappers.
+    // The "combinatorial explosion" mentioned in the old comment should be addressed
+    // elsewhere (e.g., by limiting inline depth or using different strategies).
+    //
+    // Old code (DISABLED):
+    // let nullable_terminal_ids: HashSet<TerminalID> = nullable_terminals.iter()
+    //     .filter_map(|t| terminal_map.get_by_left(t).copied())
+    //     .collect();
+    // ... (removed epsilon productions)
     
-    // Group productions by LHS
-    let mut by_lhs: BTreeMap<NonTerminal, Vec<usize>> = BTreeMap::new();
-    for (i, p) in productions.iter().enumerate() {
-        by_lhs.entry(p.lhs.clone()).or_default().push(i);
-    }
-    
-    let mut to_remove: HashSet<usize> = HashSet::new();
-    for (_nt, indices) in &by_lhs {
-        if indices.len() != 2 {
-            continue;
-        }
-        let p0 = &productions[indices[0]];
-        let p1 = &productions[indices[1]];
-        
-        // Check if one is epsilon (empty RHS) and one is single nullable terminal
-        let (epsilon_idx, term_idx) = if p0.rhs.is_empty() && p1.rhs.len() == 1 {
-            (indices[0], indices[1])
-        } else if p1.rhs.is_empty() && p0.rhs.len() == 1 {
-            (indices[1], indices[0])
-        } else {
-            continue;
-        };
-        
-        // Check if the single-symbol production is a nullable terminal
-        let term_prod = &productions[term_idx];
-        if let Some(Symbol::Terminal(t)) = term_prod.rhs.first() {
-            if let Some(tid) = terminal_map.get_by_left(t) {
-                if nullable_terminal_ids.contains(tid) {
-                    // T is nullable, so T_Opt -> T | ε simplifies to T_Opt -> T
-                    to_remove.insert(epsilon_idx);
-                }
-            }
-        }
-    }
-    
-    if !to_remove.is_empty() {
-        crate::debug!(4, "Phase 1.5: Simplified {} redundant epsilon productions from nullable wrappers",
-            to_remove.len());
-        productions = productions.into_iter()
-            .enumerate()
-            .filter(|(i, _)| !to_remove.contains(i))
-            .map(|(_, p)| p)
-            .collect();
-    }
-    print_memory_usage("After nullable wrapper simplification");
+    print_memory_usage("After nullable wrapper simplification (disabled)");
 
 
     // ============================================================
