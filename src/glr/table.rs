@@ -1622,6 +1622,22 @@ fn generate_glr_parser_with_maps(
     //   - One production with RHS = [Terminal(T)] where T is nullable
     //   - One production with RHS = [] (epsilon)
     // Action: Remove the epsilon production.
+    // [DISABLE] Phase 1.5: ESSENTIAL - Simplify redundant nullable wrappers
+    //
+    // This optimization is currently DISABLED because it is incorrect for our use case.
+    // Explanation:
+    // If T is a nullable terminal (e.g. `__opt_x[1]__`), it might match an empty string.
+    // However, our tokenizer/parser interaction implies that even for an "empty match",
+    // we might need distinct handling or the wrapper non-terminal adds necessary structure
+    // (creating a shift action vs just reducing).
+    // Specifically, when we have T_Opt -> T | ε, and T -> ε, they are NOT equivalent in the
+    // generated parser state machine if the tokenizer behavior for T depends on lookahead or
+    // if T simply doesn't produce a token when empty, whereas the epsilon production allows
+    // a reduction without consuming tokens.
+    //
+    // By merging them, we force the parser to expect the terminal T, effectively removing the
+    // "pure epsilon" path that doesn't involve the terminal symbol at all.
+    /*
     let nullable_terminal_ids: HashSet<TerminalID> = nullable_terminals.iter()
         .filter_map(|t| terminal_map.get_by_left(t).copied())
         .collect();
@@ -1670,6 +1686,7 @@ fn generate_glr_parser_with_maps(
             .map(|(_, p)| p)
             .collect();
     }
+    */
     print_memory_usage("After nullable wrapper simplification");
 
 
