@@ -1707,6 +1707,7 @@ fn test_js_like_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>>
 
     Ok(())
 }
+
 #[test]
 fn test_js_like_grammar_initial_mask_simplified() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Define the EBNF grammar

@@ -146,10 +146,7 @@ impl<'a> GrammarConstraintState<'a> {
                     if let Some((target_wa_state_id, trans_weight)) = dwa_state.get_transition(crate::precompute4::utils::DEFAULT_TRANSITION_SYMBOL) {
                         let isolated_gss = gss.isolate(Some(peeked_edge));
                         let popped_gss = isolated_gss.pop();
-                        if popped_gss.is_empty() { 
-                            crate::debug!(3, ">>> popped_gss is empty for default, continuing");
-                            continue; 
-                        }
+                        if popped_gss.is_empty() { continue; }
 
                         let f = |rsb: &RangeSetBlaze<usize>| {
                             let new_rsb = rsb & &trans_weight.rsb;
