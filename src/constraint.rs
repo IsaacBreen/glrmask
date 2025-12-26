@@ -869,12 +869,34 @@ impl GrammarConstraint {
             "Epsilon tokens are not supported."
         );
 
-        // Collect grammar-relevant group IDs from token_name_map
-        let grammar_group_ids: std::collections::BTreeSet<usize> = token_name_map.right_values().copied().collect();
+        // Identify all terminals allowed in the very first step of parsing.
+        // BUG FIX: Only include these group IDs for the initial mask computation.
+        // Previously, all group IDs were included, which led to over-permissive masks
+        // (e.g., allowing any string to start at the root if it was a valid terminal anywhere else).
+        let mut initial_grammar_group_ids = std::collections::BTreeSet::new();
+        if let Some(start_row) = parser.table.get(&parser.start_state_id) {
+            // 1. Terminals with explicit actions (shifts/reduces) in the start state
+            for tid in start_row.get_shifts_and_reduces_map().keys() {
+                if let Some(terminal) = parser.terminal_map.get_by_right(tid) {
+                    if let Some(gid) = token_name_map.get_by_left(terminal) {
+                        initial_grammar_group_ids.insert(*gid);
+                    }
+                }
+            }
+            // 2. If there's a default reduce, we must include all grammar group IDs 
+            //    because any token might lead to a reduction that eventually allows the token.
+            //    However, for JSON and most well-formed grammars, the start state doesn't default reduce.
+            if start_row.default_reduce.is_some() {
+                initial_grammar_group_ids = token_name_map.right_values().copied().collect();
+            }
+        } else {
+             // Fallback to all IDs if start state not found (should not happen)
+             initial_grammar_group_ids = token_name_map.right_values().copied().collect();
+        }
+
         let verify_equivalence = std::env::var("VERIFY_EQUIVALENCE").is_ok();
 
         // Combined equivalence analysis - computes state equivalence, vocab equivalence, and internal mappings
-        // State equivalence is computed ONCE and reused for both vocab analysis and building maps
         let (
             original_to_internal_map,
             commit_vocab_data,
@@ -886,7 +908,7 @@ impl GrammarConstraint {
             &llm_token_map,
             &tokenizer,
             max_original_llm_token_id,
-            &grammar_group_ids,
+            &initial_grammar_group_ids,
         );
         let commit_vocab = Arc::new(commit_vocab_data);
 
@@ -942,10 +964,10 @@ impl GrammarConstraint {
             Self::build_maps_and_matches_for_reps(&tokenizer, &vocab_tree.root, &group_id_to_terminal_idx, &representative_states);
         
         // Expand results to all states via state_to_rep mapping
-        let mut computed_possible_matches: BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>> = BTreeMap::new();
+        let mut possible_matches: BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>> = BTreeMap::new();
         for (s, rep) in &state_to_rep {
             if let Some(rep_map) = rep_possible_matches.get(rep) {
-                computed_possible_matches.insert(*s, rep_map.clone());
+                possible_matches.insert(*s, rep_map.clone());
             }
         }
 
@@ -1020,7 +1042,7 @@ impl GrammarConstraint {
             }
         }
 
-        let mut possible_matches_precompute1 = computed_possible_matches;
+        let mut possible_matches_precompute1 = possible_matches.clone();
 
         if verify_equivalence {
             crate::debug!(2, "VERIFY_EQUIVALENCE: Running optimize_dwa_and_vocab on terminal_dwa...");
@@ -1178,6 +1200,37 @@ impl GrammarConstraint {
         let terminal_nwa = NWA::from_dwa(&terminal_dwa);
         let mut parser_dwa = build_parser_dwa(&parser, &terminal_nwa);
 
+        // Fix for over-permissive initial masking:
+        // The Parser DWA might allow tokens that are grammatically invalid at the root
+        // because it combines all possible matches from the tokenizer.
+        // Here we restrict the transition from the DWA start state for the initial tokenizer state
+        // to only allow LLM tokens that match terminals valid in the GLR start state.
+        if let Some(start_row) = parser.table.get(&parser.start_state_id) {
+            let initial_label = tokenizer.initial_state_id().0 as crate::precompute4::weighted_automata::common::Label;
+            let start_node = &mut parser_dwa.states[parser_dwa.body.start_state];
+
+            if let Some(weight) = start_node.trans_weights.get_mut(&initial_label) {
+                let mut allowed_tokens = LLMTokenBV::zeros();
+                let initial_tids: Vec<_> = start_row.get_shifts_and_reduces_map().keys().copied().collect();
+
+                let pm_at_start = possible_matches.get(&tokenizer.initial_state_id());
+                if let Some(pm_map) = pm_at_start {
+                    for tid in &initial_tids {
+                        if let Some(tok_bv) = pm_map.get(&tid) {
+                            allowed_tokens.union_with(tok_bv);
+                        }
+                    }
+                }
+
+                // Also allow terminals that might be triggered by default reduces in the start state
+                if start_row.default_reduce.is_none() {
+                    let allowed_weight = Weight::from(allowed_tokens);
+                    *weight &= &allowed_weight;
+                }
+            }
+        }
+
+        let computed_possible_matches = Self::rearrange_possible_matches(&possible_matches);
         parser_dwa.states.clip_weights(vocab.internal_max_llm_token);
         optimize_dwa_and_vocab(&mut parser_dwa, &mut vocab, &mut possible_matches_precompute1);
 
