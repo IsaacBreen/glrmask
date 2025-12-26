@@ -23,6 +23,9 @@ benchmarking/results/
 temp.js
 output*.log
 tee
+debug_*.py
+run_targeted_conversion.py
+temp_*.jsonl
 
 # === Old/backup directories ===
 Users/
