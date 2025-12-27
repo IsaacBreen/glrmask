@@ -166,7 +166,21 @@ impl<'r> Precomputer1<'r> {
         let new_start_state = self.nwa.add_state();
         for (tsid, state) in &self.roots {
             let label = (tsid.0 + self.terminals_count) as Label;
-            self.nwa.add_transition(new_start_state, label, *state, Weight::all()).unwrap();
+            
+            // Compute the set of internal tokens that can produce any match from this tokenizer state.
+            // This restricts the entry weight to only tokens that can actually start a valid match.
+            let pm = self.possible_matches(&self.vocab.root, *tsid);
+            let mut entry_tokens = RangeSetBlaze::<usize>::new();
+            for (_, tokens) in pm {
+                entry_tokens |= tokens.inner.as_ref();
+            }
+            let weight = if entry_tokens.is_empty() {
+                Weight::all() // Fallback - shouldn't happen
+            } else {
+                Weight::from_rsb(entry_tokens)
+            };
+            
+            self.nwa.add_transition(new_start_state, label, *state, weight).unwrap();
         }
         self.nwa.body.start_states = vec![new_start_state];
 

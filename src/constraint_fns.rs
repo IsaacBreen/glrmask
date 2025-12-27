@@ -33,6 +33,12 @@ pub fn get_last_mask_time_ns() -> u64 {
 }
 
 impl<'a> GrammarConstraintState<'a> {
+    /// Expose compute_internal_mask for testing/debugging.
+    #[cfg(test)]
+    pub fn compute_internal_mask_debug(&self) -> RangeSet {
+        self.compute_internal_mask()
+    }
+    
     /// Compute the internal mask (RangeSet of internal token IDs) for the current state.
     /// This is the core computation shared by get_mask and fill_mask_i32.
     fn compute_internal_mask(&self) -> RangeSet {
@@ -85,7 +91,10 @@ impl<'a> GrammarConstraintState<'a> {
                 continue;
             }
 
+            crate::debug!(5, "compute_internal_mask: tokenizer_state_id={}", tokenizer_state_id.0);
             if let Some((target_wa_state_id, weight)) = dwa_start_state.get_transition(tokenizer_state_id.0 as Label) {
+                crate::debug!(5, "  DWA transition: target={:?}, weight tokens (first 20): {:?}", 
+                    target_wa_state_id, weight.rsb.iter().take(20).collect::<Vec<_>>());
                 let f = |acc: &Acc| {
                     let new_rsb = acc.llm_tokens_union.inner.as_ref() & &weight.rsb;
                     if new_rsb.is_empty() { None } else { Some(new_rsb) }

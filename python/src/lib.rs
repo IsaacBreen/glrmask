@@ -1714,9 +1714,16 @@ impl PyBruteforceConstraintState {
             inner: PyBruteforceConstraintStateWrapperTryBuilder {
                 constraint,
                 inner_builder: move |c: &PyGrammarConstraint| {
-                    let state = c.inner.state_from_gss_map(&state_map);
-                    // Convert GrammarConstraintState to BruteforceConstraintState
-                    let bf_state = BruteforceConstraintState::from_constraint_state(&state);
+                    // Reconstruct BruteforceConstraintState from the GSS map
+                    let bf_state = BruteforceConstraintState {
+                        parent: &c.inner,
+                        state: state_map.iter().map(|(id, gss)| {
+                            (*id, sep1::glr::parser::GLRParserState {
+                                parser: &c.inner.parser,
+                                stack: gss.clone(),
+                            })
+                        }).collect(),
+                    };
                     Ok::<_, PyErr>(bf_state)
                 },
             }

@@ -24,6 +24,28 @@ mod tests {
         map
     }
     
+    /// Create a small token map with JSON punctuation and some multi-byte tokens.
+    fn small_json_token_map() -> LLMTokenMap {
+        let mut map = LLMTokenMap::new();
+        map.insert(vec![b'{'], LLMTokenID(0));
+        map.insert(vec![b'}'], LLMTokenID(1));
+        map.insert(vec![b'"'], LLMTokenID(2));
+        map.insert(vec![b':'], LLMTokenID(3));
+        map.insert(vec![b','], LLMTokenID(4));
+        map.insert(vec![b'n'], LLMTokenID(5));
+        map.insert(vec![b'a'], LLMTokenID(6));
+        map.insert(vec![b'm'], LLMTokenID(7));
+        map.insert(vec![b'e'], LLMTokenID(8));
+        map.insert(vec![b's'], LLMTokenID(9));
+        map.insert(vec![b't'], LLMTokenID(10));
+        map.insert(vec![b'r'], LLMTokenID(11));
+        map.insert(vec![b'i'], LLMTokenID(12));
+        map.insert(vec![b'g'], LLMTokenID(13));
+        map.insert(vec![b'{', b'"'], LLMTokenID(14));  // Multi-byte
+        map.insert(vec![b'"', b':'], LLMTokenID(15));  // Multi-byte
+        map
+    }
+    
     /// Create a GPT-2 token map by loading the actual GPT-2 vocabulary.
     /// Falls back to a simulated vocab if the file doesn't exist.
     fn gpt2_like_token_map() -> (LLMTokenMap, usize) {
@@ -298,6 +320,166 @@ mod tests {
         
         assert!(mask.contains(b'}' as usize),
             "'}}' should be valid after '{{' for empty object");
+    }
+
+    /// Bug reproduction: With small vocab, only `{` and `{"` should be valid at empty prefix.
+    /// 
+    /// This test uses a minimal token map to clearly show the bug.
+    #[test]
+    fn test_small_vocab_only_brace_valid_at_start() {
+        let schema = r#"{
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"}
+            }
+        }"#;
+        
+        let ebnf = json_schema_to_ebnf(schema).expect("Schema should convert");
+        println!("Generated EBNF:\n{}", ebnf);
+        
+        let gd = GrammarDefinition::from_ebnf(&ebnf).expect("Grammar should build");
+        
+        // Debug: Print how many groups the grammar has
+        println!("\n=== Grammar terminal info ===");
+        println!("regex_name_to_group_id: {:?}", gd.regex_name_to_group_id);
+        println!("literal_to_group_id: {:?}", gd.literal_to_group_id);
+        println!("Total groups: {}", gd.regex_name_to_group_id.len() + gd.literal_to_group_id.len());
+        
+        let token_map = small_json_token_map();
+        let max_token_id = 15;  // Maximum token ID in small_json_token_map
+        
+        let constraint = GrammarConstraint::new_from_grammar_definition(
+            Arc::new(gd),
+            token_map.clone(),
+            max_token_id,
+            &GrammarConstraintConfig::default(),
+        );
+        
+        // Debug: Print the internal-to-original mapping
+        println!("\n=== DEBUG: Vocabulary mapping ===");
+        let vocab = &constraint.parser_dwa_vocab;
+        println!("Internal max token: {}", vocab.internal_max_llm_token);
+        println!("Original max token: {}", vocab.max_original_llm_token_id);
+        println!("internal_to_original:");
+        for (int_id, originals) in &vocab.internal_to_original {
+            let orig_ids: Vec<usize> = originals.iter_up_to(max_token_id).collect();
+            print!("  internal {} -> originals {:?} = ", int_id, orig_ids);
+            for &orig in &orig_ids {
+                let token_str = match orig {
+                    0 => "'{'" ,
+                    1 => "'}'",
+                    2 => "'\"'",
+                    3 => "':'",
+                    4 => "','",
+                    5 => "'n'",
+                    6 => "'a'",
+                    7 => "'m'",
+                    8 => "'e'",
+                    9 => "'s'",
+                    10 => "'t'",
+                    11 => "'r'",
+                    12 => "'i'",
+                    13 => "'g'",
+                    14 => "'{\"'",
+                    15 => "'\":'" ,
+                    _ => "?",
+                };
+                print!("{} ", token_str);
+            }
+            println!();
+        }
+        
+        // Debug: Print possible_matches
+        println!("\n=== possible_matches ===");
+        for (tok_state, terminal_map) in &constraint.possible_matches {
+            for (terminal_id, llm_tokens) in terminal_map {
+                let token_ids: Vec<usize> = llm_tokens.iter_up_to(max_token_id).collect();
+                if !token_ids.is_empty() {
+                    println!("  State {} Terminal {} -> {} tokens: {:?}", 
+                        tok_state.0, terminal_id.0, token_ids.len(), token_ids);
+                }
+            }
+        }
+        
+        // Debug DWA
+        println!("\n=== DWA info ===");
+        let dwa = &constraint.parser_dwa;
+        println!("DWA start state: {:?}", dwa.body.start_state);
+        println!("DWA states count: {}", dwa.states.len());
+        let dwa_start_state = &dwa.states[dwa.body.start_state];
+        println!("Start state transitions:");
+        for (label, target) in &dwa_start_state.transitions {
+            println!("  Label {} -> target {:?}", label, target);
+        }
+        if let Some(fw) = &dwa_start_state.final_weight {
+            let fw_tokens: Vec<usize> = fw.rsb.iter().take(20).collect();
+            println!("Start state final_weight (first 20): {:?}", fw_tokens);
+        } else {
+            println!("Start state has no final_weight");
+        }
+        
+        let state = constraint.init();
+        
+        // Debug: Print internal mask before conversion
+        println!("\n=== Internal mask (before conversion to original) ===");
+        let internal_mask = state.compute_internal_mask_debug();
+        let internal_valid: Vec<usize> = internal_mask.iter_up_to(vocab.internal_max_llm_token + 1).collect();
+        println!("Valid internal IDs: {:?}", internal_valid);
+        
+        // Show which original tokens each internal ID maps to
+        for &int_id in &internal_valid {
+            if let Some(originals) = vocab.internal_to_original.get(&int_id) {
+                let orig_ids: Vec<usize> = originals.iter_up_to(max_token_id).collect();
+                println!("  Internal {} -> original {:?}", int_id, orig_ids);
+            }
+        }
+        
+        let mask = state.get_mask();
+        
+        // Print all valid tokens
+        println!("\nValid tokens at empty prefix:");
+        let valid_tokens: Vec<usize> = mask.iter().collect();
+        for &token_id in &valid_tokens {
+            let token_str = match token_id {
+                0 => "{",
+                1 => "}",
+                2 => "\"",
+                3 => ":",
+                4 => ",",
+                5 => "n",
+                6 => "a",
+                7 => "m",
+                8 => "e",
+                9 => "s",
+                10 => "t",
+                11 => "r",
+                12 => "i",
+                13 => "g",
+                14 => "{\"",
+                15 => "\":",
+                _ => "?",
+            };
+            println!("  {}: {} valid", token_id, token_str);
+        }
+        
+        // At empty prefix, ONLY tokens starting with '{' should be valid:
+        // - Token 0: `{` - YES
+        // - Token 14: `{"` - YES
+        // All others should be INVALID
+        
+        assert!(mask.contains(0), "Token 0 '{{' should be valid");
+        assert!(mask.contains(14), "Token 14 '{{\"' should be valid");
+        
+        assert!(!mask.contains(1), "Token 1 '}}' should NOT be valid at empty prefix - BUG!");
+        assert!(!mask.contains(2), "Token 2 '\"' should NOT be valid at empty prefix - BUG!");
+        assert!(!mask.contains(3), "Token 3 ':' should NOT be valid at empty prefix - BUG!");
+        assert!(!mask.contains(4), "Token 4 ',' should NOT be valid at empty prefix - BUG!");
+        assert!(!mask.contains(15), "Token 15 '\":' should NOT be valid at empty prefix - BUG!");
+        
+        // Only 2 tokens should be valid
+        let valid_count = valid_tokens.len();
+        assert!(valid_count <= 2, 
+            "Only 2 tokens starting with {{ should be valid at empty prefix, but got {}", valid_count);
     }
 
     /// Test simple object schema without additionalProperties
