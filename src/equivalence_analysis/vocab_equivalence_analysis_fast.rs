@@ -970,42 +970,16 @@ pub fn find_vocab_equivalence_classes(
         groups.entry(class_id).or_insert_with(Vec::new).push(token_idx);
     }
 
-    // IMPORTANT: Split groups by first byte to ensure tokens with different
-    // first bytes are never considered equivalent.
-    // This is necessary because the DFA-based equivalence analysis might group
-    // tokens like '{' and '}' together if the grammar is optimized to a single
-    // terminal, but for masking purposes they must be separate since they
-    // start with different characters.
-    let mut split_groups: HashMap<(usize, Option<u8>), Vec<usize>> = HashMap::with_capacity(groups.len() * 2);
-    for (class_id, token_indices) in groups {
-        for token_idx in token_indices {
-            let first_byte = strings.get(token_idx).and_then(|s| s.first().copied());
-            split_groups
-                .entry((class_id, first_byte))
-                .or_insert_with(Vec::new)
-                .push(token_idx);
-        }
-    }
-
-    if is_debug_level_enabled(4) {
-        crate::debug!(
-            4,
-            "  After first-byte split: {} -> {} vocab equivalence classes",
-            next_class_id,
-            split_groups.len()
-        );
-    }
-
     if is_debug_level_enabled(4) {
         crate::debug!(
             4,
             "  Computed {} vocab equivalence classes in {} batches",
-            split_groups.len(),
+            groups.len(),
             batch_count
         );
     }
 
-    split_groups.into_values().collect()
+    groups.into_values().collect()
 }
 
 // =============================================================================

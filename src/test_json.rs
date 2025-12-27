@@ -5,7 +5,7 @@
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeMap, HashMap};
+    use std::collections::HashMap;
     use std::sync::Arc;
     use indoc::indoc;
     
@@ -177,9 +177,7 @@ mod tests {
             .expect(&format!("Schema should convert: {}", schema_json));
         println!("Generated EBNF:\n{}", ebnf);
         
-        // IMPORTANT: Use from_ebnf_no_optimize to avoid the bug where grammar
-        // optimization collapses to a single terminal, breaking byte-level masking.
-        let gd = GrammarDefinition::from_ebnf_no_optimize(&ebnf)
+        let gd = GrammarDefinition::from_ebnf(&ebnf)
             .expect("Grammar should build");
         
         let constraint = GrammarConstraint::new_from_grammar_definition(
@@ -205,22 +203,37 @@ mod tests {
         let open_brace_valid = mask.contains(open_brace_id.0);
         let open_brace_quote_valid = mask.contains(open_brace_quote_id.0);
         
-        // `"` alone should NOT be valid at start (this is the key assertion!)
-        let quote_alone_valid = mask.contains(quote_id.0);
-        
-        println!("At start: {{ valid = {}, {{\" valid = {}, \" alone valid = {}", 
-            open_brace_valid, open_brace_quote_valid, quote_alone_valid);
+        println!("At start: {{ valid = {}, {{\" valid = {}", open_brace_valid, open_brace_quote_valid);
         println!("Valid tokens: {:?}", mask.iter().collect::<Vec<_>>());
         
         assert!(open_brace_valid, "'{{' should be valid at start");
         assert!(open_brace_quote_valid, "'{{\"' should be valid at start for object with properties");
         
-        // This is the key test for the bug fix - `"` alone MUST NOT be valid
-        assert!(!quote_alone_valid, "'\"' alone MUST NOT be valid at start - object must start with '{{'");
-        
-        // We skip byte-by-byte testing for multi-byte tokens because the GPT-2 vocab
-        // uses BPE encoding where token IDs don't map to byte values.
-        println!("✓ Multi-byte token validity verified");
+        // Also test inputs byte-by-byte
+        for input in valid_inputs {
+            println!("\nTesting input byte-by-byte: {:?}", input);
+            let mut state = constraint.init();
+            
+            for (i, ch) in input.bytes().enumerate() {
+                let prefix = &input[..i];
+                let mask = state.get_mask();
+                // Note: we're only testing single-byte tokens here (first 128 IDs)
+                let is_valid = mask.contains(ch as usize);
+                
+                assert!(is_valid,
+                    "After {:?}, character {:?} (byte {}) should be valid but wasn't.\n\
+                     Valid token IDs: {:?}",
+                    prefix,
+                    ch as char,
+                    ch,
+                    mask.iter().take(30).collect::<Vec<_>>()
+                );
+                
+                state.commit(LLMTokenID(ch as usize))
+                    .expect(&format!("Failed to commit byte {} at position {}", ch, i));
+            }
+            println!("✓ Input {:?} accepted", input);
+        }
     }
     
     /// Test that WS (whitespace) is nullable - empty object should work.
@@ -286,306 +299,7 @@ mod tests {
         assert!(mask.contains(b'}' as usize),
             "'}}' should be valid after '{{' for empty object");
     }
-    
-    /// Simple test: At empty prefix for object schema, only '{' should be valid (with single-byte tokens)
-    /// 
-    /// This is a minimal reproduction of the bug where sep1 allows '"' at empty prefix
-    /// when only '{' should be valid.
-    #[test]
-    fn test_simple_object_only_brace_at_start() {
-        // Very simple EBNF that requires '{' to start
-        let ebnf = indoc! {r#"
-            root ::= '{' content '}' ;
-            content ::= ( '"' 'x' '"' )? ;
-        "#};
 
-        println!("Testing EBNF:\n{}", ebnf);
-        
-        let gd = GrammarDefinition::from_ebnf(ebnf).expect("EBNF should parse");
-        
-        let token_map = simple_byte_token_map();
-        let constraint = GrammarConstraint::new_from_grammar_definition(
-            Arc::new(gd),
-            token_map,
-            255,
-            &GrammarConstraintConfig::default(),
-        );
-        
-        let state = constraint.init();
-        let mask = state.get_mask();
-        
-        println!("Valid tokens at empty prefix: {:?}", mask.iter().collect::<Vec<_>>());
-        
-        // Only '{' (byte 123) should be valid at empty prefix
-        let valid_count = mask.iter().count();
-        let brace_valid = mask.contains(b'{' as usize);
-        let quote_valid = mask.contains(b'"' as usize);
-        let x_valid = mask.contains(b'x' as usize);
-        let close_brace_valid = mask.contains(b'}' as usize);
-        
-        println!("'{{' (123) valid: {}", brace_valid);
-        println!("'\"' (34) valid: {}", quote_valid);
-        println!("'x' (120) valid: {}", x_valid);
-        println!("'}}' (125) valid: {}", close_brace_valid);
-        println!("Total valid tokens: {}", valid_count);
-        
-        // Assertions
-        assert!(brace_valid, "'{{' MUST be valid at empty prefix");
-        assert!(!quote_valid, "'\"' must NOT be valid at empty prefix - grammar requires '{{' first");
-        assert!(!x_valid, "'x' must NOT be valid at empty prefix");
-        assert!(!close_brace_valid, "'}}' must NOT be valid at empty prefix");
-        
-        // Only '{' should be valid
-        assert_eq!(valid_count, 1, "Only '{{' should be valid at empty prefix, but {} tokens are valid", valid_count);
-    }
-    
-    /// Test with multi-byte tokens to reproduce the bug
-    /// 
-    /// The bug: when we have multi-byte token '{"', the single-byte token '"' is incorrectly
-    /// marked as valid at empty prefix.
-    #[test]
-    fn test_multibyte_token_bug_reproduction() {
-        // Simple grammar: must start with '{'
-        let ebnf = indoc! {r#"
-            root ::= '{' '"' 'x' '"' '}' ;
-        "#};
-
-        println!("Testing EBNF:\n{}", ebnf);
-        
-        let gd = GrammarDefinition::from_ebnf(ebnf).expect("EBNF should parse");
-        
-        // Create a minimal token map with multi-byte tokens
-        // Token 0: '"' (single byte)
-        // Token 1: '{' (single byte)
-        // Token 2: '{"' (multi-byte - combines { and ")
-        // Token 3: 'x' (single byte)
-        // Token 4: '}' (single byte)
-        let mut token_map: LLMTokenMap = BTreeMap::new();
-        token_map.insert(vec![b'"'], LLMTokenID(0));       // '"'
-        token_map.insert(vec![b'{'], LLMTokenID(1));       // '{'
-        token_map.insert(vec![b'{', b'"'], LLMTokenID(2)); // '{"'  <-- multi-byte token
-        token_map.insert(vec![b'x'], LLMTokenID(3));       // 'x'
-        token_map.insert(vec![b'}'], LLMTokenID(4));       // '}'
-        
-        println!("Token map:");
-        for (bytes, id) in &token_map {
-            println!("  Token {:?}: {:?} = '{}'", id, bytes, String::from_utf8_lossy(bytes));
-        }
-        
-        let constraint = GrammarConstraint::new_from_grammar_definition(
-            Arc::new(gd),
-            token_map,
-            4,  // max token ID
-            &GrammarConstraintConfig::default(),
-        );
-        
-        let state = constraint.init();
-        let mask = state.get_mask();
-        
-        let valid_tokens: Vec<usize> = mask.iter().collect();
-        println!("Valid tokens at empty prefix: {:?}", valid_tokens);
-        
-        let quote_valid = mask.contains(0);   // Token 0 = '"'
-        let brace_valid = mask.contains(1);   // Token 1 = '{'
-        let brace_quote_valid = mask.contains(2); // Token 2 = '{"'
-        let x_valid = mask.contains(3);       // Token 3 = 'x'
-        let close_valid = mask.contains(4);   // Token 4 = '}'
-        
-        println!("Token 0 '\"' valid: {}", quote_valid);
-        println!("Token 1 '{{' valid: {}", brace_valid);
-        println!("Token 2 '{{\"' valid: {}", brace_quote_valid);
-        println!("Token 3 'x' valid: {}", x_valid);
-        println!("Token 4 '}}' valid: {}", close_valid);
-        
-        // Expected valid tokens at empty prefix:
-        // - Token 1 '{' - YES (single char that starts the grammar)
-        // - Token 2 '{"' - YES (multi-byte that is a valid prefix)
-        assert!(brace_valid, "'{{' (token 1) MUST be valid at empty prefix");
-        assert!(brace_quote_valid, "'{{\"' (token 2) MUST be valid at empty prefix");
-        
-        // These should NOT be valid:
-        // - Token 0 '"' - NO (grammar requires '{' first)
-        // - Token 3 'x' - NO 
-        // - Token 4 '}' - NO
-        assert!(!quote_valid, "'\"' (token 0) must NOT be valid at empty prefix - this is the bug!");
-        assert!(!x_valid, "'x' (token 3) must NOT be valid at empty prefix");
-        assert!(!close_valid, "'}}' (token 4) must NOT be valid at empty prefix");
-    }
-
-    /// Test that equivalence analysis doesn't incorrectly group different tokens.
-    /// 
-    /// This test verifies that '{', '}', ',', ':' are NOT in the same equivalence class.
-    /// These tokens have completely different semantics and should be distinguished.
-    #[test]
-    fn test_equivalence_analysis_distinguishes_punctuation() {
-        use crate::equivalence_analysis::find_vocab_equivalence_classes;
-        use crate::interface::{CompiledGrammar, GrammarDefinition};
-        
-        // Create a simple JSON-like grammar
-        let ebnf = indoc! {r#"
-            root ::= '{' '"' 'x' '"' ':' '"' 'y' '"' '}' ;
-        "#};
-        
-        println!("Testing EBNF:\n{}", ebnf);
-        
-        let gd = GrammarDefinition::from_ebnf(ebnf).expect("EBNF should parse");
-        let compiled = CompiledGrammar::from_definition(Arc::new(gd));
-        let tokenizer = &compiled.tokenizer;
-        
-        // Create a minimal token set
-        let tokens: Vec<Vec<u8>> = vec![
-            b"{".to_vec(),   // 0
-            b"}".to_vec(),   // 1
-            b",".to_vec(),   // 2
-            b":".to_vec(),   // 3
-            b"\"".to_vec(),  // 4
-            b"x".to_vec(),   // 5
-            b"y".to_vec(),   // 6
-        ];
-        
-        let initial_states: Vec<usize> = tokenizer.iter_states().map(|s| s.0).collect();
-        
-        println!("Testing equivalence with {} tokens and {} initial states", 
-            tokens.len(), initial_states.len());
-        
-        let equiv_classes = find_vocab_equivalence_classes(tokenizer, &tokens, &initial_states);
-        
-        println!("Equivalence classes:");
-        for class in &equiv_classes {
-            let token_strs: Vec<String> = class.iter()
-                .map(|&idx| format!("{}: '{}'", idx, String::from_utf8_lossy(&tokens[idx])))
-                .collect();
-            println!("  Class: [{}]", token_strs.join(", "));
-        }
-        
-        // Find which class each token is in
-        let mut token_to_class: Vec<Option<usize>> = vec![None; tokens.len()];
-        for (class_idx, class) in equiv_classes.iter().enumerate() {
-            for &token_idx in class {
-                token_to_class[token_idx] = Some(class_idx);
-            }
-        }
-        
-        // Verify that '{' and '}' are NOT in the same class
-        let open_brace_class = token_to_class[0];
-        let close_brace_class = token_to_class[1];
-        println!("\n'{{' is in class {:?}", open_brace_class);
-        println!("'}}' is in class {:?}", close_brace_class);
-        
-        assert_ne!(open_brace_class, close_brace_class,
-            "'{{' and '}}' should NOT be in the same equivalence class!");
-        
-        // Verify that ':' and ',' are NOT in the same class
-        let comma_class = token_to_class[2];
-        let colon_class = token_to_class[3];
-        println!("',' is in class {:?}", comma_class);
-        println!("':' is in class {:?}", colon_class);
-        
-        // Note: ',' and ':' might or might not be equivalent depending on the grammar
-        // But they definitely shouldn't be equivalent to '{' or '}'
-        
-        // Verify '\"' is in its own class (or at least not with punctuation)
-        let quote_class = token_to_class[4];
-        println!("'\"' is in class {:?}", quote_class);
-        
-        assert_ne!(quote_class, open_brace_class,
-            "'\"' and '{{' should NOT be in the same equivalence class!");
-    }
-    
-    /// Test equivalence analysis with JSON schema EBNF (optimized to single terminal)
-    /// 
-    /// When a grammar is optimized to a single `__optimized_terminal__`, the tokenizer
-    /// becomes very simple, which might cause incorrect equivalence groupings.
-    #[test]
-    fn test_equivalence_analysis_with_optimized_grammar() {
-        use crate::equivalence_analysis::find_vocab_equivalence_classes;
-        use crate::interface::{CompiledGrammar, GrammarDefinition};
-        use crate::json_schema::json_schema_to_ebnf;
-        
-        // Use the same schema that triggered the bug
-        let schema = r#"{
-            "type": "object",
-            "properties": {
-                "name": {"type": "string"}
-            }
-        }"#;
-        
-        let ebnf = json_schema_to_ebnf(schema).expect("Schema should convert");
-        println!("Generated EBNF:\n{}", ebnf);
-        
-        // Test 1: With optimization (should fail)
-        println!("\n=== Testing WITH optimization ===");
-        let gd_opt = GrammarDefinition::from_ebnf(&ebnf).expect("Grammar should build");
-        let compiled_opt = CompiledGrammar::from_definition(Arc::new(gd_opt));
-        let tokenizer_opt = &compiled_opt.tokenizer;
-        
-        println!("Optimized tokenizer has {} states", tokenizer_opt.iter_states().count());
-        
-        // Test 2: Without optimization (should pass)
-        println!("\n=== Testing WITHOUT optimization ===");
-        let gd_noopt = GrammarDefinition::from_ebnf_no_optimize(&ebnf).expect("Grammar should build");
-        let compiled_noopt = CompiledGrammar::from_definition(Arc::new(gd_noopt));
-        let tokenizer_noopt = &compiled_noopt.tokenizer;
-        
-        println!("Non-optimized tokenizer has {} states", tokenizer_noopt.iter_states().count());
-        
-        // Use a small subset of tokens for testing
-        let tokens: Vec<Vec<u8>> = vec![
-            b"{".to_vec(),   // 0
-            b"}".to_vec(),   // 1
-            b",".to_vec(),   // 2
-            b":".to_vec(),   // 3
-            b"\"".to_vec(),  // 4
-        ];
-        
-        // Check equivalence with optimization
-        let opt_states: Vec<usize> = tokenizer_opt.iter_states().map(|s| s.0).collect();
-        let opt_classes = find_vocab_equivalence_classes(tokenizer_opt, &tokens, &opt_states);
-        
-        println!("\nOptimized equivalence classes:");
-        for class in &opt_classes {
-            let token_strs: Vec<String> = class.iter()
-                .map(|&idx| format!("{}: '{}'", idx, String::from_utf8_lossy(&tokens[idx])))
-                .collect();
-            println!("  Class: [{}]", token_strs.join(", "));
-        }
-        
-        // Check equivalence without optimization
-        let noopt_states: Vec<usize> = tokenizer_noopt.iter_states().map(|s| s.0).collect();
-        let noopt_classes = find_vocab_equivalence_classes(tokenizer_noopt, &tokens, &noopt_states);
-        
-        println!("\nNon-optimized equivalence classes:");
-        for class in &noopt_classes {
-            let token_strs: Vec<String> = class.iter()
-                .map(|&idx| format!("{}: '{}'", idx, String::from_utf8_lossy(&tokens[idx])))
-                .collect();
-            println!("  Class: [{}]", token_strs.join(", "));
-        }
-        
-        // Find which class each token is in (non-optimized)
-        let mut token_to_class: Vec<Option<usize>> = vec![None; tokens.len()];
-        for (class_idx, class) in noopt_classes.iter().enumerate() {
-            for &token_idx in class {
-                token_to_class[token_idx] = Some(class_idx);
-            }
-        }
-        
-        // With non-optimized grammar, '{' and '}' should be in different classes
-        let open_brace_class = token_to_class[0];
-        let close_brace_class = token_to_class[1];
-        println!("\n(Non-optimized) '{{' is in class {:?}", open_brace_class);
-        println!("(Non-optimized) '}}' is in class {:?}", close_brace_class);
-        
-        assert_ne!(open_brace_class, close_brace_class,
-            "WITHOUT optimization: '{{' and '}}' should NOT be in the same equivalence class!");
-        
-        // Note: WITH optimization, they WILL be in the same class (this is the bug)
-        // The fix should either:
-        // 1. Disable optimization
-        // 2. Use a different equivalence criterion
-        // 3. Don't use equivalence classes when grammar is fully optimized
-    }
-    
     /// Test simple object schema without additionalProperties
     #[test]
     fn test_schema_simple_object() {
@@ -804,9 +518,7 @@ mod tests {
             .expect("Schema should convert");
         println!("Generated EBNF:\n{}", ebnf);
         
-        // IMPORTANT: Use from_ebnf_no_optimize to avoid the bug where grammar
-        // optimization collapses to a single terminal, breaking byte-level masking.
-        let gd = GrammarDefinition::from_ebnf_no_optimize(&ebnf)
+        let gd = GrammarDefinition::from_ebnf(&ebnf)
             .expect("Grammar should build");
         
         let constraint = GrammarConstraint::new_from_grammar_definition(
@@ -815,71 +527,6 @@ mod tests {
             max_token_id,
             &GrammarConstraintConfig::default(),
         );
-        println!("Generated parser: {}", constraint.parser);
-        
-        // Debug: print some info about internal token mappings
-        println!("\n=== Internal token mapping debug ===");
-        let open_brace_bytes = b"{".to_vec();
-        let quote_bytes = b"\"".to_vec();
-        let open_brace_quote_bytes = b"{\"".to_vec();
-        
-        // Original token IDs
-        let open_brace_orig = token_map.get(&open_brace_bytes);
-        let quote_orig = token_map.get(&quote_bytes);
-        let open_brace_quote_orig = token_map.get(&open_brace_quote_bytes);
-        
-        println!("Original token IDs:");
-        println!("  '{{': {:?}", open_brace_orig);
-        println!("  '\"': {:?}", quote_orig);
-        println!("  '{{\"': {:?}", open_brace_quote_orig);
-        
-        // Internal token IDs
-        let vocab = &constraint.parser_dwa_vocab;
-        println!("\nInternal token mappings:");
-        if let Some(orig_id) = open_brace_orig {
-            let internal = vocab.original_to_internal.get(&orig_id.0);
-            println!("  '{{' (orig {}) -> internal {:?}", orig_id.0, internal);
-        }
-        if let Some(orig_id) = quote_orig {
-            let internal = vocab.original_to_internal.get(&orig_id.0);
-            println!("  '\"' (orig {}) -> internal {:?}", orig_id.0, internal);
-        }
-        if let Some(orig_id) = open_brace_quote_orig {
-            let internal = vocab.original_to_internal.get(&orig_id.0);
-            println!("  '{{\"' (orig {}) -> internal {:?}", orig_id.0, internal);
-        }
-        
-        // Check internal -> original mappings
-        println!("\nChecking which internal tokens map to '\"' (orig 1):");
-        for (internal_id, original_bv) in &vocab.internal_to_original {
-            if original_bv.contains(1) {
-                let originals: Vec<usize> = original_bv.inner.iter().collect();
-                println!("  Internal {} maps to {} original tokens: {:?}", 
-                    internal_id, originals.len(), originals);
-                // Decode some of them
-                for &orig_id in originals.iter().take(10) {
-                    for (bytes, id) in &token_map {
-                        if id.0 == orig_id {
-                            println!("    {} = '{}'", orig_id, String::from_utf8_lossy(bytes));
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-        
-        println!("\nAll internal -> original mappings (showing size and sample):");
-        for (internal_id, original_bv) in &vocab.internal_to_original {
-            let count: usize = original_bv.inner.iter().count();
-            let sample: Vec<usize> = original_bv.inner.iter().take(5).collect();
-            println!("  Internal {} -> {} original tokens, sample: {:?}", internal_id, count, sample);
-        }
-        
-        // Dump the parser DWA to see the weights
-        println!("\n=== Parser DWA dump ===");
-        constraint.dump_parser_dwa();
-        
-        println!("=== End internal token mapping debug ===\n");
         
         // Get token IDs (these are the actual GPT-2 token IDs)
         let open_brace = b"{".to_vec();
