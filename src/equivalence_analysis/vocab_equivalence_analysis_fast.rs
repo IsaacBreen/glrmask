@@ -722,14 +722,6 @@ fn compute_suffix_hashes_incremental(
 // =============================================================================
 
 /// Compute the signature for a token given a chunk of initial states.
-/// 
-/// The signature includes:
-/// 1. The first byte of the token (to ensure tokens with different first bytes are never grouped)
-/// 2. DFA behavior: final states and group finalizations across all initial states
-///
-/// This is critical for grammar-constrained decoding: tokens with different first bytes
-/// cannot appear at the same position in any valid parse, so they must be in different
-/// equivalence classes even if their DFA behavior is otherwise identical.
 fn compute_chunk_signature(
     pre: &PrecomputedDfa,
     token: &[u8],
@@ -743,7 +735,6 @@ fn compute_chunk_signature(
     compute_suffix_hashes_incremental(pre, token, all_targets, cache, suffix_scratch);
 
     let mut hasher = new_hasher();
-
     for (end_state, edges) in pos0_results {
         let mut state_hasher = new_hasher();
         let completion_hash = end_state
