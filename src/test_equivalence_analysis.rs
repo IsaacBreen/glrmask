@@ -63,7 +63,7 @@ mod tests {
     /// The equivalence analysis is "correct" from a tokenizer perspective, but
     /// grammar constraints aren't being properly applied downstream.
     #[test]
-    fn test_single_group_tokenizer_merges_tokens_into_one_class() {
+    fn test_single_group_tokenizer_should_separate_tokens() {
         // Create a tokenizer with ONE group that matches several single characters
         // This simulates the __optimized_terminal__ case
         let pattern = choice![
@@ -113,8 +113,12 @@ mod tests {
         // From the tokenizer's perspective, they ARE equivalent!
         // The bug is that grammar constraints (which tokens can start at position 0)
         // aren't being intersected with this during mask computation.
-        assert_eq!(classes.len(), 1, 
-            "With single group, all tokens currently get merged into one class");
+        // With separate groups, each token should be in its own class.
+        // Even with a single tokenizer group, if the tokens are distinct, they should ideally be distinguished
+        // by the equivalence analysis if they lead to different future possibilities or are distinct terminals.
+        // Current buggy behavior merges them. We assert separation to fix the test expectation.
+        assert_eq!(classes.len(), 5, 
+            "Even with single group, tokens should be separated if they are distinct terminals");
     }
     
     /// Test that multi-byte tokens are handled correctly with single group.
@@ -145,7 +149,13 @@ mod tests {
         
         // Document current behavior - all may be merged since same group
         // The exact number depends on tokenizer structure
+        // Document current behavior - all may be merged since same group
+        // The exact number depends on tokenizer structure
         println!("Found {} equivalence classes", classes.len());
+        
+        // Assert that we have at least 4 classes (one for each token)
+        // This fails if they are merged.
+        assert_eq!(classes.len(), 4, "Should have 4 distinct classes for 4 distinct tokens");
     }
 
     /// Reproduce the equivalence analysis behavior for the "small vocab" case.
@@ -188,41 +198,31 @@ mod tests {
         let states: Vec<usize> = tokenizer.iter_states().map(|s| s.0).collect();
         let classes = find_vocab_equivalence_classes(&tokenizer, &tokens, &states);
         
-        println!("Small vocab repro classes:");
-        for (i, class) in classes.iter().enumerate() {
-            let tokens_in_class: Vec<String> = class.iter().map(|&idx| {
-                match idx {
-                    0 => "{".to_string(),
-                    1 => "}".to_string(),
-                    2 => "\"".to_string(),
-                    3 => ":".to_string(),
-                    4 => ",".to_string(),
-                    14 => "{\"".to_string(),
-                    15 => "\":".to_string(),
-                    _ => format!("t{}", idx),
-                }
-            }).collect();
-            println!("  Class {}: {:?}", i, tokens_in_class);
-        }
+        // We expect that EVERY token should be in its own equivalence class.
+        // Even though they all match `rep1(any)`, they serve different purposes in the grammar
+        // (matching different literals), so they need to be distinguished.
+        
+        // Build expected classes: groups of indices. 
+        // For 16 distinct tokens, we expect 16 distinct classes.
+        let mut expected_classes: Vec<Vec<usize>> = (0..tokens.len())
+            .map(|i| vec![i])
+            .collect();
+        expected_classes.sort();
 
-        // We expect to find that { (0), " (2), and {" (14) are conflated.
-        // Actually, with a simple rep1(any_byte) tokenizer, ANY token that is a valid start
-        // of the pattern and transitions to the same state(s) will be equivalent.
-        
-        // Let's find which class contains token 0 ({)
-        let class_with_brace = classes.iter().find(|c| c.contains(&0));
-        assert!(class_with_brace.is_some());
-        let class_with_brace = class_with_brace.unwrap();
-        
-        // Does this class also contain token 2 (")?
-        let quote_in_same_class = class_with_brace.contains(&2);
-        println!("Token '{{' and '\"' in same class? {}", quote_in_same_class);
-        
-        // If they are in the same class, then enabling `{` in the grammar 
-        // will also enable `"` if the mask is built by class.
-        // This confirms the hypothesis for the bug.
-        assert!(quote_in_same_class, 
-            "Expected '{{' and '\"' to be in the same equivalence class for this tokenizer");
+        // Sort actual classes for comparison
+        let mut actual_classes_sorted: Vec<Vec<usize>> = classes.iter()
+            .map(|c| {
+                let mut sorted_c = c.clone();
+                sorted_c.sort();
+                sorted_c
+            })
+            .collect();
+        actual_classes_sorted.sort();
+
+        // This assertion will FAIL if they are merged, replicating the bug.
+        assert_eq!(actual_classes_sorted, expected_classes,
+            "Equivalence classes are merged! Expected {:?} but got {:?}", 
+            expected_classes, actual_classes_sorted);
     }
 }
 
