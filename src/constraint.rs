@@ -725,7 +725,6 @@ impl GrammarConstraint {
             tokenizer,
             &llm_token_strings,
             &all_states,
-            0, // Always apply state reduction
         );
         
         // Derive state_to_rep and representative_states from state_classes

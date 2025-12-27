@@ -45,8 +45,10 @@ pub fn compute_combined_equivalence(
     regex: &Regex,
     tokens: &[Vec<u8>],
     initial_states: &[usize],
-    state_reduction_threshold: usize,
 ) -> CombinedEquivalenceResult {
+    // Threshold for applying state equivalence analysis
+    let state_reduction_threshold = 50;
+
     let start = std::time::Instant::now();
     
     // Check which state equivalence algorithm to use
@@ -178,7 +180,6 @@ pub fn find_vocab_equivalence_classes_with_state_reduction(
     regex: &Regex,
     tokens: &[Vec<u8>],
     initial_states: &[usize],
-    state_reduction_threshold: usize,
 ) -> VocabEquivalenceResult {
-    compute_combined_equivalence(regex, tokens, initial_states, state_reduction_threshold).vocab_classes
+    compute_combined_equivalence(regex, tokens, initial_states).vocab_classes
 }
