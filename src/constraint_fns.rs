@@ -33,6 +33,12 @@ pub fn get_last_mask_time_ns() -> u64 {
 }
 
 impl<'a> GrammarConstraintState<'a> {
+    /// Expose compute_internal_mask for testing/debugging.
+    #[cfg(test)]
+    pub fn compute_internal_mask_debug(&self) -> RangeSet {
+        self.compute_internal_mask()
+    }
+    
     /// Compute the internal mask (RangeSet of internal token IDs) for the current state.
     /// This is the core computation shared by get_mask and fill_mask_i32.
     fn compute_internal_mask(&self) -> RangeSet {
