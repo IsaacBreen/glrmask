@@ -1663,6 +1663,103 @@ impl PyGrammarConstraintState {
     }
 }
 
+// ============================================================================
+// Brute-Force Grammar Constraint State
+// ============================================================================
+
+use sep1::bruteforce_constraint::BruteforceConstraintState;
+
+#[self_referencing]
+struct PyBruteforceConstraintStateWrapper {
+    constraint: PyGrammarConstraint, // Owns the Arc'd constraint
+    #[borrows(constraint)]
+    #[covariant]
+    inner: BruteforceConstraintState<'this>,
+}
+
+#[pyclass(name = "BruteforceConstraintState")]
+pub struct PyBruteforceConstraintState {
+    inner: PyBruteforceConstraintStateWrapper,
+}
+
+#[pymethods]
+impl PyBruteforceConstraintState {
+    #[new]
+    fn new(constraint: PyGrammarConstraint) -> PyResult<Self> {
+        Ok(PyBruteforceConstraintState {
+            inner: PyBruteforceConstraintStateWrapperTryBuilder {
+                constraint,
+                inner_builder: |c: &PyGrammarConstraint| {
+                    let state = BruteforceConstraintState::new(&c.inner);
+                    Ok::<_, PyErr>(state)
+                },
+            }
+            .try_build()?,
+        })
+    }
+
+    /// Clone the state
+    fn clone(&self) -> Self {
+        let constraint = self.inner.borrow_constraint().clone();
+        let state_map: BTreeMap<sep1::tokenizer::TokenizerStateID, RustGSS> =
+            self.inner.with_inner(|state| {
+                state
+                    .state
+                    .iter()
+                    .map(|(id, glr_state)| (*id, glr_state.stack.clone()))
+                    .collect()
+            });
+
+        PyBruteforceConstraintState {
+            inner: PyBruteforceConstraintStateWrapperTryBuilder {
+                constraint,
+                inner_builder: move |c: &PyGrammarConstraint| {
+                    let state = c.inner.state_from_gss_map(&state_map);
+                    // Convert GrammarConstraintState to BruteforceConstraintState
+                    let bf_state = BruteforceConstraintState::from_constraint_state(&state);
+                    Ok::<_, PyErr>(bf_state)
+                },
+            }
+            .try_build()
+            .expect("Failed to clone PyBruteforceConstraintState"),
+        }
+    }
+
+    /// Check if the state is a valid prefix
+    fn is_valid_prefix(&self) -> bool {
+        self.inner.with_inner(|state| state.is_valid_prefix())
+    }
+
+    /// Commit bytes to advance the state
+    fn commit_bytes(&mut self, llm_token_bytes: &[u8]) {
+        self.inner.with_inner_mut(|state| {
+            state.commit_bytes(llm_token_bytes);
+        });
+    }
+
+    /// Check if committing bytes would result in a valid prefix
+    fn is_valid_continuation(&self, bytes: &[u8]) -> bool {
+        self.inner.with_inner(|state| state.is_valid_continuation(bytes))
+    }
+
+    /// Get the brute-force mask by trying every token
+    /// Returns a list of booleans where mask[i] is true if token i is valid
+    fn get_mask_bruteforce<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<bool>>> {
+        let mask = self.inner.with_inner(|state| state.get_mask_bruteforce());
+        Ok(mask.into_pyarray_bound(py))
+    }
+
+    /// Get the count of valid tokens
+    fn valid_token_count(&self) -> usize {
+        self.inner.with_inner(|state| state.valid_token_count())
+    }
+
+    /// Get list of valid token IDs
+    fn valid_token_ids(&self) -> Vec<usize> {
+        self.inner.with_inner(|state| state.valid_token_ids())
+    }
+}
+
 #[self_referencing]
 struct PyIncrementalParserWrapper {
     grammar: PyCompiledGrammar, // Owns the PyCompiledGrammar (which owns CompiledGrammar)
@@ -1759,6 +1856,7 @@ fn _sep1(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyGrammarConstraint>()?;
     m.add_class::<PyStageVocab>()?;
     m.add_class::<PyGrammarConstraintState>()?;
+    m.add_class::<PyBruteforceConstraintState>()?;
     m.add_class::<PyHybridBitsetIterator>()?;
     m.add_class::<PyHybridBitset>()?;
     m.add_class::<PyBitsetIterator>()?;
