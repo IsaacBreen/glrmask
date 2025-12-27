@@ -7,20 +7,27 @@
 // 3. Try committing the token's bytes
 // 4. Check if the resulting state is valid
 //
-// This is O(vocab_size * commit_time) per mask query, which is slow
-// but provides a ground truth for correctness testing.
+// IMPORTANT: This implementation MUST be independent of GrammarConstraintState
+// to serve as a true validator. We only reference the read-only data structures
+// (tokenizer, parser tables) but implement our own state management.
 
 use std::collections::BTreeMap;
 
-use crate::constraint::{GrammarConstraint, GrammarConstraintState};
-use crate::glr::parser::GLRParserState;
+use crate::constraint::GrammarConstraint;
+use crate::glr::parser::{GLRParser, GLRParserState, ParserGSS};
+use crate::glr::table::TerminalID;
 use crate::tokenizer::{TokenizerStateID, LLMTokenID};
 
 /// A brute-force grammar constraint state that provides guaranteed-correct
 /// mask computation by trying every token in the vocabulary.
+/// 
+/// This is an INDEPENDENT implementation that doesn't use GrammarConstraintState's
+/// commit_bytes. It directly uses the tokenizer and parser for state transitions.
 #[derive(Clone)]
 pub struct BruteforceConstraintState<'a> {
     pub parent: &'a GrammarConstraint,
+    /// Map from tokenizer state -> GLR parser state
+    /// This is our own independent tracking, not borrowed from GrammarConstraintState
     pub state: BTreeMap<TokenizerStateID, GLRParserState<'a>>,
 }
 
@@ -38,14 +45,6 @@ impl<'a> BruteforceConstraintState<'a> {
         }
     }
 
-    /// Create from an existing GrammarConstraintState (for comparison testing).
-    pub fn from_constraint_state(gcs: &GrammarConstraintState<'a>) -> Self {
-        BruteforceConstraintState {
-            parent: gcs.parent,
-            state: gcs.state.clone(),
-        }
-    }
-
     /// Check if the current state represents a valid prefix.
     /// A prefix is valid if there exists some continuation that leads to acceptance.
     pub fn is_valid_prefix(&self) -> bool {
@@ -53,21 +52,28 @@ impl<'a> BruteforceConstraintState<'a> {
             return false;
         }
         
-        // If we're at the initial tokenizer state, we might be able to complete
+        // If we're at the initial tokenizer state with a non-empty parser state,
+        // we can potentially continue
         if self.state.contains_key(&self.parent.tokenizer.initial_state_id()) {
-            return true;
+            // Check if the parser state is valid (not in error)
+            if let Some(parser_state) = self.state.get(&self.parent.tokenizer.initial_state_id()) {
+                if parser_state.is_ok() {
+                    return true;
+                }
+            }
         }
         
         // Check if any active state can reach a valid completion
         for (tid, glr_state) in self.state.iter() {
-            for gtid in self
+            // Get all terminals that could match from this tokenizer state
+            for term_id in self
                 .parent
                 .tokenizer
                 .tokens_accessible_from_state(TokenizerStateID(tid.0))
             {
-                let mut glr_state = glr_state.clone();
-                glr_state.step(gtid);
-                if glr_state.is_ok() {
+                let mut test_state = glr_state.clone();
+                test_state.step(term_id);
+                if test_state.is_ok() {
                     return true;
                 }
             }
@@ -75,16 +81,80 @@ impl<'a> BruteforceConstraintState<'a> {
         false
     }
 
-    /// Commit bytes to advance the state (same as GrammarConstraintState::commit_bytes).
-    /// This is a copy of the implementation from constraint_fns.rs.
+    /// Commit bytes to advance the state.
+    /// 
+    /// This is an INDEPENDENT implementation that doesn't use GrammarConstraintState.
+    /// We directly run the tokenizer and parser ourselves.
     pub fn commit_bytes(&mut self, llm_token_bytes: &[u8]) {
-        // Create a temporary GrammarConstraintState and use its commit_bytes
-        let mut temp_state = GrammarConstraintState {
-            parent: self.parent,
-            state: self.state.clone(),
-        };
-        temp_state.commit_bytes(llm_token_bytes);
-        self.state = temp_state.state;
+        if llm_token_bytes.is_empty() {
+            return;
+        }
+
+        let mut new_overall_state: BTreeMap<TokenizerStateID, GLRParserState<'a>> = BTreeMap::new();
+        
+        // Process from each current state
+        // We use a queue to handle multi-byte tokens where we process part of the input
+        // and need to continue from the new tokenizer state
+        let mut processing_queue: BTreeMap<usize, BTreeMap<TokenizerStateID, ParserGSS>> = BTreeMap::new();
+        
+        // Initialize queue with current states at offset 0
+        let initial_states: BTreeMap<_, _> = self.state.iter()
+            .map(|(sid, s)| (*sid, s.stack.clone()))
+            .collect();
+        processing_queue.insert(0, initial_states);
+        
+        while let Some((offset, states_to_process)) = processing_queue.pop_first() {
+            for (tokenizer_state_id, gss) in states_to_process {
+                // Run the tokenizer on the remaining bytes
+                let remaining_bytes = &llm_token_bytes[offset..];
+                let exec_result = self.parent.tokenizer.execute_from_state(remaining_bytes, tokenizer_state_id);
+                
+                // For each matched terminal, apply the parser action
+                for match_info in &exec_result.matches {
+                    let terminal_id = TerminalID(match_info.id);
+                    
+                    // Apply parser step
+                    let new_gss = self.parent.parser.process_token_gss(&gss, terminal_id);
+                    
+                    if !new_gss.is_empty() {
+                        let new_offset = offset + match_info.width;
+                        let next_tsid = self.parent.tokenizer.initial_state_id();
+                        
+                        if new_offset == llm_token_bytes.len() {
+                            // Finished processing all bytes
+                            new_overall_state.entry(next_tsid)
+                                .and_modify(|s| s.stack = s.stack.merge(&new_gss))
+                                .or_insert_with(|| GLRParserState { 
+                                    parser: &self.parent.parser, 
+                                    stack: new_gss.clone() 
+                                });
+                        } else {
+                            // More bytes to process - add to queue
+                            processing_queue.entry(new_offset)
+                                .or_default()
+                                .entry(next_tsid)
+                                .and_modify(|s| *s = s.merge(&new_gss))
+                                .or_insert(new_gss);
+                        }
+                    }
+                }
+                
+                // Also track partial matches (tokenizer ended in non-initial state)
+                if let Some(end_state_id) = exec_result.end_state {
+                    let final_tsid = TokenizerStateID(end_state_id);
+                    new_overall_state.entry(final_tsid)
+                        .and_modify(|s| s.stack = s.stack.merge(&gss))
+                        .or_insert_with(|| GLRParserState {
+                            parser: &self.parent.parser,
+                            stack: gss.clone()
+                        });
+                }
+            }
+        }
+        
+        // Filter out invalid states
+        new_overall_state.retain(|_, s| s.is_ok());
+        self.state = new_overall_state;
     }
 
     /// Check if committing the given bytes would result in a valid prefix.
