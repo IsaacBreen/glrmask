@@ -35,5 +35,5 @@ mod vocab_equivalence_analysis_reference;
 mod combined_equivalence_analysis;
 
 // Re-exports: use the fast versions by default
-use vocab_equivalence_analysis_fast::VocabEquivalenceResult;
+pub use vocab_equivalence_analysis_fast::VocabEquivalenceResult;
 pub use combined_equivalence_analysis::compute_combined_equivalence;

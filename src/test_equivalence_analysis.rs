@@ -3,7 +3,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use crate::finite_automata::{Regex, eat_u8, rep1, Expr};
-use crate::equivalence_analysis::find_vocab_equivalence_classes;
+use crate::equivalence_analysis::compute_combined_equivalence;
 use crate::tokenizer::LLMTokenID;
 use crate::datastructures::u8set::U8Set;
 use crate::{choice, groups};
@@ -39,7 +39,7 @@ mod tests {
         
         let states: Vec<usize> = tokenizer.iter_states().map(|s| s.0).collect();
         
-        let classes = find_vocab_equivalence_classes(&tokenizer, &tokens, &states);
+        let classes = compute_combined_equivalence(&tokenizer, &tokens, &states).vocab_classes;
         
         println!("Multi-group tokenizer equivalence classes:");
         for (i, class) in classes.iter().enumerate() {
@@ -87,7 +87,7 @@ mod tests {
         let states: Vec<usize> = tokenizer.iter_states().map(|s| s.0).collect();
         println!("Tokenizer has {} states", states.len());
         
-        let classes = find_vocab_equivalence_classes(&tokenizer, &tokens, &states);
+        let classes = compute_combined_equivalence(&tokenizer, &tokens, &states).vocab_classes;
         
         println!("Single-group tokenizer equivalence classes:");
         for (i, class) in classes.iter().enumerate() {
@@ -139,7 +139,7 @@ mod tests {
         
         let states: Vec<usize> = tokenizer.iter_states().map(|s| s.0).collect();
         
-        let classes = find_vocab_equivalence_classes(&tokenizer, &tokens, &states);
+        let classes = compute_combined_equivalence(&tokenizer, &tokens, &states).vocab_classes;
         
         println!("Single-group multi-byte token classes:");
         println!("Tokens: {{, {{\", \", \":");
@@ -196,7 +196,7 @@ mod tests {
         let tokenizer = groups![pattern].build();
         
         let states: Vec<usize> = tokenizer.iter_states().map(|s| s.0).collect();
-        let classes = find_vocab_equivalence_classes(&tokenizer, &tokens, &states);
+        let classes = compute_combined_equivalence(&tokenizer, &tokens, &states).vocab_classes;
         
         // We expect that EVERY token should be in its own equivalence class.
         // Even though they all match `rep1(any)`, they serve different purposes in the grammar
