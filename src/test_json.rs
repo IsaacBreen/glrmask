@@ -338,6 +338,7 @@ mod tests {
         println!("Generated EBNF:\n{}", ebnf);
         
         let gd = GrammarDefinition::from_ebnf(&ebnf).expect("Grammar should build");
+        println!("GrammarDefinition: {}", gd);
         
         // Debug: Print how many groups the grammar has
         println!("\n=== Grammar terminal info ===");
