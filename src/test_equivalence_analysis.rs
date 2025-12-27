@@ -147,5 +147,83 @@ mod tests {
         // The exact number depends on tokenizer structure
         println!("Found {} equivalence classes", classes.len());
     }
+
+    /// Reproduce the equivalence analysis behavior for the "small vocab" case.
+    /// This corresponds to `test_small_vocab_only_brace_valid_at_start` in `test_json.rs`.
+    #[test]
+    fn test_small_vocab_repro() {
+        // Define the tokens from the small_json_token_map
+        let tokens: Vec<Vec<u8>> = vec![
+            vec![b'{'],         // 0
+            vec![b'}'],         // 1
+            vec![b'"'],         // 2
+            vec![b':'],         // 3
+            vec![b','],         // 4
+            vec![b'n'],         // 5
+            vec![b'a'],         // 6
+            vec![b'm'],         // 7
+            vec![b'e'],         // 8
+            vec![b's'],         // 9
+            vec![b't'],         // 10
+            vec![b'r'],         // 11
+            vec![b'i'],         // 12
+            vec![b'g'],         // 13
+            vec![b'{', b'"'],   // 14
+            vec![b'"', b':'],   // 15
+        ];
+
+        // Create a single-group tokenizer that matches any of these
+        // This simulates the optimized grammar where everything is one terminal
+        // We use choice! over all single bytes found in tokens
+        let mut all_bytes = BTreeSet::new();
+        for t in &tokens {
+            for &b in t {
+                all_bytes.insert(b);
+            }
+        }
+        
+        let pattern = rep1(Expr::U8Class(U8Set::from_byte_range(all_bytes)));
+        let tokenizer = groups![pattern].build();
+        
+        let states: Vec<usize> = tokenizer.iter_states().map(|s| s.0).collect();
+        let classes = find_vocab_equivalence_classes(&tokenizer, &tokens, &states);
+        
+        println!("Small vocab repro classes:");
+        for (i, class) in classes.iter().enumerate() {
+            let tokens_in_class: Vec<String> = class.iter().map(|&idx| {
+                match idx {
+                    0 => "{".to_string(),
+                    1 => "}".to_string(),
+                    2 => "\"".to_string(),
+                    3 => ":".to_string(),
+                    4 => ",".to_string(),
+                    14 => "{\"".to_string(),
+                    15 => "\":".to_string(),
+                    _ => format!("t{}", idx),
+                }
+            }).collect();
+            println!("  Class {}: {:?}", i, tokens_in_class);
+        }
+
+        // We expect to find that { (0), " (2), and {" (14) are conflated.
+        // Actually, with a simple rep1(any_byte) tokenizer, ANY token that is a valid start
+        // of the pattern and transitions to the same state(s) will be equivalent.
+        
+        // Let's find which class contains token 0 ({)
+        let class_with_brace = classes.iter().find(|c| c.contains(&0));
+        assert!(class_with_brace.is_some());
+        let class_with_brace = class_with_brace.unwrap();
+        
+        // Does this class also contain token 2 (")?
+        let quote_in_same_class = class_with_brace.contains(&2);
+        println!("Token '{{' and '\"' in same class? {}", quote_in_same_class);
+        
+        // If they are in the same class, then enabling `{` in the grammar 
+        // will also enable `"` if the mask is built by class.
+        // This confirms the hypothesis for the bug.
+        assert!(quote_in_same_class, 
+            "Expected '{{' and '\"' to be in the same equivalence class for this tokenizer");
+    }
 }
+
 
