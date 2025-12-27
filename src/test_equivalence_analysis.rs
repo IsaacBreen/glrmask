@@ -3,7 +3,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use crate::finite_automata::{Regex, eat_u8, rep1, Expr};
-use crate::equivalence_analysis::vocab_equivalence_analysis_fast::find_vocab_equivalence_classes;
+use crate::equivalence_analysis::find_vocab_equivalence_classes;
 use crate::tokenizer::LLMTokenID;
 use crate::datastructures::u8set::U8Set;
 use crate::{choice, groups};

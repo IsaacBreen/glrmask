@@ -20,9 +20,7 @@ use crate::{
         vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode},
     },
     equivalence_analysis::{
-        self,
         compute_combined_equivalence,
-        CombinedEquivalenceResult,
         VocabEquivalenceResult,
     },
     finite_automata::Regex,
