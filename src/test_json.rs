@@ -5,6 +5,7 @@
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::sync::Arc;
     use indoc::indoc;
     
@@ -23,9 +24,48 @@ mod tests {
         map
     }
     
-    /// Create a GPT-2-like token map with multi-byte tokens.
-    /// This simulates the real GPT-2 tokenizer which has tokens like `{"`, ` "`, etc.
+    /// Create a GPT-2 token map by loading the actual GPT-2 vocabulary.
+    /// Falls back to a simulated vocab if the file doesn't exist.
     fn gpt2_like_token_map() -> (LLMTokenMap, usize) {
+        // Try to load the actual GPT-2 vocab
+        let vocab_path = std::path::Path::new("vocab.json");
+        if vocab_path.exists() {
+            match load_gpt2_vocab_from_file(vocab_path) {
+                Ok((map, max_id)) => return (map, max_id),
+                Err(e) => {
+                    eprintln!("Warning: Failed to load vocab.json: {}, using simulated vocab", e);
+                }
+            }
+        }
+        
+        // Fallback: create a simulated GPT-2-like vocab
+        create_simulated_gpt2_vocab()
+    }
+    
+    /// Load the actual GPT-2 vocab from vocab.json
+    fn load_gpt2_vocab_from_file(path: &std::path::Path) -> Result<(LLMTokenMap, usize), String> {
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| format!("Failed to read vocab file: {}", e))?;
+        
+        let vocab: HashMap<String, usize> = serde_json::from_str(&content)
+            .map_err(|e| format!("Failed to parse vocab JSON: {}", e))?;
+        
+        let mut map = LLMTokenMap::new();
+        let mut max_id = 0;
+        
+        for (token_str, token_id) in vocab {
+            let bytes = token_str.as_bytes().to_vec();
+            map.insert(bytes, LLMTokenID(token_id));
+            if token_id > max_id {
+                max_id = token_id;
+            }
+        }
+        
+        Ok((map, max_id))
+    }
+    
+    /// Create a simulated GPT-2-like token map (fallback when vocab.json not available)
+    fn create_simulated_gpt2_vocab() -> (LLMTokenMap, usize) {
         let mut map = LLMTokenMap::new();
         let mut next_id = 0;
         
@@ -451,5 +491,95 @@ mod tests {
         test_schema_with_multibyte_tokens(schema, &[
             r#"{"name": "test"}"#,
         ]);
+    }
+    
+    /// Bug reproduction test: sep1 incorrectly allows `"` at empty prefix for object schema.
+    /// 
+    /// For an object schema like `{"type": "object", "properties": {"name": {"type": "string"}}}`,
+    /// only tokens starting with `{` should be valid at the empty prefix (e.g., `{` and `{"`).
+    /// The token `"` (which would start a string) should NOT be valid.
+    /// 
+    /// This test uses the actual GPT-2 vocabulary where:
+    /// - Token 90: `{`
+    /// - Token 1: `"`
+    /// - Token 4895: `{"`
+    #[test]
+    fn test_object_schema_rejects_quote_at_empty_prefix() {
+        let schema = r#"{
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"}
+            }
+        }"#;
+        
+        let (token_map, max_token_id) = gpt2_like_token_map();
+        
+        let ebnf = json_schema_to_ebnf(schema)
+            .expect("Schema should convert");
+        println!("Generated EBNF:\n{}", ebnf);
+        
+        let gd = GrammarDefinition::from_ebnf(&ebnf)
+            .expect("Grammar should build");
+        
+        let constraint = GrammarConstraint::new_from_grammar_definition(
+            Arc::new(gd),
+            token_map.clone(),
+            max_token_id,
+            &GrammarConstraintConfig::default(),
+        );
+        
+        // Get token IDs (these are the actual GPT-2 token IDs)
+        let open_brace = b"{".to_vec();
+        let quote = b"\"".to_vec();
+        let open_brace_quote = b"{\"".to_vec();
+        
+        let open_brace_id = token_map.get(&open_brace);
+        let quote_id = token_map.get(&quote);
+        let open_brace_quote_id = token_map.get(&open_brace_quote);
+        
+        println!("Token IDs: {{ = {:?}, \" = {:?}, {{\" = {:?}", 
+            open_brace_id, quote_id, open_brace_quote_id);
+        
+        // Get initial mask
+        let state = constraint.init();
+        let mask = state.get_mask();
+        
+        println!("Valid tokens at empty prefix: {:?}", mask.iter().take(100).collect::<Vec<_>>());
+        
+        // `{` should be valid (starts an object)
+        if let Some(id) = open_brace_id {
+            let is_valid = mask.contains(id.0);
+            println!("Token '{{' (id={}): valid={}", id.0, is_valid);
+            assert!(is_valid, "'{{' MUST be valid at empty prefix for object schema");
+        }
+        
+        // `{"` should be valid (starts an object with a property key)
+        if let Some(id) = open_brace_quote_id {
+            let is_valid = mask.contains(id.0);
+            println!("Token '{{\"' (id={}): valid={}", id.0, is_valid);
+            assert!(is_valid, "'{{\"' MUST be valid at empty prefix for object schema with properties");
+        }
+        
+        // `"` should NOT be valid (would start a string, not an object)
+        // THIS IS THE BUG: sep1 currently allows this token when it shouldn't
+        if let Some(id) = quote_id {
+            let is_valid = mask.contains(id.0);
+            println!("Token '\"' (id={}): valid={}", id.0, is_valid);
+            assert!(!is_valid, 
+                "'\"' MUST NOT be valid at empty prefix for object schema! \
+                 An object must start with '{{', not '\"'. \
+                 This is a known bug where sep1 incorrectly allows tokens \
+                 that are prefixes of valid multi-byte tokens.");
+        }
+        
+        // Count total valid tokens
+        let total_valid: usize = mask.iter().count();
+        println!("Total valid tokens: {}", total_valid);
+        
+        // Sanity check: there shouldn't be hundreds of valid tokens at the start of an object
+        // In fact, with the actual GPT-2 vocab, only tokens that START with `{` should be valid
+        assert!(total_valid < 100, 
+            "Too many valid tokens ({}) at empty prefix for object schema. \
+             Only tokens starting with '{{' should be valid.", total_valid);
     }
 }
