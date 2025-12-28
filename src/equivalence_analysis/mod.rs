@@ -20,11 +20,6 @@
 // State equivalence
 mod state_equivalence_analysis_fast;
 mod state_equivalence_analysis_reference;
-mod state_equivalence_trie;
-mod state_equivalence_discriminating;
-mod state_equivalence_transposed;
-mod state_equivalence_optimized;
-mod state_equivalence_u16;
 
 // Vocab equivalence
 mod vocab_equivalence_analysis_fast;
