@@ -148,12 +148,13 @@ pub fn compute_combined_equivalence(
                     tokens,
                     initial_states,
                 );
-                
+
                 let trellis_classes = super::trellis_equivalence_analysis::mapping_to_equivalence_classes(
                     initial_states,
                     &trellis_mapping,
                 );
-                
+                println!("Trellis classes: {:?}", trellis_classes);
+
                 if state_classes != trellis_classes {
                     panic!(
                         "State equivalence mismatch (fast vs trellis ground truth)!\nFast   : {:?}\nTrellis: {:?}",
@@ -187,6 +188,7 @@ pub fn compute_combined_equivalence(
                 tokens,
                 &reduced_states,
             );
+            println!("Trellis vocab classes: {:?}", trellis_vocab_classes);
             
             if vocab_classes != trellis_vocab_classes {
                 let in_fast_not_trellis: Vec<_> = vocab_classes.difference(&trellis_vocab_classes).collect();

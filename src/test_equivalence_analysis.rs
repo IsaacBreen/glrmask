@@ -13,6 +13,7 @@ use crate::{choice, groups, seq};
 
 #[cfg(test)]
 mod tests {
+    use indoc::indoc;
     use super::*;
 
     /// Test equivalence analysis with the JSON schema tokenizer.
@@ -106,19 +107,32 @@ mod tests {
 
     #[test]
     fn test_json_schema_equivalence_classes_simpler() {
-        let schema = r#"{
-            "type": "object",
-            "properties": {
-                "name": {"type": "string"}
-            }
-        }"#;
 
-        let ebnf = json_schema_to_ebnf(schema).expect("Schema should convert");
+        let ebnf = indoc! {r#"
+            #![ignore(WS)]
+
+            root ::= '{' ( _mem2 ( ',' _mem2 )* )? '}' ;
+            _pv1 ::= JSON_STRING ;
+            _mem2 ::= '"name"' ':' _pv1 ;
+            WS ::= ( ( ' ' | '	' | '\n' ) )* ;
+            JSON_STRING ::= '"' STRING_CHARS '"' ;
+            STRING_CHARS ::= ( ( STRING_CHAR | ESCAPE_SEQ ) )* ;
+            STRING_CHAR ::= [^"\\\x00-\x1f] ;
+            ESCAPE_SEQ ::= '\\' ( ["\\/bfnrt] | 'u' HEX HEX HEX HEX ) ;
+            HEX ::= [0-9a-fA-F] ;
+            JSON_INTEGER ::= ( '-' )? ( '0' | [1-9] ( [0-9] )* ) ;
+            JSON_NUMBER ::= JSON_INTEGER ( '.' DIGITS )? ( EXPONENT )? ;
+            DIGITS ::= [0-9] ( [0-9] )* ;
+            EXPONENT ::= [eE] ( [+-] )? DIGITS ;
+            JSON_BOOL ::= ( 'true' | 'false' ) ;
+            JSON_NULL ::= 'null' ;
+        "#}.to_string();
         let gd = GrammarDefinition::from_ebnf(&ebnf).expect("Grammar should build");
 
         // Build the tokenizer from the grammar
         let compiled = CompiledGrammar::from_definition(Arc::new(gd));
         let tokenizer = &compiled.tokenizer;
+        println!("Tokenizer: {:?}", tokenizer);
 
         // Same vocab as test_small_vocab_only_brace_valid_at_start
         let vocab_strs = vec![

@@ -900,7 +900,22 @@ fn grammar_expr_to_ebnf(expr: &GrammarExpr) -> String {
         GrammarExpr::Ref(name) => name.clone(),
         GrammarExpr::Literal(bytes) => {
             let s = String::from_utf8_lossy(bytes);
-            format!("'{}'", s.replace('\\', "\\\\").replace('\'', "\\'"))
+            // Escape special characters for EBNF literal
+            let mut escaped = String::new();
+            for c in s.chars() {
+                match c {
+                    '\\' => escaped.push_str("\\\\"),
+                    '\'' => escaped.push_str("\\'"),
+                    '\n' => escaped.push_str("\\n"),
+                    '\r' => escaped.push_str("\\r"),
+                    '\t' => escaped.push_str("\\t"),
+                    c if c.is_control() => {
+                        escaped.push_str(&format!("\\x{:02x}", c as u32));
+                    }
+                    _ => escaped.push(c),
+                }
+            }
+            format!("'{}'", escaped)
         }
         GrammarExpr::Sequence(exprs) => {
             let parts: Vec<String> = exprs.iter().map(grammar_expr_to_ebnf).collect();
