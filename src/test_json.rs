@@ -64,6 +64,40 @@ mod tests {
         create_simulated_gpt2_vocab()
     }
     
+    /// Decode a GPT-2 BPE token string to its actual byte representation.
+    /// GPT-2 uses a byte-level BPE where bytes 0-255 are mapped to specific Unicode characters.
+    fn gpt2_bpe_decode(token_str: &str) -> Vec<u8> {
+        // Build the byte decoder: maps Unicode chars back to bytes
+        // This is the inverse of the bytes_to_unicode() function from GPT-2
+        let mut byte_decoder: std::collections::HashMap<char, u8> = std::collections::HashMap::new();
+        
+        // Printable ASCII chars (except space) map to themselves
+        for b in b'!'..=b'~' {
+            byte_decoder.insert(b as char, b);
+        }
+        // Extended printable chars
+        for b in 0xa1u8..=0xac {
+            byte_decoder.insert(b as char, b);
+        }
+        for b in 0xaeu8..=0xff {
+            byte_decoder.insert(b as char, b);
+        }
+        
+        // Non-printable bytes map to Unicode chars starting at U+0100
+        let mut n: u32 = 0;
+        for b in 0u8..=255 {
+            if !byte_decoder.values().any(|&v| v == b) {
+                byte_decoder.insert(char::from_u32(256 + n).unwrap(), b);
+                n += 1;
+            }
+        }
+        
+        // Decode the token string
+        token_str.chars().map(|c| {
+            *byte_decoder.get(&c).unwrap_or(&(c as u8))
+        }).collect()
+    }
+    
     /// Load the actual GPT-2 vocab from vocab.json
     fn load_gpt2_vocab_from_file(path: &std::path::Path) -> Result<(LLMTokenMap, usize), String> {
         let content = std::fs::read_to_string(path)
@@ -76,7 +110,8 @@ mod tests {
         let mut max_id = 0;
         
         for (token_str, token_id) in vocab {
-            let bytes = token_str.as_bytes().to_vec();
+            // Decode the BPE-encoded token string to actual bytes
+            let bytes = gpt2_bpe_decode(&token_str);
             map.insert(bytes, LLMTokenID(token_id));
             if token_id > max_id {
                 max_id = token_id;
@@ -239,20 +274,24 @@ mod tests {
             for (i, ch) in input.bytes().enumerate() {
                 let prefix = &input[..i];
                 let mask = state.get_mask();
-                // Note: we're only testing single-byte tokens here (first 128 IDs)
-                let is_valid = mask.contains(ch as usize);
+                
+                // Look up the token ID for this single byte
+                let token_id = token_map.get(&vec![ch])
+                    .expect(&format!("Token map should have single byte {}", ch));
+                let is_valid = mask.contains(token_id.0);
                 
                 assert!(is_valid,
-                    "After {:?}, character {:?} (byte {}) should be valid but wasn't.\n\
+                    "After {:?}, character {:?} (byte {}, token_id {}) should be valid but wasn't.\n\
                      Valid token IDs: {:?}",
                     prefix,
                     ch as char,
                     ch,
+                    token_id.0,
                     mask.iter().take(30).collect::<Vec<_>>()
                 );
                 
-                state.commit(LLMTokenID(ch as usize))
-                    .expect(&format!("Failed to commit byte {} at position {}", ch, i));
+                state.commit(*token_id)
+                    .expect(&format!("Failed to commit byte {} (token_id {}) at position {}", ch, token_id.0, i));
             }
             println!("✓ Input {:?} accepted", input);
         }
