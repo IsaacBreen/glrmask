@@ -86,6 +86,11 @@ impl<'a> GrammarOptimizer<'a> {
         // Try to optimize the grammar by converting regular sub-grammars to regexes
         self.optimize_regular_subgrammars();
 
+        // Optimize the exprs
+        for expr in self.grammar.group_id_to_expr.values_mut() {
+            *expr = expr.clone().optimize();
+        }
+
         self.stats.final_productions = self.grammar.productions.len();
         self.stats.final_terminals = self.count_terminals();
     }
