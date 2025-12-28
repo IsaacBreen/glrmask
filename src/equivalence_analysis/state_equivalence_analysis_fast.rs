@@ -176,82 +176,38 @@ pub fn find_state_equivalence_classes(
         })
         .collect();
     
-    // Initialize state hashes with state's own properties
-    let mut state_hashes: Vec<u128> = states
-        .par_iter()
-        .map(|&state| {
-            let mut hash: u128 = 0;
-            for &gid in &dfa_finalizers[state] {
-                hash = mix_u128(hash ^ ((gid as u128) << 64));
-            }
-            for &gid in &possible_future_groups[state] {
-                hash = mix_u128(hash ^ ((gid as u128) << 32));
-            }
-            hash
-        })
-        .collect();
+    // Initialize state hashes to zero (like reference implementation)
+    let mut state_hashes: Vec<u128> = vec![0u128; states.len()];
     
-    // Track which state indices are "active" (not yet in singletons)
-    let mut active_mask: Vec<bool> = vec![true; states.len()];
-    let mut num_active = states.len();
-    
-    // Group by hash
-    let mut groups: HashMap<u128, Vec<usize>> = HashMap::new();
-    for (i, &_state) in states.iter().enumerate() {
-        groups.entry(state_hashes[i]).or_default().push(i);
-    }
-    
-    // Token batch size - larger batches reduce iteration overhead
+    // Process tokens in batches for memory efficiency, but process ALL tokens for ALL states
+    // to ensure correct equivalence (no early singleton exit optimization)
     let batch_size = if states.len() > 10000 { 
         25000.min(tokens.len())
     } else { 
         10000.min(tokens.len())
     };
     let mut tokens_tested = 0usize;
-    let mut iteration = 0;
-    let mut unchanged_iterations = 0usize; // Track convergence
     
-    while tokens_tested < tokens.len() && num_active > 0 {
-        iteration += 1;
-        
-        // Mark singletons as inactive
-        let t_mark_start = std::time::Instant::now();
-        for (hash, indices) in &groups {
-            if indices.len() == 1 {
-                active_mask[indices[0]] = false;
-            }
-        }
-        num_active = active_mask.iter().filter(|&&x| x).count();
-        let t_mark = t_mark_start.elapsed();
-        
-        if num_active == 0 {
-            break; // All singletons
-        }
-        
+    while tokens_tested < tokens.len() {
         // Prepare next batch of tokens
-        let t_prep_start = std::time::Instant::now();
         let batch_end = (tokens_tested + batch_size).min(tokens.len());
         let batch_tokens: Vec<&Vec<u8>> = (tokens_tested..batch_end)
             .map(|i| &tokens[i])
             .collect();
-        let batch_weights: Vec<u128> = (0..batch_tokens.len())
-            .map(|i| mix_u128(((tokens_tested + i + 1) as u128).wrapping_mul(0x9E3779B97F4A7C15)))
-            .collect();
-        let t_prep = t_prep_start.elapsed();
         
-        // Update hashes for ACTIVE states only
-        let t_compute_start = std::time::Instant::now();
+        // Precompute token weights based on global token index (for consistent hashing)
+        let batch_weights: Vec<u128> = (tokens_tested..batch_end)
+            .map(|i| mix_u128((i + 1) as u128))  // Match reference: mix(token_index + 1)
+            .collect();
+        
+        // Update hashes for ALL states
         let updates: Vec<(usize, u128)> = (0..states.len())
             .into_par_iter()
-            .filter_map(|i| {
-                if !active_mask[i] {
-                    return None;
-                }
-                
+            .map(|i| {
                 let state = states[i];
                 let mut hash_delta: u128 = 0;
                 
-                for (token_idx, token) in batch_tokens.iter().enumerate() {
+                for (batch_idx, token) in batch_tokens.iter().enumerate() {
                     let mut current = state as u32;
                     let mut finalizers_hash: u128 = 0;
                     let mut depth: u32 = 0;
@@ -282,47 +238,25 @@ pub fn find_state_equivalence_classes(
                     };
                     
                     let token_hash = end_hash.wrapping_add(finalizers_hash);
-                    hash_delta = hash_delta.wrapping_add(token_hash.wrapping_mul(batch_weights[token_idx]));
+                    hash_delta = hash_delta.wrapping_add(token_hash.wrapping_mul(batch_weights[batch_idx]));
                 }
                 
-                Some((i, hash_delta))
+                (i, hash_delta)
             })
             .collect();
-        let t_compute = t_compute_start.elapsed();
         
         // Apply updates
-        let t_apply_start = std::time::Instant::now();
         for (i, delta) in updates {
             state_hashes[i] = state_hashes[i].wrapping_add(delta);
         }
-        let t_apply = t_apply_start.elapsed();
         
         tokens_tested = batch_end;
-        
-        // Recompute groups
-        let t_group_start = std::time::Instant::now();
-        let prev_num_groups = groups.len();
-        groups.clear();
-        for (i, &_state) in states.iter().enumerate() {
-            groups.entry(state_hashes[i]).or_default().push(i);
-        }
-        let t_group = t_group_start.elapsed();
-        
-        // Track convergence
-        if groups.len() == prev_num_groups {
-            unchanged_iterations += 1;
-        } else {
-            unchanged_iterations = 0;
-        }
-        
-        crate::debug!(5, "State equiv iter {}: mark={:?} prep={:?} compute={:?} apply={:?} group={:?} | {} tokens, {} groups, {} active", 
-                      iteration, t_mark, t_prep, t_compute, t_apply, t_group, tokens_tested, groups.len(), num_active);
-        
-        // Early convergence: if groups haven't changed for 2 iterations, likely stable
-        if unchanged_iterations >= 2 {
-            crate::debug!(4, "State equiv: early convergence after {} iterations ({} tokens)", iteration, tokens_tested);
-            break;
-        }
+    }
+    
+    // Group by final hash
+    let mut groups: HashMap<u128, Vec<usize>> = HashMap::new();
+    for (i, &hash) in state_hashes.iter().enumerate() {
+        groups.entry(hash).or_default().push(i);
     }
     
     let phase1_time = instant.elapsed();
@@ -347,28 +281,27 @@ pub fn find_state_equivalence_classes(
     // All non-singleton states have seen all tokens (singletons stopped early but are already unique).
     if tokens_tested >= tokens.len() {
         // Build mapping from phase 1 groups
-        let mut state_to_rep: HashMap<usize, usize> = HashMap::with_capacity(states.len());
+        // Note: groups contains state indices (positions in `states`), not state IDs
+        let mut mapping = vec![0usize; states.len()];
         for group in groups.values() {
-            let rep = group[0]; // First state in group is representative
-            for &state in group {
-                state_to_rep.insert(state, rep);
+            let rep_state_id = states[group[0]]; // Convert representative index to state ID
+            for &idx in group {
+                mapping[idx] = rep_state_id;
             }
         }
-        let mapping: Vec<usize> = states.iter().map(|&s| state_to_rep[&s]).collect();
         let num_representatives: usize = mapping.iter().collect::<std::collections::HashSet<_>>().len();
         crate::debug!(3, "State equivalence analysis took {:.2?}. Reduced {} states to {} (phase 1 complete).", 
                       instant.elapsed(), states.len(), num_representatives);
         return mapping;
     }
     
-    // =========================================================================
     // PHASE 2: Full token analysis for ambiguous states
     // =========================================================================
     // Only needed when phase 1 didn't test all tokens (early exit due to all singletons).
     // Use full token analysis for correctness.
     
-    // Collect all ambiguous states
-    let ambiguous_state_list: Vec<usize> = groups.values()
+    // Collect all ambiguous state indices (positions in `states` array)
+    let ambiguous_idx_list: Vec<usize> = groups.values()
         .filter(|g| g.len() > 1)
         .flat_map(|g| g.iter().copied())
         .collect();
@@ -382,9 +315,11 @@ pub fn find_state_equivalence_classes(
     crate::debug!(4, "State equiv phase 2: analyzing {} states with {} tokens (full)", 
                   ambiguous_states, phase2_tokens.len());
     // Compute signatures for all ambiguous states in parallel
-    let ambiguous_signatures: Vec<(usize, u128)> = ambiguous_state_list
+    // Returns (state_index, signature) pairs
+    let ambiguous_signatures: Vec<(usize, u128)> = ambiguous_idx_list
         .par_iter()
-        .map(|&state| {
+        .map(|&idx| {
+            let state = states[idx];  // Convert index to actual state ID
             let mut hash: u128 = 0;
             
             for (token_idx, token) in phase2_tokens.iter().enumerate() {
@@ -422,21 +357,21 @@ pub fn find_state_equivalence_classes(
                 hash = hash.wrapping_add(token_hash.wrapping_mul(phase2_token_weights[token_idx]));
             }
             
-            (state, hash)
+            (idx, hash)  // Return index, not state ID
         })
         .collect();
     
-    // Build state -> signature map
-    let state_to_sig: HashMap<usize, u128> = ambiguous_signatures.iter().copied().collect();
+    // Build index -> signature map
+    let idx_to_sig: HashMap<usize, u128> = ambiguous_signatures.iter().copied().collect();
     
-    // For each group, find the refined grouping
-    let mut state_to_rep: HashMap<usize, usize> = HashMap::with_capacity(states.len());
+    // Build final mapping: mapping[index] = representative state ID
+    let mut mapping = vec![0usize; states.len()];
     
     // Singleton groups: state maps to itself
     for group in groups.values() {
         if group.len() == 1 {
-            let state = group[0];
-            state_to_rep.insert(state, state);
+            let idx = group[0];
+            mapping[idx] = states[idx];  // Map to own state ID
         }
     }
     
@@ -445,16 +380,13 @@ pub fn find_state_equivalence_classes(
         if group.len() > 1 {
             // Group by full signature within this group
             let mut sig_to_rep: HashMap<u128, usize> = HashMap::new();
-            for &state in group {
-                let sig = state_to_sig[&state];
-                let rep = *sig_to_rep.entry(sig).or_insert(state);
-                state_to_rep.insert(state, rep);
+            for &idx in group {
+                let sig = idx_to_sig[&idx];
+                let rep_idx = *sig_to_rep.entry(sig).or_insert(idx);
+                mapping[idx] = states[rep_idx];  // Map to representative's state ID
             }
         }
     }
-    
-    // Build final mapping
-    let mapping: Vec<usize> = states.iter().map(|&s| state_to_rep[&s]).collect();
     
     let num_representatives: usize = mapping.iter().collect::<std::collections::HashSet<_>>().len();
 
