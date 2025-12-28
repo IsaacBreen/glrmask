@@ -73,12 +73,6 @@ impl<'a> GrammarOptimizer<'a> {
         self.grammar.external_name_to_group_id.len()
     }
 
-    fn get_ignore_exprs(&self) -> Vec<Expr> {
-        self.grammar.ignore_terminal_ids.iter()
-            .filter_map(|id| self.grammar.group_id_to_expr.get(&id.0).cloned())
-            .collect()
-    }
-
     fn optimize(&mut self) {
         self.stats.initial_productions = self.grammar.productions.len();
         self.stats.initial_terminals = self.count_terminals();
@@ -146,8 +140,33 @@ impl<'a> GrammarOptimizer<'a> {
         let mut equations: HashMap<String, Rc<RegexTerm>> = HashMap::new();
         
         // Build a combined ignore term from all ignore expressions
-        let ignore_exprs = self.get_ignore_exprs();
-        let ignore_term = if ignore_exprs.is_empty() {
+        let ignore_exprs: Vec<Expr> = self.grammar.ignore_terminal_ids.iter()
+            .filter_map(|id| self.grammar.group_id_to_expr.get(&id.0).cloned())
+            .collect();
+        
+        // Check if the ignore pattern is "explosion-prone".
+        // An explosion-prone pattern has overlapping alternatives that can cause
+        // exponential DFA state growth when inlined at multiple positions.
+        //
+        // Examples:
+        // - Simple WS like `[ \t\n]+` is NOT explosion-prone (no overlapping alternatives)
+        // - Comment patterns like `// [^\n]* | /* [^*]* */` ARE explosion-prone because:
+        //   - Both start with `/`
+        //   - The DFA must track which alternative we're "inside" at each WS* position
+        //   - For n WS* positions, this leads to O(k^n) states where k is number of alternatives
+        //
+        // If the ignore pattern is explosion-prone, we skip inlining it during optimization.
+        // The parser will handle WS between terminals instead.
+        let is_explosion_prone = ignore_exprs.iter().any(|expr| {
+            has_overlapping_alternatives(expr)
+        });
+        
+        if is_explosion_prone {
+            debug!(4, "Detected explosion-prone ignore pattern (overlapping alternatives with unbounded repetition)");
+            debug!(4, "Skipping WS* inlining during optimization to prevent tokenizer DFA explosion");
+        }
+        
+        let ignore_term = if ignore_exprs.is_empty() || is_explosion_prone {
             None
         } else if ignore_exprs.len() == 1 {
             Some(Rc::new(RegexTerm::Star(Rc::new(RegexTerm::Concrete(ignore_exprs[0].clone())))))
@@ -287,8 +306,9 @@ impl<'a> GrammarOptimizer<'a> {
         };
         debug!(5, "Converted to Expr in {:?}", convert_start.elapsed());
         
-        // If we have ignore terminals, wrap the final expression
-        let final_expr = if !ignore_exprs.is_empty() {
+        // If we have ignore terminals and they're not explosion-prone, wrap the final expression
+        // with WS* at the start and end. This allows the grammar to accept leading/trailing WS.
+        let final_expr = if !ignore_exprs.is_empty() && !is_explosion_prone {
             let ignore_choice = if ignore_exprs.len() == 1 {
                 ignore_exprs[0].clone()
             } else {
@@ -2545,5 +2565,145 @@ mod tests {
         // Verify it compiles
         use crate::interface::CompiledGrammar;
         let _ = CompiledGrammar::from_definition(std::sync::Arc::new(grammar));
+    }
+}
+/// Check if an expression has overlapping alternatives that could cause DFA explosion.
+/// 
+/// An expression is "explosion-prone" if it has a Choice where:
+/// 1. Multiple alternatives have the same first byte (overlapping prefixes)
+/// 2. The alternatives have different termination conditions (e.g., one ends at '\n', another at '*/')
+/// 3. The expression contains unbounded repetition (star/plus)
+///
+/// Example of explosion-prone pattern:
+/// ```text
+/// // [^\n]*       # line comment: starts with '/', ends at '\n'
+/// /* [^*]* */    # block comment: starts with '/', ends at '*/'
+/// ```
+/// Both start with '/', so the DFA must track which alternative we're "inside".
+/// When this pattern appears at multiple positions (e.g., WS* A WS* B WS* C),
+/// the number of states grows exponentially: O(k^n) where k is alternatives and n is positions.
+fn has_overlapping_alternatives(expr: &Expr) -> bool {
+    use crate::datastructures::u8set::U8Set;
+    
+    // First, check if the expression contains any unbounded repetition
+    if !has_unbounded_repetition(expr) {
+        return false;
+    }
+    
+    // Then check if there are overlapping alternatives
+    has_overlapping_choice(expr)
+}
+
+/// Check if an expression contains any star (*) or plus (+) quantifier.
+fn has_unbounded_repetition(expr: &Expr) -> bool {
+    match expr {
+        Expr::Quantifier(inner, q_type) => {
+            matches!(q_type, QuantifierType::ZeroOrMore | QuantifierType::OneOrMore)
+                || has_unbounded_repetition(inner)
+        }
+        Expr::Seq(children) | Expr::Choice(children) => {
+            children.iter().any(|c| has_unbounded_repetition(c))
+        }
+        Expr::Shared(inner) => has_unbounded_repetition(inner),
+        Expr::U8Seq(_) | Expr::U8Class(_) | Expr::Epsilon => false,
+    }
+}
+
+/// Check if an expression has a Choice with overlapping first bytes.
+fn has_overlapping_choice(expr: &Expr) -> bool {
+    use crate::datastructures::u8set::U8Set;
+    
+    match expr {
+        Expr::Choice(alternatives) => {
+            // Get first bytes of each alternative
+            let first_bytes: Vec<U8Set> = alternatives.iter()
+                .map(|alt| get_first_bytes(alt))
+                .collect();
+            
+            // Check for overlap between any pair of alternatives
+            for i in 0..first_bytes.len() {
+                for j in (i + 1)..first_bytes.len() {
+                    let intersection = first_bytes[i].intersection(&first_bytes[j]);
+                    if !intersection.is_empty() {
+                        // Found overlapping alternatives
+                        // Now check if they have different "end conditions"
+                        // (This is a conservative check - we assume any overlap is problematic)
+                        return true;
+                    }
+                }
+            }
+            
+            // Also recursively check children
+            alternatives.iter().any(|alt| has_overlapping_choice(alt))
+        }
+        Expr::Seq(children) => children.iter().any(|c| has_overlapping_choice(c)),
+        Expr::Quantifier(inner, _) => has_overlapping_choice(inner),
+        Expr::Shared(inner) => has_overlapping_choice(inner),
+        Expr::U8Seq(_) | Expr::U8Class(_) | Expr::Epsilon => false,
+    }
+}
+
+/// Get the set of possible first bytes for an expression.
+fn get_first_bytes(expr: &Expr) -> crate::datastructures::u8set::U8Set {
+    use crate::datastructures::u8set::U8Set;
+    
+    match expr {
+        Expr::U8Seq(bytes) => {
+            if bytes.is_empty() {
+                U8Set::none()
+            } else {
+                U8Set::from_u8(bytes[0])
+            }
+        }
+        Expr::U8Class(set) => set.clone(),
+        Expr::Epsilon => U8Set::none(),
+        Expr::Seq(children) => {
+            if children.is_empty() {
+                U8Set::none()
+            } else {
+                // For a sequence, the first bytes are the first bytes of the first non-epsilon child
+                for child in children {
+                    let first = get_first_bytes(child);
+                    if !first.is_empty() || !can_be_empty(child) {
+                        return first;
+                    }
+                }
+                U8Set::none()
+            }
+        }
+        Expr::Choice(alternatives) => {
+            // Union of first bytes of all alternatives
+            let mut result = U8Set::none();
+            for alt in alternatives {
+                result = result.union(&get_first_bytes(alt));
+            }
+            result
+        }
+        Expr::Quantifier(inner, q_type) => {
+            match q_type {
+                QuantifierType::ZeroOrMore | QuantifierType::ZeroOrOne => {
+                    // Can be empty, so first bytes might be from what follows
+                    // For our purposes, just return the inner's first bytes
+                    get_first_bytes(inner)
+                }
+                QuantifierType::OneOrMore => get_first_bytes(inner),
+            }
+        }
+        Expr::Shared(inner) => get_first_bytes(inner),
+    }
+}
+
+/// Check if an expression can match the empty string (epsilon).
+fn can_be_empty(expr: &Expr) -> bool {
+    match expr {
+        Expr::Epsilon => true,
+        Expr::U8Seq(bytes) => bytes.is_empty(),
+        Expr::U8Class(_) => false, // Must match exactly one byte
+        Expr::Seq(children) => children.iter().all(|c| can_be_empty(c)),
+        Expr::Choice(alternatives) => alternatives.iter().any(|a| can_be_empty(a)),
+        Expr::Quantifier(_, q_type) => {
+            matches!(q_type, QuantifierType::ZeroOrMore | QuantifierType::ZeroOrOne)
+        }
+        Expr::Shared(inner) => can_be_empty(inner),
     }
 }
