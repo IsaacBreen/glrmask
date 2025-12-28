@@ -418,6 +418,8 @@ mod tests {
         } else {
             println!("Start state has no final_weight");
         }
+
+        println!("Full DWA: {}", dwa);
         
         let state = constraint.init();
         
