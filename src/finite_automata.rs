@@ -888,6 +888,12 @@ impl ExprGroups {
         let start_optimize = std::time::Instant::now();
         let optimized = crate::time!("optimize_expr", self.optimize());
         crate::debug!(5, "Optimized expression in {:.2?}", start_optimize.elapsed());
+        
+        // Print the optimized expression for debugging DFA explosion
+        crate::debug!(4, "Optimized expression groups:");
+        for (i, group) in optimized.groups.iter().enumerate() {
+            crate::debug!(4, "  Group {}: {}", i, group.expr);
+        }
 
         crate::debug!(4, "Building NFA");
         let start = std::time::Instant::now();
@@ -2412,15 +2418,25 @@ impl NFA {
         let mut time_lookup = 0u64;
         let mut time_insert = 0u64;
 
-        let mut next_log_threshold = 20_000;
+        let max_dfa_states = std::env::var("MAX_DFA_STATES")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(usize::MAX);
+        
+        let mut next_log_threshold = 1_000;
         while let Some(current_set) = worklist.pop() {
+            if dfa_states.len() >= max_dfa_states {
+                panic!("DFA state limit {} reached after {:.2?}. worklist: {}, max_subset_size: {}", 
+                    max_dfa_states, start_time.elapsed(), worklist.len(), stats.max_subset_size);
+            }
+            
             stats.max_worklist_len = stats.max_worklist_len.max(worklist.len() + 1);
             let current_subset_len = current_set.len();
             stats.max_subset_size = stats.max_subset_size.max(current_subset_len);
             stats.total_subset_size += current_subset_len as u64;
             if dfa_states.len() >= next_log_threshold {
-                crate::debug!(6, "DFA progress: {} states, worklist {}, subset size {} (max {}), elapsed {:.2?}", dfa_states.len(), worklist.len(), current_subset_len, stats.max_subset_size, start_time.elapsed());
-                next_log_threshold += 20_000;
+                crate::debug!(5, "DFA progress: {} states, worklist {}, subset size {} (max {}), elapsed {:.2?}", dfa_states.len(), worklist.len(), current_subset_len, stats.max_subset_size, start_time.elapsed());
+                next_log_threshold += 1_000;
             }
 
             let current_dfa_state = *dfa_state_map
