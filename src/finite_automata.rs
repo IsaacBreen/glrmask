@@ -3409,41 +3409,58 @@ impl Regex {
 mod tests {
     use super::*;
 
-    /// Test for the expression: "i"** "{" "i"** "}" "i"**
-    /// This tests non-greedy star with a simple pattern.
+    /// Test for the expression: (i*)* { (i*)* } (i*)*
+    /// 
+    /// This test reproduces a bug where double-repeated quantifier (i*)*
+    /// causes the DFA to collapse to a single state that incorrectly
+    /// accepts just "{" or "}" alone.
     #[test]
-    fn test_non_greedy_star_expr() {
-        // Build "i"** "{" "i"** "}" "i"**
-        // Non-greedy is handled at the ExprGroup level, but for regex matching
-        // the DFA structure is what matters
+    fn test_double_star_expr() {
+        // Build (i*)* - a double quantifier with Shared wrapper
+        // The actual structure from GrammarDefinition is:
+        // Quantifier(Shared(Quantifier(U8Seq([105]), ZeroOrMore)), ZeroOrMore)
         let i_star = Expr::Quantifier(
             Box::new(Expr::U8Seq(vec![b'i'])),
             QuantifierType::ZeroOrMore,
         );
+        let i_star_star = Expr::Quantifier(
+            Box::new(Expr::Shared(Arc::new(i_star))),
+            QuantifierType::ZeroOrMore,
+        );
         
+        // Build (i*)* { (i*)* } (i*)*
         let expr = Expr::Seq(vec![
-            i_star.clone(),
+            i_star_star.clone(),
             Expr::U8Seq(vec![b'{']),
-            i_star.clone(),
+            i_star_star.clone(),
             Expr::U8Seq(vec![b'}']),
-            i_star,
+            i_star_star,
         ]);
         
-        let regex = groups![expr].build();
-        println!("Regex: {}", regex);
+        println!("Expr: {}", expr);
         
-        println!("Regex states: {}", regex.iter_states().count());
+        // Build regex directly from the expr
+        let regex = expr.build();
+        println!("Regex:\n{}", regex);
+        println!("Regex states: {}", regex.dfa.states.len());
         
-        // Test that states exist and have expected structure
+        // CRITICAL: The regex MUST have 3 states, not 1
+        assert_eq!(regex.dfa.states.len(), 3, 
+            "Regex should have 3 states. A 1-state DFA is incorrect!");
+        
+        // Verify start state structure
         let start_state = regex.dfa.start_state;
-        println!("Start state: {:?}", start_state);
-        
-        // Test transitions from start state
         let dfa_start = &regex.dfa.states[start_state];
-        println!("Start state transitions: {:?}", dfa_start.transitions);
         
-        // Verify we can reach states by following '{' and 'i' transitions
-        assert!(!dfa_start.transitions.is_empty(), 
-            "Start state should have transitions");
+        // Start state should NOT be a finalizer (can't accept empty string)
+        assert!(dfa_start.finalizers.is_empty(),
+            "Start state should NOT be a finalizer - empty string is not valid!");
+        
+        // Start state: 'i' should loop to 0, '{' should go to state 1 (not 0!)
+        let i_target = dfa_start.transitions.get(b'i');
+        let brace_target = dfa_start.transitions.get(b'{');
+        
+        assert_eq!(i_target, Some(&0), "'i' from start should go to state 0");
+        assert_eq!(brace_target, Some(&1), "'{{' from start should go to state 1, not 0!");
     }
 }
