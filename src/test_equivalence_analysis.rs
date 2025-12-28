@@ -161,17 +161,39 @@ mod tests {
             println!("  Class {}: {:?}", i, content);
         }
         
-        // Basic sanity check: ensure we didn't crash and got some results
-        // Ideally, different tokens should be separated.
-        // 'n', 'a', 'm', 'e' are used in "name", so they might behave similarly in some states
-        // but 's', 't', 'r', 'i', 'g' are not in "name", so they only appear in string content or hex?
-        // Actually, 't' and 'r' are in 'fnrt' escape. 'r' is in '\r' (ws).
-        // Check if anything merged that shouldn't have.
+        // Expected equivalence classes (from test_small_vocab_only_brace_valid_at_start):
+        // - internal 0 -> [2, 15] = '"', '":'
+        // - internal 1 -> [0, 1, 3, 4] = '{', '}', ':', ','
+        // - internal 2 -> [6, 8] = 'a', 'e'
+        // - internal 3 -> [7, 9, 12, 13] = 'm', 's', 'i', 'g'
+        // - internal 4 -> [5, 10, 11] = 'n', 't', 'r'
+        // - internal 5 -> [14] = '{"'
         
-        // Just verify we computed something valid
-        assert!(!classes.is_empty());
+        // Build expected classes as sets of token indices
+        let expected: Vec<Vec<usize>> = vec![
+            vec![2, 15],       // '"', '":'
+            vec![0, 1, 3, 4],  // '{', '}', ':', ','
+            vec![6, 8],        // 'a', 'e'
+            vec![7, 9, 12, 13], // 'm', 's', 'i', 'g'
+            vec![5, 10, 11],   // 'n', 't', 'r'
+            vec![14],          // '{"'
+        ];
         
-        // This test replicates a verified crash/issue, so if we reach here, we're good.
-        // (Assuming the issue was a panic or infinite loop in `compute_combined_equivalence`)
+        // Convert both to sorted format for comparison
+        let mut expected_sorted: Vec<Vec<usize>> = expected.iter()
+            .map(|c| { let mut v = c.clone(); v.sort(); v })
+            .collect();
+        expected_sorted.sort();
+        
+        let mut actual_sorted: Vec<Vec<usize>> = classes.iter()
+            .map(|c| { let mut v = c.clone(); v.sort(); v })
+            .collect();
+        actual_sorted.sort();
+        
+        assert_eq!(actual_sorted, expected_sorted,
+            "Equivalence classes don't match expected!\n\
+             Expected: {:?}\n\
+             Actual:   {:?}",
+            expected_sorted, actual_sorted);
     }
 }
