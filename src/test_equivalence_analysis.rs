@@ -60,12 +60,18 @@ mod tests {
     /// from test_json.rs to verify equivalence classes match expectations.
     ///
     /// Expected equivalence classes:
-    /// - internal 0 -> [2, 15] = '"', '":'
-    /// - internal 1 -> [0, 1, 3, 4] = '{', '}', ':', ','
-    /// - internal 2 -> [6, 8] = 'a', 'e'
-    /// - internal 3 -> [7, 9, 12, 13] = 'm', 's', 'i', 'g'
-    /// - internal 4 -> [5, 10, 11] = 'n', 't', 'r'
-    /// - internal 5 -> [14] = '{"'
+    /// - "{" solo
+    /// - "}" solo
+    /// - "\"" solo
+    /// - ":" solo
+    /// - "," solo
+    /// - "n" solo
+    /// - "a" solo
+    /// - "m" solo
+    /// - "e" solo
+    /// - "{\"" solo
+    /// - "\":" solo
+    /// - "s", "t", "r", "i", "g" together
     #[test]
     fn test_json_schema_equivalence_classes() {
         // Same schema as test_small_vocab_only_brace_valid_at_start
@@ -104,22 +110,20 @@ mod tests {
             println!("  Class {}: {:?}", i, content);
         }
         
-        // Expected equivalence classes (from test_small_vocab_only_brace_valid_at_start):
-        // - internal 0 -> [2, 15] = '"', '":'
-        // - internal 1 -> [0, 1, 3, 4] = '{', '}', ':', ','
-        // - internal 2 -> [6, 8] = 'a', 'e'
-        // - internal 3 -> [7, 9, 12, 13] = 'm', 's', 'i', 'g'
-        // - internal 4 -> [5, 10, 11] = 'n', 't', 'r'
-        // - internal 5 -> [14] = '{"'
-        
         // Build expected classes as sets of token indices
         let expected: Vec<Vec<usize>> = vec![
-            vec![2, 15],       // '"', '":'
-            vec![0, 1, 3, 4],  // '{', '}', ':', ','
-            vec![6, 8],        // 'a', 'e'
-            vec![7, 9, 12, 13], // 'm', 's', 'i', 'g'
-            vec![5, 10, 11],   // 'n', 't', 'r'
-            vec![14],          // '{"'
+            vec![0],           // "{"
+            vec![1],           // "}"
+            vec![2],           // "\""
+            vec![3],           // ":"
+            vec![4],           // ","
+            vec![5],           // "n"
+            vec![6],           // "a"
+            vec![7],           // "m"
+            vec![8],           // "e"
+            vec![14],          // "{\""
+            vec![15],          // "\":"
+            vec![9, 10, 11, 12, 13], // "s", "t", "r", "i", "g"
         ];
         
         // Convert both to sorted format for comparison
