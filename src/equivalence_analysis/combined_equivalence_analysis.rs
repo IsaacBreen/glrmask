@@ -137,6 +137,7 @@ pub fn compute_combined_equivalence(
             
             // Trellis-based ground truth verification for small problems
             if use_trellis_verification {
+                println!("Performing trellis-based state equivalence verification...");
                 let trellis_mapping = super::trellis_equivalence_analysis::find_state_equivalence_classes_trellis(
                     regex,
                     tokens,
