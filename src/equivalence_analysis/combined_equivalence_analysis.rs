@@ -118,7 +118,8 @@ pub fn compute_combined_equivalence(
     #[cfg(test)]
     {
         // VERIFICATION: Check against reference implementations
-        // We only verify if we actually ran the analysis
+        let problem_size = initial_states.len() * tokens.len();
+        let use_trellis_verification = problem_size < 1_000_000;
         
         // 1. Verify State Equivalence
         if initial_states.len() > state_reduction_threshold {
@@ -135,9 +136,30 @@ pub fn compute_combined_equivalence(
             
             if state_classes != ref_classes {
                 panic!(
-                    "State equivalence mismatch!\nFast: {:?}\nRef : {:?}",
+                    "State equivalence mismatch (fast vs reference)!\nFast: {:?}\nRef : {:?}",
                     state_classes, ref_classes
                 );
+            }
+            
+            // Trellis-based ground truth verification for small problems
+            if use_trellis_verification {
+                let trellis_mapping = super::trellis_equivalence_analysis::find_state_equivalence_classes_trellis(
+                    regex,
+                    tokens,
+                    initial_states,
+                );
+                
+                let trellis_classes = super::trellis_equivalence_analysis::mapping_to_equivalence_classes(
+                    initial_states,
+                    &trellis_mapping,
+                );
+                
+                if state_classes != trellis_classes {
+                    panic!(
+                        "State equivalence mismatch (fast vs trellis ground truth)!\nFast   : {:?}\nTrellis: {:?}",
+                        state_classes, trellis_classes
+                    );
+                }
             }
         }
 
@@ -149,14 +171,32 @@ pub fn compute_combined_equivalence(
         );
         
         if vocab_classes != ref_vocab_classes {
-             // In case of mismatch, print some details
              let in_fast_not_ref: Vec<_> = vocab_classes.difference(&ref_vocab_classes).collect();
              let in_ref_not_fast: Vec<_> = ref_vocab_classes.difference(&vocab_classes).collect();
              
              panic!(
-                "Vocab equivalence mismatch!\nIn Fast Only: {:?}\nIn Ref Only : {:?}",
+                "Vocab equivalence mismatch (fast vs reference)!\nIn Fast Only: {:?}\nIn Ref Only : {:?}",
                 in_fast_not_ref, in_ref_not_fast
             );
+        }
+        
+        // Trellis-based ground truth verification for small problems
+        if use_trellis_verification {
+            let trellis_vocab_classes = super::trellis_equivalence_analysis::find_vocab_equivalence_classes_trellis(
+                regex,
+                tokens,
+                &reduced_states,
+            );
+            
+            if vocab_classes != trellis_vocab_classes {
+                let in_fast_not_trellis: Vec<_> = vocab_classes.difference(&trellis_vocab_classes).collect();
+                let in_trellis_not_fast: Vec<_> = trellis_vocab_classes.difference(&vocab_classes).collect();
+             
+                panic!(
+                    "Vocab equivalence mismatch (fast vs trellis ground truth)!\nIn Fast Only   : {:?}\nIn Trellis Only: {:?}",
+                    in_fast_not_trellis, in_trellis_not_fast
+                );
+            }
         }
     }
     
