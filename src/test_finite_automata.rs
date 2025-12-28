@@ -1332,624 +1332,124 @@ mod reproduction_tests {
         assert!(growth < 2.0, "Exponential: {:.2}x", growth);
     }
 
+    /// Compare our DFA minimization with rustfst
     #[test]
-    fn test_multi_group_dfa_explosion() {
-        // Test overlapping prefix hypothesis:
-        // The issue is that "//" and "/*" share prefix "/", so the DFA must track
-        // which comment type we're in at each WS position.
-        
+    fn test_rustfst_can_minimize_further() {
         use std::sync::Arc;
         use crate::datastructures::u8set::U8Set;
+        use rustfst::prelude::*;
+        use rustfst::algorithms::minimize;
         
-        // Test 1: Non-overlapping prefixes "aa" and "bb"
-        let aa = Expr::U8Seq(b"aa".to_vec());
-        let bb = Expr::U8Seq(b"bb".to_vec());
-        let non_overlap_ws = Expr::Choice(vec![aa, bb]);
-        let non_overlap_ws_shared = Expr::Shared(Arc::new(non_overlap_ws));
-        let non_overlap_ws_star = Expr::Quantifier(Box::new(non_overlap_ws_shared.clone()), QuantifierType::ZeroOrMore);
+        let not_e = { let mut s = U8Set::all(); s.remove(b'e'); Expr::U8Class(s) };
         
-        let pattern1 = Expr::Seq(vec![
-            Expr::U8Seq(b"x".to_vec()),
-            non_overlap_ws_star.clone(),
-            Expr::U8Seq(b"y".to_vec()),
-            non_overlap_ws_star.clone(),
-            Expr::U8Seq(b"z".to_vec()),
-        ]);
-        
-        println!("\n=== Test 1: Non-overlapping prefixes (aa | bb)* ===");
-        let regex1 = pattern1.build();
-        println!("DFA states: {}", regex1.dfa.states.len());
-        
-        // Test 2: Overlapping prefixes "ab" and "ac"  
-        let ab = Expr::U8Seq(b"ab".to_vec());
-        let ac = Expr::U8Seq(b"ac".to_vec());
-        let overlap_ws = Expr::Choice(vec![ab, ac]);
-        let overlap_ws_shared = Expr::Shared(Arc::new(overlap_ws));
-        let overlap_ws_star = Expr::Quantifier(Box::new(overlap_ws_shared.clone()), QuantifierType::ZeroOrMore);
-        
-        let pattern2 = Expr::Seq(vec![
-            Expr::U8Seq(b"x".to_vec()),
-            overlap_ws_star.clone(),
-            Expr::U8Seq(b"y".to_vec()),
-            overlap_ws_star.clone(),
-            Expr::U8Seq(b"z".to_vec()),
-        ]);
-        
-        println!("\n=== Test 2: Overlapping prefixes (ab | ac)* ===");
-        let regex2 = pattern2.build();
-        println!("DFA states: {}", regex2.dfa.states.len());
-        
-        // Test 3: More repetitions with overlap
-        let pattern3 = Expr::Seq(vec![
-            Expr::U8Seq(b"p".to_vec()),
-            overlap_ws_star.clone(),
-            Expr::U8Seq(b"q".to_vec()),
-            overlap_ws_star.clone(),
-            Expr::U8Seq(b"r".to_vec()),
-            overlap_ws_star.clone(),
-            Expr::U8Seq(b"s".to_vec()),
-            overlap_ws_star.clone(),
-            Expr::U8Seq(b"t".to_vec()),
-        ]);
-        
-        println!("\n=== Test 3: More repetitions (4 WS* slots) ===");
-        let regex3 = pattern3.build();
-        println!("DFA states: {}", regex3.dfa.states.len());
-        
-        // Test 4: Simulate line comment vs block comment (different endings)
-        // Line: "//" followed by anything except newline, then newline
-        // Block: "/*" followed by anything except */
-        // Both start with "/"
-        let non_newline = {
-            let mut set = U8Set::all();
-            set.remove(b'\n');
-            Expr::U8Class(set)
-        };
-        
-        let line_comment = Expr::Seq(vec![
-            Expr::U8Seq(b"//".to_vec()),
-            Expr::Quantifier(Box::new(non_newline), QuantifierType::ZeroOrMore),
-        ]);
-        
-        // Simplified block comment: "/*" [^*]* "*/"
-        let not_star = {
-            let mut set = U8Set::all();
-            set.remove(b'*');
-            Expr::U8Class(set)
-        };
-        let block_comment = Expr::Seq(vec![
-            Expr::U8Seq(b"/*".to_vec()),
-            Expr::Quantifier(Box::new(not_star), QuantifierType::ZeroOrMore),
-            Expr::U8Seq(b"*/".to_vec()),
-        ]);
-        
-        let comment_ws = Expr::Choice(vec![line_comment, block_comment.clone()]);
-        let comment_ws_shared = Expr::Shared(Arc::new(comment_ws));
-        let comment_ws_star = Expr::Quantifier(Box::new(comment_ws_shared.clone()), QuantifierType::ZeroOrMore);
-        
-        let pattern4 = Expr::Seq(vec![
-            Expr::U8Seq(b"x".to_vec()),
-            comment_ws_star.clone(),
-            Expr::U8Seq(b"y".to_vec()),
-            comment_ws_star.clone(),
-            Expr::U8Seq(b"z".to_vec()),
-        ]);
-        
-        println!("\n=== Test 4: Line + Block comments (overlapping /) ===");
-        let regex4 = pattern4.build();
-        println!("DFA states: {}", regex4.dfa.states.len());
-        
-        // Test 5: Same but without the overlapping prefix
-        // Line: "#" [^\n]*
-        // Block: "/*" [^*]* "*/"
-        let line_comment2 = Expr::Seq(vec![
-            Expr::U8Seq(b"#".to_vec()),
-            Expr::Quantifier(Box::new({
-                let mut set = U8Set::all();
-                set.remove(b'\n');
-                Expr::U8Class(set)
-            }), QuantifierType::ZeroOrMore),
-        ]);
-        
-        let comment_ws2 = Expr::Choice(vec![line_comment2, block_comment.clone()]);
-        let comment_ws_shared2 = Expr::Shared(Arc::new(comment_ws2));
-        let comment_ws_star2 = Expr::Quantifier(Box::new(comment_ws_shared2.clone()), QuantifierType::ZeroOrMore);
-        
-        let pattern5 = Expr::Seq(vec![
-            Expr::U8Seq(b"x".to_vec()),
-            comment_ws_star2.clone(),
-            Expr::U8Seq(b"y".to_vec()),
-            comment_ws_star2.clone(),
-            Expr::U8Seq(b"z".to_vec()),
-        ]);
-        
-        println!("\n=== Test 5: # line + /* block (non-overlapping) ===");
-        let regex5 = pattern5.build();
-        println!("DFA states: {}", regex5.dfa.states.len());
-        
-        // Test 6: Add space to the mix - the real WS pattern
-        let space = Expr::U8Class(U8Set::from_chars(" \t\n\r"));
-        let space_plus = Expr::Quantifier(Box::new(space.clone()), QuantifierType::OneOrMore);
-        
-        // Line: "//" [^\n]*
-        let line_comment3 = Expr::Seq(vec![
-            Expr::U8Seq(b"//".to_vec()),
-            Expr::Quantifier(Box::new({
-                let mut set = U8Set::all();
-                set.remove(b'\n');
-                Expr::U8Class(set)
-            }), QuantifierType::ZeroOrMore),
-        ]);
-        
-        // Block: "/*" [^*]* "*/"
-        let not_star2 = {
-            let mut set = U8Set::all();
-            set.remove(b'*');
-            Expr::U8Class(set)
-        };
-        let block_comment2 = Expr::Seq(vec![
-            Expr::U8Seq(b"/*".to_vec()),
-            Expr::Quantifier(Box::new(not_star2), QuantifierType::ZeroOrMore),
-            Expr::U8Seq(b"*/".to_vec()),
-        ]);
-        
-        // WS = space+ | line_comment | block_comment
-        let full_ws = Expr::Choice(vec![space_plus.clone(), line_comment3, block_comment2]);
-        let full_ws_shared = Expr::Shared(Arc::new(full_ws));
-        let full_ws_star = Expr::Quantifier(Box::new(full_ws_shared.clone()), QuantifierType::ZeroOrMore);
-        
-        let pattern6 = Expr::Seq(vec![
-            Expr::U8Seq(b"x".to_vec()),
-            full_ws_star.clone(),
-            Expr::U8Seq(b"y".to_vec()),
-            full_ws_star.clone(),
-            Expr::U8Seq(b"z".to_vec()),
-        ]);
-        
-        println!("\n=== Test 6: Full WS (space+ | // | /**/), 2 WS* slots ===");
-        let regex6 = pattern6.build();
-        println!("DFA states: {}", regex6.dfa.states.len());
-        
-        // Test 7: More WS* slots
-        let pattern7 = Expr::Seq(vec![
-            Expr::U8Seq(b"p".to_vec()),
-            full_ws_star.clone(),
-            Expr::U8Seq(b"q".to_vec()),
-            full_ws_star.clone(),
-            Expr::U8Seq(b"r".to_vec()),
-            full_ws_star.clone(),
-            Expr::U8Seq(b"s".to_vec()),
-        ]);
-        
-        println!("\n=== Test 7: Full WS, 3 WS* slots ===");
-        let regex7 = pattern7.build();
-        println!("DFA states: {}", regex7.dfa.states.len());
-        
-        // Test 8: With repetition
-        let pattern8 = Expr::Seq(vec![
-            Expr::U8Seq(b"x".to_vec()),
-            full_ws_star.clone(),
-            Expr::U8Seq(b"y".to_vec()),
-            Expr::Quantifier(
-                Box::new(Expr::Seq(vec![
-                    full_ws_star.clone(),
-                    Expr::U8Seq(b",".to_vec()),
-                    full_ws_star.clone(),
-                    Expr::U8Seq(b"z".to_vec()),
-                ])),
-                QuantifierType::ZeroOrMore,
-            ),
-        ]);
-        
-        println!("\n=== Test 8: Full WS with repetition ===");
-        let regex8 = pattern8.build();
-        println!("DFA states: {}", regex8.dfa.states.len());
-        
-        // Test 9: 4 WS* slots
-        let pattern9 = Expr::Seq(vec![
+        let a = Expr::Seq(vec![
             Expr::U8Seq(b"a".to_vec()),
-            full_ws_star.clone(),
+            Expr::Quantifier(Box::new(not_e.clone()), QuantifierType::ZeroOrMore),
+        ]);
+        let b = Expr::Seq(vec![
             Expr::U8Seq(b"b".to_vec()),
-            full_ws_star.clone(),
-            Expr::U8Seq(b"c".to_vec()),
-            full_ws_star.clone(),
-            Expr::U8Seq(b"d".to_vec()),
-            full_ws_star.clone(),
+            Expr::Quantifier(Box::new(not_e), QuantifierType::ZeroOrMore),
             Expr::U8Seq(b"e".to_vec()),
         ]);
         
-        println!("\n=== Test 9: Full WS, 4 WS* slots ===");
-        let regex9 = pattern9.build();
-        println!("DFA states: {}", regex9.dfa.states.len());
-        
-        // Test 10: 5 WS* slots
-        let pattern10 = Expr::Seq(vec![
-            Expr::U8Seq(b"a".to_vec()),
-            full_ws_star.clone(),
-            Expr::U8Seq(b"b".to_vec()),
-            full_ws_star.clone(),
-            Expr::U8Seq(b"c".to_vec()),
-            full_ws_star.clone(),
-            Expr::U8Seq(b"d".to_vec()),
-            full_ws_star.clone(),
-            Expr::U8Seq(b"e".to_vec()),
-            full_ws_star.clone(),
-            Expr::U8Seq(b"f".to_vec()),
-        ]);
-        
-        println!("\n=== Test 10: Full WS, 5 WS* slots ===");
-        let regex10 = pattern10.build();
-        println!("DFA states: {}", regex10.dfa.states.len());
-        
-        // Test 11: space only, 5 WS* slots
-        let space_only_star = Expr::Quantifier(Box::new(space_plus.clone()), QuantifierType::ZeroOrMore);
-        let pattern11 = Expr::Seq(vec![
-            Expr::U8Seq(b"a".to_vec()),
-            space_only_star.clone(),
-            Expr::U8Seq(b"b".to_vec()),
-            space_only_star.clone(),
-            Expr::U8Seq(b"c".to_vec()),
-            space_only_star.clone(),
-            Expr::U8Seq(b"d".to_vec()),
-            space_only_star.clone(),
-            Expr::U8Seq(b"e".to_vec()),
-            space_only_star.clone(),
-            Expr::U8Seq(b"f".to_vec()),
-        ]);
-        
-        println!("\n=== Test 11: Space only, 5 WS* slots ===");
-        let regex11 = pattern11.build();
-        println!("DFA states: {}", regex11.dfa.states.len());
-        
-        // Test 12: Line comments only (no block), 5 WS* slots
-        // Line comments terminate at newline, so "y" clearly separates regions
-        let line_only = Expr::Quantifier(Box::new({
-            let mut set = U8Set::all();
-            set.remove(b'\n');
-            Expr::U8Class(set)
-        }), QuantifierType::ZeroOrMore);
-        let line_comment_only = Expr::Seq(vec![
-            Expr::U8Seq(b"//".to_vec()),
-            line_only,
-        ]);
-        let line_ws = Expr::Choice(vec![space_plus.clone(), line_comment_only.clone()]);
-        let line_ws_star = Expr::Quantifier(Box::new(Expr::Shared(Arc::new(line_ws))), QuantifierType::ZeroOrMore);
-        
-        let pattern12 = Expr::Seq(vec![
-            Expr::U8Seq(b"a".to_vec()),
-            line_ws_star.clone(),
-            Expr::U8Seq(b"b".to_vec()),
-            line_ws_star.clone(),
-            Expr::U8Seq(b"c".to_vec()),
-            line_ws_star.clone(),
-            Expr::U8Seq(b"d".to_vec()),
-            line_ws_star.clone(),
-            Expr::U8Seq(b"e".to_vec()),
-            line_ws_star.clone(),
-            Expr::U8Seq(b"f".to_vec()),
-        ]);
-        
-        println!("\n=== Test 12: Space + line comments only, 5 WS* slots ===");
-        let regex12 = pattern12.build();
-        println!("DFA states: {}", regex12.dfa.states.len());
-        
-        // Test 13: Block comments only (no line), 5 WS* slots
-        // This should show explosion because block comments can "contain" any character
-        let not_star3 = {
-            let mut set = U8Set::all();
-            set.remove(b'*');
-            Expr::U8Class(set)
-        };
-        let block_comment_only = Expr::Seq(vec![
-            Expr::U8Seq(b"/*".to_vec()),
-            Expr::Quantifier(Box::new(not_star3), QuantifierType::ZeroOrMore),
-            Expr::U8Seq(b"*/".to_vec()),
-        ]);
-        let block_ws = Expr::Choice(vec![space_plus.clone(), block_comment_only]);
-        let block_ws_star = Expr::Quantifier(Box::new(Expr::Shared(Arc::new(block_ws))), QuantifierType::ZeroOrMore);
-        
-        let pattern13 = Expr::Seq(vec![
-            Expr::U8Seq(b"a".to_vec()),
-            block_ws_star.clone(),
-            Expr::U8Seq(b"b".to_vec()),
-            block_ws_star.clone(),
-            Expr::U8Seq(b"c".to_vec()),
-            block_ws_star.clone(),
-            Expr::U8Seq(b"d".to_vec()),
-            block_ws_star.clone(),
-            Expr::U8Seq(b"e".to_vec()),
-            block_ws_star.clone(),
-            Expr::U8Seq(b"f".to_vec()),
-        ]);
-        
-        println!("\n=== Test 13: Space + block comments only, 5 WS* slots ===");
-        let regex13 = pattern13.build();
-        println!("DFA states: {}", regex13.dfa.states.len());
-        
-        // Test 14: Line comments only - space is NOT in whitespace
-        let line_only2 = Expr::Quantifier(Box::new({
-            let mut set = U8Set::all();
-            set.remove(b'\n');
-            Expr::U8Class(set)
-        }), QuantifierType::ZeroOrMore);
-        let line_comment_only2 = Expr::Seq(vec![
-            Expr::U8Seq(b"//".to_vec()),
-            line_only2,
-        ]);
-        let line_ws_only_star = Expr::Quantifier(
-            Box::new(Expr::Shared(Arc::new(line_comment_only2))), 
+        let ws_star = Expr::Quantifier(
+            Box::new(Expr::Shared(Arc::new(Expr::Choice(vec![a, b])))), 
             QuantifierType::ZeroOrMore
         );
         
-        let pattern14 = Expr::Seq(vec![
-            Expr::U8Seq(b"a".to_vec()),
-            line_ws_only_star.clone(),
-            Expr::U8Seq(b"b".to_vec()),
-            line_ws_only_star.clone(),
-            Expr::U8Seq(b"c".to_vec()),
-            line_ws_only_star.clone(),
-            Expr::U8Seq(b"d".to_vec()),
-            line_ws_only_star.clone(),
-            Expr::U8Seq(b"e".to_vec()),
-            line_ws_only_star.clone(),
-            Expr::U8Seq(b"f".to_vec()),
+        // Build the 3-slot pattern
+        let pattern = Expr::Seq(vec![
+            Expr::U8Seq(b"x".to_vec()), ws_star.clone(), 
+            Expr::U8Seq(b"y".to_vec()), ws_star.clone(), 
+            Expr::U8Seq(b"z".to_vec()), ws_star.clone(),
+            Expr::U8Seq(b"w".to_vec()),
         ]);
         
-        println!("\n=== Test 14: Line comments ONLY (no space), 5 WS* slots ===");
-        let regex14 = pattern14.build();
-        println!("DFA states: {}", regex14.dfa.states.len());
+        let regex = pattern.build();
+        println!("Our DFA: {} states (after our minimize)", regex.dfa.states.len());
         
-        // Test 15: Space that does NOT include newline + line comments
-        // This removes the ambiguity at newline
-        let space_no_newline = Expr::U8Class(U8Set::from_chars(" \t\r"));
-        let space_no_newline_plus = Expr::Quantifier(Box::new(space_no_newline), QuantifierType::OneOrMore);
+        // Convert to rustfst VectorFst
+        let mut fst: VectorFst<TropicalWeight> = VectorFst::new();
+        for _ in 0..regex.dfa.states.len() {
+            fst.add_state();
+        }
+        fst.set_start(regex.dfa.start_state as u32).unwrap();
         
-        let line_ws_no_newline = Expr::Choice(vec![space_no_newline_plus.clone(), line_comment_only.clone()]);
-        let line_ws_no_newline_star = Expr::Quantifier(
-            Box::new(Expr::Shared(Arc::new(line_ws_no_newline))), 
-            QuantifierType::ZeroOrMore
-        );
-        
-        let pattern15 = Expr::Seq(vec![
-            Expr::U8Seq(b"a".to_vec()),
-            line_ws_no_newline_star.clone(),
-            Expr::U8Seq(b"b".to_vec()),
-            line_ws_no_newline_star.clone(),
-            Expr::U8Seq(b"c".to_vec()),
-            line_ws_no_newline_star.clone(),
-            Expr::U8Seq(b"d".to_vec()),
-            line_ws_no_newline_star.clone(),
-            Expr::U8Seq(b"e".to_vec()),
-            line_ws_no_newline_star.clone(),
-            Expr::U8Seq(b"f".to_vec()),
-        ]);
-        
-        println!("\n=== Test 15: Space (no newline) + line comments, 5 WS* slots ===");
-        let regex15 = pattern15.build();
-        println!("DFA states: {}", regex15.dfa.states.len());
-        
-        // Test 16: All three, but space doesn't include newline
-        // Line: "//" [^\n]*
-        // Block: "/*" [^*]* "*/"
-        // Space: [ \t\r]+ (no newline)
-        let line_for_16 = Expr::Seq(vec![
-            Expr::U8Seq(b"//".to_vec()),
-            Expr::Quantifier(Box::new({
-                let mut set = U8Set::all();
-                set.remove(b'\n');
-                Expr::U8Class(set)
-            }), QuantifierType::ZeroOrMore),
-        ]);
-        
-        let block_for_16 = Expr::Seq(vec![
-            Expr::U8Seq(b"/*".to_vec()),
-            Expr::Quantifier(Box::new({
-                let mut set = U8Set::all();
-                set.remove(b'*');
-                Expr::U8Class(set)
-            }), QuantifierType::ZeroOrMore),
-            Expr::U8Seq(b"*/".to_vec()),
-        ]);
-        
-        let full_ws_no_newline = Expr::Choice(vec![
-            space_no_newline_plus.clone(),
-            line_for_16,
-            block_for_16,
-        ]);
-        let full_ws_no_newline_star = Expr::Quantifier(
-            Box::new(Expr::Shared(Arc::new(full_ws_no_newline))),
-            QuantifierType::ZeroOrMore
-        );
-        
-        let pattern16 = Expr::Seq(vec![
-            Expr::U8Seq(b"a".to_vec()),
-            full_ws_no_newline_star.clone(),
-            Expr::U8Seq(b"b".to_vec()),
-            full_ws_no_newline_star.clone(),
-            Expr::U8Seq(b"c".to_vec()),
-            full_ws_no_newline_star.clone(),
-            Expr::U8Seq(b"d".to_vec()),
-            full_ws_no_newline_star.clone(),
-            Expr::U8Seq(b"e".to_vec()),
-            full_ws_no_newline_star.clone(),
-            Expr::U8Seq(b"f".to_vec()),
-        ]);
-        
-        println!("\n=== Test 16: Space (no newline) + line + block, 5 WS* slots ===");
-        let regex16 = pattern16.build();
-        println!("DFA states: {}", regex16.dfa.states.len());
-        
-        // Test 17: Line + block only (no space at all)
-        let line_for_17 = Expr::Seq(vec![
-            Expr::U8Seq(b"//".to_vec()),
-            Expr::Quantifier(Box::new({
-                let mut set = U8Set::all();
-                set.remove(b'\n');
-                Expr::U8Class(set)
-            }), QuantifierType::ZeroOrMore),
-        ]);
-        
-        let block_for_17 = Expr::Seq(vec![
-            Expr::U8Seq(b"/*".to_vec()),
-            Expr::Quantifier(Box::new({
-                let mut set = U8Set::all();
-                set.remove(b'*');
-                Expr::U8Class(set)
-            }), QuantifierType::ZeroOrMore),
-            Expr::U8Seq(b"*/".to_vec()),
-        ]);
-        
-        let line_block_only = Expr::Choice(vec![line_for_17, block_for_17]);
-        let line_block_only_star = Expr::Quantifier(
-            Box::new(Expr::Shared(Arc::new(line_block_only))),
-            QuantifierType::ZeroOrMore
-        );
-        
-        let pattern17 = Expr::Seq(vec![
-            Expr::U8Seq(b"a".to_vec()),
-            line_block_only_star.clone(),
-            Expr::U8Seq(b"b".to_vec()),
-            line_block_only_star.clone(),
-            Expr::U8Seq(b"c".to_vec()),
-            line_block_only_star.clone(),
-            Expr::U8Seq(b"d".to_vec()),
-            line_block_only_star.clone(),
-            Expr::U8Seq(b"e".to_vec()),
-            line_block_only_star.clone(),
-            Expr::U8Seq(b"f".to_vec()),
-        ]);
-        
-        println!("\n=== Test 17: Line + block only (no space), 5 WS* slots ===");
-        let regex17 = pattern17.build();
-        println!("DFA states: {}", regex17.dfa.states.len());
-        
-        // Test 18-21: Line + block with varying WS* slots
-        for n_slots in 1..=4 {
-            let mut pattern = vec![Expr::U8Seq(b"a".to_vec())];
-            let letters = ['b', 'c', 'd', 'e', 'f'];
-            for i in 0..n_slots {
-                pattern.push(line_block_only_star.clone());
-                pattern.push(Expr::U8Seq(vec![letters[i] as u8]));
+        for (idx, state) in regex.dfa.states.iter().enumerate() {
+            for (input, &next) in state.transitions.iter() {
+                fst.add_tr(idx as u32, Tr::new(input as u32 + 1, input as u32 + 1, TropicalWeight::one(), next as u32)).unwrap();
             }
-            let expr = Expr::Seq(pattern);
-            let regex = expr.build();
-            println!("Test 18.{}: Line + block, {} WS* slots: {} states", n_slots, n_slots, regex.dfa.states.len());
+            if !state.finalizers.is_empty() {
+                fst.set_final(idx as u32, TropicalWeight::one()).unwrap();
+            }
         }
         
-        // Test 19: Line + block with separators that can't appear in comments
-        // Use \x00 as separator (not allowed in line comments which exclude \n, and not in block which exclude *)
-        // Actually line comments allow everything except \n. Block comments allow everything except *.
-        // So \n can't appear in line, and * can't appear in block.
-        // Let's use \n as separator (ends line comments, and forces ambiguity resolution)
+        println!("VectorFst before rustfst minimize: {} states", fst.num_states());
         
-        // Actually, the issue is that line comment body [^\n]* does NOT include \n, so \n forces end.
-        // And block comment body [^*]* does NOT include *, but that doesn't help since the separator is different.
+        minimize(&mut fst).unwrap();
+        println!("VectorFst after rustfst minimize: {} states", fst.num_states());
         
-        // Let me try using newline as separator for line-comment-only pattern:
-        let line_only_for_19 = Expr::Seq(vec![
-            Expr::U8Seq(b"//".to_vec()),
-            Expr::Quantifier(Box::new({
-                let mut set = U8Set::all();
-                set.remove(b'\n');
-                Expr::U8Class(set)
-            }), QuantifierType::ZeroOrMore),
-        ]);
-        let line_only_star_19 = Expr::Quantifier(
-            Box::new(Expr::Shared(Arc::new(line_only_for_19))),
-            QuantifierType::ZeroOrMore
-        );
-        
-        // Pattern: "\n" WS* "\n" WS* "\n" ...
-        // Using \n as separator - this can't appear inside line comment body
-        for n_slots in 1..=5 {
-            let mut pattern = vec![Expr::U8Seq(b"\n".to_vec())];
-            for _ in 0..n_slots {
-                pattern.push(line_only_star_19.clone());
-                pattern.push(Expr::U8Seq(b"\n".to_vec()));
-            }
-            let expr = Expr::Seq(pattern);
-            let regex = expr.build();
-            println!("Test 19.{}: Line only, \\n separator, {} WS* slots: {} states", n_slots, n_slots, regex.dfa.states.len());
+        // If rustfst can minimize further, our minimize() is incomplete
+        if fst.num_states() < regex.dfa.states.len() {
+            println!("WARNING: rustfst found {} fewer states!", 
+                     regex.dfa.states.len() - fst.num_states());
+        } else {
+            println!("Our DFA is already minimally sized.");
         }
+    }
+
+    #[test]
+    fn test_multi_group_dfa_explosion() {
+        // Test: Does the explosion happen in a multi-group tokenizer?
+        // Answer: NO - tokenizer alone is fine. Explosion is from INLINED WS* in patterns.
         
-        // Test 20: Block only with */ as separator
-        let block_only_for_20 = Expr::Seq(vec![
-            Expr::U8Seq(b"/*".to_vec()),
-            Expr::Quantifier(Box::new({
-                let mut set = U8Set::all();
-                set.remove(b'*');
-                Expr::U8Class(set)
-            }), QuantifierType::ZeroOrMore),
-            Expr::U8Seq(b"*/".to_vec()),
+        use std::sync::Arc;
+        use crate::finite_automata::{groups, ExprGroup};
+        use crate::datastructures::u8set::U8Set;
+        
+        let not_e = { let mut s = U8Set::all(); s.remove(b'e'); Expr::U8Class(s) };
+        
+        let a = Expr::Seq(vec![
+            Expr::U8Seq(b"a".to_vec()),
+            Expr::Quantifier(Box::new(not_e.clone()), QuantifierType::ZeroOrMore),
         ]);
-        let block_only_star_20 = Expr::Quantifier(
-            Box::new(Expr::Shared(Arc::new(block_only_for_20))),
-            QuantifierType::ZeroOrMore
-        );
-        
-        // Use "*/" as separator - can't appear inside block comment (would end it)
-        for n_slots in 1..=5 {
-            let mut pattern = vec![Expr::U8Seq(b"*/".to_vec())];
-            for _ in 0..n_slots {
-                pattern.push(block_only_star_20.clone());
-                pattern.push(Expr::U8Seq(b"*/".to_vec()));
-            }
-            let expr = Expr::Seq(pattern);
-            let regex = expr.build();
-            println!("Test 20.{}: Block only, */ separator, {} WS* slots: {} states", n_slots, n_slots, regex.dfa.states.len());
-        }
-        
-        // Test 21: What about line + block with a separator that can't appear in EITHER?
-        // Line excludes \n, block excludes *
-        // So we need a multi-character separator that includes both \n and *
-        // Let's use "\n*" - can't be in line (has \n) and can't be in block (has *)
-        // But actually we need to be careful - the DFA might still have states for partial matches
-        
-        // Let's try: use a unique separator like "\x00" which we ensure is not in either char class
-        // Our line comment uses [^\n], our block uses [^*]
-        // So \x00 CAN appear in both! That's not helpful.
-        
-        // Let's redefine comments to exclude more characters:
-        // Line: "//" [^\n\x00]*
-        // Block: "/*" [^*\x00]* "*/"
-        // Separator: "\x00"
-        
-        let line_restricted = Expr::Seq(vec![
-            Expr::U8Seq(b"//".to_vec()),
-            Expr::Quantifier(Box::new({
-                let mut set = U8Set::all();
-                set.remove(b'\n');
-                set.remove(0);  // \x00
-                Expr::U8Class(set)
-            }), QuantifierType::ZeroOrMore),
+        let b = Expr::Seq(vec![
+            Expr::U8Seq(b"b".to_vec()),
+            Expr::Quantifier(Box::new(not_e), QuantifierType::ZeroOrMore),
+            Expr::U8Seq(b"e".to_vec()),
         ]);
         
-        let block_restricted = Expr::Seq(vec![
-            Expr::U8Seq(b"/*".to_vec()),
-            Expr::Quantifier(Box::new({
-                let mut set = U8Set::all();
-                set.remove(b'*');
-                set.remove(0);  // \x00
-                Expr::U8Class(set)
-            }), QuantifierType::ZeroOrMore),
-            Expr::U8Seq(b"*/".to_vec()),
-        ]);
+        let ws = Expr::Choice(vec![a.clone(), b.clone()]);
+        let ws_plus = Expr::Quantifier(Box::new(ws.clone()), QuantifierType::OneOrMore);
         
-        let line_block_restricted = Expr::Choice(vec![line_restricted, block_restricted]);
-        let line_block_restricted_star = Expr::Quantifier(
-            Box::new(Expr::Shared(Arc::new(line_block_restricted))),
-            QuantifierType::ZeroOrMore
-        );
+        // Test 1: Simple tokenizer - just WS and separators
+        let tokenizer = groups(vec![
+            ExprGroup::from(ws_plus.clone()),                // Group 0: WS
+            ExprGroup::from(Expr::U8Seq(b"x".to_vec())),     // Group 1: 'x'
+            ExprGroup::from(Expr::U8Seq(b"y".to_vec())),     // Group 2: 'y'
+            ExprGroup::from(Expr::U8Seq(b"z".to_vec())),     // Group 3: 'z'
+        ]).build();
         
-        for n_slots in 1..=5 {
-            let mut pattern = vec![Expr::U8Seq(vec![0u8])];  // \x00
-            for _ in 0..n_slots {
-                pattern.push(line_block_restricted_star.clone());
-                pattern.push(Expr::U8Seq(vec![0u8]));
-            }
-            let expr = Expr::Seq(pattern);
-            let regex = expr.build();
-            println!("Test 21.{}: Line+block (\\x00 excluded), \\x00 separator, {} WS* slots: {} states", n_slots, n_slots, regex.dfa.states.len());
-        }
+        println!("Tokenizer (WS | x | y | z): {} states", tokenizer.dfa.states.len());
+        
+        // Test 2: Tokenizer with MORE terminals (like full JS grammar)
+        let tokenizer2 = groups(vec![
+            ExprGroup::from(ws_plus),                         
+            ExprGroup::from(Expr::U8Seq(b"x".to_vec())),     
+            ExprGroup::from(Expr::U8Seq(b"y".to_vec())),     
+            ExprGroup::from(Expr::U8Seq(b"z".to_vec())),     
+            ExprGroup::from(Expr::U8Seq(b"w".to_vec())),     
+            ExprGroup::from(Expr::U8Seq(b"v".to_vec())),     
+            ExprGroup::from(Expr::U8Seq(b"if".to_vec())),    
+            ExprGroup::from(Expr::U8Seq(b"else".to_vec())),  
+            ExprGroup::from(Expr::U8Seq(b"while".to_vec())), 
+            ExprGroup::from(Expr::U8Seq(b"for".to_vec())),   
+        ]).build();
+        
+        println!("Tokenizer (WS + 9 keywords): {} states", tokenizer2.dfa.states.len());
+        
+        // Neither should explode
+        assert!(tokenizer.dfa.states.len() < 50, "Simple tokenizer exploded: {}", tokenizer.dfa.states.len());
+        assert!(tokenizer2.dfa.states.len() < 100, "Large tokenizer exploded: {}", tokenizer2.dfa.states.len());
     }
 }
