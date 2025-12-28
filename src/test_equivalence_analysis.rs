@@ -114,8 +114,8 @@ mod tests {
         "#}.to_string();
         let gd = GrammarDefinition::from_ebnf(&ebnf).expect("Grammar should build");
         println!("Grammar definition: {}", gd);
-        for (id, expr) in gd.group_id_to_expr {
-            println!("  Group {}: {}", id, expr);
+        for (id, expr) in &gd.group_id_to_expr {
+            println!("  Group {}: {}", id, expr.clone().build());
         }
 
         // Build the tokenizer from the grammar
