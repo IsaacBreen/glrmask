@@ -110,15 +110,15 @@ mod tests {
         let ebnf = indoc! {r#"
             root ::= '{'  '}' ;
             #![ignore(WS)]
-            WS ::= ( ( ' ' | '	' | '\n' ) )* ;
+            WS ::= ' '* ;
         "#}.to_string();
         let gd = GrammarDefinition::from_ebnf(&ebnf).expect("Grammar should build");
+        println!("Grammar definition: {}", gd);
 
         // Build the tokenizer from the grammar
         let compiled = CompiledGrammar::from_definition(Arc::new(gd));
-        println!("Grammar: {}", compiled);
         let tokenizer = &compiled.tokenizer;
-        println!("Tokenizer: {:?}", tokenizer);
+        println!("Compiled grammar: {}", compiled);
 
         // Same vocab as test_small_vocab_only_brace_valid_at_start
         let vocab_strs = vec![
