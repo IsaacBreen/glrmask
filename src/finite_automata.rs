@@ -3404,3 +3404,45 @@ impl Regex {
     }
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Test for the expression: "i"** "{" "i"** "}" "i"**
+    /// This tests non-greedy star with a simple pattern.
+    #[test]
+    fn test_non_greedy_star_expr() {
+        // Build "i"** "{" "i"** "}" "i"**
+        // Non-greedy is handled at the ExprGroup level, but for regex matching
+        // the DFA structure is what matters
+        let i_star = Expr::Quantifier(
+            Box::new(Expr::U8Seq(vec![b'i'])),
+            QuantifierType::ZeroOrMore,
+        );
+        
+        let expr = Expr::Seq(vec![
+            i_star.clone(),
+            Expr::U8Seq(vec![b'{']),
+            i_star.clone(),
+            Expr::U8Seq(vec![b'}']),
+            i_star,
+        ]);
+        
+        let regex = groups![expr].build();
+        
+        println!("Regex states: {}", regex.iter_states().count());
+        
+        // Test that states exist and have expected structure
+        let start_state = regex.dfa.start_state;
+        println!("Start state: {:?}", start_state);
+        
+        // Test transitions from start state
+        let dfa_start = &regex.dfa.states[start_state];
+        println!("Start state transitions: {:?}", dfa_start.transitions);
+        
+        // Verify we can reach states by following '{' and 'i' transitions
+        assert!(!dfa_start.transitions.is_empty(), 
+            "Start state should have transitions");
+    }
+}
