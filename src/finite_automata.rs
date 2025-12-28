@@ -546,7 +546,7 @@ impl JSONConvertible for Expr {
 }
 
 // QuantifierType is a unit-only enum - derive macro produces string serialization
-#[derive(Debug, Clone, Eq, PartialEq, PartialOrd, Ord, Hash, JSONConvertible)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, PartialOrd, Ord, Hash, JSONConvertible)]
 pub enum QuantifierType {
     ZeroOrMore, // *
     OneOrMore,  // +
@@ -883,9 +883,15 @@ impl ExprGroups {
         let stats = self.get_stats();
         crate::debug!(5, "Expr Stats: {}", stats);
 
+        // Optimize the expression first to simplify nested quantifiers
+        crate::debug!(4, "Optimizing expression");
+        let start_optimize = std::time::Instant::now();
+        let optimized = crate::time!("optimize_expr", self.optimize());
+        crate::debug!(5, "Optimized expression in {:.2?}", start_optimize.elapsed());
+
         crate::debug!(4, "Building NFA");
         let start = std::time::Instant::now();
-        let mut nfa = crate::time!("build_nfa", self.build_nfa());
+        let mut nfa = crate::time!("build_nfa", optimized.build_nfa());
         crate::debug!(5, "Built NFA with {} states in {:.2?}", nfa.states.len(), start.elapsed());
 
         let start_condense = std::time::Instant::now();
@@ -1021,7 +1027,6 @@ impl Expr {
             Start,
             Seq { current_state: usize },
             Choice { end_state: usize },
-            Shared { key: usize, entry: usize },
             Quantifier { q_type: QuantifierType, entry: usize },
         }
 
@@ -1064,44 +1069,24 @@ impl Expr {
                         return_value = Some(start_state);
                     }
                     Expr::Shared(ref inner) => {
-                        // For small leaf expressions, inline them to avoid epsilon transitions
-                        // This trades NFA size for fewer epsilon transitions
-                        let inline = match inner.as_ref() {
-                            Expr::U8Seq(s) if s.len() <= 4 => true,
-                            Expr::U8Class(_) => true,
-                            Expr::Epsilon => true,
-                            _ => false,
-                        };
-                        
-                        if inline {
-                            // Inline: just build the inner expression directly
-                            stack.push(Frame {
-                                expr: (**inner).clone(),
-                                start_state,
-                                state: FrameState::Start,
-                            });
-                        } else {
-                            // Use caching for larger expressions
-                            let key = Arc::as_ptr(inner) as usize;
-                            if let Some(&(entry, end)) = cache.get(&key) {
-                                nfa.add_epsilon_transition(start_state, entry);
-                                return_value = Some(end);
-                            } else {
-                                let entry = nfa.add_state();
-                                nfa.add_epsilon_transition(start_state, entry);
-                                state = FrameState::Shared { key, entry };
-                                stack.push(Frame {
-                                    expr: Expr::Epsilon, // Placeholder
-                                    start_state,
-                                    state,
-                                });
-                                stack.push(Frame {
-                                    expr: (**inner).clone(),
-                                    start_state: entry,
-                                    state: FrameState::Start,
-                                });
-                            }
-                        }
+                        // IMPORTANT: We MUST inline Shared expressions to avoid creating
+                        // incorrect NFA structures when the same Shared expr appears multiple
+                        // times in a sequence. Caching NFA fragments causes them to be reused
+                        // with epsilon transitions, which creates loops and merges unrelated
+                        // paths.
+                        //
+                        // Example bug: "i* { i* } i*" where all three i* are Shared(i*)
+                        // If we cache the first i*, the second and third will epsilon-transition
+                        // back to the first, causing { and } to be reordered and everything to
+                        // collapse into one DFA state.
+                        //
+                        // Solution: Always inline Shared expressions during NFA construction.
+                        // The optimization benefit of sharing is minimal compared to correctness.
+                        stack.push(Frame {
+                            expr: (**inner).clone(),
+                            start_state,
+                            state: FrameState::Start,
+                        });
                     }
                     Expr::Seq(mut exprs) => {
                         if exprs.is_empty() {
@@ -1247,11 +1232,6 @@ impl Expr {
                     } else {
                         panic!("FrameState::Choice but expr is not Choice")
                     }
-                }
-                FrameState::Shared { key, entry } => {
-                    let ret = return_value.take().expect("Shared child must return value");
-                    cache.insert(key, (entry, ret));
-                    return_value = Some(ret);
                 }
                 FrameState::Quantifier { q_type, entry } => {
                     let body_end = return_value
@@ -1412,7 +1392,89 @@ impl Expr {
                 }
                 Task::Quantifier(q) => {
                     let child = values.pop().unwrap();
-                    values.push(Expr::Quantifier(Box::new(child), q));
+                    
+                    // Simplify nested quantifiers: (expr*)*  = expr*,  (expr+)* = expr*, etc.
+                    // We need to unwrap Shared to check the inner structure
+                    let simplified = match (&child, q) {
+                        // If child is Shared, peek inside
+                        (Expr::Shared(inner_arc), outer_q) => {
+                            match inner_arc.as_ref() {
+                                Expr::Quantifier(inner_expr, inner_q) => {
+                                    // Simplification rules (regex quantifier algebra):
+                                    // (a*)* = a*, (a+)* = a*, (a?)* = a*
+                                    // (a*)+ = a*, (a+)+ = a+, (a?)+ = a*
+                                    // (a*)? = a*, (a+)? = a*, (a?)? = a?
+                                    use QuantifierType::*;
+                                    match (inner_q, outer_q) {
+                                        (ZeroOrMore, ZeroOrMore) => child, // a** = a*
+                                        (OneOrMore, ZeroOrMore) => {
+                                            // a+* = a* - rebuild with inner expr and ZeroOrMore
+                                            Expr::Shared(Arc::new(Expr::Quantifier(
+                                                inner_expr.clone(),
+                                                ZeroOrMore
+                                            )))
+                                        }
+                                        (ZeroOrOne, ZeroOrMore) => {
+                                            // a?* = a* - rebuild with inner expr and ZeroOrMore
+                                            Expr::Shared(Arc::new(Expr::Quantifier(
+                                                inner_expr.clone(),
+                                                ZeroOrMore
+                                            )))
+                                        }
+                                        (ZeroOrMore, OneOrMore) => child, // a*+ = a*
+                                        (OneOrMore, OneOrMore) => child,  // a++ = a+
+                                        (ZeroOrOne, OneOrMore) => {
+                                            // a?+ = a* (one or more of zero-or-one is zero-or-more)
+                                            Expr::Shared(Arc::new(Expr::Quantifier(
+                                                inner_expr.clone(),
+                                                ZeroOrMore
+                                            )))
+                                        }
+                                        (ZeroOrMore, ZeroOrOne) => child,  // a*? = a*
+                                        (OneOrMore, ZeroOrOne) => {
+                                            // a+? = a* (zero or one of one-or-more is zero-or-more)
+                                            Expr::Shared(Arc::new(Expr::Quantifier(
+                                                inner_expr.clone(),
+                                                ZeroOrMore
+                                            )))
+                                        }
+                                        (ZeroOrOne, ZeroOrOne) => child,   // a?? = a?
+                                    }
+                                }
+                                _ => Expr::Quantifier(Box::new(child), q)
+                            }
+                        }
+                        // Direct nested quantifier (not wrapped in Shared)
+                        (Expr::Quantifier(inner_expr, inner_q), outer_q) => {
+                            use QuantifierType::*;
+                            match (inner_q, outer_q) {
+                                (ZeroOrMore, ZeroOrMore) => child, // a** = a*
+                                (OneOrMore, ZeroOrMore) => {
+                                    // a+* = a* - rebuild as a*
+                                    Expr::Quantifier(inner_expr.clone(), ZeroOrMore)
+                                }
+                                (ZeroOrOne, ZeroOrMore) => {
+                                    // a?* = a* - rebuild as a*
+                                    Expr::Quantifier(inner_expr.clone(), ZeroOrMore)
+                                }
+                                (ZeroOrMore, OneOrMore) => child, // a*+ = a*
+                                (OneOrMore, OneOrMore) => child,  // a++ = a+
+                                (ZeroOrOne, OneOrMore) => {
+                                    // a?+ = a* - rebuild as a*
+                                    Expr::Quantifier(inner_expr.clone(), ZeroOrMore)
+                                }
+                                (ZeroOrMore, ZeroOrOne) => child, // a*? = a*
+                                (OneOrMore, ZeroOrOne) => {
+                                    // a+? = a* - rebuild as a*
+                                    Expr::Quantifier(inner_expr.clone(), ZeroOrMore)
+                                }
+                                (ZeroOrOne, ZeroOrOne) => child, // a?? = a?
+                            }
+                        }
+                        _ => Expr::Quantifier(Box::new(child), q)
+                    };
+                    
+                    values.push(simplified);
                 }
                 Task::Shared(ptr, _) => {
                     let child = values.pop().unwrap();
