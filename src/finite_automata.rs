@@ -883,12 +883,9 @@ impl ExprGroups {
         let stats = self.get_stats();
         crate::debug!(5, "Expr Stats: {}", stats);
 
-        crate::debug!(4, "Optimizing Regex (Strategy B)");
-        let optimized = self.optimize();
-
         crate::debug!(4, "Building NFA");
         let start = std::time::Instant::now();
-        let mut nfa = crate::time!("build_nfa", optimized.build_nfa());
+        let mut nfa = crate::time!("build_nfa", self.build_nfa());
         crate::debug!(5, "Built NFA with {} states in {:.2?}", nfa.states.len(), start.elapsed());
 
         let start_condense = std::time::Instant::now();
