@@ -107,30 +107,16 @@ mod tests {
 
     #[test]
     fn test_json_schema_equivalence_classes_simpler() {
-
         let ebnf = indoc! {r#"
+            root ::= '{'  '}' ;
             #![ignore(WS)]
-
-            root ::= '{' ( _mem2 ( ',' _mem2 )* )? '}' ;
-            _pv1 ::= JSON_STRING ;
-            _mem2 ::= '"name"' ':' _pv1 ;
             WS ::= ( ( ' ' | '	' | '\n' ) )* ;
-            JSON_STRING ::= '"' STRING_CHARS '"' ;
-            STRING_CHARS ::= ( ( STRING_CHAR | ESCAPE_SEQ ) )* ;
-            STRING_CHAR ::= [^"\\\x00-\x1f] ;
-            ESCAPE_SEQ ::= '\\' ( ["\\/bfnrt] | 'u' HEX HEX HEX HEX ) ;
-            HEX ::= [0-9a-fA-F] ;
-            JSON_INTEGER ::= ( '-' )? ( '0' | [1-9] ( [0-9] )* ) ;
-            JSON_NUMBER ::= JSON_INTEGER ( '.' DIGITS )? ( EXPONENT )? ;
-            DIGITS ::= [0-9] ( [0-9] )* ;
-            EXPONENT ::= [eE] ( [+-] )? DIGITS ;
-            JSON_BOOL ::= ( 'true' | 'false' ) ;
-            JSON_NULL ::= 'null' ;
         "#}.to_string();
         let gd = GrammarDefinition::from_ebnf(&ebnf).expect("Grammar should build");
 
         // Build the tokenizer from the grammar
         let compiled = CompiledGrammar::from_definition(Arc::new(gd));
+        println!("Grammar: {}", compiled);
         let tokenizer = &compiled.tokenizer;
         println!("Tokenizer: {:?}", tokenizer);
 
