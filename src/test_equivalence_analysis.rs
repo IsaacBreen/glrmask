@@ -44,7 +44,9 @@ mod tests {
         }"#;
         
         let ebnf = json_schema_to_ebnf(schema).expect("Schema should convert");
+        println!("Generated EBNF:\n{}", ebnf);
         let gd = GrammarDefinition::from_ebnf(&ebnf).expect("Grammar should build");
+        println!("Grammar definition: {}", gd);
         
         // Build the tokenizer from the grammar
         let compiled = CompiledGrammar::from_definition(Arc::new(gd));
@@ -86,7 +88,7 @@ mod tests {
             vec![15],          // "\":"
             vec![9, 10, 11, 12, 13], // "s", "t", "r", "i", "g"
         ];
-        
+
         // Convert both to sorted format for comparison
         let mut expected_sorted: Vec<Vec<usize>> = expected.iter()
             .map(|c| { let mut v = c.clone(); v.sort(); v })
