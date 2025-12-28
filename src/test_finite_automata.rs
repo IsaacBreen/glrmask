@@ -1128,4 +1128,223 @@ mod reproduction_tests {
         assert_eq!(i_target, Some(&0), "'i' from start should go to state 0");
         assert_eq!(brace_target, Some(&1), "'{{' from start should go to state 1, not 0!");
     }
+
+    #[test]
+    fn test_optimize_nested_quantifiers() {
+        // Test that the optimizer properly simplifies nested quantifiers
+        use std::sync::Arc;
+        
+        // Build (i*)* with Shared wrapper
+        let i_star = Expr::Quantifier(
+            Box::new(Expr::U8Seq(vec![b'i'])),
+            QuantifierType::ZeroOrMore,
+        );
+        let i_star_shared = Expr::Shared(Arc::new(i_star.clone()));
+        let i_star_star = Expr::Quantifier(
+            Box::new(i_star_shared.clone()),
+            QuantifierType::ZeroOrMore,
+        );
+        
+        println!("Before optimize: {}", i_star_star);
+        let optimized = i_star_star.clone().optimize();
+        println!("After optimize: {}", optimized);
+        
+        // After optimization, (i*)* should become i*
+        // So the optimized result should be equivalent to i_star
+        // (but wrapped in Shared)
+        
+        // Build DFA for both
+        let dfa_original = i_star.clone().build();
+        let dfa_optimized = optimized.build();
+        
+        println!("Original i* DFA states: {}", dfa_original.dfa.states.len());
+        println!("Optimized (i*)* DFA states: {}", dfa_optimized.dfa.states.len());
+        
+        // Both should have same number of states (2 states for i*)
+        assert_eq!(dfa_original.dfa.states.len(), dfa_optimized.dfa.states.len(),
+            "Optimized (i*)* should have same states as i*");
+    }
+
+    #[test]
+    fn test_js_whitespace_pattern() {
+        // Reproduce the JS whitespace pattern that causes DFA explosion
+        // WS = [\t\n\r ]+ | "//" [^\n]* | "/*" ("*" [^/] | [^*])* "*/"
+        // The pattern WS WS* should simplify to WS+
+        
+        use std::sync::Arc;
+        use crate::datastructures::u8set::U8Set;
+        
+        // Simplified version: space = [ ]+
+        let space_char = Expr::U8Class(U8Set::from_chars(" \t\n\r"));
+        let space_plus = Expr::Quantifier(Box::new(space_char.clone()), QuantifierType::OneOrMore);
+        
+        // WS WS* pattern (what we see in the JS grammar)
+        let ws_shared = Expr::Shared(Arc::new(space_plus.clone()));
+        let ws_star = Expr::Quantifier(Box::new(ws_shared.clone()), QuantifierType::ZeroOrMore);
+        let ws_ws_star = Expr::Seq(vec![ws_shared.clone(), ws_star.clone()]);
+        
+        println!("WS WS* before optimize: {}", ws_ws_star);
+        let optimized = ws_ws_star.clone().optimize();
+        println!("WS WS* after optimize: {}", optimized);
+        
+        // This should ideally become WS+ (or at least WS WS* should not explode DFA)
+        let dfa = optimized.build();
+        println!("DFA states: {}", dfa.dfa.states.len());
+        
+        // WS WS* = WS+ should be a small DFA (2-3 states max)
+        assert!(dfa.dfa.states.len() <= 3, 
+            "WS WS* should have at most 3 DFA states, got {}", dfa.dfa.states.len());
+    }
+
+    #[test]
+    fn test_js_complex_whitespace_pattern() {
+        // Test the full JS whitespace pattern with comments
+        // WS = space+ | "//" [^\n]* | "/*" (...) "*/"
+        // The problematic pattern is: WS WS*
+        
+        use std::sync::Arc;
+        use crate::datastructures::u8set::U8Set;
+        
+        // Build: space+ | "//" [^\n]* 
+        // (simplified - skip block comments for now)
+        
+        let space_class = Expr::U8Class(U8Set::from_chars(" \t\n\r"));
+        let space_plus = Expr::Quantifier(Box::new(space_class.clone()), QuantifierType::OneOrMore);
+        
+        let non_newline = {
+            let mut set = U8Set::all();
+            set.remove(b'\n');
+            Expr::U8Class(set)
+        };
+        let non_newline_star = Expr::Quantifier(Box::new(non_newline), QuantifierType::ZeroOrMore);
+        let line_comment = Expr::Seq(vec![
+            Expr::U8Seq(b"//".to_vec()),
+            non_newline_star,
+        ]);
+        
+        // WS = space+ | line_comment
+        let ws = Expr::Choice(vec![space_plus.clone(), line_comment]);
+        let ws_shared = Expr::Shared(Arc::new(ws));
+        
+        // WS WS* pattern (what appears throughout JS grammar)
+        let ws_star = Expr::Quantifier(Box::new(ws_shared.clone()), QuantifierType::ZeroOrMore);
+        let ws_ws_star = Expr::Seq(vec![ws_shared.clone(), ws_star.clone()]);
+        
+        println!("Complex WS WS* before optimize: {}", ws_ws_star);
+        let optimized = ws_ws_star.clone().optimize();
+        println!("Complex WS WS* after optimize: {}", optimized);
+        
+        let dfa = optimized.build();
+        println!("Complex WS WS* DFA states: {}", dfa.dfa.states.len());
+        
+        // This should be manageable
+        assert!(dfa.dfa.states.len() <= 10, 
+            "Complex WS WS* should have <= 10 DFA states, got {}", dfa.dfa.states.len());
+    }
+
+    #[test]
+    fn test_js_nested_blocks_pattern() {
+        // Test the pattern that actually causes the explosion
+        // Something like: { (WS WS*)* statement_list (WS WS*)* }
+        // Nested repetition of the whitespace pattern inside braces
+        
+        use std::sync::Arc;
+        use crate::datastructures::u8set::U8Set;
+        
+        let space_class = Expr::U8Class(U8Set::from_chars(" \t\n\r"));
+        let space_plus = Expr::Quantifier(Box::new(space_class.clone()), QuantifierType::OneOrMore);
+        let ws_shared = Expr::Shared(Arc::new(space_plus.clone()));
+        
+        // WS*
+        let ws_star = Expr::Quantifier(Box::new(ws_shared.clone()), QuantifierType::ZeroOrMore);
+        
+        // statement = "x"
+        let statement = Expr::U8Seq(b"x".to_vec());
+        
+        // block = "{" WS* statement WS* "}"
+        let block = Expr::Seq(vec![
+            Expr::U8Seq(b"{".to_vec()),
+            ws_star.clone(),
+            statement,
+            ws_star.clone(),
+            Expr::U8Seq(b"}".to_vec()),
+        ]);
+        
+        // nested_blocks = block+
+        let block_shared = Expr::Shared(Arc::new(block));
+        let nested_blocks = Expr::Quantifier(Box::new(block_shared), QuantifierType::OneOrMore);
+        
+        println!("Nested blocks pattern: {}", nested_blocks);
+        let optimized = nested_blocks.clone().optimize();
+        println!("After optimize: {}", optimized);
+        
+        let dfa = optimized.build();
+        println!("Nested blocks DFA states: {}", dfa.dfa.states.len());
+        
+        // This is the key test - nested repetition should not explode
+        assert!(dfa.dfa.states.len() <= 50, 
+            "Nested blocks should have <= 50 DFA states, got {}", dfa.dfa.states.len());
+    }
+
+    #[test]
+    fn test_multi_group_dfa_explosion() {
+        // Test with just space + line comments
+        
+        use std::sync::Arc;
+        use crate::datastructures::u8set::U8Set;
+        
+        // WS: space+ | "//" [^\n]*
+        let space = Expr::U8Class(U8Set::from_chars(" \t\n\r"));
+        let space_plus = Expr::Quantifier(Box::new(space.clone()), QuantifierType::OneOrMore);
+        
+        let non_newline = {
+            let mut set = U8Set::all();
+            set.remove(b'\n');
+            Expr::U8Class(set)
+        };
+        let line_comment = Expr::Seq(vec![
+            Expr::U8Seq(b"//".to_vec()),
+            Expr::Quantifier(Box::new(non_newline), QuantifierType::ZeroOrMore),
+        ]);
+        
+        // WS = space+ | line_comment
+        let ws = Expr::Choice(vec![space_plus, line_comment]);
+        let ws_shared = Expr::Shared(Arc::new(ws));
+        let ws_star = Expr::Quantifier(Box::new(ws_shared.clone()), QuantifierType::ZeroOrMore);
+        
+        // Pattern: "a" WS* "b" ("," WS* "a" WS* "b")*
+        let ab = Expr::Seq(vec![
+            Expr::U8Seq(b"a".to_vec()),
+            ws_star.clone(),
+            Expr::U8Seq(b"b".to_vec()),
+        ]);
+        let ab_shared = Expr::Shared(Arc::new(ab));
+        
+        let comma_ab = Expr::Seq(vec![
+            ws_star.clone(),
+            Expr::U8Seq(b",".to_vec()),
+            ws_star.clone(),
+            ab_shared.clone(),
+        ]);
+        
+        let pattern = Expr::Seq(vec![
+            ab_shared.clone(),
+            Expr::Quantifier(Box::new(comma_ab), QuantifierType::ZeroOrMore),
+        ]);
+        
+        println!("Line comment WS pattern: {}", pattern);
+        
+        let mut groups = Vec::new();
+        groups.push(ExprGroup { expr: pattern, is_non_greedy: false });
+        
+        let expr_groups = ExprGroups { groups };
+        println!("Testing with {} groups", expr_groups.groups.len());
+        
+        let t0 = std::time::Instant::now();
+        let regex = expr_groups.build();
+        println!("DFA states: {} (built in {:?})", regex.dfa.states.len(), t0.elapsed());
+        
+        assert!(regex.dfa.states.len() <= 100, 
+            "Should have <= 100 DFA states, got {}", regex.dfa.states.len());
+    }
 }
