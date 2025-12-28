@@ -1291,67 +1291,45 @@ mod reproduction_tests {
     /// 
     /// Pattern: WS = (A | B)* where:
     /// - A = "a" [^e]*     (starts with 'a', unbounded)  
-    /// - B = "b" [^e]* "e" (starts with 'b', terminated by 'e')
+    /// - B = "b" [^e]* "e" (starts with 'b', terminated)
     /// 
-    /// Explosion occurs because the separator chars (y, z, w) can appear
-    /// inside both A and B bodies, so DFA must track "which alternative?"
-    /// at each WS* position → O(k^n) states for k alternatives and n slots.
+    /// Explosion: O(3^n) states for n WS* slots
     #[test]
     fn test_minimal_dfa_explosion() {
         use std::sync::Arc;
         use crate::datastructures::u8set::U8Set;
         
-        let not_e = {
-            let mut set = U8Set::all();
-            set.remove(b'e');
-            Expr::U8Class(set)
-        };
+        let not_e = { let mut s = U8Set::all(); s.remove(b'e'); Expr::U8Class(s) };
         
-        // A = "a" [^e]* (unbounded - can match 'y', 'z', etc.)
         let a = Expr::Seq(vec![
             Expr::U8Seq(b"a".to_vec()),
             Expr::Quantifier(Box::new(not_e.clone()), QuantifierType::ZeroOrMore),
         ]);
         
-        // B = "b" [^e]* "e" (terminated - must end with 'e')
         let b = Expr::Seq(vec![
             Expr::U8Seq(b"b".to_vec()),
             Expr::Quantifier(Box::new(not_e), QuantifierType::ZeroOrMore),
             Expr::U8Seq(b"e".to_vec()),
         ]);
         
-        let ws = Expr::Choice(vec![a, b]);
         let ws_star = Expr::Quantifier(
-            Box::new(Expr::Shared(Arc::new(ws))), 
+            Box::new(Expr::Shared(Arc::new(Expr::Choice(vec![a, b])))), 
             QuantifierType::ZeroOrMore
         );
         
-        let states_1 = Expr::Seq(vec![
-            Expr::U8Seq(b"x".to_vec()), ws_star.clone(), Expr::U8Seq(b"y".to_vec()),
-        ]).build().dfa.states.len();
+        let mk = |n: usize| {
+            let seps = vec![b"x", b"y", b"z", b"w", b"v"];
+            let mut e = vec![Expr::U8Seq(seps[0].to_vec())];
+            for i in 0..n {
+                e.push(ws_star.clone());
+                e.push(Expr::U8Seq(seps[i + 1].to_vec()));
+            }
+            Expr::Seq(e).build().dfa.states.len()
+        };
         
-        let states_2 = Expr::Seq(vec![
-            Expr::U8Seq(b"x".to_vec()), ws_star.clone(), 
-            Expr::U8Seq(b"y".to_vec()), ws_star.clone(), 
-            Expr::U8Seq(b"z".to_vec()),
-        ]).build().dfa.states.len();
-        
-        let states_3 = Expr::Seq(vec![
-            Expr::U8Seq(b"x".to_vec()), ws_star.clone(), 
-            Expr::U8Seq(b"y".to_vec()), ws_star.clone(), 
-            Expr::U8Seq(b"z".to_vec()), ws_star.clone(),
-            Expr::U8Seq(b"w".to_vec()),
-        ]).build().dfa.states.len();
-        
-        println!("1 slot: {} states", states_1);
-        println!("2 slots: {} states", states_2);
-        println!("3 slots: {} states", states_3);
-        
-        let growth = states_3 as f64 / states_2 as f64;
-        println!("Growth: {:.2}x", growth);
-        
-        // FAILS until fixed: ~3.3x growth (exponential)
-        assert!(growth < 2.0, "Exponential: {:.2}x growth", growth);
+        println!("1: {} | 2: {} | 3: {}", mk(1), mk(2), mk(3));
+        let growth = mk(3) as f64 / mk(2) as f64;
+        assert!(growth < 2.0, "Exponential: {:.2}x", growth);
     }
 
     #[test]
