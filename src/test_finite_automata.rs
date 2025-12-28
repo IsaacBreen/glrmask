@@ -1068,3 +1068,64 @@ mod test_python {
         );
     }
 }
+
+#[cfg(test)]
+mod reproduction_tests {
+    use std::sync::Arc;
+    use crate::finite_automata::*;
+
+    /// Test for the expression: (i*)* { (i*)* } (i*)*
+    /// 
+    /// This test repros a bug where double-repeated quantifier (i*)*
+    /// causes the DFA to collapse to a single state that incorrectly
+    /// accepts just "{" or "}" alone.
+    #[test]
+    fn test_double_star_repro() {
+        // Build (i*)* - a double quantifier with Shared wrapper
+        // The actual structure from GrammarDefinition is:
+        // Quantifier(Shared(Quantifier(U8Seq([105]), ZeroOrMore)), ZeroOrMore)
+        let i_star = Expr::Quantifier(
+            Box::new(Expr::U8Seq(vec![b'i'])),
+            QuantifierType::ZeroOrMore,
+        );
+        let i_star_star = Expr::Quantifier(
+            Box::new(Expr::Shared(Arc::new(i_star))),
+            QuantifierType::ZeroOrMore,
+        );
+        
+        // Build (i*)* { (i*)* } (i*)*
+        let expr = Expr::Seq(vec![
+            i_star_star.clone(),
+            Expr::U8Seq(vec![b'{']),
+            i_star_star.clone(),
+            Expr::U8Seq(vec![b'}']),
+            i_star_star,
+        ]);
+        
+        println!("Expr: {}", expr);
+        
+        // Build regex directly from the expr
+        let regex = expr.build();
+        println!("Regex:\n{}", regex);
+        println!("Regex states: {}", regex.dfa.states.len());
+        
+        // CRITICAL: The regex MUST have 3 states, not 1
+        assert_eq!(regex.dfa.states.len(), 3, 
+            "Regex should have 3 states. A 1-state DFA is incorrect!");
+        
+        // Verify start state structure
+        let start_state = regex.dfa.start_state;
+        let dfa_start = &regex.dfa.states[start_state];
+        
+        // Start state should NOT be a finalizer (can't accept empty string)
+        assert!(dfa_start.finalizers.is_empty(),
+            "Start state should NOT be a finalizer - empty string is not valid!");
+        
+        // Start state: 'i' should loop to 0, '{' should go to state 1 (not 0!)
+        let i_target = dfa_start.transitions.get(b'i');
+        let brace_target = dfa_start.transitions.get(b'{');
+        
+        assert_eq!(i_target, Some(&0), "'i' from start should go to state 0");
+        assert_eq!(brace_target, Some(&1), "'{{' from start should go to state 1, not 0!");
+    }
+}
