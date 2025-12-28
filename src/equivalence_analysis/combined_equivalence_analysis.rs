@@ -114,6 +114,51 @@ pub fn compute_combined_equivalence(
         reduced_states.len(),
         start.elapsed(),
     );
+
+    #[cfg(test)]
+    {
+        // VERIFICATION: Check against reference implementations
+        // We only verify if we actually ran the analysis
+        
+        // 1. Verify State Equivalence
+        if initial_states.len() > state_reduction_threshold {
+            let ref_mapping = super::state_equivalence_analysis_reference::find_state_equivalence_classes(
+                regex,
+                tokens,
+                initial_states,
+            );
+            
+            let ref_classes = super::state_equivalence_analysis_reference::mapping_to_equivalence_classes(
+                initial_states,
+                &ref_mapping,
+            );
+            
+            if state_classes != ref_classes {
+                panic!(
+                    "State equivalence mismatch!\nFast: {:?}\nRef : {:?}",
+                    state_classes, ref_classes
+                );
+            }
+        }
+
+        // 2. Verify Vocab Equivalence
+        let ref_vocab_classes = super::vocab_equivalence_analysis_reference::find_vocab_equivalence_classes(
+            regex,
+            tokens,
+            &reduced_states,
+        );
+        
+        if vocab_classes != ref_vocab_classes {
+             // In case of mismatch, print some details
+             let in_fast_not_ref: Vec<_> = vocab_classes.difference(&ref_vocab_classes).collect();
+             let in_ref_not_fast: Vec<_> = ref_vocab_classes.difference(&vocab_classes).collect();
+             
+             panic!(
+                "Vocab equivalence mismatch!\nIn Fast Only: {:?}\nIn Ref Only : {:?}",
+                in_fast_not_ref, in_ref_not_fast
+            );
+        }
+    }
     
     CombinedEquivalenceResult {
         vocab_classes,
