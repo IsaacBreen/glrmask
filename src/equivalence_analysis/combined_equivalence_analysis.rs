@@ -117,6 +117,7 @@ pub fn compute_combined_equivalence(
 
     #[cfg(test)]
     {
+        println!("Running combined equivalence analysis verification...");
         // VERIFICATION: Check against reference implementations
         let problem_size = initial_states.len() * tokens.len();
         let use_trellis_verification = problem_size < 1_000_000;
