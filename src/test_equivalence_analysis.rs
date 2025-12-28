@@ -75,7 +75,7 @@ mod tests {
         
         // Build expected classes as sets of token indices
         let expected: Vec<Vec<usize>> = vec![
-            vec![0],           // "{"
+            vec![0, 14],       // "{", "{\""
             vec![1],           // "}"
             vec![2],           // "\""
             vec![3],           // ":"
@@ -84,9 +84,9 @@ mod tests {
             vec![6],           // "a"
             vec![7],           // "m"
             vec![8],           // "e"
-            vec![14],          // "{\""
+            vec![9, 12, 13],   // "s", "i", "g"
+            vec![10, 11],      // "t", "r"
             vec![15],          // "\":"
-            vec![9, 10, 11, 12, 13], // "s", "t", "r", "i", "g"
         ];
 
         // Convert both to sorted format for comparison
