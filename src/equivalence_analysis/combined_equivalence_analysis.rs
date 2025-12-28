@@ -135,13 +135,6 @@ pub fn compute_combined_equivalence(
                 &ref_mapping,
             );
             
-            if state_classes != ref_classes {
-                panic!(
-                    "State equivalence mismatch (fast vs reference)!\nFast: {:?}\nRef : {:?}",
-                    state_classes, ref_classes
-                );
-            }
-            
             // Trellis-based ground truth verification for small problems
             if use_trellis_verification {
                 let trellis_mapping = super::trellis_equivalence_analysis::find_state_equivalence_classes_trellis(
@@ -154,14 +147,20 @@ pub fn compute_combined_equivalence(
                     initial_states,
                     &trellis_mapping,
                 );
-                println!("Trellis classes: {:?}", trellis_classes);
 
-                if state_classes != trellis_classes {
+                if ref_classes != trellis_classes {
                     panic!(
-                        "State equivalence mismatch (fast vs trellis ground truth)!\nFast   : {:?}\nTrellis: {:?}",
-                        state_classes, trellis_classes
+                        "State equivalence mismatch (ref vs trellis ground truth)!\nRef    : {:?}\nTrellis: {:?}",
+                        ref_classes, trellis_classes
                     );
                 }
+            }
+            
+            if state_classes != ref_classes {
+                panic!(
+                    "State equivalence mismatch (fast vs reference)!\nFast: {:?}\nRef : {:?}",
+                    state_classes, ref_classes
+                );
             }
         }
 
@@ -172,6 +171,25 @@ pub fn compute_combined_equivalence(
             &reduced_states,
         );
         
+        // Trellis-based ground truth verification for small problems
+        if use_trellis_verification {
+            let trellis_vocab_classes = super::trellis_equivalence_analysis::find_vocab_equivalence_classes_trellis(
+                regex,
+                tokens,
+                &reduced_states,
+            );
+            
+            if ref_vocab_classes != trellis_vocab_classes {
+                let in_ref_not_trellis: Vec<_> = ref_vocab_classes.difference(&trellis_vocab_classes).collect();
+                let in_trellis_not_ref: Vec<_> = trellis_vocab_classes.difference(&ref_vocab_classes).collect();
+                
+                panic!(
+                    "Vocab equivalence mismatch (ref vs trellis ground truth)!\nIn Ref Only    : {:?}\nIn Trellis Only: {:?}",
+                    in_ref_not_trellis, in_trellis_not_ref
+                );
+            }
+        }
+        
         if vocab_classes != ref_vocab_classes {
              let in_fast_not_ref: Vec<_> = vocab_classes.difference(&ref_vocab_classes).collect();
              let in_ref_not_fast: Vec<_> = ref_vocab_classes.difference(&vocab_classes).collect();
@@ -180,26 +198,6 @@ pub fn compute_combined_equivalence(
                 "Vocab equivalence mismatch (fast vs reference)!\nIn Fast Only: {:?}\nIn Ref Only : {:?}",
                 in_fast_not_ref, in_ref_not_fast
             );
-        }
-        
-        // Trellis-based ground truth verification for small problems
-        if use_trellis_verification {
-            let trellis_vocab_classes = super::trellis_equivalence_analysis::find_vocab_equivalence_classes_trellis(
-                regex,
-                tokens,
-                &reduced_states,
-            );
-            println!("Trellis vocab classes: {:?}", trellis_vocab_classes);
-            
-            if vocab_classes != trellis_vocab_classes {
-                let in_fast_not_trellis: Vec<_> = vocab_classes.difference(&trellis_vocab_classes).collect();
-                let in_trellis_not_fast: Vec<_> = trellis_vocab_classes.difference(&vocab_classes).collect();
-             
-                panic!(
-                    "Vocab equivalence mismatch (fast vs trellis ground truth)!\nIn Fast Only   : {:?}\nIn Trellis Only: {:?}",
-                    in_fast_not_trellis, in_trellis_not_fast
-                );
-            }
         }
     }
     
