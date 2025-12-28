@@ -110,7 +110,7 @@ mod tests {
         let ebnf = indoc! {r#"
             root ::= '{'  '}' ;
             #![ignore(WS)]
-            WS ::= ' '* ;
+            WS ::= 'i'* ;
         "#}.to_string();
         let gd = GrammarDefinition::from_ebnf(&ebnf).expect("Grammar should build");
         println!("Grammar definition: {}", gd);
