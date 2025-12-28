@@ -1286,6 +1286,74 @@ mod reproduction_tests {
             "Nested blocks should have <= 50 DFA states, got {}", dfa.dfa.states.len());
     }
 
+    /// Minimal reproducible example of DFA state explosion.
+    /// MINIMAL DFA EXPLOSION TEST
+    /// 
+    /// Pattern: WS = (A | B)* where:
+    /// - A = "a" [^e]*     (starts with 'a', unbounded)  
+    /// - B = "b" [^e]* "e" (starts with 'b', terminated by 'e')
+    /// 
+    /// Explosion occurs because the separator chars (y, z, w) can appear
+    /// inside both A and B bodies, so DFA must track "which alternative?"
+    /// at each WS* position → O(k^n) states for k alternatives and n slots.
+    #[test]
+    fn test_minimal_dfa_explosion() {
+        use std::sync::Arc;
+        use crate::datastructures::u8set::U8Set;
+        
+        let not_e = {
+            let mut set = U8Set::all();
+            set.remove(b'e');
+            Expr::U8Class(set)
+        };
+        
+        // A = "a" [^e]* (unbounded - can match 'y', 'z', etc.)
+        let a = Expr::Seq(vec![
+            Expr::U8Seq(b"a".to_vec()),
+            Expr::Quantifier(Box::new(not_e.clone()), QuantifierType::ZeroOrMore),
+        ]);
+        
+        // B = "b" [^e]* "e" (terminated - must end with 'e')
+        let b = Expr::Seq(vec![
+            Expr::U8Seq(b"b".to_vec()),
+            Expr::Quantifier(Box::new(not_e), QuantifierType::ZeroOrMore),
+            Expr::U8Seq(b"e".to_vec()),
+        ]);
+        
+        let ws = Expr::Choice(vec![a, b]);
+        let ws_star = Expr::Quantifier(
+            Box::new(Expr::Shared(Arc::new(ws))), 
+            QuantifierType::ZeroOrMore
+        );
+        
+        let states_1 = Expr::Seq(vec![
+            Expr::U8Seq(b"x".to_vec()), ws_star.clone(), Expr::U8Seq(b"y".to_vec()),
+        ]).build().dfa.states.len();
+        
+        let states_2 = Expr::Seq(vec![
+            Expr::U8Seq(b"x".to_vec()), ws_star.clone(), 
+            Expr::U8Seq(b"y".to_vec()), ws_star.clone(), 
+            Expr::U8Seq(b"z".to_vec()),
+        ]).build().dfa.states.len();
+        
+        let states_3 = Expr::Seq(vec![
+            Expr::U8Seq(b"x".to_vec()), ws_star.clone(), 
+            Expr::U8Seq(b"y".to_vec()), ws_star.clone(), 
+            Expr::U8Seq(b"z".to_vec()), ws_star.clone(),
+            Expr::U8Seq(b"w".to_vec()),
+        ]).build().dfa.states.len();
+        
+        println!("1 slot: {} states", states_1);
+        println!("2 slots: {} states", states_2);
+        println!("3 slots: {} states", states_3);
+        
+        let growth = states_3 as f64 / states_2 as f64;
+        println!("Growth: {:.2}x", growth);
+        
+        // FAILS until fixed: ~3.3x growth (exponential)
+        assert!(growth < 2.0, "Exponential: {:.2}x growth", growth);
+    }
+
     #[test]
     fn test_multi_group_dfa_explosion() {
         // Test overlapping prefix hypothesis:
