@@ -3430,6 +3430,7 @@ mod tests {
         ]);
         
         let regex = groups![expr].build();
+        println!("Regex: {}", regex);
         
         println!("Regex states: {}", regex.iter_states().count());
         
