@@ -1,7 +1,7 @@
 # Research Project Makefile
 # Common commands for paper writing and research
 
-.PHONY: paper paper-watch paper-clean notes-today help build test test-js test-json-schema test-schema-packagejson test-schema-github test-schema-sarif test-schema-meta test-schema-extra test-schema-kestra test-schema-vegalite test-schema-apollo test-schema-liquibase test-diff-grammar test-diff-static ffi viz viz-clean all
+.PHONY: paper paper-watch paper-clean notes-today help build test test-js test-json-schema test-schema-packagejson test-schema-github test-schema-sarif test-schema-meta test-schema-extra test-schema-kestra test-schema-vegalite test-schema-apollo test-schema-liquibase test-diff test-diff-dfa ffi viz viz-clean all
 
 # === Build All ===
 
@@ -89,8 +89,8 @@ test-diff: ffi ## Test diff grammar for any text file (usage: make test-diff FIL
 	@if [ -z "$(FILE)" ]; then echo "Usage: make test-diff FILE=<path_to_text_file>"; exit 1; fi
 	SOURCE_FILE="$(FILE)" $(PYTHON) scripts/test_diff.py
 
-test-diff-static: ffi ## Test diff grammar on a static large source file (no FILE arg needed)
-	SOURCE_FILE="testdata/finite_automata.rs" $(PYTHON) scripts/test_diff_grammar.py
+test-diff-dfa: ffi ## Test diff grammar on static finite_automata.rs (no FILE arg needed)
+	SOURCE_FILE="testdata/finite_automata.rs" $(PYTHON) scripts/test_diff.py
 
 # === Hard Schema Compilation Tests ===
 # These use the Rust grammar_compiler binary directly with --json-schema
