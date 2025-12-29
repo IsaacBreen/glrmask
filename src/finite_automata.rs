@@ -890,9 +890,9 @@ impl ExprGroups {
         crate::debug!(5, "Optimized expression in {:.2?}", start_optimize.elapsed());
         
         // Print the optimized expression for debugging DFA explosion
-        crate::debug!(4, "Optimized expression groups:");
+        crate::debug!(6, "Optimized expression groups:");
         for (i, group) in optimized.groups.iter().enumerate() {
-            crate::debug!(4, "  Group {}: {}", i, group.expr);
+            crate::debug!(6, "  Group {}: {}", i, group.expr);
         }
 
         crate::debug!(4, "Building NFA");
@@ -2867,12 +2867,9 @@ impl DFA {
             return;
         }
         
-        // Skip minimization for large DFAs - state equivalence analysis will handle it
-        // Benchmarks show minimization doesn't pay off for >10K states
-        const MAX_MINIMIZATION_STATES: usize = 10_000;
+        // Always minimize regardless of size
+        const MAX_MINIMIZATION_STATES: usize = usize::MAX;
         if self.states.len() > MAX_MINIMIZATION_STATES {
-            crate::debug!(3, "Skipping DFA minimization for {} states (>{} threshold)", 
-                         self.states.len(), MAX_MINIMIZATION_STATES);
             return;
         }
         
