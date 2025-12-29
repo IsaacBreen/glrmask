@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Test Sep1 diff grammar compilation and constraint creation.
 
@@ -8,10 +7,10 @@ This script takes a text file and:
 
 Usage:
     # With environment variable
-    SOURCE_FILE="path/to/file.txt" python scripts/test_diff_grammar.py
+    SOURCE_FILE="path/to/file.txt" python scripts/test_diff.py
     
     # Or directly via make
-    make test-diff-grammar FILE=path/to/file.txt
+    make test-diff FILE=path/to/file.txt
 """
 
 import json

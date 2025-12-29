@@ -85,9 +85,9 @@ test-schema-id: ## Compile any benchmark schema by ID (usage: make test-schema-i
 	@if [ -z "$(ID)" ]; then echo "Usage: make test-schema-id ID=<schema_id>"; exit 1; fi
 	SCHEMA_ID="$(ID)" $(PYTHON) scripts/test_json_schema.py
 
-test-diff-grammar: ffi ## Test diff grammar for any text file (usage: make test-diff-grammar FILE=path/to/file.txt)
-	@if [ -z "$(FILE)" ]; then echo "Usage: make test-diff-grammar FILE=<path_to_text_file>"; exit 1; fi
-	SOURCE_FILE="$(FILE)" $(PYTHON) scripts/test_diff_grammar.py
+test-diff: ffi ## Test diff grammar for any text file (usage: make test-diff FILE=path/to/file.txt)
+	@if [ -z "$(FILE)" ]; then echo "Usage: make test-diff FILE=<path_to_text_file>"; exit 1; fi
+	SOURCE_FILE="$(FILE)" $(PYTHON) scripts/test_diff.py
 
 test-diff-static: ffi ## Test diff grammar on a static large source file (no FILE arg needed)
 	SOURCE_FILE="testdata/finite_automata.rs" $(PYTHON) scripts/test_diff_grammar.py
