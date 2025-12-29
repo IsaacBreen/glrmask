@@ -949,6 +949,7 @@ impl GrammarConstraint {
         // Compute terminal follow sets, then map to IDs.
         crate::debug!(4, "Computing terminal follow sets");
         let terminal_follow_sets_named = compute_terminal_follow_sets(&parser.productions);
+        crate::debug!(4, "Done computing terminal follow sets");
         let mut terminal_follow_map: BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>> =
             BTreeMap::new();
         for (terminal1, following_terminals) in terminal_follow_sets_named {
@@ -983,6 +984,7 @@ impl GrammarConstraint {
             representative_states_set.insert(*rep);
         }
 
+        crate::debug!(4, "Running precompute1...");
         let mut terminal_dwa = run_precompute1(
             &tokenizer,
             &internal_llm_token_map,
