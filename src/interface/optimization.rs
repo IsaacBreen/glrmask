@@ -404,6 +404,12 @@ impl<'a> GrammarOptimizer<'a> {
         // and simplify_expr is O(n) which is slow for 1M+ node trees
         // We check if we had a large number of productions as a proxy for expression size
         let skip_simplify = self.grammar.productions.len() > 100;
+        
+        // Debug: analyze Expr structure before simplification
+        if !skip_simplify {
+            analyze_expr_structure(&expr, "BEFORE simplification");
+        }
+        
         let expr = if skip_simplify {
             debug!(5, "Skipping simplify_expr for large grammar (had {} productions)", self.grammar.productions.len());
             expr
@@ -411,6 +417,10 @@ impl<'a> GrammarOptimizer<'a> {
             let simplify_start = std::time::Instant::now();
             let result = simplify_expr(expr);
             debug!(5, "Simplified expr in {:?}", simplify_start.elapsed());
+            
+            // Debug: analyze Expr structure after simplification
+            analyze_expr_structure(&result, "AFTER simplification");
+            
             result
         };
         
@@ -1882,6 +1892,123 @@ fn simplify_expr(expr: Expr) -> Expr {
     simplify_expr_cached(expr, &mut cache)
 }
 
+/// Analyze and report on the structure of an Expr tree
+/// This helps understand where exponential blowup might occur
+fn analyze_expr_structure(expr: &Expr, label: &str) {
+    crate::debug!(4, "--- Analyzing Expr structure: {} ---", label);
+    
+    struct Stats {
+        total_nodes: usize,
+        choice_nodes: usize,
+        max_choice_alternatives: usize,
+        large_choices: Vec<usize>, // Choices with 5+ alternatives
+    }
+    
+    fn analyze_recursive(expr: &Expr, stats: &mut Stats) {
+        stats.total_nodes += 1;
+        match expr {
+            Expr::Choice(alts) => {
+                stats.choice_nodes += 1;
+                stats.max_choice_alternatives = stats.max_choice_alternatives.max(alts.len());
+                if alts.len() >= 5 {
+                    stats.large_choices.push(alts.len());
+                }
+                for alt in alts {
+                    analyze_recursive(alt, stats);
+                }
+            }
+            Expr::Seq(parts) => {
+                for part in parts {
+                    analyze_recursive(part, stats);
+                }
+            }
+            Expr::Quantifier(inner, _) => {
+                analyze_recursive(inner, stats);
+            }
+            Expr::Shared(inner) => {
+                analyze_recursive(inner, stats);
+            }
+            Expr::U8Seq(_) | Expr::U8Class(_) | Expr::Epsilon => {}
+        }
+    }
+    
+    let mut stats = Stats {
+        total_nodes: 0,
+        choice_nodes: 0,
+        max_choice_alternatives: 0,
+        large_choices: Vec::new(),
+    };
+    analyze_recursive(expr, &mut stats);
+    
+    if stats.choice_nodes > 0 {
+        crate::debug!(4, "Expr structure {}: {} total nodes, {} Choice nodes, max {} alternatives per Choice", 
+            label, stats.total_nodes, stats.choice_nodes, stats.max_choice_alternatives);
+        if !stats.large_choices.is_empty() {
+            crate::debug!(4, "  Large choices (≥5 alternatives): {:?}", stats.large_choices);
+        }
+    }
+}
+
+/// Generate a key for deduplicating Choice alternatives
+/// This is a simple structural hash that identifies identical expressions
+fn expr_to_dedup_key(expr: &Expr) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    
+    fn hash_expr(expr: &Expr, hasher: &mut DefaultHasher) {
+        match expr {
+            Expr::U8Seq(bytes) => {
+                hasher.write_u8(1);
+                bytes.hash(hasher);
+            }
+            Expr::U8Class(set) => {
+                hasher.write_u8(2);
+                // Hash the set by iterating its elements in order
+                for byte in 0u8..=255 {
+                    if set.contains(byte) {
+                        hasher.write_u8(byte);
+                    }
+                }
+            }
+            Expr::Epsilon => {
+                hasher.write_u8(3);
+            }
+            Expr::Shared(inner) => {
+                // For Shared, use the Arc pointer as identity
+                hasher.write_u8(4);
+                hasher.write_usize(Arc::as_ptr(inner) as usize);
+            }
+            Expr::Quantifier(inner, qtype) => {
+                hasher.write_u8(5);
+                hasher.write_u8(match qtype {
+                    QuantifierType::ZeroOrMore => 0,
+                    QuantifierType::OneOrMore => 1,
+                    QuantifierType::ZeroOrOne => 2,
+                });
+                hash_expr(inner, hasher);
+            }
+            Expr::Choice(exprs) => {
+                hasher.write_u8(6);
+                hasher.write_usize(exprs.len());
+                for e in exprs {
+                    hash_expr(e, hasher);
+                }
+            }
+            Expr::Seq(exprs) => {
+                hasher.write_u8(7);
+                hasher.write_usize(exprs.len());
+                for e in exprs {
+                    hash_expr(e, hasher);
+                }
+            }
+        }
+    }
+    
+    let mut hasher = DefaultHasher::new();
+    hash_expr(expr, &mut hasher);
+    hasher.finish()
+}
+
 fn simplify_expr_cached(expr: Expr, cache: &mut HashMap<*const Expr, Arc<Expr>>) -> Expr {
     // Use stacker to handle deep recursion
     stacker::maybe_grow(32 * 1024, 1024 * 1024, || {
@@ -1917,20 +2044,44 @@ fn simplify_expr_cached_impl(expr: Expr, cache: &mut HashMap<*const Expr, Arc<Ex
                     other => vec![other],
                 })
                 .collect();
-            if simplified.len() == 1 {
-                simplified.into_iter().next().unwrap()
-            } else if simplified.len() == 2 {
+            
+            // Deduplicate identical alternatives to avoid exponential DFA blowup
+            // This is especially important for diff grammars where many LINEs have identical CONTENT
+            let simplified_count = simplified.len();
+            let mut deduped = Vec::new();
+            let mut seen = HashSet::new();
+            
+            for expr in simplified {
+                // Use a simple structural equality check
+                // For Shared expressions, we compare the Arc pointer
+                let key = expr_to_dedup_key(&expr);
+                if seen.insert(key) {
+                    deduped.push(expr);
+                }
+            }
+            
+            let dedup_count = simplified_count - deduped.len();
+            if dedup_count > 0 {
+                crate::debug!(4, "Deduplicated {} identical Choice alternatives (pattern: A|A|...|A)", dedup_count);
+            }
+            
+            if deduped.is_empty() {
+                // All alternatives were identical - should not happen, but handle gracefully
+                Expr::Epsilon
+            } else if deduped.len() == 1 {
+                deduped.into_iter().next().unwrap()
+            } else if deduped.len() == 2 {
                 // Check for Choice([a, Epsilon]) or Choice([Epsilon, a]) -> a?
-                let (first, second) = (&simplified[0], &simplified[1]);
+                let (first, second) = (&deduped[0], &deduped[1]);
                 if is_epsilon_expr(second) {
                     Expr::Quantifier(Box::new(first.clone()), QuantifierType::ZeroOrOne)
                 } else if is_epsilon_expr(first) {
                     Expr::Quantifier(Box::new(second.clone()), QuantifierType::ZeroOrOne)
                 } else {
-                    Expr::Choice(simplified)
+                    Expr::Choice(deduped)
                 }
             } else {
-                Expr::Choice(simplified)
+                Expr::Choice(deduped)
             }
         }
         Expr::Quantifier(inner, qtype) => {

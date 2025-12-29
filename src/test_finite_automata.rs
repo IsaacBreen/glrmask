@@ -1463,4 +1463,101 @@ mod reproduction_tests {
         assert!(tokenizer.dfa.states.len() < 50, "Simple tokenizer exploded: {}", tokenizer.dfa.states.len());
         assert!(tokenizer2.dfa.states.len() < 100, "Large tokenizer exploded: {}", tokenizer2.dfa.states.len());
     }
+
+    /// Test for exponential DFA blowup in diff-like grammars with repeated identical lines.
+    /// 
+    /// This test reproduces the issue from test10/11/12.txt where files with N identical
+    /// lines cause 2^N intermediate DFA states during subset construction.
+    /// 
+    /// The pattern:
+    /// ```
+    /// S0 ::= LINE0 | S1;
+    /// S1 ::= LINE1 | S2;
+    /// ...
+    /// LINE0 ::= CONTENT;
+    /// LINE1 ::= CONTENT;  // Same content!
+    /// ```
+    /// 
+    /// When all LINEs match the same CONTENT (" a\n"), the NFA is simultaneously in
+    /// {LINE0, LINE1, ..., LINE{N-1}} after reading that content, leading to 2^N possible
+    /// subsets.
+    ///
+    /// This test FAILS if we see exponential growth beyond reasonable thresholds.
+    #[test]
+    fn test_diff_grammar_exponential_blowup() {
+        use crate::choice;
+        use std::time::Instant;
+        
+        // Test N=8, 9, 10 lines with identical content
+        for n in 8..=10 {
+            println!("\n=== Testing N={} identical lines ===", n);
+            
+            // Create the pattern:
+            // S0 = LINE0 | S1
+            // S1 = LINE1 | S2
+            // ...
+            // S{n-1} = LINE{n-1}
+            // 
+            // All LINEs match the same content: " a\n"
+            
+            let line_content = Expr::Seq(vec![
+                Expr::Choice(vec![
+                    Expr::U8Seq(b" ".to_vec()),
+                    Expr::U8Seq(b"-".to_vec()),
+                ]),
+                Expr::U8Seq(b"a".to_vec()),
+                Expr::U8Seq(b"\n".to_vec()),
+            ]);
+            
+            // Build choice: LINE0 | LINE1 | ... | LINE{n-1}
+            // where each LINE is just the same content
+            let mut lines = Vec::new();
+            for _ in 0..n {
+                lines.push(line_content.clone());
+            }
+            
+            let expr = Expr::Choice(lines);
+            
+            let start = Instant::now();
+            let regex = ExprGroups::from(expr).build();
+            let total_time = start.elapsed();
+            
+            let dfa_states = regex.dfa.states.len();
+            
+            println!("  Total: {} minimized DFA states ({:.2?})", dfa_states, total_time);
+            
+            // Expected: Linear growth in final states (N+1 or so)
+            // Actual problem: Exponential growth in intermediate states causes slow compilation
+            
+            // ASSERTION: Final DFA states should be reasonable (< 50)
+            // The real issue is intermediate states during construction, but we can't
+            // directly measure those without modifying to_dfa(). However, if compilation
+            // takes too long, that indicates exponential blowup is occurring.
+            
+            // Check timing: should be sub-100ms for N=10 if no exponential blowup
+            let max_time_ms = match n {
+                8 => 50,
+                9 => 100,
+                10 => 200,
+                _ => unreachable!(),
+            };
+            
+            let time_ms = total_time.as_millis();
+            
+            assert!(
+                time_ms < max_time_ms,
+                "DFA construction too slow: N={} took {}ms (expected < {}ms). \
+                This suggests exponential time complexity in subset construction.",
+                n, time_ms, max_time_ms
+            );
+            
+            // Minimized DFA should be small (O(N) states)
+            assert!(
+                dfa_states < 50,
+                "Minimized DFA too large: {} states for N={} (expected < 50). \
+                Minimization is working but construction is taking too long.",
+                dfa_states, n
+            );
+        }
+    }
 }
