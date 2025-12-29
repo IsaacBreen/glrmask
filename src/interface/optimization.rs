@@ -124,8 +124,34 @@ impl<'a> GrammarOptimizer<'a> {
             return;
         }
         
+        // NOTE: Repetitive pattern detection code exists below but is NOT enabled by default.
+        // Reason: The NFA→DFA conversion may create many intermediate states (e.g., 21K for
+        // diff grammars), but minimization reduces them to a reasonable number (e.g., 151).
+        // Disabling optimization would harm runtime performance by using GLR parser instead
+        // of an optimized DFA. The compile-time cost is acceptable.
+        //
+        // To enable detection (e.g., for debugging):
+        // if std::env::var("DETECT_REPETITIVE_PATTERNS").is_ok() {
+        //     if let Some(reason) = detect_repetitive_pattern_grammar(&self.grammar.productions) {
+        //         debug!(4, "Skipping grammar optimization: repetitive pattern detected");
+        //         debug!(4, "  {}", reason);
+        //         return;
+        //     }
+        // }
+        
         let total_start = std::time::Instant::now();
         debug!(4, "Starting grammar optimization with {} productions", self.grammar.productions.len());
+        
+        // Debug: show first few productions to understand structure
+        if std::env::var("DEBUG_PRODUCTIONS").is_ok() {
+            debug!(4, "Production details:");
+            for (i, prod) in self.grammar.productions.iter().take(10).enumerate() {
+                debug!(4, "  {}: {:?}", i, prod);
+            }
+            if self.grammar.productions.len() > 10 {
+                debug!(4, "  ... ({} more)", self.grammar.productions.len() - 10);
+            }
+        }
         
         // Collect all non-terminal names
         let nt_names: HashSet<String> = self.grammar.productions.iter()
@@ -2706,4 +2732,149 @@ fn can_be_empty(expr: &Expr) -> bool {
         }
         Expr::Shared(inner) => can_be_empty(inner),
     }
+}
+
+/// Detect grammars with repetitive patterns that cause exponential DFA blowup.
+///
+/// Returns Some(reason) if the grammar is repetitive, None otherwise.
+///
+/// Example: diff grammars for files with N identical lines:
+/// ```
+/// S0 ::= LINE0 | S1;
+/// S1 ::= LINE1 | S2;
+/// ...
+/// LINE0 ::= PLUS_LINE* CONTENT0 ( LINE1 | ... )?;
+/// LINE1 ::= PLUS_LINE* CONTENT1 ( LINE2 | ... )?;
+/// ...
+/// ```
+///
+/// All S rules follow pattern: S{i} ::= LINE{i} | S{i+1}
+/// All LINE rules follow pattern: LINE{i} ::= PLUS_LINE* CONTENT{i} ( LINE{i+1} | ... )?
+///
+/// When optimized to a single regex and converted to DFA, this creates 2^N states
+/// because after reading identical content, the NFA is in multiple positions.
+///
+/// Detection heuristic:
+/// - Count productions with identical structural patterns
+/// - If >60% follow the same pattern, it's likely a repetitive grammar
+fn detect_repetitive_pattern_grammar(productions: &[Production]) -> Option<String> {
+    use std::collections::HashMap;
+    
+    let num_productions = productions.len();
+    
+    // Need at least 10 productions to be problematic
+    if num_productions < 10 {
+        return None;
+    }
+    
+    // Group productions by their RHS pattern signature
+    // Pattern signature: sequence of (symbol_type, is_optional) pairs
+    let mut pattern_groups: HashMap<Vec<PatternElement>, Vec<String>> = HashMap::new();
+    
+    for prod in productions {
+        let pattern = extract_pattern_signature(&prod.rhs);
+        pattern_groups.entry(pattern).or_default().push(prod.lhs.0.clone());
+    }
+    
+    // Find largest pattern group
+    let Some((largest_pattern, largest_group)) = pattern_groups.iter()
+        .max_by_key(|(_, group)| group.len())
+    else {
+        return None;
+    };
+    
+    let largest_group_size = largest_group.len();
+    let largest_group_pct = largest_group_size as f64 / num_productions as f64;
+    
+    // Threshold: if >60% of productions follow the same pattern
+    const THRESHOLD: f64 = 0.6;
+    
+    if largest_group_pct > THRESHOLD {
+        // Also check if the pattern involves alternatives or quantifiers
+        // (which contribute to non-determinism)
+        let has_nondeterminism = pattern_contains_nondeterminism(largest_pattern);
+        
+        if has_nondeterminism {
+            return Some(format!(
+                "{}/{} productions ({:.0}%) follow identical pattern with non-determinism",
+                largest_group_size, num_productions, largest_group_pct * 100.0
+            ));
+        }
+    }
+    
+    None
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum PatternElement {
+    /// Non-terminal reference
+    NonTerminal,
+    /// Terminal with symbol type (T=Terminal, NT=NonTerminal in its RHS)
+    Terminal(TerminalPatternType),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum TerminalPatternType {
+    /// Regex name terminal
+    RegexName,
+    /// Literal sequence of specific length
+    Literal(usize),
+    /// Character class (not used in simplified version)
+    Class,
+    /// Sequence of patterns (not used in simplified version)
+    Seq(usize),
+    /// Choice between alternatives (not used in simplified version)
+    Choice(usize),
+    /// Quantifier (*, +, ?) (not used in simplified version)
+    Quantifier(QuantifierType),
+    /// Epsilon (not used in simplified version)
+    Epsilon,
+}
+
+/// Extract structural pattern from production RHS.
+fn extract_pattern_signature(rhs: &[Symbol]) -> Vec<PatternElement> {
+    rhs.iter().map(|symbol| {
+        match symbol {
+            Symbol::NonTerminal(_) => PatternElement::NonTerminal,
+            Symbol::Terminal(term) => {
+                // We can't access the expr here, so just use the terminal type
+                match term {
+                    Terminal::RegexName(_) => PatternElement::Terminal(TerminalPatternType::RegexName),
+                    Terminal::Literal(bytes) => PatternElement::Terminal(TerminalPatternType::Literal(bytes.len())),
+                }
+            }
+        }
+    }).collect()
+}
+
+/// Extract pattern type from expression (not used currently).
+fn extract_expr_pattern(expr: &Expr) -> TerminalPatternType {
+    match expr {
+        Expr::U8Seq(bytes) => TerminalPatternType::Literal(bytes.len()),
+        Expr::U8Class(_) => TerminalPatternType::Class,
+        Expr::Epsilon => TerminalPatternType::Epsilon,
+        Expr::Seq(children) => TerminalPatternType::Seq(children.len()),
+        Expr::Choice(alternatives) => TerminalPatternType::Choice(alternatives.len()),
+        Expr::Quantifier(_, q_type) => TerminalPatternType::Quantifier(*q_type),
+        Expr::Shared(inner) => extract_expr_pattern(inner),
+    }
+}
+
+/// Check if a pattern contains elements that contribute to non-determinism.
+fn pattern_contains_nondeterminism(pattern: &[PatternElement]) -> bool {
+    pattern.iter().any(|elem| {
+        match elem {
+            PatternElement::NonTerminal => {
+                // Non-terminals can introduce non-determinism if they have alternatives
+                // We conservatively assume they do
+                true
+            }
+            PatternElement::Terminal(term_type) => {
+                matches!(term_type, 
+                    TerminalPatternType::Choice(_) |
+                    TerminalPatternType::Quantifier(_)
+                )
+            }
+        }
+    })
 }
