@@ -57,15 +57,31 @@ with open(schema_file) as f:
     schema = json.load(f)
 
 
-# Load vocabulary (GPT-2)
-print("Loading vocabulary...")
-import urllib.request
-vocab_url = "https://huggingface.co/openai-community/gpt2/raw/main/vocab.json"
-with urllib.request.urlopen(vocab_url) as resp:
-    vocab = json.loads(resp.read().decode())
+# Load vocabulary
+try:
+    import tiktoken
+    print("Loading vocabulary using tiktoken (matching benchmark runner)...")
+    enc = tiktoken.get_encoding("gpt2")
+    
+    print("\nGeneration token_to_id map (matching Sep1Adapter._get_token_to_id)...")
+    start = time.time()
+    token_to_id = {}
+    for token_id in range(enc.n_vocab):
+        token_bytes = enc.decode_single_token_bytes(token_id)
+        token_to_id[token_bytes] = token_id
+    vocab_time = time.time() - start
+    print(f"   Token map generation: {vocab_time*1000:.1f}ms")
 
-# Convert to token_bytes -> id format
-token_to_id = {k.encode('utf-8'): v for k, v in vocab.items()}
+except ImportError:
+    print("tiktoken not found, falling back to downloading vocab.json...")
+    import urllib.request
+    vocab_url = "https://huggingface.co/openai-community/gpt2/raw/main/vocab.json"
+    start = time.time()
+    with urllib.request.urlopen(vocab_url) as resp:
+        vocab = json.loads(resp.read().decode())
+    token_to_id = {k.encode('utf-8'): v for k, v in vocab.items()}
+    vocab_time = time.time() - start
+    print(f"   Vocab download/parse: {vocab_time*1000:.1f}ms")
 
 # Step 1: Convert JSON schema to EBNF
 print("\n1. Converting JSON schema to EBNF...")
@@ -126,5 +142,5 @@ print(f"\n   Final state active: {state.is_active()}")
 print(f"   Final state valid: {state.is_valid()}")
 
 # Summary
-total_time = ebnf_time + parse_time + optimize_time + compile_time + constraint_time
+total_time = vocab_time + ebnf_time + parse_time + optimize_time + compile_time + constraint_time
 print(f"\n=== Total compile time: {total_time*1000:.1f}ms ===")
