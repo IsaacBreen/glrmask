@@ -71,6 +71,14 @@ test-json-schema: ## Compile a JSON schema grammar (verifies schema-to-EBNF work
 	SCHEMA_FILE="gcg-paper/downloads/repos/jsonschemabench/data/Github_ultra/o21378.json" \
 		python3 scripts/test_json_schema.py
 
+test-json-schema-o1051: ## Compile o1051 (Github Hard) schema
+	SCHEMA_FILE="gcg-paper/downloads/repos/jsonschemabench/data/Github_hard/o1051.json" \
+		python3 scripts/test_json_schema.py
+
+test-tsconfig: ## Compile TSConfig schema
+	SCHEMA_FILE="gcg-paper/hard_schemas/data/TSConfig---tsconfig.json" \
+		python3 scripts/test_json_schema.py
+
 # === Hard Schema Compilation Tests ===
 # These use the Rust grammar_compiler binary directly with --json-schema
 
