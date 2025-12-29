@@ -942,26 +942,52 @@ impl ExprGroups {
             nfa.start_state
         };
 
-        for (group_idx, ExprGroup { expr, is_non_greedy }) in groups.groups.into_iter().enumerate() {
-            let group_start_state = nfa.add_state();
-            // Connect from the split point (end of prefix or start state)
-            nfa.add_epsilon_transition(split_point, group_start_state);
-            
-            let end_state =
-                Expr::handle_expr_cached(expr, &mut nfa, group_start_state, &mut cache);
-            
-            if is_non_greedy {
-                nfa.states[end_state].finalizers.insert(group_idx);
-                nfa.states[end_state]
-                    .non_greedy_finalizers
-                    .insert(group_idx);
+        // OPTIMIZATION: Deduplicate identical expressions across groups.
+        // Instead of building N separate NFA sub-graphs for N identical expressions,
+        // we build ONE sub-graph and add all N finalizer group IDs to the end state.
+        // This prevents exponential DFA state blowup when many terminals have the same pattern.
+        let mut expr_to_end_state: HashMap<&Expr, usize> = HashMap::new();
+        let mut dedup_count = 0usize;
+        
+        for (group_idx, ExprGroup { expr, is_non_greedy }) in groups.groups.iter().enumerate() {
+            // Check if we've already built an NFA for this exact expression
+            if let Some(&existing_end_state) = expr_to_end_state.get(expr) {
+                // Reuse the existing NFA sub-graph - just add our finalizer
+                if *is_non_greedy {
+                    nfa.states[existing_end_state].finalizers.insert(group_idx);
+                    nfa.states[existing_end_state].non_greedy_finalizers.insert(group_idx);
+                } else {
+                    nfa.states[existing_end_state].finalizers.insert(group_idx);
+                }
+                dedup_count += 1;
             } else {
-                nfa.states[end_state].finalizers.insert(group_idx);
+                // Build a new NFA sub-graph for this expression
+                let group_start_state = nfa.add_state();
+                // Connect from the split point (end of prefix or start state)
+                nfa.add_epsilon_transition(split_point, group_start_state);
+                
+                let end_state =
+                    Expr::handle_expr_cached(expr.clone(), &mut nfa, group_start_state, &mut cache);
+                
+                if *is_non_greedy {
+                    nfa.states[end_state].finalizers.insert(group_idx);
+                    nfa.states[end_state].non_greedy_finalizers.insert(group_idx);
+                } else {
+                    nfa.states[end_state].finalizers.insert(group_idx);
+                }
+                
+                // Cache this expression's end state for potential reuse
+                expr_to_end_state.insert(expr, end_state);
             }
+        }
+        
+        if dedup_count > 0 {
+            crate::debug!(4, "Deduplicated {} identical terminal expressions in NFA construction", dedup_count);
         }
 
         nfa
     }
+
 }
 
 impl ExprGroups {
@@ -1612,6 +1638,26 @@ impl Expr {
         
         if !classes.is_empty() {
             complex.push(Expr::U8Class(classes));
+        }
+        
+        // 3. Deduplicate complex expressions
+        // This prevents exponential DFA blowup when many terminals have identical patterns
+        // e.g., " a" | " a" | " a" becomes just " a"
+        if complex.len() > 1 {
+            let original_len = complex.len();
+            // Manual dedup: build new vector with unique elements
+            let mut seen: HashSet<Expr> = HashSet::with_capacity(complex.len());
+            let mut deduped_complex = Vec::with_capacity(complex.len());
+            for e in complex {
+                if seen.insert(e.clone()) {
+                    deduped_complex.push(e);
+                }
+            }
+            let removed = original_len - deduped_complex.len();
+            if removed > 0 {
+                crate::debug!(4, "Deduplicated {} identical alternatives in Choice expression", removed);
+            }
+            complex = deduped_complex;
         }
         
         if complex.len() == 1 {

@@ -28,11 +28,14 @@ import _sep1
 
 def generate_diff_grammar(source_path: str) -> str:
     """
-    Generates an EBNF grammar that validates a 'git diff'-like format
-    for a specific source file.
+    Generates an EBNF grammar that validates a 'git diff'-like format.
+    
+    This version uses a CONTENT-AGNOSTIC structure that avoids exponential
+    DFA blowup by not creating separate rules for each line. Instead, it
+    matches any line content with a generic pattern.
 
     Args:
-        source_path: The path to the input file to base the grammar on.
+        source_path: The path to the input file (used only for validation/logging).
         
     Returns:
         The EBNF grammar as a string.
@@ -42,67 +45,38 @@ def generate_diff_grammar(source_path: str) -> str:
         lines = f.readlines()
 
     num_lines = len(lines)
-    grammar_parts = []
+    print(f"   Source has {num_lines} lines")
+    
+    # Content-agnostic grammar that matches any valid diff structure
+    # without per-line enumeration
+    grammar = r'''root ::= DIFF;
 
-    # --- 1. Preamble and Top-Level Rules ---
-    grammar_parts.append("root ::= DIFF;")
-    grammar_parts.append("DIFF ::= FILE_HEADER? ( HUNK_HEADER S0 )? EOF;")
-    grammar_parts.append("FILE_HEADER ::= GIT_LINE INDEX_LINE? MINUS_LINE PLUS_FILE_LINE;")
-    grammar_parts.append("EOF  ::= '<|EOF|>';")  # Ensure this matches your tokenizer's EOF
-    grammar_parts.append("")
+// Top-level diff structure
+DIFF ::= FILE_HEADER? HUNKS EOF;
+FILE_HEADER ::= GIT_LINE INDEX_LINE? MINUS_LINE PLUS_FILE_LINE;
 
-    # --- 2. 'S' Rules (Search for Hunk Start) ---
-    grammar_parts.append("// 'S' rules: Find the start of a hunk")
-    for i in range(num_lines):
-        # Try to match line i, or skip and try line i+1
-        grammar_parts.append(f"S{i} ::= LINE{i} | S{i+1};")
+// Zero or more hunks
+HUNKS ::= ( HUNK_HEADER HUNK_BODY )*;
 
-    # If we reach the end of the file, we only allow trailing additions
-    grammar_parts.append(f"S{num_lines} ::= PLUS_LINE*;")
-    grammar_parts.append("")
+// Hunk body: any sequence of context, addition, or deletion lines
+HUNK_BODY ::= ( CONTEXT_LINE | PLUS_LINE | MINUS_CONTENT_LINE )*;
 
-    # --- 3. 'LINE' Rules (Match Context/Deletion) ---
-    grammar_parts.append("// 'LINE' rules: Match content exactly, then continue or new hunk")
-    for i in range(num_lines):
-        # After matching line i, we can:
-        # 1. Continue immediately to line i+1
-        # 2. Have some additions, then a Hunk Header, skipping to i+1
-        if i < num_lines - 1:
-            continuation = f"( LINE{i+1} | PLUS_LINE* HUNK_HEADER S{i+1} )?"
-        else:
-            continuation = f"( PLUS_LINE* HUNK_HEADER S{num_lines} )?"
+// --- TERMINALS ---
+GIT_LINE         ::= 'diff --git' [^\n\r]* NEWLINE;
+INDEX_LINE       ::= 'index' [^\n\r]* NEWLINE;
+MINUS_LINE       ::= '---' [^\n\r]* NEWLINE;
+PLUS_FILE_LINE   ::= '+++' [^\n\r]* NEWLINE;
+HUNK_HEADER      ::= '@@' [^\n\r]* NEWLINE;
 
-        # NOTE: PLUS_LINE* allows insertions *before* the context/deletion line
-        grammar_parts.append(f"LINE{i} ::= PLUS_LINE* CONTENT{i} {continuation};")
-    grammar_parts.append("")
+// Content lines (context or deletion) - matches ANY line content
+CONTEXT_LINE     ::= ' ' [^\n\r]* NEWLINE;
+MINUS_CONTENT_LINE ::= '-' [^\n\r]* NEWLINE;
+PLUS_LINE        ::= '+' [^\n\r]* NEWLINE;
 
-    # --- 4. Terminal Definitions ---
-    grammar_parts.append("// --- TERMINALS ---")
-    grammar_parts.append(r"GIT_LINE         ::= 'diff --git' [^\n\r]* NEWLINE;")
-    grammar_parts.append(r"INDEX_LINE       ::= 'index' [^\n\r]* NEWLINE;")
-    grammar_parts.append(r"MINUS_LINE       ::= '---' [^\n\r]* NEWLINE;")
-    grammar_parts.append(r"PLUS_FILE_LINE   ::= '+++' [^\n\r]* NEWLINE;")
-    grammar_parts.append(r"HUNK_HEADER      ::= '@@' [^\n\r]* NEWLINE;")
-    grammar_parts.append(r"PLUS_LINE        ::= '+' [^\n\r]* NEWLINE;")
-
-    # Safer NEWLINE definition (using escaped chars rather than literal line breaks)
-    grammar_parts.append(r"NEWLINE          ::= '\n' | '\r\n';")
-    grammar_parts.append("")
-
-    # --- 5. Content Lines ---
-    grammar_parts.append("// Context-line terminals")
-    for i, line in enumerate(lines):
-        content = line.rstrip('\r\n')
-
-        if not content:
-            # Strict diffs require a space or minus even for empty lines
-            grammar_parts.append(f"CONTENT{i} ::= ( ' ' | '-' ) NEWLINE;")
-        else:
-            # Escape backslashes and quotes for the EBNF string literal
-            escaped_content = content.replace('\\', '\\\\').replace('"', '\\"')
-            grammar_parts.append(f'CONTENT{i} ::= ( " " | "-" ) "{escaped_content}" NEWLINE;')
-
-    return '\n'.join(grammar_parts)
+NEWLINE          ::= '\n' | '\r\n';
+EOF              ::= '<|EOF|>';
+'''
+    return grammar.strip()
 
 
 def main():
