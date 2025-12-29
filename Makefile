@@ -1,7 +1,7 @@
 # Research Project Makefile
 # Common commands for paper writing and research
 
-.PHONY: paper paper-watch paper-clean notes-today help build test test-js test-json-schema test-schema-packagejson test-schema-github test-schema-sarif test-schema-meta test-schema-extra test-schema-kestra test-schema-vegalite test-schema-apollo test-schema-liquibase ffi viz viz-clean all
+.PHONY: paper paper-watch paper-clean notes-today help build test test-js test-json-schema test-schema-packagejson test-schema-github test-schema-sarif test-schema-meta test-schema-extra test-schema-kestra test-schema-vegalite test-schema-apollo test-schema-liquibase test-diff-grammar ffi viz viz-clean all
 
 # === Build All ===
 
@@ -79,11 +79,15 @@ test-tsconfig: ## Compile TSConfig schema
 	SCHEMA_FILE="gcg-paper/hard_schemas/data/TSConfig---tsconfig.json" \
 		python3 scripts/test_json_schema.py
 
-PYTHON ?= python3
+PYTHON ?= python
 
 test-schema-id: ## Compile any benchmark schema by ID (usage: make test-schema-id ID=ApolloRouter---apollo-router-2.9.0)
 	@if [ -z "$(ID)" ]; then echo "Usage: make test-schema-id ID=<schema_id>"; exit 1; fi
 	SCHEMA_ID="$(ID)" $(PYTHON) scripts/test_json_schema.py
+
+test-diff-grammar: ffi ## Test diff grammar for any text file (usage: make test-diff-grammar FILE=path/to/file.txt)
+	@if [ -z "$(FILE)" ]; then echo "Usage: make test-diff-grammar FILE=<path_to_text_file>"; exit 1; fi
+	SOURCE_FILE="$(FILE)" $(PYTHON) scripts/test_diff_grammar.py
 
 # === Hard Schema Compilation Tests ===
 # These use the Rust grammar_compiler binary directly with --json-schema
