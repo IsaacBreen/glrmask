@@ -24,7 +24,11 @@ paper-open: paper ## Build and open paper
 # === Visualization Commands ===
 
 ffi: ## Build the Python FFI binding (required for visualizations)
-	cd python && RUSTFLAGS=-Awarnings maturin develop -r
+	@if [ -z "$(SKIP_MATURIN)" ]; then \
+		cd python && RUSTFLAGS=-Awarnings maturin develop -r; \
+	else \
+		echo "Skipping maturin compilation (SKIP_MATURIN is set)"; \
+	fi
 
 viz: ffi ## Generate all visualization components
 	cd gcg-paper/paper/figures/components && make all
