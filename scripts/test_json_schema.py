@@ -124,6 +124,7 @@ print("\n4. Compiling grammar...")
 start = time.time()
 compiled = grammar_def.compile()
 compile_time = time.time() - start
+print(f"   Grammar compilation: {compile_time*1000:.1f}ms")
 
 # Step 5: Create constraint with vocabulary
 print("\n5. Creating constraint with vocabulary...")
