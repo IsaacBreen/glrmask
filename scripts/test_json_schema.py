@@ -16,7 +16,14 @@ Usage:
 import json
 import time
 import os
+import sys
 import glob
+
+# Add project root and python/ dir to sys.path to find _sep1 module
+repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, repo_root)
+sys.path.insert(0, os.path.join(repo_root, "python"))
+
 import _sep1
 
 def find_schema_by_id(schema_id: str) -> str:
@@ -54,7 +61,15 @@ elif not schema_file:
 
 print(f"Loading schema from: {schema_file}")
 with open(schema_file) as f:
-    schema = json.load(f)
+    data = json.load(f)
+
+if 'schema' in data:
+    schema = data['schema']
+else:
+    schema = data
+
+if 'title' in schema:
+    print(f"Schema title: {schema['title']}")
 
 
 # Load vocabulary
