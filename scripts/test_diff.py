@@ -4,6 +4,7 @@ Test Sep1 diff grammar compilation and constraint creation.
 This script takes a text file and:
 1. Generates an EBNF grammar that describes valid git diffs for that file
 2. Compiles the grammar and creates a constraint
+3. Caches the compiled constraint for faster subsequent runs
 
 Usage:
     # With environment variable
@@ -11,12 +12,17 @@ Usage:
     
     # Or directly via make
     make test-diff FILE=path/to/file.txt
+    
+    # Disable caching (always recompile)
+    NO_CACHE=1 SOURCE_FILE="path/to/file.txt" python scripts/test_diff.py
 """
 
 import json
 import time
 import os
 import sys
+import hashlib
+import gzip
 
 # Add project root and python/ dir to sys.path to find _sep1 module
 repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -24,6 +30,50 @@ sys.path.insert(0, repo_root)
 sys.path.insert(0, os.path.join(repo_root, "python"))
 
 import _sep1
+
+
+# Cache directory for compiled constraints
+CACHE_DIR = os.path.join(repo_root, ".cache", "diff_constraints")
+
+
+def get_cache_key(ebnf: str) -> str:
+    """Compute cache key from EBNF grammar."""
+    return hashlib.sha256(ebnf.encode('utf-8')).hexdigest()[:16]
+
+
+def get_cache_path(cache_key: str) -> str:
+    """Get cache file path for a given key."""
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    return os.path.join(CACHE_DIR, f"{cache_key}.json.gz")
+
+
+def load_cached_constraint(cache_key: str, token_to_id):
+    """Load constraint from cache if available."""
+    cache_path = get_cache_path(cache_key)
+    if not os.path.exists(cache_path):
+        return None
+    
+    try:
+        with gzip.open(cache_path, 'rt', encoding='utf-8') as f:
+            constraint_json = json.load(f)
+        
+        # Create GrammarConstraint from JSON
+        constraint = _sep1.GrammarConstraint.from_json(constraint_json, token_to_id)
+        return constraint
+    except Exception as e:
+        print(f"   Warning: Failed to load cached constraint: {e}")
+        return None
+
+
+def save_constraint_to_cache(constraint, cache_key: str):
+    """Save constraint to cache."""
+    cache_path = get_cache_path(cache_key)
+    try:
+        constraint_json = constraint.to_json()
+        with gzip.open(cache_path, 'wt', encoding='utf-8') as f:
+            json.dump(constraint_json, f)
+    except Exception as e:
+        print(f"   Warning: Failed to save constraint to cache: {e}")
 
 
 def generate_diff_grammar(source_path: str) -> str:
@@ -166,36 +216,72 @@ def main():
         vocab_time = time.time() - start
         print(f"   Vocab download/parse: {vocab_time*1000:.1f}ms")
     
-    # Step 3: Parse EBNF to GrammarDefinition
-    print("\n3. Parsing EBNF to GrammarDefinition...")
-    start = time.time()
-    grammar_def = _sep1.grammar_definition_from_ebnf(ebnf)
-    parse_time = time.time() - start
-    print(f"   Grammar parsing: {parse_time*1000:.1f}ms")
+    # Step 3: Check cache (unless NO_CACHE=1)
+    use_cache = not os.environ.get("NO_CACHE")
+    constraint = None
+    cache_key = None
+    parse_time = optimize_time = compile_time = constraint_time = 0.0
     
-    # Step 4: Optimize grammar
-    print("\n4. Optimizing grammar...")
-    start = time.time()
-    grammar_def.optimize()
-    optimize_time = time.time() - start
-    print(f"   Optimization: {optimize_time*1000:.1f}ms")
+    if use_cache:
+        print("\n3. Checking cache...")
+        start = time.time()
+        cache_key = get_cache_key(ebnf)
+        cache_path = get_cache_path(cache_key)
+        print(f"   Cache key: {cache_key}")
+        print(f"   Cache path: {cache_path}")
+        
+        constraint = load_cached_constraint(cache_key, token_to_id)
+        cache_time = time.time() - start
+        
+        if constraint is not None:
+            print(f"   ✓ Cache hit! Loaded in {cache_time*1000:.1f}ms")
+        else:
+            print(f"   ✗ Cache miss (checked in {cache_time*1000:.1f}ms)")
+    else:
+        print("\n3. Cache disabled (NO_CACHE=1)")
+        cache_key = get_cache_key(ebnf)
     
-    # Step 5: Compile to GLR parser
-    print("\n5. Compiling grammar...")
-    start = time.time()
-    compiled = grammar_def.compile()
-    compile_time = time.time() - start
-    print(f"   Grammar compilation: {compile_time*1000:.1f}ms")
+    # Step 4-7: Compile if not cached
+    if constraint is None:
+        # Step 4: Parse EBNF to GrammarDefinition
+        print("\n4. Parsing EBNF to GrammarDefinition...")
+        start = time.time()
+        grammar_def = _sep1.grammar_definition_from_ebnf(ebnf)
+        parse_time = time.time() - start
+        print(f"   Grammar parsing: {parse_time*1000:.1f}ms")
+        
+        # Step 5: Optimize grammar
+        print("\n5. Optimizing grammar...")
+        start = time.time()
+        grammar_def.optimize()
+        optimize_time = time.time() - start
+        print(f"   Optimization: {optimize_time*1000:.1f}ms")
+        
+        # Step 6: Compile to GLR parser
+        print("\n6. Compiling grammar...")
+        start = time.time()
+        compiled = grammar_def.compile()
+        compile_time = time.time() - start
+        print(f"   Grammar compilation: {compile_time*1000:.1f}ms")
+        
+        # Step 7: Create constraint with vocabulary
+        print("\n7. Creating constraint with vocabulary...")
+        start = time.time()
+        constraint = _sep1.GrammarConstraint(compiled, token_to_id)
+        constraint_time = time.time() - start
+        print(f"   Constraint creation: {constraint_time*1000:.1f}ms")
+        
+        # Step 8: Save to cache
+        if use_cache and cache_key:
+            print("\n8. Saving to cache...")
+            start = time.time()
+            save_constraint_to_cache(constraint, cache_key)
+            save_time = time.time() - start
+            print(f"   Cache saved in {save_time*1000:.1f}ms")
     
-    # Step 6: Create constraint with vocabulary
-    print("\n6. Creating constraint with vocabulary...")
-    start = time.time()
-    constraint = _sep1.GrammarConstraint(compiled, token_to_id)
-    constraint_time = time.time() - start
-    print(f"   Constraint creation: {constraint_time*1000:.1f}ms")
-    
-    # Step 7: Test the constraint
-    print("\n7. Testing constraint...")
+    # Final step: Test the constraint
+    step_num = 9 if constraint_time > 0 else 4
+    print(f"\n{step_num}. Testing constraint...")
     state = _sep1.GrammarConstraintState(constraint)
     print(f"   Initial state active: {state.is_active()}")
     
@@ -214,6 +300,8 @@ def main():
     print(f"\n{'=' * 60}")
     print(f"=== Grammar Compile Time (GCT): {total_compile_time*1000:.1f}ms ===")
     print(f"=== Total time (incl. vocab): {total_time*1000:.1f}ms ===")
+    if constraint_time == 0:
+        print("=== (Loaded from cache) ===")
     print("SUCCESS: Diff grammar constraint created!")
 
 
