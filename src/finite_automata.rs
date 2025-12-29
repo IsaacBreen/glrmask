@@ -890,9 +890,9 @@ impl ExprGroups {
         crate::debug!(5, "Optimized expression in {:.2?}", start_optimize.elapsed());
         
         // Print the optimized expression for debugging DFA explosion
-        crate::debug!(4, "Optimized expression groups:");
+        crate::debug!(6, "Optimized expression groups:");
         for (i, group) in optimized.groups.iter().enumerate() {
-            crate::debug!(4, "  Group {}: {}", i, group.expr);
+            crate::debug!(6, "  Group {}: {}", i, group.expr);
         }
 
         crate::debug!(4, "Building NFA");
