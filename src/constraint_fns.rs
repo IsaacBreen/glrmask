@@ -91,7 +91,13 @@ impl<'a> GrammarConstraintState<'a> {
                 continue;
             }
 
-            if let Some((target_wa_state_id, weight)) = dwa_start_state.get_transition(tokenizer_state_id.0 as Label) {
+            // Map tokenizer state to its representative before querying the DWA
+            let representative_state = self.parent.tokenizer_state_to_rep
+                .get(&tokenizer_state_id)
+                .copied()
+                .unwrap_or(tokenizer_state_id);
+
+            if let Some((target_wa_state_id, weight)) = dwa_start_state.get_transition(representative_state.0 as Label) {
                 let f = |acc: &Acc| {
                     let new_rsb = acc.llm_tokens_union.inner.as_ref() & &weight.rsb;
                     if new_rsb.is_empty() { None } else { Some(new_rsb) }

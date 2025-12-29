@@ -338,6 +338,10 @@ pub struct GrammarConstraint {
 
     /// Vocabulary mappings for the Parser DWA stage.
     pub parser_dwa_vocab: StageVocab,
+    
+    /// Mapping from tokenizer state ID to its representative state ID.
+    /// Used to keep parser_dwa compact by only storing transitions for representative states.
+    pub tokenizer_state_to_rep: BTreeMap<TokenizerStateID, TokenizerStateID>,
 }
 
 impl GrammarConstraint {
@@ -361,6 +365,7 @@ impl GrammarConstraint {
         assert_eq!(self.possible_matches, other.possible_matches);
         assert_eq!(self.parser_dwa_vocab, other.parser_dwa_vocab);
         assert_eq!(self.vocab_trie, other.vocab_trie);
+        assert_eq!(self.tokenizer_state_to_rep, other.tokenizer_state_to_rep);
     }
 }
 
@@ -441,6 +446,8 @@ struct GrammarConstraintJSON {
     original_llm_vocab: Option<LLMVocab>,
     /// Fallback: just max_original_llm_token_id if full vocab not available
     max_orig_id: Option<usize>,
+    /// Mapping from tokenizer state ID to representative state ID
+    tokenizer_state_to_rep: Option<BTreeMap<String, String>>,
 }
 
 impl JSONConvertible for GrammarConstraintJSON {
@@ -465,6 +472,13 @@ impl JSONConvertible for GrammarConstraintJSON {
         }
         if let Some(max_id) = self.max_orig_id {
             obj.insert("max_orig_id".to_string(), JSONNode::UInt(max_id as u128));
+        }
+        if let Some(ref state_map) = self.tokenizer_state_to_rep {
+            let mut map_obj = std::collections::BTreeMap::new();
+            for (k, v) in state_map {
+                map_obj.insert(k.clone(), JSONNode::String(v.clone()));
+            }
+            obj.insert("tokenizer_state_to_rep".to_string(), JSONNode::Object(map_obj));
         }
         
         JSONNode::Object(obj)
@@ -510,6 +524,19 @@ impl JSONConvertible for GrammarConstraintJSON {
                             JSONNode::Int(v) => Some(*v as usize),
                             _ => None,
                         }),
+                    tokenizer_state_to_rep: obj.get("tokenizer_state_to_rep")
+                        .and_then(|n| match n {
+                            JSONNode::Object(map_obj) => {
+                                let mut result = BTreeMap::new();
+                                for (k, v) in map_obj {
+                                    if let JSONNode::String(v_str) = v {
+                                        result.insert(k.clone(), v_str.clone());
+                                    }
+                                }
+                                Some(result)
+                            }
+                            _ => None,
+                        }),
                 })
             }
             _ => Err("Expected object for GrammarConstraintJSON".to_string()),
@@ -534,6 +561,14 @@ impl JSONConvertible for GrammarConstraint {
             commit_vocab: None,
             original_llm_vocab: None,
             max_orig_id: Some(self.parser_dwa_vocab.max_original_llm_token_id),
+            // Serialize the tokenizer state mapping
+            tokenizer_state_to_rep: Some({
+                let mut map = BTreeMap::new();
+                for (k, v) in &self.tokenizer_state_to_rep {
+                    map.insert(k.0.to_string(), v.0.to_string());
+                }
+                map
+            }),
         };
         intermediate.to_json()
     }
@@ -584,6 +619,21 @@ impl JSONConvertible for GrammarConstraint {
             token_name_map: intermediate.token_name_map,
             possible_matches,
             parser_dwa_vocab: intermediate.vocab,
+            tokenizer_state_to_rep: {
+                // Deserialize the mapping, or create identity mapping as fallback
+                if let Some(map_strings) = intermediate.tokenizer_state_to_rep {
+                    let mut result = BTreeMap::new();
+                    for (k_str, v_str) in map_strings {
+                        if let (Ok(k), Ok(v)) = (k_str.parse::<usize>(), v_str.parse::<usize>()) {
+                            result.insert(TokenizerStateID(k), TokenizerStateID(v));
+                        }
+                    }
+                    result
+                } else {
+                    // For backward compatibility: create identity mapping
+                    BTreeMap::new()
+                }
+            },
         })
     }
 }
@@ -982,8 +1032,11 @@ impl GrammarConstraint {
         for rep in state_to_rep.values() {
             representative_states_set.insert(*rep);
         }
+        
+        let num_representatives = representative_states_set.len();
+        let num_states = state_to_rep.len();
 
-        let mut terminal_dwa = run_precompute1(
+        let terminal_dwa = run_precompute1(
             &tokenizer,
             &internal_llm_token_map,
             vocab.internal_max_llm_token,
@@ -991,31 +1044,10 @@ impl GrammarConstraint {
             representative_states_set.into_iter().collect(),
         );
 
-        // EXPAND DWA: Add transitions for non-representative states
-        crate::debug!(4, "Expanding DWA transitions for equivalent states...");
-        let start_state_id = terminal_dwa.body.start_state;
-        {
-            let terminals_count = parser.terminal_map.len();
-            
-            // Collect transitions to add to avoid mutable borrow conflict
-            let mut transitions_to_add = Vec::new();
-            
-            for (state, rep) in &state_to_rep {
-                if state != rep {
-                    let rep_label = (rep.0 + terminals_count) as crate::precompute4::weighted_automata::common::Label;
-                    let state_label = (state.0 + terminals_count) as crate::precompute4::weighted_automata::common::Label;
-                    
-                    // Find where the representative points to
-                    if let Some((target, weight)) = terminal_dwa.states[start_state_id].get_transition(rep_label) {
-                        transitions_to_add.push((state_label, target, weight.clone()));
-                    }
-                }
-            }
-
-            for (label, target, weight) in transitions_to_add {
-                terminal_dwa.add_transition(start_state_id, label, target, weight).unwrap();
-            }
-        }
+        // Store the state_to_rep mapping in the constraint instead of expanding the DWA
+        // This keeps the parser DWA compact - constraint_fns.rs will map states as needed
+        crate::debug!(4, "Storing tokenizer state equivalence mapping ({} states, {} representatives)", 
+                     num_states, num_representatives);
 
         let mut possible_matches_precompute1 = computed_possible_matches;
 
@@ -1200,6 +1232,7 @@ impl GrammarConstraint {
             commit_vocab,
             token_name_map,
             parser_dwa_vocab: vocab,
+            tokenizer_state_to_rep: state_to_rep,
         }
     }
 

@@ -7,6 +7,7 @@
       <sourceFolder url="file://$MODULE_DIR$/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/json_convertible_derive/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/python/leveled_rs/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/python" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/python/target" />
       <excludeFolder url="file://$MODULE_DIR$/target" />
       <excludeFolder url="file://$MODULE_DIR$/json_convertible_derive/target" />
