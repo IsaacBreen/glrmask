@@ -714,15 +714,24 @@ impl JsonSchemaConverter {
 
     /// Add primitive JSON grammar rules.
     fn add_primitive_rules(&mut self) {
-        // Whitespace
-        self.add_rule("WS".to_string(), GrammarExpr::Repeat(Box::new(
-            GrammarExpr::Choice(vec![
-                GrammarExpr::Literal(b" ".to_vec()),
-                GrammarExpr::Literal(b"\t".to_vec()),
-                GrammarExpr::Literal(b"\n".to_vec()),
-                GrammarExpr::Literal(b"\r".to_vec()),
-            ])
-        )));
+        // Whitespace - can be disabled via SEP1_NO_JSON_WHITESPACE=1
+        let no_whitespace = std::env::var("SEP1_NO_JSON_WHITESPACE")
+            .map(|v| v == "1")
+            .unwrap_or(false);
+        
+        if no_whitespace {
+            // Empty WS - no whitespace allowed
+            self.add_rule("WS".to_string(), GrammarExpr::Sequence(vec![]));
+        } else {
+            self.add_rule("WS".to_string(), GrammarExpr::Repeat(Box::new(
+                GrammarExpr::Choice(vec![
+                    GrammarExpr::Literal(b" ".to_vec()),
+                    GrammarExpr::Literal(b"\t".to_vec()),
+                    GrammarExpr::Literal(b"\n".to_vec()),
+                    GrammarExpr::Literal(b"\r".to_vec()),
+                ])
+            )));
+        }
 
         // JSON string
         self.add_rule("JSON_STRING".to_string(), GrammarExpr::Sequence(vec![
@@ -870,13 +879,21 @@ pub fn json_schema_to_ebnf(schema_json: &str) -> Result<String, String> {
     
     let (rules, root_rule) = JsonSchemaConverter::new(schema).convert()?;
     
+    // Check if whitespace is disabled
+    let no_whitespace = std::env::var("SEP1_NO_JSON_WHITESPACE")
+        .map(|v| v == "1")
+        .unwrap_or(false);
+    
     // Convert rules to EBNF format
-    // Start with the ignore directive for whitespace
-    let mut ebnf = String::from("#![ignore(WS)]\n\n");
+    // Only add ignore directive if whitespace is enabled
+    let ignore_prefix = if no_whitespace { "" } else { "#![ignore(WS)]\n\n" };
+    let mut ebnf = String::from(ignore_prefix);
+    let prefix_len = ignore_prefix.len();
+    
     for (name, expr) in &rules {
         if name == &root_rule {
-            // Put root rule first (after ignore directive)
-            ebnf = format!("#![ignore(WS)]\n\n{} ::= {} ;\n", name, grammar_expr_to_ebnf(expr)) + &ebnf[16..]; // Skip the initial "#![ignore(WS)]\n\n"
+            // Put root rule first (after ignore directive if present)
+            ebnf = format!("{}{} ::= {} ;\n", ignore_prefix, name, grammar_expr_to_ebnf(expr)) + &ebnf[prefix_len..];
         } else {
             ebnf.push_str(&format!("{} ::= {} ;\n", name, grammar_expr_to_ebnf(expr)));
         }

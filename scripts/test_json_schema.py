@@ -32,6 +32,8 @@ def find_schema_by_id(schema_id: str) -> str:
         "gcg-paper/downloads/repos/jsonschemabench/data",
         "gcg-paper/downloads/repos/jsonschemabench/maskbench/data",
         "gcg-paper/hard_schemas/data",
+        "gcg-paper/hard_schemas/schemas",
+        "gcg-paper/hard_schemas/tests",
         "gcg-paper/json_schema_test_suite/data",
     ]
     
