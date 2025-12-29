@@ -79,6 +79,10 @@ test-tsconfig: ## Compile TSConfig schema
 	SCHEMA_FILE="gcg-paper/hard_schemas/data/TSConfig---tsconfig.json" \
 		python3 scripts/test_json_schema.py
 
+test-schema-id: ## Compile any benchmark schema by ID (usage: make test-schema-id ID=Snowplow---sp_136_Normalized)
+	@if [ -z "$(ID)" ]; then echo "Usage: make test-schema-id ID=<schema_id>"; exit 1; fi
+	SCHEMA_ID="$(ID)" python3 scripts/test_json_schema.py
+
 # === Hard Schema Compilation Tests ===
 # These use the Rust grammar_compiler binary directly with --json-schema
 

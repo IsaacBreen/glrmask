@@ -6,23 +6,56 @@ Usage:
     # With default hard schema
     python scripts/test_json_schema.py
     
-    # With custom schema
+    # With custom schema file
     SCHEMA_FILE="gcg-paper/downloads/repos/jsonschemabench/data/Github_easy/o10008.json" python scripts/test_json_schema.py
+    
+    # With schema ID (searches benchmark data directories)
+    SCHEMA_ID="Snowplow---sp_136_Normalized" python scripts/test_json_schema.py
 """
 
 import json
 import time
 import os
+import glob
 import _sep1
 
+def find_schema_by_id(schema_id: str) -> str:
+    """Find a schema file by its ID in benchmark data directories."""
+    search_dirs = [
+        "gcg-paper/downloads/repos/jsonschemabench/data",
+        "gcg-paper/downloads/repos/jsonschemabench/maskbench/data",
+        "gcg-paper/hard_schemas/data",
+        "gcg-paper/json_schema_test_suite/data",
+    ]
+    
+    for base_dir in search_dirs:
+        # Try exact match first
+        pattern = f"{base_dir}/**/{schema_id}.json"
+        matches = glob.glob(pattern, recursive=True)
+        if matches:
+            return matches[0]
+        
+        # Also try with schema_id as the full filename (category---name format)
+        pattern = f"{base_dir}/{schema_id}.json"
+        matches = glob.glob(pattern)
+        if matches:
+            return matches[0]
+    
+    raise FileNotFoundError(f"Schema ID '{schema_id}' not found in benchmark data directories")
+
 # Load schema
-schema_file = os.environ.get(
-    "SCHEMA_FILE", 
-    "gcg-paper/downloads/repos/jsonschemabench/data/Github_hard/o69862.json"
-)
+schema_id = os.environ.get("SCHEMA_ID")
+schema_file = os.environ.get("SCHEMA_FILE")
+
+if schema_id:
+    schema_file = find_schema_by_id(schema_id)
+elif not schema_file:
+    schema_file = "gcg-paper/downloads/repos/jsonschemabench/data/Github_hard/o69862.json"
+
 print(f"Loading schema from: {schema_file}")
 with open(schema_file) as f:
     schema = json.load(f)
+
 
 # Load vocabulary (GPT-2)
 print("Loading vocabulary...")
@@ -49,11 +82,9 @@ parse_time = time.time() - start
 print(f"   Grammar parsing: {parse_time*1000:.1f}ms")
 
 # Step 3: Compile to GLR parser
-print("\n3. Compiling grammar...")
 start = time.time()
 compiled = grammar_def.compile()
 compile_time = time.time() - start
-print(f"   Compilation: {compile_time*1000:.1f}ms")
 
 # Step 4: Create constraint with vocabulary
 print("\n4. Creating constraint with vocabulary...")
