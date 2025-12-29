@@ -93,14 +93,6 @@ impl<'a> GrammarOptimizer<'a> {
     /// This works for partial optimization - even if the whole grammar isn't regular,
     /// we can still optimize parts of it.
     fn optimize_regular_subgrammars(&mut self) {
-        // Check for environment variable to disable terminal merging/creation
-        // This is a more targeted disable than DISABLE_GRAMMAR_OPTIMIZATION,
-        // as it only skips the terminal merging/creation while keeping other optimizations
-        if std::env::var("DISABLE_TERMINAL_MERGING").is_ok() {
-            debug!(4, "Skipping terminal merging/creation (DISABLE_TERMINAL_MERGING is set)");
-            return;
-        }
-        
         // Fast path: if grammar already has only 1 production with 1 terminal RHS,
         // it's already been optimized
         if self.grammar.productions.len() == 1 {
