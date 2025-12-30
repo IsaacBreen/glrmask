@@ -1537,6 +1537,7 @@ mod reproduction_tests {
             
             let expr = diff;
             let expr_groups = ExprGroups::from(expr);
+            println!("  Expr stats: {}", expr_groups.get_stats());
 
             // 1. Build NFA and check size
             let nfa = expr_groups.build_nfa();
