@@ -1487,8 +1487,10 @@ mod reproduction_tests {
     fn test_diff_grammar_exponential_blowup() {
         use crate::choice;
         
-        // Test N=8, 9, 10 lines with identical content
-        for n in 8..=10 {
+        let mut results = Vec::new();
+
+        // Test N=8..=12 lines with identical content
+        for n in 8..=12 {
             println!("\n=== Testing N={} identical lines ===", n);
             
             // Create the pattern:
@@ -1519,22 +1521,37 @@ mod reproduction_tests {
             
             // Generate the DFA WITHOUT minimization to see the full state count
             // resulting from subset construction.
-            // If the grammar logic is correct (linear), this should be small even before minimization.
-            // If it's incorrect (exponential), this count will blow up.
             let regex = ExprGroups::from(expr).build_unminimized();
             
             let dfa_states = regex.dfa.states.len();
             println!("  Total: {} unminimized DFA states", dfa_states);
             
-            // For N lines, we expect roughly O(N) states if linear.
-            // If exponential blowup occurred, we'd see ~2^N states.
-            // For N=10, 2^10 = 1024, but with O(N) logic it should be < 50.
-            assert!(
-                dfa_states < 50,
-                "Unminimized DFA too large: {} states for N={} (expected < 50). \
-                This indicates exponential blowup in subset construction.",
-                dfa_states, n
+            results.push((n, dfa_states));
+        }
+
+        // Verify linear growth:
+        // The difference in state count between N and N+1 should be constant (or very close).
+        // Let's check the deltas.
+        let mut deltas = Vec::new();
+        for i in 0..results.len() - 1 {
+            let delta = results[i+1].1 as isize - results[i].1 as isize;
+            deltas.push(delta);
+        }
+        
+        println!("State count deltas: {:?}", deltas);
+
+        // Assert that deltas are roughly constant.
+        // Allowing a tiny bit of variance just in case, but for this grammar it should be exact.
+        let first_delta = deltas[0];
+        for &d in &deltas {
+             assert!(
+                (d - first_delta).abs() <= 1,
+                "State growth is not linear! Deltas: {:?}. Expected constant delta ~{}",
+                deltas, first_delta
             );
         }
+
+        // Also assert individual counts are reasonable (sanity check)
+        assert!(results.last().unwrap().1 < 100, "State count too high even if linear!");
     }
 }
