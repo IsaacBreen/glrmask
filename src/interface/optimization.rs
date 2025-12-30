@@ -2739,7 +2739,7 @@ fn can_be_empty(expr: &Expr) -> bool {
 /// Returns Some(reason) if the grammar is repetitive, None otherwise.
 ///
 /// Example: diff grammars for files with N identical lines:
-/// ```rust
+/// ```text
 /// S0 ::= LINE0 | S1;
 /// S1 ::= LINE1 | S2;
 /// ...
