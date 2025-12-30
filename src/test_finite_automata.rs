@@ -1486,72 +1486,104 @@ mod reproduction_tests {
     #[test]
     fn test_diff_grammar_exponential_blowup() {
         use crate::choice;
+        use crate::seq;
         
         let mut results = Vec::new();
 
-        // Test N=8..=12 lines with identical content
-        for n in 8..=12 {
+        for n in 6..=9 {
             println!("\n=== Testing N={} identical lines ===", n);
             
-            // Create the pattern:
-            // S0 = LINE0 | S1
-            // S1 = LINE1 | S2
-            // ...
-            // S{n-1} = LINE{n-1}
-            // 
-            // All LINEs match the same content: " a\n"
+            // --- Terminals ---
+            let newline = eat_u8(b'\n');
+            let plus_line = seq![eat_u8(b'+'), rep(eat_u8(b'x')), newline.clone()];
+            let hunk_header = seq![eat_u8(b'@'), eat_u8(b'@'), rep(eat_u8(b' ')), newline.clone()];
+            let plus_lines = rep(plus_line.clone());
             
-            let line_content = Expr::Seq(vec![
-                Expr::Choice(vec![
-                    Expr::U8Seq(b" ".to_vec()),
-                    Expr::U8Seq(b"-".to_vec()),
-                ]),
-                Expr::U8Seq(b"a".to_vec()),
-                Expr::U8Seq(b"\n".to_vec()),
-            ]);
+            // Content is identical for all lines: " a\n"
+            let content = seq![
+                choice![eat_u8(b' '), eat_u8(b'-')], 
+                eat_u8(b'a'), 
+                newline.clone()
+            ];
+
+            // Build grammar bottom-up
+            // Use `shared` to prevent expression tree explosion (DAG structure)
+            let mut s_next = crate::finite_automata::shared(plus_lines.clone());
+            let mut line_next: Option<Expr> = None;
             
-            // Build choice: LINE0 | LINE1 | ... | LINE{n-1}
-            // where each LINE is just the same content
-            let mut lines = Vec::new();
-            for _ in 0..n {
-                lines.push(line_content.clone());
+            for i in (0..n).rev() {
+                let continuation = if i == n - 1 {
+                    opt(seq![plus_lines.clone(), hunk_header.clone(), s_next.clone()])
+                } else {
+                    opt(choice![
+                        line_next.clone().unwrap(),
+                        seq![plus_lines.clone(), hunk_header.clone(), s_next.clone()]
+                    ])
+                };
+                
+                let line_i = seq![plus_lines.clone(), content.clone(), continuation];
+                let s_i = choice![line_i.clone(), s_next.clone()];
+                
+                line_next = Some(crate::finite_automata::shared(line_i));
+                s_next = crate::finite_automata::shared(s_i);
             }
             
-            let expr = Expr::Choice(lines);
+            let s_0 = s_next;
+            let file_header = seq![eat_u8(b'd'), eat_u8(b'i'), eat_u8(b'-'), eat_u8(b'+')];
+            let diff = seq![
+                opt(file_header),
+                opt(seq![hunk_header, s_0]),
+            ];
             
-            // Generate the DFA WITHOUT minimization to see the full state count
-            // resulting from subset construction.
-            let regex = ExprGroups::from(expr).build_unminimized();
+            let expr = diff;
+            let expr_groups = ExprGroups::from(expr);
+
+            // 1. Build NFA and check size
+            let nfa = expr_groups.build_nfa();
+            let nfa_states = nfa.states.len();
+            println!("  NFA states: {}", nfa_states);
+
+            // 2. Convert to DFA (unminimized) and check size
+            let dfa = nfa.to_dfa();
+            let dfa_states = dfa.states.len();
+            println!("  DFA states: {}", dfa_states);
             
-            let dfa_states = regex.dfa.states.len();
-            println!("  Total: {} unminimized DFA states", dfa_states);
-            
-            results.push((n, dfa_states));
+            results.push((n, nfa_states, dfa_states));
         }
 
-        // Verify linear growth:
-        // The difference in state count between N and N+1 should be constant (or very close).
-        // Let's check the deltas.
-        let mut deltas = Vec::new();
+        // Verify NFA linear growth
+        let mut nfa_deltas = Vec::new();
         for i in 0..results.len() - 1 {
             let delta = results[i+1].1 as isize - results[i].1 as isize;
-            deltas.push(delta);
+            nfa_deltas.push(delta);
         }
+        println!("NFA deltas: {:?}", nfa_deltas);
         
-        println!("State count deltas: {:?}", deltas);
-
-        // Assert that deltas are roughly constant.
-        // Allowing a tiny bit of variance just in case, but for this grammar it should be exact.
-        let first_delta = deltas[0];
-        for &d in &deltas {
+        let first_nfa_delta = nfa_deltas[0];
+        for &d in &nfa_deltas {
              assert!(
-                (d - first_delta).abs() <= 1,
-                "State growth is not linear! Deltas: {:?}. Expected constant delta ~{}",
-                deltas, first_delta
+                (d - first_nfa_delta).abs() <= 2,
+                "NFA growth is not linear! Deltas: {:?}. Expected constant ~{}",
+                nfa_deltas, first_nfa_delta
             );
         }
 
-        // Also assert individual counts are reasonable (sanity check)
-        assert!(results.last().unwrap().1 < 100, "State count too high even if linear!");
+        // Verify DFA linear growth (THIS ASSERTION SHOULD FAIL due to exponential blowup)
+        let mut dfa_deltas = Vec::new();
+        for i in 0..results.len() - 1 {
+            let delta = results[i+1].2 as isize - results[i].2 as isize;
+            dfa_deltas.push(delta);
+        }
+        
+        println!("DFA deltas: {:?}", dfa_deltas);
+
+        let first_dfa_delta = dfa_deltas[0];
+        for &d in &dfa_deltas {
+             assert!(
+                (d - first_dfa_delta).abs() <= 50, // generous tolerance
+                "DFA growth is not linear! Deltas: {:?}. Expected constant ~{}",
+                dfa_deltas, first_dfa_delta
+            );
+        }
     }
 }

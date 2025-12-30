@@ -98,8 +98,8 @@ impl JSONConvertible for NFAState {
 
 #[derive(Debug, Clone)]
 pub struct NFA {
-    states: Vec<NFAState>,
-    start_state: usize,
+    pub states: Vec<NFAState>,
+    pub start_state: usize,
 }
 
 /// Simple intermediate type for NFA using derive macro.
@@ -928,7 +928,7 @@ impl ExprGroups {
         Regex { dfa }
     }
 
-    fn build_nfa(self) -> NFA {
+    pub fn build_nfa(self) -> NFA {
         let mut nfa = NFA {
             states: vec![NFAState::new()],
             start_state: 0,
