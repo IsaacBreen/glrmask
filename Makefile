@@ -100,6 +100,11 @@ diff-grammar: ffi ## Generate EBNF grammar for a file (usage: make diff-grammar 
 	@if [ -z "$(FILE)" ] || [ -z "$(OUT)" ]; then echo "Usage: make diff-grammar FILE=<file> OUT=<out.ebnf>"; exit 1; fi
 	SOURCE_FILE="$(FILE)" OUT_FILE="$(OUT)" ONLY_GRAMMAR=1 $(PYTHON) scripts/test_diff.py
 
+show-diff-grammar: ffi ## Print EBNF grammar for a file to stdout (usage: make show-diff-grammar FILE=test12.txt)
+	@if [ -z "$(FILE)" ]; then echo "Usage: make show-diff-grammar FILE=<file>"; exit 1; fi
+	SOURCE_FILE="$(FILE)" PRINT_GRAMMAR=1 ONLY_GRAMMAR=1 $(PYTHON) scripts/test_diff.py
+
+
 
 # === Hard Schema Compilation Tests ===
 # These use the Rust grammar_compiler binary directly with --json-schema
