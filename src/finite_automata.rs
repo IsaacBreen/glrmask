@@ -2781,72 +2781,188 @@ impl DFA {
             return;
         }
         
-        // Always minimize regardless of size
-        const MAX_MINIMIZATION_STATES: usize = usize::MAX;
-        if self.states.len() > MAX_MINIMIZATION_STATES {
+        let initial_states = self.states.len();
+        self.remove_unreachable_states();
+        let n = self.states.len();
+        
+        if n <= 1 {
+            self.recompute_metadata();
+            crate::debug!(3, "Minimized DFA {} → {} states in {:.2?}", initial_states, n, instant.elapsed());
             return;
         }
         
-        let initial_states = self.states.len();
-        self.remove_unreachable_states();
-
-        let mut partitions_map: BTreeMap<BTreeSet<GroupID>, BTreeSet<usize>> = BTreeMap::new();
-        for (state_idx, state) in self.states.iter().enumerate() {
-            let finalizers_btree: BTreeSet<GroupID> = state.finalizers.iter().collect();
-            partitions_map
-                .entry(finalizers_btree)
-                .or_default()
-                .insert(state_idx);
-        }
-        let mut partition_list: Vec<BTreeSet<usize>> = partitions_map.into_values().collect();
-
-        let mut state_to_partition = vec![0; self.states.len()];
-        for (part_idx, partition) in partition_list.iter().enumerate() {
-            for &state_idx in partition {
-                state_to_partition[state_idx] = part_idx;
+        // Use Hopcroft's algorithm for O(n log n) minimization
+        // 
+        // Key data structures:
+        // - partition[s] = index of partition containing state s
+        // - blocks[p] = set of states in partition p  
+        // - inverse[target][input] = list of source states
+        
+        use rustc_hash::{FxHashMap, FxHashSet};
+        
+        // Count transitions to size arrays
+        let total_transitions: usize = self.states.iter().map(|s| s.transitions.len()).sum();
+        
+        // Build inverse transition table more efficiently
+        // inverse_by_input[input][target] = Vec<source>
+        // Use a flattened structure to avoid 256 * n allocations
+        let mut inverse_map: FxHashMap<(u8, usize), Vec<usize>> = FxHashMap::default();
+        inverse_map.reserve(total_transitions);
+        
+        for (src, state) in self.states.iter().enumerate() {
+            for (input, &target) in &state.transitions {
+                inverse_map.entry((input, target)).or_default().push(src);
             }
         }
-
-        loop {
-            let mut changed = false;
-            let mut new_partition_list: Vec<BTreeSet<usize>> = Vec::new();
-
-            for partition in &partition_list {
-                if partition.len() <= 1 {
-                    new_partition_list.push(partition.clone());
+        
+        // Initial partition: group states by their finalizer set
+        let mut partition = vec![0usize; n];
+        let mut blocks: Vec<FxHashSet<usize>> = Vec::new();
+        
+        {
+            // Use FxHashMap for faster hashing of finalizer keys
+            let mut finalizer_to_block: FxHashMap<Vec<GroupID>, usize> = FxHashMap::default();
+            for (state_idx, state) in self.states.iter().enumerate() {
+                let key: Vec<GroupID> = state.finalizers.iter().collect();
+                let block_idx = *finalizer_to_block.entry(key).or_insert_with(|| {
+                    let idx = blocks.len();
+                    blocks.push(FxHashSet::default());
+                    idx
+                });
+                partition[state_idx] = block_idx;
+                blocks[block_idx].insert(state_idx);
+            }
+        }
+        
+        // Worklist: set of (block_idx, input) pairs to process
+        // Initially add all (block, input) pairs
+        let mut all_inputs: Vec<u8> = Vec::new();
+        {
+            let mut seen = [false; 256];
+            for state in &self.states {
+                for (input, _) in &state.transitions {
+                    if !seen[input as usize] {
+                        seen[input as usize] = true;
+                        all_inputs.push(input);
+                    }
+                }
+            }
+        }
+        
+        // Worklist of (block_idx, input) pairs
+        let mut worklist: VecDeque<(usize, u8)> = VecDeque::new();
+        let num_initial_blocks = blocks.len();
+        for block_idx in 0..num_initial_blocks {
+            for &input in &all_inputs {
+                worklist.push_back((block_idx, input));
+            }
+        }
+        
+        // Track which (block, input) pairs are in worklist
+        let mut in_worklist: FxHashSet<(usize, u8)> = worklist.iter().copied().collect();
+        
+        // Reusable buffers
+        let mut sources_by_block: FxHashMap<usize, Vec<usize>> = FxHashMap::default();
+        
+        while let Some((splitter_block, input)) = worklist.pop_front() {
+            in_worklist.remove(&(splitter_block, input));
+            
+            // Skip empty blocks
+            if blocks[splitter_block].is_empty() {
+                continue;
+            }
+            
+            // Find all states that transition into splitter_block on this input
+            // Group them by their current block
+            sources_by_block.clear();
+            
+            for &target in &blocks[splitter_block] {
+                if let Some(sources) = inverse_map.get(&(input, target)) {
+                    for &src in sources {
+                        sources_by_block
+                            .entry(partition[src])
+                            .or_default()
+                            .push(src);
+                    }
+                }
+            }
+            
+            // For each block that has some (but not all) states in sources_by_block,
+            // we need to split
+            for (block_idx, sources) in sources_by_block.drain() {
+                let block_size = blocks[block_idx].len();
+                let sources_len = sources.len();
+                
+                // Deduplicate sources
+                let mut unique_sources: FxHashSet<usize> = sources.into_iter().collect();
+                let unique_count = unique_sources.len();
+                
+                // If all or none of the block's states are in sources, no split needed
+                if unique_count == block_size || unique_count == 0 {
                     continue;
                 }
-
-                let mut refined_partitions: BTreeMap<Vec<(u8, usize)>, BTreeSet<usize>> =
-                    BTreeMap::new();
-                for &state_idx in partition {
-                    let signature: Vec<(u8, usize)> = self.states[state_idx]
-                        .transitions
+                
+                // Split: move the smaller group to a new block
+                let new_block_idx = blocks.len();
+                let move_sources = unique_count <= block_size - unique_count;
+                
+                let mut new_block = FxHashSet::default();
+                
+                if move_sources {
+                    // Move sources to new block
+                    for s in unique_sources {
+                        blocks[block_idx].remove(&s);
+                        new_block.insert(s);
+                        partition[s] = new_block_idx;
+                    }
+                } else {
+                    // Move non-sources to new block  
+                    let non_sources: Vec<usize> = blocks[block_idx]
                         .iter()
-                        .map(|(input, &next_state)| (input, state_to_partition[next_state]))
+                        .copied()
+                        .filter(|s| !unique_sources.contains(s))
                         .collect();
-                    refined_partitions.entry(signature).or_default().insert(state_idx);
+                    for s in non_sources {
+                        blocks[block_idx].remove(&s);
+                        new_block.insert(s);
+                        partition[s] = new_block_idx;
+                    }
                 }
-
-                if refined_partitions.len() > 1 {
-                    changed = true;
-                }
-                new_partition_list.extend(refined_partitions.into_values());
-            }
-
-            partition_list = new_partition_list;
-
-            if !changed {
-                break;
-            }
-
-            for (part_idx, partition) in partition_list.iter().enumerate() {
-                for &state_idx in partition {
-                    state_to_partition[state_idx] = part_idx;
+                
+                blocks.push(new_block);
+                
+                // Add (block, input) pairs to worklist for the new block
+                // and possibly the old block (Hopcroft's optimization)
+                for &a in &all_inputs {
+                    let old_in_wl = in_worklist.contains(&(block_idx, a));
+                    
+                    if old_in_wl {
+                        // Original block already in worklist, add new block
+                        if !in_worklist.contains(&(new_block_idx, a)) {
+                            in_worklist.insert((new_block_idx, a));
+                            worklist.push_back((new_block_idx, a));
+                        }
+                    } else {
+                        // Add smaller block
+                        if blocks[block_idx].len() <= blocks[new_block_idx].len() {
+                            in_worklist.insert((block_idx, a));
+                            worklist.push_back((block_idx, a));
+                        } else {
+                            in_worklist.insert((new_block_idx, a));
+                            worklist.push_back((new_block_idx, a));
+                        }
+                    }
                 }
             }
         }
-
+        
+        // Convert blocks to partition_list format
+        let partition_list: Vec<BTreeSet<usize>> = blocks
+            .into_iter()
+            .filter(|b| !b.is_empty())
+            .map(|b| b.into_iter().collect())
+            .collect();
+        
         let (state_mapping, new_states) = self.rebuild_from_partitions(partition_list);
 
         self.states = new_states;
