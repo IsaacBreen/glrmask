@@ -361,6 +361,6 @@ pub fn factor_ebnf_choices(ebnf_text: &str) -> String {
         output.push_str(&format!("{} ::= {} ;\n", name, body));
     }
     
-    eprintln!("EBNF factoring: {} rules -> {} rules ({} helpers created)", rules_vec.len(), new_rules.len(), helper_counter);
+    crate::debug!(4, "EBNF factoring: {} rules -> {} rules ({} helpers created)", rules_vec.len(), new_rules.len(), helper_counter);
     output
 }
