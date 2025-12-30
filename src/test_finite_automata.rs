@@ -1486,7 +1486,6 @@ mod reproduction_tests {
     #[test]
     fn test_diff_grammar_exponential_blowup() {
         use crate::choice;
-        use std::time::Instant;
         
         // Test N=8, 9, 10 lines with identical content
         for n in 8..=10 {
@@ -1518,44 +1517,22 @@ mod reproduction_tests {
             
             let expr = Expr::Choice(lines);
             
-            let start = Instant::now();
-            let regex = ExprGroups::from(expr).build();
-            let total_time = start.elapsed();
+            // Generate the DFA WITHOUT minimization to see the full state count
+            // resulting from subset construction.
+            // If the grammar logic is correct (linear), this should be small even before minimization.
+            // If it's incorrect (exponential), this count will blow up.
+            let regex = ExprGroups::from(expr).build_unminimized();
             
             let dfa_states = regex.dfa.states.len();
+            println!("  Total: {} unminimized DFA states", dfa_states);
             
-            println!("  Total: {} minimized DFA states ({:.2?})", dfa_states, total_time);
-            
-            // Expected: Linear growth in final states (N+1 or so)
-            // Actual problem: Exponential growth in intermediate states causes slow compilation
-            
-            // ASSERTION: Final DFA states should be reasonable (< 50)
-            // The real issue is intermediate states during construction, but we can't
-            // directly measure those without modifying to_dfa(). However, if compilation
-            // takes too long, that indicates exponential blowup is occurring.
-            
-            // Check timing: should be sub-100ms for N=10 if no exponential blowup
-            let max_time_ms = match n {
-                8 => 50,
-                9 => 100,
-                10 => 200,
-                _ => unreachable!(),
-            };
-            
-            let time_ms = total_time.as_millis();
-            
-            assert!(
-                time_ms < max_time_ms,
-                "DFA construction too slow: N={} took {}ms (expected < {}ms). \
-                This suggests exponential time complexity in subset construction.",
-                n, time_ms, max_time_ms
-            );
-            
-            // Minimized DFA should be small (O(N) states)
+            // For N lines, we expect roughly O(N) states if linear.
+            // If exponential blowup occurred, we'd see ~2^N states.
+            // For N=10, 2^10 = 1024, but with O(N) logic it should be < 50.
             assert!(
                 dfa_states < 50,
-                "Minimized DFA too large: {} states for N={} (expected < 50). \
-                Minimization is working but construction is taking too long.",
+                "Unminimized DFA too large: {} states for N={} (expected < 50). \
+                This indicates exponential blowup in subset construction.",
                 dfa_states, n
             );
         }

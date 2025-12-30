@@ -880,6 +880,14 @@ impl NFAState {
 
 impl ExprGroups {
     pub fn build(self) -> Regex {
+        self.build_impl(true)
+    }
+
+    pub fn build_unminimized(self) -> Regex {
+        self.build_impl(false)
+    }
+
+    fn build_impl(self, minimize: bool) -> Regex {
         let stats = self.get_stats();
         crate::debug!(5, "Expr Stats: {}", stats);
 
@@ -909,10 +917,14 @@ impl ExprGroups {
         let start = std::time::Instant::now();
         let mut dfa = crate::time!("to_dfa", nfa.to_dfa());
         crate::debug!(5, "Converted NFA to DFA in {:.2?}", start.elapsed());
-        crate::debug!(4, "Minimizing DFA");
-        let start = std::time::Instant::now();
-        crate::time!("minimize_dfa", dfa.minimize());
-        crate::debug!(5, "Minimized DFA in {:.2?}", start.elapsed());
+
+        if minimize {
+            crate::debug!(4, "Minimizing DFA");
+            let start = std::time::Instant::now();
+            crate::time!("minimize_dfa", dfa.minimize());
+            crate::debug!(5, "Minimized DFA in {:.2?}", start.elapsed());
+        }
+
         Regex { dfa }
     }
 
