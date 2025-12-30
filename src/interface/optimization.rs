@@ -692,34 +692,62 @@ impl<'a> GrammarOptimizer<'a> {
         }
     }
     
+    /// Deep check if a production references cyclic NTs transitively
+    fn production_references_cyclic_deep(
+        &self,
+        prod: &Production,
+        prods_by_lhs: &HashMap<String, Vec<Production>>,
+        cyclic_dependent_nts: &HashSet<String>,
+        visited: &mut HashSet<String>,
+    ) -> bool {
+        for sym in &prod.rhs {
+            if let Symbol::NonTerminal(nt) = sym {
+                // Direct cyclic reference
+                if cyclic_dependent_nts.contains(&nt.0) {
+                    return true;
+                }
+                
+                // Avoid infinite recursion
+                if visited.contains(&nt.0) {
+                    continue;
+                }
+                visited.insert(nt.0.clone());
+                
+                // Check if this NT's productions reference cyclic NTs
+                if let Some(nt_prods) = prods_by_lhs.get(&nt.0) {
+                    for nt_prod in nt_prods {
+                        if self.production_references_cyclic_deep(nt_prod, prods_by_lhs, cyclic_dependent_nts, visited) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        false
+    }
+    
     /// Factor choice-based productions to group safe alternatives and common tails.
     /// 
-    /// This optimization applies to non-terminals with multiple alternative productions,
-    /// where some alternatives are "safe" (fully convertible to terminals) and others
-    /// are "unsafe" (referencing cyclic NTs).
+    /// This optimization applies to non-terminals with multiple alternative productions.
+    /// Unlike automata-level optimization (converting to regex terminals), this does
+    /// GRAMMAR-LEVEL factoring by creating helper non-terminals.
     /// 
     /// Example transformation:
     ///   A ::= safe1 | safe2 | key1 : cyclic | key2 : cyclic
     /// becomes:
-    ///   A ::= A_SAFE | A_KEYS_CYCLIC : cyclic
-    ///   A_SAFE ::= (safe1 | safe2)  -- new terminal
-    ///   A_KEYS_CYCLIC ::= (key1 | key2)  -- new terminal
+    ///   A ::= A_SAFE | A_KEYS : cyclic
+    ///   A_SAFE ::= safe1 | safe2  -- new NON-TERMINAL (not regex terminal!)
+    ///   A_KEYS ::= key1 | key2     -- new NON-TERMINAL
     /// 
-    /// This reduces the number of alternatives the GLR parser must handle,
-    /// offloading the complexity to the tokenizer (DFA).
+    /// This reduces the number of alternatives the GLR parser must handle without
+    /// forcing the tokenizer to expand everything into a DFA.
     fn factor_choice_productions(
         &mut self,
         cyclic_dependent_nts: &HashSet<String>,
-        solutions: &HashMap<String, Rc<RegexTerm>>,
-        expansion_cache: &mut HashMap<*const RegexTerm, Rc<RegexTerm>>,
+        _solutions: &HashMap<String, Rc<RegexTerm>>,
+        _expansion_cache: &mut HashMap<*const RegexTerm, Rc<RegexTerm>>,
     ) {
         let start = std::time::Instant::now();
-        
-        // Identify which NTs are "safe" (can be fully converted to terminals)
-        let safe_nts: HashSet<String> = solutions.keys()
-            .filter(|nt| !cyclic_dependent_nts.contains(*nt))
-            .cloned()
-            .collect();
         
         // Group productions by their LHS
         let mut prods_by_lhs: HashMap<String, Vec<Production>> = HashMap::new();
@@ -729,36 +757,29 @@ impl<'a> GrammarOptimizer<'a> {
                 .push(prod.clone());
         }
         
-        // Identify NTs with mixed safe/unsafe alternatives that can benefit from factoring
+        // Identify NTs with multiple alternatives that can benefit from factoring
+        // Match Python script logic: factor rules starting with '_' (except '_json')
+        // that have multiple alternatives. SKIP auto-generated NTs with [..] suffixes
+        // since they're intermediate and will be optimized differently.
         let mut factoring_candidates: Vec<String> = Vec::new();
+        let mut filtered_out_count = 0;
         for (nt, prods) in &prods_by_lhs {
             if prods.len() < 2 {
-                continue; // Need at least 2 alternatives to factor
+                continue; // Need at least 2 alternatives
             }
             
-            // Check if there's a mix of safe and unsafe productions
-            let mut has_safe = false;
-            let mut has_unsafe = false;
-            
-            for prod in prods {
-                let refs_cyclic = prod.rhs.iter().any(|sym| {
-                    if let Symbol::NonTerminal(ref nt) = sym {
-                        cyclic_dependent_nts.contains(&nt.0)
-                    } else {
-                        false
-                    }
-                });
-                
-                if refs_cyclic {
-                    has_unsafe = true;
-                } else {
-                    has_safe = true;
-                }
+            // Skip auto-generated NTs with [..] suffixes
+            if nt.contains('[') || nt.contains(']') {
+                continue;
             }
             
-            if has_safe && has_unsafe {
-                factoring_candidates.push(nt.clone());
+            // Factor internal NTs (starting with '_'), skip JSON primitives
+            if !nt.starts_with('_') || nt.starts_with("_json") {
+                filtered_out_count += 1;
+                continue;
             }
+            
+            factoring_candidates.push(nt.clone());
         }
         
         if factoring_candidates.is_empty() {
@@ -766,39 +787,34 @@ impl<'a> GrammarOptimizer<'a> {
             return;
         }
         
-        debug!(4, "Factor choice: {} NTs can be factored", factoring_candidates.len());
+        debug!(4, "Factor choice: {} NTs can be factored ({} filtered out)", factoring_candidates.len(), filtered_out_count);
         
-        // Debug: show a few examples
-        if factoring_candidates.len() > 0 {
-            debug!(5, "Factor choice: first few candidates: {:?}", &factoring_candidates[..factoring_candidates.len().min(5)]);
+        if factoring_candidates.len() < 20 {
+            debug!(5, "Factoring candidates: {:?}", factoring_candidates);
+        } else {
+            debug!(5, "First 20 candidates: {:?}", &factoring_candidates[..20]);
         }
         
-        // Get current max group_id for assigning new terminals
-        let current_max_group_id = self.grammar.group_id_to_expr.keys().max().copied().unwrap_or(0);
-        let mut next_new_group_id = current_max_group_id + 1;
-        
-        // First pass: Compute factored productions for each candidate NT
+        // Build factored replacements
         let mut factored_replacements: HashMap<String, Vec<Production>> = HashMap::new();
-        let mut terminals_created = 0;
+        let mut new_helper_productions: Vec<Production> = Vec::new();
+        let mut helper_nt_counter = 0;
         
-        // Process each non-terminal with factoring candidates
         for nt_name in &factoring_candidates {
             let prods = &prods_by_lhs[nt_name];
             
-            debug!(5, "Factoring NT '{}' with {} productions", nt_name, prods.len());
-            
-            // Separate productions into safe and unsafe
+            // Separate into safe and unsafe using deep checking
             let mut safe_prods: Vec<&Production> = Vec::new();
             let mut unsafe_prods: Vec<&Production> = Vec::new();
             
             for prod in prods {
-                let refs_cyclic = prod.rhs.iter().any(|sym| {
-                    if let Symbol::NonTerminal(ref nt) = sym {
-                        cyclic_dependent_nts.contains(&nt.0)
-                    } else {
-                        false
-                    }
-                });
+                let mut visited = HashSet::new();
+                let refs_cyclic = self.production_references_cyclic_deep(
+                    prod,
+                    &prods_by_lhs,
+                    cyclic_dependent_nts,
+                    &mut visited
+                );
                 
                 if refs_cyclic {
                     unsafe_prods.push(prod);
@@ -807,68 +823,53 @@ impl<'a> GrammarOptimizer<'a> {
                 }
             }
             
-            debug!(5, "  {} safe, {} unsafe productions", safe_prods.len(), unsafe_prods.len());
-            
             let mut nt_replacements: Vec<Production> = Vec::new();
             
-            // Create terminal for safe productions if > 1
+            // Create helper NT for safe productions if > 1
             if safe_prods.len() > 1 {
-                debug!(5, "  Creating safe terminal for {} productions", safe_prods.len());
-                // Convert each safe production to a RegexTerm
-                let safe_terms: Option<Vec<Rc<RegexTerm>>> = safe_prods.iter().map(|prod| {
-                    self.production_to_regex_term(prod, solutions, expansion_cache)
-                }).collect();
+                let helper_nt_name = format!("__FACTOR_{}_SAFE_{}", nt_name, helper_nt_counter);
+                helper_nt_counter += 1;
                 
-                if let Some(terms) = safe_terms {
-                    debug!(5, "  Successfully converted {} safe productions to terms", terms.len());
-                    let terms_len = terms.len();
-                    let choice_term = Rc::new(RegexTerm::make_choice(terms));
-                    debug!(5, "  Created choice term, attempting conversion to Expr");
-                    if let Some(expr) = regex_term_to_expr_rc(&choice_term) {
-                        debug!(5, "  Successfully converted to Expr");
-                        let terminal_name = format!("__opt_{}_SAFE__", nt_name);
-                        self.grammar.regex_name_to_group_id.insert(terminal_name.clone(), next_new_group_id);
-                        self.grammar.group_id_to_expr.insert(next_new_group_id, expr);
-                        debug!(5, "Created safe terminal '{}' with {} alternatives", terminal_name, terms_len);
-                        next_new_group_id += 1;
-                        terminals_created += 1;
-                        
-                        // Add production: NT ::= NT_SAFE
-                        nt_replacements.push(Production {
-                            lhs: NonTerminal(nt_name.clone()),
-                            rhs: vec![Symbol::Terminal(Terminal::RegexName(terminal_name))],
-                        });
-                    } else {
-                        debug!(5, "  Failed to convert choice term to expr");
-                        // Keep originals
-                        nt_replacements.extend(safe_prods.iter().map(|&p| p.clone()));
-                    }
-                } else {
-                    debug!(5, "  Failed to convert {} safe productions to terms", safe_prods.len());
-                    // Couldn't convert all safe productions, keep them as-is
-                    nt_replacements.extend(safe_prods.iter().map(|&p| p.clone()));
+                // Create helper productions (one per safe alternative)
+                for safe_prod in &safe_prods {
+                    new_helper_productions.push(Production {
+                        lhs: NonTerminal(helper_nt_name.clone()),
+                        rhs: safe_prod.rhs.clone(),
+                    });
                 }
+                
+                // Add single production referencing helper
+                nt_replacements.push(Production {
+                    lhs: NonTerminal(nt_name.clone()),
+                    rhs: vec![Symbol::NonTerminal(NonTerminal(helper_nt_name.clone()))],
+                });
+                
+                debug!(5, "Created helper NT '{}' with {} alternatives", helper_nt_name, safe_prods.len());
             } else {
-                // Keep single/zero safe productions as-is
+                // Keep safe productions as-is
                 nt_replacements.extend(safe_prods.iter().map(|&p| p.clone()));
             }
             
-            // Group unsafe productions by their tail (last symbol)
+            // Group unsafe productions by their tail pattern
             let mut tail_groups: HashMap<String, Vec<&Production>> = HashMap::new();
             let mut other_unsafe: Vec<&Production> = Vec::new();
             
             for prod in &unsafe_prods {
-                // Try to extract pattern: key_symbols... ':' tail_nt
                 if let Some((head_symbols, tail_nt)) = self.extract_key_tail_pattern(prod) {
-                    // Check if head is safe (no cyclic refs)
-                    let head_is_safe = head_symbols.iter().all(|sym| {
-                        match sym {
-                            Symbol::NonTerminal(nt) => safe_nts.contains(&nt.0),
-                            Symbol::Terminal(_) => true,
-                        }
-                    });
+                    // Check if head is "simple" (no cyclic refs) using deep checking
+                    let head_prod = Production {
+                        lhs: NonTerminal("__temp".to_string()),
+                        rhs: head_symbols.clone(),
+                    };
+                    let mut visited = HashSet::new();
+                    let head_is_simple = !self.production_references_cyclic_deep(
+                        &head_prod,
+                        &prods_by_lhs,
+                        cyclic_dependent_nts,
+                        &mut visited
+                    );
                     
-                    if head_is_safe {
+                    if head_is_simple {
                         tail_groups.entry(tail_nt).or_insert_with(Vec::new).push(prod);
                         continue;
                     }
@@ -877,61 +878,60 @@ impl<'a> GrammarOptimizer<'a> {
                 other_unsafe.push(prod);
             }
             
-            // Create terminals for each tail group with > 1 key
+            // Create helper NTs for each tail group
+            // Even single key+tail patterns benefit from factoring! It moves literals to tokenizer.
             for (tail_nt, group_prods) in tail_groups {
-                if group_prods.len() > 1 {
-                    // Extract heads and convert to RegexTerms
-                    let head_terms: Option<Vec<Rc<RegexTerm>>> = group_prods.iter().map(|prod| {
-                        if let Some((head_symbols, _)) = self.extract_key_tail_pattern(prod) {
-                            self.symbols_to_regex_term(&head_symbols, solutions, expansion_cache)
-                        } else {
-                            None
-                        }
-                    }).collect();
-                    
-                    if let Some(terms) = head_terms {
-                        let terms_len = terms.len();
-                        let choice_term = Rc::new(RegexTerm::make_choice(terms));
-                        if let Some(expr) = regex_term_to_expr_rc(&choice_term) {
-                            // Create terminal for keys
-                            let clean_tail = tail_nt.replace(|c: char| !c.is_alphanumeric(), "");
-                            let terminal_name = format!("__opt_{}_KEYS_{}__", nt_name, clean_tail);
-                            self.grammar.regex_name_to_group_id.insert(terminal_name.clone(), next_new_group_id);
-                            self.grammar.group_id_to_expr.insert(next_new_group_id, expr);
-                            debug!(5, "Created key terminal '{}' with {} alternatives", terminal_name, terms_len);
-                            next_new_group_id += 1;
-                            terminals_created += 1;
-                            
-                            // Add production: NT ::= NT_KEYS_TAIL ':' TAIL
-                            nt_replacements.push(Production {
-                                lhs: NonTerminal(nt_name.clone()),
-                                rhs: vec![
-                                    Symbol::Terminal(Terminal::RegexName(terminal_name)),
-                                    Symbol::Terminal(Terminal::Literal(vec![b':'])),
-                                    Symbol::NonTerminal(NonTerminal(tail_nt.clone())),
-                                ],
-                            });
-                        } else {
-                            // Keep originals
-                            nt_replacements.extend(group_prods.iter().map(|&p| p.clone()));
-                        }
-                    } else {
-                        // Couldn't convert all heads, keep originals
-                        nt_replacements.extend(group_prods.iter().map(|&p| p.clone()));
-                    }
+                let clean_tail = tail_nt.replace(|c: char| !c.is_alphanumeric(), "");
+                let helper_nt_name = if group_prods.len() == 1 {
+                    // Single head: name after the head
+                    let head_str = group_prods[0].rhs.iter()
+                        .take(group_prods[0].rhs.len() - 2) // exclude ':' and tail
+                        .filter_map(|sym| match sym {
+                            Symbol::Terminal(Terminal::Literal(bytes)) => {
+                                String::from_utf8(bytes.clone()).ok()
+                            }
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("");
+                    let clean_head = head_str.replace(|c: char| !c.is_alphanumeric(), "");
+                    format!("__FACTOR_KEY_{}_{}", clean_head, helper_nt_counter)
                 } else {
-                    // Single production in group, keep as-is
-                    nt_replacements.extend(group_prods.iter().map(|&p| p.clone()));
+                    // Multiple heads: name after the tail
+                    format!("__FACTOR_{}_KEYS_{}_{}", nt_name, clean_tail, helper_nt_counter)
+                };
+                helper_nt_counter += 1;
+                
+                // Create helper productions for keys (without the tail)
+                for group_prod in &group_prods {
+                    if let Some((head_symbols, _)) = self.extract_key_tail_pattern(group_prod) {
+                        new_helper_productions.push(Production {
+                            lhs: NonTerminal(helper_nt_name.clone()),
+                            rhs: head_symbols,
+                        });
+                    }
                 }
+                
+                // Add single production: NT ::= HELPER_KEYS ':' TAIL
+                nt_replacements.push(Production {
+                    lhs: NonTerminal(nt_name.clone()),
+                    rhs: vec![
+                        Symbol::NonTerminal(NonTerminal(helper_nt_name.clone())),
+                        Symbol::Terminal(Terminal::Literal(vec![b':'])),
+                        Symbol::NonTerminal(NonTerminal(tail_nt.clone())),
+                    ],
+                });
+                
+                debug!(5, "Created helper NT '{}' with {} key alternative(s)", helper_nt_name, group_prods.len());
             }
             
-            // Keep other unsafe productions as-is
+            // Keep other unsafe productions
             nt_replacements.extend(other_unsafe.iter().map(|&p| p.clone()));
             
             factored_replacements.insert(nt_name.clone(), nt_replacements);
         }
         
-        // Second pass: Build new productions list maintaining original order
+        // Build new productions list maintaining original order
         let mut new_productions: Vec<Production> = Vec::new();
         let mut seen_factored_nts: HashSet<String> = HashSet::new();
         
@@ -939,40 +939,20 @@ impl<'a> GrammarOptimizer<'a> {
             let nt_name = &prod.lhs.0;
             
             if factored_replacements.contains_key(nt_name) {
-                // This is a factored NT - add replacements only once (first occurrence)
                 if !seen_factored_nts.contains(nt_name) {
                     seen_factored_nts.insert(nt_name.clone());
                     new_productions.extend(factored_replacements[nt_name].iter().cloned());
                 }
-                // Skip original production (we already added the factored version)
             } else {
-                // Not factored, keep original
                 new_productions.push(prod.clone());
             }
         }
         
-        // Update grammar with new productions
-        if terminals_created > 0 {
+        // Append helper productions at the end
+        new_productions.extend(new_helper_productions);
+        
+        if helper_nt_counter > 0 {
             let old_count = self.grammar.productions.len();
-            
-            // Validate that all referenced NTs have productions
-            let nt_with_prods: HashSet<String> = new_productions.iter()
-                .map(|p| p.lhs.0.clone())
-                .collect();
-            
-            for prod in &new_productions {
-                if prod.rhs.is_empty() {
-                    debug!(3, "WARNING: Production {} has empty RHS (epsilon production)", prod.lhs.0);
-                }
-                for sym in &prod.rhs {
-                    if let Symbol::NonTerminal(nt) = sym {
-                        if !nt_with_prods.contains(&nt.0) {
-                            debug!(3, "WARNING: Production {} references NT {} which has no productions", 
-                                prod.lhs.0, nt.0);
-                        }
-                    }
-                }
-            }
             
             // Find the start production
             let start_prod_lhs = self.grammar.productions[self.grammar.start_production_id].lhs.clone();
@@ -981,20 +961,12 @@ impl<'a> GrammarOptimizer<'a> {
                 .position(|p| p.lhs == start_prod_lhs)
                 .unwrap_or(0);
             
-            debug!(4, "After factoring: start symbol is '{}', start production: {} -> {:?}",
-                start_prod_lhs.0,
-                self.grammar.productions[self.grammar.start_production_id].lhs.0,
-                self.grammar.productions[self.grammar.start_production_id].rhs);
-            
-            debug!(4, "Factor choice: {} productions -> {}, {} terminals created (in {:?})",
-                old_count, self.grammar.productions.len(), terminals_created, start.elapsed());
+            debug!(4, "Factor choice: {} productions -> {}, {} helper NTs created (in {:?})",
+                old_count, self.grammar.productions.len(), helper_nt_counter, start.elapsed());
         } else {
-            debug!(5, "Factor choice: no terminals created");
+            debug!(5, "Factor choice: no helpers created");
         }
     }
-    
-    /// Extract key-tail pattern from a production.
-    /// Returns Some((head_symbols, tail_nt_name)) if pattern matches: head ':' tail
     fn extract_key_tail_pattern(&self, prod: &Production) -> Option<(Vec<Symbol>, String)> {
         // Pattern: ... ':' NT (at least 3 symbols, last is NT, second-to-last is ':')
         if prod.rhs.len() < 3 {
