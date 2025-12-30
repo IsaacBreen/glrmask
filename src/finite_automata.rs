@@ -945,6 +945,8 @@ impl ExprGroups {
 
         let mut cache: CpsCache = HashMap::new();
 
+        crate::debug!(4, "Expr stats: {}", self.get_stats());
+
         // Optimization: Factor out common prefix (e.g. ignore pattern)
         let (prefix, groups) = self.optimize_prefixes();
 
