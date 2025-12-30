@@ -365,7 +365,8 @@ pub enum Expr {
     Quantifier(Box<Expr>, QuantifierType),
     Choice(Vec<Expr>),
     Seq(Vec<Expr>),
-    Epsilon, // Explicit epsilon transition
+    Epsilon, // Explicit epsilon transition (matches empty string)
+    Empty,   // Matches nothing (empty set) - used in derivative computation
 }
 
 /// Intermediate type for Expr JSON serialization (maintains backward compatibility)
@@ -378,6 +379,7 @@ enum ExprJSON {
     Choice { exprs: Vec<ExprJSON> },
     Seq { exprs: Vec<ExprJSON> },
     Epsilon,
+    Empty,
 }
 
 impl ExprJSON {
@@ -397,6 +399,7 @@ impl ExprJSON {
                 exprs: exprs.iter().map(ExprJSON::from_expr).collect(),
             },
             Expr::Epsilon => ExprJSON::Epsilon,
+            Expr::Empty => ExprJSON::Empty,
         }
     }
 
@@ -409,6 +412,7 @@ impl ExprJSON {
             ExprJSON::Choice { exprs } => Expr::Choice(exprs.into_iter().map(|e| e.to_expr()).collect()),
             ExprJSON::Seq { exprs } => Expr::Seq(exprs.into_iter().map(|e| e.to_expr()).collect()),
             ExprJSON::Epsilon => Expr::Epsilon,
+            ExprJSON::Empty => Expr::Empty,
         }
     }
 }
@@ -478,6 +482,7 @@ impl Display for Expr {
                 Ok(())
             }
             Expr::Epsilon => write!(f, "ε"),
+            Expr::Empty => write!(f, "∅"),
         }
     }
 }
@@ -673,6 +678,7 @@ impl ExprGroups {
                         }
                     }
                     Expr::Epsilon => stats.epsilon += 1,
+                    Expr::Empty => {} // Empty is a special derivative marker, not typically in input
                 }
             }
         }
@@ -887,7 +893,47 @@ impl ExprGroups {
         self.build_impl(false)
     }
 
+    /// Build using Brzozowski derivatives (Expr → DFA directly).
+    /// This is the default method as it avoids exponential blowup from NFA→DFA subset construction.
     fn build_impl(self, minimize: bool) -> Regex {
+        let stats = self.get_stats();
+        crate::debug!(5, "Expr Stats: {}", stats);
+
+        // Optimize the expression first
+        crate::debug!(4, "Optimizing expression");
+        let start_optimize = std::time::Instant::now();
+        let optimized = crate::time!("optimize_expr", self.optimize());
+        crate::debug!(5, "Optimized expression in {:.2?}", start_optimize.elapsed());
+        
+        crate::debug!(4, "Building DFA via derivatives");
+        let start = std::time::Instant::now();
+        let mut dfa = crate::time!("build_dfa_via_derivatives", optimized.build_dfa_via_derivatives());
+        crate::debug!(5, "Built DFA with {} states in {:.2?}", dfa.states.len(), start.elapsed());
+
+        if minimize {
+            crate::debug!(4, "Minimizing DFA");
+            let start = std::time::Instant::now();
+            crate::time!("minimize_dfa", dfa.minimize());
+            crate::debug!(5, "Minimized DFA in {:.2?}", start.elapsed());
+        }
+
+        Regex { dfa }
+    }
+
+    /// Build using the traditional NFA→DFA approach (kept for testing/comparison).
+    /// Warning: This can have exponential blowup for certain patterns.
+    #[allow(dead_code)]
+    pub fn build_via_nfa(self) -> Regex {
+        self.build_via_nfa_impl(true)
+    }
+    
+    #[allow(dead_code)]
+    pub fn build_via_nfa_unminimized(self) -> Regex {
+        self.build_via_nfa_impl(false)
+    }
+    
+    #[allow(dead_code)]
+    fn build_via_nfa_impl(self, minimize: bool) -> Regex {
         let stats = self.get_stats();
         crate::debug!(5, "Expr Stats: {}", stats);
 
@@ -1034,6 +1080,7 @@ impl Expr {
                 }
             }
             Expr::Epsilon => {}
+            Expr::Empty => {}
         }
     }
 
@@ -1087,6 +1134,11 @@ impl Expr {
                     }
                     Expr::Epsilon => {
                         return_value = Some(start_state);
+                    }
+                    Expr::Empty => {
+                        // Empty matches nothing - create a dead state with no transitions
+                        let dead_state = nfa.add_state();
+                        return_value = Some(dead_state);
                     }
                     Expr::Shared(ref inner) => {
                         // IMPORTANT: We MUST inline Shared expressions to avoid creating
@@ -1632,6 +1684,860 @@ impl Expr {
             complex.pop().unwrap()
         } else {
             Expr::Choice(complex)
+        }
+    }
+}
+
+// =============================================================================
+// Brzozowski Derivative-Based DFA Construction
+// =============================================================================
+//
+// This implementation builds a DFA directly from regular expressions using
+// Brzozowski derivatives, avoiding the intermediate NFA construction that
+// can cause exponential state blowup.
+//
+// Key insight: Each DFA state corresponds to an equivalence class of 
+// expressions (represented by a normalized/simplified expression). The
+// derivative of an expression with respect to a byte gives us the expression
+// that matches the remainder after consuming that byte.
+//
+// We use hash-consing to ensure equivalent expressions are represented by
+// the same ID, making comparison O(1).
+
+/// An interned expression ID. All expression operations go through the ExprInterner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+struct ExprId(u32);
+
+/// Canonical form of an expression node (used for interning).
+/// Unlike Expr, this uses ExprId for recursive references.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum ExprNode {
+    Empty,
+    Epsilon,
+    Byte(u8),           // Single byte (simplified from U8Seq of length 1)
+    ByteSeq(Vec<u8>),   // Sequence of bytes (length >= 2)
+    Class(U8Set),       // Byte class
+    Star(ExprId),       // r*
+    Plus(ExprId),       // r+
+    Optional(ExprId),   // r?
+    Choice(Vec<ExprId>), // r | s | t ... (sorted, deduplicated, no Empty)
+    Seq(Vec<ExprId>),    // r s t ... (no Epsilon, no Empty)
+}
+
+/// Expression interner that provides hash-consing for expressions.
+struct ExprInterner {
+    /// Map from ExprNode to its ID
+    node_to_id: rustc_hash::FxHashMap<ExprNode, ExprId>,
+    /// Reverse map: ID to node
+    id_to_node: Vec<ExprNode>,
+    /// Cache for nullability
+    nullable_cache: Vec<Option<bool>>,
+    /// Cache for first_bytes
+    first_bytes_cache: Vec<Option<U8Set>>,
+    /// Cache for derivatives: (expr_id, byte) -> derived expr_id
+    deriv_cache: rustc_hash::FxHashMap<(ExprId, u8), ExprId>,
+    /// Cache for intern_expr: Arc pointer -> ExprId (to avoid re-traversing Shared)
+    intern_cache: rustc_hash::FxHashMap<usize, ExprId>,
+}
+
+impl ExprInterner {
+    fn new() -> Self {
+        let mut interner = ExprInterner {
+            node_to_id: rustc_hash::FxHashMap::default(),
+            id_to_node: Vec::new(),
+            nullable_cache: Vec::new(),
+            first_bytes_cache: Vec::new(),
+            deriv_cache: rustc_hash::FxHashMap::default(),
+            intern_cache: rustc_hash::FxHashMap::default(),
+        };
+        // Pre-intern common expressions
+        let _ = interner.intern(ExprNode::Empty);   // ID 0
+        let _ = interner.intern(ExprNode::Epsilon); // ID 1
+        interner
+    }
+
+    fn empty(&self) -> ExprId {
+        ExprId(0)
+    }
+
+    fn epsilon(&self) -> ExprId {
+        ExprId(1)
+    }
+
+    /// Intern an expression node and return its unique ID.
+    fn intern(&mut self, node: ExprNode) -> ExprId {
+        if let Some(&id) = self.node_to_id.get(&node) {
+            return id;
+        }
+        let id = ExprId(self.id_to_node.len() as u32);
+        self.id_to_node.push(node.clone());
+        self.nullable_cache.push(None);
+        self.first_bytes_cache.push(None);
+        self.node_to_id.insert(node, id);
+        id
+    }
+
+    /// Get the node for an ID.
+    fn get(&self, id: ExprId) -> &ExprNode {
+        &self.id_to_node[id.0 as usize]
+    }
+
+    /// Intern a byte expression.
+    fn byte(&mut self, b: u8) -> ExprId {
+        self.intern(ExprNode::Byte(b))
+    }
+
+    /// Intern a byte sequence expression.
+    fn byte_seq(&mut self, bytes: Vec<u8>) -> ExprId {
+        if bytes.is_empty() {
+            self.epsilon()
+        } else if bytes.len() == 1 {
+            self.byte(bytes[0])
+        } else {
+            self.intern(ExprNode::ByteSeq(bytes))
+        }
+    }
+
+    /// Intern a byte class expression.
+    fn class(&mut self, set: U8Set) -> ExprId {
+        if set.is_empty() {
+            self.empty()
+        } else if set.len() == 1 {
+            self.byte(set.iter().next().unwrap())
+        } else {
+            self.intern(ExprNode::Class(set))
+        }
+    }
+
+    /// Intern a star (r*) expression.
+    fn star(&mut self, inner: ExprId) -> ExprId {
+        if inner == self.empty() || inner == self.epsilon() {
+            return self.epsilon();
+        }
+        self.intern(ExprNode::Star(inner))
+    }
+
+    /// Intern a plus (r+) expression.
+    fn plus(&mut self, inner: ExprId) -> ExprId {
+        if inner == self.empty() {
+            return self.empty();
+        }
+        if inner == self.epsilon() {
+            return self.epsilon();
+        }
+        self.intern(ExprNode::Plus(inner))
+    }
+
+    /// Intern an optional (r?) expression.
+    fn optional(&mut self, inner: ExprId) -> ExprId {
+        if inner == self.empty() || inner == self.epsilon() {
+            return self.epsilon();
+        }
+        self.intern(ExprNode::Optional(inner))
+    }
+
+    /// Intern a choice expression, normalizing and simplifying.
+    fn choice(&mut self, mut exprs: Vec<ExprId>) -> ExprId {
+        // Remove Empty
+        exprs.retain(|&e| e != self.empty());
+        
+        if exprs.is_empty() {
+            return self.empty();
+        }
+        if exprs.len() == 1 {
+            return exprs[0];
+        }
+
+        // Flatten nested choices and collect unique expressions
+        let mut flat = Vec::new();
+        let mut seen = rustc_hash::FxHashSet::default();
+        
+        for e in exprs {
+            if let ExprNode::Choice(inner) = self.get(e) {
+                for &inner_e in inner {
+                    if seen.insert(inner_e) {
+                        flat.push(inner_e);
+                    }
+                }
+            } else if seen.insert(e) {
+                flat.push(e);
+            }
+        }
+
+        if flat.is_empty() {
+            return self.empty();
+        }
+        if flat.len() == 1 {
+            return flat[0];
+        }
+
+        // Sort for canonical order
+        flat.sort();
+        
+        self.intern(ExprNode::Choice(flat))
+    }
+
+    /// Intern a sequence expression, normalizing and simplifying.
+    fn seq(&mut self, exprs: Vec<ExprId>) -> ExprId {
+        // Empty in sequence = Empty
+        if exprs.iter().any(|&e| e == self.empty()) {
+            return self.empty();
+        }
+
+        // Flatten nested sequences and remove epsilon
+        let mut flat: Vec<ExprId> = Vec::new();
+        
+        for e in exprs {
+            if e == self.epsilon() {
+                continue;
+            }
+            if let ExprNode::Seq(inner) = self.get(e) {
+                flat.extend(inner.iter().copied());
+            } else {
+                flat.push(e);
+            }
+        }
+
+        if flat.is_empty() {
+            return self.epsilon();
+        }
+        if flat.len() == 1 {
+            return flat[0];
+        }
+
+        // Merge adjacent byte sequences
+        let mut merged: Vec<ExprId> = Vec::new();
+        let mut pending_bytes: Vec<u8> = Vec::new();
+        
+        let flush_bytes = |interner: &mut ExprInterner, merged: &mut Vec<ExprId>, bytes: &mut Vec<u8>| {
+            if !bytes.is_empty() {
+                let id = interner.byte_seq(std::mem::take(bytes));
+                merged.push(id);
+            }
+        };
+
+        for e in flat {
+            match self.get(e) {
+                ExprNode::Byte(b) => pending_bytes.push(*b),
+                ExprNode::ByteSeq(bs) => pending_bytes.extend(bs.iter()),
+                _ => {
+                    flush_bytes(self, &mut merged, &mut pending_bytes);
+                    merged.push(e);
+                }
+            }
+        }
+        flush_bytes(self, &mut merged, &mut pending_bytes);
+
+        if merged.is_empty() {
+            return self.epsilon();
+        }
+        if merged.len() == 1 {
+            return merged[0];
+        }
+
+        self.intern(ExprNode::Seq(merged))
+    }
+
+    /// Check if an expression is nullable (can match empty string).
+    fn is_nullable(&mut self, id: ExprId) -> bool {
+        if let Some(cached) = self.nullable_cache[id.0 as usize] {
+            return cached;
+        }
+
+        let result = match self.get(id).clone() {
+            ExprNode::Empty => false,
+            ExprNode::Epsilon => true,
+            ExprNode::Byte(_) | ExprNode::ByteSeq(_) | ExprNode::Class(_) => false,
+            ExprNode::Star(_) | ExprNode::Optional(_) => true,
+            ExprNode::Plus(inner) => self.is_nullable(inner),
+            ExprNode::Choice(exprs) => exprs.iter().any(|&e| self.is_nullable(e)),
+            ExprNode::Seq(exprs) => exprs.iter().all(|&e| self.is_nullable(e)),
+        };
+
+        self.nullable_cache[id.0 as usize] = Some(result);
+        result
+    }
+
+    /// Get the first bytes that can be matched by this expression.
+    fn first_bytes(&mut self, id: ExprId) -> U8Set {
+        if let Some(cached) = self.first_bytes_cache[id.0 as usize].clone() {
+            return cached;
+        }
+
+        let result = match self.get(id).clone() {
+            ExprNode::Empty | ExprNode::Epsilon => U8Set::none(),
+            ExprNode::Byte(b) => U8Set::from_u8(b),
+            ExprNode::ByteSeq(bs) => U8Set::from_u8(bs[0]),
+            ExprNode::Class(set) => set,
+            ExprNode::Star(inner) | ExprNode::Plus(inner) | ExprNode::Optional(inner) => {
+                self.first_bytes(inner)
+            }
+            ExprNode::Choice(exprs) => {
+                let mut result = U8Set::none();
+                for e in exprs {
+                    result = result.union(&self.first_bytes(e));
+                }
+                result
+            }
+            ExprNode::Seq(exprs) => {
+                let mut result = U8Set::none();
+                for e in exprs {
+                    result = result.union(&self.first_bytes(e));
+                    if !self.is_nullable(e) {
+                        break;
+                    }
+                }
+                result
+            }
+        };
+
+        self.first_bytes_cache[id.0 as usize] = Some(result.clone());
+        result
+    }
+
+    /// Compute the derivative of an expression with respect to a byte.
+    fn derivative(&mut self, id: ExprId, byte: u8) -> ExprId {
+        // Check cache
+        let key = (id, byte);
+        if let Some(&cached) = self.deriv_cache.get(&key) {
+            return cached;
+        }
+
+        let result = self.derivative_impl(id, byte);
+        self.deriv_cache.insert(key, result);
+        result
+    }
+
+    fn derivative_impl(&mut self, id: ExprId, byte: u8) -> ExprId {
+        match self.get(id).clone() {
+            ExprNode::Empty | ExprNode::Epsilon => self.empty(),
+            ExprNode::Byte(b) => {
+                if b == byte { self.epsilon() } else { self.empty() }
+            }
+            ExprNode::ByteSeq(bs) => {
+                if bs[0] == byte {
+                    self.byte_seq(bs[1..].to_vec())
+                } else {
+                    self.empty()
+                }
+            }
+            ExprNode::Class(set) => {
+                if set.contains(byte) { self.epsilon() } else { self.empty() }
+            }
+            ExprNode::Star(inner) => {
+                // ∂_a(r*) = ∂_a(r) · r*
+                let inner_deriv = self.derivative(inner, byte);
+                let star = self.star(inner);
+                self.seq(vec![inner_deriv, star])
+            }
+            ExprNode::Plus(inner) => {
+                // ∂_a(r+) = ∂_a(r) · r*
+                let inner_deriv = self.derivative(inner, byte);
+                let star = self.star(inner);
+                self.seq(vec![inner_deriv, star])
+            }
+            ExprNode::Optional(inner) => {
+                // ∂_a(r?) = ∂_a(r)
+                self.derivative(inner, byte)
+            }
+            ExprNode::Choice(exprs) => {
+                // ∂_a(r|s) = ∂_a(r) | ∂_a(s)
+                let derivs: Vec<ExprId> = exprs.iter()
+                    .map(|&e| self.derivative(e, byte))
+                    .collect();
+                self.choice(derivs)
+            }
+            ExprNode::Seq(exprs) => {
+                // ∂_a(r · s) = ∂_a(r) · s + ν(r) · ∂_a(s)
+                if exprs.is_empty() {
+                    return self.empty();
+                }
+
+                let mut result_choices = Vec::new();
+                
+                for i in 0..exprs.len() {
+                    // Check if all previous elements are nullable
+                    let all_prev_nullable = exprs[..i].iter().all(|&e| self.is_nullable(e));
+                    if !all_prev_nullable && i > 0 {
+                        break;
+                    }
+                    
+                    // Compute ∂_a(exprs[i]) · exprs[i+1..]
+                    let deriv_i = self.derivative(exprs[i], byte);
+                    let mut seq_parts = vec![deriv_i];
+                    seq_parts.extend(exprs[i + 1..].iter().copied());
+                    result_choices.push(self.seq(seq_parts));
+                }
+                
+                self.choice(result_choices)
+            }
+        }
+    }
+
+    /// Convert an Expr to an interned ExprId.
+    fn intern_expr(&mut self, expr: &Expr) -> ExprId {
+        // For Shared expressions, use the Arc pointer as cache key
+        if let Expr::Shared(arc) = expr {
+            let ptr = Arc::as_ptr(arc) as usize;
+            if let Some(&cached) = self.intern_cache.get(&ptr) {
+                return cached;
+            }
+            let result = self.intern_expr(arc);
+            self.intern_cache.insert(ptr, result);
+            return result;
+        }
+        
+        match expr {
+            Expr::Empty => self.empty(),
+            Expr::Epsilon => self.epsilon(),
+            Expr::U8Seq(bytes) => self.byte_seq(bytes.clone()),
+            Expr::U8Class(set) => self.class(set.clone()),
+            Expr::Shared(_) => unreachable!(), // Handled above
+            Expr::Quantifier(inner, q_type) => {
+                let inner_id = self.intern_expr(inner);
+                match q_type {
+                    QuantifierType::ZeroOrMore => self.star(inner_id),
+                    QuantifierType::OneOrMore => self.plus(inner_id),
+                    QuantifierType::ZeroOrOne => self.optional(inner_id),
+                }
+            }
+            Expr::Choice(exprs) => {
+                let ids: Vec<ExprId> = exprs.iter().map(|e| self.intern_expr(e)).collect();
+                self.choice(ids)
+            }
+            Expr::Seq(exprs) => {
+                let ids: Vec<ExprId> = exprs.iter().map(|e| self.intern_expr(e)).collect();
+                self.seq(ids)
+            }
+        }
+    }
+}
+
+impl Expr {
+    /// Check if the expression is nullable (can match the empty string).
+    /// This is used to determine if a DFA state is accepting.
+    pub fn is_nullable(&self) -> bool {
+        match self {
+            Expr::Epsilon => true,
+            Expr::Empty => false,
+            Expr::U8Seq(bytes) => bytes.is_empty(),
+            Expr::U8Class(_) => false,
+            Expr::Shared(inner) => inner.is_nullable(),
+            Expr::Quantifier(inner, q_type) => match q_type {
+                QuantifierType::ZeroOrMore | QuantifierType::ZeroOrOne => true,
+                QuantifierType::OneOrMore => inner.is_nullable(),
+            },
+            Expr::Choice(exprs) => exprs.iter().any(|e| e.is_nullable()),
+            Expr::Seq(exprs) => exprs.iter().all(|e| e.is_nullable()),
+        }
+    }
+
+    /// Compute the Brzozowski derivative of this expression with respect to a byte.
+    /// The derivative ∂_a(r) is the expression that matches exactly the strings s
+    /// such that (a ++ s) is matched by r.
+    pub fn derivative(&self, byte: u8) -> Expr {
+        match self {
+            Expr::Empty => Expr::Empty,
+            Expr::Epsilon => Expr::Empty,
+            Expr::U8Seq(bytes) => {
+                if bytes.is_empty() {
+                    Expr::Empty
+                } else if bytes[0] == byte {
+                    if bytes.len() == 1 {
+                        Expr::Epsilon
+                    } else {
+                        Expr::U8Seq(bytes[1..].to_vec())
+                    }
+                } else {
+                    Expr::Empty
+                }
+            }
+            Expr::U8Class(set) => {
+                if set.contains(byte) {
+                    Expr::Epsilon
+                } else {
+                    Expr::Empty
+                }
+            }
+            Expr::Shared(inner) => inner.derivative(byte),
+            Expr::Quantifier(inner, q_type) => {
+                // ∂_a(r*) = ∂_a(r) · r*
+                // ∂_a(r+) = ∂_a(r) · r*
+                // ∂_a(r?) = ∂_a(r)
+                let inner_deriv = inner.derivative(byte);
+                match q_type {
+                    QuantifierType::ZeroOrMore => {
+                        // ∂_a(r*) = ∂_a(r) · r*
+                        Expr::make_seq(vec![
+                            inner_deriv,
+                            Expr::Quantifier(inner.clone(), QuantifierType::ZeroOrMore),
+                        ])
+                    }
+                    QuantifierType::OneOrMore => {
+                        // ∂_a(r+) = ∂_a(r) · r*
+                        Expr::make_seq(vec![
+                            inner_deriv,
+                            Expr::Quantifier(inner.clone(), QuantifierType::ZeroOrMore),
+                        ])
+                    }
+                    QuantifierType::ZeroOrOne => {
+                        // ∂_a(r?) = ∂_a(r)
+                        inner_deriv
+                    }
+                }
+            }
+            Expr::Choice(exprs) => {
+                // ∂_a(r|s) = ∂_a(r) | ∂_a(s)
+                let derivs: Vec<Expr> = exprs.iter().map(|e| e.derivative(byte)).collect();
+                Expr::make_choice(derivs)
+            }
+            Expr::Seq(exprs) => {
+                // ∂_a(r · s) = ∂_a(r) · s + ν(r) · ∂_a(s)
+                // where ν(r) = ε if r is nullable, ∅ otherwise
+                if exprs.is_empty() {
+                    return Expr::Empty;
+                }
+                
+                let mut result_choices = Vec::new();
+                
+                // Process each position in the sequence
+                for i in 0..exprs.len() {
+                    // Check if all previous elements are nullable
+                    let all_prev_nullable = exprs[..i].iter().all(|e| e.is_nullable());
+                    if !all_prev_nullable && i > 0 {
+                        break;
+                    }
+                    
+                    // Compute ∂_a(exprs[i]) · exprs[i+1..]
+                    let deriv_i = exprs[i].derivative(byte);
+                    let suffix: Vec<Expr> = exprs[i + 1..].to_vec();
+                    
+                    let mut seq_parts = vec![deriv_i];
+                    seq_parts.extend(suffix);
+                    result_choices.push(Expr::make_seq(seq_parts));
+                }
+                
+                Expr::make_choice(result_choices)
+            }
+        }
+    }
+
+    /// Simplify an expression to a canonical form.
+    /// This is critical for the derivative-based approach: equivalent expressions
+    /// must simplify to the same form so they can be identified as the same DFA state.
+    pub fn simplify(&self) -> Expr {
+        self.simplify_impl()
+    }
+    
+    fn simplify_impl(&self) -> Expr {
+        match self {
+            Expr::Empty => Expr::Empty,
+            Expr::Epsilon => Expr::Epsilon,
+            Expr::U8Seq(bytes) => {
+                if bytes.is_empty() {
+                    Expr::Epsilon
+                } else {
+                    Expr::U8Seq(bytes.clone())
+                }
+            }
+            Expr::U8Class(set) => {
+                if set.is_empty() {
+                    Expr::Empty
+                } else if set.len() == 1 {
+                    Expr::U8Seq(vec![set.iter().next().unwrap()])
+                } else {
+                    Expr::U8Class(set.clone())
+                }
+            }
+            Expr::Shared(inner) => inner.simplify_impl(),
+            Expr::Quantifier(inner, q_type) => {
+                let inner_simplified = inner.simplify_impl();
+                match &inner_simplified {
+                    Expr::Empty => {
+                        // ∅* = ε, ∅+ = ∅, ∅? = ε
+                        match q_type {
+                            QuantifierType::ZeroOrMore | QuantifierType::ZeroOrOne => Expr::Epsilon,
+                            QuantifierType::OneOrMore => Expr::Empty,
+                        }
+                    }
+                    Expr::Epsilon => {
+                        // ε* = ε+ = ε? = ε
+                        Expr::Epsilon
+                    }
+                    _ => Expr::Quantifier(Box::new(inner_simplified), *q_type),
+                }
+            }
+            Expr::Choice(exprs) => {
+                let mut simplified: Vec<Expr> = Vec::new();
+                let mut has_epsilon = false;
+                
+                for e in exprs {
+                    let s = e.simplify_impl();
+                    match s {
+                        Expr::Empty => continue, // Remove Empty from choices
+                        Expr::Epsilon => {
+                            has_epsilon = true;
+                        }
+                        Expr::Choice(inner) => {
+                            // Flatten nested choices
+                            for e2 in inner {
+                                match e2 {
+                                    Expr::Empty => continue,
+                                    Expr::Epsilon => has_epsilon = true,
+                                    _ => simplified.push(e2),
+                                }
+                            }
+                        }
+                        _ => simplified.push(s),
+                    }
+                }
+                
+                // Add epsilon back if we saw it
+                if has_epsilon {
+                    // Check if any simplified expr is already epsilon
+                    if !simplified.iter().any(|e| matches!(e, Expr::Epsilon)) {
+                        simplified.push(Expr::Epsilon);
+                    }
+                }
+                
+                // Deduplicate using HashSet
+                let mut seen = rustc_hash::FxHashSet::default();
+                simplified.retain(|e| {
+                    // Use hash for fast dedup
+                    use std::hash::{Hash, Hasher};
+                    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                    e.hash(&mut hasher);
+                    seen.insert(hasher.finish())
+                });
+                
+                if simplified.is_empty() {
+                    Expr::Empty
+                } else if simplified.len() == 1 {
+                    simplified.pop().unwrap()
+                } else {
+                    Expr::Choice(simplified)
+                }
+            }
+            Expr::Seq(exprs) => {
+                let mut simplified: Vec<Expr> = Vec::new();
+                
+                for e in exprs {
+                    let s = e.simplify_impl();
+                    match s {
+                        Expr::Empty => return Expr::Empty, // Empty in sequence = Empty
+                        Expr::Epsilon => continue, // Skip epsilon in sequences
+                        Expr::Seq(inner) => {
+                            // Flatten nested sequences
+                            simplified.extend(inner);
+                        }
+                        _ => simplified.push(s),
+                    }
+                }
+                
+                // Merge adjacent U8Seq
+                let mut merged: Vec<Expr> = Vec::new();
+                for e in simplified {
+                    if let Expr::U8Seq(bytes) = &e {
+                        if let Some(Expr::U8Seq(prev)) = merged.last_mut() {
+                            prev.extend(bytes.iter());
+                            continue;
+                        }
+                    }
+                    merged.push(e);
+                }
+                
+                if merged.is_empty() {
+                    Expr::Epsilon
+                } else if merged.len() == 1 {
+                    merged.pop().unwrap()
+                } else {
+                    Expr::Seq(merged)
+                }
+            }
+        }
+    }
+
+    /// Compute the set of bytes that would lead to a non-Empty derivative.
+    /// This is used to partition the input alphabet into equivalence classes.
+    pub fn first_bytes(&self) -> U8Set {
+        match self {
+            Expr::Empty => U8Set::none(),
+            Expr::Epsilon => U8Set::none(),
+            Expr::U8Seq(bytes) => {
+                if bytes.is_empty() {
+                    U8Set::none()
+                } else {
+                    U8Set::from_u8(bytes[0])
+                }
+            }
+            Expr::U8Class(set) => set.clone(),
+            Expr::Shared(inner) => inner.first_bytes(),
+            Expr::Quantifier(inner, _) => inner.first_bytes(),
+            Expr::Choice(exprs) => {
+                let mut result = U8Set::none();
+                for e in exprs {
+                    result = result.union(&e.first_bytes());
+                }
+                result
+            }
+            Expr::Seq(exprs) => {
+                let mut result = U8Set::none();
+                for e in exprs {
+                    result = result.union(&e.first_bytes());
+                    if !e.is_nullable() {
+                        break;
+                    }
+                }
+                result
+            }
+        }
+    }
+}
+
+/// A state in the derivative-based DFA construction.
+/// Uses interned expression IDs for efficiency.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct DerivDFAState {
+    /// One expression ID per group.
+    group_exprs: Vec<ExprId>,
+}
+
+impl ExprGroups {
+    /// Build a DFA directly from expressions using Brzozowski derivatives.
+    /// This avoids the exponential blowup that can occur with NFA→DFA conversion.
+    pub fn build_dfa_via_derivatives(self) -> DFA {
+        use rustc_hash::FxHashMap;
+        
+        let start_time = std::time::Instant::now();
+        
+        // Create interner
+        let mut interner = ExprInterner::new();
+        
+        // Intern initial expressions
+        let initial_exprs: Vec<ExprId> = self.groups.iter()
+            .map(|g| interner.intern_expr(&g.expr))
+            .collect();
+        let non_greedy_finalizers: BTreeSet<GroupID> = self.groups.iter()
+            .enumerate()
+            .filter_map(|(i, g)| if g.is_non_greedy { Some(i) } else { None })
+            .collect();
+        
+        let initial_state = DerivDFAState { group_exprs: initial_exprs };
+        
+        // State map: DerivDFAState -> state index
+        let mut state_map: FxHashMap<DerivDFAState, usize> = FxHashMap::default();
+        let mut dfa_states: Vec<DFAState> = Vec::new();
+        let mut worklist: Vec<DerivDFAState> = Vec::new();
+        
+        // Add initial state
+        state_map.insert(initial_state.clone(), 0);
+        worklist.push(initial_state);
+        
+        // Create placeholder for initial state
+        dfa_states.push(DFAState {
+            transitions: CharTransitions::new(),
+            finalizers: DenseStateSet::empty(),
+            possible_future_group_ids: BTreeSet::new(),
+            group_id_to_u8set: BTreeMap::new(),
+        });
+        
+        while let Some(current_state) = worklist.pop() {
+            let current_idx = *state_map.get(&current_state).unwrap();
+            
+            // Progress logging
+            if dfa_states.len() % 10 == 0 || dfa_states.len() < 20 {
+                crate::debug!(5, "  Processing state {}/{}, {} interned exprs, {} deriv cache entries",
+                    current_idx, dfa_states.len(), interner.id_to_node.len(), interner.deriv_cache.len());
+            }
+            
+            // Get finalizers for this state (expressions that are nullable)
+            let mut finalizers = DenseStateSet::empty();
+            for (i, &expr_id) in current_state.group_exprs.iter().enumerate() {
+                if interner.is_nullable(expr_id) {
+                    finalizers.insert(i);
+                }
+            }
+            dfa_states[current_idx].finalizers = finalizers;
+            
+            // Compute union of first_bytes across all groups
+            let mut first = U8Set::none();
+            for &expr_id in &current_state.group_exprs {
+                first = first.union(&interner.first_bytes(expr_id));
+            }
+            
+            // Group bytes by their derivative
+            let mut seen_derivs: FxHashMap<DerivDFAState, U8Set> = FxHashMap::default();
+            
+            for byte in first.iter() {
+                let deriv_exprs: Vec<ExprId> = current_state.group_exprs.iter()
+                    .map(|&e| interner.derivative(e, byte))
+                    .collect();
+                let deriv_state = DerivDFAState { group_exprs: deriv_exprs };
+                seen_derivs.entry(deriv_state)
+                    .or_insert_with(U8Set::none)
+                    .insert(byte);
+            }
+            
+            // Handle bytes not in first_bytes -> dead state
+            let complement = first.complement();
+            if !complement.is_empty() {
+                let dead_exprs: Vec<ExprId> = current_state.group_exprs.iter()
+                    .map(|_| interner.empty())
+                    .collect();
+                let dead_state = DerivDFAState { group_exprs: dead_exprs };
+                seen_derivs.entry(dead_state)
+                    .or_insert_with(U8Set::none)
+                    .update(&complement);
+            }
+            
+            // Build transitions
+            let mut transitions = CharTransitions::new();
+            for (deriv_state, bytes) in seen_derivs {
+                let target_idx = if let Some(&idx) = state_map.get(&deriv_state) {
+                    idx
+                } else {
+                    let new_idx = dfa_states.len();
+                    state_map.insert(deriv_state.clone(), new_idx);
+                    worklist.push(deriv_state);
+                    dfa_states.push(DFAState {
+                        transitions: CharTransitions::new(),
+                        finalizers: DenseStateSet::empty(),
+                        possible_future_group_ids: BTreeSet::new(),
+                        group_id_to_u8set: BTreeMap::new(),
+                    });
+                    new_idx
+                };
+                
+                for byte in bytes.iter() {
+                    transitions.insert(byte, target_idx);
+                }
+            }
+            
+            dfa_states[current_idx].transitions = transitions;
+        }
+        
+        crate::debug!(4, "Derivative DFA: {} states, {} interned exprs in {:.2?}", 
+            dfa_states.len(), interner.id_to_node.len(), start_time.elapsed());
+        
+        // Compute possible_future_group_ids and group_id_to_u8set
+        for (state_idx, state) in dfa_states.iter_mut().enumerate() {
+            if let Some((ds, _)) = state_map.iter().find(|(_, &idx)| idx == state_idx) {
+                for (group_idx, &expr_id) in ds.group_exprs.iter().enumerate() {
+                    if expr_id != interner.empty() {
+                        state.possible_future_group_ids.insert(group_idx);
+                        let fb = interner.first_bytes(expr_id);
+                        if !fb.is_empty() {
+                            state.group_id_to_u8set.insert(group_idx, fb);
+                        }
+                    }
+                }
+            }
+        }
+        
+        DFA {
+            states: dfa_states,
+            start_state: 0,
+            non_greedy_finalizers,
         }
     }
 }

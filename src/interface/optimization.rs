@@ -2631,7 +2631,7 @@ fn has_unbounded_repetition(expr: &Expr) -> bool {
             children.iter().any(|c| has_unbounded_repetition(c))
         }
         Expr::Shared(inner) => has_unbounded_repetition(inner),
-        Expr::U8Seq(_) | Expr::U8Class(_) | Expr::Epsilon => false,
+        Expr::U8Seq(_) | Expr::U8Class(_) | Expr::Epsilon | Expr::Empty => false,
     }
 }
 
@@ -2665,7 +2665,7 @@ fn has_overlapping_choice(expr: &Expr) -> bool {
         Expr::Seq(children) => children.iter().any(|c| has_overlapping_choice(c)),
         Expr::Quantifier(inner, _) => has_overlapping_choice(inner),
         Expr::Shared(inner) => has_overlapping_choice(inner),
-        Expr::U8Seq(_) | Expr::U8Class(_) | Expr::Epsilon => false,
+        Expr::U8Seq(_) | Expr::U8Class(_) | Expr::Epsilon | Expr::Empty => false,
     }
 }
 
@@ -2683,6 +2683,7 @@ fn get_first_bytes(expr: &Expr) -> crate::datastructures::u8set::U8Set {
         }
         Expr::U8Class(set) => set.clone(),
         Expr::Epsilon => U8Set::none(),
+        Expr::Empty => U8Set::none(), // Empty matches nothing, so no first bytes
         Expr::Seq(children) => {
             if children.is_empty() {
                 U8Set::none()
@@ -2723,6 +2724,7 @@ fn get_first_bytes(expr: &Expr) -> crate::datastructures::u8set::U8Set {
 fn can_be_empty(expr: &Expr) -> bool {
     match expr {
         Expr::Epsilon => true,
+        Expr::Empty => false, // Empty matches nothing, so it can't match empty string
         Expr::U8Seq(bytes) => bytes.is_empty(),
         Expr::U8Class(_) => false, // Must match exactly one byte
         Expr::Seq(children) => children.iter().all(|c| can_be_empty(c)),
@@ -2853,6 +2855,7 @@ fn extract_expr_pattern(expr: &Expr) -> TerminalPatternType {
         Expr::U8Seq(bytes) => TerminalPatternType::Literal(bytes.len()),
         Expr::U8Class(_) => TerminalPatternType::Class,
         Expr::Epsilon => TerminalPatternType::Epsilon,
+        Expr::Empty => TerminalPatternType::Epsilon, // Empty treated as epsilon for pattern purposes
         Expr::Seq(children) => TerminalPatternType::Seq(children.len()),
         Expr::Choice(alternatives) => TerminalPatternType::Choice(alternatives.len()),
         Expr::Quantifier(_, q_type) => TerminalPatternType::Quantifier(*q_type),
