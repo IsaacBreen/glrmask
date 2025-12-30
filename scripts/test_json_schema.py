@@ -118,36 +118,30 @@ if os.environ.get("PRINT_EBNF"):
         print(ebnf)
     sys.exit(0)
 
-# Step 2: Parse EBNF to GrammarDefinition
+# Step 2: Parse EBNF to GrammarDefinition (includes optimization)
+# Note: from_ebnf() already calls optimize() internally
 print("\n2. Parsing EBNF to GrammarDefinition...")
 start = time.time()
 grammar_def = _sep1.grammar_definition_from_json_schema(json.dumps(schema))
 parse_time = time.time() - start
-print(f"   Grammar parsing: {parse_time*1000:.1f}ms")
+print(f"   Grammar parsing (includes optimization): {parse_time*1000:.1f}ms")
 
-# Step 3: Optimize grammar
-print("\n3. Optimizing grammar...")
-start = time.time()
-grammar_def.optimize()
-optimize_time = time.time() - start
-print(f"   Optimization: {optimize_time*1000:.1f}ms")
-
-# Step 4: Compile to GLR parser
-print("\n4. Compiling grammar...")
+# Step 3: Compile to GLR parser
+print("\n3. Compiling grammar...")
 start = time.time()
 compiled = grammar_def.compile()
 compile_time = time.time() - start
 print(f"   Grammar compilation: {compile_time*1000:.1f}ms")
 
-# Step 5: Create constraint with vocabulary
-print("\n5. Creating constraint with vocabulary...")
+# Step 4: Create constraint with vocabulary
+print("\n4. Creating constraint with vocabulary...")
 start = time.time()
 constraint = _sep1.GrammarConstraint(compiled, token_to_id)
 constraint_time = time.time() - start
 print(f"   Constraint creation: {constraint_time*1000:.1f}ms")
 
-# Step 6: Test stepping through a valid input
-print("\n6. Testing constraint on valid input...")
+# Step 5: Test stepping through a valid input
+print("\n5. Testing constraint on valid input...")
 state = _sep1.GrammarConstraintState(constraint)
 
 # A minimal valid JSON that should match most schemas
@@ -171,5 +165,5 @@ print(f"\n   Final state active: {state.is_active()}")
 print(f"   Final state valid: {state.is_valid()}")
 
 # Summary
-total_time = vocab_time + ebnf_time + parse_time + optimize_time + compile_time + constraint_time
+total_time = vocab_time + ebnf_time + parse_time + compile_time + constraint_time
 print(f"\n=== Total compile time: {total_time*1000:.1f}ms ===")

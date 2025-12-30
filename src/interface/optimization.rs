@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use std::rc::Rc;
 use bimap::BiBTreeMap;
+use rustc_hash::FxHashMap;
 use crate::finite_automata::{Expr, QuantifierType};
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::interface::{GrammarDefinition, GrammarExpr, ExprNullability, get_expr_nullability};
@@ -220,24 +221,26 @@ impl<'a> GrammarOptimizer<'a> {
                 })
                 .or_insert(term);
         }
-        debug!(5, "Built {} equations in {:?}", equations.len(), eq_start.elapsed());
+        debug!(4, "Built {} equations in {:?}", equations.len(), eq_start.elapsed());
         
         // Find NTs that are part of mutual recursion cycles
+        let cycle_start = std::time::Instant::now();
         let cyclic_nts = find_cyclic_nts(&equations);
+        debug!(4, "Found {} cyclic NTs in {:?}", cyclic_nts.len(), cycle_start.elapsed());
         if !cyclic_nts.is_empty() {
-            debug!(5, "Found {} cyclic NTs: {:?}", cyclic_nts.len(), cyclic_nts);
+            debug!(5, "Cyclic NTs: {:?}", cyclic_nts);
         }
         
         // Build dependency graph and compute elimination order (reverse topological)
         let order_start = std::time::Instant::now();
         let elimination_order = compute_elimination_order(&equations, &start_nt);
-        debug!(5, "Computed elimination order ({} NTs) in {:?}", elimination_order.len(), order_start.elapsed());
+        debug!(4, "Computed elimination order ({} NTs) in {:?}", elimination_order.len(), order_start.elapsed());
         
         // PHASE 1: Build solution map (solve each NT's equation with Arden's lemma)
         // We DON'T substitute into other equations yet - just solve each NT in isolation
         let mut solutions: HashMap<String, Rc<RegexTerm>> = HashMap::new();
         // Persistent cache for expansion - shared across all expand_with_solutions calls
-        let mut expansion_cache: HashMap<*const RegexTerm, Rc<RegexTerm>> = HashMap::new();
+        let mut expansion_cache: FxHashMap<*const RegexTerm, Rc<RegexTerm>> = FxHashMap::default();
         
         let phase1_start = std::time::Instant::now();
         let mut solved_count = 0;
@@ -245,7 +248,7 @@ impl<'a> GrammarOptimizer<'a> {
         let mut solve_time = std::time::Duration::ZERO;
         for (i, nt_to_eliminate) in elimination_order.iter().enumerate() {
             if i > 0 && i % 5000 == 0 {
-                debug!(5, "Phase 1 progress: {}/{} NTs, solved={}, failed={}, solve={:?}", 
+                debug!(4, "Phase 1 progress: {}/{} NTs, solved={}, failed={}, solve={:?}", 
                     i, elimination_order.len(), solved_count, failed_count, solve_time);
             }
             if nt_to_eliminate == &start_nt {
@@ -275,7 +278,13 @@ impl<'a> GrammarOptimizer<'a> {
             solutions.insert(nt_to_eliminate.clone(), solved_rc);
             solved_count += 1;
         }
-        debug!(5, "Phase 1: solved {} NTs, failed {} in {:?} (solve={:?})", 
+        
+        // Log solution sizes
+        let total_solution_size: usize = solutions.values().map(|s| s.size()).sum();
+        let max_solution_size = solutions.values().map(|s| s.size()).max().unwrap_or(0);
+        debug!(5, "Solutions: {} NTs, total size {}, max size {}", solutions.len(), total_solution_size, max_solution_size);
+        
+        debug!(4, "Phase 1: solved {} NTs, failed {} in {:?} (solve={:?})", 
             solved_count, failed_count, phase1_start.elapsed(), solve_time);
         
         // PHASE 2: Solve the start NT
@@ -290,11 +299,12 @@ impl<'a> GrammarOptimizer<'a> {
             debug!(4, "Grammar optimization failed: could not solve start NT");
             return;
         };
-        debug!(5, "Phase 2: solved start NT symbolically in {:?}", phase2_start.elapsed());
+        debug!(4, "Phase 2a: solved start NT symbolically in {:?}", phase2_start.elapsed());
         
         // Now expand all NtRefs in the solved start equation
         let expand_start = std::time::Instant::now();
         let solved_start_rc = Rc::new(solved_start_symbolic);
+        debug!(5, "Start term size before expansion: {}", solved_start_rc.size());
         
         // If there are cyclic NTs, use the skip_cyclic version
         let (expanded_start, has_remaining_ntrefs) = if cyclic_nts.is_empty() {
@@ -307,12 +317,13 @@ impl<'a> GrammarOptimizer<'a> {
         } else {
             // Has cycles - use lenient expansion that skips cyclic NTs
             let expanded = expand_with_solutions_skip_cyclic(&solved_start_rc, &solutions, &mut expansion_cache, &cyclic_nts);
+            debug!(5, "Expanded term size: {}", expanded.size());
             // Check if the result still has NtRefs
             let remaining = expanded.referenced_nts();
             debug!(5, "After expansion, {} NtRefs remain: {:?}", remaining.len(), remaining);
             (expanded, !remaining.is_empty())
         };
-        debug!(5, "Phase 2: expanded start NT in {:?}", expand_start.elapsed());
+        debug!(4, "Phase 2b: expanded start NT in {:?}", expand_start.elapsed());
         
         // If there are remaining NtRefs, we need to do partial optimization
         if has_remaining_ntrefs {
@@ -479,7 +490,7 @@ impl<'a> GrammarOptimizer<'a> {
     fn partial_optimize(
         &mut self,
         solutions: &HashMap<String, Rc<RegexTerm>>,
-        expansion_cache: &mut HashMap<*const RegexTerm, Rc<RegexTerm>>,
+        expansion_cache: &mut FxHashMap<*const RegexTerm, Rc<RegexTerm>>,
         cyclic_dependent_nts: &HashSet<String>,
         ignore_term: Option<&Rc<RegexTerm>>,
     ) {
@@ -745,7 +756,7 @@ impl<'a> GrammarOptimizer<'a> {
         &mut self,
         cyclic_dependent_nts: &HashSet<String>,
         _solutions: &HashMap<String, Rc<RegexTerm>>,
-        _expansion_cache: &mut HashMap<*const RegexTerm, Rc<RegexTerm>>,
+        _expansion_cache: &mut FxHashMap<*const RegexTerm, Rc<RegexTerm>>,
     ) {
         let start = std::time::Instant::now();
         
@@ -1071,7 +1082,7 @@ impl<'a> GrammarOptimizer<'a> {
         &self,
         prod: &Production,
         solutions: &HashMap<String, Rc<RegexTerm>>,
-        expansion_cache: &mut HashMap<*const RegexTerm, Rc<RegexTerm>>,
+        expansion_cache: &mut FxHashMap<*const RegexTerm, Rc<RegexTerm>>,
     ) -> Option<Rc<RegexTerm>> {
         self.symbols_to_regex_term(&prod.rhs, solutions, expansion_cache)
     }
@@ -1081,7 +1092,7 @@ impl<'a> GrammarOptimizer<'a> {
         &self,
         symbols: &[Symbol],
         solutions: &HashMap<String, Rc<RegexTerm>>,
-        expansion_cache: &mut HashMap<*const RegexTerm, Rc<RegexTerm>>,
+        expansion_cache: &mut FxHashMap<*const RegexTerm, Rc<RegexTerm>>,
     ) -> Option<Rc<RegexTerm>> {
         let terms: Option<Vec<Rc<RegexTerm>>> = symbols.iter().map(|sym| {
             match sym {
@@ -1113,7 +1124,7 @@ impl<'a> GrammarOptimizer<'a> {
     fn expand_nt_refs_static(
         term: &Rc<RegexTerm>,
         solutions: &HashMap<String, Rc<RegexTerm>>,
-        cache: &mut HashMap<*const RegexTerm, Rc<RegexTerm>>,
+        cache: &mut FxHashMap<*const RegexTerm, Rc<RegexTerm>>,
     ) -> Rc<RegexTerm> {
         let ptr = Rc::as_ptr(term);
         if let Some(cached) = cache.get(&ptr) {
@@ -1297,9 +1308,6 @@ fn compute_cyclic_dependent_nts(cyclic_nts: &HashSet<String>, productions: &[Pro
         }
     }
     
-    // Start with cyclic NTs
-    let mut result: HashSet<String> = cyclic_nts.clone();
-    
     // Build reverse dependency graph for propagation
     let mut rev_deps: HashMap<String, HashSet<String>> = HashMap::new();
     for (nt, refs) in &deps {
@@ -1308,18 +1316,16 @@ fn compute_cyclic_dependent_nts(cyclic_nts: &HashSet<String>, productions: &[Pro
         }
     }
     
-    // Propagate: any NT that depends on a cyclic-dependent NT is also cyclic-dependent
-    let mut changed = true;
-    while changed {
-        changed = false;
-        let current: Vec<String> = result.iter().cloned().collect();
-        for nt in current {
-            // Any NT that references this one becomes cyclic-dependent
-            if let Some(dependents) = rev_deps.get(&nt) {
-                for dep in dependents {
-                    if result.insert(dep.clone()) {
-                        changed = true;
-                    }
+    // Use worklist algorithm: start with cyclic NTs and propagate to dependents
+    let mut result: HashSet<String> = cyclic_nts.clone();
+    let mut worklist: Vec<String> = cyclic_nts.iter().cloned().collect();
+    
+    while let Some(nt) = worklist.pop() {
+        // Any NT that references this one becomes cyclic-dependent
+        if let Some(dependents) = rev_deps.get(&nt) {
+            for dep in dependents {
+                if result.insert(dep.clone()) {
+                    worklist.push(dep.clone());
                 }
             }
         }
@@ -1637,22 +1643,11 @@ impl RegexTerm {
             }
         }
         
-        // Epsilon Absorption:
-        // If we have an Epsilon alternative, check if any OTHER alternative is nullable.
-        // If so, the Epsilon is redundant because the nullable alternative already covers it.
-        // e.g., (A | ε) where A matches ε -> A
+        // Epsilon Absorption: DISABLED for performance
+        // The is_nullable() traversal is too expensive for large regex trees.
+        // We'll keep explicit epsilons - they'll be simplified later or are harmless.
         if has_epsilon {
-            // Check if any existing term is nullable
-            let any_nullable = flat.iter().any(|t| t.is_nullable());
-            if !any_nullable {
-                // If no other nullable term, we must keep Epsilon
-                // Add it at the end for canonical ordering (or beginning, doesn't matter much)
-                // We'll treat it as just another term for now, maybe explicit handling is better?
-                
-                // Let's create an explicit Epsilon term
-                 flat.push(Rc::new(RegexTerm::Epsilon));
-            }
-            // If any_nullable is true, we DROP the explicit Epsilon!
+            flat.push(Rc::new(RegexTerm::Epsilon));
         }
 
         if flat.is_empty() {
@@ -1681,11 +1676,37 @@ impl RegexTerm {
     
     fn referenced_nts(&self) -> HashSet<String> {
         let mut result = HashSet::new();
-        self.collect_nts(&mut result);
+        let mut visited: HashSet<*const RegexTerm> = HashSet::new();
+        self.collect_nts_memoized(&mut result, &mut visited);
         result
     }
     
+    fn collect_nts_memoized(&self, result: &mut HashSet<String>, visited: &mut HashSet<*const RegexTerm>) {
+        match self {
+            RegexTerm::Epsilon | RegexTerm::Concrete(_) => {}
+            RegexTerm::NtRef(n) => { result.insert(n.clone()); }
+            RegexTerm::Seq(terms) | RegexTerm::Choice(terms) => {
+                for t in terms {
+                    let ptr = Rc::as_ptr(t);
+                    if visited.contains(&ptr) {
+                        continue;
+                    }
+                    visited.insert(ptr);
+                    t.collect_nts_memoized(result, visited);
+                }
+            }
+            RegexTerm::Star(inner) => {
+                let ptr = Rc::as_ptr(inner);
+                if !visited.contains(&ptr) {
+                    visited.insert(ptr);
+                    inner.collect_nts_memoized(result, visited);
+                }
+            }
+        }
+    }
+    
     fn collect_nts(&self, result: &mut HashSet<String>) {
+        // Legacy non-memoized version - kept for compatibility
         match self {
             RegexTerm::Epsilon | RegexTerm::Concrete(_) => {}
             RegexTerm::NtRef(n) => { result.insert(n.clone()); }
@@ -1911,7 +1932,7 @@ fn solve_single_equation_rc(equation: &Rc<RegexTerm>, nt: &str) -> Option<RegexT
 fn separate_recursive_alts_rc(
     term: &Rc<RegexTerm>, 
     nt: &str,
-    contains_cache: &mut HashMap<*const RegexTerm, bool>
+    contains_cache: &mut FxHashMap<*const RegexTerm, bool>
 ) -> (Vec<Rc<RegexTerm>>, Vec<Rc<RegexTerm>>) {
     match term.as_ref() {
         RegexTerm::Choice(alts) => {
@@ -1936,7 +1957,7 @@ fn separate_recursive_alts_rc(
 fn extract_coef_rc(
     term: &Rc<RegexTerm>, 
     nt: &str,
-    contains_cache: &mut HashMap<*const RegexTerm, bool>
+    contains_cache: &mut FxHashMap<*const RegexTerm, bool>
 ) -> Option<(RegexTerm, RegexTerm)> {
     match term.as_ref() {
         RegexTerm::NtRef(n) if n == nt => {
@@ -1987,7 +2008,7 @@ fn is_epsilon(term: &RegexTerm) -> bool {
 fn contains_nt_memoized(
     term: &Rc<RegexTerm>,
     nt: &str,
-    visited: &mut HashMap<*const RegexTerm, bool>
+    visited: &mut FxHashMap<*const RegexTerm, bool>
 ) -> bool {
     let ptr = Rc::as_ptr(term);
     if let Some(&result) = visited.get(&ptr) {
@@ -2014,7 +2035,7 @@ fn expand_with_solutions(
     term: &Rc<RegexTerm>,
     solutions: &HashMap<String, Rc<RegexTerm>>
 ) -> Option<Rc<RegexTerm>> {
-    let mut cache: HashMap<*const RegexTerm, Rc<RegexTerm>> = HashMap::new();
+    let mut cache: FxHashMap<*const RegexTerm, Rc<RegexTerm>> = FxHashMap::default();
     expand_with_solutions_cached(term, solutions, &mut cache)
 }
 
@@ -2025,7 +2046,7 @@ fn expand_with_solutions(
 fn expand_with_solutions_cached(
     root: &Rc<RegexTerm>,
     solutions: &HashMap<String, Rc<RegexTerm>>,
-    cache: &mut HashMap<*const RegexTerm, Rc<RegexTerm>>
+    cache: &mut FxHashMap<*const RegexTerm, Rc<RegexTerm>>
 ) -> Option<Rc<RegexTerm>> {
     let mut expanding: HashSet<String> = HashSet::new();
     let skip_nts: HashSet<String> = HashSet::new();
@@ -2037,7 +2058,7 @@ fn expand_with_solutions_cached(
 fn expand_with_solutions_skip_cyclic(
     root: &Rc<RegexTerm>,
     solutions: &HashMap<String, Rc<RegexTerm>>,
-    cache: &mut HashMap<*const RegexTerm, Rc<RegexTerm>>,
+    cache: &mut FxHashMap<*const RegexTerm, Rc<RegexTerm>>,
     skip_nts: &HashSet<String>
 ) -> Rc<RegexTerm> {
     let mut expanding: HashSet<String> = HashSet::new();
@@ -2049,20 +2070,18 @@ fn expand_with_solutions_skip_cyclic(
 fn expand_with_solutions_cached_inner(
     root: &Rc<RegexTerm>,
     solutions: &HashMap<String, Rc<RegexTerm>>,
-    cache: &mut HashMap<*const RegexTerm, Rc<RegexTerm>>,
+    cache: &mut FxHashMap<*const RegexTerm, Rc<RegexTerm>>,
     expanding: &mut HashSet<String>,
     skip_nts: &HashSet<String>
 ) -> Option<Rc<RegexTerm>> {
-    // Use stacker to handle deep recursion by switching to heap allocation when needed
-    stacker::maybe_grow(32 * 1024, 1024 * 1024, || {
-        expand_with_solutions_cached_impl(root, solutions, cache, expanding, skip_nts)
-    })
+    // Skip stacker for now to test performance impact
+    expand_with_solutions_cached_impl(root, solutions, cache, expanding, skip_nts)
 }
 
 fn expand_with_solutions_cached_impl(
     term: &Rc<RegexTerm>,
     solutions: &HashMap<String, Rc<RegexTerm>>,
-    cache: &mut HashMap<*const RegexTerm, Rc<RegexTerm>>,
+    cache: &mut FxHashMap<*const RegexTerm, Rc<RegexTerm>>,
     expanding: &mut HashSet<String>,
     skip_nts: &HashSet<String>
 ) -> Option<Rc<RegexTerm>> {
@@ -2091,6 +2110,8 @@ fn expand_with_solutions_cached_impl(
             // Recursively expand the solution
             let result = expand_with_solutions_cached_inner(solution, solutions, cache, expanding, skip_nts)?;
             expanding.remove(n);
+            // CACHE the expanded solution - this is crucial for avoiding re-expansion!
+            cache.insert(sol_ptr, result.clone());
             return Some(result);
         } else {
             return Some(term.clone());
@@ -2149,8 +2170,8 @@ fn expand_with_solutions_cached_impl(
 /// Returns an Rc to preserve sharing - crucial for avoiding exponential blowup
 /// Uses memoization to handle shared subterms efficiently
 fn substitute_nt_rc(term: &Rc<RegexTerm>, nt: &str, replacement: &Rc<RegexTerm>) -> Rc<RegexTerm> {
-    let mut cache: HashMap<*const RegexTerm, Rc<RegexTerm>> = HashMap::new();
-    let mut contains_cache: HashMap<*const RegexTerm, bool> = HashMap::new();
+    let mut cache: FxHashMap<*const RegexTerm, Rc<RegexTerm>> = FxHashMap::default();
+    let mut contains_cache: FxHashMap<*const RegexTerm, bool> = FxHashMap::default();
     let result = substitute_nt_rc_cached(term, nt, replacement, &mut cache, &mut contains_cache);
     result
 }
@@ -2159,8 +2180,8 @@ fn substitute_nt_rc_cached(
     term: &Rc<RegexTerm>,
     nt: &str,
     replacement: &Rc<RegexTerm>,
-    cache: &mut HashMap<*const RegexTerm, Rc<RegexTerm>>,
-    contains_cache: &mut HashMap<*const RegexTerm, bool>
+    cache: &mut FxHashMap<*const RegexTerm, Rc<RegexTerm>>,
+    contains_cache: &mut FxHashMap<*const RegexTerm, bool>
 ) -> Rc<RegexTerm> {
     let ptr = Rc::as_ptr(term);
     
