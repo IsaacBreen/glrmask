@@ -929,51 +929,57 @@ impl ExprGroups {
     }
 
     pub fn build_nfa(self) -> NFA {
+        // CPS (continuation-passing style) NFA compilation:
+        // Cache key is (SharedId, continuation_state) to enable safe sharing.
+        // This prevents exponential blowup when the same Shared subexpression
+        // appears multiple times with the same continuation.
+        type SharedId = usize;      // Arc pointer identity
+        type ContState = usize;     // continuation NFA state
+        type CpsCacheKey = (SharedId, ContState);
+        type CpsCache = HashMap<CpsCacheKey, usize>;
+
         let mut nfa = NFA {
             states: vec![NFAState::new()],
             start_state: 0,
         };
 
-        let mut cache: HashMap<usize, (usize, usize)> = HashMap::new();
+        let mut cache: CpsCache = HashMap::new();
 
         // Optimization: Factor out common prefix (e.g. ignore pattern)
         let (prefix, groups) = self.optimize_prefixes();
 
-        let split_point = if let Some(prefix_expr) = prefix {
+        // Create split point where all groups branch from
+        let split_point = nfa.add_state();
+
+        // Compile optional prefix into the split point
+        let start_state = if let Some(prefix_expr) = prefix {
             crate::debug!(4, "Factored out common prefix in NFA construction");
-            // Build the prefix NFA from start_state
-            let start_state = nfa.start_state;
-            let prefix_end = Expr::handle_expr_cached(
-                prefix_expr,
-                &mut nfa,
-                start_state,
-                &mut cache,
-            );
-            prefix_end
+            Expr::compile_cps(&prefix_expr, &mut nfa, split_point, &mut cache)
         } else {
-            nfa.start_state
+            split_point
         };
+        
+        // Start from the compiled prefix (or split point if no prefix)
+        nfa.states[0].epsilon_transitions.push(start_state);
 
         for (group_idx, ExprGroup { expr, is_non_greedy }) in groups.groups.into_iter().enumerate() {
-            let group_start_state = nfa.add_state();
-            // Connect from the split point (end of prefix or start state)
-            nfa.add_epsilon_transition(split_point, group_start_state);
-            
-            let end_state =
-                Expr::handle_expr_cached(expr, &mut nfa, group_start_state, &mut cache);
-            
+            // Create accept state for this group
+            let accept = nfa.add_state();
+            nfa.states[accept].finalizers.insert(group_idx);
             if is_non_greedy {
-                nfa.states[end_state].finalizers.insert(group_idx);
-                nfa.states[end_state]
-                    .non_greedy_finalizers
-                    .insert(group_idx);
-            } else {
-                nfa.states[end_state].finalizers.insert(group_idx);
+                nfa.states[accept].non_greedy_finalizers.insert(group_idx);
             }
+            
+            // Compile the group expression into the accept state
+            let group_start = Expr::compile_cps(&expr, &mut nfa, accept, &mut cache);
+            
+            // Connect from split point to group start
+            nfa.add_epsilon_transition(split_point, group_start);
         }
 
         nfa
     }
+
 }
 
 impl ExprGroups {
@@ -1035,256 +1041,136 @@ impl Expr {
         }
     }
 
-    fn handle_expr_cached(
-        expr: Expr,
+    /// CPS (Continuation-Passing Style) NFA compilation.
+    /// 
+    /// Compiles an expression into an NFA fragment that, when entered at the returned
+    /// start state, recognizes the expression and then flows to `cont`.
+    /// 
+    /// This approach enables safe sharing of `Shared` subexpressions by caching based
+    /// on `(SharedId, continuation_state)`. The key insight is that two occurrences of
+    /// the same Shared subexpression can only share NFA states if they have the same
+    /// continuation - otherwise, merging them would create incorrect paths.
+    /// 
+    /// Cache key: `(Arc::as_ptr(shared_arc) as usize, cont_state)`
+    fn compile_cps(
+        expr: &Expr,
         nfa: &mut NFA,
-        current_state: usize,
-        cache: &mut HashMap<usize, (usize, usize)>,
+        cont: usize,
+        cache: &mut HashMap<(usize, usize), usize>,
     ) -> usize {
-        enum FrameState {
-            Start,
-            Seq { current_state: usize },
-            Choice { end_state: usize },
-            Quantifier { q_type: QuantifierType, entry: usize },
-        }
-
-        struct Frame {
-            expr: Expr,
-            start_state: usize,
-            state: FrameState,
-        }
-
-        let mut stack = vec![Frame {
-            expr,
-            start_state: current_state,
-            state: FrameState::Start,
-        }];
-        let mut return_value: Option<usize> = None;
-
-        while let Some(frame) = stack.pop() {
-            let Frame {
-                mut expr,
-                start_state,
-                mut state,
-            } = frame;
-            match state {
-                FrameState::Start => match expr {
-                    Expr::U8Seq(ref bytes) => {
-                        let mut next = start_state;
-                        for &b in bytes {
-                            let new = nfa.add_state();
-                            nfa.add_transition(next, b, new);
-                            next = new;
-                        }
-                        return_value = Some(next);
-                    }
-                    Expr::U8Class(ref set) => {
-                        let new = nfa.add_state();
-                        nfa.add_u8set_transition(start_state, set.clone(), new);
-                        return_value = Some(new);
-                    }
-                    Expr::Epsilon => {
-                        return_value = Some(start_state);
-                    }
-                    Expr::Shared(ref inner) => {
-                        // IMPORTANT: We MUST inline Shared expressions to avoid creating
-                        // incorrect NFA structures when the same Shared expr appears multiple
-                        // times in a sequence. Caching NFA fragments causes them to be reused
-                        // with epsilon transitions, which creates loops and merges unrelated
-                        // paths.
-                        //
-                        // Example bug: "i* { i* } i*" where all three i* are Shared(i*)
-                        // If we cache the first i*, the second and third will epsilon-transition
-                        // back to the first, causing { and } to be reordered and everything to
-                        // collapse into one DFA state.
-                        //
-                        // Solution: Always inline Shared expressions during NFA construction.
-                        // The optimization benefit of sharing is minimal compared to correctness.
-                        stack.push(Frame {
-                            expr: (**inner).clone(),
-                            start_state,
-                            state: FrameState::Start,
-                        });
-                    }
-                    Expr::Seq(mut exprs) => {
-                        if exprs.is_empty() {
-                            return_value = Some(start_state);
-                        } else {
-                            exprs.reverse();
-                            let first = exprs.pop().unwrap();
-                            state = FrameState::Seq {
-                                current_state: start_state,
-                            };
-                            stack.push(Frame {
-                                expr: Expr::Seq(exprs),
-                                start_state,
-                                state,
-                            });
-                            stack.push(Frame {
-                                expr: first,
-                                start_state,
-                                state: FrameState::Start,
-                            });
-                        }
-                    }
-                    Expr::Choice(mut exprs) => {
-                        let end_state = nfa.add_state();
-
-                        if exprs.is_empty() {
-                            return_value = Some(end_state);
-                        } else {
-                            exprs.reverse();
-                            let first = exprs.pop().unwrap();
-                            state = FrameState::Choice { end_state };
-                            stack.push(Frame {
-                                expr: Expr::Choice(exprs),
-                                start_state,
-                                state,
-                            });
-                            stack.push(Frame {
-                                expr: first,
-                                start_state,
-                                state: FrameState::Start,
-                            });
-                        }
-                    }
-                    Expr::Quantifier(inner, q_type) => match q_type {
-                        QuantifierType::ZeroOrMore => {
-                            let entry = nfa.add_state();
-                            nfa.add_epsilon_transition(start_state, entry);
-                            state = FrameState::Quantifier {
-                                q_type: QuantifierType::ZeroOrMore,
-                                entry,
-                            };
-                            stack.push(Frame {
-                                expr: Expr::Epsilon,
-                                start_state,
-                                state,
-                            });
-                            stack.push(Frame {
-                                expr: *inner,
-                                start_state: entry,
-                                state: FrameState::Start,
-                            });
-                        }
-                        QuantifierType::OneOrMore => {
-                            let entry = start_state;
-                            state = FrameState::Quantifier {
-                                q_type: QuantifierType::OneOrMore,
-                                entry,
-                            };
-                            stack.push(Frame {
-                                expr: Expr::Epsilon,
-                                start_state,
-                                state,
-                            });
-                            stack.push(Frame {
-                                expr: *inner,
-                                start_state: entry,
-                                state: FrameState::Start,
-                            });
-                        }
-                        QuantifierType::ZeroOrOne => {
-                            state = FrameState::Quantifier {
-                                q_type: QuantifierType::ZeroOrOne,
-                                entry: start_state,
-                            };
-                            stack.push(Frame {
-                                expr: Expr::Epsilon,
-                                start_state,
-                                state,
-                            });
-                            stack.push(Frame {
-                                expr: *inner,
-                                start_state,
-                                state: FrameState::Start,
-                            });
-                        }
-                    },
-                },
-                FrameState::Seq { current_state } => {
-                    let ret = return_value.take().expect("Seq child must return value");
-                    let next_state = ret;
-                    if let Expr::Seq(mut exprs) = expr {
-                        if let Some(next_expr) = exprs.pop() {
-                            state = FrameState::Seq {
-                                current_state: next_state,
-                            };
-                            stack.push(Frame {
-                                expr: Expr::Seq(exprs),
-                                start_state,
-                                state,
-                            });
-                            stack.push(Frame {
-                                expr: next_expr,
-                                start_state: next_state,
-                                state: FrameState::Start,
-                            });
-                        } else {
-                            return_value = Some(next_state);
-                        }
-                    } else {
-                        panic!("FrameState::Seq but expr is not Seq")
-                    }
+        match expr {
+            Expr::Epsilon => {
+                // Epsilon consumes nothing, so the entry point is just the continuation
+                cont
+            }
+            
+            Expr::U8Seq(bytes) => {
+                if bytes.is_empty() {
+                    return cont;
                 }
-                FrameState::Choice { end_state } => {
-                    let ret = return_value.take().expect("Choice child must return value");
-                    nfa.add_epsilon_transition(ret, end_state);
-
-                    if let Expr::Choice(mut exprs) = expr {
-                        if let Some(next_expr) = exprs.pop() {
-                            state = FrameState::Choice { end_state };
-                            stack.push(Frame {
-                                expr: Expr::Choice(exprs),
-                                start_state,
-                                state,
-                            });
-                            stack.push(Frame {
-                                expr: next_expr,
-                                start_state,
-                                state: FrameState::Start,
-                            });
-                        } else {
-                            return_value = Some(end_state);
-                        }
-                    } else {
-                        panic!("FrameState::Choice but expr is not Choice")
-                    }
+                // Build a chain backwards so it ends at cont:
+                // for "abc": a -> b -> c -> cont
+                let mut s = cont;
+                for &b in bytes.iter().rev() {
+                    let p = nfa.add_state();
+                    nfa.add_transition(p, b, s);
+                    s = p;
                 }
-                FrameState::Quantifier { q_type, entry } => {
-                    let body_end = return_value
-                        .take()
-                        .expect("Quantifier child must return value");
-                    match q_type {
-                        QuantifierType::ZeroOrMore => {
-                            let exit = nfa.add_state();
-                            nfa.add_epsilon_transition(entry, exit);
-                            nfa.add_epsilon_transition(body_end, entry);
-                            nfa.add_epsilon_transition(body_end, exit);
-                            return_value = Some(exit);
-                        }
-                        QuantifierType::OneOrMore => {
-                            let exit = nfa.add_state();
-                            nfa.add_epsilon_transition(body_end, entry);
-                            nfa.add_epsilon_transition(body_end, exit);
-                            return_value = Some(exit);
-                        }
-                        QuantifierType::ZeroOrOne => {
-                            let exit = nfa.add_state();
-                            nfa.add_epsilon_transition(start_state, exit);
-                            nfa.add_epsilon_transition(body_end, exit);
-                            return_value = Some(exit);
-                        }
+                s
+            }
+            
+            Expr::U8Class(set) => {
+                // One state that transitions on the set to cont
+                let s = nfa.add_state();
+                nfa.add_u8set_transition(s, set.clone(), cont);
+                s
+            }
+            
+            Expr::Seq(children) => {
+                if children.is_empty() {
+                    return cont;
+                }
+                // Compile from tail to head: each earlier element's continuation
+                // is the start of the suffix
+                let mut s = cont;
+                for child in children.iter().rev() {
+                    s = Self::compile_cps(child, nfa, s, cache);
+                }
+                s
+            }
+            
+            Expr::Choice(alts) => {
+                if alts.is_empty() {
+                    // Empty choice matches nothing - create a dead state
+                    return nfa.add_state();
+                }
+                // Create one split state with epsilon transitions to each alternative's start
+                let split = nfa.add_state();
+                for alt in alts.iter() {
+                    let alt_start = Self::compile_cps(alt, nfa, cont, cache);
+                    nfa.add_epsilon_transition(split, alt_start);
+                }
+                split
+            }
+            
+            Expr::Quantifier(inner, q_type) => {
+                match q_type {
+                    QuantifierType::ZeroOrMore => {
+                        // e* uses the standard CPS/Thompson split state:
+                        // split -> cont (skip)
+                        // split -> body_start (take one iteration)
+                        // body ends at split (loop back)
+                        let split = nfa.add_state();
+                        nfa.add_epsilon_transition(split, cont);  // skip path
+                        
+                        let body_start = Self::compile_cps(inner.as_ref(), nfa, split, cache);
+                        nfa.add_epsilon_transition(split, body_start);  // take path
+                        
+                        split
+                    }
+                    QuantifierType::OneOrMore => {
+                        // e+ = e e* without building an explicit Seq node
+                        // Build the * loop, then return the start of one required e
+                        let loop_split = nfa.add_state();
+                        nfa.add_epsilon_transition(loop_split, cont);  // exit loop
+                        
+                        // Body of the star: ends at loop_split
+                        let body_start = Self::compile_cps(inner.as_ref(), nfa, loop_split, cache);
+                        nfa.add_epsilon_transition(loop_split, body_start);  // loop back
+                        
+                        // For +: must do body once before reaching loop_split
+                        // Return body_start - ensures at least one iteration
+                        body_start
+                    }
+                    QuantifierType::ZeroOrOne => {
+                        // e? is choice between e and epsilon
+                        let split = nfa.add_state();
+                        nfa.add_epsilon_transition(split, cont);  // skip (epsilon path)
+                        let body_start = Self::compile_cps(inner.as_ref(), nfa, cont, cache);
+                        nfa.add_epsilon_transition(split, body_start);  // take path
+                        split
                     }
                 }
             }
+            
+            Expr::Shared(inner_arc) => {
+                // Key rule: cache by (Arc_ptr, cont) for safe sharing
+                let id = Arc::as_ptr(inner_arc) as usize;
+                let key = (id, cont);
+                
+                if let Some(&start) = cache.get(&key) {
+                    // Cache hit: reuse the previously compiled fragment
+                    return start;
+                }
+                
+                // Cache miss: compile underlying expr with same continuation
+                let start = Self::compile_cps(inner_arc.as_ref(), nfa, cont, cache);
+                
+                // Memoize for future reuse
+                cache.insert(key, start);
+                start
+            }
         }
-        return_value.expect("Stack empty but no return value")
-    }
-
-    fn handle_expr(expr: Expr, nfa: &mut NFA, current_state: usize) -> usize {
-        let mut cache: HashMap<usize, (usize, usize)> = HashMap::new();
-        Self::handle_expr_cached(expr, nfa, current_state, &mut cache)
     }
 
     // --- Optimizers ---
