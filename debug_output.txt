@@ -1,0 +1,1 @@
+Factored grammar written to temp_factored3.ebnf

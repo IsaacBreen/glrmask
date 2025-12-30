@@ -1,0 +1,31 @@
+DEBUG: Extracted head=''"apq"'' tail='_def1' from ''"apq"' ':' _def1'
+DEBUG: Extracted head=''"authentication"'' tail='_def2' from ''"authentication"' ':' _def2'
+DEBUG: Extracted head=''"batching"'' tail='_def4' from ''"batching"' ':' _def4'
+DEBUG: Extracted head=''"connectors"'' tail='_def5' from ''"connectors"' ':' _def5'
+DEBUG: Extracted head=''"coprocessor"'' tail='_def6' from ''"coprocessor"' ':' _def6'
+DEBUG: Extracted head=''"enhanced_client_awareness"'' tail='_json_object' from ''"enhanced_client_awareness"' ':' _json_object'
+DEBUG: Extracted head=''"fleet_detector"'' tail='_json_object' from ''"fleet_detector"' ':' _json_object'
+DEBUG: Extracted head=''"headers"'' tail='_def12' from ''"headers"' ':' _def12'
+DEBUG: Extracted head=''"include_subgraph_errors"'' tail='_def15' from ''"include_subgraph_errors"' ':' _def15'
+DEBUG: Extracted head=''"license_enforcement"'' tail='_json_object' from ''"license_enforcement"' ':' _json_object'
+DEBUG: Extracted head=''"override_subgraph_url"'' tail='_json_object' from ''"override_subgraph_url"' ':' ( _json_object )'
+DEBUG: Extracted head=''"preview_entity_cache"'' tail='_def19' from ''"preview_entity_cache"' ':' _def19'
+DEBUG: Extracted head=''"progressive_override"'' tail='_json_object' from ''"progressive_override"' ':' _json_object'
+DEBUG: Extracted head=''"subscription"'' tail='_def24' from ''"subscription"' ':' _def24'
+DEBUG: Extracted head=''"telemetry"'' tail='_def26' from ''"telemetry"' ':' _def26'
+DEBUG: Extracted head=''"tls"'' tail='_def27' from ''"tls"' ':' _def27'
+DEBUG: Extracted head=''"traffic_shaping"'' tail='_def28' from ''"traffic_shaping"' ':' _def28'
+DEBUG: Grouping _def1 with 1 heads: ['\'"apq"\'']
+DEBUG: Grouping _def2 with 1 heads: ['\'"authentication"\'']
+DEBUG: Grouping _def4 with 1 heads: ['\'"batching"\'']
+DEBUG: Grouping _def5 with 1 heads: ['\'"connectors"\'']
+DEBUG: Grouping _def6 with 1 heads: ['\'"coprocessor"\'']
+DEBUG: Grouping _json_object with 5 heads: ['\'"enhanced_client_awareness"\'', '\'"fleet_detector"\'', '\'"license_enforcement"\'', '\'"override_subgraph_url"\'', '\'"progressive_override"\'']
+DEBUG: Grouping _def12 with 1 heads: ['\'"headers"\'']
+DEBUG: Grouping _def15 with 1 heads: ['\'"include_subgraph_errors"\'']
+DEBUG: Grouping _def19 with 1 heads: ['\'"preview_entity_cache"\'']
+DEBUG: Grouping _def24 with 1 heads: ['\'"subscription"\'']
+DEBUG: Grouping _def26 with 1 heads: ['\'"telemetry"\'']
+DEBUG: Grouping _def27 with 1 heads: ['\'"tls"\'']
+DEBUG: Grouping _def28 with 1 heads: ['\'"traffic_shaping"\'']
+Factored grammar written to temp_factored3.ebnf
