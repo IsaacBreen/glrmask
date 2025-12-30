@@ -1656,7 +1656,7 @@ mod slow_dfa_build_tests {
         // This test is expected to take a long time.
         // The purpose is to reproduce the slow build for profiling.
         // We set a generous timeout to detect catastrophic regressions.
-        let max_acceptable_time = Duration::from_secs(120); // 2 minutes
+        let max_acceptable_time = Duration::from_secs(5);
         assert!(
             elapsed < max_acceptable_time,
             "DFA build took {:?}, which exceeds the acceptable threshold of {:?}. \
