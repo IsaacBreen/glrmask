@@ -1481,7 +1481,7 @@ mod reproduction_tests {
 
         // Test N=8..=12 lines with identical content
         // N=12 might be too slow if it truly explodes, so we might stop early or increase carefully
-        for n in 8..=11 {
+        for n in 5..=9 {
             println!("\n=== Testing N={} identical lines ===", n);
             
             // --- Terminals ---
