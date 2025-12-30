@@ -1736,8 +1736,10 @@ impl GrammarDefinition {
     /// rule ::= expr;
     /// ```
     pub fn from_ebnf(ebnf_source: &str) -> Result<Self, String> {
-        // Apply choice factoring if enabled
-        let ebnf_source = if std::env::var("ENABLE_EBNF_CHOICE_FACTORING").is_ok() {
+        // Apply choice factoring unless explicitly disabled
+        // This significantly improves compilation time (7-8s vs 25-30s for complex grammars)
+        // by creating helper terminals that reduce grammar complexity before parsing.
+        let ebnf_source = if std::env::var("DISABLE_EBNF_CHOICE_FACTORING").is_err() {
             crate::interface::ebnf_factoring::factor_ebnf_choices(ebnf_source)
         } else {
             ebnf_source.to_string()

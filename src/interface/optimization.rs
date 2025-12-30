@@ -949,7 +949,7 @@ impl<'a> GrammarOptimizer<'a> {
         }
         
         // Append helper productions at the end
-        new_productions.extend(new_helper_productions);
+        new_productions.extend(new_helper_productions.clone());
         
         if helper_nt_counter > 0 {
             let old_count = self.grammar.productions.len();
@@ -963,6 +963,76 @@ impl<'a> GrammarOptimizer<'a> {
             
             debug!(4, "Factor choice: {} productions -> {}, {} helper NTs created (in {:?})",
                 old_count, self.grammar.productions.len(), helper_nt_counter, start.elapsed());
+            
+            // CRITICAL: Convert the helper NTs to terminals immediately!
+            // This matches Python's approach where helpers become terminals via uppercase naming.
+            // Group helper productions by LHS
+            let mut helper_prods_by_lhs: HashMap<String, Vec<&Production>> = HashMap::new();
+            for helper_prod in &new_helper_productions {
+                helper_prods_by_lhs.entry(helper_prod.lhs.0.clone())
+                    .or_insert_with(Vec::new)
+                    .push(helper_prod);
+            }
+            
+            // Convert each helper NT's productions to a terminal regex
+            let current_max_group_id = self.grammar.group_id_to_expr.keys().max().copied().unwrap_or(0);
+            let mut next_group_id = current_max_group_id + 1;
+            let mut terminals_created = 0;
+            
+            for (helper_nt_name, helper_prods) in helper_prods_by_lhs {
+                // Convert each alternative to a RegexTerm
+                let mut alt_terms: Vec<Rc<RegexTerm>> = Vec::new();
+                for prod in helper_prods {
+                    if let Some(term) = self.symbols_to_regex_term(&prod.rhs, _solutions, _expansion_cache) {
+                        alt_terms.push(term);
+                    }
+                }
+                
+                if alt_terms.is_empty() {
+                    continue;
+                }
+                
+                // Create choice or single term
+                let final_term = if alt_terms.len() == 1 {
+                    alt_terms.into_iter().next().unwrap()
+                } else {
+                    Rc::new(RegexTerm::make_choice(alt_terms))
+                };
+                
+                // Convert to Expr using the module-level function
+                let Some(expr) = regex_term_to_expr_rc(&final_term) else {
+                    debug!(5, "Failed to convert helper NT '{}' to Expr", helper_nt_name);
+                    continue;
+                };
+                
+                // Add as terminal
+                let terminal_name = helper_nt_name.clone();
+                self.grammar.regex_name_to_group_id.insert(terminal_name.clone(), next_group_id);
+                self.grammar.group_id_to_expr.insert(next_group_id, expr);
+                next_group_id += 1;
+                terminals_created += 1;
+                
+                debug!(5, "Converted helper NT '{}' to terminal", helper_nt_name);
+            }
+            
+            // Remove helper productions from grammar since they're now terminals
+            self.grammar.productions.retain(|p| {
+                !p.lhs.0.starts_with("__FACTOR_")
+            });
+            
+            // Update references to helper NTs to use Terminal instead of NonTerminal
+            for prod in &mut self.grammar.productions {
+                for sym in &mut prod.rhs {
+                    if let Symbol::NonTerminal(nt) = sym {
+                        if nt.0.starts_with("__FACTOR_") {
+                            *sym = Symbol::Terminal(Terminal::RegexName(nt.0.clone()));
+                        }
+                    }
+                }
+            }
+            
+            debug!(4, "Converted {} helper NTs to terminals, {} productions remain",
+                terminals_created, self.grammar.productions.len());
         } else {
             debug!(5, "Factor choice: no helpers created");
         }
