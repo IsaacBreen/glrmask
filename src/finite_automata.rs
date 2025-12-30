@@ -2792,167 +2792,176 @@ impl DFA {
         }
         
         // Use Hopcroft's algorithm for O(n log n) minimization
-        // 
-        // Key data structures:
-        // - partition[s] = index of partition containing state s
-        // - blocks[p] = set of states in partition p  
-        // - inverse[target][input] = list of source states
         
-        use rustc_hash::{FxHashMap, FxHashSet};
+        use rustc_hash::FxHashMap;
         
-        // Count transitions to size arrays
-        let total_transitions: usize = self.states.iter().map(|s| s.transitions.len()).sum();
-        
-        // Build inverse transition table more efficiently
-        // inverse_by_input[input][target] = Vec<source>
-        // Use a flattened structure to avoid 256 * n allocations
-        let mut inverse_map: FxHashMap<(u8, usize), Vec<usize>> = FxHashMap::default();
-        inverse_map.reserve(total_transitions);
-        
+        // Build inverse transition table - grouped by (target, input) to make iteration efficient
+        // inverse[target] = Vec<(input, source)>
+        let mut inverse: Vec<Vec<(u8, u32)>> = vec![Vec::new(); n];
         for (src, state) in self.states.iter().enumerate() {
             for (input, &target) in &state.transitions {
-                inverse_map.entry((input, target)).or_default().push(src);
+                inverse[target].push((input, src as u32));
             }
+        }
+        // Sort by input for efficient grouping
+        for inv in &mut inverse {
+            inv.sort_unstable_by_key(|&(input, _)| input);
         }
         
         // Initial partition: group states by their finalizer set
-        let mut partition = vec![0usize; n];
-        let mut blocks: Vec<FxHashSet<usize>> = Vec::new();
+        let mut partition = vec![0u32; n];  // partition[state] = block_id
+        let mut blocks: Vec<Vec<u32>> = Vec::new();  // blocks[block_id] = list of states
         
         {
-            // Use FxHashMap for faster hashing of finalizer keys
-            let mut finalizer_to_block: FxHashMap<Vec<GroupID>, usize> = FxHashMap::default();
+            let mut finalizer_to_block: FxHashMap<Vec<GroupID>, u32> = FxHashMap::default();
             for (state_idx, state) in self.states.iter().enumerate() {
                 let key: Vec<GroupID> = state.finalizers.iter().collect();
                 let block_idx = *finalizer_to_block.entry(key).or_insert_with(|| {
-                    let idx = blocks.len();
-                    blocks.push(FxHashSet::default());
+                    let idx = blocks.len() as u32;
+                    blocks.push(Vec::new());
                     idx
                 });
                 partition[state_idx] = block_idx;
-                blocks[block_idx].insert(state_idx);
+                blocks[block_idx as usize].push(state_idx as u32);
             }
         }
         
-        // Worklist: set of (block_idx, input) pairs to process
-        // Initially add all (block, input) pairs
-        let mut all_inputs: Vec<u8> = Vec::new();
-        {
-            let mut seen = [false; 256];
-            for state in &self.states {
-                for (input, _) in &state.transitions {
-                    if !seen[input as usize] {
-                        seen[input as usize] = true;
-                        all_inputs.push(input);
-                    }
-                }
+        // Worklist: blocks to process
+        let mut worklist: VecDeque<u32> = (0..blocks.len() as u32).collect();
+        let mut in_worklist = vec![true; blocks.len()];
+        
+        // Reusable arrays for the inner loop
+        let mut source_set = vec![false; n];
+        let mut sources_to_clear: Vec<u32> = Vec::with_capacity(n.min(10000));
+        let mut touched_blocks: Vec<u32> = Vec::with_capacity(1024);
+        let mut block_touched = vec![false; blocks.len()];
+        
+        while let Some(splitter_block) = worklist.pop_front() {
+            let splitter_idx = splitter_block as usize;
+            if splitter_idx >= in_worklist.len() {
+                continue;
             }
-        }
-        
-        // Worklist of (block_idx, input) pairs
-        let mut worklist: VecDeque<(usize, u8)> = VecDeque::new();
-        let num_initial_blocks = blocks.len();
-        for block_idx in 0..num_initial_blocks {
-            for &input in &all_inputs {
-                worklist.push_back((block_idx, input));
-            }
-        }
-        
-        // Track which (block, input) pairs are in worklist
-        let mut in_worklist: FxHashSet<(usize, u8)> = worklist.iter().copied().collect();
-        
-        // Reusable buffers
-        let mut sources_by_block: FxHashMap<usize, Vec<usize>> = FxHashMap::default();
-        
-        while let Some((splitter_block, input)) = worklist.pop_front() {
-            in_worklist.remove(&(splitter_block, input));
+            in_worklist[splitter_idx] = false;
             
-            // Skip empty blocks
-            if blocks[splitter_block].is_empty() {
+            if splitter_idx >= blocks.len() || blocks[splitter_idx].is_empty() {
+                continue;
+            }
+            let splitter_states: Vec<u32> = blocks[splitter_idx].clone();
+            
+            // Gather all (input, source) pairs into a flat list and sort by input
+            let mut all_pairs: Vec<(u8, u32)> = Vec::new();
+            for &target in &splitter_states {
+                all_pairs.extend_from_slice(&inverse[target as usize]);
+            }
+            
+            if all_pairs.is_empty() {
                 continue;
             }
             
-            // Find all states that transition into splitter_block on this input
-            // Group them by their current block
-            sources_by_block.clear();
+            all_pairs.sort_unstable_by_key(|&(input, _)| input);
             
-            for &target in &blocks[splitter_block] {
-                if let Some(sources) = inverse_map.get(&(input, target)) {
-                    for &src in sources {
-                        sources_by_block
-                            .entry(partition[src])
-                            .or_default()
-                            .push(src);
+            // Process each input group
+            let mut i = 0;
+            while i < all_pairs.len() {
+                let current_input = all_pairs[i].0;
+                let group_start = i;
+                
+                // Find end of this input group and collect unique sources
+                sources_to_clear.clear();
+                while i < all_pairs.len() && all_pairs[i].0 == current_input {
+                    let src = all_pairs[i].1;
+                    if !source_set[src as usize] {
+                        source_set[src as usize] = true;
+                        sources_to_clear.push(src);
+                        
+                        let block_id = partition[src as usize] as usize;
+                        if block_id < block_touched.len() && !block_touched[block_id] {
+                            block_touched[block_id] = true;
+                            touched_blocks.push(block_id as u32);
+                        }
                     }
-                }
-            }
-            
-            // For each block that has some (but not all) states in sources_by_block,
-            // we need to split
-            for (block_idx, sources) in sources_by_block.drain() {
-                let block_size = blocks[block_idx].len();
-                let sources_len = sources.len();
-                
-                // Deduplicate sources
-                let mut unique_sources: FxHashSet<usize> = sources.into_iter().collect();
-                let unique_count = unique_sources.len();
-                
-                // If all or none of the block's states are in sources, no split needed
-                if unique_count == block_size || unique_count == 0 {
-                    continue;
+                    i += 1;
                 }
                 
-                // Split: move the smaller group to a new block
-                let new_block_idx = blocks.len();
-                let move_sources = unique_count <= block_size - unique_count;
-                
-                let mut new_block = FxHashSet::default();
-                
-                if move_sources {
-                    // Move sources to new block
-                    for s in unique_sources {
-                        blocks[block_idx].remove(&s);
-                        new_block.insert(s);
-                        partition[s] = new_block_idx;
+                // Process each touched block for this input
+                for &block_id in &touched_blocks {
+                    let block_idx = block_id as usize;
+                    if block_idx >= blocks.len() {
+                        continue;
                     }
-                } else {
-                    // Move non-sources to new block  
-                    let non_sources: Vec<usize> = blocks[block_idx]
-                        .iter()
-                        .copied()
-                        .filter(|s| !unique_sources.contains(s))
-                        .collect();
-                    for s in non_sources {
-                        blocks[block_idx].remove(&s);
-                        new_block.insert(s);
-                        partition[s] = new_block_idx;
+                    let block_len = blocks[block_idx].len();
+                    if block_len <= 1 {
+                        continue;
                     }
-                }
-                
-                blocks.push(new_block);
-                
-                // Add (block, input) pairs to worklist for the new block
-                // and possibly the old block (Hopcroft's optimization)
-                for &a in &all_inputs {
-                    let old_in_wl = in_worklist.contains(&(block_idx, a));
                     
-                    if old_in_wl {
-                        // Original block already in worklist, add new block
-                        if !in_worklist.contains(&(new_block_idx, a)) {
-                            in_worklist.insert((new_block_idx, a));
-                            worklist.push_back((new_block_idx, a));
+                    // Count sources in this block
+                    let mut source_count = 0usize;
+                    for &state in &blocks[block_idx] {
+                        if source_set[state as usize] {
+                            source_count += 1;
                         }
-                    } else {
-                        // Add smaller block
-                        if blocks[block_idx].len() <= blocks[new_block_idx].len() {
-                            in_worklist.insert((block_idx, a));
-                            worklist.push_back((block_idx, a));
+                    }
+                    
+                    // No split if all or none
+                    if source_count == 0 || source_count == block_len {
+                        continue;
+                    }
+                    
+                    // Split the block
+                    let new_block_idx = blocks.len();
+                    let move_sources = source_count <= block_len - source_count;
+                    
+                    let mut new_block = Vec::with_capacity(if move_sources { source_count } else { block_len - source_count });
+                    let mut remaining = Vec::with_capacity(block_len - new_block.capacity());
+                    
+                    for &state in &blocks[block_idx] {
+                        let is_source = source_set[state as usize];
+                        if move_sources == is_source {
+                            new_block.push(state);
                         } else {
-                            in_worklist.insert((new_block_idx, a));
-                            worklist.push_back((new_block_idx, a));
+                            remaining.push(state);
+                        }
+                    }
+                    
+                    // Update partitions
+                    for &state in &new_block {
+                        partition[state as usize] = new_block_idx as u32;
+                    }
+                    
+                    blocks[block_idx] = remaining;
+                    blocks.push(new_block);
+                    
+                    // Extend tracking arrays
+                    in_worklist.push(false);
+                    block_touched.push(false);
+                    
+                    // Add smaller block to worklist (Hopcroft's optimization)
+                    if in_worklist[block_idx] {
+                        in_worklist[new_block_idx] = true;
+                        worklist.push_back(new_block_idx as u32);
+                    } else {
+                        if blocks[block_idx].len() <= blocks[new_block_idx].len() {
+                            in_worklist[block_idx] = true;
+                            worklist.push_back(block_idx as u32);
+                        } else {
+                            in_worklist[new_block_idx] = true;
+                            worklist.push_back(new_block_idx as u32);
                         }
                     }
                 }
+                
+                // Clear source_set only for elements we set
+                for &src in &sources_to_clear {
+                    source_set[src as usize] = false;
+                }
+                
+                // Reset touched blocks
+                for &block_id in &touched_blocks {
+                    if (block_id as usize) < block_touched.len() {
+                        block_touched[block_id as usize] = false;
+                    }
+                }
+                touched_blocks.clear();
             }
         }
         
@@ -2960,7 +2969,7 @@ impl DFA {
         let partition_list: Vec<BTreeSet<usize>> = blocks
             .into_iter()
             .filter(|b| !b.is_empty())
-            .map(|b| b.into_iter().collect())
+            .map(|b| b.into_iter().map(|s| s as usize).collect())
             .collect();
         
         let (state_mapping, new_states) = self.rebuild_from_partitions(partition_list);

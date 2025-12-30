@@ -203,6 +203,22 @@ impl JsonSchemaConverter {
             return Ok(GrammarExpr::Choice(alternatives));
         }
         
+        // Handle allOf with a single inlineable item
+        if let Some(all_of) = obj.get("allOf").and_then(|v| v.as_array()) {
+            // Check if this allOf can be simplified to a single inline ref
+            // This handles patterns like: { "allOf": [{ "$ref": "#/definitions/Foo" }] }
+            if all_of.len() == 1 {
+                // Check if the merged result is inlineable
+                if let Ok(merged) = self.merge_all_of(all_of, obj) {
+                    // Try to inline the merged result recursively
+                    if let Ok(expr) = self.convert_schema_inline(&merged) {
+                        return Ok(expr);
+                    }
+                }
+            }
+            return Err("complex".to_string());
+        }
+        
         // Handle simple types (no additional constraints that matter)
         if let Some(type_val) = obj.get("type") {
             if let Some(type_str) = type_val.as_str() {
@@ -212,10 +228,47 @@ impl JsonSchemaConverter {
                     "number" => Ok(GrammarExpr::Ref("JSON_NUMBER".to_string())),
                     "boolean" => Ok(GrammarExpr::Ref("JSON_BOOL".to_string())),
                     "null" => Ok(GrammarExpr::Ref("JSON_NULL".to_string())),
-                    // Complex types need their own rules
-                    "object" | "array" => Err("complex".to_string()),
+                    // Object without properties -> generic object
+                    "object" => {
+                        let has_properties = obj.get("properties").and_then(|v| v.as_object()).map(|p| !p.is_empty()).unwrap_or(false);
+                        if !has_properties && obj.get("additionalProperties") != Some(&Value::Bool(false)) {
+                            Ok(self.json_object_ref())
+                        } else {
+                            Err("complex".to_string())
+                        }
+                    }
+                    // Array without items -> generic array
+                    "array" => {
+                        if obj.get("items").is_none() && obj.get("prefixItems").is_none() {
+                            Ok(self.json_array_ref())
+                        } else {
+                            Err("complex".to_string())
+                        }
+                    }
                     _ => Ok(self.json_value_ref()),
                 };
+            } else if let Some(types) = type_val.as_array() {
+                // Multi-type: inline if all are primitives
+                let mut alternatives = Vec::new();
+                let mut all_primitive = true;
+                for t in types {
+                    if let Some(type_str) = t.as_str() {
+                        match type_str {
+                            "string" => alternatives.push(GrammarExpr::Ref("JSON_STRING".to_string())),
+                            "integer" => alternatives.push(GrammarExpr::Ref("JSON_INTEGER".to_string())),
+                            "number" => alternatives.push(GrammarExpr::Ref("JSON_NUMBER".to_string())),
+                            "boolean" => alternatives.push(GrammarExpr::Ref("JSON_BOOL".to_string())),
+                            "null" => alternatives.push(GrammarExpr::Ref("JSON_NULL".to_string())),
+                            _ => { all_primitive = false; break; }
+                        }
+                    } else {
+                        all_primitive = false;
+                        break;
+                    }
+                }
+                if all_primitive && !alternatives.is_empty() {
+                    return Ok(GrammarExpr::Choice(alternatives));
+                }
             }
         }
         
@@ -269,16 +322,23 @@ impl JsonSchemaConverter {
             
             let mut alternatives = Vec::new();
             for sub in any_of {
-                let sub_name = self.new_rule_name("alt");
-                
                 if has_parent_props {
-                    // Merge parent properties into this alternative
+                    // Merge parent properties into this alternative - needs named rule
+                    let sub_name = self.new_rule_name("alt");
                     let merged = self.merge_anyof_with_parent(sub, obj)?;
                     self.convert_schema(&merged, sub_name.clone())?;
+                    alternatives.push(GrammarExpr::Ref(sub_name));
                 } else {
-                    self.convert_schema(sub, sub_name.clone())?;
+                    // Try to inline simple alternatives
+                    match self.convert_schema_inline(sub) {
+                        Ok(expr) => alternatives.push(expr),
+                        Err(_) => {
+                            let sub_name = self.new_rule_name("alt");
+                            self.convert_schema(sub, sub_name.clone())?;
+                            alternatives.push(GrammarExpr::Ref(sub_name));
+                        }
+                    }
                 }
-                alternatives.push(GrammarExpr::Ref(sub_name));
             }
             self.add_rule(rule_name.clone(), GrammarExpr::Choice(alternatives));
             return Ok(rule_name);
@@ -307,13 +367,25 @@ impl JsonSchemaConverter {
             if let Some(type_str) = type_val.as_str() {
                 return self.convert_typed_schema(type_str, obj, rule_name);
             } else if let Some(types) = type_val.as_array() {
-                // Multiple types
+                // Multiple types - inline simple primitives
                 let mut alternatives = Vec::new();
                 for t in types {
                     if let Some(type_str) = t.as_str() {
-                        let alt_name = self.new_rule_name("type");
-                        self.convert_typed_schema(type_str, obj, alt_name.clone())?;
-                        alternatives.push(GrammarExpr::Ref(alt_name));
+                        // Inline primitive types directly
+                        match type_str {
+                            "string" => alternatives.push(GrammarExpr::Ref("JSON_STRING".to_string())),
+                            "integer" => alternatives.push(GrammarExpr::Ref("JSON_INTEGER".to_string())),
+                            "number" => alternatives.push(GrammarExpr::Ref("JSON_NUMBER".to_string())),
+                            "boolean" => alternatives.push(GrammarExpr::Ref("JSON_BOOL".to_string())),
+                            "null" => alternatives.push(GrammarExpr::Ref("JSON_NULL".to_string())),
+                            "object" | "array" => {
+                                // Complex types need their own rules
+                                let alt_name = self.new_rule_name("type");
+                                self.convert_typed_schema(type_str, obj, alt_name.clone())?;
+                                alternatives.push(GrammarExpr::Ref(alt_name));
+                            }
+                            _ => alternatives.push(self.json_value_ref()),
+                        }
                     }
                 }
                 self.add_rule(rule_name.clone(), GrammarExpr::Choice(alternatives));

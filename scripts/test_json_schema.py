@@ -101,11 +101,22 @@ except ImportError:
     print(f"   Vocab download/parse: {vocab_time*1000:.1f}ms")
 
 # Step 1: Convert JSON schema to EBNF
-print("\n1. Converting JSON schema to EBNF...")
+print("\n1. Converting JSON schema to EBNF...", file=sys.stderr)
 start = time.time()
 ebnf = _sep1.json_schema_to_ebnf_py(json.dumps(schema))
 ebnf_time = time.time() - start
-print(f"   EBNF conversion: {ebnf_time*1000:.1f}ms ({len(ebnf)} chars)")
+print(f"   EBNF conversion: {ebnf_time*1000:.1f}ms ({len(ebnf)} chars)", file=sys.stderr)
+
+# If PRINT_EBNF is set, just output the EBNF and exit
+if os.environ.get("PRINT_EBNF"):
+    out_file = os.environ.get("OUT_FILE")
+    if out_file:
+        with open(out_file, 'w') as f:
+            f.write(ebnf)
+        print(f"EBNF written to: {out_file}", file=sys.stderr)
+    else:
+        print(ebnf)
+    sys.exit(0)
 
 # Step 2: Parse EBNF to GrammarDefinition
 print("\n2. Parsing EBNF to GrammarDefinition...")

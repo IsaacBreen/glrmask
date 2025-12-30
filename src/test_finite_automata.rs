@@ -1121,12 +1121,13 @@ mod reproduction_tests {
         assert!(dfa_start.finalizers.is_empty(),
             "Start state should NOT be a finalizer - empty string is not valid!");
         
-        // Start state: 'i' should loop to 0, '{' should go to state 1 (not 0!)
+        // Start state: 'i' should loop to start, '{' should go to a different state
         let i_target = dfa_start.transitions.get(b'i');
         let brace_target = dfa_start.transitions.get(b'{');
         
-        assert_eq!(i_target, Some(&0), "'i' from start should go to state 0");
-        assert_eq!(brace_target, Some(&1), "'{{' from start should go to state 1, not 0!");
+        assert_eq!(i_target, Some(&start_state), "'i' from start should loop back to start");
+        assert!(brace_target.is_some() && *brace_target.unwrap() != start_state, 
+            "'{{' from start should go to a different state, not back to start!");
     }
 
     #[test]
