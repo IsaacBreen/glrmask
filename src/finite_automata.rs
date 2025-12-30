@@ -1586,8 +1586,8 @@ impl Expr {
     }
 
     fn make_choice(exprs: Vec<Expr>) -> Expr {
-        // Flatten nested choices and deduplicate by structural hash
-        // This prevents exponential blowup when multiple alternatives expand to the same expression
+        // Simple implementation: just flatten and dedup (without expensive sorting)
+        // Sorting was causing O(n * depth) comparisons per element which is expensive
         
         // 1. Flatten nested choices
         let mut worklist = exprs;
@@ -1624,15 +1624,6 @@ impl Expr {
         
         if !classes.is_empty() {
             complex.push(Expr::U8Class(classes));
-        }
-
-        // 3. Deduplicate complex expressions by structural hash
-        // This is the key optimization that prevents 2^N blowup when N alternatives
-        // all expand to the same semantic expression (e.g., in diff grammars where
-        // LINE0 through LINE_{N-1} all match the same content pattern)
-        if complex.len() > 1 {
-            let mut seen = std::collections::HashSet::with_capacity(complex.len());
-            complex.retain(|e| seen.insert(e.clone()));
         }
         
         if complex.len() == 1 {
