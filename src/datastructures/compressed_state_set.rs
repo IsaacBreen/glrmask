@@ -195,6 +195,62 @@ impl CompressedStateSet {
     pub fn len(&self) -> usize {
         self.words.iter().map(|(_, w)| w.count_ones() as usize).sum()
     }
+
+    /// Create a normalized version of this state set by mapping each state to its representative.
+    /// This is used for NFA bisimulation: states that are bisimilar (have identical future behavior)
+    /// map to the same representative, so equivalent NFA subsets become identical after normalization.
+    /// 
+    /// The state_to_rep slice maps state_id -> representative_state_id.
+    /// Only states present in this set are mapped.
+    #[inline]
+    pub fn normalized(&self, state_to_rep: &[usize]) -> Self {
+        // Collect all mapped states
+        let mut mapped_states: Vec<usize> = Vec::with_capacity(self.len());
+        for state in self.iter() {
+            if state < state_to_rep.len() {
+                mapped_states.push(state_to_rep[state]);
+            } else {
+                mapped_states.push(state);
+            }
+        }
+        
+        // Sort and deduplicate (multiple states may map to same representative)
+        mapped_states.sort_unstable();
+        mapped_states.dedup();
+        
+        // Build compressed set from sorted unique states
+        let mut result = Self::new();
+        for state in mapped_states {
+            result.insert(state);
+        }
+        result.recompute_hash();
+        result
+    }
+
+    /// Efficiently normalize and store into a preallocated buffer.
+    /// Same as normalized() but reuses allocations.
+    #[inline]
+    pub fn normalize_into(&self, state_to_rep: &[usize], buffer: &mut Self, scratch: &mut Vec<usize>) {
+        scratch.clear();
+        scratch.reserve(self.len());
+        
+        for state in self.iter() {
+            if state < state_to_rep.len() {
+                scratch.push(state_to_rep[state]);
+            } else {
+                scratch.push(state);
+            }
+        }
+        
+        scratch.sort_unstable();
+        scratch.dedup();
+        
+        buffer.words.clear();
+        for &state in scratch.iter() {
+            buffer.insert(state);
+        }
+        buffer.recompute_hash();
+    }
 }
 
 impl FromIterator<usize> for CompressedStateSet {

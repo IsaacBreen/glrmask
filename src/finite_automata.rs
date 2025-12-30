@@ -2168,6 +2168,127 @@ impl NFA {
         }
     }
 
+    /// Compute NFA state bisimulation equivalence classes.
+    /// 
+    /// Two NFA states are bisimilar if:
+    /// 1. They have the same finalizers and non_greedy_finalizers
+    /// 2. For every input byte, the set of target equivalence classes is the same
+    /// 3. The set of epsilon-reachable equivalence classes is the same
+    /// 
+    /// Returns a mapping from state_id -> representative_state_id.
+    /// States that are bisimilar will map to the same representative.
+    /// 
+    /// This is used to normalize NFA subsets during DFA construction, which can
+    /// dramatically reduce the number of DFA states for grammars with many
+    /// structurally identical NFA regions.
+    fn compute_state_bisimulation(&self) -> Vec<usize> {
+        use rustc_hash::FxHashMap;
+        let num_states = self.states.len();
+        if num_states == 0 {
+            return vec![];
+        }
+
+        // Initial partition: group states by (finalizers, non_greedy_finalizers)
+        let mut partition_of: Vec<usize> = vec![0; num_states];
+        let mut partition_map: FxHashMap<(DenseStateSet, DenseStateSet), usize> = FxHashMap::default();
+        let mut num_partitions = 0;
+        
+        for (state_idx, state) in self.states.iter().enumerate() {
+            let key = (state.finalizers.clone(), state.non_greedy_finalizers.clone());
+            let part = *partition_map.entry(key).or_insert_with(|| {
+                let p = num_partitions;
+                num_partitions += 1;
+                p
+            });
+            partition_of[state_idx] = part;
+        }
+        
+        crate::debug!(5, "NFA bisimulation: {} initial partitions based on finalizers", num_partitions);
+
+        // Partition refinement loop
+        // Signature = (finalizer_partition, sorted list of (input_byte, sorted target_partitions), sorted epsilon_target_partitions)
+        loop {
+            let mut new_partition_of = vec![0usize; num_states];
+            let mut signature_map: FxHashMap<(usize, Vec<(u8, Vec<usize>)>, Vec<usize>), usize> = FxHashMap::default();
+            let mut new_num_partitions = 0;
+
+            for state_idx in 0..num_states {
+                let state = &self.states[state_idx];
+                let current_partition = partition_of[state_idx];
+
+                // Build transition signature: for each input byte, what partitions can we reach?
+                // First, collect transitions by byte
+                let mut byte_to_targets: [Vec<usize>; 256] = std::array::from_fn(|_| Vec::new());
+                for (u8set, target) in &state.transitions {
+                    let target_part = partition_of[*target];
+                    for b in u8set.iter() {
+                        byte_to_targets[b as usize].push(target_part);
+                    }
+                }
+                
+                // Sort and dedup target partitions for each byte, then collect non-empty bytes
+                let mut transition_sig: Vec<(u8, Vec<usize>)> = Vec::new();
+                for (b, targets) in byte_to_targets.iter_mut().enumerate() {
+                    if !targets.is_empty() {
+                        targets.sort_unstable();
+                        targets.dedup();
+                        transition_sig.push((b as u8, targets.clone()));
+                    }
+                }
+
+                // Epsilon signature: sorted list of target partitions
+                let mut epsilon_sig: Vec<usize> = state.epsilon_transitions
+                    .iter()
+                    .map(|&t| partition_of[t])
+                    .collect();
+                epsilon_sig.sort_unstable();
+                epsilon_sig.dedup();
+
+                let signature = (current_partition, transition_sig, epsilon_sig);
+                
+                let new_part = *signature_map.entry(signature).or_insert_with(|| {
+                    let p = new_num_partitions;
+                    new_num_partitions += 1;
+                    p
+                });
+                new_partition_of[state_idx] = new_part;
+            }
+
+            if new_num_partitions == num_partitions {
+                // Fixed point reached
+                break;
+            }
+            
+            crate::debug!(6, "NFA bisimulation refinement: {} -> {} partitions", num_partitions, new_num_partitions);
+            partition_of = new_partition_of;
+            num_partitions = new_num_partitions;
+        }
+
+        crate::debug!(5, "NFA bisimulation: {} final partitions for {} states", num_partitions, num_states);
+
+        // Build representative mapping: for each partition, pick the smallest state_id as representative
+        let mut partition_to_rep: Vec<usize> = vec![usize::MAX; num_partitions];
+        for (state_idx, &part) in partition_of.iter().enumerate() {
+            if state_idx < partition_to_rep[part] {
+                partition_to_rep[part] = state_idx;
+            }
+        }
+
+        // Return mapping: state_id -> representative
+        let state_to_rep: Vec<usize> = partition_of
+            .iter()
+            .map(|&part| partition_to_rep[part])
+            .collect();
+        
+        // Log reduction stats
+        let unique_reps: std::collections::HashSet<usize> = state_to_rep.iter().copied().collect();
+        crate::debug!(4, "NFA bisimulation: {} states -> {} equivalence classes ({:.1}% reduction)", 
+            num_states, unique_reps.len(), 
+            100.0 * (1.0 - unique_reps.len() as f64 / num_states as f64));
+
+        state_to_rep
+    }
+
     fn compute_equivalence_classes(&self) -> (Vec<u8>, usize, Vec<Vec<u8>>) {
         let mut partitions = vec![U8Set::all()];
         let mut seen_sets = HashSet::new();
@@ -2232,6 +2353,16 @@ impl NFA {
         let (class_map, num_classes, class_members) = crate::time!("compute_equivalence_classes", self.compute_equivalence_classes());
         stats.class_computation_time = start_classes.elapsed();
         crate::debug!(4, "Computed {} input equivalence classes in {:.2?}", num_classes, stats.class_computation_time);
+
+        // Compute NFA state bisimulation for normalizing DFA state sets
+        // This dramatically reduces DFA state count for grammars with many structurally identical NFA regions
+        let start_bisim = std::time::Instant::now();
+        let state_to_rep = crate::time!("compute_state_bisimulation", self.compute_state_bisimulation());
+        let bisim_time = start_bisim.elapsed();
+        crate::debug!(4, "Computed NFA bisimulation in {:.2?}", bisim_time);
+        
+        // Scratch buffer for normalization
+        let mut normalize_scratch: Vec<usize> = Vec::with_capacity(1024);
 
         let start_remap = std::time::Instant::now();
         // Pre-process NFA transitions to use class IDs
@@ -2381,8 +2512,10 @@ impl NFA {
 
         let start_state_set = crate::time!("compress_state_set", CompressedStateSet::from_sparse(&closure_set));
 
-        dfa_state_map.insert(start_state_set.clone(), 0);
-        worklist.push(start_state_set.clone());
+        // Normalize the start state set using bisimulation
+        let normalized_start = start_state_set.normalized(&state_to_rep);
+        dfa_state_map.insert(normalized_start.clone(), 0);
+        worklist.push(start_state_set.clone());  // Worklist uses raw (un-normalized) sets for correct finalizer computation
         stats.max_worklist_len = stats.max_worklist_len.max(worklist.len());
 
         let (finalizers, non_greedy_finalizers) = crate::time!("compute_finalizers", {
@@ -2436,6 +2569,9 @@ impl NFA {
             .unwrap_or(usize::MAX);
         
         let mut next_log_threshold = 1_000;
+        // Reusable buffer for normalizing current set
+        let mut normalized_current = CompressedStateSet::new();
+        
         while let Some(current_set) = worklist.pop() {
             if dfa_states.len() >= max_dfa_states {
                 panic!("DFA state limit {} reached after {:.2?}. worklist: {}, max_subset_size: {}", 
@@ -2451,8 +2587,10 @@ impl NFA {
                 next_log_threshold += 1_000;
             }
 
+            // Normalize current_set for map lookup
+            current_set.normalize_into(&state_to_rep, &mut normalized_current, &mut normalize_scratch);
             let current_dfa_state = *dfa_state_map
-                .get(&current_set)
+                .get(&normalized_current)
                 .expect("DFA state set not found in map");
 
             // 1. Populate transition_targets for all inputs (COLLECT PHASE)
@@ -2534,11 +2672,17 @@ impl NFA {
                     CompressedStateSet::reuse_from_sparse(&closure_set, &mut scratch_closure, &mut sort_scratch);
                     if let Some(t) = t2 { time_compress += t.elapsed().as_nanos() as u64; }
 
-                    // Map lookup/insert
+                    // Normalize the state set using bisimulation for map lookup
+                    // This is the key optimization: states that are bisimilar (have identical future behavior)
+                    // will have the same normalized representation, so we can reuse the same DFA state
+                    let mut normalized_key = CompressedStateSet::new();
+                    scratch_closure.normalize_into(&state_to_rep, &mut normalized_key, &mut normalize_scratch);
+
+                    // Map lookup/insert using NORMALIZED key
                     let t3 = if enable_timing { Some(std::time::Instant::now()) } else { None };
                     let next_state_idx = {
                         // First try lookup without cloning
-                        if let Some(&existing) = dfa_state_map.get(&scratch_closure) {
+                        if let Some(&existing) = dfa_state_map.get(&normalized_key) {
                             total_cache_hits += 1;
                             if let Some(t) = t3 { time_lookup += t.elapsed().as_nanos() as u64; }
                             existing
@@ -2549,7 +2693,8 @@ impl NFA {
                             let t4 = if enable_timing { Some(std::time::Instant::now()) } else { None };
                             let new_state_index = dfa_states.len();
                             
-                            // Compute finalizers before moving the key
+                            // Compute finalizers from the ORIGINAL (un-normalized) state set
+                            // This is important: we need all the original states to get correct finalizers
                             let (new_finalizers, new_non_greedy_finalizers) = {
                                 let mut new_finalizers = DenseStateSet::empty();
                                 let mut new_non_greedy_finalizers = DenseStateSet::empty();
@@ -2560,10 +2705,10 @@ impl NFA {
                                 (new_finalizers, new_non_greedy_finalizers)
                             };
                             
-                            // Clone once for map, once for worklist
-                            let key = scratch_closure.clone();
-                            worklist.push(key.clone());
-                            dfa_state_map.insert(key, new_state_index);
+                            // Use ORIGINAL state set for worklist (to compute correct transitions)
+                            // Use NORMALIZED key for the map (for deduplication)
+                            worklist.push(scratch_closure.clone());
+                            dfa_state_map.insert(normalized_key.clone(), new_state_index);
                             stats.max_worklist_len = stats.max_worklist_len.max(worklist.len());
 
                             dfa_states.push(DFAState {
