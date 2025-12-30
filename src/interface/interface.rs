@@ -1736,7 +1736,14 @@ impl GrammarDefinition {
     /// rule ::= expr;
     /// ```
     pub fn from_ebnf(ebnf_source: &str) -> Result<Self, String> {
-        let ebnf = EbnfParser::new(ebnf_source).and_then(|mut p| p.parse())?;
+        // Apply choice factoring if enabled
+        let ebnf_source = if std::env::var("ENABLE_EBNF_CHOICE_FACTORING").is_ok() {
+            crate::interface::ebnf_factoring::factor_ebnf_choices(ebnf_source)
+        } else {
+            ebnf_source.to_string()
+        };
+        
+        let ebnf = EbnfParser::new(&ebnf_source).and_then(|mut p| p.parse())?;
         Self::from_parsed_rules(ebnf.grammar_rules, ebnf.ignore_symbol_name)
     }
 
