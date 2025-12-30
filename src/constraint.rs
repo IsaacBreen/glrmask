@@ -993,6 +993,9 @@ impl GrammarConstraint {
             representative_states_set.into_iter().collect(),
         );
 
+        #[allow(clippy::redundant_closure_call)]
+        crate::debug!(4, "Terminal DWA stats: {}", terminal_dwa.stats());
+
         // EXPAND DWA: Add transitions for non-representative states
         crate::debug!(4, "Expanding DWA transitions for equivalent states...");
         let start_state_id = terminal_dwa.body.start_state;
