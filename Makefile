@@ -96,6 +96,11 @@ test-diff: ffi ## Test diff grammar for any text file (usage: make test-diff FIL
 test-diff-dfa: ffi ## Test diff grammar on static finite_automata.rs (no FILE arg needed)
 	SOURCE_FILE="testdata/finite_automata.rs" $(PYTHON) scripts/test_diff.py
 
+diff-grammar: ffi ## Generate EBNF grammar for a file (usage: make diff-grammar FILE=test12.txt OUT=temp.ebnf)
+	@if [ -z "$(FILE)" ] || [ -z "$(OUT)" ]; then echo "Usage: make diff-grammar FILE=<file> OUT=<out.ebnf>"; exit 1; fi
+	SOURCE_FILE="$(FILE)" OUT_FILE="$(OUT)" ONLY_GRAMMAR=1 $(PYTHON) scripts/test_diff.py
+
+
 # === Hard Schema Compilation Tests ===
 # These use the Rust grammar_compiler binary directly with --json-schema
 

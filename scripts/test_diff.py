@@ -181,6 +181,21 @@ def main():
     gen_time = time.time() - start
     print(f"   Grammar generation: {gen_time*1000:.1f}ms ({len(ebnf)} chars)")
     
+    # Optional: Write EBNF to file
+    out_file = os.environ.get("OUT_FILE")
+    if out_file:
+        try:
+            with open(out_file, 'w', encoding='utf-8') as f:
+                f.write(ebnf)
+            print(f"   Wrote EBNF to: {out_file}")
+            
+            if os.environ.get("ONLY_GRAMMAR"):
+                print("   Exiting after grammar generation (ONLY_GRAMMAR=1)")
+                sys.exit(0)
+        except Exception as e:
+            print(f"   Error writing to file: {e}")
+
+    
     # Show first few lines of grammar
     lines = ebnf.split('\n')
     print(f"   Grammar has {len(lines)} lines")
