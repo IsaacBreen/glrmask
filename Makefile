@@ -1,7 +1,7 @@
 # Research Project Makefile
 # Common commands for paper writing and research
 
-.PHONY: paper paper-watch paper-clean notes-today help build test test-js test-json-schema test-schema-packagejson test-schema-github test-schema-sarif test-schema-meta test-schema-extra test-schema-kestra test-schema-vegalite test-schema-apollo test-schema-liquibase test-diff test-diff-dfa ffi viz viz-clean all
+.PHONY: paper paper-watch paper-clean notes-today help build test test-js test-json-schema test-schema-packagejson test-schema-github test-schema-sarif test-schema-meta test-schema-extra test-schema-kestra test-schema-vegalite test-schema-apollo test-schema-liquibase test-diff test-diff-dfa show-schema-id schema-id ffi viz viz-clean all
 
 # === Build All ===
 
@@ -89,6 +89,14 @@ PYTHON ?= python
 test-schema-id: ## Compile any benchmark schema by ID (usage: make test-schema-id ID=ApolloRouter---apollo-router-2.9.0)
 	@if [ -z "$(ID)" ]; then echo "Usage: make test-schema-id ID=<schema_id>"; exit 1; fi
 	SCHEMA_ID="$(ID)" $(PYTHON) scripts/test_json_schema.py
+
+show-schema-id: ffi ## Print EBNF for a schema by ID to stdout (usage: make show-schema-id ID=...)
+	@if [ -z "$(ID)" ]; then echo "Usage: make show-schema-id ID=<schema_id>"; exit 1; fi
+	SCHEMA_ID="$(ID)" PRINT_EBNF=1 $(PYTHON) scripts/test_json_schema.py
+
+schema-id: ffi ## Write EBNF for a schema by ID to a file (usage: make schema-id ID=... OUT=file.ebnf)
+	@if [ -z "$(ID)" ] || [ -z "$(OUT)" ]; then echo "Usage: make schema-id ID=<schema_id> OUT=<file.ebnf>"; exit 1; fi
+	SCHEMA_ID="$(ID)" PRINT_EBNF=1 OUT_FILE="$(OUT)" $(PYTHON) scripts/test_json_schema.py
 
 test-diff: ffi ## Test diff grammar for any text file (usage: make test-diff FILE=path/to/file.txt)
 	@if [ -z "$(FILE)" ]; then echo "Usage: make test-diff FILE=<path_to_text_file>"; exit 1; fi
