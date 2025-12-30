@@ -611,9 +611,10 @@ pub fn remove_productions_with_undefined_nonterminals(
     current.into_iter().map(|(_, prod)| prod).collect()
 }
 
-// TODO: This function is known to be incomplete; kept here for compatibility.
+/// DEPRECATED: This function is incomplete and known to be broken. It's not currently used.
+/// Keeping it here for reference in case we need dead-production elimination in the future.
+#[allow(dead_code)]
 pub fn drop_dead(productions: &[Production]) -> Vec<Production> {
-    // todo: this function is broken
     let mut nt_reachables: BTreeMap<&NonTerminal, BTreeSet<&NonTerminal>> = BTreeMap::new();
 
     for prod in productions {

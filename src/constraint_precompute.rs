@@ -126,7 +126,6 @@ impl<'r> Precomputer1<'r> {
             }
         }
         
-        // TODO: WTF is this
         // Debug: Count transitions
         let mut total_transitions = 0;
         let mut transitions_to_leaf = 0;
