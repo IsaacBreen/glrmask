@@ -7,26 +7,36 @@
 use std::collections::{HashMap, HashSet};
 use regex::Regex;
 
-/// Parse EBNF text into a simple map of rule_name -> rule_body
-pub fn parse_ebnf_simple(ebnf_text: &str) -> HashMap<String, String> {
-    let mut rules = HashMap::new();
+/// Parse EBNF text into rules and directives, preserving order
+/// Returns (rules as Vec for order preservation, rules as HashMap for lookup, directives)
+pub fn parse_ebnf_simple(ebnf_text: &str) -> (Vec<(String, String)>, HashMap<String, String>, Vec<String>) {
+    let mut rules_vec = Vec::new();
+    let mut rules_map = HashMap::new();
+    let mut directives = Vec::new();
     
     let rule_regex = Regex::new(r"^\s*(\S+)\s*::=\s*(.+?)\s*;\s*$").unwrap();
     
     for line in ebnf_text.lines() {
         let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
+        if line.is_empty() {
+            continue;
+        }
+        
+        // Preserve directives (lines starting with #)
+        if line.starts_with('#') {
+            directives.push(line.to_string());
             continue;
         }
         
         if let Some(caps) = rule_regex.captures(line) {
             let name = caps.get(1).unwrap().as_str().to_string();
             let body = caps.get(2).unwrap().as_str().to_string();
-            rules.insert(name, body);
+            rules_vec.push((name.clone(), body.clone()));
+            rules_map.insert(name, body);
         }
     }
     
-    rules
+    (rules_vec, rules_map, directives)
 }
 
 /// Find all rule names referenced in a rule body
@@ -219,14 +229,15 @@ fn extract_tail(alt: &str) -> Option<(String, String)> {
 
 /// Factor choices in EBNF rules
 pub fn factor_ebnf_choices(ebnf_text: &str) -> String {
-    let rules = parse_ebnf_simple(ebnf_text);
-    let recursive_rules = find_recursive_rules(&rules);
+    let (rules_vec, rules_map, directives) = parse_ebnf_simple(ebnf_text);
+    let recursive_rules = find_recursive_rules(&rules_map);
     
     let mut new_rules: Vec<(String, String)> = Vec::new();
     let mut helper_counter = 0;
     let mut factor_cache: HashMap<String, String> = HashMap::new();
     
-    for (name, body) in &rules {
+    // Iterate over rules_vec to preserve original order
+    for (name, body) in &rules_vec {
         // Only factor internal rules starting with '_' (except '_json')
         if !name.starts_with('_') || name.starts_with("_json") {
             new_rules.push((name.clone(), body.clone()));
@@ -244,7 +255,7 @@ pub fn factor_ebnf_choices(ebnf_text: &str) -> String {
         let mut unsafe_alts = Vec::new();
         
         for alt in &choices {
-            if is_safe_subtree(alt, &rules, &recursive_rules) {
+            if is_safe_subtree(alt, &rules_map, &recursive_rules) {
                 safe_alts.push(alt.clone());
             } else {
                 unsafe_alts.push(alt.clone());
@@ -265,7 +276,7 @@ pub fn factor_ebnf_choices(ebnf_text: &str) -> String {
                 // Check for name collisions and add suffix if needed
                 let mut collision_idx = 1;
                 let base_name = term_name.clone();
-                while new_rules.iter().any(|(n, _)| n == &term_name) || rules.contains_key(&term_name) {
+                while new_rules.iter().any(|(n, _)| n == &term_name) || rules_map.contains_key(&term_name) {
                     term_name = format!("{}_{}", base_name, collision_idx);
                     collision_idx += 1;
                 }
@@ -285,7 +296,7 @@ pub fn factor_ebnf_choices(ebnf_text: &str) -> String {
         
         for alt in &unsafe_alts {
             if let Some((head, tail)) = extract_tail(alt) {
-                if is_safe_subtree(&head, &rules, &recursive_rules) {
+                if is_safe_subtree(&head, &rules_map, &recursive_rules) {
                     tail_groups.entry(tail).or_insert_with(Vec::new).push(head);
                     continue;
                 }
@@ -311,7 +322,7 @@ pub fn factor_ebnf_choices(ebnf_text: &str) -> String {
                 // Check for name collisions and add suffix if needed
                 let mut collision_idx = 1;
                 let base_name = term_name.clone();
-                while new_rules.iter().any(|(n, _)| n == &term_name) || rules.contains_key(&term_name) {
+                while new_rules.iter().any(|(n, _)| n == &term_name) || rules_map.contains_key(&term_name) {
                     term_name = format!("{}_{}", base_name, collision_idx);
                     collision_idx += 1;
                 }
@@ -336,12 +347,20 @@ pub fn factor_ebnf_choices(ebnf_text: &str) -> String {
         new_rules.push((name.clone(), new_body));
     }
     
-    // Generate output EBNF
+    // Generate output EBNF - start with directives
     let mut output = String::new();
-    for (name, body) in new_rules {
+    for directive in &directives {
+        output.push_str(directive);
+        output.push('\n');
+    }
+    if !directives.is_empty() {
+        output.push('\n');
+    }
+    
+    for (name, body) in &new_rules {
         output.push_str(&format!("{} ::= {} ;\n", name, body));
     }
     
-    eprintln!("Factored {} rules, created {} helper NTs", rules.len(), helper_counter);
+    eprintln!("EBNF factoring: {} rules -> {} rules ({} helpers created)", rules_vec.len(), new_rules.len(), helper_counter);
     output
 }
