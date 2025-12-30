@@ -2514,7 +2514,7 @@ impl NFA {
         stats.dfa_states_created = dfa.states.len();
 
         // Level 4: Brief summary. Level 5+: Full stats.
-        crate::debug!(4, "NFA → DFA: {} states ({:.2?})", dfa.states.len(), stats.total_time);
+        crate::debug!(4, "NFA → DFA: {} → {} states ({:.2?})", self.states.len(), dfa.states.len(), stats.total_time);
         if crate::r#macro::is_debug_level_enabled(5) {
             // Print detailed timing breakdown at level 5+
             crate::debug!(5, "  └─ Class computation: {:.2?}", stats.class_computation_time);
