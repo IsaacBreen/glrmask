@@ -10,6 +10,8 @@ use crate::debug;
 
 pub fn optimize_grammar(grammar: &mut GrammarDefinition) {
     if std::env::var("DISABLE_GRAMMAR_OPTIMIZATION").is_ok() {
+        let mut optimizer = GrammarOptimizer::new(grammar);
+        optimizer.remove_unused_terminals_and_compact();
         return;
     }
     
