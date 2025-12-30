@@ -167,6 +167,62 @@ impl JsonSchemaConverter {
         None // External ref - not supported
     }
 
+    /// Try to convert a schema to an inline grammar expression without creating a named rule.
+    /// Returns Ok(expr) for simple schemas that can be inlined, Err(_) for complex schemas
+    /// that need their own named rule.
+    fn convert_schema_inline(&mut self, schema: &Value) -> Result<GrammarExpr, String> {
+        // Handle boolean schemas
+        if let Some(b) = schema.as_bool() {
+            return if b { 
+                Ok(self.json_value_ref()) 
+            } else { 
+                Ok(GrammarExpr::Literal(b"<NEVER>".to_vec())) 
+            };
+        }
+        
+        let obj = schema.as_object().ok_or("complex")?;
+        
+        // Handle $ref - return reference to the resolved rule
+        if let Some(ref_val) = obj.get("$ref").and_then(|v| v.as_str()) {
+            if let Some(ref_rule) = self.resolve_ref(ref_val) {
+                return Ok(GrammarExpr::Ref(ref_rule));
+            }
+            return Ok(self.json_value_ref());
+        }
+        
+        // Handle const
+        if let Some(const_val) = obj.get("const") {
+            return Ok(self.value_to_literal(const_val));
+        }
+        
+        // Handle enum
+        if let Some(enum_vals) = obj.get("enum").and_then(|v| v.as_array()) {
+            let alternatives: Vec<GrammarExpr> = enum_vals.iter()
+                .map(|v| self.value_to_literal(v))
+                .collect();
+            return Ok(GrammarExpr::Choice(alternatives));
+        }
+        
+        // Handle simple types (no additional constraints that matter)
+        if let Some(type_val) = obj.get("type") {
+            if let Some(type_str) = type_val.as_str() {
+                return match type_str {
+                    "string" => Ok(GrammarExpr::Ref("JSON_STRING".to_string())),
+                    "integer" => Ok(GrammarExpr::Ref("JSON_INTEGER".to_string())),
+                    "number" => Ok(GrammarExpr::Ref("JSON_NUMBER".to_string())),
+                    "boolean" => Ok(GrammarExpr::Ref("JSON_BOOL".to_string())),
+                    "null" => Ok(GrammarExpr::Ref("JSON_NULL".to_string())),
+                    // Complex types need their own rules
+                    "object" | "array" => Err("complex".to_string()),
+                    _ => Ok(self.json_value_ref()),
+                };
+            }
+        }
+        
+        // For complex schemas (allOf, anyOf, oneOf, objects, arrays), need a named rule
+        Err("complex".to_string())
+    }
+
     /// Convert a schema to grammar rules. Returns the rule name.
     fn convert_schema(&mut self, schema: &Value, rule_name: String) -> Result<String, String> {
         // Handle boolean schemas
@@ -331,8 +387,16 @@ impl JsonSchemaConverter {
 
         if let Some(props) = properties {
             for (prop_name, prop_schema) in props {
-                let prop_value_rule = self.new_rule_name("pv");
-                self.convert_schema(prop_schema, prop_value_rule.clone())?;
+                // Try to inline simple types, only create named rules for complex schemas
+                let prop_value_expr = match self.convert_schema_inline(prop_schema) {
+                    Ok(expr) => expr,
+                    Err(_) => {
+                        // Complex schema - create a named rule
+                        let prop_value_rule = self.new_rule_name("pv");
+                        self.convert_schema(prop_schema, prop_value_rule.clone())?;
+                        GrammarExpr::Ref(prop_value_rule)
+                    }
+                };
 
                 // Build: '"propName"' ':' value
                 // WS is handled by the ignore terminal, no need to include it explicitly
@@ -340,7 +404,7 @@ impl JsonSchemaConverter {
                 member_alternatives.push(GrammarExpr::Sequence(vec![
                     GrammarExpr::Literal(format!("\"{}\"", escaped_name).into_bytes()),
                     GrammarExpr::Literal(b":".to_vec()),
-                    GrammarExpr::Ref(prop_value_rule),
+                    prop_value_expr,
                 ]));
             }
         }
@@ -354,12 +418,20 @@ impl JsonSchemaConverter {
                 member_alternatives.push(self.json_kv_ref());
             }
             Some(Value::Object(ap_schema)) => {
-                let additional_rule = self.new_rule_name("ap");
-                self.convert_schema(&Value::Object(ap_schema.clone()), additional_rule.clone())?;
+                // Try to inline simple additionalProperties schemas
+                let ap_value = Value::Object(ap_schema.clone());
+                let ap_expr = match self.convert_schema_inline(&ap_value) {
+                    Ok(expr) => expr,
+                    Err(_) => {
+                        let additional_rule = self.new_rule_name("ap");
+                        self.convert_schema(&ap_value, additional_rule.clone())?;
+                        GrammarExpr::Ref(additional_rule)
+                    }
+                };
                 member_alternatives.push(GrammarExpr::Sequence(vec![
                     GrammarExpr::Ref("JSON_STRING".to_string()),
                     GrammarExpr::Literal(b":".to_vec()),
-                    GrammarExpr::Ref(additional_rule),
+                    ap_expr,
                 ]));
             }
             _ => {} // additionalProperties: false - don't add generic kv
@@ -428,19 +500,25 @@ impl JsonSchemaConverter {
             }
 
             if let Some(_) = item_schema.as_object() {
-                // All items must match schema
-                let item_rule = self.new_rule_name("item");
-                self.convert_schema(item_schema, item_rule.clone())?;
+                // All items must match schema - try to inline simple types
+                let item_expr = match self.convert_schema_inline(item_schema) {
+                    Ok(expr) => expr,
+                    Err(_) => {
+                        let item_rule = self.new_rule_name("item");
+                        self.convert_schema(item_schema, item_rule.clone())?;
+                        GrammarExpr::Ref(item_rule)
+                    }
+                };
 
                 // Build: '[' ( item ( ',' item )* )? ']'
                 // WS is handled by the ignore terminal
                 let comma_item = GrammarExpr::Sequence(vec![
                     GrammarExpr::Literal(b",".to_vec()),
-                    GrammarExpr::Ref(item_rule.clone()),
+                    item_expr.clone(),
                 ]);
 
                 let items_opt = GrammarExpr::Optional(Box::new(GrammarExpr::Sequence(vec![
-                    GrammarExpr::Ref(item_rule),
+                    item_expr,
                     GrammarExpr::Repeat(Box::new(comma_item)),
                 ])));
 
