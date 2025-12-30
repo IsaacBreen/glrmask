@@ -1552,7 +1552,7 @@ mod reproduction_tests {
             results.push((n, nfa_states, dfa_states));
         }
 
-        // Print NFA growth for informational purposes (NFA may grow exponentially due to expression inlining)
+        // Verify NFA linear growth
         let mut nfa_deltas = Vec::new();
         for i in 0..results.len() - 1 {
             let delta = results[i+1].1 as isize - results[i].1 as isize;
@@ -1560,13 +1560,16 @@ mod reproduction_tests {
         }
         println!("NFA deltas: {:?}", nfa_deltas);
         
-        // Note: NFA growth may be exponential due to expression inlining.
-        // This is acceptable because the DFA construction with bisimulation normalization
-        // handles this gracefully by deduplicating equivalent NFA state sets.
+        let first_nfa_delta = nfa_deltas[0];
+        for &d in &nfa_deltas {
+             assert!(
+                (d - first_nfa_delta).abs() <= 2,
+                "NFA growth is not linear! Deltas: {:?}. Expected constant ~{}",
+                nfa_deltas, first_nfa_delta
+            );
+        }
 
-        // Verify DFA linear growth - this is the key test
-        // With bisimulation-based normalization, equivalent NFA state sets are merged,
-        // resulting in linear DFA growth even when NFA grows exponentially.
+        // Verify DFA linear growth (THIS ASSERTION SHOULD FAIL due to exponential blowup)
         let mut dfa_deltas = Vec::new();
         for i in 0..results.len() - 1 {
             let delta = results[i+1].2 as isize - results[i].2 as isize;
