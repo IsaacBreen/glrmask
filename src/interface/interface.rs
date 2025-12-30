@@ -86,7 +86,6 @@ pub fn get_expr_nullability(expr: &Expr) -> ExprNullability {
                 }
             }
             Expr::Epsilon => ExprNullability::AlwaysNull,
-            Expr::Empty => ExprNullability::NeverNull, // Empty matches nothing, so never null
             Expr::Shared(arc) => {
                 let ptr = Arc::as_ptr(arc) as *const Expr;
                 if let Some(&cached_nullability) = cache.get(&ptr) {
@@ -701,7 +700,6 @@ impl GrammarDefinition {
                 parts.join(" ")
             }
             Epsilon => "ε".to_string(),
-            Empty => "∅".to_string(),
             Shared(arc) => Self::format_expr(arc),
         }
     }
