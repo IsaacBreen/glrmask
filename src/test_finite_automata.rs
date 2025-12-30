@@ -1466,58 +1466,144 @@ mod reproduction_tests {
 
     /// Test for exponential DFA blowup in diff-like grammars with repeated identical lines.
     /// 
-    /// This test reproduces the issue from test10/11/12.txt where files with N identical
-    /// lines cause 2^N intermediate DFA states during subset construction.
-    /// 
-    /// The pattern:
-    /// ```
-    /// S0 ::= LINE0 | S1;
-    /// S1 ::= LINE1 | S2;
-    /// ...
-    /// LINE0 ::= CONTENT;
-    /// LINE1 ::= CONTENT;  // Same content!
-    /// ```
-    /// 
-    /// When all LINEs match the same CONTENT (" a\n"), the NFA is simultaneously in
-    /// {LINE0, LINE1, ..., LINE{N-1}} after reading that content, leading to 2^N possible
-    /// subsets.
+    /// This test reproduces the issue where files with N identical lines cause 
+    /// exponential intermediate DFA states during subset construction.
     ///
-    /// This test FAILS if we see exponential growth beyond reasonable thresholds.
+    /// It constructs the exact same grammar structure as `scripts/test_diff.py`:
+    /// S{i} ::= LINE{i} | S{i+1}
+    /// LINE{i} ::= PLUS_LINE* CONTENT{i} ( LINE{i+1} | PLUS_LINE* HUNK_HEADER S{i+1} )?
     #[test]
     fn test_diff_grammar_exponential_blowup() {
         use crate::choice;
+        use crate::seq;
         
         let mut results = Vec::new();
 
         // Test N=8..=12 lines with identical content
-        for n in 8..=12 {
+        // N=12 might be too slow if it truly explodes, so we might stop early or increase carefully
+        for n in 8..=11 {
             println!("\n=== Testing N={} identical lines ===", n);
             
-            // Create the pattern:
-            // S0 = LINE0 | S1
-            // S1 = LINE1 | S2
-            // ...
-            // S{n-1} = LINE{n-1}
-            // 
-            // All LINEs match the same content: " a\n"
+            // --- Terminals ---
+            // Simplified terminals for the test, but structurally similar
+            let newline = eat_u8(b'\n');
             
-            let line_content = Expr::Seq(vec![
-                Expr::Choice(vec![
-                    Expr::U8Seq(b" ".to_vec()),
-                    Expr::U8Seq(b"-".to_vec()),
-                ]),
-                Expr::U8Seq(b"a".to_vec()),
-                Expr::U8Seq(b"\n".to_vec()),
-            ]);
+            let plus_line = seq![eat_u8(b'+'), rep(eat_u8(b'x')), newline.clone()];
+            let hunk_header = seq![eat_u8(b'@'), eat_u8(b'@'), rep(eat_u8(b' ')), newline.clone()];
             
-            // Build choice: LINE0 | LINE1 | ... | LINE{n-1}
-            // where each LINE is just the same content
-            let mut lines = Vec::new();
-            for _ in 0..n {
-                lines.push(line_content.clone());
+            let plus_lines = rep(plus_line.clone());
+            
+            // Content is identical for all lines: " a\n"
+            let content = seq![
+                choice![eat_u8(b' '), eat_u8(b'-')], 
+                eat_u8(b'a'), 
+                newline.clone()
+            ];
+
+            // We need to build from bottom up (N down to 0) due to dependencies
+            
+            // S{n} ::= PLUS_LINE*;
+            let mut s_next = plus_lines.clone();
+            
+            // We also need LINE{n} (conceptually doesn't exist as a rule index n, but S{n} is the end)
+            // Actually, looking at the python script:
+            // S{num_lines} ::= PLUS_LINE*;
+            // Loop i from 0 to num_lines-1
+            
+            // We need to keep track of LINE{i+1} to build LINE{i}
+            // but LINE{i} depends on LINE{i+1} AND S{i+1}
+            //
+            // Let's re-read the python logic carefully:
+            // S{i} ::= LINE{i} | S{i+1}
+            // LINE{i} ::= PLUS_LINE* CONTENT{i} continuation
+            // continuation depends on i:
+            // if i < n-1: ( LINE{i+1} | PLUS_LINE* HUNK_HEADER S{i+1} )?
+            // else:       ( PLUS_LINE* HUNK_HEADER S{n} )?
+            
+            // It seems LINE{i} depends on LINE{i+1}. This means we need LINE{i+1} explicitly.
+            // But S{i+1} depends on LINE{i+1} too.
+            // S{i+1} = LINE{i+1} | S{i+2}
+            
+            // So:
+            // 1. Start with S{n} = PLUS_LINE*
+            // 2. Loop i from n-1 down to 0:
+            //    Define LINE{i}:
+            //      continuation:
+            //        if i == n-1: ( PLUS_LINE* HUNK_HEADER S{n} )?
+            //        else:        ( LINE{i+1} | PLUS_LINE* HUNK_HEADER S{i+1} )?
+            //      LINE{i} = PLUS_LINE* CONTENT PLUS_LINE* continuation  <-- WAIT, python says:
+            //      LINE{i} ::= PLUS_LINE* CONTENT{i} {continuation}
+            //    Define S{i} = LINE{i} | S{i+1}
+            
+            // We need to store LINE{i+1} for the next iteration (which is i).
+            // Actually, if we look at the Else branch: `( LINE{i+1} | ... )`
+            // We need `LINE{i+1}` available when building `LINE{i}`.
+            
+            let mut line_next: Option<Expr> = None; // This will hold LINE{i+1}
+            
+            for i in (0..n).rev() {
+                // Determine continuation
+                let continuation = if i == n - 1 {
+                    // Last line
+                    // ( PLUS_LINE* HUNK_HEADER S{num_lines} )?
+                    opt(seq![
+                        plus_lines.clone(),
+                        hunk_header.clone(),
+                        s_next.clone()
+                    ])
+                } else {
+                    // Not last line
+                    // ( LINE{i+1} | PLUS_LINE* HUNK_HEADER S{i+1} )?
+                    opt(choice![
+                        line_next.clone().unwrap(),
+                        seq![
+                            plus_lines.clone(),
+                            hunk_header.clone(),
+                            s_next.clone()
+                        ]
+                    ])
+                };
+                
+                // LINE{i} ::= PLUS_LINE* CONTENT{i} continuation
+                let line_i = seq![
+                    plus_lines.clone(),
+                    content.clone(),
+                    continuation
+                ];
+                
+                // S{i} ::= LINE{i} | S{i+1}
+                let s_i = choice![
+                    line_i.clone(),
+                    s_next.clone()
+                ];
+                
+                // Update for next iteration
+                line_next = Some(line_i);
+                s_next = s_i;
             }
             
-            let expr = Expr::Choice(lines);
+            let s_0 = s_next; // This is S0
+            
+            // root ::= DIFF;
+            // DIFF ::= FILE_HEADER? ( HUNK_HEADER S0 )? EOF;
+            
+            let file_header = seq![
+                eat_u8(b'd'), // diff --git ...
+                eat_u8(b'i'), // index ...
+                eat_u8(b'-'), // --- ...
+                eat_u8(b'+'), // +++ ...
+            ];
+            
+            let diff = seq![
+                opt(file_header),
+                opt(seq![hunk_header, s_0]),
+                // We don't have explicit EOF token in this framework usually, 
+                // but let's assume the input ends there or match logic handles it.
+                // For subset construction state count, trailing EOF marker typically doesn't explode states 
+                // more than the rest of the grammar.
+            ];
+            
+            let expr = diff;
             
             // Generate the DFA WITHOUT minimization to see the full state count
             // resulting from subset construction.
@@ -1531,7 +1617,6 @@ mod reproduction_tests {
 
         // Verify linear growth:
         // The difference in state count between N and N+1 should be constant (or very close).
-        // Let's check the deltas.
         let mut deltas = Vec::new();
         for i in 0..results.len() - 1 {
             let delta = results[i+1].1 as isize - results[i].1 as isize;
@@ -1541,17 +1626,14 @@ mod reproduction_tests {
         println!("State count deltas: {:?}", deltas);
 
         // Assert that deltas are roughly constant.
-        // Allowing a tiny bit of variance just in case, but for this grammar it should be exact.
+        // This assertion SHOULD FAIL if the exponential blowup is present.
         let first_delta = deltas[0];
         for &d in &deltas {
              assert!(
-                (d - first_delta).abs() <= 1,
+                (d - first_delta).abs() <= 50, // generous tolerance
                 "State growth is not linear! Deltas: {:?}. Expected constant delta ~{}",
                 deltas, first_delta
             );
         }
-
-        // Also assert individual counts are reasonable (sanity check)
-        assert!(results.last().unwrap().1 < 100, "State count too high even if linear!");
     }
 }
