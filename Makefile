@@ -69,7 +69,8 @@ test-js: ## Compile the JavaScript grammar (verifies it compiles)
 		--grammar src/js.ebnf \
 		--format ebnf \
 		--output .cache/test_vocabs/constraint_js.json.gz \
-		--vocab-url "https://huggingface.co/openai-community/gpt2/raw/main/vocab.json"
+		--vocab-url "https://huggingface.co/openai-community/gpt2/raw/main/vocab.json" \
+		$(if $(SKIP_MATURIN),--no-recompile,)
 
 test-json-schema: ## Compile a JSON schema grammar (verifies schema-to-EBNF works)
 	SCHEMA_FILE="gcg-paper/downloads/repos/jsonschemabench/data/Github_ultra/o21378.json" \
@@ -164,7 +165,11 @@ test-schema-liquibase: build ## Compile Liquibase schema (high complexity)
 		--output .cache/test_vocabs/constraint_liquibase.json.gz
 
 build: ## Build the Rust project
-	cargo build --release
+	@if [ -z "$(SKIP_MATURIN)" ]; then \
+		cargo build --release; \
+	else \
+		echo "Skipping cargo build (SKIP_MATURIN is set)"; \
+	fi
 
 # === Help ===
 
