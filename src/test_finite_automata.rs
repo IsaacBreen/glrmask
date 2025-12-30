@@ -1588,3 +1588,80 @@ mod reproduction_tests {
         }
     }
 }
+
+/// Tests for reproducing slow DFA build times from specific schema compilations.
+/// These tests load serialized ExprGroups and time their build process.
+#[cfg(test)]
+mod slow_dfa_build_tests {
+    use crate::finite_automata::ExprGroups;
+    use crate::json_serialization::JSONConvertible;
+    use std::time::{Duration, Instant};
+    use std::io::Read;
+
+    /// Helper to load ExprGroups from a gzipped JSON file in testdata/expr_groups/
+    fn load_expr_groups_gz(filename: &str) -> ExprGroups {
+        use serde::de::Deserialize;
+        
+        let path = format!("testdata/expr_groups/{}", filename);
+        let file = std::fs::File::open(&path)
+            .expect(&format!("Failed to open {}", path));
+        let mut decoder = flate2::read::GzDecoder::new(file);
+        let mut json_str = String::new();
+        decoder.read_to_string(&mut json_str)
+            .expect(&format!("Failed to decompress {}", path));
+        
+        // Use unbounded depth deserializer from serde_json
+        let mut deserializer = serde_json::Deserializer::from_str(&json_str);
+        deserializer.disable_recursion_limit();
+        let json_node = crate::json_serialization::JSONNode::deserialize(&mut deserializer)
+            .expect(&format!("Failed to parse JSON from {}", path));
+        
+        ExprGroups::from_json(json_node)
+            .expect(&format!("Failed to deserialize ExprGroups from {}", path))
+    }
+
+    /// Test DFA build time for the FULL ApolloRouter schema expressions.
+    /// This test reproduces the slow build from:
+    ///   MACRO_DEBUG_LEVEL=4 make test-schema-id ID=ApolloRouter---apollo-router-2.9.0
+    ///
+    /// The ExprGroups were serialized by running the above command with 
+    /// DUMP_EXPR_GROUPS_PATH=testdata/expr_groups/apollo_router_full.json
+    ///
+    /// Expected stats: ~58713 nodes, ~338439 DFA states before minimization,
+    /// ~83733 states after minimization.
+    ///
+    /// NOTE: This test will take a LONG time (>10 seconds) and may use significant RAM.
+    /// It's marked with #[ignore] by default.
+    #[test]
+    #[ignore] // Enable with: cargo test -- --ignored
+    fn test_apollo_router_dfa_build_time() {
+        println!("Loading compressed ExprGroups from apollo_router_full.json.gz...");
+        let start_load = Instant::now();
+        let expr_groups = load_expr_groups_gz("apollo_router_full.json.gz");
+        println!("Load time: {:?}", start_load.elapsed());
+        
+        println!("Loaded ExprGroups with {} groups", expr_groups.groups.len());
+        let stats = expr_groups.get_stats();
+        println!("Expression stats: {}", stats);
+        
+        // Time the build process
+        println!("Starting DFA build (this will take a while)...");
+        let start = Instant::now();
+        let regex = expr_groups.build();
+        let elapsed = start.elapsed();
+        
+        println!("DFA build time: {:?}", elapsed);
+        println!("DFA has {} states", regex.dfa.states.len());
+        
+        // This test is expected to take a long time.
+        // The purpose is to reproduce the slow build for profiling.
+        // We set a generous timeout to detect catastrophic regressions.
+        let max_acceptable_time = Duration::from_secs(120); // 2 minutes
+        assert!(
+            elapsed < max_acceptable_time,
+            "DFA build took {:?}, which exceeds the acceptable threshold of {:?}. \
+             This may indicate a catastrophic performance regression.",
+            elapsed, max_acceptable_time
+        );
+    }
+}

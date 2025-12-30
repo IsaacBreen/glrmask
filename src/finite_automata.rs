@@ -888,6 +888,20 @@ impl ExprGroups {
     }
 
     fn build_impl(self, minimize: bool) -> Regex {
+        // Debug: serialize ExprGroups if DUMP_EXPR_GROUPS_PATH env var is set.
+        // Useful for capturing expressions that cause slow builds.
+        // Usage: DUMP_EXPR_GROUPS_PATH=expr_groups.json cargo test ...
+        if let Ok(dump_path) = std::env::var("DUMP_EXPR_GROUPS_PATH") {
+            use crate::json_serialization::JSONConvertible;
+            let json = self.to_json();
+            let json_str = json.to_json_string();
+            if let Err(e) = std::fs::write(&dump_path, &json_str) {
+                eprintln!("Failed to write ExprGroups to {}: {}", dump_path, e);
+            } else {
+                eprintln!("Wrote ExprGroups ({} bytes) to {}", json_str.len(), dump_path);
+            }
+        }
+        
         let stats = self.get_stats();
         crate::debug!(5, "Expr Stats: {}", stats);
 
