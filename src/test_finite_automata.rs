@@ -1508,9 +1508,9 @@ mod reproduction_tests {
 
             // Build grammar bottom-up
             // Use `shared` to prevent expression tree explosion (DAG structure)
-            let mut s_next = crate::finite_automata::shared(plus_lines.clone());
+            let mut s_next = shared(plus_lines.clone());
             let mut line_next: Option<Expr> = None;
-            
+
             for i in (0..n).rev() {
                 let continuation = if i == n - 1 {
                     opt(seq![plus_lines.clone(), hunk_header.clone(), s_next.clone()])
@@ -1520,12 +1520,12 @@ mod reproduction_tests {
                         seq![plus_lines.clone(), hunk_header.clone(), s_next.clone()]
                     ])
                 };
-                
+
                 let line_i = seq![plus_lines.clone(), content.clone(), continuation];
                 let s_i = choice![line_i.clone(), s_next.clone()];
-                
-                line_next = Some(crate::finite_automata::shared(line_i));
-                s_next = crate::finite_automata::shared(s_i);
+
+                line_next = Some(shared(line_i));
+                s_next = shared(s_i);
             }
             
             let s_0 = s_next;
