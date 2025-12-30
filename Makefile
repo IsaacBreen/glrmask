@@ -113,6 +113,15 @@ show-diff-grammar: ffi ## Print EBNF grammar for a file to stdout (usage: make s
 	@if [ -z "$(FILE)" ]; then echo "Usage: make show-diff-grammar FILE=<file>"; exit 1; fi
 	SOURCE_FILE="$(FILE)" PRINT_GRAMMAR=1 ONLY_GRAMMAR=1 $(PYTHON) scripts/test_diff.py
 
+compile-ebnf: ## Compile an EBNF grammar (usage: make compile-ebnf FILE=src/js.ebnf [OUT=out.json.gz])
+	@if [ -z "$(FILE)" ]; then echo "Usage: make compile-ebnf FILE=<ebnf_file> [OUT=<output_file>]"; exit 1; fi
+	python scripts/compile.py \
+		--grammar "$(FILE)" \
+		--format ebnf \
+		--output "$${OUT:-.cache/test_vocabs/constraint_$$(basename "$(FILE)" .ebnf).json.gz}" \
+		--vocab-url "https://huggingface.co/openai-community/gpt2/raw/main/vocab.json" \
+		$(if $(SKIP_MATURIN),--no-recompile,)
+
 
 
 # === Hard Schema Compilation Tests ===
