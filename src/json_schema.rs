@@ -33,8 +33,18 @@ pub struct JsonSchemaConverter {
     generated_refs: HashSet<String>,
     /// Stack of refs currently being processed (for detecting self-references)
     current_ref_stack: Vec<String>,
+    /// Stack of refs currently being resolved (for detecting cycles during inlining analysis)
+    resolving_stack: Vec<String>,
+    /// Cache of inlined references: path -> expr
+    inlined_refs: BTreeMap<String, GrammarExpr>,
+    /// Map of definition paths to their schemas
+    definitions: BTreeMap<String, Value>,
     /// Rules to be emitted: (name, expr)
     rules: Vec<(String, GrammarExpr)>,
+    /// Deduplication map: Expression -> Rule Name
+    rule_dedup: BTreeMap<GrammarExpr, String>,
+    /// Alias map: Duplicate Rule Name -> Original Rule Name
+    aliases: BTreeMap<String, String>,
     /// Queue of pending refs to process: (ref_path, schema)
     pending_refs: Vec<(String, Value)>,
     /// Track which primitive rules are needed
@@ -53,7 +63,12 @@ impl JsonSchemaConverter {
             resolved_refs: BTreeMap::new(),
             generated_refs: HashSet::new(),
             current_ref_stack: Vec::new(),
+            resolving_stack: Vec::new(),
+            inlined_refs: BTreeMap::new(),
+            definitions: BTreeMap::new(),
             rules: Vec::new(),
+            rule_dedup: BTreeMap::new(),
+            aliases: BTreeMap::new(),
             pending_refs: Vec::new(),
             needs_json_value: false,
             needs_json_object: false,
@@ -70,7 +85,55 @@ impl JsonSchemaConverter {
 
     /// Add a rule to the grammar.
     fn add_rule(&mut self, name: String, expr: GrammarExpr) {
+        if let Some(existing_name) = self.rule_dedup.get(&expr) {
+            if *existing_name != name {
+                self.aliases.insert(name, existing_name.clone());
+            }
+            return;
+        }
+        self.rule_dedup.insert(expr.clone(), name.clone());
         self.rules.push((name, expr));
+    }
+    
+    fn apply_aliases(&mut self) {
+        // Resolve alias chains
+        let mut resolved_aliases = self.aliases.clone();
+        let keys: Vec<String> = self.aliases.keys().cloned().collect();
+        // Simple loop to resolve chains (safe upper bound)
+        for _ in 0..keys.len() { 
+             let mut changed = false;
+             for val in resolved_aliases.values_mut() {
+                 if let Some(target) = self.aliases.get(val) {
+                     *val = target.clone();
+                     changed = true;
+                 }
+             }
+             if !changed { break; }
+        }
+
+        // Apply to all rules
+        for (_, expr) in &mut self.rules {
+             Self::update_expr_refs(expr, &resolved_aliases);
+        }
+    }
+
+    fn update_expr_refs(expr: &mut GrammarExpr, aliases: &BTreeMap<String, String>) {
+        match expr {
+            GrammarExpr::Ref(name) => {
+                if let Some(target) = aliases.get(name) {
+                    *name = target.clone();
+                }
+            },
+            GrammarExpr::Sequence(exprs) | GrammarExpr::Choice(exprs) => {
+                for e in exprs {
+                    Self::update_expr_refs(e, aliases);
+                }
+            },
+            GrammarExpr::Optional(e) | GrammarExpr::Repeat(e) => {
+                Self::update_expr_refs(e, aliases);
+            },
+            _ => {}
+        }
     }
 
     /// Reference _json_value and mark it as needed
@@ -125,6 +188,9 @@ impl JsonSchemaConverter {
 
         // Add primitive rules
         self.add_primitive_rules();
+        
+        // Resolve aliases
+        self.apply_aliases();
 
         Ok((self.rules, root_rule))
     }
@@ -136,35 +202,82 @@ impl JsonSchemaConverter {
             if let Some(defs) = self.root_schema.get(*key).and_then(|v| v.as_object()).cloned() {
                 for (name, def_schema) in defs {
                     let ref_path = format!("#/{}/{}", key, name);
-                    let rule_name = self.new_rule_name("def");
-                    self.resolved_refs.insert(ref_path.clone(), rule_name);
-                    self.pending_refs.push((ref_path, def_schema.clone()));
+                    self.definitions.insert(ref_path, def_schema);
                 }
             }
         }
     }
 
-    /// Resolve a $ref and return the rule name.
-    fn resolve_ref(&mut self, ref_path: &str) -> Option<String> {
+    /// Resolve a $ref and return an expression (inlined or ref).
+    fn resolve_ref_expr(&mut self, ref_path: &str) -> Option<GrammarExpr> {
+        // 1. Check if already inlined
+        if let Some(expr) = self.inlined_refs.get(ref_path) {
+            return Some(expr.clone());
+        }
+        
+        // 2. Check if already resolved to a rule
         if let Some(name) = self.resolved_refs.get(ref_path) {
-            return Some(name.clone());
+            return Some(GrammarExpr::Ref(name.clone()));
+        }
+        
+        // 3. Cycle detection
+        if self.resolving_stack.contains(&ref_path.to_string()) {
+            // Recursive reference detected during inlining analysis.
+            // We must use a named rule. Assign one now.
+            let rule_name = self.new_rule_name("rec");
+            self.resolved_refs.insert(ref_path.to_string(), rule_name.clone());
+            // Schema will be processed when popping stack or explicitly pushed
+            return Some(GrammarExpr::Ref(rule_name));
         }
 
-        // Try to resolve the reference
-        if ref_path.starts_with("#/") {
+        // 4. Find the schema
+        let target_schema = if let Some(schema) = self.definitions.get(ref_path) {
+            schema.clone()
+        } else if ref_path.starts_with("#/") {
             let parts: Vec<&str> = ref_path[2..].split('/').collect();
             let mut target = self.root_schema.clone();
             for part in &parts {
-                target = target.get(*part)?.clone();
+                target = match target.get(*part) {
+                    Some(t) => t.clone(),
+                    None => return None,
+                };
             }
+            target
+        } else {
+            return None;
+        };
 
-            let rule_name = self.new_rule_name("ref");
-            self.resolved_refs.insert(ref_path.to_string(), rule_name.clone());
-            self.pending_refs.push((ref_path.to_string(), target));
-            return Some(rule_name);
-        }
-
-        None // External ref - not supported
+        // 5. Try to inline
+        self.resolving_stack.push(ref_path.to_string());
+        
+        let result = match self.convert_schema_inline(&target_schema) {
+            Ok(expr) => {
+                // If a rule name was assigned during recursion (step 3 hit), we MUST make it a rule
+                if let Some(rule_name) = self.resolved_refs.get(ref_path) {
+                     self.pending_refs.push((ref_path.to_string(), target_schema));
+                     GrammarExpr::Ref(rule_name.clone())
+                } else {
+                     // Success! Cache inline.
+                     self.inlined_refs.insert(ref_path.to_string(), expr.clone());
+                     expr
+                }
+            },
+            Err(_) => {
+                // Complex schema, needs a rule.
+                // Check if one was already assigned
+                if !self.resolved_refs.contains_key(ref_path) {
+                    let new_name = self.new_rule_name("def");
+                    self.resolved_refs.insert(ref_path.to_string(), new_name);
+                }
+                let rule_name = self.resolved_refs.get(ref_path).unwrap().clone();
+                
+                self.pending_refs.push((ref_path.to_string(), target_schema));
+                GrammarExpr::Ref(rule_name)
+            }
+        };
+        
+        self.resolving_stack.pop();
+        Some(result)
     }
 
     /// Try to convert a schema to an inline grammar expression without creating a named rule.
@@ -182,10 +295,10 @@ impl JsonSchemaConverter {
         
         let obj = schema.as_object().ok_or("complex")?;
         
-        // Handle $ref - return reference to the resolved rule
+        // Handle $ref - return expression (inlined or ref)
         if let Some(ref_val) = obj.get("$ref").and_then(|v| v.as_str()) {
-            if let Some(ref_rule) = self.resolve_ref(ref_val) {
-                return Ok(GrammarExpr::Ref(ref_rule));
+            if let Some(expr) = self.resolve_ref_expr(ref_val) {
+                return Ok(expr);
             }
             return Ok(self.json_value_ref());
         }
@@ -200,23 +313,23 @@ impl JsonSchemaConverter {
             let alternatives: Vec<GrammarExpr> = enum_vals.iter()
                 .map(|v| self.value_to_literal(v))
                 .collect();
+            if alternatives.len() == 1 {
+                return Ok(alternatives[0].clone());
+            }
             return Ok(GrammarExpr::Choice(alternatives));
         }
         
-        // Handle allOf with a single inlineable item
+        // Handle allOf - try to merge and inline
         if let Some(all_of) = obj.get("allOf").and_then(|v| v.as_array()) {
-            // Check if this allOf can be simplified to a single inline ref
-            // This handles patterns like: { "allOf": [{ "$ref": "#/definitions/Foo" }] }
-            if all_of.len() == 1 {
-                // Check if the merged result is inlineable
-                if let Ok(merged) = self.merge_all_of(all_of, obj) {
-                    // Try to inline the merged result recursively
-                    if let Ok(expr) = self.convert_schema_inline(&merged) {
-                        return Ok(expr);
-                    }
+            // Try to merge allOf. If successful, see if the result is inlineable.
+            if let Ok(merged) = self.merge_all_of(all_of, obj) {
+                if let Ok(expr) = self.convert_schema_inline(&merged) {
+                    return Ok(expr);
                 }
             }
-            return Err("complex".to_string());
+            // If merge fails or result is complex, fall through to Err("complex")
+            // But wait, if we don't handle it here, it drops to "complex" error at end.
+            // Which forces a rule. Correct.
         }
         
         // Handle simple types (no additional constraints that matter)
@@ -248,9 +361,9 @@ impl JsonSchemaConverter {
                     _ => Ok(self.json_value_ref()),
                 };
             } else if let Some(types) = type_val.as_array() {
-                // Multi-type: inline if all are primitives
+                // Multi-type: inline if all are primitives OR simple object/array
                 let mut alternatives = Vec::new();
-                let mut all_primitive = true;
+                let mut all_inline = true;
                 for t in types {
                     if let Some(type_str) = t.as_str() {
                         match type_str {
@@ -259,20 +372,65 @@ impl JsonSchemaConverter {
                             "number" => alternatives.push(GrammarExpr::Ref("JSON_NUMBER".to_string())),
                             "boolean" => alternatives.push(GrammarExpr::Ref("JSON_BOOL".to_string())),
                             "null" => alternatives.push(GrammarExpr::Ref("JSON_NULL".to_string())),
-                            _ => { all_primitive = false; break; }
+                            "object" => {
+                                let has_props = obj.get("properties").and_then(|v| v.as_object()).map(|p| !p.is_empty()).unwrap_or(false);
+                                if !has_props && obj.get("additionalProperties") != Some(&Value::Bool(false)) {
+                                    alternatives.push(self.json_object_ref());
+                                } else { all_inline = false; break; }
+                            }
+                            "array" => {
+                                if obj.get("items").is_none() && obj.get("prefixItems").is_none() {
+                                    alternatives.push(self.json_array_ref());
+                                } else { all_inline = false; break; }
+                            }
+                            _ => { all_inline = false; break; }
                         }
                     } else {
-                        all_primitive = false;
+                        all_inline = false;
                         break;
                     }
                 }
-                if all_primitive && !alternatives.is_empty() {
+                if all_inline && !alternatives.is_empty() {
                     return Ok(GrammarExpr::Choice(alternatives));
                 }
             }
         }
         
         // For complex schemas (allOf, anyOf, oneOf, objects, arrays), need a named rule
+        
+        // Handle anyOf / oneOf - inline if all alternatives are inlineable
+        if let Some(any_of) = obj.get("anyOf").or_else(|| obj.get("oneOf")).and_then(|v| v.as_array()) {
+            // Check if parent has merging properties - if so, it's complex
+            // Note: We ignore "type" here as it's often consistent with alternatives
+            let has_parent_props = obj.contains_key("properties") || 
+                                   obj.contains_key("additionalProperties");
+            
+            if !has_parent_props {
+                let mut alternatives = Vec::new();
+                let mut all_inline = true;
+                
+                for sub in any_of {
+                    if let Ok(expr) = self.convert_schema_inline(sub) {
+                        alternatives.push(expr);
+                    } else {
+                        all_inline = false;
+                        break;
+                    }
+                }
+                
+                if all_inline && !alternatives.is_empty() {
+                    return Ok(GrammarExpr::Choice(alternatives));
+                }
+            }
+        }
+
+        // If no type/combining keywords, it's a generic JSON value
+        if !obj.contains_key("type") && !obj.contains_key("allOf") && 
+           !obj.contains_key("anyOf") && !obj.contains_key("oneOf") &&
+           !obj.contains_key("properties") && !obj.contains_key("items") {
+             return Ok(self.json_value_ref());
+        }
+
         Err("complex".to_string())
     }
 
@@ -294,8 +452,8 @@ impl JsonSchemaConverter {
 
         // Handle $ref
         if let Some(ref_val) = obj.get("$ref").and_then(|v| v.as_str()) {
-            if let Some(ref_rule) = self.resolve_ref(ref_val) {
-                self.add_rule(rule_name.clone(), GrammarExpr::Ref(ref_rule));
+            if let Some(expr) = self.resolve_ref_expr(ref_val) {
+                self.add_rule(rule_name.clone(), expr);
                 return Ok(rule_name);
             } else {
                 let ref_expr = self.json_value_ref();
