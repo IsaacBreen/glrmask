@@ -1588,6 +1588,25 @@ impl GrammarDefinition {
             def.optimize();
         }
         debug!(5, "Optimization complete, returning");
+        
+        // Print grammar stats at debug level 4
+        let num_nonterminals: usize = def.productions.iter()
+            .map(|p| &p.lhs)
+            .collect::<HashSet<_>>()
+            .len();
+        let num_terminals = def.regex_name_to_group_id.len()
+            + def.literal_to_group_id.len()
+            + def.external_name_to_group_id.len();
+        debug!(
+            4,
+            "Grammar stats: {} prods, {} nonterminals, {} terminals ({} regex, {} literal, {} external)",
+            def.productions.len(),
+            num_nonterminals,
+            num_terminals,
+            def.regex_name_to_group_id.len(),
+            def.literal_to_group_id.len(),
+            def.external_name_to_group_id.len()
+        );
 
         Ok(def)
     }
