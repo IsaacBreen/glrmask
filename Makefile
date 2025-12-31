@@ -86,7 +86,7 @@ test-tsconfig: ## Compile TSConfig schema
 
 PYTHON ?= python
 
-test-schema-id: ## Compile any benchmark schema by ID (usage: make test-schema-id ID=ApolloRouter---apollo-router-2.9.0)
+test-schema-id: ffi ## Compile any benchmark schema by ID (usage: make test-schema-id ID=ApolloRouter---apollo-router-2.9.0)
 	@if [ -z "$(ID)" ]; then echo "Usage: make test-schema-id ID=<schema_id>"; exit 1; fi
 	SCHEMA_ID="$(ID)" $(PYTHON) scripts/test_json_schema.py
 
@@ -122,8 +122,20 @@ compile-ebnf: ## Compile an EBNF grammar (usage: make compile-ebnf FILE=src/js.e
 		--vocab-url "https://huggingface.co/openai-community/gpt2/raw/main/vocab.json" \
 		$(if $(SKIP_MATURIN),--no-recompile,)
 
+# === Token Error Reproduction (sep1 failures) ===
+# These reproduce cases where sep1 rejects valid tokens from test data
 
+repro-jstsdraft4-enum: ffi ## Reproduce JSTSDraft4 enum failure (whitespace issue at step 1)
+	SCHEMA_ID="JSTSDraft4---enum_8_enumwithtruedoesnotmatch1" \
+		$(PYTHON) scripts/test_json_schema.py
 
+repro-openapi: ffi ## Reproduce OpenAPI failure (property order at step 500)
+	SCHEMA_ID="OpenAPI---openapi-3.0" \
+		$(PYTHON) scripts/test_json_schema.py
+
+repro-washingtonpost: ffi ## Reproduce WashingtonPost failure (property key at step 45)
+	SCHEMA_ID="WashingtonPost---wp_68_Normalized" \
+		$(PYTHON) scripts/test_json_schema.py
 # === Hard Schema Compilation Tests ===
 # These use the Rust grammar_compiler binary directly with --json-schema
 
