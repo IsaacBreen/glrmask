@@ -1027,10 +1027,7 @@ impl JsonSchemaConverter {
             .map(|v| v == "1")
             .unwrap_or(false);
         
-        if no_whitespace {
-            // Empty WS - no whitespace allowed
-            self.add_rule("WS".to_string(), GrammarExpr::Sequence(vec![]));
-        } else {
+        if !no_whitespace {
             self.add_rule("WS".to_string(), GrammarExpr::Repeat(Box::new(
                 GrammarExpr::Choice(vec![
                     GrammarExpr::Literal(b" ".to_vec()),
