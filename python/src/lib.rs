@@ -401,6 +401,10 @@ impl PyGrammarDefinition {
         })?;
         Ok(PyGrammarDefinition { inner: grammar })
     }
+
+    fn to_ebnf(&self) -> String {
+        self.inner.to_ebnf()
+    }
 }
 
 #[pyclass(name = "CompiledGrammar")]

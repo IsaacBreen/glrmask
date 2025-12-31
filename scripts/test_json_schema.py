@@ -107,15 +107,28 @@ ebnf = _sep1.json_schema_to_ebnf_py(json.dumps(schema))
 ebnf_time = time.time() - start
 print(f"   EBNF conversion: {ebnf_time*1000:.1f}ms ({len(ebnf)} chars)", file=sys.stderr)
 
-# If PRINT_EBNF is set, just output the EBNF and exit
+# If PRINT_EBNF is set, output the OPTIMIZED EBNF and exit
 if os.environ.get("PRINT_EBNF"):
+    print("\n2. Parsing EBNF to GrammarDefinition and OPTIMIZING...", file=sys.stderr)
+    start = time.time()
+    # Logic to optimize:
+    # 1. We have the raw EBNF from step 1
+    # 2. Parse it into GrammarDefinition (this runs optimizations)
+    grammar_def = _sep1.grammar_definition_from_ebnf(ebnf)
+    
+    # 3. Output the optimized EBNF
+    optimized_ebnf = grammar_def.to_ebnf()
+    
+    ebnf_time = time.time() - start
+    print(f"   Optimization: {ebnf_time*1000:.1f}ms", file=sys.stderr)
+
     out_file = os.environ.get("OUT_FILE")
     if out_file:
         with open(out_file, 'w') as f:
-            f.write(ebnf)
-        print(f"EBNF written to: {out_file}", file=sys.stderr)
+            f.write(optimized_ebnf)
+        print(f"Optimized EBNF written to: {out_file}", file=sys.stderr)
     else:
-        print(ebnf)
+        print(optimized_ebnf)
     sys.exit(0)
 
 # Step 2: Parse EBNF to GrammarDefinition (includes optimization)
