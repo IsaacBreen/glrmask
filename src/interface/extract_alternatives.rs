@@ -59,6 +59,9 @@ pub fn extract_complex_alternatives(grammar: &mut GrammarDefinition) {
     let mut extracted_productions: Vec<Production> = Vec::new();
     let mut helper_counter = 0;
     
+    // Track RHS -> helper name mapping for deduplication
+    let mut rhs_to_helper: HashMap<Vec<Symbol>, String> = HashMap::new();
+    
     // Mark productions that will be extracted (complex ones only)
     let mut extracted_indices: HashSet<usize> = HashSet::new();
     for (_, _, complex_indices) in &to_extract {
@@ -89,18 +92,29 @@ pub fn extract_complex_alternatives(grammar: &mut GrammarDefinition) {
             new_productions.push(grammar.productions[idx].clone());
         }
         
-        // Extract complex alternatives into helper rules
+        // Extract complex alternatives into helper rules WITH DEDUPLICATION
         for &idx in complex_indices {
             let prod = &grammar.productions[idx];
             
-            let helper_name = format!("{}_alt{}", nt, helper_counter);
-            helper_counter += 1;
-            
-            // Create helper production
-            extracted_productions.push(Production {
-                lhs: NonTerminal(helper_name.clone()),
-                rhs: prod.rhs.clone(),
-            });
+            // Check if we already have a helper for this RHS
+            let helper_name = if let Some(existing_helper) = rhs_to_helper.get(&prod.rhs) {
+                existing_helper.clone()
+            } else {
+                // Create new helper
+                let new_helper = format!("{}_alt{}", nt, helper_counter);
+                helper_counter += 1;
+                
+                // Track this RHS pattern
+                rhs_to_helper.insert(prod.rhs.clone(), new_helper.clone());
+                
+                // Create helper production
+                extracted_productions.push(Production {
+                    lhs: NonTerminal(new_helper.clone()),
+                    rhs: prod.rhs.clone(),
+                });
+                
+                new_helper
+            };
             
             // Add reference to helper in main rule
             new_productions.push(Production {
@@ -115,5 +129,11 @@ pub fn extract_complex_alternatives(grammar: &mut GrammarDefinition) {
     
     grammar.productions = new_productions;
     
-    crate::debug!(4, "Extracted {} helper rules", helper_counter);
+    let reused_count = to_extract.iter()
+        .map(|(_, _, complex)| complex.len())
+        .sum::<usize>() - helper_counter;
+    
+    crate::debug!(4, "Extracted {} helper rules ({} deduplicated, {} unique)", 
+        to_extract.iter().map(|(_, _, complex)| complex.len()).sum::<usize>(),
+        reused_count, helper_counter);
 }
