@@ -80,6 +80,11 @@ impl<'a> GrammarOptimizer<'a> {
         self.stats.initial_productions = self.grammar.productions.len();
         self.stats.initial_terminals = self.count_terminals();
 
+        // Extract complex alternatives before optimization (reduces terminal count)
+        if std::env::var("EXTRACT_COMPLEX_ALTERNATIVES").is_ok() {
+            crate::interface::extract_alternatives::extract_complex_alternatives(self.grammar);
+        }
+
         // Try to optimize the grammar by converting regular sub-grammars to regexes
         self.optimize_regular_subgrammars();
 
