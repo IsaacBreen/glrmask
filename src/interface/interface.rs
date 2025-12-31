@@ -1842,17 +1842,19 @@ impl GrammarDefinition {
     /// rule ::= expr;
     /// ```
     pub fn from_ebnf(ebnf_source: &str) -> Result<Self, String> {
-        // Apply choice factoring by default
+        // Parse EBNF first
+        let ebnf = EbnfParser::new(ebnf_source).and_then(|mut p| p.parse())?;
+        
+        // Apply choice factoring by default on parsed GrammarExpr
         // This significantly improves compilation time (7-8s vs 25-30s for complex grammars)
         // Disable with DISABLE_EBNF_CHOICE_FACTORING=1
-        let ebnf_source = if std::env::var("DISABLE_EBNF_CHOICE_FACTORING").is_ok() {
-            ebnf_source.to_string()
+        let grammar_rules = if std::env::var("DISABLE_EBNF_CHOICE_FACTORING").is_ok() {
+            ebnf.grammar_rules
         } else {
-            crate::interface::ebnf_factoring::factor_ebnf_choices(ebnf_source)
+            crate::interface::ebnf_factoring::factor_grammar_rules(ebnf.grammar_rules)
         };
         
-        let ebnf = EbnfParser::new(&ebnf_source).and_then(|mut p| p.parse())?;
-        Self::from_parsed_rules(ebnf.grammar_rules, ebnf.ignore_symbol_name)
+        Self::from_parsed_rules(grammar_rules, ebnf.ignore_symbol_name)
     }
 
     /// Like `from_ebnf` but without grammar optimization.
