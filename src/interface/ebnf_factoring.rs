@@ -227,214 +227,6 @@ fn extract_tail(alt: &str) -> Option<(String, String)> {
     None
 }
 
-/// Tokenize an alternative into a sequence of tokens (terminals, non-terminals, operators)
-fn tokenize_alt(alt: &str) -> Vec<String> {
-    let mut tokens = Vec::new();
-    let mut current = String::new();
-    let mut in_quote = false;
-    let mut quote_char = ' ';
-    let mut depth = 0;
-    
-    for c in alt.chars() {
-        match c {
-            '\'' | '"' if !in_quote => {
-                if !current.is_empty() {
-                    tokens.push(current.trim().to_string());
-                    current.clear();
-                }
-                in_quote = true;
-                quote_char = c;
-                current.push(c);
-            }
-            c if in_quote && c == quote_char => {
-                current.push(c);
-                in_quote = false;
-                tokens.push(current.clone());
-                current.clear();
-            }
-            c if in_quote => {
-                current.push(c);
-            }
-            '(' if !in_quote => {
-                if !current.is_empty() {
-                    tokens.push(current.trim().to_string());
-                    current.clear();
-                }
-                depth += 1;
-                current.push(c);
-            }
-            ')' if !in_quote => {
-                current.push(c);
-                depth -= 1;
-                if depth == 0 {
-                    tokens.push(current.trim().to_string());
-                    current.clear();
-                }
-            }
-            c if depth > 0 => {
-                current.push(c);
-            }
-            c if c.is_whitespace() && depth == 0 && !in_quote => {
-                if !current.is_empty() {
-                    tokens.push(current.trim().to_string());
-                    current.clear();
-                }
-            }
-            _ => {
-                current.push(c);
-            }
-        }
-    }
-    
-    if !current.is_empty() {
-        tokens.push(current.trim().to_string());
-    }
-    
-    tokens
-}
-
-/// Find the longest common suffix among a set of token sequences
-fn find_common_suffix(token_seqs: &[Vec<String>]) -> Vec<String> {
-    if token_seqs.is_empty() || token_seqs.len() == 1 {
-        return Vec::new();
-    }
-    
-    let min_len = token_seqs.iter().map(|s| s.len()).min().unwrap_or(0);
-    if min_len == 0 {
-        return Vec::new();
-    }
-    
-    let mut suffix_len = 0;
-    for i in 1..=min_len {
-        let pos = min_len - i;
-        let token = &token_seqs[0][token_seqs[0].len() - i];
-        
-        if token_seqs.iter().all(|seq| &seq[seq.len() - i] == token) {
-            suffix_len = i;
-        } else {
-            break;
-        }
-    }
-    
-    if suffix_len > 0 {
-        let first = &token_seqs[0];
-        first[first.len() - suffix_len..].to_vec()
-    } else {
-        Vec::new()
-    }
-}
-
-/// Group alternatives by their exact suffix and factor each group
-fn factor_by_suffix_groups(
-    alts: &[String],
-    rules: &HashMap<String, String>,
-    recursive_rules: &HashSet<String>,
-    new_rules: &mut Vec<(String, String)>,
-    factor_cache: &mut HashMap<String, String>,
-    helper_counter: &mut usize,
-    rule_name: &str,
-) -> Vec<String> {
-    if alts.len() < 2 {
-        return alts.to_vec();
-    }
-    
-    // Tokenize all alternatives
-    let token_seqs: Vec<(String, Vec<String>)> = alts.iter()
-        .map(|alt| (alt.clone(), tokenize_alt(alt)))
-        .collect();
-    
-    // Group alternatives by their suffix (trying different lengths)
-    let mut suffix_groups: HashMap<String, Vec<(String, Vec<String>)>> = HashMap::new();
-    let mut ungrouped = Vec::new();
-    
-    for (alt, tokens) in token_seqs {
-        if tokens.len() < 2 {
-            ungrouped.push(alt);
-            continue;
-        }
-        
-        // Try to find an existing group with matching suffix
-        let mut matched = false;
-        for suffix_len in (2..=tokens.len()).rev() {
-            let suffix = tokens[tokens.len() - suffix_len..].join(" ");
-            
-            if suffix_groups.contains_key(&suffix) {
-                suffix_groups.get_mut(&suffix).unwrap().push((alt.clone(), tokens.clone()));
-                matched = true;
-                break;
-            }
-        }
-        
-        if !matched {
-            // Try to create a new group with largest possible suffix
-            for suffix_len in (2..=tokens.len()).rev() {
-                let suffix = tokens[tokens.len() - suffix_len..].join(" ");
-                suffix_groups.entry(suffix).or_default().push((alt.clone(), tokens.clone()));
-                matched = true;
-                break;
-            }
-        }
-        
-        if !matched {
-            ungrouped.push(alt);
-        }
-    }
-    
-    let mut factored_alts = Vec::new();
-    
-    // Process each suffix group
-    for (suffix_str, group) in suffix_groups {
-        if group.len() < 2 {
-            // Only one alternative with this suffix, keep as-is
-            factored_alts.push(group[0].0.clone());
-            continue;
-        }
-        
-        // Extract prefixes
-        let suffix_tokens: Vec<String> = tokenize_alt(&suffix_str);
-        let prefixes: Vec<String> = group.iter().map(|(_, tokens)| {
-            tokens[..tokens.len() - suffix_tokens.len()].join(" ")
-        }).collect();
-        
-        // Check if all prefixes are safe
-        if !prefixes.iter().all(|p| is_safe_subtree(p, rules, recursive_rules)) {
-            // Not all safe, keep as-is
-            for (alt, _) in group {
-                factored_alts.push(alt);
-            }
-            continue;
-        }
-        
-        // Create factored alternative
-        let prefix_body = prefixes.join(" | ");
-        
-        // Check cache for prefix helper
-        let prefix_helper = if let Some(existing) = factor_cache.get(&prefix_body) {
-            existing.clone()
-        } else {
-            let mut term_name = format!("__{}_pfx", rule_name);
-            let mut collision_idx = 1;
-            let base_name = term_name.clone();
-            while new_rules.iter().any(|(n, _)| n == &term_name) {
-                term_name = format!("{}_{}", base_name, collision_idx);
-                collision_idx += 1;
-            }
-            
-            new_rules.push((term_name.clone(), format!("( {} )", prefix_body)));
-            factor_cache.insert(prefix_body, term_name.clone());
-            *helper_counter += 1;
-            term_name
-        };
-        
-        factored_alts.push(format!("{} {}", prefix_helper, suffix_str));
-    }
-    
-    // Add ungrouped alternatives
-    factored_alts.extend(ungrouped);
-    
-    factored_alts
-}
-
 /// Factor choices in EBNF rules
 pub fn factor_ebnf_choices(ebnf_text: &str) -> String {
     let (rules_vec, rules_map, directives) = parse_ebnf_simple(ebnf_text);
@@ -472,44 +264,27 @@ pub fn factor_ebnf_choices(ebnf_text: &str) -> String {
         
         let mut final_choices = Vec::new();
         
-        // 1. Group safe alternatives - try suffix factoring first
+        // 1. Group safe alternatives
         if safe_alts.len() > 1 {
-            // Try to factor by common suffix
-            let factored = factor_by_suffix_groups(
-                &safe_alts,
-                &rules_map,
-                &recursive_rules,
-                &mut new_rules,
-                &mut factor_cache,
-                &mut helper_counter,
-                name,
-            );
+            let term_body = safe_alts.join(" | ");
             
-            // If suffix factoring helped (reduced alternatives), use it
-            if !factored.is_empty() && factored.len() < safe_alts.len() {
-                final_choices.extend(factored);
+            if let Some(existing_name) = factor_cache.get(&term_body) {
+                final_choices.push(existing_name.clone());
             } else {
-                // Fall back to grouping all safe alternatives
-                let term_body = safe_alts.join(" | ");
+                let mut term_name = format!("__{}_safe", name);
                 
-                if let Some(existing_name) = factor_cache.get(&term_body) {
-                    final_choices.push(existing_name.clone());
-                } else {
-                    let mut term_name = format!("__{}_safe", name);
-                    
-                    // Check for name collisions and add suffix if needed
-                    let mut collision_idx = 1;
-                    let base_name = term_name.clone();
-                    while new_rules.iter().any(|(n, _)| n == &term_name) || rules_map.contains_key(&term_name) {
-                        term_name = format!("{}_{}", base_name, collision_idx);
-                        collision_idx += 1;
-                    }
-                    
-                    new_rules.push((term_name.clone(), format!("( {} )", term_body)));
-                    factor_cache.insert(term_body, term_name.clone());
-                    final_choices.push(term_name);
-                    helper_counter += 1;
+                // Check for name collisions and add suffix if needed
+                let mut collision_idx = 1;
+                let base_name = term_name.clone();
+                while new_rules.iter().any(|(n, _)| n == &term_name) || rules_map.contains_key(&term_name) {
+                    term_name = format!("{}_{}", base_name, collision_idx);
+                    collision_idx += 1;
                 }
+                
+                new_rules.push((term_name.clone(), format!("( {} )", term_body)));
+                factor_cache.insert(term_body, term_name.clone());
+                final_choices.push(term_name);
+                helper_counter += 1;
             }
         } else if safe_alts.len() == 1 {
             final_choices.push(safe_alts[0].clone());
