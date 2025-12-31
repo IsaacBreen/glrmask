@@ -344,7 +344,8 @@ impl JsonSchemaConverter {
                     // Object without properties -> generic object
                     "object" => {
                         let has_properties = obj.get("properties").and_then(|v| v.as_object()).map(|p| !p.is_empty()).unwrap_or(false);
-                        if !has_properties && obj.get("additionalProperties") != Some(&Value::Bool(false)) {
+                        let has_pattern_props = obj.get("patternProperties").and_then(|v| v.as_object()).map(|p| !p.is_empty()).unwrap_or(false);
+                        if !has_properties && !has_pattern_props && obj.get("additionalProperties") != Some(&Value::Bool(false)) {
                             Ok(self.json_object_ref())
                         } else {
                             Err("complex".to_string())
@@ -374,7 +375,8 @@ impl JsonSchemaConverter {
                             "null" => alternatives.push(GrammarExpr::Ref("JSON_NULL".to_string())),
                             "object" => {
                                 let has_props = obj.get("properties").and_then(|v| v.as_object()).map(|p| !p.is_empty()).unwrap_or(false);
-                                if !has_props && obj.get("additionalProperties") != Some(&Value::Bool(false)) {
+                                let has_pattern_props = obj.get("patternProperties").and_then(|v| v.as_object()).map(|p| !p.is_empty()).unwrap_or(false);
+                                if !has_props && !has_pattern_props && obj.get("additionalProperties") != Some(&Value::Bool(false)) {
                                     alternatives.push(self.json_object_ref());
                                 } else { all_inline = false; break; }
                             }
@@ -594,17 +596,19 @@ impl JsonSchemaConverter {
     fn convert_object(&mut self, obj: &serde_json::Map<String, Value>, rule_name: String) -> Result<String, String> {
         let properties = obj.get("properties").and_then(|v| v.as_object());
         let additional_props = obj.get("additionalProperties");
+        let pattern_props = obj.get("patternProperties").and_then(|v| v.as_object());
 
         // If no properties defined and additional allowed, just use generic object
         let has_properties = properties.map(|p| !p.is_empty()).unwrap_or(false);
-        if !has_properties && additional_props != Some(&Value::Bool(false)) {
+        let has_pattern_properties = pattern_props.map(|p| !p.is_empty()).unwrap_or(false);
+        if !has_properties && !has_pattern_properties && additional_props != Some(&Value::Bool(false)) {
             let ref_expr = self.json_object_ref();
             self.add_rule(rule_name.clone(), ref_expr);
             return Ok(rule_name);
         }
 
-        // If no properties and no additional allowed, empty object only
-        if !has_properties && additional_props == Some(&Value::Bool(false)) {
+        // If no properties, no pattern properties, and no additional allowed, empty object only
+        if !has_properties && !has_pattern_properties && additional_props == Some(&Value::Bool(false)) {
             self.add_rule(rule_name.clone(), GrammarExpr::Sequence(vec![
                 GrammarExpr::Literal(b"{".to_vec()),
                 GrammarExpr::Literal(b"}".to_vec()),
@@ -665,6 +669,28 @@ impl JsonSchemaConverter {
                 ]));
             }
             _ => {} // additionalProperties: false - don't add generic kv
+        }
+
+        // Handle patternProperties - for each pattern, add a member alternative
+        // that allows any JSON_STRING key with the corresponding value schema.
+        // We can't enforce regex patterns in CFG, so this is a conservative approximation.
+        if let Some(pp) = pattern_props {
+            for (_pattern, pp_schema) in pp {
+                // Try to inline simple patternProperties schemas
+                let pp_expr = match self.convert_schema_inline(pp_schema) {
+                    Ok(expr) => expr,
+                    Err(_) => {
+                        let pp_rule = self.new_rule_name("pp");
+                        self.convert_schema(pp_schema, pp_rule.clone())?;
+                        GrammarExpr::Ref(pp_rule)
+                    }
+                };
+                member_alternatives.push(GrammarExpr::Sequence(vec![
+                    GrammarExpr::Ref("JSON_STRING".to_string()),
+                    GrammarExpr::Literal(b":".to_vec()),
+                    pp_expr,
+                ]));
+            }
         }
 
         // Create member rule
@@ -983,6 +1009,7 @@ impl JsonSchemaConverter {
     }
 
     /// Convert a JSON value to a grammar literal.
+    /// Convert a JSON value to a grammar literal.
     fn value_to_literal(&self, val: &Value) -> GrammarExpr {
         match val {
             Value::Null => GrammarExpr::Literal(b"null".to_vec()),
@@ -993,10 +1020,42 @@ impl JsonSchemaConverter {
                 let escaped = self.escape_string_for_json(s);
                 GrammarExpr::Literal(format!("\"{}\"", escaped).into_bytes())
             }
-            Value::Array(_) | Value::Object(_) => {
-                // Serialize to compact JSON
-                let json_str = serde_json::to_string(val).unwrap_or_default();
-                GrammarExpr::Literal(json_str.into_bytes())
+            Value::Array(items) => {
+                let mut parts = Vec::new();
+                parts.push(GrammarExpr::Literal(b"[".to_vec()));
+                
+                for (i, item) in items.iter().enumerate() {
+                    if i > 0 {
+                        parts.push(GrammarExpr::Literal(b",".to_vec()));
+                    }
+                    parts.push(self.value_to_literal(item));
+                }
+                
+                parts.push(GrammarExpr::Literal(b"]".to_vec()));
+                GrammarExpr::Sequence(parts)
+            }
+            Value::Object(map) => {
+                let mut parts = Vec::new();
+                parts.push(GrammarExpr::Literal(b"{".to_vec()));
+                
+                for (i, (key, value)) in map.iter().enumerate() {
+                    if i > 0 {
+                        parts.push(GrammarExpr::Literal(b",".to_vec()));
+                    }
+                    
+                    // Key string
+                    let escaped_key = self.escape_string_for_json(key);
+                    parts.push(GrammarExpr::Literal(format!("\"{}\"", escaped_key).into_bytes()));
+                    
+                    // Colon
+                    parts.push(GrammarExpr::Literal(b":".to_vec()));
+                    
+                    // Value
+                    parts.push(self.value_to_literal(value));
+                }
+                
+                parts.push(GrammarExpr::Literal(b"}".to_vec()));
+                GrammarExpr::Sequence(parts)
             }
         }
     }
