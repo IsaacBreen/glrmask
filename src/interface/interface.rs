@@ -688,6 +688,10 @@ impl GrammarDefinition {
                 format!("({})", parts.join(" | "))
             }
             Seq(exprs) => {
+                // Handle empty sequence specially
+                if exprs.is_empty() {
+                    return "()".to_string(); // Empty sequence in EBNF
+                }
                 let parts: Vec<_> = exprs.iter().map(|e| {
                     let s = Self::format_expr(e);
                     // Add parens around choices in sequences
@@ -699,7 +703,7 @@ impl GrammarDefinition {
                 }).collect();
                 parts.join(" ")
             }
-            Epsilon => "ε".to_string(),
+            Epsilon => "()".to_string(), // Explicit epsilon as empty group in EBNF
             Shared(arc) => Self::format_expr(arc),
         }
     }
@@ -796,21 +800,47 @@ impl GrammarDefinition {
     pub fn to_ebnf(&self) -> String {
         let mut ebnf_string = String::new();
 
+        // Build terminal name mapping (lowercase -> uppercase)
+        let mut terminal_name_map: BTreeMap<String, String> = BTreeMap::new();
+        for name in self.regex_name_to_group_id.left_values() {
+            let uppercase_name = Self::ensure_uppercase_name(name);
+            if name != &uppercase_name {
+                terminal_name_map.insert(name.clone(), uppercase_name);
+            }
+        }
+
         // Group productions by LHS
         let mut prods_by_lhs: BTreeMap<NonTerminal, Vec<&[Symbol]>> = BTreeMap::new();
         for prod in &self.productions {
             prods_by_lhs.entry(prod.lhs.clone()).or_default().push(&prod.rhs);
         }
 
-        // Process non-terminals in alphabetical order for deterministic output.
-        for (nt, rhss) in prods_by_lhs {
-            ebnf_string.push_str(&format!("{} ::= ", nt.0));
+        // Get the start symbol from the start production
+        let start_symbol = if !self.productions.is_empty() {
+            Some(self.productions[self.start_production_id].lhs.clone())
+        } else {
+            None
+        };
 
+        // Helper function to format a terminal (applying name mapping if needed)
+        let format_terminal = |t: &Terminal| -> String {
+            let s = t.to_string();
+            // Check if this is a regex name that needs to be uppercased
+            if let Terminal::RegexName(name) = t {
+                if let Some(uppercase_name) = terminal_name_map.get(name) {
+                    return uppercase_name.clone();
+                }
+            }
+            s
+        };
+
+        // Helper function to format a single rule
+        let format_rule = |nt: &NonTerminal, rhss: &Vec<&[Symbol]>| -> String {
+            let mut rule = format!("{} ::= ", nt.0);
             for (i, rhs) in rhss.iter().enumerate() {
                 if i > 0 {
-                    ebnf_string.push_str("\n  | ");
+                    rule.push_str("\n  | ");
                 }
-
                 if rhs.is_empty() {
                     // Epsilon production is an empty sequence before the semicolon.
                 } else {
@@ -818,15 +848,71 @@ impl GrammarDefinition {
                         .iter()
                         .map(|symbol| match symbol {
                             Symbol::NonTerminal(nt) => nt.0.clone(),
-                            Symbol::Terminal(t) => t.to_string(),
+                            Symbol::Terminal(t) => format_terminal(t),
                         })
                         .collect();
-                    ebnf_string.push_str(&rhs_str.join(" "));
+                    rule.push_str(&rhs_str.join(" "));
                 }
             }
-            ebnf_string.push_str(" ;\n");
+            rule.push_str(" ;\n");
+            rule
+        };
+
+        // Output start symbol first if it exists
+        if let Some(ref start) = start_symbol {
+            if let Some(rhss) = prods_by_lhs.get(start) {
+                ebnf_string.push_str(&format_rule(start, rhss));
+            }
         }
+
+        // Process remaining non-terminals in alphabetical order
+        for (nt, rhss) in prods_by_lhs {
+            // Skip start symbol since we already printed it
+            if start_symbol.as_ref() == Some(&nt) {
+                continue;
+            }
+            ebnf_string.push_str(&format_rule(&nt, &rhss));
+        }
+        
+        // Add terminal definitions (uppercase rules)
+        // Sort by name for deterministic output
+        let mut terminal_defs: Vec<(String, String)> = Vec::new();
+        
+        for (name, group_id) in &self.regex_name_to_group_id {
+            if let Some(expr) = self.group_id_to_expr.get(group_id) {
+                let expr_str = Self::format_expr(expr);
+                // Ensure terminal names start with uppercase
+                let uppercase_name = Self::ensure_uppercase_name(name);
+                terminal_defs.push((uppercase_name, expr_str));
+            }
+        }
+        
+        terminal_defs.sort_by(|a, b| a.0.cmp(&b.0));
+        
+        for (name, expr_str) in terminal_defs {
+            ebnf_string.push_str(&format!("{} ::= {} ;\n", name, expr_str));
+        }
+        
         ebnf_string
+    }
+    
+    /// Ensure a terminal name starts with uppercase
+    fn ensure_uppercase_name(name: &str) -> String {
+        if name.is_empty() {
+            return "T".to_string();
+        }
+        
+        let first_char = name.chars().next().unwrap();
+        if first_char.is_uppercase() {
+            name.to_string()
+        } else if first_char == '_' {
+            // Replace leading underscore with uppercase letter
+            format!("T{}", &name[1..])
+        } else {
+            // Capitalize first letter
+            let mut chars = name.chars();
+            chars.next().unwrap().to_uppercase().collect::<String>() + chars.as_str()
+        }
     }
 
     pub fn add_external_terminal(&mut self, name: &str) -> usize {
@@ -856,7 +942,8 @@ impl GrammarDefinition {
 }
 
 impl GrammarDefinition {
-    /// Generates a unique indexed name (e.g., Base[0], Base[1]) avoiding collisions.
+    /// Generates a unique indexed name (e.g., Base_0, Base_1) avoiding collisions.
+    /// Uses underscore instead of brackets to ensure valid EBNF identifiers.
     fn generate_unique_indexed_name(
         base_name: &str,
         counters: &mut HashMap<String, usize>,
@@ -865,7 +952,7 @@ impl GrammarDefinition {
         let idx_ref = counters.entry(base_name.to_string()).or_insert(0);
         let mut current_idx = *idx_ref;
         loop {
-            let new_name = format!("{}[{}]", base_name, current_idx);
+            let new_name = format!("{}_{}", base_name, current_idx);
             if !all_existing_names.contains(&new_name) {
                 all_existing_names.insert(new_name.clone());
                 *idx_ref = current_idx + 1;
