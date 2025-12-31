@@ -346,7 +346,7 @@ impl<'a> GrammarOptimizer<'a> {
             // DFA states 37% (81K→112K), resulting in net SLOWER compilation (26s→60s).
             // Therefore, disabled by default. Enable with ENABLE_CHOICE_FACTORING=1.
             if std::env::var("ENABLE_CHOICE_FACTORING").is_ok() {
-                self.factor_choice_productions(&cyclic_dependent_nts, &solutions, &mut expansion_cache);
+                self.factor_choice_productions(&cyclic_dependent_nts, &solutions, &mut expansion_cache, ignore_term.as_ref());
             }
             
             debug!(4, "Partial grammar optimization complete in {:?}", total_start.elapsed());
@@ -762,6 +762,7 @@ impl<'a> GrammarOptimizer<'a> {
         cyclic_dependent_nts: &HashSet<String>,
         _solutions: &HashMap<String, Rc<RegexTerm>>,
         _expansion_cache: &mut FxHashMap<*const RegexTerm, Rc<RegexTerm>>,
+        ignore_term: Option<&Rc<RegexTerm>>,
     ) {
         let start = std::time::Instant::now();
         
@@ -999,7 +1000,7 @@ impl<'a> GrammarOptimizer<'a> {
                 // Convert each alternative to a RegexTerm
                 let mut alt_terms: Vec<Rc<RegexTerm>> = Vec::new();
                 for prod in helper_prods {
-                    if let Some(term) = self.symbols_to_regex_term(&prod.rhs, _solutions, _expansion_cache) {
+                    if let Some(term) = self.symbols_to_regex_term(&prod.rhs, _solutions, _expansion_cache, ignore_term) {
                         alt_terms.push(term);
                     }
                 }
@@ -1082,22 +1083,25 @@ impl<'a> GrammarOptimizer<'a> {
         Some((head_symbols, tail_nt))
     }
     
-    /// Convert a production's RHS to a RegexTerm
+    /// Convert a production's RHS to a RegexTerm (unused - kept for potential future use)
+    #[allow(dead_code)]
     fn production_to_regex_term(
         &self,
         prod: &Production,
         solutions: &HashMap<String, Rc<RegexTerm>>,
         expansion_cache: &mut FxHashMap<*const RegexTerm, Rc<RegexTerm>>,
     ) -> Option<Rc<RegexTerm>> {
-        self.symbols_to_regex_term(&prod.rhs, solutions, expansion_cache)
+        self.symbols_to_regex_term(&prod.rhs, solutions, expansion_cache, None)
     }
     
-    /// Convert a sequence of symbols to a RegexTerm
+    /// Convert a sequence of symbols to a RegexTerm.
+    /// If ignore_term is provided, it will be interleaved between symbols (like WS*).
     fn symbols_to_regex_term(
         &self,
         symbols: &[Symbol],
         solutions: &HashMap<String, Rc<RegexTerm>>,
         expansion_cache: &mut FxHashMap<*const RegexTerm, Rc<RegexTerm>>,
+        ignore_term: Option<&Rc<RegexTerm>>,
     ) -> Option<Rc<RegexTerm>> {
         let terms: Option<Vec<Rc<RegexTerm>>> = symbols.iter().map(|sym| {
             match sym {
@@ -1122,7 +1126,21 @@ impl<'a> GrammarOptimizer<'a> {
             }
         }).collect();
         
-        terms.map(|t| Rc::new(RegexTerm::make_seq(t)))
+        terms.map(|ts| {
+            // Interleave ignore_term (e.g., WS*) between symbols, just like production_rhs_to_regex_term does
+            if let Some(ign) = ignore_term {
+                let mut with_ignore = Vec::with_capacity(ts.len() * 2);
+                for (i, t) in ts.into_iter().enumerate() {
+                    if i > 0 {
+                        with_ignore.push(ign.clone());
+                    }
+                    with_ignore.push(t);
+                }
+                Rc::new(RegexTerm::make_seq(with_ignore))
+            } else {
+                Rc::new(RegexTerm::make_seq(ts))
+            }
+        })
     }
     
     /// Static version of expand_nt_refs for use in symbols_to_regex_term
