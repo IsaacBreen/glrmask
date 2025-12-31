@@ -994,7 +994,7 @@ impl GrammarConstraint {
         );
 
         #[allow(clippy::redundant_closure_call)]
-        crate::debug!(4, "Terminal DWA stats: {}", terminal_dwa.stats());
+        crate::debug!(4, "Done precompute1. Terminal DWA stats: {}", terminal_dwa.stats());
 
         // EXPAND DWA: Add transitions for non-representative states
         crate::debug!(4, "Expanding DWA transitions for equivalent states...");
