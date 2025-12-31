@@ -15,7 +15,7 @@ use crate::precompute4::weighted_automata::rangeset::RangeSet as WARangeSet;
 use crate::precompute4::weighted_automata::{DWA, NWA, NWAStateID, Weight};
 use crate::profiler::{self};
 
-use crate::tokenizer::{LLMTokenID, TokenizerStateID, ExecuteResult};
+use crate::tokenizer::{LLMTokenID, TokenizerStateID};
 use crate::types::TerminalID as GrammarTokenID;
 use crate::precompute4::weighted_automata::common::Label;
 
@@ -50,8 +50,6 @@ pub(crate) struct Precomputer1<'r> {
     pub(crate) live_tokens: HashMap<NWAStateID, Weight>,
     // Cache for tokens_accessible_from_state - only 389 unique states but called 700k+ times
     accessible_terminals_cache: HashMap<TokenizerStateID, std::rc::Rc<Vec<GrammarTokenID>>>,
-    // Cache for execute_from_state - avoids repeated tokenizer execution on same inputs
-    execute_cache: RefCell<HashMap<(Vec<u8>, TokenizerStateID), ExecuteResult>>,
 }
 
 impl<'r> Precomputer1<'r> {
@@ -101,15 +99,7 @@ impl<'r> Precomputer1<'r> {
             pending_epsilons: HashMap::new(),
             live_tokens: HashMap::new(),
             accessible_terminals_cache: HashMap::new(),
-            execute_cache: RefCell::new(HashMap::new()),
         }
-    }
-
-    /// Cached version of tokenizer.execute_from_state
-    fn execute_from_state_cached(&self, text: &[u8], state: TokenizerStateID) -> ExecuteResult {
-        // Skip caching - the overhead of HashMap + Vec cloning is more expensive
-        // than just calling execute_from_state directly
-        self.tokenizer.execute_from_state(text, state)
     }
 
     fn finish(mut self) -> DWA {
@@ -267,7 +257,7 @@ impl<'r> Precomputer1<'r> {
 
         for (segment_bytes, child_vocab_node) in vocab_node.iter_children() {
             let exec_result =
-                self.execute_from_state_cached(&segment_bytes, tokenizer_state_id);
+                self.tokenizer.execute_from_state(&segment_bytes, tokenizer_state_id);
             for token in &exec_result.matches {
                 let grammar_token_id = GrammarTokenID(token.id);
                 let applicable_tokens = child_vocab_node.reachable_token_ids();
@@ -395,9 +385,6 @@ impl<'r> Precomputer1<'r> {
 
             let child_reachable = child_vocab_node.reachable_token_ids();
             let child_token_id = child_vocab_node.token_id();
-            
-            // Pre-create weight for this child token (reused many times)
-            let child_token_weight = WARangeSet::from_item(child_token_id);
 
             // Caches possible matches for end states to prune edge_bv
             let mut possible_matches_at_end_cache: HashMap<
@@ -423,7 +410,8 @@ impl<'r> Precomputer1<'r> {
                 for (tokenizer_state_id, src_node) in states_at_pos {
                     let slice = &segment_bytes[pos..];
                     let exec_result = self
-                        .execute_from_state_cached(slice, tokenizer_state_id);
+                        .tokenizer
+                        .execute_from_state(slice, tokenizer_state_id);
                     
                     crate::debug!(7, "  Tokenizer on {:?} from state {:?} (src_node={}): matches={:?}, end_state={:?}",
                         String::from_utf8_lossy(slice), tokenizer_state_id, src_node, exec_result.matches, exec_result.end_state);
@@ -449,9 +437,10 @@ impl<'r> Precomputer1<'r> {
                         // Leaf check: if match consumes remainder of segment
                         if next_pos == segment_bytes.len() {
                             let leaf = self.leaf_state;
+                            let weight = WARangeSet::from_item(child_token_id);
                             crate::debug!(7, "      -> LEAF transition: {} --{}--> {} (leaf_state), weight={:?}", 
-                                src_node, terminal_id.0, leaf, child_token_weight);
-                            self.add_pending_transition(src_node, terminal_id.0 as Label, leaf, child_token_weight.clone());
+                                src_node, terminal_id.0, leaf, weight);
+                            self.add_pending_transition(src_node, terminal_id.0 as Label, leaf, weight);
                         }
 
                         // Continuation logic
@@ -516,16 +505,19 @@ impl<'r> Precomputer1<'r> {
                         
                         crate::debug!(7, "    accessible_terminals={:?}", accessible_terminals.as_slice());
 
+                        // Create weight once, it's just a single token
+                        let single_token_weight = WARangeSet::from_item(child_token_id);
+
                         let end_idx = self.leaf_state;
                         
                         for terminal_id in accessible_terminals.iter() {
                             crate::debug!(7, "    -> END_STATE transition: {} --{}--> {} (leaf_state), weight={:?}",
-                                src_node, terminal_id.0, end_idx, child_token_weight);
+                                src_node, terminal_id.0, end_idx, single_token_weight);
                             self.add_pending_transition(
                                     src_node,
                                     terminal_id.0 as Label,
                                     end_idx,
-                                    child_token_weight.clone(),
+                                    single_token_weight.clone(),
                                 );
                         }
 
