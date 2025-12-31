@@ -644,11 +644,9 @@ impl JsonSchemaConverter {
         }
 
         // If additional properties allowed, add generic kv
-        // Note: We treat unspecified additionalProperties as false (stricter interpretation)
-        // This avoids adding recursive _json_* rules which can slow down optimization.
-        // Only explicitly set additionalProperties: true will enable arbitrary properties.
+        // Default behavior for additionalProperties is true if not specified.
         match additional_props {
-            Some(Value::Bool(true)) => {
+            None | Some(Value::Bool(true)) => {
                 member_alternatives.push(self.json_kv_ref());
             }
             Some(Value::Object(ap_schema)) => {
@@ -668,7 +666,7 @@ impl JsonSchemaConverter {
                     ap_expr,
                 ]));
             }
-            _ => {} // additionalProperties: false - don't add generic kv
+            _ => {} // additionalProperties: false or invalid type - don't add generic kv
         }
 
         // Handle patternProperties - for each pattern, add a member alternative
