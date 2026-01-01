@@ -1,7 +1,7 @@
 # Research Project Makefile
 # Common commands for paper writing and research
 
-.PHONY: paper paper-watch paper-clean notes-today help build test test-js test-json-schema test-schema-packagejson test-schema-github test-schema-sarif test-schema-meta test-schema-extra test-schema-kestra test-schema-vegalite test-schema-apollo test-schema-liquibase test-diff test-diff-dfa show-schema-id schema-id ffi viz viz-clean all
+.PHONY: paper paper-watch paper-clean notes-today help build test test-js test-json-schema test-schema-packagejson test-schema-github test-schema-sarif test-schema-meta test-schema-extra test-schema-kestra test-schema-vegalite test-schema-apollo test-schema-liquibase test-diff test-diff-dfa show-schema-id schema-id ffi viz viz-clean all jsonschemabench jsonschemabench-quick jsonschemabench-subset jsonschemabench-analyze jsonschemabench-llg jsonschemabench-llg-analyze jsonschemabench-compare
 
 # === Build All ===
 
@@ -199,6 +199,36 @@ build: ## Build the Rust project
 	else \
 		echo "Skipping cargo build (SKIP_MATURIN is set)"; \
 	fi
+
+# === JSON Schema Benchmark ===
+
+jsonschemabench: ffi ## Run sep1 benchmarks on JSonSchemaBench suite (full, ~11K schemas)
+	cd gcg-paper/external-benchmarks/jsonschemabench && make run
+
+jsonschemabench-quick: ffi ## Run sep1 benchmark on a single schema (quick test)
+	cd gcg-paper/external-benchmarks/jsonschemabench/jsonschemabench/maskbench && \
+		python3 -m maskbench.runner --sep1 data/JME_0.json
+
+jsonschemabench-subset: ffi ## Run sep1 benchmarks on a subset of schemas (usage: make jsonschemabench-subset PATTERN="JME_*.json")
+	@if [ -z "$(PATTERN)" ]; then echo "Usage: make jsonschemabench-subset PATTERN=\"JME_*.json\""; exit 1; fi
+	cd gcg-paper/external-benchmarks/jsonschemabench/jsonschemabench/maskbench && \
+		python3 -m maskbench.runner --sep1 data/$(PATTERN)
+
+jsonschemabench-analyze: ## Analyze sep1 benchmark results (run after jsonschemabench)
+	cd gcg-paper/external-benchmarks/jsonschemabench/jsonschemabench/maskbench && \
+		python3 scripts/maskbench_results.py tmp/out--sep1
+
+jsonschemabench-llg: ## Run llguidance benchmarks on JSonSchemaBench suite (full, ~11K schemas)
+	cd gcg-paper/external-benchmarks/jsonschemabench/jsonschemabench/maskbench && \
+		python3 scripts/run_maskbench.py --llg data/
+
+jsonschemabench-llg-analyze: ## Analyze llguidance benchmark results
+	cd gcg-paper/external-benchmarks/jsonschemabench/jsonschemabench/maskbench && \
+		python3 scripts/maskbench_results.py tmp/out--llg
+
+jsonschemabench-compare: ## Compare sep1 and llguidance benchmark results side by side
+	cd gcg-paper/external-benchmarks/jsonschemabench/jsonschemabench/maskbench && \
+		python3 scripts/maskbench_results.py tmp/out--sep1 tmp/out--llg
 
 # === Help ===
 
