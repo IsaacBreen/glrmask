@@ -336,7 +336,17 @@ impl JsonSchemaConverter {
         if let Some(type_val) = obj.get("type") {
             if let Some(type_str) = type_val.as_str() {
                 return match type_str {
-                    "string" => Ok(GrammarExpr::Ref("JSON_STRING".to_string())),
+                    "string" => {
+                        // Check if there are constraints that need a dedicated rule
+                        let has_pattern = obj.get("pattern").is_some();
+                        let has_min_length = obj.get("minLength").is_some();
+                        let has_max_length = obj.get("maxLength").is_some();
+                        if has_pattern || has_min_length || has_max_length {
+                            Err("complex".to_string()) // Needs dedicated rule
+                        } else {
+                            Ok(GrammarExpr::Ref("JSON_STRING".to_string()))
+                        }
+                    }
                     "integer" => Ok(GrammarExpr::Ref("JSON_INTEGER".to_string())),
                     "number" => Ok(GrammarExpr::Ref("JSON_NUMBER".to_string())),
                     "boolean" => Ok(GrammarExpr::Ref("JSON_BOOL".to_string())),
@@ -365,10 +375,23 @@ impl JsonSchemaConverter {
                 // Multi-type: inline if all are primitives OR simple object/array
                 let mut alternatives = Vec::new();
                 let mut all_inline = true;
+                
+                // Check for string constraints that would need a dedicated rule
+                let has_pattern = obj.get("pattern").is_some();
+                let has_min_length = obj.get("minLength").is_some();
+                let has_max_length = obj.get("maxLength").is_some();
+                let has_string_constraints = has_pattern || has_min_length || has_max_length;
+                
                 for t in types {
                     if let Some(type_str) = t.as_str() {
                         match type_str {
-                            "string" => alternatives.push(GrammarExpr::Ref("JSON_STRING".to_string())),
+                            "string" => {
+                                if has_string_constraints {
+                                    all_inline = false;
+                                    break;
+                                }
+                                alternatives.push(GrammarExpr::Ref("JSON_STRING".to_string()));
+                            }
                             "integer" => alternatives.push(GrammarExpr::Ref("JSON_INTEGER".to_string())),
                             "number" => alternatives.push(GrammarExpr::Ref("JSON_NUMBER".to_string())),
                             "boolean" => alternatives.push(GrammarExpr::Ref("JSON_BOOL".to_string())),
@@ -565,8 +588,18 @@ impl JsonSchemaConverter {
             "object" => self.convert_object(obj, rule_name),
             "array" => self.convert_array(obj, rule_name),
             "string" => {
-                self.add_rule(rule_name.clone(), GrammarExpr::Ref("JSON_STRING".to_string()));
-                Ok(rule_name)
+                // Extract string constraints
+                let pattern = obj.get("pattern").and_then(|v| v.as_str()).map(|s| s.to_string());
+                let min_length = obj.get("minLength").and_then(|v| v.as_u64());
+                let max_length = obj.get("maxLength").and_then(|v| v.as_u64());
+                
+                // Check if we have any constraints
+                if pattern.is_some() || min_length.is_some() || max_length.is_some() {
+                    self.convert_string_with_constraints(pattern, min_length, max_length, rule_name)
+                } else {
+                    self.add_rule(rule_name.clone(), GrammarExpr::Ref("JSON_STRING".to_string()));
+                    Ok(rule_name)
+                }
             }
             "integer" => {
                 self.add_rule(rule_name.clone(), GrammarExpr::Ref("JSON_INTEGER".to_string()));
@@ -589,6 +622,585 @@ impl JsonSchemaConverter {
                 self.add_rule(rule_name.clone(), ref_expr);
                 Ok(rule_name)
             }
+        }
+    }
+
+    /// Convert a string with pattern and/or length constraints.
+    fn convert_string_with_constraints(
+        &mut self, 
+        pattern: Option<String>,
+        min_length: Option<u64>,
+        max_length: Option<u64>,
+        rule_name: String
+    ) -> Result<String, String> {
+        // For now, if we have length constraints but no pattern, create a length-constrained string
+        // If we have a pattern, we need to handle both together
+        
+        // Create the string content rule
+        let content_rule = self.new_rule_name("strcontent");
+        
+        if let Some(pattern) = pattern {
+            // Build pattern-based content
+            let pattern_content = self.build_pattern_content(&pattern, min_length, max_length);
+            self.add_rule(content_rule.clone(), pattern_content);
+        } else {
+            // Length-only constraints (no pattern)
+            let length_content = self.build_length_constrained_content(min_length, max_length);
+            self.add_rule(content_rule.clone(), length_content);
+        }
+        
+        // Final rule: '"' content '"'
+        self.add_rule(rule_name.clone(), GrammarExpr::Sequence(vec![
+            GrammarExpr::Literal(b"\"".to_vec()),
+            GrammarExpr::Ref(content_rule),
+            GrammarExpr::Literal(b"\"".to_vec()),
+        ]));
+        
+        Ok(rule_name)
+    }
+    
+    /// Build content expression for a string with length constraints only.
+    fn build_length_constrained_content(&mut self, min_length: Option<u64>, max_length: Option<u64>) -> GrammarExpr {
+        // STRING_CHAR_OR_ESCAPE = STRING_CHAR | ESCAPE_SEQ
+        let char_or_escape = GrammarExpr::Choice(vec![
+            GrammarExpr::Ref("STRING_CHAR".to_string()),
+            GrammarExpr::Ref("ESCAPE_SEQ".to_string()),
+        ]);
+        
+        match (min_length, max_length) {
+            (None, None) => {
+                // No constraints - just STRING_CHARS
+                GrammarExpr::Ref("STRING_CHARS".to_string())
+            }
+            (Some(min), None) => {
+                // At least min characters
+                // char{min,} = char{min} char*
+                let mut parts: Vec<GrammarExpr> = Vec::new();
+                for _ in 0..min {
+                    parts.push(char_or_escape.clone());
+                }
+                parts.push(GrammarExpr::Ref("STRING_CHARS".to_string()));
+                GrammarExpr::Sequence(parts)
+            }
+            (None, Some(max)) => {
+                // At most max characters
+                // char{0,max} = char? char? ... (max times)
+                let mut result = GrammarExpr::Sequence(vec![]);
+                for _ in 0..max {
+                    result = GrammarExpr::Sequence(vec![
+                        result,
+                        GrammarExpr::Optional(Box::new(char_or_escape.clone())),
+                    ]);
+                }
+                result
+            }
+            (Some(min), Some(max)) => {
+                if max < min {
+                    // Invalid constraint - return empty
+                    return GrammarExpr::Sequence(vec![]);
+                }
+                // Exactly between min and max characters
+                // char{min,max} = char{min} char{0,max-min}
+                let mut parts: Vec<GrammarExpr> = Vec::new();
+                // First min required characters
+                for _ in 0..min {
+                    parts.push(char_or_escape.clone());
+                }
+                // Then (max-min) optional characters
+                for _ in 0..(max - min) {
+                    parts.push(GrammarExpr::Optional(Box::new(char_or_escape.clone())));
+                }
+                GrammarExpr::Sequence(parts)
+            }
+        }
+    }
+    
+    /// Build content expression for a string with pattern (and optional length constraints).
+    fn build_pattern_content(&mut self, pattern: &str, min_length: Option<u64>, max_length: Option<u64>) -> GrammarExpr {
+        // Determine if pattern is anchored
+        let starts_anchored = pattern.starts_with('^');
+        let ends_anchored = pattern.ends_with('$');
+        
+        // Strip anchors for the inner pattern
+        let mut inner = pattern;
+        if starts_anchored {
+            inner = &inner[1..];
+        }
+        if ends_anchored && !inner.is_empty() {
+            inner = &inner[..inner.len()-1];
+        }
+        
+        // For fully anchored patterns with length constraints, try to apply them
+        if starts_anchored && ends_anchored && (min_length.is_some() || max_length.is_some()) {
+            // Check if the pattern is a simple character class with + or *
+            // e.g., [a-zA-Z]+, \d+, [0-9a-fA-F]+
+            if let Some(content) = self.apply_length_to_simple_pattern(inner, min_length, max_length) {
+                return content;
+            }
+        }
+        
+        // For NON-anchored patterns with length constraints, prioritize length constraints
+        // The pattern match is a "soft" constraint that we can't fully enforce for search patterns
+        if !starts_anchored || !ends_anchored {
+            if min_length.is_some() || max_length.is_some() {
+                // Use length constraints only - pattern is too loose to combine
+                return self.build_length_constrained_content(min_length, max_length);
+            }
+        }
+        
+        // Convert the pattern to an EBNF-compatible format
+        let ebnf_pattern = self.regex_to_ebnf_pattern(inner);
+        
+        // Check if pattern has top-level alternation and needs wrapping
+        let pattern_has_alternation = ebnf_pattern.split_whitespace().any(|p| p == "|");
+        let pattern_part = if pattern_has_alternation {
+            format!("({})", ebnf_pattern)
+        } else {
+            ebnf_pattern
+        };
+        
+        // Build the full string pattern
+        let string_content = if starts_anchored && ends_anchored {
+            // Full match: ^pattern$
+            pattern_part
+        } else if starts_anchored {
+            // Anchored at start: ^pattern.*
+            format!("{} STRING_CHARS", pattern_part)
+        } else if ends_anchored {
+            // Anchored at end: .*pattern$
+            format!("STRING_CHARS {}", pattern_part)
+        } else {
+            // Search pattern: .*pattern.*
+            format!("STRING_CHARS {} STRING_CHARS", pattern_part)
+        };
+        
+        // Parse and build the pattern expression
+        if string_content.trim().is_empty() {
+            // Empty pattern - match empty string content
+            GrammarExpr::Sequence(vec![])
+        } else {
+            // Create the pattern as a sequence/choice structure
+            self.build_pattern_expr(&string_content)
+        }
+    }
+    
+    /// Try to apply length constraints to a simple regex pattern.
+    /// Returns Some(expr) if successful, None if the pattern is too complex.
+    fn apply_length_to_simple_pattern(&mut self, pattern: &str, min_length: Option<u64>, max_length: Option<u64>) -> Option<GrammarExpr> {
+        // Handle patterns like:
+        // - [a-zA-Z]+  -> [a-zA-Z]{min,max}
+        // - [0-9]*     -> [0-9]{min,max}  
+        // - \d+        -> [0-9]{min,max}
+        // - \w+        -> [a-zA-Z0-9_]{min,max}
+        
+        let trimmed = pattern.trim();
+        
+        // Check for patterns ending in + or *
+        if !trimmed.ends_with('+') && !trimmed.ends_with('*') {
+            return None;
+        }
+        
+        let base_pattern = &trimmed[..trimmed.len()-1];
+        let is_plus = trimmed.ends_with('+');
+        
+        // Parse the base pattern to get a character class
+        let char_class = if base_pattern.starts_with('[') && base_pattern.ends_with(']') {
+            // It's already a character class - sanitize for EBNF
+            self.sanitize_char_class(base_pattern)
+        } else if base_pattern == "\\d" {
+            "[0-9]".to_string()
+        } else if base_pattern == "\\D" {
+            "[^0-9]".to_string()
+        } else if base_pattern == "\\w" {
+            "[a-zA-Z0-9_]".to_string()
+        } else if base_pattern == "\\W" {
+            "[^a-zA-Z0-9_]".to_string()
+        } else if base_pattern == "\\s" {
+            "[ \\t\\n\\r]".to_string()
+        } else if base_pattern == "\\S" {
+            "[^ \\t\\n\\r]".to_string()
+        } else if base_pattern == "." {
+            // Any char - use STRING_CHAR | ESCAPE_SEQ
+            return self.apply_length_to_any_char(min_length, max_length, is_plus);
+        } else {
+            return None;
+        };
+        
+        let char_expr = GrammarExpr::CharClass(char_class);
+        
+        // Calculate effective min/max
+        let min = if is_plus {
+            std::cmp::max(min_length.unwrap_or(1), 1)
+        } else {
+            min_length.unwrap_or(0)
+        };
+        let max = max_length;
+        
+        match (min, max) {
+            (0, None) => {
+                // Zero or more
+                Some(GrammarExpr::Repeat(Box::new(char_expr)))
+            }
+            (min, None) if min > 0 => {
+                // At least min
+                let mut parts: Vec<GrammarExpr> = Vec::new();
+                for _ in 0..min {
+                    parts.push(char_expr.clone());
+                }
+                parts.push(GrammarExpr::Repeat(Box::new(char_expr)));
+                Some(GrammarExpr::Sequence(parts))
+            }
+            (0, Some(max)) => {
+                // At most max
+                let mut parts: Vec<GrammarExpr> = Vec::new();
+                for _ in 0..max {
+                    parts.push(GrammarExpr::Optional(Box::new(char_expr.clone())));
+                }
+                Some(GrammarExpr::Sequence(parts))
+            }
+            (min, Some(max)) if max >= min => {
+                // Between min and max
+                let mut parts: Vec<GrammarExpr> = Vec::new();
+                for _ in 0..min {
+                    parts.push(char_expr.clone());
+                }
+                for _ in 0..(max - min) {
+                    parts.push(GrammarExpr::Optional(Box::new(char_expr.clone())));
+                }
+                Some(GrammarExpr::Sequence(parts))
+            }
+            _ => None
+        }
+    }
+    
+    /// Sanitize a character class for EBNF compatibility.
+    /// EBNF character classes can't contain literal (, ), {, }, [ or ] without escaping.
+    fn sanitize_char_class(&self, class_def: &str) -> String {
+        // Strip [ and ]
+        let content = &class_def[1..class_def.len()-1];
+        
+        // Check for negation
+        let (negated, content) = if content.starts_with('^') {
+            (true, &content[1..])
+        } else {
+            (false, content)
+        };
+        
+        let mut result = String::from("[");
+        if negated {
+            result.push('^');
+        }
+        
+        let mut chars = content.chars().peekable();
+        while let Some(c) = chars.next() {
+            match c {
+                '\\' => {
+                    // Escape sequence - pass through
+                    result.push(c);
+                    if let Some(next) = chars.next() {
+                        result.push(next);
+                    }
+                }
+                '(' | ')' | '{' | '}' | '[' | ']' => {
+                    // These need escaping for EBNF
+                    result.push('\\');
+                    result.push(c);
+                }
+                _ => result.push(c),
+            }
+        }
+        
+        result.push(']');
+        result
+    }
+    
+    /// Apply length constraints to "any character" pattern (.).
+    fn apply_length_to_any_char(&mut self, min_length: Option<u64>, max_length: Option<u64>, is_plus: bool) -> Option<GrammarExpr> {
+        let char_or_escape = GrammarExpr::Choice(vec![
+            GrammarExpr::Ref("STRING_CHAR".to_string()),
+            GrammarExpr::Ref("ESCAPE_SEQ".to_string()),
+        ]);
+        
+        let min = if is_plus {
+            std::cmp::max(min_length.unwrap_or(1), 1)
+        } else {
+            min_length.unwrap_or(0)
+        };
+        let max = max_length;
+        
+        match (min, max) {
+            (0, None) => {
+                Some(GrammarExpr::Ref("STRING_CHARS".to_string()))
+            }
+            (min, None) if min > 0 => {
+                let mut parts: Vec<GrammarExpr> = Vec::new();
+                for _ in 0..min {
+                    parts.push(char_or_escape.clone());
+                }
+                parts.push(GrammarExpr::Ref("STRING_CHARS".to_string()));
+                Some(GrammarExpr::Sequence(parts))
+            }
+            (0, Some(max)) => {
+                let mut parts: Vec<GrammarExpr> = Vec::new();
+                for _ in 0..max {
+                    parts.push(GrammarExpr::Optional(Box::new(char_or_escape.clone())));
+                }
+                Some(GrammarExpr::Sequence(parts))
+            }
+            (min, Some(max)) if max >= min => {
+                let mut parts: Vec<GrammarExpr> = Vec::new();
+                for _ in 0..min {
+                    parts.push(char_or_escape.clone());
+                }
+                for _ in 0..(max - min) {
+                    parts.push(GrammarExpr::Optional(Box::new(char_or_escape.clone())));
+                }
+                Some(GrammarExpr::Sequence(parts))
+            }
+            _ => None
+        }
+    }
+
+    /// Convert a regex pattern fragment to EBNF-compatible format.
+    /// This handles common regex constructs but is not a full regex implementation.
+    fn regex_to_ebnf_pattern(&self, pattern: &str) -> String {
+        // This is a simplified conversion that handles common patterns
+        // Full regex support would require a proper regex-to-CFG conversion
+        
+        let mut result = String::new();
+        let mut chars = pattern.chars().peekable();
+        
+        while let Some(c) = chars.next() {
+            match c {
+                '\\' => {
+                    // Escape sequence
+                    if let Some(&next) = chars.peek() {
+                        match next {
+                            'd' => {
+                                chars.next();
+                                result.push_str("[0-9]");
+                            }
+                            'D' => {
+                                chars.next();
+                                result.push_str("[^0-9]");
+                            }
+                            'w' => {
+                                chars.next();
+                                result.push_str("[a-zA-Z0-9_]");
+                            }
+                            'W' => {
+                                chars.next();
+                                result.push_str("[^a-zA-Z0-9_]");
+                            }
+                            's' => {
+                                chars.next();
+                                result.push_str("[ \\t\\n\\r]");
+                            }
+                            'S' => {
+                                chars.next();
+                                result.push_str("[^ \\t\\n\\r]");
+                            }
+                            'n' => {
+                                chars.next();
+                                // In JSON, newline is encoded as \n (two chars)
+                                result.push_str("'\\n'");
+                            }
+                            'r' => {
+                                chars.next();
+                                result.push_str("'\\r'");
+                            }
+                            't' => {
+                                chars.next();
+                                result.push_str("'\\t'");
+                            }
+                            '\\' | '/' | '"' | '.' | '*' | '+' | '?' | '[' | ']' | '(' | ')' | '{' | '}' | '|' | '^' | '$' => {
+                                chars.next();
+                                // Literal escaped character
+                                result.push('\'');
+                                result.push(next);
+                                result.push('\'');
+                            }
+                            _ => {
+                                // Unknown escape, treat as literal
+                                chars.next();
+                                result.push('\'');
+                                result.push(next);
+                                result.push('\'');
+                            }
+                        }
+                    }
+                }
+                '[' => {
+                    // Character class - collect and sanitize for EBNF
+                    let mut class = String::from("[");
+                    let mut depth = 1;
+                    while depth > 0 {
+                        if let Some(cc) = chars.next() {
+                            // Sanitize characters that need escaping in EBNF char classes
+                            if cc == '\\' {
+                                class.push(cc);
+                                if let Some(esc) = chars.next() {
+                                    class.push(esc);
+                                }
+                            } else if cc == '[' {
+                                depth += 1;
+                                class.push('\\');
+                                class.push(cc);
+                            } else if cc == ']' {
+                                depth -= 1;
+                                if depth > 0 {
+                                    // Not the final ], escape it
+                                    class.push('\\');
+                                    class.push(cc);
+                                } else {
+                                    class.push(cc);
+                                }
+                            } else if cc == '(' || cc == ')' || cc == '{' || cc == '}' {
+                                // These need escaping for EBNF
+                                class.push('\\');
+                                class.push(cc);
+                            } else {
+                                class.push(cc);
+                            }
+                        } else {
+                            break;
+                        }
+                    }
+                    result.push_str(&class);
+                }
+                '.' => {
+                    // Any character except newline
+                    // In JSON strings, most printable chars are allowed directly
+                    result.push_str("( STRING_CHAR | ESCAPE_SEQ )");
+                }
+                '*' | '+' | '?' => {
+                    // Quantifier - append to result
+                    result.push(c);
+                }
+                '(' | ')' => {
+                    // Grouping - pass through
+                    result.push(c);
+                }
+                '|' => {
+                    // Alternation
+                    result.push_str(" | ");
+                }
+                '^' | '$' => {
+                    // Anchors - skip them within the pattern (they're handled at a higher level)
+                    // When they appear inside groups like (^gs://.+), just skip them
+                }
+                '{' => {
+                    // Quantifier {n} or {n,m} - pass through until }
+                    result.push(c);
+                    while let Some(&nc) = chars.peek() {
+                        chars.next();
+                        result.push(nc);
+                        if nc == '}' { break; }
+                    }
+                }
+                _ => {
+                    // Literal character - collect consecutive alphanumerics into single quoted string
+                    let mut literal = String::new();
+                    literal.push(c);
+                    
+                    // Peek ahead and collect more literal characters
+                    while let Some(&next) = chars.peek() {
+                        // Stop at special regex chars
+                        if next == '\\' || next == '[' || next == '.' || next == '*' 
+                            || next == '+' || next == '?' || next == '(' || next == ')'
+                            || next == '|' || next == '{' || next == '^' || next == '$' {
+                            break;
+                        }
+                        literal.push(chars.next().unwrap());
+                    }
+                    
+                    // Output as a single quoted literal, escaping single quotes if any
+                    result.push('\'');
+                    for lc in literal.chars() {
+                        if lc == '\'' {
+                            result.push_str("\\'");
+                        } else {
+                            result.push(lc);
+                        }
+                    }
+                    result.push('\'');
+                }
+            }
+        }
+        
+        result
+    }
+    
+    /// Build a GrammarExpr from an EBNF-style pattern string.
+    /// This parses a simplified EBNF pattern format.
+    fn build_pattern_expr(&mut self, pattern: &str) -> GrammarExpr {
+        // For now, use CharClass for the whole pattern if it looks like a simple regex
+        // More complex patterns would need proper parsing
+        
+        // Simple approach: If the pattern is a single regex-like expression, use CharClass
+        // Otherwise, create a sequence with refs
+        
+        let trimmed = pattern.trim();
+        
+        // Check if it's referencing existing rules
+        if trimmed == "STRING_CHARS" {
+            return GrammarExpr::Ref("STRING_CHARS".to_string());
+        }
+        
+        // Split by whitespace but handle alternation specially
+        // The pattern string uses " | " for alternation (with spaces)
+        let parts: Vec<&str> = trimmed.split_whitespace().collect();
+        
+        // Check if there's alternation at the top level
+        let has_top_level_alternation = parts.iter().any(|p| *p == "|");
+        
+        if has_top_level_alternation {
+            // Split by " | " and build a Choice
+            let alternatives: Vec<&str> = trimmed.split(" | ").collect();
+            if alternatives.len() > 1 {
+                let choice_exprs: Vec<GrammarExpr> = alternatives
+                    .iter()
+                    .map(|alt| self.build_pattern_expr(alt.trim()))
+                    .collect();
+                return GrammarExpr::Choice(choice_exprs);
+            }
+        }
+        
+        if parts.len() == 1 {
+            // Single element
+            let part = parts[0];
+            if part == "STRING_CHARS" {
+                return GrammarExpr::Ref("STRING_CHARS".to_string());
+            } else if part.starts_with('[') && part.ends_with(']') {
+                // Character class
+                return GrammarExpr::CharClass(part.to_string());
+            } else if part.starts_with('\'') && part.ends_with('\'') && part.len() >= 2 {
+                // Literal
+                let inner = &part[1..part.len()-1];
+                return GrammarExpr::Literal(inner.as_bytes().to_vec());
+            } else if part.starts_with('(') && part.ends_with(')') {
+                // Grouped expression - recurse
+                return self.build_pattern_expr(&part[1..part.len()-1]);
+            } else {
+                // Assume it's a reference
+                return GrammarExpr::Ref(part.to_string());
+            }
+        }
+        
+        // Multiple parts - create a sequence
+        let mut seq = Vec::new();
+        for part in parts {
+            // Skip standalone "|" tokens as they've been handled above
+            if part == "|" {
+                continue;
+            }
+            seq.push(self.build_pattern_expr(part));
+        }
+        
+        if seq.len() == 1 {
+            seq.remove(0)
+        } else {
+            GrammarExpr::Sequence(seq)
         }
     }
 
@@ -859,11 +1471,15 @@ impl JsonSchemaConverter {
             }
         }
 
+        // Check if we have pattern properties
+        let has_pattern_props = pattern_props.map(|p| !p.is_empty()).unwrap_or(false);
+
         // Determine if additional properties are allowed
+        // Note: patternProperties count as "additional" even when additionalProperties: false
         let allow_additional = match additional_props {
             None | Some(Value::Bool(true)) => true,
             Some(Value::Object(_)) => true, // Schema for additional - still allowed
-            _ => false, // additionalProperties: false
+            _ => has_pattern_props, // additionalProperties: false, but patternProperties may exist
         };
 
         // Collect declared property names for exclusion from additional properties
@@ -888,31 +1504,35 @@ impl JsonSchemaConverter {
                 };
                 // Use string pattern that excludes declared property names
                 let key_expr = self.json_string_except(&declared_prop_names);
-                GrammarExpr::Sequence(vec![
+                Some(GrammarExpr::Sequence(vec![
                     key_expr,
                     GrammarExpr::Literal(b":".to_vec()),
                     ap_expr,
-                ])
+                ]))
             }
             None | Some(Value::Bool(true)) => {
                 // Generic additional properties - use exclusion pattern
                 let key_expr = self.json_string_except(&declared_prop_names);
-                GrammarExpr::Sequence(vec![
+                Some(GrammarExpr::Sequence(vec![
                     key_expr,
                     GrammarExpr::Literal(b":".to_vec()),
                     self.json_value_ref(),
-                ])
+                ]))
             }
             _ => {
-                // additionalProperties: false - shouldn't get here but just in case
-                GrammarExpr::Sequence(vec![])
+                // additionalProperties: false - no generic additional allowed
+                // (patternProperties handled separately below)
+                None
             }
         };
 
         // Handle patternProperties - add to additional as alternatives
         // Since we can't enforce patterns in CFG, they're treated like additional properties
         // Also exclude declared property names from pattern property keys
-        let mut additional_alternatives = vec![additional_kv_expr];
+        let mut additional_alternatives = Vec::new();
+        if let Some(ap_expr) = additional_kv_expr {
+            additional_alternatives.push(ap_expr);
+        }
         if let Some(pp) = pattern_props {
             for (_pattern, pp_schema) in pp {
                 let pp_expr = match self.convert_schema_inline(pp_schema) {
@@ -933,10 +1553,12 @@ impl JsonSchemaConverter {
             }
         }
 
-        let additional_member = if additional_alternatives.len() == 1 {
-            additional_alternatives.remove(0)
+        let additional_member = if additional_alternatives.is_empty() {
+            None
+        } else if additional_alternatives.len() == 1 {
+            Some(additional_alternatives.remove(0))
         } else {
-            GrammarExpr::Choice(additional_alternatives)
+            Some(GrammarExpr::Choice(additional_alternatives))
         };
 
         // Build the object body
@@ -967,13 +1589,13 @@ impl JsonSchemaConverter {
 
         if declared_props.is_empty() {
             // No declared properties, only additional
-            if allow_additional {
+            if let Some(ref am) = additional_member {
                 let comma_additional = GrammarExpr::Sequence(vec![
                     GrammarExpr::Literal(b",".to_vec()),
-                    additional_member.clone(),
+                    am.clone(),
                 ]);
                 let members = GrammarExpr::Optional(Box::new(GrammarExpr::Sequence(vec![
-                    additional_member,
+                    am.clone(),
                     GrammarExpr::Repeat(Box::new(comma_additional)),
                 ])));
                 self.add_rule(rule_name.clone(), GrammarExpr::Sequence(vec![
@@ -1017,14 +1639,14 @@ impl JsonSchemaConverter {
         }
         
         // Create the additional_start rule: additional (',' additional)*
-        let additional_start_rule = if allow_additional {
+        let additional_start_rule = if let Some(ref am) = additional_member {
             let rule_name = format!("{}_ap", obj_prefix);
             let comma_additional = GrammarExpr::Sequence(vec![
                 GrammarExpr::Literal(b",".to_vec()),
-                additional_member.clone(),
+                am.clone(),
             ]);
             self.add_rule(rule_name.clone(), GrammarExpr::Sequence(vec![
-                additional_member.clone(),
+                am.clone(),
                 GrammarExpr::Repeat(Box::new(comma_additional)),
             ]));
             Some(rule_name)
