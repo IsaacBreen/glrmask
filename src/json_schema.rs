@@ -1073,12 +1073,31 @@ impl JsonSchemaConverter {
                     // In JSON strings, most printable chars are allowed directly
                     result.push_str("( STRING_CHAR | ESCAPE_SEQ )");
                 }
-                '*' | '+' | '?' => {
+                '*' | '+' => {
                     // Quantifier - append to result
                     result.push(c);
                 }
-                '(' | ')' => {
-                    // Grouping - pass through
+                '?' => {
+                    // Could be quantifier or part of (?:) non-capturing group
+                    // Just pass through - it will be handled with context
+                    result.push(c);
+                }
+                '(' => {
+                    // Grouping - check for non-capturing group (?:...)
+                    result.push(c);
+                    // Check if this is (?:...) non-capturing group
+                    if chars.peek() == Some(&'?') {
+                        chars.next(); // consume '?'
+                        if chars.peek() == Some(&':') {
+                            chars.next(); // consume ':'
+                            // Skip the ?:, just output (
+                        } else {
+                            // Some other ? construct, just skip the ?
+                        }
+                    }
+                }
+                ')' => {
+                    // Closing group
                     result.push(c);
                 }
                 '|' => {
