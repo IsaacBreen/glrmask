@@ -776,116 +776,131 @@ impl JsonSchemaConverter {
             return Ok(rule_name);
         }
 
-        // Generate alternatives for each possible starting property
+        // Generate ordered property sequence using a LINEAR approach
         // 
-        // NEW APPROACH: After each declared property, we can either:
-        // 1. Continue to any later declared property (skipping intermediate ones)
-        // 2. Switch to additional properties (and no more declared after that)
-        // 3. End the object
+        // KEY INSIGHT from llguidance: Use NAMED RULES for suffixes to avoid duplication.
+        // Instead of inlining `after_rules[j]` which causes exponential growth,
+        // we create named rules and reference them.
         //
-        // We create helper rules for "after property i" to enable property skipping.
-        // 
-        // after_prop_i := (',' (prop_j after_prop_j | prop_k after_prop_k | ... | additional_tail))?
-        //                 where j, k, ... are all properties after i
-        // additional_tail := (',' additional)*
+        // Grammar structure:
+        //   object := '{' _obj_start_or_empty '}'
+        //   _obj_start_or_empty := (prop_0 _after_0 | prop_1 _after_1 | ... | prop_n _after_n | additional_start)?
+        //   _after_i := (',' (prop_j _after_j | ... | additional_start))?  for each j > i
+        //   additional_start := additional (',' additional)*
         //
-        // object := '{' (prop_0 after_prop_0 | prop_1 after_prop_1 | ... | prop_n after_prop_n)? '}'
+        // This creates O(n) rules, not O(2^n) expressions.
         
-        // Create the additional_tail expression: (',' additional)*
-        let additional_tail = if allow_additional {
+        // Generate unique rule name prefix for this object
+        let obj_prefix = self.new_rule_name("obj");
+        
+        // Create property rules: _obj_prefix_prop_i for each property
+        let mut prop_rule_names = Vec::new();
+        for (i, prop_expr) in declared_props.iter().enumerate() {
+            let prop_rule_name = format!("{}_p{}", obj_prefix, i);
+            self.add_rule(prop_rule_name.clone(), prop_expr.clone());
+            prop_rule_names.push(prop_rule_name);
+        }
+        
+        // Create the additional_start rule: additional (',' additional)*
+        let additional_start_rule = if allow_additional {
+            let rule_name = format!("{}_ap", obj_prefix);
             let comma_additional = GrammarExpr::Sequence(vec![
                 GrammarExpr::Literal(b",".to_vec()),
                 additional_member.clone(),
             ]);
-            GrammarExpr::Repeat(Box::new(comma_additional))
+            self.add_rule(rule_name.clone(), GrammarExpr::Sequence(vec![
+                additional_member.clone(),
+                GrammarExpr::Repeat(Box::new(comma_additional)),
+            ]));
+            Some(rule_name)
         } else {
-            GrammarExpr::Sequence(vec![]) // Empty sequence (epsilon)
+            None
         };
-
-        // Create helper rules for "after property i" (what can follow property i)
-        // We build these backwards from the last property
-        let mut after_rules: Vec<GrammarExpr> = Vec::with_capacity(declared_props.len());
-        after_rules.resize(declared_props.len(), GrammarExpr::Sequence(vec![])); // Placeholder
-
-        // after the last property, only additional tail is possible
+        
+        // Create _after_i rules (backwards, so we can reference later ones)
+        // _after_i represents what can come after property i
+        let mut after_rule_names = Vec::new();
+        for i in 0..declared_props.len() {
+            after_rule_names.push(format!("{}_a{}", obj_prefix, i));
+        }
+        
+        // Define _after_n-1 (after the last property): just additional tail
         let last_idx = declared_props.len() - 1;
-        after_rules[last_idx] = GrammarExpr::Optional(Box::new(additional_tail.clone()));
-
-        // Build backwards: after_prop_i allows going to any prop_j where j > i, or additional
+        let last_after_expr = if let Some(ref ap_rule) = additional_start_rule {
+            // Can continue with ',' + additional_start, or nothing
+            GrammarExpr::Optional(Box::new(GrammarExpr::Sequence(vec![
+                GrammarExpr::Literal(b",".to_vec()),
+                GrammarExpr::Ref(ap_rule.clone()),
+            ])))
+        } else {
+            GrammarExpr::Sequence(vec![]) // epsilon - nothing can follow
+        };
+        self.add_rule(after_rule_names[last_idx].clone(), last_after_expr);
+        
+        // Define _after_i for i < n-1 (backwards)
         for i in (0..last_idx).rev() {
-            // Options after property i:
-            // - ',' prop_j after_prop_j for each j > i
-            // - ',' additional (',' additional)*  (switch to additional mode)
+            // Options: ',' followed by (prop_j _after_j for j > i) OR additional_start
             let mut options = Vec::new();
             
+            // Option: go to each later property
             for j in (i + 1)..declared_props.len() {
-                // Option: go to property j
-                let after_j = after_rules[j].clone();
-                let goto_j = GrammarExpr::Sequence(vec![
-                    GrammarExpr::Literal(b",".to_vec()),
-                    declared_props[j].clone(),
-                    after_j,
-                ]);
-                options.push(goto_j);
+                options.push(GrammarExpr::Sequence(vec![
+                    GrammarExpr::Ref(prop_rule_names[j].clone()),
+                    GrammarExpr::Ref(after_rule_names[j].clone()),
+                ]));
             }
             
-            // Option: switch to additional properties (if allowed)
-            if allow_additional {
-                // ',' additional (',' additional)*
-                let switch_to_additional = GrammarExpr::Sequence(vec![
-                    GrammarExpr::Literal(b",".to_vec()),
-                    additional_member.clone(),
-                    additional_tail.clone(),
-                ]);
-                options.push(switch_to_additional);
+            // Option: switch to additional properties
+            if let Some(ref ap_rule) = additional_start_rule {
+                options.push(GrammarExpr::Ref(ap_rule.clone()));
             }
             
-            // Combine all options
             let continuation = if options.len() == 1 {
                 options.remove(0)
             } else if options.is_empty() {
-                GrammarExpr::Sequence(vec![]) // epsilon
+                // No continuation possible - _after_i is epsilon
+                self.add_rule(after_rule_names[i].clone(), GrammarExpr::Sequence(vec![]));
+                continue;
             } else {
                 GrammarExpr::Choice(options)
             };
             
-            after_rules[i] = GrammarExpr::Optional(Box::new(continuation));
+            // _after_i := (',' continuation)?
+            self.add_rule(after_rule_names[i].clone(), GrammarExpr::Optional(Box::new(
+                GrammarExpr::Sequence(vec![
+                    GrammarExpr::Literal(b",".to_vec()),
+                    continuation,
+                ])
+            )));
         }
-
-        // Build object alternatives: start at any declared property
-        let mut object_alternatives = Vec::new();
+        
+        // Build object start: can start with any declared property, or additional only
+        let mut start_options = Vec::new();
         for i in 0..declared_props.len() {
-            let start_with_i = GrammarExpr::Sequence(vec![
-                declared_props[i].clone(),
-                after_rules[i].clone(),
-            ]);
-            object_alternatives.push(start_with_i);
+            start_options.push(GrammarExpr::Sequence(vec![
+                GrammarExpr::Ref(prop_rule_names[i].clone()),
+                GrammarExpr::Ref(after_rule_names[i].clone()),
+            ]));
         }
-
+        
         // NOTE: We do NOT add an "additional properties only" alternative when there are
         // declared properties. This is intentional to avoid grammar ambiguity.
         // 
-        // If we allowed `_json_kv*` as an alternative, then a key like `"keywords"` could 
-        // match both:
-        //   1. The declared property literal `'"keywords"'` with constrained value
+        // If we allowed starting with additional properties (`_json_kv*`), then a key like
+        // `"keywords"` could match both:
+        //   1. The declared property literal with constrained value
         //   2. The generic `_json_kv` which allows any value
         //
-        // The GLR parser would explore both paths, and if the generic path accepts, 
+        // The GLR parser would explore both paths, and if the generic path accepts,
         // invalid JSON would be accepted.
         //
-        // By not having the additional-only alternative, the only way to start an object
-        // is with a declared property. Additional properties can only appear AFTER
-        // declared properties. This matches the user's requirement:
-        // "Do NOT allow additionalProperties before x y or z"
-        //
-        // This is more restrictive than the JSON schema semantics (which allow any order),
-        // but it ensures correctness: invalid values for declared properties are rejected.
+        // By not having the additional-only alternative, declared properties must come
+        // first (in any order among themselves), then additional properties follow.
 
-        // Wrap in optional (for empty object case)
-        let members = if object_alternatives.len() == 1 {
-            GrammarExpr::Optional(Box::new(object_alternatives.remove(0)))
+        let members = if start_options.len() == 1 {
+            GrammarExpr::Optional(Box::new(start_options.remove(0)))
         } else {
-            GrammarExpr::Optional(Box::new(GrammarExpr::Choice(object_alternatives)))
+            GrammarExpr::Optional(Box::new(GrammarExpr::Choice(start_options)))
         };
 
         self.add_rule(rule_name.clone(), GrammarExpr::Sequence(vec![
