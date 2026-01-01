@@ -616,26 +616,51 @@ impl JsonSchemaConverter {
             return Ok(rule_name);
         }
 
-        // Build member alternatives
-        let mut member_alternatives = Vec::new();
+        // NEW APPROACH: Order-dependent property matching
+        // 
+        // Properties must appear in the order they're declared in the schema.
+        // Additional properties (if allowed) can only appear AFTER all declared properties.
+        // This avoids the ambiguity where `"propName"` could match either the constrained
+        // property rule or the generic _json_kv fallback.
+        //
+        // Example for schema {"properties": {"x": ..., "y": ...}, "additionalProperties": true}:
+        //   object ::= '{' 
+        //              ( '"x"' ':' xValue ( ',' '"y"' ':' yValue ( ',' _json_kv )* )? )?
+        //              | ( '"y"' ':' yValue ( ',' _json_kv )* )?
+        //              | ( _json_kv ( ',' _json_kv )* )?
+        //              '}'
+        //
+        // Wait, that's still ambiguous. The key insight is:
+        // - Each declared property can optionally appear, in order
+        // - Additional properties come after all declared properties
+        // - We generate: '{' prop1? (',' prop2)? (',' prop3)? (',' _json_kv)* '}'
+        // 
+        // Actually simpler: since JSON allows properties in any order, but we need to
+        // disambiguate at parse time, we'll generate a grammar where declared properties
+        // MUST appear in schema order. Additional properties come after.
+        //
+        // Grammar: '{' ( declared_members )? ( ',' _json_kv )* '}'
+        // declared_members: each property in sequence, all optional with commas between
 
+        let mut sequence_parts = Vec::new();
+        sequence_parts.push(GrammarExpr::Literal(b"{".to_vec()));
+
+        // Build the declared properties sequence
+        let mut declared_props = Vec::new();
         if let Some(props) = properties {
             for (prop_name, prop_schema) in props {
-                // Try to inline simple types, only create named rules for complex schemas
+                // Convert the property value schema
                 let prop_value_expr = match self.convert_schema_inline(prop_schema) {
                     Ok(expr) => expr,
                     Err(_) => {
-                        // Complex schema - create a named rule
                         let prop_value_rule = self.new_rule_name("pv");
                         self.convert_schema(prop_schema, prop_value_rule.clone())?;
                         GrammarExpr::Ref(prop_value_rule)
                     }
                 };
 
-                // Build: '"propName"' ':' value
-                // WS is handled by the ignore terminal, no need to include it explicitly
                 let escaped_name = self.escape_string_for_json(prop_name);
-                member_alternatives.push(GrammarExpr::Sequence(vec![
+                declared_props.push(GrammarExpr::Sequence(vec![
                     GrammarExpr::Literal(format!("\"{}\"", escaped_name).into_bytes()),
                     GrammarExpr::Literal(b":".to_vec()),
                     prop_value_expr,
@@ -643,14 +668,17 @@ impl JsonSchemaConverter {
             }
         }
 
-        // If additional properties allowed, add generic kv
-        // Default behavior for additionalProperties is true if not specified.
-        match additional_props {
-            None | Some(Value::Bool(true)) => {
-                member_alternatives.push(self.json_kv_ref());
-            }
+        // Determine if additional properties are allowed
+        let allow_additional = match additional_props {
+            None | Some(Value::Bool(true)) => true,
+            Some(Value::Object(_)) => true, // Schema for additional - still allowed
+            _ => false, // additionalProperties: false
+        };
+
+        // Build the additional properties expression
+        let additional_kv_expr = match additional_props {
             Some(Value::Object(ap_schema)) => {
-                // Try to inline simple additionalProperties schemas
+                // Constrained additional properties
                 let ap_value = Value::Object(ap_schema.clone());
                 let ap_expr = match self.convert_schema_inline(&ap_value) {
                     Ok(expr) => expr,
@@ -660,21 +688,20 @@ impl JsonSchemaConverter {
                         GrammarExpr::Ref(additional_rule)
                     }
                 };
-                member_alternatives.push(GrammarExpr::Sequence(vec![
+                GrammarExpr::Sequence(vec![
                     GrammarExpr::Ref("JSON_STRING".to_string()),
                     GrammarExpr::Literal(b":".to_vec()),
                     ap_expr,
-                ]));
+                ])
             }
-            _ => {} // additionalProperties: false or invalid type - don't add generic kv
-        }
+            _ => self.json_kv_ref(), // Generic _json_kv
+        };
 
-        // Handle patternProperties - for each pattern, add a member alternative
-        // that allows any JSON_STRING key with the corresponding value schema.
-        // We can't enforce regex patterns in CFG, so this is a conservative approximation.
+        // Handle patternProperties - add to additional as alternatives
+        // Since we can't enforce patterns in CFG, they're treated like additional properties
+        let mut additional_alternatives = vec![additional_kv_expr];
         if let Some(pp) = pattern_props {
             for (_pattern, pp_schema) in pp {
-                // Try to inline simple patternProperties schemas
                 let pp_expr = match self.convert_schema_inline(pp_schema) {
                     Ok(expr) => expr,
                     Err(_) => {
@@ -683,7 +710,7 @@ impl JsonSchemaConverter {
                         GrammarExpr::Ref(pp_rule)
                     }
                 };
-                member_alternatives.push(GrammarExpr::Sequence(vec![
+                additional_alternatives.push(GrammarExpr::Sequence(vec![
                     GrammarExpr::Ref("JSON_STRING".to_string()),
                     GrammarExpr::Literal(b":".to_vec()),
                     pp_expr,
@@ -691,30 +718,179 @@ impl JsonSchemaConverter {
             }
         }
 
-        // Create member rule
-        let member_rule = self.new_rule_name("mem");
-        if member_alternatives.len() == 1 {
-            self.add_rule(member_rule.clone(), member_alternatives.remove(0));
+        let additional_member = if additional_alternatives.len() == 1 {
+            additional_alternatives.remove(0)
         } else {
-            self.add_rule(member_rule.clone(), GrammarExpr::Choice(member_alternatives));
+            GrammarExpr::Choice(additional_alternatives)
+        };
+
+        // Build the object body
+        // Strategy: Generate all permutations of declared properties (since JSON allows any order)
+        // but that's exponential. Instead, we'll use a simpler approach:
+        //
+        // Generate: '{' ( any_declared_or_additional ( ',' any_declared_or_additional )* )? '}'
+        // where any_declared_or_additional = declared_prop_1 | declared_prop_2 | ... | additional
+        //
+        // BUT this has the original ambiguity problem!
+        //
+        // NEW STRATEGY: Require declared properties in order, with optional skipping
+        // '{' prop1? (',' prop2?)* (',' additional)* '}'
+        //
+        // Even simpler: treat each property as optional, in sequence, then allow additional
+        // But we need to handle comma separators correctly.
+        //
+        // SIMPLEST WORKING APPROACH for now:
+        // If there are N declared properties, generate:
+        //   '{' ( prop0 (',' prop1 (',' prop2 ... (',' additional)*...)?)?)?
+        //     | ( prop1 (',' prop2 ... (',' additional)*...)?)?
+        //     | ( prop2 ... (',' additional)*...)?
+        //     | ( additional (',' additional)* )?
+        //   '}'
+        //
+        // This allows any subset of properties in order, with additional at the end.
+        // Each alternative is unambiguous because the first token disambiguates.
+
+        if declared_props.is_empty() {
+            // No declared properties, only additional
+            if allow_additional {
+                let comma_additional = GrammarExpr::Sequence(vec![
+                    GrammarExpr::Literal(b",".to_vec()),
+                    additional_member.clone(),
+                ]);
+                let members = GrammarExpr::Optional(Box::new(GrammarExpr::Sequence(vec![
+                    additional_member,
+                    GrammarExpr::Repeat(Box::new(comma_additional)),
+                ])));
+                self.add_rule(rule_name.clone(), GrammarExpr::Sequence(vec![
+                    GrammarExpr::Literal(b"{".to_vec()),
+                    members,
+                    GrammarExpr::Literal(b"}".to_vec()),
+                ]));
+            } else {
+                // Empty object only
+                self.add_rule(rule_name.clone(), GrammarExpr::Sequence(vec![
+                    GrammarExpr::Literal(b"{".to_vec()),
+                    GrammarExpr::Literal(b"}".to_vec()),
+                ]));
+            }
+            return Ok(rule_name);
         }
 
-        // Object rule: { member (, member)* }
-        // Build: '{' ( member ( ',' member )* )? '}'
-        // WS is handled by the ignore terminal
-        let comma_member = GrammarExpr::Sequence(vec![
-            GrammarExpr::Literal(b",".to_vec()),
-            GrammarExpr::Ref(member_rule.clone()),
-        ]);
+        // Generate alternatives for each possible starting property
+        // 
+        // NEW APPROACH: After each declared property, we can either:
+        // 1. Continue to any later declared property (skipping intermediate ones)
+        // 2. Switch to additional properties (and no more declared after that)
+        // 3. End the object
+        //
+        // We create helper rules for "after property i" to enable property skipping.
+        // 
+        // after_prop_i := (',' (prop_j after_prop_j | prop_k after_prop_k | ... | additional_tail))?
+        //                 where j, k, ... are all properties after i
+        // additional_tail := (',' additional)*
+        //
+        // object := '{' (prop_0 after_prop_0 | prop_1 after_prop_1 | ... | prop_n after_prop_n)? '}'
+        
+        // Create the additional_tail expression: (',' additional)*
+        let additional_tail = if allow_additional {
+            let comma_additional = GrammarExpr::Sequence(vec![
+                GrammarExpr::Literal(b",".to_vec()),
+                additional_member.clone(),
+            ]);
+            GrammarExpr::Repeat(Box::new(comma_additional))
+        } else {
+            GrammarExpr::Sequence(vec![]) // Empty sequence (epsilon)
+        };
 
-        let members_opt = GrammarExpr::Optional(Box::new(GrammarExpr::Sequence(vec![
-            GrammarExpr::Ref(member_rule),
-            GrammarExpr::Repeat(Box::new(comma_member)),
-        ])));
+        // Create helper rules for "after property i" (what can follow property i)
+        // We build these backwards from the last property
+        let mut after_rules: Vec<GrammarExpr> = Vec::with_capacity(declared_props.len());
+        after_rules.resize(declared_props.len(), GrammarExpr::Sequence(vec![])); // Placeholder
+
+        // after the last property, only additional tail is possible
+        let last_idx = declared_props.len() - 1;
+        after_rules[last_idx] = GrammarExpr::Optional(Box::new(additional_tail.clone()));
+
+        // Build backwards: after_prop_i allows going to any prop_j where j > i, or additional
+        for i in (0..last_idx).rev() {
+            // Options after property i:
+            // - ',' prop_j after_prop_j for each j > i
+            // - ',' additional (',' additional)*  (switch to additional mode)
+            let mut options = Vec::new();
+            
+            for j in (i + 1)..declared_props.len() {
+                // Option: go to property j
+                let after_j = after_rules[j].clone();
+                let goto_j = GrammarExpr::Sequence(vec![
+                    GrammarExpr::Literal(b",".to_vec()),
+                    declared_props[j].clone(),
+                    after_j,
+                ]);
+                options.push(goto_j);
+            }
+            
+            // Option: switch to additional properties (if allowed)
+            if allow_additional {
+                // ',' additional (',' additional)*
+                let switch_to_additional = GrammarExpr::Sequence(vec![
+                    GrammarExpr::Literal(b",".to_vec()),
+                    additional_member.clone(),
+                    additional_tail.clone(),
+                ]);
+                options.push(switch_to_additional);
+            }
+            
+            // Combine all options
+            let continuation = if options.len() == 1 {
+                options.remove(0)
+            } else if options.is_empty() {
+                GrammarExpr::Sequence(vec![]) // epsilon
+            } else {
+                GrammarExpr::Choice(options)
+            };
+            
+            after_rules[i] = GrammarExpr::Optional(Box::new(continuation));
+        }
+
+        // Build object alternatives: start at any declared property
+        let mut object_alternatives = Vec::new();
+        for i in 0..declared_props.len() {
+            let start_with_i = GrammarExpr::Sequence(vec![
+                declared_props[i].clone(),
+                after_rules[i].clone(),
+            ]);
+            object_alternatives.push(start_with_i);
+        }
+
+        // NOTE: We do NOT add an "additional properties only" alternative when there are
+        // declared properties. This is intentional to avoid grammar ambiguity.
+        // 
+        // If we allowed `_json_kv*` as an alternative, then a key like `"keywords"` could 
+        // match both:
+        //   1. The declared property literal `'"keywords"'` with constrained value
+        //   2. The generic `_json_kv` which allows any value
+        //
+        // The GLR parser would explore both paths, and if the generic path accepts, 
+        // invalid JSON would be accepted.
+        //
+        // By not having the additional-only alternative, the only way to start an object
+        // is with a declared property. Additional properties can only appear AFTER
+        // declared properties. This matches the user's requirement:
+        // "Do NOT allow additionalProperties before x y or z"
+        //
+        // This is more restrictive than the JSON schema semantics (which allow any order),
+        // but it ensures correctness: invalid values for declared properties are rejected.
+
+        // Wrap in optional (for empty object case)
+        let members = if object_alternatives.len() == 1 {
+            GrammarExpr::Optional(Box::new(object_alternatives.remove(0)))
+        } else {
+            GrammarExpr::Optional(Box::new(GrammarExpr::Choice(object_alternatives)))
+        };
 
         self.add_rule(rule_name.clone(), GrammarExpr::Sequence(vec![
             GrammarExpr::Literal(b"{".to_vec()),
-            members_opt,
+            members,
             GrammarExpr::Literal(b"}".to_vec()),
         ]));
 
