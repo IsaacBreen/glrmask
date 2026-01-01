@@ -574,54 +574,87 @@ impl<'a> GrammarOptimizer<'a> {
         
         // Step 3: Convert expanded solutions to terminal expressions
         // Nullable terminals will be handled by transform_nullable_terminals in table.rs
-        // Deduplicate terminals with identical expressions (but skip for very large expressions)
+        // Deduplicate terminals with identical expressions
         let convert_start = std::time::Instant::now();
         
-        // Map from expression to (canonical_nt_name, group_id)
-        // This allows us to share terminals for NTs with identical expressions
-        // NOTE: We only deduplicate small expressions to avoid expensive hash/eq for large ones
-        let mut expr_to_terminal: HashMap<Expr, (String, usize)> = HashMap::new();
+        // Use term-based deduplication with precomputed hashes for efficiency.
+        // We hash the RegexTerm (which uses Rc sharing) rather than the Expr.
+        // Two NTs with pointer-identical terms can share the same terminal.
+        // For structurally identical (but not pointer-identical) terms, we use a content hash.
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        
+        // Map from term content hash to (canonical_nt_name, group_id)
+        let mut term_hash_to_terminal: HashMap<u64, (String, usize)> = HashMap::new();
         // Map from NT name to the canonical NT name it should use
         let mut nt_to_canonical: HashMap<String, String> = HashMap::new();
         
-        // Threshold for deduplication: skip if expression is larger than this
-        const DEDUP_SIZE_THRESHOLD: usize = 500;
+        // Helper to compute a content-based hash for a RegexTerm
+        fn hash_term(term: &Rc<RegexTerm>, cache: &mut HashMap<*const RegexTerm, u64>) -> u64 {
+            let ptr = Rc::as_ptr(term);
+            if let Some(&cached) = cache.get(&ptr) {
+                return cached;
+            }
+            
+            let mut hasher = DefaultHasher::new();
+            match term.as_ref() {
+                RegexTerm::Epsilon => {
+                    0u8.hash(&mut hasher);
+                }
+                RegexTerm::Concrete(expr) => {
+                    1u8.hash(&mut hasher);
+                    // Hash the expr's debug representation as a simple way to get content hash
+                    format!("{:?}", expr).hash(&mut hasher);
+                }
+                RegexTerm::NtRef(name) => {
+                    2u8.hash(&mut hasher);
+                    name.hash(&mut hasher);
+                }
+                RegexTerm::Seq(parts) => {
+                    3u8.hash(&mut hasher);
+                    for p in parts {
+                        hash_term(p, cache).hash(&mut hasher);
+                    }
+                }
+                RegexTerm::Choice(alts) => {
+                    4u8.hash(&mut hasher);
+                    for a in alts {
+                        hash_term(a, cache).hash(&mut hasher);
+                    }
+                }
+                RegexTerm::Star(inner) => {
+                    5u8.hash(&mut hasher);
+                    hash_term(inner, cache).hash(&mut hasher);
+                }
+            }
+            
+            let hash = hasher.finish();
+            cache.insert(ptr, hash);
+            hash
+        }
         
-        debug!(5, "Starting NT->Expr conversion loop for {} NTs", nt_expand_order.len());
-        let mut convert_count = 0;
-        let mut skipped_dedup_count = 0;
+        debug!(5, "Converting {} NTs to terminal expressions", nt_expand_order.len());
+        let mut hash_cache: HashMap<*const RegexTerm, u64> = HashMap::new();
+        
         for nt in &nt_expand_order {
             if let Some(expanded) = expanded_solutions.get(nt) {
-                if let Some(expr) = regex_term_to_expr_rc(expanded) {
-                    // Estimate expression size for deduplication decision
-                    let expr_size = expanded.size();
-                    
-                    if expr_size <= DEDUP_SIZE_THRESHOLD {
-                        // Small expression: try to deduplicate
-                        if let Some((canonical_nt, _group_id)) = expr_to_terminal.get(&expr) {
-                            // Reuse existing terminal
-                            nt_to_canonical.insert(nt.clone(), canonical_nt.clone());
-                        } else {
-                            let group_id = next_group_id;
-                            next_group_id += 1;
-                            new_terminals.insert(nt.clone(), (group_id, expr.clone()));
-                            expr_to_terminal.insert(expr, (nt.clone(), group_id));
-                            nt_to_canonical.insert(nt.clone(), nt.clone());
-                        }
-                    } else {
-                        // Large expression: skip deduplication, just add it
-                        skipped_dedup_count += 1;
+                // Compute content hash for deduplication
+                let term_hash = hash_term(expanded, &mut hash_cache);
+                
+                // Check if we've already seen an identical term
+                if let Some((canonical_nt, _group_id)) = term_hash_to_terminal.get(&term_hash) {
+                    // Reuse existing terminal
+                    nt_to_canonical.insert(nt.clone(), canonical_nt.clone());
+                } else {
+                    // New unique term - convert to expr
+                    if let Some(expr) = regex_term_to_expr_rc(expanded) {
                         let group_id = next_group_id;
                         next_group_id += 1;
                         new_terminals.insert(nt.clone(), (group_id, expr));
+                        term_hash_to_terminal.insert(term_hash, (nt.clone(), group_id));
                         nt_to_canonical.insert(nt.clone(), nt.clone());
                     }
                 }
-            }
-            convert_count += 1;
-            if convert_count % 500 == 0 {
-                debug!(5, "  Converted {}/{} NTs in {:?} (skipped_dedup={})", 
-                    convert_count, nt_expand_order.len(), convert_start.elapsed(), skipped_dedup_count);
             }
         }
         

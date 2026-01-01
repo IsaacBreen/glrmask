@@ -592,6 +592,195 @@ impl JsonSchemaConverter {
         }
     }
 
+    /// Generate a GrammarExpr for a JSON string key that is NOT any of the excluded property names.
+    /// 
+    /// This is used for additionalProperties to ensure they don't match declared property names.
+    /// The strategy:
+    /// 1. If no exclusions, just return JSON_STRING
+    /// 2. Otherwise, generate a pattern that matches strings differing from ALL excluded strings
+    ///
+    /// For implementation, we build a choice of patterns:
+    /// - Strings with different lengths than all excluded strings
+    /// - Strings starting with characters not at start of any excluded string
+    /// - Strings starting the same as some excluded string but diverging later
+    fn json_string_except(&mut self, excluded: &[String]) -> GrammarExpr {
+        if excluded.is_empty() {
+            return GrammarExpr::Ref("JSON_STRING".to_string());
+        }
+
+        // Create a unique rule name for this exclusion pattern
+        let rule_name = self.new_rule_name("str_ex");
+        
+        // Build the exclusion pattern
+        let pattern = self.build_string_except_pattern(excluded);
+        self.add_rule(rule_name.clone(), pattern);
+        
+        GrammarExpr::Ref(rule_name)
+    }
+
+    /// Build a grammar pattern for strings not matching any of the excluded strings.
+    /// The pattern is: `"` + (content NOT matching any excluded) + `"`
+    fn build_string_except_pattern(&mut self, excluded: &[String]) -> GrammarExpr {
+        // Strategy: Build a trie-like pattern of exclusions
+        // A string matches if it differs from ALL excluded strings at some position
+        
+        // Group excluded strings by first character
+        let mut by_first_char: std::collections::BTreeMap<char, Vec<&str>> = std::collections::BTreeMap::new();
+        let mut first_chars: std::collections::BTreeSet<char> = std::collections::BTreeSet::new();
+        
+        for s in excluded {
+            if let Some(c) = s.chars().next() {
+                first_chars.insert(c);
+                by_first_char.entry(c).or_default().push(s.as_str());
+            }
+        }
+
+        // Build alternatives for the content between quotes
+        let mut content_alternatives = Vec::new();
+
+        // Alternative 1: Start with a character NOT in first_chars
+        // This automatically avoids all excluded strings
+        let first_chars_escaped: Vec<String> = first_chars.iter()
+            .map(|c| Self::escape_char_for_char_class(*c))
+            .collect();
+        
+        if !first_chars_escaped.is_empty() {
+            let not_first_chars_pattern = format!("[^{}\"\\\\\\x00-\\x1f]", first_chars_escaped.join(""));
+            // Matches: (not_first_char) + any_remaining_chars
+            content_alternatives.push(GrammarExpr::Sequence(vec![
+                GrammarExpr::CharClass(not_first_chars_pattern),
+                GrammarExpr::Ref("STRING_CHARS".to_string()),
+            ]));
+        }
+
+        // Alternative 2: For each first char, match strings that START with that char
+        // but then DIVERGE from all excluded strings starting with that char
+        for (first_char, strings_with_this_first) in &by_first_char {
+            let suffixes: Vec<&str> = strings_with_this_first.iter()
+                .map(|s| &s[first_char.len_utf8()..])
+                .collect();
+            
+            let divergent_suffix = self.build_divergent_suffix_pattern(&suffixes);
+            
+            // Pattern: first_char + divergent_suffix
+            let first_char_literal = Self::escape_string_for_json(&first_char.to_string());
+            content_alternatives.push(GrammarExpr::Sequence(vec![
+                GrammarExpr::Literal(first_char_literal.into_bytes()),
+                divergent_suffix,
+            ]));
+        }
+
+        // Also allow empty string (if no excluded string is empty)
+        if !excluded.iter().any(|s| s.is_empty()) {
+            content_alternatives.push(GrammarExpr::Sequence(vec![])); // epsilon
+        }
+
+        // Combine all alternatives
+        let content = if content_alternatives.len() == 1 {
+            content_alternatives.remove(0)
+        } else {
+            GrammarExpr::Choice(content_alternatives)
+        };
+
+        // Final pattern: `"` + content + `"`
+        GrammarExpr::Sequence(vec![
+            GrammarExpr::Literal(b"\"".to_vec()),
+            content,
+            GrammarExpr::Literal(b"\"".to_vec()),
+        ])
+    }
+
+    /// Build a pattern for suffixes that diverge from all the given suffixes.
+    /// Returns a pattern that matches strings NOT equal to any of the suffixes.
+    fn build_divergent_suffix_pattern(&self, suffixes: &[&str]) -> GrammarExpr {
+        if suffixes.is_empty() {
+            // No suffixes to avoid - match anything
+            return GrammarExpr::Ref("STRING_CHARS".to_string());
+        }
+
+        // If all suffixes are empty, we need to match at least one more character
+        if suffixes.iter().all(|s| s.is_empty()) {
+            // Must have at least one more character to diverge
+            return GrammarExpr::Sequence(vec![
+                GrammarExpr::Choice(vec![
+                    GrammarExpr::Ref("STRING_CHAR".to_string()),
+                    GrammarExpr::Ref("ESCAPE_SEQ".to_string()),
+                ]),
+                GrammarExpr::Ref("STRING_CHARS".to_string()),
+            ]);
+        }
+
+        // Group by next character
+        let mut by_next_char: std::collections::BTreeMap<char, Vec<&str>> = std::collections::BTreeMap::new();
+        let mut next_chars: std::collections::BTreeSet<char> = std::collections::BTreeSet::new();
+        let mut has_empty = false;
+        
+        for suffix in suffixes {
+            if suffix.is_empty() {
+                has_empty = true;
+            } else if let Some(c) = suffix.chars().next() {
+                next_chars.insert(c);
+                by_next_char.entry(c).or_default().push(&suffix[c.len_utf8()..]);
+            }
+        }
+
+        let mut alternatives = Vec::new();
+
+        // Alternative 1: Use a character not in next_chars
+        if !next_chars.is_empty() {
+            let chars_escaped: Vec<String> = next_chars.iter()
+                .map(|c| Self::escape_char_for_char_class(*c))
+                .collect();
+            let not_next_chars = format!("[^{}\"\\\\\\x00-\\x1f]", chars_escaped.join(""));
+            alternatives.push(GrammarExpr::Sequence(vec![
+                GrammarExpr::CharClass(not_next_chars),
+                GrammarExpr::Ref("STRING_CHARS".to_string()),
+            ]));
+        }
+
+        // Alternative 2: For each next char, recursively build divergent pattern
+        for (next_char, sub_suffixes) in &by_next_char {
+            let next_divergent = self.build_divergent_suffix_pattern(sub_suffixes);
+            let next_char_literal = Self::escape_string_for_json(&next_char.to_string());
+            alternatives.push(GrammarExpr::Sequence(vec![
+                GrammarExpr::Literal(next_char_literal.into_bytes()),
+                next_divergent,
+            ]));
+        }
+
+        // Alternative 3: If no empty suffix, we can also stop here (empty continuation)
+        if !has_empty {
+            alternatives.push(GrammarExpr::Sequence(vec![])); // epsilon - empty string
+        }
+
+        if alternatives.len() == 1 {
+            alternatives.remove(0)
+        } else if alternatives.is_empty() {
+            // All suffixes were empty, must have more chars
+            GrammarExpr::Sequence(vec![
+                GrammarExpr::Choice(vec![
+                    GrammarExpr::Ref("STRING_CHAR".to_string()),
+                    GrammarExpr::Ref("ESCAPE_SEQ".to_string()),
+                ]),
+                GrammarExpr::Ref("STRING_CHARS".to_string()),
+            ])
+        } else {
+            GrammarExpr::Choice(alternatives)
+        }
+    }
+
+    /// Escape a character for use in a character class regex pattern.
+    fn escape_char_for_char_class(c: char) -> String {
+        match c {
+            '\\' | ']' | '^' | '-' => format!("\\{}", c),
+            '\n' => "\\n".to_string(),
+            '\r' => "\\r".to_string(),
+            '\t' => "\\t".to_string(),
+            c if c.is_ascii_control() => format!("\\x{:02x}", c as u8),
+            c => c.to_string(),
+        }
+    }
+
     /// Convert an object schema.
     fn convert_object(&mut self, obj: &serde_json::Map<String, Value>, rule_name: String) -> Result<String, String> {
         let properties = obj.get("properties").and_then(|v| v.as_object());
@@ -661,7 +850,7 @@ impl JsonSchemaConverter {
                     }
                 };
 
-                let escaped_name = self.escape_string_for_json(prop_name);
+                let escaped_name = Self::escape_string_for_json(prop_name);
                 declared_props.push(GrammarExpr::Sequence(vec![
                     GrammarExpr::Literal(format!("\"{}\"", escaped_name).into_bytes()),
                     GrammarExpr::Literal(b":".to_vec()),
@@ -677,7 +866,14 @@ impl JsonSchemaConverter {
             _ => false, // additionalProperties: false
         };
 
+        // Collect declared property names for exclusion from additional properties
+        let declared_prop_names: Vec<String> = properties
+            .map(|p| p.keys().cloned().collect())
+            .unwrap_or_default();
+
         // Build the additional properties expression
+        // IMPORTANT: additionalProperties keys must NOT match declared property names
+        // This ensures we don't have ambiguity between declared and additional properties
         let additional_kv_expr = match additional_props {
             Some(Value::Object(ap_schema)) => {
                 // Constrained additional properties
@@ -690,17 +886,32 @@ impl JsonSchemaConverter {
                         GrammarExpr::Ref(additional_rule)
                     }
                 };
+                // Use string pattern that excludes declared property names
+                let key_expr = self.json_string_except(&declared_prop_names);
                 GrammarExpr::Sequence(vec![
-                    GrammarExpr::Ref("JSON_STRING".to_string()),
+                    key_expr,
                     GrammarExpr::Literal(b":".to_vec()),
                     ap_expr,
                 ])
             }
-            _ => self.json_kv_ref(), // Generic _json_kv
+            None | Some(Value::Bool(true)) => {
+                // Generic additional properties - use exclusion pattern
+                let key_expr = self.json_string_except(&declared_prop_names);
+                GrammarExpr::Sequence(vec![
+                    key_expr,
+                    GrammarExpr::Literal(b":".to_vec()),
+                    self.json_value_ref(),
+                ])
+            }
+            _ => {
+                // additionalProperties: false - shouldn't get here but just in case
+                GrammarExpr::Sequence(vec![])
+            }
         };
 
         // Handle patternProperties - add to additional as alternatives
         // Since we can't enforce patterns in CFG, they're treated like additional properties
+        // Also exclude declared property names from pattern property keys
         let mut additional_alternatives = vec![additional_kv_expr];
         if let Some(pp) = pattern_props {
             for (_pattern, pp_schema) in pp {
@@ -712,8 +923,10 @@ impl JsonSchemaConverter {
                         GrammarExpr::Ref(pp_rule)
                     }
                 };
+                // Use exclusion pattern for pattern property keys too
+                let key_expr = self.json_string_except(&declared_prop_names);
                 additional_alternatives.push(GrammarExpr::Sequence(vec![
-                    GrammarExpr::Ref("JSON_STRING".to_string()),
+                    key_expr,
                     GrammarExpr::Literal(b":".to_vec()),
                     pp_expr,
                 ]));
@@ -885,19 +1098,19 @@ impl JsonSchemaConverter {
             ]));
         }
         
-        // NOTE: We do NOT add an "additional properties only" alternative when there are
-        // declared properties. This is intentional to avoid grammar ambiguity.
+        // Add additional-properties-only start option
         // 
-        // If we allowed starting with additional properties (`_json_kv*`), then a key like
-        // `"keywords"` could match both:
-        //   1. The declared property literal with constrained value
-        //   2. The generic `_json_kv` which allows any value
+        // This is now safe because we use json_string_except() to generate exclusion
+        // patterns for additional property keys. The exclusion pattern ensures that
+        // additional property keys CANNOT match declared property names.
         //
-        // The GLR parser would explore both paths, and if the generic path accepts,
-        // invalid JSON would be accepted.
-        //
-        // By not having the additional-only alternative, declared properties must come
-        // first (in any order among themselves), then additional properties follow.
+        // For example, if declared properties are "foo" and "bar", the additional
+        // property key pattern matches any JSON string EXCEPT "foo" and "bar".
+        // This means there's no ambiguity - the first token unambiguously determines
+        // whether we're looking at a declared property or an additional property.
+        if let Some(ref ap_rule) = additional_start_rule {
+            start_options.push(GrammarExpr::Ref(ap_rule.clone()));
+        }
 
         let members = if start_options.len() == 1 {
             GrammarExpr::Optional(Box::new(start_options.remove(0)))
@@ -1208,7 +1421,7 @@ impl JsonSchemaConverter {
             Value::Bool(false) => GrammarExpr::Literal(b"false".to_vec()),
             Value::Number(n) => GrammarExpr::Literal(n.to_string().into_bytes()),
             Value::String(s) => {
-                let escaped = self.escape_string_for_json(s);
+                let escaped = Self::escape_string_for_json(s);
                 GrammarExpr::Literal(format!("\"{}\"", escaped).into_bytes())
             }
             Value::Array(items) => {
@@ -1235,7 +1448,7 @@ impl JsonSchemaConverter {
                     }
                     
                     // Key string
-                    let escaped_key = self.escape_string_for_json(key);
+                    let escaped_key = Self::escape_string_for_json(key);
                     parts.push(GrammarExpr::Literal(format!("\"{}\"", escaped_key).into_bytes()));
                     
                     // Colon
@@ -1252,7 +1465,7 @@ impl JsonSchemaConverter {
     }
 
     /// Escape a string for use in JSON.
-    fn escape_string_for_json(&self, s: &str) -> String {
+    fn escape_string_for_json(s: &str) -> String {
         let mut result = String::new();
         for c in s.chars() {
             match c {
