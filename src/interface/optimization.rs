@@ -574,30 +574,54 @@ impl<'a> GrammarOptimizer<'a> {
         
         // Step 3: Convert expanded solutions to terminal expressions
         // Nullable terminals will be handled by transform_nullable_terminals in table.rs
-        // Deduplicate terminals with identical expressions
+        // Deduplicate terminals with identical expressions (but skip for very large expressions)
         let convert_start = std::time::Instant::now();
         
         // Map from expression to (canonical_nt_name, group_id)
         // This allows us to share terminals for NTs with identical expressions
+        // NOTE: We only deduplicate small expressions to avoid expensive hash/eq for large ones
         let mut expr_to_terminal: HashMap<Expr, (String, usize)> = HashMap::new();
         // Map from NT name to the canonical NT name it should use
         let mut nt_to_canonical: HashMap<String, String> = HashMap::new();
         
+        // Threshold for deduplication: skip if expression is larger than this
+        const DEDUP_SIZE_THRESHOLD: usize = 500;
+        
+        debug!(5, "Starting NT->Expr conversion loop for {} NTs", nt_expand_order.len());
+        let mut convert_count = 0;
+        let mut skipped_dedup_count = 0;
         for nt in &nt_expand_order {
             if let Some(expanded) = expanded_solutions.get(nt) {
                 if let Some(expr) = regex_term_to_expr_rc(expanded) {
-                    // Check if we've already seen this expression
-                    if let Some((canonical_nt, _group_id)) = expr_to_terminal.get(&expr) {
-                        // Reuse existing terminal
-                        nt_to_canonical.insert(nt.clone(), canonical_nt.clone());
+                    // Estimate expression size for deduplication decision
+                    let expr_size = expanded.size();
+                    
+                    if expr_size <= DEDUP_SIZE_THRESHOLD {
+                        // Small expression: try to deduplicate
+                        if let Some((canonical_nt, _group_id)) = expr_to_terminal.get(&expr) {
+                            // Reuse existing terminal
+                            nt_to_canonical.insert(nt.clone(), canonical_nt.clone());
+                        } else {
+                            let group_id = next_group_id;
+                            next_group_id += 1;
+                            new_terminals.insert(nt.clone(), (group_id, expr.clone()));
+                            expr_to_terminal.insert(expr, (nt.clone(), group_id));
+                            nt_to_canonical.insert(nt.clone(), nt.clone());
+                        }
                     } else {
+                        // Large expression: skip deduplication, just add it
+                        skipped_dedup_count += 1;
                         let group_id = next_group_id;
                         next_group_id += 1;
-                        new_terminals.insert(nt.clone(), (group_id, expr.clone()));
-                        expr_to_terminal.insert(expr, (nt.clone(), group_id));
+                        new_terminals.insert(nt.clone(), (group_id, expr));
                         nt_to_canonical.insert(nt.clone(), nt.clone());
                     }
                 }
+            }
+            convert_count += 1;
+            if convert_count % 500 == 0 {
+                debug!(5, "  Converted {}/{} NTs in {:?} (skipped_dedup={})", 
+                    convert_count, nt_expand_order.len(), convert_start.elapsed(), skipped_dedup_count);
             }
         }
         

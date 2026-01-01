@@ -646,6 +646,8 @@ impl JsonSchemaConverter {
         sequence_parts.push(GrammarExpr::Literal(b"{".to_vec()));
 
         // Build the declared properties sequence
+        // Properties are processed in the order they appear in the schema.
+        // Note: serde_json with preserve_order feature maintains insertion order.
         let mut declared_props = Vec::new();
         if let Some(props) = properties {
             for (prop_name, prop_schema) in props {
