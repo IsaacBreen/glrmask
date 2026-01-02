@@ -34,6 +34,24 @@
 use crate::interface::interface::GrammarExpr;
 use std::collections::{HashMap, HashSet};
 
+/// Check if an expression contains regex features (CharClass or AnyChar).
+/// Rules containing these features will be treated as terminals later,
+/// so they should not be factored (helpers would not be recognized as terminals).
+fn contains_regex_features(expr: &GrammarExpr) -> bool {
+    match expr {
+        GrammarExpr::AnyChar => true,
+        GrammarExpr::CharClass(_) => true,
+        GrammarExpr::Literal(_) => false,
+        GrammarExpr::Ref(_) => false,
+        GrammarExpr::Sequence(exprs) | GrammarExpr::Choice(exprs) => {
+            exprs.iter().any(contains_regex_features)
+        }
+        GrammarExpr::Optional(inner) | GrammarExpr::Repeat(inner) => {
+            contains_regex_features(inner)
+        }
+    }
+}
+
 /// Factor choices in a list of grammar rules.
 /// This operates on parsed GrammarExpr structures, not raw EBNF text.
 pub fn factor_grammar_rules(rules: Vec<(String, GrammarExpr)>) -> Vec<(String, GrammarExpr)> {
@@ -73,7 +91,11 @@ impl ChoiceFactorer {
             
             // Only factor rules that are internal helpers (start with '_')
             // Skip rules with the _json prefix (empirically validated exception)
-            let should_factor = name.starts_with('_') && !name.starts_with("_json");
+            // Skip rules with regex features (CharClass, AnyChar) - they will be treated as terminals
+            // and their helper rules would not be recognized as terminals, causing errors
+            let should_factor = name.starts_with('_') 
+                && !name.starts_with("_json")
+                && !contains_regex_features(&expr);
             
             let factored_expr = if should_factor {
                 self.factor_expr(expr, name)
