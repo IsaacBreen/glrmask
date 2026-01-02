@@ -6,6 +6,14 @@ mod lark;
 mod optimization;
 mod ebnf_factoring;
 mod extract_alternatives;
+
+// JSON Schema conversion - new modular structure
+pub mod json_schema_types;
+pub mod json_schema_parser;
+pub mod json_schema_convert;
+pub mod json_schema_emit;
+
+// Legacy JSON Schema module (uses old monolithic approach, will be deprecated)
 pub mod json_schema;
 
 pub use ebnf::*;

@@ -1,23 +1,48 @@
-//! JSON Schema to Grammar conversion.
+//! JSON Schema to Grammar conversion (Legacy Implementation).
+//!
+//! **NOTE:** This is the legacy monolithic implementation. For new development,
+//! consider using the modular implementation in:
+//! - `json_schema_types`: Intermediate representations (SchemaType, GrammarType)
+//! - `json_schema_parser`: JSON -> SchemaType conversion  
+//! - `json_schema_convert`: SchemaType -> GrammarType conversion
+//! - `json_schema_emit`: GrammarType -> GrammarExpr conversion
+//!
+//! This legacy module is kept for backward compatibility and because it handles
+//! some edge cases that haven't been migrated yet.
+//!
+//! ---
 //!
 //! This module converts JSON Schema (draft-07 compatible) to Sep1's grammar representation.
 //! The goal is to generate grammars that are as permissive as the schema allows, without
 //! trying to enforce semantic constraints that are impossible for CFGs.
 //!
-//! # Supported features:
+//! # Assumptions and Limitations
+//!
+//! ## Properties are Order-Dependent
+//! Properties in objects must appear in the order they are declared in the schema.
+//! This is necessary for grammar disambiguation and differs from standard JSON Schema
+//! which allows properties in any order.
+//!
+//! ## Additional Properties Location
+//! When `additionalProperties` is enabled, additional properties can ONLY appear
+//! AFTER all declared properties. This is a grammar constraint for unambiguous parsing.
+//!
+//! ## Supported Features
 //! - `type`: object, array, string, integer, number, boolean, null, and arrays of types
 //! - `properties`, `additionalProperties`
 //! - `items`, `prefixItems` (draft 2020-12)
 //! - `$ref`, `$defs`, `definitions`
 //! - `allOf`, `anyOf`, `oneOf`
 //! - `const`, `enum`
+//! - `pattern`, `minLength`, `maxLength` (for strings)
 //!
-//! # Unsupported (intentionally - these require semantic validation, not syntax):
-//! - minimum/maximum/exclusiveMinimum/exclusiveMaximum
-//! - minLength/maxLength
-//! - minItems/maxItems
-//! - minProperties/maxProperties
-//! - pattern, format, uniqueItems, dependencies, if/then/else, not
+//! ## Intentionally Unsupported (semantic constraints, not syntactic)
+//! - `minimum`/`maximum`/`exclusiveMinimum`/`exclusiveMaximum` (number constraints)
+//! - `minItems`/`maxItems` (array length)
+//! - `minProperties`/`maxProperties`
+//! - `uniqueItems`
+//! - `dependencies`, `if`/`then`/`else`, `not`
+//! - `format` (stored but not enforced)
 
 use super::GrammarExpr;
 use crate::tokenizer::string_utils::{escape_char_for_char_class, escape_string_for_json};
