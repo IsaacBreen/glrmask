@@ -11,7 +11,7 @@ mod tests {
     
     use crate::constraint::{GrammarConstraint, GrammarConstraintConfig};
     use crate::interface::GrammarDefinition;
-    use crate::json_schema::json_schema_to_ebnf;
+    use crate::interface::json_schema::json_schema_to_ebnf;
     use crate::tokenizer::{LLMTokenID, LLMTokenMap};
     use crate::datastructures::bitset::Bitset;
 
