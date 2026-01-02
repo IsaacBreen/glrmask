@@ -480,6 +480,7 @@ pub type ShiftsAndReducesFull = BTreeMap<TerminalID, Stage7ShiftsAndReducesLooka
 pub struct Row {
     shifts_and_reduces_full: ShiftsAndReducesFull,
     pub default_reduce: Option<Stage7ShiftsAndReducesLookaheadValue>,
+    pub default_reduce_lookaheads: Option<BTreeSet<TerminalID>>,
     pub gotos: BTreeMap<NonTerminalID, Goto>,
 }
 
@@ -496,10 +497,23 @@ impl Row {
         &self,
         terminal_id: &TerminalID,
     ) -> Option<Stage7ShiftsAndReducesLookaheadValue> {
-        self.shifts_and_reduces_full
-            .get(terminal_id)
-            .cloned()
-            .or_else(|| self.default_reduce.clone())
+        if let Some(action) = self.shifts_and_reduces_full.get(terminal_id) {
+            return Some(action.clone());
+        }
+
+        // Check if default reduce applies to this specific terminal
+        if let Some(default) = &self.default_reduce {
+            if let Some(lookaheads) = &self.default_reduce_lookaheads {
+                if lookaheads.contains(terminal_id) {
+                    return Some(default.clone());
+                }
+            } else {
+                // Legacy/Wildcard behavior: applies to all unseen terminals
+                return Some(default.clone());
+            }
+        }
+        
+        None
     }
 
     pub fn get_shifts_and_reduces_map(
@@ -518,28 +532,27 @@ impl Row {
         shiftfn: impl FnOnce(&StateID),
         mut reducefn: impl FnMut(&NonTerminalID, &usize, &Vec<ProductionID>),
     ) {
-        let action = self
-            .shifts_and_reduces_full
-            .get(&terminal_id)
-            .or(self.default_reduce.as_ref());
+        // Use the centralized lookup logic
+        let action = self.get_shifts_and_reduces_for_terminal(&terminal_id);
 
         if let Some(action) = action {
             match action {
-                Stage7ShiftsAndReducesLookaheadValue::Shift(state_id) => shiftfn(state_id),
+                Stage7ShiftsAndReducesLookaheadValue::Shift(state_id) => shiftfn(&state_id),
                 Stage7ShiftsAndReducesLookaheadValue::Reduce {
                     nonterminal_id,
                     len,
                     production_ids,
-                } => reducefn(nonterminal_id, len, production_ids),
+                } => reducefn(&nonterminal_id, &len, &production_ids),
                 Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
                     if let Some(state_id) = shift {
-                        shiftfn(state_id);
+                        shiftfn(&state_id);
                     }
                     for (len, nts) in reduces {
-                        for (&nt_id, pids) in nts {
-                            reducefn(&nt_id, len, pids);
+                        for (nt_id, pids) in nts {
+                            reducefn(&nt_id, &len, &pids);
                         }
                     }
+
                 }
             }
         }
@@ -548,7 +561,7 @@ impl Row {
 
 impl JSONConvertible for Row {
     fn to_json(&self) -> JSONNode {
-        // [[[term_id, Action], ...], [[nt_id, Goto], ...], default_reduce]
+        // [[[term_id, Action], ...], [[nt_id, Goto], ...], default_reduce, default_reduce_lookaheads?]
         let shifts_pairs: Vec<JSONNode> = self
             .shifts_and_reduces_full
             .iter()
@@ -559,15 +572,24 @@ impl JSONConvertible for Row {
             .iter()
             .map(|(ntid, goto)| JSONNode::Array(vec![ntid.to_json(), goto.to_json()]))
             .collect();
-        JSONNode::Array(vec![
+            
+        let mut fields = vec![
             JSONNode::Array(shifts_pairs),
             JSONNode::Array(gotos_pairs),
             self.default_reduce.to_json(),
-        ])
+        ];
+        
+        // Add optional 4th field if present
+        if let Some(lookaheads) = &self.default_reduce_lookaheads {
+            let lookahead_nodes: Vec<JSONNode> = lookaheads.iter().map(|tid| tid.to_json()).collect();
+            fields.push(JSONNode::Array(lookahead_nodes));
+        }
+
+        JSONNode::Array(fields)
     }
     fn from_json(node: JSONNode) -> Result<Self, String> {
         match node {
-            JSONNode::Array(mut arr) if arr.len() == 3 => {
+            JSONNode::Array(mut arr) if arr.len() >= 3 && arr.len() <= 4 => {
                 // Parse shifts_and_reduces_full
                 let mut shifts_and_reduces_full = BTreeMap::new();
                 match arr.remove(0) {
@@ -603,17 +625,32 @@ impl JSONConvertible for Row {
                     }
                     _ => return Err("Expected array of goto pairs in Row".to_string()),
                 }
-                
-                // Parse default_reduce
+
                 let default_reduce = Option::<Stage7ShiftsAndReducesLookaheadValue>::from_json(arr.remove(0))?;
                 
+                let default_reduce_lookaheads = if !arr.is_empty() {
+                    match arr.remove(0) {
+                        JSONNode::Array(items) => {
+                            let mut lookaheads = BTreeSet::new();
+                            for item in items {
+                                lookaheads.insert(TerminalID::from_json(item)?);
+                            }
+                            Some(lookaheads)
+                        }
+                        _ => return Err("Expected array of terminal IDs for default_reduce_lookaheads".to_string())
+                    }
+                } else {
+                    None
+                };
+
                 Ok(Row {
                     shifts_and_reduces_full,
-                    default_reduce,
                     gotos,
+                    default_reduce,
+                    default_reduce_lookaheads,
                 })
             }
-            _ => Err("Expected JSONNode::Array of length 3 for Row".to_string()),
+            _ => Err("Expected [shifts, gotos, default_reduce, (optional) lookaheads] array for Row".to_string()),
         }
     }
 }
@@ -971,8 +1008,10 @@ fn compute_final_table(
             Row {
                 shifts_and_reduces_full,
                 default_reduce,
+                default_reduce_lookaheads: None,
                 gotos,
-            },
+            }
+,
         );
     }
 
@@ -1316,6 +1355,7 @@ fn remap_row_states(row: &Row, mapping: &BTreeMap<StateID, StateID>) -> Row {
     let default_reduce = row.default_reduce
         .as_ref()
         .map(|action| remap_action_states(action, mapping));
+    let default_reduce_lookaheads = row.default_reduce_lookaheads.clone();
     
     let gotos: BTreeMap<NonTerminalID, Goto> = row.gotos
         .iter()
@@ -1325,8 +1365,9 @@ fn remap_row_states(row: &Row, mapping: &BTreeMap<StateID, StateID>) -> Row {
         })
         .collect();
     
-    Row { shifts_and_reduces_full, default_reduce, gotos }
+    Row { shifts_and_reduces_full, default_reduce, default_reduce_lookaheads, gotos }
 }
+
 
 fn remap_action_states(
     action: &Stage7ShiftsAndReducesLookaheadValue, 
@@ -1357,12 +1398,26 @@ fn remap_action_states(
 fn compact_default_reduces(mut table: Table) -> Table {
     for (_state_id, row) in table.iter_mut() {
         if let Some(ref default) = row.default_reduce {
-            // Remove entries that are identical to the default
-            row.shifts_and_reduces_full.retain(|_tid, action| action != default);
+            // Collect terminals that will be removed (handled by default reduce)
+            let mut lookaheads = BTreeSet::new();
+            
+            // Remove entries that are identical to the default, but track which terminals they were!
+            // This allows us to restrict the default reduce to ONLY these terminals later.
+            row.shifts_and_reduces_full.retain(|tid, action| {
+                if action == default {
+                    lookaheads.insert(*tid);
+                    false // Remove
+                } else {
+                    true // Keep
+                }
+            });
+            
+            row.default_reduce_lookaheads = Some(lookaheads);
         }
     }
     table
 }
+
 
 fn print_memory_usage(label: &str) {
     if let Some(usage) = memory_stats() {
