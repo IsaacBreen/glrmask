@@ -171,22 +171,6 @@ pub fn build_template_dwas(parser: &GLRParser) -> Result<BTreeMap<TerminalID, DW
     let all = compute_all_characterizations(parser);
     crate::debug!(5, "Computed terminal characterizations for {} terminals", all.len());
 
-    if crate::r#macro::is_debug_level_enabled(5) {
-        for (term, tc) in &all {
-            let num_rc = tc.reduce_characterizations.len();
-            let num_rr: usize = tc.reduce_characterizations.values().map(|r| r.reveal_and_rereduces.len()).sum();
-            let num_rgs: usize = tc.reduce_characterizations.values().map(|r| r.reveal_goto_shift_escapes.len()).sum();
-            crate::debug!(5, "Terminal {:?}: {} initial shifts, {} initial reduces, {} reduce chars ({} rr, {} rgs)", 
-                term, 
-                tc.initial_shifts.len(), 
-                tc.initial_reduces.len(), 
-                num_rc, 
-                num_rr, 
-                num_rgs
-            );
-        }
-    }
-
     // OPTIMIZATION: Group terminals by their characterization key (excluding terminal ID).
     // Terminals with identical grammatical behavior can share the same DWA.
     let mut key_to_terms: std::collections::HashMap<CharacterizationKey, Vec<(TerminalID, TerminalCharacterization)>> = 
@@ -221,6 +205,20 @@ pub fn build_template_dwas(parser: &GLRParser) -> Result<BTreeMap<TerminalID, DW
             first_term, terms.len() - 1, dwa.states.len());
         dwa.simplify_single_pass();
         crate::debug!(6, "Terminal {:?}: {} states after simplify", first_term, dwa.states.len());
+        
+        // Debug stats at level 5: print one line per terminal with characterization and DFA stats
+        if crate::r#macro::is_debug_level_enabled(5) {
+            for (term, tc) in &terms {
+                let num_rc_nonempty = tc.reduce_characterizations.values().filter(|r| !r.reveal_and_rereduces.is_empty() || !r.reveal_goto_shift_escapes.is_empty()).count();
+                crate::debug!(5, "Terminal {:?}: {} shifts, {} reduces, {} non-trivial reduce chars, {} DFA states", 
+                    term, 
+                    tc.initial_shifts.len(), 
+                    tc.initial_reduces.len(), 
+                    num_rc_nonempty, 
+                    dwa.states.len()
+                );
+            }
+        }
         
         // Clone the DWA for all terminals with this characterization
         for (term, _) in terms {
