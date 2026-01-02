@@ -116,27 +116,67 @@ impl JsonSchemaConverter {
         Self { root_schema: schema }
     }
     
-    pub fn convert(mut self) -> Result<(Vec<(String, GrammarExpr)>, String), String> {
+    /// Sanitize a name to be a valid EBNF rule name
+    fn sanitize_rule_name(name: &str) -> String {
+        let mut result = String::with_capacity(name.len());
+        for c in name.chars() {
+            match c {
+                'a'..='z' | 'A'..='Z' | '0'..='9' | '_' => result.push(c),
+                '<' | '>' | '[' | ']' | '(' | ')' | '{' | '}' => result.push('_'),
+                '/' | '-' | '.' | ':' | '#' | ' ' => result.push('_'),
+                _ => result.push('_'),
+            }
+        }
+        result
+    }
+    
+    /// Convert a ref path like "#/$defs/Foo" to a rule name like "_def_Foo"
+    fn ref_path_to_rule_name(ref_path: &str) -> String {
+        // Extract the definition name from the path
+        if let Some(name) = ref_path.strip_prefix("#/$defs/") {
+            format!("_def_{}", Self::sanitize_rule_name(name))
+        } else if let Some(name) = ref_path.strip_prefix("#/definitions/") {
+            format!("_def_{}", Self::sanitize_rule_name(name))
+        } else {
+            // Fallback: sanitize the whole path
+            format!("_ref_{}", Self::sanitize_rule_name(ref_path))
+        }
+    }
+    
+    pub fn convert(self) -> Result<(Vec<(String, GrammarExpr)>, String), String> {
         // Parse schema
         let mut parser = parser::SchemaParser::new(self.root_schema);
-        let schema_type = parser.parse_root()?;
+        let root_schema_type = parser.parse_root()?;
         
-        // Convert to grammar type
+        // Parse all definitions
+        let definitions = parser.parse_definitions()?;
+        
+        // Convert root to grammar type
         let mut converter = convert::SchemaToGrammar::new();
-        let grammar_type = converter.convert(&schema_type);
+        let root_grammar_type = converter.convert(&root_schema_type);
         
-        // Get auxiliary rules
-        let aux_rules = converter.get_rules();
+        // Convert all definitions to grammar types
+        let mut def_rules: Vec<(String, types::GrammarType)> = Vec::new();
+        for (ref_path, schema_type) in definitions {
+            let rule_name = Self::ref_path_to_rule_name(&ref_path);
+            let grammar_type = converter.convert(&schema_type);
+            def_rules.push((rule_name, grammar_type));
+        }
+        
+        // Get primitive needs
         let needs = converter.get_needs();
         
         // Emit to GrammarExpr
         let mut emitter = emit::GrammarEmitter::new();
-        let root_expr = emitter.emit(&grammar_type);
         
-        // Add auxiliary rules
-        for (name, gt) in aux_rules {
-            let expr = emitter.emit(gt);
-            emitter.add_rule(name.clone(), expr);
+        // Emit root rule
+        let root_expr = emitter.emit(&root_grammar_type);
+        emitter.add_rule("root".to_string(), root_expr);
+        
+        // Emit definition rules
+        for (rule_name, grammar_type) in &def_rules {
+            let expr = emitter.emit(grammar_type);
+            emitter.add_rule(rule_name.clone(), expr);
         }
         
         // Add primitive rules as needed
@@ -146,9 +186,6 @@ impl JsonSchemaConverter {
             needs.json_array,
             needs.json_kv,
         );
-        
-        // Add root rule
-        emitter.add_rule("root".to_string(), root_expr);
         
         let rules = emitter.into_rules();
         Ok((rules, "root".to_string()))

@@ -155,46 +155,38 @@ impl SchemaParser {
     }
     
     /// Resolve a $ref to a SchemaType
+    /// 
+    /// Always returns SchemaType::Ref to avoid exponential inlining.
+    /// The definition will be parsed separately and converted to a grammar rule.
     fn resolve_ref(&mut self, ref_str: &str) -> Result<SchemaType, String> {
-        // Cycle detection
-        if self.parsing_stack.contains(&ref_str.to_string()) {
-            // Return a Ref that will be resolved later during grammar generation
-            return Ok(SchemaType::Ref(ref_str.to_string()));
-        }
+        // Always return a reference - we'll generate rules for definitions separately
+        Ok(SchemaType::Ref(ref_str.to_string()))
+    }
+    
+    /// Parse all definitions from the schema.
+    /// Returns a map of ref paths to their parsed SchemaTypes.
+    pub fn parse_definitions(&mut self) -> Result<Vec<(String, SchemaType)>, String> {
+        let mut results = Vec::new();
         
-        // Check cache
-        if let Some(cached) = self.parsed_refs.get(ref_str) {
-            return Ok(cached.clone());
-        }
+        // Get all definition paths
+        let paths: Vec<String> = self.definitions.keys().cloned().collect();
         
-        // Find the referenced schema
-        let target_schema = if let Some(schema) = self.definitions.get(ref_str) {
-            schema.clone()
-        } else if ref_str.starts_with("#/") {
-            // Navigate the root schema
-            let parts: Vec<&str> = ref_str[2..].split('/').collect();
-            let mut target = self.root.clone();
-            for part in parts {
-                target = target.get(part)
-                    .ok_or_else(|| format!("Could not resolve ref: {}", ref_str))?
-                    .clone();
+        for ref_path in paths {
+            if let Some(def_schema) = self.definitions.get(&ref_path).cloned() {
+                // Check for cycles
+                if self.parsing_stack.contains(&ref_path) {
+                    continue; // Skip recursive definitions (they'll be handled via the ref)
+                }
+                
+                self.parsing_stack.push(ref_path.clone());
+                let schema_type = self.parse_schema(&def_schema)?;
+                self.parsing_stack.pop();
+                
+                results.push((ref_path, schema_type));
             }
-            target
-        } else {
-            return Err(format!("Unsupported ref format: {}", ref_str));
-        };
-        
-        // Parse the referenced schema
-        self.parsing_stack.push(ref_str.to_string());
-        let result = self.parse_schema(&target_schema);
-        self.parsing_stack.pop();
-        
-        // Cache the result
-        if let Ok(ref schema_type) = result {
-            self.parsed_refs.insert(ref_str.to_string(), schema_type.clone());
         }
         
-        result
+        Ok(results)
     }
     
     /// Parse a schema with a type field

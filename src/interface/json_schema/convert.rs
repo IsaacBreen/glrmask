@@ -119,10 +119,33 @@ impl SchemaToGrammar {
         }
     }
     
+    /// Sanitize a name to be a valid EBNF rule name
+    fn sanitize_rule_name(name: &str) -> String {
+        let mut result = String::with_capacity(name.len());
+        for c in name.chars() {
+            match c {
+                'a'..='z' | 'A'..='Z' | '0'..='9' | '_' => result.push(c),
+                '<' | '>' | '[' | ']' | '(' | ')' | '{' | '}' => result.push('_'),
+                '/' | '-' | '.' | ':' | '#' | ' ' => result.push('_'),
+                _ => result.push('_'),
+            }
+        }
+        result
+    }
+    
     fn ref_path_to_rule_name(&self, path: &str) -> String {
-        // Convert #/$defs/Foo to _def_Foo
-        let name = path.rsplit('/').next().unwrap_or("ref");
-        format!("_def_{}", name)
+        // Convert ref paths to rule names:
+        // #/$defs/Foo -> _def_Foo
+        // #/definitions/Bar -> _def_Bar
+        if let Some(name) = path.strip_prefix("#/$defs/") {
+            format!("_def_{}", Self::sanitize_rule_name(name))
+        } else if let Some(name) = path.strip_prefix("#/definitions/") {
+            format!("_def_{}", Self::sanitize_rule_name(name))
+        } else {
+            // Fallback: use the last segment
+            let name = path.rsplit('/').next().unwrap_or("ref");
+            format!("_ref_{}", Self::sanitize_rule_name(name))
+        }
     }
     
     fn convert_primitive(&mut self, p: PrimitiveType) -> GrammarType {
