@@ -1,5 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
-
+use std::collections::BTreeMap;
 
 use crate::glr::parser::GLRParser;
 use crate::glr::table::{NonTerminalID, StateID as ParserStateID, TerminalID};
@@ -33,17 +32,12 @@ pub fn build_nwa_from_terminal_characterization(tc: &TerminalCharacterization) -
     let mut nwa = NWA::new();
     let w_all = Weight::all();
 
-    // OPTIMIZATION: Compute which NTs can actually reach a final state via reveal_goto_shift_escapes.
-    // If an NT has no escape edges and only chains to other NTs without escapes, it's dead code.
-    let reachable_nts = compute_reachable_nts(tc);
-    
-    // Only create nodes for reachable NTs (those that can eventually lead to a shift)
+    // Node for each non-terminal.
     let mut nt_nodes: BTreeMap<NonTerminalID, StateID> = BTreeMap::new();
-    for &nt in &reachable_nts {
+    for &nt in &tc.all_nts {
         let id = nwa.states.add_state();
         nt_nodes.insert(nt, id);
     }
-
 
     // NWA::new() initializes a single start state.
     let start = nwa.body.start_states[0];
@@ -68,53 +62,32 @@ pub fn build_nwa_from_terminal_characterization(tc: &TerminalCharacterization) -
     }
 
     // Initial reduces from start.
-    // OPTIMIZATION: Group by (len, nt) to share the default-transition chain.
-    // Before: O(n) paths where n = number of (state, len, nt) tuples
-    // After: O(groups) chains where groups = unique (len, nt) pairs
-    let mut reduces_by_signature: BTreeMap<(usize, NonTerminalID), Vec<ParserStateID>> = BTreeMap::new();
-
     for &(initial_state, len, nt) in &tc.initial_reduces {
-        reduces_by_signature.entry((len, nt)).or_default().push(initial_state);
-    }
-    
-    for ((len, nt), initial_states) in reduces_by_signature {
-        // Skip reduces targeting unreachable NTs (NTs with no path to escape edges)
-        let Some(&target_nt_state) = nt_nodes.get(&nt) else { continue };
+        let pos_initial = utils::encode_symbol_i16(initial_state)?;
+        let target_nt_state = *nt_nodes.get(&nt).expect("nt_node must exist for initial_reduce");
 
-        
-        // Create shared chain: collector_state --(default)*len--> target_nt_state
-        // First, create the collector state that all initial states will feed into
-        let collector_state = if len == 0 { target_nt_state } else { nwa.states.add_state() };
-        
-        // Build the default transition chain from collector to target
-        let mut from = collector_state;
+        // start --eps--> s0 --(+initial)--> s1 --(default)*len--> target_nt_state
+        let s0 = nwa.states.add_state();
+        nwa.add_epsilon(start, s0, w_all.clone());
+        let mut from = s0;
+        let next_state = if len == 0 { target_nt_state } else { nwa.states.add_state() };
+        nwa.add_transition(from, pos_initial, next_state, w_all.clone())?;
+        from = next_state;
+
         for i in 0..len {
             let to = if i == len - 1 { target_nt_state } else { nwa.states.add_state() };
             nwa.states.add_transition(from, DEFAULT_TRANSITION_SYMBOL, to, w_all.clone())?;
             from = to;
         }
-        
-        // Connect each initial_state to the shared collector
-        for initial_state in initial_states {
-            let pos_initial = utils::encode_symbol_i16(initial_state)?;
-            let s0 = nwa.states.add_state();
-            nwa.add_epsilon(start, s0, w_all.clone());
-            nwa.add_transition(s0, pos_initial, collector_state, w_all.clone())?;
-        }
     }
 
-
-    // Actions from non-terminal states (only for reachable NTs).
+    // Actions from non-terminal states.
     for (nt, rc) in &tc.reduce_characterizations {
-        // Skip NTs that can't reach any escape edges
-        let Some(&src_nt_state) = nt_nodes.get(nt) else { continue };
-
+        let src_nt_state = *nt_nodes.get(nt).expect("nt_node must exist for reduce_char");
 
         for &(revealed_state, len, reduce_nt) in &rc.reveal_and_rereduces {
-            // Skip edges to unreachable NTs
-            let Some(&dst_nt_state) = nt_nodes.get(&reduce_nt) else { continue };
             let pos_revealed = utils::encode_symbol_i16(revealed_state)?;
-
+            let dst_nt_state = *nt_nodes.get(&reduce_nt).expect("dst nt_node must exist");
 
             // src --eps--> s0 --(+revealed)--> s1 --(default)*len--> dst
             let s0 = nwa.states.add_state();
@@ -155,51 +128,6 @@ pub fn build_nwa_from_terminal_characterization(tc: &TerminalCharacterization) -
 
     Ok(nwa)
 }
-
-/// Compute which NTs can actually reach a final state (shift escape).
-/// 
-/// Works backwards: starts with NTs that have reveal_goto_shift_escapes,
-/// then propagates to NTs whose reveal_and_rereduces can reach those.
-/// 
-/// Returns empty set if no NTs have escape edges (all reduce characterizations are dead ends).
-fn compute_reachable_nts(tc: &TerminalCharacterization) -> BTreeSet<NonTerminalID> {
-    // Step 1: Find all NTs with escape edges (these can directly reach final states)
-    let mut reachable: BTreeSet<NonTerminalID> = tc.reduce_characterizations
-        .iter()
-        .filter(|(_, rc)| !rc.reveal_goto_shift_escapes.is_empty())
-        .map(|(nt, _)| *nt)
-        .collect();
-    
-    if reachable.is_empty() {
-        // No escape edges anywhere - the entire reduce characterization machinery is dead code
-        crate::debug!(5, "  No escape edges found - skipping all {} reduce characterization NT nodes", tc.reduce_characterizations.len());
-        return reachable;
-    }
-    
-    // Step 2: Build reverse adjacency: target_nt -> set of source NTs that can reach it
-    let mut reverse_adj: BTreeMap<NonTerminalID, BTreeSet<NonTerminalID>> = BTreeMap::new();
-    for (src_nt, rc) in &tc.reduce_characterizations {
-        for &(_revealed, _len, target_nt) in &rc.reveal_and_rereduces {
-            reverse_adj.entry(target_nt).or_default().insert(*src_nt);
-        }
-    }
-    
-    // Step 3: Propagate backwards - any NT that can reach a reachable NT is also reachable
-    let mut worklist: Vec<NonTerminalID> = reachable.iter().cloned().collect();
-    while let Some(nt) = worklist.pop() {
-        if let Some(sources) = reverse_adj.get(&nt) {
-            for &src in sources {
-                if reachable.insert(src) {
-                    worklist.push(src);
-                }
-            }
-        }
-    }
-    
-    crate::debug!(5, "  Reachable NTs: {} of {} total", reachable.len(), tc.all_nts.len());
-    reachable
-}
-
 
 /// Deprecated alias for build_nwa_from_terminal_characterization
 #[deprecated(since = "0.3.0", note = "Use build_nwa_from_terminal_characterization instead")]
@@ -242,10 +170,6 @@ pub fn build_template_dwas(parser: &GLRParser) -> Result<BTreeMap<TerminalID, DW
     
     let all = compute_all_characterizations(parser);
     crate::debug!(5, "Computed terminal characterizations for {} terminals", all.len());
-    
-    // At level 6, print the full parser table
-    crate::debug!(6, "{}", parser);
-
 
     // OPTIMIZATION: Group terminals by their characterization key (excluding terminal ID).
     // Terminals with identical grammatical behavior can share the same DWA.
@@ -286,28 +210,6 @@ pub fn build_template_dwas(parser: &GLRParser) -> Result<BTreeMap<TerminalID, DW
         if crate::r#macro::is_debug_level_enabled(5) {
             for (term, tc) in &terms {
                 let num_rc_nonempty = tc.reduce_characterizations.values().filter(|r| !r.reveal_and_rereduces.is_empty() || !r.reveal_goto_shift_escapes.is_empty()).count();
-                
-                // Analyze collapse: how many unique (len, nt) pairs vs total initial_reduces?
-                let unique_len_nt: std::collections::BTreeSet<_> = tc.initial_reduces.iter()
-                    .map(|&(_state, len, nt)| (len, nt))
-                    .collect();
-                
-                // How many unique shift_states?
-                let unique_shift_states: std::collections::BTreeSet<_> = tc.initial_shifts.iter()
-                    .map(|&(_initial, shift)| shift)
-                    .collect();
-                
-                // Count total reveal_goto_shift_escapes (the terminal escape points)
-                let total_rgs: usize = tc.reduce_characterizations.values()
-                    .map(|r| r.reveal_goto_shift_escapes.len())
-                    .sum();
-                
-                // How many unique (goto_state, shift_state) pairs in reveal_goto_shift_escapes?
-                let unique_goto_shift: std::collections::BTreeSet<_> = tc.reduce_characterizations.values()
-                    .flat_map(|r| r.reveal_goto_shift_escapes.iter())
-                    .map(|&(_revealed, goto, shift)| (goto, shift))
-                    .collect();
-                
                 crate::debug!(5, "Terminal {:?}: {} shifts, {} reduces, {} non-trivial reduce chars, {} DFA states, {} transitions", 
                     term, 
                     tc.initial_shifts.len(), 
@@ -316,17 +218,6 @@ pub fn build_template_dwas(parser: &GLRParser) -> Result<BTreeMap<TerminalID, DW
                     dwa.states.len(),
                     dwa.states.num_transitions()
                 );
-                crate::debug!(5, "  Collapse analysis: {} unique (len,nt) from {} reduces, {} unique shift_states from {} shifts",
-                    unique_len_nt.len(),
-                    tc.initial_reduces.len(),
-                    unique_shift_states.len(),
-                    tc.initial_shifts.len()
-                );
-                crate::debug!(5, "  Escape analysis: {} total rgs entries, {} unique (goto,shift) pairs",
-                    total_rgs,
-                    unique_goto_shift.len()
-                );
-                
                 // At level 6, print the full characterization
                 crate::debug!(6, "{}", tc);
             }
