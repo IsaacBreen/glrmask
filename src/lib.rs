@@ -1,4 +1,6 @@
 #![allow(warnings)]
+pub mod tokenizer;
+/// Backward-compatibility re-export from tokenizer::dfa
 pub mod finite_automata;
 pub mod equivalence_analysis;
 pub mod glr;
@@ -6,7 +8,6 @@ pub mod constraint;
 pub mod datastructures;
 pub mod interface;
 pub mod r#macro;
-pub mod tokenizer;
 mod types;
 pub mod json_serialization;
 pub mod json_schema;
