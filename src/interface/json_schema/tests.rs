@@ -836,4 +836,69 @@ mod tests {
             "Too many valid tokens ({}) at empty prefix for object schema. \
              Only tokens starting with '{{' should be valid.", total_valid);
     }
+    
+    // Tests moved from legacy module
+    
+    use crate::interface::json_schema::json_schema_to_grammar_exprs;
+    
+    #[test]
+    fn test_conversion_simple_object() {
+        let schema = r#"{
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "age": {"type": "integer"}
+            }
+        }"#;
+        
+        let ebnf = json_schema_to_ebnf(schema).unwrap();
+        assert!(ebnf.contains("root"));
+        assert!(ebnf.contains("JSON_STRING"));
+        assert!(ebnf.contains("JSON_INTEGER"));
+    }
+
+    #[test]
+    fn test_conversion_any_of() {
+        let schema = r#"{
+            "anyOf": [
+                {"type": "string"},
+                {"type": "number"}
+            ]
+        }"#;
+        
+        let rules = json_schema_to_grammar_exprs(schema).unwrap();
+        // Should have root rule and alternatives
+        assert!(!rules.is_empty());
+    }
+
+    #[test]
+    fn test_conversion_enum() {
+        let schema = r#"{
+            "enum": ["red", "green", "blue"]
+        }"#;
+        
+        let ebnf = json_schema_to_ebnf(schema).unwrap();
+        assert!(ebnf.contains("\"red\""));
+        assert!(ebnf.contains("\"green\""));
+        assert!(ebnf.contains("\"blue\""));
+    }
+
+    #[test]
+    fn test_conversion_ref() {
+        let schema = r##"{
+            "$defs": {
+                "person": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"}
+                    }
+                }
+            },
+            "type": "array",
+            "items": {"$ref": "#/$defs/person"}
+        }"##;
+        
+        let rules = json_schema_to_grammar_exprs(schema).unwrap();
+        assert!(!rules.is_empty());
+    }
 }
