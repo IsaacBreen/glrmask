@@ -19,7 +19,7 @@
 //! - minProperties/maxProperties
 //! - pattern, format, uniqueItems, dependencies, if/then/else, not
 
-use crate::interface::GrammarExpr;
+use super::GrammarExpr;
 use crate::tokenizer::string_utils::{escape_char_for_char_class, escape_string_for_json};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashSet};

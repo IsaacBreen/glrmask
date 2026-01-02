@@ -10,7 +10,10 @@ pub mod interface;
 pub mod r#macro;
 mod types;
 pub mod json_serialization;
-pub mod json_schema;
+/// Backward-compatibility re-export from interface::json_schema
+pub mod json_schema {
+    pub use crate::interface::json_schema::*;
+}
 mod test_constraint_basic;
 // mod test_constraint_python;
 mod profiler;
