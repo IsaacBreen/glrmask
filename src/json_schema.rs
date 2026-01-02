@@ -20,6 +20,7 @@
 //! - pattern, format, uniqueItems, dependencies, if/then/else, not
 
 use crate::interface::GrammarExpr;
+use crate::tokenizer::string_utils::{escape_char_for_char_class, escape_string_for_json};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashSet};
 
@@ -1272,7 +1273,7 @@ impl JsonSchemaConverter {
         // Alternative 1: Start with a character NOT in first_chars
         // This automatically avoids all excluded strings
         let first_chars_escaped: Vec<String> = first_chars.iter()
-            .map(|c| Self::escape_char_for_char_class(*c))
+            .map(|c| escape_char_for_char_class(*c))
             .collect();
         
         if !first_chars_escaped.is_empty() {
@@ -1294,7 +1295,7 @@ impl JsonSchemaConverter {
             let divergent_suffix = self.build_divergent_suffix_pattern(&suffixes);
             
             // Pattern: first_char + divergent_suffix
-            let first_char_literal = Self::escape_string_for_json(&first_char.to_string());
+            let first_char_literal = escape_string_for_json(&first_char.to_string());
             content_alternatives.push(GrammarExpr::Sequence(vec![
                 GrammarExpr::Literal(first_char_literal.into_bytes()),
                 divergent_suffix,
@@ -1360,7 +1361,7 @@ impl JsonSchemaConverter {
         // Alternative 1: Use a character not in next_chars
         if !next_chars.is_empty() {
             let chars_escaped: Vec<String> = next_chars.iter()
-                .map(|c| Self::escape_char_for_char_class(*c))
+                .map(|c| escape_char_for_char_class(*c))
                 .collect();
             let not_next_chars = format!("[^{}\"\\\\\\x00-\\x1f]", chars_escaped.join(""));
             alternatives.push(GrammarExpr::Sequence(vec![
@@ -1372,7 +1373,7 @@ impl JsonSchemaConverter {
         // Alternative 2: For each next char, recursively build divergent pattern
         for (next_char, sub_suffixes) in &by_next_char {
             let next_divergent = self.build_divergent_suffix_pattern(sub_suffixes);
-            let next_char_literal = Self::escape_string_for_json(&next_char.to_string());
+            let next_char_literal = escape_string_for_json(&next_char.to_string());
             alternatives.push(GrammarExpr::Sequence(vec![
                 GrammarExpr::Literal(next_char_literal.into_bytes()),
                 next_divergent,
@@ -1397,18 +1398,6 @@ impl JsonSchemaConverter {
             ])
         } else {
             GrammarExpr::Choice(alternatives)
-        }
-    }
-
-    /// Escape a character for use in a character class regex pattern.
-    fn escape_char_for_char_class(c: char) -> String {
-        match c {
-            '\\' | ']' | '^' | '-' => format!("\\{}", c),
-            '\n' => "\\n".to_string(),
-            '\r' => "\\r".to_string(),
-            '\t' => "\\t".to_string(),
-            c if c.is_ascii_control() => format!("\\x{:02x}", c as u8),
-            c => c.to_string(),
         }
     }
 
@@ -1481,7 +1470,7 @@ impl JsonSchemaConverter {
                     }
                 };
 
-                let escaped_name = Self::escape_string_for_json(prop_name);
+                let escaped_name = escape_string_for_json(prop_name);
                 declared_props.push(GrammarExpr::Sequence(vec![
                     GrammarExpr::Literal(format!("\"{}\"", escaped_name).into_bytes()),
                     GrammarExpr::Literal(b":".to_vec()),
@@ -2062,7 +2051,7 @@ impl JsonSchemaConverter {
             Value::Bool(false) => GrammarExpr::Literal(b"false".to_vec()),
             Value::Number(n) => GrammarExpr::Literal(n.to_string().into_bytes()),
             Value::String(s) => {
-                let escaped = Self::escape_string_for_json(s);
+                let escaped = escape_string_for_json(s);
                 GrammarExpr::Literal(format!("\"{}\"", escaped).into_bytes())
             }
             Value::Array(items) => {
@@ -2089,7 +2078,7 @@ impl JsonSchemaConverter {
                     }
                     
                     // Key string
-                    let escaped_key = Self::escape_string_for_json(key);
+                    let escaped_key = escape_string_for_json(key);
                     parts.push(GrammarExpr::Literal(format!("\"{}\"", escaped_key).into_bytes()));
                     
                     // Colon
@@ -2103,25 +2092,6 @@ impl JsonSchemaConverter {
                 GrammarExpr::Sequence(parts)
             }
         }
-    }
-
-    /// Escape a string for use in JSON.
-    fn escape_string_for_json(s: &str) -> String {
-        let mut result = String::new();
-        for c in s.chars() {
-            match c {
-                '"' => result.push_str("\\\""),
-                '\\' => result.push_str("\\\\"),
-                '\n' => result.push_str("\\n"),
-                '\r' => result.push_str("\\r"),
-                '\t' => result.push_str("\\t"),
-                c if c.is_control() => {
-                    result.push_str(&format!("\\u{:04x}", c as u32));
-                }
-                _ => result.push(c),
-            }
-        }
-        result
     }
 
     /// Add primitive JSON grammar rules.
