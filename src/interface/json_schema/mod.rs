@@ -183,6 +183,12 @@ impl JsonSchemaConverter {
             emitter.add_rule(rule_name.clone(), expr);
         }
         
+        // Emit synthetic rules generated during conversion (e.g. for property ordering)
+        for (name, grammar) in converter.get_rules() {
+            let expr = emitter.emit(grammar);
+            emitter.add_rule(name.clone(), expr);
+        }
+        
         // Add primitive rules as needed
         emitter.add_primitive_rules(
             needs.json_value,
