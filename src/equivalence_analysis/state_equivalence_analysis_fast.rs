@@ -38,12 +38,19 @@ fn mix_u128(mut x: u128) -> u128 {
 // -----------------------------------------------------------------------------
 
 /// Compute a hash signature for a single state by running all tokens through it.
+/// 
+/// The signature captures the (group_id, final_position) pairs and the final end_state.
+/// - Greedy groups: use LAST position
+/// - Non-greedy groups: use FIRST position
+/// This matches the trellis semantics where only one match per group is recorded.
 fn compute_state_signature(
     dfa_transitions: &[[u32; 256]],
     dfa_finalizers: &[Vec<usize>],
+    _possible_futures: &[Vec<usize>],
     end_state_hashes: &[u128],
     token_weights: &[u128],
     tokens: &[Vec<u8>],
+    non_greedy_finalizers: &std::collections::BTreeSet<usize>,
     start_state: usize,
 ) -> u128 {
     const NONE_STATE: u32 = u32::MAX;
@@ -52,37 +59,52 @@ fn compute_state_signature(
     for (token_idx, token) in tokens.iter().enumerate() {
         // Run token through DFA from start_state
         let mut current = start_state as u32;
-        let mut finalizers_hash: u128 = 0;
-        let mut depth: u32 = 0;
+        let mut dead_at_depth: Option<usize> = None;
         
-        for &byte in token {
+        // Track (group_id, position) - we'll need to hash this at the end
+        // Using BTreeMap for ordered hashing (matches reference)
+        let mut matches: std::collections::BTreeMap<usize, usize> = std::collections::BTreeMap::new();
+        
+        for (depth, &byte) in token.iter().enumerate() {
             let next = dfa_transitions[current as usize][byte as usize];
             if next == NONE_STATE {
+                dead_at_depth = Some(depth + 1);
                 current = NONE_STATE;
                 break;
             }
             current = next;
-            depth += 1;
+            let position = depth + 1;
             
-            // Hash any finalizers at this state
-            let finalizers = &dfa_finalizers[current as usize];
-            if !finalizers.is_empty() {
-                for &gid in finalizers {
-                    finalizers_hash = finalizers_hash.wrapping_add(
-                        mix_u128((depth as u128) ^ ((gid as u128) << 32))
-                    );
+            // Record matches with proper greedy/non-greedy semantics
+            for &gid in &dfa_finalizers[current as usize] {
+                if non_greedy_finalizers.contains(&gid) {
+                    // Non-greedy: keep first
+                    matches.entry(gid).or_insert(position);
+                } else {
+                    // Greedy: keep last
+                    matches.insert(gid, position);
                 }
             }
         }
         
-        // Use precomputed end_hash and token_weight
-        let end_hash = if current == NONE_STATE {
-            mix_u128(0xDEADBEEF_u128)
-        } else {
-            end_state_hashes[current as usize]
-        };
+        // Hash structure: dead position OR (matches + end state)
+        let structure_hash: u128;
+        let end_hash: u128;
         
-        let token_hash = end_hash.wrapping_add(finalizers_hash);
+        if let Some(dead_depth) = dead_at_depth {
+            structure_hash = mix_u128((dead_depth as u128) ^ 0xDEAD_DEAD_DEAD_DEAD);
+            end_hash = mix_u128(0xDEADBEEF_u128);
+        } else {
+            // Hash (group_id, position) pairs
+            let mut sh = mix_u128(matches.len() as u128 | (1u128 << 48));
+            for (&gid, &pos) in &matches {
+                sh = sh.wrapping_add(mix_u128((gid as u128) | ((pos as u128) << 32)));
+            }
+            structure_hash = sh;
+            end_hash = end_state_hashes[current as usize];
+        }
+        
+        let token_hash = end_hash.wrapping_add(structure_hash);
         hash = hash.wrapping_add(token_hash.wrapping_mul(token_weights[token_idx]));
     }
     
@@ -165,19 +187,29 @@ pub fn find_state_equivalence_classes(
     // identified yet. Once a state is in a singleton group, it stays there.
     
     // Precompute end state hashes
+    // CRITICAL: Must include the COUNT of possible futures in the hash!
+    // Otherwise sets like [0, 6] and [6] would hash the same because mix(0) = 0.
     let end_state_hashes: Vec<u128> = dfa.states
         .iter()
         .map(|state| {
-            let mut h = 0u128;
-            for &gid in &state.possible_future_group_ids {
-                h = mix_u128(h ^ (gid as u128));
+            // Seed with the length to distinguish sets of different sizes
+            let futures = &state.possible_future_group_ids;
+            let mut h = mix_u128(futures.len() as u128 | (1u128 << 48));
+            // Add (not XOR!) each element's hash for commutativity and collision resistance
+            // NOTE: Match reference by NOT adding extra bits to gid
+            for &gid in futures {
+                h = h.wrapping_add(mix_u128(gid as u128));
             }
-            mix_u128(h | (1u128 << 127))
+            // Flag to distinguish from dead state hash
+            h | (1u128 << 127)
         })
         .collect();
     
     // Initialize state hashes to zero (like reference implementation)
     let mut state_hashes: Vec<u128> = vec![0u128; states.len()];
+    
+    // Get non-greedy finalizers for proper position tracking
+    let non_greedy_finalizers = &dfa.non_greedy_finalizers;
     
     // Process tokens in batches for memory efficiency, but process ALL tokens for ALL states
     // to ensure correct equivalence (no early singleton exit optimization)
@@ -209,35 +241,59 @@ pub fn find_state_equivalence_classes(
                 
                 for (batch_idx, token) in batch_tokens.iter().enumerate() {
                     let mut current = state as u32;
-                    let mut finalizers_hash: u128 = 0;
-                    let mut depth: u32 = 0;
+                    let mut dead_at_depth: Option<usize> = None;
                     
-                    for &byte in *token {
+                    // Track (group_id, position) with proper greedy/non-greedy semantics
+                    let mut matches: std::collections::BTreeMap<usize, usize> = std::collections::BTreeMap::new();
+                    
+                    for (depth, &byte) in (*token).iter().enumerate() {
+                        // Safety check - should never trigger since we break after setting NONE_STATE
+                        if current == NONE_STATE {
+                            dead_at_depth = Some(depth);
+                            break;
+                        }
                         let next = dfa_transitions[current as usize][byte as usize];
                         if next == NONE_STATE {
+                            dead_at_depth = Some(depth + 1);
                             current = NONE_STATE;
                             break;
                         }
                         current = next;
-                        depth += 1;
+                        let position = depth + 1;
                         
-                        let finalizers = &dfa_finalizers[current as usize];
-                        if !finalizers.is_empty() {
-                            for &gid in finalizers {
-                                finalizers_hash = finalizers_hash.wrapping_add(
-                                    mix_u128((depth as u128) ^ ((gid as u128) << 32))
-                                );
+                        // Record matches with proper greedy/non-greedy semantics
+                        for &gid in &dfa_finalizers[current as usize] {
+                            if non_greedy_finalizers.contains(&gid) {
+                                // Non-greedy: keep first
+                                matches.entry(gid).or_insert(position);
+                            } else {
+                                // Greedy: keep last
+                                matches.insert(gid, position);
                             }
                         }
                     }
                     
-                    let end_hash = if current == NONE_STATE {
-                        mix_u128(0xDEADBEEF_u128)
-                    } else {
-                        end_state_hashes[current as usize]
-                    };
+                    // Hash structure: dead position OR (matches + end state)
+                    let structure_hash: u128;
+                    let end_hash: u128;
                     
-                    let token_hash = end_hash.wrapping_add(finalizers_hash);
+                    if let Some(dead_depth) = dead_at_depth {
+                        // Token leads to dead state - hash the dead depth
+                        structure_hash = mix_u128((dead_depth as u128) ^ 0xDEAD_DEAD_DEAD_DEAD);
+                        end_hash = mix_u128(0xDEADBEEF_u128);
+                    } else {
+                        // Token is valid - hash the (group_id, position) pairs
+                        let mut sh = mix_u128(matches.len() as u128 | (1u128 << 48));
+                        for (&gid, &pos) in &matches {
+                            sh = sh.wrapping_add(mix_u128((gid as u128) | ((pos as u128) << 32)));
+                        }
+                        structure_hash = sh;
+                        
+                        // Hash end state possible_futures (precomputed)
+                        end_hash = end_state_hashes[current as usize];
+                    }
+                    
+                    let token_hash = end_hash.wrapping_add(structure_hash);
                     hash_delta = hash_delta.wrapping_add(token_hash.wrapping_mul(batch_weights[batch_idx]));
                 }
                 
@@ -324,36 +380,55 @@ pub fn find_state_equivalence_classes(
             
             for (token_idx, token) in phase2_tokens.iter().enumerate() {
                 let mut current = state as u32;
-                let mut finalizers_hash: u128 = 0;
-                let mut depth: u32 = 0;
+                let mut dead_at_depth: Option<usize> = None;
+                
+                // Track (group_id, position) with proper greedy/non-greedy semantics
+                let mut matches: std::collections::BTreeMap<usize, usize> = std::collections::BTreeMap::new();
                 
                 const NONE_STATE: u32 = u32::MAX;
-                for &byte in *token {
+                for (depth, &byte) in (*token).iter().enumerate() {
                     let next = dfa_transitions[current as usize][byte as usize];
                     if next == NONE_STATE {
+                        dead_at_depth = Some(depth + 1);
                         current = NONE_STATE;
                         break;
                     }
                     current = next;
-                    depth += 1;
+                    let position = depth + 1;
                     
-                    let finalizers = &dfa_finalizers[current as usize];
-                    if !finalizers.is_empty() {
-                        for &gid in finalizers {
-                            finalizers_hash = finalizers_hash.wrapping_add(
-                                mix_u128((depth as u128) ^ ((gid as u128) << 32))
-                            );
+                    // Record matches with proper greedy/non-greedy semantics
+                    for &gid in &dfa_finalizers[current as usize] {
+                        if non_greedy_finalizers.contains(&gid) {
+                            // Non-greedy: keep first
+                            matches.entry(gid).or_insert(position);
+                        } else {
+                            // Greedy: keep last
+                            matches.insert(gid, position);
                         }
                     }
                 }
                 
-                let end_hash = if current == NONE_STATE {
-                    mix_u128(0xDEADBEEF_u128)
-                } else {
-                    end_state_hashes[current as usize]
-                };
+                // Hash structure: dead position OR (matches + end state)
+                let structure_hash: u128;
+                let end_hash: u128;
                 
-                let token_hash = end_hash.wrapping_add(finalizers_hash);
+                if let Some(dead_depth) = dead_at_depth {
+                    // Token leads to dead state - hash the dead depth
+                    structure_hash = mix_u128((dead_depth as u128) ^ 0xDEAD_DEAD_DEAD_DEAD);
+                    end_hash = mix_u128(0xDEADBEEF_u128);
+                } else {
+                    // Token is valid - hash the (group_id, position) pairs
+                    let mut sh = mix_u128(matches.len() as u128 | (1u128 << 48));
+                    for (&gid, &pos) in &matches {
+                        sh = sh.wrapping_add(mix_u128((gid as u128) | ((pos as u128) << 32)));
+                    }
+                    structure_hash = sh;
+                    
+                    // Hash end state possible_futures (precomputed)
+                    end_hash = end_state_hashes[current as usize];
+                }
+                
+                let token_hash = end_hash.wrapping_add(structure_hash);
                 hash = hash.wrapping_add(token_hash.wrapping_mul(phase2_token_weights[token_idx]));
             }
             

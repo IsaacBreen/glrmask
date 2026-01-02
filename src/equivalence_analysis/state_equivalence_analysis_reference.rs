@@ -24,10 +24,23 @@ fn mix64(mut x: u64) -> u64 {
 }
 
 /// Compute signature for a state based on its behavior on all tokens.
+/// 
+/// The signature must capture all information that affects the trellis structure:
+/// - Finalizers at each position (which groups complete at each byte position)
+/// - Possible futures at the END (after consuming all bytes)
+/// 
+/// Two states are equivalent iff they produce identical trellis structures for all tokens.
+/// 
+/// The trellis edges at position 0 are based on the FINAL match positions for each group:
+/// - Greedy groups: last position where they matched
+/// - Non-greedy groups: first position where they matched
+///
+/// So we need to track (group_id, final_position) pairs, not just which groups completed.
 fn compute_state_signature(
     dfa_transitions: &[[u32; 256]],
     dfa_finalizers: &[Vec<usize>],
     possible_futures: &[Vec<usize>],
+    non_greedy_finalizers: &std::collections::BTreeSet<usize>,
     tokens: &[Vec<u8>],
     state: usize,
 ) -> u64 {
@@ -37,44 +50,68 @@ fn compute_state_signature(
     for (token_idx, token) in tokens.iter().enumerate() {
         // Run token through DFA from this state
         let mut current = state as u32;
-        let mut finalizers_hash: u64 = 0;
+        let mut dead_at_depth: Option<usize> = None;
+        
+        // Track (group_id, final_position) using the same semantics as execute():
+        // - For greedy groups: store last position (overwrite)
+        // - For non-greedy groups: store first position (don't overwrite)
+        let mut matches: std::collections::BTreeMap<usize, usize> = std::collections::BTreeMap::new();
         
         for (depth, &byte) in token.iter().enumerate() {
             if current == NONE_STATE {
+                dead_at_depth = Some(depth);
                 break;
             }
             let next = dfa_transitions[current as usize][byte as usize];
             if next == NONE_STATE {
+                dead_at_depth = Some(depth + 1);
                 current = NONE_STATE;
                 break;
             }
             current = next;
+            let position = depth + 1; // 1-indexed like execute()
             
-            // Hash finalizers at this position
-            let finalizers = &dfa_finalizers[current as usize];
-            if !finalizers.is_empty() {
-                for &gid in finalizers {
-                    finalizers_hash = finalizers_hash.wrapping_add(
-                        mix64(((depth + 1) as u64) ^ ((gid as u64) << 32))
-                    );
+            // Record matches at this state with proper greedy/non-greedy semantics
+            for &gid in &dfa_finalizers[current as usize] {
+                if non_greedy_finalizers.contains(&gid) {
+                    // Non-greedy: keep first
+                    matches.entry(gid).or_insert(position);
+                } else {
+                    // Greedy: keep last
+                    matches.insert(gid, position);
                 }
             }
         }
         
-        // Hash end state's possible futures
-        let end_hash = if current == NONE_STATE {
-            mix64(0xDEADBEEF_u64)
+        // Hash structure: dead position OR (matches + end state)
+        let structure_hash: u64;
+        let end_hash: u64;
+        
+        if let Some(dead_depth) = dead_at_depth {
+            // Token leads to dead state - hash the dead depth
+            structure_hash = mix64((dead_depth as u64) ^ 0xDEAD_DEAD_DEAD_DEAD);
+            end_hash = mix64(0xDEADBEEF_u64);
         } else {
+            // Token is valid - hash the (group_id, position) pairs
+            // The order is determined by BTreeMap (sorted by group_id)
+            let mut sh: u64 = mix64(matches.len() as u64 | (1 << 48));
+            for (&gid, &pos) in &matches {
+                // Hash both the group ID and position together
+                sh = sh.wrapping_add(mix64((gid as u64) | ((pos as u64) << 32)));
+            }
+            structure_hash = sh;
+            
+            // Hash end state possible_futures
             let futures = &possible_futures[current as usize];
-            let mut h: u64 = 0;
+            let mut h: u64 = mix64(futures.len() as u64 | (1 << 48));
             for &gid in futures {
                 h = h.wrapping_add(mix64(gid as u64));
             }
-            h | (1 << 63)
-        };
+            end_hash = h | (1 << 63);
+        }
         
         // Combine into token result, weighted by token index
-        let token_hash = end_hash.wrapping_add(finalizers_hash);
+        let token_hash = end_hash.wrapping_add(structure_hash);
         let weight = mix64((token_idx + 1) as u64);
         hash = hash.wrapping_add(token_hash.wrapping_mul(weight));
     }
@@ -123,6 +160,8 @@ pub fn find_state_equivalence_classes(
         .map(|state| state.possible_future_group_ids.iter().copied().collect())
         .collect();
     
+    let non_greedy_finalizers = &dfa.non_greedy_finalizers;
+    
     // Compute signatures for all states in parallel
     let signatures: Vec<u64> = states
         .par_iter()
@@ -131,6 +170,7 @@ pub fn find_state_equivalence_classes(
                 &dfa_transitions,
                 &dfa_finalizers,
                 &possible_futures,
+                non_greedy_finalizers,
                 tokens,
                 state,
             )
