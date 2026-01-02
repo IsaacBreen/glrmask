@@ -74,8 +74,17 @@ mod tests {
         }
         
         // Build expected classes as sets of token indices
+        // These were updated after fixing state/vocab equivalence analysis to properly 
+        // hash possible_futures at intermediate positions, which made the analysis more
+        // accurate and distinguishes more tokens.
+        //
+        // Vocab: 0={, 1=}, 2=", 3=:, 4=,, 5=n, 6=a, 7=m, 8=e, 9=s, 10=t, 11=r, 12=i, 13=g, 14={", 15=":
+        //
+        // Most tokens are now unique because they produce different trellis structures
+        // from different tokenizer states. Only "i" and "g" remain equivalent since
+        // they are both single-char string characters with identical behavior.
         let expected: Vec<Vec<usize>> = vec![
-            vec![0, 14],       // "{", "{\""
+            vec![0],           // "{"
             vec![1],           // "}"
             vec![2],           // "\""
             vec![3],           // ":"
@@ -84,8 +93,11 @@ mod tests {
             vec![6],           // "a"
             vec![7],           // "m"
             vec![8],           // "e"
-            vec![9, 12, 13],   // "s", "i", "g"
-            vec![10, 11],      // "t", "r"
+            vec![9],           // "s"
+            vec![10],          // "t"
+            vec![11],          // "r"
+            vec![12, 13],      // "i", "g" - equivalent string chars
+            vec![14],          // "{\""
             vec![15],          // "\":"
         ];
 
