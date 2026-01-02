@@ -137,6 +137,10 @@ impl JsonSchemaConverter {
             format!("_def_{}", Self::sanitize_rule_name(name))
         } else if let Some(name) = ref_path.strip_prefix("#/definitions/") {
             format!("_def_{}", Self::sanitize_rule_name(name))
+        } else if let Some(name) = ref_path.strip_prefix("#/defs/") {
+            format!("_def_{}", Self::sanitize_rule_name(name))
+        } else if let Some(name) = ref_path.strip_prefix("#/refs/") {
+            format!("_ref_{}", Self::sanitize_rule_name(name))
         } else {
             // Fallback: sanitize the whole path
             format!("_ref_{}", Self::sanitize_rule_name(ref_path))

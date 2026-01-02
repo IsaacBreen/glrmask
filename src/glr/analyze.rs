@@ -1332,7 +1332,22 @@ pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {
     let mut seen = BTreeSet::<Production>::new();
     let mut out = Vec::<Production>::new();
 
-    for prod in productions {
+    for (i, prod) in productions.iter().enumerate() {
+        // Count nullable symbols for this production
+        let nullable_count = prod.rhs.iter().filter(|sym| {
+            if let Symbol::NonTerminal(nt) = sym {
+                matches!(nullability.get(nt), Some(Nullability::Nullable))
+            } else {
+                false
+            }
+        }).count();
+        
+        // Log productions that would cause exponential blowup
+        if nullable_count > 10 {
+            crate::debug!(4, "    Warning: Production {} has {} nullable symbols (2^{} = {} variants): {} -> {:?}",
+                i, nullable_count, nullable_count, 1usize << nullable_count.min(20), prod.lhs, prod.rhs);
+        }
+        
         let rhs_variants: Vec<Vec<Symbol>> =
             prod.rhs.iter().fold(vec![vec![]], |acc, sym| {
                 let sym_options = match sym {
@@ -1366,7 +1381,14 @@ pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {
                 out.push(new_prod);
             }
         }
+        
+        // Progress logging
+        if i > 0 && i % 100 == 0 {
+            crate::debug!(5, "    Processed {} / {} productions, {} output productions so far", i, productions.len(), out.len());
+        }
     }
+    
+    crate::debug!(4, "    Null inlining complete: {} input → {} output productions", productions.len(), out.len());
 
     // Now strict filtering: remove ALL epsilon productions.
     out.into_iter()

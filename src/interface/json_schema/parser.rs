@@ -79,6 +79,20 @@ impl SchemaParser {
                 self.definitions.insert(path, schema.clone());
             }
         }
+        // Check defs (non-standard but used by some schemas like Vega)
+        if let Some(defs) = root.get("defs").and_then(|v| v.as_object()) {
+            for (name, schema) in defs {
+                let path = format!("#/defs/{}", name);
+                self.definitions.insert(path, schema.clone());
+            }
+        }
+        // Check refs (non-standard but used by Vega)
+        if let Some(refs) = root.get("refs").and_then(|v| v.as_object()) {
+            for (name, schema) in refs {
+                let path = format!("#/refs/{}", name);
+                self.definitions.insert(path, schema.clone());
+            }
+        }
     }
     
     /// Parse the root schema
@@ -208,6 +222,15 @@ impl SchemaParser {
         // Handle single type
         if let Some(type_str) = type_val.as_str() {
             return self.parse_single_type(type_str, obj);
+        }
+        
+        // Handle invalid type={} (empty object or other non-standard value).
+        // This is not valid JSON Schema per spec, but some real-world schemas (e.g., Vega)
+        // use it. We treat it permissively as "any" to allow benchmarking against such schemas.
+        // A stricter implementation would return an error here.
+        if type_val.is_object() {
+            crate::log_warn!("JSON Schema has non-standard type value (object instead of string/array); treating as 'any'");
+            return Ok(SchemaType::Any);
         }
         
         Err("Invalid type value".to_string())
@@ -400,9 +423,10 @@ mod tests {
         
         if let SchemaType::Object(obj) = schema {
             assert_eq!(obj.properties.len(), 2);
-            // Both should resolve to String
-            assert!(matches!(obj.properties[0].1, SchemaType::String(_)));
-            assert!(matches!(obj.properties[1].1, SchemaType::String(_)));
+            // Refs are not inlined - they remain as Ref types
+            // This prevents exponential blowup for schemas with many refs
+            assert!(matches!(&obj.properties[0].1, SchemaType::Ref(path) if path == "#/$defs/name"));
+            assert!(matches!(&obj.properties[1].1, SchemaType::Ref(path) if path == "#/$defs/name"));
         } else {
             panic!("Expected Object schema");
         }
