@@ -1502,43 +1502,70 @@ fn load_gpt2_vocab() -> Option<(LLMTokenMap, usize)> {
     use std::fs;
 
     // Attempt to load gpt2 vocab from various paths
-    let paths = vec!["vocab.json", "src/tests/data/vocab.json", "gpt2_vocab.json"];
-    let mut vocab_json: Option<serde_json::Value> = None;
+    let paths = vec![
+        "vocab.json", 
+        "src/tests/data/vocab.json", 
+        "gpt2_vocab.json",
+        "benchmarking/gpt2_vocab.json",
+        "python/.cache/py_benchmark_vocabs/gpt2_vocab.json",
+    ];
+    
     for p in &paths {
         if let Ok(file) = fs::File::open(p) {
             let reader = BufReader::new(file);
-            if let Ok(v) = serde_json::from_reader(reader) {
+            if let Ok(vocab_json) = serde_json::from_reader::<_, serde_json::Value>(reader) {
+                let vocab_map = match vocab_json.as_object() {
+                    Some(m) => m,
+                    None => continue,
+                };
+                
+                let mut llm_token_map = LLMTokenMap::new();
+                let mut max_id = 0;
+                let mut valid = true;
+
+                for (token_str, id_val) in vocab_map {
+                    let id = match id_val.as_u64() {
+                        Some(id) => id as usize,
+                        None => { valid = false; break; }
+                    };
+                    if id > max_id { max_id = id; }
+
+                    // Minimal Byte-Pair Encoding reversal for GPT-2:
+                    // Map 'Ġ' (U+0120) to space, 'Ċ' (U+010A) to newline.
+                    let bytes: Vec<u8> = token_str.chars().flat_map(|c| {
+                        match c {
+                            'Ġ' => vec![b' '],
+                            'Ċ' => vec![b'\n'],
+                            c if c.is_ascii() => vec![c as u8],
+                            _ => c.to_string().into_bytes(), // Fallback
+                        }
+                    }).collect();
+                    llm_token_map.insert(bytes, LLMTokenID(id));
+                }
+                
+                if !valid {
+                    continue;
+                }
+                
+                // Verify this is a real GPT-2 vocab (should have thousands of tokens)
+                if llm_token_map.len() < 1000 {
+                    eprintln!("Warning: {} has only {} tokens, not a real GPT-2 vocab", p, llm_token_map.len());
+                    continue;
+                }
+                
+                // Verify it has basic tokens
+                if !llm_token_map.contains_key(&vec![b'{']) {
+                    eprintln!("Warning: {} missing '{{' token, not a real GPT-2 vocab", p);
+                    continue;
+                }
+                
                 println!("Loaded vocab from {}", p);
-                vocab_json = Some(v);
-                break;
+                return Some((llm_token_map, max_id));
             }
         }
     }
 
-    let vocab_json = vocab_json?;
-    let vocab_map = vocab_json.as_object()?;
-    let mut llm_token_map = LLMTokenMap::new();
-    let mut max_id = 0;
-
-    for (token_str, id_val) in vocab_map {
-        let id_u64 = id_val.as_u64()?;
-        let id = id_u64 as usize;
-        if id > max_id { max_id = id; }
-
-        // Minimal Byte-Pair Encoding reversal for GPT-2:
-        // Map 'Ġ' (U+0120) to space, 'Ċ' (U+010A) to newline.
-        let bytes: Vec<u8> = token_str.chars().flat_map(|c| {
-            match c {
-                'Ġ' => vec![b' '],
-                'Ċ' => vec![b'\n'],
-                c if c.is_ascii() => vec![c as u8],
-                _ => c.to_string().into_bytes(), // Fallback
-            }
-        }).collect();
-        llm_token_map.insert(bytes, LLMTokenID(id));
-    }
-    
-    Some((llm_token_map, max_id))
+    None
 }
 
 #[test]
@@ -2979,10 +3006,9 @@ fn test_json_schema_gpt2_real_vocab() {
     let grammar_definition = GrammarDefinition::from_ebnf(&ebnf).unwrap();
 
     // 2. Load REAL GPT-2 Vocab
-    let (llm_token_map, max_id) = match load_gpt2_vocab() {
-        Some(v) => v,
-        None => panic!("gpt2_vocab.json or vocab.json not found! Required for real vocab test."),
-    };
+    let (llm_token_map, max_id) = load_gpt2_vocab()
+        .expect("No valid GPT-2 vocab found! This test requires a real GPT-2 vocab with thousands of tokens. \
+                 Try: wget -O benchmarking/gpt2_vocab.json https://huggingface.co/openai-community/gpt2/raw/main/vocab.json");
 
     println!("Loaded real vocab with {} tokens. Max ID: {}", llm_token_map.len(), max_id);
 

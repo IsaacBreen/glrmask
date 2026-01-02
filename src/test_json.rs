@@ -48,20 +48,43 @@ mod tests {
     
     /// Create a GPT-2 token map by loading the actual GPT-2 vocabulary.
     /// Falls back to a simulated vocab if the file doesn't exist.
-    fn gpt2_like_token_map() -> (LLMTokenMap, usize) {
+    fn gpt2_like_token_map() -> Option<(LLMTokenMap, usize)> {
         // Try to load the actual GPT-2 vocab
-        let vocab_path = std::path::Path::new("vocab.json");
-        if vocab_path.exists() {
-            match load_gpt2_vocab_from_file(vocab_path) {
-                Ok((map, max_id)) => return (map, max_id),
-                Err(e) => {
-                    eprintln!("Warning: Failed to load vocab.json: {}, using simulated vocab", e);
+        // We look for vocab files in several locations
+        let paths = [
+            "vocab.json",
+            "gpt2_vocab.json",
+            "benchmarking/gpt2_vocab.json",
+            "python/.cache/py_benchmark_vocabs/gpt2_vocab.json",
+        ];
+        
+        for path in paths {
+            let vocab_path = std::path::Path::new(path);
+            if vocab_path.exists() {
+                match load_gpt2_vocab_from_file(vocab_path) {
+                    Ok((map, max_id)) => {
+                        // Verify this is a real GPT-2 vocab (should have thousands of tokens)
+                        // and contains basic tokens like `{`, `}`, `"`, etc.
+                        if map.len() < 1000 {
+                            eprintln!("Warning: {} has only {} tokens, not a real GPT-2 vocab", path, map.len());
+                            continue;
+                        }
+                        if !map.contains_key(&vec![b'{']) {
+                            eprintln!("Warning: {} missing '{{' token, not a real GPT-2 vocab", path);
+                            continue;
+                        }
+                        return Some((map, max_id));
+                    }
+                    Err(e) => {
+                        eprintln!("Warning: Failed to load {}: {}", path, e);
+                        continue;
+                    }
                 }
             }
         }
         
-        // Fallback: create a simulated GPT-2-like vocab
-        create_simulated_gpt2_vocab()
+        // No valid GPT-2 vocab found
+        None
     }
     
     /// Decode a GPT-2 BPE token string to its actual byte representation.
@@ -227,8 +250,11 @@ mod tests {
     }
     
     /// Test using multi-byte tokens like GPT-2. This tests that tokens like `{"` work correctly.
+    /// Requires a valid GPT-2 vocab to be available - will panic if not found.
     fn test_schema_with_multibyte_tokens(schema_json: &str, valid_inputs: &[&str]) {
-        let (token_map, max_token_id) = gpt2_like_token_map();
+        let (token_map, max_token_id) = gpt2_like_token_map()
+            .expect("No valid GPT-2 vocab found! This test requires a real GPT-2 vocab with thousands of tokens. \
+                     Try: wget -O benchmarking/gpt2_vocab.json https://huggingface.co/openai-community/gpt2/raw/main/vocab.json");
         
         let ebnf = json_schema_to_ebnf(schema_json)
             .expect(&format!("Schema should convert: {}", schema_json));
@@ -687,6 +713,7 @@ mod tests {
     }
     
     /// Test that multi-byte tokens like `{"` work with simple object schema.
+    /// Requires a valid GPT-2 vocab - will panic if not available.
     #[test]
     fn test_multibyte_tokens_simple_object() {
         let schema = r#"{
@@ -702,6 +729,7 @@ mod tests {
     }
     
     /// Test that multi-byte tokens work with additionalProperties: true.
+    /// Requires a valid GPT-2 vocab - will panic if not available.
     #[test]
     fn test_multibyte_tokens_additional_properties_true() {
         let schema = r#"{
@@ -736,7 +764,9 @@ mod tests {
             }
         }"#;
         
-        let (token_map, max_token_id) = gpt2_like_token_map();
+        let (token_map, max_token_id) = gpt2_like_token_map()
+            .expect("No valid GPT-2 vocab found! This test requires a real GPT-2 vocab with thousands of tokens. \
+                     Try: wget -O benchmarking/gpt2_vocab.json https://huggingface.co/openai-community/gpt2/raw/main/vocab.json");
         
         let ebnf = json_schema_to_ebnf(schema)
             .expect("Schema should convert");
