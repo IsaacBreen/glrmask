@@ -359,7 +359,7 @@ pub fn canonicalize_bundle(terminal_map: BTreeMap<Option<TerminalID>, Weight>) -
 /// 3. Determinizes the result into the final Parser DWA
 /// 
 /// The resulting DWA is used at runtime for O(1) mask queries.
-pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
+pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA, tsid_bit_offset: usize, num_tsids: usize) -> DWA {
     crate::debug!(4, "Starting Parser DWA construction");
     let now = Instant::now();
     let terminal_dwas = match build_template_dwas(parser) { Ok(m) => m, Err(e) => panic!("Failed to build terminal DWAs: {:?}", e), };
@@ -566,6 +566,9 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
         reversed_nwa.body.start_states.iter().map(|&s| (s, (BTreeMap::from([(initial_body.clone(), initial_term_map.clone())]), LLMTokenBV::max_ones()))).collect();
 
     let final_bodies_arc: Arc<Mutex<BTreeMap<TokenizerStateID, Vec<(NWABody, Weight)>>>> = Arc::new(Mutex::new(BTreeMap::new()));
+    
+    // Clone for use in process callback - the callback will detect final states and extract tsid bits
+    let final_bodies_arc_for_process = final_bodies_arc.clone();
 
     crate::debug!(4, "Beginning NWA traversal");
 
@@ -573,24 +576,9 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
         &reversed_nwa, &traversal_data, initial_values_full,
         |current_val: &(BTreeMap<NWABody, BTreeMap<Option<TerminalID>, Weight>>, LLMTokenBV), edge_label, transitions| {
             let (current_bodies, current_tokens) = current_val;
-            if let Some(lbl) = edge_label {
-                if lbl >= offset {
-                    let tsid = TokenizerStateID((lbl - offset) as usize);
-                    let mut fb = final_bodies_arc.lock().unwrap();
-                    let list = fb.entry(tsid).or_default();
-                    for (_dest, weight) in transitions {
-                        let w_bv: LLMTokenBV = weight.clone().into();
-                        let intersection_bv = current_tokens & &w_bv;
-                        if !intersection_bv.is_empty() {
-                            let final_w = Weight::from_rsb(intersection_bv.inner.as_ref().clone());
-                            for body in current_bodies.keys() {
-                                list.push((body.clone(), final_w.clone()));
-                            }
-                        }
-                    }
-                    return Vec::new();
-                }
-            }
+            // With the new tsid-in-weights approach, there are no labeled tsid transitions.
+            // The tsid bits are in the current_tokens and will be extracted at final states.
+            // All labeled transitions are terminal transitions (label < offset).
             let terminal_id = edge_label.map(|l| TerminalID(l as usize));
             let mut results = Vec::new();
             for (dest_id, weight) in transitions {
@@ -614,8 +602,36 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
             }
             *tokens1 |= &tokens2;
         },
-        |_, val| {
+        |node_id, val| {
             let (nwa_bodies_map, tokens) = val;
+            
+            // Check if this is a final state in the reversed NWA (old start state of terminal NWA).
+            // If so, extract tsid bits from tokens and record to final_bodies_arc.
+            if reversed_nwa.states[node_id].final_weight.is_some() {
+                // This is a final state - extract tsid bits from tokens
+                // tsid bits are at indices tsid_bit_offset, tsid_bit_offset+1, ..., tsid_bit_offset+num_tsids-1
+                for tsid_idx in 0..num_tsids {
+                    let tsid_bit = tsid_bit_offset + tsid_idx;
+                    if tokens.contains(tsid_bit) {
+                        let tsid = TokenizerStateID(tsid_idx);
+                        let mut fb = final_bodies_arc_for_process.lock().unwrap();
+                        let list = fb.entry(tsid).or_default();
+                        // Filter tokens to only include LLM tokens (indices 0..tsid_bit_offset)
+                        let llm_tokens_only: RangeSetBlaze<usize> = tokens.inner.iter()
+                            .filter(|&idx| idx < tsid_bit_offset)
+                            .collect();
+                        if !llm_tokens_only.is_empty() {
+                            let final_w = Weight::from_rsb(llm_tokens_only);
+                            for body in nwa_bodies_map.keys() {
+                                list.push((body.clone(), final_w.clone()));
+                            }
+                        }
+                    }
+                }
+                // Don't continue traversal from final states
+                return None;
+            }
+            
             let mut nwa_body = NWABody { start_states: vec![] };
             for (right_body, terminal_map) in nwa_bodies_map {
                 let (signature, concrete_weights) = canonicalize_bundle(terminal_map);
@@ -663,8 +679,8 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
 
 /// Deprecated alias for build_parser_dwa
 #[deprecated(since = "0.3.0", note = "Use build_parser_dwa instead")]
-pub fn precompute4(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
-    build_parser_dwa(parser, terminal_nwa)
+pub fn precompute4(parser: &GLRParser, terminal_nwa: &NWA, tsid_bit_offset: usize, num_tsids: usize) -> DWA {
+    build_parser_dwa(parser, terminal_nwa, tsid_bit_offset, num_tsids)
 }
 
 pub fn precompute_token_bvs_and_signatures(reversed_nwa: &NWA, traversal_data: &NwaTraversalData, initial_values: Vec<(StateID, LLMTokenBV)>, offset: Label) -> (HashMap<StateID, LLMTokenBV>, HashSet<Signature>) {

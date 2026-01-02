@@ -983,6 +983,7 @@ impl GrammarConstraint {
         for rep in state_to_rep.values() {
             representative_states_set.insert(*rep);
         }
+        let num_tsids = representative_states_set.len();
 
         crate::debug!(4, "Running precompute1...");
         let mut terminal_dwa = run_precompute1(
@@ -1178,7 +1179,9 @@ impl GrammarConstraint {
         // Convert the lexical DWA to NWA and build the Parser DWA.
         crate::debug!(3, "Building Parser DWA");
         let terminal_nwa = NWA::from_dwa(&terminal_dwa);
-        let mut parser_dwa = build_parser_dwa(&parser, &terminal_nwa);
+        // tsid_bit_offset is internal_max_llm_token + 1, num_tsids is the number of representative states
+        let tsid_bit_offset = vocab.internal_max_llm_token + 1;
+        let mut parser_dwa = build_parser_dwa(&parser, &terminal_nwa, tsid_bit_offset, num_tsids);
 
         parser_dwa.states.clip_weights(vocab.internal_max_llm_token);
         optimize_dwa_and_vocab(&mut parser_dwa, &mut vocab, &mut possible_matches_precompute1);
