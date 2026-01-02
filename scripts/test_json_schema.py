@@ -107,6 +107,11 @@ ebnf = _sep1.json_schema_to_ebnf_py(json.dumps(schema))
 ebnf_time = time.time() - start
 print(f"   EBNF conversion: {ebnf_time*1000:.1f}ms ({len(ebnf)} chars)", file=sys.stderr)
 
+# If PRINT_RAW_EBNF is set, output the raw EBNF and exit
+if os.environ.get("PRINT_RAW_EBNF"):
+    print(ebnf)
+    sys.exit(0)
+
 # If PRINT_EBNF is set, output the OPTIMIZED EBNF and exit
 if os.environ.get("PRINT_EBNF"):
     print("\n2. Parsing EBNF to GrammarDefinition and OPTIMIZING...", file=sys.stderr)
