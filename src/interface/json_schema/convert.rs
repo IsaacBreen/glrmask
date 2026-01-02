@@ -24,14 +24,6 @@ use crate::tokenizer::string_utils::escape_string_for_json;
 use serde_json::Value;
 use std::collections::BTreeMap;
 
-/// Maximum number of optional properties where we use any-order pattern.
-/// For objects with more optional properties than this, we fall back to
-/// declaration order to avoid exponential state explosion in the parser DWA.
-/// 
-/// Any-order with N optional properties creates O(N!) orderings in the parser,
-/// while declaration order creates O(N) states.
-const MAX_ANY_ORDER_OPTIONAL_PROPS: usize = 3;
-
 /// Context for schema-to-grammar conversion
 pub struct SchemaToGrammar {
     /// Counter for generating unique rule names
@@ -64,11 +56,6 @@ impl SchemaToGrammar {
     fn new_rule(&mut self, prefix: &str) -> String {
         self.rule_counter += 1;
         format!("_{}{}", prefix, self.rule_counter)
-    }
-    
-    /// Add a new rule definition
-    fn add_rule(&mut self, name: String, grammar: GrammarType) {
-        self.rules.push((name, grammar));
     }
     
     /// Convert a SchemaType to GrammarType
@@ -353,312 +340,13 @@ impl SchemaToGrammar {
             }
             GrammarType::seq(parts)
         } else if all_optional && props.len() <= 3 {
+            // All optional with few properties: enumerate all valid combinations
             self.build_optional_property_choices(&prop_kvs, additional_suffix)
         } else {
             // Mixed or many properties: use a simplified approach
             // Required props first, then optional ones with commas
             self.build_mixed_property_pattern(props, &prop_kvs, additional_suffix)
         }
-    }
-    
-    /// Factor out common prefixes from property choices to reduce terminal count.
-    /// 
-    /// If multiple properties share a strict prefix (e.g. "prefix_A", "prefix_B"),
-    /// we can reduce the number of initial states/transitions by factoring it out:
-    /// "prefix_" ( "A" ... | "B" ... )
-    fn factor_common_prefixes(&self, choices: Vec<GrammarType>) -> Vec<GrammarType> {
-        // Only optimize if we have enough choices to matter
-        if choices.len() < 3 {
-             return choices;
-        }
-
-        // Helper to extract key bytes from a JsonKeyValue rule
-        let get_key = |g: &GrammarType| -> Option<Vec<u8>> {
-            match g {
-                GrammarType::JsonKeyValue { key, .. } => {
-                    match &**key {
-                        GrammarType::Literal(bytes) => Some(bytes.clone()),
-                        _ => None
-                    }
-                },
-                _ => None
-            }
-        };
-
-        // Store (index, key) pairs
-        let mut indexed_keys: Vec<(usize, Vec<u8>)> = choices.iter()
-            .enumerate()
-            .filter_map(|(i, g)| get_key(g).map(|k| (i, k)))
-            .collect();
-
-        // If we couldn't extract keys for most items, bail
-        if indexed_keys.len() < 2 {
-            return choices;
-        }
-
-        // Sort by key to group prefixes
-        indexed_keys.sort_by(|a, b| a.1.cmp(&b.1));
-
-        let mut output = Vec::new();
-        let mut handled_indices = std::collections::HashSet::new();
-        
-        // Iterate and find groups
-        let mut i = 0;
-        while i < indexed_keys.len() {
-            let (start_idx, ref start_key) = indexed_keys[i];
-            
-            // Find LCP with next item (heuristic: at least 4 chars)
-            if i + 1 < indexed_keys.len() {
-                let (_, ref next_key) = indexed_keys[i + 1];
-                let common_len = start_key.iter()
-                    .zip(next_key.iter())
-                    .take_while(|(a, b)| a == b)
-                    .count();
-
-                if common_len >= 4 {
-                    // Start a group
-                    let prefix = start_key[..common_len].to_vec();
-                    let mut group = vec![start_idx];
-                    
-                    let mut j = i + 1;
-                    while j < indexed_keys.len() {
-                        let (_, ref k) = indexed_keys[j];
-                        if k.starts_with(&prefix) {
-                            group.push(indexed_keys[j].0);
-                            j += 1;
-                        } else {
-                            break;
-                        }
-                    }
-                    
-                    // Emit group if useful
-                    if group.len() > 1 {
-                        for &idx in &group {
-                            handled_indices.insert(idx);
-                        }
-                        
-                        let mut suffixes = Vec::new();
-                        for &idx in &group {
-                            match &choices[idx] {
-                                GrammarType::JsonKeyValue { key, colon, value } => {
-                                    if let GrammarType::Literal(k_bytes) = &**key {
-                                        let suffix_bytes = k_bytes[common_len..].to_vec();
-                                        let suffix_key = GrammarType::Literal(suffix_bytes);
-                                        
-                                        suffixes.push(GrammarType::seq(vec![
-                                            suffix_key,
-                                            *colon.clone(),
-                                            *value.clone()
-                                        ]));
-                                    }
-                                },
-                                _ => unreachable!()
-                            }
-                        }
-                        
-                        output.push(GrammarType::seq(vec![
-                            GrammarType::Literal(prefix),
-                            GrammarType::choice(suffixes)
-                        ]));
-                        
-                        i = j;
-                        continue;
-                    }
-                }
-            }
-            i += 1;
-        }
-        
-        // Add unhandled items
-        for (i, g) in choices.iter().enumerate() {
-            if !handled_indices.contains(&i) {
-                output.push(g.clone());
-            }
-        }
-        
-        output
-    }
-
-    /// Build property pattern using interleaved approach for many optional properties.
-    /// 
-    /// Instead of generating:
-    ///   req1 ',' opt1? ',' opt2? ... ',' optN?
-    /// which leads to 2^N variants during null inlining,
-    /// 
-    /// We generate:
-    ///   req1 additional_opts
-    ///   additional_opts ::= (',' (opt1 | opt2 | ... | optN) additional_opts)?
-    ///
-    /// This uses right recursion instead of sequential optionals, avoiding the exponential blowup.
-    /// 
-    /// For mixed cases with multiple required properties interspersed with optionals,
-    /// we generate:
-    ///   req1 (',' opt_choice)* ',' req2 (',' opt_choice)*
-    fn build_interleaved_property_pattern(&mut self, props: &[(String, GrammarType, bool)], prop_kvs: &[GrammarType], additional_suffix: Option<GrammarType>) -> GrammarType {
-        let mut required_props = Vec::new();
-        let mut optional_props = Vec::new();
-        
-        for (i, (_, _, required)) in props.iter().enumerate() {
-            if *required {
-                required_props.push((i, &prop_kvs[i]));
-            } else {
-                optional_props.push(&prop_kvs[i]);
-            }
-        }
-        
-        if required_props.is_empty() {
-            // All optional: (prop (',' prop)*)?
-            let mut opt_choices: Vec<GrammarType> = optional_props.iter()
-                .map(|kv| (*kv).clone())
-                .collect();
-            
-            if let Some(suffix) = additional_suffix {
-                // If additional properties are allowed, add the generic kv pattern to choices
-                self.needs.json_kv = true;
-                opt_choices.push(GrammarType::RuleRef("_json_kv".to_string()));
-            } else if opt_choices.is_empty() {
-                return GrammarType::Empty;
-            }
-            
-            // Factor common prefixes to reduce terminals
-            let opt_choices = self.factor_common_prefixes(opt_choices);
-            
-            // Generate: (prop (',' prop)*)? where prop is any optional property
-            let prop_choice = GrammarType::choice(opt_choices);
-            let comma_prop = GrammarType::seq(vec![GrammarType::lit(","), prop_choice.clone()]);
-            
-            GrammarType::opt(GrammarType::seq(vec![
-                prop_choice,
-                GrammarType::repeat(comma_prop),
-            ]))
-        } else {
-            // Has required properties: build sequence with optional interleaving
-            let mut parts = Vec::new();
-            
-            // Build the optional property choice pattern
-            let mut opt_choices: Vec<GrammarType> = optional_props.iter()
-                .map(|kv| (*kv).clone())
-                .collect();
-            
-            if let Some(ref _suffix) = additional_suffix {
-                self.needs.json_kv = true;
-                opt_choices.push(GrammarType::RuleRef("_json_kv".to_string()));
-            }
-            
-            let opt_repeat = if !opt_choices.is_empty() {
-                // Factor common prefixes
-                let opt_choices = self.factor_common_prefixes(opt_choices);
-                
-                let prop_choice = GrammarType::choice(opt_choices);
-                let comma_prop = GrammarType::seq(vec![GrammarType::lit(","), prop_choice]);
-                Some(GrammarType::repeat(comma_prop))
-            } else if additional_suffix.is_some() {
-                // Just additional properties
-                let kv_ref = GrammarType::RuleRef("_json_kv".to_string());
-                let comma_kv = GrammarType::seq(vec![GrammarType::lit(","), kv_ref]);
-                Some(GrammarType::repeat(comma_kv))
-            } else {
-                None
-            };
-            
-            // Add required properties with optional properties interspersed
-            for (i, (_, kv)) in required_props.iter().enumerate() {
-                if i > 0 {
-                    // Add optional properties between required ones
-                    if let Some(ref opt_rep) = opt_repeat {
-                        parts.push(opt_rep.clone());
-                    }
-                    parts.push(GrammarType::lit(","));
-                }
-                parts.push((*kv).clone());
-            }
-            
-            // Add trailing optional properties
-            if let Some(opt_rep) = opt_repeat {
-                parts.push(opt_rep);
-            }
-            
-            GrammarType::seq(parts)
-        }
-    }
-
-    /// Build property pattern using declaration order with repetition.
-    /// 
-    /// For N optional properties, generates a recursive choice pattern:
-    ///   Rule N: P_N
-    ///   Rule k: (P_k (',' Rule_{k+1})?) | Rule_{k+1}
-    /// 
-    /// This ensures O(N) grammar size via named rules and enforces "subset of {k..N}" semantics.
-    fn build_declaration_order_repetition_pattern(&mut self, props: &[(String, GrammarType, bool)], prop_kvs: &[GrammarType], additional_suffix: Option<GrammarType>) -> GrammarType {
-        // The strategy is to build the grammar from right to left (last property to first).
-        // `current_grammar` will represent the grammar for the suffix of properties
-        // starting from the current position.
-
-        // Initialize `current_grammar` with the additional properties suffix, if any.
-        // This forms the "base" of our right-to-left construction.
-        let mut current_grammar = additional_suffix.unwrap_or(GrammarType::Empty);
-
-        // Iterate through properties in reverse order
-        for (i, (_, _, required)) in props.iter().enumerate().rev() {
-            let kv_grammar = prop_kvs[i].clone();
-
-            // If `current_grammar` is empty, it means we are at the very end of the property list
-            // (or the additional_suffix was None and we haven't added anything yet).
-            if matches!(current_grammar, GrammarType::Empty) {
-                if *required {
-                    // If it's a required property and there's nothing after it, it must just be the property itself.
-                    current_grammar = kv_grammar;
-                } else {
-                    // If it's an optional property and there's nothing after it, it can be present or skipped.
-                    current_grammar = GrammarType::opt(kv_grammar);
-                }
-            } else {
-                // We have a `current_grammar` representing the suffix (properties to the right).
-                // We need to combine `kv_grammar` with `current_grammar`.
-
-                // To avoid exponential growth and allow recursion, we wrap `current_grammar` in a rule reference
-                // if it's not already a simple rule reference or empty. This ensures `current_grammar`
-                // can be referenced multiple times without duplicating its potentially complex structure.
-                let current_grammar_ref = if matches!(current_grammar, GrammarType::RuleRef(_)) {
-                    current_grammar.clone()
-                } else {
-                    let rule_name = self.new_rule("prop_suffix");
-                    self.add_rule(rule_name.clone(), current_grammar);
-                    GrammarType::RuleRef(rule_name)
-                };
-
-                if *required {
-                    // If the current property is required:
-                    // It must appear, followed by a comma, then the rest of the properties (`current_grammar_ref`).
-                    current_grammar = GrammarType::seq(vec![
-                        kv_grammar,
-                        GrammarType::lit(","),
-                        current_grammar_ref,
-                    ]);
-                } else {
-                    // If the current property is optional:
-                    // It can either appear (followed by a comma and the rest), OR it can be skipped (just the rest).
-                    current_grammar = GrammarType::choice(vec![
-                        GrammarType::seq(vec![
-                            kv_grammar,
-                            GrammarType::opt(GrammarType::seq(vec![
-                                GrammarType::lit(","),
-                                current_grammar_ref.clone(),
-                            ])),
-                        ]),
-                        current_grammar_ref,
-                    ]);
-                }
-            }
-        }
-
-        // The final `current_grammar` represents the entire sequence of properties.
-        // If the entire object can be empty (e.g., all properties are optional and no required ones),
-        // we might need to wrap the final result in an `opt`.
-        // However, the recursive construction `(P_k (',' R_{k+1})?) | R_{k+1}` already handles
-        // the "skip P_k" case, so if all properties are optional, the final `current_grammar`
-        // will naturally allow matching `GrammarType::Empty` if all are skipped.
-        current_grammar
     }
     
     fn build_optional_property_choices(&mut self, prop_kvs: &[GrammarType], additional_suffix: Option<GrammarType>) -> GrammarType {
@@ -713,27 +401,160 @@ impl SchemaToGrammar {
         // Count optional properties
         let optional_count = props.iter().filter(|(_, _, r)| !*r).count();
         
-        // For small number of optional properties, use any-order (interleaved) pattern
-        // which allows properties in any order but causes O(N!) parser states.
-        // For many optional properties, use declaration-order pattern which is O(N).
-        if optional_count > 0 && optional_count <= MAX_ANY_ORDER_OPTIONAL_PROPS {
+        // If many optional properties, use a different strategy to avoid exponential blowup
+        // The threshold of 5 is chosen because 2^5 = 32 which is still manageable,
+        // but 2^22 = 4 million which is not.
+        if optional_count > 0 {
             return self.build_interleaved_property_pattern(props, prop_kvs, additional_suffix);
         }
         
-        // For many optional properties, use declaration order via repetition pattern.
-        // Generate: ( first_member rest )? where rest = ( ',' member rest )?
-        // This creates O(N) grammar states instead of O(2^N) from sequential optionals.
-        self.build_declaration_order_repetition_pattern(props, prop_kvs, additional_suffix)
+        // Original approach for small number of optional properties
+        let mut parts = Vec::new();
+        let mut first_required_seen = false;
+        let mut pending_optionals: Vec<GrammarType> = Vec::new();
+        
+        for ((_name, _value, required), kv) in props.iter().zip(prop_kvs.iter()) {
+            if *required {
+                // Flush pending optionals
+                for opt in pending_optionals.drain(..) {
+                    parts.push(GrammarType::opt(GrammarType::seq(vec![
+                        GrammarType::lit(","),
+                        opt,
+                    ])));
+                }
+                
+                if first_required_seen || !parts.is_empty() {
+                    parts.push(GrammarType::lit(","));
+                }
+                parts.push(kv.clone());
+                first_required_seen = true;
+            } else {
+                pending_optionals.push(kv.clone());
+            }
+        }
+        
+        // Flush remaining optionals
+        for opt in pending_optionals.drain(..) {
+            parts.push(GrammarType::opt(GrammarType::seq(vec![
+                GrammarType::lit(","),
+                opt,
+            ])));
+        }
+        
+        if let Some(suffix) = additional_suffix {
+            parts.push(suffix);
+        }
+        
+        let seq = GrammarType::seq(parts);
+        
+        // If no required properties, make the whole thing optional
+        if !first_required_seen {
+            GrammarType::opt(seq)
+        } else {
+            seq
+        }
     }
     
-    /// Build property pattern using declaration order with repetition.
+    /// Build property pattern using interleaved approach for many optional properties.
     /// 
-    /// For N optional properties, generates a pattern like:
-    ///   ( prop1 ( ',' prop2 ( ',' prop3 ... )? )? )?
+    /// Instead of generating:
+    ///   req1 ',' opt1? ',' opt2? ... ',' optN?
+    /// which leads to 2^N variants during null inlining,
     /// 
-    /// This enforces declaration order and uses nested optionals that don't
-    /// cause 2^N expansion because each level has only ONE optional.
-
+    /// We generate:
+    ///   req1 additional_opts
+    ///   additional_opts ::= (',' (opt1 | opt2 | ... | optN) additional_opts)?
+    ///
+    /// This uses right recursion instead of sequential optionals, avoiding the exponential blowup.
+    /// 
+    /// For mixed cases with multiple required properties interspersed with optionals,
+    /// we generate:
+    ///   (opts_before_req1)? req1 (opts_after_req1)? ',' req2 (opts_after_req2)?
+    /// where each opts_group uses the recursive pattern if there are many optionals.
+    fn build_interleaved_property_pattern(&mut self, props: &[(String, GrammarType, bool)], prop_kvs: &[GrammarType], additional_suffix: Option<GrammarType>) -> GrammarType {
+        // Separate required and optional properties
+        let required_props: Vec<(usize, &GrammarType)> = props.iter().zip(prop_kvs.iter())
+            .enumerate()
+            .filter(|(_, ((_, _, r), _))| *r)
+            .map(|(i, (_, kv))| (i, kv))
+            .collect();
+        
+        let optional_props: Vec<&GrammarType> = props.iter().zip(prop_kvs.iter())
+            .filter(|((_, _, r), _)| !*r)
+            .map(|(_, kv)| kv)
+            .collect();
+        
+        if required_props.is_empty() {
+            // All optional: generate choice pattern with repetition
+            let mut opt_choices: Vec<GrammarType> = optional_props.iter()
+                .map(|kv| (*kv).clone())
+                .collect();
+            
+            if let Some(ref suffix) = additional_suffix {
+                // Add _json_kv as another option
+                self.needs.json_kv = true;
+                opt_choices.push(GrammarType::RuleRef("_json_kv".to_string()));
+            }
+            
+            if opt_choices.is_empty() {
+                return GrammarType::Empty;
+            }
+            
+            // Generate: (prop (',' prop)*)? where prop is any optional property
+            let prop_choice = GrammarType::choice(opt_choices);
+            let comma_prop = GrammarType::seq(vec![GrammarType::lit(","), prop_choice.clone()]);
+            
+            GrammarType::opt(GrammarType::seq(vec![
+                prop_choice,
+                GrammarType::repeat(comma_prop),
+            ]))
+        } else {
+            // Has required properties: build sequence with optional interleaving
+            let mut parts = Vec::new();
+            
+            // Build the optional property choice pattern
+            let mut opt_choices: Vec<GrammarType> = optional_props.iter()
+                .map(|kv| (*kv).clone())
+                .collect();
+            
+            if let Some(ref _suffix) = additional_suffix {
+                self.needs.json_kv = true;
+                opt_choices.push(GrammarType::RuleRef("_json_kv".to_string()));
+            }
+            
+            let opt_repeat = if !opt_choices.is_empty() {
+                let prop_choice = GrammarType::choice(opt_choices);
+                let comma_prop = GrammarType::seq(vec![GrammarType::lit(","), prop_choice]);
+                Some(GrammarType::repeat(comma_prop))
+            } else if additional_suffix.is_some() {
+                // Just additional properties
+                let kv_ref = GrammarType::RuleRef("_json_kv".to_string());
+                let comma_kv = GrammarType::seq(vec![GrammarType::lit(","), kv_ref]);
+                Some(GrammarType::repeat(comma_kv))
+            } else {
+                None
+            };
+            
+            // Add required properties with optional properties interspersed
+            for (i, (_, kv)) in required_props.iter().enumerate() {
+                if i > 0 {
+                    // Add optional properties between required ones
+                    if let Some(ref opt_rep) = opt_repeat {
+                        parts.push(opt_rep.clone());
+                    }
+                    parts.push(GrammarType::lit(","));
+                }
+                parts.push((*kv).clone());
+            }
+            
+            // Add trailing optional properties
+            if let Some(opt_rep) = opt_repeat {
+                parts.push(opt_rep);
+            }
+            
+            GrammarType::seq(parts)
+        }
+    }
     
     fn convert_array(&mut self, arr: &ArraySchema) -> GrammarType {
         if arr.prefix_items.is_empty() && arr.items.is_none() {
