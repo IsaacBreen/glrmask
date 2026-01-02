@@ -404,7 +404,7 @@ impl SchemaToGrammar {
         // If many optional properties, use a different strategy to avoid exponential blowup
         // The threshold of 5 is chosen because 2^5 = 32 which is still manageable,
         // but 2^22 = 4 million which is not.
-        if optional_count > 5 {
+        if optional_count > 0 {
             return self.build_interleaved_property_pattern(props, prop_kvs, additional_suffix);
         }
         
