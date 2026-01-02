@@ -220,6 +220,10 @@ impl GrammarEmitter {
         self.rules.push(("JSON_NULL".to_string(), GrammarExpr::Literal(b"null".to_vec())));
         
         // Conditional rules based on needs
+        // Note: _json_kv and _json_object both reference _json_value, so if either is needed,
+        // we must emit _json_value
+        let needs_value = needs_value || needs_kv || needs_object;
+        
         if needs_value {
             self.rules.push(("_json_value".to_string(), GrammarExpr::Choice(vec![
                 GrammarExpr::Ref("_json_object".to_string()),

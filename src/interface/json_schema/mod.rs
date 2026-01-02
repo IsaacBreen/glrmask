@@ -21,12 +21,6 @@
 //!    - Converts to final grammar expression
 //!    - Generates primitive rules (string, number, boolean, null)
 //!
-//! # Legacy Module
-//!
-//! The [`legacy`] module contains the original monolithic implementation.
-//! It is kept for backward compatibility but will be deprecated.
-//! New code should use the staged pipeline above.
-//!
 //! # Quick Start
 //!
 //! ```rust,ignore
@@ -35,6 +29,9 @@
 //! let schema = r#"{"type": "object", "properties": {"name": {"type": "string"}}}"#;
 //! let ebnf = json_schema_to_ebnf(schema).unwrap();
 //! ```
+
+use crate::interface::GrammarExpr;
+use serde_json::Value;
 
 // Type definitions
 pub mod types;
@@ -48,9 +45,6 @@ pub mod convert;
 // Stage 3: Emit GrammarType to GrammarExpr
 pub mod emit;
 
-// Legacy monolithic module (deprecated)
-pub mod legacy;
-
 // Tests
 #[cfg(test)]
 mod tests;
@@ -61,5 +55,144 @@ pub use parser::parse_json_schema;
 pub use convert::SchemaToGrammar;
 pub use emit::GrammarEmitter;
 
-// Re-export legacy functions and types for backward compatibility
-pub use legacy::{json_schema_to_ebnf, json_schema_to_grammar_exprs, JsonSchemaConverter};
+// ============================================================================
+// Public API Functions
+// ============================================================================
+
+/// Convert a JSON Schema string to EBNF string.
+///
+/// This is the main entry point for JSON Schema → EBNF conversion.
+pub fn json_schema_to_ebnf(schema_json: &str) -> Result<String, String> {
+    let rules = json_schema_to_grammar_exprs(schema_json)?;
+    
+    // Check if whitespace is disabled
+    let no_whitespace = std::env::var("SEP1_NO_JSON_WHITESPACE")
+        .map(|v| v == "1")
+        .unwrap_or(false);
+    
+    // Convert rules to EBNF format
+    let ignore_prefix = if no_whitespace { "" } else { "#![ignore(WS)]\n\n" };
+    let mut ebnf = String::from(ignore_prefix);
+    let prefix_len = ignore_prefix.len();
+    
+    let root_rule = "root".to_string();
+    
+    for (name, expr) in &rules {
+        let ebnf_str = grammar_expr_to_ebnf(expr);
+        if name == &root_rule {
+            // Put root rule first (after ignore directive if present)
+            ebnf = format!("{}{} ::= {} ;\n", ignore_prefix, name, ebnf_str) + &ebnf[prefix_len..];
+        } else {
+            ebnf.push_str(&format!("{} ::= {} ;\n", name, ebnf_str));
+        }
+    }
+    
+    Ok(ebnf)
+}
+
+/// Convert a JSON Schema to a Vec<(String, GrammarExpr)>.
+pub fn json_schema_to_grammar_exprs(schema_json: &str) -> Result<Vec<(String, GrammarExpr)>, String> {
+    // Parse JSON
+    let schema: Value = serde_json::from_str(schema_json)
+        .map_err(|e| format!("Failed to parse JSON schema: {}", e))?;
+    
+    // Use the converter
+    let mut converter = JsonSchemaConverter::new(schema);
+    let (rules, _root_rule) = converter.convert()?;
+    
+    Ok(rules)
+}
+
+/// JSON Schema to Grammar converter.
+///
+/// This is a wrapper around the modular conversion pipeline that maintains
+/// backward compatibility with the original API.
+pub struct JsonSchemaConverter {
+    root_schema: Value,
+}
+
+impl JsonSchemaConverter {
+    pub fn new(schema: Value) -> Self {
+        Self { root_schema: schema }
+    }
+    
+    pub fn convert(mut self) -> Result<(Vec<(String, GrammarExpr)>, String), String> {
+        // Parse schema
+        let mut parser = parser::SchemaParser::new(self.root_schema);
+        let schema_type = parser.parse_root()?;
+        
+        // Convert to grammar type
+        let mut converter = convert::SchemaToGrammar::new();
+        let grammar_type = converter.convert(&schema_type);
+        
+        // Get auxiliary rules
+        let aux_rules = converter.get_rules();
+        let needs = converter.get_needs();
+        
+        // Emit to GrammarExpr
+        let mut emitter = emit::GrammarEmitter::new();
+        let root_expr = emitter.emit(&grammar_type);
+        
+        // Add auxiliary rules
+        for (name, gt) in aux_rules {
+            let expr = emitter.emit(gt);
+            emitter.add_rule(name.clone(), expr);
+        }
+        
+        // Add primitive rules as needed
+        emitter.add_primitive_rules(
+            needs.json_value,
+            needs.json_object,
+            needs.json_array,
+            needs.json_kv,
+        );
+        
+        // Add root rule
+        emitter.add_rule("root".to_string(), root_expr);
+        
+        let rules = emitter.into_rules();
+        Ok((rules, "root".to_string()))
+    }
+}
+
+/// Convert a GrammarExpr to EBNF string.
+fn grammar_expr_to_ebnf(expr: &GrammarExpr) -> String {
+    match expr {
+        GrammarExpr::Ref(name) => name.clone(),
+        GrammarExpr::Literal(bytes) => {
+            let s = String::from_utf8_lossy(bytes);
+            // Escape special characters for EBNF literal
+            let mut escaped = String::new();
+            for c in s.chars() {
+                match c {
+                    '\\' => escaped.push_str("\\\\"),
+                    '\'' => escaped.push_str("\\'"),
+                    '\n' => escaped.push_str("\\n"),
+                    '\r' => escaped.push_str("\\r"),
+                    '\t' => escaped.push_str("\\t"),
+                    c if c.is_control() => {
+                        escaped.push_str(&format!("\\x{:02x}", c as u32));
+                    }
+                    _ => escaped.push(c),
+                }
+            }
+            format!("'{}'", escaped)
+        }
+        GrammarExpr::Sequence(exprs) => {
+            let parts: Vec<String> = exprs.iter().map(grammar_expr_to_ebnf).collect();
+            parts.join(" ")
+        }
+        GrammarExpr::Choice(exprs) => {
+            let parts: Vec<String> = exprs.iter().map(|e| grammar_expr_to_ebnf(e)).collect();
+            format!("( {} )", parts.join(" | "))
+        }
+        GrammarExpr::Optional(e) => {
+            format!("( {} )?", grammar_expr_to_ebnf(e))
+        }
+        GrammarExpr::Repeat(e) => {
+            format!("( {} )*", grammar_expr_to_ebnf(e))
+        }
+        GrammarExpr::CharClass(s) => s.clone(),
+        GrammarExpr::AnyChar => ".".to_string(),
+    }
+}

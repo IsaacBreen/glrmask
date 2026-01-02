@@ -34,12 +34,13 @@ pub struct SchemaToGrammar {
     needs: PrimitiveNeeds,
 }
 
+/// Tracks which primitive JSON types are needed by the grammar
 #[derive(Default)]
-struct PrimitiveNeeds {
-    json_value: bool,
-    json_object: bool,
-    json_array: bool,
-    json_kv: bool,
+pub struct PrimitiveNeeds {
+    pub json_value: bool,
+    pub json_object: bool,
+    pub json_array: bool,
+    pub json_kv: bool,
 }
 
 impl SchemaToGrammar {
