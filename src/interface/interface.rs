@@ -1384,21 +1384,23 @@ impl GrammarDefinition {
     }
 
     /// Constructs a `GrammarDefinition` from a list of grammar expressions.
+    /// Note: Optimization is disabled by default. Use `optimize()` explicitly if needed.
     pub fn from_exprs(
         grammar_exprs: Vec<(String, GrammarExpr)>,
         regex_exprs: Vec<(String, Expr)>,
     ) -> Result<Self, String> {
-        Self::from_exprs_impl(grammar_exprs, regex_exprs, None, true)
+        Self::from_exprs_impl(grammar_exprs, regex_exprs, None, false)
     }
 
     /// Constructs a `GrammarDefinition` from a list of `(name, GrammarExpr)` tuples
     /// with optional ignore symbol.
+    /// Note: Optimization is disabled by default. Use `optimize()` explicitly if needed.
     pub fn from_exprs_with_ignore(
         grammar_exprs: Vec<(String, GrammarExpr)>,
         regex_exprs: Vec<(String, Expr)>,
         ignore_symbol_name: Option<&str>,
     ) -> Result<Self, String> {
-        Self::from_exprs_impl(grammar_exprs, regex_exprs, ignore_symbol_name, true)
+        Self::from_exprs_impl(grammar_exprs, regex_exprs, ignore_symbol_name, false)
     }
 
     /// Internal implementation that takes an explicit optimize flag.
@@ -1710,11 +1712,12 @@ impl GrammarDefinition {
 
     /// Constructs a `GrammarDefinition` from parsed grammar rules.
     /// This is the common implementation used by both `from_ebnf` and `from_lark`.
+    /// Note: Optimization is disabled by default. Use `optimize()` explicitly if needed.
     fn from_parsed_rules(
         grammar_exprs: Vec<(String, GrammarExpr)>,
         ignore_symbol_name: Option<String>,
     ) -> Result<Self, String> {
-        Self::from_parsed_rules_impl(grammar_exprs, ignore_symbol_name, true)
+        Self::from_parsed_rules_impl(grammar_exprs, ignore_symbol_name, false)
     }
 
     /// Like `from_parsed_rules` but without grammar optimization.
@@ -1845,13 +1848,12 @@ impl GrammarDefinition {
         // Parse EBNF first
         let ebnf = EbnfParser::new(ebnf_source).and_then(|mut p| p.parse())?;
         
-        // Apply choice factoring by default on parsed GrammarExpr
-        // This significantly improves compilation time (7-8s vs 25-30s for complex grammars)
-        // Disable with DISABLE_EBNF_CHOICE_FACTORING=1
-        let grammar_rules = if std::env::var("DISABLE_EBNF_CHOICE_FACTORING").is_ok() {
-            ebnf.grammar_rules
-        } else {
+        // Choice factoring is disabled by default.
+        // Enable with ENABLE_EBNF_CHOICE_FACTORING=1 if needed.
+        let grammar_rules = if std::env::var("ENABLE_EBNF_CHOICE_FACTORING").is_ok() {
             crate::interface::ebnf_factoring::factor_grammar_rules(ebnf.grammar_rules)
+        } else {
+            ebnf.grammar_rules
         };
         
         Self::from_parsed_rules(grammar_rules, ebnf.ignore_symbol_name)

@@ -51,7 +51,7 @@ class Sep1System(BaseSystem):
         elif grammar_path.suffix == '.ebnf':
              # EBNF File
              gd = ffi.GrammarDefinition.from_ebnf_file(str(grammar_path))
-             gd.optimize()
+             # gd.optimize()  # Optimization disabled by default
              cg = gd.compile()
              
              token_to_id = {v: k for k, v in vocab.items()}
@@ -74,7 +74,7 @@ class Sep1System(BaseSystem):
              
              # Native compile from JSON Schema
              gd = ffi.grammar_definition_from_json_schema(schema_str)
-             gd.optimize()
+             # gd.optimize()  # Optimization disabled by default
              cg = gd.compile()
              
              token_to_id = {v: k for k, v in vocab.items()}
