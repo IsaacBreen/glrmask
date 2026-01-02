@@ -98,6 +98,10 @@ schema-id: ffi ## Write EBNF for a schema by ID to a file (usage: make schema-id
 	@if [ -z "$(ID)" ] || [ -z "$(OUT)" ]; then echo "Usage: make schema-id ID=<schema_id> OUT=<file.ebnf>"; exit 1; fi
 	SCHEMA_ID="$(ID)" PRINT_EBNF=1 OUT_FILE="$(OUT)" $(PYTHON) scripts/test_json_schema.py
 
+show-json-schema: ffi ## Print the original JSON schema to stdout (usage: make show-json-schema ID=...)
+	@if [ -z "$(ID)" ]; then echo "Usage: make show-json-schema ID=<schema_id>"; exit 1; fi
+	SCHEMA_ID="$(ID)" PRINT_JSON_SCHEMA=1 $(PYTHON) scripts/test_json_schema.py
+
 test-diff: ffi ## Test diff grammar for any text file (usage: make test-diff FILE=path/to/file.txt)
 	@if [ -z "$(FILE)" ]; then echo "Usage: make test-diff FILE=<path_to_text_file>"; exit 1; fi
 	SOURCE_FILE="$(FILE)" $(PYTHON) scripts/test_diff.py

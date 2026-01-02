@@ -73,6 +73,11 @@ else:
 if 'title' in schema:
     print(f"Schema title: {schema['title']}")
 
+# If PRINT_JSON_SCHEMA is set, output the schema JSON and exit
+if os.environ.get("PRINT_JSON_SCHEMA"):
+    print(json.dumps(schema, indent=2))
+    sys.exit(0)
+
 
 # Load vocabulary
 try:
