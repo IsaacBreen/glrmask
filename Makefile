@@ -206,8 +206,19 @@ build: ## Build the Rust project
 
 # === JSON Schema Benchmark ===
 
-jsonschemabench: ffi ## Run sep1 benchmarks on JSonSchemaBench suite (full, ~11K schemas)
-	cd gcg-paper/external-benchmarks/jsonschemabench && make run
+BENCH_OPTS :=
+ifneq ($(LIMIT),)
+    BENCH_OPTS += --limit $(LIMIT)
+endif
+ifneq ($(FRACTION),)
+    BENCH_OPTS += --fraction $(FRACTION)
+endif
+ifneq ($(SHUFFLE),)
+    BENCH_OPTS += --shuffle
+endif
+
+jsonschemabench: ffi ## Run sep1 benchmarks on JSonSchemaBench suite (full, ~11K schemas). Vars: LIMIT, FRACTION, SHUFFLE
+	cd gcg-paper/external-benchmarks/jsonschemabench && make run BENCH_ARGS="$(BENCH_OPTS)"
 
 jsonschemabench-quick: ffi ## Run sep1 benchmark on a single schema (quick test)
 	cd gcg-paper/external-benchmarks/jsonschemabench/jsonschemabench/maskbench && \
@@ -216,15 +227,15 @@ jsonschemabench-quick: ffi ## Run sep1 benchmark on a single schema (quick test)
 jsonschemabench-subset: ffi ## Run sep1 benchmarks on a subset of schemas (usage: make jsonschemabench-subset PATTERN="JME_*.json")
 	@if [ -z "$(PATTERN)" ]; then echo "Usage: make jsonschemabench-subset PATTERN=\"JME_*.json\""; exit 1; fi
 	cd gcg-paper/external-benchmarks/jsonschemabench/jsonschemabench/maskbench && \
-		python3 -m maskbench.runner --sep1 data/$(PATTERN)
+		python3 -m maskbench.runner --sep1 "data/$(PATTERN)" $(BENCH_OPTS)
 
 jsonschemabench-analyze: ## Analyze sep1 benchmark results (run after jsonschemabench)
 	cd gcg-paper/external-benchmarks/jsonschemabench/jsonschemabench/maskbench && \
 		python3 scripts/maskbench_results.py tmp/out--sep1
 
-jsonschemabench-llg: ## Run llguidance benchmarks on JSonSchemaBench suite (full, ~11K schemas)
+jsonschemabench-llg: ## Run llguidance benchmarks on JSonSchemaBench suite (full, ~11K schemas). Vars: LIMIT, FRACTION, SHUFFLE
 	cd gcg-paper/external-benchmarks/jsonschemabench/jsonschemabench/maskbench && \
-		python3 scripts/run_maskbench.py --llg data/
+		python3 scripts/run_maskbench.py --llg data/ $(BENCH_OPTS)
 
 jsonschemabench-llg-analyze: ## Analyze llguidance benchmark results
 	cd gcg-paper/external-benchmarks/jsonschemabench/jsonschemabench/maskbench && \
