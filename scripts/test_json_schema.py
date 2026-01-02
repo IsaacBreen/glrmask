@@ -117,37 +117,35 @@ if os.environ.get("PRINT_RAW_EBNF"):
     print(ebnf)
     sys.exit(0)
 
-# If PRINT_EBNF is set, output the OPTIMIZED EBNF and exit
+# If PRINT_EBNF is set, output the parsed EBNF and exit
 if os.environ.get("PRINT_EBNF"):
-    print("\n2. Parsing EBNF to GrammarDefinition and OPTIMIZING...", file=sys.stderr)
+    print("\n2. Parsing EBNF to GrammarDefinition...", file=sys.stderr)
     start = time.time()
-    # Logic to optimize:
-    # 1. We have the raw EBNF from step 1
-    # 2. Parse it into GrammarDefinition (this runs optimizations)
+    # Parse into GrammarDefinition (optimization is disabled by default)
     grammar_def = _sep1.grammar_definition_from_ebnf(ebnf)
     
-    # 3. Output the optimized EBNF
-    optimized_ebnf = grammar_def.to_ebnf()
+    # Output the parsed EBNF
+    parsed_ebnf = grammar_def.to_ebnf()
     
     ebnf_time = time.time() - start
-    print(f"   Optimization: {ebnf_time*1000:.1f}ms", file=sys.stderr)
+    print(f"   Parsing: {ebnf_time*1000:.1f}ms", file=sys.stderr)
 
     out_file = os.environ.get("OUT_FILE")
     if out_file:
         with open(out_file, 'w') as f:
-            f.write(optimized_ebnf)
-        print(f"Optimized EBNF written to: {out_file}", file=sys.stderr)
+            f.write(parsed_ebnf)
+        print(f"Parsed EBNF written to: {out_file}", file=sys.stderr)
     else:
-        print(optimized_ebnf)
+        print(parsed_ebnf)
     sys.exit(0)
 
-# Step 2: Parse EBNF to GrammarDefinition (includes optimization)
-# Note: from_ebnf() already calls optimize() internally
+# Step 2: Parse EBNF to GrammarDefinition
+# Note: from_ebnf() does NOT optimize by default
 print("\n2. Parsing EBNF to GrammarDefinition...")
 start = time.time()
 grammar_def = _sep1.grammar_definition_from_json_schema(json.dumps(schema))
 parse_time = time.time() - start
-print(f"   Grammar parsing (includes optimization): {parse_time*1000:.1f}ms")
+print(f"   Grammar parsing: {parse_time*1000:.1f}ms")
 
 # Step 3: Compile to GLR parser
 print("\n3. Compiling grammar...")
