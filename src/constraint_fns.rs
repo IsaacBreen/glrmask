@@ -91,29 +91,21 @@ impl<'a> GrammarConstraintState<'a> {
                 continue;
             }
 
-            // NEW APPROACH: Instead of looking up a labeled transition for the tokenizer state,
-            // we start at the DWA start state and set the tsid bit in the rangeset.
-            // The tsid bit offset is internal_max_llm_token + 1.
-            // Tsid bits filter which paths we take based on final weight intersections.
-            let tsid_bit_offset = self.parent.parser_dwa_vocab.internal_max_llm_token + 1;
-            let tsid_bit = tsid_bit_offset + tokenizer_state_id.0;
-            
-            let f = |acc: &Acc| {
-                // Add the tsid bit to the LLM tokens rangeset
-                let mut rsb = acc.llm_tokens_union.inner.as_ref().clone();
-                rsb.insert(tsid_bit);
-                Some(rsb)
-            };
-            let weighted_gss = gss.apply_and_prune(f);
+            if let Some((target_wa_state_id, weight)) = dwa_start_state.get_transition(tokenizer_state_id.0 as Label) {
+                let f = |acc: &Acc| {
+                    let new_rsb = acc.llm_tokens_union.inner.as_ref() & &weight.rsb;
+                    if new_rsb.is_empty() { None } else { Some(new_rsb) }
+                };
+                let weighted_gss = gss.apply_and_prune(f);
 
-            if !weighted_gss.is_empty() {
-                // Add to queue at the DWA start state (not a target of a transition)
-                queue
-                    .entry(weighted_gss.max_depth())
-                    .or_default()
-                    .entry(dwa.body.start_state)
-                    .and_modify(|existing| *existing = existing.merge(&weighted_gss))
-                    .or_insert(weighted_gss);
+                if !weighted_gss.is_empty() {
+                    queue
+                        .entry(weighted_gss.max_depth())
+                        .or_default()
+                        .entry(target_wa_state_id)
+                        .and_modify(|existing| *existing = existing.merge(&weighted_gss))
+                        .or_insert(weighted_gss);
+                }
             }
         }
 

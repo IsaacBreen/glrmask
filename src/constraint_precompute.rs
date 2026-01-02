@@ -41,14 +41,10 @@ pub(crate) struct Precomputer1<'r> {
         >,
     >,
     pub(crate) all_llm_tokens: RangeSetBlaze<usize>,
-    /// All tsid bits to include in transition weights so they propagate through determinization.
-    /// These bits allow any tsid to pass through transitions; discrimination happens at final weights.
-    pub(crate) all_tsid_bits: RangeSetBlaze<usize>,
     pub(crate) pb: NoOpPb,
     pub(crate) leaf_state: NWAStateID,
     pub(crate) nwa: NWA,
     pub(crate) terminals_count: usize,
-    pub(crate) internal_max_llm_token: usize,
     pub(crate) pending_transitions: HashMap<NWAStateID, HashMap<Label, HashMap<NWAStateID, Weight>>>,
     pub(crate) pending_epsilons: HashMap<NWAStateID, HashMap<NWAStateID, Weight>>,
     pub(crate) live_tokens: HashMap<NWAStateID, Weight>,
@@ -89,28 +85,16 @@ impl<'r> Precomputer1<'r> {
         nwa.states[leaf_state].final_weight = Some(Weight::all());
         crate::debug!(6, "Created trie1 leaf state");
 
-        // Compute all tsid bits: tsid_bit_offset + 0, ..., tsid_bit_offset + num_tsids - 1
-        // These bits are added to all transition weights so they propagate through determinization.
-        let tsid_bit_offset = internal_max_llm_token + 1;
-        let num_tsids = roots.len();
-        let all_tsid_bits = if num_tsids > 0 {
-            RangeSetBlaze::from_iter(tsid_bit_offset..tsid_bit_offset + num_tsids)
-        } else {
-            RangeSetBlaze::new()
-        };
-
         Self {
             tokenizer,
             vocab,
             roots,
             possible_matches: RefCell::new(BTreeMap::new()),
             all_llm_tokens: RangeSetBlaze::from_iter(0..=internal_max_llm_token),
-            all_tsid_bits,
             pb,
             leaf_state,
             nwa,
             terminals_count,
-            internal_max_llm_token,
             pending_transitions: HashMap::new(),
             pending_epsilons: HashMap::new(),
             live_tokens: HashMap::new(),
@@ -178,18 +162,10 @@ impl<'r> Precomputer1<'r> {
             }
         }
 
-        // Create epsilon edges from start to each tsid subtree root.
-        // Weight = all LLM tokens + the specific tsid bit
-        // This encodes tokenizer state IDs in weights instead of transition labels.
         let new_start_state = self.nwa.add_state();
-        let tsid_bit_offset = self.internal_max_llm_token + 1;
         for (tsid, state) in &self.roots {
-            // Create weight with all LLM tokens + this tsid bit
-            let tsid_bit = tsid_bit_offset + tsid.0;
-            let mut rsb = self.all_llm_tokens.clone();
-            rsb.insert(tsid_bit);
-            let weight = Weight::from_rsb(rsb);
-            self.nwa.add_epsilon(new_start_state, *state, weight);
+            let label = (tsid.0 + self.terminals_count) as Label;
+            self.nwa.add_transition(new_start_state, label, *state, Weight::all()).unwrap();
         }
         self.nwa.body.start_states = vec![new_start_state];
 
@@ -348,20 +324,15 @@ impl<'r> Precomputer1<'r> {
     }
 
     fn add_pending_transition(&mut self, src: NWAStateID, label: Label, dst: NWAStateID, weight: Weight) {
-        // Add all tsid bits to the weight so they propagate through determinization.
-        // This ensures that the tsid bit from epsilon closure is preserved through transitions.
-        // Discrimination happens at final weights, not transition weights.
-        let weight_with_tsids = Weight::from_rsb(&weight.rsb | &self.all_tsid_bits);
-        
         self.pending_transitions
             .entry(src)
             .or_default()
             .entry(label)
             .or_default()
             .entry(dst)
-            .and_modify(|w| *w |= &weight_with_tsids)
-            .or_insert(weight_with_tsids.clone());
-        *self.live_tokens.entry(dst).or_insert_with(Weight::zeros) |= &weight_with_tsids;
+            .and_modify(|w| *w |= &weight)
+            .or_insert(weight.clone());
+        *self.live_tokens.entry(dst).or_insert_with(Weight::zeros) |= &weight;
     }
 
     fn add_pending_epsilon(&mut self, src: NWAStateID, dst: NWAStateID, weight: Weight) {
