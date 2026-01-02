@@ -34,7 +34,7 @@
 //! - `additionalProperties: true` or schema allows any additional properties
 //! - Properties appear in declaration order (for disambiguation)
 
-use super::json_schema_types::*;
+use super::types::*;
 use serde_json::Value;
 use std::collections::{BTreeMap, HashSet};
 

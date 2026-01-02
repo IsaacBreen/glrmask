@@ -28,7 +28,7 @@ use crate::interface::{
     GrammarDefinition,
 };
 use crate::json_serialization::JSONConvertible;
-use crate::json_schema::json_schema_to_ebnf;
+use crate::interface::json_schema::json_schema_to_ebnf;
 use crate::tokenizer::{LLMTokenID, LLMTokenMap};
 use crate::types::TerminalID;
 use crate::{choice_fast, groups, seq_fast};

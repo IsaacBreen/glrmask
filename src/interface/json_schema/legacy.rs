@@ -44,7 +44,7 @@
 //! - `dependencies`, `if`/`then`/`else`, `not`
 //! - `format` (stored but not enforced)
 
-use super::GrammarExpr;
+use crate::interface::GrammarExpr;
 use crate::tokenizer::string_utils::{escape_char_for_char_class, escape_string_for_json};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashSet};

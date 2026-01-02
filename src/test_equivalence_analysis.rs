@@ -8,7 +8,7 @@ use crate::equivalence_analysis::compute_combined_equivalence;
 use crate::tokenizer::LLMTokenID;
 use crate::datastructures::u8set::U8Set;
 use crate::interface::{GrammarDefinition, CompiledGrammar};
-use crate::json_schema::json_schema_to_ebnf;
+use crate::interface::json_schema::json_schema_to_ebnf;
 use crate::{choice, groups, seq};
 
 #[cfg(test)]

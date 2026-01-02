@@ -19,7 +19,7 @@
 //! - `prefixItems: [...]` - First N items must match specific schemas
 //! - Combination: prefix items first, then items schema for rest
 
-use super::json_schema_types::*;
+use super::types::*;
 use crate::tokenizer::string_utils::escape_string_for_json;
 use serde_json::Value;
 use std::collections::BTreeMap;

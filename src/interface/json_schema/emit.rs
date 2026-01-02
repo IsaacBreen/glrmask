@@ -7,8 +7,8 @@
 //! - Generating primitive rule definitions (JSON_STRING, etc.)
 //! - Rule deduplication and optimization
 
-use super::json_schema_types::*;
-use super::GrammarExpr;
+use super::types::*;
+use crate::interface::GrammarExpr;
 
 /// Emitter that converts GrammarType to GrammarExpr
 pub struct GrammarEmitter {
