@@ -12,6 +12,7 @@ pub mod simplification_experiment;
 pub mod unroll;
 mod test_determinization;
 pub(crate) mod test_weighted_automata;
+mod test_weight_push_optimization;
 
 pub use self::rangeset::RangeSet;
 pub use self::common::{format_i16_char, format_pos_code, format_word, NWAStateID, StateID, Weight};
