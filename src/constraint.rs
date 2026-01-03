@@ -1117,7 +1117,7 @@ impl GrammarConstraint {
             }
             crate::debug!(1, "=== END TERMINAL DWA STRUCTURE ===\n");
 
-            // PRINT GRAPHVIZ DOT
+            // PRINT GRAPHVIZ DOT - combine labels for edges between same node pairs
             crate::debug!(1, "\n=== TERMINAL DWA DOT ===");
             crate::debug!(1, "digraph TerminalDWA {{");
             crate::debug!(1, "  rankdir=LR;");
@@ -1125,39 +1125,51 @@ impl GrammarConstraint {
             crate::debug!(1, "  start [shape=point];");
             crate::debug!(1, "  start -> {};", orig_dwa_for_min.body.start_state);
 
+            // Collect edges grouped by (source, target)
+            let mut edge_labels: std::collections::HashMap<(usize, usize), (Vec<String>, bool)> = std::collections::HashMap::new();
+            
             for (sid, state) in orig_dwa_for_min.states.0.iter().enumerate() {
                 let shape = if state.final_weight.is_some() { "doublecircle" } else { "circle" };
-                let color = if state.final_weight.is_some() { "lightblue" } else { "white" };
-                
-                // Add state tooltip/label if it has a special meaning (start state targets)
-                // We don't have a direct map for normal states, but we can verify if it's a target
-                // For now just ID.
-                crate::debug!(1, "  {} [shape={}, fillcolor={}, label=\"{}\"];", sid, shape, color, sid);
+                let node_color = if state.final_weight.is_some() { "lightblue" } else { "white" };
+                crate::debug!(1, "  {} [shape={}, fillcolor={}, label=\"{}\"];", sid, shape, node_color, sid);
 
                 for (&label, &target) in &state.transitions {
-                    let (label_str, color) = if label >= parser.terminal_map.len() as i32 {
+                    let (label_str, is_tsid) = if label >= parser.terminal_map.len() as i32 {
                         let tsid = (label - parser.terminal_map.len() as i32) as usize;
                         let name = tsid_names.get(&tsid)
                             .cloned()
                             .unwrap_or_else(|| format!("tsid:{}", tsid));
-                        (format!("TSID\\n[{}]", name), "blue")
+                        (format!("TSID[{}]", name), true)
                     } else {
                         let term = parser.terminal_map.get_by_right(&crate::types::TerminalID(label as usize));
                         let s = match term {
                             Some(Terminal::Literal(bytes)) => {
                                 let s = String::from_utf8_lossy(bytes);
-                                // Escape for DOT label: " -> \"
-                                s.escape_default().to_string().replace("\"", "\\\"")
+                                s.replace("\"", "'").replace("\\", "\\\\")
                             },
-                            Some(t) => format!("{:?}", t).replace("\"", "\\\""),
+                            Some(t) => format!("{:?}", t).replace("\"", "'"),
                             None => format!("T{}", label),
                         };
-                        (format!("\"{}\"", s), "black")
+                        (s, false)
                     };
                     
-                    crate::debug!(1, "  {} -> {} [label=\"{}\", color={}, fontcolor={}];", 
-                        sid, target, label_str, color, color);
+                    let entry = edge_labels.entry((sid, target)).or_insert_with(|| (vec![], false));
+                    entry.0.push(label_str);
+                    entry.1 |= is_tsid;
                 }
+            }
+            
+            // Output combined edges
+            for ((src, tgt), (labels, has_tsid)) in &edge_labels {
+                let color = if *has_tsid { "blue" } else { "black" };
+                // Combine labels with newlines, truncate if too many
+                let combined_label = if labels.len() <= 5 {
+                    labels.join("\\n")
+                } else {
+                    format!("{}\\n...+{} more", labels[..3].join("\\n"), labels.len() - 3)
+                };
+                crate::debug!(1, "  {} -> {} [label=\"{}\", color={}, fontcolor={}];", 
+                    src, tgt, combined_label, color, color);
             }
             crate::debug!(1, "}}");
             crate::debug!(1, "=== END TERMINAL DWA DOT ===\n");
@@ -1423,6 +1435,63 @@ impl GrammarConstraint {
             } else {
                 crate::debug!(1, "TERMINAL DWA RESULT: No explosion (reduction or same)");
             }
+            
+            // PRINT MODIFIED DWA DOT (after epsilon merge + minimize) - combine labels
+            crate::debug!(1, "\n=== MODIFIED TERMINAL DWA DOT ===");
+            crate::debug!(1, "digraph ModifiedTerminalDWA {{");
+            crate::debug!(1, "  rankdir=LR;");
+            crate::debug!(1, "  node [shape=circle, style=filled, fillcolor=white];");
+            crate::debug!(1, "  start [shape=point];");
+            crate::debug!(1, "  start -> {};", mod_dwa.body.start_state);
+
+            // Collect edges grouped by (source, target)
+            let mut edge_labels: std::collections::HashMap<(usize, usize), (Vec<String>, bool)> = std::collections::HashMap::new();
+
+            for (sid, state) in mod_dwa.states.0.iter().enumerate() {
+                let shape = if state.final_weight.is_some() { "doublecircle" } else { "circle" };
+                let node_color = if state.final_weight.is_some() { "lightblue" } else { "white" };
+                crate::debug!(1, "  {} [shape={}, fillcolor={}, label=\"{}\"];", sid, shape, node_color, sid);
+
+                for (&label, &target) in &state.transitions {
+                    let (label_str, is_tsid) = if label >= parser.terminal_map.len() as i32 {
+                        let tsid = (label - parser.terminal_map.len() as i32) as usize;
+                        let name = tsid_names.get(&tsid)
+                            .cloned()
+                            .unwrap_or_else(|| format!("tsid:{}", tsid));
+                        (format!("TSID[{}]", name), true)
+                    } else {
+                        let term = parser.terminal_map.get_by_right(&crate::types::TerminalID(label as usize));
+                        let s = match term {
+                            Some(Terminal::Literal(bytes)) => {
+                                let s = String::from_utf8_lossy(bytes);
+                                s.replace("\"", "'").replace("\\", "\\\\")
+                            },
+                            Some(t) => format!("{:?}", t).replace("\"", "'"),
+                            None => format!("T{}", label),
+                        };
+                        (s, false)
+                    };
+                    
+                    let entry = edge_labels.entry((sid, target)).or_insert_with(|| (vec![], false));
+                    entry.0.push(label_str);
+                    entry.1 |= is_tsid;
+                }
+            }
+            
+            // Output combined edges
+            for ((src, tgt), (labels, has_tsid)) in &edge_labels {
+                let color = if *has_tsid { "blue" } else { "black" };
+                // Combine labels with newlines, truncate if too many
+                let combined_label = if labels.len() <= 5 {
+                    labels.join("\\n")
+                } else {
+                    format!("{}\\n...+{} more", labels[..3].join("\\n"), labels.len() - 3)
+                };
+                crate::debug!(1, "  {} -> {} [label=\"{}\", color={}, fontcolor={}];", 
+                    src, tgt, combined_label, color, color);
+            }
+            crate::debug!(1, "}}");
+            crate::debug!(1, "=== END MODIFIED TERMINAL DWA DOT ===\n");
         }
 
         // EXPAND DWA: Add transitions for non-representative states
