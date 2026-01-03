@@ -11,6 +11,7 @@ pub mod simplification;
 pub mod simplification_experiment;
 pub mod unroll;
 mod test_determinization;
+mod test_determinization_explosion;
 pub(crate) mod test_weighted_automata;
 
 pub use self::rangeset::RangeSet;
