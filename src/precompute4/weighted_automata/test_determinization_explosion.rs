@@ -101,6 +101,7 @@ fn test_minimal_counterexample() {
     // Original: determinize and minimize
     let mut orig_dwa = nwa.determinize();
     orig_dwa.minimize_with_rustfst();
+    orig_dwa.simplify();
     let orig_states = orig_dwa.states.len();
     let orig_trans = orig_dwa.states.num_transitions();
     println!("Original: {} states, {} transitions", orig_states, orig_trans);
@@ -120,6 +121,8 @@ fn test_minimal_counterexample() {
     // Modified: determinize and minimize
     let mut mod_dwa = mod_nwa.determinize();
     mod_dwa.minimize_with_rustfst();
+    mod_dwa.simplify();
+    println!("Modified DWA: {}", mod_dwa);
     let mod_states = mod_dwa.states.len();
     let mod_trans = mod_dwa.states.num_transitions();
     println!("Modified: {} states, {} transitions", mod_states, mod_trans);
