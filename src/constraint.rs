@@ -1259,7 +1259,9 @@ impl GrammarConstraint {
         // Convert the lexical DWA to NWA and build the Parser DWA.
         crate::debug!(3, "Building Parser DWA");
         let terminal_nwa = NWA::from_dwa(&terminal_dwa);
+        let orig_parser_build_start = std::time::Instant::now();
         let mut parser_dwa = build_parser_dwa(&parser, &terminal_nwa);
+        let orig_parser_build_time = orig_parser_build_start.elapsed();
 
         // EPSILON EXPLOSION EXPERIMENT - Parser DWA from epsilon terminal NWA
         // Test: Build Parser DWA from the epsilon-modified terminal NWA
@@ -1269,6 +1271,9 @@ impl GrammarConstraint {
             use std::time::Instant;
             
             crate::debug!(1, "=== EPSILON EXPLOSION EXPERIMENT: Parser DWA from epsilon terminal NWA ===");
+            crate::debug!(1, "Original Parser DWA build time: {:?}", orig_parser_build_time);
+            crate::debug!(1, "Original terminal DWA: {} states, {} trans",
+                terminal_dwa.states.len(), terminal_dwa.states.num_transitions());
             
             // First, minimize the original parser DWA to verify baseline
             let mut orig_parser_dwa_for_min = parser_dwa.clone();
