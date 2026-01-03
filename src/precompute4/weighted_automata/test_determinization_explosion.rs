@@ -160,7 +160,7 @@ fn fuzz_find_transition_explosion_after_simplify() {
                      }
                  }
              }
-             println!("nwa.body.start_states = vec![states[{}]];", start_node.0);
+             println!("nwa.body.start_states = vec![states[{}]];", start_node);
 
              assert!(mod_trans > orig_trans);
              return;
