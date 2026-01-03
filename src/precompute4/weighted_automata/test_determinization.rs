@@ -871,3 +871,120 @@ fn test_epsilon_explosion_different_alphabets() {
         println!("Still reduction...");
     }
 }
+/// Test that matches the real JSON schema grammar pattern
+/// 
+/// This models:
+/// - N tokenizer states (roots) connected via labeled transitions from start
+/// - Each root has a vocabulary trie with shared labels but different weights
+/// - The key is: roots have DIFFERENT transition patterns on the SAME labels
+/// 
+/// The explosion happens when:
+/// 1. Multiple roots are epsilon-merged into the start state
+/// 2. Reading a label, different roots transition to different targets
+/// 3. The result is a subset of targets with different weight combinations
+/// 4. Deeper transitions accumulate more subset combinations
+#[test]
+fn test_epsilon_explosion_json_like() {
+    // Model the JSON grammar pattern:
+    // - root ::= '{' field1 options '}' 
+    // - options ::= (',' option)* 
+    // - option ::= '"a"':STRING | '"b"':STRING | ...
+    //
+    // The tokenizer has different states for:
+    // - After opening brace
+    // - After field1
+    // - After each optional field variant
+    //
+    // When we read a character, different tokenizer states have different valid continuations.
+    
+    const NUM_ROOTS: usize = 8;  // Number of tokenizer states (positions in JSON)
+    const NUM_LABELS: usize = 20;  // Number of possible next labels (characters/terminals)
+    
+    // LABELED version: each root is a separate subtree
+    let mut nwa_labeled = NWA::new();
+    nwa_labeled.states.0.clear();
+    let start_labeled = nwa_labeled.states.add_state();
+    nwa_labeled.body.start_states = vec![start_labeled];
+    
+    // Create NUM_ROOTS independent roots
+    // Each root can transition on a SUBSET of labels
+    // Different roots have DIFFERENT subsets (like different JSON positions)
+    for root_idx in 0..NUM_ROOTS {
+        let root = nwa_labeled.states.add_state();
+        nwa_labeled.add_transition(start_labeled, root_idx as Label, root, Weight::all()).unwrap();
+        
+        // This root can transition on labels [root_idx..root_idx + 5] mod NUM_LABELS
+        // Different roots have overlapping but not identical label sets
+        for j in 0..5 {
+            let label = ((root_idx + j) % NUM_LABELS) as Label;
+            
+            // Create a small subtree for this label
+            let level1 = nwa_labeled.states.add_state();
+            nwa_labeled.add_transition(root, label, level1, Weight::from_item(root_idx * 100 + j)).unwrap();
+            
+            // Each level1 node can continue to a few more states
+            for k in 0..3 {
+                let level2 = nwa_labeled.states.add_state();
+                let next_label = ((label as usize + k + 1) % NUM_LABELS) as Label;
+                nwa_labeled.add_transition(level1, next_label, level2, Weight::from_item(root_idx * 1000 + j * 10 + k)).unwrap();
+                nwa_labeled.states[level2].final_weight = Some(Weight::from_item(root_idx));
+            }
+        }
+    }
+    
+    let dwa_labeled = nwa_labeled.determinize();
+    let labeled_states = dwa_labeled.states.len();
+    let labeled_trans = dwa_labeled.states.num_transitions();
+    
+    // EPSILON version: roots are epsilon-reachable from start
+    let mut nwa_epsilon = NWA::new();
+    nwa_epsilon.states.0.clear();
+    let start_eps = nwa_epsilon.states.add_state();
+    nwa_epsilon.body.start_states = vec![start_eps];
+    
+    for root_idx in 0..NUM_ROOTS {
+        let root = nwa_epsilon.states.add_state();
+        nwa_epsilon.add_epsilon(start_eps, root, Weight::all());
+        
+        for j in 0..5 {
+            let label = ((root_idx + j) % NUM_LABELS) as Label;
+            let level1 = nwa_epsilon.states.add_state();
+            nwa_epsilon.add_transition(root, label, level1, Weight::from_item(root_idx * 100 + j)).unwrap();
+            
+            for k in 0..3 {
+                let level2 = nwa_epsilon.states.add_state();
+                let next_label = ((label as usize + k + 1) % NUM_LABELS) as Label;
+                nwa_epsilon.add_transition(level1, next_label, level2, Weight::from_item(root_idx * 1000 + j * 10 + k)).unwrap();
+                nwa_epsilon.states[level2].final_weight = Some(Weight::from_item(root_idx));
+            }
+        }
+    }
+    
+    let dwa_epsilon = nwa_epsilon.determinize();
+    let epsilon_states = dwa_epsilon.states.len();
+    let epsilon_trans = dwa_epsilon.states.num_transitions();
+    
+    println!("NUM_ROOTS = {}, NUM_LABELS = {}", NUM_ROOTS, NUM_LABELS);
+    println!("LABELED: {} states, {} transitions", labeled_states, labeled_trans);
+    println!("EPSILON: {} states, {} transitions", epsilon_states, epsilon_trans);
+    println!("State ratio: {:.2}x", epsilon_states as f64 / labeled_states as f64);
+    println!("Trans ratio: {:.2}x", epsilon_trans as f64 / labeled_trans as f64);
+    
+    // The key insight:
+    // - LABELED: After reading root_idx, we're in exactly one subtree
+    //   Total states ≈ NUM_ROOTS * (1 + 5 * 4) = NUM_ROOTS * 21
+    //
+    // - EPSILON: After epsilon closure, we're in ALL roots at once
+    //   On reading label L:
+    //   - Some roots accept L, some don't
+    //   - Result is a SUBSET of level1 states from different roots
+    //   - Need to track which subset we're in
+    //   
+    // This creates subset states that weren't in the labeled version!
+    
+    if epsilon_trans > labeled_trans {
+        println!("SUCCESS! Transition explosion: {:.2}x", epsilon_trans as f64 / labeled_trans as f64);
+    } else {
+        println!("No explosion (ratio = {:.2}x)", epsilon_trans as f64 / labeled_trans as f64);
+    }
+}
