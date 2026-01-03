@@ -60,6 +60,8 @@ pub fn run_dwa_optimization_experiment(dwa: &mut DWA) {
                     DwaPass::PruneDeadEnds => current_dwa.prune_dead_ends(),
                     DwaPass::PushWeights => current_dwa.push_weights_into_transitions_and_finals(),
                     DwaPass::PushWeightsToInitial => current_dwa.push_weights_to_initial(),
+                    DwaPass::PushWeightsRustfst => current_dwa.push_weights_with_rustfst(),
+                    DwaPass::FactorUniformOutgoing => current_dwa.factor_uniform_outgoing_weights(),
                     DwaPass::Minimize => current_dwa.minimize_states(),
                 };
                 if changed {
@@ -255,6 +257,8 @@ impl NWA {
                 DwaPass::PruneDeadEnds => { dwa.prune_dead_ends(); },
                 DwaPass::PushWeights => { dwa.push_weights_into_transitions_and_finals(); },
                 DwaPass::PushWeightsToInitial => { dwa.push_weights_to_initial(); },
+                DwaPass::PushWeightsRustfst => { dwa.push_weights_with_rustfst(); },
+                DwaPass::FactorUniformOutgoing => { dwa.factor_uniform_outgoing_weights(); },
                 DwaPass::Minimize => { dwa.minimize_states(); },
             }
             let pass_time = pass_start.elapsed();
