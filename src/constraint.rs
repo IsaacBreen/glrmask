@@ -1008,8 +1008,16 @@ impl GrammarConstraint {
         // by this explosion. See TODO.md for details.
         if std::env::var("TEST_EPSILON_EXPLOSION").is_ok() {
             use crate::precompute4::weighted_automata::nwa::NWA;
+            use crate::precompute4::weighted_automata::Weight;
+            use std::collections::{HashSet, VecDeque};
             
             crate::debug!(1, "=== EPSILON EXPLOSION EXPERIMENT: Terminal DWA ===");
+            
+            // Get the valid LLM token range
+            let max_llm_token = vocab.internal_max_llm_token;
+            let valid_tokens = Weight::from_iter(0..=max_llm_token);
+            crate::debug!(1, "Valid LLM token range: 0..={}, cardinality: {}", 
+                max_llm_token, valid_tokens.len());
             
             // First, minimize the original terminal DWA with rustfst to verify it's minimal
             let mut orig_dwa_for_min = terminal_dwa.clone();
@@ -1018,8 +1026,8 @@ impl GrammarConstraint {
                 orig_dwa_for_min.states.len(), orig_dwa_for_min.states.num_transitions());
             
             let terminal_nwa_orig = NWA::from_dwa(&terminal_dwa);
-            let orig_trans = terminal_dwa.states.num_transitions();
-            let orig_states = terminal_dwa.states.len();
+            let _orig_trans = terminal_dwa.states.num_transitions();
+            let _orig_states = terminal_dwa.states.len();
             
             let start_id = terminal_dwa.body.start_state;
             let start_out_degree = terminal_dwa.states[start_id].transitions.len();
@@ -1029,11 +1037,30 @@ impl GrammarConstraint {
                 .transitions.values().cloned().collect();
             crate::debug!(1, "{} unique first-hop states from start", first_hop_states.len());
             
+            // Count the out-degree of each first-hop state to understand structure
             let mut first_hop_out_trans = 0;
+            let mut second_hop_states: std::collections::HashSet<usize> = std::collections::HashSet::new();
             for &s in &first_hop_states {
                 first_hop_out_trans += terminal_dwa.states[s].transitions.len();
+                for &t in terminal_dwa.states[s].transitions.values() {
+                    second_hop_states.insert(t);
+                }
             }
             crate::debug!(1, "{} total outgoing transitions from first-hop states", first_hop_out_trans);
+            crate::debug!(1, "{} unique second-hop states", second_hop_states.len());
+            
+            // KEY INSIGHT: How many second-hop states are shared between first-hop states?
+            // This determines the explosion factor!
+            let mut second_hop_reachability: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+            for &s in &first_hop_states {
+                for &t in terminal_dwa.states[s].transitions.values() {
+                    *second_hop_reachability.entry(t).or_insert(0) += 1;
+                }
+            }
+            let shared_count = second_hop_reachability.values().filter(|&&v| v > 1).count();
+            let max_sharing = second_hop_reachability.values().max().copied().unwrap_or(0);
+            crate::debug!(1, "{} second-hop states are reachable from >1 first-hop state (max sharing: {})",
+                shared_count, max_sharing);
             
             let mut terminal_nwa_mod = terminal_nwa_orig.clone();
             let start_state = terminal_nwa_mod.body.start_states[0];
@@ -1048,11 +1075,195 @@ impl GrammarConstraint {
             
             crate::debug!(1, "Replaced with {} epsilon transitions", num_eps);
             
+            // ANALYZE: What WEIGHTS are on the epsilon transitions?
+            // This is crucial - different weights cause subset differentiation
+            let eps_with_weights: Vec<_> = terminal_nwa_mod.states[start_state].epsilons.iter().collect();
+            let unique_weights: std::collections::HashSet<_> = eps_with_weights.iter().map(|(_, w)| w.len()).collect();
+            crate::debug!(1, "Epsilon transitions: {} total, {} unique weight cardinalities", 
+                eps_with_weights.len(), unique_weights.len());
+            
+            // Sample some weights
+            let mut weight_samples: Vec<_> = eps_with_weights.iter().take(5)
+                .map(|(_, w)| w.len())
+                .collect();
+            weight_samples.sort();
+            crate::debug!(1, "Sample weight cardinalities: {:?}", weight_samples);
+            
+            // Check if weights are all Weight::all()
+            let all_weights_are_all = eps_with_weights.iter().all(|(_, w)| w.is_all_fast());
+            crate::debug!(1, "All epsilon weights are Weight::all(): {}", all_weights_are_all);
+            
+            // ANALYZE: What does the NWA look like after epsilon replacement?
+            // Count epsilon targets and their out-degrees
+            let eps_targets: std::collections::HashSet<_> = terminal_nwa_mod.states[start_state].epsilons
+                .iter().map(|(t, _)| *t).collect();
+            crate::debug!(1, "Epsilon targets from start: {} states", eps_targets.len());
+            
+            // Count labeled transitions from epsilon targets
+            let mut labeled_trans_from_eps_targets = 0;
+            let mut label_histogram: std::collections::HashMap<i32, usize> = std::collections::HashMap::new();
+            for &target in &eps_targets {
+                for (&label, dsts) in terminal_nwa_mod.states[target].transitions.iter() {
+                    labeled_trans_from_eps_targets += dsts.len();
+                    *label_histogram.entry(label).or_insert(0) += dsts.len();
+                }
+            }
+            crate::debug!(1, "Total labeled transitions from epsilon targets: {}", labeled_trans_from_eps_targets);
+            crate::debug!(1, "Unique labels from epsilon targets: {}", label_histogram.len());
+            
+            // Find labels that have multiple sources (cause subset explosion)
+            let multi_source_labels: Vec<_> = label_histogram.iter()
+                .filter(|(_, &count)| count > 1)
+                .map(|(&label, &count)| (label, count))
+                .collect();
+            crate::debug!(1, "Labels with multiple sources: {} (max count: {})",
+                multi_source_labels.len(),
+                multi_source_labels.iter().map(|(_, c)| *c).max().unwrap_or(0));
+            
+            // Sample a few high-sharing labels
+            let mut sorted_labels: Vec<_> = multi_source_labels.clone();
+            sorted_labels.sort_by_key(|(_, c)| std::cmp::Reverse(*c));
+            for (label, count) in sorted_labels.iter().take(5) {
+                crate::debug!(1, "  Label {} has {} source states", label, count);
+            }
+            
+            // DEEP ANALYSIS: For the highest-sharing label, where do the transitions GO?
+            if let Some(&(highest_label, source_count)) = sorted_labels.first() {
+                let mut targets_for_label: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+                let mut weights_for_label: std::collections::HashSet<usize> = std::collections::HashSet::new();
+                
+                for &eps_target in &eps_targets {
+                    if let Some(dsts) = terminal_nwa_mod.states[eps_target].transitions.get(&highest_label) {
+                        for (dst, weight) in dsts {
+                            *targets_for_label.entry(*dst).or_insert(0) += 1;
+                            weights_for_label.insert(weight.len());
+                        }
+                    }
+                }
+                
+                crate::debug!(1, "For label {} with {} sources:", highest_label, sorted_labels[0].1);
+                crate::debug!(1, "  {} unique target states", targets_for_label.len());
+                crate::debug!(1, "  {} unique weight cardinalities", weights_for_label.len());
+                
+                // How many targets are shared?
+                let shared_targets = targets_for_label.values().filter(|&&v| v > 1).count();
+                let max_target_sharing = targets_for_label.values().max().copied().unwrap_or(0);
+                crate::debug!(1, "  {} targets reachable from multiple sources (max: {})", 
+                    shared_targets, max_target_sharing);
+            }
+            
             crate::debug!(1, "Starting determinize...");
             let mut mod_dwa = terminal_nwa_mod.determinize();
             let det_states = mod_dwa.states.len();
             let det_trans = mod_dwa.states.num_transitions();
             crate::debug!(1, "After determinize: {} states, {} trans", det_states, det_trans);
+            
+            // ANALYSIS: What does the start state look like after epsilon?
+            let mod_start = mod_dwa.body.start_state;
+            let mod_start_out = mod_dwa.states[mod_start].transitions.len();
+            crate::debug!(1, "Modified start state {} has {} outgoing transitions", mod_start, mod_start_out);
+            
+            // Count unique target states from start
+            let mod_start_targets: std::collections::HashSet<_> = mod_dwa.states[mod_start]
+                .transitions.values().cloned().collect();
+            crate::debug!(1, "Modified start reaches {} unique states", mod_start_targets.len());
+            
+            // Sample some states reachable from start
+            let mut total_second_hop = 0;
+            let mut sample_states = vec![];
+            for (i, &target) in mod_start_targets.iter().take(5).enumerate() {
+                let out_degree = mod_dwa.states[target].transitions.len();
+                total_second_hop += out_degree;
+                sample_states.push((target, out_degree));
+                crate::debug!(1, "  Sample target {}: state {} has {} outgoing", i, target, out_degree);
+            }
+            
+            if mod_start_targets.len() > 5 {
+                // Compute average for all states
+                let mut total = 0;
+                for &target in &mod_start_targets {
+                    total += mod_dwa.states[target].transitions.len();
+                }
+                let avg = total as f64 / mod_start_targets.len() as f64;
+                crate::debug!(1, "  Average outgoing from start targets: {:.1}", avg);
+            }
+            
+            // WEIGHT-BASED ANALYSIS: How many transitions have empty weights when intersected with valid tokens?
+            let mut empty_weight_trans = 0;
+            let mut nonempty_weight_trans = 0;
+            for state in mod_dwa.states.0.iter() {
+                for (_, &target) in state.transitions.iter() {
+                    let is_empty = match mod_dwa.states[target].final_weight.as_ref() {
+                        Some(w) => (&(w & &valid_tokens)).is_empty(),
+                        None => false, // No final weight means not constrained
+                    };
+                    if is_empty {
+                        empty_weight_trans += 1;
+                    } else {
+                        nonempty_weight_trans += 1;
+                    }
+                }
+            }
+            crate::debug!(1, "Weight analysis: {} transitions lead to empty weights, {} lead to non-empty",
+                empty_weight_trans, nonempty_weight_trans);
+            
+            // BACKWARD REACHABILITY ANALYSIS with weights
+            // Find which states can reach a final state with non-empty accumulated weight
+            let mut can_reach_final_nonempty: HashSet<usize> = HashSet::new();
+            let mut worklist = VecDeque::new();
+            
+            // Initialize: final states with non-empty weight
+            for (sid, state) in mod_dwa.states.0.iter().enumerate() {
+                if let Some(ref fw) = state.final_weight {
+                    let intersected = fw & &valid_tokens;
+                    if !intersected.is_empty() {
+                        can_reach_final_nonempty.insert(sid);
+                        worklist.push_back(sid);
+                    }
+                }
+            }
+            crate::debug!(1, "Initial final states with non-empty weight: {}", can_reach_final_nonempty.len());
+            
+            // Backward propagation
+            // Build reverse edge map
+            let mut reverse_edges: std::collections::HashMap<usize, Vec<usize>> = std::collections::HashMap::new();
+            for (sid, state) in mod_dwa.states.0.iter().enumerate() {
+                for (_, &target) in state.transitions.iter() {
+                    reverse_edges.entry(target).or_default().push(sid);
+                }
+            }
+            
+            while let Some(state) = worklist.pop_front() {
+                if let Some(predecessors) = reverse_edges.get(&state) {
+                    for &pred in predecessors {
+                        if !can_reach_final_nonempty.contains(&pred) {
+                            can_reach_final_nonempty.insert(pred);
+                            worklist.push_back(pred);
+                        }
+                    }
+                }
+            }
+            crate::debug!(1, "States that can reach final with non-empty weight: {} / {} total",
+                can_reach_final_nonempty.len(), mod_dwa.states.len());
+            
+            // Count useful transitions (both source and target can reach final with non-empty weight)
+            let mut useful_trans = 0;
+            let mut useless_trans = 0;
+            for (sid, state) in mod_dwa.states.0.iter().enumerate() {
+                if can_reach_final_nonempty.contains(&sid) {
+                    for (_, &target) in state.transitions.iter() {
+                        if can_reach_final_nonempty.contains(&target) {
+                            useful_trans += 1;
+                        } else {
+                            useless_trans += 1;
+                        }
+                    }
+                } else {
+                    useless_trans += state.transitions.len();
+                }
+            }
+            crate::debug!(1, "Useful transitions: {}, Useless: {} (could be removed)",
+                useful_trans, useless_trans);
             
             mod_dwa.minimize_with_rustfst();
             let mod_states = mod_dwa.states.len();
