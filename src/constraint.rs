@@ -1307,6 +1307,28 @@ impl GrammarConstraint {
             let det_trans = mod_dwa.states.num_transitions();
             crate::debug!(1, "After determinize: {} states, {} trans", det_states, det_trans);
             
+            // EXPORT DWAs to JSON for Python analysis
+            if std::env::var("EXPORT_DWA_JSON").is_ok() {
+                let export_dir = std::path::Path::new("temp");
+                std::fs::create_dir_all(export_dir).ok();
+                
+                // Export original terminal DWA
+                let orig_path = export_dir.join("terminal_dwa_original.json");
+                if let Err(e) = orig_dwa_for_min.export_to_json_file(&orig_path) {
+                    crate::debug!(1, "Warning: failed to export original DWA: {}", e);
+                } else {
+                    crate::debug!(1, "Exported original terminal DWA to {}", orig_path.display());
+                }
+                
+                // Export modified terminal DWA (after epsilon, before minimize)
+                let mod_path = export_dir.join("terminal_dwa_modified.json");
+                if let Err(e) = mod_dwa.export_to_json_file(&mod_path) {
+                    crate::debug!(1, "Warning: failed to export modified DWA: {}", e);
+                } else {
+                    crate::debug!(1, "Exported modified terminal DWA to {}", mod_path.display());
+                }
+            }
+            
             // ANALYSIS: What does the start state look like after epsilon?
             let mod_start = mod_dwa.body.start_state;
             let mod_start_out = mod_dwa.states[mod_start].transitions.len();
@@ -1414,6 +1436,10 @@ impl GrammarConstraint {
             crate::debug!(1, "Useful transitions: {}, Useless: {} (could be removed)",
                 useful_trans, useless_trans);
             
+            // Apply factor_uniform_outgoing_weights before minimize to enable more merging
+            let factored = mod_dwa.factor_uniform_outgoing_weights();
+            crate::debug!(1, "factor_uniform_outgoing_weights: changed={}", factored);
+            
             mod_dwa.minimize_with_rustfst();
             let mod_states = mod_dwa.states.len();
             let mod_trans = mod_dwa.states.num_transitions();
@@ -1437,6 +1463,23 @@ impl GrammarConstraint {
             }
             
             // PRINT MODIFIED DWA DOT (after epsilon merge + minimize) - combine labels
+            // DEBUG: Transition weight inspection - uncomment to verify state non-mergeability
+            // States 105, 106, 107 have same final_weight but DIFFERENT trans_weights:
+            // - State 105: trans_weight = 0..=11, 13..=∞
+            // - State 106: trans_weight = 0..=5, 7..=∞  
+            // - State 107: trans_weight = 0..=66, 68..=∞
+            // This is why minimization correctly keeps them separate.
+            // for sid in [34, 35, 36, 105, 106, 107] {
+            //     if sid < mod_dwa.states.len() {
+            //         let state = &mod_dwa.states.0[sid];
+            //         crate::debug!(1, "State {}: final={:?}", sid, state.final_weight);
+            //         for (&label, &target) in &state.transitions {
+            //             let weight = state.trans_weights.get(&label);
+            //             crate::debug!(1, "  trans {} -> {}: weight={:?}", label, target, weight);
+            //         }
+            //     }
+            // }
+
             crate::debug!(1, "\n=== MODIFIED TERMINAL DWA DOT ===");
             crate::debug!(1, "digraph ModifiedTerminalDWA {{");
             crate::debug!(1, "  rankdir=LR;");

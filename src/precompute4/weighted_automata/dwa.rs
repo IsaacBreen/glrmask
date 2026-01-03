@@ -352,3 +352,73 @@ impl Display for DWA {
         Ok(())
     }
 }
+
+impl DWA {
+    /// Export the DWA to a JSON-serializable format for Python analysis
+    pub fn to_json_value(&self) -> serde_json::Value {
+        use serde_json::{json, Map, Value};
+        
+        // Helper to convert Weight to JSON representation
+        fn weight_to_json(w: &Weight) -> Value {
+            if w.is_all_fast() {
+                json!({"is_all": true})
+            } else if w.is_empty() {
+                json!({"is_empty": true})
+            } else {
+                // Export as ranges
+                let ranges: Vec<(usize, usize)> = w.rsb.ranges()
+                    .map(|r| (*r.start(), *r.end()))
+                    .collect();
+                json!({
+                    "ranges": ranges,
+                    "len": w.len()
+                })
+            }
+        }
+        
+        let states: Vec<Value> = self.states.0.iter().enumerate().map(|(id, state)| {
+            let mut state_obj = Map::new();
+            state_obj.insert("id".to_string(), json!(id));
+            
+            // Transitions as list of {label, target, weight}
+            let transitions: Vec<Value> = state.transitions.iter().map(|(label, target)| {
+                let weight = state.trans_weights.get(label)
+                    .cloned()
+                    .unwrap_or_else(Weight::all);
+                json!({
+                    "label": label,
+                    "target": target,
+                    "weight": weight_to_json(&weight)
+                })
+            }).collect();
+            state_obj.insert("transitions".to_string(), json!(transitions));
+            
+            // Final weight
+            if let Some(ref fw) = state.final_weight {
+                state_obj.insert("final_weight".to_string(), weight_to_json(fw));
+            }
+            
+            // State weight
+            if let Some(ref sw) = state.state_weight {
+                state_obj.insert("state_weight".to_string(), weight_to_json(sw));
+            }
+            
+            Value::Object(state_obj)
+        }).collect();
+        
+        json!({
+            "start_state": self.body.start_state,
+            "num_states": self.states.len(),
+            "num_transitions": self.states.num_transitions(),
+            "states": states
+        })
+    }
+    
+    /// Export the DWA to a JSON file
+    pub fn export_to_json_file(&self, path: &std::path::Path) -> Result<(), std::io::Error> {
+        let json_value = self.to_json_value();
+        let file = std::fs::File::create(path)?;
+        serde_json::to_writer_pretty(file, &json_value)?;
+        Ok(())
+    }
+}
