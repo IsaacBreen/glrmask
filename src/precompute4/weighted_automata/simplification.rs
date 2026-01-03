@@ -142,8 +142,6 @@ pub enum DwaPass {
     PruneDeadEnds,
     PushWeights,
     PushWeightsToInitial,
-    PushWeightsRustfst,  // Use rustfst's push_weights algorithm
-    FactorUniformOutgoing,  // Factor out uniform outgoing weights to enable merging
     Minimize,
 }
 
@@ -207,8 +205,6 @@ impl DWA {
                     DwaPass::PruneDeadEnds => self.prune_dead_ends(),
                     DwaPass::PushWeights => self.push_weights_into_transitions_and_finals(),
                     DwaPass::PushWeightsToInitial => self.push_weights_to_initial(),
-                    DwaPass::PushWeightsRustfst => self.push_weights_with_rustfst(),
-                    DwaPass::FactorUniformOutgoing => self.factor_uniform_outgoing_weights(),
                     DwaPass::Minimize => unreachable!(),
                 };
                 changed_in_iteration |= pass_changed;
@@ -223,13 +219,12 @@ impl DWA {
     /// Unlike simplify(), this does NOT iterate until fixpoint - it runs each pass once.
     /// Useful for terminal DWAs where we want minimize but don't need full convergence.
     pub fn simplify_single_pass(&mut self) {
-        // Order: clean graph, minimize, push weights, factor uniform, minimize again, clean
+        // Order: clean graph, minimize, push weights, clean
         self.prune_dead_ends();
         self.prune_unreachable();
         self.minimize_states();
         self.push_weights_into_transitions_and_finals();
-        self.factor_uniform_outgoing_weights();  // Factor out uniform weights to enable more merging
-        self.minimize_states();  // Second minimize after factoring
+        self.minimize_states();  // Second minimize after pushing weights
         self.prune_dead_ends();
         self.prune_unreachable();
     }
@@ -250,19 +245,6 @@ impl DWA {
     
     /// Push weights toward initial state using rustfst's push algorithm.
     /// This normalizes the FST so each state's outgoing weights "sum" to one.
-    pub fn push_weights_with_rustfst(&mut self) -> bool {
-        use rustfst::algorithms::{push_weights, ReweightType};
-        let initial_states = self.states.len();
-        let mut fst = self.to_rustfst();
-        // Push toward initial - each non-initial state will have outgoing weights that "sum" to 1
-        if let Err(e) = push_weights(&mut fst, ReweightType::ReweightToInitial) {
-            crate::debug!(1, "Warning: rustfst push_weights failed: {:?}", e);
-            return false;
-        }
-        *self = DWA::from_rustfst(&fst);
-        self.states.len() != initial_states
-    }
-
     pub fn simplify_internal(&mut self) -> bool {
         let initial_num_states = self.states.len();
         if initial_num_states > 1000 {
@@ -278,14 +260,13 @@ impl DWA {
             let min1 = self.minimize_states();
             let push1 = self.push_weights_into_transitions_and_finals();
             let push2 = self.push_weights_to_initial();
-            let factor1 = self.factor_uniform_outgoing_weights();  // Factor out uniform weights
             let prune2 = self.prune_unreachable();
-            changed = prune1 || min1 || push1 || push2 || factor1 || prune2;
+            changed = prune1 || min1 || push1 || push2 || prune2;
             
-            // Second pass ONLY if pruning/pushing/factoring changed something (not just minimize)
+            // Second pass ONLY if pruning/pushing changed something (not just minimize)
             // After minimize, the DWA is already minimal so re-minimizing won't help
-            // unless structure was changed by prune/push/factor
-            if prune1 || push1 || push2 || factor1 || prune2 {
+            // unless structure was changed by prune/push
+            if prune1 || push1 || push2 || prune2 {
                 self.prune_dead_ends();
                 self.minimize_states();
                 self.prune_unreachable();
@@ -299,7 +280,6 @@ impl DWA {
             DwaPass::Minimize,
             DwaPass::PushWeights,
             DwaPass::PushWeightsToInitial,
-            DwaPass::FactorUniformOutgoing,  // Factor out uniform weights to enable more merging
             DwaPass::PruneUnreachable,
         ];
         
@@ -338,8 +318,6 @@ impl DWA {
                     DwaPass::PruneDeadEnds => self.prune_dead_ends(),
                     DwaPass::PushWeights => self.push_weights_into_transitions_and_finals(),
                     DwaPass::PushWeightsToInitial => self.push_weights_to_initial(),
-                    DwaPass::PushWeightsRustfst => self.push_weights_with_rustfst(),
-                    DwaPass::FactorUniformOutgoing => self.factor_uniform_outgoing_weights(),
                     DwaPass::Minimize => {
                         let changed = self.minimize_states();
                         if !changed {
@@ -536,105 +514,6 @@ impl DWA {
                 }
             }
         }
-        changed
-    }
-
-    /// Factor out uniform outgoing weights and push them to incoming edges.
-    /// 
-    /// If state v has the SAME weight W on ALL outgoing transitions:
-    /// 1. Multiply W into all incoming transitions to v
-    /// 2. Set all outgoing trans_weights from v to identity (Weight::all())
-    /// 
-    /// This enables states that only differ in their uniform outgoing factor
-    /// to become equivalent and merge via minimization.
-    pub fn factor_uniform_outgoing_weights(&mut self) -> bool {
-        let n = self.states.len();
-        if n == 0 {
-            return false;
-        }
-        let start = self.body.start_state;
-        
-        crate::debug!(1, "factor_uniform_outgoing_weights: {} states, start={}", n, start);
-
-        // Build predecessor map: preds[v] = [(u, label)] where u -> v on label
-        let mut preds: Vec<Vec<(StateID, Label)>> = vec![Vec::new(); n];
-        for (u, st) in self.states.0.iter().enumerate() {
-            for (&label, &v) in &st.transitions {
-                if v < n {
-                    preds[v].push((u, label));
-                }
-            }
-        }
-
-        let mut changed = false;
-
-        // Process each state
-        let mut checked_count = 0;
-        let mut identity_count = 0;
-        let mut not_all_equal_count = 0;
-        for v in 0..n {
-            // Skip start state - factoring from it would be complicated
-            if v == start {
-                continue;
-            }
-
-            let st = &self.states[v];
-            if st.transitions.is_empty() {
-                continue;
-            }
-            checked_count += 1;
-
-            // Check if all outgoing trans_weights are EXACTLY equal
-            let mut iter = st.transitions.keys();
-            let first_label = *iter.next().unwrap();
-            let first_weight = st.trans_weights.get(&first_label).cloned().unwrap_or_else(Weight::all);
-            
-            // If first weight is already identity, nothing to factor out
-            if first_weight == Weight::all() {
-                identity_count += 1;
-                continue;
-            }
-
-            let mut all_equal = true;
-            for &label in iter {
-                let w = st.trans_weights.get(&label).cloned().unwrap_or_else(Weight::all);
-                if w != first_weight {
-                    all_equal = false;
-                    break;
-                }
-            }
-
-            if !all_equal {
-                not_all_equal_count += 1;
-                continue;
-            }
-
-            // All outgoing weights are equal to first_weight
-            // Factor it out: push first_weight to incoming edges
-            for (u, label) in &preds[v] {
-                if let Some(w) = self.states[*u].trans_weights.get_mut(label) {
-                    *w &= &first_weight;  // times = intersection
-                    changed = true;
-                }
-            }
-
-            // Collect labels first to avoid borrow conflict
-            let labels: Vec<_> = self.states[v].transitions.keys().cloned().collect();
-            // Set all outgoing trans_weights to identity
-            for label in labels {
-                if let Some(w) = self.states[v].trans_weights.get_mut(&label) {
-                    *w = Weight::all();
-                }
-            }
-            crate::debug!(1, "  Factored state {}: uniform weight {:?}", v, first_weight);
-            changed = true;
-        }
-
-        if n >= 100 {
-            crate::debug!(1, "factor_uniform_outgoing_weights stats: checked={}, identity={}, not_all_equal={}", 
-                checked_count, identity_count, not_all_equal_count);
-        }
-        crate::debug!(1, "factor_uniform_outgoing_weights: changed={}", changed);
         changed
     }
 

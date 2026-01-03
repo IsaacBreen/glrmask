@@ -1436,10 +1436,6 @@ impl GrammarConstraint {
             crate::debug!(1, "Useful transitions: {}, Useless: {} (could be removed)",
                 useful_trans, useless_trans);
             
-            // Apply factor_uniform_outgoing_weights before minimize to enable more merging
-            let factored = mod_dwa.factor_uniform_outgoing_weights();
-            crate::debug!(1, "factor_uniform_outgoing_weights: changed={}", factored);
-            
             mod_dwa.minimize_with_rustfst();
             let mod_states = mod_dwa.states.len();
             let mod_trans = mod_dwa.states.num_transitions();
