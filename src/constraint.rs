@@ -996,6 +996,80 @@ impl GrammarConstraint {
         #[allow(clippy::redundant_closure_call)]
         crate::debug!(4, "Done precompute1. Terminal DWA stats: {}", terminal_dwa.stats());
 
+        // EPSILON EXPLOSION EXPERIMENT - Terminal DWA
+        // This code tests whether replacing labeled tsid transitions with epsilon transitions
+        // causes a transition explosion. Enable with: TEST_EPSILON_EXPLOSION=1
+        //
+        // Confirmed results (ApolloRouter schema):
+        // - Original: 5,952 states, 45,284 transitions  
+        // - Modified: 634 states, 315,507 transitions (6.97x explosion!)
+        //
+        // Conclusion: The proposed refactor to encode tsid in weights (using epsilons) is blocked
+        // by this explosion. See TODO.md for details.
+        if std::env::var("TEST_EPSILON_EXPLOSION").is_ok() {
+            use crate::precompute4::weighted_automata::nwa::NWA;
+            
+            crate::debug!(1, "=== EPSILON EXPLOSION EXPERIMENT: Terminal DWA ===");
+            
+            let terminal_nwa_orig = NWA::from_dwa(&terminal_dwa);
+            let orig_trans = terminal_dwa.states.num_transitions();
+            let orig_states = terminal_dwa.states.len();
+            
+            let start_id = terminal_dwa.body.start_state;
+            let start_out_degree = terminal_dwa.states[start_id].transitions.len();
+            crate::debug!(1, "Original start state has {} outgoing transitions", start_out_degree);
+            
+            let first_hop_states: std::collections::HashSet<_> = terminal_dwa.states[start_id]
+                .transitions.values().cloned().collect();
+            crate::debug!(1, "{} unique first-hop states from start", first_hop_states.len());
+            
+            let mut first_hop_out_trans = 0;
+            for &s in &first_hop_states {
+                first_hop_out_trans += terminal_dwa.states[s].transitions.len();
+            }
+            crate::debug!(1, "{} total outgoing transitions from first-hop states", first_hop_out_trans);
+            
+            let mut terminal_nwa_mod = terminal_nwa_orig.clone();
+            let start_state = terminal_nwa_mod.body.start_states[0];
+            
+            let start_trans = std::mem::take(&mut terminal_nwa_mod.states[start_state].transitions);
+            let num_eps = start_trans.values().map(|v| v.len()).sum::<usize>();
+            for (_, targets) in start_trans {
+                for (target, weight) in targets {
+                    terminal_nwa_mod.add_epsilon(start_state, target, weight);
+                }
+            }
+            
+            crate::debug!(1, "Replaced with {} epsilon transitions", num_eps);
+            
+            crate::debug!(1, "Starting determinize...");
+            let mut mod_dwa = terminal_nwa_mod.determinize();
+            let det_states = mod_dwa.states.len();
+            let det_trans = mod_dwa.states.num_transitions();
+            crate::debug!(1, "After determinize: {} states, {} trans", det_states, det_trans);
+            
+            mod_dwa.simplify();
+            let mod_states = mod_dwa.states.len();
+            let mod_trans = mod_dwa.states.num_transitions();
+            
+            let mod_start_id = mod_dwa.body.start_state;
+            let mod_start_out = mod_dwa.states[mod_start_id].transitions.len();
+            crate::debug!(1, "Modified start has {} outgoing transitions", mod_start_out);
+            
+            crate::debug!(1, "After simplify: {} states, {} trans", mod_states, mod_trans);
+            crate::debug!(1, "TERMINAL DWA: Original {} states/{} trans -> Modified {} states/{} trans",
+                orig_states, orig_trans, mod_states, mod_trans);
+            crate::debug!(1, "TERMINAL DWA: State factor {:.2}x, Trans factor {:.2}x",
+                mod_states as f64 / orig_states as f64, mod_trans as f64 / orig_trans as f64);
+            
+            if mod_trans > orig_trans {
+                crate::debug!(1, "TERMINAL DWA RESULT: EXPLOSION! ({:.2}x expansion)", 
+                    mod_trans as f64 / orig_trans as f64);
+            } else {
+                crate::debug!(1, "TERMINAL DWA RESULT: No explosion (reduction or same)");
+            }
+        }
+
         // EXPAND DWA: Add transitions for non-representative states
         crate::debug!(4, "Expanding DWA transitions for equivalent states...");
         let start_state_id = terminal_dwa.body.start_state;
@@ -1179,6 +1253,72 @@ impl GrammarConstraint {
         crate::debug!(3, "Building Parser DWA");
         let terminal_nwa = NWA::from_dwa(&terminal_dwa);
         let mut parser_dwa = build_parser_dwa(&parser, &terminal_nwa);
+
+        // EPSILON EXPLOSION EXPERIMENT - Parser DWA
+        // Similar test on the Parser DWA (which includes parse stack transitions)
+        if std::env::var("TEST_EPSILON_EXPLOSION").is_ok() {
+            use crate::precompute4::weighted_automata::nwa::NWA;
+            
+            crate::debug!(1, "=== EPSILON EXPLOSION EXPERIMENT: Parser DWA ===");
+            
+            let orig_trans = parser_dwa.states.num_transitions();
+            let orig_states = parser_dwa.states.len();
+            
+            let start_id = parser_dwa.body.start_state;
+            let start_out_degree = parser_dwa.states[start_id].transitions.len();
+            crate::debug!(1, "Original start state has {} outgoing transitions", start_out_degree);
+            
+            let first_hop_states: std::collections::HashSet<_> = parser_dwa.states[start_id]
+                .transitions.values().cloned().collect();
+            crate::debug!(1, "{} unique first-hop states from start", first_hop_states.len());
+            
+            let mut first_hop_out_trans = 0;
+            for &s in &first_hop_states {
+                first_hop_out_trans += parser_dwa.states[s].transitions.len();
+            }
+            crate::debug!(1, "{} total outgoing transitions from first-hop states", first_hop_out_trans);
+            
+            // Convert to NWA, replace start transitions with epsilons
+            let mut parser_nwa_mod = NWA::from_dwa(&parser_dwa);
+            let start_state = parser_nwa_mod.body.start_states[0];
+            
+            let start_trans = std::mem::take(&mut parser_nwa_mod.states[start_state].transitions);
+            let num_eps = start_trans.values().map(|v| v.len()).sum::<usize>();
+            for (_, targets) in start_trans {
+                for (target, weight) in targets {
+                    parser_nwa_mod.add_epsilon(start_state, target, weight);
+                }
+            }
+            
+            crate::debug!(1, "Replaced with {} epsilon transitions", num_eps);
+            
+            crate::debug!(1, "Starting determinize...");
+            let mut mod_dwa = parser_nwa_mod.determinize();
+            let det_states = mod_dwa.states.len();
+            let det_trans = mod_dwa.states.num_transitions();
+            crate::debug!(1, "After determinize: {} states, {} trans", det_states, det_trans);
+            
+            mod_dwa.simplify();
+            let mod_states = mod_dwa.states.len();
+            let mod_trans = mod_dwa.states.num_transitions();
+            
+            let mod_start_id = mod_dwa.body.start_state;
+            let mod_start_out = mod_dwa.states[mod_start_id].transitions.len();
+            crate::debug!(1, "Modified start has {} outgoing transitions", mod_start_out);
+            
+            crate::debug!(1, "After simplify: {} states, {} trans", mod_states, mod_trans);
+            crate::debug!(1, "PARSER DWA: Original {} states/{} trans -> Modified {} states/{} trans",
+                orig_states, orig_trans, mod_states, mod_trans);
+            crate::debug!(1, "PARSER DWA: State factor {:.2}x, Trans factor {:.2}x",
+                mod_states as f64 / orig_states as f64, mod_trans as f64 / orig_trans as f64);
+            
+            if mod_trans > orig_trans {
+                crate::debug!(1, "PARSER DWA RESULT: EXPLOSION! ({:.2}x expansion)", 
+                    mod_trans as f64 / orig_trans as f64);
+            } else {
+                crate::debug!(1, "PARSER DWA RESULT: No explosion (reduction or same)");
+            }
+        }
 
         parser_dwa.states.clip_weights(vocab.internal_max_llm_token);
         optimize_dwa_and_vocab(&mut parser_dwa, &mut vocab, &mut possible_matches_precompute1);
