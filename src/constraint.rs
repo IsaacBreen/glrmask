@@ -1025,6 +1025,143 @@ impl GrammarConstraint {
             crate::debug!(1, "Original terminal DWA (after minimize_with_rustfst): {} states, {} trans",
                 orig_dwa_for_min.states.len(), orig_dwa_for_min.states.num_transitions());
             
+            // PRINT THE ACTUAL DWA STRUCTURE with human-readable names
+            crate::debug!(1, "\n=== TERMINAL DWA STRUCTURE (minimized) ===");
+            crate::debug!(1, "Start state: {}", orig_dwa_for_min.body.start_state);
+            
+            // Build a map from tokenizer state ID to a human-readable description
+            let mut tsid_names: std::collections::HashMap<usize, String> = std::collections::HashMap::new();
+            tsid_names.insert(0, "INITIAL".to_string());
+            
+            // BFS to find shortest example string for each state
+            let mut queue = std::collections::VecDeque::new();
+            queue.push_back((0, Vec::new())); // (state, bytes)
+            let mut visited = std::collections::HashSet::new();
+            visited.insert(0);
+            
+            // Limit BFS depth to avoid infinite loops in cyclic graphs
+            let mut iterations = 0;
+            while let Some((curr, bytes)) = queue.pop_front() {
+                iterations += 1;
+                if iterations > 10000 { break; }
+                
+                // Explore transitions
+                if curr < tokenizer.dfa.states.len() {
+                    // Collect transitions for this state
+                    // The DFA structure in typical regex crates might be different, let's look at available fields
+                    // Assuming we have access to transitions. 
+                    // Since specific crate internals might be hidden, we rely on the fact that we can iterate 256 bytes
+                    // Optimization: only check ASCII + some others? Or rely on .transitions field if public?
+                    // Let's rely on `tokenizer.dfa.states[curr].transitions` which is a sparse map or array
+                    
+                    // We need to iterate edges. The Tokenizer struct seems to wrap a DFA.
+                    // Let's look at how `tokenizer.dfa.states` is defined.
+                    // Based on previous simple usage: `tokenizer.dfa.states[sid].transitions.get(byte)`
+                    // We can just iterate the transitions map directly if it's a map.
+                    
+                    for (byte, &next) in &tokenizer.dfa.states[curr].transitions {
+                        if !visited.contains(&next) {
+                            visited.insert(next);
+                            let mut new_bytes = bytes.clone();
+                            new_bytes.push(byte);
+                            
+                            // Name this state
+                            let s = String::from_utf8_lossy(&new_bytes);
+                            tsid_names.insert(next, format!("after {}", s.escape_default()));
+                            
+                            if new_bytes.len() < 10 { // Don't make path too long
+                                queue.push_back((next, new_bytes));
+                            }
+                        }
+                    }
+                }
+            }
+            
+            for (sid, state) in orig_dwa_for_min.states.0.iter().enumerate() {
+                let final_str = match &state.final_weight {
+                    Some(w) => format!("FINAL(weight len={})", w.len()),
+                    None => "non-final".to_string(),
+                };
+                crate::debug!(1, "State {}: {} transitions, {}", sid, state.transitions.len(), final_str);
+                for (&label, &target) in &state.transitions {
+                    // Decode label: if >= terminals_count, it's a tokenizer state ID
+                    let label_str = if label >= parser.terminal_map.len() as i32 {
+                        let tsid = (label - parser.terminal_map.len() as i32) as usize;
+                        let name = tsid_names.get(&tsid)
+                            .cloned()
+                            .unwrap_or_else(|| format!("tsid:{}", tsid));
+                        format!("TSID[{}]", name)
+                    } else {
+                        // Look up terminal name and show the actual bytes
+                        let term = parser.terminal_map.get_by_right(&crate::types::TerminalID(label as usize));
+                        match term {
+                            Some(Terminal::Literal(bytes)) => {
+                                // Show as escaped string
+                                let s = String::from_utf8_lossy(bytes);
+                                format!("\"{}\"", s.escape_default())
+                            },
+                            Some(t) => format!("{:?}", t),
+                            None => format!("T{}", label),
+                        }
+                    };
+                    // Get weight from target state
+                    let target_weight_str = match &orig_dwa_for_min.states[target].final_weight {
+                        Some(w) if w.len() <= 10 => format!("{:?}", w.rsb.iter().collect::<Vec<_>>()),
+                        Some(w) if w.len() == u64::MAX as usize => "ALL".to_string(),
+                        Some(w) => format!("(len={})", w.len()),
+                        None => "".to_string(),
+                    };
+                    let weight_part = if target_weight_str.is_empty() { "".to_string() } else { format!(" [w:{}]", target_weight_str) };
+                    crate::debug!(1, "  --[{}]--> state {}{}", label_str, target, weight_part);
+                }
+            }
+            crate::debug!(1, "=== END TERMINAL DWA STRUCTURE ===\n");
+
+            // PRINT GRAPHVIZ DOT
+            crate::debug!(1, "\n=== TERMINAL DWA DOT ===");
+            crate::debug!(1, "digraph TerminalDWA {{");
+            crate::debug!(1, "  rankdir=LR;");
+            crate::debug!(1, "  node [shape=circle, style=filled, fillcolor=white];");
+            crate::debug!(1, "  start [shape=point];");
+            crate::debug!(1, "  start -> {};", orig_dwa_for_min.body.start_state);
+
+            for (sid, state) in orig_dwa_for_min.states.0.iter().enumerate() {
+                let shape = if state.final_weight.is_some() { "doublecircle" } else { "circle" };
+                let color = if state.final_weight.is_some() { "lightblue" } else { "white" };
+                
+                // Add state tooltip/label if it has a special meaning (start state targets)
+                // We don't have a direct map for normal states, but we can verify if it's a target
+                // For now just ID.
+                crate::debug!(1, "  {} [shape={}, fillcolor={}, label=\"{}\"];", sid, shape, color, sid);
+
+                for (&label, &target) in &state.transitions {
+                    let (label_str, color) = if label >= parser.terminal_map.len() as i32 {
+                        let tsid = (label - parser.terminal_map.len() as i32) as usize;
+                        let name = tsid_names.get(&tsid)
+                            .cloned()
+                            .unwrap_or_else(|| format!("tsid:{}", tsid));
+                        (format!("TSID\\n[{}]", name), "blue")
+                    } else {
+                        let term = parser.terminal_map.get_by_right(&crate::types::TerminalID(label as usize));
+                        let s = match term {
+                            Some(Terminal::Literal(bytes)) => {
+                                let s = String::from_utf8_lossy(bytes);
+                                // Escape for DOT label: " -> \"
+                                s.escape_default().to_string().replace("\"", "\\\"")
+                            },
+                            Some(t) => format!("{:?}", t).replace("\"", "\\\""),
+                            None => format!("T{}", label),
+                        };
+                        (format!("\"{}\"", s), "black")
+                    };
+                    
+                    crate::debug!(1, "  {} -> {} [label=\"{}\", color={}, fontcolor={}];", 
+                        sid, target, label_str, color, color);
+                }
+            }
+            crate::debug!(1, "}}");
+            crate::debug!(1, "=== END TERMINAL DWA DOT ===\n");
+            
             let terminal_nwa_orig = NWA::from_dwa(&terminal_dwa);
             let _orig_trans = terminal_dwa.states.num_transitions();
             let _orig_states = terminal_dwa.states.len();
