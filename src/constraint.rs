@@ -1025,6 +1025,9 @@ impl GrammarConstraint {
             crate::debug!(1, "Original terminal DWA (after minimize_with_rustfst): {} states, {} trans",
                 orig_dwa_for_min.states.len(), orig_dwa_for_min.states.num_transitions());
             
+            // Only dump verbose DWA structure and DOT graphs if DUMP_DWA_DOT is set
+            // (These can produce 1000s of lines of output)
+            if std::env::var("DUMP_DWA_DOT").is_ok() {
             // PRINT THE ACTUAL DWA STRUCTURE with human-readable names
             crate::debug!(1, "\n=== TERMINAL DWA STRUCTURE (minimized) ===");
             crate::debug!(1, "Start state: {}", orig_dwa_for_min.body.start_state);
@@ -1173,6 +1176,8 @@ impl GrammarConstraint {
             }
             crate::debug!(1, "}}");
             crate::debug!(1, "=== END TERMINAL DWA DOT ===\n");
+            // end of first DOT dump, but we keep the DUMP_DWA_DOT block open for the second dump
+            
             
             let terminal_nwa_orig = NWA::from_dwa(&terminal_dwa);
             let _orig_trans = terminal_dwa.states.num_transitions();
@@ -1531,6 +1536,7 @@ impl GrammarConstraint {
             }
             crate::debug!(1, "}}");
             crate::debug!(1, "=== END MODIFIED TERMINAL DWA DOT ===\n");
+            } // end DUMP_DWA_DOT block - both DOT dumps complete
         }
 
         // EXPAND DWA: Add transitions for non-representative states
