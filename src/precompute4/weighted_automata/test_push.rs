@@ -16,6 +16,157 @@ use crate::precompute4::weighted_automata::common::Label;
 use crate::precompute4::weighted_automata::dwa::{DWABody, DWAStates};
 use crate::precompute4::weighted_automata::test_weighted_automata::stochastic_equivalence_test;
 
+// =============================================================================
+// MACROS for concise DWA construction
+// =============================================================================
+
+/// Helper for parsing weights
+macro_rules! dwa_weight {
+    (ALL) => { Weight::all() };
+    ([$($x:expr),*]) => { Weight::from_iter([$($x),*]) }; 
+    ($x:literal) => { Weight::from_item($x) };
+}
+
+/// Helper for parsing labels
+macro_rules! dwa_label {
+    ($l:literal) => { $l as Label };
+    ($l:ident) => { $l as Label }; // Allow variable names if needed
+    ($l:expr) => { $l as Label };
+}
+
+/// Inner macro to scan state body for targets (Pass 1)
+macro_rules! dwa_scan {
+    ($get_id:expr,) => {};
+    ($get_id:expr) => {};
+
+    // Skip final property
+    ($get_id:expr, final: $w:tt $(,)? $($rest:tt)*) => {
+        dwa_scan!($get_id, $($rest)*);
+    };
+
+    // Scan transition target: LABEL => TARGET [WEIGHT],
+    ($get_id:expr, $lbl:tt => $tgt:tt $w:tt, $($rest:tt)*) => {
+        let _ = $get_id(stringify!($tgt));
+        dwa_scan!($get_id, $($rest)*);
+    };
+
+    // Scan transition target: LABEL => TARGET,
+    ($get_id:expr, $lbl:tt => $tgt:tt, $($rest:tt)*) => {
+        let _ = $get_id(stringify!($tgt));
+        dwa_scan!($get_id, $($rest)*);
+    };
+}
+
+/// Inner macro to parse state body (Pass 2)
+macro_rules! dwa_body {
+    // Base case: nothing left
+    ($states:expr, $src_id:expr, $get_id:expr,) => {};
+    ($states:expr, $src_id:expr, $get_id:expr) => {};
+
+    // Final weight: final: WEIGHT
+    ($states:expr, $src_id:expr, $get_id:expr, final: $w:tt $(,)? $($rest:tt)*) => {
+        $states[$src_id].final_weight = Some(dwa_weight!($w));
+        dwa_body!($states, $src_id, $get_id, $($rest)*);
+    };
+
+    // Transition with weight: LABEL => TARGET [WEIGHT],
+    ($states:expr, $src_id:expr, $get_id:expr, $lbl:tt => $tgt:tt $w:tt, $($rest:tt)*) => {
+        let tid = $get_id(stringify!($tgt));
+        let l = dwa_label!($lbl);
+        $states[$src_id].transitions.insert(l, tid);
+        $states[$src_id].trans_weights.insert(l, dwa_weight!($w));
+        dwa_body!($states, $src_id, $get_id, $($rest)*);
+    };
+
+    // Transition default weight: LABEL => TARGET,
+    ($states:expr, $src_id:expr, $get_id:expr, $lbl:tt => $tgt:tt, $($rest:tt)*) => {
+        let tid = $get_id(stringify!($tgt));
+        let l = dwa_label!($lbl);
+        $states[$src_id].transitions.insert(l, tid);
+        $states[$src_id].trans_weights.insert(l, Weight::all());
+        dwa_body!($states, $src_id, $get_id, $($rest)*);
+    };
+}
+
+/// Main DWA macro
+macro_rules! dwa {
+    (
+        $(
+            $src:tt {
+                $($body:tt)*
+            }
+        )*
+    ) => {{
+        #[allow(unused_imports)]
+        use std::collections::HashMap;
+        use crate::precompute4::weighted_automata::{DWA, DWABody, DWAStates, Weight};
+        
+        // ID Management
+        let mut name_to_id: HashMap<String, usize> = HashMap::new();
+        let mut next_id = 0;
+        
+        {
+            let mut get_id = |name: &str| -> usize {
+                if let Some(&id) = name_to_id.get(name) {
+                    id
+                } else {
+                    let id = next_id;
+                    next_id += 1;
+                    name_to_id.insert(name.to_string(), id);
+                    id
+                }
+            };
+
+            // Pass 1: Register all states (sources and targets)
+            $(
+                let _ = get_id(stringify!($src));
+                dwa_scan!(get_id, $($body)*);
+            )*
+        } // Borrow of next_id ends here
+
+        // Initialize states
+        let mut states = DWAStates::default();
+        for _ in 0..next_id {
+            states.add_state();
+        }
+
+        // Helper for second pass (read-only lookup)
+        let get_id = |name: &str| -> usize {
+            *name_to_id.get(name).unwrap()
+        };
+
+        // Pass 2: Fill content
+        $(
+            let src_id = get_id(stringify!($src));
+            dwa_body!(states, src_id, get_id, $($body)*);
+        )*
+
+        DWA {
+            body: DWABody { start_state: 0 },
+            states,
+        }
+    }};
+}
+
+// Checks if the macro works
+#[test]
+fn test_dwa_macro_syntax() {
+    let d = dwa! {
+        s0 {
+            0 => s1 [100],
+            1 => s2,
+        }
+        s1 {
+            final: [100]
+        }
+        s2 {
+            final: ALL
+        }
+    };
+    
+    assert_eq!(d.states.len(), 3);
+}
+
 /// Get DWA stats (states, transitions)
 fn dwa_stats(dwa: &DWA) -> (usize, usize) {
     (dwa.states.len(), dwa.states.num_transitions())
