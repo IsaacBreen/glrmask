@@ -141,6 +141,27 @@ pub fn convert_symbol_heavy_to_weight_heavy(
     result
 }
 
+/// Expands all weights in a DWA from N-space to NxM-space in-place.
+pub fn expand_dwa_weights(dwa: &mut DWA, num_tsids: usize) {
+    if num_tsids == 0 {
+        return;
+    }
+    
+    for state in &mut dwa.states.0 {
+        // Expand final weight
+        if let Some(ref fw) = state.final_weight {
+            state.final_weight = Some(expand_weight(fw, num_tsids));
+        }
+        
+        // Expand transition weights
+        for weight in state.trans_weights.values_mut() {
+            *weight = expand_weight(weight, num_tsids);
+        }
+    }
+}
+
+
+
 /// Find the maximum position set in any weight in the DWA.
 fn find_max_weight_position(dwa: &DWA) -> usize {
     let mut max_pos = 0usize;
@@ -180,14 +201,26 @@ pub fn collapse_weight(weight: &Weight, num_tsids: usize) -> Weight {
         return Weight::all();
     }
     
+    Weight::from_rsb(collapse_weight_rsb(&weight.rsb, num_tsids))
+}
+
+/// Collapse a RangeSetBlaze from N×M-space to N-space.
+pub fn collapse_weight_rsb(rsb: &RangeSetBlaze<usize>, num_tsids: usize) -> RangeSetBlaze<usize> {
+    if rsb.is_empty() {
+        return RangeSetBlaze::new();
+    }
+    if num_tsids == 0 {
+        return rsb.clone();
+    }
+    
     // For each position in the expanded weight, divide by M to get the original position
     let mut collapsed = RangeSetBlaze::new();
-    for range in weight.rsb.ranges() {
+    for range in rsb.ranges() {
         let start = *range.start() / num_tsids;
         let end = *range.end() / num_tsids;
         collapsed.extend([start..=end]);
     }
-    Weight::from_rsb(collapsed)
+    collapsed
 }
 
 /// Create an initial weight for weight-heavy mode given an active tokenizer state ID.

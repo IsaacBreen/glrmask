@@ -20,7 +20,7 @@ use crate::precompute4::resolve_negatives::{
 use crate::precompute4::template_nwa::{build_ignore_terminal_dwa, build_template_dwas};
 use crate::precompute4::weighted_automata::{
     common::Label, determinization_rustfst::determinize_nwa_to_dwa, DWA, NWA, NWABody, NWAStateID, NWAStates,
-    StateID, Weight,
+    StateID, Weight, weight_expansion,
 };
 use crate::tokenizer::TokenizerStateID;
 use crate::types::{TerminalID, TerminalID as GrammarTokenID};
@@ -359,14 +359,57 @@ pub fn canonicalize_bundle(terminal_map: BTreeMap<Option<TerminalID>, Weight>) -
 /// 3. Determinizes the result into the final Parser DWA
 /// 
 /// The resulting DWA is used at runtime for O(1) mask queries.
-pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
+pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA, num_tsids: usize, max_llm_token: usize) -> DWA {
     crate::debug!(4, "Starting Parser DWA construction");
     let now = Instant::now();
     let terminal_dwas = match build_template_dwas(parser) { Ok(m) => m, Err(e) => panic!("Failed to build terminal DWAs: {:?}", e), };
     let ignore_dwa = build_ignore_terminal_dwa();
     crate::debug!(4, "Built {} terminal DWAs in {:?}", terminal_dwas.len(), now.elapsed());
+    crate::debug!(4, "Built {} terminal DWAs in {:?}", terminal_dwas.len(), now.elapsed());
 
-    let reversed_nwa = terminal_nwa.reverse();
+    // WEIGHT-HEAVY: Expand weights if needed
+    let mut terminal_dwas = terminal_dwas;
+    let mut ignore_dwa = ignore_dwa;
+    let terminal_nwa_expanded = if num_tsids > 0 {
+        crate::debug!(4, "Expanding weights to NxM space (num_tsids={})", num_tsids);
+        
+        // Expand terminal DWAs
+        for dwa in terminal_dwas.values_mut() {
+            weight_expansion::expand_dwa_weights(dwa, num_tsids);
+        }
+        
+        // Expand ignore DWA
+        weight_expansion::expand_dwa_weights(&mut ignore_dwa, num_tsids);
+        
+        // Expand terminal NWA (convert to DWA first for easy expansion, or specialized expansion? 
+        // Actually terminal_nwa here is conceptually a DWA (Lexical DWA).
+        // Let's create an expanded version.
+        // Since NWA doesn't have expand_weights helper, we can convert DWA->NWA if we had DWA.
+        // But we have NWA. 
+        // Let's implement expand for NWA or just do it manually here since we have public access?
+        // Wait, expand_dwa_weights works on DWA.
+        // We can create a dedicated expand_nwa_weights or just iterate states.
+        // NWA transitions are HashMap<Label, Vec<(StateID, Weight)>>.
+        let mut nwa = terminal_nwa.clone();
+         for state in &mut nwa.states.0 {
+            if let Some(ref fw) = state.final_weight {
+                state.final_weight = Some(weight_expansion::expand_weight(fw, num_tsids));
+            }
+             for targets in state.transitions.values_mut() {
+                 for (_, weight) in targets {
+                     *weight = weight_expansion::expand_weight(weight, num_tsids);
+                 }
+             }
+             for eps in &mut state.epsilons {
+                 eps.1 = weight_expansion::expand_weight(&eps.1, num_tsids);
+             }
+         }
+         nwa
+    } else {
+        terminal_nwa.clone()
+    };
+
+    let reversed_nwa = terminal_nwa_expanded.reverse();
     let traversal_data = reversed_nwa.compute_traversal_data();
 
     let initial_tokens = LLMTokenBV::max_ones();
@@ -480,6 +523,19 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
                 None => &ignore_dwa,
             };
             let mut weighted_dwa = term_dwa.clone();
+            
+            // WEIGHT-HEAVY FIX: Reset weights to ALL before applying synthetic bit.
+            // Original weights are Token Masks. Intersection with Synthetic Bit would clear them.
+            // We only need the structure here; tokens are re-applied via instantation of concrete weights.
+            for state in &mut weighted_dwa.states.0 {
+                if state.final_weight.is_some() {
+                    state.final_weight = Some(Weight::all());
+                }
+                for w in state.trans_weights.values_mut() {
+                    *w = Weight::all();
+                }
+            }
+            
             weighted_dwa.apply_weight_inplace(&weight);
             NWA::union_assign(&mut super_nwa, &NWA::from_dwa(&weighted_dwa));
         }
@@ -646,9 +702,26 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
     let combined_start_state = combined_nwa_states.add_state();
     for (tsid, list) in final_bodies {
         let label = tsid.0 as Label;
+        
+        // WEIGHT-HEAVY: Create tsid mask for this tokenizer state
+        let tsid_mask = if num_tsids > 0 {
+            Some(weight_expansion::create_initial_weight_for_tsid(tsid.0, num_tsids, max_llm_token))
+        } else {
+            None
+        };
+        
         for (body, weight) in list {
-            for &s in &body.start_states {
-                combined_nwa_states.add_transition(combined_start_state, label, s, weight.clone()).unwrap();
+            // WEIGHT-HEAVY: Apply tsid mask only (weight is already expanded)
+            let final_weight = if let Some(ref mask) = tsid_mask {
+                &weight & mask
+            } else {
+                weight.clone()
+            };
+            
+            if !final_weight.is_empty() {
+                for &s in &body.start_states {
+                    combined_nwa_states.add_transition(combined_start_state, label, s, final_weight.clone()).unwrap();
+                }
             }
         }
     }
@@ -664,7 +737,7 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
 /// Deprecated alias for build_parser_dwa
 #[deprecated(since = "0.3.0", note = "Use build_parser_dwa instead")]
 pub fn precompute4(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
-    build_parser_dwa(parser, terminal_nwa)
+    build_parser_dwa(parser, terminal_nwa, 0, 0) // Legacy: no weight expansion
 }
 
 pub fn precompute_token_bvs_and_signatures(reversed_nwa: &NWA, traversal_data: &NwaTraversalData, initial_values: Vec<(StateID, LLMTokenBV)>, offset: Label) -> (HashMap<StateID, LLMTokenBV>, HashSet<Signature>) {

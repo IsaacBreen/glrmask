@@ -338,6 +338,10 @@ pub struct GrammarConstraint {
 
     /// Vocabulary mappings for the Parser DWA stage.
     pub parser_dwa_vocab: StageVocab,
+
+    /// Number of tokenizer state IDs used for weight-heavy mode.
+    /// When > 0, weights are in N×M space (LLM tokens × tsids).
+    pub num_tsids: usize,
 }
 
 impl GrammarConstraint {
@@ -584,6 +588,7 @@ impl JSONConvertible for GrammarConstraint {
             token_name_map: intermediate.token_name_map,
             possible_matches,
             parser_dwa_vocab: intermediate.vocab,
+            num_tsids: 0, // Legacy: no weight expansion for deserialized constraints
         })
     }
 }
@@ -1718,11 +1723,13 @@ impl GrammarConstraint {
         let max_internal_llm_token_id = vocab.internal_max_llm_token;
         // Note: vocab.internal_max_llm_token might have changed due to optimization, which is fine.
 
-        // Convert the lexical DWA to NWA and build the Parser DWA.
-        crate::debug!(3, "Building Parser DWA");
+        // Compute num_tsids from representative states for weight-heavy mode
+        let num_tsids = state_to_rep.values().collect::<std::collections::HashSet<_>>().len();
+        
+        crate::debug!(3, "Building Parser DWA (weight-heavy: {} tsids, max_token: {})", num_tsids, max_internal_llm_token_id);
         let terminal_nwa = NWA::from_dwa(&terminal_dwa);
         let orig_parser_build_start = std::time::Instant::now();
-        let mut parser_dwa = build_parser_dwa(&parser, &terminal_nwa);
+        let mut parser_dwa = build_parser_dwa(&parser, &terminal_nwa, num_tsids, max_internal_llm_token_id);
         let orig_parser_build_time = orig_parser_build_start.elapsed();
 
         // EPSILON EXPLOSION EXPERIMENT - Parser DWA from epsilon terminal NWA
@@ -1785,7 +1792,7 @@ impl GrammarConstraint {
             let terminal_nwa_for_parser = NWA::from_dwa(&terminal_dwa_mod);
             crate::debug!(1, "Building Parser DWA from modified terminal NWA...");
             let parser_start = Instant::now();
-            let mut parser_dwa_mod = build_parser_dwa(&parser, &terminal_nwa_for_parser);
+            let mut parser_dwa_mod = build_parser_dwa(&parser, &terminal_nwa_for_parser, 0, 0); // Experiment: no weight expansion
             let build_time = parser_start.elapsed();
             crate::debug!(1, "Modified Parser DWA (before minimize): {} states, {} trans (took {:?})",
                 parser_dwa_mod.states.len(), parser_dwa_mod.states.num_transitions(), build_time);
@@ -1837,6 +1844,7 @@ impl GrammarConstraint {
             commit_vocab,
             token_name_map,
             parser_dwa_vocab: vocab,
+            num_tsids,
         }
     }
 
