@@ -14,11 +14,12 @@
 //! ```
 //!
 //! **Phase 2: Reweight Edges**
-//! - For START edges: `w'(start→r) = w(start→r) ∩ d[r]` (tighten only)
-//! - For internal edges: `w'(q→r) = (w(q→r) ∩ d[r]) ∪ ¬d[r]` (push from TARGET)
+//! - `w'(q→r) = w(q→r) ∩ d[r]`
 //!
-//! The key insight: using ¬d[target] (not ¬d[source]) makes all edges to the same
-//! target become identical (effectively ALL), enabling the source states to merge.
+//! We tighten all edges to only allow flow that is consistent with the target's future.
+//! This effectively "pushes" the constraint early. Since any bits outside d[target]
+//! are irrelevant (they die at target anyway), removing them makes edges canonical
+//! (edges distiguished only by "dead" bits become identical).
 //!
 //! **Phase 3: Reweight Final Weights**
 //! ```text
@@ -49,14 +50,10 @@ impl DWA {
         // Phase 1: Compute backward potentials d[q]
         // d[q] = all tokens that can reach acceptance from state q
         let d = self.compute_backward_potentials();
-
-        let start = self.body.start_state;
         let mut changed = false;
 
         // Phase 2: Reweight transitions
         for q in 0..n {
-            let d_q = &d[q];
-
             // Collect transitions to avoid borrow issues
             let transitions: Vec<_> = self.states[q]
                 .transitions
@@ -77,19 +74,10 @@ impl DWA {
 
                 let d_target = &d[target];
 
-                // Compute new weight based on whether this is a start edge
-                let new_weight = if q == start {
-                    // Start edges: just tighten (can't push further back)
-                    // w' = w ∩ d[target]
-                    &w & d_target
-                } else {
-                    // Internal edges: push from TARGET
-                    // w' = (w ∩ d[target]) ∪ ¬d[target]
-                    // This makes all edges to the same target identical!
-                    let tightened = &w & d_target;
-                    let complement_d_target = d_target.complement();
-                    &tightened | &complement_d_target
-                };
+                // Compute new weight: w' = w ∩ d[target]
+                // We tighten the edge to only allow flow that is valid for the target's future.
+                // This strips away "junk" bits that don't matter, canonicalizing the edge.
+                let new_weight = &w & d_target;
 
                 if new_weight.is_empty() {
                     self.states[q].transitions.remove(&label);
