@@ -27,8 +27,20 @@ fn run_push_optimization_test(input: DWA, expected: DWA) {
     stochastic_equivalence_test(input.clone(), expected.clone());
     println!("Sanity check passed.");
 
-    // 2. Optimization Check
+    // 2. Optimization Potential Check
+    let (input_states, input_trans) = dwa_stats(&input);
     let (exp_states, exp_trans) = dwa_stats(&expected);
+    
+    assert!(
+        input_states > exp_states || input_trans > exp_trans,
+        "FAULTY TEST: Expected DWA is not smaller than Input DWA.\n\
+         Input:    {} states, {} trans\n\
+         Expected: {} states, {} trans\n\
+         The test must demonstrate an optimization opportunity.",
+        input_states, input_trans, exp_states, exp_trans
+    );
+
+    // 3. Optimization Check
 
     let mut pushed = input.clone();
     pushed.residuated_push();
@@ -104,24 +116,24 @@ fn test_merge_branches() {
     let expected = {
         let mut states = DWAStates::default();
         let s0 = states.add_state();
-        let s1 = states.add_state(); // after a
-        let s2 = states.add_state(); // after b
-        let s34 = states.add_state(); // merged
+        let s12 = states.add_state(); // merged 1,2
+        let s34 = states.add_state(); // merged 3,4
         let s5 = states.add_state(); // sink
 
-        states[s0].transitions.insert(a, s1);
-        states[s0].trans_weights.insert(a, w100.clone()); // Pushed {100}
-        states[s0].transitions.insert(b, s2);
-        states[s0].trans_weights.insert(b, w200.clone()); // Pushed {200}
+        // 0 -> 12 on a ({100})
+        states[s0].transitions.insert(a, s12);
+        states[s0].trans_weights.insert(a, w100.clone());
+        // 0 -> 12 on b ({200})
+        states[s0].transitions.insert(b, s12);
+        states[s0].trans_weights.insert(b, w200.clone());
 
-        states[s1].transitions.insert(colon, s34);
-        states[s1].trans_weights.insert(colon, all.clone()); // Loosened
-        
-        states[s2].transitions.insert(colon, s34);
-        states[s2].trans_weights.insert(colon, all.clone()); // Loosened
+        // 12 -> 34 on :
+        states[s12].transitions.insert(colon, s34);
+        states[s12].trans_weights.insert(colon, all.clone());
 
+        // 34 -> 5 on x
         states[s34].transitions.insert(x, s5);
-        states[s34].trans_weights.insert(x, all.clone()); // Loosened
+        states[s34].trans_weights.insert(x, all.clone());
 
         states[s5].final_weight = Some(all.clone());
 
@@ -175,26 +187,25 @@ fn test_field_name_optimization() {
     let expected = {
         let mut states = DWAStates::default();
         let start = states.add_state();
+        let merged_field = states.add_state();
         let merged_colon = states.add_state();
         let sink = states.add_state();
         
-        states[sink].final_weight = Some(all.clone());
+        // start -> merged_field for all i
+        for i in 0..num_fields {
+             states[start].transitions.insert((100+i) as Label, merged_field);
+             states[start].trans_weights.insert((100+i) as Label, Weight::from_item(i));
+        }
 
-        // Merged colon -> sink is ALL (loosened)
+        // merged_field -> merged_colon
+        states[merged_field].transitions.insert(colon, merged_colon);
+        states[merged_field].trans_weights.insert(colon, all.clone());
+
+        // merged_colon -> sink
         states[merged_colon].transitions.insert(value, sink);
         states[merged_colon].trans_weights.insert(value, all.clone());
 
-        for i in 0..num_fields {
-            let field = states.add_state();
-            
-            // Pushed weight {i} on start edge
-            states[start].transitions.insert((100+i) as Label, field);
-            states[start].trans_weights.insert((100+i) as Label, Weight::from_item(i));
-            
-            // Loosened intermediate edge
-            states[field].transitions.insert(colon, merged_colon);
-            states[field].trans_weights.insert(colon, all.clone());
-        }
+        states[sink].final_weight = Some(all.clone());
 
         DWA { body: DWABody { start_state: start }, states }
     };
