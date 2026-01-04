@@ -81,7 +81,6 @@ fn run_push_optimization_test(input: DWA, expected: DWA) {
 //   0 ──[b]──> 2 ──[:, w={200}]──> 34
 
 #[test]
-#[ignore = "Weight pushing algorithm not yet correct"]
 fn test_merge_states_with_different_final_weights() {
     let a: Label = 97;
     let b: Label = 98;
@@ -166,7 +165,6 @@ fn test_merge_states_with_different_final_weights() {
 // Expected: All S_i merged into one state.
 
 #[test]
-#[ignore = "Weight pushing algorithm not yet correct"]
 fn test_field_name_pattern() {
     let num_fields = 3;
     let colon: Label = 58;
@@ -246,7 +244,6 @@ fn test_field_name_pattern() {
 //           Same structure, tighter weights.
 
 #[test]
-#[ignore = "Weight pushing algorithm not yet correct"]
 fn test_chain_tightening() {
     // Input DWA
     let input = {
