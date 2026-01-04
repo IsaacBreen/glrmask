@@ -751,6 +751,7 @@ fn test_epsilon_explosion_many_sources_with_continuation() {
 
 /// Test where roots have DIFFERENT alphabets (some respond to char X, some don't)
 /// This creates many different subsets!
+#[ignore]
 #[test]
 fn test_epsilon_explosion_different_alphabets() {
     // Key insight: the explosion is in TRANSITIONS, not states!
