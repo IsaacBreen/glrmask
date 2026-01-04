@@ -20,7 +20,7 @@ use crate::precompute4::resolve_negatives::{
 use crate::precompute4::template_nwa::{build_ignore_terminal_dwa, build_template_dwas};
 use crate::precompute4::weighted_automata::{
     common::Label, determinization_rustfst::determinize_nwa_to_dwa, DWA, NWA, NWABody, NWAStateID, NWAStates,
-    StateID, Weight, weight_expansion,
+    StateID, Weight,
 };
 use crate::tokenizer::TokenizerStateID;
 use crate::types::{TerminalID, TerminalID as GrammarTokenID};
@@ -359,7 +359,7 @@ pub fn canonicalize_bundle(terminal_map: BTreeMap<Option<TerminalID>, Weight>) -
 /// 3. Determinizes the result into the final Parser DWA
 /// 
 /// The resulting DWA is used at runtime for O(1) mask queries.
-pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA, num_tsids: usize, max_llm_token: usize) -> DWA {
+pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
     crate::debug!(4, "Starting Parser DWA construction");
     let now = Instant::now();
     let terminal_dwas = match build_template_dwas(parser) { Ok(m) => m, Err(e) => panic!("Failed to build terminal DWAs: {:?}", e), };
@@ -393,13 +393,32 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA, num_tsids: usize
 
     let mut template_cache: FxHashMap<Signature, NWA> = FxHashMap::default();
 
-    crate::debug!(4, "Building {} signature templates", unique_signatures.len());
+    // OPTIMIZATION START: Split signatures into Simple (Direct Union) and Complex (Bitvector Derivation)
+    let mut simple_signatures = Vec::new();
+    let mut complex_signatures = Vec::new();
 
-    // Handle signatures via direct Union
     for sig in unique_signatures {
+        if sig.len() == 1 {
+            simple_signatures.push(sig);
+        } else {
+            complex_signatures.push(sig);
+        }
+    }
+
+    crate::debug!(4, "Optimization: {} simple signatures (direct build), {} complex signatures (derivation)",
+        simple_signatures.len(), complex_signatures.len());
+
+    // 1. FAST PATH: Handle simple signatures via direct Union
+    // A signature of length 1 means all terminals in it map to the same logical state transition.
+    // We don't need bitmasks; we just Union the Templates.
+    // NOTE: Parallelizing this was tested but memory contention makes serial faster (143-169ms vs 121ms serial).
+
+    for sig in simple_signatures {
         let terminals = &sig[0];
         let mut combined_nwa = NWA::new_empty();
 
+        // If there are many terminals, this might look expensive, but NWA union is cheap (just adding edges/start states).
+        // Determinization handles the complexity.
         for term_opt in terminals {
             let term_dwa = match term_opt {
                 Some(term_id) => {
@@ -411,13 +430,127 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA, num_tsids: usize
                 },
                 None => &ignore_dwa,
             };
+            // We can convert DWA to NWA cheaply and union
             NWA::union_assign(&mut combined_nwa, &NWA::from_dwa(term_dwa));
         }
 
+        // OPTIMIZATION: Skip NWA simplification for simple signatures.
+        // Determinization will merge states anyway, so pre-simplification has minimal benefit.
+        // Use lightweight simplification on the DWA to avoid expensive minimization.
         let mut dwa = combined_nwa.determinize();
         dwa.simplify_lightweight();
+
         template_cache.insert(sig, NWA::from_dwa(&dwa));
+
     }
+
+    // 2. SLOW PATH: Handle complex signatures via Super DWA
+    // Only run this logic if we actually have complex signatures.
+    if !complex_signatures.is_empty() {
+        crate::debug!(4, "Building Super DWA for {} complex signatures", complex_signatures.len());
+
+        let mut used_terminals: BTreeSet<TerminalID> = BTreeSet::new();
+        for sig in &complex_signatures {
+            for group in sig {
+                for term in group { if let Some(term) = term { used_terminals.insert(*term); } }
+            }
+        }
+
+        let mut term_to_bit = BTreeMap::new();
+        let mut bit_to_term: Vec<Option<TerminalID>> = Vec::new();
+        // We ONLY include terminals relevant to the complex signatures to keep bitvectors small
+        let mut all_terminals: BTreeSet<TerminalID> = used_terminals;
+
+        // Note: Unlike original code, we don't force ALL terminal_dwas keys into the Super DWA,
+        // only those needed for the complex pool. This makes the Super DWA smaller.
+
+        term_to_bit.insert(None, 0);
+        bit_to_term.push(None);
+        for (i, term_id) in all_terminals.iter().enumerate() {
+            term_to_bit.insert(Some(*term_id), i + 1);
+            bit_to_term.push(Some(*term_id));
+        }
+
+        let mut super_nwa = NWA::new_empty();
+        for (term_id_opt, bit) in &term_to_bit {
+            let mut weight = Weight::zeros();
+            weight.set(*bit, true);
+            let term_dwa = match term_id_opt {
+                Some(term_id) => if parser.ignore_terminal_ids.contains(term_id) { &ignore_dwa } else { terminal_dwas.get(term_id).unwrap_or(&ignore_dwa) },
+                None => &ignore_dwa,
+            };
+            let mut weighted_dwa = term_dwa.clone();
+            weighted_dwa.apply_weight_inplace(&weight);
+            NWA::union_assign(&mut super_nwa, &NWA::from_dwa(&weighted_dwa));
+        }
+
+        // OPTIMIZATION: Use lightweight simplification for super DWA construction.
+        // Full minimization is expensive and not critical for intermediate results.
+        let super_dwa = super_nwa.determinize_and_simplify("SuperDWA");
+
+        let super_signature: Signature = bit_to_term.iter().map(|t| vec![*t]).collect();
+        
+        // Collect all unique weights from super_dwa once
+        let super_dwa_unique_weights: Vec<Weight> = super_dwa.states.0.par_iter()
+            .fold(HashSet::new, |mut acc, s| {
+                 if let Some(w) = &s.state_weight { acc.insert(w.clone()); }
+                 if let Some(w) = &s.final_weight { acc.insert(w.clone()); }
+                 for w in s.trans_weights.values() { acc.insert(w.clone()); }
+                 acc
+            })
+            .reduce(HashSet::new, |mut a, b| {
+                for w in b { a.insert(w); }
+                a
+            })
+            .into_iter().collect();
+
+        // PRE-COMPUTE: Build all weight mappings for all complex signatures upfront
+        // This avoids redundant computation inside specialize_dwa_relative, which was creating
+        // a new weight_map HashMap for each of the 199 complex signatures.
+        let all_mappings: Vec<(Signature, Vec<Weight>, HashMap<Weight, Weight>)> = complex_signatures.par_iter().map(|target_sig| {
+            let target_idx = SignatureIndex::new(target_sig);
+            let mapping = can_derive(&super_signature, &target_idx).expect("Super signature must derive target");
+            
+            // Pre-compute the weight mapping for this target signature
+            let weight_map: HashMap<Weight, Weight> = super_dwa_unique_weights.iter()
+                .map(|w| {
+                    let mut accumulator = RangeSetBlaze::new();
+                    let mut is_all = false;
+
+                    for bit in w.iter_up_to(mapping.len()) {
+                        if let Some(target_w) = mapping.get(bit) {
+                            if target_w.is_all_fast() {
+                                is_all = true;
+                                break;
+                            }
+                            accumulator |= &target_w.rsb;
+                        }
+                    }
+
+                    let new_w = if is_all {
+                        Weight::all()
+                    } else {
+                        Weight::from_rsb(accumulator)
+                    };
+                    (w.clone(), new_w)
+                })
+                .collect();
+            
+            (target_sig.clone(), mapping, weight_map)
+        }).collect();
+
+        // PARALLEL OPTIMIZATION: Specialize DWAs using pre-computed weight mappings
+        let results: Vec<(Signature, NWA)> = all_mappings.par_iter().map(|(target_sig, _mapping, weight_map)| {
+            let mut derived_dwa = specialize_dwa_relative_with_map(&super_dwa, weight_map);
+            derived_dwa.simplify_lightweight();
+            (target_sig.clone(), NWA::from_dwa(&derived_dwa))
+        }).collect();
+
+        for (sig, nwa) in results {
+            template_cache.insert(sig, nwa);
+        }
+    }
+    // OPTIMIZATION END
 
     crate::debug!(4, "Finished DWA specialization");
 
@@ -511,41 +644,19 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA, num_tsids: usize
     let final_bodies = Arc::try_unwrap(final_bodies_arc).unwrap().into_inner().unwrap();
     let mut combined_nwa_states = states_arena.into_inner();
     let combined_start_state = combined_nwa_states.add_state();
-    let terminals_count = parser.terminal_map.len() as Label;
     for (tsid, list) in final_bodies {
-        // SYMBOL-HEAVY: tsid transitions use label = terminals_count + tsid
-        // This distinguishes them from terminal transitions (labels 0..terminals_count-1)
-        let label = terminals_count + tsid.0 as Label;
+        let label = tsid.0 as Label;
         for (body, weight) in list {
-            if !weight.is_empty() {
-                for &s in &body.start_states {
-                    combined_nwa_states.add_transition(combined_start_state, label, s, weight.clone()).unwrap();
-                }
+            for &s in &body.start_states {
+                combined_nwa_states.add_transition(combined_start_state, label, s, weight.clone()).unwrap();
             }
         }
     }
 
     let combined_nwa = NWA { states: combined_nwa_states, body: NWABody { start_states: vec![combined_start_state] } };
-    let final_dwa = finalize_and_optimize_and_determinize(parser, combined_nwa);
-    
-    // WEIGHT-HEAVY: Convert symbol-heavy to weight-heavy if needed
-    // This: (1) expands weights to N×M, (2) converts tsid transitions to epsilons with tsid masks, (3) re-determinizes
-    let final_dwa = if num_tsids > 0 {
-        let terminals_count = parser.terminal_map.len();
-        println!("DEBUG: Converting to weight-heavy: num_tsids={}, terminals_count={}", num_tsids, terminals_count);
-        crate::debug!(4, "Converting Parser DWA to weight-heavy mode (num_tsids={}, terminals={})", num_tsids, terminals_count);
-        let converted = weight_expansion::convert_symbol_heavy_to_weight_heavy(&final_dwa, num_tsids, terminals_count);
-        println!("DEBUG: After conversion, DWA has {} states", converted.states.len());
-        // Debug: show start state transitions
-        let start = &converted.states[converted.body.start_state];
-        for (label, w) in &start.trans_weights {
-            println!("DEBUG: Converted start state, label {}, weight={:?}", label, w);
-        }
-        converted
-    } else {
-        final_dwa
-    };
-    
+    let mut final_dwa = finalize_and_optimize_and_determinize(parser, combined_nwa);
+    // SKIP final simplification to test performance impact
+    // final_dwa.simplify();
     crate::debug!(4, "Parser DWA construction complete. Stats: {}", final_dwa.stats());
     final_dwa
 }
@@ -553,7 +664,7 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA, num_tsids: usize
 /// Deprecated alias for build_parser_dwa
 #[deprecated(since = "0.3.0", note = "Use build_parser_dwa instead")]
 pub fn precompute4(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
-    build_parser_dwa(parser, terminal_nwa, 0, 0) // Legacy: no weight expansion
+    build_parser_dwa(parser, terminal_nwa)
 }
 
 pub fn precompute_token_bvs_and_signatures(reversed_nwa: &NWA, traversal_data: &NwaTraversalData, initial_values: Vec<(StateID, LLMTokenBV)>, offset: Label) -> (HashMap<StateID, LLMTokenBV>, HashSet<Signature>) {

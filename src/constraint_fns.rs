@@ -4,8 +4,6 @@ use crate::datastructures::leveled_gss::LeveledGSS;
 use crate::glr::parser::{GLRParserState, ParseStateEdgeContent};
 use crate::glr::table::TerminalID;
 use crate::precompute4::weighted_automata::common::{Label, StateID as WAStateID};
-use crate::precompute4::weighted_automata::common::Weight;
-use crate::precompute4::weighted_automata::weight_expansion;
 use crate::tokenizer::TokenizerStateID;
 use profiler_macro::time_it;
 use range_set_blaze::RangeSetBlaze;
@@ -53,13 +51,6 @@ impl<'a> GrammarConstraintState<'a> {
         let mut queue: BTreeMap<isize, BTreeMap<WAStateID, LeveledGSS<ParseStateEdgeContent, RangeSetBlaze<usize>>>> = BTreeMap::new();
         let dwa = &self.parent.parser_dwa;
         let dwa_start_state = &dwa.states[dwa.body.start_state];
-        
-        // Debug: show DWA weights at constraint time
-        println!("DEBUG constraint: num_tsids={}, DWA start state has {} transitions", 
-            self.parent.num_tsids, dwa_start_state.trans_weights.len());
-        for (label, w) in &dwa_start_state.trans_weights {
-            println!("DEBUG constraint: DWA start, label {}, weight={:?}", label, w);
-        }
 
 
         crate::debug!(5, ">>> Seeding initial states");
@@ -69,92 +60,64 @@ impl<'a> GrammarConstraintState<'a> {
                 continue;
             }
 
-            // WEIGHT-HEAVY: Create tsid mask for this tokenizer state
-            // The mask has bit set at every tsid + M*i where i is in 0..N
-            let tsid_mask = if self.parent.num_tsids > 0 {
-                let mask = weight_expansion::create_initial_weight_for_tsid(
-                    tokenizer_state_id.0, 
-                    self.parent.num_tsids, 
-                    self.parent.parser_dwa_vocab.internal_max_llm_token
-                );
-                println!("DEBUG: tsid={}, num_tsids={}, max_tok={}, tsid_mask={:?}", 
-                    tokenizer_state_id.0, self.parent.num_tsids, 
-                    self.parent.parser_dwa_vocab.internal_max_llm_token, mask);
-                mask
-            } else {
-                Weight::all()
-            };
-
-            // Prune GSS based on disallowed terminals AND apply tsid mask
-            let gss = glr_state.stack.clone();
+            // Prune GSS based on disallowed terminals before starting.
+            let mut gss = glr_state.stack.clone();
             let possible_matches = &self.parent.possible_matches;
-            let num_tsids = self.parent.num_tsids;
-            let gss = gss.apply_and_prune(|acc| {
-                let mut result_rsb = acc.llm_tokens_union.inner.as_ref().clone();
-                
-                // Apply disallowed terminal filtering
-                if !acc.terminals_union.is_empty() {
-                    let mut forbidden_llm_tokens = RangeSet::zeros();
-                    for (&tsid, disallowed_in_state) in &acc.terminals_union {
-                        if disallowed_in_state.is_empty() { continue; }
-                        if let Some(state_matches) = possible_matches.get(&TokenizerStateID(tsid)) {
-                            for (terminal_id, llm_tokens) in state_matches {
-                                if disallowed_in_state.contains(terminal_id.0) {
-                                    forbidden_llm_tokens |= llm_tokens;
-                                }
+            gss = gss.apply_and_prune(|acc| {
+                if acc.terminals_union.is_empty() {
+                    return Some(acc.clone());
+                }
+                let mut forbidden_llm_tokens = RangeSet::zeros();
+                for (&tokenizer_state_id, disallowed_in_state) in &acc.terminals_union {
+                    if disallowed_in_state.is_empty() { continue; }
+                    if let Some(state_matches) = possible_matches.get(&TokenizerStateID(tokenizer_state_id)) {
+                        for (terminal_id, llm_tokens) in state_matches {
+                            if disallowed_in_state.contains(terminal_id.0) {
+                                forbidden_llm_tokens |= llm_tokens;
                             }
                         }
                     }
-                    if !forbidden_llm_tokens.is_empty() {
-                        result_rsb = &result_rsb - forbidden_llm_tokens.inner.as_ref();
-                    }
                 }
-                
-                // WEIGHT-HEAVY: Expand GSS tokens from N-space to N×M-space, then apply tsid mask
-                if num_tsids > 0 {
-                    // Expand: each token t becomes t*M + 0..M-1
-                    let before_expand = result_rsb.clone();
-                    result_rsb = weight_expansion::expand_rsb(&result_rsb, num_tsids);
-                    println!("DEBUG closure: before_expand={:?}, after_expand={:?}, tsid_mask={:?}", 
-                        before_expand, result_rsb, tsid_mask.rsb);
-                    // Apply tsid mask intersection
-                    result_rsb = &result_rsb & &tsid_mask.rsb;
-                    println!("DEBUG closure: after_mask={:?}", result_rsb);
+
+                if forbidden_llm_tokens.is_empty() {
+                    return Some(acc.clone());
                 }
-                
-                if result_rsb.is_empty() { None } else { Some(result_rsb) }
+                let mut new_acc = acc.clone();
+                new_acc.llm_tokens_union -= &forbidden_llm_tokens;
+                if new_acc.llm_tokens_union.is_empty() { None } else { Some(new_acc) }
             });
 
             if gss.is_empty() {
                 continue;
             }
 
-            // Queue the GSS at the DWA start state
-            let dwa_start_id = dwa.body.start_state;
-            queue
-                .entry(gss.max_depth())
-                .or_default()
-                .entry(dwa_start_id)
-                .and_modify(|existing| *existing = existing.merge(&gss))
-                .or_insert(gss);
+            if let Some((target_wa_state_id, weight)) = dwa_start_state.get_transition(tokenizer_state_id.0 as Label) {
+                let f = |acc: &Acc| {
+                    let new_rsb = acc.llm_tokens_union.inner.as_ref() & &weight.rsb;
+                    if new_rsb.is_empty() { None } else { Some(new_rsb) }
+                };
+                let weighted_gss = gss.apply_and_prune(f);
+
+                if !weighted_gss.is_empty() {
+                    queue
+                        .entry(weighted_gss.max_depth())
+                        .or_default()
+                        .entry(target_wa_state_id)
+                        .and_modify(|existing| *existing = existing.merge(&weighted_gss))
+                        .or_insert(weighted_gss);
+                }
+            }
         }
 
         // 2. Main worklist loop
         while let Some((_depth, states_at_depth)) = queue.pop_last() {
             for (current_wa_state_id, gss) in states_at_depth {
                 let dwa_state = &dwa.states[current_wa_state_id];
-                
-                // Debug: show which state we're processing
-                let reduced = gss.reduce_acc();
-                println!("DEBUG loop: Processing DWA state {}, GSS reduced_acc={:?}, has_final={}", 
-                    current_wa_state_id, reduced, dwa_state.final_weight.is_some());
 
                 // Check for final state
                 if let Some(final_weight) = &dwa_state.final_weight {
                     if let Some(reduced_acc) = gss.reduce_acc() {
                         let final_tokens = &reduced_acc & &final_weight.rsb;
-                        println!("DEBUG loop: Final check: reduced_acc={:?}, final_weight={:?}, intersection={:?}", 
-                            reduced_acc, final_weight, final_tokens);
                         if !final_tokens.is_empty() {
                             crate::debug!(7, "Adding {} tokens from final state {}", final_tokens.ranges_len(), current_wa_state_id);
                             final_mask_internal |= RangeSet::from(final_tokens);
@@ -163,19 +126,12 @@ impl<'a> GrammarConstraintState<'a> {
                 }
 
                 // Process transitions
-                println!("DEBUG loop: DWA state {} has transitions on labels: {:?}", 
-                    current_wa_state_id, dwa_state.trans_weights.keys().collect::<Vec<_>>());
                 for peeked_edge in gss.peek() {
                     let parser_state_id = peeked_edge.state_id.0 as Label;
-                    println!("DEBUG loop: GSS peeked edge parser_state_id={}", parser_state_id);
                     if let Some((target_wa_state_id, trans_weight)) = dwa_state.get_transition(parser_state_id) {
-                        println!("DEBUG loop: Found transition to DWA state {} with weight {:?}", target_wa_state_id, trans_weight);
                         let isolated_gss = gss.isolate(Some(peeked_edge));
                         let popped_gss = isolated_gss.pop();
-                        if popped_gss.is_empty() { 
-                            println!("DEBUG loop: popped_gss is empty, skipping");
-                            continue; 
-                        }
+                        if popped_gss.is_empty() { continue; }
 
                         let f = |rsb: &RangeSetBlaze<usize>| {
                             let new_rsb = rsb & &trans_weight.rsb;
@@ -217,12 +173,7 @@ impl<'a> GrammarConstraintState<'a> {
             }
         }
 
-        if self.parent.num_tsids > 0 {
-            let collapsed_rsb = weight_expansion::collapse_weight_rsb(&final_mask_internal.inner, self.parent.num_tsids);
-            RangeSet::from_iter(collapsed_rsb)
-        } else {
-            final_mask_internal
-        }
+        final_mask_internal
     }
 
     /// Get the allowed token mask as a dense bitvector.
