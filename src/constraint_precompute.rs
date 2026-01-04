@@ -229,8 +229,10 @@ impl<'r> Precomputer1<'r> {
         // provides little benefit. Just do basic cleanup.
         self.nwa.compress_transitions();
         crate::debug!(5, "Compressed NWA with {} states and {} transitions", self.nwa.states.len(), self.nwa.states.num_transitions());
-        
-        let dwa = self.nwa.determinize_and_simplify("Precompute1");
+
+        // let dwa = self.nwa.determinize_and_simplify("Precompute1");
+        let mut dwa = self.nwa.determinize();
+        dwa.simplify();
         crate::debug!(5, "Simplified DWA with {} states and {} transitions", dwa.states.len(), dwa.states.num_transitions());
 
         dwa
