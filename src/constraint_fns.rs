@@ -4,6 +4,7 @@ use crate::datastructures::leveled_gss::LeveledGSS;
 use crate::glr::parser::{GLRParserState, ParseStateEdgeContent};
 use crate::glr::table::TerminalID;
 use crate::precompute4::weighted_automata::common::{Label, StateID as WAStateID};
+use crate::precompute4::weighted_automata::common::Weight;
 use crate::precompute4::weighted_automata::weight_expansion;
 use crate::tokenizer::TokenizerStateID;
 use profiler_macro::time_it;
@@ -98,8 +99,25 @@ impl<'a> GrammarConstraintState<'a> {
             let dwa_start_state = &dwa.states[dwa_start_id];
 
             if let Some((target_wa_state_id, weight)) = dwa_start_state.get_transition(tokenizer_state_id.0 as Label) {
+                // WEIGHT-HEAVY: Create tsid mask for this tokenizer state
+                // The mask has bit set at every tsid + M*i where i is in 0..N
+                let tsid_mask = if self.parent.num_tsids > 0 {
+                    let mask = weight_expansion::create_initial_weight_for_tsid(
+                        tokenizer_state_id.0, 
+                        self.parent.num_tsids, 
+                        self.parent.parser_dwa_vocab.internal_max_llm_token
+                    );
+                    println!("DEBUG: tsid={}, num_tsids={}, max_tok={}, mask={:?}", 
+                        tokenizer_state_id.0, self.parent.num_tsids, 
+                        self.parent.parser_dwa_vocab.internal_max_llm_token, mask);
+                    mask
+                } else {
+                    Weight::all()
+                };
+                
                 let f = |acc: &Acc| {
-                    let new_rsb = acc.llm_tokens_union.inner.as_ref() & &weight.rsb;
+                    // Intersect with both the transition weight AND the tsid mask
+                    let new_rsb = acc.llm_tokens_union.inner.as_ref() & &weight.rsb & &tsid_mask.rsb;
                     if new_rsb.is_empty() { None } else { Some(new_rsb) }
                 };
                 let weighted_gss = gss.apply_and_prune(f);
@@ -136,39 +154,22 @@ impl<'a> GrammarConstraintState<'a> {
                     let parser_state_id = peeked_edge.state_id.0 as Label;
                     if let Some((target_wa_state_id, trans_weight)) = dwa_state.get_transition(parser_state_id) {
                         let isolated_gss = gss.isolate(Some(peeked_edge));
-                        
-                        // Compute new weight intersection manually to handle Root case
-                        if let Some(acc) = isolated_gss.reduce_acc() {
-                            let new_rsb = &acc & &trans_weight.rsb;
-                            if new_rsb.is_empty() { continue; }
+                        let popped_gss = isolated_gss.pop();
+                        if popped_gss.is_empty() { continue; }
 
-                            let popped_gss = isolated_gss.pop();
-                            if popped_gss.is_empty() {
-                                // We reached the Root of the GSS (end of stack).
-                                // Valid path exists if DWA target state is Final.
-                                let target_state = &dwa.states[target_wa_state_id];
-                                if let Some(fw) = &target_state.final_weight {
-                                    let valid = &new_rsb & &fw.rsb;
-                                    if !valid.is_empty() {
-                                        crate::debug!(7, "Reached Root at DWA state {} - adding {} tokens", target_wa_state_id, valid.ranges_len());
-                                        final_mask_internal |= RangeSet::from(valid);
-                                    }
-                                }
-                            } else {
-                                // Continue propagation
-                                // Use the ANY closure since we already checked intersection
-                                let f = |_: &RangeSetBlaze<usize>| Some(new_rsb.clone());
-                                let final_gss = popped_gss.apply_and_prune(f);
+                        let f = |rsb: &RangeSetBlaze<usize>| {
+                            let new_rsb = rsb & &trans_weight.rsb;
+                            if new_rsb.is_empty() { None } else { Some(new_rsb) }
+                        };
+                        let final_gss = popped_gss.apply_and_prune(f);
 
-                                if !final_gss.is_empty() {
-                                    queue
-                                        .entry(final_gss.max_depth())
-                                        .or_default()
-                                        .entry(target_wa_state_id)
-                                        .and_modify(|existing| *existing = existing.merge(&final_gss))
-                                        .or_insert(final_gss);
-                                }
-                            }
+                        if !final_gss.is_empty() {
+                            queue
+                                .entry(final_gss.max_depth())
+                                .or_default()
+                                .entry(target_wa_state_id)
+                                .and_modify(|existing| *existing = existing.merge(&final_gss))
+                                .or_insert(final_gss);
                         }
                     }
 
