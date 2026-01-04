@@ -88,12 +88,6 @@ impl DWA {
                     self.states[q].trans_weights.insert(label, new_weight);
                 }
             }
-
-            // Update final weight: φ★(q) = ¬ρ(q) ∪ φ(q)
-            if let Some(fw) = &self.states[q].final_weight {
-                let new_fw = &complement_rho_q | fw;
-                self.states[q].final_weight = Some(new_fw);
-            }
         }
 
         // Phase 3: Absorb initial potential into start state edges
@@ -237,4 +231,260 @@ impl DWA {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::precompute4::weighted_automata::common::Label;
+    use crate::precompute4::weighted_automata::dwa::{DWABody, DWAStates};
 
+    /// Helper to build a simple DWA for testing.
+    fn build_simple_dwa() -> DWA {
+        // A --[{1,2}]--> B --[{2}]--> C (final, weight {1,2})
+        //
+        // Before pushing:
+        //   Path weight = {1,2} ∩ {2} ∩ {1,2} = {2}
+        //
+        // Potentials: ρ(C) = {1,2}, ρ(B) = {2} ∩ {1,2} = {2}, ρ(A) = {1,2} ∩ {2} = {2}
+        //
+        // After prune-only pushing:
+        //   A --[{1,2} ∩ {2}]--> B --[{2} ∩ {1,2}]--> C
+        //   = A --[{2}]--> B --[{2}]--> C
+        //   Path weight = {2} ∩ {2} ∩ {1,2} = {2} ✓
+
+        let mut states = DWAStates::default();
+        let a = states.add_state();
+        let b = states.add_state();
+        let c = states.add_state();
+
+        let w_12 = Weight::from_iter([1, 2]);
+        let w_2 = Weight::from_item(2);
+
+        // A -> B on label 0 with weight {1,2}
+        states[a].transitions.insert(0, b);
+        states[a].trans_weights.insert(0, w_12.clone());
+
+        // B -> C on label 1 with weight {2}
+        states[b].transitions.insert(1, c);
+        states[b].trans_weights.insert(1, w_2.clone());
+
+        // C is final with weight {1,2}
+        states[c].final_weight = Some(w_12.clone());
+
+        DWA {
+            body: DWABody { start_state: a },
+            states,
+        }
+    }
+
+    #[test]
+    fn test_backward_potentials() {
+        let dwa = build_simple_dwa();
+        let rho = dwa.compute_backward_potentials();
+
+        // ρ(C) should be {1,2} (the final weight)
+        assert_eq!(rho[2], Weight::from_iter([1, 2]));
+
+        // ρ(B) = w(B→C) ∩ ρ(C) = {2} ∩ {1,2} = {2}
+        assert_eq!(rho[1], Weight::from_item(2));
+
+        // ρ(A) = w(A→B) ∩ ρ(B) = {1,2} ∩ {2} = {2}
+        assert_eq!(rho[0], Weight::from_item(2));
+    }
+
+    #[test]
+    fn test_residuated_push_prune_only() {
+        let mut dwa = build_simple_dwa();
+
+        // Compute original path weight
+        let orig_weight = dwa.eval_word_weight(&[0, 1]);
+        assert_eq!(orig_weight, Weight::from_item(2));
+
+        dwa.residuated_push_prune_only();
+
+        // After pushing, A->B weight should be tightened to {2}
+        assert_eq!(
+            dwa.states[0].trans_weights.get(&0),
+            Some(&Weight::from_item(2))
+        );
+
+        // B->C weight should remain {2}
+        assert_eq!(
+            dwa.states[1].trans_weights.get(&1),
+            Some(&Weight::from_item(2))
+        );
+
+        // Path weight should be preserved
+        let new_weight = dwa.eval_word_weight(&[0, 1]);
+        assert_eq!(new_weight, orig_weight);
+    }
+
+    #[test]
+    fn test_residuated_push_full() {
+        let mut dwa = build_simple_dwa();
+
+        // Compute original path weight
+        let orig_weight = dwa.eval_word_weight(&[0, 1]);
+
+        dwa.residuated_push();
+
+        // Path weight should be preserved
+        let new_weight = dwa.eval_word_weight(&[0, 1]);
+        assert_eq!(new_weight, orig_weight);
+    }
+
+    #[test]
+    fn test_push_removes_dead_edges() {
+        // Build DWA with an edge that leads nowhere useful:
+        // A --[{1}]--> B --[{2}]--> C (final, weight {3})
+        //
+        // Path weight = {1} ∩ {2} ∩ {3} = {} (empty!)
+        // So the entire path should be pruned.
+
+        let mut states = DWAStates::default();
+        let a = states.add_state();
+        let b = states.add_state();
+        let c = states.add_state();
+
+        states[a].transitions.insert(0, b);
+        states[a].trans_weights.insert(0, Weight::from_item(1));
+
+        states[b].transitions.insert(1, c);
+        states[b].trans_weights.insert(1, Weight::from_item(2));
+
+        states[c].final_weight = Some(Weight::from_item(3));
+
+        let mut dwa = DWA {
+            body: DWABody { start_state: a },
+            states,
+        };
+
+        dwa.residuated_push_prune_only();
+
+        // All edges should be removed since path weight is empty
+        assert!(dwa.states[0].transitions.is_empty());
+        assert!(dwa.states[1].transitions.is_empty());
+    }
+
+    #[test]
+    fn test_push_with_branching() {
+        // Build DWA with branching:
+        //       ┌─[{1,2}]─→ B ─[{2}]─→ D (final {2})
+        // A ─┤
+        //       └─[{1,3}]─→ C ─[{3}]─→ E (final {3})
+        //
+        // ρ(D) = {2}, ρ(B) = {2}, contribution to ρ(A) from B path: {1,2} ∩ {2} = {2}
+        // ρ(E) = {3}, ρ(C) = {3}, contribution to ρ(A) from C path: {1,3} ∩ {3} = {3}
+        // ρ(A) = {2} ∪ {3} = {2,3}
+
+        let mut states = DWAStates::default();
+        let a = states.add_state();
+        let b = states.add_state();
+        let c = states.add_state();
+        let d = states.add_state();
+        let e = states.add_state();
+
+        // A -> B on label 0 with weight {1,2}
+        states[a].transitions.insert(0, b);
+        states[a].trans_weights.insert(0, Weight::from_iter([1, 2]));
+
+        // A -> C on label 1 with weight {1,3}
+        states[a].transitions.insert(1, c);
+        states[a].trans_weights.insert(1, Weight::from_iter([1, 3]));
+
+        // B -> D on label 2 with weight {2}
+        states[b].transitions.insert(2, d);
+        states[b].trans_weights.insert(2, Weight::from_item(2));
+
+        // C -> E on label 3 with weight {3}
+        states[c].transitions.insert(3, e);
+        states[c].trans_weights.insert(3, Weight::from_item(3));
+
+        // D is final with weight {2}
+        states[d].final_weight = Some(Weight::from_item(2));
+
+        // E is final with weight {3}
+        states[e].final_weight = Some(Weight::from_item(3));
+
+        let mut dwa = DWA {
+            body: DWABody { start_state: a },
+            states,
+        };
+
+        // Compute original path weights
+        let orig_weight_bd = dwa.eval_word_weight(&[0, 2]);
+        let orig_weight_ce = dwa.eval_word_weight(&[1, 3]);
+
+        dwa.residuated_push_prune_only();
+
+        // After pushing:
+        // A->B should be tightened to {1,2} ∩ {2} = {2}
+        assert_eq!(
+            dwa.states[0].trans_weights.get(&0),
+            Some(&Weight::from_item(2))
+        );
+
+        // A->C should be tightened to {1,3} ∩ {3} = {3}
+        assert_eq!(
+            dwa.states[0].trans_weights.get(&1),
+            Some(&Weight::from_item(3))
+        );
+
+        // Path weights should be preserved
+        let new_weight_bd = dwa.eval_word_weight(&[0, 2]);
+        let new_weight_ce = dwa.eval_word_weight(&[1, 3]);
+        assert_eq!(new_weight_bd, orig_weight_bd);
+        assert_eq!(new_weight_ce, orig_weight_ce);
+    }
+
+    #[test]
+    fn test_push_with_cycle() {
+        // Build DWA with a cycle:
+        // A --[{1,2}]--> B --[{2}]--> B (self-loop)
+        //                    └─[{2}]─→ C (final {2})
+        //
+        // ρ(C) = {2}
+        // ρ(B) = {2} ∩ {2} ∪ {2} ∩ ρ(B) -- fixed point is {2}
+        // ρ(A) = {1,2} ∩ {2} = {2}
+
+        let mut states = DWAStates::default();
+        let a = states.add_state();
+        let b = states.add_state();
+        let c = states.add_state();
+
+        // A -> B on label 0 with weight {1,2}
+        states[a].transitions.insert(0, b);
+        states[a].trans_weights.insert(0, Weight::from_iter([1, 2]));
+
+        // B -> B on label 1 with weight {2} (self-loop)
+        states[b].transitions.insert(1, b);
+        states[b].trans_weights.insert(1, Weight::from_item(2));
+
+        // B -> C on label 2 with weight {2}
+        states[b].transitions.insert(2, c);
+        states[b].trans_weights.insert(2, Weight::from_item(2));
+
+        // C is final with weight {2}
+        states[c].final_weight = Some(Weight::from_item(2));
+
+        let mut dwa = DWA {
+            body: DWABody { start_state: a },
+            states,
+        };
+
+        // Compute original path weights
+        let orig_direct = dwa.eval_word_weight(&[0, 2]);
+        let orig_loop_once = dwa.eval_word_weight(&[0, 1, 2]);
+
+        dwa.residuated_push_prune_only();
+
+        // A->B should be tightened to {2}
+        assert_eq!(
+            dwa.states[0].trans_weights.get(&0),
+            Some(&Weight::from_item(2))
+        );
+
+        // Path weights should be preserved
+        assert_eq!(dwa.eval_word_weight(&[0, 2]), orig_direct);
+        assert_eq!(dwa.eval_word_weight(&[0, 1, 2]), orig_loop_once);
+    }
+}
