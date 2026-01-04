@@ -43,7 +43,7 @@ fn run_push_optimization_test(input: DWA, expected: DWA) {
     // 3. Optimization Check
 
     let mut pushed = input.clone();
-    pushed.residuated_push();
+    pushed.simplify();
     pushed.simplify();
     let (push_states, push_trans) = dwa_stats(&pushed);
 
@@ -283,14 +283,19 @@ fn test_diamond_structure() {
         let end = states.add_state();
 
         // START -> ABC (pushed weights)
+        // Must include w3 because it is required by END
+        let w0_pushed = &w0 | &w3;
+        let w1_pushed = &w1 | &w3;
+        let w2_pushed = &w2 | &w3;
+
         states[start].transitions.insert(l0, abc);
-        states[start].trans_weights.insert(l0, w0.clone());
+        states[start].trans_weights.insert(l0, w0_pushed);
 
         states[start].transitions.insert(l1, abc);
-        states[start].trans_weights.insert(l1, w1.clone());
+        states[start].trans_weights.insert(l1, w1_pushed);
 
         states[start].transitions.insert(l2, abc);
-        states[start].trans_weights.insert(l2, w2.clone());
+        states[start].trans_weights.insert(l2, w2_pushed);
 
         // ABC -> END (loosened A,B,C all had transitions to end with ALL)
         states[abc].transitions.insert(l0, end);
