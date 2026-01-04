@@ -252,10 +252,13 @@ mod tests {
     /// Test using multi-byte tokens like GPT-2. This tests that tokens like `{"` work correctly.
     /// Requires a valid GPT-2 vocab to be available - will panic if not found.
     fn test_schema_with_multibyte_tokens(schema_json: &str, valid_inputs: &[&str]) {
+        println!("Loading GPT-2-like vocab for multi-byte token test.");
         let (token_map, max_token_id) = gpt2_like_token_map()
             .expect("No valid GPT-2 vocab found! This test requires a real GPT-2 vocab with thousands of tokens. \
                      Try: wget -O benchmarking/gpt2_vocab.json https://huggingface.co/openai-community/gpt2/raw/main/vocab.json");
-        
+        println!("Using GPT-2-like vocab with {} tokens, max ID {}", token_map.len(), max_token_id);
+
+        println!("Generating EBNF for schema.");
         let ebnf = json_schema_to_ebnf(schema_json)
             .expect(&format!("Schema should convert: {}", schema_json));
         println!("Generated EBNF:\n{}", ebnf);
