@@ -229,6 +229,21 @@ impl DWA {
         self.prune_unreachable();
     }
 
+    /// Simplification without weight pushing.
+    /// Useful when weight pushing is being tested separately or when the caller
+    /// wants to control when pushing occurs.
+    pub fn simplify_without_pushing(&mut self) {
+        for _ in 0..MAX_OPTIMIZE_ITERATIONS {
+            let mut changed = false;
+            changed |= self.prune_dead_ends();
+            changed |= self.minimize_states();
+            changed |= self.prune_unreachable();
+            if !changed {
+                break;
+            }
+        }
+    }
+
     pub fn minimize_with_rustfst(&mut self) {
         let mut fst = self.to_rustfst();
         minimize(&mut fst).unwrap();

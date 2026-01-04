@@ -44,7 +44,7 @@ fn run_push_optimization_test(input: DWA, expected: DWA) {
 
     let mut pushed = input.clone();
     pushed.residuated_push();
-    pushed.simplify();
+    pushed.simplify_without_pushing();
     let (push_states, push_trans) = dwa_stats(&pushed);
 
     // This assertion MUST FAIL if weight pushing is not working/implemented
