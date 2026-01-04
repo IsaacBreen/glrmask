@@ -11,7 +11,6 @@ pub mod push;
 pub mod simplification;
 pub mod simplification_experiment;
 pub mod unroll;
-pub mod weight_expansion;
 
 mod test_determinization;
 pub(crate) mod test_weighted_automata;
@@ -22,4 +21,3 @@ pub use self::common::{format_i16_char, format_pos_code, format_word, NWAStateID
 pub use self::dwa::{DWABody, DWABuildError, DWAState, DWAStates, DWA};
 pub use self::nwa::{NWABody, NWABuildError, NWAState, NWAStates, NWA};
 pub use self::determinization::{reset_determinize_stats, get_determinize_stats};
-pub use self::weight_expansion::WeightExpansionParams;
