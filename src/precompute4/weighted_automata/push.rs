@@ -144,7 +144,7 @@ impl DWA {
         // Fixed-point iteration: propagate backwards until stable
         let mut changed = true;
         let mut iterations = 0;
-        const MAX_ITERATIONS: usize = 10000;
+        const MAX_ITERATIONS: usize = usize::MAX;
 
         while changed && iterations < MAX_ITERATIONS {
             changed = false;
