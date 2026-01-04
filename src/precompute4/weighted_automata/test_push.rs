@@ -43,7 +43,7 @@ fn run_push_optimization_test(input: DWA, expected: DWA) {
     // 3. Optimization Check
 
     let mut pushed = input.clone();
-    pushed.simplify();
+    pushed.residuated_push();
     pushed.simplify();
     let (push_states, push_trans) = dwa_stats(&pushed);
 
