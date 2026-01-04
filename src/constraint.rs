@@ -1819,7 +1819,13 @@ impl GrammarConstraint {
                 parser_dwa_mod.states.len(), parser_dwa_mod.states.num_transitions());
         }
 
-        parser_dwa.states.clip_weights(vocab.internal_max_llm_token);
+        // WEIGHT-HEAVY: In N×M mode, clip to expanded max, not N-space max
+        let clip_max = if num_tsids > 0 {
+            (vocab.internal_max_llm_token + 1) * num_tsids - 1
+        } else {
+            vocab.internal_max_llm_token
+        };
+        parser_dwa.states.clip_weights(clip_max);
         optimize_dwa_and_vocab(&mut parser_dwa, &mut vocab, &mut possible_matches_precompute1);
 
         let internal_to_original_sparse_matrix =

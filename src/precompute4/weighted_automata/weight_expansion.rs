@@ -40,7 +40,7 @@ pub fn expand_weight_rsb(rsb: &std::sync::Arc<RangeSetBlaze<usize>>, num_tsids: 
 
 /// Internal helper to expand a RangeSetBlaze.
 /// Uses saturating arithmetic to handle large values that would overflow.
-fn expand_rsb(rsb: &RangeSetBlaze<usize>, num_tsids: usize) -> RangeSetBlaze<usize> {
+pub fn expand_rsb(rsb: &RangeSetBlaze<usize>, num_tsids: usize) -> RangeSetBlaze<usize> {
     let mut expanded = RangeSetBlaze::new();
     for range in rsb.ranges() {
         let start = range.start().saturating_mul(num_tsids);

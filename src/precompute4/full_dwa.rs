@@ -523,9 +523,26 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA, num_tsids: usize
     }
 
     let combined_nwa = NWA { states: combined_nwa_states, body: NWABody { start_states: vec![combined_start_state] } };
-    let mut final_dwa = finalize_and_optimize_and_determinize(parser, combined_nwa);
-    // SKIP final simplification to test performance impact
-    // final_dwa.simplify();
+    let final_dwa = finalize_and_optimize_and_determinize(parser, combined_nwa);
+    
+    // WEIGHT-HEAVY: Convert symbol-heavy to weight-heavy if needed
+    // This: (1) expands weights to N×M, (2) converts tsid transitions to epsilons with tsid masks, (3) re-determinizes
+    let final_dwa = if num_tsids > 0 {
+        let terminals_count = parser.terminal_map.len();
+        println!("DEBUG: Converting to weight-heavy: num_tsids={}, terminals_count={}", num_tsids, terminals_count);
+        crate::debug!(4, "Converting Parser DWA to weight-heavy mode (num_tsids={}, terminals={})", num_tsids, terminals_count);
+        let converted = weight_expansion::convert_symbol_heavy_to_weight_heavy(&final_dwa, num_tsids, terminals_count);
+        println!("DEBUG: After conversion, DWA has {} states", converted.states.len());
+        // Debug: show start state transitions
+        let start = &converted.states[converted.body.start_state];
+        for (label, w) in &start.trans_weights {
+            println!("DEBUG: Converted start state, label {}, weight={:?}", label, w);
+        }
+        converted
+    } else {
+        final_dwa
+    };
+    
     crate::debug!(4, "Parser DWA construction complete. Stats: {}", final_dwa.stats());
     final_dwa
 }
