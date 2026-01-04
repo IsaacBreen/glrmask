@@ -38,10 +38,12 @@ impl DWA {
     /// weights without requiring division. After pushing:
     /// - States with identical outgoing behavior will have identical weights
     /// - Standard minimization can then merge these states
-    pub fn residuated_push(&mut self) {
+    ///
+    /// Returns true if any weights were changed.
+    pub fn residuated_push(&mut self) -> bool {
         let n = self.states.len();
         if n == 0 {
-            return;
+            return false;
         }
 
         // Phase 1: Compute backward potentials d[q]
@@ -49,6 +51,7 @@ impl DWA {
         let d = self.compute_backward_potentials();
 
         let start = self.body.start_state;
+        let mut changed = false;
 
         // Phase 2: Reweight transitions
         for q in 0..n {
@@ -91,8 +94,10 @@ impl DWA {
                 if new_weight.is_empty() {
                     self.states[q].transitions.remove(&label);
                     self.states[q].trans_weights.remove(&label);
-                } else {
+                    changed = true;
+                } else if self.states[q].trans_weights.get(&label) != Some(&new_weight) {
                     self.states[q].trans_weights.insert(label, new_weight);
+                    changed = true;
                 }
             }
         }
@@ -106,11 +111,16 @@ impl DWA {
 
             if let Some(fw) = &self.states[q].final_weight {
                 let new_fw = fw | &complement_d_q;
-                self.states[q].final_weight = Some(new_fw);
+                if new_fw != *fw {
+                    self.states[q].final_weight = Some(new_fw);
+                    changed = true;
+                }
             }
             // Note: If state was not final (fw = None), it stays non-final.
             // The "garbage" ¬d[q] only matters for the actual final weight intersection.
         }
+
+        changed
     }
 
     /// Compute backward potentials d[q] for all states.

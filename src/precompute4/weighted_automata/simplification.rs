@@ -142,6 +142,7 @@ pub enum DwaPass {
     PruneDeadEnds,
     PushWeights,
     PushWeightsToInitial,
+    ResidualPush,
     Minimize,
 }
 
@@ -205,6 +206,7 @@ impl DWA {
                     DwaPass::PruneDeadEnds => self.prune_dead_ends(),
                     DwaPass::PushWeights => self.push_weights_into_transitions_and_finals(),
                     DwaPass::PushWeightsToInitial => self.push_weights_to_initial(),
+                    DwaPass::ResidualPush => self.residuated_push(),
                     DwaPass::Minimize => unreachable!(),
                 };
                 changed_in_iteration |= pass_changed;
@@ -257,6 +259,7 @@ impl DWA {
         if initial_num_states < 1000 {
             let mut changed = false;
             let prune1 = self.prune_dead_ends();
+            self.residuated_push();  // New: Push weights to enable merging
             let min1 = self.minimize_states();
             let push1 = self.push_weights_into_transitions_and_finals();
             let push2 = self.push_weights_to_initial();
@@ -268,6 +271,7 @@ impl DWA {
             // unless structure was changed by prune/push
             if prune1 || push1 || push2 || prune2 {
                 self.prune_dead_ends();
+                self.residuated_push();  // Push again before second minimize
                 self.minimize_states();
                 self.prune_unreachable();
             }
@@ -277,6 +281,7 @@ impl DWA {
         let mut total_changed = false;
         let ordering = &[
             DwaPass::PruneDeadEnds,
+            DwaPass::ResidualPush,  // New: Push weights before minimize
             DwaPass::Minimize,
             DwaPass::PushWeights,
             DwaPass::PushWeightsToInitial,
@@ -318,6 +323,7 @@ impl DWA {
                     DwaPass::PruneDeadEnds => self.prune_dead_ends(),
                     DwaPass::PushWeights => self.push_weights_into_transitions_and_finals(),
                     DwaPass::PushWeightsToInitial => self.push_weights_to_initial(),
+                    DwaPass::ResidualPush => self.residuated_push(),
                     DwaPass::Minimize => {
                         let changed = self.minimize_states();
                         if !changed {
