@@ -185,14 +185,21 @@ impl WeightExpansionParams {
 impl DWA {
     /// Convert a symbol-heavy DWA to weight-heavy regime.
     ///
+    /// # Algorithm (per user specification)
+    /// 1. Expand ALL weights: each position p becomes [p*M, p*M + M)
+    /// 2. For each initial tsid transition (label=tsid, target, original_weight):
+    ///    - Expand original_weight (multiply positions by M)
+    ///    - Intersect with tsid mask {tsid + n*M | n in 0..N}
+    ///    - This becomes the weight for an epsilon transition to target
+    /// 3. Convert to NWA, determinize, simplify
+    ///
     /// # Symbol-Heavy Structure
     /// - Start state has transitions labeled 0, 1, ..., M-1 (tsid labels)
-    /// - Each leads to a child state
+    /// - Each leads to a child state  
     /// - Weights have length N (num_tokens)
     ///
     /// # Weight-Heavy Structure  
-    /// - Start state is a new state
-    /// - Single epsilon-like path to merged children
+    /// - Start state has epsilon transitions (no tsid labels)
     /// - Weights have length N×M
     ///
     /// # Arguments
@@ -203,43 +210,88 @@ impl DWA {
     /// - Converted DWA in weight-heavy regime
     /// - WeightExpansionParams for interpreting the expanded weights
     pub fn to_weight_heavy(&self, num_tokens: usize, num_tsids: usize) -> (DWA, WeightExpansionParams) {
+        use super::nwa::NWA;
+        use super::common::Label;
+        
         let params = WeightExpansionParams { num_tokens, num_tsids };
+        
+        // If no tsids or only 1 tsid, just expand weights uniformly
+        if num_tsids <= 1 {
+            return self.expand_weights_uniformly(&params);
+        }
         
         let old_start = self.body.start_state;
         let old_start_state = &self.states[old_start];
         
-        // Collect the tsid transitions from start state
+        // Step 1: Collect tsid transitions from start state
         // These are transitions labeled 0, 1, ..., num_tsids-1
-        let mut tsid_targets: BTreeMap<usize, (StateID, Weight)> = BTreeMap::new();
+        let mut tsid_transitions: Vec<(usize, StateID, Weight)> = Vec::new();
+        
         for (&label, &target) in &old_start_state.transitions {
             if label >= 0 && (label as usize) < num_tsids {
                 let weight = old_start_state.trans_weights
                     .get(&label)
                     .cloned()
                     .unwrap_or_else(Weight::all);
-                tsid_targets.insert(label as usize, (target, weight));
+                tsid_transitions.push((label as usize, target, weight));
             }
         }
         
-        // If there are no tsid transitions or they don't go to different states,
-        // the conversion is trivial - just expand all weights
-        if tsid_targets.is_empty() {
+        // If there are no tsid transitions, just expand weights
+        if tsid_transitions.is_empty() {
             return self.expand_weights_uniformly(&params);
         }
         
-        // Check if all tsid transitions lead to the same state
-        let targets: Vec<StateID> = tsid_targets.values().map(|(t, _)| *t).collect();
-        let all_same = targets.iter().all(|&t| t == targets[0]);
+        // Step 2: Convert to NWA (for epsilon transitions)
+        let mut nwa = NWA::from_dwa(self);
         
-        if all_same {
-            // Simple case: all tsids lead to same state
-            return self.expand_simple_case(&params, &tsid_targets);
+        // Step 3: Expand ALL weights in the NWA (multiply positions by M)
+        for state in &mut nwa.states.0 {
+            // Expand final weights
+            if let Some(ref fw) = state.final_weight {
+                state.final_weight = Some(params.expand_weight_all_tsids(fw));
+            }
+            
+            // Expand transition weights
+            for targets in state.transitions.values_mut() {
+                for (_, weight) in targets.iter_mut() {
+                    *weight = params.expand_weight_all_tsids(weight);
+                }
+            }
+            
+            // Expand epsilon weights (if any exist already)
+            for (_, weight) in &mut state.epsilons {
+                *weight = params.expand_weight_all_tsids(weight);
+            }
         }
         
-        // Complex case: tsids lead to different states
-        // We need to do a proper state product construction
-        self.expand_complex_case(&params, &tsid_targets)
+        // Step 4: Replace tsid transitions with epsilon transitions
+        // Remove the tsid transitions from the start state in the NWA
+        for (tsid, _, _) in &tsid_transitions {
+            nwa.states[old_start].transitions.remove(&(*tsid as Label));
+        }
+        
+        // Add epsilon transitions with the correct expanded+masked weights
+        for (tsid, target, original_weight) in &tsid_transitions {
+            // 1. Expand the original weight (multiply positions by M)
+            let expanded_weight = params.expand_weight_all_tsids(original_weight);
+            // 2. Create the tsid mask: {tsid + n*M | n in 0..N}
+            let tsid_mask = params.create_initial_weight_for_tsid(*tsid);
+            // 3. Intersect
+            let epsilon_weight = &expanded_weight & &tsid_mask;
+            
+            if !epsilon_weight.is_empty() {
+                nwa.add_epsilon(old_start, *target, epsilon_weight);
+            }
+        }
+        
+        // Step 5: Determinize and simplify
+        let mut result_dwa = nwa.determinize();
+        result_dwa.simplify();
+        
+        (result_dwa, params)
     }
+
 
     /// Expand weights uniformly when there are no tsid-specific transitions.
     fn expand_weights_uniformly(&self, params: &WeightExpansionParams) -> (DWA, WeightExpansionParams) {
@@ -272,169 +324,6 @@ impl DWA {
         
         let new_dwa = DWA {
             body: self.body.clone(),
-            states: new_states,
-        };
-        
-        (new_dwa, params.clone())
-    }
-
-    /// Handle the simple case where all tsid transitions lead to the same state.
-    fn expand_simple_case(
-        &self,
-        params: &WeightExpansionParams,
-        tsid_targets: &BTreeMap<usize, (StateID, Weight)>,
-    ) -> (DWA, WeightExpansionParams) {
-        let old_start = self.body.start_state;
-        let common_target = tsid_targets.values().next().unwrap().0;
-        
-        let mut new_states = DWAStates::default();
-        
-        // Copy all states except start, expanding weights
-        let mut state_mapping: BTreeMap<StateID, StateID> = BTreeMap::new();
-        
-        for (old_id, old_state) in self.states.0.iter().enumerate() {
-            if old_id == old_start {
-                continue; // Handle start state specially
-            }
-            
-            let mut new_state = DWAState::default();
-            
-            // Copy transitions (will update targets later)
-            for (&label, &target) in &old_state.transitions {
-                new_state.transitions.insert(label, target);
-            }
-            
-            // Expand weights
-            for (label, weight) in &old_state.trans_weights {
-                new_state.trans_weights.insert(*label, params.expand_weight_all_tsids(weight));
-            }
-            
-            if let Some(fw) = &old_state.final_weight {
-                new_state.final_weight = Some(params.expand_weight_all_tsids(fw));
-            }
-            
-            if let Some(sw) = &old_state.state_weight {
-                new_state.state_weight = Some(params.expand_weight_all_tsids(sw));
-            }
-            
-            let new_id = new_states.add_existing_state(new_state);
-            state_mapping.insert(old_id, new_id);
-        }
-        
-        // Create new start state with combined weight for the single target
-        let mut combined_weight = Weight::zeros();
-        for (tsid, (_, weight)) in tsid_targets {
-            let expanded = params.expand_weight_single_tsid(weight, *tsid);
-            combined_weight |= &expanded;
-        }
-        
-        let new_start_state = {
-            let mut s = DWAState::default();
-            let new_target = state_mapping.get(&common_target).copied().unwrap_or(common_target);
-            // Use a dummy label (we'll remove tsid labels)
-            s.transitions.insert(0, new_target);
-            s.trans_weights.insert(0, combined_weight);
-            s
-        };
-        
-        let new_start_id = new_states.add_existing_state(new_start_state);
-        
-        // Update transition targets
-        for state in &mut new_states.0 {
-            for target in state.transitions.values_mut() {
-                if let Some(&new_target) = state_mapping.get(target) {
-                    *target = new_target;
-                }
-            }
-        }
-        
-        let new_dwa = DWA {
-            body: DWABody { start_state: new_start_id },
-            states: new_states,
-        };
-        
-        (new_dwa, params.clone())
-    }
-
-    /// Handle the complex case where tsid transitions lead to different states.
-    /// This requires creating a product construction.
-    fn expand_complex_case(
-        &self,
-        params: &WeightExpansionParams,
-        tsid_targets: &BTreeMap<usize, (StateID, Weight)>,
-    ) -> (DWA, WeightExpansionParams) {
-        // For the complex case, we need to track which tsid we're in throughout the DWA.
-        // This is done by keeping the tsid information in the weights.
-        //
-        // The key insight: after the initial transition, we're committed to a particular tsid.
-        // So we can:
-        // 1. Create a new start state
-        // 2. For each tsid, create an epsilon transition (dummy label) with weight encoding that tsid
-        // 3. The rest of the DWA is duplicated M times (once per tsid), or we use weights to distinguish
-        //
-        // Actually, a simpler approach: just expand all weights, and at the initial transitions,
-        // restrict to the appropriate tsid. The rest of the DWA will naturally propagate this.
-        
-        let old_start = self.body.start_state;
-        let mut new_states = DWAStates::default();
-        
-        // Create mapping for all states except old start
-        let mut state_mapping: BTreeMap<StateID, StateID> = BTreeMap::new();
-        
-        // First pass: create all new states (except start)
-        for (old_id, old_state) in self.states.0.iter().enumerate() {
-            if old_id == old_start {
-                continue;
-            }
-            
-            let mut new_state = DWAState::default();
-            
-            // Copy structure
-            new_state.transitions = old_state.transitions.clone();
-            
-            // Expand weights uniformly - tsid info is encoded in which bits are set
-            for (label, weight) in &old_state.trans_weights {
-                new_state.trans_weights.insert(*label, params.expand_weight_all_tsids(weight));
-            }
-            
-            if let Some(fw) = &old_state.final_weight {
-                new_state.final_weight = Some(params.expand_weight_all_tsids(fw));
-            }
-            
-            if let Some(sw) = &old_state.state_weight {
-                new_state.state_weight = Some(params.expand_weight_all_tsids(sw));
-            }
-            
-            let new_id = new_states.add_existing_state(new_state);
-            state_mapping.insert(old_id, new_id);
-        }
-        
-        // Create new start state
-        // It has transitions for each tsid, each leading to the appropriate target
-        let mut new_start = DWAState::default();
-        
-        for (tsid, (target, weight)) in tsid_targets {
-            let new_target = state_mapping.get(target).copied().unwrap_or(*target);
-            let expanded_weight = params.expand_weight_single_tsid(weight, *tsid);
-            
-            // Use tsid as the label (same as before, but weight encodes tsid info)
-            new_start.transitions.insert(*tsid as Label, new_target);
-            new_start.trans_weights.insert(*tsid as Label, expanded_weight);
-        }
-        
-        let new_start_id = new_states.add_existing_state(new_start);
-        
-        // Update all transition targets
-        for state in &mut new_states.0 {
-            for target in state.transitions.values_mut() {
-                if let Some(&new_target) = state_mapping.get(target) {
-                    *target = new_target;
-                }
-            }
-        }
-        
-        let new_dwa = DWA {
-            body: DWABody { start_state: new_start_id },
             states: new_states,
         };
         
