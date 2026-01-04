@@ -11,6 +11,7 @@ pub mod push;
 pub mod simplification;
 pub mod simplification_experiment;
 pub mod unroll;
+pub mod weight_expansion;
 
 mod test_determinization;
 pub(crate) mod test_weighted_automata;
