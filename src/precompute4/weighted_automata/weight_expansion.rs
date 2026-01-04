@@ -109,9 +109,17 @@ pub fn convert_symbol_heavy_to_weight_heavy(
         }
     }
     
+    println!("DEBUG convert: After expansion, NWA has {} states", nwa.states.0.len());
+    
     // Step 2: Convert tsid labeled transitions from start state to epsilon transitions
     let start_state = nwa.body.start_states[0];
     let start_transitions = std::mem::take(&mut nwa.states[start_state].transitions);
+    
+    println!("DEBUG convert: Start state {} had {} transitions", start_state, start_transitions.len());
+    for (label, targets) in &start_transitions {
+        println!("DEBUG convert: Start transition label={}, is_tsid={}, num_targets={}", 
+            label, *label >= terminals_count as Label, targets.len());
+    }
     
     for (label, targets) in start_transitions {
         let is_tsid_label = label >= terminals_count as Label;
@@ -135,8 +143,24 @@ pub fn convert_symbol_heavy_to_weight_heavy(
     }
     
     // Step 3: Determinize and simplify
+    println!("DEBUG convert: Before determinize, start state {} has {} epsilons, {} transitions", 
+        start_state, nwa.states[start_state].epsilons.len(), nwa.states[start_state].transitions.len());
+    for (target, weight) in &nwa.states[start_state].epsilons {
+        println!("DEBUG convert: epsilon -> {} with weight {:?}", target, weight);
+        // Show target state's transitions
+        let target_state = &nwa.states[*target];
+        for (label, targets) in &target_state.transitions {
+            println!("DEBUG convert: target {} has transition label={} with {} targets", target, label, targets.len());
+        }
+    }
     let mut result = nwa.determinize();
     result.simplify();
+    
+    println!("DEBUG convert: After determinize, DWA has {} states", result.states.len());
+    for (i, state) in result.states.0.iter().enumerate() {
+        println!("DEBUG convert: DWA state {} has {} transitions, final={:?}", 
+            i, state.trans_weights.len(), state.final_weight.as_ref().map(|w| format!("{:?}", w)));
+    }
     
     result
 }
@@ -327,5 +351,91 @@ mod tests {
         assert!(!final_weight.contains(9));
         assert!(!final_weight.contains(11));
         assert_eq!(final_weight.len(), 2);
+    }
+    
+    #[test]
+    fn test_convert_symbol_heavy_to_weight_heavy() {
+        use super::*;
+        use crate::precompute4::weighted_automata::dwa::{DWA, DWAState, DWAStates, DWABody};
+        use crate::precompute4::weighted_automata::test_weighted_automata::stochastic_equivalence_test;
+        
+        // Build the input DWA as specified:
+        // DWA (start: 0)
+        //   State 0:
+        //     2 -> 1 (weight: [0..=1])   // label 2 = terminals_count + tsid 0
+        //   State 1:
+        //     0 -> 2 (weight: [0..=1])   // terminal A
+        //     1 -> 3 (weight: [0..=1])   // terminal EOF
+        //   State 2:
+        //     final_weight: [1]
+        //   State 3:
+        //     final_weight: [0]
+        
+        let num_tsids = 3;
+        let terminals_count = 2; // terminals A=0, EOF=1
+        
+        // Create input states
+        let mut state0 = DWAState::default();
+        state0.trans_weights.insert(2, Weight::from_rsb(RangeSetBlaze::from_iter([0, 1])));
+        state0.transitions.insert(2, 1);
+        
+        let mut state1 = DWAState::default();
+        state1.trans_weights.insert(0, Weight::from_rsb(RangeSetBlaze::from_iter([0, 1])));
+        state1.trans_weights.insert(1, Weight::from_rsb(RangeSetBlaze::from_iter([0, 1])));
+        state1.transitions.insert(0, 2);
+        state1.transitions.insert(1, 3);
+        
+        let mut state2 = DWAState::default();
+        state2.final_weight = Some(Weight::from_iter([1usize]));
+        
+        let mut state3 = DWAState::default();
+        state3.final_weight = Some(Weight::from_iter([0usize]));
+        
+        let input_dwa = DWA {
+            states: DWAStates(vec![state0, state1, state2, state3]),
+            body: DWABody { start_state: 0 },
+        };
+        
+        println!("INPUT DWA:");
+        println!("{}", input_dwa);
+        
+        // Build expected output DWA:
+        // DWA (start: 0)
+        //   State 0:
+        //     0 -> 1 (weight: [0..=0,3..=3])   // terminal A with tsid mask
+        //     1 -> 2 (weight: [0..=0,3..=3])   // terminal EOF with tsid mask
+        //   State 1:
+        //     final_weight: [3..=3]            // from path: tsid0 + terminal EOF
+        //   State 2:
+        //     final_weight: [0..=0]            // from path: tsid0 + terminal A
+        
+        let mut exp_state0 = DWAState::default();
+        exp_state0.trans_weights.insert(0, Weight::from_iter([0usize, 3]));
+        exp_state0.trans_weights.insert(1, Weight::from_iter([0usize, 3]));
+        exp_state0.transitions.insert(0, 1);
+        exp_state0.transitions.insert(1, 2);
+        
+        let mut exp_state1 = DWAState::default();
+        exp_state1.final_weight = Some(Weight::from_iter([3usize]));
+        
+        let mut exp_state2 = DWAState::default();
+        exp_state2.final_weight = Some(Weight::from_iter([0usize]));
+        
+        let expected_dwa = DWA {
+            states: DWAStates(vec![exp_state0, exp_state1, exp_state2]),
+            body: DWABody { start_state: 0 },
+        };
+        
+        println!("EXPECTED DWA:");
+        println!("{}", expected_dwa);
+        
+        // Convert
+        let output_dwa = convert_symbol_heavy_to_weight_heavy(&input_dwa, num_tsids, terminals_count);
+        
+        println!("OUTPUT DWA:");
+        println!("{}", output_dwa);
+        
+        // Test for semantic equivalence
+        stochastic_equivalence_test(output_dwa, expected_dwa);
     }
 }

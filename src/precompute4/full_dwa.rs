@@ -511,8 +511,11 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA, num_tsids: usize
     let final_bodies = Arc::try_unwrap(final_bodies_arc).unwrap().into_inner().unwrap();
     let mut combined_nwa_states = states_arena.into_inner();
     let combined_start_state = combined_nwa_states.add_state();
+    let terminals_count = parser.terminal_map.len() as Label;
     for (tsid, list) in final_bodies {
-        let label = tsid.0 as Label;
+        // SYMBOL-HEAVY: tsid transitions use label = terminals_count + tsid
+        // This distinguishes them from terminal transitions (labels 0..terminals_count-1)
+        let label = terminals_count + tsid.0 as Label;
         for (body, weight) in list {
             if !weight.is_empty() {
                 for &s in &body.start_states {
