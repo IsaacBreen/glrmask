@@ -62,75 +62,60 @@ impl<'a> GrammarConstraintState<'a> {
                 continue;
             }
 
-            // Prune GSS based on disallowed terminals before starting.
-            let mut gss = glr_state.stack.clone();
+            // WEIGHT-HEAVY: Create tsid mask for this tokenizer state
+            // The mask has bit set at every tsid + M*i where i is in 0..N
+            let tsid_mask = if self.parent.num_tsids > 0 {
+                weight_expansion::create_initial_weight_for_tsid(
+                    tokenizer_state_id.0, 
+                    self.parent.num_tsids, 
+                    self.parent.parser_dwa_vocab.internal_max_llm_token
+                )
+            } else {
+                Weight::all()
+            };
+
+            // Prune GSS based on disallowed terminals AND apply tsid mask
+            let gss = glr_state.stack.clone();
             let possible_matches = &self.parent.possible_matches;
-            gss = gss.apply_and_prune(|acc| {
-                if acc.terminals_union.is_empty() {
-                    return Some(acc.clone());
-                }
-                let mut forbidden_llm_tokens = RangeSet::zeros();
-                for (&tokenizer_state_id, disallowed_in_state) in &acc.terminals_union {
-                    if disallowed_in_state.is_empty() { continue; }
-                    if let Some(state_matches) = possible_matches.get(&TokenizerStateID(tokenizer_state_id)) {
-                        for (terminal_id, llm_tokens) in state_matches {
-                            if disallowed_in_state.contains(terminal_id.0) {
-                                forbidden_llm_tokens |= llm_tokens;
+            let gss = gss.apply_and_prune(|acc| {
+                let mut result_rsb = acc.llm_tokens_union.inner.as_ref().clone();
+                
+                // Apply disallowed terminal filtering
+                if !acc.terminals_union.is_empty() {
+                    let mut forbidden_llm_tokens = RangeSet::zeros();
+                    for (&tsid, disallowed_in_state) in &acc.terminals_union {
+                        if disallowed_in_state.is_empty() { continue; }
+                        if let Some(state_matches) = possible_matches.get(&TokenizerStateID(tsid)) {
+                            for (terminal_id, llm_tokens) in state_matches {
+                                if disallowed_in_state.contains(terminal_id.0) {
+                                    forbidden_llm_tokens |= llm_tokens;
+                                }
                             }
                         }
                     }
+                    if !forbidden_llm_tokens.is_empty() {
+                        result_rsb = &result_rsb - forbidden_llm_tokens.inner.as_ref();
+                    }
                 }
-
-                if forbidden_llm_tokens.is_empty() {
-                    return Some(acc.clone());
-                }
-                let mut new_acc = acc.clone();
-                new_acc.llm_tokens_union -= &forbidden_llm_tokens;
-                if new_acc.llm_tokens_union.is_empty() { None } else { Some(new_acc) }
+                
+                // Apply tsid mask intersection
+                result_rsb = &result_rsb & &tsid_mask.rsb;
+                
+                if result_rsb.is_empty() { None } else { Some(result_rsb) }
             });
 
             if gss.is_empty() {
                 continue;
             }
 
-            let dwa = &self.parent.parser_dwa;
+            // Queue the GSS at the DWA start state
             let dwa_start_id = dwa.body.start_state;
-            if dwa.states.len() <= dwa_start_id { continue; }
-            let dwa_start_state = &dwa.states[dwa_start_id];
-
-            if let Some((target_wa_state_id, weight)) = dwa_start_state.get_transition(tokenizer_state_id.0 as Label) {
-                // WEIGHT-HEAVY: Create tsid mask for this tokenizer state
-                // The mask has bit set at every tsid + M*i where i is in 0..N
-                let tsid_mask = if self.parent.num_tsids > 0 {
-                    let mask = weight_expansion::create_initial_weight_for_tsid(
-                        tokenizer_state_id.0, 
-                        self.parent.num_tsids, 
-                        self.parent.parser_dwa_vocab.internal_max_llm_token
-                    );
-                    println!("DEBUG: tsid={}, num_tsids={}, max_tok={}, mask={:?}", 
-                        tokenizer_state_id.0, self.parent.num_tsids, 
-                        self.parent.parser_dwa_vocab.internal_max_llm_token, mask);
-                    mask
-                } else {
-                    Weight::all()
-                };
-                
-                let f = |acc: &Acc| {
-                    // Intersect with both the transition weight AND the tsid mask
-                    let new_rsb = acc.llm_tokens_union.inner.as_ref() & &weight.rsb & &tsid_mask.rsb;
-                    if new_rsb.is_empty() { None } else { Some(new_rsb) }
-                };
-                let weighted_gss = gss.apply_and_prune(f);
-
-                if !weighted_gss.is_empty() {
-                    queue
-                        .entry(weighted_gss.max_depth())
-                        .or_default()
-                        .entry(target_wa_state_id)
-                        .and_modify(|existing| *existing = existing.merge(&weighted_gss))
-                        .or_insert(weighted_gss);
-                }
-            }
+            queue
+                .entry(gss.max_depth())
+                .or_default()
+                .entry(dwa_start_id)
+                .and_modify(|existing| *existing = existing.merge(&gss))
+                .or_insert(gss);
         }
 
         // 2. Main worklist loop
