@@ -513,4 +513,225 @@ mod tests {
             merged
         );
     }
+
+    /// Test the three-branch structure from user request.
+    ///
+    /// ```text
+    /// START{fw: []} -{s=a, w: [0,1,2,3]}-> A1{fw: []} -{s=d, w: [0,1,2,3]}-> A2{fw: [0]} -{s=d, w: [0,1,2,3]}-> END{fw: [3]}
+    /// START{fw: []} -{s=b, w: [0,1,2,3]}-> B1{fw: []} -{s=d, w: [0,1,2,3]}-> B2{fw: [1]} -{s=d, w: [0,1,2,3]}-> END{fw: [3]}
+    /// START{fw: []} -{s=c, w: [0,1,2,3]}-> C1{fw: []} -{s=d, w: [0,1,2,3]}-> C2{fw: [2]} -{s=d, w: [0,1,2,3]}-> END{fw: [3]}
+    /// ```
+    ///
+    /// After weight pushing and minimization, this should become:
+    ///
+    /// ```text
+    /// START{fw: []} -{s=a, w: [0,3]}-> A1{fw: []}
+    /// START{fw: []} -{s=b, w: [1,3]}-> A1{fw: []}
+    /// START{fw: []} -{s=c, w: [2,3]}-> A1{fw: []}
+    /// A1{fw: []} -{s=d, w: [0,1,2,3]}-> A2{fw: [0,1,2]} -{s=d, w: [0,1,2,3]}-> END{fw: [3]}
+    /// ```
+    #[test]
+    fn test_three_branch_weight_push_merge() {
+        let mut nwa = NWA::new();
+        nwa.states.0.clear();
+
+        // Create states
+        let start = nwa.states.add_state(); // START
+        let a1 = nwa.states.add_state();    // A1
+        let b1 = nwa.states.add_state();    // B1
+        let c1 = nwa.states.add_state();    // C1
+        let a2 = nwa.states.add_state();    // A2 (fw: [0])
+        let b2 = nwa.states.add_state();    // B2 (fw: [1])
+        let c2 = nwa.states.add_state();    // C2 (fw: [2])
+        let end = nwa.states.add_state();   // END (fw: [3])
+
+        nwa.body.start_states = vec![start];
+
+        // Labels
+        let label_a: Label = 97; // 'a'
+        let label_b: Label = 98; // 'b'
+        let label_c: Label = 99; // 'c'
+        let label_d: Label = 100; // 'd'
+
+        // Weight: [0,1,2,3] = from_iter([0,1,2,3])
+        let w_all: Weight = [0usize, 1, 2, 3].into_iter().collect();
+        let w_0 = Weight::from_item(0);
+        let w_1 = Weight::from_item(1);
+        let w_2 = Weight::from_item(2);
+        let w_3 = Weight::from_item(3);
+
+        // START -> A1/B1/C1
+        nwa.add_transition(start, label_a, a1, w_all.clone()).unwrap();
+        nwa.add_transition(start, label_b, b1, w_all.clone()).unwrap();
+        nwa.add_transition(start, label_c, c1, w_all.clone()).unwrap();
+
+        // A1/B1/C1 -> A2/B2/C2
+        nwa.add_transition(a1, label_d, a2, w_all.clone()).unwrap();
+        nwa.add_transition(b1, label_d, b2, w_all.clone()).unwrap();
+        nwa.add_transition(c1, label_d, c2, w_all.clone()).unwrap();
+
+        // A2/B2/C2 -> END
+        nwa.add_transition(a2, label_d, end, w_all.clone()).unwrap();
+        nwa.add_transition(b2, label_d, end, w_all.clone()).unwrap();
+        nwa.add_transition(c2, label_d, end, w_all.clone()).unwrap();
+
+        // Set final weights
+        nwa.states[a2].final_weight = Some(w_0.clone());
+        nwa.states[b2].final_weight = Some(w_1.clone());
+        nwa.states[c2].final_weight = Some(w_2.clone());
+        nwa.states[end].final_weight = Some(w_3.clone());
+
+        // Determinize the NWA
+        let mut dwa = nwa.determinize();
+
+        // Debug: print DWA structure
+        println!("DWA structure before merge:");
+        println!("  States: {}", dwa.states.len());
+        println!("  Transitions: {}", dwa.states.num_transitions());
+        for (sid, state) in dwa.states.iter().enumerate() {
+            println!("  State {}: fw={:?}", sid, state.final_weight.as_ref().map(|w| w.rsb.iter().collect::<Vec<_>>()));
+            for (&label, &target) in &state.transitions {
+                let tw = state.trans_weights.get(&label).map(|w| w.rsb.iter().collect::<Vec<_>>());
+                println!("    -{} w={:?}-> {}", char::from_u32(label as u32).unwrap_or('?'), tw, target);
+            }
+        }
+
+        // Helper function to trace path and compute weight
+        fn trace_path(dwa: &DWA, path: &[Label]) -> Weight {
+            let mut state = dwa.body.start_state;
+            let mut weight = Weight::all();
+
+            for &label in path {
+                if let Some(&target) = dwa.states[state].transitions.get(&label) {
+                    if let Some(tw) = dwa.states[state].trans_weights.get(&label) {
+                        weight = &weight & tw;
+                    }
+                    state = target;
+                } else {
+                    return Weight::zeros();
+                }
+            }
+
+            // Intersect with final weight
+            if let Some(ref fw) = dwa.states[state].final_weight {
+                weight = &weight & fw;
+            } else {
+                return Weight::zeros();
+            }
+
+            weight
+        }
+
+        // Record path weights before merge
+        let path_add_before = trace_path(&dwa, &[label_a, label_d, label_d]);
+        let path_bdd_before = trace_path(&dwa, &[label_b, label_d, label_d]);
+        let path_cdd_before = trace_path(&dwa, &[label_c, label_d, label_d]);
+        let path_ad_before = trace_path(&dwa, &[label_a, label_d]);
+        let path_bd_before = trace_path(&dwa, &[label_b, label_d]);
+        let path_cd_before = trace_path(&dwa, &[label_c, label_d]);
+
+        println!("\nPath weights before merge:");
+        println!("  'add' (to END): {:?}", path_add_before.rsb.iter().collect::<Vec<_>>());
+        println!("  'bdd' (to END): {:?}", path_bdd_before.rsb.iter().collect::<Vec<_>>());
+        println!("  'cdd' (to END): {:?}", path_cdd_before.rsb.iter().collect::<Vec<_>>());
+        println!("  'ad' (to A2): {:?}", path_ad_before.rsb.iter().collect::<Vec<_>>());
+        println!("  'bd' (to B2): {:?}", path_bd_before.rsb.iter().collect::<Vec<_>>());
+        println!("  'cd' (to C2): {:?}", path_cd_before.rsb.iter().collect::<Vec<_>>());
+
+        let states_before = dwa.states.len();
+        let transitions_before = dwa.states.num_transitions();
+
+        // Apply weight-push merge
+        let merged = dwa.merge_by_weight_push();
+
+        println!("\nDWA structure after merge:");
+        println!("  States: {} (was {})", dwa.states.len(), states_before);
+        println!("  Transitions: {} (was {})", dwa.states.num_transitions(), transitions_before);
+        println!("  Merged: {} states", merged);
+        for (sid, state) in dwa.states.iter().enumerate() {
+            println!("  State {}: fw={:?}", sid, state.final_weight.as_ref().map(|w| w.rsb.iter().collect::<Vec<_>>()));
+            for (&label, &target) in &state.transitions {
+                let tw = state.trans_weights.get(&label).map(|w| w.rsb.iter().collect::<Vec<_>>());
+                println!("    -{} w={:?}-> {}", char::from_u32(label as u32).unwrap_or('?'), tw, target);
+            }
+        }
+
+        // Record path weights after merge
+        let path_add_after = trace_path(&dwa, &[label_a, label_d, label_d]);
+        let path_bdd_after = trace_path(&dwa, &[label_b, label_d, label_d]);
+        let path_cdd_after = trace_path(&dwa, &[label_c, label_d, label_d]);
+        let path_ad_after = trace_path(&dwa, &[label_a, label_d]);
+        let path_bd_after = trace_path(&dwa, &[label_b, label_d]);
+        let path_cd_after = trace_path(&dwa, &[label_c, label_d]);
+
+        println!("\nPath weights after merge:");
+        println!("  'add' (to END): {:?}", path_add_after.rsb.iter().collect::<Vec<_>>());
+        println!("  'bdd' (to END): {:?}", path_bdd_after.rsb.iter().collect::<Vec<_>>());
+        println!("  'cdd' (to END): {:?}", path_cdd_after.rsb.iter().collect::<Vec<_>>());
+        println!("  'ad' (to merged A2/B2/C2): {:?}", path_ad_after.rsb.iter().collect::<Vec<_>>());
+        println!("  'bd' (to merged A2/B2/C2): {:?}", path_bd_after.rsb.iter().collect::<Vec<_>>());
+        println!("  'cd' (to merged A2/B2/C2): {:?}", path_cd_after.rsb.iter().collect::<Vec<_>>());
+
+        // Verify semantics are preserved
+        // Paths to END should have weight [3]
+        assert_eq!(
+            path_add_before.rsb.iter().collect::<Vec<_>>(),
+            path_add_after.rsb.iter().collect::<Vec<_>>(),
+            "Path 'add' weight should be preserved"
+        );
+        assert_eq!(
+            path_bdd_before.rsb.iter().collect::<Vec<_>>(),
+            path_bdd_after.rsb.iter().collect::<Vec<_>>(),
+            "Path 'bdd' weight should be preserved"
+        );
+        assert_eq!(
+            path_cdd_before.rsb.iter().collect::<Vec<_>>(),
+            path_cdd_after.rsb.iter().collect::<Vec<_>>(),
+            "Path 'cdd' weight should be preserved"
+        );
+
+        // Paths to intermediate states should also be preserved
+        assert_eq!(
+            path_ad_before.rsb.iter().collect::<Vec<_>>(),
+            path_ad_after.rsb.iter().collect::<Vec<_>>(),
+            "Path 'ad' weight should be preserved"
+        );
+        assert_eq!(
+            path_bd_before.rsb.iter().collect::<Vec<_>>(),
+            path_bd_after.rsb.iter().collect::<Vec<_>>(),
+            "Path 'bd' weight should be preserved"
+        );
+        assert_eq!(
+            path_cd_before.rsb.iter().collect::<Vec<_>>(),
+            path_cd_after.rsb.iter().collect::<Vec<_>>(),
+            "Path 'cd' weight should be preserved"
+        );
+
+        // We should have merged A2/B2/C2 (which have identical outgoing but different final_weights)
+        // Original: start, a1, b1, c1, a2, b2, c2, end = 8 states
+        // Merged: A1/B1/C1 should also be mergeable if they have identical outgoing
+        // Expected: start, merged_a1_b1_c1, merged_a2_b2_c2, end = 4 states
+        // Or at minimum: start, a1, b1, c1, merged_a2_b2_c2, end = 6 states
+
+        println!("\nExpected merges:");
+        println!("  A2, B2, C2 have identical outgoing (->END on 'd') but different fw [0], [1], [2]");
+        println!("  They should merge into one state with fw [0,1,2]");
+        println!("  A1, B1, C1 also have identical outgoing (->merged on 'd')");
+        println!("  After first merge, they may become identical and merge further");
+
+        // At minimum, we should have merged a2/b2/c2 (3 -> 1 = 2 merges)
+        assert!(
+            merged >= 2,
+            "Should have merged at least 2 states (a2, b2, c2 -> 1), but only merged {}",
+            merged
+        );
+
+        // After merging, we should have fewer states
+        assert!(
+            dwa.states.len() < states_before,
+            "Should have fewer states after merge: {} >= {}",
+            dwa.states.len(),
+            states_before
+        );
+    }
 }
