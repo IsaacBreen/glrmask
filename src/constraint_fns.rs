@@ -42,6 +42,213 @@ impl<'a> GrammarConstraintState<'a> {
     /// Compute the internal mask (RangeSet of internal token IDs) for the current state.
     /// This is the core computation shared by get_mask and fill_mask_i32.
     fn compute_internal_mask(&self) -> RangeSet {
+        // Dispatch based on regime
+        if let Some(ref params) = self.parent.weight_expansion_params {
+            self.compute_internal_mask_weight_heavy(params)
+        } else {
+            self.compute_internal_mask_symbol_heavy()
+        }
+    }
+
+    /// Weight-heavy regime: tsid is encoded in expanded weights (N×M).
+    fn compute_internal_mask_weight_heavy(
+        &self,
+        params: &crate::precompute4::weighted_automata::WeightExpansionParams,
+    ) -> RangeSet {
+        let mut final_mask_expanded = RangeSet::zeros();
+        if self.state.is_empty() {
+            crate::debug!(7, "compute_internal_mask_weight_heavy: state is empty");
+            return final_mask_expanded;
+        }
+        crate::debug!(5, "compute_internal_mask_weight_heavy: {} tsids in state", self.state.len());
+
+        let mut queue: BTreeMap<isize, BTreeMap<WAStateID, LeveledGSS<ParseStateEdgeContent, RangeSetBlaze<usize>>>> = BTreeMap::new();
+        let dwa = &self.parent.parser_dwa;
+        let dwa_start_state_id = dwa.body.start_state;
+        let dwa_start_state = &dwa.states[dwa_start_state_id];
+
+        crate::debug!(5, ">>> Seeding initial states (weight-heavy regime)");
+        crate::debug!(5, "    Start state {} has {} transitions", dwa_start_state_id, dwa_start_state.transitions.len());
+        
+        // 1. Seed initial states
+        // In weight-heavy regime, we still have tsid transitions at start state
+        // (the weights are expanded, but structure is similar to symbol-heavy)
+        for (&tokenizer_state_id, glr_state) in &self.state {
+            if glr_state.stack.is_empty() {
+                crate::debug!(7, "    tsid {}: stack empty, skipping", tokenizer_state_id.0);
+                continue;
+            }
+
+            // Prune GSS based on disallowed terminals before starting.
+            let mut gss = glr_state.stack.clone();
+            let possible_matches = &self.parent.possible_matches;
+            gss = gss.apply_and_prune(|acc| {
+                if acc.terminals_union.is_empty() {
+                    return Some(acc.clone());
+                }
+                let mut forbidden_llm_tokens = RangeSet::zeros();
+                for (&tsid, disallowed_in_state) in &acc.terminals_union {
+                    if disallowed_in_state.is_empty() { continue; }
+                    if let Some(state_matches) = possible_matches.get(&TokenizerStateID(tsid)) {
+                        for (terminal_id, llm_tokens) in state_matches {
+                            if disallowed_in_state.contains(terminal_id.0) {
+                                forbidden_llm_tokens |= llm_tokens;
+                            }
+                        }
+                    }
+                }
+
+                if forbidden_llm_tokens.is_empty() {
+                    return Some(acc.clone());
+                }
+                let mut new_acc = acc.clone();
+                new_acc.llm_tokens_union -= &forbidden_llm_tokens;
+                if new_acc.llm_tokens_union.is_empty() { None } else { Some(new_acc) }
+            });
+
+            if gss.is_empty() {
+                crate::debug!(7, "    tsid {}: GSS empty after prune, skipping", tokenizer_state_id.0);
+                continue;
+            }
+
+            // Follow the tsid transition from start state (same as symbol-heavy)
+            // The transition weight is already expanded to N×M space
+            let tsid = tokenizer_state_id.0;
+            if let Some((target_wa_state_id, trans_weight)) = dwa_start_state.get_transition(tsid as Label) {
+                crate::debug!(5, "    tsid {}: found transition to state {}", tsid, target_wa_state_id);
+                // Apply tsid-specific initial weight by intersecting with expanded GSS weights
+                let f = |acc: &Acc| {
+                    // First expand acc's llm_tokens to N×M space, restricted to this tsid
+                    // Check if weight is ALL (universe) - handle specially
+                    if acc.llm_tokens_union.is_all() {
+                        // All tokens allowed - expand to all indices for this tsid
+                        let mut expanded_rsb = RangeSetBlaze::<usize>::new();
+                        for token_id in 0..params.num_tokens {
+                            let idx = params.to_expanded_index(token_id, tsid);
+                            expanded_rsb.insert(idx);
+                        }
+                        // Then intersect with the transition weight
+                        let new_rsb = &expanded_rsb & &trans_weight.rsb;
+                        if new_rsb.is_empty() { None } else { Some(new_rsb) }
+                    } else {
+                        let mut expanded_rsb = RangeSetBlaze::<usize>::new();
+                        for range in acc.llm_tokens_union.inner.as_ref().ranges() {
+                            let start = *range.start();
+                            let end = *range.end();
+                            // Sanity check: don't try to expand huge ranges
+                            if end.saturating_sub(start) > 1_000_000 {
+                                // Treat as all tokens
+                                for token_id in 0..params.num_tokens {
+                                    let idx = params.to_expanded_index(token_id, tsid);
+                                    expanded_rsb.insert(idx);
+                                }
+                                break;
+                            }
+                            for token_id in start..=end {
+                                if token_id >= params.num_tokens {
+                                    break; // Don't go beyond valid token range
+                                }
+                                let idx = params.to_expanded_index(token_id, tsid);
+                                expanded_rsb.insert(idx);
+                            }
+                        }
+                        // Then intersect with the transition weight
+                        let new_rsb = &expanded_rsb & &trans_weight.rsb;
+                        if new_rsb.is_empty() { None } else { Some(new_rsb) }
+                    }
+                };
+                let weighted_gss = gss.apply_and_prune(f);
+
+                if !weighted_gss.is_empty() {
+                    crate::debug!(5, "    tsid {}: added to queue, depth={}", tsid, weighted_gss.max_depth());
+                    queue
+                        .entry(weighted_gss.max_depth())
+                        .or_default()
+                        .entry(target_wa_state_id)
+                        .and_modify(|existing| *existing = existing.merge(&weighted_gss))
+                        .or_insert(weighted_gss);
+                } else {
+                    crate::debug!(5, "    tsid {}: weighted_gss empty after apply_and_prune", tsid);
+                }
+            } else {
+                crate::debug!(5, "    tsid {}: NO transition from start state", tsid);
+            }
+        }
+
+        // 2. Main worklist loop (same as symbol-heavy, but weights are expanded)
+        crate::debug!(5, ">>> Starting worklist loop, queue has {} depths", queue.len());
+        while let Some((_depth, states_at_depth)) = queue.pop_last() {
+            for (current_wa_state_id, gss) in states_at_depth {
+                let dwa_state = &dwa.states[current_wa_state_id];
+
+                // Check for final state
+                if let Some(final_weight) = &dwa_state.final_weight {
+                    if let Some(reduced_acc) = gss.reduce_acc() {
+                        let final_tokens = &reduced_acc & &final_weight.rsb;
+                        if !final_tokens.is_empty() {
+                            crate::debug!(7, "Adding {} tokens from final state {}", final_tokens.ranges_len(), current_wa_state_id);
+                            final_mask_expanded |= RangeSet::from(final_tokens);
+                        }
+                    }
+                }
+
+                // Process transitions
+                for peeked_edge in gss.peek() {
+                    let parser_state_id = peeked_edge.state_id.0 as Label;
+                    if let Some((target_wa_state_id, trans_weight)) = dwa_state.get_transition(parser_state_id) {
+                        let isolated_gss = gss.isolate(Some(peeked_edge));
+                        let popped_gss = isolated_gss.pop();
+                        if popped_gss.is_empty() { continue; }
+
+                        let f = |rsb: &RangeSetBlaze<usize>| {
+                            let new_rsb = rsb & &trans_weight.rsb;
+                            if new_rsb.is_empty() { None } else { Some(new_rsb) }
+                        };
+                        let final_gss = popped_gss.apply_and_prune(f);
+
+                        if !final_gss.is_empty() {
+                            queue
+                                .entry(final_gss.max_depth())
+                                .or_default()
+                                .entry(target_wa_state_id)
+                                .and_modify(|existing| *existing = existing.merge(&final_gss))
+                                .or_insert(final_gss);
+                        }
+                    }
+
+                    if let Some((target_wa_state_id, trans_weight)) = dwa_state.get_transition(crate::precompute4::utils::DEFAULT_TRANSITION_SYMBOL) {
+                        let isolated_gss = gss.isolate(Some(peeked_edge));
+                        let popped_gss = isolated_gss.pop();
+                        if popped_gss.is_empty() { continue; }
+
+                        let f = |rsb: &RangeSetBlaze<usize>| {
+                            let new_rsb = rsb & &trans_weight.rsb;
+                            if new_rsb.is_empty() { None } else { Some(new_rsb) }
+                        };
+                        let final_gss = popped_gss.apply_and_prune(f);
+
+                        if !final_gss.is_empty() {
+                            queue
+                                .entry(final_gss.max_depth())
+                                .or_default()
+                                .entry(target_wa_state_id)
+                                .and_modify(|existing| *existing = existing.merge(&final_gss))
+                                .or_insert(final_gss);
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3. Contract the expanded mask back to N tokens
+        // A token is valid if ANY tsid bit is set for it
+        let expanded_weight = crate::precompute4::weighted_automata::Weight::from_rsb(final_mask_expanded.inner.as_ref().clone());
+        let contracted = params.contract_weight_any_tsid(&expanded_weight);
+        contracted.rsb.clone().into()
+    }
+
+    /// Symbol-heavy regime (legacy): tsid is encoded as transition label.
+    fn compute_internal_mask_symbol_heavy(&self) -> RangeSet {
         let mut final_mask_internal = RangeSet::zeros();
         if self.state.is_empty() {
             crate::debug!(7, "compute_internal_mask: state is empty");

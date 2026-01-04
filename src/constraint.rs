@@ -40,7 +40,7 @@ use crate::datastructures::bitset::Bitset;
 use crate::datastructures::gss_acc::Acc;
 use crate::glr::parser::{ExpectElse, ParseStateEdgeContent};
 use crate::precompute4::weighted_automata::{DWA, NWA};
-use crate::precompute4::weighted_automata::{RangeSet as WARangeSet, Weight};
+use crate::precompute4::weighted_automata::{RangeSet as WARangeSet, Weight, WeightExpansionParams};
 
 pub use crate::constraint_vocab::*;
 use crate::constraint_precompute::run_precompute1;
@@ -322,7 +322,17 @@ pub struct GrammarConstraint {
     /// This deterministic weighted automaton encodes how grammar terminals
     /// interact with parse stacks, with weights being sparse bitvectors
     /// over LLM token equivalence classes.
+    /// 
+    /// In weight-heavy regime (when `weight_expansion_params` is Some):
+    /// - Weights have length N×M (N tokens, M tsids)
+    /// - Layout: index = token_id * M + tsid
+    /// - No special initial transitions per tsid
     pub parser_dwa: ParserDWA,
+
+    /// Parameters for weight expansion (weight-heavy regime).
+    /// If Some, the parser_dwa uses expanded weights of length N×M.
+    /// If None, using legacy symbol-heavy regime with tsid transitions.
+    pub weight_expansion_params: Option<WeightExpansionParams>,
 
     /// LLM vocabulary stored as a trie for efficient lookup and compact serialization.
     pub vocab_trie: Arc<LLMVocabTrie>,
@@ -441,6 +451,8 @@ struct GrammarConstraintJSON {
     original_llm_vocab: Option<LLMVocab>,
     /// Fallback: just max_original_llm_token_id if full vocab not available
     max_orig_id: Option<usize>,
+    /// Weight expansion params for weight-heavy regime
+    weight_expansion_params: Option<WeightExpansionParams>,
 }
 
 impl JSONConvertible for GrammarConstraintJSON {
@@ -465,6 +477,12 @@ impl JSONConvertible for GrammarConstraintJSON {
         }
         if let Some(max_id) = self.max_orig_id {
             obj.insert("max_orig_id".to_string(), JSONNode::UInt(max_id as u128));
+        }
+        if let Some(ref params) = self.weight_expansion_params {
+            let mut params_obj = std::collections::BTreeMap::new();
+            params_obj.insert("num_tokens".to_string(), JSONNode::UInt(params.num_tokens as u128));
+            params_obj.insert("num_tsids".to_string(), JSONNode::UInt(params.num_tsids as u128));
+            obj.insert("weight_expansion_params".to_string(), JSONNode::Object(params_obj));
         }
         
         JSONNode::Object(obj)
@@ -510,6 +528,25 @@ impl JSONConvertible for GrammarConstraintJSON {
                             JSONNode::Int(v) => Some(*v as usize),
                             _ => None,
                         }),
+                    weight_expansion_params: obj.get("weight_expansion_params")
+                        .and_then(|n| match n {
+                            JSONNode::Object(params_obj) => {
+                                let num_tokens = params_obj.get("num_tokens")
+                                    .and_then(|v| match v {
+                                        JSONNode::UInt(u) => Some(*u as usize),
+                                        JSONNode::Int(i) => Some(*i as usize),
+                                        _ => None,
+                                    })?;
+                                let num_tsids = params_obj.get("num_tsids")
+                                    .and_then(|v| match v {
+                                        JSONNode::UInt(u) => Some(*u as usize),
+                                        JSONNode::Int(i) => Some(*i as usize),
+                                        _ => None,
+                                    })?;
+                                Some(WeightExpansionParams { num_tokens, num_tsids })
+                            }
+                            _ => None,
+                        }),
                 })
             }
             _ => Err("Expected object for GrammarConstraintJSON".to_string()),
@@ -534,6 +571,7 @@ impl JSONConvertible for GrammarConstraint {
             commit_vocab: None,
             original_llm_vocab: None,
             max_orig_id: Some(self.parser_dwa_vocab.max_original_llm_token_id),
+            weight_expansion_params: self.weight_expansion_params.clone(),
         };
         intermediate.to_json()
     }
@@ -579,6 +617,7 @@ impl JSONConvertible for GrammarConstraint {
             tokenizer,
             parser: intermediate.parser,
             parser_dwa: intermediate.dwa,
+            weight_expansion_params: intermediate.weight_expansion_params,
             vocab_trie,
             commit_vocab,
             token_name_map: intermediate.token_name_map,
@@ -1813,7 +1852,23 @@ impl GrammarConstraint {
         }
 
         parser_dwa.states.clip_weights(vocab.internal_max_llm_token);
-        optimize_dwa_and_vocab(&mut parser_dwa, &mut vocab, &mut possible_matches_precompute1);
+        
+        // Convert to weight-heavy regime
+        // num_tokens = internal_max_llm_token + 1 (0-indexed)
+        // num_tsids = tokenizer.max_state()
+        let weight_expansion_params = {
+            let num_tokens = vocab.internal_max_llm_token + 1;
+            let num_tsids = tokenizer.max_state();
+            crate::debug!(3, "Converting to weight-heavy regime: {} tokens × {} tsids = {} expanded weight size",
+                num_tokens, num_tsids, num_tokens * num_tsids);
+            
+            let (weight_heavy_dwa, weight_expansion_params) = parser_dwa.to_weight_heavy(num_tokens, num_tsids);
+            parser_dwa = weight_heavy_dwa;
+            
+            crate::debug!(3, "Weight-heavy DWA: {} states, {} transitions",
+                parser_dwa.states.len(), parser_dwa.states.num_transitions());
+            Some(weight_expansion_params)
+        };
 
         let internal_to_original_sparse_matrix =
             StageVocab::build_internal_to_original_sparse_matrix(
@@ -1832,6 +1887,7 @@ impl GrammarConstraint {
             tokenizer,
             parser,
             parser_dwa,
+            weight_expansion_params,
             possible_matches: possible_matches_precompute1,
             vocab_trie,
             commit_vocab,
