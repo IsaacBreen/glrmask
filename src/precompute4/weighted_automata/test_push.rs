@@ -212,3 +212,97 @@ fn test_field_name_optimization() {
 
     run_push_optimization_test(input, expected);
 }
+
+// =============================================================================
+// TEST 3: Diamond Structure (User Requested)
+// =============================================================================
+// Input:
+//   START -[0, w=ALL]-> A (fw={0}) -[0, w=ALL]-> END (fw={3})
+//   START -[1, w=ALL]-> B (fw={1}) -[0, w=ALL]-> END (fw={3})
+//   START -[2, w=ALL]-> C (fw={2}) -[0, w=ALL]-> END (fw={3})
+//
+// States A, B, C are distinct due to fw.
+//
+// Expected:
+//   START -[0, w={0}]-> ABC
+//   START -[1, w={1}]-> ABC
+//   START -[2, w={2}]-> ABC
+//   ABC (fw={0,1,2}) -[0, w=ALL]-> END (fw={3})
+
+#[test]
+fn test_diamond_structure() {
+    // Labels
+    let l0: Label = 0;
+    let l1: Label = 1;
+    let l2: Label = 2; // For transition inputs
+    
+    // For weights, we use standard simple weights
+    let all = Weight::all();
+    let w0 = Weight::from_item(0);
+    let w1 = Weight::from_item(1);
+    let w2 = Weight::from_item(2);
+    let w3 = Weight::from_item(3);
+    
+    // In expected, ABC final weight is union of {0}, {1}, {2}
+    let w012 = &(&w0 | &w1) | &w2;
+
+    let input = {
+        let mut nwa = NWA::new();
+        nwa.states.0.clear();
+        let start = nwa.states.add_state();
+        let a = nwa.states.add_state();
+        let b = nwa.states.add_state();
+        let c = nwa.states.add_state();
+        let end = nwa.states.add_state();
+        
+        nwa.body.start_states = vec![start];
+
+        // START -> A/B/C
+        nwa.add_transition(start, l0, a, all.clone()).unwrap(); // Use label 0
+        nwa.add_transition(start, l1, b, all.clone()).unwrap(); // Use label 1
+        nwa.add_transition(start, l2, c, all.clone()).unwrap(); // Use label 2
+
+        // A/B/C -> END (on label 0)
+        nwa.add_transition(a, l0, end, all.clone()).unwrap();
+        nwa.add_transition(b, l0, end, all.clone()).unwrap();
+        nwa.add_transition(c, l0, end, all.clone()).unwrap();
+
+        nwa.states[a].final_weight = Some(w0.clone());
+        nwa.states[b].final_weight = Some(w1.clone());
+        nwa.states[c].final_weight = Some(w2.clone());
+        
+        nwa.states[end].final_weight = Some(w3.clone());
+
+        nwa.determinize()
+    };
+
+    let expected = {
+        let mut states = DWAStates::default();
+        let start = states.add_state();
+        let abc = states.add_state(); // Merged A,B,C
+        let end = states.add_state();
+
+        // START -> ABC (pushed weights)
+        states[start].transitions.insert(l0, abc);
+        states[start].trans_weights.insert(l0, w0.clone());
+
+        states[start].transitions.insert(l1, abc);
+        states[start].trans_weights.insert(l1, w1.clone());
+
+        states[start].transitions.insert(l2, abc);
+        states[start].trans_weights.insert(l2, w2.clone());
+
+        // ABC -> END (loosened A,B,C all had transitions to end with ALL)
+        states[abc].transitions.insert(l0, end);
+        states[abc].trans_weights.insert(l0, all.clone());
+        
+        // Final weight of merged state is union of pushed-out components
+        states[abc].final_weight = Some(w012.clone());
+
+        states[end].final_weight = Some(w3.clone());
+
+        DWA { body: DWABody { start_state: start }, states }
+    };
+
+    run_push_optimization_test(input, expected);
+}
