@@ -59,6 +59,7 @@ mod tests {
         ];
         
         for path in paths {
+            println!("Trying to load GPT-2 vocab from {}", path);
             let vocab_path = std::path::Path::new(path);
             if vocab_path.exists() {
                 match load_gpt2_vocab_from_file(vocab_path) {
@@ -87,11 +88,8 @@ mod tests {
         None
     }
     
-    /// Decode a GPT-2 BPE token string to its actual byte representation.
-    /// GPT-2 uses a byte-level BPE where bytes 0-255 are mapped to specific Unicode characters.
-    fn gpt2_bpe_decode(token_str: &str) -> Vec<u8> {
-        // Build the byte decoder: maps Unicode chars back to bytes
-        // This is the inverse of the bytes_to_unicode() function from GPT-2
+    /// Build the byte decoder map once.
+    fn build_gpt2_byte_decoder() -> HashMap<char, u8> {
         let mut byte_decoder: std::collections::HashMap<char, u8> = std::collections::HashMap::new();
         
         // Printable ASCII chars (except space) map to themselves
@@ -114,7 +112,12 @@ mod tests {
                 n += 1;
             }
         }
-        
+        byte_decoder
+    }
+
+    /// Decode a GPT-2 BPE token string to its actual byte representation.
+    /// GPT-2 uses a byte-level BPE where bytes 0-255 are mapped to specific Unicode characters.
+    fn gpt2_bpe_decode(token_str: &str, byte_decoder: &HashMap<char, u8>) -> Vec<u8> {
         // Decode the token string
         token_str.chars().map(|c| {
             *byte_decoder.get(&c).unwrap_or(&(c as u8))
@@ -132,9 +135,12 @@ mod tests {
         let mut map = LLMTokenMap::new();
         let mut max_id = 0;
         
+        // Build the decoder map once
+        let byte_decoder = build_gpt2_byte_decoder();
+        
         for (token_str, token_id) in vocab {
             // Decode the BPE-encoded token string to actual bytes
-            let bytes = gpt2_bpe_decode(&token_str);
+            let bytes = gpt2_bpe_decode(&token_str, &byte_decoder);
             map.insert(bytes, LLMTokenID(token_id));
             if token_id > max_id {
                 max_id = token_id;
