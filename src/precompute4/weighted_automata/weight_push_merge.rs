@@ -381,23 +381,7 @@ mod tests {
         let mut dwa = nwa.determinize();
 
         // Debug: print DWA structure
-        println!("DWA structure before merge:");
-        for (sid, state) in dwa.states.0.iter().enumerate() {
-            let fw = match &state.final_weight {
-                Some(w) if w.is_all_fast() => "ALL".to_string(),
-                Some(w) => format!("{:?}", w.rsb.ranges().collect::<Vec<_>>()),
-                None => "none".to_string(),
-            };
-            println!("  State {} (fw={})", sid, fw);
-            for (&label, &target) in &state.transitions {
-                let tw = match state.trans_weights.get(&label) {
-                    Some(w) if w.is_all_fast() => "ALL".to_string(),
-                    Some(w) => format!("{:?}", w.rsb.ranges().collect::<Vec<_>>()),
-                    None => "implicit ALL".to_string(),
-                };
-                println!("    --[{} (tw={})]--> {}", label as u8 as char, tw, target);
-            }
-        }
+        println!("DWA structure before merge:\n{}", dwa);
 
         // Compute path weights before merge
         // Path "ax": should have weight intersecting with {100}
@@ -436,6 +420,8 @@ mod tests {
         println!("  Path 'bx' weight: {:?}", path_bx_before.rsb.iter().collect::<Vec<_>>());
 
         dwa.merge_by_weight_push();
+
+        println!("DWA structure after merge:\n{}", dwa);
 
         let path_ax_after = trace_path(&dwa, &[a, x]);
         let path_bx_after = trace_path(&dwa, &[b, x]);
