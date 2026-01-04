@@ -7,14 +7,14 @@ pub mod determinization_rustfst;
 pub mod dwa;
 pub mod json;
 pub mod nwa;
-pub mod residuated_push;
+pub mod push;
 pub mod simplification;
 pub mod simplification_experiment;
 pub mod unroll;
-pub mod weight_push_merge;
+
 mod test_determinization;
 pub(crate) mod test_weighted_automata;
-mod test_weight_push_optimization;
+mod test_push;
 
 pub use self::rangeset::RangeSet;
 pub use self::common::{format_i16_char, format_pos_code, format_word, NWAStateID, StateID, Weight};
