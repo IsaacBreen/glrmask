@@ -113,6 +113,11 @@ impl NWA {
     /// - Displays a progress bar for large automata.
     /// - **Formerly:** `determinize_to_dwa2`
     pub fn determinize_robust(&self) -> DWA {
+        // Handle empty NWA early
+        if self.states.0.is_empty() {
+            return DWA::new();
+        }
+        
         // 0. Optionally remove epsilons first via rustfst (produces more compact DWA)
         // This matches what determinize_to_dwa_with_rustfst does.
         let use_rm_epsilon = std::env::var("DWA_USE_RM_EPSILON").map_or(false, |v| v == "1");
