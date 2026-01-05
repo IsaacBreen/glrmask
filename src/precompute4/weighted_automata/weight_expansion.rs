@@ -446,13 +446,49 @@ mod tests {
         //   State 1:
         //     final_weight: [1]
 
-        // ...
+        let num_tsids = 2;
+        let terminals_count = 0; // No labeled parser-state transitions
+
+        let mut state0 = DWAState::default();
+        state0.trans_weights.insert(0, Weight::from_rsb(RangeSetBlaze::from_iter([0, 1])));
+        state0.trans_weights.insert(1, Weight::from_rsb(RangeSetBlaze::from_iter([0, 1])));
+        state0.transitions.insert(0, 1);
+        state0.transitions.insert(1, 1);
+
+        let mut state1 = DWAState::default();
+        state1.final_weight = Some(Weight::from_iter([1usize]));
+
+        let input_dwa = DWA {
+            states: DWAStates(vec![state0, state1]),
+            body: DWABody { start_state: 0 },
+        };
+
+        println!("INPUT DWA:");
+        println!("{}", input_dwa);
 
         // Build expected output DWA:
         // DWA (start: 0)
         //   State 0:
         //     final_weight: [2..=3]
 
-        // ...
+        let mut exp_state0 = DWAState::default();
+        exp_state0.final_weight = Some(Weight::from_rsb(RangeSetBlaze::from_iter([2, 3])));
+
+        let expected_dwa = DWA {
+            states: DWAStates(vec![exp_state0]),
+            body: DWABody { start_state: 0 },
+        };
+
+        println!("EXPECTED DWA:");
+        println!("{}", expected_dwa);
+
+        // Convert
+        let output_dwa = convert_symbol_heavy_to_weight_heavy(&input_dwa, num_tsids, terminals_count);
+
+        println!("OUTPUT DWA:");
+        println!("{}", output_dwa);
+
+        // Test for semantic equivalence
+        stochastic_equivalence_test(output_dwa, expected_dwa);
     }
 }
