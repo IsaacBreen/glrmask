@@ -775,6 +775,18 @@ mod tests {
             r#""fixed_value""#,
         ]);
     }
+
+    /// Simpler
+    #[test]
+    fn test_schema_const2() {
+        let schema = r#"{
+            "const": "x"
+        }"#;
+
+        test_schema_with_inputs(schema, &[
+            r#""x""#,
+        ]);
+    }
     
     /// Test that multi-byte tokens like `{"` work with simple object schema.
     /// Requires a valid GPT-2 vocab - will panic if not available.
