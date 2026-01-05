@@ -93,7 +93,13 @@ impl DWA {
         // Phase 3: Reweight final weights
         // final'(q) = final(q) ∪ ¬d[q]
         // This canonicalizes final weights so equivalent states become identical
+        // NOTE: Skip the start state - it has no incoming transitions to tighten,
+        // so loosening its final weight would change semantics.
+        let start_state = self.body.start_state;
         for q in 0..n {
+            if q == start_state {
+                continue;
+            }
             let d_q = &d[q];
             let complement_d_q = d_q.complement();
 
