@@ -279,20 +279,18 @@ impl DWA {
         if initial_num_states < 1000 {
             let mut changed = false;
             let prune1 = if DwaPass::PruneDeadEnds.is_enabled() { self.prune_dead_ends() } else { false };
-            let bidir1 = if DwaPass::BidirectionalRefinement.is_enabled() { self.bidirectional_weight_refinement() } else { false };  // Tighten weights bidirectionally
             if DwaPass::ResidualPush.is_enabled() { self.residuated_push(); }  // Push weights to enable merging
             let min1 = if DwaPass::Minimize.is_enabled() { self.minimize_states() } else { false };
             let push1 = if DwaPass::PushWeights.is_enabled() { self.push_weights_into_transitions_and_finals() } else { false };
             let push2 = if DwaPass::PushWeightsToInitial.is_enabled() { self.push_weights_to_initial() } else { false };
             let prune2 = if DwaPass::PruneUnreachable.is_enabled() { self.prune_unreachable() } else { false };
-            changed = prune1 || bidir1 || min1 || push1 || push2 || prune2;
+            changed = prune1 || min1 || push1 || push2 || prune2;
             
             // Second pass ONLY if pruning/pushing changed something (not just minimize)
             // After minimize, the DWA is already minimal so re-minimizing won't help
             // unless structure was changed by prune/push
-            if prune1 || bidir1 || push1 || push2 || prune2 {
+            if prune1 || push1 || push2 || prune2 {
                 if DwaPass::PruneDeadEnds.is_enabled() { self.prune_dead_ends(); }
-                if DwaPass::BidirectionalRefinement.is_enabled() { self.bidirectional_weight_refinement(); }
                 if DwaPass::ResidualPush.is_enabled() { self.residuated_push(); }  // Push again before second minimize
                 if DwaPass::Minimize.is_enabled() { self.minimize_states(); }
                 if DwaPass::PruneUnreachable.is_enabled() { self.prune_unreachable(); }
@@ -303,7 +301,6 @@ impl DWA {
         let mut total_changed = false;
         let ordering = &[
             DwaPass::PruneDeadEnds,
-            DwaPass::BidirectionalRefinement,  // Tighten weights bidirectionally
             DwaPass::ResidualPush,  // Push weights before minimize
             DwaPass::Minimize,
             DwaPass::PushWeights,
