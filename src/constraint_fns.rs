@@ -4,6 +4,7 @@ use crate::datastructures::leveled_gss::LeveledGSS;
 use crate::glr::parser::{GLRParserState, ParseStateEdgeContent};
 use crate::glr::table::TerminalID;
 use crate::precompute4::weighted_automata::common::{Label, StateID as WAStateID};
+use crate::precompute4::weighted_automata::weight_expansion::{create_tsid_mask_rsb, collapse_weight_rsb};
 use crate::tokenizer::TokenizerStateID;
 use profiler_macro::time_it;
 use range_set_blaze::RangeSetBlaze;
@@ -176,6 +177,157 @@ impl<'a> GrammarConstraintState<'a> {
         final_mask_internal
     }
 
+    /// Compute the internal mask using weight-heavy encoding.
+    /// 
+    /// In weight-heavy mode:
+    /// - num_tsids > 0 indicates weight-heavy encoding
+    /// - Weights are in N×M space where position = llm_token * M + tsid
+    /// - No tsid transitions at DWA start (replaced with epsilon transitions)
+    /// - We seed directly at the start state, applying tsid masks to weights
+    fn compute_internal_mask_weight_heavy(&self) -> RangeSet {
+        let num_tsids = self.parent.num_tsids;
+        let max_llm_token = self.parent.parser_dwa_vocab.internal_max_llm_token;
+        
+        let mut final_mask_internal = RangeSet::zeros();
+        if self.state.is_empty() {
+            return final_mask_internal;
+        }
+
+        let dwa = &self.parent.parser_dwa;
+        let dwa_start_state_id = dwa.body.start_state;
+        
+        // Queue: depth -> (dwa_state -> GSS with N×M weights)
+        let mut queue: BTreeMap<isize, BTreeMap<WAStateID, LeveledGSS<ParseStateEdgeContent, RangeSetBlaze<usize>>>> = BTreeMap::new();
+
+        // 1. Seed: For each tokenizer state, apply tsid mask and seed at DWA start
+        for (&tokenizer_state_id, glr_state) in &self.state {
+            if glr_state.stack.is_empty() {
+                continue;
+            }
+            
+            let tsid = tokenizer_state_id.0;
+            let tsid_mask = create_tsid_mask_rsb(tsid, num_tsids, max_llm_token);
+            
+            // Prune GSS based on disallowed terminals (same as symbol-heavy)
+            let mut gss = glr_state.stack.clone();
+            let possible_matches = &self.parent.possible_matches;
+            gss = gss.apply_and_prune(|acc| {
+                if acc.terminals_union.is_empty() {
+                    return Some(acc.clone());
+                }
+                let mut forbidden_llm_tokens = RangeSet::zeros();
+                for (&ts_id, disallowed_in_state) in &acc.terminals_union {
+                    if disallowed_in_state.is_empty() { continue; }
+                    if let Some(state_matches) = possible_matches.get(&TokenizerStateID(ts_id)) {
+                        for (terminal_id, llm_tokens) in state_matches {
+                            if disallowed_in_state.contains(terminal_id.0) {
+                                forbidden_llm_tokens |= llm_tokens;
+                            }
+                        }
+                    }
+                }
+                if forbidden_llm_tokens.is_empty() {
+                    return Some(acc.clone());
+                }
+                let mut new_acc = acc.clone();
+                new_acc.llm_tokens_union -= &forbidden_llm_tokens;
+                if new_acc.llm_tokens_union.is_empty() { None } else { Some(new_acc) }
+            });
+
+            if gss.is_empty() {
+                continue;
+            }
+
+            // Convert GSS accumulator to N×M space with tsid mask applied
+            let f = |acc: &Acc| {
+                // Expand the LLM token set to N×M and intersect with tsid mask
+                // This creates weights where only positions i*M + tsid are set
+                let expanded = crate::precompute4::weighted_automata::weight_expansion::expand_rsb(
+                    &acc.llm_tokens_union.inner, num_tsids
+                );
+                let masked = &expanded & &tsid_mask;
+                if masked.is_empty() { None } else { Some(masked) }
+            };
+            let weighted_gss = gss.apply_and_prune(f);
+
+            if !weighted_gss.is_empty() {
+                queue
+                    .entry(weighted_gss.max_depth())
+                    .or_default()
+                    .entry(dwa_start_state_id)
+                    .and_modify(|existing| *existing = existing.merge(&weighted_gss))
+                    .or_insert(weighted_gss);
+            }
+        }
+
+        // 2. Main worklist loop (same structure as symbol-heavy)
+        while let Some((_depth, states_at_depth)) = queue.pop_last() {
+            for (current_wa_state_id, gss) in states_at_depth {
+                let dwa_state = &dwa.states[current_wa_state_id];
+
+                // Check for final state
+                if let Some(final_weight) = &dwa_state.final_weight {
+                    if let Some(reduced_acc) = gss.reduce_acc() {
+                        let final_tokens = &reduced_acc & &final_weight.rsb;
+                        if !final_tokens.is_empty() {
+                            // Collapse from N×M to N before adding to result
+                            let collapsed = collapse_weight_rsb(&final_tokens, num_tsids);
+                            final_mask_internal |= RangeSet::from(collapsed);
+                        }
+                    }
+                }
+
+                // Process transitions (same as symbol-heavy)
+                for peeked_edge in gss.peek() {
+                    let parser_state_id = peeked_edge.state_id.0 as Label;
+                    if let Some((target_wa_state_id, trans_weight)) = dwa_state.get_transition(parser_state_id) {
+                        let isolated_gss = gss.isolate(Some(peeked_edge));
+                        let popped_gss = isolated_gss.pop();
+                        if popped_gss.is_empty() { continue; }
+
+                        let f = |rsb: &RangeSetBlaze<usize>| {
+                            let new_rsb = rsb & &trans_weight.rsb;
+                            if new_rsb.is_empty() { None } else { Some(new_rsb) }
+                        };
+                        let final_gss = popped_gss.apply_and_prune(f);
+
+                        if !final_gss.is_empty() {
+                            queue
+                                .entry(final_gss.max_depth())
+                                .or_default()
+                                .entry(target_wa_state_id)
+                                .and_modify(|existing| *existing = existing.merge(&final_gss))
+                                .or_insert(final_gss);
+                        }
+                    }
+
+                    if let Some((target_wa_state_id, trans_weight)) = dwa_state.get_transition(crate::precompute4::utils::DEFAULT_TRANSITION_SYMBOL) {
+                        let isolated_gss = gss.isolate(Some(peeked_edge));
+                        let popped_gss = isolated_gss.pop();
+                        if popped_gss.is_empty() { continue; }
+
+                        let f = |rsb: &RangeSetBlaze<usize>| {
+                            let new_rsb = rsb & &trans_weight.rsb;
+                            if new_rsb.is_empty() { None } else { Some(new_rsb) }
+                        };
+                        let final_gss = popped_gss.apply_and_prune(f);
+
+                        if !final_gss.is_empty() {
+                            queue
+                                .entry(final_gss.max_depth())
+                                .or_default()
+                                .entry(target_wa_state_id)
+                                .and_modify(|existing| *existing = existing.merge(&final_gss))
+                                .or_insert(final_gss);
+                        }
+                    }
+                }
+            }
+        }
+
+        final_mask_internal
+    }
+
     /// Get the allowed token mask as a dense bitvector.
     ///
     /// This is the main method for getting the allowed tokens mask. It returns
@@ -184,7 +336,13 @@ impl<'a> GrammarConstraintState<'a> {
     ///
     /// For zero-allocation mask filling, see `fill_mask_i32` and `fill_mask_i32_ptr`.
     pub fn get_mask(&self) -> Bitset {
-        let final_mask_internal = self.compute_internal_mask();
+        let final_mask_internal = if self.parent.num_tsids > 0 {
+            // Weight-heavy mode: tsid encoded in N×M weights
+            self.compute_internal_mask_weight_heavy()
+        } else {
+            // Symbol-heavy mode: tsid as initial transition labels
+            self.compute_internal_mask()
+        };
         self.parent.parser_dwa_vocab.internal_bv_to_original(&final_mask_internal)
     }
 
@@ -203,7 +361,11 @@ impl<'a> GrammarConstraintState<'a> {
             None
         };
         
-        let final_mask_internal = self.compute_internal_mask();
+        let final_mask_internal = if self.parent.num_tsids > 0 {
+            self.compute_internal_mask_weight_heavy()
+        } else {
+            self.compute_internal_mask()
+        };
         self.parent.parser_dwa_vocab.fill_internal_bv_to_original_i32(&final_mask_internal, out);
         
         if let Some(start) = start {

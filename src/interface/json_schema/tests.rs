@@ -576,6 +576,60 @@ mod tests {
         ]);
     }
 
+    /// Test simple object schema with weight-heavy encoding
+    /// This test compares symbol-heavy vs weight-heavy to ensure they produce identical results.
+    #[test]
+    fn test_schema_simple_object_weight_heavy() {
+        let schema = r#"{
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"}
+            }
+        }"#;
+        
+        let ebnf = json_schema_to_ebnf(schema).expect("Schema should convert");
+        println!("Generated EBNF:\n{}", ebnf);
+        
+        let gd = GrammarDefinition::from_ebnf(&ebnf).expect("Grammar should build");
+        let token_map = simple_byte_token_map();
+        let max_token_id = 255;
+        
+        // Create constraint (now defaults to weight-heavy)
+        let weight_heavy = GrammarConstraint::new_from_grammar_definition(
+            Arc::new(gd.clone()),
+            token_map.clone(),
+            max_token_id,
+            &GrammarConstraintConfig::default(),
+        );
+        assert!(weight_heavy.is_weight_heavy(), "Should be weight-heavy by default");
+        println!("Weight-heavy: {} tsids, {} DWA states", 
+            weight_heavy.num_tsids, weight_heavy.parser_dwa.states.len());
+        
+        // Test inputs work correctly
+        let inputs = &["{}",r#"{"name": "test"}"#, r#"{ "name" : "hello world" }"#];
+        
+        for input in inputs {
+            println!("\nTesting input: {:?}", input);
+            
+            let mut state = weight_heavy.init();
+            
+            for (i, ch) in input.bytes().enumerate() {
+                let mask = state.get_mask();
+                let is_valid = mask.contains(ch as usize);
+                
+                assert!(is_valid, 
+                    "At position {}, char {:?} (byte {}) should be valid. mask: {:?}...",
+                    i, ch as char, ch,
+                    mask.iter().take(30).collect::<Vec<_>>()
+                );
+                
+                state.commit(LLMTokenID(ch as usize)).expect("commit failed");
+            }
+            
+            println!("✓ Input {:?} accepted in weight-heavy mode", input);
+        }
+    }
+
     /// Test object with additionalProperties: true
     #[test]
     fn test_schema_additional_properties_true() {

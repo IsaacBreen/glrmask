@@ -54,7 +54,7 @@ pub fn expand_rsb(rsb: &RangeSetBlaze<usize>, num_tsids: usize) -> RangeSetBlaze
 /// Create a tsid mask for a specific tokenizer state ID.
 /// The mask has positions: tsid + n*M for n in 0..N
 /// This is equivalent to: all positions where position % M == tsid
-fn create_tsid_mask(tsid: usize, num_tsids: usize, max_llm_token: usize) -> Weight {
+pub fn create_tsid_mask(tsid: usize, num_tsids: usize, max_llm_token: usize) -> Weight {
     // For tsid m, we want positions: m, m+M, m+2M, ..., m+n*M where n*M + m <= max_llm_token * M
     let mut mask = RangeSetBlaze::new();
     for n in 0..=max_llm_token {
@@ -63,21 +63,49 @@ fn create_tsid_mask(tsid: usize, num_tsids: usize, max_llm_token: usize) -> Weig
     Weight::from_rsb(mask)
 }
 
+/// Create a tsid mask as a RangeSetBlaze.
+pub fn create_tsid_mask_rsb(tsid: usize, num_tsids: usize, max_llm_token: usize) -> RangeSetBlaze<usize> {
+    let mut mask = RangeSetBlaze::new();
+    for n in 0..=max_llm_token {
+        mask.insert(tsid + n * num_tsids);
+    }
+    mask
+}
+
+/// Collapse a weight from N×M-space back to N-space.
+/// Given a weight in N×M-space (already restricted to a specific tsid via intersection),
+/// convert positions back to LLM token IDs: position / num_tsids.
+pub fn collapse_weight_rsb(rsb: &RangeSetBlaze<usize>, num_tsids: usize) -> RangeSetBlaze<usize> {
+    if num_tsids == 0 || rsb.is_empty() {
+        return rsb.clone();
+    }
+    let mut collapsed = RangeSetBlaze::new();
+    for pos in rsb.iter() {
+        collapsed.insert(pos / num_tsids);
+    }
+    collapsed
+}
+
 /// Convert a symbol-heavy DWA to a weight-heavy DWA.
 /// 
 /// In symbol-heavy mode:
 /// - Start state has labeled transitions for each tokenizer state ID
-/// - Labels >= terminals_count represent tsids (label - terminals_count = tsid)
+/// - Labels at start state are tsid values (0, 1, 2, ..., M-1)
+/// - Labels at internal states are parser_state_id values
 /// - Weights encode just LLM tokens (N-space)
 ///
 /// In weight-heavy mode:
-/// - Start state has no special tsid transitions
+/// - Start state has no tsid-labeled transitions (converted to epsilon)
 /// - All weights are in N×M space (LLM tokens × tokenizer states)
-/// - Initial transitions become epsilon transitions with tsid-masked weights
+/// - For a given tsid, only bits at positions {i*M + tsid : i ∈ 0..N} are relevant
+///
+/// Key insight: At the DWA start state, ALL labeled transitions are tsid transitions.
+/// The `terminals_count` parameter is not used because tsid labels and parser_state_id
+/// labels are distinguished by position (start vs internal), not by label value.
 pub fn convert_symbol_heavy_to_weight_heavy(
     dwa: &DWA,
     num_tsids: usize,
-    terminals_count: usize,
+    _terminals_count: usize,  // Not used, kept for API compatibility
 ) -> DWA {
     if num_tsids == 0 {
         return dwa.clone();
@@ -89,78 +117,61 @@ pub fn convert_symbol_heavy_to_weight_heavy(
     // Create NWA from DWA for manipulation
     let mut nwa = NWA::from_dwa(dwa);
     
-    // Step 1: Expand all weights (transitions and finals) by multiplying positions by M
+    // Step 1: Expand all weights (transitions and finals) from N-space to N×M-space
     for state in &mut nwa.states.0 {
-        // Expand final weight
         if let Some(ref fw) = state.final_weight {
             state.final_weight = Some(expand_weight(fw, num_tsids));
         }
-        
-        // Expand transition weights
         for targets in state.transitions.values_mut() {
             for (_, weight) in targets {
                 *weight = expand_weight(weight, num_tsids);
             }
         }
-        
-        // Expand epsilon weights
         for (_, weight) in &mut state.epsilons {
             *weight = expand_weight(weight, num_tsids);
         }
     }
     
-    println!("DEBUG convert: After expansion, NWA has {} states", nwa.states.0.len());
+    crate::debug!(3, "convert_symbol_heavy_to_weight_heavy: After expansion, NWA has {} states", nwa.states.0.len());
     
-    // Step 2: Convert tsid labeled transitions from start state to epsilon transitions
+    // Step 2: At start state, ALL labeled transitions are tsid transitions.
+    // Convert them to epsilon transitions with tsid-masked weights.
     let start_state = nwa.body.start_states[0];
     let start_transitions = std::mem::take(&mut nwa.states[start_state].transitions);
     
-    println!("DEBUG convert: Start state {} had {} transitions", start_state, start_transitions.len());
-    for (label, targets) in &start_transitions {
-        println!("DEBUG convert: Start transition label={}, is_tsid={}, num_targets={}", 
-            label, *label >= terminals_count as Label, targets.len());
-    }
+    crate::debug!(3, "convert: Start state {} had {} labeled transitions (all are tsid)", 
+        start_state, start_transitions.len());
     
     for (label, targets) in start_transitions {
-        let is_tsid_label = label >= terminals_count as Label;
+        // Label IS the tsid (0, 1, 2, ...)
+        let tsid = label as usize;
         
-        if is_tsid_label {
-            // This is a tsid transition - convert to epsilon with masked weight
-            let tsid = (label - terminals_count as Label) as usize;
-            let tsid_mask = create_tsid_mask(tsid, num_tsids, max_llm_token);
-            
-            for (target, weight) in targets {
-                // Intersect the expanded weight with the tsid mask
-                let masked_weight = &weight & &tsid_mask;
-                if !masked_weight.is_empty() {
-                    nwa.states[start_state].epsilons.push((target, masked_weight));
-                }
+        if tsid >= num_tsids {
+            // This shouldn't happen - skip if tsid is out of range
+            crate::debug!(2, "WARNING: tsid {} >= num_tsids {} at start state", tsid, num_tsids);
+            continue;
+        }
+        
+        let tsid_mask = create_tsid_mask(tsid, num_tsids, max_llm_token);
+        
+        for (target, weight) in targets {
+            // Weight has already been expanded to N×M space.
+            // Intersect with tsid mask to keep only bits for this specific tsid.
+            let masked_weight = &weight & &tsid_mask;
+            if !masked_weight.is_empty() {
+                nwa.states[start_state].epsilons.push((target, masked_weight));
             }
-        } else {
-            // Regular terminal transition - keep as is (already expanded)
-            nwa.states[start_state].transitions.insert(label, targets);
         }
     }
     
+    crate::debug!(3, "convert: After conversion, start state has {} epsilon transitions", 
+        nwa.states[start_state].epsilons.len());
+    
     // Step 3: Determinize and simplify
-    println!("DEBUG convert: Before determinize, start state {} has {} epsilons, {} transitions", 
-        start_state, nwa.states[start_state].epsilons.len(), nwa.states[start_state].transitions.len());
-    for (target, weight) in &nwa.states[start_state].epsilons {
-        println!("DEBUG convert: epsilon -> {} with weight {:?}", target, weight);
-        // Show target state's transitions
-        let target_state = &nwa.states[*target];
-        for (label, targets) in &target_state.transitions {
-            println!("DEBUG convert: target {} has transition label={} with {} targets", target, label, targets.len());
-        }
-    }
     let mut result = nwa.determinize();
     result.simplify();
     
-    println!("DEBUG convert: After determinize, DWA has {} states", result.states.len());
-    for (i, state) in result.states.0.iter().enumerate() {
-        println!("DEBUG convert: DWA state {} has {} transitions, final={:?}", 
-            i, state.trans_weights.len(), state.final_weight.as_ref().map(|w| format!("{:?}", w)));
-    }
+    crate::debug!(3, "convert: After determinize, DWA has {} states", result.states.len());
     
     result
 }
@@ -226,25 +237,6 @@ pub fn collapse_weight(weight: &Weight, num_tsids: usize) -> Weight {
     }
     
     Weight::from_rsb(collapse_weight_rsb(&weight.rsb, num_tsids))
-}
-
-/// Collapse a RangeSetBlaze from N×M-space to N-space.
-pub fn collapse_weight_rsb(rsb: &RangeSetBlaze<usize>, num_tsids: usize) -> RangeSetBlaze<usize> {
-    if rsb.is_empty() {
-        return RangeSetBlaze::new();
-    }
-    if num_tsids == 0 {
-        return rsb.clone();
-    }
-    
-    // For each position in the expanded weight, divide by M to get the original position
-    let mut collapsed = RangeSetBlaze::new();
-    for range in rsb.ranges() {
-        let start = *range.start() / num_tsids;
-        let end = *range.end() / num_tsids;
-        collapsed.extend([start..=end]);
-    }
-    collapsed
 }
 
 /// Create an initial weight for weight-heavy mode given an active tokenizer state ID.

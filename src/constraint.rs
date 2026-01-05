@@ -338,6 +338,11 @@ pub struct GrammarConstraint {
 
     /// Vocabulary mappings for the Parser DWA stage.
     pub parser_dwa_vocab: StageVocab,
+    
+    /// Number of tokenizer states (M in weight-heavy encoding).
+    /// When > 0, indicates weight-heavy mode where weights are in N×M space.
+    /// When 0, indicates symbol-heavy mode (tsid as initial transition labels).
+    pub num_tsids: usize,
 }
 
 impl GrammarConstraint {
@@ -361,6 +366,7 @@ impl GrammarConstraint {
         assert_eq!(self.possible_matches, other.possible_matches);
         assert_eq!(self.parser_dwa_vocab, other.parser_dwa_vocab);
         assert_eq!(self.vocab_trie, other.vocab_trie);
+        assert_eq!(self.num_tsids, other.num_tsids);
     }
 }
 
@@ -441,6 +447,8 @@ struct GrammarConstraintJSON {
     original_llm_vocab: Option<LLMVocab>,
     /// Fallback: just max_original_llm_token_id if full vocab not available
     max_orig_id: Option<usize>,
+    /// Number of tsids for weight-heavy mode (0 = symbol-heavy)
+    num_tsids: usize,
 }
 
 impl JSONConvertible for GrammarConstraintJSON {
@@ -465,6 +473,11 @@ impl JSONConvertible for GrammarConstraintJSON {
         }
         if let Some(max_id) = self.max_orig_id {
             obj.insert("max_orig_id".to_string(), JSONNode::UInt(max_id as u128));
+        }
+        
+        // num_tsids (0 = symbol-heavy, > 0 = weight-heavy)
+        if self.num_tsids > 0 {
+            obj.insert("num_tsids".to_string(), JSONNode::UInt(self.num_tsids as u128));
         }
         
         JSONNode::Object(obj)
@@ -510,6 +523,13 @@ impl JSONConvertible for GrammarConstraintJSON {
                             JSONNode::Int(v) => Some(*v as usize),
                             _ => None,
                         }),
+                    num_tsids: obj.get("num_tsids")
+                        .and_then(|n| match n {
+                            JSONNode::UInt(v) => Some(*v as usize),
+                            JSONNode::Int(v) => Some(*v as usize),
+                            _ => None,
+                        })
+                        .unwrap_or(0),
                 })
             }
             _ => Err("Expected object for GrammarConstraintJSON".to_string()),
@@ -534,6 +554,7 @@ impl JSONConvertible for GrammarConstraint {
             commit_vocab: None,
             original_llm_vocab: None,
             max_orig_id: Some(self.parser_dwa_vocab.max_original_llm_token_id),
+            num_tsids: self.num_tsids,
         };
         intermediate.to_json()
     }
@@ -584,6 +605,7 @@ impl JSONConvertible for GrammarConstraint {
             token_name_map: intermediate.token_name_map,
             possible_matches,
             parser_dwa_vocab: intermediate.vocab,
+            num_tsids: intermediate.num_tsids,
         })
     }
 }
@@ -1828,7 +1850,7 @@ impl GrammarConstraint {
         let vocab_trie = Arc::new(LLMVocabTrie::from_token_map(&llm_token_map));
 
         #[allow(deprecated)]
-        GrammarConstraint {
+        let constraint = GrammarConstraint {
             tokenizer,
             parser,
             parser_dwa,
@@ -1837,7 +1859,11 @@ impl GrammarConstraint {
             commit_vocab,
             token_name_map,
             parser_dwa_vocab: vocab,
-        }
+            num_tsids: 0, // Symbol-heavy mode initially
+        };
+        
+        // Convert to weight-heavy mode by default
+        constraint.convert_to_weight_heavy()
     }
 
     pub fn dump_vocab(&self) {
@@ -1846,6 +1872,51 @@ impl GrammarConstraint {
         for (i, s) in self.parser_dwa_vocab.internal_to_original.iter() {
             println!("  {}: {:?}", i, s);
         }
+    }
+    
+    /// Convert this constraint from symbol-heavy to weight-heavy encoding.
+    /// 
+    /// In weight-heavy mode:
+    /// - The DWA weights are in N×M space (N = LLM tokens, M = tokenizer states)
+    /// - Tokenizer state info is encoded in the weight positions, not as labels
+    /// - This can be more efficient for mask computation with many tokenizer states
+    ///
+    /// # Returns
+    /// A new GrammarConstraint in weight-heavy mode, or the same constraint if already weight-heavy.
+    pub fn convert_to_weight_heavy(mut self) -> Self {
+        if self.num_tsids > 0 {
+            // Already weight-heavy
+            return self;
+        }
+        
+        // Count the number of tokenizer states
+        let max_tsid = self.possible_matches.keys().map(|k| k.0).max().unwrap_or(0);
+        let num_tsids = max_tsid + 1;
+        
+        if num_tsids == 0 {
+            return self;
+        }
+        
+        // Get terminals count (for API compatibility, not actually used)
+        let terminals_count = self.parser.terminal_map.len();
+        
+        // Convert the DWA
+        self.parser_dwa = crate::precompute4::weighted_automata::weight_expansion::convert_symbol_heavy_to_weight_heavy(
+            &self.parser_dwa,
+            num_tsids,
+            terminals_count,
+        );
+        self.num_tsids = num_tsids;
+        
+        crate::debug!(2, "Converted to weight-heavy: {} tsids, {} DWA states", 
+            num_tsids, self.parser_dwa.states.len());
+        
+        self
+    }
+    
+    /// Check if this constraint is in weight-heavy mode.
+    pub fn is_weight_heavy(&self) -> bool {
+        self.num_tsids > 0
     }
 
     // -----------------------------------------------------------------------
