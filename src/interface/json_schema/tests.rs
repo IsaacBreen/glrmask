@@ -23,6 +23,32 @@ mod tests {
         }
         map
     }
+
+    fn format_byte(b: u8) -> String {
+        match b {
+            b if b.is_ascii_graphic() => format!("'{}'", b as char),
+            b' ' => "' '".to_string(),
+            b'\n' => r"'\n'".to_string(),
+            b'\r' => r"'\r'".to_string(),
+            b'\t' => r"'\t'".to_string(),
+            _ => format!("\\x{:02x}", b),
+        }
+    }
+
+    fn format_bytes(bytes: &[usize]) -> String {
+        if bytes.is_empty() {
+            return "[]".to_string();
+        }
+        let mut s = String::from("[");
+        for (i, &b) in bytes.iter().enumerate() {
+            if i > 0 {
+                s.push_str(", ");
+            }
+            s.push_str(&format_byte(b as u8));
+        }
+        s.push(']');
+        s
+    }
     
     /// Create a small token map with JSON punctuation and some multi-byte tokens.
     fn small_json_token_map() -> LLMTokenMap {
@@ -241,11 +267,11 @@ mod tests {
                 
                 assert!(is_valid,
                     "After {:?}, character {:?} (byte {}) should be valid but wasn't.\n\
-                     Valid bytes: {:?}",
+                     Valid bytes: {}",
                     prefix,
                     ch as char,
                     ch,
-                    mask.iter().take(30).collect::<Vec<_>>()
+                    format_bytes(&mask.iter().take(30).collect::<Vec<_>>())
                 );
                 
                 state.commit(LLMTokenID(ch as usize))
@@ -317,12 +343,12 @@ mod tests {
                 
                 assert!(is_valid,
                     "After {:?}, character {:?} (byte {}, token_id {}) should be valid but wasn't.\n\
-                     Valid token IDs: {:?}",
+                     Valid token IDs: {}",
                     prefix,
                     ch as char,
                     ch,
                     token_id.0,
-                    mask.iter().take(30).collect::<Vec<_>>()
+                    format_bytes(&mask.iter().take(30).collect::<Vec<_>>())
                 );
                 
                 state.commit(*token_id)
@@ -776,16 +802,22 @@ mod tests {
         ]);
     }
 
-    /// Simpler
+    /// Simpler reproduction case with minimal vocab.
     #[test]
     fn test_schema_const2() {
         let schema = r#"{
             "const": "x"
         }"#;
 
-        test_schema_with_inputs(schema, &[
-            r#""x""#,
-        ]);
+        let mut token_map = LLMTokenMap::new();
+        token_map.insert(vec![b'"'], LLMTokenID(b'"' as usize));
+        token_map.insert(vec![b'x'], LLMTokenID(b'x' as usize));
+        token_map.insert(vec![b' '], LLMTokenID(b' ' as usize));
+        token_map.insert(vec![b'\n'], LLMTokenID(b'\n' as usize));
+        token_map.insert(vec![b'\r'], LLMTokenID(b'\r' as usize));
+        token_map.insert(vec![b'\t'], LLMTokenID(b'\t' as usize));
+
+        test_schema_with_inputs_and_vocab(schema, &["\"x\""], token_map, 255);
     }
     
     /// Test that multi-byte tokens like `{"` work with simple object schema.
