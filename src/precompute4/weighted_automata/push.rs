@@ -29,7 +29,7 @@
 //! This makes states with identical outgoing structure have identical final weights,
 //! enabling minimization to merge them.
 
-use super::common::Weight;
+use super::common::{Label, Weight};
 use super::dwa::DWA;
 
 impl DWA {
@@ -181,4 +181,184 @@ impl DWA {
 
         d
     }
+
+    /// Compute forward potentials f[q] for all states.
+    ///
+    /// f[q] = all weights that can reach state q from the start state.
+    ///
+    /// For the start state: f[start] = Weight::all() (any token can "be at" start)
+    /// For other states: f[q] = ⋃_{(p,σ,q) ∈ δ} (f[p] ∩ w(p→q))
+    pub(crate) fn compute_forward_potentials(&self) -> Vec<Weight> {
+        let n = self.states.len();
+        if n == 0 {
+            return vec![];
+        }
+
+        let start = self.body.start_state;
+
+        // Initialize: f[start] = all, f[others] = empty
+        let mut f: Vec<Weight> = (0..n)
+            .map(|q| {
+                if q == start {
+                    Weight::all()
+                } else {
+                    Weight::zeros()
+                }
+            })
+            .collect();
+
+        // Build reverse graph: for each state q, list of (predecessor, label, weight)
+        let mut preds: Vec<Vec<(usize, Label, Weight)>> = vec![Vec::new(); n];
+        for (p, st) in self.states.0.iter().enumerate() {
+            for (&label, &target) in &st.transitions {
+                if target < n {
+                    let w = st
+                        .trans_weights
+                        .get(&label)
+                        .cloned()
+                        .unwrap_or_else(Weight::all);
+                    preds[target].push((p, label, w));
+                }
+            }
+        }
+
+        // Fixed-point iteration: propagate forwards until stable
+        let mut changed = true;
+        let mut iterations = 0;
+        const MAX_ITERATIONS: usize = usize::MAX;
+
+        while changed && iterations < MAX_ITERATIONS {
+            changed = false;
+            iterations += 1;
+
+            // Process in forward order (helps convergence for DAGs)
+            for q in 0..n {
+                if q == start {
+                    continue; // f[start] is always Weight::all()
+                }
+
+                let mut new_f = Weight::zeros();
+
+                // Add contributions from incoming edges
+                for (p, _label, w) in &preds[q] {
+                    // Contribution: f[p] ∩ w(p→q)
+                    let contribution = &f[*p] & w;
+                    new_f |= &contribution;
+                }
+
+                if new_f != f[q] {
+                    f[q] = new_f;
+                    changed = true;
+                }
+            }
+        }
+
+        if iterations >= MAX_ITERATIONS {
+            crate::debug!(1, "Warning: forward potential computation did not converge");
+        }
+
+        f
+    }
+
+    /// Bidirectional weight refinement: adjusts weights based on reachability analysis.
+    ///
+    /// This pass computes:
+    /// - f[q] = forward potentials (weights that can reach state q from start)
+    /// - d[q] = backward potentials (weights that can reach acceptance from q)
+    /// - useful[q] = f[q] ∩ d[q] (weights valid for complete accepting runs through q)
+    ///
+    /// Behavior controlled by BIDIR_LOOSEN env var:
+    /// - BIDIR_LOOSEN=0 or unset (tighten): Intersect with useful[q]
+    ///   - final'(q) = final(q) ∩ useful[q]
+    ///   - w'(q→r) = w(q→r) ∩ useful[q]
+    /// - BIDIR_LOOSEN=1 (loosen): Union with complement of useful[q]
+    ///   - final'(q) = final(q) ∪ ¬useful[q]
+    ///   - w'(q→r) = w(q→r) ∪ ¬useful[q]
+    ///
+    /// Returns true if any weights were changed.
+    pub fn bidirectional_weight_refinement(&mut self) -> bool {
+        let n = self.states.len();
+        if n == 0 {
+            return false;
+        }
+
+        // Check env var for mode
+        let loosen = std::env::var("BIDIR_LOOSEN")
+            .map(|v| v == "1")
+            .unwrap_or(false);
+
+        // Compute potentials
+        let f = self.compute_forward_potentials();
+        let d = self.compute_backward_potentials();
+
+        // Compute useful = f ∩ d for each state
+        let useful: Vec<Weight> = (0..n).map(|q| &f[q] & &d[q]).collect();
+
+        let mut changed = false;
+        let start_state = self.body.start_state;
+
+        for q in 0..n {
+            let useful_q = &useful[q];
+
+            // Skip start state in loosen mode to preserve semantics
+            if loosen && q == start_state {
+                continue;
+            }
+
+            // Skip if useful_q is all() in tighten mode - nothing to refine
+            if !loosen && *useful_q == Weight::all() {
+                continue;
+            }
+
+            // Adjust final weight
+            if let Some(fw) = &self.states[q].final_weight {
+                let new_fw = if loosen {
+                    fw | &useful_q.complement()
+                } else {
+                    fw & useful_q
+                };
+                if new_fw != *fw {
+                    if !loosen && new_fw.is_empty() {
+                        self.states[q].final_weight = None;
+                    } else {
+                        self.states[q].final_weight = Some(new_fw);
+                    }
+                    changed = true;
+                }
+            }
+
+            // Adjust outgoing transitions
+            let labels: Vec<Label> = self.states[q].transitions.keys().copied().collect();
+            for label in labels {
+                let target = self.states[q].transitions[&label];
+                if target >= n {
+                    continue;
+                }
+
+                let w = self.states[q]
+                    .trans_weights
+                    .get(&label)
+                    .cloned()
+                    .unwrap_or_else(Weight::all);
+
+                let new_w = if loosen {
+                    &w | &useful_q.complement()
+                } else {
+                    &w & useful_q
+                };
+
+                if !loosen && new_w.is_empty() {
+                    self.states[q].transitions.remove(&label);
+                    self.states[q].trans_weights.remove(&label);
+                    changed = true;
+                } else if self.states[q].trans_weights.get(&label) != Some(&new_w) {
+                    self.states[q].trans_weights.insert(label, new_w);
+                    changed = true;
+                }
+            }
+        }
+
+        changed
+    }
 }
+

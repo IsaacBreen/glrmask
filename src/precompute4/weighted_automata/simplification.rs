@@ -143,6 +143,7 @@ pub enum DwaPass {
     PushWeights,
     PushWeightsToInitial,
     ResidualPush,
+    BidirectionalRefinement,
     Minimize,
 }
 
@@ -207,6 +208,7 @@ impl DWA {
                     DwaPass::PushWeights => self.push_weights_into_transitions_and_finals(),
                     DwaPass::PushWeightsToInitial => self.push_weights_to_initial(),
                     DwaPass::ResidualPush => self.residuated_push(),
+                    DwaPass::BidirectionalRefinement => self.bidirectional_weight_refinement(),
                     DwaPass::Minimize => unreachable!(),
                 };
                 changed_in_iteration |= pass_changed;
@@ -259,18 +261,23 @@ impl DWA {
         if initial_num_states < 1000 {
             let mut changed = false;
             let prune1 = self.prune_dead_ends();
-            self.residuated_push();  // New: Push weights to enable merging
+            let bidir1 = self.bidirectional_weight_refinement();  // Tighten weights bidirectionally
+            self.residuated_push();  // Push weights to enable merging
             let min1 = self.minimize_states();
-            let push1 = self.push_weights_into_transitions_and_finals();
-            let push2 = self.push_weights_to_initial();
+            // TEMPORARILY DISABLED:
+            // let push1 = self.push_weights_into_transitions_and_finals();
+            // let push2 = self.push_weights_to_initial();
+            let push1 = false;
+            let push2 = false;
             let prune2 = self.prune_unreachable();
-            changed = prune1 || min1 || push1 || push2 || prune2;
+            changed = prune1 || bidir1 || min1 || push1 || push2 || prune2;
             
             // Second pass ONLY if pruning/pushing changed something (not just minimize)
             // After minimize, the DWA is already minimal so re-minimizing won't help
             // unless structure was changed by prune/push
-            if prune1 || push1 || push2 || prune2 {
+            if prune1 || bidir1 || push1 || push2 || prune2 {
                 self.prune_dead_ends();
+                self.bidirectional_weight_refinement();
                 self.residuated_push();  // Push again before second minimize
                 self.minimize_states();
                 self.prune_unreachable();
@@ -281,10 +288,12 @@ impl DWA {
         let mut total_changed = false;
         let ordering = &[
             DwaPass::PruneDeadEnds,
-            DwaPass::ResidualPush,  // New: Push weights before minimize
+            DwaPass::BidirectionalRefinement,  // Tighten weights bidirectionally
+            DwaPass::ResidualPush,  // Push weights before minimize
             DwaPass::Minimize,
-            DwaPass::PushWeights,
-            DwaPass::PushWeightsToInitial,
+            // TEMPORARILY DISABLED:
+            // DwaPass::PushWeights,
+            // DwaPass::PushWeightsToInitial,
             DwaPass::PruneUnreachable,
         ];
         
@@ -324,6 +333,7 @@ impl DWA {
                     DwaPass::PushWeights => self.push_weights_into_transitions_and_finals(),
                     DwaPass::PushWeightsToInitial => self.push_weights_to_initial(),
                     DwaPass::ResidualPush => self.residuated_push(),
+                    DwaPass::BidirectionalRefinement => self.bidirectional_weight_refinement(),
                     DwaPass::Minimize => {
                         let changed = self.minimize_states();
                         if !changed {
