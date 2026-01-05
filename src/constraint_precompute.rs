@@ -274,8 +274,13 @@ impl<'r> Precomputer1<'r> {
         crate::debug!(5, "Compressed NWA with {} states and {} transitions", self.nwa.states.len(), self.nwa.states.num_transitions());
         // self.nwa.simplify();
         crate::debug!(5, "Simplified NWA with {} states and {} transitions", self.nwa.states.len(), self.nwa.states.num_transitions());
-        let mut dwa = self.nwa.determinize();
-        // let mut dwa = self.nwa.determinize_to_dwa_with_rustfst();
+        let mut dwa = if std::env::var("DWA_USE_RUSTFST_DETERMINIZE").map(|v| v == "1").unwrap_or(false) {
+            crate::debug!(5, "Using RustFST-based determinization");
+            self.nwa.determinize_to_dwa_with_rustfst()
+        } else {
+            crate::debug!(5, "Using built-in determinization");
+            self.nwa.determinize()
+        };
         crate::debug!(5, "Determinized DWA with {} states and {} transitions", dwa.states.len(), dwa.states.num_transitions());
         dwa.simplify_with_rustfst();
         crate::debug!(5, "Simplified DWA with {} states and {} transitions", dwa.states.len(), dwa.states.num_transitions());
