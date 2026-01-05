@@ -103,12 +103,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|sid| (sid, sid))
         .collect();
 
+    let num_tsids = tokenizer.max_state() + 1;
     let mut terminal_dwa = run_precompute1(
         tokenizer,
         &internal_llm_token_map,
         internal_max_llm_token,
         terminals_count,
         state_to_rep,
+        num_tsids,
     );
     if is_debug_level_enabled(5) {
         println!("Terminal DWA (before simplify):");

@@ -565,7 +565,8 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
     let initial_values_full: Vec<(usize, (BTreeMap<NWABody, BTreeMap<Option<TerminalID>, Weight>>, LLMTokenBV))> =
         reversed_nwa.body.start_states.iter().map(|&s| (s, (BTreeMap::from([(initial_body.clone(), initial_term_map.clone())]), LLMTokenBV::max_ones()))).collect();
 
-    let final_bodies_arc: Arc<Mutex<BTreeMap<TokenizerStateID, Vec<(NWABody, Weight)>>>> = Arc::new(Mutex::new(BTreeMap::new()));
+    // In weight-heavy mode, we don't group by tsid - the weight encodes tsid info
+    let final_bodies_arc: Arc<Mutex<Vec<(NWABody, Weight)>>> = Arc::new(Mutex::new(Vec::new()));
 
     crate::debug!(4, "Beginning NWA traversal");
 
@@ -575,16 +576,17 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
             let (current_bodies, current_tokens) = current_val;
             if let Some(lbl) = edge_label {
                 if lbl >= offset {
-                    let tsid = TokenizerStateID((lbl - offset) as usize);
+                    // In weight-heavy mode: tsid boundary detected
+                    // The edge weight already encodes tsid info, so we don't group by tsid
+                    // Just collect (body, weight) pairs directly
                     let mut fb = final_bodies_arc.lock().unwrap();
-                    let list = fb.entry(tsid).or_default();
                     for (_dest, weight) in transitions {
                         let w_bv: LLMTokenBV = weight.clone().into();
                         let intersection_bv = current_tokens & &w_bv;
                         if !intersection_bv.is_empty() {
                             let final_w = Weight::from_rsb(intersection_bv.inner.as_ref().clone());
                             for body in current_bodies.keys() {
-                                list.push((body.clone(), final_w.clone()));
+                                fb.push((body.clone(), final_w.clone()));
                             }
                         }
                     }
@@ -644,12 +646,12 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
     let final_bodies = Arc::try_unwrap(final_bodies_arc).unwrap().into_inner().unwrap();
     let mut combined_nwa_states = states_arena.into_inner();
     let combined_start_state = combined_nwa_states.add_state();
-    for (tsid, list) in final_bodies {
-        let label = tsid.0 as Label;
-        for (body, weight) in list {
-            for &s in &body.start_states {
-                combined_nwa_states.add_transition(combined_start_state, label, s, weight.clone()).unwrap();
-            }
+    
+    // In weight-heavy mode: no tsid labels, just add epsilon transitions with weights
+    // The weights encode tsid info (positions in N×M space)
+    for (body, weight) in final_bodies {
+        for &s in &body.start_states {
+            combined_nwa_states.add_epsilon(combined_start_state, s, weight.clone());
         }
     }
 

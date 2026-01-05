@@ -1000,13 +1000,17 @@ impl GrammarConstraint {
             internal_to_original_sparse_matrix: vec![],
         };
 
-        crate::debug!(4, "Running precompute1...");
+        // Number of tokenizer states for weight-heavy encoding
+        let num_tsids = tokenizer.dfa.states.len();
+        
+        crate::debug!(4, "Running precompute1 (weight-heavy mode, num_tsids={})...", num_tsids);
         let mut terminal_dwa = run_precompute1(
             &tokenizer,
             &internal_llm_token_map,
             vocab.internal_max_llm_token,
             parser.terminal_map.len(),
             state_to_rep.clone(),
+            num_tsids,
         );
 
         #[allow(clippy::redundant_closure_call)]
@@ -1803,8 +1807,10 @@ impl GrammarConstraint {
                 parser_dwa_mod.states.len(), parser_dwa_mod.states.num_transitions());
         }
 
-        parser_dwa.states.clip_weights(vocab.internal_max_llm_token);
-        optimize_dwa_and_vocab(&mut parser_dwa, &mut vocab, &mut possible_matches_precompute1);
+        // Weight-heavy mode: Skip clip_weights and optimize_dwa_and_vocab
+        // These assume N-space weights but we now have N×M-space weights
+        // parser_dwa.states.clip_weights(vocab.internal_max_llm_token);
+        // optimize_dwa_and_vocab(&mut parser_dwa, &mut vocab, &mut possible_matches_precompute1);
 
         let internal_to_original_sparse_matrix =
             StageVocab::build_internal_to_original_sparse_matrix(
@@ -1818,8 +1824,11 @@ impl GrammarConstraint {
         // Build the new trie-based vocab from the LLM token map
         let vocab_trie = Arc::new(LLMVocabTrie::from_token_map(&llm_token_map));
 
+        // In weight-heavy mode, num_tsids is set during construction
+        let num_tsids = tokenizer.dfa.states.len();
+        
         #[allow(deprecated)]
-        let constraint = GrammarConstraint {
+        GrammarConstraint {
             tokenizer,
             parser,
             parser_dwa,
@@ -1828,11 +1837,8 @@ impl GrammarConstraint {
             commit_vocab,
             token_name_map,
             parser_dwa_vocab: vocab,
-            num_tsids: 0, // Symbol-heavy mode initially
-        };
-        
-        // Convert to weight-heavy mode by default
-        constraint.convert_to_weight_heavy()
+            num_tsids,
+        }
     }
 
     pub fn dump_vocab(&self) {

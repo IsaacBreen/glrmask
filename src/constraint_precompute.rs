@@ -13,6 +13,7 @@ use crate::finite_automata::Regex;
 use crate::glr::parser::GLRParser;
 use crate::precompute4::weighted_automata::rangeset::RangeSet as WARangeSet;
 use crate::precompute4::weighted_automata::{DWA, NWA, NWAStateID, Weight};
+use crate::precompute4::weighted_automata::weight_expansion::{expand_rsb, create_tsid_mask};
 use crate::profiler::{self};
 
 use crate::tokenizer::{LLMTokenID, TokenizerStateID};
@@ -51,6 +52,10 @@ pub(crate) struct Precomputer1<'r> {
     pub(crate) live_tokens: HashMap<NWAStateID, Weight>,
     // Cache for tokens_accessible_from_state - only 389 unique states but called 700k+ times
     accessible_terminals_cache: HashMap<TokenizerStateID, std::rc::Rc<Vec<GrammarTokenID>>>,
+    // Weight-heavy mode: number of tokenizer states
+    pub(crate) num_tsids: usize,
+    // Max LLM token ID for creating tsid masks
+    pub(crate) internal_max_llm_token: usize,
 }
 
 impl<'r> Precomputer1<'r> {
@@ -60,11 +65,18 @@ impl<'r> Precomputer1<'r> {
         internal_max_llm_token: usize,
         terminals_count: usize,
         state_to_rep: BTreeMap<TokenizerStateID, TokenizerStateID>,
+        num_tsids: usize,
     ) -> Self {
         let tokens: Vec<(usize, Vec<u8>)> = internal_llm_token_map
             .iter()
             .map(|(bytes, id)| (id.0 as usize, bytes.clone()))
             .collect();
+
+        // Debug print the tokens
+        crate::debug!(2, "Tokens being passed to VocabPrefixTree::build:");
+        for (id, bytes) in &tokens {
+            crate::debug!(2, "  id={}, bytes={:?}", id, String::from_utf8_lossy(bytes));
+        }
 
         crate::debug!(6, "Building vocab prefix tree");
         let vocab = VocabPrefixTree::build(&tokens);
@@ -85,8 +97,11 @@ impl<'r> Precomputer1<'r> {
         let pb = NoOpPb;
 
         let leaf_state = nwa.add_state();
-        nwa.states[leaf_state].final_weight = Some(Weight::all());
-        crate::debug!(6, "Created trie1 leaf state");
+        // In weight-heavy mode, final weight should also be expanded
+        nwa.states[leaf_state].final_weight = Some(Weight::from_rsb(
+            expand_rsb(&RangeSetBlaze::from_iter(0..=internal_max_llm_token), num_tsids)
+        ));
+        crate::debug!(6, "Created trie1 leaf state with expanded final weight");
 
         Self {
             tokenizer,
@@ -103,6 +118,8 @@ impl<'r> Precomputer1<'r> {
             pending_epsilons: HashMap::new(),
             live_tokens: HashMap::new(),
             accessible_terminals_cache: HashMap::new(),
+            num_tsids,
+            internal_max_llm_token,
         }
     }
 
@@ -166,11 +183,18 @@ impl<'r> Precomputer1<'r> {
             }
         }
 
+        // Create start state with labeled tsid transitions for weight-heavy mode
+        // Each tsid gets a transition labeled (tsid + terminals_count) with a tsid-masked weight
+        // This preserves compatibility with build_parser_dwa which expects labeled tsid transitions
         let new_start_state = self.nwa.add_state();
         for (tsid, rep_tsid) in &self.state_to_rep {
             if let Some(&state) = self.roots.get(rep_tsid) {
+                // Create tsid mask: positions {i*M + tsid : i in 0..N} for M = num_tsids
+                let tsid_mask = create_tsid_mask(tsid.0, self.num_tsids, self.internal_max_llm_token);
+                // Use labeled transition with label = tsid + terminals_count (like symbol-heavy)
+                // but with tsid mask weight instead of ALL weight
                 let label = (tsid.0 + self.terminals_count) as Label;
-                self.nwa.add_transition(new_start_state, label, state, Weight::all()).unwrap();
+                self.nwa.add_transition(new_start_state, label, state, tsid_mask).unwrap();
             }
         }
         self.nwa.body.start_states = vec![new_start_state];
@@ -240,6 +264,21 @@ impl<'r> Precomputer1<'r> {
         let mut dwa = self.nwa.determinize();
         dwa.simplify();
         crate::debug!(5, "Simplified DWA with {} states and {} transitions", dwa.states.len(), dwa.states.num_transitions());
+
+        // DEBUG: Print the terminal DWA
+        crate::debug!(2, "=== Terminal DWA after construction ===");
+        crate::debug!(2, "Start state: {}", dwa.body.start_state);
+        for (i, state) in dwa.states.0.iter().enumerate() {
+            crate::debug!(2, "State {}:", i);
+            for (label, target) in &state.transitions {
+                let weight = state.trans_weights.get(label).map(|w| format!("{:?}", w)).unwrap_or_default();
+                crate::debug!(2, "  --{}--> {} (weight: {})", label, target, weight);
+            }
+            if let Some(ref fw) = state.final_weight {
+                crate::debug!(2, "  final_weight: {:?}", fw);
+            }
+        }
+        crate::debug!(2, "=== End Terminal DWA ===");
 
         dwa
     }
@@ -331,6 +370,31 @@ impl<'r> Precomputer1<'r> {
         }
     }
 
+    /// Create an expanded weight from a single token ID.
+    /// Expands from N-space to N×M-space where M = num_tsids.
+    #[inline]
+    fn expanded_weight_from_item(&self, token_id: usize) -> Weight {
+        // A single token ID in N-space becomes a range in N×M-space
+        // Token i becomes positions [i*M, i*M + M - 1]
+        let start = token_id * self.num_tsids;
+        let end = start + self.num_tsids - 1;
+        Weight::from_rsb(RangeSetBlaze::from_iter(start..=end))
+    }
+
+    /// Create an expanded weight from a RangeSetBlaze of token IDs.
+    #[inline]
+    fn expanded_weight_from_rsb(&self, rsb: RangeSetBlaze<usize>) -> Weight {
+        Weight::from_rsb(expand_rsb(&rsb, self.num_tsids))
+    }
+
+    /// Create an expanded "all" weight (all tokens for all tsids).
+    #[inline]
+    fn expanded_weight_all(&self) -> Weight {
+        // All tokens in N×M space
+        let max_pos = self.internal_max_llm_token * self.num_tsids + self.num_tsids - 1;
+        Weight::from_rsb(RangeSetBlaze::from_iter(0..=max_pos))
+    }
+
     fn add_pending_transition(&mut self, src: NWAStateID, label: Label, dst: NWAStateID, weight: Weight) {
         self.pending_transitions
             .entry(src)
@@ -410,7 +474,8 @@ impl<'r> Precomputer1<'r> {
                     for (tokenizer_state_id, node) in states_at_pos {
                         let next = self.get_or_create_next_state(node, tokenizer_state_id, &mut next_level_assoc);
                         crate::debug!(7, "     State {} (tsid={:?}) -> epsilon to state {}", node, tokenizer_state_id, next);
-                        self.add_pending_epsilon(node, next, Weight::all());
+                        // Use expanded "all" weight
+                        self.add_pending_epsilon(node, next, self.expanded_weight_all());
                     }
                     continue;
                 }
@@ -445,7 +510,8 @@ impl<'r> Precomputer1<'r> {
                         // Leaf check: if match consumes remainder of segment
                         if next_pos == segment_bytes.len() {
                             let leaf = self.leaf_state;
-                            let weight = WARangeSet::from_item(child_token_id);
+                            // Use expanded weight from single token
+                            let weight = self.expanded_weight_from_item(child_token_id);
                             crate::debug!(7, "      -> LEAF transition: {} --{}--> {} (leaf_state), weight={:?}", 
                                 src_node, terminal_id.0, leaf, weight);
                             self.add_pending_transition(src_node, terminal_id.0 as Label, leaf, weight);
@@ -475,7 +541,8 @@ impl<'r> Precomputer1<'r> {
                         let dest_map = pending.entry(next_pos).or_default();
 
                         let initial_tsid = self.tokenizer.initial_state_id();
-                        let weight = WARangeSet::from_rsb(final_bv.into_owned());
+                        // Use expanded weight from rsb
+                        let weight = self.expanded_weight_from_rsb(final_bv.into_owned());
 
                         let target_entry = dest_map.entry(initial_tsid);
                         let target = match target_entry {
@@ -513,8 +580,8 @@ impl<'r> Precomputer1<'r> {
                         
                         crate::debug!(7, "    accessible_terminals={:?}", accessible_terminals.as_slice());
 
-                        // Create weight once, it's just a single token
-                        let single_token_weight = WARangeSet::from_item(child_token_id);
+                        // Create expanded weight once, it's just a single token expanded to N×M space
+                        let single_token_weight = self.expanded_weight_from_item(child_token_id);
 
                         let end_idx = self.leaf_state;
                         
@@ -531,7 +598,8 @@ impl<'r> Precomputer1<'r> {
 
                         let next = self.get_or_create_next_state(src_node, final_tokenizer_state, &mut next_level_assoc);
                         crate::debug!(7, "    -> END_STATE epsilon: {} --eps--> {}", src_node, next);
-                        self.add_pending_epsilon(src_node, next, Weight::all());
+                        // Use expanded "all" weight
+                        self.add_pending_epsilon(src_node, next, self.expanded_weight_all());
                     }
                 }
             }
@@ -561,6 +629,7 @@ pub fn run_precompute1(
     internal_max_llm_token: usize,
     terminals_count: usize,
     state_to_rep: BTreeMap<TokenizerStateID, TokenizerStateID>,
+    num_tsids: usize,
 ) -> DWA {
     let mut representative_llm_token_map: BTreeMap<Vec<u8>, LLMTokenID> = BTreeMap::new();
     let mut seen_internal_ids = std::collections::HashSet::new();
@@ -577,6 +646,7 @@ pub fn run_precompute1(
         internal_max_llm_token,
         terminals_count,
         state_to_rep,
+        num_tsids,
     );
 
     helper.run_dfs();
