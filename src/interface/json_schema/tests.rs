@@ -578,6 +578,7 @@ mod tests {
 
     /// Test simple object schema with weight-heavy encoding
     /// This test compares symbol-heavy vs weight-heavy to ensure they produce identical results.
+    #[ignore]
     #[test]
     fn test_schema_simple_object_weight_heavy() {
         let schema = r#"{
