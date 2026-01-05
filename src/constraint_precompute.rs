@@ -72,12 +72,6 @@ impl<'r> Precomputer1<'r> {
             .map(|(bytes, id)| (id.0 as usize, bytes.clone()))
             .collect();
 
-        // Debug print the tokens
-        crate::debug!(2, "Tokens being passed to VocabPrefixTree::build:");
-        for (id, bytes) in &tokens {
-            crate::debug!(2, "  id={}, bytes={:?}", id, String::from_utf8_lossy(bytes));
-        }
-
         crate::debug!(6, "Building vocab prefix tree");
         let vocab = VocabPrefixTree::build(&tokens);
         crate::debug!(6, "Done building vocab prefix tree");
@@ -264,21 +258,6 @@ impl<'r> Precomputer1<'r> {
         let mut dwa = self.nwa.determinize();
         dwa.simplify();
         crate::debug!(5, "Simplified DWA with {} states and {} transitions", dwa.states.len(), dwa.states.num_transitions());
-
-        // DEBUG: Print the terminal DWA
-        crate::debug!(2, "=== Terminal DWA after construction ===");
-        crate::debug!(2, "Start state: {}", dwa.body.start_state);
-        for (i, state) in dwa.states.0.iter().enumerate() {
-            crate::debug!(2, "State {}:", i);
-            for (label, target) in &state.transitions {
-                let weight = state.trans_weights.get(label).map(|w| format!("{:?}", w)).unwrap_or_default();
-                crate::debug!(2, "  --{}--> {} (weight: {})", label, target, weight);
-            }
-            if let Some(ref fw) = state.final_weight {
-                crate::debug!(2, "  final_weight: {:?}", fw);
-            }
-        }
-        crate::debug!(2, "=== End Terminal DWA ===");
 
         dwa
     }
