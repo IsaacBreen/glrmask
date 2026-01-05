@@ -29,6 +29,9 @@ mod tests {
         };
         println!("After determinize: {} states", dwa.states.len());
         
+        if !use_rustfst_determinize {
+            dwa.residuated_push();
+        }
         dwa.simplify_with_rustfst();
         dwa.simplify();
         println!("Final size (with weights): {} states", dwa.states.len());

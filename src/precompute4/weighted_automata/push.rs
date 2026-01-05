@@ -74,10 +74,13 @@ impl DWA {
 
                 let d_target = &d[target];
 
-                // Compute new weight: w' = w ∩ d[target]
-                // We tighten the edge to only allow flow that is valid for the target's future.
-                // This pulls weights from the future back into the transition.
-                let new_weight = &w & d_target;
+                // Compute new weight: w' = (w ∩ d[target]) ∪ ¬d[source]
+                // This corresponds to w' = (d[source]^-1 * w * d[target]) in the semiring.
+                // - Tighten (∩ d[target]): restricts flow to valid future.
+                // - Loosen (∪ ¬d[source]): adds "don't care" bits for impossible source weights.
+                let d_source = &d[q];
+                let d_source_inv = !d_source;
+                let new_weight = (&w & d_target) | &d_source_inv;
 
                 if new_weight.is_empty() {
                     self.states[q].transitions.remove(&label);
