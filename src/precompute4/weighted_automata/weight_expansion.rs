@@ -394,24 +394,24 @@ mod tests {
         // Build expected output DWA:
         // DWA (start: 0)
         //   State 0:
-        //     0 -> 1 (weight: [0, 3])   // terminal A with tsid mask
-        //     1 -> 2 (weight: [0, 3])   // terminal EOF with tsid mask
+        //     0 -> 1 (weight: [2, 5])   // terminal A with tsid mask
+        //     1 -> 2 (weight: [2, 5])   // terminal EOF with tsid mask
         //   State 1:
-        //     final_weight: [3]            // from path: tsid0 + terminal EOF
+        //     final_weight: [5]            // from path: tsid0 + terminal EOF
         //   State 2:
-        //     final_weight: [0]            // from path: tsid0 + terminal A
+        //     final_weight: [2]            // from path: tsid0 + terminal A
         
         let mut exp_state0 = DWAState::default();
-        exp_state0.trans_weights.insert(0, Weight::from_iter([0usize, 3]));
-        exp_state0.trans_weights.insert(1, Weight::from_iter([0usize, 3]));
+        exp_state0.trans_weights.insert(0, Weight::from_iter([2usize, 5]));
+        exp_state0.trans_weights.insert(1, Weight::from_iter([2usize, 5]));
         exp_state0.transitions.insert(0, 1);
         exp_state0.transitions.insert(1, 2);
         
         let mut exp_state1 = DWAState::default();
-        exp_state1.final_weight = Some(Weight::from_iter([3usize]));
+        exp_state1.final_weight = Some(Weight::from_iter([5usize]));
         
         let mut exp_state2 = DWAState::default();
-        exp_state2.final_weight = Some(Weight::from_iter([0usize]));
+        exp_state2.final_weight = Some(Weight::from_iter([2usize]));
         
         let expected_dwa = DWA {
             states: DWAStates(vec![exp_state0, exp_state1, exp_state2]),
