@@ -4,7 +4,8 @@ use super::common::{BENCHMARK_DEBUG, Label, NWAStateID, StateID, Weight};
 use super::dwa::{DWAState, DWAStates, DWA};
 use super::nwa::{NWAState, NWAStates, NWA};
 use rayon::prelude::*;
-use rustfst::algorithms::{minimize, minimize_with_config, MinimizeConfig};
+use rustfst::algorithms::{minimize, minimize_with_config, MinimizeConfig, push, PushType, ReweightType};
+use rustfst::prelude::VectorFst;
 use rustc_hash::FxHashMap;
 use std::collections::{BTreeMap, VecDeque, HashSet, HashMap};
 use std::sync::Arc;
@@ -258,10 +259,15 @@ impl DWA {
     }
 
     pub fn simplify_with_rustfst(&mut self) -> bool {
+        let fst = self.to_rustfst();
+        // Push weights toward the initial state to canonicalize.
+        // push() returns a new FST.
+        let pushed_fst: VectorFst<_> = push(&fst, ReweightType::ReweightToInitial, PushType::PUSH_WEIGHTS).unwrap();
+        
+        let mut minimized_fst = pushed_fst;
         let min_config = MinimizeConfig::default();
-        let mut fst = self.to_rustfst();
-        minimize_with_config(&mut fst, min_config).unwrap();
-        *self = DWA::from_rustfst(&fst);
+        minimize_with_config(&mut minimized_fst, min_config).unwrap();
+        *self = DWA::from_rustfst(&minimized_fst);
         true
     }
     

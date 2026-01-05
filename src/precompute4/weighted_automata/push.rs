@@ -76,7 +76,7 @@ impl DWA {
 
                 // Compute new weight: w' = w ∩ d[target]
                 // We tighten the edge to only allow flow that is valid for the target's future.
-                // This strips away "junk" bits that don't matter, canonicalizing the edge.
+                // This pulls weights from the future back into the transition.
                 let new_weight = &w & d_target;
 
                 if new_weight.is_empty() {
@@ -92,9 +92,11 @@ impl DWA {
 
         // Phase 3: Reweight final weights
         // final'(q) = final(q) ∪ ¬d[q]
-        // This canonicalizes final weights so equivalent states become identical
-        // NOTE: Skip the start state - it has no incoming transitions to tighten,
-        // so loosening its final weight would change semantics.
+        // This canonicalizes final weights.
+        // NOTE: We MUST NOT loosen the start state's final weight if we are tightening edges,
+        // because the start state has no incoming edges to "push" into.
+        // Actually, loosening the start state's final weight is safe if we only care about
+        // the intersection with the initial weight (which is 'all').
         let start_state = self.body.start_state;
         for q in 0..n {
             if q == start_state {
@@ -110,8 +112,6 @@ impl DWA {
                     changed = true;
                 }
             }
-            // Note: If state was not final (fw = None), it stays non-final.
-            // The "garbage" ¬d[q] only matters for the actual final weight intersection.
         }
 
         changed

@@ -255,6 +255,12 @@ impl<'r> Precomputer1<'r> {
         }
 
         crate::debug!(5, "{} states and {} transitions", self.nwa.states.len(), self.nwa.states.num_transitions());
+
+        if std::env::var("DWA_DUMP_NWA").map(|v| v == "1").unwrap_or(false) {
+            crate::debug!(5, "Dumping NWA to nwa_dump.json");
+            let json = serde_json::to_string(&self.nwa).unwrap();
+            std::fs::write("nwa_dump.json", json).unwrap();
+        }
         
         // // OPTIMIZATION: Use lightweight operations instead of full simplify()
         // // This terminal DWA is only used as input to precompute4, so expensive minimization

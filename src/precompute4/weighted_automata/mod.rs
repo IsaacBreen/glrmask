@@ -16,6 +16,8 @@ pub mod weight_expansion;
 mod test_determinization;
 pub(crate) mod test_weighted_automata;
 mod test_push;
+mod test_repro;
+mod test_debug_min;
 
 pub use self::rangeset::RangeSet;
 pub use self::common::{format_i16_char, format_pos_code, format_word, NWAStateID, StateID, Weight};
