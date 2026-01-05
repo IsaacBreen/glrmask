@@ -100,7 +100,7 @@ impl NWA {
     ///
     /// This defaults to the **Simple** strategy for performance.
     pub fn determinize(&self) -> DWA {
-        self.determinize_simple()
+        self.determinize_robust()
     }
 
     /// Determinizes the NWA using a robust strategy with precomputed epsilon closures.
@@ -290,11 +290,13 @@ impl NWA {
             
             // Use FxHashMap for faster transition collection, then sort at the end
             let mut transitions: FxHashMap<Label, FxHashMap<NWAStateID, Weight>> = FxHashMap::default();
+            let mut edge_weights: FxHashMap<Label, Weight> = FxHashMap::default();
             for (nwa_id, path_weight) in &subset.inner {
                 for (label, targets) in &self.states[*nwa_id].transitions {
                     for (target_nwa_id, trans_weight) in targets {
                         let next_path_weight = path_weight & trans_weight;
                         if !next_path_weight.is_empty() {
+                            edge_weights.entry(*label).or_insert_with(Weight::zeros).bitor_assign(&next_path_weight);
                             let entry = transitions.entry(*label).or_default();
                             entry.entry(*target_nwa_id).or_insert_with(Weight::zeros).bitor_assign(&next_path_weight);
                         }
@@ -314,15 +316,26 @@ impl NWA {
                 if next_subset.is_empty() {
                     continue;
                 }
+                
+                let w_edge = edge_weights.remove(&label).unwrap();
+                let w_edge_inv = !&w_edge;
+
+                // Normalize weights in the subset by dividing by w_edge.
+                // Division in Boolean semiring (loosening): w / v = w | !v.
+                let normalized_subset: FxHashMap<NWAStateID, Weight> = next_subset
+                    .into_iter()
+                    .map(|(id, w)| (id, w | &w_edge_inv))
+                    .collect();
+
                 let t_map = std::time::Instant::now();
-                let hashed_next = HashedSubset::from_fxhashmap(next_subset);
+                let hashed_next = HashedSubset::from_fxhashmap(normalized_subset);
                 let to_dwa_id = *subset_map.entry(hashed_next.clone()).or_insert_with(|| {
                     let new_id = dwa.add_state();
                     worklist.push_back(hashed_next);
                     new_id
                 });
                 time_map_lookup += t_map.elapsed().as_nanos() as u64;
-                dwa.add_transition(from_dwa_id, label, to_dwa_id, Weight::all()).unwrap();
+                dwa.add_transition(from_dwa_id, label, to_dwa_id, w_edge).unwrap();
             }
             time_build_edges += t_edges.elapsed().as_nanos() as u64;
         }
@@ -513,7 +526,13 @@ impl<'a> Determinizer<'a> {
                 }
             }
 
-            let mut dest_subset: WeightedSubset = dest_map.into_iter().collect();
+            // Normalize weights in the subset by dividing by w_edge.
+            // Division in Boolean semiring (loosening): w / v = w | !v.
+            let w_edge_inv = !&w_edge;
+            let mut dest_subset: WeightedSubset = dest_map
+                .into_iter()
+                .map(|(sid, w)| (sid, w | &w_edge_inv))
+                .collect();
             dest_subset.sort_unstable_by(|a, b| a.0.cmp(&b.0));
 
             let dest_dwa_id = self.register_closure(dest_subset);

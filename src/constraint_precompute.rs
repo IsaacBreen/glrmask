@@ -292,6 +292,7 @@ impl<'r> Precomputer1<'r> {
         crate::debug!(5, "Simplified DWA with {} states and {} transitions", dwa.states.len(), dwa.states.num_transitions());
         dwa.simplify();
         crate::debug!(5, "Final simplified DWA with {} states and {} transitions", dwa.states.len(), dwa.states.num_transitions());
+        
         let mut dwa2 = self.nwa.determinize_to_dwa_with_rustfst();
         dwa2.simplify_with_rustfst();
         crate::debug!(5, "dwa is cyclic? {}", if dwa.is_cyclic() { "yes" } else { "no" });

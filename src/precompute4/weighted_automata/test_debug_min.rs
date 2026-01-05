@@ -6,6 +6,16 @@ use serde_json;
 mod tests {
     use super::*;
 
+    fn remove_weights(dwa: &mut DWA) {
+        for s in dwa.states.0.iter_mut() {
+            s.final_weight = s.final_weight.as_ref().map(|_| Weight::all());
+            s.state_weight = None;
+            for w in s.trans_weights.values_mut() {
+                *w = Weight::all();
+            }
+        }
+    }
+
     fn run_pipeline(nwa_in: &NWA, use_rustfst_determinize: bool) -> DWA {
         let mut nwa = nwa_in.clone();
         println!("--- Pipeline ({}) ---", if use_rustfst_determinize { "RustFST" } else { "Builtin" });
@@ -19,13 +29,15 @@ mod tests {
         };
         println!("After determinize: {} states", dwa.states.len());
         
-        if !use_rustfst_determinize {
-            dwa.residuated_push();
-        }
         dwa.simplify_with_rustfst();
         dwa.simplify();
+        println!("Final size (with weights): {} states", dwa.states.len());
+
+        let mut dwa_unweighted = dwa.clone();
+        remove_weights(&mut dwa_unweighted);
+        dwa_unweighted.simplify_with_rustfst();
+        println!("Final size (unweighted): {} states", dwa_unweighted.states.len());
         
-        println!("Final size: {} states", dwa.states.len());
         dwa
     }
 
