@@ -1816,6 +1816,7 @@ fn test_ebnf_ignore_directive_with_partial_match() -> Result<(), Box<dyn std::er
         &GrammarConstraintConfig::default(),
     );
     println!("Parser: {}", constraint.parser);
+    constraint.dump_parser_dwa();
 
     // 5. Initialize state and get the initial mask
     let mut state = constraint.init();
