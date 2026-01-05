@@ -264,11 +264,8 @@ impl DWA {
             let bidir1 = self.bidirectional_weight_refinement();  // Tighten weights bidirectionally
             self.residuated_push();  // Push weights to enable merging
             let min1 = self.minimize_states();
-            // TEMPORARILY DISABLED:
-            // let push1 = self.push_weights_into_transitions_and_finals();
-            // let push2 = self.push_weights_to_initial();
-            let push1 = false;
-            let push2 = false;
+            let push1 = self.push_weights_into_transitions_and_finals();
+            let push2 = self.push_weights_to_initial();
             let prune2 = self.prune_unreachable();
             changed = prune1 || bidir1 || min1 || push1 || push2 || prune2;
             
@@ -291,9 +288,8 @@ impl DWA {
             DwaPass::BidirectionalRefinement,  // Tighten weights bidirectionally
             DwaPass::ResidualPush,  // Push weights before minimize
             DwaPass::Minimize,
-            // TEMPORARILY DISABLED:
-            // DwaPass::PushWeights,
-            // DwaPass::PushWeightsToInitial,
+            DwaPass::PushWeights,
+            DwaPass::PushWeightsToInitial,
             DwaPass::PruneUnreachable,
         ];
         
