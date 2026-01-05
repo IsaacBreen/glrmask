@@ -1889,9 +1889,8 @@ impl GrammarConstraint {
             return self;
         }
         
-        // Count the number of tokenizer states
-        let max_tsid = self.possible_matches.keys().map(|k| k.0).max().unwrap_or(0);
-        let num_tsids = max_tsid + 1;
+        // Count the number of tokenizer states from the actual tokenizer
+        let num_tsids = self.tokenizer.dfa.states.len();
         
         if num_tsids == 0 {
             return self;
