@@ -19,6 +19,7 @@ use crate::profiler::{self};
 use crate::tokenizer::{LLMTokenID, TokenizerStateID};
 use crate::types::TerminalID as GrammarTokenID;
 use crate::precompute4::weighted_automata::common::Label;
+use crate::precompute4::weighted_automata::test_weighted_automata::stochastic_equivalence_test;
 
 // No-op progress bar replacement
 struct NoOpPb;
@@ -267,7 +268,7 @@ impl<'r> Precomputer1<'r> {
         // crate::debug!(5, "Simplified DWA with {} states and {} transitions", dwa.states.len(), dwa.states.num_transitions());
 
         crate::debug!(5, "Starting RustFST-based simplification and determinization");
-        // self.nwa.simplify_with_rustfst();
+        self.nwa.simplify_with_rustfst();
         crate::debug!(5, "Simplified NWA with {} states and {} transitions", self.nwa.states.len(), self.nwa.states.num_transitions());
         self.nwa.compress_transitions();
         crate::debug!(5, "Compressed NWA with {} states and {} transitions", self.nwa.states.len(), self.nwa.states.num_transitions());
@@ -280,6 +281,9 @@ impl<'r> Precomputer1<'r> {
         crate::debug!(5, "Simplified DWA with {} states and {} transitions", dwa.states.len(), dwa.states.num_transitions());
         dwa.simplify();
         crate::debug!(5, "Final simplified DWA with {} states and {} transitions", dwa.states.len(), dwa.states.num_transitions());
+        let mut dwa2 = self.nwa.determinize_to_dwa_with_rustfst();
+        dwa2.simplify_with_rustfst();
+        stochastic_equivalence_test(dwa.clone(), dwa2);
 
         dwa
     }
