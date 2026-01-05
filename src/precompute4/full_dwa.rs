@@ -375,9 +375,8 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
         initial_values_bv.push((start, initial_tokens.clone()));
     }
 
-    let offset = parser.terminal_map.len() as Label;
     let start_pass1 = Instant::now();
-    let (node_tokens, mut unique_signatures) = precompute_token_bvs_and_signatures(&reversed_nwa, &traversal_data, initial_values_bv, offset);
+    let (node_tokens, mut unique_signatures) = precompute_token_bvs_and_signatures(&reversed_nwa, &traversal_data, initial_values_bv);
     unique_signatures.insert(vec![vec![None]]);
     crate::debug!(4, "Pass 1: Tokens & Signatures ({} sigs, {:.2?})", unique_signatures.len(), start_pass1.elapsed());
     let mut unique_term_ids_in_sigs = BTreeSet::new();
@@ -574,25 +573,6 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
         &reversed_nwa, &traversal_data, initial_values_full,
         |current_val: &(BTreeMap<NWABody, BTreeMap<Option<TerminalID>, Weight>>, LLMTokenBV), edge_label, transitions| {
             let (current_bodies, current_tokens) = current_val;
-            if let Some(lbl) = edge_label {
-                if lbl >= offset {
-                    // In weight-heavy mode: tsid boundary detected
-                    // The edge weight already encodes tsid info, so we don't group by tsid
-                    // Just collect (body, weight) pairs directly
-                    let mut fb = final_bodies_arc.lock().unwrap();
-                    for (_dest, weight) in transitions {
-                        let w_bv: LLMTokenBV = weight.clone().into();
-                        let intersection_bv = current_tokens & &w_bv;
-                        if !intersection_bv.is_empty() {
-                            let final_w = Weight::from_rsb(intersection_bv.inner.as_ref().clone());
-                            for body in current_bodies.keys() {
-                                fb.push((body.clone(), final_w.clone()));
-                            }
-                        }
-                    }
-                    return Vec::new();
-                }
-            }
             let terminal_id = edge_label.map(|l| TerminalID(l as usize));
             let mut results = Vec::new();
             for (dest_id, weight) in transitions {
@@ -616,15 +596,15 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
             }
             *tokens1 |= &tokens2;
         },
-        |_, val| {
+        |node_id, val| {
             let (nwa_bodies_map, tokens) = val;
             let mut nwa_body = NWABody { start_states: vec![] };
-            for (right_body, terminal_map) in nwa_bodies_map {
-                let (signature, concrete_weights) = canonicalize_bundle(terminal_map);
+            for (right_body, terminal_map) in &nwa_bodies_map {
+                let (signature, concrete_weights) = canonicalize_bundle(terminal_map.clone());
                 let cached_nwa = template_cache.get(&signature).expect_else(|| format!("Template must exist for signature {:?}", signature));
                 let mut states = states_arena.borrow_mut();
                 let new_states_offset = states.len();
-                let composed_body = instantiate_nwa_template_into(cached_nwa, &concrete_weights, &mut states, &right_body);
+                let composed_body = instantiate_nwa_template_into(cached_nwa, &concrete_weights, &mut states, right_body);
                 let range = new_states_offset..states.len();
                 if !range.is_empty() {
                     apply_cancellations_range(&mut states, range.clone());
@@ -635,6 +615,19 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
                 }
                 nwa_body = NWABody::union(&nwa_body, &composed_body);
             }
+            
+            // Check if this is a final state in the reversed NWA (original start state)
+            // If so, collect the accumulated bodies into final_bodies
+            if let Some(fw) = &reversed_nwa.states[node_id].final_weight {
+                let fw_bv: LLMTokenBV = fw.clone().into();
+                let intersection_bv = &tokens & &fw_bv;
+                if !intersection_bv.is_empty() {
+                    let final_w = Weight::from_rsb(intersection_bv.inner.as_ref().clone());
+                    let mut fb = final_bodies_arc.lock().unwrap();
+                    fb.push((nwa_body.clone(), final_w));
+                }
+            }
+            
             if !tokens.is_empty() {
                 let mut next_body_map = BTreeMap::new(); next_body_map.insert(nwa_body, BTreeMap::new());
                 Some((next_body_map, tokens))
@@ -660,6 +653,7 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
     // SKIP final simplification to test performance impact
     // final_dwa.simplify();
     crate::debug!(4, "Parser DWA construction complete. Stats: {}", final_dwa.stats());
+
     final_dwa
 }
 
@@ -669,7 +663,7 @@ pub fn precompute4(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
     build_parser_dwa(parser, terminal_nwa)
 }
 
-pub fn precompute_token_bvs_and_signatures(reversed_nwa: &NWA, traversal_data: &NwaTraversalData, initial_values: Vec<(StateID, LLMTokenBV)>, offset: Label) -> (HashMap<StateID, LLMTokenBV>, HashSet<Signature>) {
+pub fn precompute_token_bvs_and_signatures(reversed_nwa: &NWA, traversal_data: &NwaTraversalData, initial_values: Vec<(StateID, LLMTokenBV)>) -> (HashMap<StateID, LLMTokenBV>, HashSet<Signature>) {
     let node_tokens: Arc<Mutex<HashMap<StateID, LLMTokenBV>>> = Arc::new(Mutex::new(HashMap::new()));
     let signatures: Arc<Mutex<HashSet<Signature>>> = Arc::new(Mutex::new(HashSet::new()));
 
@@ -677,11 +671,8 @@ pub fn precompute_token_bvs_and_signatures(reversed_nwa: &NWA, traversal_data: &
     let signatures_clone = signatures.clone();
 
     nwa_special_map(reversed_nwa, traversal_data, initial_values,
-        move |tokens: &LLMTokenBV, edge_label, transitions| {
+        move |tokens: &LLMTokenBV, _edge_label, transitions| {
             let mut results = Vec::new();
-            if let Some(lbl) = edge_label {
-                if lbl >= offset { return results; }
-            }
             for (dest_id, weight) in transitions {
                 let edge_bv: LLMTokenBV = weight.clone().into();
                 let next = tokens & &edge_bv;
@@ -695,7 +686,6 @@ pub fn precompute_token_bvs_and_signatures(reversed_nwa: &NWA, traversal_data: &
             let mut bundles_by_dest: HashMap<StateID, BTreeMap<Option<TerminalID>, Weight>> = HashMap::new();
             let state = &reversed_nwa.states[node_id];
             for (label, targets) in &state.transitions {
-                if *label >= offset { continue; }
                 let term = Some(TerminalID(*label as usize));
                 for (v, w) in targets {
                     let edge_bv: LLMTokenBV = w.clone().into();

@@ -187,10 +187,7 @@ impl<'r> Precomputer1<'r> {
             if let Some(&state) = self.roots.get(rep_tsid) {
                 // Create tsid mask: positions {i*M + tsid : i in 0..N} for M = num_tsids
                 let tsid_mask = create_tsid_mask(tsid.0, self.num_tsids, self.internal_max_llm_token);
-                // Use labeled transition with label = tsid + terminals_count (like symbol-heavy)
-                // but with tsid mask weight instead of ALL weight
-                let label = (tsid.0 + self.terminals_count) as Label;
-                self.nwa.add_transition(new_start_state, label, state, tsid_mask).unwrap();
+                self.nwa.add_epsilon(new_start_state, state, tsid_mask);
             }
         }
         self.nwa.body.start_states = vec![new_start_state];
