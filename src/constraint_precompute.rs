@@ -92,8 +92,9 @@ impl<'r> Precomputer1<'r> {
 
         let leaf_state = nwa.add_state();
         // In weight-heavy mode, final weight should also be expanded
+        // IMPORTANT: Use [0..=...] to create from ONE range, not iterate over all integers!
         nwa.states[leaf_state].final_weight = Some(Weight::from_rsb(
-            expand_rsb(&RangeSetBlaze::from_iter(0..=internal_max_llm_token), num_tsids)
+            expand_rsb(&RangeSetBlaze::from_iter([0..=internal_max_llm_token]), num_tsids)
         ));
         crate::debug!(6, "Created trie1 leaf state with expanded final weight");
 
@@ -103,7 +104,8 @@ impl<'r> Precomputer1<'r> {
             roots,
             state_to_rep,
             possible_matches: RefCell::new(BTreeMap::new()),
-            all_llm_tokens: RangeSetBlaze::from_iter(0..=internal_max_llm_token),
+            // IMPORTANT: Use [0..=...] to create from ONE range, not iterate over all integers!
+            all_llm_tokens: RangeSetBlaze::from_iter([0..=internal_max_llm_token]),
             pb,
             leaf_state,
             nwa,
@@ -357,7 +359,8 @@ impl<'r> Precomputer1<'r> {
         // Token i becomes positions [i*M, i*M + M - 1]
         let start = token_id * self.num_tsids;
         let end = start + self.num_tsids - 1;
-        Weight::from_rsb(RangeSetBlaze::from_iter(start..=end))
+        // IMPORTANT: Use [start..=end] to create from ONE range, not iterate over all integers!
+        Weight::from_rsb(RangeSetBlaze::from_iter([start..=end]))
     }
 
     /// Create an expanded weight from a RangeSetBlaze of token IDs.
@@ -371,7 +374,8 @@ impl<'r> Precomputer1<'r> {
     fn expanded_weight_all(&self) -> Weight {
         // All tokens in N×M space
         let max_pos = self.internal_max_llm_token * self.num_tsids + self.num_tsids - 1;
-        Weight::from_rsb(RangeSetBlaze::from_iter(0..=max_pos))
+        // IMPORTANT: Use [0..=max_pos] to create from ONE range, not iterate over all integers!
+        Weight::from_rsb(RangeSetBlaze::from_iter([0..=max_pos]))
     }
 
     fn add_pending_transition(&mut self, src: NWAStateID, label: Label, dst: NWAStateID, weight: Weight) {
