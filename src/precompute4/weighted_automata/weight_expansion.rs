@@ -430,4 +430,29 @@ mod tests {
         // Test for semantic equivalence
         stochastic_equivalence_test(output_dwa, expected_dwa);
     }
+
+
+    #[test]
+    fn test_convert_symbol_heavy_to_weight_heavy2() {
+        use super::*;
+        use crate::precompute4::weighted_automata::dwa::{DWA, DWAState, DWAStates, DWABody};
+        use crate::precompute4::weighted_automata::test_weighted_automata::stochastic_equivalence_test;
+
+        // Build the input DWA as specified:
+        // DWA (start: 0)
+        //   State 0:
+        //     0 -> 1 (weight: [0..=1])
+        //     1 -> 1 (weight: [0..=1])
+        //   State 1:
+        //     final_weight: [1]
+
+        // ...
+
+        // Build expected output DWA:
+        // DWA (start: 0)
+        //   State 0:
+        //     final_weight: [2..=3]
+
+        // ...
+    }
 }
