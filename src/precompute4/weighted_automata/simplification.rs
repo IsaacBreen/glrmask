@@ -147,6 +147,21 @@ pub enum DwaPass {
     Minimize,
 }
 
+impl DwaPass {
+    pub fn is_enabled(&self) -> bool {
+        let var_name = match self {
+            DwaPass::PruneUnreachable => "DWA_DISABLE_PRUNE_UNREACHABLE",
+            DwaPass::PruneDeadEnds => "DWA_DISABLE_PRUNE_DEAD_ENDS",
+            DwaPass::PushWeights => "DWA_DISABLE_PUSH_WEIGHTS",
+            DwaPass::PushWeightsToInitial => "DWA_DISABLE_PUSH_WEIGHTS_TO_INITIAL",
+            DwaPass::ResidualPush => "DWA_DISABLE_RESIDUAL_PUSH",
+            DwaPass::BidirectionalRefinement => "DWA_DISABLE_BIDIRECTIONAL_REFINEMENT",
+            DwaPass::Minimize => "DWA_DISABLE_MINIMIZE",
+        };
+        std::env::var(var_name).map(|v| v != "1").unwrap_or(true)
+    }
+}
+
 impl DWA {
     pub fn simplify(&mut self) {
         if self.states.len() == 0 {
@@ -202,6 +217,9 @@ impl DWA {
         for _ in 0..10 {
             let mut changed_in_iteration = false;
             for &pass in ordering {
+                if !pass.is_enabled() {
+                    continue;
+                }
                 let pass_changed = match pass {
                     DwaPass::PruneUnreachable => self.prune_unreachable(),
                     DwaPass::PruneDeadEnds => self.prune_dead_ends(),
@@ -224,13 +242,13 @@ impl DWA {
     /// Useful for terminal DWAs where we want minimize but don't need full convergence.
     pub fn simplify_single_pass(&mut self) {
         // Order: clean graph, minimize, push weights, clean
-        self.prune_dead_ends();
-        self.prune_unreachable();
-        self.minimize_states();
-        self.push_weights_into_transitions_and_finals();
-        self.minimize_states();  // Second minimize after pushing weights
-        self.prune_dead_ends();
-        self.prune_unreachable();
+        if DwaPass::PruneDeadEnds.is_enabled() { self.prune_dead_ends(); }
+        if DwaPass::PruneUnreachable.is_enabled() { self.prune_unreachable(); }
+        if DwaPass::Minimize.is_enabled() { self.minimize_states(); }
+        if DwaPass::PushWeights.is_enabled() { self.push_weights_into_transitions_and_finals(); }
+        if DwaPass::Minimize.is_enabled() { self.minimize_states(); }  // Second minimize after pushing weights
+        if DwaPass::PruneDeadEnds.is_enabled() { self.prune_dead_ends(); }
+        if DwaPass::PruneUnreachable.is_enabled() { self.prune_unreachable(); }
     }
 
     pub fn minimize_with_rustfst(&mut self) {
@@ -260,24 +278,24 @@ impl DWA {
         // and benefit from this optimization (saves ~200ms for 78 templates).
         if initial_num_states < 1000 {
             let mut changed = false;
-            let prune1 = self.prune_dead_ends();
-            let bidir1 = self.bidirectional_weight_refinement();  // Tighten weights bidirectionally
-            self.residuated_push();  // Push weights to enable merging
-            let min1 = self.minimize_states();
-            let push1 = self.push_weights_into_transitions_and_finals();
-            let push2 = self.push_weights_to_initial();
-            let prune2 = self.prune_unreachable();
+            let prune1 = if DwaPass::PruneDeadEnds.is_enabled() { self.prune_dead_ends() } else { false };
+            let bidir1 = if DwaPass::BidirectionalRefinement.is_enabled() { self.bidirectional_weight_refinement() } else { false };  // Tighten weights bidirectionally
+            if DwaPass::ResidualPush.is_enabled() { self.residuated_push(); }  // Push weights to enable merging
+            let min1 = if DwaPass::Minimize.is_enabled() { self.minimize_states() } else { false };
+            let push1 = if DwaPass::PushWeights.is_enabled() { self.push_weights_into_transitions_and_finals() } else { false };
+            let push2 = if DwaPass::PushWeightsToInitial.is_enabled() { self.push_weights_to_initial() } else { false };
+            let prune2 = if DwaPass::PruneUnreachable.is_enabled() { self.prune_unreachable() } else { false };
             changed = prune1 || bidir1 || min1 || push1 || push2 || prune2;
             
             // Second pass ONLY if pruning/pushing changed something (not just minimize)
             // After minimize, the DWA is already minimal so re-minimizing won't help
             // unless structure was changed by prune/push
             if prune1 || bidir1 || push1 || push2 || prune2 {
-                self.prune_dead_ends();
-                self.bidirectional_weight_refinement();
-                self.residuated_push();  // Push again before second minimize
-                self.minimize_states();
-                self.prune_unreachable();
+                if DwaPass::PruneDeadEnds.is_enabled() { self.prune_dead_ends(); }
+                if DwaPass::BidirectionalRefinement.is_enabled() { self.bidirectional_weight_refinement(); }
+                if DwaPass::ResidualPush.is_enabled() { self.residuated_push(); }  // Push again before second minimize
+                if DwaPass::Minimize.is_enabled() { self.minimize_states(); }
+                if DwaPass::PruneUnreachable.is_enabled() { self.prune_unreachable(); }
             }
             return changed;
         }
@@ -308,6 +326,10 @@ impl DWA {
             let mut changed_in_iteration = false;
             
             for &pass in ordering {
+                if !pass.is_enabled() {
+                    continue;
+                }
+
                 // Special handling for Minimize: skip if we've already determined it can't help
                 // This prevents the expensive partition computation when we know it won't reduce states
                 if pass == DwaPass::Minimize && minimize_fully_explored {
