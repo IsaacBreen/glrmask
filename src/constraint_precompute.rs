@@ -13,7 +13,7 @@ use crate::finite_automata::Regex;
 use crate::glr::parser::GLRParser;
 use crate::precompute4::weighted_automata::rangeset::RangeSet as WARangeSet;
 use crate::precompute4::weighted_automata::{DWA, NWA, NWAStateID, Weight};
-use crate::precompute4::weighted_automata::weight_expansion::{expand_rsb, create_tsid_mask, create_tsid_set_mask};
+use crate::precompute4::weighted_automata::weight_expansion::{expand_rsb, create_tsid_set_mask};
 use crate::profiler::{self};
 
 use crate::tokenizer::{LLMTokenID, TokenizerStateID};
@@ -255,16 +255,24 @@ impl<'r> Precomputer1<'r> {
 
         crate::debug!(5, "{} states and {} transitions", self.nwa.states.len(), self.nwa.states.num_transitions());
         
-        // OPTIMIZATION: Use lightweight operations instead of full simplify()
-        // This terminal DWA is only used as input to precompute4, so expensive minimization
-        // provides little benefit. Just do basic cleanup.
-        self.nwa.compress_transitions();
-        crate::debug!(5, "Compressed NWA with {} states and {} transitions", self.nwa.states.len(), self.nwa.states.num_transitions());
+        // // OPTIMIZATION: Use lightweight operations instead of full simplify()
+        // // This terminal DWA is only used as input to precompute4, so expensive minimization
+        // // provides little benefit. Just do basic cleanup.
+        // self.nwa.compress_transitions();
+        // crate::debug!(5, "Compressed NWA with {} states and {} transitions", self.nwa.states.len(), self.nwa.states.num_transitions());
+        //
+        // // let dwa = self.nwa.determinize_and_simplify("Precompute1");
+        // let mut dwa = self.nwa.determinize();
+        // dwa.simplify();
+        // crate::debug!(5, "Simplified DWA with {} states and {} transitions", dwa.states.len(), dwa.states.num_transitions());
 
-        // let dwa = self.nwa.determinize_and_simplify("Precompute1");
-        let mut dwa = self.nwa.determinize();
-        dwa.simplify();
-        crate::debug!(5, "Simplified DWA with {} states and {} transitions", dwa.states.len(), dwa.states.num_transitions());
+        crate::debug!(5, "Starting RustFST-based simplification and determinization");
+        self.nwa.simplify_with_rustfst();
+        crate::debug!(5, "Simplified NWA with {} states and {} transitions", self.nwa.states.len(), self.nwa.states.num_transitions());
+        let mut dwa = self.nwa.determinize_to_dwa_with_rustfst();
+        crate::debug!(5, "Determinized DWA with {} states and {} transitions", dwa.states.len(), dwa.states.num_transitions());
+        dwa.simplify_with_rustfst();
+        crate::debug!(5, "Final simplified DWA with {} states and {} transitions", dwa.states.len(), dwa.states.num_transitions());
 
         dwa
     }

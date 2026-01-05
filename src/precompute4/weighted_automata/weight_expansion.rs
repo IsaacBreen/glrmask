@@ -331,6 +331,49 @@ mod tests {
     }
     
     #[test]
+    fn test_create_tsid_set_mask() {
+        let num_tsids = 5;
+        let max_llm_token = 3; // 4 tokens: 0, 1, 2, 3
+        
+        // Test with tsids {0, 2, 4}
+        let mask = create_tsid_set_mask([0usize, 2, 4], num_tsids, max_llm_token);
+        
+        // Should have positions for each tsid across all tokens:
+        // tsid 0: 0, 5, 10, 15
+        // tsid 2: 2, 7, 12, 17
+        // tsid 4: 4, 9, 14, 19
+        assert!(mask.contains(0));
+        assert!(mask.contains(5));
+        assert!(mask.contains(10));
+        assert!(mask.contains(15));
+        assert!(mask.contains(2));
+        assert!(mask.contains(7));
+        assert!(mask.contains(12));
+        assert!(mask.contains(17));
+        assert!(mask.contains(4));
+        assert!(mask.contains(9));
+        assert!(mask.contains(14));
+        assert!(mask.contains(19));
+        
+        // Should NOT have positions for tsids 1 or 3
+        assert!(!mask.contains(1));
+        assert!(!mask.contains(3));
+        assert!(!mask.contains(6));
+        assert!(!mask.contains(8));
+        
+        // Verify equivalence with calling create_tsid_mask individually
+        let mask0 = create_tsid_mask(0, num_tsids, max_llm_token);
+        let mask2 = create_tsid_mask(2, num_tsids, max_llm_token);
+        let mask4 = create_tsid_mask(4, num_tsids, max_llm_token);
+        let combined = &(&mask0 | &mask2) | &mask4;
+        
+        assert_eq!(mask.len(), combined.len());
+        for pos in combined.rsb.iter() {
+            assert!(mask.contains(pos), "mask missing position {}", pos);
+        }
+    }
+    
+    #[test]
     fn test_collapse_weight() {
         let num_tsids = 3;
         // Weight with positions 4, 5 (which is token 1) and 10 (which is token 3)
