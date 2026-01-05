@@ -72,6 +72,42 @@ pub fn create_tsid_mask_rsb(tsid: usize, num_tsids: usize, max_llm_token: usize)
     mask
 }
 
+/// Create a combined tsid mask for a set of tokenizer state IDs.
+/// 
+/// This is more efficient than calling `create_tsid_mask` multiple times when
+/// you have multiple tsids that all need to be combined. Instead of building
+/// N separate RangeSets (each iterating through max_llm_token), this builds
+/// one RangeSet by:
+/// 1. Creating a base pattern with all the tsid offsets
+/// 2. "Tiling" that pattern across all LLM token positions
+/// 
+/// For example, with tsids = {0, 2, 5} and num_tsids = 10:
+/// - Base pattern: {0, 2, 5}
+/// - Tiled for each LLM token n: {0+n*10, 2+n*10, 5+n*10}
+pub fn create_tsid_set_mask<I>(tsids: I, num_tsids: usize, max_llm_token: usize) -> Weight
+where
+    I: IntoIterator<Item = usize>,
+{
+    // Build base pattern from all tsids
+    let base_pattern: RangeSetBlaze<usize> = tsids.into_iter().collect();
+    
+    if base_pattern.is_empty() {
+        return Weight::zeros();
+    }
+    
+    // Tile the pattern across all LLM tokens
+    // For each LLM token n, shift the base pattern by n * num_tsids
+    let mut mask = RangeSetBlaze::new();
+    for n in 0..=max_llm_token {
+        let offset = n * num_tsids;
+        for tsid in base_pattern.iter() {
+            mask.insert(tsid + offset);
+        }
+    }
+    
+    Weight::from_rsb(mask)
+}
+
 /// Collapse a weight from N×M-space back to N-space.
 /// Given a weight in N×M-space (already restricted to a specific tsid via intersection),
 /// convert positions back to LLM token IDs: position / num_tsids.

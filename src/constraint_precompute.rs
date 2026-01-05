@@ -13,7 +13,7 @@ use crate::finite_automata::Regex;
 use crate::glr::parser::GLRParser;
 use crate::precompute4::weighted_automata::rangeset::RangeSet as WARangeSet;
 use crate::precompute4::weighted_automata::{DWA, NWA, NWAStateID, Weight};
-use crate::precompute4::weighted_automata::weight_expansion::{expand_rsb, create_tsid_mask};
+use crate::precompute4::weighted_automata::weight_expansion::{expand_rsb, create_tsid_mask, create_tsid_set_mask};
 use crate::profiler::{self};
 
 use crate::tokenizer::{LLMTokenID, TokenizerStateID};
@@ -183,10 +183,18 @@ impl<'r> Precomputer1<'r> {
         // Each tsid gets a transition labeled (tsid + terminals_count) with a tsid-masked weight
         // This preserves compatibility with build_parser_dwa which expects labeled tsid transitions
         let new_start_state = self.nwa.add_state();
+        
+        // Group tsids by their representative to call create_tsid_set_mask once per group
+        let mut rep_to_tsids: BTreeMap<TokenizerStateID, Vec<usize>> = BTreeMap::new();
         for (tsid, rep_tsid) in &self.state_to_rep {
-            if let Some(&state) = self.roots.get(rep_tsid) {
-                // Create tsid mask: positions {i*M + tsid : i in 0..N} for M = num_tsids
-                let tsid_mask = create_tsid_mask(tsid.0, self.num_tsids, self.internal_max_llm_token);
+            rep_to_tsids.entry(*rep_tsid).or_default().push(tsid.0);
+        }
+        
+        // Create one epsilon transition per representative with combined tsid mask
+        for (rep_tsid, tsids) in rep_to_tsids {
+            if let Some(&state) = self.roots.get(&rep_tsid) {
+                // Create combined tsid mask for all tsids that map to this representative
+                let tsid_mask = create_tsid_set_mask(tsids, self.num_tsids, self.internal_max_llm_token);
                 self.nwa.add_epsilon(new_start_state, state, tsid_mask);
             }
         }
