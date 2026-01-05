@@ -65,4 +65,23 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn test_github_hard_dump() {
+        let path = "nwa_dump.json";
+        if fs::metadata(path).is_err() {
+            println!("Skipping test: {} not found", path);
+            return;
+        }
+        let content = fs::read_to_string(path).expect("Failed to read nwa_dump.json");
+        let nwa: NWA = serde_json::from_str(&content).expect("Failed to parse NWA");
+        
+        println!("Loaded NWA from {}: {} states, {} transitions", path, nwa.states.len(), nwa.states.num_transitions());
+
+        let d_rust = run_pipeline(&nwa, true);
+        let d_built = run_pipeline(&nwa, false);
+
+        println!("RustFST: {} states", d_rust.states.len());
+        println!("Builtin: {} states", d_built.states.len());
+    }
 }

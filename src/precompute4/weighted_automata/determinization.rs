@@ -318,11 +318,14 @@ impl NWA {
                 }
                 
                 let w_edge = edge_weights.remove(&label).unwrap();
+                let w_edge_inv = !&w_edge;
 
                 // Normalize weights in the subset by dividing by w_edge.
-                // Division in Boolean semiring (tightening): w / v = w.
-                // Since w is a subset of v (w_edge), we simply keep w.
-                let normalized_subset: FxHashMap<NWAStateID, Weight> = next_subset;
+                // Division in Boolean semiring (loosening): w / v = w | !v.
+                let normalized_subset: FxHashMap<NWAStateID, Weight> = next_subset
+                    .into_iter()
+                    .map(|(id, w)| (id, w | &w_edge_inv))
+                    .collect();
 
                 let t_map = std::time::Instant::now();
                 let hashed_next = HashedSubset::from_fxhashmap(normalized_subset);
