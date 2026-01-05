@@ -150,6 +150,42 @@ impl DWA {
         format!("States: {}, Transitions: {}", self.states.len(), self.states.iter().map(|s| s.transitions.len()).sum::<usize>())
     }
 
+    pub fn is_cyclic(&self) -> bool {
+        let n = self.states.len();
+        if n == 0 { return false; }
+        
+        // 0: unvisited, 1: visiting, 2: visited
+        let mut color = vec![0u8; n];
+        
+        for i in 0..n {
+            if color[i] == 0 {
+                if self.is_cyclic_dfs(i, &mut color) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+    
+    fn is_cyclic_dfs(&self, u: usize, color: &mut [u8]) -> bool {
+        color[u] = 1;
+        
+        for &v in self.states[u].transitions.values() {
+            if v >= self.states.len() { continue; }
+            if color[v] == 1 {
+                return true;
+            }
+            if color[v] == 0 {
+                if self.is_cyclic_dfs(v, color) {
+                    return true;
+                }
+            }
+        }
+        
+        color[u] = 2;
+        false
+    }
+
     pub fn optimize_for_visualization(&mut self) {
         let n = self.states.len();
         if n == 0 {
