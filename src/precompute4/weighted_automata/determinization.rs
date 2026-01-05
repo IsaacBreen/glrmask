@@ -113,6 +113,20 @@ impl NWA {
     /// - Displays a progress bar for large automata.
     /// - **Formerly:** `determinize_to_dwa2`
     pub fn determinize_robust(&self) -> DWA {
+        // 0. Optionally remove epsilons first via rustfst (produces more compact DWA)
+        // This matches what determinize_to_dwa_with_rustfst does.
+        let use_rm_epsilon = std::env::var("DWA_USE_RM_EPSILON").map_or(false, |v| v == "1");
+        if use_rm_epsilon {
+            crate::debug!(5, "Determinization: Removing epsilons via rustfst first...");
+            let epsilon_free = self.remove_epsilons();
+            return epsilon_free.determinize_robust_internal();
+        }
+        
+        self.determinize_robust_internal()
+    }
+    
+    /// Internal implementation of determinize_robust (called after optional rm_epsilon).
+    fn determinize_robust_internal(&self) -> DWA {
         // 1. Try Heuristic Optimization
         if let Some(dwa) = try_build_singleton_loop_union(self) {
             return dwa;

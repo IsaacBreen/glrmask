@@ -420,4 +420,13 @@ impl NWA {
     pub fn from_rustfst(fst: &VectorFst<BitsetWeight>) -> NWA {
         vector_fst_to_nwa(fst)
     }
+    
+    /// Remove epsilon transitions by converting to rustfst and back.
+    /// This canonicalizes the NWA structure for more efficient determinization.
+    pub fn remove_epsilons(&self) -> NWA {
+        let mut fst = nwa_to_vector_fst(self);
+        fst.compute_and_update_properties_all().unwrap();
+        rm_epsilon(&mut fst).unwrap();
+        vector_fst_to_nwa(&fst)
+    }
 }
