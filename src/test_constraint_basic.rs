@@ -904,9 +904,6 @@ fn test_precompute_a_plus_tokenizer() {
     let state_to_rep: BTreeMap<TokenizerStateID, TokenizerStateID> = BTreeMap::from([
         (tokenizer.initial_state_id(), tokenizer.initial_state_id())
     ]);
-    
-    // Number of tokenizer states for weight-heavy encoding
-    let num_tsids = tokenizer.dfa.states.len();
 
     let dwa = run_precompute1(
         &tokenizer,
@@ -914,17 +911,17 @@ fn test_precompute_a_plus_tokenizer() {
         internal_max_llm_token,
         terminals_count,
         state_to_rep,
-        num_tsids,
     );
 
     // --- Verification ---
     // In weight-heavy mode, the terminal DWA has:
-    // - Start state with epsilon transitions (tsid info encoded in weights)
+    // - Start state with tsid-labeled transitions (tsid info encoded in weights)
     // - Expanded weights in N×M space
     
     let start_state_id = dwa.body.start_state;
-    assert!(dwa.states[start_state_id].transitions.is_empty(), 
-        "Weight-heavy DWA start state should have no labeled transitions");
+    // Start state should have tsid transitions (labels >= terminals_count)
+    assert!(!dwa.states[start_state_id].transitions.is_empty(), 
+        "Terminal DWA start state should have tsid transitions");
     
     // The DWA should have states and be non-trivial
     assert!(dwa.states.len() > 1, "DWA should have multiple states");
@@ -990,26 +987,23 @@ fn test_precompute_x_eq() {
         (tokenizer.initial_state_id(), tokenizer.initial_state_id())
     ]);
     
-    // Number of tokenizer states for weight-heavy encoding
-    let num_tsids = tokenizer.dfa.states.len();
-
     let dwa = run_precompute1(
         &tokenizer,
         &internal_llm_token_map,
         internal_max_llm_token,
         terminals_count,
         state_to_rep,
-        num_tsids,
     );
 
     // --- Verification (weight-heavy mode) ---
     // In weight-heavy mode, the terminal DWA has:
-    // - Start state with epsilon transitions (tsid info encoded in weights)
+    // - Start state with tsid-labeled transitions (tsid info encoded in weights)
     // - Expanded weights in N×M space
     
     let start_state_id = dwa.body.start_state;
-    assert!(dwa.states[start_state_id].transitions.is_empty(), 
-        "Weight-heavy DWA start state should have no labeled transitions");
+    // Start state should have tsid transitions (labels >= terminals_count)
+    assert!(!dwa.states[start_state_id].transitions.is_empty(), 
+        "Terminal DWA start state should have tsid transitions");
     
     // The DWA should have states and be non-trivial
     assert!(dwa.states.len() > 1, "DWA should have multiple states");
@@ -2788,27 +2782,24 @@ fn test_tokenizer_vocab_to_terminal_dwa_aa() {
         .collect();
     
     // Number of tokenizer states for weight-heavy encoding
-    let num_tsids = tokenizer.dfa.states.len();
-    
     let terminal_dwa = run_precompute1(
         &tokenizer,
         &internal_llm_token_map,
         0, // max internal token id
         terminals_count,
         state_to_rep,
-        num_tsids,
     );
     
     println!("Actual Terminal DWA:\n{}", terminal_dwa);
     
-    // In weight-heavy mode, the DWA structure is different:
-    // - Start state has epsilon transitions (no labeled transitions)
+    // In weight-heavy mode, the terminal DWA has:
+    // - Start state with tsid-labeled transitions (tsid info encoded in weights)
     // - Weights are in N×M space
-    // This test now just verifies basic structure, not the old symbol-heavy format.
     
     let start_state_id = terminal_dwa.body.start_state;
-    assert!(terminal_dwa.states[start_state_id].transitions.is_empty(), 
-        "Weight-heavy DWA start state should have no labeled transitions");
+    // Start state should have tsid transitions (labels >= terminals_count)
+    assert!(!terminal_dwa.states[start_state_id].transitions.is_empty(), 
+        "Terminal DWA start state should have tsid transitions");
     
     // The DWA should have states and be non-trivial
     assert!(terminal_dwa.states.len() > 1, "DWA should have multiple states");

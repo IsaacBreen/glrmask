@@ -1000,7 +1000,7 @@ impl GrammarConstraint {
             internal_to_original_sparse_matrix: vec![],
         };
 
-        // Number of tokenizer states for weight-heavy encoding
+        // Number of tokenizer states for weight-heavy encoding (for debug logging)
         let num_tsids = tokenizer.dfa.states.len();
         
         crate::debug!(4, "Running precompute1 (weight-heavy mode, num_tsids={})...", num_tsids);
@@ -1010,7 +1010,6 @@ impl GrammarConstraint {
             vocab.internal_max_llm_token,
             parser.terminal_map.len(),
             state_to_rep.clone(),
-            num_tsids,
         );
 
         #[allow(clippy::redundant_closure_call)]

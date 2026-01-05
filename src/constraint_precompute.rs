@@ -629,8 +629,10 @@ pub fn run_precompute1(
     internal_max_llm_token: usize,
     terminals_count: usize,
     state_to_rep: BTreeMap<TokenizerStateID, TokenizerStateID>,
-    num_tsids: usize,
 ) -> DWA {
+    // Compute num_tsids from tokenizer
+    let num_tsids = tokenizer.dfa.states.len();
+    
     let mut representative_llm_token_map: BTreeMap<Vec<u8>, LLMTokenID> = BTreeMap::new();
     let mut seen_internal_ids = std::collections::HashSet::new();
 
