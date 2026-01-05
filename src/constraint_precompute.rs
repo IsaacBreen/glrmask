@@ -34,6 +34,7 @@ pub(crate) struct Precomputer1<'r> {
     pub(crate) tokenizer: &'r Regex,
     pub(crate) vocab: VocabPrefixTree,
     pub(crate) roots: BTreeMap<TokenizerStateID, NWAStateID>,
+    pub(crate) state_to_rep: BTreeMap<TokenizerStateID, TokenizerStateID>,
     pub(crate) possible_matches: RefCell<
         BTreeMap<
             *const VocabPrefixTreeNode,
@@ -58,7 +59,7 @@ impl<'r> Precomputer1<'r> {
         internal_llm_token_map: &BTreeMap<Vec<u8>, LLMTokenID>,
         internal_max_llm_token: usize,
         terminals_count: usize,
-        active_states: Vec<TokenizerStateID>,
+        state_to_rep: BTreeMap<TokenizerStateID, TokenizerStateID>,
     ) -> Self {
         let tokens: Vec<(usize, Vec<u8>)> = internal_llm_token_map
             .iter()
@@ -73,11 +74,13 @@ impl<'r> Precomputer1<'r> {
         nwa.states.0.clear(); // Clear default start state
 
         let mut roots = BTreeMap::new();
-        for sid in active_states {
-            let root_state = nwa.add_state();
-            roots.insert(sid, root_state);
+        for &rep_sid in state_to_rep.values() {
+            if !roots.contains_key(&rep_sid) {
+                let root_state = nwa.add_state();
+                roots.insert(rep_sid, root_state);
+            }
         }
-        crate::debug!(5, "Created trie1 roots ({} states)", roots.len());
+        crate::debug!(5, "Created trie1 roots ({} states for {} total tsids)", roots.len(), state_to_rep.len());
 
         let pb = NoOpPb;
 
@@ -89,6 +92,7 @@ impl<'r> Precomputer1<'r> {
             tokenizer,
             vocab,
             roots,
+            state_to_rep,
             possible_matches: RefCell::new(BTreeMap::new()),
             all_llm_tokens: RangeSetBlaze::from_iter(0..=internal_max_llm_token),
             pb,
@@ -163,9 +167,11 @@ impl<'r> Precomputer1<'r> {
         }
 
         let new_start_state = self.nwa.add_state();
-        for (tsid, state) in &self.roots {
-            let label = (tsid.0 + self.terminals_count) as Label;
-            self.nwa.add_transition(new_start_state, label, *state, Weight::all()).unwrap();
+        for (tsid, rep_tsid) in &self.state_to_rep {
+            if let Some(&state) = self.roots.get(rep_tsid) {
+                let label = (tsid.0 + self.terminals_count) as Label;
+                self.nwa.add_transition(new_start_state, label, state, Weight::all()).unwrap();
+            }
         }
         self.nwa.body.start_states = vec![new_start_state];
 
@@ -554,9 +560,8 @@ pub fn run_precompute1(
     internal_llm_token_map: &BTreeMap<Vec<u8>, LLMTokenID>,
     internal_max_llm_token: usize,
     terminals_count: usize,
-    active_states: Vec<TokenizerStateID>,
+    state_to_rep: BTreeMap<TokenizerStateID, TokenizerStateID>,
 ) -> DWA {
-    // Reduce internal_llm_token_map to representatives to speed up precomputation
     let mut representative_llm_token_map: BTreeMap<Vec<u8>, LLMTokenID> = BTreeMap::new();
     let mut seen_internal_ids = std::collections::HashSet::new();
 
@@ -571,11 +576,9 @@ pub fn run_precompute1(
         &representative_llm_token_map,
         internal_max_llm_token,
         terminals_count,
-        active_states,
+        state_to_rep,
     );
 
-
     helper.run_dfs();
-
     helper.finish()
 }

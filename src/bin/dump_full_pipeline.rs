@@ -98,14 +98,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let internal_max_llm_token = max_token_id;
     let terminals_count = parser.terminal_map.len();
-    let active_states = tokenizer.iter_states().collect();
+    let state_to_rep: BTreeMap<sep1::tokenizer::TokenizerStateID, sep1::tokenizer::TokenizerStateID> = tokenizer
+        .iter_states()
+        .map(|sid| (sid, sid))
+        .collect();
 
     let mut terminal_dwa = run_precompute1(
         tokenizer,
         &internal_llm_token_map,
         internal_max_llm_token,
         terminals_count,
-        active_states,
+        state_to_rep,
     );
     if is_debug_level_enabled(5) {
         println!("Terminal DWA (before simplify):");

@@ -1000,19 +1000,13 @@ impl GrammarConstraint {
             internal_to_original_sparse_matrix: vec![],
         };
 
-        // Precompute1 - generate terminal DWA using only representative states
-        let mut representative_states_set: BTreeSet<TokenizerStateID> = BTreeSet::new();
-        for rep in state_to_rep.values() {
-            representative_states_set.insert(*rep);
-        }
-
         crate::debug!(4, "Running precompute1...");
         let mut terminal_dwa = run_precompute1(
             &tokenizer,
             &internal_llm_token_map,
             vocab.internal_max_llm_token,
             parser.terminal_map.len(),
-            representative_states_set.into_iter().collect(),
+            state_to_rep.clone(),
         );
 
         #[allow(clippy::redundant_closure_call)]
@@ -1561,31 +1555,6 @@ impl GrammarConstraint {
             } // end DUMP_DWA_DOT block - both DOT dumps complete
         }
 
-        // EXPAND DWA: Add transitions for non-representative states
-        crate::debug!(4, "Expanding DWA transitions for equivalent states...");
-        let start_state_id = terminal_dwa.body.start_state;
-        {
-            let terminals_count = parser.terminal_map.len();
-            
-            // Collect transitions to add to avoid mutable borrow conflict
-            let mut transitions_to_add = Vec::new();
-            
-            for (state, rep) in &state_to_rep {
-                if state != rep {
-                    let rep_label = (rep.0 + terminals_count) as crate::precompute4::weighted_automata::common::Label;
-                    let state_label = (state.0 + terminals_count) as crate::precompute4::weighted_automata::common::Label;
-                    
-                    // Find where the representative points to
-                    if let Some((target, weight)) = terminal_dwa.states[start_state_id].get_transition(rep_label) {
-                        transitions_to_add.push((state_label, target, weight.clone()));
-                    }
-                }
-            }
-
-            for (label, target, weight) in transitions_to_add {
-                terminal_dwa.add_transition(start_state_id, label, target, weight).unwrap();
-            }
-        }
 
         let mut possible_matches_precompute1 = computed_possible_matches;
 

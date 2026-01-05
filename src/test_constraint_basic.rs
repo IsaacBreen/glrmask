@@ -29,7 +29,7 @@ use crate::interface::{
 };
 use crate::json_serialization::JSONConvertible;
 use crate::interface::json_schema::json_schema_to_ebnf;
-use crate::tokenizer::{LLMTokenID, LLMTokenMap};
+use crate::tokenizer::{LLMTokenID, LLMTokenMap, TokenizerStateID};
 use crate::types::TerminalID;
 use crate::{choice_fast, groups, seq_fast};
 
@@ -901,14 +901,16 @@ fn test_precompute_a_plus_tokenizer() {
     let internal_max_llm_token = max_original_llm_token_id;
 
     let terminals_count = parser.terminal_map.len();
-    let active_states = vec![tokenizer.initial_state_id()];
+    let state_to_rep: BTreeMap<TokenizerStateID, TokenizerStateID> = BTreeMap::from([
+        (tokenizer.initial_state_id(), tokenizer.initial_state_id())
+    ]);
 
     let dwa = run_precompute1(
         &tokenizer,
         &internal_llm_token_map,
         internal_max_llm_token,
         terminals_count,
-        active_states,
+        state_to_rep,
     );
 
     // --- Verification ---
@@ -985,14 +987,16 @@ fn test_precompute_x_eq() {
     let internal_max_llm_token = max_original_llm_token_id;
 
     let terminals_count = parser.terminal_map.len();
-    let active_states = vec![tokenizer.initial_state_id()];
+    let state_to_rep: BTreeMap<TokenizerStateID, TokenizerStateID> = BTreeMap::from([
+        (tokenizer.initial_state_id(), tokenizer.initial_state_id())
+    ]);
 
     let dwa = run_precompute1(
         &tokenizer,
         &internal_llm_token_map,
         internal_max_llm_token,
         terminals_count,
-        active_states,
+        state_to_rep,
     );
 
     // --- Verification ---
@@ -2814,14 +2818,17 @@ fn test_tokenizer_vocab_to_terminal_dwa_aa() {
     internal_llm_token_map.insert(b"aa".to_vec(), LLMTokenID(0));
 
     let terminals_count = 1; // Just terminal 'a' (id=0)
-    let active_states = tokenizer.iter_states().collect();
+    let state_to_rep: BTreeMap<TokenizerStateID, TokenizerStateID> = tokenizer
+        .iter_states()
+        .map(|sid| (sid, sid))
+        .collect();
     
     let terminal_dwa = run_precompute1(
         &tokenizer,
         &internal_llm_token_map,
         0, // max internal token id
         terminals_count,
-        active_states,
+        state_to_rep,
     );
     
     println!("Actual Terminal DWA:\n{}", terminal_dwa);
