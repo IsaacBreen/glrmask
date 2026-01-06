@@ -308,22 +308,18 @@ fn test_minimization_with_weight_loosening() {
     println!("Step 2: Compress transitions...");
     nwa_simplified.compress_transitions();
     println!("  After compress_transitions: {} states", nwa_simplified.states.len());
-    
-    println!("Step 3: Remove epsilons...");
-    let nwa_no_eps = nwa_simplified.remove_epsilons();
-    println!("  After rm_epsilon: {} states", nwa_no_eps.states.len());
-    
+
     println!("\n=== DETERMINIZATION WITH WEIGHT LOOSENING ===");
     
     // Builtin pipeline
     println!("Builtin pipeline: determinize() → simplify()");
-    let mut dwa_builtin = nwa_no_eps.clone().determinize();
+    let mut dwa_builtin = nwa_simplified.clone().determinize();
     dwa_builtin.simplify();
     println!("  Result: {} states", dwa_builtin.states.len());
     
     // RustFST pipeline
     println!("RustFST pipeline: determinize_to_dwa_with_rustfst() → simplify()");
-    let mut dwa_rustfst = nwa_no_eps.determinize_to_dwa_with_rustfst();
+    let mut dwa_rustfst = nwa_simplified.determinize_to_dwa_with_rustfst();
     dwa_rustfst.simplify();
     println!("  Result: {} states", dwa_rustfst.states.len());
     
