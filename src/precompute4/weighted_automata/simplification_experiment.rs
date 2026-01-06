@@ -61,7 +61,6 @@ pub fn run_dwa_optimization_experiment(dwa: &mut DWA) {
                     DwaPass::PushWeights => current_dwa.push_weights_into_transitions_and_finals(),
                     DwaPass::PushWeightsToInitial => current_dwa.push_weights_to_initial(),
                     DwaPass::ResidualPush => current_dwa.residuated_push(),
-                    DwaPass::BidirectionalRefinement => current_dwa.bidirectional_weight_refinement(),
                     DwaPass::Minimize => current_dwa.minimize_states(),
                 };
                 if changed {
@@ -258,7 +257,6 @@ impl NWA {
                 DwaPass::PushWeights => { dwa.push_weights_into_transitions_and_finals(); },
                 DwaPass::PushWeightsToInitial => { dwa.push_weights_to_initial(); },
                 DwaPass::ResidualPush => { dwa.residuated_push(); },
-                DwaPass::BidirectionalRefinement => { dwa.bidirectional_weight_refinement(); },
                 DwaPass::Minimize => { dwa.minimize_states(); },
             }
             let pass_time = pass_start.elapsed();

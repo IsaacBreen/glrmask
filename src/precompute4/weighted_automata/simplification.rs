@@ -144,7 +144,6 @@ pub enum DwaPass {
     PushWeights,
     PushWeightsToInitial,
     ResidualPush,
-    BidirectionalRefinement,
     Minimize,
 }
 
@@ -156,7 +155,6 @@ impl DwaPass {
             DwaPass::PushWeights => "DWA_DISABLE_PUSH_WEIGHTS",
             DwaPass::PushWeightsToInitial => "DWA_DISABLE_PUSH_WEIGHTS_TO_INITIAL",
             DwaPass::ResidualPush => "DWA_DISABLE_RESIDUAL_PUSH",
-            DwaPass::BidirectionalRefinement => "DWA_DISABLE_BIDIRECTIONAL_REFINEMENT",
             DwaPass::Minimize => "DWA_DISABLE_MINIMIZE",
         };
         std::env::var(var_name).map(|v| v != "1").unwrap_or(true)
@@ -227,7 +225,6 @@ impl DWA {
                     DwaPass::PushWeights => self.push_weights_into_transitions_and_finals(),
                     DwaPass::PushWeightsToInitial => self.push_weights_to_initial(),
                     DwaPass::ResidualPush => self.residuated_push(),
-                    DwaPass::BidirectionalRefinement => self.bidirectional_weight_refinement(),
                     DwaPass::Minimize => unreachable!(),
                 };
                 changed_in_iteration |= pass_changed;
@@ -354,7 +351,6 @@ impl DWA {
                     DwaPass::PushWeights => self.push_weights_into_transitions_and_finals(),
                     DwaPass::PushWeightsToInitial => self.push_weights_to_initial(),
                     DwaPass::ResidualPush => self.residuated_push(),
-                    DwaPass::BidirectionalRefinement => self.bidirectional_weight_refinement(),
                     DwaPass::Minimize => {
                         let changed = self.minimize_states();
                         if !changed {
