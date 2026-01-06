@@ -562,8 +562,203 @@ impl DWA {
     /// These don't-care weights are added to all transition weights and final weights
     /// at each state, making states more similar and enabling more merging during minimization.
     ///
+    /// Algorithm (for acyclic DWAs):
+    /// 1. Compute Pre(q) = tokens that can reach state q from start
+    /// 2. Compute Post(q) = tokens that can reach an accepting state from q
+    /// 3. For final weights: w*_final(q) = w_final(q) | !Pre(q)
+    /// 4. For transition weights: w*_trans(p,a->q) = w_trans(p,a) | !(Pre(p) & Post(q))
+    ///
+    /// This is sound because tokens not in Pre(q) can never reach q, and tokens
+    /// not in (Pre(p) & Post(q)) can never use transition (p,a) on an accepting path.
     pub fn loosen_weights_for_minimize(&mut self) -> bool {
-        false
+        // Check if loosening is disabled via environment variable
+        if std::env::var("DISABLE_WEIGHT_LOOSENING").map(|v| v == "1").unwrap_or(false) {
+            return false;
+        }
+        
+        let n = self.states.len();
+        if n == 0 {
+            return false;
+        }
+        
+        // For now, only handle acyclic DWAs
+        if self.is_cyclic() {
+            return false;
+        }
+        
+        let start = self.body.start_state;
+        if start >= n {
+            return false;
+        }
+        
+        // === Phase 1: Compute Pre(q) - forward reachability ===
+        // Pre(q) = tokens that can reach state q from start via ON-weight transitions
+        // Pre(start) = T (all tokens)
+        // Pre(q) = Union over all (p,a)->q of (Pre(p) & w_trans(p,a))
+        
+        let mut pre: Vec<Weight> = vec![Weight::zeros(); n];
+        pre[start] = Weight::all();
+        
+        // BFS/DFS forward propagation
+        let mut queue: VecDeque<StateID> = VecDeque::new();
+        queue.push_back(start);
+        let mut in_queue = vec![false; n];
+        in_queue[start] = true;
+        
+        while let Some(u) = queue.pop_front() {
+            in_queue[u] = false;
+            let pre_u = pre[u].clone();
+            if pre_u.is_empty() {
+                continue;
+            }
+            
+            // For each outgoing transition u --a--> v
+            for (&label, &v) in &self.states[u].transitions {
+                if v >= n {
+                    continue;
+                }
+                let w = self.states[u].trans_weights.get(&label).cloned().unwrap_or_else(Weight::all);
+                if w.is_empty() {
+                    continue;
+                }
+                
+                // Tokens reaching v via this edge = Pre(u) & w_trans(u,a)
+                let flow = &pre_u & &w;
+                if flow.is_empty() {
+                    continue;
+                }
+                
+                // Update Pre(v)
+                if !flow.is_subset_of(&pre[v]) {
+                    pre[v] |= &flow;
+                    if !in_queue[v] {
+                        queue.push_back(v);
+                        in_queue[v] = true;
+                    }
+                }
+            }
+        }
+        
+        // === Phase 2: Compute Post(q) - backward co-reachability ===
+        // Post(q) = tokens that can reach an accepting state from q
+        // Post(q) starts with final_weight(q) if q is accepting
+        // Post(q) |= Union over all (q,a)->r of (w_trans(q,a) & Post(r))
+        //
+        // IMPORTANT: We compute Post using the ORIGINAL weights (before loosening),
+        // then loosen finals, then recompute Post with loosened finals for transition loosening.
+        
+        let mut post: Vec<Weight> = vec![Weight::zeros(); n];
+        
+        // Initialize with final weights
+        for q in 0..n {
+            if let Some(ref fw) = self.states[q].final_weight {
+                if !fw.is_empty() {
+                    post[q] = fw.clone();
+                }
+            }
+        }
+        
+        // Build reverse adjacency
+        let mut preds: Vec<Vec<(StateID, i32)>> = vec![Vec::new(); n];
+        for (u, st) in self.states.0.iter().enumerate() {
+            for (&label, &v) in &st.transitions {
+                if v < n {
+                    preds[v].push((u, label));
+                }
+            }
+        }
+        
+        // BFS backwards
+        for q in 0..n {
+            if !post[q].is_empty() {
+                queue.push_back(q);
+                in_queue[q] = true;
+            }
+        }
+        
+        while let Some(v) = queue.pop_front() {
+            in_queue[v] = false;
+            let post_v = post[v].clone();
+            if post_v.is_empty() {
+                continue;
+            }
+            
+            // For each predecessor u --label--> v
+            for &(u, label) in &preds[v] {
+                let w = self.states[u].trans_weights.get(&label).cloned().unwrap_or_else(Weight::all);
+                if w.is_empty() {
+                    continue;
+                }
+                
+                // Tokens that can reach acceptance from u via this edge
+                let contrib = &w & &post_v;
+                if contrib.is_empty() {
+                    continue;
+                }
+                
+                if !contrib.is_subset_of(&post[u]) {
+                    post[u] |= &contrib;
+                    if !in_queue[u] {
+                        queue.push_back(u);
+                        in_queue[u] = true;
+                    }
+                }
+            }
+        }
+        
+        // === Phase 3: Loosen weights ===
+        let mut changed = false;
+        
+        // NOTE: We do NOT loosen final weights because it creates interdependency issues
+        // with transition loosening. If we loosen a final weight to include tokens that
+        // "can't reach" that state, and then loosen transitions to let those tokens through,
+        // we create new accepting runs.
+        //
+        // Only transition loosening is safe because it's computed using ORIGINAL Post values
+        // which account for the original final weights.
+        
+        // Loosen transition weights: w*_trans(p,a->q) = w_trans(p,a) | !(Pre(p) & Post(q))
+        // Tokens not in (Pre(p) & Post(q)) either can't reach p or can't continue to acceptance from q
+        //
+        // IMPORTANT: We use the ORIGINAL Post values here, not post_star computed from loosened finals.
+        // Using post_star would be incorrect because it would think tokens can accept that can't
+        // actually reach the final state due to transition weight restrictions.
+        for p in 0..n {
+            let pre_p = &pre[p];
+            let labels: Vec<i32> = self.states[p].transitions.keys().copied().collect();
+            
+            for label in labels {
+                let q = match self.states[p].transitions.get(&label) {
+                    Some(&dest) => dest,
+                    None => continue,
+                };
+                if q >= n {
+                    continue;
+                }
+                
+                // Use ORIGINAL post values, not post_star
+                let post_q = &post[q];
+                
+                // Tokens that could use this transition on an accepting path
+                let active = pre_p & post_q;
+                // Don't-care tokens = !active
+                let dont_care = active.complement();
+                
+                if !dont_care.is_empty() {
+                    if let Some(w) = self.states[p].trans_weights.get_mut(&label) {
+                        if !dont_care.is_subset_of(w) {
+                            let new_w = &*w | &dont_care;
+                            if new_w != *w {
+                                *w = new_w;
+                                changed = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        changed
     }
 
     pub fn minimize_states(&mut self) -> bool {

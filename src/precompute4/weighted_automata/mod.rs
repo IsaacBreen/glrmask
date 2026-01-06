@@ -21,6 +21,7 @@ mod test_debug_min;
 mod test_minimization_failure;
 mod test_rm_epsilon_effect;
 mod test_minimization;
+mod test_weight_loosening;
 
 pub use self::rangeset::RangeSet;
 pub use self::common::{format_i16_char, format_pos_code, format_word, NWAStateID, StateID, Weight};
