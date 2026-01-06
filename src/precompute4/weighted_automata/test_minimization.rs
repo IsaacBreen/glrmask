@@ -1,6 +1,7 @@
 use crate::precompute4::weighted_automata::nwa::NWA;
 use std::fs;
 use std::path::PathBuf;
+use crate::precompute4::weighted_automata::test_weighted_automata::stochastic_equivalence_test;
 
 #[test]
 fn test_minimization_889() {
@@ -23,6 +24,8 @@ fn test_minimization_889() {
     let mut dwa_builtin = nwa.determinize();
     dwa_builtin.simplify();
     println!("Builtin states: {}", dwa_builtin.states.len());
+
+    stochastic_equivalence_test(dwa_builtin.clone(), dwa_rustfst.clone());
 
     // They should match
     assert_eq!(
