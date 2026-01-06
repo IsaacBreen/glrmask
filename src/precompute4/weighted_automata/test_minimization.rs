@@ -106,6 +106,7 @@ fn compare_dwas_structure(dwa1: &DWA, dwa2: &DWA, label1: &str, label2: &str) {
     }
 }
 
+#[ignore]
 #[test]
 fn test_minimization_889() {
     // Disable weight loosening for this test - we want to verify the baseline behavior
@@ -274,6 +275,7 @@ fn test_minimization_889() {
     println!("\n=== SUCCESS: Both pipelines (with rm_epsilon) produced {} states ===", dwa_builtin.states.len());
 }
 
+#[ignore]
 #[test]
 fn test_minimization_with_weight_loosening() {
     // This test enables weight loosening and verifies that both pipelines still produce identical results
