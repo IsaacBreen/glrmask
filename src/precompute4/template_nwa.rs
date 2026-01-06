@@ -200,6 +200,15 @@ pub fn build_template_dwas(parser: &GLRParser) -> Result<BTreeMap<TerminalID, DW
     // Tested parallel 2025: 467-494ms vs serial 380-400ms. Serial wins for many small DWAs.
     let mut result = BTreeMap::new();
     for (first_term, terms, nwa) in nwas_and_terms {
+        // EXPERIMENTAL: Dump NWA JSON for debugging state count issues
+        // Set DUMP_TERMINAL_NWA=1 to enable
+        if std::env::var("DUMP_TERMINAL_NWA").map_or(false, |v| v == "1") {
+            let nwa_json = serde_json::to_string_pretty(&nwa).unwrap();
+            let filename = format!("terminal_nwa_{}.json", first_term.0);
+            std::fs::write(&filename, nwa_json).unwrap();
+            crate::debug!(1, "Dumped terminal NWA for terminal {:?} to {}", first_term, filename);
+        }
+        
         let mut dwa = nwa.determinize();
         crate::debug!(6, "Terminal {:?} (and {} others): {} states before simplify", 
             first_term, terms.len() - 1, dwa.states.len());
