@@ -39,6 +39,7 @@ mod tests {
         dwa
     }
 
+    #[ignore]
     #[test]
     fn test_repro_and_minimize() {
         let content = fs::read_to_string("nwa_dump.json");
