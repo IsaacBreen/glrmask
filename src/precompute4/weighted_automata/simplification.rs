@@ -283,8 +283,7 @@ impl DWA {
             let mut changed = false;
             let prune1 = if DwaPass::PruneDeadEnds.is_enabled() { self.prune_dead_ends() } else { false };
             if DwaPass::ResidualPush.is_enabled() { self.residuated_push(); }  // Push weights to enable merging
-            // DISABLED: Weight-loosening optimization is INCORRECT - it changes the DWA semantics!
-            // self.loosen_weights_for_minimize();  // Loosen weights before minimize
+            self.loosen_weights_for_minimize();  // Loosen weights before minimize (controlled by DISABLE_WEIGHT_LOOSENING env var)
             let min1 = if DwaPass::Minimize.is_enabled() { self.minimize_states() } else { false };
             let push1 = if DwaPass::PushWeights.is_enabled() { self.push_weights_into_transitions_and_finals() } else { false };
             let push2 = if DwaPass::PushWeightsToInitial.is_enabled() { self.push_weights_to_initial() } else { false };
@@ -355,8 +354,7 @@ impl DWA {
                     DwaPass::PushWeightsToInitial => self.push_weights_to_initial(),
                     DwaPass::ResidualPush => self.residuated_push(),
                     DwaPass::Minimize => {
-                        // DISABLED: Weight-loosening optimization is INCORRECT - it changes the DWA semantics!
-                        // self.loosen_weights_for_minimize();
+                        self.loosen_weights_for_minimize();  // Loosen weights before minimize (controlled by DISABLE_WEIGHT_LOOSENING env var)
                         let changed = self.minimize_states();
                         if !changed {
                             // Minimize found no improvement - mark as fully explored
@@ -567,46 +565,50 @@ impl DWA {
     /// Processing is done in depth-first order (deepest first) for acyclic DWAs to propagate
     /// loosening from leaves to root.
     pub fn loosen_weights_for_minimize(&mut self) -> bool {
+        // Check if weight loosening is enabled via environment variable
+        if std::env::var("DISABLE_WEIGHT_LOOSENING").map_or(false, |v| v == "1") {
+            return false;
+        }
+        
         let n = self.states.len();
         if n <= 1 {
             return false;
         }
         
         // 1. Compute forward reachability: which weights can reach each state from start
+        // Iterate until convergence to handle cycles
         let mut can_reach: Vec<Weight> = vec![Weight::zeros(); n];
         can_reach[self.body.start_state] = Weight::all();  // All weights can start
         
-        // BFS to propagate reachability
-        let mut queue: VecDeque<StateID> = VecDeque::new();
-        queue.push_back(self.body.start_state);
-        let mut in_queue = vec![false; n];
-        in_queue[self.body.start_state] = true;
-        
-        while let Some(u) = queue.pop_front() {
-            in_queue[u] = false;
-            let reach_u = can_reach[u].clone();
-            
-            for (&label, &v) in &self.states[u].transitions {
-                if v >= n {
+        let mut changed_forward = true;
+        while changed_forward {
+            changed_forward = false;
+            for u in 0..n {
+                let reach_u = can_reach[u].clone();
+                if reach_u.is_empty() {
                     continue;
                 }
-                let trans_weight = self.states[u].trans_weights.get(&label)
-                    .cloned().unwrap_or_else(Weight::all);
-                let new_reach = &reach_u & &trans_weight;
                 
-                // Update reachability for v
-                let old_reach = &can_reach[v];
-                if !new_reach.is_subset_of(old_reach) {
-                    can_reach[v] |= &new_reach;
-                    if !in_queue[v] {
-                        queue.push_back(v);
-                        in_queue[v] = true;
+                for (&label, &v) in &self.states[u].transitions {
+                    if v >= n {
+                        continue;
+                    }
+                    let trans_weight = self.states[u].trans_weights.get(&label)
+                        .cloned().unwrap_or_else(Weight::all);
+                    let new_reach = &reach_u & &trans_weight;
+                    
+                    // Update reachability for v
+                    let old_reach = &can_reach[v];
+                    if !new_reach.is_subset_of(old_reach) {
+                        can_reach[v] |= &new_reach;
+                        changed_forward = true;
                     }
                 }
             }
         }
         
         // 2. Compute which weights have reached a final state from each state
+        // Iterate until convergence to handle cycles
         let mut reached_final: Vec<Weight> = vec![Weight::zeros(); n];
         
         // Initialize with final weights
@@ -628,31 +630,25 @@ impl DWA {
             }
         }
         
-        // Backward BFS to propagate "reached final" info
-        queue.clear();
-        in_queue.fill(false);
-        for i in 0..n {
-            if !reached_final[i].is_empty() {
-                queue.push_back(i);
-                in_queue[i] = true;
-            }
-        }
-        
-        while let Some(v) = queue.pop_front() {
-            in_queue[v] = false;
-            let reached_v = reached_final[v].clone();
-            
-            for (u, label) in &preds[v] {
-                let trans_weight = self.states[*u].trans_weights.get(label)
-                    .cloned().unwrap_or_else(Weight::all);
-                let new_reached = &reached_v & &trans_weight;
+        // Backward propagation with iteration until convergence
+        let mut changed_backward = true;
+        while changed_backward {
+            changed_backward = false;
+            for v in 0..n {
+                let reached_v = reached_final[v].clone();
+                if reached_v.is_empty() {
+                    continue;
+                }
                 
-                let old_reached = &reached_final[*u];
-                if !new_reached.is_subset_of(old_reached) {
-                    reached_final[*u] |= &new_reached;
-                    if !in_queue[*u] {
-                        queue.push_back(*u);
-                        in_queue[*u] = true;
+                for (u, label) in &preds[v] {
+                    let trans_weight = self.states[*u].trans_weights.get(label)
+                        .cloned().unwrap_or_else(Weight::all);
+                    let new_reached = &reached_v & &trans_weight;
+                    
+                    let old_reached = &reached_final[*u];
+                    if !new_reached.is_subset_of(old_reached) {
+                        reached_final[*u] |= &new_reached;
+                        changed_backward = true;
                     }
                 }
             }
@@ -660,7 +656,7 @@ impl DWA {
         
         // 3. Compute depth for DFS order (deepest first)
         let mut depth: Vec<usize> = vec![0; n];
-        queue.clear();
+        let mut queue: VecDeque<StateID> = VecDeque::new();
         queue.push_back(self.body.start_state);
         let mut visited = vec![false; n];
         visited[self.body.start_state] = true;

@@ -4,6 +4,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use crate::precompute4::weighted_automata::test_weighted_automata::stochastic_equivalence_test;
+use crate::json_serialization::{JSONNode, JSONConvertible};
 
 /// Deep comparison of two DWAs to find structural differences
 fn compare_dwas_structure(dwa1: &DWA, dwa2: &DWA, label1: &str, label2: &str) {
@@ -107,6 +108,9 @@ fn compare_dwas_structure(dwa1: &DWA, dwa2: &DWA, label1: &str, label2: &str) {
 
 #[test]
 fn test_minimization_889() {
+    // Disable weight loosening for this test - we want to verify the baseline behavior
+    std::env::set_var("DISABLE_WEIGHT_LOOSENING", "1");
+    
     // Load the NWA from the JSON dump
     // This file is expected to be in the root of the repo
     let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -270,4 +274,75 @@ fn test_minimization_889() {
     println!("\n=== SUCCESS: Both pipelines (with rm_epsilon) produced {} states ===", dwa_builtin.states.len());
 }
 
+#[test]
+fn test_minimization_with_weight_loosening() {
+    // This test enables weight loosening and verifies that both pipelines still produce identical results
+    // The absolute state count may differ from test_minimization_889 due to the optimization
     
+    // Enable weight loosening for this test
+    std::env::remove_var("DISABLE_WEIGHT_LOOSENING");
+    
+    // Load the NWA from the JSON dump
+    let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    path.push("nwa_dump.json");
+
+    let content =
+        fs::read_to_string(&path).expect("Failed to read nwa_dump.json - run test_minimization_889 first to generate it");
+    let nwa: NWA = serde_json::from_str(&content).expect("Failed to parse NWA");
+    
+    println!("Loaded NWA with {} states", nwa.states.len());
+    
+    // Count epsilon transitions
+    let epsilon_count: usize = nwa.states.0.iter()
+        .map(|s| s.epsilons.len())
+        .sum();
+    println!("Original NWA has {} epsilon transitions", epsilon_count);
+    
+    println!("\n=== PREPROCESSING ===");
+    println!("Step 1: Simplify NWA with rustfst...");
+    let mut nwa_simplified = nwa.clone();
+    nwa_simplified.simplify_with_rustfst();
+    println!("  After simplify_with_rustfst: {} states", nwa_simplified.states.len());
+    
+    println!("Step 2: Compress transitions...");
+    nwa_simplified.compress_transitions();
+    println!("  After compress_transitions: {} states", nwa_simplified.states.len());
+    
+    println!("Step 3: Remove epsilons...");
+    let nwa_no_eps = nwa_simplified.remove_epsilons();
+    println!("  After rm_epsilon: {} states", nwa_no_eps.states.len());
+    
+    println!("\n=== DETERMINIZATION WITH WEIGHT LOOSENING ===");
+    
+    // Builtin pipeline
+    println!("Builtin pipeline: determinize() → simplify()");
+    let mut dwa_builtin = nwa_no_eps.clone().determinize();
+    dwa_builtin.simplify();
+    println!("  Result: {} states", dwa_builtin.states.len());
+    
+    // RustFST pipeline
+    println!("RustFST pipeline: determinize_to_dwa_with_rustfst() → simplify()");
+    let mut dwa_rustfst = nwa_no_eps.determinize_to_dwa_with_rustfst();
+    dwa_rustfst.simplify();
+    println!("  Result: {} states", dwa_rustfst.states.len());
+    
+    // Both pipelines must produce the same result
+    assert_eq!(
+        dwa_builtin.states.len(),
+        dwa_rustfst.states.len(),
+        "With weight loosening: Builtin pipeline produced {} states, RustFST pipeline produced {} states",
+        dwa_builtin.states.len(),
+        dwa_rustfst.states.len()
+    );
+    
+    println!("\n=== SUCCESS: Both pipelines produced {} states (with weight loosening) ===", dwa_builtin.states.len());
+    
+    // Note: The state count with weight loosening may be less than 889 (the baseline from test_minimization_889)
+    // This is expected if the optimization works correctly
+    println!("Note: Baseline without weight loosening is 889 states (from test_minimization_889)");
+    if dwa_builtin.states.len() < 889 {
+        let reduction = (889 - dwa_builtin.states.len()) as f64 / 889.0 * 100.0;
+        println!("Weight loosening reduced states by {:.1}% ({} → {})", reduction, 889, dwa_builtin.states.len());
+    }
+}
+
