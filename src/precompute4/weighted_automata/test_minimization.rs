@@ -178,9 +178,33 @@ fn test_minimization_889() {
     println!("Builtin pipeline (with rm_epsilon): {} states", dwa_builtin.states.len());
     println!("RustFST pipeline (with rm_epsilon): {} states", dwa_rustfst.states.len());
     
-    // NOTE: Actual expected values depend on whether weight-loosening is enabled
-    // With weight-loosening: 889 states
-    // Without weight-loosening: should be same as builtin  
+    // Expected results WITHOUT weight-loosening optimization:
+    // - Without rm_epsilon: 1533 states
+    // - With rm_epsilon: 889 states (both pipelines)
+    //
+    // Note: Weight-loosening optimization reduced to 487/491 states but was INCORRECT -
+    // it changed the DWA semantics by adding don't-care weights to transitions.
+    
+    assert_eq!(
+        dwa_no_rm_eps.states.len(),
+        1533,
+        "Baseline (no rm_epsilon) mismatch! Expected 1533 states, got {}",
+        dwa_no_rm_eps.states.len()
+    );
+    
+    assert_eq!(
+        dwa_builtin.states.len(),
+        889,
+        "Builtin pipeline (with rm_epsilon) mismatch! Expected 889 states, got {}",
+        dwa_builtin.states.len()
+    );
+    
+    assert_eq!(
+        dwa_rustfst.states.len(),
+        889,
+        "RustFST pipeline (with rm_epsilon) mismatch! Expected 889 states, got {}",
+        dwa_rustfst.states.len()
+    );  
     
     // Central test: Both pipelines should produce the same number of states
     assert_eq!(
@@ -191,5 +215,59 @@ fn test_minimization_889() {
         dwa_rustfst.states.len()
     );
     
+    // Analyze why no-rm-epsilon has more states
+    println!("\n=== STRUCTURAL ANALYSIS ===");
+    
+    // Compare state space characteristics
+    let total_transitions_no_rm: usize = dwa_no_rm_eps.states.0.iter()
+        .map(|s| s.transitions.len())
+        .sum();
+    let total_transitions_rm: usize = dwa_builtin.states.0.iter()
+        .map(|s| s.transitions.len())
+        .sum();
+    
+    println!("Total transitions:");
+    println!("  Without rm_epsilon: {} transitions across {} states ({:.1} per state)",
+             total_transitions_no_rm, dwa_no_rm_eps.states.len(),
+             total_transitions_no_rm as f64 / dwa_no_rm_eps.states.len() as f64);
+    println!("  With rm_epsilon: {} transitions across {} states ({:.1} per state)",
+             total_transitions_rm, dwa_builtin.states.len(),
+             total_transitions_rm as f64 / dwa_builtin.states.len() as f64);
+    
+    // Compute average weight complexity per transition (number of ranges, not total elements)
+    let mut weight_ranges_no_rm: u64 = 0;
+    let mut transition_count_no_rm: u64 = 0;
+    for state in &dwa_no_rm_eps.states.0 {
+        for (label, _target) in &state.transitions {
+            if let Some(weight) = state.trans_weights.get(label) {
+                weight_ranges_no_rm += weight.rsb.ranges().count() as u64;
+                transition_count_no_rm += 1;
+            }
+        }
+    }
+    
+    let mut weight_ranges_rm: u64 = 0;
+    let mut transition_count_rm: u64 = 0;
+    for state in &dwa_builtin.states.0 {
+        for (label, _target) in &state.transitions {
+            if let Some(weight) = state.trans_weights.get(label) {
+                weight_ranges_rm += weight.rsb.ranges().count() as u64;
+                transition_count_rm += 1;
+            }
+        }
+    }
+    
+    if transition_count_no_rm > 0 && transition_count_rm > 0 {
+        println!("Weight complexity (ranges per transition):");
+        println!("  Without rm_epsilon: {:.1} ranges/transition ({} total ranges)",
+                 weight_ranges_no_rm as f64 / transition_count_no_rm as f64,
+                 weight_ranges_no_rm);
+        println!("  With rm_epsilon: {:.1} ranges/transition ({} total ranges)",
+                 weight_ranges_rm as f64 / transition_count_rm as f64,
+                 weight_ranges_rm);
+    }
+    
     println!("\n=== SUCCESS: Both pipelines (with rm_epsilon) produced {} states ===", dwa_builtin.states.len());
 }
+
+    

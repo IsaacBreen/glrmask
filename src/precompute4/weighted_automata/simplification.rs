@@ -283,7 +283,8 @@ impl DWA {
             let mut changed = false;
             let prune1 = if DwaPass::PruneDeadEnds.is_enabled() { self.prune_dead_ends() } else { false };
             if DwaPass::ResidualPush.is_enabled() { self.residuated_push(); }  // Push weights to enable merging
-            // TEMP DISABLED: self.loosen_weights_for_minimize();  // Loosen weights before minimize
+            // DISABLED: Weight-loosening optimization is INCORRECT - it changes the DWA semantics!
+            // self.loosen_weights_for_minimize();  // Loosen weights before minimize
             let min1 = if DwaPass::Minimize.is_enabled() { self.minimize_states() } else { false };
             let push1 = if DwaPass::PushWeights.is_enabled() { self.push_weights_into_transitions_and_finals() } else { false };
             let push2 = if DwaPass::PushWeightsToInitial.is_enabled() { self.push_weights_to_initial() } else { false };
@@ -296,7 +297,7 @@ impl DWA {
             if prune1 || push1 || push2 || prune2 {
                 if DwaPass::PruneDeadEnds.is_enabled() { self.prune_dead_ends(); }
                 if DwaPass::ResidualPush.is_enabled() { self.residuated_push(); }  // Push again before second minimize
-                // TEMP DISABLED: self.loosen_weights_for_minimize();  // Loosen weights before minimize
+                // DISABLED: self.loosen_weights_for_minimize();  // Loosen weights before minimize
                 if DwaPass::Minimize.is_enabled() { self.minimize_states(); }
                 if DwaPass::PruneUnreachable.is_enabled() { self.prune_unreachable(); }
             }
@@ -354,7 +355,7 @@ impl DWA {
                     DwaPass::PushWeightsToInitial => self.push_weights_to_initial(),
                     DwaPass::ResidualPush => self.residuated_push(),
                     DwaPass::Minimize => {
-                        // TEMP DISABLED: Loosen weights before minimize to enable more merging
+                        // DISABLED: Weight-loosening optimization is INCORRECT - it changes the DWA semantics!
                         // self.loosen_weights_for_minimize();
                         let changed = self.minimize_states();
                         if !changed {
