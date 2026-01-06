@@ -53,6 +53,8 @@ impl DWA {
         let mut changed = false;
 
         // Phase 2: Reweight transitions
+        let start_state = self.body.start_state;
+        
         for q in 0..n {
             // Collect transitions to avoid borrow issues
             let transitions: Vec<_> = self.states[q]
@@ -60,6 +62,13 @@ impl DWA {
                 .iter()
                 .map(|(&label, &target)| (label, target))
                 .collect();
+            
+            // Allow loosening based on source future (unless start state)
+            let inv_d_q = if q == start_state {
+                Weight::zeros()
+            } else {
+                d[q].complement()
+            };
 
             for (label, target) in transitions {
                 if target >= n {
@@ -73,11 +82,15 @@ impl DWA {
                     .unwrap_or_else(Weight::all);
 
                 let d_target = &d[target];
+                let inv_d_target = d_target.complement();
 
-                // Compute new weight: w' = w ∩ d[target]
-                // We tighten the edge to only allow flow that is valid for the target's future.
-                // This pulls weights from the future back into the transition.
-                let new_weight = &w & d_target;
+                // Compute new weight: w' = (w ∩ d[target]) ∪ ¬d[q] ∪ ¬d[target]
+                // 1. (w ∩ d[target]): Tighten to valid future flow.
+                // 2. ∪ ¬d[q]: Allow flow that is not in source's future (dead at source). (Skip for start).
+                // 3. ∪ ¬d[target]: Allow flow that is not in target's future (dead at target).
+                
+                let valid_flow = &w & d_target;
+                let new_weight = &(&valid_flow | &inv_d_q) | &inv_d_target;
 
                 if new_weight.is_empty() {
                     self.states[q].transitions.remove(&label);
