@@ -84,12 +84,6 @@ fn test_weight_loosening_preserves_semantics() {
 /// ```
 /// 
 /// Only token 0 can reach state 1, but state 1 only accepts tokens [5..=10].
-/// So no word is accepted. The transition weight [0] can be loosened:
-/// - Pre(0) = ALL
-/// - Post(1) = [5..=10]
-/// - Active tokens for transition = Pre(0) & Post(1) = [5..=10]
-/// - Don't-care = !(5..=10) = [0..=4, 11..]
-/// - Loosened transition = [0] | [0..=4, 11..] = [0..=4, 11..]
 #[test]
 fn test_weight_loosening_loosens_unreachable() {
     let mut dwa = DWA::new();
@@ -122,22 +116,25 @@ fn test_weight_loosening_loosens_unreachable() {
     let accept_after = dwa.eval_word_weight(&[1]);
     assert!(accept_after.is_empty(), "Expected no acceptance after loosening, got {}", accept_after);
     
-    // The transition weight should be loosened to include all tokens except [5..=10]
-    let trans_weight = dwa.states[0].trans_weights.get(&1).unwrap();
-    // It should include 0 (original) plus [0..=4, 11..] (don't-care)
-    assert!(trans_weight.contains(0), "Should still contain original token 0");
-    assert!(trans_weight.contains(1), "Should contain don't-care token 1");
-    assert!(trans_weight.contains(100), "Should contain don't-care token 100");
-    // But it should NOT include tokens that are in the active set [5..=10]
-    // Wait - actually the active set is Pre(0) & Post(1) = ALL & [5,10] = [5,10]
-    // So the transition CAN'T be loosened to include 5-10 since those would be active
-    assert!(!trans_weight.contains(5), "Should NOT contain active token 5");
-    assert!(!trans_weight.contains(10), "Should NOT contain active token 10");
+    // STRATEGY: Forward Loosening (Pre-only)
+    // - Pre(0) = ALL. !Pre(0) = EMPTY.
+    // - Pre(1) = {0}. !Pre(1) = ALL \ {0}.
     
-    // Final weight should remain unchanged (we don't loosen finals anymore)
+    // Transition 0->1: Source is 0. 
+    // Loosening uses !Pre(0) which is empty. 
+    // So transition weight should remain UNCHANGED.
+    let trans_weight = dwa.states[0].trans_weights.get(&1).unwrap();
+    assert!(trans_weight.contains(0), "Should still contain original token 0");
+    assert!(!trans_weight.contains(1), "Should NOT contain token 1 (reachable source shouldn't loosen outgoing)");
+    
+    // Final weight at 1:
+    // Loosening uses !Pre(1) which is ALL \ {0}.
+    // Original was [5..10].
+    // New should be [5..10] | (ALL \ {0}) = ALL \ {0}.
     let final_weight = dwa.states[s1].final_weight.as_ref().unwrap();
-    assert_eq!(*final_weight, Weight::from_ranges(&[(5, 10)]), 
-        "Final weight should be unchanged");
+    assert!(final_weight.contains(5), "Should contain original token 5");
+    assert!(final_weight.contains(100), "Should contain don't-care token 100");
+    assert!(!final_weight.contains(0), "Should NOT contain 0 (it is in Pre(1) so it matters)");
     
     println!("\n✓ Weight loosening worked correctly!");
 }
