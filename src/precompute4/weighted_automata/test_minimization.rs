@@ -275,7 +275,6 @@ fn test_minimization_889() {
     println!("\n=== SUCCESS: Both pipelines (with rm_epsilon) produced {} states ===", dwa_builtin.states.len());
 }
 
-#[ignore]
 #[test]
 fn test_minimization_with_weight_loosening() {
     // This test enables weight loosening and verifies that both pipelines still produce identical results
