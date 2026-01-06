@@ -1823,7 +1823,8 @@ impl GrammarConstraint {
         // Build the new trie-based vocab from the LLM token map
         let vocab_trie = Arc::new(LLMVocabTrie::from_token_map(&llm_token_map));
 
-        // In weight-heavy mode, num_tsids is set during construction
+        // Weight-heavy mode: num_tsids > 0 means tsid info is encoded in weight positions
+        // The precompute1 code always uses weight-heavy encoding (N×M weights)
         let num_tsids = tokenizer.dfa.states.len();
         
         #[allow(deprecated)]

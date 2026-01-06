@@ -603,8 +603,7 @@ mod tests {
     }
 
     /// Test simple object schema with weight-heavy encoding
-    /// This test compares symbol-heavy vs weight-heavy to ensure they produce identical results.
-    #[ignore]
+    /// This test verifies that weight-heavy mode (now the default) works correctly.
     #[test]
     fn test_schema_simple_object_weight_heavy() {
         let schema = r#"{
@@ -622,23 +621,23 @@ mod tests {
         let max_token_id = 255;
         
         // Create constraint (now defaults to weight-heavy)
-        let weight_heavy = GrammarConstraint::new_from_grammar_definition(
+        let constraint = GrammarConstraint::new_from_grammar_definition(
             Arc::new(gd.clone()),
             token_map.clone(),
             max_token_id,
             &GrammarConstraintConfig::default(),
         );
-        assert!(weight_heavy.is_weight_heavy(), "Should be weight-heavy by default");
+        assert!(constraint.is_weight_heavy(), "Should default to weight-heavy");
         println!("Weight-heavy: {} tsids, {} DWA states", 
-            weight_heavy.num_tsids, weight_heavy.parser_dwa.states.len());
+            constraint.num_tsids, constraint.parser_dwa.states.len());
         
-        // Test inputs work correctly
+        // Test inputs work correctly in weight-heavy mode
         let inputs = &["{}",r#"{"name": "test"}"#, r#"{ "name" : "hello world" }"#];
         
         for input in inputs {
             println!("\nTesting input: {:?}", input);
             
-            let mut state = weight_heavy.init();
+            let mut state = constraint.init();
             
             for (i, ch) in input.bytes().enumerate() {
                 let mask = state.get_mask();
