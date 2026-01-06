@@ -1,4 +1,4 @@
-//! NWA simplification passes.
+//! NWA minimization passes.
 
 mod prune_unreachable;
 mod prune_dead_ends;
@@ -28,7 +28,7 @@ pub enum NwaPass {
 }
 
 impl NWA {
-    pub fn simplify(&mut self) {
+    pub fn minimize(&mut self) {
         if self.states.len() == 0 {
             return;
         }
@@ -37,13 +37,13 @@ impl NWA {
             let initial_states = self.states.len();
             let mut internal = self.clone();
             let internal_start = std::time::Instant::now();
-            internal.simplify_internal();
+            internal.minimize_internal();
             let internal_time = internal_start.elapsed();
             let internal_states = internal.states.len();
 
             let mut rustfst = self.clone();
             let rustfst_start = std::time::Instant::now();
-            rustfst.simplify_with_rustfst();
+            rustfst.minimize_with_rustfst_full();
             let rustfst_time = rustfst_start.elapsed();
             let rustfst_states = rustfst.states.len();
 
@@ -59,12 +59,12 @@ impl NWA {
                     std::cmp::Ordering::Greater => ">",
                 };
 
-                crate::debug!(6, "[NWA Simplify({})] Internal: t={:.2?}, s={} | RustFST: t={:.2?}, s={}. [s: {}, t: {}]", initial_states, internal_time, internal_states, rustfst_time, rustfst_states, state_cmp, time_cmp);
+                crate::debug!(6, "[NWA Minimize({})] Internal: t={:.2?}, s={} | RustFST: t={:.2?}, s={}. [s: {}, t: {}]", initial_states, internal_time, internal_states, rustfst_time, rustfst_states, state_cmp, time_cmp);
             }
 
             *self = internal;
         } else {
-            self.simplify_internal();
+            self.minimize_internal();
         }
     }
 
@@ -74,7 +74,7 @@ impl NWA {
         *self = NWA::from_rustfst(&fst);
     }
 
-    pub fn simplify_with_rustfst(&mut self) -> bool {
+    pub fn minimize_with_rustfst_full(&mut self) -> bool {
         let min_config = MinimizeConfig::default().with_allow_nondet(true);
         let mut fst = self.to_rustfst();
         minimize_with_config(&mut fst, min_config).unwrap();
@@ -82,8 +82,8 @@ impl NWA {
         true
     }
 
-    pub fn simplify_internal(&mut self) -> bool {
-        crate::debug!(6, "[NWA::simplify] Starting simplification. Initial stats: {}", self.stats());
+    pub fn minimize_internal(&mut self) -> bool {
+        crate::debug!(6, "[NWA::minimize] Starting minimization. Initial stats: {}", self.stats());
         let mut total_changed = false;
 
         let ordering = &[
@@ -144,10 +144,10 @@ impl NWA {
 
         if !converged {
             let last_changes = history.last().map(|s| s.iter().copied().collect::<Vec<_>>()).unwrap_or_default();
-            crate::debug!(4, "NWA simplification did not converge after {} iterations. Still changing: {:?}", MAX_OPTIMIZE_ITERATIONS, last_changes);
+            crate::debug!(4, "NWA minimization did not converge after {} iterations. Still changing: {:?}", MAX_OPTIMIZE_ITERATIONS, last_changes);
         }
 
-        crate::debug!(6, "[NWA::simplify] Simplification finished. Total changed: {}. Final stats: {}", total_changed, self.stats());
+        crate::debug!(6, "[NWA::minimize] Minimization finished. Total changed: {}. Final stats: {}", total_changed, self.stats());
         total_changed
     }
 }

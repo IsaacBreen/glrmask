@@ -344,7 +344,7 @@ fn dwa_from_str(s: &str, final_weight: Weight) -> DWA {
 }
 
 #[test]
-fn test_simplify_redundant_states() {
+fn test_minimize_redundant_states() {
     let mut d = DWA::new();
     let s1 = d.add_state();
     let s2 = d.add_state();
@@ -361,9 +361,9 @@ fn test_simplify_redundant_states() {
     d.set_final_weight(s4, Weight::from_item(1)).unwrap();
 
     assert_eq!(d.states.len(), 6);
-    println!("Before simplification:\n{}", d);
-    d.simplify();
-    println!("After simplification:\n{}", d);
+    println!("Before minimization:\n{}", d);
+    d.minimize();
+    println!("After minimization:\n{}", d);
     // s5 pruned (unreachable). s2 and s3 merged.
     // Expected states: start, 'a'-state, 'b'/'c'-state, final-state. Total 4.
     assert_eq!(d.states.len(), 4);
@@ -516,14 +516,14 @@ fn test_prune_unreachable_with_default_chain() {
         .unwrap();
 
     let before = d.states.len();
-    d.simplify();
+    d.minimize();
     let after = d.states.len();
     assert!(after < before, "Unreachable states should be pruned");
     assert_eq!(after, 2, "Only start and s1 should remain reachable");
 }
 
 #[test]
-fn test_equivalence_via_simplification() {
+fn test_equivalence_via_minimization() {
     // DWA 'a' has explicit transitions for inputs '1' and '3' which lead
     // to non-final, sink-like states. State 1 is a true sink, and state 2
     // only transitions to state 1.
@@ -536,7 +536,7 @@ fn test_equivalence_via_simplification() {
     a.add_transition(0, 3, s1a, Weight::from_iter(0..=1)).unwrap();
 
     // DWA 'b' lacks these transitions. For inputs '1' and '3', it transitions
-    // to an implicit sink. The simplification process should make 'a' equivalent
+    // to an implicit sink. The minimization process should make 'a' equivalent
     // to 'b'.
     let mut b = DWA::new();
     let s1b = b.add_state();
@@ -571,7 +571,7 @@ fn test_concatenate_left_start_is_final() {
 }
 
 #[test]
-fn test_simplify_propagates_future_weights() {
+fn test_minimize_propagates_future_weights() {
     // This test checks that weight constraints from final states are propagated
     // backward to relax unnecessarily restrictive edge weights.
     // DWA A has a transition 1 -> 2 with weight [1..=2], but the final
@@ -584,7 +584,7 @@ fn test_simplify_propagates_future_weights() {
     a.add_transition(s1, 'b' as Label, s2, Weight::from_iter([1..=2])).unwrap();
     a.set_final_weight(s2, Weight::from_item(2)).unwrap();
 
-    // DWA B is the expected simplified form. The transition 1 -> 2 has its
+    // DWA B is the expected minimized form. The transition 1 -> 2 has its
     // weight relaxed to ALL, because any components of the weight other than
     // [2] would be filtered by the final state anyway. The path weight for "ab"
     // is ALL & ALL & [2] = [2], which is equivalent.
@@ -595,9 +595,9 @@ fn test_simplify_propagates_future_weights() {
     b.add_transition(s1_b, 'b' as Label, s2_b, Weight::all()).unwrap();
     b.set_final_weight(s2_b, Weight::from_item(2)).unwrap();
 
-    println!("Before simplification A:\n{}", a);
-    a.simplify();
-    println!("After simplification A:\n{}", a);
+    println!("Before minimization A:\n{}", a);
+    a.minimize();
+    println!("After minimization A:\n{}", a);
 
     stochastic_equivalence_test(a, b);
 }
@@ -917,8 +917,8 @@ fn test_union_complex_from_attachment_simpified() {
     // State 22
     right.set_final_weight(22, Weight::from_item(0)).unwrap();
 
-    left.simplify();
-    right.simplify();
+    left.minimize();
+    right.minimize();
 
     let u = left.union(&right);
     DWA::stochastic_validate_union(&left, &right, &u);
@@ -1008,8 +1008,8 @@ fn test_concatenate_complex_from_attachment() {
     let mut right = DWA::new();
     right.set_final_weight(0, Weight::all()).unwrap();
 
-    left.simplify();
-    right.simplify();
+    left.minimize();
+    right.minimize();
 
     let c = left.concatenate(&right);
     DWA::stochastic_validate_concatenate(&left, &right, &c, &Weight::all());
@@ -1077,7 +1077,7 @@ fn test_union_from_debug_log() {
 }
 
 #[test]
-fn test_union_from_debug_log_simplified1() {
+fn test_union_from_debug_log_minimized1() {
     // This test isolates two simple paths with different initial edge weights.
     // A: path [0, 1] with weight [0]
     // B: path [0, 1, 2] with weight [1]
@@ -1098,7 +1098,7 @@ fn test_union_from_debug_log_simplified1() {
 }
 
 #[test]
-fn test_union_from_debug_log_simplified2() {
+fn test_union_from_debug_log_minimized2() {
     // This test isolates two simple paths with different initial edge weights.
     // A: path [0, 1] with weight [0]
     // B: path [0, 1, 2] with weight [1]
@@ -1123,7 +1123,7 @@ fn test_union_from_debug_log_simplified2() {
 }
 
 #[test]
-fn test_union_from_debug_log_simplified2_with_simplification_trick() {
+fn test_union_from_debug_log_minimized2_with_minimization_trick() {
     // This test isolates two simple paths with different initial edge weights.
     // A: path [0, 1] with weight [0]
     // B: path [0, 1, 2] with weight [1]
@@ -1149,7 +1149,7 @@ fn test_union_from_debug_log_simplified2_with_simplification_trick() {
 }
 
 #[test]
-fn test_union_from_debug_log_simplified3() {
+fn test_union_from_debug_log_minimized3() {
     // This test isolates two simple paths with different initial edge weights.
     // A: path [0, 1] with weight [0]
     // B: path [0, 1, 2] with weight [1]
@@ -1242,7 +1242,7 @@ fn test_concatenate_disjoint_weights() {
 }
 
 #[test]
-fn test_simplify_complex_dwa_from_attachment() {
+fn test_minimize_complex_dwa_from_attachment() {
     fn neg(x: Label) -> Label {
         Label::MIN + x
     }
@@ -1321,12 +1321,12 @@ fn test_simplify_complex_dwa_from_attachment() {
     left.add_transition(25, 9, 4, w_01.clone()).unwrap();
     left.add_transition(25, 10, 5, w_01.clone()).unwrap();
 
-    println!("Before simplification:\n{}", left);
-    let mut simplified = left.clone();
-    simplified.simplify();
-    println!("After simplification:\n{}", simplified);
+    println!("Before minimization:\n{}", left);
+    let mut minimized = left.clone();
+    minimized.minimize();
+    println!("After minimization:\n{}", minimized);
 
-    stochastic_equivalence_test(left, simplified);
+    stochastic_equivalence_test(left, minimized);
 }
 
 #[test]
@@ -1497,7 +1497,7 @@ fn test_concatenate_default_path_to_final() {
 }
 
 #[test]
-fn test_simplify() {
+fn test_minimize() {
     let mut d = DWA::new();
     let s1 = d.add_state();
     let s2 = d.add_state();
@@ -1573,9 +1573,9 @@ fn test_simplify() {
 
     // Since there are no negative codes, the DWA should not be changed.
     let expected = d.clone();
-    println!("Before simplification:\n{}", d);
-    d.simplify();
-    println!("After simplification:\n{}", d);
+    println!("Before minimization:\n{}", d);
+    d.minimize();
+    println!("After minimization:\n{}", d);
 
     stochastic_equivalence_test(d, expected);
 }
@@ -1684,7 +1684,7 @@ fn test_dwa_to_nwa_to_dwa_roundtrip() {
     println!("Converted NWA:\n{}", nwa);
 
     let mut roundtrip_dwa = nwa.determinize();
-    roundtrip_dwa.simplify();
+    roundtrip_dwa.minimize();
 
     println!("Roundtrip DWA:\n{}", roundtrip_dwa);
 

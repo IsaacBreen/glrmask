@@ -20,9 +20,9 @@ fn test_rm_epsilon_effect() {
     println!("\n=== WITHOUT rm_epsilon ===");
     let dwa_no_rm = nwa.determinize();
     println!("States after determinization: {}", dwa_no_rm.states.len());
-    let mut dwa_no_rm_simplified = dwa_no_rm.clone();
-    dwa_no_rm_simplified.simplify();
-    println!("States after simplification: {}", dwa_no_rm_simplified.states.len());
+    let mut dwa_no_rm_minimized = dwa_no_rm.clone();
+    dwa_no_rm_minimized.minimize();
+    println!("States after minimization: {}", dwa_no_rm_minimized.states.len());
     
     // Test WITH rm_epsilon
     println!("\n=== WITH rm_epsilon ===");
@@ -33,18 +33,18 @@ fn test_rm_epsilon_effect() {
     
     let dwa_with_rm = nwa_rm.determinize();
     println!("States after determinization: {}", dwa_with_rm.states.len());
-    let mut dwa_with_rm_simplified = dwa_with_rm.clone();
-    dwa_with_rm_simplified.simplify();
-    println!("States after simplification: {}", dwa_with_rm_simplified.states.len());
+    let mut dwa_with_rm_minimized = dwa_with_rm.clone();
+    dwa_with_rm_minimized.minimize();
+    println!("States after minimization: {}", dwa_with_rm_minimized.states.len());
     
     // Compare
     println!("\n=== COMPARISON ===");
     println!("Without rm_epsilon: {} -> {} -> {}", 
-        nwa.states.len(), dwa_no_rm.states.len(), dwa_no_rm_simplified.states.len());
+        nwa.states.len(), dwa_no_rm.states.len(), dwa_no_rm_minimized.states.len());
     println!("With rm_epsilon: {} -> {} -> {}", 
-        nwa_rm.states.len(), dwa_with_rm.states.len(), dwa_with_rm_simplified.states.len());
+        nwa_rm.states.len(), dwa_with_rm.states.len(), dwa_with_rm_minimized.states.len());
     
-    if dwa_no_rm_simplified.states.len() != dwa_with_rm_simplified.states.len() {
+    if dwa_no_rm_minimized.states.len() != dwa_with_rm_minimized.states.len() {
         println!("\n!!! DIFFERENCE FOUND !!!");
         println!("rm_epsilon DOES affect the final state count!");
     } else {

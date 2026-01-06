@@ -19,7 +19,7 @@ mod tests {
     fn run_pipeline(nwa_in: &NWA, use_rustfst_determinize: bool) -> DWA {
         let mut nwa = nwa_in.clone();
         println!("--- Pipeline ({}) ---", if use_rustfst_determinize { "RustFST" } else { "Builtin" });
-        nwa.simplify_with_rustfst();
+        nwa.minimize_with_rustfst_full();
         nwa.compress_transitions();
         
         let mut dwa = if use_rustfst_determinize {
@@ -29,13 +29,13 @@ mod tests {
         };
         println!("After determinize: {} states", dwa.states.len());
         
-        dwa.simplify_with_rustfst();
-        dwa.simplify();
+        dwa.minimize_with_rustfst_full();
+        dwa.minimize();
         println!("Final size (with weights): {} states", dwa.states.len());
 
         let mut dwa_unweighted = dwa.clone();
         remove_weights(&mut dwa_unweighted);
-        dwa_unweighted.simplify_with_rustfst();
+        dwa_unweighted.minimize_with_rustfst_full();
         println!("Final size (unweighted): {} states", dwa_unweighted.states.len());
         
         dwa

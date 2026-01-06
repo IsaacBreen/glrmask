@@ -3,7 +3,7 @@
 use super::common::optimize_debug;
 use super::dwa::DWA;
 use super::nwa::NWA;
-use super::simplification::{DwaPass, NwaPass, MAX_OPTIMIZE_ITERATIONS};
+use super::minimization::{DwaPass, NwaPass, MAX_OPTIMIZE_ITERATIONS};
 use std::collections::HashSet;
 
 const DWA_PASS_ORDERINGS: &[&[DwaPass]] = &[
@@ -181,26 +181,26 @@ pub fn run_nwa_optimization_experiment(nwa: &mut NWA) {
 }
 
 #[derive(Clone, Debug)]
-pub struct DeterminizeAndSimplifyConfig {
+pub struct DeterminizeAndMinimizeConfig {
     pub nwa_passes: Vec<NwaPass>,
     pub dwa_passes: Vec<DwaPass>,
 }
 
 impl NWA {
-    pub fn determinize_and_simplify(mut self, context: &str) -> DWA {
+    pub fn determinize_and_minimize(mut self, context: &str) -> DWA {
         if self.states.len() > 1000 && optimize_debug() {
-            return Self::run_determinize_and_simplify_experiment(self, context);
+            return Self::run_determinize_and_minimize_experiment(self, context);
         }
 
         // Production configs based on experiments
         let config = match context {
-            "Precompute1" => DeterminizeAndSimplifyConfig {
+            "Precompute1" => DeterminizeAndMinimizeConfig {
                 // OPTIMIZATION: Skip Minimize to save ~420ms - Precompute1 is just input to precompute4
                 // The final DWA will be minimized, so intermediate minimization is redundant.
                 nwa_passes: vec![NwaPass::PruneDeadEnds, NwaPass::PruneUnreachable, NwaPass::CompressTransitions],
                 dwa_passes: vec![DwaPass::PruneDeadEnds],
             },
-            "FinalDWA" => DeterminizeAndSimplifyConfig {
+            "FinalDWA" => DeterminizeAndMinimizeConfig {
                 // OPTIMIZATION: Skip Minimize for FinalDWA - it takes 2-6 seconds and only
                 // reduces output size. The DWA works correctly without minimization.
                 // Before: 54K states, 664K transitions (minimized). After: ~400K states (unminimized).
@@ -208,13 +208,13 @@ impl NWA {
                 nwa_passes: vec![],
                 dwa_passes: vec![DwaPass::PruneDeadEnds],
             },
-            "SuperDWA" => DeterminizeAndSimplifyConfig {
+            "SuperDWA" => DeterminizeAndMinimizeConfig {
                 // Fallback / Default for SuperDWA (was not large enough to trigger experiment in test)
                 // Using a balanced approach
                 nwa_passes: vec![NwaPass::CompressTransitions],
                 dwa_passes: vec![DwaPass::PruneDeadEnds, DwaPass::Minimize],
             },
-            _ => DeterminizeAndSimplifyConfig {
+            _ => DeterminizeAndMinimizeConfig {
                 // Default fallback
                 nwa_passes: vec![NwaPass::CompressTransitions],
                 dwa_passes: vec![
@@ -226,10 +226,10 @@ impl NWA {
                 ],
             }
         };
-        Self::determinize_and_simplify_with_config(&mut self, config)
+        Self::determinize_and_minimize_with_config(&mut self, config)
     }
 
-    pub fn determinize_and_simplify_with_config(&mut self, config: DeterminizeAndSimplifyConfig) -> DWA {
+    pub fn determinize_and_minimize_with_config(&mut self, config: DeterminizeAndMinimizeConfig) -> DWA {
         // Run NWA passes
         for pass in config.nwa_passes {
             match pass {
@@ -268,13 +268,13 @@ impl NWA {
         dwa
     }
 
-    pub fn run_determinize_and_simplify_experiment(self, context: &str) -> DWA {
+    pub fn run_determinize_and_minimize_experiment(self, context: &str) -> DWA {
         let initial_states = self.states.len();
-        println!("[Det&Sim Experiment] [{}] Starting experiment with {} NWA states.", context, initial_states);
+        println!("[Det&Min Experiment] [{}] Starting experiment with {} NWA states.", context, initial_states);
 
         // Define interesting NWA sequences
         let nwa_configs: Vec<Vec<NwaPass>> = vec![
-            vec![], // Baseline: no NWA simplification
+            vec![], // Baseline: no NWA minimization
             vec![NwaPass::CompressTransitions],
             vec![NwaPass::PruneUnreachable, NwaPass::CompressTransitions],
             vec![NwaPass::PruneDeadEnds, NwaPass::PruneUnreachable, NwaPass::CompressTransitions],
@@ -305,17 +305,17 @@ impl NWA {
 
                 let start_time = std::time::Instant::now();
 
-                let config = DeterminizeAndSimplifyConfig {
+                let config = DeterminizeAndMinimizeConfig {
                     nwa_passes: nwa_pass_seq.clone(),
                     dwa_passes: dwa_pass_seq.clone(),
                 };
 
-                let dwa = Self::determinize_and_simplify_with_config(&mut nwa_clone, config);
+                let dwa = Self::determinize_and_minimize_with_config(&mut nwa_clone, config);
 
                 let elapsed = start_time.elapsed();
                 let final_states = dwa.states.len();
 
-                println!("[Det&Sim Experiment] [{}] Config N#{}-D#{}: NWA={:?} | DWA={:?} -> Time: {:.2?}, States: {}",
+                println!("[Det&Min Experiment] [{}] Config N#{}-D#{}: NWA={:?} | DWA={:?} -> Time: {:.2?}, States: {}",
                          context, n_idx, d_idx, nwa_pass_seq, dwa_pass_seq, elapsed, final_states);
 
                 if best_result.as_ref().map_or(true, |(_, best_time, best_states)| {
@@ -328,7 +328,7 @@ impl NWA {
             }
         }
 
-        println!("[Det&Sim Experiment] [{}] Winner: Config N#{}-D#{}", context, best_config_idx.0, best_config_idx.1);
+        println!("[Det&Min Experiment] [{}] Winner: Config N#{}-D#{}", context, best_config_idx.0, best_config_idx.1);
         best_result.unwrap().0
     }
 }

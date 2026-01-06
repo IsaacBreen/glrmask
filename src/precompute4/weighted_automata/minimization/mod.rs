@@ -1,4 +1,4 @@
-//! Simplification passes for DWA and NWA.
+//! Minimization passes for DWA and NWA.
 //!
 //! This module provides optimization passes for weighted automata:
 //! - Pruning unreachable and dead-end states

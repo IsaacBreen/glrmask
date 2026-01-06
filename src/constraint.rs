@@ -1040,7 +1040,7 @@ impl GrammarConstraint {
             
             // First, minimize the original terminal DWA with rustfst to verify it's minimal
             let mut orig_dwa_for_min = terminal_dwa.clone();
-            orig_dwa_for_min.simplify();
+            orig_dwa_for_min.minimize();
             crate::debug!(1, "Original terminal DWA (after minimize_with_rustfst): {} states, {} trans",
                 orig_dwa_for_min.states.len(), orig_dwa_for_min.states.num_transitions());
             
@@ -1460,7 +1460,7 @@ impl GrammarConstraint {
             crate::debug!(1, "Useful transitions: {}, Useless: {} (could be removed)",
                 useful_trans, useless_trans);
             
-            mod_dwa.simplify();
+            mod_dwa.minimize();
             let mod_states = mod_dwa.states.len();
             let mod_trans = mod_dwa.states.num_transitions();
             
@@ -1733,7 +1733,7 @@ impl GrammarConstraint {
             
             // First, minimize the original parser DWA to verify baseline
             let mut orig_parser_dwa_for_min = parser_dwa.clone();
-            orig_parser_dwa_for_min.simplify();
+            orig_parser_dwa_for_min.minimize();
             crate::debug!(1, "Original Parser DWA (after minimize_with_rustfst): {} states, {} trans",
                 orig_parser_dwa_for_min.states.len(), orig_parser_dwa_for_min.states.num_transitions());
             
@@ -1771,7 +1771,7 @@ impl GrammarConstraint {
             crate::debug!(1, "Determinizing and minimizing modified terminal NWA...");
             let det_start = Instant::now();
             let mut terminal_dwa_mod = terminal_nwa_mod.determinize();
-            terminal_dwa_mod.simplify();
+            terminal_dwa_mod.minimize();
             crate::debug!(1, "Modified terminal DWA (after minimize): {} states, {} trans (took {:?})",
                 terminal_dwa_mod.states.len(), terminal_dwa_mod.states.num_transitions(), det_start.elapsed());
             
@@ -1784,14 +1784,14 @@ impl GrammarConstraint {
             crate::debug!(1, "Modified Parser DWA (before minimize): {} states, {} trans (took {:?})",
                 parser_dwa_mod.states.len(), parser_dwa_mod.states.num_transitions(), build_time);
             
-            parser_dwa_mod.simplify();
+            parser_dwa_mod.minimize();
             crate::debug!(1, "Modified Parser DWA (after minimize): {} states, {} trans",
                 parser_dwa_mod.states.len(), parser_dwa_mod.states.num_transitions());
             
             // Compare with original (minimized)
             let orig_term_min = {
                 let mut t = terminal_dwa.clone();
-                t.simplify();
+                t.minimize();
                 t
             };
             

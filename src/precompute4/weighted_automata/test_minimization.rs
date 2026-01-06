@@ -141,41 +141,41 @@ fn test_minimization_889() {
 
     // Preprocess the NWA (same for both pipelines)
     println!("\n=== PREPROCESSING (same for both pipelines) ===");
-    println!("Step 0a: Simplify NWA with rustfst...");
-    let mut nwa_simplified = nwa.clone();
-    nwa_simplified.simplify_with_rustfst();
-    println!("  After simplify_with_rustfst: {} states", nwa_simplified.states.len());
+    println!("Step 0a: Minimize NWA with rustfst...");
+    let mut nwa_minimized = nwa.clone();
+    nwa_minimized.minimize_with_rustfst_full();
+    println!("  After minimize_with_rustfst_full: {} states", nwa_minimized.states.len());
     
     println!("Step 0b: Compress transitions...");
-    nwa_simplified.compress_transitions();
-    println!("  After compress_transitions: {} states", nwa_simplified.states.len());
+    nwa_minimized.compress_transitions();
+    println!("  After compress_transitions: {} states", nwa_minimized.states.len());
     
     // TEST WITHOUT rm_epsilon first to get baseline (1533 states expected)
     println!("\n=== WITHOUT rm_epsilon (baseline) ===");
-    let mut dwa_no_rm_eps = nwa_simplified.determinize();
+    let mut dwa_no_rm_eps = nwa_minimized.determinize();
     println!("After determinize (no rm_epsilon): {} states", dwa_no_rm_eps.states.len());
-    dwa_no_rm_eps.simplify();
-    println!("After simplify: {} states", dwa_no_rm_eps.states.len());
+    dwa_no_rm_eps.minimize();
+    println!("After minimize: {} states", dwa_no_rm_eps.states.len());
     
     // TEST WITH rm_epsilon
     println!("\n=== WITH rm_epsilon ===");
     println!("Step 1: Remove epsilons...");
-    let nwa_no_eps = nwa_simplified.remove_epsilons();
+    let nwa_no_eps = nwa_minimized.remove_epsilons();
     println!("  After rm_epsilon: {} states", nwa_no_eps.states.len());
     
     // Test BUILTIN pipeline
-    println!("\n=== BUILTIN PIPELINE: determinize() → simplify() ===");
+    println!("\n=== BUILTIN PIPELINE: determinize() → minimize() ===");
     let mut dwa_builtin = nwa_no_eps.determinize();
     println!("After determinize(): {} states", dwa_builtin.states.len());
-    dwa_builtin.simplify();
-    println!("After simplify(): {} states", dwa_builtin.states.len());
+    dwa_builtin.minimize();
+    println!("After minimize(): {} states", dwa_builtin.states.len());
     
     // Test RUSTFST pipeline
-    println!("\n=== RUSTFST PIPELINE: determinize_to_dwa_with_rustfst() → simplify() ===");
+    println!("\n=== RUSTFST PIPELINE: determinize_to_dwa_with_rustfst() → minimize() ===");
     let mut dwa_rustfst = nwa_no_eps.determinize_to_dwa_with_rustfst();
     println!("After determinize_to_dwa_with_rustfst(): {} states", dwa_rustfst.states.len());
-    dwa_rustfst.simplify();
-    println!("After simplify(): {} states", dwa_rustfst.states.len());
+    dwa_rustfst.minimize();
+    println!("After minimize(): {} states", dwa_rustfst.states.len());
     
     // Results
     println!("\n=== RESULTS ===");
@@ -300,27 +300,27 @@ fn test_minimization_with_weight_loosening() {
     println!("Original NWA has {} epsilon transitions", epsilon_count);
     
     println!("\n=== PREPROCESSING ===");
-    println!("Step 1: Simplify NWA with rustfst...");
-    let mut nwa_simplified = nwa.clone();
-    nwa_simplified.simplify_with_rustfst();
-    println!("  After simplify_with_rustfst: {} states", nwa_simplified.states.len());
+    println!("Step 1: Minimize NWA with rustfst...");
+    let mut nwa_minimized = nwa.clone();
+    nwa_minimized.minimize_with_rustfst_full();
+    println!("  After minimize_with_rustfst_full: {} states", nwa_minimized.states.len());
     
     println!("Step 2: Compress transitions...");
-    nwa_simplified.compress_transitions();
-    println!("  After compress_transitions: {} states", nwa_simplified.states.len());
+    nwa_minimized.compress_transitions();
+    println!("  After compress_transitions: {} states", nwa_minimized.states.len());
 
     println!("\n=== DETERMINIZATION WITH WEIGHT LOOSENING ===");
     
     // Builtin pipeline
-    println!("Builtin pipeline: determinize() → simplify()");
-    let mut dwa_builtin = nwa_simplified.clone().determinize();
-    dwa_builtin.simplify();
+    println!("Builtin pipeline: determinize() → minimize()");
+    let mut dwa_builtin = nwa_minimized.clone().determinize();
+    dwa_builtin.minimize();
     println!("  Result: {} states", dwa_builtin.states.len());
     
     // RustFST pipeline
-    println!("RustFST pipeline: determinize_to_dwa_with_rustfst() → simplify()");
-    let mut dwa_rustfst = nwa_simplified.determinize_to_dwa_with_rustfst();
-    dwa_rustfst.simplify();
+    println!("RustFST pipeline: determinize_to_dwa_with_rustfst() → minimize()");
+    let mut dwa_rustfst = nwa_minimized.determinize_to_dwa_with_rustfst();
+    dwa_rustfst.minimize();
     println!("  Result: {} states", dwa_rustfst.states.len());
     
     // Both pipelines must produce the same result

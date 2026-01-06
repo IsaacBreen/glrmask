@@ -1,4 +1,4 @@
-//! DWA simplification passes.
+//! DWA minimization passes.
 
 mod prune_unreachable;
 mod prune_dead_ends;
@@ -42,7 +42,7 @@ impl DwaPass {
 }
 
 impl DWA {
-    pub fn simplify(&mut self) {
+    pub fn minimize(&mut self) {
         if self.states.len() == 0 {
             return;
         }
@@ -51,13 +51,13 @@ impl DWA {
             let initial_states = self.states.len();
             let mut internal = self.clone();
             let internal_start = std::time::Instant::now();
-            internal.simplify_internal();
+            internal.minimize_internal();
             let internal_time = internal_start.elapsed();
             let internal_states = internal.states.len();
 
             let mut rustfst = self.clone();
             let rustfst_start = std::time::Instant::now();
-            rustfst.simplify_with_rustfst();
+            rustfst.minimize_with_rustfst_full();
             let rustfst_time = rustfst_start.elapsed();
             let rustfst_states = rustfst.states.len();
 
@@ -73,19 +73,19 @@ impl DWA {
                     std::cmp::Ordering::Greater => ">",
                 };
 
-                crate::debug!(6, "[DWA Simplify({})] Internal: t={:.2?}, s={} | RustFST: t={:.2?}, s={}. [s: {}, t: {}]", initial_states, internal_time, internal_states, rustfst_time, rustfst_states, state_cmp, time_cmp);
+                crate::debug!(6, "[DWA Minimize({})] Internal: t={:.2?}, s={} | RustFST: t={:.2?}, s={}. [s: {}, t: {}]", initial_states, internal_time, internal_states, rustfst_time, rustfst_states, state_cmp, time_cmp);
             }
 
             *self = internal;
         } else {
-            self.simplify_internal();
+            self.minimize_internal();
         }
     }
 
     /// Performs linear-time optimizations only (Pruning, Weight Pushing).
     /// Skips the expensive O(N log N) or O(N^2) state minimization.
     /// Useful for template generation where we just want a clean graph quickly.
-    pub fn simplify_lightweight(&mut self) {
+    pub fn minimize_lightweight(&mut self) {
         if self.states.len() == 0 {
             return;
         }
@@ -118,15 +118,15 @@ impl DWA {
                 break;
             }
             if iter_num > 0 && iter_num % 100 == 0 {
-                crate::debug!(4, "DWA simplify_lightweight iteration {} still changing", iter_num);
+                crate::debug!(4, "DWA minimize_lightweight iteration {} still changing", iter_num);
             }
         }
     }
 
     /// Performs a single pass of all optimization passes including minimize.
-    /// Unlike simplify(), this does NOT iterate until fixpoint - it runs each pass once.
+    /// Unlike minimize(), this does NOT iterate until fixpoint - it runs each pass once.
     /// Useful for terminal DWAs where we want minimize but don't need full convergence.
-    pub fn simplify_single_pass(&mut self) {
+    pub fn minimize_single_pass(&mut self) {
         if self.states.len() == 0 {
             return;
         }
@@ -146,7 +146,7 @@ impl DWA {
         *self = DWA::from_rustfst(&fst);
     }
 
-    pub fn simplify_with_rustfst(&mut self) -> bool {
+    pub fn minimize_with_rustfst_full(&mut self) -> bool {
         self.prune_unreachable();
         self.push_weights_into_transitions_and_finals();
         self.push_weights_to_initial();
@@ -161,10 +161,10 @@ impl DWA {
 
     /// Push weights toward initial state using rustfst's push algorithm.
     /// This normalizes the FST so each state's outgoing weights "sum" to one.
-    pub fn simplify_internal(&mut self) -> bool {
+    pub fn minimize_internal(&mut self) -> bool {
         let initial_num_states = self.states.len();
         if initial_num_states > 1000 {
-            crate::debug!(6, "[DWA::simplify] Starting simplification. Initial stats: {}", self.stats());
+            crate::debug!(6, "[DWA::minimize] Starting minimization. Initial stats: {}", self.stats());
         }
         let mut total_changed = false;
 
@@ -207,7 +207,7 @@ impl DWA {
                         self.loosen_weights_for_minimize();
                         let changed = self.minimize_states();
                         if changed && initial_num_states > 1000 {
-                            crate::debug!(6, "[DWA::simplify] After minimize (iter {}): {}", iter_num, self.stats());
+                            crate::debug!(6, "[DWA::minimize] After minimize (iter {}): {}", iter_num, self.stats());
                         }
                         changed
                     },
@@ -237,11 +237,11 @@ impl DWA {
 
         if !converged {
             let last_changes = history.last().map(|s| s.iter().copied().collect::<Vec<_>>()).unwrap_or_default();
-            crate::debug!(4, "DWA simplification did not converge after {} iterations. Still changing: {:?}", MAX_OPTIMIZE_ITERATIONS, last_changes);
+            crate::debug!(4, "DWA minimization did not converge after {} iterations. Still changing: {:?}", MAX_OPTIMIZE_ITERATIONS, last_changes);
         }
 
         if initial_num_states > 1000 {
-            crate::debug!(6, "[DWA::simplify] Simplification finished. Total changed: {}. Final stats: {}", total_changed, self.stats());
+            crate::debug!(6, "[DWA::minimize] Minimization finished. Total changed: {}. Final stats: {}", total_changed, self.stats());
         }
         total_changed
     }

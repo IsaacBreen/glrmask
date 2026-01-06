@@ -1,4 +1,4 @@
-//! Common types shared between DWA and NWA simplification.
+//! Common types shared between DWA and NWA minimization.
 
 pub const MAX_OPTIMIZE_ITERATIONS: usize = 1000;
 

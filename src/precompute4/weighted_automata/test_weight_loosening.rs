@@ -1,4 +1,4 @@
-//! Tests for the weight loosening algorithm in simplification.rs
+//! Tests for the weight loosening algorithm in minimization.rs
 
 use crate::precompute4::weighted_automata::dwa::DWA;
 use crate::precompute4::weighted_automata::common::Weight;

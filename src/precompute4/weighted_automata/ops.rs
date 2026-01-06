@@ -1,1 +1,1 @@
-pub mod simplification_experiment;
+pub mod minimization_experiment;

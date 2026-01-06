@@ -25,7 +25,7 @@ mod tests {
 
     fn run_pipeline(nwa_in: &NWA, use_rustfst_determinize: bool) -> DWA {
         let mut nwa = nwa_in.clone();
-        nwa.simplify_with_rustfst();
+        nwa.minimize_with_rustfst_full();
         nwa.compress_transitions();
         
         let dwa = if use_rustfst_determinize {
@@ -34,8 +34,8 @@ mod tests {
             nwa.determinize()
         };
         let mut dwa = dwa;
-        dwa.simplify_with_rustfst();
-        dwa.simplify();
+        dwa.minimize_with_rustfst_full();
+        dwa.minimize();
         dwa
     }
 

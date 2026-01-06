@@ -298,13 +298,13 @@ mod test_minimization_failure {
         println!("\n=== Minimization Test ===");
         
         let mut dwa_builtin_min = dwa_builtin.clone();
-        dwa_builtin_min.simplify_with_rustfst();
-        println!("Builtin after simplify_with_rustfst: {} states, {} unique weights",
+        dwa_builtin_min.minimize_with_rustfst_full();
+        println!("Builtin after minimize_with_rustfst_full: {} states, {} unique weights",
                  dwa_builtin_min.states.len(), count_unique_weights(&dwa_builtin_min));
         
         let mut dwa_rm_eps_min = dwa_with_rm_eps.clone();
-        dwa_rm_eps_min.simplify_with_rustfst();
-        println!("rm_epsilon after simplify_with_rustfst: {} states, {} unique weights",
+        dwa_rm_eps_min.minimize_with_rustfst_full();
+        println!("rm_epsilon after minimize_with_rustfst_full: {} states, {} unique weights",
                  dwa_rm_eps_min.states.len(), count_unique_weights(&dwa_rm_eps_min));
         
         // The key insight:
@@ -387,11 +387,11 @@ mod test_minimization_failure {
         
         // After minimization
         let mut dwa_builtin_min = dwa_builtin.clone();
-        dwa_builtin_min.simplify_with_rustfst();
+        dwa_builtin_min.minimize_with_rustfst_full();
         println!("Builtin minimized: {} states", dwa_builtin_min.states.len());
         
         let mut dwa_rm_eps_min = dwa_rm_eps.clone();
-        dwa_rm_eps_min.simplify_with_rustfst();
+        dwa_rm_eps_min.minimize_with_rustfst_full();
         println!("rm_epsilon minimized: {} states", dwa_rm_eps_min.states.len());
         
         println!("\nWeight difference analysis:");

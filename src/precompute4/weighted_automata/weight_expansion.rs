@@ -203,9 +203,9 @@ pub fn convert_symbol_heavy_to_weight_heavy(
     crate::debug!(3, "convert: After conversion, start state has {} epsilon transitions", 
         nwa.states[start_state].epsilons.len());
     
-    // Step 3: Determinize and simplify
+    // Step 3: Determinize and minimize
     let mut result = nwa.determinize();
-    result.simplify();
+    result.minimize();
     
     crate::debug!(3, "convert: After determinize, DWA has {} states", result.states.len());
     
