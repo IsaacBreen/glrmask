@@ -288,13 +288,44 @@ impl<'r> Precomputer1<'r> {
             self.nwa.determinize()
         };
         crate::debug!(5, "Determinized DWA with {} states and {} transitions", dwa.states.len(), dwa.states.num_transitions());
+        
+        // === Debug: compare weights before and after simplification ===
+        let states_before_simplify = dwa.states.len();
+        let unique_weights_before: std::collections::HashSet<_> = dwa.states.0.iter()
+            .flat_map(|s| s.trans_weights.values().chain(s.final_weight.iter()))
+            .cloned()
+            .collect();
+        crate::debug!(5, "Before simplify_with_rustfst: {} states, {} unique weights", 
+                      states_before_simplify, unique_weights_before.len());
+        
         dwa.simplify_with_rustfst();
+        
+        let unique_weights_after: std::collections::HashSet<_> = dwa.states.0.iter()
+            .flat_map(|s| s.trans_weights.values().chain(s.final_weight.iter()))
+            .cloned()
+            .collect();
+        crate::debug!(5, "After simplify_with_rustfst: {} states, {} unique weights", 
+                      dwa.states.len(), unique_weights_after.len());
+        
         crate::debug!(5, "Simplified DWA with {} states and {} transitions", dwa.states.len(), dwa.states.num_transitions());
         dwa.simplify();
         crate::debug!(5, "Final simplified DWA with {} states and {} transitions", dwa.states.len(), dwa.states.num_transitions());
         
         let mut dwa2 = self.nwa.determinize_to_dwa_with_rustfst();
+        let unique_weights_dwa2: std::collections::HashSet<_> = dwa2.states.0.iter()
+            .flat_map(|s| s.trans_weights.values().chain(s.final_weight.iter()))
+            .cloned()
+            .collect();
+        crate::debug!(5, "RustFST DWA before simplify: {} states, {} unique weights", 
+                      dwa2.states.len(), unique_weights_dwa2.len());
         dwa2.simplify_with_rustfst();
+        let unique_weights_dwa2_after: std::collections::HashSet<_> = dwa2.states.0.iter()
+            .flat_map(|s| s.trans_weights.values().chain(s.final_weight.iter()))
+            .cloned()
+            .collect();
+        crate::debug!(5, "RustFST DWA after simplify: {} states, {} unique weights", 
+                      dwa2.states.len(), unique_weights_dwa2_after.len());
+        
         crate::debug!(5, "dwa is cyclic? {}", if dwa.is_cyclic() { "yes" } else { "no" });
         crate::debug!(5, "dwa2 is cyclic? {}", if dwa2.is_cyclic() { "yes" } else { "no" });
         stochastic_equivalence_test(dwa.clone(), dwa2);
