@@ -4,15 +4,14 @@ use std::path::PathBuf;
 
 #[test]
 fn test_minimization_889() {
-    let mut d = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    d.push("nwa_repro_min.json");
-
-    if !d.exists() {
-        // Fallback for when running from root
-        d = PathBuf::from("nwa_repro_min.json");
-    }
+    // Load the NWA from the JSON dump
+    // This file is expected to be in the root of the repo
+    let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    path.push("nwa_dump.json");
     
-    let content = fs::read_to_string(&d).expect("Failed to read nwa_repro_min.json");
+    let content = fs::read_to_string(&path)
+        .expect(&format!("Failed to read nwa_dump.json from {:?}", path));
+    
     let nwa: NWA = serde_json::from_str(&content).expect("Failed to parse NWA");
 
     // RustFST pipeline
@@ -34,6 +33,6 @@ fn test_minimization_889() {
         dwa_rustfst.states.len()
     );
 
-    // Optional: Assert exact count if we're sure it should be 889
-    // assert_eq!(dwa_builtin.states.len(), 889, "Expected 889 states");
+    // Assert exact expected count
+    assert_eq!(dwa_builtin.states.len(), 889, "Expected 889 states, but got {}", dwa_builtin.states.len());
 }
