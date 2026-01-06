@@ -8,10 +8,10 @@ fn test_minimization_889() {
     // This file is expected to be in the root of the repo
     let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     path.push("nwa_dump.json");
-    
-    let content = fs::read_to_string(&path)
-        .expect(&format!("Failed to read nwa_dump.json from {:?}", path));
-    
+
+    let content =
+        fs::read_to_string(&path).expect(&format!("Failed to read nwa_dump.json from {:?}", path));
+
     let nwa: NWA = serde_json::from_str(&content).expect("Failed to parse NWA");
 
     // RustFST pipeline
@@ -26,10 +26,10 @@ fn test_minimization_889() {
 
     // They should match
     assert_eq!(
-        dwa_builtin.states.len(), 
-        dwa_rustfst.states.len(), 
-        "State count mismatch! Builtin: {}, RustFST: {}", 
-        dwa_builtin.states.len(), 
+        dwa_builtin.states.len(),
+        dwa_rustfst.states.len(),
+        "State count mismatch! Builtin: {}, RustFST: {}",
+        dwa_builtin.states.len(),
         dwa_rustfst.states.len()
     );
 }
