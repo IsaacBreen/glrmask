@@ -14,6 +14,7 @@ fn test_minimization_889() {
         fs::read_to_string(&path).expect(&format!("Failed to read nwa_dump.json from {:?}", path));
 
     let nwa: NWA = serde_json::from_str(&content).expect("Failed to parse NWA");
+    println!("Loaded NWA with {} states", nwa.states.len());
 
     // RustFST pipeline
     println!("Determinizing with RustFST...");
