@@ -369,8 +369,8 @@ fn find_longest_common_prefix(alternatives: &[Vec<Symbol>]) -> usize {
     min_len
 }
 
-/// Applies a series of simplification steps to a grammar to reduce it for a specific test case.
-pub fn simplify_grammar_for_test_case(
+/// Applies a series of minimization steps to a grammar to reduce it for a specific test case.
+pub fn minimize_grammar_for_test_case(
     productions: &[Production],
     interesting_terminals: &BTreeSet<Terminal>,
 ) -> (Vec<Production>, usize) {
@@ -382,7 +382,7 @@ pub fn simplify_grammar_for_test_case(
     let mut current_productions =
         remove_productions_with_uninteresting_terminals(productions, interesting_terminals);
     println!(
-        "simplify_grammar_for_test_case: After removing uninteresting terminals: {} productions",
+        "minimize_grammar_for_test_case: After removing uninteresting terminals: {} productions",
         current_productions.len()
     );
     if current_productions.len() < 500 {
@@ -401,7 +401,7 @@ pub fn simplify_grammar_for_test_case(
         let substituted = remove_productions_for_nts(&substituted_with_defs, &substituted_nts);
         if substituted.len() != current_productions.len() {
             println!(
-                "simplify_grammar_for_test_case: After substituting single productions: {} productions",
+                "minimize_grammar_for_test_case: After substituting single productions: {} productions",
                 substituted.len()
             );
             if substituted.len() < 500 {
@@ -423,7 +423,7 @@ pub fn simplify_grammar_for_test_case(
             remove_productions_with_undefined_nonterminals(&substituted, &exempt_indices);
         if cleaned.len() != substituted.len() {
             println!(
-                "simplify_grammar_for_test_case: After removing undefined non-terminals: {} productions",
+                "minimize_grammar_for_test_case: After removing undefined non-terminals: {} productions",
                 cleaned.len()
             );
             if cleaned.len() < 500 {
@@ -437,7 +437,7 @@ pub fn simplify_grammar_for_test_case(
         let reachable = eliminate_unreachable_productions(&cleaned, start_nt);
         if reachable.len() != cleaned.len() {
             println!(
-                "simplify_grammar_for_test_case: After eliminating unreachable productions: {} productions",
+                "minimize_grammar_for_test_case: After eliminating unreachable productions: {} productions",
                 reachable.len()
             );
             if reachable.len() < 500 {
@@ -449,7 +449,7 @@ pub fn simplify_grammar_for_test_case(
         }
 
         println!(
-            "Current productions after simplification: {}",
+            "Current productions after minimization: {}",
             reachable.len()
         );
 
@@ -463,7 +463,7 @@ pub fn simplify_grammar_for_test_case(
     let final_start_id = current_productions
         .iter()
         .position(|p| p.lhs == *start_nt)
-        .expect("Start production was removed during simplification");
+        .expect("Start production was removed during minimization");
 
     (current_productions, final_start_id)
 }

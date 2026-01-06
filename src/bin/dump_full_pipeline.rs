@@ -111,10 +111,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         state_to_rep,
     );
     if is_debug_level_enabled(5) {
-        println!("Terminal DWA (before simplify):");
+        println!("Terminal DWA (before minimize):");
         println!("{}", terminal_dwa);
     }
-    terminal_dwa.simplify();
+    terminal_dwa.minimize();
     if is_debug_level_enabled(4) {
         println!("Terminal DWA:");
         println!("{}", terminal_dwa);
@@ -300,14 +300,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("{}", resolved_nwa);
     }
     let mut final_dwa = finalize_and_optimize_and_determinize(parser, resolved_nwa.clone());
-    final_dwa.simplify();
+    final_dwa.minimize();
     if is_debug_level_enabled(4) {
         println!("Final DWA:");
         println!("{}", final_dwa);
     }
 
     // Optimize DWA/NWA for visualization
-    final_dwa.simplify();
+    final_dwa.minimize();
     terminal_dwa.optimize_for_visualization();
     unresolved_nwa.optimize_for_visualization();
     resolved_nwa.optimize_for_visualization();

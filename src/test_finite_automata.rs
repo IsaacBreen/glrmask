@@ -1170,12 +1170,12 @@ mod reproduction_tests {
     fn test_js_whitespace_pattern() {
         // Reproduce the JS whitespace pattern that causes DFA explosion
         // WS = [\t\n\r ]+ | "//" [^\n]* | "/*" ("*" [^/] | [^*])* "*/"
-        // The pattern WS WS* should simplify to WS+
+        // The pattern WS WS* should minimize to WS+
         
         use std::sync::Arc;
         use crate::datastructures::u8set::U8Set;
         
-        // Simplified version: space = [ ]+
+        // Minimized version: space = [ ]+
         let space_char = Expr::U8Class(U8Set::from_chars(" \t\n\r"));
         let space_plus = Expr::Quantifier(Box::new(space_char.clone()), QuantifierType::OneOrMore);
         
@@ -1207,7 +1207,7 @@ mod reproduction_tests {
         use crate::datastructures::u8set::U8Set;
         
         // Build: space+ | "//" [^\n]* 
-        // (simplified - skip block comments for now)
+        // (minimized - skip block comments for now)
         
         let space_class = Expr::U8Class(U8Set::from_chars(" \t\n\r"));
         let space_plus = Expr::Quantifier(Box::new(space_class.clone()), QuantifierType::OneOrMore);

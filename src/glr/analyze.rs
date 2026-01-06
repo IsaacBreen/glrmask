@@ -774,7 +774,7 @@ pub fn filter_productions_by_reachability(
     kept_productions
 }
 
-pub fn simplify_grammar(initial_productions: &[Production]) -> Vec<Production> {
+pub fn minimize_grammar(initial_productions: &[Production]) -> Vec<Production> {
     todo!()
 }
 

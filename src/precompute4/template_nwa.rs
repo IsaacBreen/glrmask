@@ -196,7 +196,7 @@ pub fn build_template_dwas(parser: &GLRParser) -> Result<BTreeMap<TerminalID, DW
         })
         .collect();
     
-    // Determinize and simplify serially (memory contention in parallel slows things down)
+    // Determinize and minimize serially (memory contention in parallel slows things down)
     // Tested parallel 2025: 467-494ms vs serial 380-400ms. Serial wins for many small DWAs.
     let mut result = BTreeMap::new();
     for (first_term, terms, nwa) in nwas_and_terms {
@@ -210,10 +210,10 @@ pub fn build_template_dwas(parser: &GLRParser) -> Result<BTreeMap<TerminalID, DW
         }
         
         let mut dwa = nwa.determinize();
-        crate::debug!(6, "Terminal {:?} (and {} others): {} states before simplify", 
+        crate::debug!(6, "Terminal {:?} (and {} others): {} states before minimize", 
             first_term, terms.len() - 1, dwa.states.len());
-        dwa.simplify_single_pass();
-        crate::debug!(6, "Terminal {:?}: {} states after simplify", first_term, dwa.states.len());
+        dwa.minimize_single_pass();
+        crate::debug!(6, "Terminal {:?}: {} states after minimize", first_term, dwa.states.len());
         
         // Debug stats at level 5: print one line per terminal with characterization and DFA stats
         if crate::r#macro::is_debug_level_enabled(5) {

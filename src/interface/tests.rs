@@ -430,7 +430,7 @@ mod tests {
     }
 
     #[test]
-    fn test_sentence_grammar_from_prompt_simplified() {
+    fn test_sentence_grammar_from_prompt_minimized() {
         let terminals = vec![
             ("A_T".to_string(), eat_u8_seq(b"ab".to_vec())),
             ("B_T".to_string(), eat_u8_seq(b"bc".to_vec())),

@@ -279,8 +279,8 @@ pub fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
     progress_step(3, "Determinize");
     let mut result = nwa.determinize();
 
-    progress_step(4, "Simplify");
-    result.simplify();
+    progress_step(4, "Minimize");
+    result.minimize();
     *dwa = result;
     crate::debug!(6, "Stats for final DWA after negative resolution:\n{}", dwa.stats());
 

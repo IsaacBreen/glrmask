@@ -25,13 +25,13 @@ use crate::precompute4::weighted_automata::{
 use crate::tokenizer::TokenizerStateID;
 use crate::types::{TerminalID, TerminalID as GrammarTokenID};
 
-struct SimplifyRustfstConfig {
+struct MinimizeRustfstConfig {
     rm_epsilon: bool,
     #[allow(dead_code)]
     determinize: bool,
 }
 
-impl SimplifyRustfstConfig {
+impl MinimizeRustfstConfig {
     fn default() -> Self { Self { rm_epsilon: false, determinize: false } }
     fn with_rm_epsilon(mut self, val: bool) -> Self { self.rm_epsilon = val; self }
 }
@@ -433,11 +433,11 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
             NWA::union_assign(&mut combined_nwa, &NWA::from_dwa(term_dwa));
         }
 
-        // OPTIMIZATION: Skip NWA simplification for simple signatures.
-        // Determinization will merge states anyway, so pre-simplification has minimal benefit.
-        // Use lightweight simplification on the DWA to avoid expensive minimization.
+        // OPTIMIZATION: Skip NWA minimization for simple signatures.
+        // Determinization will merge states anyway, so pre-minimization has minimal benefit.
+        // Use lightweight minimization on the DWA to avoid expensive minimization.
         let mut dwa = combined_nwa.determinize();
-        dwa.simplify_lightweight();
+        dwa.minimize_lightweight();
 
         template_cache.insert(sig, NWA::from_dwa(&dwa));
 
@@ -483,9 +483,9 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
             NWA::union_assign(&mut super_nwa, &NWA::from_dwa(&weighted_dwa));
         }
 
-        // OPTIMIZATION: Use lightweight simplification for super DWA construction.
+        // OPTIMIZATION: Use lightweight minimization for super DWA construction.
         // Full minimization is expensive and not critical for intermediate results.
-        let super_dwa = super_nwa.determinize_and_simplify("SuperDWA");
+        let super_dwa = super_nwa.determinize_and_minimize("SuperDWA");
 
         let super_signature: Signature = bit_to_term.iter().map(|t| vec![*t]).collect();
         
@@ -541,7 +541,7 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
         // PARALLEL OPTIMIZATION: Specialize DWAs using pre-computed weight mappings
         let results: Vec<(Signature, NWA)> = all_mappings.par_iter().map(|(target_sig, _mapping, weight_map)| {
             let mut derived_dwa = specialize_dwa_relative_with_map(&super_dwa, weight_map);
-            derived_dwa.simplify_lightweight();
+            derived_dwa.minimize_lightweight();
             (target_sig.clone(), NWA::from_dwa(&derived_dwa))
         }).collect();
 
@@ -650,8 +650,8 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
 
     let combined_nwa = NWA { states: combined_nwa_states, body: NWABody { start_states: vec![combined_start_state] } };
     let mut final_dwa = finalize_and_optimize_and_determinize(parser, combined_nwa);
-    // SKIP final simplification to test performance impact
-    // final_dwa.simplify();
+    // SKIP final minimization to test performance impact
+    // final_dwa.minimize();
     crate::debug!(4, "Parser DWA construction complete. Stats: {}", final_dwa.stats());
 
     final_dwa
@@ -720,10 +720,10 @@ pub fn finalize_and_optimize_and_determinize(parser: &GLRParser, mut combined_nw
     prune_continuations_from_final_states(&mut combined_nwa);
     crate::debug!(4, "Pruned continuations from final states. NWA with {} states and {} transitions remaining.", combined_nwa.states.len(), combined_nwa.states.num_transitions());
     
-    // Full simplify() is actually needed here to reduce the massive combined NWA (1M+ states).
+    // Full minimize() is actually needed here to reduce the massive combined NWA (1M+ states).
     // Lightweight pruning left 144K states which caused worse performance downstream.
-    let dwa = combined_nwa.determinize_and_simplify("FinalDWA");
-    crate::debug!(4, "Simplified DWA. {} states and {} transitions remaining.", dwa.states.len(), dwa.states.num_transitions());
+    let dwa = combined_nwa.determinize_and_minimize("FinalDWA");
+    crate::debug!(4, "Minimized DWA. {} states and {} transitions remaining.", dwa.states.len(), dwa.states.num_transitions());
     dwa
 }
 
@@ -791,6 +791,6 @@ pub fn instantiate_nwa_template_into(
     }
 }
 
-fn simplify_remove_epsilon(nwa: &mut NWA) {
-    nwa.simplify()
+fn minimize_remove_epsilon(nwa: &mut NWA) {
+    nwa.minimize()
 }

@@ -208,7 +208,7 @@ pub fn compute_combined_equivalence(
     }
 }
 
-/// Simplified entry point that just returns vocab equivalence classes.
+/// Minimized entry point that just returns vocab equivalence classes.
 ///
 /// Use this when you don't need the state mapping information.
 pub fn find_vocab_equivalence_classes_with_state_reduction(

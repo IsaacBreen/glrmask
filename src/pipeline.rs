@@ -62,16 +62,16 @@ pub struct PipelineConfig {
     /// Default: true
     pub optimize_grammar: bool,
     
-    /// Whether to simplify the grammar (inline single-use rules, etc.).
+    /// Whether to minimize the grammar (inline single-use rules, etc.).
     /// Default: true
-    pub simplify_grammar: bool,
+    pub minimize_grammar: bool,
 }
 
 impl Default for PipelineConfig {
     fn default() -> Self {
         Self {
             optimize_grammar: true,
-            simplify_grammar: true,
+            minimize_grammar: true,
         }
     }
 }
@@ -81,7 +81,7 @@ impl PipelineConfig {
     pub fn no_optimization() -> Self {
         Self {
             optimize_grammar: false,
-            simplify_grammar: false,
+            minimize_grammar: false,
         }
     }
 }
@@ -304,14 +304,14 @@ mod tests {
     fn test_pipeline_config_default() {
         let config = PipelineConfig::default();
         assert!(config.optimize_grammar);
-        assert!(config.simplify_grammar);
+        assert!(config.minimize_grammar);
     }
 
     #[test]
     fn test_pipeline_config_no_optimization() {
         let config = PipelineConfig::no_optimization();
         assert!(!config.optimize_grammar);
-        assert!(!config.simplify_grammar);
+        assert!(!config.minimize_grammar);
     }
 
     #[test]

@@ -43,7 +43,7 @@ pub(crate) fn prune_continuations_from_final_states(nwa: &mut NWA) -> bool {
 
 /// If a default transition for A -> B exists with weight W, subtract W from the weights of all
 /// non-default transitions A -> B (and remove if the resulting weight is empty).
-pub(crate) fn simplify_default_transitions(nwa: &mut NWA) -> bool {
+pub(crate) fn minimize_default_transitions(nwa: &mut NWA) -> bool {
     let mut changed = false;
     for i in 0..nwa.states.len() {
         let state = &mut nwa.states[i];

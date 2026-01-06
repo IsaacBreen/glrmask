@@ -328,7 +328,7 @@ pub enum Stage7ShiftsAndReducesLookaheadValue {
 }
 
 impl Stage7ShiftsAndReducesLookaheadValue {
-    pub fn simplify(&mut self) {
+    pub fn minimize(&mut self) {
         if let Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } = self {
             if reduces.is_empty() {
                 if let Some(shift_id) = *shift {
@@ -952,7 +952,7 @@ fn compute_final_table(
                 shift: None,
                 reduces: reduces_grouped,
             };
-            val.simplify();
+            val.minimize();
 
             (Some(val), eof_reduces.clone())
         } else {
@@ -994,7 +994,7 @@ fn compute_final_table(
                 shift: entry.shift,
                 reduces: reduces_grouped,
             };
-            val.simplify();
+            val.minimize();
             shifts_and_reduces_full.insert(t, val);
         }
 
@@ -1513,7 +1513,7 @@ fn print_memory_usage(label: &str) {
 ///                                ▼
 ///                 ┌─────────────────────────────────┐
 ///                 │ Phase 6: Unit Production Elim.  │
-///                 │ (DECORATIVE - simplify grammar) │
+///                 │ (DECORATIVE - minimize grammar) │
 ///                 └─────────────────────────────────┘
 /// ```
 ///
@@ -1663,21 +1663,21 @@ fn generate_glr_parser_with_maps(
     }
     
     // ============================================================
-    // Phase 1.5: ESSENTIAL - Simplify redundant nullable wrappers
+    // Phase 1.5: ESSENTIAL - Minimize redundant nullable wrappers
     // ============================================================
     // Nullable wrapper productions (T_Opt -> T | ε) can be created by:
     //   - Phase 1 above (transform_nullable_terminals)
     //   - optimization.rs (handle_nullable_terminals)
     //
     // If T is a nullable terminal (matches empty string), then T | ε = T.
-    // So we can simplify T_Opt -> T | ε to just T_Opt -> T.
+    // So we can minimize T_Opt -> T | ε to just T_Opt -> T.
     // This prevents combinatorial explosion in inline_null_productions later.
     //
     // Detection: For each NT with exactly 2 productions:
     //   - One production with RHS = [Terminal(T)] where T is nullable
     //   - One production with RHS = [] (epsilon)
     // Action: Remove the epsilon production.
-    // [DISABLE] Phase 1.5: ESSENTIAL - Simplify redundant nullable wrappers
+    // [DISABLE] Phase 1.5: ESSENTIAL - Minimize redundant nullable wrappers
     //
     // This optimization is currently DISABLED because it is incorrect for our use case.
     // Explanation:
@@ -1733,7 +1733,7 @@ fn generate_glr_parser_with_maps(
     }
     
     if !to_remove.is_empty() {
-        crate::debug!(4, "Phase 1.5: Simplified {} redundant epsilon productions from nullable wrappers",
+        crate::debug!(4, "Phase 1.5: Minimized {} redundant epsilon productions from nullable wrappers",
             to_remove.len());
         productions = productions.into_iter()
             .enumerate()
@@ -1742,7 +1742,7 @@ fn generate_glr_parser_with_maps(
             .collect();
     }
     */
-    print_memory_usage("After nullable wrapper simplification");
+    print_memory_usage("After nullable wrapper minimization");
 
 
     // ============================================================
@@ -1869,7 +1869,7 @@ fn generate_glr_parser_with_maps(
     // ============================================================
     // After grammar transformations (especially right recursion elimination),
     // some non-terminals may become unreachable from the start symbol.
-    // Remove these to simplify the grammar and reduce parser states.
+    // Remove these to minimize the grammar and reduce parser states.
     let start_nt_for_unreachable = productions.get(0).map(|p| p.lhs.clone()).unwrap_or(NonTerminal("start".to_string()));
     let before_unreachable = productions.len();
     productions = eliminate_unreachable_productions(&productions, &start_nt_for_unreachable);
@@ -1947,24 +1947,24 @@ fn generate_glr_parser_with_maps(
     // ============================================================
     // Phase 8: DECORATIVE - Unit production elimination
     // ============================================================
-    // Simplify grammar by eliminating unit productions (A → B → X becomes A → X).
+    // Minimize grammar by eliminating unit productions (A → B → X becomes A → X).
     // This reduces parser construction time but doesn't affect correctness.
     let start_nt = &productions.get(0).map(|p| p.lhs.clone()).unwrap_or(NonTerminal("start".to_string()));
     const MAX_SUBSTITUTION_RHS_LEN: usize = 1;
-    let (simplified_with_defs, substituted_nts) = substitute_single_productions_and_report(
+    let (minimized_with_defs, substituted_nts) = substitute_single_productions_and_report(
         &productions,
         start_nt,
         MAX_SUBSTITUTION_RHS_LEN,
     );
-    let simplified_productions = remove_productions_for_nts(&simplified_with_defs, &substituted_nts);
+    let minimized_productions = remove_productions_for_nts(&minimized_with_defs, &substituted_nts);
 
-    if simplified_productions.len() < productions.len() {
+    if minimized_productions.len() < productions.len() {
         crate::debug!(4, "Phase 8: Eliminated {} unit productions ({} → {})",
-            productions.len() - simplified_productions.len(),
+            productions.len() - minimized_productions.len(),
             productions.len(),
-            simplified_productions.len());
+            minimized_productions.len());
     }
-    productions = simplified_productions;
+    productions = minimized_productions;
     print_memory_usage("After unit production elimination");
 
     // ============================================================

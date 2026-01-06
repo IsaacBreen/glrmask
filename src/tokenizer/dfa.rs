@@ -905,7 +905,7 @@ impl ExprGroups {
         let stats = self.get_stats();
         crate::debug!(5, "Expr Stats: {}", stats);
 
-        // Optimize the expression first to simplify nested quantifiers
+        // Optimize the expression first to minimize nested quantifiers
         crate::debug!(4, "Optimizing expression");
         let start_optimize = std::time::Instant::now();
         let optimized = crate::time!("optimize_expr", self.optimize());
@@ -1207,7 +1207,7 @@ impl Expr {
                     Head::Other => {
                         // Reconstruction is hard here without cloning the original 'first', 
                         // but since Head::Other implies we can't optimize, we handle it loosely.
-                        // We'll return Other and re-wrap the simplified tail if possible, 
+                        // We'll return Other and re-wrap the minimized tail if possible, 
                         // but for now, just returning Other with a reconstructed Seq is enough to bail out.
                         let mut reconstructed = vec![first_tail.unwrap_or(Expr::Epsilon)];
                         // Note: ^ logic slightly lossy if we don't return exact original, 
@@ -1313,14 +1313,14 @@ impl Expr {
                 Task::Quantifier(q) => {
                     let child = values.pop().unwrap();
                     
-                    // Simplify nested quantifiers: (expr*)*  = expr*,  (expr+)* = expr*, etc.
+                    // Minimize nested quantifiers: (expr*)*  = expr*,  (expr+)* = expr*, etc.
                     // We need to unwrap Shared to check the inner structure
-                    let simplified = match (&child, q) {
+                    let minimized = match (&child, q) {
                         // If child is Shared, peek inside
                         (Expr::Shared(inner_arc), outer_q) => {
                             match inner_arc.as_ref() {
                                 Expr::Quantifier(inner_expr, inner_q) => {
-                                    // Simplification rules (regex quantifier algebra):
+                                    // Minimization rules (regex quantifier algebra):
                                     // (a*)* = a*, (a+)* = a*, (a?)* = a*
                                     // (a*)+ = a*, (a+)+ = a+, (a?)+ = a*
                                     // (a*)? = a*, (a+)? = a*, (a?)? = a?
@@ -1394,7 +1394,7 @@ impl Expr {
                         _ => Expr::Quantifier(Box::new(child), q)
                     };
                     
-                    values.push(simplified);
+                    values.push(minimized);
                 }
                 Task::Shared(ptr, _) => {
                     let child = values.pop().unwrap();

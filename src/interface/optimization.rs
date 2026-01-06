@@ -122,7 +122,7 @@ impl<'a> GrammarOptimizer<'a> {
         // and simple tokenizer (~12K states) than a simple parser (~700 states) and 
         // complex tokenizer (~160K states).
         // 
-        // UPDATE: With terminal DWA simplification, grammar optimization can help, but
+        // UPDATE: With terminal DWA minimization, grammar optimization can help, but
         // the tokenizer explosion still dominates. Keep threshold at 500 for now.
         const MAX_PRODUCTIONS_FOR_OPTIMIZATION: usize = 50000;
         if self.grammar.productions.len() > MAX_PRODUCTIONS_FOR_OPTIMIZATION {
@@ -428,18 +428,18 @@ impl<'a> GrammarOptimizer<'a> {
 
     /// Replace the entire grammar with a single terminal
     fn replace_grammar_with_single_terminal(&mut self, expr: Expr) {
-        // Skip simplification for expressions that came from large grammars
+        // Skip minimization for expressions that came from large grammars
         // The regex_term_to_expr already creates well-formed expressions
-        // and simplify_expr is O(n) which is slow for 1M+ node trees
+        // and minimize_expr is O(n) which is slow for 1M+ node trees
         // We check if we had a large number of productions as a proxy for expression size
-        let skip_simplify = self.grammar.productions.len() > 100;
-        let expr = if skip_simplify {
-            debug!(5, "Skipping simplify_expr for large grammar (had {} productions)", self.grammar.productions.len());
+        let skip_minimize = self.grammar.productions.len() > 100;
+        let expr = if skip_minimize {
+            debug!(5, "Skipping minimize_expr for large grammar (had {} productions)", self.grammar.productions.len());
             expr
         } else {
-            let simplify_start = std::time::Instant::now();
-            let result = simplify_expr(expr);
-            debug!(5, "Simplified expr in {:?}", simplify_start.elapsed());
+            let minimize_start = std::time::Instant::now();
+            let result = minimize_expr(expr);
+            debug!(5, "Minimized expr in {:?}", minimize_start.elapsed());
             result
         };
         
@@ -1697,7 +1697,7 @@ impl RegexTerm {
                 matches!(get_expr_nullability(e), ExprNullability::AlwaysNull | ExprNullability::CanBeNull)
             }
             // Non-terminals nullability is unknown here (requires solving), assume false to be safe
-            // for local simplification.
+            // for local minimization.
             RegexTerm::NtRef(_) => false,
             RegexTerm::Seq(terms) => terms.iter().all(|t| t.is_nullable()),
             RegexTerm::Choice(terms) => terms.iter().any(|t| t.is_nullable()),
@@ -1725,7 +1725,7 @@ impl RegexTerm {
         
         // Epsilon Absorption: DISABLED for performance
         // The is_nullable() traversal is too expensive for large regex trees.
-        // We'll keep explicit epsilons - they'll be simplified later or are harmless.
+        // We'll keep explicit epsilons - they'll be minimized later or are harmless.
         if has_epsilon {
             flat.push(Rc::new(RegexTerm::Epsilon));
         }
@@ -2451,65 +2451,65 @@ fn is_epsilon_expr(expr: &Expr) -> bool {
     }
 }
 
-/// Simplify an expression
-fn simplify_expr(expr: Expr) -> Expr {
+/// Minimize an expression
+fn minimize_expr(expr: Expr) -> Expr {
     let mut cache: HashMap<*const Expr, Arc<Expr>> = HashMap::new();
-    simplify_expr_cached(expr, &mut cache)
+    minimize_expr_cached(expr, &mut cache)
 }
 
-fn simplify_expr_cached(expr: Expr, cache: &mut HashMap<*const Expr, Arc<Expr>>) -> Expr {
+fn minimize_expr_cached(expr: Expr, cache: &mut HashMap<*const Expr, Arc<Expr>>) -> Expr {
     // Use stacker to handle deep recursion
     stacker::maybe_grow(32 * 1024, 1024 * 1024, || {
-        simplify_expr_cached_impl(expr, cache)
+        minimize_expr_cached_impl(expr, cache)
     })
 }
 
-fn simplify_expr_cached_impl(expr: Expr, cache: &mut HashMap<*const Expr, Arc<Expr>>) -> Expr {
+fn minimize_expr_cached_impl(expr: Expr, cache: &mut HashMap<*const Expr, Arc<Expr>>) -> Expr {
     match expr {
         Expr::Seq(exprs) => {
-            let mut simplified = Vec::new();
+            let mut minimized = Vec::new();
             for e in exprs {
-                let e = simplify_expr_cached(e, cache);
+                let e = minimize_expr_cached(e, cache);
                 match e {
                     Expr::Epsilon => {}
-                    Expr::Seq(inner) => simplified.extend(inner),
-                    other => simplified.push(other),
+                    Expr::Seq(inner) => minimized.extend(inner),
+                    other => minimized.push(other),
                 }
             }
-            if simplified.is_empty() {
+            if minimized.is_empty() {
                 Expr::Epsilon
-            } else if simplified.len() == 1 {
-                simplified.into_iter().next().unwrap()
+            } else if minimized.len() == 1 {
+                minimized.into_iter().next().unwrap()
             } else {
-                Expr::Seq(simplified)
+                Expr::Seq(minimized)
             }
         }
         Expr::Choice(exprs) => {
-            let simplified: Vec<Expr> = exprs.into_iter()
-                .map(|e| simplify_expr_cached(e, cache))
+            let minimized: Vec<Expr> = exprs.into_iter()
+                .map(|e| minimize_expr_cached(e, cache))
                 .flat_map(|e| match e {
                     Expr::Choice(inner) => inner,
                     other => vec![other],
                 })
                 .collect();
-            if simplified.len() == 1 {
-                simplified.into_iter().next().unwrap()
-            } else if simplified.len() == 2 {
+            if minimized.len() == 1 {
+                minimized.into_iter().next().unwrap()
+            } else if minimized.len() == 2 {
                 // Check for Choice([a, Epsilon]) or Choice([Epsilon, a]) -> a?
-                let (first, second) = (&simplified[0], &simplified[1]);
+                let (first, second) = (&minimized[0], &minimized[1]);
                 if is_epsilon_expr(second) {
                     Expr::Quantifier(Box::new(first.clone()), QuantifierType::ZeroOrOne)
                 } else if is_epsilon_expr(first) {
                     Expr::Quantifier(Box::new(second.clone()), QuantifierType::ZeroOrOne)
                 } else {
-                    Expr::Choice(simplified)
+                    Expr::Choice(minimized)
                 }
             } else {
-                Expr::Choice(simplified)
+                Expr::Choice(minimized)
             }
         }
         Expr::Quantifier(inner, qtype) => {
-            let inner = simplify_expr_cached(*inner, cache);
+            let inner = minimize_expr_cached(*inner, cache);
             match (&inner, &qtype) {
                 (Expr::Epsilon, _) => Expr::Epsilon,
                 (Expr::Quantifier(inner2, QuantifierType::ZeroOrMore), QuantifierType::ZeroOrMore) |
@@ -2527,10 +2527,10 @@ fn simplify_expr_cached_impl(expr: Expr, cache: &mut HashMap<*const Expr, Arc<Ex
                 // Return a Shared pointing to the cached result
                 return Expr::Shared(cached.clone());
             }
-            // Simplify the inner expression
-            let simplified = simplify_expr_cached((*inner).clone(), cache);
+            // Minimize the inner expression
+            let minimized = minimize_expr_cached((*inner).clone(), cache);
             // Cache and return
-            let result = Arc::new(simplified);
+            let result = Arc::new(minimized);
             cache.insert(ptr, result.clone());
             Expr::Shared(result)
         }
@@ -3394,15 +3394,15 @@ enum TerminalPatternType {
     RegexName,
     /// Literal sequence of specific length
     Literal(usize),
-    /// Character class (not used in simplified version)
+    /// Character class (not used in minimized version)
     Class,
-    /// Sequence of patterns (not used in simplified version)
+    /// Sequence of patterns (not used in minimized version)
     Seq(usize),
-    /// Choice between alternatives (not used in simplified version)
+    /// Choice between alternatives (not used in minimized version)
     Choice(usize),
-    /// Quantifier (*, +, ?) (not used in simplified version)
+    /// Quantifier (*, +, ?) (not used in minimized version)
     Quantifier(QuantifierType),
-    /// Epsilon (not used in simplified version)
+    /// Epsilon (not used in minimized version)
     Epsilon,
 }
 

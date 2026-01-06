@@ -389,7 +389,7 @@ impl<'a> LarkParser<'a> {
             // Lark repeat syntax: ~n or ~n..m
             // For now, treat ~n as exactly n repetitions (approximate with +)
             self.consume_op("~")?;
-            // Skip the number(s) - this is a simplification
+            // Skip the number(s) - this is a minimization
             while let Some(LarkToken { kind: LarkTokenKind::Ident(_), .. }) = self.tokens.peek() {
                 self.tokens.next();
             }

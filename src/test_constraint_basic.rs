@@ -251,7 +251,7 @@ fn test_constraint_simple() {
 }
 
 #[test]
-fn test_constraint_simple_simplified() {
+fn test_constraint_simple_minimized() {
     // LLM tokens: "a", "$"
     // Grammar tokens: "a", "$" (EOF)
     // Grammar: S -> X $ ; X -> "a"
@@ -405,7 +405,7 @@ fn test_constraint_expression() {
 }
 
 #[test]
-fn test_constraint_expression_simplified_06_11_25() {
+fn test_constraint_expression_minimized_06_11_25() {
     let mut llm_token_map = LLMTokenMap::new();
     llm_token_map.insert(b"+".to_vec(), LLMTokenID(0));
 
@@ -1588,7 +1588,7 @@ fn test_json_gpt2_initial_mask_bruteforce() -> Result<(), Box<dyn std::error::Er
 }
 
 #[test]
-fn test_js_simplified_ebnf_string() -> Result<(), Box<dyn std::error::Error>> {
+fn test_js_minimized_ebnf_string() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Load and compile the grammar from the EBNF file
     let ebnf_grammar = indoc! {r#"
         program ::= (expression ';')* EOF;
@@ -1698,7 +1698,7 @@ fn test_js_like_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>>
 }
 
 #[test]
-fn test_js_like_grammar_initial_mask_simplified() -> Result<(), Box<dyn std::error::Error>> {
+fn test_js_like_grammar_initial_mask_minimized() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Define the EBNF grammar
     let ebnf_grammar = indoc! {r#"
         program ::= unary_expression unary_expression '$';
@@ -2488,7 +2488,7 @@ fn test_ambiguous_tokenizer_no_gss_explosion() {
 }
 
 #[test]
-fn test_constraint_indirect_recursion_simplified() {
+fn test_constraint_indirect_recursion_minimized() {
     // Grammar: S' -> S EOF; S -> a E | b; E -> S
     // This is equivalent to S -> a* b, so valid strings are "b", "ab", "aab", etc.
     // LLM token vocabulary: a, b, $
@@ -2808,13 +2808,13 @@ fn test_tokenizer_vocab_to_terminal_dwa_aa() {
 // #[ignore]
 // #[test]
 // fn test_gss_explosion_from_ambiguity() -> Result<(), Box<dyn std::error::Error>> {
-//     // This test uses the grammar from `test_js_simplified_ebnf_string` to reproduce
+//     // This test uses the grammar from `test_js_minimized_ebnf_string` to reproduce
 //     // a low structural sharing factor, which is a symptom of GSS explosion.
 //     // When parsing from a combined GSS state, processing a common token like an
 //     // identifier can lead to many structurally similar but distinct GSS paths,
 //     // revealing poor node sharing if the GSS is not normalized.
 //
-//     // 1. Grammar from `test_js_simplified_ebnf_string`
+//     // 1. Grammar from `test_js_minimized_ebnf_string`
 //     let ebnf_grammar = indoc! {r#"
 //         program ::= (expression ';')* EOF;
 //         expression ::= '!'? (IDENTIFIER | STRING_LITERAL) ;

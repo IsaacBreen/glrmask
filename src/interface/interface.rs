@@ -2,7 +2,7 @@ use crate::constraint::GrammarConstraint;
 use crate::datastructures::u8set::U8Set;
 use crate::debug;
 use crate::finite_automata::{greedy_group, groups, Expr, ExprGroup, GroupID, QuantifierType, Regex};
-use crate::glr::analyze::simplify_grammar;
+use crate::glr::analyze::minimize_grammar;
 use crate::glr::grammar::regex_name;
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
 use crate::glr::parser::GLRParser;
@@ -621,7 +621,7 @@ impl Display for GrammarDefinition {
 }
 
 impl GrammarDefinition {
-    /// Helper to format Expr for display (simplified readable format)
+    /// Helper to format Expr for display (minimized readable format)
     fn format_expr(expr: &Expr) -> String {
         use crate::finite_automata::Expr::*;
         

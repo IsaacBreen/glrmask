@@ -276,11 +276,11 @@ fn test_resolve_negatives_from_large_nwa_log() {
     // State 68:
     nwa.add_transition(states[68], 0, states[67], Weight::all()).unwrap();
 
-    nwa.simplify();
+    nwa.minimize();
     println!("Before negative resolution:\n{}", nwa);
 
     let mut d = nwa.determinize();
-    d.simplify();
+    d.minimize();
     println!("DWA before negative resolution:\n{}", d);
     assert_eq!(
         d.eval_word_weight(&[0, 422, Label::MIN + 422, Label::MIN + 458, 458, Label::MIN + 458, Label::MIN + 459, 459, DEFAULT_TRANSITION_SYMBOL, 422, Label::MIN + 422, Label::MIN + 436, Label::MIN + 458, 458, Label::MIN + 458, Label::MIN + 459]),
