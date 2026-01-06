@@ -7,7 +7,6 @@ pub mod determinization_rustfst;
 pub mod dwa;
 pub mod json;
 pub mod nwa;
-pub mod push;
 pub mod simplification;
 pub mod simplification_experiment;
 pub mod unroll;
