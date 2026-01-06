@@ -588,14 +588,7 @@ impl DWA {
         if std::env::var("DISABLE_WEIGHT_LOOSENING").map(|v| v == "1").unwrap_or(false) {
             return false;
         }
-        
-        // This algorithm handles both cyclic and acyclic graphs if we use fixpoint for Pre.
-        // For now, implementing the simple DAG propagation.
-        // TODO: Use true fixpoint for cyclic graphs.
-        if self.is_cyclic() {
-            return false;
-        }
-        
+
         let n = self.states.len();
         if n == 0 {
             return false;
@@ -606,44 +599,71 @@ impl DWA {
             return false;
         }
         
-        // === Phase 1: Compute Pre(q) - forward reachability ===
+        // === Phase 1: Compute Pre(q) using Topological Sort (Kahn's Algorithm) ===
+        // This is O(V + E) and guarantees we process nodes in dependency order.
+        // It also detects cycles implicitly.
+        
+        let mut in_degree = vec![0; n];
+        for st in self.states.0.iter() {
+            for &v in st.transitions.values() {
+                if v < n {
+                    in_degree[v] += 1;
+                }
+            }
+        }
+        
         let mut pre: Vec<Weight> = vec![Weight::zeros(); n];
         pre[start] = Weight::all();
         
         let mut queue: VecDeque<StateID> = VecDeque::new();
-        queue.push_back(start);
-        let mut in_queue = vec![false; n];
-        in_queue[start] = true;
+        // Initialize queue with nodes having in-degree 0
+        for i in 0..n {
+            if in_degree[i] == 0 {
+                queue.push_back(i);
+            }
+        }
+        
+        let mut visited_count = 0;
         
         while let Some(u) = queue.pop_front() {
-            in_queue[u] = false;
-            let pre_u = pre[u].clone();
-            if pre_u.is_empty() {
-                continue;
-            }
+            visited_count += 1;
+            
+            // Allow Pre computation even if empty, to propagate dependencies
+            // (Standard topo sort needs to process all nodes)
+            
+            // Optimization: if pre[u] is empty, we don't need to do expensive set operations,
+            // but we MUST propagate in-degree decrements.
+            let u_is_reachable = !pre[u].is_empty();
+            let pre_u = if u_is_reachable { pre[u].clone() } else { Weight::zeros() };
             
             for (&label, &v) in &self.states[u].transitions {
                 if v >= n {
                     continue;
                 }
-                let w = self.states[u].trans_weights.get(&label).cloned().unwrap_or_else(Weight::all);
-                if w.is_empty() {
-                    continue;
-                }
                 
-                let flow = &pre_u & &w;
-                if flow.is_empty() {
-                    continue;
-                }
-                
-                if !flow.is_subset_of(&pre[v]) {
-                    pre[v] |= &flow;
-                    if !in_queue[v] {
-                        queue.push_back(v);
-                        in_queue[v] = true;
+                // Propagate flow if u is reachable
+                if u_is_reachable {
+                    let w = self.states[u].trans_weights.get(&label).cloned().unwrap_or_else(Weight::all);
+                    if !w.is_empty() {
+                        let flow = &pre_u & &w;
+                        if !flow.is_empty() {
+                             pre[v] |= &flow;
+                        }
                     }
                 }
+                
+                // Decrement in-degree
+                in_degree[v] -= 1;
+                if in_degree[v] == 0 {
+                    queue.push_back(v);
+                }
             }
+        }
+        
+        // If we didn't visit all states, the graph has a cycle.
+        // In that case, we abort loosening (it requires acyclic property for safety/convergence).
+        if visited_count < n {
+            return false;
         }
         
         // === Phase 2: Loosen weights ===
