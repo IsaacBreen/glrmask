@@ -283,6 +283,7 @@ impl DWA {
             let mut changed = false;
             let prune1 = if DwaPass::PruneDeadEnds.is_enabled() { self.prune_dead_ends() } else { false };
             if DwaPass::ResidualPush.is_enabled() { self.residuated_push(); }  // Push weights to enable merging
+            // TEMP DISABLED: self.loosen_weights_for_minimize();  // Loosen weights before minimize
             let min1 = if DwaPass::Minimize.is_enabled() { self.minimize_states() } else { false };
             let push1 = if DwaPass::PushWeights.is_enabled() { self.push_weights_into_transitions_and_finals() } else { false };
             let push2 = if DwaPass::PushWeightsToInitial.is_enabled() { self.push_weights_to_initial() } else { false };
@@ -295,6 +296,7 @@ impl DWA {
             if prune1 || push1 || push2 || prune2 {
                 if DwaPass::PruneDeadEnds.is_enabled() { self.prune_dead_ends(); }
                 if DwaPass::ResidualPush.is_enabled() { self.residuated_push(); }  // Push again before second minimize
+                // TEMP DISABLED: self.loosen_weights_for_minimize();  // Loosen weights before minimize
                 if DwaPass::Minimize.is_enabled() { self.minimize_states(); }
                 if DwaPass::PruneUnreachable.is_enabled() { self.prune_unreachable(); }
             }
@@ -352,6 +354,8 @@ impl DWA {
                     DwaPass::PushWeightsToInitial => self.push_weights_to_initial(),
                     DwaPass::ResidualPush => self.residuated_push(),
                     DwaPass::Minimize => {
+                        // TEMP DISABLED: Loosen weights before minimize to enable more merging
+                        // self.loosen_weights_for_minimize();
                         let changed = self.minimize_states();
                         if !changed {
                             // Minimize found no improvement - mark as fully explored
@@ -547,6 +551,164 @@ impl DWA {
                 }
             }
         }
+        changed
+    }
+
+    /// Loosen weights before minimization to enable more state merging.
+    ///
+    /// For each state, computes "don't care" weights - weights that either:
+    /// 1. Can't reach this state (blocked earlier in the DWA)
+    /// 2. Have already reached a final state (accepted earlier)
+    ///
+    /// These don't-care weights are added to all transition weights and final weights
+    /// at each state, making states more similar and enabling more merging during minimization.
+    ///
+    /// Processing is done in depth-first order (deepest first) for acyclic DWAs to propagate
+    /// loosening from leaves to root.
+    pub fn loosen_weights_for_minimize(&mut self) -> bool {
+        let n = self.states.len();
+        if n <= 1 {
+            return false;
+        }
+        
+        // 1. Compute forward reachability: which weights can reach each state from start
+        let mut can_reach: Vec<Weight> = vec![Weight::zeros(); n];
+        can_reach[self.body.start_state] = Weight::all();  // All weights can start
+        
+        // BFS to propagate reachability
+        let mut queue: VecDeque<StateID> = VecDeque::new();
+        queue.push_back(self.body.start_state);
+        let mut in_queue = vec![false; n];
+        in_queue[self.body.start_state] = true;
+        
+        while let Some(u) = queue.pop_front() {
+            in_queue[u] = false;
+            let reach_u = can_reach[u].clone();
+            
+            for (&label, &v) in &self.states[u].transitions {
+                if v >= n {
+                    continue;
+                }
+                let trans_weight = self.states[u].trans_weights.get(&label)
+                    .cloned().unwrap_or_else(Weight::all);
+                let new_reach = &reach_u & &trans_weight;
+                
+                // Update reachability for v
+                let old_reach = &can_reach[v];
+                if !new_reach.is_subset_of(old_reach) {
+                    can_reach[v] |= &new_reach;
+                    if !in_queue[v] {
+                        queue.push_back(v);
+                        in_queue[v] = true;
+                    }
+                }
+            }
+        }
+        
+        // 2. Compute which weights have reached a final state from each state
+        let mut reached_final: Vec<Weight> = vec![Weight::zeros(); n];
+        
+        // Initialize with final weights
+        for i in 0..n {
+            if let Some(ref fw) = self.states[i].final_weight {
+                if !fw.is_empty() {
+                    reached_final[i] = fw.clone();
+                }
+            }
+        }
+        
+        // Build reverse graph
+        let mut preds: Vec<Vec<(StateID, Label)>> = vec![Vec::new(); n];
+        for u in 0..n {
+            for (&label, &v) in &self.states[u].transitions {
+                if v < n {
+                    preds[v].push((u, label));
+                }
+            }
+        }
+        
+        // Backward BFS to propagate "reached final" info
+        queue.clear();
+        in_queue.fill(false);
+        for i in 0..n {
+            if !reached_final[i].is_empty() {
+                queue.push_back(i);
+                in_queue[i] = true;
+            }
+        }
+        
+        while let Some(v) = queue.pop_front() {
+            in_queue[v] = false;
+            let reached_v = reached_final[v].clone();
+            
+            for (u, label) in &preds[v] {
+                let trans_weight = self.states[*u].trans_weights.get(label)
+                    .cloned().unwrap_or_else(Weight::all);
+                let new_reached = &reached_v & &trans_weight;
+                
+                let old_reached = &reached_final[*u];
+                if !new_reached.is_subset_of(old_reached) {
+                    reached_final[*u] |= &new_reached;
+                    if !in_queue[*u] {
+                        queue.push_back(*u);
+                        in_queue[*u] = true;
+                    }
+                }
+            }
+        }
+        
+        // 3. Compute depth for DFS order (deepest first)
+        let mut depth: Vec<usize> = vec![0; n];
+        queue.clear();
+        queue.push_back(self.body.start_state);
+        let mut visited = vec![false; n];
+        visited[self.body.start_state] = true;
+        
+        while let Some(u) = queue.pop_front() {
+            for &v in self.states[u].transitions.values() {
+                if v < n && !visited[v] {
+                    visited[v] = true;
+                    depth[v] = depth[u] + 1;
+                    queue.push_back(v);
+                }
+            }
+        }
+        
+        // 4. Process states in depth-first order (deepest first)
+        let mut order: Vec<StateID> = (0..n).collect();
+        order.sort_by_key(|&s| std::cmp::Reverse(depth[s]));
+        
+        let mut changed = false;
+        for &s in &order {
+            // Compute don't-care weights for this state
+            // Don't care = weights that CAN'T reach here OR HAVE reached final
+            let cant_reach = can_reach[s].complement();
+            let dont_care = &cant_reach | &reached_final[s];
+            
+            if dont_care.is_empty() {
+                continue;  // No don't-care weights to add
+            }
+            
+            // Add don't-care weights to all transition weights
+            let st = &mut self.states[s];
+            for (label, weight) in st.trans_weights.iter_mut() {
+                let old_weight = weight.clone();
+                *weight |= &dont_care;
+                if *weight != old_weight {
+                    changed = true;
+                }
+            }
+            
+            // Add don't-care weights to final weight if present
+            if let Some(ref mut fw) = st.final_weight {
+                let old_fw = fw.clone();
+                *fw |= &dont_care;
+                if *fw != old_fw {
+                    changed = true;
+                }
+            }
+        }
+        
         changed
     }
 

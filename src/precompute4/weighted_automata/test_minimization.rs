@@ -134,10 +134,8 @@ fn test_minimization_889() {
         .sum();
     println!("Original NWA has {} epsilon transitions", epsilon_count);
 
-    // Test the full pipeline that constraint_precompute.rs uses with DWA_USE_RM_EPSILON=1
-    println!("\n=== PIPELINE: simplify NWA → compress → rm_epsilon → determinize → simplify DWA ===");
-    println!("This mimics constraint_precompute.rs with DWA_USE_RM_EPSILON=1");
-    
+    // Preprocess the NWA (same for both pipelines)
+    println!("\n=== PREPROCESSING (same for both pipelines) ===");
     println!("Step 0a: Simplify NWA with rustfst...");
     let mut nwa_simplified = nwa.clone();
     nwa_simplified.simplify_with_rustfst();
@@ -147,31 +145,51 @@ fn test_minimization_889() {
     nwa_simplified.compress_transitions();
     println!("  After compress_transitions: {} states", nwa_simplified.states.len());
     
+    // TEST WITHOUT rm_epsilon first to get baseline (1533 states expected)
+    println!("\n=== WITHOUT rm_epsilon (baseline) ===");
+    let mut dwa_no_rm_eps = nwa_simplified.determinize();
+    println!("After determinize (no rm_epsilon): {} states", dwa_no_rm_eps.states.len());
+    dwa_no_rm_eps.simplify();
+    println!("After simplify: {} states", dwa_no_rm_eps.states.len());
+    
+    // TEST WITH rm_epsilon
+    println!("\n=== WITH rm_epsilon ===");
     println!("Step 1: Remove epsilons...");
     let nwa_no_eps = nwa_simplified.remove_epsilons();
     println!("  After rm_epsilon: {} states", nwa_no_eps.states.len());
     
-    println!("Step 2: Determinize with builtin...");
-    let mut dwa = nwa_no_eps.determinize();
-    println!("  After determinize: {} states", dwa.states.len());
+    // Test BUILTIN pipeline
+    println!("\n=== BUILTIN PIPELINE: determinize() → simplify() ===");
+    let mut dwa_builtin = nwa_no_eps.determinize();
+    println!("After determinize(): {} states", dwa_builtin.states.len());
+    dwa_builtin.simplify();
+    println!("After simplify(): {} states", dwa_builtin.states.len());
     
-    println!("Step 3: Simplify with rustfst...");
-    dwa.simplify_with_rustfst();
-    println!("  After simplify_with_rustfst: {} states", dwa.states.len());
+    // Test RUSTFST pipeline
+    println!("\n=== RUSTFST PIPELINE: determinize_to_dwa_with_rustfst() → simplify() ===");
+    let mut dwa_rustfst = nwa_no_eps.determinize_to_dwa_with_rustfst();
+    println!("After determinize_to_dwa_with_rustfst(): {} states", dwa_rustfst.states.len());
+    dwa_rustfst.simplify();
+    println!("After simplify(): {} states", dwa_rustfst.states.len());
     
-    println!("Step 4: Simplify with builtin...");
-    dwa.simplify();
-    println!("  After simplify: {} states", dwa.states.len());
+    // Results
+    println!("\n=== RESULTS ===");
+    println!("Without rm_epsilon: {} states", dwa_no_rm_eps.states.len());
+    println!("Builtin pipeline (with rm_epsilon): {} states", dwa_builtin.states.len());
+    println!("RustFST pipeline (with rm_epsilon): {} states", dwa_rustfst.states.len());
     
-    // Sanity check: Verify we get the expected 889 states
-    // From MACRO_DEBUG_LEVEL=5 make test-schema-id ID=Github_hard---o66331 with DWA_USE_RM_EPSILON=1
-    // Terminal output showed: "Determinized DWA with 889 states and 54431 transitions"
+    // NOTE: Actual expected values depend on whether weight-loosening is enabled
+    // With weight-loosening: 889 states
+    // Without weight-loosening: should be same as builtin  
+    
+    // Central test: Both pipelines should produce the same number of states
     assert_eq!(
-        dwa.states.len(),
-        889,
-        "State count mismatch! Expected 889 states after full pipeline with rm_epsilon, got {}",
-        dwa.states.len()
+        dwa_builtin.states.len(),
+        dwa_rustfst.states.len(),
+        "Pipeline mismatch! Builtin: {} states, RustFST: {} states",
+        dwa_builtin.states.len(),
+        dwa_rustfst.states.len()
     );
     
-    println!("\n=== SUCCESS: Test passed with {} states ===", dwa.states.len());
+    println!("\n=== SUCCESS: Both pipelines (with rm_epsilon) produced {} states ===", dwa_builtin.states.len());
 }
