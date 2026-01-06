@@ -16,12 +16,16 @@ fn test_minimization_889() {
     let nwa: NWA = serde_json::from_str(&content).expect("Failed to parse NWA");
 
     // RustFST pipeline
+    println!("Determinizing with RustFST...");
     let mut dwa_rustfst = nwa.determinize_to_dwa_with_rustfst();
+    println!("Simplifying....");
     dwa_rustfst.simplify();
     println!("RustFST states: {}", dwa_rustfst.states.len());
 
     // Builtin pipeline
+    println!("Determinizing with builtin...");
     let mut dwa_builtin = nwa.determinize();
+    println!("Simplifying....");
     dwa_builtin.simplify();
     println!("Builtin states: {}", dwa_builtin.states.len());
 
