@@ -19,6 +19,7 @@ mod test_push;
 mod test_repro;
 mod test_debug_min;
 mod test_minimization_failure;
+mod test_rm_epsilon_effect;
 mod test_minimization;
 
 pub use self::rangeset::RangeSet;
