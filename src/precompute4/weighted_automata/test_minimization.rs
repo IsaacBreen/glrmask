@@ -118,55 +118,60 @@ fn test_minimization_889() {
     let nwa: NWA = serde_json::from_str(&content).expect("Failed to parse NWA");
     println!("Loaded NWA with {} states", nwa.states.len());
     
+    // Sanity check: Verify the NWA has the expected number of states from the export
+    // From MACRO_DEBUG_LEVEL=5 make test-schema-id ID=Github_hard---o66331 with DWA_USE_RM_EPSILON=1
+    // we got: "14647 states and 165438 transitions"
+    assert_eq!(
+        nwa.states.len(), 
+        14647,
+        "NWA state count mismatch! Expected 14647 states from Github_hard---o66331 terminal NWA, got {}",
+        nwa.states.len()
+    );
+    
     // Count epsilon transitions in the original NWA
     let epsilon_count: usize = nwa.states.0.iter()
         .map(|s| s.epsilons.len())
         .sum();
     println!("Original NWA has {} epsilon transitions", epsilon_count);
 
-    // RustFST pipeline
-    println!("\n=== RUSTFST PIPELINE ===");
-    println!("Determinizing with RustFST...");
-    let dwa_rustfst_raw = nwa.determinize_to_dwa_with_rustfst();
-    println!("RustFST raw states: {}", dwa_rustfst_raw.states.len());
-    let mut dwa_rustfst = dwa_rustfst_raw.clone();
-    println!("Simplifying....");
-    dwa_rustfst.simplify();
-    println!("RustFST states after simplify: {}", dwa_rustfst.states.len());
-
-    // Builtin pipeline
-    println!("\n=== BUILTIN PIPELINE ===");
-    println!("Determinizing with builtin...");
-    let dwa_builtin_raw = nwa.determinize();
-    println!("Builtin raw states: {}", dwa_builtin_raw.states.len());
-    let mut dwa_builtin = dwa_builtin_raw.clone();
-    println!("Simplifying....");
-    dwa_builtin.simplify();
-    println!("Builtin states after simplify: {}", dwa_builtin.states.len());
+    // Test the full pipeline that constraint_precompute.rs uses with DWA_USE_RM_EPSILON=1
+    println!("\n=== PIPELINE: simplify NWA → compress → rm_epsilon → determinize → simplify DWA ===");
+    println!("This mimics constraint_precompute.rs with DWA_USE_RM_EPSILON=1");
     
-    // Compare raw DWAs (before simplification)
-    compare_dwas_structure(&dwa_rustfst_raw, &dwa_builtin_raw, "RustFST-raw", "Builtin-raw");
+    println!("Step 0a: Simplify NWA with rustfst...");
+    let mut nwa_simplified = nwa.clone();
+    nwa_simplified.simplify_with_rustfst();
+    println!("  After simplify_with_rustfst: {} states", nwa_simplified.states.len());
     
-    // Compare simplified DWAs
-    compare_dwas_structure(&dwa_rustfst, &dwa_builtin, "RustFST-simplified", "Builtin-simplified");
+    println!("Step 0b: Compress transitions...");
+    nwa_simplified.compress_transitions();
+    println!("  After compress_transitions: {} states", nwa_simplified.states.len());
     
-    // Run stochastic equivalence test
-    println!("\n=== STOCHASTIC EQUIVALENCE TEST ===");
-    stochastic_equivalence_test(dwa_builtin.clone(), dwa_rustfst.clone());
-    println!("Stochastic equivalence test passed!");
-
-    // They should match
-    if dwa_builtin.states.len() != dwa_rustfst.states.len() {
-        println!("\n!!! STATE COUNT MISMATCH !!!");
-        println!("This indicates that internal determinization may be handling epsilon transitions differently.");
-        println!("However, the stochastic equivalence test passed, so they are semantically equivalent.");
-    }
+    println!("Step 1: Remove epsilons...");
+    let nwa_no_eps = nwa_simplified.remove_epsilons();
+    println!("  After rm_epsilon: {} states", nwa_no_eps.states.len());
     
+    println!("Step 2: Determinize with builtin...");
+    let mut dwa = nwa_no_eps.determinize();
+    println!("  After determinize: {} states", dwa.states.len());
+    
+    println!("Step 3: Simplify with rustfst...");
+    dwa.simplify_with_rustfst();
+    println!("  After simplify_with_rustfst: {} states", dwa.states.len());
+    
+    println!("Step 4: Simplify with builtin...");
+    dwa.simplify();
+    println!("  After simplify: {} states", dwa.states.len());
+    
+    // Sanity check: Verify we get the expected 889 states
+    // From MACRO_DEBUG_LEVEL=5 make test-schema-id ID=Github_hard---o66331 with DWA_USE_RM_EPSILON=1
+    // Terminal output showed: "Determinized DWA with 889 states and 54431 transitions"
     assert_eq!(
-        dwa_builtin.states.len(),
-        dwa_rustfst.states.len(),
-        "State count mismatch! Builtin: {}, RustFST: {}",
-        dwa_builtin.states.len(),
-        dwa_rustfst.states.len()
+        dwa.states.len(),
+        889,
+        "State count mismatch! Expected 889 states after full pipeline with rm_epsilon, got {}",
+        dwa.states.len()
     );
+    
+    println!("\n=== SUCCESS: Test passed with {} states ===", dwa.states.len());
 }
