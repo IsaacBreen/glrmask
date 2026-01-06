@@ -5,7 +5,7 @@ use crate::precompute4::weighted_automata::dwa::{DWAStates, DWA};
 use std::collections::VecDeque;
 
 impl DWA {
-    pub fn prune_dead_ends(&mut self) -> bool {
+    pub fn prune_dead_ends_cyclic(&mut self) -> bool {
         crate::debug!(7, "[DWA] Pruning dead ends...");
         let n = self.states.len();
         if n == 0 {

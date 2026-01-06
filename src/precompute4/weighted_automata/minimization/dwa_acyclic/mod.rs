@@ -9,7 +9,7 @@ mod loosen_weights;
 mod minimize;
 mod rebuild;
 
-use super::common::{Partition, MAX_OPTIMIZE_ITERATIONS};
+use super::common::{Partition, MAX_OPTIMIZE_ITERATIONS, DwaPass};
 use crate::precompute4::weighted_automata::common::BENCHMARK_DEBUG;
 use crate::precompute4::weighted_automata::dwa::DWA;
 
@@ -18,31 +18,8 @@ use rustfst::prelude::MinimizeConfig;
 
 use std::collections::HashSet;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum DwaPass {
-    PruneUnreachable,
-    PruneDeadEnds,
-    PushWeights,
-    PushWeightsToInitial,
-    ResidualPush,
-    Minimize,
-}
-
-impl DwaPass {
-    pub fn is_enabled(&self) -> bool {
-        match self {
-            DwaPass::PruneUnreachable => std::env::var("DWA_DISABLE_PRUNE_UNREACHABLE").map(|v| v != "1").unwrap_or(true),
-            DwaPass::PruneDeadEnds => std::env::var("DWA_DISABLE_PRUNE_DEAD_ENDS").map(|v| v != "1").unwrap_or(true),
-            DwaPass::PushWeights => std::env::var("DWA_DISABLE_PUSH_WEIGHTS").map(|v| v != "1").unwrap_or(true),
-            DwaPass::PushWeightsToInitial => std::env::var("DWA_DISABLE_PUSH_WEIGHTS_TO_INITIAL").map(|v| v != "1").unwrap_or(true),
-            DwaPass::ResidualPush => std::env::var("DWA_DISABLE_RESIDUAL_PUSH").map(|v| v != "1").unwrap_or(true),
-            DwaPass::Minimize => std::env::var("DWA_DISABLE_MINIMIZE").map(|v| v != "1").unwrap_or(true),
-        }
-    }
-}
-
 impl DWA {
-    pub fn minimize(&mut self) {
+    pub fn minimize_acyclic(&mut self) {
         if self.states.len() == 0 {
             return;
         }
@@ -51,15 +28,15 @@ impl DWA {
             let initial_states = self.states.len();
             let mut internal = self.clone();
             let internal_start = std::time::Instant::now();
-            internal.minimize_internal();
-            let internal_time = internal_start.elapsed();
+            internal.minimize_internal_acyclic();
             let internal_states = internal.states.len();
+            let internal_time = internal_start.elapsed();
 
             let mut rustfst = self.clone();
             let rustfst_start = std::time::Instant::now();
-            rustfst.minimize_with_rustfst_full();
-            let rustfst_time = rustfst_start.elapsed();
+            rustfst.minimize_with_rustfst_full_acyclic();
             let rustfst_states = rustfst.states.len();
+            let rustfst_time = rustfst_start.elapsed();
 
             if internal_time + rustfst_time > std::time::Duration::from_secs(1) {
                 let state_cmp = match internal_states.cmp(&rustfst_states) {
@@ -73,19 +50,19 @@ impl DWA {
                     std::cmp::Ordering::Greater => ">",
                 };
 
-                crate::debug!(6, "[DWA Minimize({})] Internal: t={:.2?}, s={} | RustFST: t={:.2?}, s={}. [s: {}, t: {}]", initial_states, internal_time, internal_states, rustfst_time, rustfst_states, state_cmp, time_cmp);
+                crate::debug!(6, "[DWA MinimizeAcyclic({})] Internal: t={:.2?}, s={} | RustFST: t={:.2?}, s={}. [s: {}, t: {}]", initial_states, internal_time, internal_states, rustfst_time, rustfst_states, state_cmp, time_cmp);
             }
 
             *self = internal;
         } else {
-            self.minimize_internal();
+            self.minimize_internal_acyclic();
         }
     }
 
     /// Performs linear-time optimizations only (Pruning, Weight Pushing).
     /// Skips the expensive O(N log N) or O(N^2) state minimization.
     /// Useful for template generation where we just want a clean graph quickly.
-    pub fn minimize_lightweight(&mut self) {
+    pub fn minimize_lightweight_acyclic(&mut self) {
         if self.states.len() == 0 {
             return;
         }
@@ -105,11 +82,11 @@ impl DWA {
                     continue;
                 }
                 let pass_changed = match pass {
-                    DwaPass::PruneUnreachable => self.prune_unreachable(),
-                    DwaPass::PruneDeadEnds => self.prune_dead_ends(),
-                    DwaPass::PushWeights => self.push_weights_into_transitions_and_finals(),
-                    DwaPass::PushWeightsToInitial => self.push_weights_to_initial(),
-                    DwaPass::ResidualPush => self.residuated_push(),
+                    DwaPass::PruneUnreachable => self.prune_unreachable_acyclic(),
+                    DwaPass::PruneDeadEnds => self.prune_dead_ends_acyclic(),
+                    DwaPass::PushWeights => self.push_weights_into_transitions_and_finals_acyclic(),
+                    DwaPass::PushWeightsToInitial => self.push_weights_to_initial_acyclic(),
+                    DwaPass::ResidualPush => self.residuated_push_acyclic(),
                     DwaPass::Minimize => false,
                 };
                 changed_in_iteration |= pass_changed;
@@ -118,7 +95,7 @@ impl DWA {
                 break;
             }
             if iter_num > 0 && iter_num % 100 == 0 {
-                crate::debug!(4, "DWA minimize_lightweight iteration {} still changing", iter_num);
+                crate::debug!(4, "DWA minimize_lightweight_acyclic iteration {} still changing", iter_num);
             }
         }
     }
@@ -126,33 +103,33 @@ impl DWA {
     /// Performs a single pass of all optimization passes including minimize.
     /// Unlike minimize(), this does NOT iterate until fixpoint - it runs each pass once.
     /// Useful for terminal DWAs where we want minimize but don't need full convergence.
-    pub fn minimize_single_pass(&mut self) {
+    pub fn minimize_single_pass_acyclic(&mut self) {
         if self.states.len() == 0 {
             return;
         }
 
-        self.prune_unreachable();
-        self.push_weights_into_transitions_and_finals();
-        self.push_weights_to_initial();
-        self.residuated_push();
-        self.loosen_weights_for_minimize();
-        self.prune_dead_ends();
-        self.minimize_states();
+        self.prune_unreachable_acyclic();
+        self.push_weights_into_transitions_and_finals_acyclic();
+        self.push_weights_to_initial_acyclic();
+        self.residuated_push_acyclic();
+        self.loosen_weights_for_minimize_acyclic();
+        self.prune_dead_ends_acyclic();
+        self.minimize_states_acyclic();
     }
 
-    pub fn minimize_with_rustfst(&mut self) {
+    pub fn minimize_with_rustfst_acyclic(&mut self) {
         let mut fst = self.to_rustfst();
         minimize_with_config(&mut fst, MinimizeConfig::default().with_allow_nondet(true)).unwrap();
         *self = DWA::from_rustfst(&fst);
     }
 
-    pub fn minimize_with_rustfst_full(&mut self) -> bool {
-        self.prune_unreachable();
-        self.push_weights_into_transitions_and_finals();
-        self.push_weights_to_initial();
-        self.residuated_push();
-        self.loosen_weights_for_minimize();
-        self.prune_dead_ends();
+    pub fn minimize_with_rustfst_full_acyclic(&mut self) -> bool {
+        self.prune_unreachable_acyclic();
+        self.push_weights_into_transitions_and_finals_acyclic();
+        self.push_weights_to_initial_acyclic();
+        self.residuated_push_acyclic();
+        self.loosen_weights_for_minimize_acyclic();
+        self.prune_dead_ends_acyclic();
         let mut fst = self.to_rustfst();
         minimize_with_config(&mut fst, MinimizeConfig::default().with_allow_nondet(true)).unwrap();
         *self = DWA::from_rustfst(&fst);
@@ -161,10 +138,10 @@ impl DWA {
 
     /// Push weights toward initial state using rustfst's push algorithm.
     /// This normalizes the FST so each state's outgoing weights "sum" to one.
-    pub fn minimize_internal(&mut self) -> bool {
+    pub fn minimize_internal_acyclic(&mut self) -> bool {
         let initial_num_states = self.states.len();
         if initial_num_states > 1000 {
-            crate::debug!(6, "[DWA::minimize] Starting minimization. Initial stats: {}", self.stats());
+            crate::debug!(6, "[DWA::minimize_acyclic] Starting minimization. Initial stats: {}", self.stats());
         }
         let mut total_changed = false;
 
@@ -198,16 +175,16 @@ impl DWA {
                 }
 
                 let pass_changed = match pass {
-                    DwaPass::PruneUnreachable => self.prune_unreachable(),
-                    DwaPass::PruneDeadEnds => self.prune_dead_ends(),
-                    DwaPass::PushWeights => self.push_weights_into_transitions_and_finals(),
-                    DwaPass::PushWeightsToInitial => self.push_weights_to_initial(),
-                    DwaPass::ResidualPush => self.residuated_push(),
+                    DwaPass::PruneUnreachable => self.prune_unreachable_acyclic(),
+                    DwaPass::PruneDeadEnds => self.prune_dead_ends_acyclic(),
+                    DwaPass::PushWeights => self.push_weights_into_transitions_and_finals_acyclic(),
+                    DwaPass::PushWeightsToInitial => self.push_weights_to_initial_acyclic(),
+                    DwaPass::ResidualPush => self.residuated_push_acyclic(),
                     DwaPass::Minimize => {
-                        self.loosen_weights_for_minimize();
-                        let changed = self.minimize_states();
+                        self.loosen_weights_for_minimize_acyclic();
+                        let changed = self.minimize_states_acyclic();
                         if changed && initial_num_states > 1000 {
-                            crate::debug!(6, "[DWA::minimize] After minimize (iter {}): {}", iter_num, self.stats());
+                            crate::debug!(6, "[DWA::minimize_acyclic] After minimize (iter {}): {}", iter_num, self.stats());
                         }
                         changed
                     },
@@ -241,7 +218,7 @@ impl DWA {
         }
 
         if initial_num_states > 1000 {
-            crate::debug!(6, "[DWA::minimize] Minimization finished. Total changed: {}. Final stats: {}", total_changed, self.stats());
+            crate::debug!(6, "[DWA::minimize_acyclic] Minimization finished. Total changed: {}. Final stats: {}", total_changed, self.stats());
         }
         total_changed
     }

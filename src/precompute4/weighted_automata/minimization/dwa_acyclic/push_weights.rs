@@ -4,7 +4,7 @@ use crate::precompute4::weighted_automata::common::{Label, StateID, Weight};
 use crate::precompute4::weighted_automata::dwa::DWA;
 
 impl DWA {
-    pub fn push_weights_into_transitions_and_finals(&mut self) -> bool {
+    pub fn push_weights_into_transitions_and_finals_acyclic(&mut self) -> bool {
         let n = self.states.len();
         if n == 0 {
             return false;

@@ -14,7 +14,7 @@ impl DWA {
     /// 1. Compute Pre(q) = tokens that can reach state q from start
     /// 2. Loosen finals: w*_final(q) = w_final(q) | !Pre(q)
     /// 3. Loosen transitions: w*_trans(p,a) = w_trans(p,a) | !Pre(p)
-    pub fn loosen_weights_for_minimize(&mut self) -> bool {
+    pub fn loosen_weights_for_minimize_acyclic(&mut self) -> bool {
         if std::env::var("DISABLE_WEIGHT_LOOSENING").map(|v| v == "1").unwrap_or(false) {
             return false;
         }

@@ -21,3 +21,26 @@ impl Partition {
         self.num_classes
     }
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum DwaPass {
+    PruneUnreachable,
+    PruneDeadEnds,
+    PushWeights,
+    PushWeightsToInitial,
+    ResidualPush,
+    Minimize,
+}
+
+impl DwaPass {
+    pub fn is_enabled(&self) -> bool {
+        match self {
+            DwaPass::PruneUnreachable => std::env::var("DWA_DISABLE_PRUNE_UNREACHABLE").map(|v| v != "1").unwrap_or(true),
+            DwaPass::PruneDeadEnds => std::env::var("DWA_DISABLE_PRUNE_DEAD_ENDS").map(|v| v != "1").unwrap_or(true),
+            DwaPass::PushWeights => std::env::var("DWA_DISABLE_PUSH_WEIGHTS").map(|v| v != "1").unwrap_or(true),
+            DwaPass::PushWeightsToInitial => std::env::var("DWA_DISABLE_PUSH_WEIGHTS_TO_INITIAL").map(|v| v != "1").unwrap_or(true),
+            DwaPass::ResidualPush => std::env::var("DWA_DISABLE_RESIDUAL_PUSH").map(|v| v != "1").unwrap_or(true),
+            DwaPass::Minimize => std::env::var("DWA_DISABLE_MINIMIZE").map(|v| v != "1").unwrap_or(true),
+        }
+    }
+}

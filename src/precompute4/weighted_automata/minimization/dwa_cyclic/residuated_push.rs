@@ -24,14 +24,14 @@ use crate::precompute4::weighted_automata::dwa::DWA;
 
 impl DWA {
     /// Push weights toward start state to enable state merging.
-    pub fn residuated_push(&mut self) -> bool {
+    pub fn residuated_push_cyclic(&mut self) -> bool {
         let n = self.states.len();
         if n == 0 {
             return false;
         }
 
         // Phase 1: Compute backward potentials d[q]
-        let d = self.compute_backward_potentials();
+        let d = self.compute_backward_potentials_cyclic();
         let mut changed = false;
 
         // Phase 2: Reweight transitions
@@ -89,7 +89,7 @@ impl DWA {
     }
 
     /// Compute backward potentials d[q] for all states.
-    pub(crate) fn compute_backward_potentials(&self) -> Vec<Weight> {
+    pub(crate) fn compute_backward_potentials_cyclic(&self) -> Vec<Weight> {
         let n = self.states.len();
         
         let mut d: Vec<Weight> = (0..n)

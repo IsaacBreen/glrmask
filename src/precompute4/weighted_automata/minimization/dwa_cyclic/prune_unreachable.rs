@@ -5,7 +5,7 @@ use crate::precompute4::weighted_automata::dwa::{DWAStates, DWA};
 use std::collections::VecDeque;
 
 impl DWA {
-    pub fn prune_unreachable(&mut self) -> bool {
+    pub fn prune_unreachable_cyclic(&mut self) -> bool {
         crate::debug!(7, "[DWA] Pruning unreachable states...");
         let n = self.states.len();
         if n == 0 {

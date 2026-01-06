@@ -82,7 +82,7 @@ pub(super) fn minimize_dwa_partition(states: &DWAStates) -> Partition {
 }
 
 impl DWA {
-    pub fn minimize_states(&mut self) -> bool {
+    pub fn minimize_states_acyclic(&mut self) -> bool {
         let n = self.states.len();
         if n < 3 {
             return false;
@@ -104,7 +104,7 @@ impl DWA {
         if partition.num_classes() >= n {
             return false;
         }
-        self.rebuild_from_partition(partition);
+        self.rebuild_acyclic_from_partition(partition);
         true
     }
 }

@@ -5,7 +5,7 @@ use crate::precompute4::weighted_automata::dwa::DWA;
 use std::collections::VecDeque;
 
 impl DWA {
-    pub fn push_weights_to_initial(&mut self) -> bool {
+    pub fn push_weights_to_initial_cyclic(&mut self) -> bool {
         let n = self.states.len();
         if n == 0 { return false; }
 

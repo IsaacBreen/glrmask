@@ -13,7 +13,7 @@ struct DwaStateBuilder {
 }
 
 impl DWA {
-    pub(super) fn rebuild_from_partition(&mut self, partition: Partition) {
+    pub(super) fn rebuild_cyclic_from_partition(&mut self, partition: Partition) {
         let n = self.states.len();
         if n == 0 {
             return;
