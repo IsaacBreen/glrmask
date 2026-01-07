@@ -107,6 +107,7 @@ impl JSONConvertible for DWAState {
             trans_weights: BTreeMap::<Label, Weight>::from_json(
                 obj.remove("trans_weights").ok_or("Missing trans_weights")?,
             )?,
+            state_weight: None,
         })
     }
 }
@@ -285,6 +286,7 @@ impl JSONConvertible for DWA {
                 transitions,
                 final_weight,
                 trans_weights,
+                state_weight: None,
             });
         }
 

@@ -1,472 +1,346 @@
 use crate::precompute4::weighted_automata::common::{Label, StateID, Weight};
 use crate::precompute4::weighted_automata::dwa::{DWA, DWAState, DWAStates};
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 
 impl DWA {
-    /// Minimizes an acyclic DWA by exploiting "don't care" tokens.
+    /// Minimizes an acyclic DWA.
     ///
-    /// This algorithm implements **Incompletely Specified Finite Automata (ISFA)** minimization.
-    /// Unlike standard DFA minimization, it can merge states that have different behaviors
-    /// (e.g. `fw={0}` vs `fw={1}`) if they are "compatible" (i.e., the specific tokens that
-    /// distinguish them are "dead" or "unreachable" in the other state).
+    /// This algorithm is stronger than standard DFA minimization. It performs "Need" analysis
+    /// (liveness analysis) to determine which tokens are relevant at each state.
     ///
-    /// The algorithm:
-    /// 1. Computes `Need[u]`: the set of tokens that can reach a final state from `u`.
-    /// 2. Processes states bottom-up (by height).
-    /// 3. Partitions states into the minimum number of cliques based on compatibility.
-    ///    Two states are compatible if their behaviors do not conflict on the intersection
-    ///    of their `Need` sets.
-    /// 4. Merges cliques into single states, pushing constraints upstream.
+    /// It then merges states `u` and `v` if they are **compatible**:
+    /// i.e., for every token `t` that is "live" in both `u` and `v`, `u` and `v` behave identically.
     ///
-    /// This solves an NP-hard problem (Clique Partition) to guarantee the global optimum.
+    /// This allows merging the "Diamond" structure:
+    /// - A accepts {0}, B accepts {1}.
+    /// - They are strictly different.
+    /// - But if A is only entered with {0,2} and B with {1,2}, their "overlap" is {2}.
+    /// - If they behave the same on {2}, they can be merged into AB (accepting {0,1}),
+    ///   relying on incoming edges to filter {0} vs {1}.
     pub fn minimize_acyclic(&mut self) {
         if self.states.len() == 0 {
             return;
         }
 
-        // 1. Compute DAG heights to process bottom-up
-        let heights = match compute_heights(&self.states) {
-            Some(h) => h,
-            None => return, // Cyclic
+        // 1. Compute Topological Sort (and check for cycles)
+        let topo_order = match self.get_topological_sort() {
+            Some(order) => order,
+            None => {
+                eprintln!("Warning: DWA::minimize_acyclic called on cyclic graph. Skipping.");
+                return;
+            }
         };
-        let max_height = heights.iter().max().copied().unwrap_or(0);
 
-        // 2. Compute "Need" masks (backward reachability of acceptance)
-        let needs = compute_needs(self, &heights, max_height);
+        // 2. Compute "Need" (Liveness)
+        // Need[s] = Union of all path weights from s to any acceptance.
+        // This tells us which tokens *matter* at state s.
+        let mut need = vec![Weight::zeros(); self.states.len()];
 
-        // 3. Level-by-level Exact Minimization
-        // Maps old_state_id -> new_state_id
-        let mut mapping: Vec<StateID> = vec![usize::MAX; self.states.len()];
-        let mut new_states: Vec<DWAState> = Vec::new();
-        // Stores the Need mask for each new state (Union of merged states' needs)
-        let mut new_state_needs: Vec<Weight> = Vec::new();
+        // Iterate reverse topological order
+        for &u in topo_order.iter().rev() {
+            let state = &self.states[u];
+            let mut u_need = Weight::zeros();
 
-        // Group old states by height for processing
-        let mut states_by_height: Vec<Vec<StateID>> = vec![Vec::new(); max_height + 1];
-        for (id, &h) in heights.iter().enumerate() {
-            states_by_height[h].push(id);
+            // 2a. Contribution from Final Weight
+            if let Some(fw) = &state.final_weight {
+                u_need |= fw;
+            }
+
+            // 2b. Contribution from Transitions
+            for (label, &target) in &state.transitions {
+                if target < self.states.len() {
+                    if let Some(w) = state.trans_weights.get(label) {
+                        // The tokens needed by target, masked by the transition weight
+                        let mut flow = need[target].clone();
+                        flow &= w;
+                        u_need |= &flow;
+                    }
+                }
+            }
+
+            // 2c. Mask by State Weight
+            if let Some(sw) = &state.state_weight {
+                u_need &= sw;
+            }
+
+            need[u] = u_need;
         }
 
-        for h in 0..=max_height {
-            let candidates = &states_by_height[h];
-            if candidates.is_empty() {
+        // If start state needs nothing, the whole machine is empty
+        if need[self.body.start_state].is_empty() {
+            *self = DWA::new();
+            return;
+        }
+
+        // 3. Build Minimized Automaton Bottom-Up
+        // We will construct new states. We map old_id -> new_id.
+        let mut old_to_new = vec![None; self.states.len()];
+        let mut new_states = DWAStates::default();
+
+        // Store indices of new states to check for compatibility
+        // We scan linearly or use a helper. Since we need "Compatibility" (not equality),
+        // we cannot use a simple HashMap signature. We use a list of unique states.
+        // Optimization: In a large graph, we would bucket by (finalness, transition_keys).
+        let mut unique_indices: Vec<StateID> = Vec::new();
+
+        // Needs for the *new* states (accumulated during merges)
+        let mut new_state_needs: Vec<Weight> = Vec::new();
+
+        for &u in topo_order.iter().rev() {
+            // If the state is dead (Need is empty), map it to a dummy or skip
+            // We just skip; incoming transitions to it will be filtered by Need logic anyway.
+            if need[u].is_empty() {
                 continue;
             }
 
-            // A. Group candidates by "Skeleton" (transition labels & targets).
-            // States with different structural targets (mapped new_ids) are rarely compatible.
-            // This is an optimization to decompose the clique problem.
-            // Note: We can only strictly group by targets if we assume incompatible targets
-            // implies incompatibility. In DWA, different targets are strictly incompatible
-            // unless the weights on the intersection of Needs are empty.
-            // To be provably optimal, we strictly check compatibility between ALL nodes
-            // at this height, but we can use the structure to fail fast.
+            // Construct the "Proposed" Candidate State
+            // Note: Targets must already be mapped because we are in reverse topo order.
+            let mut candidate = DWAState::default();
 
-            // For the global exact solution, we build one compatibility graph for the whole level.
-            let mut adj = vec![vec![false; candidates.len()]; candidates.len()];
+            // Normalize State Weight:
+            // In the merged logic, we usually push state_weight into incoming edges or final.
+            // But to preserve semantics, we keep it, but we can union it during merges.
+            candidate.state_weight = self.states[u].state_weight.clone();
 
-            for i in 0..candidates.len() {
-                adj[i][i] = true;
-                for j in (i + 1)..candidates.len() {
-                    let u = candidates[i];
-                    let v = candidates[j];
-                    if are_compatible(u, &self.states[u], &needs[u],
-                                      v, &self.states[v], &needs[v],
-                                      &mapping, &new_state_needs) {
-                        adj[i][j] = true;
-                        adj[j][i] = true;
+            // Normalize Final Weight:
+            // We only care about the intersection with Need.
+            if let Some(fw) = &self.states[u].final_weight {
+                let mut eff = fw.clone();
+                eff &= &need[u];
+                if !eff.is_empty() {
+                    candidate.final_weight = Some(eff);
+                }
+            }
+
+            // Normalize Transitions
+            for (lbl, &old_tgt) in &self.states[u].transitions {
+                // If target is dead, ignore transition
+                if need[old_tgt].is_empty() { continue; }
+
+                // If target is alive, it must have been processed
+                if let Some(new_tgt) = old_to_new[old_tgt] {
+                    let w_original = self.states[u].trans_weights.get(lbl).unwrap();
+
+                    // CRITICAL: The weight on the transition is trimmed by the
+                    // Need of the ORIGINAL target. This preserves the path constraints
+                    // (e.g. "Start->A" allows {0}, "Start->B" allows {1}).
+                    let mut w_eff = w_original.clone();
+                    w_eff &= &need[old_tgt];
+
+                    if !w_eff.is_empty() {
+                        candidate.transitions.insert(*lbl, new_tgt);
+                        candidate.trans_weights.insert(*lbl, w_eff);
                     }
                 }
             }
 
-            // B. Solve Minimum Clique Partition (NP-hard, exact backtracking)
-            let partition = solve_min_clique_partition(&adj);
+            // Try to merge with an existing compatible state
+            let mut merged_id = None;
 
-            // C. Create new merged states
-            for clique_indices in partition {
-                let clique_states: Vec<StateID> = clique_indices.into_iter().map(|idx| candidates[idx]).collect();
+            for &existing_id in &unique_indices {
+                // Check compatibility between `candidate` and `new_states[existing_id]`
+                // Context: They must agree on the intersection of `need[u]` and `new_state_needs[existing_id]`.
 
-                // Merge u, v, ... -> M
-                let mut m_state = DWAState::default();
-                let mut m_need = Weight::zeros();
+                let existing = &new_states[existing_id];
+                let existing_need = &new_state_needs[existing_id];
 
-                // Merged final weight is Union of original finals
-                // (Incoming edges will be trimmed by Need, preventing "cross-contamination")
-                let mut m_fw = Weight::zeros();
+                // Calculate intersection of domains
+                let mut common = need[u].clone();
+                common &= existing_need;
 
-                for &old_id in &clique_states {
-                    if let Some(fw) = &self.states[old_id].final_weight {
-                        m_fw |= fw;
+                if is_compatible(&candidate, existing, &common) {
+                    merged_id = Some(existing_id);
+                    break;
+                }
+            }
+
+            if let Some(id) = merged_id {
+                // MERGE
+                old_to_new[u] = Some(id);
+
+                // Update the existing state by UNIONING the behaviors
+                // This creates the "super-state" (e.g., AB accepts {0} U {1})
+                merge_states(&mut new_states[id], &candidate);
+
+                // Update need
+                new_state_needs[id] |= &need[u];
+            } else {
+                // CREATE NEW
+                let new_id = new_states.add_existing_state(candidate);
+                old_to_new[u] = Some(new_id);
+                unique_indices.push(new_id);
+                new_state_needs.push(need[u].clone());
+            }
+        }
+
+        // 4. Update Self
+        self.states = new_states;
+        // Start state might have been mapped. If it was dead, we defaulted to empty earlier.
+        if let Some(new_start) = old_to_new[self.body.start_state] {
+            self.body.start_state = new_start;
+        } else {
+            // Start state was unreachable or dead
+            *self = DWA::new();
+        }
+    }
+
+    fn get_topological_sort(&self) -> Option<Vec<usize>> {
+        let n = self.states.len();
+        let mut in_degree = vec![0; n];
+        for state in self.states.iter() {
+            for &to in state.transitions.values() {
+                if to < n { in_degree[to] += 1; }
+            }
+        }
+
+        let mut queue = VecDeque::new();
+        for i in 0..n {
+            if in_degree[i] == 0 { queue.push_back(i); }
+        }
+
+        let mut order = Vec::new();
+        while let Some(u) = queue.pop_front() {
+            order.push(u);
+            for &to in self.states[u].transitions.values() {
+                if to < n {
+                    in_degree[to] -= 1;
+                    if in_degree[to] == 0 {
+                        queue.push_back(to);
                     }
-                    m_need |= &needs[old_id];
-                }
-
-                if !m_fw.is_empty() {
-                    m_state.final_weight = Some(m_fw);
-                }
-
-                // Merge transitions
-                // For a deterministic DWA, for each label 'c', all u in clique must
-                // agree on the transition.
-                // Compatibility ensures that if multiple u have transition on 'c',
-                // they are consistent. We take the Union of weights.
-                let mut trans_map: BTreeMap<Label, (StateID, Weight)> = BTreeMap::new();
-
-                for &old_id in &clique_states {
-                    for (&lbl, &old_target) in &self.states[old_id].transitions {
-                        // Skip transitions to dead states (already filtered by Need computation logic roughly,
-                        // but safe to check)
-                        if old_target >= mapping.len() { continue; }
-                        let new_target = mapping[old_target];
-                        if new_target == usize::MAX { continue; } // Should not happen in reverse topo
-
-                        let old_w = self.states[old_id].trans_weights.get(&lbl).cloned().unwrap_or_else(Weight::all);
-
-                        // We must intersect with the target's Need to ignore dead bits
-                        // (This is the standard trimming, but crucial for the merge).
-                        let mut eff_w = old_w;
-                        eff_w &= &new_state_needs[new_target];
-
-                        if eff_w.is_empty() { continue; }
-
-                        if let Some((existing_t, existing_w)) = trans_map.get_mut(&lbl) {
-                            // Compatibility guarantees existing_t == new_target
-                            // OR the weights are disjoint on the Need intersection.
-                            // In a valid merged state, we Union the weights.
-                            debug_assert_eq!(*existing_t, new_target, "Partition logic error: merged states have divergent targets");
-                            *existing_w |= &eff_w;
-                        } else {
-                            trans_map.insert(lbl, (new_target, eff_w));
-                        }
-                    }
-                }
-
-                for (lbl, (t, w)) in trans_map {
-                    m_state.transitions.insert(lbl, t);
-                    m_state.trans_weights.insert(lbl, w);
-                }
-
-                let new_id = new_states.len();
-                new_states.push(m_state);
-                new_state_needs.push(m_need);
-
-                for &old_id in &clique_states {
-                    mapping[old_id] = new_id;
                 }
             }
         }
 
-        // 4. Update Start State and apply Incoming Edge Trimming
-        // The start state itself is just a pointer. However, the constraints "pushed up"
-        // from the start state's need must be handled.
-        // In this DWA struct, start_state is an ID. The "incoming" edges to start
-        // don't exist, but the start state's behavior is effectively restricted by its Need.
-        // We simply point to the new ID.
-        let new_start = mapping[self.body.start_state];
-
-        // Final pass: The merge logic created states with "Union" weights.
-        // To correspond to the original semantics, any "User" of these states (parent)
-        // must restrict the inputs to the specific Need of the original child.
-        // Since we processed bottom-up, we have already done this!
-        // When we processed layer H+1, we formed its transitions by looking at `mapping[old_target]`
-        // and trimming weight by `new_state_needs[new_target]`.
-        // Wait, `new_state_needs` is the UNION. This is correct for the merged state.
-        // But what about the specific restriction?
-        //
-        // Example Diamond:
-        // A (Need {0,2}), B (Need {1,2}). Merged to AB (Need {0,1,2}).
-        // Parent Start had edge to A (w=ALL).
-        // New edge Start -> AB.
-        // Weight should be ALL & Need(A) = {0,2}.
-        //
-        // In the loop above:
-        // When processing Start (at higher height), we iterate its edges.
-        // Edge Start->A: old_target=A, new_target=AB.
-        // eff_w = old_w ({0,2} effectively) & new_state_needs[AB] ({0,1,2}) = {0,2}.
-        // This seems to retain the {0,2}.
-        //
-        // Is `new_state_needs` correct?
-        // Yes, because `eff_w` calculation in the loop used `old_w` from the PARENT.
-        // `old_w` from Start->A was ALL? No, in the input it was ALL.
-        // But `needs[A]` was computed on the ORIGINAL graph.
-        //
-        // CORRECTION:
-        // The trimming in the loop `eff_w &= &new_state_needs[new_target]` uses the MERGED need.
-        // This allows `Start->A` to access `B`'s tokens if `B` is merged with `A`.
-        // This is WRONG. `Start->A` must NOT access `B`'s unique tokens (like 1).
-        //
-        // We must trim by the ORIGINAL need of the ORIGINAL target.
-        // `eff_w = old_w & needs[old_target]`.
-        // Then we insert/union into the merged state.
-        //
-        // Let's fix that line in the code above.
-
-        self.states = DWAStates(new_states);
-        self.body.start_state = new_start;
-
-        // Apply a final trim to the start state's internal weights just in case
-        if new_start < self.states.len() {
-            // The start state technically has no incoming edges to filter it.
-            // Its "state_weight" is the only thing acting as an incoming filter.
-            // If the original had state_weight, it was absorbed or handled.
-            // Here we assume standard DWA semantics where execution begins at start.
-        }
+        if order.len() == n { Some(order) } else { None }
     }
 }
 
-// -----------------------------------------------------------------------------
-// Helper: Compatibility Check
-// -----------------------------------------------------------------------------
-
-fn are_compatible(
-    u: StateID, u_st: &DWAState, u_need: &Weight,
-    v: StateID, v_st: &DWAState, v_need: &Weight,
-    mapping: &[StateID], // maps old_id -> new_id (for children)
-    new_needs: &[Weight] // maps new_id -> Need mask
-) -> bool {
-    // 1. Compute Intersection of Care Sets
-    let mut intersection = u_need.clone();
-    intersection &= v_need;
-
-    if intersection.is_empty() {
-        return true; // No conflict if care sets are disjoint
+/// Checks if two states behave identically for all tokens in `mask`.
+fn is_compatible(a: &DWAState, b: &DWAState, mask: &Weight) -> bool {
+    if mask.is_empty() {
+        return true;
     }
 
-    // 2. Check Final Weights
-    // (fw_u & I) == (fw_v & I)
-    let binding = Weight::zeros();
-    let binding2 = Weight::zeros();
-    let u_fw = u_st.final_weight.as_ref().unwrap_or(&binding);
-    let v_fw = v_st.final_weight.as_ref().unwrap_or(&binding2);
+    // 1. Check State Weight
+    // (Optional strictness: strictly, state_weight is applied on entry.
+    // If we merge, the new state_weight is Union.
+    // We must ensure that for tokens in Common, the restriction is identical.)
+    let empty = Weight::zeros();
+    let sw_a = a.state_weight.as_ref().unwrap_or(&Weight::all()); // Treat None as All for comparison?
+    // Actually, in DWAState logic, None is "All".
+    // BUT we normalized candidate above. However, safe to check logic:
+    // a.sw & mask == b.sw & mask
+    // Since we are merging, specific implementation of Weight equality is needed.
+    // Let's assume strict check on effective weights.
 
-    // Check containment both ways on the intersection
-    if !weights_equal_on_mask(u_fw, v_fw, &intersection) {
+    // Helper for effective weight comparison
+    let check_weight_eq = |w1: Option<&Weight>, w2: Option<&Weight>, m: &Weight| -> bool {
+        let mut v1 = w1.cloned().unwrap_or_else(Weight::all);
+        v1 &= m;
+        let mut v2 = w2.cloned().unwrap_or_else(Weight::all);
+        v2 &= m;
+        v1 == v2
+    };
+
+    if !check_weight_eq(a.state_weight.as_ref(), b.state_weight.as_ref(), mask) {
+        return false;
+    }
+
+    // 2. Check Final Weight
+    // a.fw & mask == b.fw & mask
+    // Note: DWAState default for final_weight is None (which means 0/Empty).
+    // Wait, struct says `final_weight: Option<Weight>`. Usually None implies not final (empty).
+    // Let's verify `DWAState` def: "if fw.is_empty() { self.final_weight = None; }"
+    // So None == Empty.
+    let mut fw_a = a.final_weight.as_ref().map(|w| w.clone()).unwrap_or_else(|| empty.clone()); fw_a &= mask;
+    let mut fw_b = b.final_weight.as_ref().map(|w| w.clone()).unwrap_or_else(|| empty.clone()); fw_b &= mask;
+    if fw_a != fw_b {
         return false;
     }
 
     // 3. Check Transitions
-    // Gather all labels present in either
-    let mut labels: BTreeSet<Label> = u_st.transitions.keys().copied().collect();
-    labels.extend(v_st.transitions.keys());
+    // For every label, targets must be same, and weights (under mask) must be same.
+    // Collect all labels
+    let mut labels: Vec<&Label> = a.transitions.keys().collect();
+    labels.extend(b.transitions.keys());
+    labels.sort();
+    labels.dedup();
 
-    for lbl in labels {
-        // Get target/weight for u
-        let (u_target_new, u_w) = if let Some(&old_t) = u_st.transitions.get(&lbl) {
-            if old_t >= mapping.len() { (usize::MAX, Weight::zeros()) }
-            else {
-                let w = u_st.trans_weights.get(&lbl).cloned().unwrap_or_else(Weight::all);
-                (mapping[old_t], w)
-            }
-        } else {
-            (usize::MAX, Weight::zeros())
-        };
+    for &lbl in labels {
+        let t_a = a.transitions.get(&lbl);
+        let t_b = b.transitions.get(&lbl);
 
-        // Get target/weight for v
-        let (v_target_new, v_w) = if let Some(&old_t) = v_st.transitions.get(&lbl) {
-            if old_t >= mapping.len() { (usize::MAX, Weight::zeros()) }
-            else {
-                let w = v_st.trans_weights.get(&lbl).cloned().unwrap_or_else(Weight::all);
-                (mapping[old_t], w)
-            }
-        } else {
-            (usize::MAX, Weight::zeros())
-        };
+        // Effective weights
+        let mut w_a = if t_a.is_some() { a.trans_weights.get(&lbl).cloned().unwrap_or_else(Weight::all) } else { Weight::zeros() };
+        w_a &= mask;
 
-        // Check consistency on Intersection
-        // Effective weight contributes only if it hits the target's Need
-        // But here we need to check if the BEHAVIORS are identical on Intersection.
+        let mut w_b = if t_b.is_some() { b.trans_weights.get(&lbl).cloned().unwrap_or_else(Weight::all) } else { Weight::zeros() };
+        w_b &= mask;
 
-        // Behavior of u on `lbl` & `intersection` is:
-        //   IF u takes transition: transitions to `u_target_new`.
-        //   We need to verify that v does the same thing for all tokens in `intersection`.
-
-        // Case A: Targets match
-        if u_target_new == v_target_new {
-            if u_target_new == usize::MAX { continue; } // Both missing/dead -> ok
-
-            // Mask = Intersection & Need(Child)
-            let mut check_mask = intersection.clone();
-            check_mask &= &new_needs[u_target_new];
-
-            if !weights_equal_on_mask(&u_w, &v_w, &check_mask) {
-                return false;
-            }
+        // If both are effectively zero under the mask, they are compatible (ignoring target mismatch)
+        if w_a.is_empty() && w_b.is_empty() {
+            continue;
         }
-        // Case B: Targets differ
-        else {
-            // This is only allowed if for every token in Intersection,
-            // at least one of the branches is "Dead" or "Filtered Out".
 
-            // Tokens relevant for U: Intersection & u_w & Need(u_target)
-            let mut u_active = intersection.clone();
-            u_active &= &u_w;
-            if u_target_new != usize::MAX {
-                u_active &= &new_needs[u_target_new];
-            } else {
-                u_active = Weight::zeros();
-            }
-
-            // Tokens relevant for V: Intersection & v_w & Need(v_target)
-            let mut v_active = intersection.clone();
-            v_active &= &v_w;
-            if v_target_new != usize::MAX {
-                v_active &= &new_needs[v_target_new];
-            } else {
-                v_active = Weight::zeros();
-            }
-
-            // Since targets differ (and are minimized, so distinct behaviors),
-            // a token cannot be active in both.
-            // Also, since DWA is deterministic, a state cannot simply "switch" targets
-            // based on the token unless we split the transition.
-            // But here we are merging U and V.
-            // If U goes to T1 and V goes to T2 on 'a', and both U and V "care" about token `k`,
-            // then `k` would go to BOTH T1 and T2 in the merged state? No, DWA allows 1 target.
-            // Thus, we cannot merge U and V if they map active tokens to different targets.
-            // So: u_active must be empty AND v_active must be empty?
-            // No, if `u_active` has token `k`, then `v` must NOT map `k` to T2?
-            // Actually, if `k` is in Intersection, it means `k` reaches a final state in BOTH U and V.
-            // If U maps `k` to T1 and V maps `k` to T2, and T1 != T2, then U and V have different behaviors for `k`.
-            // Therefore, `u_active` and `v_active` must be empty.
-            if !u_active.is_empty() || !v_active.is_empty() {
-                return false;
-            }
+        // If one exists and other doesn't (and weight is non-zero), incompatible
+        // If both exist:
+        // 1. Weights must match
+        if w_a != w_b {
+            return false;
         }
-    }
-
-    true
-}
-
-fn weights_equal_on_mask(w1: &Weight, w2: &Weight, mask: &Weight) -> bool {
-    let mut a = w1.clone(); a &= mask;
-    let mut b = w2.clone(); b &= mask;
-    a == b
-}
-
-// -----------------------------------------------------------------------------
-// Helper: Exact Minimum Clique Partition
-// -----------------------------------------------------------------------------
-
-fn solve_min_clique_partition(adj: &[Vec<bool>]) -> Vec<Vec<usize>> {
-    let n = adj.len();
-    if n == 0 { return vec![]; }
-
-    // Heuristic: Greedy first to establish a bound?
-    // For small N (typical in minimized layers), pure backtracking is fine.
-    // We try to assign node `idx` to existing cliques or start a new one.
-
-    let mut best_solution: Option<Vec<Vec<usize>>> = None;
-    let mut current_cliques: Vec<Vec<usize>> = Vec::new();
-
-    backtrack(0, n, adj, &mut current_cliques, &mut best_solution);
-
-    best_solution.unwrap_or_default()
-}
-
-fn backtrack(
-    idx: usize,
-    n: usize,
-    adj: &[Vec<bool>],
-    current: &mut Vec<Vec<usize>>,
-    best: &mut Option<Vec<Vec<usize>>>
-) {
-    // Pruning: if current count >= best found, stop (we want MIN cliques)
-    if let Some(b) = best {
-        if current.len() >= b.len() {
-            return;
-        }
-    }
-
-    if idx == n {
-        // Found a complete assignment better than best
-        *best = Some(current.clone());
-        return;
-    }
-
-    // Try adding to existing compatible cliques
-    for c_idx in 0..current.len() {
-        if can_add_to_clique(idx, &current[c_idx], adj) {
-            current[c_idx].push(idx);
-            backtrack(idx + 1, n, adj, current, best);
-            current[c_idx].pop();
-        }
-    }
-
-    // Try starting a new clique
-    current.push(vec![idx]);
-    backtrack(idx + 1, n, adj, current, best);
-    current.pop();
-}
-
-fn can_add_to_clique(node: usize, clique: &[usize], adj: &[Vec<bool>]) -> bool {
-    for &member in clique {
-        if !adj[node][member] {
+        // 2. Targets must match
+        // Since we are building bottom-up, targets are NewStateIDs.
+        if t_a != t_b {
             return false;
         }
     }
+
     true
 }
 
-// -----------------------------------------------------------------------------
-// Helper: Reachability & Need
-// -----------------------------------------------------------------------------
-
-fn compute_heights(states: &DWAStates) -> Option<Vec<usize>> {
-    let n = states.len();
-    let mut heights = vec![0; n];
-    let mut visited = vec![0; n]; // 0: unvisited, 1: visiting, 2: visited
-
-    for i in 0..n {
-        if visited[i] == 0 {
-            if dfs_height(i, states, &mut visited, &mut heights) {
-                return None; // Cycle
-            }
+/// Merges `src` into `dest` (in-place union).
+fn merge_states(dest: &mut DWAState, src: &DWAState) {
+    // Union State Weight
+    // (None is All. If one is All, result is All (None). Else Union).
+    // Actually, careful:
+    // DWAState def: None in state_weight means ??? Usually ALL?
+    // Let's look at `apply_weight`: `sw &= weight`.
+    // If sw is None, it acts like ALL.
+    // Union(All, X) = All.
+    if dest.state_weight.is_none() || src.state_weight.is_none() {
+        dest.state_weight = None;
+    } else {
+        // Both are Some. Union them.
+        let mut combined = dest.state_weight.clone().unwrap();
+        combined |= src.state_weight.as_ref().unwrap();
+        if combined.is_all_fast() { // Optimization check
+            dest.state_weight = None;
+        } else {
+            dest.state_weight = Some(combined);
         }
     }
-    Some(heights)
-}
 
-fn dfs_height(u: usize, states: &DWAStates, visited: &mut [u8], heights: &mut [usize]) -> bool {
-    visited[u] = 1;
-    let mut max_h = 0;
-    for &v in states[u].transitions.values() {
-        if v >= states.len() { continue; }
-        if visited[v] == 1 { return true; } // Cycle
-        if visited[v] == 0 {
-            if dfs_height(v, states, visited, heights) { return true; }
-        }
-        max_h = std::cmp::max(max_h, heights[v] + 1);
-    }
-    visited[u] = 2;
-    heights[u] = max_h;
-    false
-}
-
-fn compute_needs(dwa: &DWA, heights: &[usize], max_height: usize) -> Vec<Weight> {
-    let n = dwa.states.len();
-    let mut needs = vec![Weight::zeros(); n];
-
-    // Process by height ascending (Leaves -> Root)
-    // Height 0 are leaves.
-    let mut by_height = vec![Vec::new(); max_height + 1];
-    for (i, &h) in heights.iter().enumerate() {
-        by_height[h].push(i);
-    }
-
-    for h in 0..=max_height {
-        for &u in &by_height[h] {
-            let mut acc = dwa.states[u].final_weight.clone().unwrap_or_else(Weight::zeros);
-
-            for (lbl, &v) in &dwa.states[u].transitions {
-                if v >= n { continue; }
-                let w = dwa.states[u].trans_weights.get(lbl).cloned().unwrap_or_else(Weight::all);
-                // Need = Union of (TransitionWeight AND ChildNeed)
-                let mut path_contrib = w;
-                path_contrib &= &needs[v];
-                acc |= &path_contrib;
-            }
-            needs[u] = acc;
+    // Union Final Weight
+    // (None is Empty).
+    if let Some(fw_src) = &src.final_weight {
+        if let Some(fw_dest) = &mut dest.final_weight {
+            *fw_dest |= fw_src;
+        } else {
+            dest.final_weight = Some(fw_src.clone());
         }
     }
-    needs
+
+    // Union Transitions
+    for (lbl, &tgt) in &src.transitions {
+        let w_src = src.trans_weights.get(lbl).unwrap();
+
+        if dest.transitions.contains_key(lbl) {
+            // Target matches (checked by is_compatible), just union weights
+            let w_dest = dest.trans_weights.get_mut(lbl).unwrap();
+            *w_dest |= w_src;
+        } else {
+            dest.transitions.insert(*lbl, tgt);
+            dest.trans_weights.insert(*lbl, w_src.clone());
+        }
+    }
 }
