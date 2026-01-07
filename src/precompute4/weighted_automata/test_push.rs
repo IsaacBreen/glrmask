@@ -313,5 +313,8 @@ fn test_diamond_structure() {
         DWA { body: DWABody { start_state: start }, states }
     };
 
+    println!("input DWA: {}", input);
+    println!("expected DWA: {}", expected);
+
     run_push_optimization_test(input, expected);
 }
