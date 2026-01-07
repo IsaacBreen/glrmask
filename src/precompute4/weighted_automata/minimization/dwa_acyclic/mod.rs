@@ -235,15 +235,38 @@ fn are_compatible(
     old_to_new: &HashMap<StateID, StateID>,
     _new_states: &[MergedStateBuilder]
 ) -> bool {
-    // States must have identical prospective weight sets to be equivalent
-    if needed[u] != needed[v] {
-        return false;
+    // Compute the overlapping domain of tokens
+    let mut domain = needed[u].clone();
+    domain &= &needed[v];
+
+    // Debug for 0 vs 25 (or all pairs for Diamond debugging)
+    let debug = true; // (u == 0 && v == 25) || (u == 25 && v == 0);
+    if debug {
+        eprintln!("DEBUG are_compatible({}, {})", u, v);
+        eprintln!("  needed[{}] = {:?}", u, needed[u]);
+        eprintln!("  needed[{}] = {:?}", v, needed[v]);
+        eprintln!("  domain = {:?}", domain);
     }
 
+    // If domains are disjoint, states can be safely merged (Diamond case)
+    if domain.is_empty() {
+        if debug { eprintln!("  COMPATIBLE: disjoint domains"); }
+        return true;
+    }
+
+    // For overlapping domains, we check that:
+    // 1. Final weights match on domain
+    // 2. Transition weights match on domain (both raw and effective)
+    // 3. Targets map to same merged state
+    // Note: We do NOT require needed[u]==needed[v] because the Diamond case
+    // has different needed sets but identical behavior on the overlapping domain.
+
+    // For overlapping domains, check that behaviors are EXACTLY equal on the domain
     let fw_u = dwa.states[u].final_weight.as_ref().cloned().unwrap_or_else(Weight::zeros);
     let fw_v = dwa.states[v].final_weight.as_ref().cloned().unwrap_or_else(Weight::zeros);
 
-    if fw_u != fw_v {
+    // Final weights must match on the overlapping domain
+    if (&fw_u & &domain) != (&fw_v & &domain) {
         return false;
     }
 
@@ -254,32 +277,56 @@ fn are_compatible(
         let trans_u = dwa.states[u].get_transition(lbl);
         let trans_v = dwa.states[v].get_transition(lbl);
 
-        let mut w_u_eff = match trans_u {
+        // Get raw weights
+        let w_u_raw = match trans_u {
             Some((_, w)) => w.clone(),
             None => Weight::zeros(),
         };
-        // Mask by needed[target] logic: if target is not needed, this path is dead
+        let w_v_raw = match trans_v {
+            Some((_, w)) => w.clone(),
+            None => Weight::zeros(),
+        };
+
+        // Get effective weights (masked by target's needed set)
+        let mut w_u_eff = w_u_raw.clone();
         if let Some((target_u, _)) = trans_u {
              if target_u < needed.len() {
                   w_u_eff &= &needed[target_u];
              }
         }
 
-        let mut w_v_eff = match trans_v {
-            Some((_, w)) => w.clone(),
-            None => Weight::zeros(),
-        };
+        let mut w_v_eff = w_v_raw.clone();
         if let Some((target_v, _)) = trans_v {
              if target_v < needed.len() {
                   w_v_eff &= &needed[target_v];
              }
         }
 
-        if w_u_eff != w_v_eff {
+        // Effective weights must match on the domain
+        if (&w_u_eff & &domain) != (&w_v_eff & &domain) {
             return false;
         }
 
-        if !w_u_eff.is_empty() {
+        // CRITICAL: Raw weights must be identical (not just identical after masking)
+        // to prevent capability expansion. If w_u = ALL and w_v = [0..=1],
+        // merging would allow ALL tokens on paths restricted to [0..=1].
+        // However, we relax this for Diamond case: if both weights handle
+        // the domain identically, they can merge even if they differ outside domain.
+        // The key: if one weight is ALL and another is restricted, the merged
+        // state would inherit ALL on shared transitions.
+        // SOLUTION: Check if weights, restricted to domain, are equal AND
+        // neither weight extends beyond what the other allows on domain.
+        // i.e., the weights must be equal OR both must fully cover the domain portion of each other.
+        // Simpler: For states to merge, within the overlapping domain, their source
+        // weights must be the same. Check raw weights intersected with domain.
+        if (&w_u_raw & &domain) != (&w_v_raw & &domain) {
+            if debug { eprintln!("  INCOMPATIBLE: raw weights differ on domain for label {}", lbl); }
+            return false;
+        }
+
+        // If there's any effective weight, check targets map to same state
+        let w_common = &w_u_eff & &domain;
+        if !w_common.is_empty() {
             let target_u_old = trans_u.unwrap().0;
             let target_v_old = trans_v.unwrap().0;
 
