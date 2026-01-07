@@ -229,6 +229,15 @@ impl DWA {
         let fwd_topo = self.topological_order();
         
         // Compute R[q] (forward reachable weights) in topological order
+        // R[q] = weights that CAN reach q via SOME path (UNION over paths)
+        // 
+        // This is the correct definition because:
+        // - W \ R[q] = weights that are blocked on ALL paths to q
+        // - These are true "don't cares" - they can never contribute to accepting
+        //
+        // Using intersection (must reach) would be wrong because:
+        // - W \ R[q] would include weights blocked on SOME path but valid on others
+        // - Adding these as don't cares would break semantics
         let mut r: Vec<Weight> = vec![Weight::zeros(); n];
 
         // R[start] = W (all weights can reach start from start)
@@ -246,7 +255,8 @@ impl DWA {
             }
         }
 
-        // R[q] = ∩_{(p,a): δ(p,a)=q} (R[p] ∩ ω_T(p,a))
+        // R[q] = ∪_{(p,a): δ(p,a)=q} (R[p] ∩ ω_T(p,a))
+        // Union over all incoming edges - weight can reach q if ANY path allows it
         for &q in &fwd_topo {
             if q == self.body.start_state {
                 continue; // Already set to W
@@ -257,15 +267,16 @@ impl DWA {
                 continue;
             }
 
-            // Start with W, intersect all incoming paths
-            let mut r_q = Weight::all();
+            // Start with empty, UNION all incoming paths
+            let mut r_q = Weight::zeros();
             for &(p, label) in &incoming[q] {
                 let tw = self.states[p]
                     .trans_weights
                     .get(&label)
                     .cloned()
                     .unwrap_or_else(Weight::all);
-                r_q = &r_q & &(&r[p] & &tw);
+                // Add weights that can come through this edge
+                r_q = &r_q | &(&r[p] & &tw);
             }
             r[q] = r_q;
         }
@@ -295,23 +306,32 @@ impl DWA {
             b[q] = b_q;
         }
 
-        // Apply relaxation: add don't-cares to TRANSITION WEIGHTS ONLY
+        // Apply relaxation: add don't-cares
         // 
-        // IMPORTANT: We do NOT relax final weights. The correctness proof relies on
-        // the invariant that "unfinishable" weights (W \ B[target]) will be blocked
-        // by the target's final weight. If we also relax finals, this blocking is
-        // destroyed and semantic equivalence breaks.
+        // Now that R[q] uses UNION (weights that CAN reach q via some path):
+        // - (W \ R[q]) = weights that CANNOT reach q via ANY path
+        // - These are true don't-cares, safe to add anywhere
         //
-        // For transitions, we can safely add:
-        // - (W \ R[q]): weights blocked on all paths TO this state
-        // - (W \ B[target]): weights blocked on all paths FROM the target to accepting
+        // For finals:
+        // - (W \ R[q]): weights that cannot reach this final state
+        // - (W \ B[q]): weights that cannot finish from this state
+        //   Both are safe because if w can't reach OR can't finish, w doesn't matter
         //
-        // Both are "don't care" because they're already blocked elsewhere.
+        // For transitions:
+        // - (W \ R[q]): weights that cannot reach source state
+        // - (W \ B[target]): weights that cannot finish from target state
         for q in 0..n {
-            // unreachable = W \ R[q]
-            let unreachable = r[q].complement();
+            // cannot_reach = W \ R[q] (blocked on ALL paths to q)
+            let cannot_reach = r[q].complement();
+            // cannot_finish_here = W \ B[q] (blocked on ALL paths from q)
+            let cannot_finish_here = b[q].complement();
 
-            // Relax transition weights only (NOT final weights)
+            // Relax final weights: add things that can't reach OR can't finish
+            if let Some(ref mut fw) = self.states.0[q].final_weight {
+                *fw = fw.clone() | &cannot_reach | &cannot_finish_here;
+            }
+
+            // Relax transition weights
             let labels: Vec<i32> = self.states[q].transitions.keys().copied().collect();
             for label in labels {
                 let target = self.states[q].transitions[&label];
@@ -319,9 +339,9 @@ impl DWA {
                     continue;
                 }
 
-                // unfinishable = W \ B[target]
-                let unfinishable = b[target].complement();
-                let dont_care = &unreachable | &unfinishable;
+                // cannot_finish_from_target = W \ B[target]
+                let cannot_finish_from_target = b[target].complement();
+                let dont_care = &cannot_reach | &cannot_finish_from_target;
 
                 if let Some(tw) = self.states.0[q].trans_weights.get_mut(&label) {
                     *tw = tw.clone() | &dont_care;
