@@ -1,4 +1,4 @@
-use crate::precompute4::weighted_automata::{DWAState, RangeSet, DWA, DWABuildError, NWA, NWABuildError, Weight, format_word, DWAStates, StateID};
+use crate::precompute4::weighted_automata::{DWAState, RangeSet, DWA, DWABuildError, NWA, NWABuildError, Weight, format_word, DWAStates, StateID, DWABody};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::time::{SystemTime, UNIX_EPOCH};
 use crate::precompute4::weighted_automata::common::Label;
@@ -2452,4 +2452,111 @@ fn test_dwa_roundtrip_minimal_repro() {
     println!("Roundtrip DWA:\n{}", roundtrip_dwa);
 
     stochastic_equivalence_test(a, roundtrip_dwa);
+}
+
+// =============================================================================
+// Diamond Structure Optimization Test
+// =============================================================================
+// Verifies that the bottom-up minimization algorithm correctly pushes weights
+// and merges states in a diamond structure.
+
+fn dwa_stats(dwa: &DWA) -> (usize, usize) {
+    (dwa.states.len(), dwa.states.num_transitions())
+}
+
+fn run_push_optimization_test(input: DWA, expected: DWA) {
+    // 1. Sanity Check: Input must be semantically equivalent to Expected
+    stochastic_equivalence_test(input.clone(), expected.clone());
+
+    // 2. Optimization Potential Check
+    let (input_states, input_trans) = dwa_stats(&input);
+    let (exp_states, exp_trans) = dwa_stats(&expected);
+    
+    assert!(
+        input_states > exp_states || input_trans > exp_trans,
+        "FAULTY TEST: Expected DWA is not smaller than Input DWA."
+    );
+
+    // 3. Optimization Check
+    let mut min = input.clone();
+    min.minimize();
+    let (min_states, min_trans) = dwa_stats(&min);
+
+    assert_eq!(
+        (min_states, min_trans), (exp_states, exp_trans),
+        "Optimization Failed!\nExpected: {} states, {} trans\nGot:      {} states, {} trans",
+        exp_states, exp_trans, min_states, min_trans
+    );
+}
+
+#[test]
+fn test_diamond_structure() {
+    // Labels
+    let l0: Label = 0;
+    let l1: Label = 1;
+    let l2: Label = 2;
+    
+    let all = Weight::all();
+    let w0 = Weight::from_item(0);
+    let w1 = Weight::from_item(1);
+    let w2 = Weight::from_item(2);
+    let w3 = Weight::from_item(3);
+    
+    let w012 = &(&w0 | &w1) | &w2;
+
+    let input = {
+        let mut nwa = NWA::new();
+        nwa.states.0.clear();
+        let start = nwa.states.add_state();
+        let a = nwa.states.add_state();
+        let b = nwa.states.add_state();
+        let c = nwa.states.add_state();
+        let end = nwa.states.add_state();
+        
+        nwa.body.start_states = vec![start];
+
+        nwa.add_transition(start, l0, a, all.clone()).unwrap();
+        nwa.add_transition(start, l1, b, all.clone()).unwrap();
+        nwa.add_transition(start, l2, c, all.clone()).unwrap();
+
+        nwa.add_transition(a, l0, end, all.clone()).unwrap();
+        nwa.add_transition(b, l0, end, all.clone()).unwrap();
+        nwa.add_transition(c, l0, end, all.clone()).unwrap();
+
+        nwa.states[a].final_weight = Some(w0.clone());
+        nwa.states[b].final_weight = Some(w1.clone());
+        nwa.states[c].final_weight = Some(w2.clone());
+        nwa.states[end].final_weight = Some(w3.clone());
+
+        nwa.determinize()
+    };
+
+    let expected = {
+        let mut states = DWAStates::default();
+        let start = states.add_state();
+        let abc = states.add_state(); // Merged A,B,C
+        let end = states.add_state();
+
+        let w0_pushed = &w0 | &w3;
+        let w1_pushed = &w1 | &w3;
+        let w2_pushed = &w2 | &w3;
+
+        states[start].transitions.insert(l0, abc);
+        states[start].trans_weights.insert(l0, w0_pushed);
+
+        states[start].transitions.insert(l1, abc);
+        states[start].trans_weights.insert(l1, w1_pushed);
+
+        states[start].transitions.insert(l2, abc);
+        states[start].trans_weights.insert(l2, w2_pushed);
+
+        states[abc].transitions.insert(l0, end);
+        states[abc].trans_weights.insert(l0, all.clone());
+        states[abc].final_weight = Some(w012.clone());
+        states[end].final_weight = Some(w3.clone());
+
+        DWA { body: DWABody { start_state: start }, states }
+    };
+
+    run_push_optimization_test(input, expected);
 }
