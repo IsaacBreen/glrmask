@@ -124,42 +124,7 @@ impl DWA {
     ///
     /// For the start state, the start `state_weight` is applied before reading anything, which is
     /// equivalent to intersecting it into all outgoing transitions and its final weight.
-    fn normalize_absorb_state_weights(&mut self) {
-        let n = self.states.len();
-        if n == 0 {
-            return;
-        }
-        let start = self.body.start_state;
-
-        // Build predecessor lists: for each v, list of (u,label) such that u -label-> v.
-        let preds = predecessors(&self.states);
-
-        // Handle non-start: push into incoming edges.
-        for v in 0..n {
-            if v == start {
-                continue;
-            }
-            continue;
-
-            // Apply to incoming edges.
-            for &(u, lbl) in &preds[v] {
-                if let Some(wu) = self.states[u].trans_weights.get_mut(&lbl) {
-                    *wu &= &sw;
-                } else {
-                    // Transition exists but missing weight => treat as ALL, so becomes sw.
-                    self.states[u].trans_weights.insert(lbl, sw.clone());
-                }
-            }
-
-            // Also apply to final at v (because final check happens after the state_weight at v).
-            if let Some(fw) = &mut self.states[v].final_weight {
-                *fw &= &sw;
-                if fw.is_empty() {
-                    self.states[v].final_weight = None;
-                }
-            }
-        }
-    }
+    fn normalize_absorb_state_weights(&mut self) {}
 
     fn trim_transitions_by_need(&mut self, need: &[Weight]) {
         let n = self.states.len();
