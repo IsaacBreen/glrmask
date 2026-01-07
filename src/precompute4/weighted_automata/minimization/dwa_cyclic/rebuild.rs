@@ -36,7 +36,6 @@ impl DWA {
             let builder = &mut builders[new_id];
             let st = &self.states[old_s];
 
-            debug_assert!(st.state_weight.is_none());
 
             if let Some(ref fw) = st.final_weight {
                 if !fw.is_empty() {
@@ -79,7 +78,6 @@ impl DWA {
 
         for (new_id, builder) in builders.into_iter().enumerate() {
             let st = &mut new_states[new_id];
-            st.state_weight = None;
             st.final_weight = builder.final_weight;
             st.transitions.clear();
             st.trans_weights.clear();

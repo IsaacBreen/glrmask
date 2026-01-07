@@ -314,12 +314,6 @@ fn specialize_dwa_relative_with_map(parent_dwa: &DWA, weight_map: &HashMap<Weigh
             if !new_fw.is_empty() { new_state.final_weight = Some(new_fw); }
         }
 
-        // State weight
-        if let Some(sw) = &state.state_weight {
-            let new_sw = map_weight(sw);
-            if !new_sw.is_empty() { new_state.state_weight = Some(new_sw); }
-        }
-
         // Transitions
         for (label, w) in &state.trans_weights {
             let new_w = map_weight(w);
@@ -492,7 +486,6 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
         // Collect all unique weights from super_dwa once
         let super_dwa_unique_weights: Vec<Weight> = super_dwa.states.0.par_iter()
             .fold(HashSet::new, |mut acc, s| {
-                 if let Some(w) = &s.state_weight { acc.insert(w.clone()); }
                  if let Some(w) = &s.final_weight { acc.insert(w.clone()); }
                  for w in s.trans_weights.values() { acc.insert(w.clone()); }
                  acc

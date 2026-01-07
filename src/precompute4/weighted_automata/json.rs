@@ -92,7 +92,6 @@ impl JSONConvertible for DWAState {
         obj.insert("transitions".to_string(), self.transitions.to_json());
         obj.insert("final_weight".to_string(), self.final_weight.to_json());
         obj.insert("trans_weights".to_string(), self.trans_weights.to_json());
-        obj.insert("state_weight".to_string(), self.state_weight.to_json());
         JSONNode::Object(obj)
     }
 
@@ -107,9 +106,6 @@ impl JSONConvertible for DWAState {
             )?,
             trans_weights: BTreeMap::<Label, Weight>::from_json(
                 obj.remove("trans_weights").ok_or("Missing trans_weights")?,
-            )?,
-            state_weight: Option::<Weight>::from_json(
-                obj.remove("state_weight").ok_or("Missing state_weight")?,
             )?,
         })
     }
@@ -140,7 +136,6 @@ impl JSONConvertible for DWA {
         //   "states": [
         //     [transitions],
         //     [final_weight_idx, transitions],
-        //     [final_weight_idx_or_null, state_weight_idx_or_null, transitions],
         //     ...
         //   ]
         //
@@ -176,22 +171,12 @@ impl JSONConvertible for DWA {
             }
 
             let fw_idx_opt = state.final_weight.as_ref().map(|w| intern_weight(w));
-            let sw_idx_opt = state.state_weight.as_ref().map(|w| intern_weight(w));
             let trans_node = Array(trans_json);
 
             // Use the shortest array form that still encodes all information.
-            let state_node = match (fw_idx_opt, sw_idx_opt) {
-                (None, None) => Array(vec![trans_node]),
-                (Some(fw_idx), None) => Array(vec![fw_idx.to_json(), trans_node]),
-                (fw_opt, sw_opt) => {
-                    let fw_node = fw_opt
-                        .map(|idx| idx.to_json())
-                        .unwrap_or(JSONNode::Null);
-                    let sw_node = sw_opt
-                        .map(|idx| idx.to_json())
-                        .unwrap_or(JSONNode::Null);
-                    Array(vec![fw_node, sw_node, trans_node])
-                }
+            let state_node = match fw_idx_opt {
+                None => Array(vec![trans_node]),
+                Some(fw_idx) => Array(vec![fw_idx.to_json(), trans_node]),
             };
 
             states_json.push(state_node);
@@ -240,29 +225,14 @@ impl JSONConvertible for DWA {
                 .into_array()
                 .map_err(|e| format!("Invalid transitions array at state {}: {}", state_idx, e))?;
 
-            let (final_weight, state_weight) = match parts.len() {
-                0 => (None, None),
-                1 => {
-                    let fw_node = parts.pop().unwrap();
-                    let fw = match fw_node {
-                        JSONNode::Null => None,
-                        n => Some(get_weight(n)?),
-                    };
-                    (fw, None)
-                }
+            let final_weight = match parts.len() {
+                0 => None,
                 _ => {
-                    // At least two entries: [final, state, transitions]
-                    let sw_node = parts.pop().unwrap();
                     let fw_node = parts.pop().unwrap();
-                    let fw = match fw_node {
+                    match fw_node {
                         JSONNode::Null => None,
                         n => Some(get_weight(n)?),
-                    };
-                    let sw = match sw_node {
-                        JSONNode::Null => None,
-                        n => Some(get_weight(n)?),
-                    };
-                    (fw, sw)
+                    }
                 }
             };
 
@@ -315,7 +285,6 @@ impl JSONConvertible for DWA {
                 transitions,
                 final_weight,
                 trans_weights,
-                state_weight,
             });
         }
 

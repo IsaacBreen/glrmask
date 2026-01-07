@@ -25,7 +25,6 @@ pub struct DWAState {
     pub transitions: BTreeMap<Label, StateID>,
     pub final_weight: Option<Weight>,
     pub trans_weights: BTreeMap<Label, Weight>,
-    pub state_weight: Option<Weight>,
 }
 
 impl DWAState {
@@ -34,13 +33,11 @@ impl DWAState {
     }
     
     pub fn apply_weight(&mut self, weight: &Weight) {
-        if let Some(sw) = &mut self.state_weight { *sw &= weight; if sw.is_empty() { self.state_weight = None; } }
         if let Some(fw) = &mut self.final_weight { *fw &= weight; if fw.is_empty() { self.final_weight = None; } }
         for w in self.trans_weights.values_mut() { *w &= weight; }
     }
 
     pub fn clip_weights(&mut self, max: usize) {
-        if let Some(sw) = &mut self.state_weight { sw.clip_max(max); if sw.is_empty() { self.state_weight = None; } }
         if let Some(fw) = &mut self.final_weight { fw.clip_max(max); if fw.is_empty() { self.final_weight = None; } }
         for w in self.trans_weights.values_mut() { w.clip_max(max); }
     }
@@ -120,7 +117,6 @@ impl DWA {
         let mut acc = Weight::all();
 
         if s < self.states.len() {
-             if let Some(sw) = &self.states[s].state_weight { acc &= sw; if acc.is_empty() { return Weight::zeros(); } }
         } else { return Weight::zeros(); }
 
         for &ch in word {
@@ -128,7 +124,6 @@ impl DWA {
             if let Some((t, w)) = self.states[s].get_transition(ch) {
                 acc &= w; if acc.is_empty() { return Weight::zeros(); }
                 s = t;
-                if let Some(sw) = &self.states[s].state_weight { acc &= sw; if acc.is_empty() { return Weight::zeros(); } }
             } else { return Weight::zeros(); }
         }
         if s >= self.states.len() { return Weight::zeros(); }
@@ -141,7 +136,6 @@ impl DWA {
     pub fn apply_weight_inplace(&mut self, weight: &Weight) {
         if self.body.start_state < self.states.len() {
             let s = &mut self.states[self.body.start_state];
-            if let Some(sw) = &mut s.state_weight { *sw &= weight; } else { s.state_weight = Some(weight.clone()); }
             s.apply_weight(weight);
         }
     }
@@ -192,25 +186,14 @@ impl DWA {
             return;
         }
 
-        // Snapshot effective state weights: `None` means "all tokens".
-        let mut state_weights: Vec<Weight> = Vec::with_capacity(n);
-        for i in 0..n {
-            let w = self.states[i]
-                .state_weight
-                .clone()
-                .unwrap_or_else(Weight::all);
-            state_weights.push(w);
-        }
 
         let start = self.body.start_state;
         if start >= n {
             return;
         }
 
-        // 1. Forward tokens: for each state s, tokens that can reach s from the start
-        // while satisfying all transition and state weights along the way.
         let mut forward: Vec<Weight> = vec![Weight::zeros(); n];
-        forward[start] = state_weights[start].clone();
+        forward[start] = Weight::all();
 
         let mut changed = true;
         while changed {
@@ -233,7 +216,6 @@ impl DWA {
                         .unwrap_or_else(Weight::all);
                     let mut flow = fu.clone();
                     flow &= &w;
-                    flow &= &state_weights[v];
                     if !flow.is_subset_of(&forward[v]) {
                         forward[v] |= &flow;
                         changed = true;
@@ -266,7 +248,7 @@ impl DWA {
                         .get(lbl)
                         .cloned()
                         .unwrap_or_else(Weight::all);
-                    let contribution = &w & &state_weights[v] & &backward[v];
+                    let contribution = &w & &backward[v];
                     if !contribution.is_subset_of(&bu_new) {
                         bu_new |= &contribution;
                     }
@@ -280,22 +262,6 @@ impl DWA {
 
         // 3. Apply trimming to states and transitions.
         for s in 0..n {
-            let live_state_tokens = &forward[s] & &backward[s];
-
-            // State weights: keep only tokens that appear on some accepted path
-            // that passes through this state.
-            if live_state_tokens.is_empty() {
-                self.states[s].state_weight = None;
-            } else {
-                let mut new_sw = live_state_tokens.clone();
-                new_sw &= &state_weights[s];
-                if new_sw.is_all_fast() {
-                    self.states[s].state_weight = None;
-                } else {
-                    self.states[s].state_weight = Some(new_sw);
-                }
-            }
-
             // Final weights: tokens must be reachable from the start.
             if let Some(fw) = &mut self.states[s].final_weight {
                 *fw &= &forward[s];
@@ -304,7 +270,7 @@ impl DWA {
                 }
             }
 
-            // Transitions: w_new = w & forward[u] & state_weights[v] & backward[v].
+            // Transitions: w_new = w & forward[u] & backward[v].
             let labels: Vec<Label> = self.states[s].transitions.keys().copied().collect();
             for lbl in labels {
                 let to = match self.states[s].transitions.get(&lbl) {
@@ -325,7 +291,6 @@ impl DWA {
 
                 let mut new_w = old_w;
                 new_w &= &forward[s];
-                new_w &= &state_weights[to];
                 new_w &= &backward[to];
 
                 if new_w.is_empty() {
@@ -374,7 +339,6 @@ impl Display for DWA {
         writeln!(f, "DWA (start: {})", self.body.start_state)?;
         for (id, state) in self.states.0.iter().enumerate() {
             writeln!(f, "  State {}:", id)?;
-            if let Some(sw) = &state.state_weight { writeln!(f, "    state_weight: {}", sw)?; }
             if let Some(w) = &state.final_weight { writeln!(f, "    final_weight: {}", w)?; }
             for (on, to) in &state.transitions {
                 let w = state.trans_weights.get(on).cloned().unwrap_or_else(Weight::all);
@@ -432,11 +396,6 @@ impl DWA {
             // Final weight
             if let Some(ref fw) = state.final_weight {
                 state_obj.insert("final_weight".to_string(), weight_to_json(fw));
-            }
-            
-            // State weight
-            if let Some(ref sw) = state.state_weight {
-                state_obj.insert("state_weight".to_string(), weight_to_json(sw));
             }
             
             Value::Object(state_obj)

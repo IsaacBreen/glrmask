@@ -49,15 +49,6 @@ fn compare_dwas_structure(dwa1: &DWA, dwa2: &DWA, label1: &str, label2: &str) {
         println!("  Labels only in {}: {:?}", label2, only_in_2);
     }
     
-    // Analyze state weights
-    let mut state_weights1: Vec<_> = dwa1.states.0.iter()
-        .filter_map(|s| s.state_weight.as_ref())
-        .collect();
-    let mut state_weights2: Vec<_> = dwa2.states.0.iter()
-        .filter_map(|s| s.state_weight.as_ref())
-        .collect();
-    println!("States with state_weight: {} vs {}", state_weights1.len(), state_weights2.len());
-    
     // Analyze transition weights
     let mut trans_weights1: BTreeMap<String, usize> = BTreeMap::new();
     let mut trans_weights2: BTreeMap<String, usize> = BTreeMap::new();

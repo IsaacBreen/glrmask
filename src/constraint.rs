@@ -66,7 +66,6 @@ fn count_dwa_ranges(dwa: &DWA) -> usize {
     let mut unique_weights = HashSet::new();
     for state in &dwa.states.0 {
         if let Some(w) = &state.final_weight { unique_weights.insert(w); }
-        if let Some(w) = &state.state_weight { unique_weights.insert(w); }
         for w in state.trans_weights.values() { unique_weights.insert(w); }
     }
     unique_weights.iter().map(|w| w.rsb.ranges_len()).sum()
@@ -84,7 +83,6 @@ fn compute_dwa_partition(
     let mut dwa_weights = HashSet::new();
     for state in &dwa.states.0 {
         if let Some(w) = &state.final_weight { unique_weights.insert(w.clone()); dwa_weights.insert(w.clone()); }
-        if let Some(w) = &state.state_weight { unique_weights.insert(w.clone()); dwa_weights.insert(w.clone()); }
         for w in state.trans_weights.values() { unique_weights.insert(w.clone()); dwa_weights.insert(w.clone()); }
     }
     let mut possible_match_weights = HashSet::new();
@@ -163,7 +161,6 @@ fn optimize_dwa_and_vocab(
     let mut unique_weights = HashSet::with_capacity(dwa.states.0.len() * 3);
     for state in &dwa.states.0 {
         if let Some(w) = &state.final_weight { unique_weights.insert(w.clone()); }
-        if let Some(w) = &state.state_weight { unique_weights.insert(w.clone()); }
         for w in state.trans_weights.values() { unique_weights.insert(w.clone()); }
     }
    // Also include bitsets from possible_matches to ensure we don't merge tokens
@@ -242,7 +239,6 @@ fn optimize_dwa_and_vocab(
 
     for state in &mut dwa.states.0 {
         if let Some(w) = &mut state.final_weight { *w = map_weight(w, &mut weight_cache); }
-        if let Some(w) = &mut state.state_weight { *w = map_weight(w, &mut weight_cache); }
         for w in state.trans_weights.values_mut() { *w = map_weight(w, &mut weight_cache); }
     }
 

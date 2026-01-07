@@ -6,9 +6,7 @@ use std::hash::{Hash, Hasher};
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct StateSignature {
     // Canonicalized:
-    // - state_weight: None => ALL, so store concrete weight
     // - final_weight: None => EMPTY, so store concrete weight
-    state_weight: Weight,
     final_weight: Weight,
 
     // Outgoing transitions, sorted by label (BTreeMap iteration order).
@@ -41,7 +39,6 @@ fn hash_weight<H: Hasher>(w: &Weight, h: &mut H) {
 
 impl Hash for StateSignature {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        hash_weight(&self.state_weight, state);
         hash_weight(&self.final_weight, state);
         for (lbl, to, w) in &self.transitions {
             lbl.hash(state);
@@ -61,12 +58,6 @@ impl DWA {
         let n = self.states.len();
 
         for s in 0..n {
-            // Canonicalize state_weight representation: Some(ALL) => None
-            if let Some(sw) = &self.states[s].state_weight {
-                if sw.is_all_fast() {
-                    self.states[s].state_weight = None;
-                }
-            }
 
             // Canonicalize final_weight: empty => None
             if let Some(fw) = &self.states[s].final_weight {
@@ -297,10 +288,6 @@ impl DWA {
             let old_state = &self.states[old_s];
 
             // Canonicalize optional weights.
-            let sw = old_state
-                .state_weight
-                .clone()
-                .unwrap_or_else(Weight::all);
             let fw = old_state
                 .final_weight
                 .clone()
@@ -334,7 +321,6 @@ impl DWA {
             }
 
             let sig = StateSignature {
-                state_weight: sw,
                 final_weight: fw,
                 transitions,
             };
@@ -348,11 +334,6 @@ impl DWA {
             let new_id = new_states.len();
             let mut new_state = DWAState::default();
 
-            if sig.state_weight.is_all_fast() {
-                new_state.state_weight = None;
-            } else {
-                new_state.state_weight = Some(sig.state_weight.clone());
-            }
 
             if sig.final_weight.is_empty() {
                 new_state.final_weight = None;

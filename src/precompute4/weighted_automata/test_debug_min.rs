@@ -9,7 +9,6 @@ mod tests {
     fn remove_weights(dwa: &mut DWA) {
         for s in dwa.states.0.iter_mut() {
             s.final_weight = s.final_weight.as_ref().map(|_| Weight::all());
-            s.state_weight = None;
             for w in s.trans_weights.values_mut() {
                 *w = Weight::all();
             }

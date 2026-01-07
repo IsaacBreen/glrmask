@@ -17,13 +17,6 @@ impl DWA {
         }
 
         let mut start_weight = Weight::all();
-        if let Some(sw) = &self.states[start_node].state_weight {
-            start_weight &= sw;
-        }
-
-        if start_weight.is_empty() {
-            return new_dwa;
-        }
 
         // visited[original_state_id] -> HashMap<Weight, new_state_id>
         // Use Option to lazy initialize HashMaps to save memory/time for sparse traversals
@@ -35,11 +28,9 @@ impl DWA {
         let new_start = new_dwa.add_state();
         new_dwa.body.start_state = new_start;
 
-        // Copy properties for start state
         {
             let start_state_ref = &self.states[start_node];
             let new_state_ref = &mut new_dwa.states[new_start];
-            new_state_ref.state_weight = start_state_ref.state_weight.clone();
             new_state_ref.final_weight = start_state_ref.final_weight.clone();
         }
 
@@ -87,14 +78,7 @@ impl DWA {
                 if next_w.is_empty() {
                     continue;
                 }
-
                 let v_state = &self.states[v];
-                if let Some(sw) = &v_state.state_weight {
-                    next_w &= sw;
-                    if next_w.is_empty() {
-                        continue;
-                    }
-                }
 
                 let v_visited = visited[v].get_or_insert_with(HashMap::new);
 
@@ -104,7 +88,6 @@ impl DWA {
                     let id = new_dwa.add_state();
                     // Initialize new state
                     let new_st = &mut new_dwa.states[id];
-                    new_st.state_weight = v_state.state_weight.clone();
                     new_st.final_weight = v_state.final_weight.clone();
                     
                     v_visited.insert(next_w.clone(), id);

@@ -154,9 +154,6 @@ mod test_minimization_failure {
             if let Some(fw) = &s.final_weight {
                 println!("    final: {:?}", fw);
             }
-            if let Some(sw) = &s.state_weight {
-                println!("    state_weight: {:?}", sw);
-            }
             for (lbl, target) in &s.transitions {
                 let w = &s.trans_weights[lbl];
                 println!("    {} -> {}: {:?} (len={})", lbl, target, w, w.len());
