@@ -115,6 +115,9 @@ pub fn minimize_acyclic_exact(dwa: &DWA) -> Result<DWA, DWABuildError> {
             // Merge Transitions
             for (&label, &target_old) in &old_state.transitions {
                 if target_old >= dwa.states.len() { continue; }
+                
+                // If the target state was skipped (e.g. not needed), ignore this transition branch
+                if !old_to_new.contains_key(&target_old) { continue; }
 
                 let w_orig = old_state.trans_weights.get(&label).unwrap();
                 let target_new = old_to_new[&target_old];
@@ -232,17 +235,15 @@ fn are_compatible(
     old_to_new: &HashMap<StateID, StateID>,
     _new_states: &[MergedStateBuilder]
 ) -> bool {
-    let mut domain = needed[u].clone();
-    domain &= &needed[v];
-
-    if domain.is_empty() {
-        return true;
+    // States must have identical prospective weight sets to be equivalent
+    if needed[u] != needed[v] {
+        return false;
     }
 
     let fw_u = dwa.states[u].final_weight.as_ref().cloned().unwrap_or_else(Weight::zeros);
     let fw_v = dwa.states[v].final_weight.as_ref().cloned().unwrap_or_else(Weight::zeros);
 
-    if (&fw_u & &domain) != (&fw_v & &domain) {
+    if fw_u != fw_v {
         return false;
     }
 
@@ -257,13 +258,22 @@ fn are_compatible(
             Some((_, w)) => w.clone(),
             None => Weight::zeros(),
         };
-        w_u_eff &= &domain;
+        // Mask by needed[target] logic: if target is not needed, this path is dead
+        if let Some((target_u, _)) = trans_u {
+             if target_u < needed.len() {
+                  w_u_eff &= &needed[target_u];
+             }
+        }
 
         let mut w_v_eff = match trans_v {
             Some((_, w)) => w.clone(),
             None => Weight::zeros(),
         };
-        w_v_eff &= &domain;
+        if let Some((target_v, _)) = trans_v {
+             if target_v < needed.len() {
+                  w_v_eff &= &needed[target_v];
+             }
+        }
 
         if w_u_eff != w_v_eff {
             return false;
