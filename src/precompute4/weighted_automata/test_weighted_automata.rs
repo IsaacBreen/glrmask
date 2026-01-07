@@ -2484,8 +2484,8 @@ fn run_push_optimization_test(input: DWA, expected: DWA) {
 
     assert_eq!(
         (min_states, min_trans), (exp_states, exp_trans),
-        "Optimization Failed!\nExpected: {} states, {} trans\nGot:      {} states, {} trans",
-        exp_states, exp_trans, min_states, min_trans
+        "DWA:\n{}\nOptimization Failed!\nExpected: {} states, {} trans\nGot:      {} states, {} trans",
+        min, exp_states, exp_trans, min_states, min_trans
     );
 }
 
