@@ -25,7 +25,6 @@ pub struct DWAState {
     pub transitions: BTreeMap<Label, StateID>,
     pub final_weight: Option<Weight>,
     pub trans_weights: BTreeMap<Label, Weight>,
-    pub state_weight: Option<Weight>,
 }
 
 impl DWAState {
