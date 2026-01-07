@@ -1321,10 +1321,8 @@ fn test_minimize_complex_dwa_from_attachment() {
     left.add_transition(25, 9, 4, w_01.clone()).unwrap();
     left.add_transition(25, 10, 5, w_01.clone()).unwrap();
 
-    println!("Before minimization:\n{}", left);
     let mut minimized = left.clone();
     minimized.minimize();
-    println!("After minimization:\n{}", minimized);
 
     stochastic_equivalence_test(left, minimized);
 }
