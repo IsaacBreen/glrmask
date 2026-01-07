@@ -1,352 +1,97 @@
-#![allow(dead_code)]
+#![allow(clippy::needless_borrow)]
+#![allow(clippy::type_complexity)]
+
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
-use crate::precompute4::weighted_automata::{DWABody, DWAState, DWAStates, StateID, Weight, DWA};
+use crate::precompute4::weighted_automata::{DWA, DWAState, DWAStates, DWABody, StateID, Weight};
 use crate::precompute4::weighted_automata::common::Label;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+impl DWA {
+    pub fn minimize_acyclic(&mut self) {
+        let opts = ExactMinimizeOpts::default();
+        if let Ok(minimized) = minimize_acyclic_dwa_exact(self, opts) {
+            *self = minimized;
+        } else {
+            panic!("minimize_acyclic_dwa_exact failed");
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub enum DWAMinimizeError {
-    StartStateOutOfBounds { start: StateID, num_states: usize },
-    Cyclic,
+    NotAcyclic,
+    StartOutOfBounds { start: StateID, n: usize },
 }
 
-impl DWA {
-    pub fn minimize_acyclic(&mut self) -> Result<(), DWAMinimizeError> {
-        let minimized = self.minimize_acyclic_provably()?;
-        *self = minimized;
-        Ok(())
-    }
+/// Options for the exact minimizer.
+///
+/// If you want a guaranteed-minimal result, leave `node_limit` and `step_limit` as `None`.
+#[derive(Debug, Clone)]
+pub struct ExactMinimizeOpts {
+    /// If set, abort search once we ever see more than this many states
+    /// in the (trimmed) base automaton. (Safety valve.)
+    pub node_limit: Option<usize>,
+    /// If set, abort search after this many DFS nodes. (Safety valve.)
+    pub step_limit: Option<u64>,
 }
 
-/// Hash a Weight by its “shape” (ranges). Used only to speed up signature hashing.
-/// Equality still uses full Weight equality, so hash collisions are safe (just slower).
-fn hash_weight_into<H: Hasher>(w: &Weight, h: &mut H) {
-    if w.is_empty() {
-        0u8.hash(h);
-        return;
-    }
-    if w.is_all_fast() {
-        1u8.hash(h);
-        return;
-    }
-    2u8.hash(h);
-
-    // This relies on your existing JSON export using `w.rsb.ranges()`.
-    // If `Weight` changes representation, update this accordingly.
-    for r in w.rsb.ranges() {
-        r.start().hash(h);
-        r.end().hash(h);
-    }
-    w.len().hash(h);
-}
-
-#[derive(Clone, Debug)]
-struct TransSig {
-    lbl: Label,
-    to: StateID,
-    w: Weight,
-}
-
-impl PartialEq for TransSig {
-    fn eq(&self, other: &Self) -> bool {
-        self.lbl == other.lbl && self.to == other.to && self.w == other.w
-    }
-}
-impl Eq for TransSig {}
-
-impl Hash for TransSig {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.lbl.hash(state);
-        self.to.hash(state);
-        hash_weight_into(&self.w, state);
-    }
-}
-
-#[derive(Clone, Debug)]
-struct StateSig {
-    final_w: Option<Weight>,
-    trans: Vec<TransSig>, // sorted by lbl
-}
-
-impl PartialEq for StateSig {
-    fn eq(&self, other: &Self) -> bool {
-        self.final_w == other.final_w && self.trans == other.trans
-    }
-}
-impl Eq for StateSig {}
-
-impl Hash for StateSig {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        match &self.final_w {
-            None => 0u8.hash(state),
-            Some(w) => {
-                1u8.hash(state);
-                hash_weight_into(w, state);
-            }
+impl Default for ExactMinimizeOpts {
+    fn default() -> Self {
+        Self {
+            node_limit: None,
+            step_limit: None,
         }
-        self.trans.hash(state);
     }
 }
 
-impl DWA {
-    /// Provably minimal minimization for **acyclic deterministic** DWAs under the
-    /// standard notion:
-    ///
-    /// Two states are mergeable iff they induce identical suffix functions
-    /// `Σ* -> Weight` when started with accumulator `ALL`.
-    ///
-    /// This is the weighted analogue of minimal DAFSA construction:
-    /// - trim unreachable structure
-    /// - trim semantically-dead token bits (backward support)
-    /// - reverse-topo signature hashing to merge equivalent states
-    ///
-    /// If you instead want “start-only compression” (merge non-equivalent states by
-    /// redistributing weights on incoming edges), that is a different optimization
-    /// problem and this function is not intended to solve it.
-    pub fn minimize_acyclic_provably(&self) -> Result<DWA, DWAMinimizeError> {
-        let n0 = self.states.len();
-        if n0 == 0 {
-            return Ok(DWA::default());
-        }
-        if self.body.start_state >= n0 {
-            return Err(DWAMinimizeError::StartStateOutOfBounds {
-                start: self.body.start_state,
-                num_states: n0,
-            });
-        }
-
-        // 1) Clone and clean: remove out-of-bounds targets, remove empty-weight transitions,
-        // and remove dangling trans_weights entries not backed by transitions.
-        let mut work = self.clone();
-        clean_dwa_inplace(&mut work);
-
-        // 2) Restrict to reachable from start (graph reachability ignoring weights content,
-        // because empty-weight transitions were removed above).
-        work = restrict_to_reachable(&work);
-
-        // 3) Ensure acyclic and get topo order.
-        let topo = topo_order_or_err(&work)?;
-
-        // 4) Compute backward support B[q] = tokens that can be produced by *some* suffix.
-        // (This is semantics-preserving pruning: tokens not in B[target] can never matter.)
-        let backward = compute_backward_support(&work, &topo);
-
-        // 5) Trim finals and transition weights using backward support; drop empties.
-        trim_by_backward_support_inplace(&mut work, &backward);
-
-        // 6) Restrict again to reachable (trimming can disconnect).
-        work = restrict_to_reachable(&work);
-
-        // 7) Topo order again (graph may have changed).
-        let topo = topo_order_or_err(&work)?;
-
-        // 8) Bottom-up (reverse topo) register minimization by signature.
-        let n = work.states.len();
-        let mut old_to_new: Vec<StateID> = vec![usize::MAX; n];
-
-        let mut sig2rep: HashMap<StateSig, StateID> = HashMap::new();
-        let mut new_states: Vec<DWAState> = Vec::new();
-
-        for &u in topo.iter().rev() {
-            let st = &work.states[u];
-
-            // final weight signature: None == empty behavior on ε for this model.
-            let final_w = st.final_weight.clone().filter(|w| !w.is_empty());
-
-            let mut trans: Vec<TransSig> = Vec::with_capacity(st.transitions.len());
-            for (&lbl, &to) in &st.transitions {
-                let w = st
-                    .trans_weights
-                    .get(&lbl)
-                    .cloned()
-                    .unwrap_or_else(Weight::all);
-
-                if w.is_empty() {
-                    continue; // should already be cleaned, but safe
-                }
-
-                let to_new = old_to_new[to];
-                debug_assert!(to_new != usize::MAX, "topo ensures successors processed");
-
-                trans.push(TransSig { lbl, to: to_new, w });
-            }
-            // Canonical order
-            trans.sort_by_key(|t| t.lbl);
-
-            let sig = StateSig { final_w, trans };
-
-            if let Some(&rep) = sig2rep.get(&sig) {
-                old_to_new[u] = rep;
-            } else {
-                let rep = new_states.len();
-                sig2rep.insert(sig.clone(), rep);
-
-                // Build representative state from signature.
-                let mut transitions = BTreeMap::new();
-                let mut trans_weights = BTreeMap::new();
-                for t in sig.trans {
-                    transitions.insert(t.lbl, t.to);
-                    trans_weights.insert(t.lbl, t.w);
-                }
-
-                new_states.push(DWAState {
-                    transitions,
-                    final_weight: sig.final_w,
-                    trans_weights,
-                });
-
-                old_to_new[u] = rep;
-            }
-        }
-
-        let new_start = old_to_new[work.body.start_state];
-
-        let mut out = DWA {
-            states: DWAStates(new_states),
-            body: DWABody { start_state: new_start },
-        };
-
-        // 9) Final cleanup: remove unreachable reps (shouldn’t happen, but cheap) and
-        // strip any stray trans_weights without transitions.
-        clean_dwa_inplace(&mut out);
-        out = restrict_to_reachable(&out);
-
-        Ok(out)
+/// Public entry point: exact, provably minimal (merge-only) minimization for *acyclic* DWAs.
+///
+/// This returns the smallest equivalent quotient automaton (states merged, unreachable dropped),
+/// under `DWA::eval_word_weight` semantics.
+///
+/// Worst-case exponential (NP-hard), but correct and optimal when it terminates.
+///
+/// Pipeline:
+/// 1) semantics-preserving dead-token trimming
+/// 2) strict DAG minimization (fast)
+/// 3) exact search for additional merges (slow, optimal)
+pub fn minimize_acyclic_dwa_exact(input: &DWA, opts: ExactMinimizeOpts) -> Result<DWA, DWAMinimizeError> {
+    if input.states.len() == 0 {
+        return Ok(DWA::default());
     }
+    if input.body.start_state >= input.states.len() {
+        return Err(DWAMinimizeError::StartOutOfBounds { start: input.body.start_state, n: input.states.len() });
+    }
+
+    // 1) Dead-token trim (semantics-preserving).
+    let trimmed = trim_dead_tokens_and_edges(input)?;
+
+    // 2) Strict DAG minimization (polynomial; merges truly identical residual states).
+    let base = minimize_strict_acyclic(&trimmed)?;
+
+    if let Some(limit) = opts.node_limit {
+        if base.states.len() > limit {
+            // Still return something correct; but no exact search.
+            return Ok(base);
+        }
+    }
+
+    // 3) Exact search for additional merges.
+    let exact = minimize_exact_by_merging(&base, opts.step_limit)?;
+    Ok(exact)
 }
 
-// --------------------------- helpers ---------------------------
+/* ========================================================================================== */
+/* == Step 1: semantics-preserving dead-token trimming (forward/backward) ==================== */
+/* ========================================================================================== */
 
-fn clean_dwa_inplace(dwa: &mut DWA) {
+fn topo_order(dwa: &DWA) -> Result<Vec<StateID>, DWAMinimizeError> {
     let n = dwa.states.len();
     if n == 0 {
-        return;
-    }
-    if dwa.body.start_state >= n {
-        // leave it; caller will error
+        return Ok(vec![]);
     }
 
-    for s in 0..n {
-        // Clean final
-        if let Some(fw) = &dwa.states[s].final_weight {
-            if fw.is_empty() {
-                dwa.states[s].final_weight = None;
-            }
-        }
-
-        // Remove out-of-bounds transitions and empty weights
-        let labels: Vec<Label> = dwa.states[s].transitions.keys().copied().collect();
-        for lbl in labels {
-            let to = match dwa.states[s].transitions.get(&lbl).copied() {
-                Some(t) => t,
-                None => continue,
-            };
-            let w = dwa.states[s]
-                .trans_weights
-                .get(&lbl)
-                .cloned()
-                .unwrap_or_else(Weight::all);
-
-            if to >= n || w.is_empty() {
-                dwa.states[s].transitions.remove(&lbl);
-                dwa.states[s].trans_weights.remove(&lbl);
-            } else {
-                // Ensure a weight exists for each transition
-                dwa.states[s].trans_weights.insert(lbl, w);
-            }
-        }
-
-        // Remove any trans_weights entries that don't have a transition.
-        let weight_labels: Vec<Label> = dwa.states[s].trans_weights.keys().copied().collect();
-        for lbl in weight_labels {
-            if !dwa.states[s].transitions.contains_key(&lbl) {
-                dwa.states[s].trans_weights.remove(&lbl);
-            }
-        }
-    }
-}
-
-fn restrict_to_reachable(dwa: &DWA) -> DWA {
-    let n = dwa.states.len();
-    if n == 0 || dwa.body.start_state >= n {
-        return dwa.clone();
-    }
-
-    let mut seen = vec![false; n];
-    let mut q = VecDeque::new();
-    seen[dwa.body.start_state] = true;
-    q.push_back(dwa.body.start_state);
-
-    while let Some(u) = q.pop_front() {
-        for &v in dwa.states[u].transitions.values() {
-            if v < n && !seen[v] {
-                seen[v] = true;
-                q.push_back(v);
-            }
-        }
-    }
-
-    // Compact
-    let mut map = vec![usize::MAX; n];
-    let mut rev = Vec::new();
-    for i in 0..n {
-        if seen[i] {
-            map[i] = rev.len();
-            rev.push(i);
-        }
-    }
-    let new_n = rev.len();
-    if new_n == n {
-        return dwa.clone();
-    }
-
-    let mut new_states: Vec<DWAState> = Vec::with_capacity(new_n);
-    for &old in &rev {
-        let old_state = &dwa.states[old];
-
-        let mut transitions = BTreeMap::new();
-        let mut trans_weights = BTreeMap::new();
-
-        for (&lbl, &to_old) in &old_state.transitions {
-            if to_old >= n {
-                continue;
-            }
-            if !seen[to_old] {
-                continue;
-            }
-            let to_new = map[to_old];
-
-            let w = old_state
-                .trans_weights
-                .get(&lbl)
-                .cloned()
-                .unwrap_or_else(Weight::all);
-
-            if w.is_empty() {
-                continue;
-            }
-
-            transitions.insert(lbl, to_new);
-            trans_weights.insert(lbl, w);
-        }
-
-        new_states.push(DWAState {
-            transitions,
-            final_weight: old_state.final_weight.clone().filter(|w| !w.is_empty()),
-            trans_weights,
-        });
-    }
-
-    let new_start = map[dwa.body.start_state];
-    DWA {
-        states: DWAStates(new_states),
-        body: DWABody { start_state: new_start },
-    }
-}
-
-fn topo_order_or_err(dwa: &DWA) -> Result<Vec<StateID>, DWAMinimizeError> {
-    let n = dwa.states.len();
     let mut indeg = vec![0usize; n];
     for u in 0..n {
         for &v in dwa.states[u].transitions.values() {
@@ -363,9 +108,9 @@ fn topo_order_or_err(dwa: &DWA) -> Result<Vec<StateID>, DWAMinimizeError> {
         }
     }
 
-    let mut topo = Vec::with_capacity(n);
+    let mut order = Vec::with_capacity(n);
     while let Some(u) = q.pop_front() {
-        topo.push(u);
+        order.push(u);
         for &v in dwa.states[u].transitions.values() {
             if v >= n {
                 continue;
@@ -377,93 +122,789 @@ fn topo_order_or_err(dwa: &DWA) -> Result<Vec<StateID>, DWAMinimizeError> {
         }
     }
 
-    if topo.len() != n {
-        return Err(DWAMinimizeError::Cyclic);
+    if order.len() != n {
+        return Err(DWAMinimizeError::NotAcyclic);
     }
-    Ok(topo)
+    Ok(order)
 }
 
-fn compute_backward_support(dwa: &DWA, topo: &[StateID]) -> Vec<Weight> {
+/// Trim unreachable states (graph reachability). This is safe for your semantics because
+/// unreachable states can never be visited from the start on any word.
+fn trim_unreachable(mut dwa: DWA) -> Result<DWA, DWAMinimizeError> {
     let n = dwa.states.len();
-    let mut backward: Vec<Weight> = vec![Weight::zeros(); n];
+    if n == 0 {
+        return Ok(dwa);
+    }
+    let start = dwa.body.start_state;
+    if start >= n {
+        return Err(DWAMinimizeError::StartOutOfBounds { start, n });
+    }
 
-    for &u in topo.iter().rev() {
-        let mut bw = dwa.states[u]
-            .final_weight
-            .clone()
-            .unwrap_or_else(Weight::zeros);
+    let mut seen = vec![false; n];
+    let mut stack = vec![start];
+    seen[start] = true;
 
-        for (&lbl, &v) in &dwa.states[u].transitions {
+    while let Some(u) = stack.pop() {
+        for &v in dwa.states[u].transitions.values() {
             if v >= n {
                 continue;
             }
-            let w = dwa.states[u]
+            if !seen[v] {
+                seen[v] = true;
+                stack.push(v);
+            }
+        }
+    }
+
+    // Remap old -> new ids
+    let mut map = vec![None; n];
+    let mut new_states = Vec::new();
+    for i in 0..n {
+        if seen[i] {
+            map[i] = Some(new_states.len());
+            new_states.push(dwa.states[i].clone());
+        }
+    }
+    let new_start = map[start].unwrap();
+
+    // Remap transitions
+    for st in &mut new_states {
+        let labels: Vec<Label> = st.transitions.keys().copied().collect();
+        for lbl in labels {
+            let to = st.transitions[&lbl];
+            match map.get(to).and_then(|x| *x) {
+                Some(new_to) => {
+                    st.transitions.insert(lbl, new_to);
+                }
+                None => {
+                    st.transitions.remove(&lbl);
+                    st.trans_weights.remove(&lbl);
+                }
+            }
+        }
+
+        // Drop weights that have no target transition (these don't matter for eval_word_weight).
+        let default_labels: Vec<Label> = st.trans_weights
+            .keys()
+            .filter(|l| !st.transitions.contains_key(l))
+            .copied()
+            .collect();
+        for lbl in default_labels {
+            st.trans_weights.remove(&lbl);
+        }
+    }
+
+    dwa.states = DWAStates(new_states);
+    dwa.body.start_state = new_start;
+    Ok(dwa)
+}
+
+/// Semantics-preserving trimming:
+///
+/// Let `forward[u]` = tokens that can reach `u` from start while surviving intersections.
+/// Let `backward[u]` = tokens that can be accepted from `u` by some suffix.
+///
+/// Then any token outside these “live” sets is irrelevant to *all* outputs from the start.
+/// We can safely replace each transition weight by:
+///     w' = forward[u] ∩ w(u,a) ∩ backward[v]
+/// and each final weight by:
+///     fw' = forward[u] ∩ fw(u)
+///
+/// and drop empty edges/finals.
+fn trim_dead_tokens_and_edges(input: &DWA) -> Result<DWA, DWAMinimizeError> {
+    let n = input.states.len();
+    if n == 0 {
+        return Ok(input.clone());
+    }
+    let start = input.body.start_state;
+    if start >= n {
+        return Err(DWAMinimizeError::StartOutOfBounds { start, n });
+    }
+
+    let order = topo_order(input)?;
+    let mut forward = vec![Weight::zeros(); n];
+    forward[start] = Weight::all();
+
+    for &u in &order {
+        if forward[u].is_empty() {
+            continue;
+        }
+        let fu = forward[u].clone();
+        for (lbl, &v) in &input.states[u].transitions {
+            if v >= n {
+                continue;
+            }
+            let w = input.states[u]
                 .trans_weights
-                .get(&lbl)
+                .get(lbl)
+                .cloned()
+                .unwrap_or_else(Weight::all);
+
+            let mut flow = fu.clone();
+            flow &= &w;
+            if !flow.is_subset_of(&forward[v]) {
+                forward[v] |= &flow;
+            }
+        }
+    }
+
+    let mut backward = vec![Weight::zeros(); n];
+    for u in 0..n {
+        if let Some(fw) = &input.states[u].final_weight {
+            backward[u] |= fw;
+        }
+    }
+
+    for &u in order.iter().rev() {
+        let mut bu = backward[u].clone();
+        for (lbl, &v) in &input.states[u].transitions {
+            if v >= n {
+                continue;
+            }
+            let w = input.states[u]
+                .trans_weights
+                .get(lbl)
                 .cloned()
                 .unwrap_or_else(Weight::all);
 
             let contrib = &w & &backward[v];
-            bw |= &contrib;
+            if !contrib.is_subset_of(&bu) {
+                bu |= &contrib;
+            }
         }
-
-        backward[u] = bw;
+        backward[u] = bu;
     }
 
-    backward
-}
-
-fn trim_by_backward_support_inplace(dwa: &mut DWA, backward: &[Weight]) {
-    let n = dwa.states.len();
-
+    // Build trimmed automaton (same indexing, then trim unreachable).
+    let mut new_states = vec![DWAState::default(); n];
     for u in 0..n {
-        // finals
-        if let Some(fw) = &dwa.states[u].final_weight {
-            let mut new_fw = fw.clone();
-            new_fw &= &backward[u];
-            if new_fw.is_empty() {
-                dwa.states[u].final_weight = None;
-            } else {
-                dwa.states[u].final_weight = Some(new_fw);
+        let old = &input.states[u];
+
+        // Final
+        if let Some(fw) = &old.final_weight {
+            let mut nf = fw.clone();
+            nf &= &forward[u];
+            if !nf.is_empty() {
+                new_states[u].final_weight = Some(nf);
             }
         }
 
-        // transitions
-        let labels: Vec<Label> = dwa.states[u].transitions.keys().copied().collect();
-        for lbl in labels {
-            let v = match dwa.states[u].transitions.get(&lbl).copied() {
-                Some(t) => t,
-                None => continue,
-            };
+        // Transitions
+        for (lbl, &v) in &old.transitions {
             if v >= n {
-                dwa.states[u].transitions.remove(&lbl);
-                dwa.states[u].trans_weights.remove(&lbl);
                 continue;
             }
+            let w = old.trans_weights.get(lbl).cloned().unwrap_or_else(Weight::all);
 
-            let w = dwa.states[u]
-                .trans_weights
-                .get(&lbl)
-                .cloned()
-                .unwrap_or_else(Weight::all);
+            let mut nw = w;
+            nw &= &forward[u];
+            nw &= &backward[v];
 
-            let mut new_w = w;
-            new_w &= &backward[v];
-
-            if new_w.is_empty() {
-                dwa.states[u].transitions.remove(&lbl);
-                dwa.states[u].trans_weights.remove(&lbl);
-            } else {
-                dwa.states[u].trans_weights.insert(lbl, new_w);
+            if nw.is_empty() {
+                continue;
             }
+            new_states[u].transitions.insert(*lbl, v);
+            new_states[u].trans_weights.insert(*lbl, nw);
         }
+    }
 
-        // remove stray weights (shouldn’t exist after our cleaning rules)
-        let weight_labels: Vec<Label> = dwa.states[u].trans_weights.keys().copied().collect();
-        for lbl in weight_labels {
-            if !dwa.states[u].transitions.contains_key(&lbl) {
-                dwa.states[u].trans_weights.remove(&lbl);
+    let trimmed = DWA {
+        states: DWAStates(new_states),
+        body: DWABody { start_state: start },
+    };
+
+    trim_unreachable(trimmed)
+}
+
+/* ========================================================================================== */
+/* == Step 2: strict acyclic minimization (bottom-up hashing) ================================ */
+/* ========================================================================================== */
+
+#[derive(Clone, Debug, Eq)]
+enum WeightKey {
+    All,
+    Empty,
+    Ranges(Vec<(usize, usize)>),
+}
+
+impl PartialEq for WeightKey {
+    fn eq(&self, other: &Self) -> bool {
+        use WeightKey::*;
+        match (self, other) {
+            (All, All) => true,
+            (Empty, Empty) => true,
+            (Ranges(a), Ranges(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
+impl Hash for WeightKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        match self {
+            WeightKey::All => {
+                0u8.hash(state);
+            }
+            WeightKey::Empty => {
+                1u8.hash(state);
+            }
+            WeightKey::Ranges(rs) => {
+                2u8.hash(state);
+                rs.hash(state);
             }
         }
     }
+}
+
+fn weight_key(w: &Weight) -> WeightKey {
+    if w.is_all_fast() {
+        return WeightKey::All;
+    }
+    if w.is_empty() {
+        return WeightKey::Empty;
+    }
+    // This relies on Weight exposing `rsb.ranges()` like your JSON exporter does.
+    let rs: Vec<(usize, usize)> = w
+        .rsb
+        .ranges()
+        .map(|r| (*r.start(), *r.end()))
+        .collect();
+    WeightKey::Ranges(rs)
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+struct SigKey {
+    final_w: WeightKey,
+    trans: Vec<(Label, WeightKey, usize)>, // (label, weight, succ_sig_id)
+}
+
+/// Computes a canonical “behavior signature id” for the start state.
+/// Two DWAs are equivalent (from the start) iff these ids are equal when computed
+/// with the *same* interner table.
+///
+/// This is exact for acyclic deterministic machines under your eval semantics.
+fn start_behavior_id(dwa: &DWA, interner: &mut HashMap<SigKey, usize>) -> Result<usize, DWAMinimizeError> {
+    let n = dwa.states.len();
+    if n == 0 {
+        // empty machine: always outputs empty
+        let key = SigKey { final_w: WeightKey::Empty, trans: vec![] };
+        let id = *interner.entry(key).or_insert_with(|| interner.len());
+        return Ok(id);
+    }
+    let start = dwa.body.start_state;
+    if start >= n {
+        return Err(DWAMinimizeError::StartOutOfBounds { start, n });
+    }
+
+    let order = topo_order(dwa)?;
+    let mut sig_id = vec![0usize; n];
+
+    for &u in order.iter().rev() {
+        let fw = dwa.states[u].final_weight.clone().unwrap_or_else(Weight::zeros);
+        let final_w = weight_key(&fw);
+
+        let mut trans = Vec::with_capacity(dwa.states[u].transitions.len());
+        for (lbl, &v) in &dwa.states[u].transitions {
+            let w = dwa.states[u].trans_weights.get(lbl).cloned().unwrap_or_else(Weight::all);
+            trans.push((*lbl, weight_key(&w), sig_id[v]));
+        }
+
+        // transitions are already sorted by BTreeMap iteration order, but keep it explicit:
+        trans.sort_by_key(|(lbl, _, _)| *lbl);
+
+        let key = SigKey { final_w, trans };
+        let id = *interner.entry(key).or_insert_with(|| interner.len());
+        sig_id[u] = id;
+    }
+
+    Ok(sig_id[start])
+}
+
+/// Strict minimization: merges states that are *already* equivalent (identical residual behavior).
+fn minimize_strict_acyclic(input: &DWA) -> Result<DWA, DWAMinimizeError> {
+    let n = input.states.len();
+    if n == 0 {
+        return Ok(input.clone());
+    }
+    let start = input.body.start_state;
+    if start >= n {
+        return Err(DWAMinimizeError::StartOutOfBounds { start, n });
+    }
+
+    let order = topo_order(input)?;
+    let mut map: HashMap<SigKey, usize> = HashMap::new();
+    let mut rep_of = vec![0usize; n];
+    let mut reps: Vec<StateID> = Vec::new(); // representative old state for each new state
+
+    // Build signatures bottom-up.
+    for &u in order.iter().rev() {
+        let fw = input.states[u].final_weight.clone().unwrap_or_else(Weight::zeros);
+        let final_w = weight_key(&fw);
+
+        let mut trans = Vec::with_capacity(input.states[u].transitions.len());
+        for (lbl, &v) in &input.states[u].transitions {
+            let w = input.states[u].trans_weights.get(lbl).cloned().unwrap_or_else(Weight::all);
+            trans.push((*lbl, weight_key(&w), rep_of[v]));
+        }
+        trans.sort_by_key(|(lbl, _, _)| *lbl);
+
+        let key = SigKey { final_w, trans };
+        let id = *map.entry(key).or_insert_with(|| {
+            let new_id = reps.len();
+            reps.push(u);
+            new_id
+        });
+        rep_of[u] = id;
+    }
+
+    // Build minimized automaton.
+    let mut new_states = vec![DWAState::default(); reps.len()];
+    for (new_id, &u) in reps.iter().enumerate() {
+        // final
+        new_states[new_id].final_weight = input.states[u].final_weight.clone();
+
+        // transitions
+        for (lbl, &v) in &input.states[u].transitions {
+            let w = input.states[u].trans_weights.get(lbl).cloned().unwrap_or_else(Weight::all);
+            new_states[new_id].transitions.insert(*lbl, rep_of[v]);
+            new_states[new_id].trans_weights.insert(*lbl, w);
+        }
+    }
+
+    let mut out = DWA {
+        states: DWAStates(new_states),
+        body: DWABody { start_state: rep_of[start] },
+    };
+    out = trim_unreachable(out)?;
+    Ok(out)
+}
+
+/* ========================================================================================== */
+/* == Step 3: exact merge search (rollback DSU + branch-and-bound) =========================== */
+/* ========================================================================================== */
+
+#[derive(Clone, Debug)]
+struct BitSet {
+    words: Vec<u64>,
+}
+
+impl BitSet {
+    fn new(nbits: usize) -> Self {
+        Self { words: vec![0u64; (nbits + 63) / 64] }
+    }
+    fn set(&mut self, i: usize) {
+        self.words[i / 64] |= 1u64 << (i % 64);
+    }
+    fn or_assign(&mut self, other: &BitSet) {
+        for (a, b) in self.words.iter_mut().zip(other.words.iter()) {
+            *a |= *b;
+        }
+    }
+    fn intersects(&self, other: &BitSet) -> bool {
+        self.words.iter().zip(other.words.iter()).any(|(a, b)| (*a & *b) != 0)
+    }
+}
+
+#[derive(Clone)]
+enum Hist {
+    Union {
+        child: usize,
+        parent_before: usize,
+        root: usize,
+        size_before: usize,
+        members_before: BitSet,
+        blocked_before: BitSet,
+        final_before: Weight,
+        trans_before: BTreeMap<Label, (StateID, Weight)>,
+    },
+    Block {
+        a: usize,
+        blocked_a_before: BitSet,
+        b: usize,
+        blocked_b_before: BitSet,
+    },
+}
+
+struct RBMerge {
+    n: usize,
+    parent: Vec<usize>,
+    size: Vec<usize>,
+    members: Vec<BitSet>,
+    blocked: Vec<BitSet>,
+    final_w: Vec<Weight>,
+    trans: Vec<BTreeMap<Label, (StateID, Weight)>>,
+    hist: Vec<Hist>,
+}
+
+impl RBMerge {
+    fn new(base: &DWA) -> Result<Self, DWAMinimizeError> {
+        let n = base.states.len();
+        let order = topo_order(base)?; // ensure acyclic
+
+        // Precompute reachability bitsets for “cannot merge ancestors/descendants”.
+        let mut reach = vec![BitSet::new(n); n];
+        for &u in order.iter().rev() {
+            for &v in base.states[u].transitions.values() {
+                if v >= n {
+                    continue;
+                }
+                reach[u].set(v);
+                let rv = reach[v].clone();
+                reach[u].or_assign(&rv);
+            }
+        }
+
+        let mut rev_reach = vec![BitSet::new(n); n];
+        for u in 0..n {
+            for v in 0..n {
+                if reach[u].intersects(&{
+                    let mut bs = BitSet::new(n);
+                    bs.set(v);
+                    bs
+                }) && reach[u].words[v / 64] & (1u64 << (v % 64)) != 0
+                {
+                    rev_reach[v].set(u);
+                }
+            }
+        }
+
+        let mut parent = (0..n).collect::<Vec<_>>();
+        let mut size = vec![1usize; n];
+
+        let mut members = vec![BitSet::new(n); n];
+        for i in 0..n {
+            members[i].set(i);
+        }
+
+        // Initial blocked set = (reachable either way) + self.
+        let mut blocked = vec![BitSet::new(n); n];
+        for i in 0..n {
+            blocked[i].set(i);
+            blocked[i].or_assign(&reach[i]);
+            blocked[i].or_assign(&rev_reach[i]);
+        }
+
+        let mut final_w = vec![Weight::zeros(); n];
+        let mut trans = vec![BTreeMap::<Label, (StateID, Weight)>::new(); n];
+        for i in 0..n {
+            if let Some(fw) = &base.states[i].final_weight {
+                final_w[i] = fw.clone();
+            }
+            for (lbl, &to) in &base.states[i].transitions {
+                let w = base.states[i].trans_weights.get(lbl).cloned().unwrap_or_else(Weight::all);
+                trans[i].insert(*lbl, (to, w));
+            }
+        }
+
+        Ok(Self {
+            n,
+            parent,
+            size,
+            members,
+            blocked,
+            final_w,
+            trans,
+            hist: vec![],
+        })
+    }
+
+    fn snapshot(&self) -> usize {
+        self.hist.len()
+    }
+
+    fn rollback(&mut self, snap: usize) {
+        while self.hist.len() > snap {
+            match self.hist.pop().unwrap() {
+                Hist::Union {
+                    child,
+                    parent_before,
+                    root,
+                    size_before,
+                    members_before,
+                    blocked_before,
+                    final_before,
+                    trans_before,
+                } => {
+                    self.parent[child] = parent_before;
+                    self.size[root] = size_before;
+                    self.members[root] = members_before;
+                    self.blocked[root] = blocked_before;
+                    self.final_w[root] = final_before;
+                    self.trans[root] = trans_before;
+                }
+                Hist::Block { a, blocked_a_before, b, blocked_b_before } => {
+                    self.blocked[a] = blocked_a_before;
+                    self.blocked[b] = blocked_b_before;
+                }
+            }
+        }
+    }
+
+    fn find(&self, mut x: usize) -> usize {
+        while self.parent[x] != x {
+            x = self.parent[x];
+        }
+        x
+    }
+
+    fn roots(&self) -> Vec<usize> {
+        (0..self.n).filter(|&i| self.parent[i] == i).collect()
+    }
+
+    fn can_merge_roots(&self, ra: usize, rb: usize) -> bool {
+        if ra == rb {
+            return true;
+        }
+        // symmetric check: members(ra) ∩ blocked(rb) = ∅ and vice versa
+        if self.members[ra].intersects(&self.blocked[rb]) {
+            return false;
+        }
+        if self.members[rb].intersects(&self.blocked[ra]) {
+            return false;
+        }
+        true
+    }
+
+    fn add_block(&mut self, a: usize, b: usize) {
+        let ra = self.find(a);
+        let rb = self.find(b);
+        if ra == rb {
+            return;
+        }
+        let blocked_a_before = self.blocked[ra].clone();
+        let blocked_b_before = self.blocked[rb].clone();
+        self.hist.push(Hist::Block { a: ra, blocked_a_before, b: rb, blocked_b_before });
+
+        let mb = self.members[rb].clone();
+        let ma = self.members[ra].clone();
+        self.blocked[ra].or_assign(&mb);
+        self.blocked[rb].or_assign(&ma);
+    }
+
+    fn union_roots(&mut self, ra: usize, rb: usize, todo: &mut Vec<(usize, usize)>) -> bool {
+        let ra = self.find(ra);
+        let rb = self.find(rb);
+        if ra == rb {
+            return true;
+        }
+        if !self.can_merge_roots(ra, rb) {
+            return false;
+        }
+
+        // union-by-size: root = a, child = b
+        let (a, b) = if self.size[ra] >= self.size[rb] { (ra, rb) } else { (rb, ra) };
+
+        // Any common label forces merging the targets to keep determinism.
+        for (lbl, (tb, _)) in self.trans[b].iter() {
+            if let Some((ta, _)) = self.trans[a].get(lbl) {
+                todo.push((*ta, *tb));
+            }
+        }
+
+        // Save rollback info for root `a` and child `b`.
+        self.hist.push(Hist::Union {
+            child: b,
+            parent_before: self.parent[b],
+            root: a,
+            size_before: self.size[a],
+            members_before: self.members[a].clone(),
+            blocked_before: self.blocked[a].clone(),
+            final_before: self.final_w[a].clone(),
+            trans_before: self.trans[a].clone(),
+        });
+
+        // Perform union.
+        self.parent[b] = a;
+        self.size[a] += self.size[b];
+        self.members[a].or_assign(&self.members[b]);
+        self.blocked[a].or_assign(&self.blocked[b]);
+
+        self.final_w[a] |= &self.final_w[b];
+
+        // Merge transition maps: union weights; keep one target (closure merges the targets anyway).
+        let trans_b = self.trans[b].clone();
+        for (lbl, (tb, wb)) in trans_b.into_iter() {
+            self.trans[a]
+                .entry(lbl)
+                .and_modify(|(_ta, wa)| {
+                    *wa |= &wb;
+                })
+                .or_insert((tb, wb));
+        }
+
+        true
+    }
+
+    fn merge_with_closure(&mut self, a: usize, b: usize) -> bool {
+        let mut todo = vec![(a, b)];
+        while let Some((x, y)) = todo.pop() {
+            let rx = self.find(x);
+            let ry = self.find(y);
+            if rx == ry {
+                continue;
+            }
+            if !self.union_roots(rx, ry, &mut todo) {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn build_quotient_dwa(&self, start_old: usize) -> DWA {
+        let roots = self.roots();
+        let mut root_to_new = vec![None; self.n];
+        for (nid, &r) in roots.iter().enumerate() {
+            root_to_new[r] = Some(nid);
+        }
+
+        let mut states = vec![DWAState::default(); roots.len()];
+        for (nid, &r) in roots.iter().enumerate() {
+            let fw = self.final_w[r].clone();
+            if !fw.is_empty() {
+                states[nid].final_weight = Some(fw);
+            }
+
+            for (lbl, (to_old, w)) in &self.trans[r] {
+                if w.is_empty() {
+                    continue;
+                }
+                let to_root = self.find(*to_old);
+                let to_new = root_to_new[to_root].unwrap();
+                states[nid].transitions.insert(*lbl, to_new);
+                states[nid].trans_weights.insert(*lbl, w.clone());
+            }
+        }
+
+        let start_root = self.find(start_old);
+        let start_new = root_to_new[start_root].unwrap();
+
+        DWA {
+            states: DWAStates(states),
+            body: DWABody { start_state: start_new },
+        }
+    }
+}
+
+/// Exact search driver.
+fn minimize_exact_by_merging(base: &DWA, step_limit: Option<u64>) -> Result<DWA, DWAMinimizeError> {
+    let mut dsu = RBMerge::new(base)?;
+    let mut interner: HashMap<SigKey, usize> = HashMap::new();
+    let base_id = start_behavior_id(base, &mut interner)?;
+
+    // Initial best = base (already correct).
+    let mut best = base.clone();
+    let mut best_n = best.states.len();
+
+    let mut steps: u64 = 0;
+
+    fn greedy_clique_lower_bound(dsu: &RBMerge, roots: &[usize]) -> usize {
+        // Greedy clique in the incompatibility graph implied by current blocked sets.
+        // This is only a lower bound, but cheap and sometimes prunes.
+        let mut verts = roots.to_vec();
+        // sort by “blocked degree” approximation
+        verts.sort_by_key(|&r| {
+            // degree ≈ number of 1 bits in blocked[r] intersect roots
+            // we compute a cheap proxy: sum popcount(blocked words)
+            dsu.blocked[r].words.iter().map(|w| w.count_ones() as usize).sum::<usize>()
+        });
+        verts.reverse();
+
+        let mut clique: Vec<usize> = vec![];
+        'outer: for &v in &verts {
+            for &u in &clique {
+                // Need u incompatible with v, i.e., u ∈ blocked[v] or v ∈ blocked[u]
+                // We test via members/blocked intersection.
+                if dsu.can_merge_roots(u, v) {
+                    continue 'outer;
+                }
+            }
+            clique.push(v);
+        }
+        clique.len().max(1)
+    }
+
+    fn dfs(
+        base: &DWA,
+        dsu: &mut RBMerge,
+        interner: &mut HashMap<SigKey, usize>,
+        base_id: usize,
+        best: &mut DWA,
+        best_n: &mut usize,
+        steps: &mut u64,
+        step_limit: Option<u64>,
+    ) -> Result<(), DWAMinimizeError> {
+        *steps += 1;
+        if let Some(limit) = step_limit {
+            if *steps > limit {
+                return Ok(());
+            }
+        }
+
+        let roots = dsu.roots();
+
+        // Prune if even an optimistic lower bound can't beat best.
+        let lb = greedy_clique_lower_bound(dsu, &roots);
+        if lb >= *best_n {
+            return Ok(());
+        }
+
+        // Find a mergeable pair to branch on.
+        let mut pair: Option<(usize, usize)> = None;
+        'find: for i in 0..roots.len() {
+            for j in (i + 1)..roots.len() {
+                let a = roots[i];
+                let b = roots[j];
+                if dsu.can_merge_roots(a, b) {
+                    pair = Some((a, b));
+                    break 'find;
+                }
+            }
+        }
+
+        if let Some((a, b)) = pair {
+            // Branch 1: merge (with closure).
+            let snap = dsu.snapshot();
+            if dsu.merge_with_closure(a, b) {
+                dfs(base, dsu, interner, base_id, best, best_n, steps, step_limit)?;
+            }
+            dsu.rollback(snap);
+
+            // Branch 2: forbid merging these components.
+            let snap = dsu.snapshot();
+            dsu.add_block(a, b);
+            dfs(base, dsu, interner, base_id, best, best_n, steps, step_limit)?;
+            dsu.rollback(snap);
+
+            return Ok(());
+        }
+
+        // No mergeable pairs left: evaluate this partition.
+        let cand = dsu.build_quotient_dwa(base.body.start_state);
+        let cand = trim_unreachable(cand)?;
+        let cand_n = cand.states.len();
+        if cand_n >= *best_n {
+            return Ok(());
+        }
+
+        let cand_id = start_behavior_id(&cand, interner)?;
+        if cand_id == base_id {
+            *best = cand;
+            *best_n = cand_n;
+        }
+
+        Ok(())
+    }
+
+    dfs(
+        base,
+        &mut dsu,
+        &mut interner,
+        base_id,
+        &mut best,
+        &mut best_n,
+        &mut steps,
+        step_limit,
+    )?;
+
+    Ok(best)
 }
