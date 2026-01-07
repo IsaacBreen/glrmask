@@ -122,7 +122,6 @@ impl DWA {
 
     /// Lightweight version - just prunes, no full minimization.
     pub fn minimize_lightweight_acyclic(&mut self) {
-        self.pass0_prune();
         self.minimize();
     }
 
