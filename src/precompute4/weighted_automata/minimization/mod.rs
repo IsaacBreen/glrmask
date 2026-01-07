@@ -62,7 +62,8 @@ impl DWA {
         if self.is_cyclic() {
             self.prune_unreachable_cyclic()
         } else {
-            self.prune_unreachable_acyclic()
+            self.prune_unreachable_acyclic();
+            true
         }
     }
 
@@ -70,7 +71,8 @@ impl DWA {
         if self.is_cyclic() {
             self.prune_dead_ends_cyclic()
         } else {
-            self.prune_dead_ends_acyclic()
+            self.prune_dead_ends_acyclic();
+            true
         }
     }
 
