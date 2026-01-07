@@ -1,29 +1,31 @@
-//! Bottom-up signature merging for acyclic DWA minimization.
+//! Overlap-compatible merging for acyclic DWA minimization.
 //!
-//! After normalization, states with identical signatures can be merged.
-//! Signature = (final_weight, {(label, trans_weight, target_class) for each transition})
+//! After edge trimming, states with the same transition structure merge.
+//! When merging, union their final weights and transition weights.
 
 use crate::precompute4::weighted_automata::common::Weight;
 use crate::precompute4::weighted_automata::dwa::{DWA, DWAState, DWAStates};
 use std::collections::{BTreeMap, HashMap};
 
-/// State signature for merging.
+/// State signature for structure-based merging.
+/// 
+/// After edge trimming, we compare only transition STRUCTURE (labels and target classes),
+/// not the actual weights. States with identical structure merge with weight union.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-struct StateSignature {
-    /// Final weight (None if non-final)
-    final_weight: Option<u64>, // Fingerprint of the weight
-    /// Sorted list of (label, trans_weight_fingerprint, target_class)
-    transitions: Vec<(i32, u64, usize)>,
+struct StructureSignature {
+    /// Is this state final? (bool, not the actual weight)
+    is_final: bool,
+    /// Sorted list of (label, target_class) - NOT weight!
+    transitions: Vec<(i32, usize)>,
 }
 
 impl DWA {
-    /// Merge states with identical signatures (bottom-up).
-    ///
-    /// Returns true if any states were merged.
-    pub fn merge_by_signature(&mut self) -> bool {
+    /// Merge states with identical structure (same labels to equivalent targets).
+    /// When merged, union their final and transition weights.
+    pub fn merge_by_signature(&mut self, _live: &[Weight]) {
         let n = self.states.len();
         if n == 0 {
-            return false;
+            return;
         }
 
         // Get reverse topological order (sinks first)
@@ -33,11 +35,11 @@ impl DWA {
         let mut class: Vec<usize> = (0..n).collect();
 
         // Map from signature to canonical state ID
-        let mut sig_to_class: HashMap<StateSignature, usize> = HashMap::new();
+        let mut sig_to_class: HashMap<StructureSignature, usize> = HashMap::new();
 
         // Process bottom-up
         for &q in &topo_order {
-            let sig = self.compute_signature(q, &class);
+            let sig = self.compute_structure_signature(q, &class);
 
             if let Some(&existing_class) = sig_to_class.get(&sig) {
                 // Merge q into existing class
@@ -49,52 +51,37 @@ impl DWA {
             }
         }
 
-        // Count distinct classes
-        let num_classes = sig_to_class.len();
+        // Count distinct classes (representatives)
+        // A state q is a representative if class[q] == q
+        let num_classes = class.iter().enumerate().filter(|&(q, &c)| q == c).count();
         if num_classes == n {
-            return false; // No merging possible
+            return; // No merging possible
         }
 
-        // Rebuild the DWA with merged states
-        self.rebuild_merged(&class, num_classes);
-        true
+        // Rebuild the DWA with merged states, unioning weights
+        self.rebuild_merged_with_union(&class);
     }
 
-    /// Compute the signature of a state given current class assignments.
-    fn compute_signature(&self, q: usize, class: &[usize]) -> StateSignature {
-        // Final weight fingerprint
-        let final_fp = self.states[q]
-            .final_weight
-            .as_ref()
-            .map(|w| w.fp);
-
-        // Transitions: (label, weight_fp, target_class)
-        let mut transitions: Vec<(i32, u64, usize)> = Vec::new();
+    /// Compute the structure signature (just transition structure + finality).
+    fn compute_structure_signature(&self, q: usize, class: &[usize]) -> StructureSignature {
+        let is_final = self.states[q].final_weight.is_some();
+        
+        let mut transitions: Vec<(i32, usize)> = Vec::new();
         for (&label, &target) in &self.states[q].transitions {
-            let weight_fp = self.states[q]
-                .trans_weights
-                .get(&label)
-                .map(|w| w.fp)
-                .unwrap_or(0);
-
             let target_class = if target < class.len() {
                 class[target]
             } else {
                 target
             };
-
-            transitions.push((label, weight_fp, target_class));
+            transitions.push((label, target_class));
         }
-        transitions.sort_by_key(|(l, _, _)| *l);
+        transitions.sort_by_key(|(l, _)| *l);
 
-        StateSignature {
-            final_weight: final_fp,
-            transitions,
-        }
+        StructureSignature { is_final, transitions }
     }
 
-    /// Rebuild the DWA after merging, keeping one representative per class.
-    fn rebuild_merged(&mut self, class: &[usize], _num_classes: usize) {
+    /// Rebuild the DWA after merging, unioning weights for merged states.
+    fn rebuild_merged_with_union(&mut self, class: &[usize]) {
         let n = self.states.len();
 
         // Determine which states are representatives (class[q] == q)
@@ -123,26 +110,49 @@ impl DWA {
             }
         }
 
-        // Build new states
-        let mut new_states: Vec<DWAState> = Vec::with_capacity(new_idx);
+        // First pass: collect states to merge into each representative
+        let mut members: Vec<Vec<usize>> = vec![Vec::new(); n];
         for q in 0..n {
-            if !is_rep[q] {
+            let rep = class[q];
+            members[rep].push(q);
+        }
+
+        // Build new states with unioned weights
+        let mut new_states: Vec<DWAState> = Vec::with_capacity(new_idx);
+        for rep in 0..n {
+            if !is_rep[rep] {
                 continue;
             }
 
-            let old_state = &self.states[q];
+            // Start with the representative's state
             let mut new_state = DWAState {
-                final_weight: old_state.final_weight.clone(),
+                final_weight: None,
                 transitions: BTreeMap::new(),
                 trans_weights: BTreeMap::new(),
-                state_weight: old_state.state_weight.clone(),
+                state_weight: self.states[rep].state_weight.clone(),
             };
 
-            for (&label, &target) in &old_state.transitions {
-                let new_target = old_to_new[target].unwrap_or(0);
-                new_state.transitions.insert(label, new_target);
-                if let Some(w) = old_state.trans_weights.get(&label) {
-                    new_state.trans_weights.insert(label, w.clone());
+            // Union in all members' weights
+            for &member in &members[rep] {
+                let old_state = &self.states[member];
+
+                // Union final weights
+                if let Some(ref fw) = old_state.final_weight {
+                    new_state.final_weight = Some(match new_state.final_weight {
+                        Some(ref existing) => existing | fw,
+                        None => fw.clone(),
+                    });
+                }
+
+                // Union transition weights (and collect transitions)
+                for (&label, &target) in &old_state.transitions {
+                    let new_target = old_to_new[target].unwrap_or(0);
+                    new_state.transitions.insert(label, new_target);
+
+                    if let Some(tw) = old_state.trans_weights.get(&label) {
+                        let entry = new_state.trans_weights.entry(label).or_insert_with(Weight::zeros);
+                        *entry = &*entry | tw;
+                    }
                 }
             }
 

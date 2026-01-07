@@ -67,6 +67,61 @@ impl DWA {
         g
     }
 
+    /// Compute live(s) for all states: tokens that CAN be accepted from state s.
+    ///
+    /// live(s) = F(s) ∪ ⋃_{s -a,w-> t} (w ∩ live(t))
+    ///
+    /// A token is "live" at state s if:
+    /// 1. It can be accepted immediately (in the final weight), OR
+    /// 2. There's a transition that allows it AND it's live at the target
+    ///
+    /// Used for overlap-compatible merging: trim transitions to only carry live weights.
+    pub fn compute_live_sets(&self) -> Vec<Weight> {
+        let n = self.states.len();
+        if n == 0 {
+            return vec![];
+        }
+
+        // Compute reverse topological order (sinks first)
+        let topo_order = self.reverse_topological_order();
+
+        // Initialize live[q] for all states
+        let mut live: Vec<Weight> = vec![Weight::zeros(); n];
+
+        // Process in reverse topological order (sinks first)
+        for &q in &topo_order {
+            // Start with the final weight (tokens accepted immediately)
+            let mut live_q = self.states[q]
+                .final_weight
+                .clone()
+                .unwrap_or_else(Weight::zeros);
+
+            // For each outgoing transition, union with (w ∩ live(target))
+            for (&label, &target) in &self.states[q].transitions {
+                if target >= n {
+                    continue;
+                }
+
+                // Transition weight (defaults to ALL if not specified)
+                let trans_weight = self.states[q]
+                    .trans_weights
+                    .get(&label)
+                    .cloned()
+                    .unwrap_or_else(Weight::all);
+
+                // w ∩ live(target) = tokens that can pass through this edge AND be accepted later
+                let reachable = &trans_weight & &live[target];
+
+                // Union into live_q
+                live_q = &live_q | &reachable;
+            }
+
+            live[q] = live_q;
+        }
+
+        live
+    }
+
     /// Compute reverse topological order (sinks first, sources last).
     pub(crate) fn reverse_topological_order(&self) -> Vec<usize> {
         let n = self.states.len();

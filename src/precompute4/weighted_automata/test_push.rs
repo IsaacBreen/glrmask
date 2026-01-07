@@ -234,7 +234,6 @@ fn test_field_name_optimization() {
 //   ABC (fw={0,1,2}) -[0, w=ALL]-> END (fw={3})
 
 #[test]
-#[ignore = "Requires overlap-compatible merging for states with different intermediate finals"]
 fn test_diamond_structure() {
     // Labels
     let l0: Label = 0;

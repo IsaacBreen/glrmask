@@ -1,7 +1,17 @@
 //! Provably minimal acyclic DWA minimization.
 //!
-//! Algorithm: Forbidden-set dualization + canonical weight pushing + bottom-up merging.
-//! Guarantees the absolute minimum number of states among all equivalent DWAs.
+//! Algorithm: Live-set trimming + overlap-compatible merging.
+//! 
+//! Key insight: States can merge even if they have different final/edge weights,
+//! as long as the differences are on tokens that are "dead" (can never be accepted).
+//!
+//! Pipeline:
+//! 1. Prune unreachable/dead-ends
+//! 2. Compute live(q) = tokens that can be accepted from state q
+//! 3. Trim edges: W(p,a) &= live(target)
+//! 4. Overlap-compatible merge (union weights when merging)
+//! 5. Optional: relax edges back (W |= dead(target)) for canonical form
+//! 6. Final prune
 
 mod forbidden;
 mod normalize;
@@ -13,8 +23,7 @@ use crate::precompute4::weighted_automata::dwa::DWA;
 impl DWA {
     /// Minimize an acyclic DWA to the absolute minimum number of states.
     ///
-    /// Uses forbidden-set dualization for canonical weight pushing,
-    /// followed by bottom-up signature merging.
+    /// Uses live-set trimming and overlap-compatible merging.
     pub fn minimize_acyclic(&mut self) {
         if self.states.len() == 0 {
             return;
@@ -22,7 +31,7 @@ impl DWA {
         self.minimize_internal_acyclic();
     }
 
-    /// Internal minimization: normalize weights then merge by signature.
+    /// Internal minimization: trim edges then merge with overlap compatibility.
     pub fn minimize_internal_acyclic(&mut self) -> bool {
         let initial_states = self.states.len();
         if initial_states == 0 {
@@ -37,19 +46,25 @@ impl DWA {
             return initial_states > 0;
         }
 
-        // Phase 1: Compute g(q) for all states
-        let g = self.compute_unavoidably_forbidden();
+        // Phase 1: Compute live(q) for all states
+        // live(q) = tokens that can be accepted from state q
+        let live = self.compute_live_sets();
 
-        // Phase 2: Normalize weights (canonical pushing)
-        let initial_forbidden = self.normalize_weights(&g);
+        // Phase 2: Trim edges: W(p,a) &= live(target)
+        // This removes dead tokens, enabling overlap-compatible merging
+        let _start_live = self.normalize_weights(&live);
 
-        // Phase 3: Bottom-up merge by signature
-        self.merge_by_signature();
+        // Phase 3: Overlap-compatible merge with weight union
+        self.merge_by_signature(&live);
 
-        // Phase 4: Apply initial forbidden as start-state constraint
-        self.apply_initial_forbidden(&initial_forbidden);
+        // Phase 4: Recompute live sets for the merged automaton
+        let new_live = self.compute_live_sets();
 
-        // Phase 5: Final prune to remove any dead-ends created during merge
+        // Phase 5: Relax edges back to canonical form
+        // W(p,a) |= dead(target) to get "ALL" where possible
+        self.relax_edges(&new_live);
+
+        // Phase 6: Final prune to remove any dead-ends created during merge
         self.prune_dead_ends_acyclic();
 
         self.states.len() < initial_states
