@@ -29,20 +29,23 @@ pub fn minimize_acyclic_exact(dwa: &DWA) -> Result<DWA, DWABuildError> {
     if dwa.states.len() == 0 {
         return Ok(DWA::new());
     }
+    
+    // Step 0: Preprocess - tighten weights by removing unreachable tokens
+    let dwa = tighten_weights(dwa)?;
 
     // 1. Topological Sort & Reachability Analysis
     // We need to process from leaves (End) up to Start.
     // This also acts as a cycle check.
-    let topo_order = compute_topo_order(dwa)?;
+    let topo_order = compute_topo_order(&dwa)?;
 
     // 2. Compute "Needed" sets (Reverse Flow Analysis).
     // Needed[u] contains all tokens that can ever be accepted by any path starting at u.
     // This effectively calculates the "Domain" of the state's future function.
-    let needed = compute_needed_sets(dwa, &topo_order);
+    let needed = compute_needed_sets(&dwa, &topo_order);
 
     // 3. Layer states by topological height (distance to sink).
     // States at height 0 are finals/sinks. States at H point only to states < H.
-    let heights = compute_heights(dwa, &topo_order);
+    let heights = compute_heights(&dwa, &topo_order);
     let max_height = heights.iter().max().copied().unwrap_or(0);
 
     let mut states_by_height: Vec<Vec<StateID>> = vec![vec![]; max_height + 1];
@@ -59,6 +62,16 @@ pub fn minimize_acyclic_exact(dwa: &DWA) -> Result<DWA, DWABuildError> {
     let mut old_to_new: HashMap<StateID, StateID> = HashMap::new();
     let mut new_states: Vec<MergedStateBuilder> = Vec::new();
 
+    // Diagnostic counters
+    let mut diag_total_pairs = 0usize;
+    let mut diag_disjoint = 0usize;
+    let mut diag_final_mismatch = 0usize;
+    let mut diag_eff_weight_mismatch = 0usize;
+    let mut diag_raw_weight_mismatch = 0usize;
+    let mut diag_raw_full_mismatch = 0usize;
+    let mut diag_target_mismatch = 0usize;
+    let mut diag_compatible = 0usize;
+
     // Process from leaves (height 0) upwards
     for h in 0..=max_height {
         let candidates = &states_by_height[h];
@@ -66,12 +79,20 @@ pub fn minimize_acyclic_exact(dwa: &DWA) -> Result<DWA, DWABuildError> {
 
         // A. Build Incompatibility Graph for this layer
         // Two states are incompatible if they CANNOT be merged.
-        let adj = build_incompatibility_graph(
-            dwa,
+        let adj = build_incompatibility_graph_with_diag(
+            &dwa,
             candidates,
             &needed,
             &old_to_new,
-            &new_states
+            &new_states,
+            &mut diag_total_pairs,
+            &mut diag_disjoint,
+            &mut diag_final_mismatch,
+            &mut diag_eff_weight_mismatch,
+            &mut diag_raw_weight_mismatch,
+            &mut diag_raw_full_mismatch,
+            &mut diag_target_mismatch,
+            &mut diag_compatible,
         );
 
         // B. Solve Exact Graph Coloring to find minimum cliques
@@ -134,6 +155,18 @@ pub fn minimize_acyclic_exact(dwa: &DWA) -> Result<DWA, DWABuildError> {
             }
         }
     }
+
+    // Print diagnostics
+    eprintln!("=== DWA Minimization Diagnostics ===");
+    eprintln!("Total pairs checked: {}", diag_total_pairs);
+    eprintln!("  Disjoint domains (Diamond): {}", diag_disjoint);
+    eprintln!("  Final weight mismatch: {}", diag_final_mismatch);
+    eprintln!("  Effective weight mismatch: {}", diag_eff_weight_mismatch);
+    eprintln!("  Raw weight on domain mismatch: {}", diag_raw_weight_mismatch);
+    eprintln!("  Raw weight FULL mismatch: {}", diag_raw_full_mismatch);
+    eprintln!("  Target state mismatch: {}", diag_target_mismatch);
+    eprintln!("  Compatible (mergeable): {}", diag_compatible);
+    eprintln!("Input states: {}, Output states: {}", dwa.states.len(), new_states.len());
 
     // 5. Reconstruct the Final DWA
     reconstruct_dwa(dwa.body.start_state, &old_to_new, new_states)
@@ -209,6 +242,87 @@ fn compute_needed_sets(dwa: &DWA, topo_order: &[StateID]) -> Vec<Weight> {
         needed[u] = acc;
     }
     needed
+}
+
+/// Compute forward reachability: which tokens can reach each state from the start
+fn compute_forward_reachable(dwa: &DWA, topo_order: &[StateID]) -> Vec<Weight> {
+    let mut forward = vec![Weight::zeros(); dwa.states.len()];
+    
+    // Start state can reach all tokens
+    forward[dwa.body.start_state] = Weight::all();
+    
+    // Process in reverse topo order (from start toward leaves)
+    for &u in topo_order.iter().rev() {
+        let incoming = forward[u].clone();
+        if incoming.is_empty() { continue; }
+        
+        for (&lbl, &v) in &dwa.states[u].transitions {
+            if v >= dwa.states.len() { continue; }
+            let w_trans = dwa.states[u].trans_weights.get(&lbl).unwrap();
+            // Tokens that can reach v through this transition
+            let mut contribution = incoming.clone();
+            contribution &= w_trans;
+            forward[v] |= &contribution;
+        }
+    }
+    
+    forward
+}
+
+/// Tighten DWA weights by removing tokens that can never reach a transition.
+/// 
+/// This is a semantic-preserving transformation that restricts each transition's
+/// weight to only include tokens that can actually reach that transition from the start.
+/// 
+/// The key insight: if a token T can never reach state S, then the weight of S's
+/// outgoing transitions doesn't matter for T. By removing T from those weights,
+/// we might create more opportunities for state merging (disjoint domains).
+fn tighten_weights(dwa: &DWA) -> Result<DWA, DWABuildError> {
+    if dwa.states.len() == 0 {
+        return Ok(DWA::new());
+    }
+    
+    // Compute topo order
+    let topo_order = compute_topo_order(dwa)?;
+    
+    // Compute forward reachability
+    let forward = compute_forward_reachable(dwa, &topo_order);
+    
+    // Create new DWA with tightened weights
+    let mut new_states = DWAStates(Vec::with_capacity(dwa.states.len()));
+    
+    for (u, state) in dwa.states.0.iter().enumerate() {
+        let mut new_state = DWAState::default();
+        
+        // Tighten final weight: only keep tokens that can reach this state
+        if let Some(fw) = &state.final_weight {
+            let tightened = fw & &forward[u];
+            if !tightened.is_empty() {
+                new_state.final_weight = Some(tightened);
+            }
+        }
+        
+        // Tighten transition weights
+        for (&lbl, &target) in &state.transitions {
+            if target >= dwa.states.len() { continue; }
+            
+            let w_orig = state.trans_weights.get(&lbl).unwrap();
+            // Tighten: only keep tokens that can reach this state
+            let tightened = w_orig & &forward[u];
+            
+            if !tightened.is_empty() {
+                new_state.transitions.insert(lbl, target);
+                new_state.trans_weights.insert(lbl, tightened);
+            }
+        }
+        
+        new_states.0.push(new_state);
+    }
+    
+    Ok(DWA {
+        states: new_states,
+        body: dwa.body.clone(),
+    })
 }
 
 fn compute_heights(dwa: &DWA, topo_order: &[StateID]) -> Vec<usize> {
@@ -342,6 +456,139 @@ fn are_compatible(
     true
 }
 
+#[derive(Clone, Copy, Debug)]
+enum IncompatReason {
+    Compatible,
+    DisjointDomain,  // Actually compatible
+    FinalMismatch,
+    EffWeightMismatch,
+    RawWeightOnDomainMismatch,
+    RawWeightFullMismatch,
+    TargetMismatch,
+}
+
+fn are_compatible_diag(
+    u: StateID,
+    v: StateID,
+    dwa: &DWA,
+    needed: &[Weight],
+    old_to_new: &HashMap<StateID, StateID>,
+    _new_states: &[MergedStateBuilder]
+) -> IncompatReason {
+    // Compute the overlapping domain of tokens
+    let mut domain = needed[u].clone();
+    domain &= &needed[v];
+
+    // If domains are disjoint, states can be safely merged (Diamond case)
+    if domain.is_empty() {
+        return IncompatReason::DisjointDomain;
+    }
+
+    let fw_u = dwa.states[u].final_weight.as_ref().cloned().unwrap_or_else(Weight::zeros);
+    let fw_v = dwa.states[v].final_weight.as_ref().cloned().unwrap_or_else(Weight::zeros);
+
+    if (&fw_u & &domain) != (&fw_v & &domain) {
+        return IncompatReason::FinalMismatch;
+    }
+
+    let mut labels: BTreeSet<Label> = dwa.states[u].transitions.keys().copied().collect();
+    labels.extend(dwa.states[v].transitions.keys());
+
+    for lbl in labels {
+        let trans_u = dwa.states[u].get_transition(lbl);
+        let trans_v = dwa.states[v].get_transition(lbl);
+
+        let w_u_raw = match trans_u {
+            Some((_, w)) => w.clone(),
+            None => Weight::zeros(),
+        };
+        let w_v_raw = match trans_v {
+            Some((_, w)) => w.clone(),
+            None => Weight::zeros(),
+        };
+
+        let mut w_u_eff = w_u_raw.clone();
+        if let Some((target_u, _)) = trans_u {
+             if target_u < needed.len() {
+                  w_u_eff &= &needed[target_u];
+             }
+        }
+
+        let mut w_v_eff = w_v_raw.clone();
+        if let Some((target_v, _)) = trans_v {
+             if target_v < needed.len() {
+                  w_v_eff &= &needed[target_v];
+             }
+        }
+
+        if (&w_u_eff & &domain) != (&w_v_eff & &domain) {
+            return IncompatReason::EffWeightMismatch;
+        }
+
+        if (&w_u_raw & &domain) != (&w_v_raw & &domain) {
+            return IncompatReason::RawWeightOnDomainMismatch;
+        }
+
+        let w_u_on_domain = &w_u_raw & &domain;
+        let w_v_on_domain = &w_v_raw & &domain;
+        if !w_u_on_domain.is_empty() && !w_v_on_domain.is_empty() && w_u_raw != w_v_raw {
+            return IncompatReason::RawWeightFullMismatch;
+        }
+
+        let w_common = &w_u_eff & &domain;
+        if !w_common.is_empty() {
+            let target_u_old = trans_u.unwrap().0;
+            let target_v_old = trans_v.unwrap().0;
+
+            let target_u_new = old_to_new.get(&target_u_old).expect("Bottom-up violation");
+            let target_v_new = old_to_new.get(&target_v_old).expect("Bottom-up violation");
+
+            if target_u_new != target_v_new {
+                return IncompatReason::TargetMismatch;
+            }
+        }
+    }
+
+    IncompatReason::Compatible
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_incompatibility_graph_with_diag(
+    dwa: &DWA,
+    candidates: &[StateID],
+    needed: &[Weight],
+    old_to_new: &HashMap<StateID, StateID>,
+    new_states: &[MergedStateBuilder],
+    diag_total_pairs: &mut usize,
+    diag_disjoint: &mut usize,
+    diag_final_mismatch: &mut usize,
+    diag_eff_weight_mismatch: &mut usize,
+    diag_raw_weight_mismatch: &mut usize,
+    diag_raw_full_mismatch: &mut usize,
+    diag_target_mismatch: &mut usize,
+    diag_compatible: &mut usize,
+) -> Vec<Vec<usize>> {
+    let n = candidates.len();
+    let mut adj = vec![vec![]; n];
+
+    for i in 0..n {
+        for j in (i+1)..n {
+            *diag_total_pairs += 1;
+            let reason = are_compatible_diag(candidates[i], candidates[j], dwa, needed, old_to_new, new_states);
+            match reason {
+                IncompatReason::Compatible => { *diag_compatible += 1; }
+                IncompatReason::DisjointDomain => { *diag_disjoint += 1; }
+                IncompatReason::FinalMismatch => { *diag_final_mismatch += 1; adj[i].push(j); adj[j].push(i); }
+                IncompatReason::EffWeightMismatch => { *diag_eff_weight_mismatch += 1; adj[i].push(j); adj[j].push(i); }
+                IncompatReason::RawWeightOnDomainMismatch => { *diag_raw_weight_mismatch += 1; adj[i].push(j); adj[j].push(i); }
+                IncompatReason::RawWeightFullMismatch => { *diag_raw_full_mismatch += 1; adj[i].push(j); adj[j].push(i); }
+                IncompatReason::TargetMismatch => { *diag_target_mismatch += 1; adj[i].push(j); adj[j].push(i); }
+            }
+        }
+    }
+    adj
+}
+
 fn build_incompatibility_graph(
     dwa: &DWA,
     candidates: &[StateID],
@@ -363,9 +610,43 @@ fn build_incompatibility_graph(
     adj
 }
 
+/// Greedy graph coloring - fast but not optimal
+fn solve_greedy_coloring(adj: &Vec<Vec<usize>>) -> Vec<usize> {
+    let n = adj.len();
+    if n == 0 { return vec![]; }
+
+    let mut colors = vec![usize::MAX; n];
+    
+    // Sort by degree (high degree nodes first)
+    let mut nodes: Vec<usize> = (0..n).collect();
+    nodes.sort_by_key(|&i| std::cmp::Reverse(adj[i].len()));
+
+    for &u in &nodes {
+        // Find smallest color not used by neighbors
+        let neighbor_colors: std::collections::BTreeSet<usize> = 
+            adj[u].iter().filter_map(|&v| {
+                if colors[v] != usize::MAX { Some(colors[v]) } else { None }
+            }).collect();
+        
+        let mut c = 0;
+        while neighbor_colors.contains(&c) {
+            c += 1;
+        }
+        colors[u] = c;
+    }
+    
+    colors
+}
+
 fn solve_exact_graph_coloring(adj: &Vec<Vec<usize>>) -> Vec<usize> {
     let n = adj.len();
     if n == 0 { return vec![]; }
+    
+    // For graphs with more than 50 nodes, use greedy coloring to avoid exponential blowup
+    // The exact solver has worst-case exponential time complexity
+    if n > 50 {
+        return solve_greedy_coloring(adj);
+    }
 
     let mut colors = vec![usize::MAX; n];
     let mut best_coloring = vec![0; n];
