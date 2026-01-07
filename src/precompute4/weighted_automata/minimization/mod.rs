@@ -122,6 +122,7 @@ impl DWA {
     /// Lightweight version - just prunes, no full minimization.
     pub fn minimize_lightweight_acyclic(&mut self) {
         self.pass0_prune();
+        self.minimize();
     }
 
     /// Single pass - runs full minimization once.
@@ -135,8 +136,7 @@ impl DWA {
     }
 
     pub fn push_weights_into_transitions_and_finals_acyclic(&mut self) -> bool {
-        self.pass1_weight_push();
-        true
+        false
     }
 
     pub fn push_weights_to_initial_acyclic(&mut self) -> bool {
@@ -152,8 +152,7 @@ impl DWA {
     }
 
     pub fn loosen_weights_for_minimize_acyclic(&mut self) -> bool {
-        self.pass2_weight_relax();
-        true
+        false
     }
 
     // Legacy methods for compatibility with old API
@@ -224,7 +223,7 @@ impl DWA {
     }
 
     pub fn merge_by_signature(&mut self, _live: &[Weight]) {
-        self.pass3_state_merge();
+
     }
 
     pub fn relax_edges(&mut self, live: &[Weight]) {

@@ -67,7 +67,7 @@ impl DWA {
     // ========================================================================
 
     /// Remove unreachable states (forward from start) and dead-ends (backward from finals).
-    pub(crate) fn pass0_prune(&mut self) {
+     fn pass0_prune(&mut self) {
         self.prune_unreachable_acyclic();
         self.prune_dead_ends_acyclic();
     }
@@ -159,7 +159,7 @@ impl DWA {
     /// Push zeros toward the start: ω_T(q,a) ← ω_T(q,a) ∩ B[target]
     ///
     /// B[q] = weights that can survive from q to some accepting state
-    pub(crate) fn pass1_weight_push(&mut self) {
+     fn pass1_weight_push(&mut self) {
         let n = self.states.len();
         if n == 0 {
             return;
@@ -228,7 +228,7 @@ impl DWA {
     ///    d. Update B[q] to include the relaxed final weight
     ///    e. Relax all outgoing transitions: add (W \ R[q]) | (W \ B[target])
     ///    f. Update B[q] to reflect the relaxed transitions
-    pub(crate) fn pass2_weight_relax(&mut self) {
+     fn pass2_weight_relax(&mut self) {
         let n = self.states.len();
         if n == 0 {
             return;
@@ -359,7 +359,7 @@ impl DWA {
     /// Merge states with identical signatures (bottom-up).
     ///
     /// After relaxation, states that can merge have exactly identical weights.
-    pub(crate) fn pass3_state_merge(&mut self) {
+     fn pass3_state_merge(&mut self) {
         let n = self.states.len();
         if n == 0 {
             return;
@@ -530,7 +530,7 @@ impl DWA {
     }
 
     /// Compute reverse topological order (sinks first).
-    pub(crate) fn reverse_topological_order(&self) -> Vec<usize> {
+     fn reverse_topological_order(&self) -> Vec<usize> {
         let n = self.states.len();
         if n == 0 {
             return vec![];
