@@ -53,16 +53,10 @@ impl DWA {
         // Pass 1: Weight Pushing
         self.pass1_weight_push();
 
-        // Pass 3: State Merging (BEFORE relaxation!)
-        // This is important: if residuated_push has already prepared states for merging,
-        // we need to merge them before weight relaxation breaks the symmetry.
-        self.pass3_state_merge();
-
-        // Pass 2: Weight Relaxation (AFTER merging)
-        // Now that equivalent states are merged, relaxation won't break symmetry.
+        // Pass 2: Weight Relaxation
         self.pass2_weight_relax();
 
-        // Pass 3 again: in case relaxation enabled more merging
+        // Pass 3: State Merging
         self.pass3_state_merge();
 
         self.states.len() < initial_states
@@ -638,100 +632,8 @@ impl DWA {
         false // Not used in new algorithm
     }
 
-    /// Residuated weight pushing for acyclic DWAs.
-    ///
-    /// This algorithm enables state merging by:
-    /// 1. Computing B[q] = weights that can finish from state q
-    /// 2. Restricting transitions: w'(q→r) = w(q→r) ∩ B[r]
-    /// 3. Relaxing finals: final'(q) = final(q) ∪ ¬B[q]
-    ///
-    /// After this transformation, states with identical outgoing behavior
-    /// (same transitions and final weights) can be merged, even if they
-    /// originally had different final weights.
     pub fn residuated_push_acyclic(&mut self) -> bool {
-        let n = self.states.len();
-        if n == 0 {
-            return false;
-        }
-
-        // Step 1: Compute B[q] (backward reachability) in reverse topological order
-        let rev_topo = self.reverse_topological_order();
-        let mut b: Vec<Weight> = vec![Weight::zeros(); n];
-
-        for &q in &rev_topo {
-            let mut b_q = self.states[q]
-                .final_weight
-                .clone()
-                .unwrap_or_else(Weight::zeros);
-
-            for (&label, &target) in &self.states[q].transitions {
-                if target >= n {
-                    continue;
-                }
-                let tw = self.states[q]
-                    .trans_weights
-                    .get(&label)
-                    .cloned()
-                    .unwrap_or_else(Weight::all);
-                b_q = &b_q | &(&tw & &b[target]);
-            }
-
-            b[q] = b_q;
-        }
-
-        let mut changed = false;
-
-        // Step 2: Restrict transitions: w'(q→r) = w(q→r) ∩ B[r]
-        for q in 0..n {
-            let labels: Vec<i32> = self.states[q].transitions.keys().copied().collect();
-            for label in labels {
-                let target = self.states[q].transitions[&label];
-                if target >= n {
-                    continue;
-                }
-
-                let tw = self.states[q]
-                    .trans_weights
-                    .get(&label)
-                    .cloned()
-                    .unwrap_or_else(Weight::all);
-
-                let new_tw = &tw & &b[target];
-
-                if new_tw != tw {
-                    if new_tw.is_empty() {
-                        // Remove dead transition
-                        self.states.0[q].transitions.remove(&label);
-                        self.states.0[q].trans_weights.remove(&label);
-                    } else {
-                        self.states.0[q].trans_weights.insert(label, new_tw);
-                    }
-                    changed = true;
-                }
-            }
-        }
-
-        // Step 3: Relax finals: final'(q) = final(q) ∪ ¬B[q]
-        // This makes states with the same outgoing behavior have the same final weight
-        for q in 0..n {
-            // Skip the start state - we don't want to relax its final weight
-            // (though typically start state doesn't have a final weight anyway)
-            if q == self.body.start_state {
-                continue;
-            }
-
-            let complement_b_q = b[q].complement();
-
-            if let Some(ref mut fw) = self.states.0[q].final_weight {
-                let new_fw = fw.clone() | &complement_b_q;
-                if new_fw != *fw {
-                    *fw = new_fw;
-                    changed = true;
-                }
-            }
-        }
-
-        changed
+        false // Not used in new algorithm
     }
 
     pub fn minimize_states_acyclic(&mut self) -> bool {
