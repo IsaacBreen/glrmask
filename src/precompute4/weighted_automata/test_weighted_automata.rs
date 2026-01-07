@@ -2423,3 +2423,33 @@ mod determinization_tests {
         assert!(!weight.is_empty(), "Path should be valid after determinization. Word: {}", format_word(&word));
     }
 }
+#[test]
+fn test_dwa_roundtrip_minimal_repro() {
+    fn neg(x: Label) -> Label {
+        Label::MIN + x
+    }
+
+    // A minimal DWA that accepts [1, neg(1), neg(4)] with weight [0].
+    // This is a minimal reproduction of the failure in test_dwa_to_nwa_to_dwa_roundtrip.
+    let mut a = DWA::new();
+    let s1 = a.add_state();
+    let s2 = a.add_state();
+    let s3 = a.add_state();
+    
+    a.add_transition(0, 1, s1, Weight::from_item(0)).unwrap();
+    a.add_transition(s1, neg(1), s2, Weight::from_item(0)).unwrap();
+    a.add_transition(s2, neg(4), s3, Weight::from_item(0)).unwrap();
+    a.set_final_weight(s3, Weight::from_item(0)).unwrap();
+    
+    println!("Original Minimal DWA:\n{}", a);
+
+    let nwa = NWA::from_dwa(&a);
+    println!("Converted NWA:\n{}", nwa);
+
+    let mut roundtrip_dwa = nwa.determinize();
+    roundtrip_dwa.minimize();
+
+    println!("Roundtrip DWA:\n{}", roundtrip_dwa);
+
+    stochastic_equivalence_test(a, roundtrip_dwa);
+}
