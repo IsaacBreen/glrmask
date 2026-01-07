@@ -3,7 +3,7 @@
 #![allow(dead_code)]
 #![allow(clippy::needless_borrow)]
 
-use super::common::{format_pos_code, Label, StateID, Weight};
+pub(crate) use super::common::{format_pos_code, Label, StateID, Weight};
 use std::collections::BTreeMap;
 use std::fmt::{self, Display, Formatter};
 use std::ops::{Deref, Index, IndexMut};

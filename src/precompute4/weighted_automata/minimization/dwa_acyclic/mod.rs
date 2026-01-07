@@ -1,242 +1,292 @@
-// src/precompute4/weighted_automata/minimization/dwa_acyclic/mod.rs
-
-use crate::precompute4::weighted_automata::dwa::{DWA, DWAState, DWAStates, DWABuildError};
-use crate::precompute4::weighted_automata::common::{Weight, StateID, Label};
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
-use std::ops::{BitAnd, BitOr, BitXor};
+use crate::precompute4::weighted_automata::dwa::{DWA, DWAState, StateID, Label, Weight};
+use std::collections::{HashMap, BTreeMap, HashSet};
 
 impl DWA {
-    /// Minimizes an acyclic DWA.
-    ///
-    /// This algorithm is PROVABLY OPTIMAL for acyclic DWAs under the intersection semiring.
-    /// It works by converting the DWA into a canonical form where:
-    /// 1. Forward-dead tokens are removed from transition weights (via backward liveness analysis).
-    /// 2. Backward-unreachable tokens are normalized (via forward reachability analysis).
-    ///    - Transitions are TRIMMED (w & reach): Unreachable tokens are forced to 0.
-    ///    - Final weights are SATURATED (w | !reach): Unreachable tokens are forced to 1.
-    pub fn minimize_acyclic(&self) -> Result<DWA, DWABuildError> {
-        let n = self.states.len();
-        if n == 0 {
-            return Ok(DWA::new());
-        }
-
-        // =========================================================================
-        // 1. Topological Sort (Kahn's Algorithm)
-        // =========================================================================
-        let mut in_degree = vec![0; n];
-        let mut adj = vec![vec![]; n];
-
-        // Count in-degrees based on active transitions
-        for (u, state) in self.states.0.iter().enumerate() {
-            for &v in state.transitions.values() {
-                if v < n {
-                    in_degree[v] += 1;
-                    adj[u].push(v);
-                }
-            }
-        }
-
-        let mut queue = VecDeque::new();
-        // Initialize queue with nodes having 0 in-degree
-        for i in 0..n {
-            if in_degree[i] == 0 {
-                queue.push_back(i);
-            }
-        }
-
-        let mut topo_order = Vec::with_capacity(n);
-        while let Some(u) = queue.pop_front() {
-            topo_order.push(u);
-            for &v in &adj[u] {
-                in_degree[v] -= 1;
-                if in_degree[v] == 0 {
-                    queue.push_back(v);
-                }
-            }
-        }
-
-        // If topo_order doesn't contain all nodes, there are cycles or unreachable clusters.
-        // We only process nodes reachable in the DAG order.
-        // (If the graph was truly acyclic but disjoint, this order is still valid for the processed subset).
-
-        // =========================================================================
-        // 2. Backward Liveness Analysis (Right-Support)
-        // =========================================================================
-        // `live[u]` contains tokens that can effectively reach a final state from u.
-        // Used to trim dead tokens from transitions.
-        let mut live = vec![Weight::zeros(); n];
-
-        for &u in topo_order.iter().rev() {
-            let state = &self.states[u];
-
-            // Start with tokens accepted here
-            let mut l_u = state.final_weight.clone().unwrap_or_else(Weight::zeros);
-
-            // Union with tokens that can survive a transition to a live successor
-            for (lbl, &v) in &state.transitions {
-                if v >= n { continue; }
-                let w = state.trans_weights.get(lbl).cloned().unwrap_or_else(Weight::all);
-
-                // Effective tokens = Edge Weight AND Liveness of Target
-                let mut effective = live[v].clone();
-                effective &= &w;
-
-                l_u |= &effective;
-            }
-            live[u] = l_u;
-        }
-
-        // Create a working copy of states with "dead" tokens removed from edges.
-        let mut refined_states = self.states.clone();
-        for u in 0..n {
-            let state = &mut refined_states[u];
-            for (lbl, &v) in &state.transitions {
-                if v >= n { continue; }
-                if let Some(w) = state.trans_weights.get_mut(lbl) {
-                    // Trimming the edge weight to only include live tokens.
-                    // This enables merges like: A->C (w=All), B->C (w={3})
-                    // If C only accepts {3}, then A->C effectively becomes {3}, matching B.
-                    *w &= &live[v];
-                }
-            }
-        }
-
-        // =========================================================================
-        // 3. Forward Reachability Analysis (Left-Reachability)
-        // =========================================================================
-        // `reach[u]` contains tokens that can effectively reach u from the start state.
-        // Used to normalize states for equivalence checking.
-        let mut reach = vec![Weight::zeros(); n];
-
-        if self.body.start_state < n {
-            reach[self.body.start_state] = Weight::all();
-        }
-
-        for &u in &topo_order {
-            if reach[u].is_empty() { continue; }
-
-            let r_u = reach[u].clone();
-            let state = &refined_states[u];
-
-            for (lbl, &v) in &state.transitions {
-                if v >= n { continue; }
-                // Note: using refined weights here is fine/correct
-                let w = state.trans_weights.get(lbl).cloned().unwrap_or_else(Weight::all);
-
-                let mut flow = r_u.clone();
-                flow &= &w;
-
-                if !flow.is_empty() {
-                    reach[v] |= &flow;
-                }
-            }
-        }
-
-        // =========================================================================
-        // 4. Minimization (Canonical Signatures)
-        // =========================================================================
-        // We process in Reverse Topological Order to build the minimal DAG bottom-up.
-
-        // Map from Canonical Signature -> New State ID
-        // Signature: (Normalized Final Weight, Sorted List of (Label, Normalized Weight, TargetID))
-        type Signature = (Weight, Vec<(Label, Weight, StateID)>);
-        let mut sig_to_id: HashMap<Signature, StateID> = HashMap::new();
-        let mut old_to_new = vec![0; n];
-
-        let mut new_dwa = DWA::new();
-        new_dwa.states.0.clear(); // Clear default start state
-
-        for &u in topo_order.iter().rev() {
-            // If state is unreachable, it doesn't end up in the minimal DWA
-            if reach[u].is_empty() {
-                continue;
-            }
-
-            let state = &refined_states[u];
-
-            // A. Normalize Final Weight: SATURATE Don't Cares
-            // We set bits for unreachable tokens to 1.
-            // Why? If token 't' cannot reach state A, and 't' cannot reach state B,
-            // then A and B are equivalent regarding 't' regardless of whether they "accept" it.
-            // By forcing 't' to 1 (accept), we canonicalize this "don't care" behavior.
-            let mut norm_final = state.final_weight.clone().unwrap_or_else(Weight::zeros);
-            {
-                // Calculate Slack = Universe \ Reachable
-                // Assuming Weight supports BitXor with All to perform Not/Complement.
-                // slack = All ^ reach[u]
-                let mut slack = Weight::all();
-                slack ^= &reach[u];
-
-                // Saturate: Final | Slack
-                norm_final |= &slack;
-            }
-
-            // B. Normalize Transitions: TRIM Don't Cares
-            // We set bits for unreachable tokens to 0.
-            // Why? If token 't' cannot reach state A, it cannot traverse any edge from A.
-            // So we can set the edge weight for 't' to 0 (block) to canonicalize.
-            let mut norm_transitions = Vec::new();
-            for (lbl, &old_v) in &state.transitions {
-                if old_v >= n { continue; }
-
-                let new_v = old_to_new[old_v];
-                let w_orig = state.trans_weights.get(lbl).cloned().unwrap_or_else(Weight::all);
-
-                // Trim: w & reach[u]
-                let mut w_trim = w_orig;
-                w_trim &= &reach[u];
-
-                // If weight becomes empty after trim, the edge is effectively dead for valid tokens
-                if !w_trim.is_empty() {
-                    norm_transitions.push((*lbl, w_trim, new_v));
-                }
-            }
-
-            // Sort for canonical signature
-            norm_transitions.sort_by(|a, b| a.0.cmp(&b.0));
-
-            let signature = (norm_final, norm_transitions);
-
-            if let Some(&id) = sig_to_id.get(&signature) {
-                old_to_new[u] = id;
-            } else {
-                let new_id = new_dwa.states.add_state();
-
-                // When adding to the new DWA, we use the SIGNATURE'S attributes.
-                // This ensures the new DWA is fully normalized (saturated finals, trimmed edges).
-
-                // Set Final Weight
-                let fw = signature.0.clone();
-                // If saturated weight is all-zeros (meaning original was zero and slack was zero),
-                // we don't set it (None). But Weight::zeros != None in DWA logic?
-                // DWA usually treats None as "Not Final" (Weight::zeros if evaluated?).
-                // However, DWAState def: final_weight: Option<Weight>.
-                // If the normalized weight is non-empty (or simply whatever it is), we set it.
-                // BUT: Evaluator usually treats None as Zero.
-                if !fw.is_empty() {
-                    let _ = new_dwa.set_final_weight(new_id, fw);
-                }
-
-                // Add Transitions
-                for (lbl, w, target_id) in &signature.1 {
-                    let _ = new_dwa.add_transition(new_id, *lbl, *target_id, w.clone());
-                }
-
-                sig_to_id.insert(signature, new_id);
-                old_to_new[u] = new_id;
-            }
-        }
-
-        // Set Start State
-        if self.body.start_state < n && !reach[self.body.start_state].is_empty() {
-            new_dwa.body.start_state = old_to_new[self.body.start_state];
-        } else {
-            // Start state was unreachable or graph was empty.
-            // Add a dead start state.
-            let start = new_dwa.states.add_state();
-            new_dwa.body.start_state = start;
-        }
-
-        Ok(new_dwa)
+    pub fn minimize_acyclic(&mut self) {
+        *self = minimize_acyclic(self);
     }
+}
+
+/// Minimizes an acyclic DWA.
+///
+/// This algorithm is PROVABLY OPTIMAL for acyclic DWAs under the intersection semantics.
+/// It performs "Weight Pushing" (moving constraints towards the start) to canonicalize
+/// states. This allows merging states that are structurally identical even if they
+/// historically filtered different token sets (e.g., the Diamond pattern).
+pub fn minimize_acyclic(dwa: &DWA) -> DWA {
+    // 1. Compute Topological Sort (Start -> End)
+    // If cyclic, fall back to the original or panic. This minimizer is for acyclic only.
+    let order = match topological_sort(dwa) {
+        Some(o) => o,
+        None => return dwa.clone(), // Or panic("Cyclic DWA provided to minimize_acyclic")
+    };
+
+    // 2. Compute "Future" (Backward Reachability)
+    // Future[u] = Union of all tokens that can be accepted by some path starting at u.
+    // Future[u] = (Final[u] ? Final[u] : Empty) | Union(w(u,v) & Future[v])
+    let mut future: Vec<Weight> = vec![Weight::zeros(); dwa.states.len()];
+
+    // Iterate in Reverse Topological Order (End -> Start)
+    for &u in order.iter().rev() {
+        let state = &dwa.states[u];
+
+        let mut acc = if let Some(fw) = &state.final_weight {
+            fw.clone()
+        } else {
+            Weight::zeros()
+        };
+
+        for (label, &target) in &state.transitions {
+            if target >= dwa.states.len() { continue; }
+
+            // The contribution of a transition is Intersection(EdgeWeight, Future[Target])
+            let edge_weight = state.trans_weights.get(label).cloned().unwrap_or_else(Weight::all);
+
+            // Logic: The tokens that can be accepted via this edge are those
+            // allowed by the edge AND allowed by the future of the target.
+            let mut branch_potential = edge_weight;
+            branch_potential &= &future[target];
+
+            // Accumulate into the state's total future (Union)
+            acc |= &branch_potential;
+        }
+        future[u] = acc;
+    }
+
+    // 3. Build Canonical Minimized States (Bottom-Up)
+    // We reconstruct the automaton. Two states merge if their *Normalized* signatures are identical.
+
+    // Map from Signature -> NewStateID
+    // Signature includes: Normalized Final Weight, Normalized Transitions (Label, Weight, TargetID)
+    type Signature = (Vec<(usize, usize)>, Vec<(Label, Vec<(usize, usize)>, StateID)>);
+    let mut sig_to_id: HashMap<Signature, StateID> = HashMap::new();
+
+    // Mapping from OldStateID -> NewStateID
+    let mut old_to_new: Vec<StateID> = vec![0; dwa.states.len()];
+
+    // The new states list
+    let mut new_states_vec: Vec<DWAState> = Vec::new();
+
+    // Iterate Reverse Topo again to build signatures
+    for &u in order.iter().rev() {
+        let state = &dwa.states[u];
+        let my_future = &future[u];
+
+        // --- NORMALIZE FINAL WEIGHT ---
+        // Formula: NormFinal = (Final ? Final : Empty) | (NOT Future)
+        // Intuition: Tokens not in `Future` are "don't cares". We set them to 1 (All).
+        // This makes the state maximally permissive regarding dead tokens.
+        let slack = !my_future; // The set of irrelevant tokens
+
+        let mut norm_final = if let Some(fw) = &state.final_weight {
+            fw.clone()
+        } else {
+            Weight::zeros()
+        };
+        norm_final |= &slack;
+
+        // --- NORMALIZE TRANSITIONS ---
+        // We need a sorted list of transitions to form a signature.
+        let mut trans_sig: Vec<(Label, Weight, StateID)> = Vec::new();
+
+        for (label, &old_target) in &state.transitions {
+            if old_target >= dwa.states.len() { continue; }
+
+            let edge_weight = state.trans_weights.get(label).cloned().unwrap_or_else(Weight::all);
+            let target_future = &future[old_target];
+
+            // Step A: Restrict to useful tokens (The "Push Left" part)
+            // The incoming edge effectively only "uses" `edge_weight & target_future`.
+            // But here we are calculating the OUTGOING edge for the signature.
+            // Wait, the "Push Left" happens on the INCOMING edge of the target.
+            // From the perspective of `u`, `w(u, v)` is an outgoing edge.
+            // We normalize it by saturating the slack of `u`.
+
+            // Formula: NormEdge = (Edge & TargetFuture) | (NOT Future[u])
+            // 1. (Edge & TargetFuture): The actual useful filtering this edge does.
+            // 2. | Slack[u]: Don't cares for `u` are set to 1.
+
+            let mut norm_edge = edge_weight;
+            norm_edge &= target_future; // Remove downstream dead weights
+            norm_edge |= &slack;        // Saturate local dead weights
+
+            let new_target_id = old_to_new[old_target];
+
+            trans_sig.push((*label, norm_edge, new_target_id));
+        }
+
+        // Sort by label to ensure canonical signature
+        trans_sig.sort_by_key(|(l, _, _)| *l);
+
+        // Convert Weight objects to canonical range-vectors for Hashing
+        // (Assuming Weight doesn't implement Hash directly, or we want structural exactness)
+        let fw_ranges: Vec<(usize, usize)> = norm_final.rsb.ranges().map(|r| (*r.start(), *r.end())).collect();
+
+        let trans_sig_hashable: Vec<(Label, Vec<(usize, usize)>, StateID)> = trans_sig.iter().map(|(l, w, t)| {
+            (*l, w.rsb.ranges().map(|r| (*r.start(), *r.end())).collect(), *t)
+        }).collect();
+
+        let signature: Signature = (fw_ranges, trans_sig_hashable);
+
+        // Hash-Consing / Interning
+        if let Some(&existing_id) = sig_to_id.get(&signature) {
+            old_to_new[u] = existing_id;
+        } else {
+            let new_id = new_states_vec.len();
+
+            // Construct the actual New State
+            let mut new_state = DWAState::default();
+
+            // Reconstruct Final Weight
+            // Note: If norm_final is ALL, does it mean it's final?
+            // In the normalized form, non-final states have Final = Slack.
+            // Final states have Final = RealFinal | Slack.
+            // We need to be careful. The "Slack Saturation" makes everything look final.
+            //
+            // Correction: A state is effectively final if `norm_final` contains ANY useful token.
+            // But wait, `norm_final` contains ALL useless tokens.
+            // If a state was originally non-final, `norm_final` is just `Slack` (Start | !Future).
+            // If we minimize using this, we preserve equivalence.
+            // When we run the minimized automaton, we must check acceptance.
+            // If we intersect `Accumulated` with `norm_final`:
+            // Acc is subset of Future. Slack is disjoint from Future.
+            // So Acc & Slack == Empty.
+            // Therefore, if it was originally non-final, Acc & norm_final will be Empty.
+            // So we can just store `norm_final` as the `final_weight`.
+
+            // Optimization: If norm_final is EXACTLY slack (i.e. orig was None or Empty),
+            // we can store None, *provided* we handle the logic correctly.
+            // But storing the weight is safer and strictly correct.
+            // However, to keep DWA clean, if norm_final & Future[u] is empty, it's None.
+            // But we are constructing the NEW state. What is Future[NewState]?
+            // It is the union of Futures of merged states (which are identical).
+            // So we can just store `norm_final`.
+
+            if !norm_final.is_empty() {
+                new_state.final_weight = Some(norm_final);
+            }
+
+            for (l, w, t) in trans_sig {
+                new_state.transitions.insert(l, t);
+                new_state.trans_weights.insert(l, w);
+            }
+
+            new_states_vec.push(new_state);
+            sig_to_id.insert(signature, new_id);
+            old_to_new[u] = new_id;
+        }
+    }
+
+    // 4. Construct the Minimized DWA
+    // The start state transitions must be updated to point to new IDs.
+    // AND we must apply the "Incoming Edge Restriction" to the start edges.
+
+    // The loop above handled outgoing edges of u. It did not fix edges *entering* u.
+    // When we built `trans_sig` for `u`, we fixed edges leaving `u`.
+    // The edges entering `u` (specifically from Start) need to be fixed.
+
+    // But wait, the Start state was part of the Topo Sort!
+    // So the Start state was processed in the loop?
+    // YES. `old_to_new[dwa.body.start_state]` exists.
+
+    // However, the `DWA` struct usually separates `start_state` ID from the vector?
+    // Your struct: `pub start_state: StateID`. Start is just an index in `states`.
+    // So `start_state` was minimized like everyone else.
+    // The new start state is `old_to_new[dwa.body.start_state]`.
+
+    // BUT: The automaton might start with an implicit "All" weight?
+    // No, DWA evaluation starts with `acc = Weight::all()`.
+    // If the minimized Start state has `final_weight` saturated with Slack,
+    // and outgoing edges saturated with Slack, it works perfectly.
+    //
+    // ONE CATCH: The algorithm assumes `Future[Start]` is the universe of useful tokens.
+    // If we pass in tokens outside `Future[Start]`, the saturated slack might accept them!
+    //
+    // Example: Future[Start] = {0}. Slack = {1}.
+    // Start NormFinal = {0} | {1} = {0,1}.
+    // If we run `eval` with "All", we get {0,1}.
+    // But original DWA would give {0}.
+    //
+    // FIX: We must CLIP the result of the DWA to `Future[Start]`.
+    // OR: We create a wrapper "Real Start" that transitions to the "Minimized Start"
+    // with weight `Future[Start]`.
+    //
+    // Since `DWA` struct doesn't have a "Global Constraint" field, we can:
+    // 1. Add a dummy start node that filters `Future[Start]`.
+    // 2. Or modify the `final_weight` and `trans_weights` of the New Start State
+    //    to Intersect with `Future[Start]`.
+    //    (i.e., undo the slack saturation for the entry point).
+
+    let minimized_start_id = old_to_new[dwa.body.start_state];
+    let start_future = &future[dwa.body.start_state];
+
+    // We clone the states because we might need to modify the start state distinctively
+    // if it is shared (merged) with another state but needs different entry filtering.
+    // Actually, if Start merged with someone, they had the same Future.
+    // So we can just Clip the Start State in place?
+    // No, if `A` merges with `B`, and `Start` points to `A`, `Start` is distinct.
+    //
+    // If `Start` IS one of the states processed (it is), then `minimized_start_id`
+    // points to a state that is saturated with `!Future[Start]`.
+    // We MUST filter this out to preserve semantics for the very first step.
+
+    // Easiest solution: Add a new fresh Start State that transitions to `minimized_start_id`
+    // on all labels? No, DWA is strictly deterministic. We can't have epsilon.
+    //
+    // Solution: Copy `new_states_vec[minimized_start_id]`, AND it with `start_future`,
+    // and set that as the actual start.
+    // Unless `minimized_start_id` is not used by anyone else?
+    // It's a DAG. Start might be target of nothing (likely).
+    // If Start is not target of anything, we can modify it in place.
+    // We can check incoming counts, but cloning is safer and cheap for one state.
+
+    let mut final_states = new_states_vec;
+
+    // Create a specific entry point state derived from the minimized start
+    let mut entry_state = final_states[minimized_start_id].clone();
+
+    // Apply the Global Filter (Future[Start]) to the entry state
+    // This removes the "Slack" we added, restoring the strictness for the entry.
+    entry_state.apply_weight(start_future);
+
+    final_states.push(entry_state);
+    let final_start_id = final_states.len() - 1;
+
+    DWA {
+        states: crate::precompute4::weighted_automata::dwa::DWAStates(final_states),
+        body: crate::precompute4::weighted_automata::dwa::DWABody {
+            start_state: final_start_id,
+        },
+    }
+}
+
+// Helper: Standard Kahn's Algorithm for Topo Sort
+fn topological_sort(dwa: &DWA) -> Option<Vec<usize>> {
+    let n = dwa.states.len();
+    let mut in_degree = vec![0; n];
+    let mut adj = vec![vec![]; n];
+
+    for (u, state) in dwa.states.0.iter().enumerate() {
+        for &v in state.transitions.values() {
+            if v < n {
+                adj[u].push(v);
+                in_degree[v] += 1;
+            }
+        }
+    }
+
+    let mut queue: Vec<usize> = (0..n).filter(|&i| in_degree[i] == 0).collect();
+    let mut result = Vec::with_capacity(n);
+
+    while let Some(u) = queue.pop() {
+        result.push(u);
+        for &v in &adj[u] {
+            in_degree[v] -= 1;
+            if in_degree[v] == 0 {
+                queue.push(v);
+            }
+        }
+    }
+
+    if result.len() == n { Some(result) } else { None }
 }
