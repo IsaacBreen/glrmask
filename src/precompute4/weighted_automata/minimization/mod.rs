@@ -29,7 +29,8 @@ impl DWA {
         if self.is_cyclic() {
             self.minimize_internal_cyclic()
         } else {
-            self.minimize_acyclic()
+            self.minimize_acyclic();
+            true
         }
     }
 
@@ -127,12 +128,13 @@ impl DWA {
 
     /// Single pass - runs full minimization once.
     pub fn minimize_single_pass_acyclic(&mut self) {
-        self.minimize_internal_acyclic();
+        self.minimize_acyclic();
     }
 
     /// RustFST-based minimization (for comparison/benchmarking).
     pub fn minimize_with_rustfst_full_acyclic(&mut self) -> bool {
-        self.minimize_internal_acyclic()
+        self.minimize_acyclic();
+        true
     }
 
     pub fn push_weights_into_transitions_and_finals_acyclic(&mut self) -> bool {
@@ -148,7 +150,8 @@ impl DWA {
     }
 
     pub fn minimize_states_acyclic(&mut self) -> bool {
-        self.minimize_internal_acyclic()
+        self.minimize_acyclic();
+        true
     }
 
     pub fn loosen_weights_for_(&mut self) -> bool {
@@ -162,8 +165,8 @@ impl DWA {
             return vec![];
         }
 
-        let topo_order = self.reverse_topological_order();
-        let topo_order = todo!();
+        // let topo_order = self.reverse_topological_order();
+        let topo_order: Vec<_> = todo!();
         let mut b: Vec<Weight> = vec![Weight::zeros(); n];
 
         for &q in &topo_order {
