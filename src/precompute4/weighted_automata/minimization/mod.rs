@@ -63,7 +63,8 @@ impl DWA {
         if self.is_cyclic() {
             self.prune_unreachable_cyclic()
         } else {
-            todo!()
+            // Acyclic minimization handles pruning internally
+            false
         }
     }
 
@@ -71,7 +72,8 @@ impl DWA {
         if self.is_cyclic() {
             self.prune_dead_ends_cyclic()
         } else {
-            todo!()
+            // Acyclic minimization handles pruning internally
+            false
         }
     }
 
