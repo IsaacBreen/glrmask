@@ -388,7 +388,8 @@ fn start_behavior_id(dwa: &DWA, interner: &mut HashMap<SigKey, usize>) -> Result
     if n == 0 {
         // empty machine: always outputs empty
         let key = SigKey { final_w: WeightKey::Empty, trans: vec![] };
-        let id = *interner.entry(key).or_insert_with(|| interner.len());
+        let next_id = interner.len();
+        let id = *interner.entry(key).or_insert(next_id);
         return Ok(id);
     }
     let start = dwa.body.start_state;
@@ -413,7 +414,8 @@ fn start_behavior_id(dwa: &DWA, interner: &mut HashMap<SigKey, usize>) -> Result
         trans.sort_by_key(|(lbl, _, _)| *lbl);
 
         let key = SigKey { final_w, trans };
-        let id = *interner.entry(key).or_insert_with(|| interner.len());
+        let next_id = interner.len();
+        let id = *interner.entry(key).or_insert(next_id);
         sig_id[u] = id;
     }
 
@@ -716,10 +718,13 @@ impl RBMerge {
         // Perform union.
         self.parent[b] = a;
         self.size[a] += self.size[b];
-        self.members[a].or_assign(&self.members[b]);
-        self.blocked[a].or_assign(&self.blocked[b]);
+        let mb = self.members[b].clone();
+        self.members[a].or_assign(&mb);
+        let bb = self.blocked[b].clone();
+        self.blocked[a].or_assign(&bb);
 
-        self.final_w[a] |= &self.final_w[b];
+        let fb = self.final_w[b].clone();
+        self.final_w[a] |= &fb;
 
         // Merge transition maps: union weights; keep one target (closure merges the targets anyway).
         let trans_b = self.trans[b].clone();
