@@ -214,18 +214,27 @@ impl DWA {
 
     /// Add don't-cares for weights blocked forward or backward.
     ///
-    /// R[q] = weights surviving on ALL paths from start to q
-    /// B[q] = weights surviving on SOME path from q to accepting
+    /// KEY INSIGHT: We process in REVERSE topological order, updating B dynamically.
+    /// When we relax a final weight, we also update B[q]. This ensures that when
+    /// we later process transitions pointing to q, we use the POST-relaxation
+    /// value of B, not a stale pre-relaxation value.
     ///
-    /// For each transition (q,a) → Y:
-    ///   ω_T(q,a) ∪= (W \ R[q]) ∪ (W \ B[Y])
+    /// Algorithm:
+    /// 1. Compute R[q] = weights that CAN reach q (via some path), using UNION
+    /// 2. Process states in reverse topological order (leaves to roots):
+    ///    a. Initialize B[q] from final weight (if any)
+    ///    b. Add incoming B contributions from already-processed successors
+    ///    c. Relax final weight: add (W \ R[q]) 
+    ///    d. Update B[q] to include the relaxed final weight
+    ///    e. Relax all outgoing transitions: add (W \ R[q]) | (W \ B[target])
+    ///    f. Update B[q] to reflect the relaxed transitions
     fn pass2_weight_relax(&mut self) {
         let n = self.states.len();
         if n == 0 {
             return;
         }
 
-        // Compute forward topological order
+        // Compute forward topological order for R computation
         let fwd_topo = self.topological_order();
         
         // Compute R[q] (forward reachable weights) in topological order
@@ -234,10 +243,6 @@ impl DWA {
         // This is the correct definition because:
         // - W \ R[q] = weights that are blocked on ALL paths to q
         // - These are true "don't cares" - they can never contribute to accepting
-        //
-        // Using intersection (must reach) would be wrong because:
-        // - W \ R[q] would include weights blocked on SOME path but valid on others
-        // - Adding these as don't cares would break semantics
         let mut r: Vec<Weight> = vec![Weight::zeros(); n];
 
         // R[start] = W (all weights can reach start from start)
@@ -245,7 +250,7 @@ impl DWA {
             r[self.body.start_state] = Weight::all();
         }
 
-        // Build reverse adjacency with transition weights
+        // Build reverse adjacency with transition weights (for R computation)
         let mut incoming: Vec<Vec<(usize, i32)>> = vec![Vec::new(); n];
         for u in 0..n {
             for (&label, &v) in &self.states[u].transitions {
@@ -281,11 +286,15 @@ impl DWA {
             r[q] = r_q;
         }
 
-        // Recompute B[q] after pushing
+        // Process in REVERSE topological order, computing B and relaxing simultaneously.
+        // This ensures we process leaves (sinks) before their predecessors.
+        // When we get to a state, all its successors are already relaxed and B is up-to-date.
         let rev_topo = self.reverse_topological_order();
         let mut b: Vec<Weight> = vec![Weight::zeros(); n];
 
         for &q in &rev_topo {
+            // Step 1: Compute initial B[q] from final weight and successors
+            // Since we're in reverse topo order, all successors have been processed
             let mut b_q = self.states[q]
                 .final_weight
                 .clone()
@@ -300,38 +309,25 @@ impl DWA {
                     .get(&label)
                     .cloned()
                     .unwrap_or_else(Weight::all);
+                // B[target] is already final (post-relaxation) since we processed target first
                 b_q = &b_q | &(&tw & &b[target]);
             }
 
-            b[q] = b_q;
-        }
-
-        // Apply relaxation: add don't-cares
-        // 
-        // Now that R[q] uses UNION (weights that CAN reach q via some path):
-        // - (W \ R[q]) = weights that CANNOT reach q via ANY path
-        // - These are true don't-cares, safe to add anywhere
-        //
-        // For finals:
-        // - (W \ R[q]): weights that cannot reach this final state
-        // - (W \ B[q]): weights that cannot finish from this state
-        //   Both are safe because if w can't reach OR can't finish, w doesn't matter
-        //
-        // For transitions:
-        // - (W \ R[q]): weights that cannot reach source state
-        // - (W \ B[target]): weights that cannot finish from target state
-        for q in 0..n {
-            // cannot_reach = W \ R[q] (blocked on ALL paths to q)
+            // Step 2: Compute cannot_reach = W \ R[q]
+            // These weights can never reach this state, so they're don't-cares
             let cannot_reach = r[q].complement();
-            // cannot_finish_here = W \ B[q] (blocked on ALL paths from q)
-            let cannot_finish_here = b[q].complement();
 
-            // Relax final weights: add things that can't reach OR can't finish
+            // Step 3: Relax final weight if present
+            // Add cannot_reach to final weight (if can't reach, doesn't matter what final says)
             if let Some(ref mut fw) = self.states.0[q].final_weight {
-                *fw = fw.clone() | &cannot_reach | &cannot_finish_here;
+                let relaxed_fw = fw.clone() | &cannot_reach;
+                *fw = relaxed_fw.clone();
+                // Update b_q to reflect the relaxed final weight
+                // This is crucial: b_q needs to include the don't-cares we just added
+                b_q = &b_q | &relaxed_fw;
             }
 
-            // Relax transition weights
+            // Step 4: Relax outgoing transition weights
             let labels: Vec<i32> = self.states[q].transitions.keys().copied().collect();
             for label in labels {
                 let target = self.states[q].transitions[&label];
@@ -339,14 +335,20 @@ impl DWA {
                     continue;
                 }
 
-                // cannot_finish_from_target = W \ B[target]
+                // B[target] is already post-relaxation (processed earlier in reverse topo)
                 let cannot_finish_from_target = b[target].complement();
                 let dont_care = &cannot_reach | &cannot_finish_from_target;
 
                 if let Some(tw) = self.states.0[q].trans_weights.get_mut(&label) {
-                    *tw = tw.clone() | &dont_care;
+                    let relaxed_tw = tw.clone() | &dont_care;
+                    *tw = relaxed_tw.clone();
+                    // Update b_q to reflect the relaxed transition weight
+                    b_q = &b_q | &(&relaxed_tw & &b[target]);
                 }
             }
+
+            // Store final B[q] for use by predecessors
+            b[q] = b_q;
         }
     }
 
