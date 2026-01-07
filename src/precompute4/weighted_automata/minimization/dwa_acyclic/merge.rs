@@ -1,6 +1,8 @@
 //! Overlap-compatible merging for acyclic DWA minimization.
 //!
-//! After edge trimming, states with the same transition structure merge.
+//! States can merge if they have the same transition structure AND
+//! they agree on the intersection of their live sets (weights verify).
+//!
 //! When merging, union their final weights and transition weights.
 
 use crate::precompute4::weighted_automata::common::Weight;
@@ -9,20 +11,19 @@ use std::collections::{BTreeMap, HashMap};
 
 /// State signature for structure-based merging.
 /// 
-/// After edge trimming, we compare only transition STRUCTURE (labels and target classes),
-/// not the actual weights. States with identical structure merge with weight union.
+/// We first group states by transition STRUCTURE (labels and target classes).
+/// Then within each group, we check overlap-compatibility of weights.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct StructureSignature {
-    /// Is this state final? (bool, not the actual weight)
+    /// Is this state final?
     is_final: bool,
-    /// Sorted list of (label, target_class) - NOT weight!
+    /// Sorted list of (label, target_class)
     transitions: Vec<(i32, usize)>,
 }
 
 impl DWA {
-    /// Merge states with identical structure (same labels to equivalent targets).
-    /// When merged, union their final and transition weights.
-    pub fn merge_by_signature(&mut self, _live: &[Weight]) {
+    /// Merge states with compatible signatures (bottom-up with weight union).
+    pub fn merge_by_signature(&mut self, live: &[Weight]) {
         let n = self.states.len();
         if n == 0 {
             return;
@@ -34,25 +35,39 @@ impl DWA {
         // class[q] = canonical class ID for state q
         let mut class: Vec<usize> = (0..n).collect();
 
-        // Map from signature to canonical state ID
-        let mut sig_to_class: HashMap<StructureSignature, usize> = HashMap::new();
+        // Map from signature to LIST of canonical state IDs (potential representatives)
+        // We need a list because states with same structure might have incompatible weights
+        let mut sig_to_classes: HashMap<StructureSignature, Vec<usize>> = HashMap::new();
 
         // Process bottom-up
         for &q in &topo_order {
             let sig = self.compute_structure_signature(q, &class);
 
-            if let Some(&existing_class) = sig_to_class.get(&sig) {
-                // Merge q into existing class
-                class[q] = existing_class;
+            let mut merged = false;
+            
+            // Check against existing classes with same structure
+            if let Some(existing_classes) = sig_to_classes.get_mut(&sig) {
+                for &rep in existing_classes.iter() {
+                    if self.can_merge_overlap(q, rep, live) {
+                        class[q] = rep;
+                        merged = true;
+                        break;
+                    }
+                }
+                
+                if !merged {
+                    // Same structure but incompatible weights -> new class
+                    existing_classes.push(q);
+                    class[q] = q;
+                }
             } else {
-                // q is a new class
-                sig_to_class.insert(sig, q);
+                // New structure -> new class
+                sig_to_classes.insert(sig, vec![q]);
                 class[q] = q;
             }
         }
 
-        // Count distinct classes (representatives)
-        // A state q is a representative if class[q] == q
+        // Count distinct classes
         let num_classes = class.iter().enumerate().filter(|&(q, &c)| q == c).count();
         if num_classes == n {
             return; // No merging possible
@@ -78,6 +93,67 @@ impl DWA {
         transitions.sort_by_key(|(l, _)| *l);
 
         StructureSignature { is_final, transitions }
+    }
+
+    /// Check if two states can merge (overlap compatible).
+    /// They must agree on their shared live tokens for finals and transitions.
+    fn can_merge_overlap(&self, q1: usize, q2: usize, live: &[Weight]) -> bool {
+        let n = self.states.len();
+        if q1 >= n || q2 >= n {
+            return false;
+        }
+
+        // Compute overlap of live sets
+        let live1 = &live[q1];
+        let live2 = &live[q2];
+        let overlap = live1 & live2;
+
+        if overlap.is_empty() {
+            // No overlap means no conflict - can merge
+            return true;
+        }
+
+        // Check final weights agree on overlap
+        let f1 = self.states[q1].final_weight.as_ref();
+        let f2 = self.states[q2].final_weight.as_ref();
+        
+        match (f1, f2) {
+            (Some(w1), Some(w2)) => {
+                // Both final - must agree on overlap
+                let f1_overlap = w1 & &overlap;
+                let f2_overlap = w2 & &overlap;
+                if f1_overlap != f2_overlap {
+                    return false;
+                }
+            }
+            (None, None) => {
+                // Both non-final - ok
+            }
+            _ => {
+                // One final, one not - check if overlap would be affected
+                let final_w = f1.or(f2).unwrap();
+                let final_overlap = final_w & &overlap;
+                if !final_overlap.is_empty() {
+                    return false;
+                }
+            }
+        }
+
+        // Check transition weights agree on overlap for each label
+        // Note: Structure match guarantees keys are same
+        for label in self.states[q1].transitions.keys() {
+            let tw1 = self.states[q1].trans_weights.get(label);
+            let tw2 = self.states[q2].trans_weights.get(label);
+            
+            let w1 = tw1.map(|w| w & &overlap).unwrap_or_else(|| Weight::zeros() & &overlap);
+            let w2 = tw2.map(|w| w & &overlap).unwrap_or_else(|| Weight::zeros() & &overlap);
+            
+            if w1 != w2 {
+                return false;
+            }
+        }
+
+        true
     }
 
     /// Rebuild the DWA after merging, unioning weights for merged states.
