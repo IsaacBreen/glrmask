@@ -14,6 +14,7 @@ pub use common::{Partition, MAX_OPTIMIZE_ITERATIONS, DwaPass};
 pub use nwa::NwaPass;
 
 use crate::precompute4::weighted_automata::dwa::DWA;
+use crate::precompute4::weighted_automata::Weight;
 
 impl DWA {
     pub fn minimize(&mut self) {
@@ -110,6 +111,142 @@ impl DWA {
             self.loosen_weights_for_minimize_cyclic()
         } else {
             self.loosen_weights_for_minimize_acyclic()
+        }
+    }
+
+
+    // ========================================================================
+    // LEGACY API COMPATIBILITY
+    // ========================================================================
+
+    /// Lightweight version - just prunes, no full minimization.
+    pub fn minimize_lightweight_acyclic(&mut self) {
+        self.pass0_prune();
+    }
+
+    /// Single pass - runs full minimization once.
+    pub fn minimize_single_pass_acyclic(&mut self) {
+        self.minimize_internal_acyclic();
+    }
+
+    /// RustFST-based minimization (for comparison/benchmarking).
+    pub fn minimize_with_rustfst_full_acyclic(&mut self) -> bool {
+        self.minimize_internal_acyclic()
+    }
+
+    pub fn push_weights_into_transitions_and_finals_acyclic(&mut self) -> bool {
+        self.pass1_weight_push();
+        true
+    }
+
+    pub fn push_weights_to_initial_acyclic(&mut self) -> bool {
+        false // Not used in new algorithm
+    }
+
+    pub fn residuated_push_acyclic(&mut self) -> bool {
+        false // Not used in new algorithm
+    }
+
+    pub fn minimize_states_acyclic(&mut self) -> bool {
+        self.minimize_internal_acyclic()
+    }
+
+    pub fn loosen_weights_for_minimize_acyclic(&mut self) -> bool {
+        self.pass2_weight_relax();
+        true
+    }
+
+    // Legacy methods for compatibility with old API
+    pub fn compute_live_sets(&self) -> Vec<Weight> {
+        let n = self.states.len();
+        if n == 0 {
+            return vec![];
+        }
+
+        let topo_order = self.reverse_topological_order();
+        let mut b: Vec<Weight> = vec![Weight::zeros(); n];
+
+        for &q in &topo_order {
+            let mut b_q = self.states[q]
+                .final_weight
+                .clone()
+                .unwrap_or_else(Weight::zeros);
+
+            for (&label, &target) in &self.states[q].transitions {
+                if target >= n {
+                    continue;
+                }
+                let tw = self.states[q]
+                    .trans_weights
+                    .get(&label)
+                    .cloned()
+                    .unwrap_or_else(Weight::all);
+                b_q = &b_q | &(&tw & &b[target]);
+            }
+
+            b[q] = b_q;
+        }
+
+        b
+    }
+
+    pub fn normalize_weights(&mut self, live: &[Weight]) -> Weight {
+        let n = self.states.len();
+        if n == 0 {
+            return Weight::zeros();
+        }
+
+        let start = self.body.start_state;
+        let start_live = if start < n {
+            live[start].clone()
+        } else {
+            Weight::zeros()
+        };
+
+        // Trim each transition's weight to live(target)
+        for q in 0..n {
+            let labels: Vec<i32> = self.states[q].transitions.keys().copied().collect();
+            for label in labels {
+                let target = self.states[q].transitions[&label];
+                if target >= n {
+                    continue;
+                }
+
+                let live_target = &live[target];
+
+                if let Some(tw) = self.states.0[q].trans_weights.get_mut(&label) {
+                    *tw = tw.clone() & live_target;
+                }
+            }
+        }
+
+        start_live
+    }
+
+    pub fn merge_by_signature(&mut self, _live: &[Weight]) {
+        self.pass3_state_merge();
+    }
+
+    pub fn relax_edges(&mut self, live: &[Weight]) {
+        let n = self.states.len();
+        if n == 0 {
+            return;
+        }
+
+        for q in 0..n {
+            let labels: Vec<i32> = self.states[q].transitions.keys().copied().collect();
+            for label in labels {
+                let target = self.states[q].transitions[&label];
+                if target >= n {
+                    continue;
+                }
+
+                let dead_target = live[target].complement();
+
+                if let Some(tw) = self.states.0[q].trans_weights.get_mut(&label) {
+                    *tw = tw.clone() | &dead_target;
+                }
+            }
         }
     }
 }
