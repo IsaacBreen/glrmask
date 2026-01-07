@@ -2,42 +2,33 @@
 
 use crate::precompute4::weighted_automata::common::{Label, StateID, Weight};
 use crate::precompute4::weighted_automata::dwa::{DWA, DWAState, DWAStates};
-use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::hash::{Hash, Hasher};
+use std::collections::{HashMap, VecDeque};
 
-/// A signature representing the "semantic behavior" of a state.
-/// Two states are equivalent if and only if they have the same Signature.
-///
-/// The weights in this signature must be "Relaxed" weights (normalized relative to
-/// the weights pushed forward).
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-struct StateSignature {
-    /// The normalized final weight.
-    final_weight: Option<Weight>,
-    /// Normalized transitions: (Label, TargetStateID, EdgeWeight)
-    /// TargetStateID refers to the ID in the *new* (minimized) set of states.
-    transitions: Vec<(Label, StateID, Weight)>,
+/// Represents the structural "skeleton" of a state.
+/// Two states can only be merged if they have identical skeletons.
+/// The skeleton consists of the sorted transitions (Labels and Target State IDs).
+/// Weights are NOT part of the skeleton; they are handled during the clustering phase.
+#[derive(Debug, PartialEq, Eq, Hash, Clone)]
+struct StateSkeleton {
+    // Sorted list of (Label, TargetStateID).
+    // TargetStateID refers to the ID in the NEW (minimized) set of states.
+    transitions: Vec<(Label, StateID)>,
 }
 
 impl DWA {
-    /// Minimize an acyclic DWA to minimal state count.
+    /// Minimize an acyclic DWA to minimal state count using a "Push-Weights-to-Front" strategy.
     ///
-    /// This uses a bottom-up construction approach (Revuz-like algorithm extended for Weights).
-    ///
-    /// Algorithm:
+    /// The Algorithm:
     /// 1. Prune unreachable/dead states.
-    /// 2. Compute Reverse Topological Order.
-    /// 3. Iterate from leaves (end) to root (start):
-    ///    a. Compute "Push Weight" (L[u]): The union of all weights that can successfully
-    ///       finish a path starting from `u`. This includes `u`'s state_weight, final_weight,
-    ///       and weights of outgoing transitions combined with the L of targets.
-    ///    b. "Relax" internals: Create a canonical signature where all local weights are
-    ///       OR'd with (NOT L[u]). This effectively erases constraints that are already
-    ///       enforced by the Push Weight.
-    ///    c. Deduplicate: Check if this signature exists in the new state registry.
-    ///       If yes, reuse ID. If no, create new state.
-    ///    d. Map `u` -> `(new_id, L[u])`.
-    /// 4. Reconstruct the DWA.
+    /// 2. Compute `L[u]` (Max Reachable Weight) for every state `u`.
+    ///    `L[u]` is the union of all weights accepted by all paths starting at `u`.
+    /// 3. Iterate states in Reverse Topological Order (Leaves -> Roots).
+    /// 4. For each state `u`, generate its `Skeleton` (based on minimized targets).
+    /// 5. Attempt to merge `u` into an existing cluster of states with the same Skeleton.
+    ///    Merging is valid if the weights are "Compatible".
+    ///    Compatibility ensures that the union of weights in the merged state, when filtered
+    ///    by the incoming constraint `L`, behaves exactly like the original state.
+    /// 6. Reconstruct the DWA.
     pub fn minimize_acyclic(&mut self) {
         if self.states.len() == 0 {
             return;
@@ -45,191 +36,224 @@ impl DWA {
 
         // 1. Prune dead nodes to ensure topological sort is clean and efficient
         self.pass0_prune();
-
         if self.states.len() == 0 {
             return;
         }
 
-        // 2. Compute processing order (Leaves -> Roots)
+        // 2. Compute Reverse Topological Order
         let rev_order = self.reverse_topological_order();
 
-        // Registry: Signature -> New State ID
-        // Used to find existing equivalent states.
-        let mut registry: HashMap<StateSignature, StateID> = HashMap::new();
+        // 3. Compute Max Reachable Weights (L[u])
+        // L[u] = FinalWeight[u] U Union(TransWeight[u, l] & L[target])
+        let l_weights = self.compute_push_weights(&rev_order);
 
-        // New States vector being built
-        let mut new_states: Vec<DWAState> = Vec::with_capacity(self.states.len());
+        // 4. Bottom-Up Clustering
+        // Stores the new minimized states
+        let mut new_states: Vec<DWAState> = Vec::new();
+        // Maps OldStateID -> NewStateID
+        let mut old_to_new: Vec<StateID> = vec![0; self.states.len()];
 
-        // Mapping: Old State ID -> (New State ID, Pushed Weight)
-        // The "Pushed Weight" is the constraint that must be applied to any edge *entering* this state.
-        let mut state_mapping: Vec<Option<(StateID, Weight)>> = vec![None; self.states.len()];
+        // Registry to find candidate states for merging.
+        // Map<Skeleton, List<(NewStateID, List<ConstraintL>)>>
+        // We store the list of L-weights of all original states merged into NewStateID
+        // to perform the validity check.
+        let mut registry: HashMap<StateSkeleton, Vec<(StateID, Vec<Weight>)>> = HashMap::new();
 
-        // 3. Bottom-Up Processing
         for &u in &rev_order {
             let old_state = &self.states[u];
 
-            // --- Step A: Calculate the "Push Weight" (L[u]) ---
-            // L[u] is the Union of all token sets that can survive from this node to an accept state.
-            // L[u] = (StateWeight) INTERSECT [ (FinalWeight) UNION (Union over trans(t): Weight(t) & L[t]) ]
+            // Build Skeleton using mapped targets
+            let mut transitions: Vec<(Label, StateID)> = old_state.transitions.iter()
+                .map(|(&lbl, &t)| (lbl, old_to_new[t]))
+                .collect();
+            transitions.sort_by_key(|t| t.0);
+            let skeleton = StateSkeleton { transitions: transitions.clone() };
 
-            // 1. Accumulate future possibilities from transitions
-            let mut future_union = Weight::zeros();
+            let u_l = &l_weights[u];
+            let mut merged_target_id = None;
 
-            // Add contribution from being a final state
-            if let Some(fw) = &old_state.final_weight {
-                future_union = &future_union | fw;
-            }
+            // Try to find a compatible existing state in the registry
+            if let Some(candidates) = registry.get_mut(&skeleton) {
+                for (cand_id, constraints) in candidates.iter_mut() {
+                    let cand_state = &mut new_states[*cand_id];
 
-            // Add contributions from transitions
-            // Note: We use the already-computed Pushed Weight of the targets.
-            for (&lbl, &old_target) in &old_state.transitions {
-                if old_target >= self.states.len() { continue; } // Should be pruned, but safe check
-
-                if let Some((_, target_push_weight)) = &state_mapping[old_target] {
-                    let trans_w = old_state.trans_weights.get(&lbl).cloned().unwrap_or_else(Weight::all);
-
-                    // The path is valid if it passes the transition weight AND the target's requirements
-                    let path_w = &trans_w & target_push_weight;
-                    future_union = &future_union | &path_w;
-                }
-            }
-
-            // 2. Restrict by State Weight
-            // If the state itself has a filter, it limits everything passing through.
-            let mut push_weight = future_union;
-            if let Some(sw) = &old_state.state_weight {
-                push_weight = &push_weight & sw;
-            }
-
-            // --- Step B: Build Canonical Signature (Relaxation) ---
-            // We create a "Residual State" where all weights are relaxed by `push_weight`.
-            // Effectively: Weight_New = Weight_Old | (NOT push_weight).
-            // This turns constraints that are fully captured by `push_weight` into `ALL`.
-
-            let dont_care = push_weight.complement();
-
-            // 1. Relax Final Weight
-            // Effective final weight is (fw & sw).
-            // We assume State Weight is absorbed into Push Weight, so we check just FW relative to Push.
-            // Actually, correct logic: The generic node must behave such that:
-            //    NodeInput(W) -> InternalCheck -> Result
-            // We are moving `push_weight` to `NodeInput`.
-            // So `InternalCheck` can be `OriginalCheck | !PushWeight`.
-
-            let mut sig_final_weight = None;
-            if let Some(fw) = &old_state.final_weight {
-                // Effective local finality requires both state_weight and final_weight
-                let effective_fw = if let Some(sw) = &old_state.state_weight {
-                    fw & sw
-                } else {
-                    fw.clone()
-                };
-
-                let relaxed = &effective_fw | &dont_care;
-                if !relaxed.is_all_fast() {
-                    sig_final_weight = Some(relaxed);
-                }
-            } else {
-                // If it wasn't final, can it become final?
-                // No, struct definition implies final_weight Option is structural.
-                // But conceptually, if push_weight is empty (dead state), everything relaxes to ALL.
-                // We handle non-final states by keeping None.
-            }
-
-            // 2. Relax Transitions
-            let mut sig_transitions = Vec::new();
-            for (&lbl, &old_target) in &old_state.transitions {
-                if let Some((new_target_id, target_push_w)) = &state_mapping[old_target] {
-                    // Effective path weight: TransW & TargetPushW & StateW
-                    let old_trans_w = old_state.trans_weights.get(&lbl).cloned().unwrap_or_else(Weight::all);
-                    let sw = old_state.state_weight.as_ref().cloned().unwrap_or_else(Weight::all);
-
-                    let effective_w = &(&old_trans_w & target_push_w) & &sw;
-
-                    // Relax: w | !L[u]
-                    let relaxed_w = &effective_w | dont_care.clone();
-
-                    sig_transitions.push((lbl, *new_target_id, relaxed_w));
-                }
-            }
-
-            // Sort to ensure canonical order for hashing
-            sig_transitions.sort_by(|a, b| a.0.cmp(&b.0));
-
-            let signature = StateSignature {
-                final_weight: sig_final_weight,
-                transitions: sig_transitions,
-            };
-
-            // --- Step C: Deduplicate ---
-            let new_id = if let Some(&existing_id) = registry.get(&signature) {
-                existing_id
-            } else {
-                let id = new_states.len();
-
-                // Convert Signature back to DWAState
-                let mut trans_map = BTreeMap::new();
-                let mut weights_map = BTreeMap::new();
-
-                for (l, t, w) in &signature.transitions {
-                    trans_map.insert(*l, *t);
-                    if !w.is_all_fast() {
-                        weights_map.insert(*l, w.clone());
+                    // Check compatibility
+                    if Self::can_merge(cand_state, constraints, old_state, u_l) {
+                        // Merge!
+                        Self::perform_merge(cand_state, old_state);
+                        constraints.push(u_l.clone());
+                        merged_target_id = Some(*cand_id);
+                        break;
                     }
                 }
+            }
 
-                new_states.push(DWAState {
-                    transitions: trans_map,
-                    trans_weights: weights_map,
-                    final_weight: signature.final_weight.clone(),
-                    state_weight: None, // State weight has been pushed out!
-                });
+            if let Some(id) = merged_target_id {
+                old_to_new[u] = id;
+            } else {
+                // Create new state
+                let new_id = new_states.len();
+                // StateWeight is set to None (ALL) for internal states.
+                // The restriction is applied by the incoming edges (L[u]).
+                let mut new_state = DWAState {
+                    transitions: old_state.transitions.iter()
+                        .map(|(&l, &t)| (l, old_to_new[t]))
+                        .collect(),
+                    trans_weights: old_state.trans_weights.clone(),
+                    final_weight: old_state.final_weight.clone(),
+                    state_weight: None,
+                };
 
-                registry.insert(signature, id);
-                id
-            };
+                // If the transition targets in old_state were raw, we need to map them in the new state struct too
+                // (Already done in map construction above, but DWAState needs BTreeMap)
+                let mut new_trans_map = std::collections::BTreeMap::new();
+                for &(lbl, target) in &skeleton.transitions {
+                    new_trans_map.insert(lbl, target);
+                }
+                new_state.transitions = new_trans_map;
 
-            // --- Step D: Map ---
-            state_mapping[u] = Some((new_id, push_weight));
+                new_states.push(new_state);
+                old_to_new[u] = new_id;
+
+                registry.entry(skeleton)
+                    .or_default()
+                    .push((new_id, vec![u_l.clone()]));
+            }
         }
 
-        // 4. Reconstruct DWA
-        // The start state needs special handling.
-        // We have `start_mapping = (new_start_id, global_push_weight)`.
-        // The `global_push_weight` must be applied. Since we can't put weights on the
-        // "incoming arrow" to start, we apply it to the Start State's `state_weight`.
+        // 5. Reconstruct Start State
+        // The Start State needs special handling because there is no "Incoming Edge" to hold L[start].
+        // We must apply L[start] to the state_weight of the start state.
 
-        if let Some((mapped_start, start_req)) = state_mapping[self.body.start_state].clone() {
-            // Optimization: If the mapped start state is "fresh" (not used by others)
-            // or if we don't care about cloning, we can just apply the weight.
-            // However, `mapped_start` might be a merged state used deep in the graph.
-            // We must create a dedicated entry point if the weight is restrictive.
+        let mapped_start = old_to_new[self.body.start_state];
+        let start_req = &l_weights[self.body.start_state];
 
-            if start_req.is_all_fast() {
-                self.states = DWAStates(new_states);
-                self.body.start_state = mapped_start;
-            } else {
-                // Must create a new start state that clones the behavior of `mapped_start`
-                // but restricts it by `start_req`.
-                // Actually, simply cloning the state in `new_states` and adding state_weight works.
-                let mut root_state = new_states[mapped_start].clone();
-                root_state.apply_weight(&start_req);
+        // We can simply clone the mapped state and apply the weight.
+        // This ensures we don't accidentally restrict a shared state used deep in the graph.
+        let mut root_state = new_states[mapped_start].clone();
 
-                new_states.push(root_state);
-                let new_root_id = new_states.len() - 1;
+        // Combine with original state_weight if any
+        if let Some(orig_sw) = &self.states[self.body.start_state].state_weight {
+            root_state.apply_weight(orig_sw);
+        }
+        root_state.apply_weight(start_req);
 
-                self.states = DWAStates(new_states);
-                self.body.start_state = new_root_id;
+        new_states.push(root_state);
+        self.body.start_state = new_states.len() - 1;
+        self.states = DWAStates(new_states);
+    }
+
+    /// Computes L[u]: The union of all path weights starting from u.
+    fn compute_push_weights(&self, rev_order: &[usize]) -> Vec<Weight> {
+        let mut l = vec![Weight::zeros(); self.states.len()];
+
+        for &u in rev_order {
+            let state = &self.states[u];
+            let mut acc = Weight::zeros();
+
+            // 1. Final Weight contribution
+            if let Some(fw) = &state.final_weight {
+                acc |= fw;
             }
-        } else {
-            // Start state was pruned (unreachable or dead)
-            self.states = DWAStates(vec![DWAState::default()]);
-            self.body.start_state = 0;
+
+            // 2. Transition contributions
+            for (&lbl, &target) in &state.transitions {
+                if target < self.states.len() {
+                    let w_trans = state.trans_weights.get(&lbl).cloned().unwrap_or_else(Weight::all);
+                    let branch_contrib = &w_trans & &l[target];
+                    acc |= &branch_contrib;
+                }
+            }
+
+            // 3. State Weight restriction (local to u)
+            if let Some(sw) = &state.state_weight {
+                acc &= sw;
+            }
+
+            l[u] = acc;
+        }
+        l
+    }
+
+    /// Checks if `u` can be safely merged into `cluster_state`.
+    ///
+    /// Conditions:
+    /// 1. Cluster -> U Safety: The existing weights in Cluster (`W_curr`), when masked by `L_u`,
+    ///    must not exceed `W_u`.
+    ///    Actually, since `W_u` is added to `W_curr`, we strictly need: `L_u & W_curr <= W_u`.
+    ///
+    /// 2. U -> Cluster Safety: The weight `W_u`, when masked by any `L_v` from the cluster,
+    ///    must not exceed `W_v` (where `W_v <= W_curr`).
+    ///    Strictly: `L_v & W_u <= W_curr`.
+    fn can_merge(
+        cluster_state: &DWAState,
+        cluster_constraints: &[Weight],
+        u_state: &DWAState,
+        u_l: &Weight
+    ) -> bool {
+        // Check Final Weights
+        {
+            let w_curr = cluster_state.final_weight.clone().unwrap_or_else(Weight::zeros);
+            let w_u = u_state.final_weight.clone().unwrap_or_else(Weight::zeros);
+
+            // 1. Cluster -> U
+            let check1 = u_l & &w_curr;
+            if !check1.is_subset_of(&w_u) { return false; }
+
+            // 2. U -> Cluster
+            for v_l in cluster_constraints {
+                let check2 = v_l & &w_u;
+                if !check2.is_subset_of(&w_curr) { return false; }
+            }
+        }
+
+        // Check Transitions
+        // Note: Skeletons match, so keys are identical.
+        for lbl in cluster_state.transitions.keys() {
+            let w_curr = cluster_state.trans_weights.get(lbl).cloned().unwrap_or_else(Weight::all);
+            let w_u = u_state.trans_weights.get(lbl).cloned().unwrap_or_else(Weight::all);
+
+            // 1. Cluster -> U
+            let check1 = u_l & &w_curr;
+            if !check1.is_subset_of(&w_u) { return false; }
+
+            // 2. U -> Cluster
+            for v_l in cluster_constraints {
+                let check2 = v_l & &w_u;
+                if !check2.is_subset_of(&w_curr) { return false; }
+            }
+        }
+
+        true
+    }
+
+    /// Updates `cluster_state` to include the weights of `u_state`.
+    fn perform_merge(cluster_state: &mut DWAState, u_state: &DWAState) {
+        // Union Final Weight
+        let fw_u = u_state.final_weight.clone().unwrap_or_else(Weight::zeros);
+        if let Some(fw_curr) = &mut cluster_state.final_weight {
+            *fw_curr |= &fw_u;
+        } else if !fw_u.is_empty() {
+            // If cluster was empty/zero (None usually implies 0 in this context if explicit field is Option)
+            // But struct def says Option<Weight>. Usually None means 0 for Final, All for Trans.
+            // Let's stick to DWA defs: final_weight None => Zero.
+            cluster_state.final_weight = Some(fw_u);
+        }
+
+        // Union Transition Weights
+        for (lbl, _) in &cluster_state.transitions {
+            let w_u = u_state.trans_weights.get(lbl).cloned().unwrap_or_else(Weight::all);
+
+            // We need to union w_u into w_curr.
+            // Map entry might be missing (implicit All) or present.
+            // Best to normalize to explicit weights.
+            let w_curr = cluster_state.trans_weights.entry(*lbl).or_insert_with(Weight::all);
+            *w_curr |= &w_u;
         }
     }
 
     // ========================================================================
-    // HELPER: PRUNING (Copied from previous context to ensure completeness)
+    // PRUNING & TOPOLOGY HELPERS
     // ========================================================================
 
     pub(crate) fn pass0_prune(&mut self) {
@@ -237,7 +261,7 @@ impl DWA {
         self.prune_dead_ends_acyclic();
     }
 
-    pub(crate) fn prune_unreachable_acyclic(&mut self) {
+    fn prune_unreachable_acyclic(&mut self) {
         let n = self.states.len();
         if n == 0 { return; }
         let mut reachable = vec![false; n];
@@ -259,7 +283,7 @@ impl DWA {
         }
     }
 
-    pub(crate) fn prune_dead_ends_acyclic(&mut self) {
+    fn prune_dead_ends_acyclic(&mut self) {
         let n = self.states.len();
         if n == 0 { return; }
         let mut reverse_adj = vec![Vec::new(); n];
@@ -289,7 +313,7 @@ impl DWA {
         }
     }
 
-    pub(crate) fn reverse_topological_order(&self) -> Vec<usize> {
+    fn reverse_topological_order(&self) -> Vec<usize> {
         let n = self.states.len();
         if n == 0 { return vec![]; }
         let mut out_degree = vec![0usize; n];
@@ -341,10 +365,5 @@ impl DWA {
         }
         self.states.0 = new_states;
         self.body.start_state = old_to_new[self.body.start_state].unwrap_or(0);
-    }
-
-    pub fn minimize_internal_acyclic(&mut self) -> bool {
-        self.minimize_acyclic();
-        true
     }
 }

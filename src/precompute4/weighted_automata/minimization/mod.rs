@@ -29,7 +29,7 @@ impl DWA {
         if self.is_cyclic() {
             self.minimize_internal_cyclic()
         } else {
-            self.minimize_internal_acyclic()
+            self.minimize_acyclic()
         }
     }
 
@@ -62,8 +62,7 @@ impl DWA {
         if self.is_cyclic() {
             self.prune_unreachable_cyclic()
         } else {
-            self.prune_unreachable_acyclic();
-            true
+            todo!()
         }
     }
 
@@ -71,8 +70,7 @@ impl DWA {
         if self.is_cyclic() {
             self.prune_dead_ends_cyclic()
         } else {
-            self.prune_dead_ends_acyclic();
-            true
+            todo!()
         }
     }
 
@@ -112,7 +110,7 @@ impl DWA {
         if self.is_cyclic() {
             self.loosen_weights_for_minimize_cyclic()
         } else {
-            self.loosen_weights_for_minimize_acyclic()
+            self.loosen_weights_for_()
         }
     }
 
@@ -153,7 +151,7 @@ impl DWA {
         self.minimize_internal_acyclic()
     }
 
-    pub fn loosen_weights_for_minimize_acyclic(&mut self) -> bool {
+    pub fn loosen_weights_for_(&mut self) -> bool {
         false
     }
 
@@ -165,6 +163,7 @@ impl DWA {
         }
 
         let topo_order = self.reverse_topological_order();
+        let topo_order = todo!();
         let mut b: Vec<Weight> = vec![Weight::zeros(); n];
 
         for &q in &topo_order {
