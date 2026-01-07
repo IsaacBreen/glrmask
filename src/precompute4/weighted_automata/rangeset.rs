@@ -12,7 +12,7 @@ use std::fmt::{Debug, Display, Formatter};
 use std::hash::{Hash, Hasher};
 use std::iter::FromIterator;
 use std::num::NonZeroUsize;
-use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Deref, Not, Sub, SubAssign};
+use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, BitXor, BitXorAssign, Deref, Not, Sub, SubAssign};
 use std::sync::{Arc, Mutex};
 use crate::datastructures::hybrid_bitset::RangeSet as OtherRangeSet;
 
@@ -95,6 +95,7 @@ impl ShardedCache {
 
 static UNION_CACHE: Lazy<ShardedCache> = Lazy::new(ShardedCache::new);
 static INTERSECTION_CACHE: Lazy<ShardedCache> = Lazy::new(ShardedCache::new);
+static XOR_CACHE: Lazy<ShardedCache> = Lazy::new(ShardedCache::new);
 static SUB_CACHE: Lazy<ShardedCache> = Lazy::new(ShardedCache::new);
 
 pub(crate) const FP_ZERO: u64 = 0x9E37_79B9_7F4A_7C15;
@@ -445,6 +446,55 @@ impl<'a> BitAnd<RangeSet> for &'a RangeSet {
 impl<'a> BitOr<RangeSet> for &'a RangeSet {
     type Output = RangeSet;
     fn bitor(self, rhs: RangeSet) -> Self::Output { self | (&rhs) }
+}
+
+impl<'a> BitXor<&'a RangeSet> for &'a RangeSet {
+    type Output = RangeSet;
+    fn bitxor(self, rhs: &'a RangeSet) -> Self::Output {
+        if Arc::ptr_eq(&self.0, &rhs.0) {
+            return RangeSet::zeros();
+        }
+        if self.is_empty() {
+            return rhs.clone();
+        }
+        if rhs.is_empty() {
+            return self.clone();
+        }
+
+        let p1 = Arc::as_ptr(&self.0) as usize;
+        let p2 = Arc::as_ptr(&rhs.0) as usize;
+        let key = if p1 < p2 { (p1, p2) } else { (p2, p1) };
+
+        let mut cache = XOR_CACHE.get(key).lock().unwrap();
+        if let Some(result) = cache.get(&key) {
+            return result.clone();
+        }
+
+        let result = intern(&self.rsb ^ &rhs.rsb);
+        cache.put(key, result.clone());
+        result
+    }
+}
+
+impl BitXorAssign<&RangeSet> for RangeSet {
+    fn bitxor_assign(&mut self, rhs: &RangeSet) {
+        *self = &*self ^ rhs;
+    }
+}
+
+impl BitXor<RangeSet> for RangeSet {
+    type Output = RangeSet;
+    fn bitxor(self, rhs: RangeSet) -> Self::Output { (&self) ^ (&rhs) }
+}
+
+impl<'a> BitXor<&'a RangeSet> for RangeSet {
+    type Output = RangeSet;
+    fn bitxor(self, rhs: &'a RangeSet) -> Self::Output { (&self) ^ rhs }
+}
+
+impl<'a> BitXor<RangeSet> for &'a RangeSet {
+    type Output = RangeSet;
+    fn bitxor(self, rhs: RangeSet) -> Self::Output { self ^ (&rhs) }
 }
 
 impl SubAssign<&RangeSet> for RangeSet {
