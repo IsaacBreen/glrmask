@@ -1283,7 +1283,7 @@ pub fn merge_identical_nonterminals(
                 } else {
                     (nts[i].clone(), nts[j].clone())
                 };
-                crate::debug!(5, "Merging identical non-terminals: {} -> {}", remove.0, keep.0);
+                crate::debug!(6, "Merging identical non-terminals: {} -> {}", remove.0, keep.0);
                 merge_map.insert(remove, keep);
             }
         }

@@ -143,7 +143,7 @@ impl NWA {
             return DWA::new();
         }
 
-        crate::debug!(5, "Determinization: Precomputing epsilon closures...");
+        crate::debug!(6, "Determinization: Precomputing epsilon closures...");
         
         // 3. Precompute Reachability
         let eps_reach = precompute_all_epsilon_closures(&self.states);

@@ -215,11 +215,11 @@ pub fn build_template_dwas(parser: &GLRParser) -> Result<BTreeMap<TerminalID, DW
         dwa.minimize_single_pass();
         crate::debug!(6, "Terminal {:?}: {} states after minimize", first_term, dwa.states.len());
         
-        // Debug stats at level 5: print one line per terminal with characterization and DFA stats
-        if crate::r#macro::is_debug_level_enabled(5) {
+        // Debug stats at level 6: print one line per terminal with characterization and DFA stats
+        if crate::r#macro::is_debug_level_enabled(6) {
             for (term, tc) in &terms {
                 let num_rc_nonempty = tc.reduce_characterizations.values().filter(|r| !r.reveal_and_rereduces.is_empty() || !r.reveal_goto_shift_escapes.is_empty()).count();
-                crate::debug!(5, "Terminal {:?}: {} shifts, {} reduces, {} non-trivial reduce chars, {} DFA states, {} transitions", 
+                crate::debug!(6, "Terminal {:?}: {} shifts, {} reduces, {} non-trivial reduce chars, {} DFA states, {} transitions", 
                     term, 
                     tc.initial_shifts.len(), 
                     tc.initial_reduces.len(), 
@@ -227,8 +227,8 @@ pub fn build_template_dwas(parser: &GLRParser) -> Result<BTreeMap<TerminalID, DW
                     dwa.states.len(),
                     dwa.states.num_transitions()
                 );
-                // At level 6, print the full characterization
-                crate::debug!(6, "{}", tc);
+                // At level 7, print the full characterization
+                crate::debug!(7, "{}", tc);
             }
         }
         
