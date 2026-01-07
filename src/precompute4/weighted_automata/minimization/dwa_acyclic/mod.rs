@@ -62,16 +62,6 @@ pub fn minimize_acyclic_exact(dwa: &DWA) -> Result<DWA, DWABuildError> {
     let mut old_to_new: HashMap<StateID, StateID> = HashMap::new();
     let mut new_states: Vec<MergedStateBuilder> = Vec::new();
 
-    // Diagnostic counters
-    let mut diag_total_pairs = 0usize;
-    let mut diag_disjoint = 0usize;
-    let mut diag_final_mismatch = 0usize;
-    let mut diag_eff_weight_mismatch = 0usize;
-    let mut diag_raw_weight_mismatch = 0usize;
-    let mut diag_raw_full_mismatch = 0usize;
-    let mut diag_target_mismatch = 0usize;
-    let mut diag_compatible = 0usize;
-
     // Process from leaves (height 0) upwards
     for h in 0..=max_height {
         let candidates = &states_by_height[h];
@@ -79,20 +69,12 @@ pub fn minimize_acyclic_exact(dwa: &DWA) -> Result<DWA, DWABuildError> {
 
         // A. Build Incompatibility Graph for this layer
         // Two states are incompatible if they CANNOT be merged.
-        let adj = build_incompatibility_graph_with_diag(
+        let adj = build_incompatibility_graph(
             &dwa,
             candidates,
             &needed,
             &old_to_new,
             &new_states,
-            &mut diag_total_pairs,
-            &mut diag_disjoint,
-            &mut diag_final_mismatch,
-            &mut diag_eff_weight_mismatch,
-            &mut diag_raw_weight_mismatch,
-            &mut diag_raw_full_mismatch,
-            &mut diag_target_mismatch,
-            &mut diag_compatible,
         );
 
         // B. Solve Exact Graph Coloring to find minimum cliques
@@ -155,18 +137,6 @@ pub fn minimize_acyclic_exact(dwa: &DWA) -> Result<DWA, DWABuildError> {
             }
         }
     }
-
-    // Print diagnostics
-    eprintln!("=== DWA Minimization Diagnostics ===");
-    eprintln!("Total pairs checked: {}", diag_total_pairs);
-    eprintln!("  Disjoint domains (Diamond): {}", diag_disjoint);
-    eprintln!("  Final weight mismatch: {}", diag_final_mismatch);
-    eprintln!("  Effective weight mismatch: {}", diag_eff_weight_mismatch);
-    eprintln!("  Raw weight on domain mismatch: {}", diag_raw_weight_mismatch);
-    eprintln!("  Raw weight FULL mismatch: {}", diag_raw_full_mismatch);
-    eprintln!("  Target state mismatch: {}", diag_target_mismatch);
-    eprintln!("  Compatible (mergeable): {}", diag_compatible);
-    eprintln!("Input states: {}, Output states: {}", dwa.states.len(), new_states.len());
 
     // 5. Reconstruct the Final DWA
     reconstruct_dwa(dwa.body.start_state, &old_to_new, new_states)
@@ -454,139 +424,6 @@ fn are_compatible(
     }
 
     true
-}
-
-#[derive(Clone, Copy, Debug)]
-enum IncompatReason {
-    Compatible,
-    DisjointDomain,  // Actually compatible
-    FinalMismatch,
-    EffWeightMismatch,
-    RawWeightOnDomainMismatch,
-    RawWeightFullMismatch,
-    TargetMismatch,
-}
-
-fn are_compatible_diag(
-    u: StateID,
-    v: StateID,
-    dwa: &DWA,
-    needed: &[Weight],
-    old_to_new: &HashMap<StateID, StateID>,
-    _new_states: &[MergedStateBuilder]
-) -> IncompatReason {
-    // Compute the overlapping domain of tokens
-    let mut domain = needed[u].clone();
-    domain &= &needed[v];
-
-    // If domains are disjoint, states can be safely merged (Diamond case)
-    if domain.is_empty() {
-        return IncompatReason::DisjointDomain;
-    }
-
-    let fw_u = dwa.states[u].final_weight.as_ref().cloned().unwrap_or_else(Weight::zeros);
-    let fw_v = dwa.states[v].final_weight.as_ref().cloned().unwrap_or_else(Weight::zeros);
-
-    if (&fw_u & &domain) != (&fw_v & &domain) {
-        return IncompatReason::FinalMismatch;
-    }
-
-    let mut labels: BTreeSet<Label> = dwa.states[u].transitions.keys().copied().collect();
-    labels.extend(dwa.states[v].transitions.keys());
-
-    for lbl in labels {
-        let trans_u = dwa.states[u].get_transition(lbl);
-        let trans_v = dwa.states[v].get_transition(lbl);
-
-        let w_u_raw = match trans_u {
-            Some((_, w)) => w.clone(),
-            None => Weight::zeros(),
-        };
-        let w_v_raw = match trans_v {
-            Some((_, w)) => w.clone(),
-            None => Weight::zeros(),
-        };
-
-        let mut w_u_eff = w_u_raw.clone();
-        if let Some((target_u, _)) = trans_u {
-             if target_u < needed.len() {
-                  w_u_eff &= &needed[target_u];
-             }
-        }
-
-        let mut w_v_eff = w_v_raw.clone();
-        if let Some((target_v, _)) = trans_v {
-             if target_v < needed.len() {
-                  w_v_eff &= &needed[target_v];
-             }
-        }
-
-        if (&w_u_eff & &domain) != (&w_v_eff & &domain) {
-            return IncompatReason::EffWeightMismatch;
-        }
-
-        if (&w_u_raw & &domain) != (&w_v_raw & &domain) {
-            return IncompatReason::RawWeightOnDomainMismatch;
-        }
-
-        let w_u_on_domain = &w_u_raw & &domain;
-        let w_v_on_domain = &w_v_raw & &domain;
-        if !w_u_on_domain.is_empty() && !w_v_on_domain.is_empty() && w_u_raw != w_v_raw {
-            return IncompatReason::RawWeightFullMismatch;
-        }
-
-        let w_common = &w_u_eff & &domain;
-        if !w_common.is_empty() {
-            let target_u_old = trans_u.unwrap().0;
-            let target_v_old = trans_v.unwrap().0;
-
-            let target_u_new = old_to_new.get(&target_u_old).expect("Bottom-up violation");
-            let target_v_new = old_to_new.get(&target_v_old).expect("Bottom-up violation");
-
-            if target_u_new != target_v_new {
-                return IncompatReason::TargetMismatch;
-            }
-        }
-    }
-
-    IncompatReason::Compatible
-}
-
-#[allow(clippy::too_many_arguments)]
-fn build_incompatibility_graph_with_diag(
-    dwa: &DWA,
-    candidates: &[StateID],
-    needed: &[Weight],
-    old_to_new: &HashMap<StateID, StateID>,
-    new_states: &[MergedStateBuilder],
-    diag_total_pairs: &mut usize,
-    diag_disjoint: &mut usize,
-    diag_final_mismatch: &mut usize,
-    diag_eff_weight_mismatch: &mut usize,
-    diag_raw_weight_mismatch: &mut usize,
-    diag_raw_full_mismatch: &mut usize,
-    diag_target_mismatch: &mut usize,
-    diag_compatible: &mut usize,
-) -> Vec<Vec<usize>> {
-    let n = candidates.len();
-    let mut adj = vec![vec![]; n];
-
-    for i in 0..n {
-        for j in (i+1)..n {
-            *diag_total_pairs += 1;
-            let reason = are_compatible_diag(candidates[i], candidates[j], dwa, needed, old_to_new, new_states);
-            match reason {
-                IncompatReason::Compatible => { *diag_compatible += 1; }
-                IncompatReason::DisjointDomain => { *diag_disjoint += 1; }
-                IncompatReason::FinalMismatch => { *diag_final_mismatch += 1; adj[i].push(j); adj[j].push(i); }
-                IncompatReason::EffWeightMismatch => { *diag_eff_weight_mismatch += 1; adj[i].push(j); adj[j].push(i); }
-                IncompatReason::RawWeightOnDomainMismatch => { *diag_raw_weight_mismatch += 1; adj[i].push(j); adj[j].push(i); }
-                IncompatReason::RawWeightFullMismatch => { *diag_raw_full_mismatch += 1; adj[i].push(j); adj[j].push(i); }
-                IncompatReason::TargetMismatch => { *diag_target_mismatch += 1; adj[i].push(j); adj[j].push(i); }
-            }
-        }
-    }
-    adj
 }
 
 fn build_incompatibility_graph(
