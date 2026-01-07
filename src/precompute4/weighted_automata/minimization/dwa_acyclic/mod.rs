@@ -239,18 +239,8 @@ fn are_compatible(
     let mut domain = needed[u].clone();
     domain &= &needed[v];
 
-    // Debug for 0 vs 25 (or all pairs for Diamond debugging)
-    let debug = true; // (u == 0 && v == 25) || (u == 25 && v == 0);
-    if debug {
-        eprintln!("DEBUG are_compatible({}, {})", u, v);
-        eprintln!("  needed[{}] = {:?}", u, needed[u]);
-        eprintln!("  needed[{}] = {:?}", v, needed[v]);
-        eprintln!("  domain = {:?}", domain);
-    }
-
     // If domains are disjoint, states can be safely merged (Diamond case)
     if domain.is_empty() {
-        if debug { eprintln!("  COMPATIBLE: disjoint domains"); }
         return true;
     }
 
@@ -320,7 +310,17 @@ fn are_compatible(
         // Simpler: For states to merge, within the overlapping domain, their source
         // weights must be the same. Check raw weights intersected with domain.
         if (&w_u_raw & &domain) != (&w_v_raw & &domain) {
-            if debug { eprintln!("  INCOMPATIBLE: raw weights differ on domain for label {}", lbl); }
+            return false;
+        }
+        
+        // NEW: Check if raw weights differ. If so, the merged state would have
+        // weight = w_u_raw | w_v_raw, which could expand capabilities.
+        // Only allow merge if both raw weights are equal OR if their difference
+        // is entirely outside the union of needed[u] + needed[v].
+        // For simplicity: if raw weights differ AND both cover the domain, reject.
+        let w_u_on_domain = &w_u_raw & &domain;
+        let w_v_on_domain = &w_v_raw & &domain;
+        if !w_u_on_domain.is_empty() && !w_v_on_domain.is_empty() && w_u_raw != w_v_raw {
             return false;
         }
 
