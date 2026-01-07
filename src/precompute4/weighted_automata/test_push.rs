@@ -315,6 +315,9 @@ fn test_diamond_structure() {
 
     println!("input DWA: {}", input);
     println!("expected DWA: {}", expected);
+    let mut min = input.clone();
+    min.minimize();
+    println!("minimized DWA: {}", min);
 
     run_push_optimization_test(input, expected);
 }
