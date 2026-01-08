@@ -188,6 +188,51 @@ impl DWA {
         }
         total
     }
+    
+    /// Analyze weight distribution to understand range fragmentation
+    pub fn analyze_weights(&self) {
+        use std::collections::HashMap;
+        use std::ptr;
+        
+        // Collect all unique weights
+        let mut weight_usage: HashMap<usize, (usize, usize)> = HashMap::new(); // ptr -> (count, num_ranges)
+        let mut range_histogram: HashMap<usize, usize> = HashMap::new(); // num_ranges -> count
+        
+        for state in &self.states.0 {
+            if let Some(fw) = &state.final_weight {
+                let ptr = ptr::addr_of!(**fw) as usize;
+                let entry = weight_usage.entry(ptr).or_insert((0, fw.num_ranges()));
+                entry.0 += 1;
+                *range_histogram.entry(fw.num_ranges()).or_insert(0) += 1;
+            }
+            for w in state.trans_weights.values() {
+                let ptr = ptr::addr_of!(**w) as usize;
+                let entry = weight_usage.entry(ptr).or_insert((0, w.num_ranges()));
+                entry.0 += 1;
+                *range_histogram.entry(w.num_ranges()).or_insert(0) += 1;
+            }
+        }
+        
+        let unique_weights = weight_usage.len();
+        let total_usages: usize = weight_usage.values().map(|(c, _)| c).sum();
+        let total_ranges_unique: usize = weight_usage.values().map(|(_, r)| r).sum();
+        
+        crate::debug!(5, "DWA Weight Analysis:");
+        crate::debug!(5, "  Unique weights: {}", unique_weights);
+        crate::debug!(5, "  Total weight usages: {}", total_usages);
+        crate::debug!(5, "  Total ranges (unique): {}", total_ranges_unique);
+        crate::debug!(5, "  Avg ranges per unique weight: {:.2}", total_ranges_unique as f64 / unique_weights as f64);
+        
+        let mut ranges: Vec<_> = range_histogram.into_iter().collect();
+        ranges.sort();
+        crate::debug!(5, "  Range distribution:");
+        for (num_ranges, count) in ranges.iter().take(20) {
+            crate::debug!(5, "    {} ranges: {} weights", num_ranges, count);
+        }
+        if ranges.len() > 20 {
+            crate::debug!(5, "    ... and {} more categories", ranges.len() - 20);
+        }
+    }
 
     pub fn is_cyclic(&self) -> bool {
         let n = self.states.len();

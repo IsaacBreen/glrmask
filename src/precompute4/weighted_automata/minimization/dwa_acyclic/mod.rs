@@ -1,3 +1,5 @@
+mod consolidate_ranges;
+
 use crate::precompute4::weighted_automata::common::{Label, StateID, Weight};
 use crate::precompute4::weighted_automata::dwa::{DWA, DWABuildError, DWAState, DWAStates};
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};

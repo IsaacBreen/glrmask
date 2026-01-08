@@ -62,6 +62,7 @@ pub fn run_dwa_optimization_experiment(dwa: &mut DWA) {
                     DwaPass::PushWeightsToInitial => current_dwa.push_weights_to_initial(),
                     DwaPass::ResidualPush => current_dwa.residuated_push(),
                     DwaPass::Minimize => current_dwa.minimize_states(),
+                    DwaPass::ConsolidateRanges => current_dwa.consolidate_ranges(),
                 };
                 if changed {
                     current_changing_passes.push(pass);
@@ -201,7 +202,7 @@ impl NWA {
                 // Current best: NWA minimize_rustfst → compress → rm_epsilon → determinize → DWA minimize
                 // Results: 14647 → 5904 → 5904 → 889 → 189 states
                 nwa_passes: vec![NwaPass::MinimizeRustfst, NwaPass::CompressTransitions, NwaPass::RmEpsilon],
-                dwa_passes: vec![DwaPass::Minimize],
+                dwa_passes: vec![DwaPass::Minimize, DwaPass::ConsolidateRanges],
             },
             "Precompute1" => DeterminizeAndMinimizeConfig {
                 // OPTIMIZATION: Skip Minimize to save ~420ms - Precompute1 is just input to precompute4
@@ -213,13 +214,13 @@ impl NWA {
                 // Full pipeline for Parser DWA (finalize_and_optimize_and_determinize)
                 // Includes minimize to get optimal state count
                 nwa_passes: vec![],
-                dwa_passes: vec![DwaPass::PruneDeadEnds, DwaPass::Minimize],
+                dwa_passes: vec![DwaPass::PruneDeadEnds, DwaPass::Minimize, DwaPass::ConsolidateRanges],
             },
             "SuperDWA" => DeterminizeAndMinimizeConfig {
                 // Fallback / Default for SuperDWA (was not large enough to trigger experiment in test)
                 // Using a balanced approach
                 nwa_passes: vec![NwaPass::CompressTransitions],
-                dwa_passes: vec![DwaPass::PruneDeadEnds, DwaPass::Minimize],
+                dwa_passes: vec![DwaPass::PruneDeadEnds, DwaPass::Minimize, DwaPass::ConsolidateRanges],
             },
             _ => DeterminizeAndMinimizeConfig {
                 // Default fallback
@@ -230,6 +231,7 @@ impl NWA {
                     DwaPass::PushWeights,
                     DwaPass::PushWeightsToInitial,
                     DwaPass::PruneUnreachable,
+                    DwaPass::ConsolidateRanges,
                 ],
             }
         };
@@ -272,6 +274,7 @@ impl NWA {
                 DwaPass::PushWeightsToInitial => { dwa.push_weights_to_initial(); },
                 DwaPass::ResidualPush => { dwa.residuated_push(); },
                 DwaPass::Minimize => { dwa.minimize_states(); },
+                DwaPass::ConsolidateRanges => { dwa.consolidate_ranges(); },
             }
             let pass_time = pass_start.elapsed();
             if pass_time.as_millis() > 50 {
