@@ -515,14 +515,16 @@ fn are_compatible(
         // If domains are disjoint, weights can differ (they'll be unioned when merged)
         // But both must go to the same target (after mapping)
 
-        // If either has a transition on the overlap, check targets map to same state
-        // For disjoint domains, we don't care about target matching (tokens won't mix)
-        let w_u_overlap = &w_u_effective & &domain_overlap;
-        let w_v_overlap = &w_v_effective & &domain_overlap;
-        if !w_u_overlap.is_empty() || !w_v_overlap.is_empty() {
+        // CRITICAL: If BOTH states have transitions on this label, they must go to same target
+        // This is true regardless of whether domains overlap - we can't have two transitions
+        // on the same label going to different states after merging!
+        let u_has_live_trans = !w_u_effective.is_empty();
+        let v_has_live_trans = !w_v_effective.is_empty();
+        
+        if u_has_live_trans && v_has_live_trans {
+            // Both states have live transitions on this label - targets must match
             match (target_u, target_v) {
                 (Some(&tu), Some(&tv)) => {
-                    // Both have transitions - check targets
                     let target_u_new = old_to_new.get(&tu);
                     let target_v_new = old_to_new.get(&tv);
                     
@@ -530,21 +532,33 @@ fn are_compatible(
                         (Some(u_new), Some(v_new)) if u_new != v_new => return false,
                         (Some(_), None) | (None, Some(_)) => return false,
                         (None, None) => {
-                            // Both targets not yet processed - must be same height level
+                            // Both targets not yet processed - must be same original state
                             if tu != tv {
                                 return false;
                             }
                         }
-                        _ => {} // Both same
+                        _ => {} // Both mapped to same state
                     }
                 }
                 (Some(_), None) | (None, Some(_)) => {
-                    // One has transition on overlap, other doesn't - incompatible
+                    // One has target, other doesn't (but both have weights) - shouldn't happen
+                    // If there's a live weight, there should be a transition
                     return false;
                 }
-                (None, None) => {} // Neither has transition on overlap
+                (None, None) => {} // Neither has target (shouldn't happen with live weights)
+            }
+        } else if !domains_disjoint {
+            // Domains overlap, so check if one has live transition on overlap when other doesn't
+            let w_u_overlap = &w_u_effective & &domain_overlap;
+            let w_v_overlap = &w_v_effective & &domain_overlap;
+            if (!w_u_overlap.is_empty() && w_v_overlap.is_empty()) ||
+               (w_u_overlap.is_empty() && !w_v_overlap.is_empty()) {
+                // One has transition on overlap, other doesn't - incompatible
+                return false;
             }
         }
+        // If domains are disjoint AND only one has transition on this label, that's fine
+        // The merged state will just have that transition restricted to its domain
     }
 
     true
