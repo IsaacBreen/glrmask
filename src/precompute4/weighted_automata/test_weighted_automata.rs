@@ -253,7 +253,7 @@ impl DWA {
 }
 
 pub fn stochastic_equivalence_test(mut a: DWA, mut b: DWA) {
-    crate::debug!(5, "Starting stochastic equivalence test");
+    crate::debug!(6, "Starting stochastic equivalence test");
     let mut rng = SimpleRng::from_time();
     for _ in 0..VALIDATION_SAMPLES {
         // Sample from A, check against B
