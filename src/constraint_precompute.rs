@@ -202,9 +202,10 @@ impl<'r> Precomputer1<'r> {
             for (tsid, rep_tsid) in &self.state_to_rep {
                 rep_to_tsids.entry(*rep_tsid).or_default().push(tsid.0);
             }
-            
+
             // Create one epsilon transition per representative with combined tsid mask
             for (rep_tsid, tsids) in rep_to_tsids {
+                debug_assert!(tsids.contains(&rep_tsid.0));
                 if let Some(&state) = self.roots.get(&rep_tsid) {
                     // Create combined tsid mask for all tsids that map to this representative
                     let tsid_mask = create_tsid_set_mask(tsids, self.num_tsids, self.internal_max_llm_token);
