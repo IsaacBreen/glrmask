@@ -1,4 +1,8 @@
 //! DWA minimization passes.
+//!
+//! This module provides cyclic-specific DWA minimization. The primary algorithm
+//! is `minimize_exact` which extends the acyclic Diamond-aware algorithm to handle
+//! cycles via SCC decomposition and fixed-point iteration.
 
 mod prune_unreachable;
 mod prune_dead_ends;
@@ -7,6 +11,7 @@ mod push_to_initial;
 mod residuated_push;
 mod loosen_weights;
 mod minimize;
+mod minimize_exact;
 mod rebuild;
 
 use super::common::{Partition, MAX_OPTIMIZE_ITERATIONS, DwaPass};
@@ -19,44 +24,18 @@ use rustfst::prelude::MinimizeConfig;
 use std::collections::HashSet;
 
 impl DWA {
+    /// Minimizes a cyclic DWA using the exact Diamond-aware algorithm.
+    /// 
+    /// This uses SCC decomposition and fixed-point iteration to extend
+    /// the acyclic algorithm to handle cycles. Falls back to partition
+    /// refinement if the exact algorithm fails.
     pub fn minimize_cyclic(&mut self) {
         if self.states.len() == 0 {
             return;
         }
 
-        if BENCHMARK_DEBUG {
-            let initial_states = self.states.len();
-            let mut internal = self.clone();
-            let internal_start = std::time::Instant::now();
-            internal.minimize_internal_cyclic();
-            let internal_states = internal.states.len();
-            let internal_time = internal_start.elapsed();
-
-            let mut rustfst = self.clone();
-            let rustfst_start = std::time::Instant::now();
-            rustfst.minimize_with_rustfst_full_cyclic();
-            let rustfst_states = rustfst.states.len();
-            let rustfst_time = rustfst_start.elapsed();
-
-            if internal_time + rustfst_time > std::time::Duration::from_secs(1) {
-                let state_cmp = match internal_states.cmp(&rustfst_states) {
-                    std::cmp::Ordering::Less => "<",
-                    std::cmp::Ordering::Equal => "=",
-                    std::cmp::Ordering::Greater => ">",
-                };
-                let time_cmp = match internal_time.cmp(&rustfst_time) {
-                    std::cmp::Ordering::Less => "<",
-                    std::cmp::Ordering::Equal => "=",
-                    std::cmp::Ordering::Greater => ">",
-                };
-
-                crate::debug!(6, "[DWA MinimizeCyclic({})] Internal: t={:.2?}, s={} | RustFST: t={:.2?}, s={}. [s: {}, t: {}]", initial_states, internal_time, internal_states, rustfst_time, rustfst_states, state_cmp, time_cmp);
-            }
-
-            *self = internal;
-        } else {
-            self.minimize_internal_cyclic();
-        }
+        // Use the exact minimization algorithm (SCC-based extension of acyclic)
+        self.minimize_exact();
     }
 
     /// Performs linear-time optimizations only (Pruning, Weight Pushing).

@@ -4,6 +4,20 @@
 //! - Pruning unreachable and dead-end states
 //! - Weight pushing (toward start/final)
 //! - State minimization via partition refinement
+//!
+//! ## Minimization Algorithm
+//!
+//! The primary minimization algorithm is the "exact" Diamond-aware algorithm in
+//! `dwa_cyclic::minimize_exact`. This algorithm:
+//!
+//! 1. Uses SCC decomposition to handle cycles
+//! 2. Computes "needed sets" (what tokens can reach acceptance from each state)
+//! 3. Uses exact graph coloring to find optimal state merging
+//! 4. Handles the "Diamond" case where states with disjoint domains can merge
+//!
+//! This is significantly more effective than traditional partition refinement
+//! because it can merge states that have different behavior, as long as their
+//! "active" token domains are disjoint.
 
 pub mod common;
 pub mod dwa_acyclic;
@@ -17,6 +31,9 @@ use crate::precompute4::weighted_automata::dwa::DWA;
 use crate::precompute4::weighted_automata::Weight;
 
 impl DWA {
+    /// Minimizes the DWA to its optimal state count.
+    /// Dispatches to acyclic or cyclic implementation based on graph structure.
+    /// Both paths now use the exact Diamond-aware algorithm with SCC support.
     pub fn minimize(&mut self) {
         if self.is_cyclic() {
             self.minimize_cyclic();
@@ -25,6 +42,7 @@ impl DWA {
         }
     }
 
+    /// Same as minimize(), returns true if any changes were made.
     pub fn minimize_internal(&mut self) -> bool {
         if self.is_cyclic() {
             self.minimize_internal_cyclic()
