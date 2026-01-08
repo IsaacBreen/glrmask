@@ -4,12 +4,14 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 impl DWA {
     pub fn minimize_acyclic(&mut self) {
+        let x = self.clone();
         match minimize_acyclic_exact(self) {
             Ok(min_dwa) => *self = min_dwa,
             Err(e) => {
                 eprintln!("DWA minimization failed: {:?}", e);
             }
         }
+        crate::precompute4::weighted_automata::test_weighted_automata::stochastic_equivalence_test(x.clone(), self.clone());
     }
 }
 
