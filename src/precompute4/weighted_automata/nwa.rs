@@ -280,6 +280,61 @@ impl NWA {
         st
     }
 
+    /// Counts the total number of ranges across all weights in this NWA.
+    /// This includes final weights, transition weights, and epsilon weights.
+    /// Note: If the same weight object appears multiple times, its ranges are counted each time.
+    pub fn num_ranges(&self) -> usize {
+        let mut total = 0;
+        for state in &self.states.0 {
+            if let Some(fw) = &state.final_weight {
+                total += fw.num_ranges();
+            }
+            for targets in state.transitions.values() {
+                for (_, w) in targets {
+                    total += w.num_ranges();
+                }
+            }
+            for (_, w) in &state.epsilons {
+                total += w.num_ranges();
+            }
+        }
+        total
+    }
+
+    /// Counts the total number of ranges across unique (interned) weights in this NWA.
+    /// If the same interned weight appears multiple times, it is only counted once.
+    pub fn num_ranges_interned(&self) -> usize {
+        use std::collections::HashSet;
+        use std::ptr;
+        
+        // Track unique weights by their Arc pointer address
+        let mut seen: HashSet<usize> = HashSet::new();
+        let mut total = 0;
+        
+        let mut process_weight = |w: &Weight| {
+            // Get the Arc pointer address as a unique identifier
+            let ptr = ptr::addr_of!(**w) as usize;
+            if seen.insert(ptr) {
+                total += w.num_ranges();
+            }
+        };
+        
+        for state in &self.states.0 {
+            if let Some(fw) = &state.final_weight {
+                process_weight(fw);
+            }
+            for targets in state.transitions.values() {
+                for (_, w) in targets {
+                    process_weight(w);
+                }
+            }
+            for (_, w) in &state.epsilons {
+                process_weight(w);
+            }
+        }
+        total
+    }
+
     /// Eliminate epsilon chains for visualization.
     /// 
     /// A state is "epsilon-only" if it has:

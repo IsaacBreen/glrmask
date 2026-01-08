@@ -203,6 +203,10 @@ impl RangeSetInner {
 
     pub fn max_item(&self) -> Option<usize> { self.rsb.ranges().last().map(|r| *r.end()) }
 
+    /// Returns the number of contiguous ranges in this set.
+    /// For example, {1..=3, 5..=7} has 2 ranges.
+    pub fn num_ranges(&self) -> usize { self.rsb.ranges().count() }
+
     pub fn iter_up_to(&self, max: usize) -> impl Iterator<Item = usize> {
         (&self.rsb & &RangeSetBlaze::from_iter([0..=max])).into_iter()
     }

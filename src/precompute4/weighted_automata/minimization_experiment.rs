@@ -250,13 +250,14 @@ impl NWA {
                 NwaPass::MinimizeRustfst => { self.minimize_with_rustfst_full(); },
             }
         }
-        crate::debug!(5, "NWA minimization: {} states, {} transitions", self.states.len(), self.states.num_transitions());
+        crate::debug!(5, "NWA minimization: {} states, {} transitions, {} ranges ({} interned)", 
+            self.states.len(), self.states.num_transitions(), self.num_ranges(), self.num_ranges_interned());
 
         let det_start = std::time::Instant::now();
         let mut dwa = self.determinize();
         let det_time = det_start.elapsed();
-        crate::debug!(5, "Determinization: {} states, {} transitions in {:.2?}", 
-            dwa.states.len(), dwa.states.num_transitions(), det_time);
+        crate::debug!(5, "Determinization: {} states, {} transitions, {} ranges ({} interned) in {:.2?}", 
+            dwa.states.len(), dwa.states.num_transitions(), dwa.num_ranges(), dwa.num_ranges_interned(), det_time);
 
         // Run DWA passes
         for pass in config.dwa_passes.clone() {
@@ -271,8 +272,8 @@ impl NWA {
             }
             let pass_time = pass_start.elapsed();
             if pass_time.as_millis() > 50 {
-                crate::debug!(5, "DWA Pass {:?}: {} states, {} transitions in {:.2?}", 
-                    pass, dwa.states.len(), dwa.states.num_transitions(), pass_time);
+                crate::debug!(5, "DWA Pass {:?}: {} states, {} transitions, {} ranges ({} interned) in {:.2?}", 
+                    pass, dwa.states.len(), dwa.states.num_transitions(), dwa.num_ranges(), dwa.num_ranges_interned(), pass_time);
             }
         }
         dwa

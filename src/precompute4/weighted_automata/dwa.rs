@@ -144,6 +144,51 @@ impl DWA {
         format!("States: {}, Transitions: {}", self.states.len(), self.states.iter().map(|s| s.transitions.len()).sum::<usize>())
     }
 
+    /// Counts the total number of ranges across all weights in this DWA.
+    /// This includes final weights and transition weights.
+    /// Note: If the same weight object appears multiple times, its ranges are counted each time.
+    pub fn num_ranges(&self) -> usize {
+        let mut total = 0;
+        for state in &self.states.0 {
+            if let Some(fw) = &state.final_weight {
+                total += fw.num_ranges();
+            }
+            for w in state.trans_weights.values() {
+                total += w.num_ranges();
+            }
+        }
+        total
+    }
+
+    /// Counts the total number of ranges across unique (interned) weights in this DWA.
+    /// If the same interned weight appears multiple times, it is only counted once.
+    pub fn num_ranges_interned(&self) -> usize {
+        use std::collections::HashSet;
+        use std::ptr;
+        
+        // Track unique weights by their Arc pointer address
+        let mut seen: HashSet<usize> = HashSet::new();
+        let mut total = 0;
+        
+        let mut process_weight = |w: &Weight| {
+            // Get the Arc pointer address as a unique identifier
+            let ptr = ptr::addr_of!(**w) as usize;
+            if seen.insert(ptr) {
+                total += w.num_ranges();
+            }
+        };
+        
+        for state in &self.states.0 {
+            if let Some(fw) = &state.final_weight {
+                process_weight(fw);
+            }
+            for w in state.trans_weights.values() {
+                process_weight(w);
+            }
+        }
+        total
+    }
+
     pub fn is_cyclic(&self) -> bool {
         let n = self.states.len();
         if n == 0 { return false; }
