@@ -11,10 +11,12 @@ impl DWA {
         // because the different outputs are encoded in the incoming transition weights.
         let pushed = push_weights_acyclic(self);
         
-        // First verify weight pushing is semantics-preserving
+        // Verify weight pushing is semantics-preserving
         if pushed {
             crate::precompute4::weighted_automata::test_weighted_automata::stochastic_equivalence_test(x.clone(), self.clone());
         }
+        
+        let after_push = self.clone();
         
         match minimize_acyclic_exact(self) {
             Ok(min_dwa) => *self = min_dwa,
@@ -23,9 +25,8 @@ impl DWA {
             }
         }
         
-        // Verify minimization is semantics-preserving (against pushed version, not original)
-        // Note: We already verified pushing preserves semantics above
-        // So we skip the final equivalence check here to avoid double-checking
+        // Verify minimization is semantics-preserving (vs after-push state)
+        crate::precompute4::weighted_automata::test_weighted_automata::stochastic_equivalence_test(after_push.clone(), self.clone());
     }
 }
 
@@ -428,13 +429,13 @@ fn compute_heights(dwa: &DWA, topo_order: &[StateID]) -> Vec<usize> {
 /// After weight pushing and tightening, states can be merged if:
 /// 1. For each label, the transitions are "compatible":
 ///    - Both have the same target (after mapping)
-///    - Their weights are identical, OR their domains are disjoint (diamond case)
+///    - Their weights are identical on the domain overlap (diamond case)
+/// 2. Final weights are compatible on the domain overlap
 /// 
 /// The diamond case is correct because:
 /// - After tighten_weights, trans weights only include tokens that can reach the state
-/// - If domains are disjoint, the weights must also be disjoint
-/// - Merging disjoint weights (union) preserves semantics: each token only uses one branch
-/// - Final weights can differ - they'll be unioned, and incoming tokens restrict which is used
+/// - If the behavior is identical on overlapping tokens, merging is safe
+/// - Tokens outside the overlap only reach one state anyway (disjoint domains)
 fn are_compatible(
     u: StateID,
     v: StateID,
@@ -448,6 +449,20 @@ fn are_compatible(
     let domain_v = &needed[v];
     let domain_overlap = domain_u & domain_v;
     let domains_disjoint = domain_overlap.is_empty();
+    
+    // Check final weight compatibility on the overlap domain
+    // For tokens in the overlap, final weights must produce the same output
+    if !domains_disjoint {
+        let fw_u = dwa.states[u].final_weight.as_ref()
+            .map(|w| w & &domain_overlap)
+            .unwrap_or_else(Weight::zeros);
+        let fw_v = dwa.states[v].final_weight.as_ref()
+            .map(|w| w & &domain_overlap)
+            .unwrap_or_else(Weight::zeros);
+        if fw_u != fw_v {
+            return false;
+        }
+    }
     
     // Collect all labels present in either state
     let mut labels: BTreeSet<Label> = dwa.states[u].transitions.keys().copied().collect();
@@ -467,19 +482,23 @@ fn are_compatible(
             None => Weight::zeros(),
         };
 
-        // Check weight compatibility
+        // Check weight compatibility on the overlap domain
         if !domains_disjoint {
-            // Domains overlap: weights must be identical on the overlap
-            // This is the conservative check - require exactly equal weights
-            if w_u_raw != w_v_raw {
+            // For tokens in the overlap, transition weights must produce the same output
+            let w_u_overlap = &w_u_raw & &domain_overlap;
+            let w_v_overlap = &w_v_raw & &domain_overlap;
+            if w_u_overlap != w_v_overlap {
                 return false;
             }
         }
         // If domains are disjoint, weights can differ (they'll be unioned when merged)
         // But both must go to the same target (after mapping)
 
-        // If either has a transition, check targets map to same state
-        if !w_u_raw.is_empty() || !w_v_raw.is_empty() {
+        // If either has a transition on the overlap, check targets map to same state
+        // For disjoint domains, we don't care about target matching (tokens won't mix)
+        let w_u_overlap = &w_u_raw & &domain_overlap;
+        let w_v_overlap = &w_v_raw & &domain_overlap;
+        if !w_u_overlap.is_empty() || !w_v_overlap.is_empty() {
             let target_u_old = trans_u.map(|(t, _)| t);
             let target_v_old = trans_v.map(|(t, _)| t);
             
@@ -502,13 +521,10 @@ fn are_compatible(
                     }
                 }
                 (Some(_), None) | (None, Some(_)) => {
-                    // One has transition, other doesn't
-                    // Only OK if domains are disjoint
-                    if !domains_disjoint {
-                        return false;
-                    }
+                    // One has transition on overlap, other doesn't - incompatible
+                    return false;
                 }
-                (None, None) => {} // Neither has transition
+                (None, None) => {} // Neither has transition on overlap
             }
         }
     }
