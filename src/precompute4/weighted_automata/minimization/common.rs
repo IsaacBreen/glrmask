@@ -42,7 +42,8 @@ impl DwaPass {
             DwaPass::PushWeightsToInitial => std::env::var("DWA_DISABLE_PUSH_WEIGHTS_TO_INITIAL").map(|v| v != "1").unwrap_or(true),
             DwaPass::ResidualPush => std::env::var("DWA_DISABLE_RESIDUAL_PUSH").map(|v| v != "1").unwrap_or(true),
             DwaPass::Minimize => std::env::var("DWA_DISABLE_MINIMIZE").map(|v| v != "1").unwrap_or(true),
-            DwaPass::ConsolidateRanges => std::env::var("DWA_ENABLE_CONSOLIDATE_RANGES").map(|v| v == "1").unwrap_or(false),
+            // ConsolidateRanges is now fast (~52ms) after optimization, enabled by default
+            DwaPass::ConsolidateRanges => std::env::var("DWA_DISABLE_CONSOLIDATE_RANGES").map(|v| v != "1").unwrap_or(true),
         }
     }
 }

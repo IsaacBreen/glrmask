@@ -2,6 +2,7 @@ mod consolidate_ranges;
 
 use crate::precompute4::weighted_automata::common::{Label, StateID, Weight};
 use crate::precompute4::weighted_automata::dwa::{DWA, DWABuildError, DWAState, DWAStates};
+use crate::precompute4::weighted_automata::minimization::common::DwaPass;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 impl DWA {
@@ -29,6 +30,11 @@ impl DWA {
         
         // Verify minimization is semantics-preserving (vs after-push state)
         crate::precompute4::weighted_automata::test_weighted_automata::stochastic_equivalence_test(after_push.clone(), self.clone());
+        
+        // Consolidate ranges if enabled
+        if DwaPass::ConsolidateRanges.is_enabled() {
+            self.consolidate_ranges();
+        }
     }
 }
 

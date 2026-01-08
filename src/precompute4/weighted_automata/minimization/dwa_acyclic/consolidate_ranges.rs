@@ -38,12 +38,30 @@ impl DWA {
         self.analyze_weight_structure();
         
         // Compute forward and backward reachability
+        let t0 = std::time::Instant::now();
         let forward_reach = self.compute_forward_reachability();
+        crate::debug!(5, "  Forward reachability computed in {:?}", t0.elapsed());
+        
+        let t1 = std::time::Instant::now();
         let backward_reach = self.compute_backward_reachability();
+        crate::debug!(5, "  Backward reachability computed in {:?}", t1.elapsed());
         
         let mut changed = false;
         let mut ranges_removed = 0usize;
         let mut gaps_filled = 0usize;
+        
+        // Build a cache of optimized weights indexed by (weight_ptr, state_id, dest_state_id)
+        // Since forward_reach depends only on state_id and backward_reach depends only on dest,
+        // we can use these as cache keys
+        use std::ptr;
+        type WeightKey = (usize, StateID, StateID); // (weight_ptr, state_id, dest_state_id)
+        let mut weight_cache: HashMap<WeightKey, Weight> = HashMap::new();
+        
+        let t2 = std::time::Instant::now();
+        let mut intersect_time = std::time::Duration::ZERO;
+        let mut optimize_time = std::time::Duration::ZERO;
+        let mut cache_hits = 0usize;
+        let mut cache_misses = 0usize;
         
         // Process each state's weights
         for state_id in 0..self.states.len() {
@@ -55,17 +73,32 @@ impl DWA {
                 let dest = self.states[state_id].transitions[&label];
                 let reach_dest = &backward_reach[dest];
                 
-                // For removing ranges: token must be reachable from start AND can finish from dest
-                let tokens_for_removal = reach_here & reach_dest;
-                // For filling gaps: token must not be reachable from start
-                let tokens_for_gap_fill = reach_here;
-                
                 if let Some(weight) = self.states[state_id].trans_weights.get(&label).cloned() {
-                    let (new_weight, removed, filled) = optimize_weight_ranges(&weight, &tokens_for_removal, tokens_for_gap_fill);
+                    let weight_ptr = ptr::addr_of!(*weight) as usize;
+                    let cache_key = (weight_ptr, state_id, dest);
                     
-                    if removed > 0 || filled > 0 {
+                    let new_weight = if let Some(cached) = weight_cache.get(&cache_key) {
+                        cache_hits += 1;
+                        cached.clone()
+                    } else {
+                        cache_misses += 1;
+                        // For removing ranges: token must be reachable from start AND can finish from dest
+                        let ti = std::time::Instant::now();
+                        let tokens_for_removal = reach_here & reach_dest;
+                        intersect_time += ti.elapsed();
+                        // For filling gaps: token must not be reachable from start
+                        let tokens_for_gap_fill = reach_here;
+                        
+                        let to = std::time::Instant::now();
+                        let (opt_weight, removed, filled) = optimize_weight_ranges(&weight, &tokens_for_removal, tokens_for_gap_fill);
+                        optimize_time += to.elapsed();
                         ranges_removed += removed;
                         gaps_filled += filled;
+                        weight_cache.insert(cache_key, opt_weight.clone());
+                        opt_weight
+                    };
+                    
+                    if new_weight != weight {
                         changed = true;
                         self.states.0[state_id].trans_weights.insert(label, new_weight);
                     }
@@ -74,12 +107,26 @@ impl DWA {
             
             // Process final weight
             if let Some(fw) = self.states[state_id].final_weight.clone() {
-                // For final weight: forward reachability matters for both removal and gap filling
-                let (new_fw, removed, filled) = optimize_weight_ranges(&fw, reach_here, reach_here);
+                let weight_ptr = ptr::addr_of!(*fw) as usize;
+                // For final weights, use state_id as both source and dest (since it's self-contained)
+                let cache_key = (weight_ptr, state_id, state_id);
                 
-                if removed > 0 || filled > 0 {
+                let new_fw = if let Some(cached) = weight_cache.get(&cache_key) {
+                    cache_hits += 1;
+                    cached.clone()
+                } else {
+                    cache_misses += 1;
+                    // For final weight: forward reachability matters for both removal and gap filling
+                    let to = std::time::Instant::now();
+                    let (opt_fw, removed, filled) = optimize_weight_ranges(&fw, reach_here, reach_here);
+                    optimize_time += to.elapsed();
                     ranges_removed += removed;
                     gaps_filled += filled;
+                    weight_cache.insert(cache_key, opt_fw.clone());
+                    opt_fw
+                };
+                
+                if new_fw != fw {
                     changed = true;
                     if new_fw.is_empty() {
                         self.states.0[state_id].final_weight = None;
@@ -104,6 +151,12 @@ impl DWA {
                 changed = true;
             }
         }
+        
+        crate::debug!(5, "  Main loop took {:?} (intersect: {:?}, optimize: {:?})", 
+            t2.elapsed(), intersect_time, optimize_time);
+        crate::debug!(5, "  Cache: {} hits, {} misses ({:.1}% hit rate)", 
+            cache_hits, cache_misses, 
+            100.0 * cache_hits as f64 / (cache_hits + cache_misses).max(1) as f64);
         
         let after_ranges = self.num_ranges_interned();
         let after_unique = self.count_unique_weights();
@@ -323,13 +376,17 @@ fn optimize_weight_ranges(weight: &Weight, tokens_for_removal: &RangeSetBlaze<us
     }
     
     // Step 2: Fill gaps that don't intersect tokens_for_gap_fill
-    // For each pair of adjacent ranges, check if the gap is "safe" to fill
+    // Use merge-style iteration: process gaps and reachability ranges in sorted order
     let ranges: Vec<_> = pruned.ranges().collect();
     
     if ranges.len() <= 1 {
         let ranges_removed = original_ranges - ranges.len();
         return (Weight::from_rsb(pruned), ranges_removed, 0);
     }
+    
+    // Collect reachability ranges for merge-style iteration
+    let gap_fill_ranges: Vec<_> = tokens_for_gap_fill.ranges().collect();
+    let mut gap_fill_idx = 0;
     
     let mut result = RangeSetBlaze::new();
     let mut gaps_filled = 0usize;
@@ -347,11 +404,16 @@ fn optimize_weight_ranges(weight: &Weight, tokens_for_removal: &RangeSetBlaze<us
             let gap_start = current_end + 1;
             let gap_end = next_start - 1;
             
-            // Check if gap intersects with tokens_for_gap_fill
-            let gap = RangeSetBlaze::from_iter([gap_start..=gap_end]);
-            let gap_intersection = &gap & tokens_for_gap_fill;
+            // Check if gap intersects with tokens_for_gap_fill using merge-style iteration
+            // Advance gap_fill_idx to find ranges that might overlap with [gap_start, gap_end]
+            while gap_fill_idx < gap_fill_ranges.len() && *gap_fill_ranges[gap_fill_idx].end() < gap_start {
+                gap_fill_idx += 1;
+            }
             
-            if gap_intersection.is_empty() {
+            let gap_intersects = gap_fill_idx < gap_fill_ranges.len() 
+                && *gap_fill_ranges[gap_fill_idx].start() <= gap_end;
+            
+            if !gap_intersects {
                 // Safe to fill this gap - extend current range
                 current_end = next_end;
                 gaps_filled += 1;

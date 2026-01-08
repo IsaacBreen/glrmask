@@ -132,6 +132,7 @@ impl DWA {
             DwaPass::ResidualPush,
             DwaPass::PruneDeadEnds,
             DwaPass::Minimize,
+            DwaPass::ConsolidateRanges,
         ];
 
         let all_passes: HashSet<DwaPass> = ordering.iter().copied().collect();
