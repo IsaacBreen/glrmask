@@ -250,6 +250,7 @@ impl NWA {
                 NwaPass::MinimizeRustfst => { self.minimize_with_rustfst_full(); },
             }
         }
+        crate::debug!(5, "NWA minimization: {} states, {} transitions", self.states.len(), self.states.num_transitions());
 
         let det_start = std::time::Instant::now();
         let mut dwa = self.determinize();
