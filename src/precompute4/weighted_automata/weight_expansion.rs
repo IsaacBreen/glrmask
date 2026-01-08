@@ -41,14 +41,15 @@ pub fn expand_weight_rsb(rsb: &std::sync::Arc<RangeSetBlaze<usize>>, num_tsids: 
 /// Internal helper to expand a RangeSetBlaze.
 /// Uses saturating arithmetic to handle large values that would overflow.
 pub fn expand_rsb(rsb: &RangeSetBlaze<usize>, num_tsids: usize) -> RangeSetBlaze<usize> {
-    let mut expanded = RangeSetBlaze::new();
-    for range in rsb.ranges() {
-        let start = range.start().saturating_mul(num_tsids);
-        let end_base = range.end().saturating_mul(num_tsids);
-        let end = end_base.saturating_add(num_tsids.saturating_sub(1));
-        expanded.extend([start..=end]);
-    }
-    expanded
+    rsb.ranges()
+        .map(|r| {
+            let start = r.start().saturating_mul(num_tsids);
+            let end = r.end()
+                .saturating_mul(num_tsids)
+                .saturating_add(num_tsids.saturating_sub(1));
+            start..=end
+        })
+        .collect()
 }
 
 /// Create a tsid mask for a specific tokenizer state ID.
