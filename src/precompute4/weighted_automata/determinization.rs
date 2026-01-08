@@ -2,7 +2,6 @@
 #![allow(clippy::needless_borrow)]
 
 use chrono::Local;
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use rustc_hash::FxHashMap;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -148,15 +147,10 @@ impl NWA {
         // 3. Precompute Reachability
         let eps_reach = precompute_all_epsilon_closures(&self.states);
 
-        // 4. Configure Progress Bar
-        // We only show the progress bar if determinization takes longer than 100ms.
-        let start_time = std::time::Instant::now();
-        let mut pbar_data: Option<(MultiProgress, ProgressBar)> = None;
-
-        // 5. Initialize Determinizer
+        // 4. Initialize Determinizer
         let mut det = Determinizer::new(self, &eps_reach);
 
-        // 6. Initial State Construction
+        // 5. Initial State Construction
         let mut start_map: HashMap<NWAStateID, Weight> = HashMap::new();
         for &s in &self.body.start_states {
             if s < eps_reach.len() {
@@ -174,8 +168,7 @@ impl NWA {
         let start_id = det.register_closure(start_subset);
         det.dwa.body.start_state = start_id;
 
-        // 7. Main Expansion Loop
-        let mut processed_count = 0;
+        // 6. Main Expansion Loop
         while let Some(sid) = det.queue.pop_front() {
             // Safety Guard
             if det.seen.len() > STATE_LIMIT {
@@ -187,37 +180,10 @@ impl NWA {
                 panic!("Determinization aborted after reaching {} states.", STATE_LIMIT);
             }
 
-            // Progress Update
-            // Initialize progress bar if > 100ms has elapsed and it's not yet created
-            if pbar_data.is_none() && start_time.elapsed().as_millis() > 100 {
-                let mp = MultiProgress::new();
-                let pb = mp.add(ProgressBar::new(1));
-                pb.set_style(
-                    ProgressStyle::default_bar()
-                        .template("{spinner:.green} [{elapsed_precise}] States: [{bar:40.cyan/blue}] {pos}/{len} ({eta}) {msg}")
-                        .unwrap()
-                        .progress_chars("#>-"),
-                );
-                pb.set_message("Determinizing NWA");
-                pbar_data = Some((mp, pb));
-            }
-
-            if let Some((_, pb)) = &pbar_data {
-                let total_states = det.seen.len();
-                pb.set_length(total_states as u64);
-                pb.set_position(processed_count as u64);
-                pb.set_message(format!("Expanding state {}/{}", processed_count + 1, total_states));
-            }
-
             det.expand_state(sid);
-            processed_count += 1;
-        }
-        
-        if let Some((_, pb)) = pbar_data {
-            pb.finish_with_message("Determinization complete");
         }
 
-        // 8. Debug Verification
+        // 7. Debug Verification
         if DETERMINIZE_DEBUG {
             let rustfst_dwa = self.determinize_to_dwa_with_rustfst();
             crate::debug!(5, "[DETERMINIZE_DEBUG] Comparing custom determinization with rustfst...");

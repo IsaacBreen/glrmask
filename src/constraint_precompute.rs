@@ -19,7 +19,6 @@ use crate::profiler::{self};
 use crate::tokenizer::{LLMTokenID, TokenizerStateID};
 use crate::types::TerminalID as GrammarTokenID;
 use crate::precompute4::weighted_automata::common::Label;
-use crate::precompute4::weighted_automata::test_weighted_automata::stochastic_equivalence_test;
 
 // No-op progress bar replacement
 struct NoOpPb;
@@ -254,7 +253,8 @@ impl<'r> Precomputer1<'r> {
             crate::debug!(5, "NWA: Found {} pairs of states connected by multiple transitions", parallel_connections);
         }
 
-        crate::debug!(5, "{} states and {} transitions", self.nwa.states.len(), self.nwa.states.num_transitions());
+        crate::debug!(5, "Terminal NWA: {} states, {} transitions", 
+                      self.nwa.states.len(), self.nwa.states.num_transitions());
 
         if std::env::var("DWA_DUMP_NWA").map(|v| v == "1").unwrap_or(false) {
             crate::debug!(5, "Dumping NWA to nwa_dump.json");
@@ -262,73 +262,25 @@ impl<'r> Precomputer1<'r> {
             std::fs::write("nwa_dump.json", json).unwrap();
         }
         
-        // // OPTIMIZATION: Use lightweight operations instead of full minimize()
-        // // This terminal DWA is only used as input to precompute4, so expensive minimization
-        // // provides little benefit. Just do basic cleanup.
-        // self.nwa.compress_transitions();
-        // crate::debug!(5, "Compressed NWA with {} states and {} transitions", self.nwa.states.len(), self.nwa.states.num_transitions());
-        //
-        // // let dwa = self.nwa.determinize_and_minimize("Precompute1");
-        // let mut dwa = self.nwa.determinize();
-        // dwa.minimize();
-        // crate::debug!(5, "Minimized DWA with {} states and {} transitions", dwa.states.len(), dwa.states.num_transitions());
-
-        crate::debug!(5, "Starting RustFST-based minimization and determinization");
+        // Step 1: Minimize NWA
         self.nwa.minimize_with_rustfst_full();
-        crate::debug!(5, "Minimized NWA with {} states and {} transitions", self.nwa.states.len(), self.nwa.states.num_transitions());
+        crate::debug!(5, "After NWA minimize: {} states, {} transitions", 
+                      self.nwa.states.len(), self.nwa.states.num_transitions());
+        
+        // Step 2: Compress transitions
         self.nwa.compress_transitions();
-        crate::debug!(5, "Compressed NWA with {} states and {} transitions", self.nwa.states.len(), self.nwa.states.num_transitions());
-        // self.nwa.minimize();
-        crate::debug!(5, "Minimized NWA with {} states and {} transitions", self.nwa.states.len(), self.nwa.states.num_transitions());
-        let mut dwa = if std::env::var("DWA_USE_RUSTFST_DETERMINIZE").map(|v| v == "1").unwrap_or(false) {
-            crate::debug!(5, "Using RustFST-based determinization");
-            self.nwa.determinize_to_dwa_with_rustfst()
-        } else {
-            crate::debug!(5, "Using built-in determinization");
-            self.nwa.determinize()
-        };
-        crate::debug!(5, "Determinized DWA with {} states and {} transitions", dwa.states.len(), dwa.states.num_transitions());
+        crate::debug!(5, "After compress: {} states, {} transitions", 
+                      self.nwa.states.len(), self.nwa.states.num_transitions());
         
-        // === Debug: compare weights before and after minimization ===
-        let states_before_minimize = dwa.states.len();
-        let unique_weights_before: std::collections::HashSet<_> = dwa.states.0.iter()
-            .flat_map(|s| s.trans_weights.values().chain(s.final_weight.iter()))
-            .cloned()
-            .collect();
-        crate::debug!(5, "Before minimize_with_rustfst_full: {} states, {} unique weights", 
-                      states_before_minimize, unique_weights_before.len());
+        // Step 3: Determinize
+        let mut dwa = self.nwa.determinize();
+        crate::debug!(5, "After determinize: {} states, {} transitions", 
+                      dwa.states.len(), dwa.states.num_transitions());
         
-        dwa.minimize_with_rustfst_full();
-        
-        let unique_weights_after: std::collections::HashSet<_> = dwa.states.0.iter()
-            .flat_map(|s| s.trans_weights.values().chain(s.final_weight.iter()))
-            .cloned()
-            .collect();
-        crate::debug!(5, "After minimize_with_rustfst_full: {} states, {} unique weights", 
-                      dwa.states.len(), unique_weights_after.len());
-        
-        crate::debug!(5, "Minimized DWA with {} states and {} transitions", dwa.states.len(), dwa.states.num_transitions());
+        // Step 4: Minimize DWA
         dwa.minimize();
-        crate::debug!(5, "Final minimized DWA with {} states and {} transitions", dwa.states.len(), dwa.states.num_transitions());
-        
-        let mut dwa2 = self.nwa.determinize_to_dwa_with_rustfst();
-        let unique_weights_dwa2: std::collections::HashSet<_> = dwa2.states.0.iter()
-            .flat_map(|s| s.trans_weights.values().chain(s.final_weight.iter()))
-            .cloned()
-            .collect();
-        crate::debug!(5, "RustFST DWA before minimize: {} states, {} unique weights", 
-                      dwa2.states.len(), unique_weights_dwa2.len());
-        dwa2.minimize_with_rustfst_full();
-        let unique_weights_dwa2_after: std::collections::HashSet<_> = dwa2.states.0.iter()
-            .flat_map(|s| s.trans_weights.values().chain(s.final_weight.iter()))
-            .cloned()
-            .collect();
-        crate::debug!(5, "RustFST DWA after minimize: {} states, {} unique weights", 
-                      dwa2.states.len(), unique_weights_dwa2_after.len());
-        
-        crate::debug!(5, "dwa is cyclic? {}", if dwa.is_cyclic() { "yes" } else { "no" });
-        crate::debug!(5, "dwa2 is cyclic? {}", if dwa2.is_cyclic() { "yes" } else { "no" });
-        stochastic_equivalence_test(dwa.clone(), dwa2);
+        crate::debug!(5, "After DWA minimize: {} states, {} transitions", 
+                      dwa.states.len(), dwa.states.num_transitions());
 
         dwa
     }
