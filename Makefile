@@ -1,7 +1,7 @@
 # Research Project Makefile
 # Common commands for paper writing and research
 
-.PHONY: paper paper-watch paper-clean notes-today help build test test-js test-json-schema test-schema-packagejson test-schema-github test-schema-sarif test-schema-meta test-schema-extra test-schema-kestra test-schema-vegalite test-schema-apollo test-schema-liquibase test-diff test-diff-dfa show-schema-id schema-id ffi viz viz-clean all jsonschemabench jsonschemabench-quick jsonschemabench-subset jsonschemabench-analyze jsonschemabench-llg jsonschemabench-llg-analyze jsonschemabench-compare
+.PHONY: paper paper-watch paper-clean notes-today help build test test-release test-js test-json-schema test-schema-packagejson test-schema-github test-schema-sarif test-schema-meta test-schema-extra test-schema-kestra test-schema-vegalite test-schema-apollo test-schema-liquibase test-diff test-diff-dfa show-schema-id schema-id ffi viz viz-clean all jsonschemabench jsonschemabench-quick jsonschemabench-subset jsonschemabench-analyze jsonschemabench-llg jsonschemabench-llg-analyze jsonschemabench-compare
 
 # === Build All ===
 
@@ -63,6 +63,13 @@ download-arxiv: ## Download arXiv paper: make download-arxiv ID=2305.13971 NAME=
 
 test: ## Run Rust tests
 	RUST_TEST_THREADS=1 RUSTFLAGS=-Awarnings ENABLE_PROGRESS_BAR=0 CARGO_PROFILE_DEV_OPT_LEVEL=1 cargo test --color=always --package sep1 --lib --profile test -- --nocapture
+
+test-release: ## Run all crate tests in release profile + test_nwa_minimize_determinize_minimize (ignored by default)
+	@echo "Running all non-ignored tests in release profile..."
+	RUST_TEST_THREADS=1 RUSTFLAGS=-Awarnings ENABLE_PROGRESS_BAR=0 cargo test --color=always --package sep1 --lib --release -- --nocapture
+	@echo ""
+	@echo "Running test_nwa_minimize_determinize_minimize (ignored by default)..."
+	RUST_TEST_THREADS=1 RUSTFLAGS=-Awarnings ENABLE_PROGRESS_BAR=0 cargo test --color=always --package sep1 --lib --release -- test_nwa_minimize_determinize_minimize --nocapture --include-ignored
 
 test-js: ## Compile the JavaScript grammar (verifies it compiles)
 	MACRO_DEBUG_LEVEL=4 timeout 120 python scripts/compile.py \
