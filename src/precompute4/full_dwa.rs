@@ -715,8 +715,10 @@ pub fn finalize_and_optimize_and_determinize(parser: &GLRParser, mut combined_nw
     
     // Full minimize() is actually needed here to reduce the massive combined NWA (1M+ states).
     // Lightweight pruning left 144K states which caused worse performance downstream.
-    let dwa = combined_nwa.determinize_and_minimize("FinalDWA");
+    let mut dwa = combined_nwa.determinize_and_minimize("FinalDWA");
     crate::debug!(4, "Minimized DWA. {} states and {} transitions remaining.", dwa.states.len(), dwa.states.num_transitions());
+    dwa.minimize();
+    crate::debug!(4, "Final DWA minimization complete. {} states and {} transitions.", dwa.states.len(), dwa.states.num_transitions());
     dwa
 }
 
