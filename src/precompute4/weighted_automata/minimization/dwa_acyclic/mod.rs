@@ -92,13 +92,13 @@ fn push_weights_acyclic(dwa: &mut DWA) -> bool {
         }
         
         // Include outputs reachable via transitions
-        for (&_label, &target) in &dwa.states[u].transitions {
+        // Only consider transitions that have explicit weights (dead transitions don't contribute)
+        for (&label, &target) in &dwa.states[u].transitions {
             if target < n {
-                let trans_w = dwa.states[u].trans_weights.get(&_label)
-                    .cloned()
-                    .unwrap_or_else(Weight::all);
-                // Tokens that can use this transition AND reach outputs from target
-                reach_u |= &(&trans_w & &reachable[target]);
+                if let Some(trans_w) = dwa.states[u].trans_weights.get(&label) {
+                    // Tokens that can use this transition AND reach outputs from target
+                    reach_u |= &(trans_w & &reachable[target]);
+                }
             }
         }
         
@@ -235,17 +235,20 @@ pub fn minimize_acyclic_exact(dwa: &DWA) -> Result<DWA, DWABuildError> {
                 // If the target state was skipped (e.g. not needed), ignore this transition branch
                 if !old_to_new.contains_key(&target_old) { continue; }
 
-                let w_orig = old_state.trans_weights.get(&label).unwrap();
-                let target_new = old_to_new[&target_old];
+                // Only consider transitions that have explicit weights
+                // Transitions without weights are "dead" (get_transition returns None)
+                if let Some(w_orig) = old_state.trans_weights.get(&label) {
+                    let target_new = old_to_new[&target_old];
 
-                // CRITICAL OPTIMIZATION:
-                // Effectively w_trans = w_orig & Needed[target_old].
-                // Since target is already merged, we use completed[target_new].needed.
-                let mut w_effective = w_orig.clone();
-                w_effective &= &completed[target_new].needed;
+                    // CRITICAL OPTIMIZATION:
+                    // Effectively w_trans = w_orig & Needed[target_old].
+                    // Since target is already merged, we use completed[target_new].needed.
+                    let mut w_effective = w_orig.clone();
+                    w_effective &= &completed[target_new].needed;
 
-                if !w_effective.is_empty() {
-                    builder.add_transition(label, target_new, w_effective);
+                    if !w_effective.is_empty() {
+                        builder.add_transition(label, target_new, w_effective);
+                    }
                 }
             }
         }
@@ -317,10 +320,13 @@ fn compute_needed_sets(dwa: &DWA, topo_order: &[StateID]) -> Vec<Weight> {
         }
         for (&lbl, &v) in &dwa.states[u].transitions {
             if v >= dwa.states.len() { continue; }
-            let w_trans = dwa.states[u].trans_weights.get(&lbl).unwrap();
-            let mut contribution = w_trans.clone();
-            contribution &= &needed[v];
-            acc |= &contribution;
+            // Only consider transitions that have explicit weights
+            // Transitions without weights are "dead" (get_transition returns None)
+            if let Some(w_trans) = dwa.states[u].trans_weights.get(&lbl) {
+                let mut contribution = w_trans.clone();
+                contribution &= &needed[v];
+                acc |= &contribution;
+            }
         }
         needed[u] = acc;
     }
@@ -341,11 +347,14 @@ fn compute_forward_reachable(dwa: &DWA, topo_order: &[StateID]) -> Vec<Weight> {
         
         for (&lbl, &v) in &dwa.states[u].transitions {
             if v >= dwa.states.len() { continue; }
-            let w_trans = dwa.states[u].trans_weights.get(&lbl).unwrap();
-            // Tokens that can reach v through this transition
-            let mut contribution = incoming.clone();
-            contribution &= w_trans;
-            forward[v] |= &contribution;
+            // Only consider transitions that have explicit weights
+            // Transitions without weights are "dead" (get_transition returns None)
+            if let Some(w_trans) = dwa.states[u].trans_weights.get(&lbl) {
+                // Tokens that can reach v through this transition
+                let mut contribution = incoming.clone();
+                contribution &= w_trans;
+                forward[v] |= &contribution;
+            }
         }
     }
     
@@ -389,13 +398,16 @@ fn tighten_weights(dwa: &DWA) -> Result<DWA, DWABuildError> {
         for (&lbl, &target) in &state.transitions {
             if target >= dwa.states.len() { continue; }
             
-            let w_orig = state.trans_weights.get(&lbl).unwrap();
-            // Tighten: only keep tokens that can reach this state
-            let tightened = w_orig & &forward[u];
-            
-            if !tightened.is_empty() {
-                new_state.transitions.insert(lbl, target);
-                new_state.trans_weights.insert(lbl, tightened);
+            // Only consider transitions that have explicit weights
+            // Transitions without weights are "dead" (get_transition returns None)
+            if let Some(w_orig) = state.trans_weights.get(&lbl) {
+                // Tighten: only keep tokens that can reach this state
+                let tightened = w_orig & &forward[u];
+                
+                if !tightened.is_empty() {
+                    new_state.transitions.insert(lbl, target);
+                    new_state.trans_weights.insert(lbl, tightened);
+                }
             }
         }
         
@@ -469,24 +481,33 @@ fn are_compatible(
     labels.extend(dwa.states[v].transitions.keys());
 
     for lbl in labels {
-        let trans_u = dwa.states[u].get_transition(lbl);
-        let trans_v = dwa.states[v].get_transition(lbl);
+        // Check if transitions exist and get their targets
+        let target_u = dwa.states[u].transitions.get(&lbl);
+        let target_v = dwa.states[v].transitions.get(&lbl);
 
-        // Get raw weights
-        let w_u_raw = match trans_u {
-            Some((_, w)) => w.clone(),
-            None => Weight::zeros(),
+        // Get weights
+        // A transition is only "live" if it has an explicit weight in trans_weights
+        // Missing trans_weights entries mean the transition is "dead" (get_transition returns None)
+        let w_u_raw = if target_u.is_some() {
+            dwa.states[u].trans_weights.get(&lbl).cloned()
+        } else {
+            None
         };
-        let w_v_raw = match trans_v {
-            Some((_, w)) => w.clone(),
-            None => Weight::zeros(),
+        let w_v_raw = if target_v.is_some() {
+            dwa.states[v].trans_weights.get(&lbl).cloned()
+        } else {
+            None
         };
+        
+        // Treat missing weights as empty (dead transitions)
+        let w_u_effective = w_u_raw.as_ref().cloned().unwrap_or_else(Weight::zeros);
+        let w_v_effective = w_v_raw.as_ref().cloned().unwrap_or_else(Weight::zeros);
 
         // Check weight compatibility on the overlap domain
         if !domains_disjoint {
             // For tokens in the overlap, transition weights must produce the same output
-            let w_u_overlap = &w_u_raw & &domain_overlap;
-            let w_v_overlap = &w_v_raw & &domain_overlap;
+            let w_u_overlap = &w_u_effective & &domain_overlap;
+            let w_v_overlap = &w_v_effective & &domain_overlap;
             if w_u_overlap != w_v_overlap {
                 return false;
             }
@@ -496,14 +517,11 @@ fn are_compatible(
 
         // If either has a transition on the overlap, check targets map to same state
         // For disjoint domains, we don't care about target matching (tokens won't mix)
-        let w_u_overlap = &w_u_raw & &domain_overlap;
-        let w_v_overlap = &w_v_raw & &domain_overlap;
+        let w_u_overlap = &w_u_effective & &domain_overlap;
+        let w_v_overlap = &w_v_effective & &domain_overlap;
         if !w_u_overlap.is_empty() || !w_v_overlap.is_empty() {
-            let target_u_old = trans_u.map(|(t, _)| t);
-            let target_v_old = trans_v.map(|(t, _)| t);
-            
-            match (target_u_old, target_v_old) {
-                (Some(tu), Some(tv)) => {
+            match (target_u, target_v) {
+                (Some(&tu), Some(&tv)) => {
                     // Both have transitions - check targets
                     let target_u_new = old_to_new.get(&tu);
                     let target_v_new = old_to_new.get(&tv);
