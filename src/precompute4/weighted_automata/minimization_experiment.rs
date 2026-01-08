@@ -279,6 +279,8 @@ impl NWA {
                     pass, dwa.states.len(), dwa.states.num_transitions(), dwa.num_ranges(), dwa.num_ranges_interned(), pass_time);
             }
         }
+        crate::debug!(5, "DWA minimization: {} states, {} transitions, {} ranges ({} interned)",
+            dwa.states.len(), dwa.states.num_transitions(), dwa.num_ranges(), dwa.num_ranges_interned());
         dwa
     }
 
