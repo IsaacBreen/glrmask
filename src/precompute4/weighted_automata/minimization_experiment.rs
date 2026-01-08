@@ -143,6 +143,7 @@ pub fn run_nwa_optimization_experiment(nwa: &mut NWA) {
                     NwaPass::PushWeightsToInitial => current_nwa.push_weights_to_initial(),
                     NwaPass::CompressTransitions => current_nwa.compress_transitions(),
                     NwaPass::Minimize => current_nwa.minimize_states(),
+                    NwaPass::RmEpsilon => { current_nwa.rm_epsilon(); true },
                 };
                 if changed {
                     current_changing_passes.push(pass);
@@ -194,6 +195,13 @@ impl NWA {
 
         // Production configs based on experiments
         let config = match context {
+            "TerminalDWA" => DeterminizeAndMinimizeConfig {
+                // Full pipeline for Terminal DWA construction (precompute1)
+                // Current best: NWA minimize → compress → rm_epsilon → determinize → DWA minimize
+                // Results: 14647 → 5904 → 5904 → 889 → 189 states
+                nwa_passes: vec![NwaPass::Minimize, NwaPass::CompressTransitions, NwaPass::RmEpsilon],
+                dwa_passes: vec![DwaPass::Minimize],
+            },
             "Precompute1" => DeterminizeAndMinimizeConfig {
                 // OPTIMIZATION: Skip Minimize to save ~420ms - Precompute1 is just input to precompute4
                 // The final DWA will be minimized, so intermediate minimization is redundant.
@@ -201,12 +209,10 @@ impl NWA {
                 dwa_passes: vec![DwaPass::PruneDeadEnds],
             },
             "FinalDWA" => DeterminizeAndMinimizeConfig {
-                // OPTIMIZATION: Skip Minimize for FinalDWA - it takes 2-6 seconds and only
-                // reduces output size. The DWA works correctly without minimization.
-                // Before: 54K states, 664K transitions (minimized). After: ~400K states (unminimized).
-                // Trade-off: ~2MB larger output for 3-5x faster compilation.
+                // Full pipeline for Parser DWA (finalize_and_optimize_and_determinize)
+                // Includes minimize to get optimal state count
                 nwa_passes: vec![],
-                dwa_passes: vec![DwaPass::PruneDeadEnds],
+                dwa_passes: vec![DwaPass::PruneDeadEnds, DwaPass::Minimize],
             },
             "SuperDWA" => DeterminizeAndMinimizeConfig {
                 // Fallback / Default for SuperDWA (was not large enough to trigger experiment in test)
@@ -239,6 +245,7 @@ impl NWA {
                 NwaPass::PushWeightsToInitial => { self.push_weights_to_initial(); },
                 NwaPass::CompressTransitions => { self.compress_transitions(); },
                 NwaPass::Minimize => { self.minimize_states(); },
+                NwaPass::RmEpsilon => { self.rm_epsilon(); },
             }
         }
 

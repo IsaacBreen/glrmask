@@ -26,6 +26,7 @@ pub enum NwaPass {
     PushWeightsToInitial,
     CompressTransitions,
     Minimize,
+    RmEpsilon,
 }
 
 impl NWA {
@@ -140,6 +141,7 @@ impl NWA {
                     NwaPass::PushWeightsToInitial => self.push_weights_to_initial(),
                     NwaPass::CompressTransitions => self.compress_transitions(),
                     NwaPass::Minimize => self.minimize_states(),
+                    NwaPass::RmEpsilon => { self.rm_epsilon(); true },
                 };
                 if pass_changed {
                     current_changing_passes.insert(pass);

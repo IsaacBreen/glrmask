@@ -996,10 +996,15 @@ impl GrammarConstraint {
             internal_to_original_sparse_matrix: vec![],
         };
 
-        // Number of tokenizer states for weight-heavy encoding (for debug logging)
-        let num_tsids = tokenizer.dfa.states.len();
+        // Number of tokenizer states for weight-heavy encoding
+        let weight_heavy_enabled = crate::constraint_precompute::is_weight_heavy_enabled();
+        let num_tsids = if weight_heavy_enabled {
+            tokenizer.dfa.states.len()
+        } else {
+            0
+        };
         
-        crate::debug!(4, "Running precompute1 (weight-heavy mode, num_tsids={})...", num_tsids);
+        crate::debug!(4, "Running precompute1 (weight_heavy={}, num_tsids={})...", weight_heavy_enabled, num_tsids);
         let mut terminal_dwa = run_precompute1(
             &tokenizer,
             &internal_llm_token_map,
@@ -1820,8 +1825,12 @@ impl GrammarConstraint {
         let vocab_trie = Arc::new(LLMVocabTrie::from_token_map(&llm_token_map));
 
         // Weight-heavy mode: num_tsids > 0 means tsid info is encoded in weight positions
-        // The precompute1 code always uses weight-heavy encoding (N×M weights)
-        let num_tsids = tokenizer.dfa.states.len();
+        // Check if weight-heavy mode is enabled via environment variable
+        let num_tsids = if crate::constraint_precompute::is_weight_heavy_enabled() {
+            tokenizer.dfa.states.len()
+        } else {
+            0
+        };
         
         #[allow(deprecated)]
         GrammarConstraint {

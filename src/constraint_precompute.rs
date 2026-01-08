@@ -91,12 +91,17 @@ impl<'r> Precomputer1<'r> {
         let pb = NoOpPb;
 
         let leaf_state = nwa.add_state();
-        // In weight-heavy mode, final weight should also be expanded
+        // Final weight - expanded in weight-heavy mode, simple in symbol-heavy mode
         // IMPORTANT: Use [0..=...] to create from ONE range, not iterate over all integers!
-        nwa.states[leaf_state].final_weight = Some(Weight::from_rsb(
-            expand_rsb(&RangeSetBlaze::from_iter([0..=internal_max_llm_token]), num_tsids)
-        ));
-        crate::debug!(6, "Created trie1 leaf state with expanded final weight");
+        let final_weight = if num_tsids == 0 {
+            // Symbol-heavy mode: all tokens in N-space
+            Weight::from_rsb(RangeSetBlaze::from_iter([0..=internal_max_llm_token]))
+        } else {
+            // Weight-heavy mode: all tokens in N×M-space
+            Weight::from_rsb(expand_rsb(&RangeSetBlaze::from_iter([0..=internal_max_llm_token]), num_tsids))
+        };
+        nwa.states[leaf_state].final_weight = Some(final_weight);
+        crate::debug!(6, "Created trie1 leaf state with final weight (num_tsids={})", num_tsids);
 
         Self {
             tokenizer,
@@ -179,23 +184,32 @@ impl<'r> Precomputer1<'r> {
             }
         }
 
-        // Create start state with labeled tsid transitions for weight-heavy mode
-        // Each tsid gets a transition labeled (tsid + terminals_count) with a tsid-masked weight
-        // This preserves compatibility with build_parser_dwa which expects labeled tsid transitions
+        // Create start state with transitions to root states
         let new_start_state = self.nwa.add_state();
         
-        // Group tsids by their representative to call create_tsid_set_mask once per group
-        let mut rep_to_tsids: BTreeMap<TokenizerStateID, Vec<usize>> = BTreeMap::new();
-        for (tsid, rep_tsid) in &self.state_to_rep {
-            rep_to_tsids.entry(*rep_tsid).or_default().push(tsid.0);
-        }
-        
-        // Create one epsilon transition per representative with combined tsid mask
-        for (rep_tsid, tsids) in rep_to_tsids {
-            if let Some(&state) = self.roots.get(&rep_tsid) {
-                // Create combined tsid mask for all tsids that map to this representative
-                let tsid_mask = create_tsid_set_mask(tsids, self.num_tsids, self.internal_max_llm_token);
-                self.nwa.add_epsilon(new_start_state, state, tsid_mask);
+        if self.num_tsids == 0 {
+            // Symbol-heavy mode: create labeled transitions with Weight::all()
+            // Label = tsid + terminals_count
+            for (tsid, &state) in &self.roots {
+                let label = (tsid.0 + self.terminals_count) as Label;
+                let weight = Weight::from_rsb(RangeSetBlaze::from_iter([0..=self.internal_max_llm_token]));
+                self.nwa.add_transition(new_start_state, label, state, weight).unwrap();
+            }
+        } else {
+            // Weight-heavy mode: create epsilon transitions with tsid-masked weights
+            // Group tsids by their representative to call create_tsid_set_mask once per group
+            let mut rep_to_tsids: BTreeMap<TokenizerStateID, Vec<usize>> = BTreeMap::new();
+            for (tsid, rep_tsid) in &self.state_to_rep {
+                rep_to_tsids.entry(*rep_tsid).or_default().push(tsid.0);
+            }
+            
+            // Create one epsilon transition per representative with combined tsid mask
+            for (rep_tsid, tsids) in rep_to_tsids {
+                if let Some(&state) = self.roots.get(&rep_tsid) {
+                    // Create combined tsid mask for all tsids that map to this representative
+                    let tsid_mask = create_tsid_set_mask(tsids, self.num_tsids, self.internal_max_llm_token);
+                    self.nwa.add_epsilon(new_start_state, state, tsid_mask);
+                }
             }
         }
         self.nwa.body.start_states = vec![new_start_state];
@@ -262,26 +276,11 @@ impl<'r> Precomputer1<'r> {
             std::fs::write("nwa_dump.json", json).unwrap();
         }
 
-        // Step 1: Minimize NWA
-        self.nwa.minimize_with_rustfst_full();
-        crate::debug!(5, "After NWA minimize: {} states, {} transitions",
-                      self.nwa.states.len(), self.nwa.states.num_transitions());
-
-        // Step 2: Compress transitions
-        self.nwa.compress_transitions();
-        crate::debug!(5, "After compress: {} states, {} transitions",
-                      self.nwa.states.len(), self.nwa.states.num_transitions());
-
-        self.nwa.rm_epsilon();
-
-        // Step 3: Determinize
-        let mut dwa = self.nwa.determinize();
-        crate::debug!(5, "After determinize: {} states, {} transitions", 
-                      dwa.states.len(), dwa.states.num_transitions());
-        
-        // Step 4: Minimize DWA
-        dwa.minimize();
-        crate::debug!(5, "After DWA minimize: {} states, {} transitions", 
+        // Use unified determinize_and_minimize with "TerminalDWA" profile
+        // Pipeline: NWA minimize → compress → rm_epsilon → determinize → DWA minimize
+        // Expected results: 14647 → 5904 → 5904 → 889 → 189 states
+        let dwa = self.nwa.determinize_and_minimize("TerminalDWA");
+        crate::debug!(5, "Terminal DWA: {} states, {} transitions", 
                       dwa.states.len(), dwa.states.num_transitions());
 
         dwa
@@ -376,29 +375,48 @@ impl<'r> Precomputer1<'r> {
 
     /// Create an expanded weight from a single token ID.
     /// Expands from N-space to N×M-space where M = num_tsids.
+    /// If num_tsids == 0 (symbol-heavy mode), returns the token ID directly in N-space.
     #[inline]
     fn expanded_weight_from_item(&self, token_id: usize) -> Weight {
-        // A single token ID in N-space becomes a range in N×M-space
-        // Token i becomes positions [i*M, i*M + M - 1]
-        let start = token_id * self.num_tsids;
-        let end = start + self.num_tsids - 1;
-        // IMPORTANT: Use [start..=end] to create from ONE range, not iterate over all integers!
-        Weight::from_rsb(RangeSetBlaze::from_iter([start..=end]))
+        if self.num_tsids == 0 {
+            // Symbol-heavy mode: just use the token ID directly
+            Weight::from_rsb(RangeSetBlaze::from_iter([token_id..=token_id]))
+        } else {
+            // Weight-heavy mode: A single token ID in N-space becomes a range in N×M-space
+            // Token i becomes positions [i*M, i*M + M - 1]
+            let start = token_id * self.num_tsids;
+            let end = start + self.num_tsids - 1;
+            // IMPORTANT: Use [start..=end] to create from ONE range, not iterate over all integers!
+            Weight::from_rsb(RangeSetBlaze::from_iter([start..=end]))
+        }
     }
 
     /// Create an expanded weight from a RangeSetBlaze of token IDs.
+    /// If num_tsids == 0 (symbol-heavy mode), returns the rsb directly.
     #[inline]
     fn expanded_weight_from_rsb(&self, rsb: RangeSetBlaze<usize>) -> Weight {
-        Weight::from_rsb(expand_rsb(&rsb, self.num_tsids))
+        if self.num_tsids == 0 {
+            // Symbol-heavy mode: use rsb directly
+            Weight::from_rsb(rsb)
+        } else {
+            // Weight-heavy mode: expand to N×M space
+            Weight::from_rsb(expand_rsb(&rsb, self.num_tsids))
+        }
     }
 
     /// Create an expanded "all" weight (all tokens for all tsids).
+    /// If num_tsids == 0 (symbol-heavy mode), returns Weight::all().
     #[inline]
     fn expanded_weight_all(&self) -> Weight {
-        // All tokens in N×M space
-        let max_pos = self.internal_max_llm_token * self.num_tsids + self.num_tsids - 1;
-        // IMPORTANT: Use [0..=max_pos] to create from ONE range, not iterate over all integers!
-        Weight::from_rsb(RangeSetBlaze::from_iter([0..=max_pos]))
+        if self.num_tsids == 0 {
+            // Symbol-heavy mode: all tokens in N-space
+            Weight::from_rsb(RangeSetBlaze::from_iter([0..=self.internal_max_llm_token]))
+        } else {
+            // Weight-heavy mode: All tokens in N×M space
+            let max_pos = self.internal_max_llm_token * self.num_tsids + self.num_tsids - 1;
+            // IMPORTANT: Use [0..=max_pos] to create from ONE range, not iterate over all integers!
+            Weight::from_rsb(RangeSetBlaze::from_iter([0..=max_pos]))
+        }
     }
 
     fn add_pending_transition(&mut self, src: NWAStateID, label: Label, dst: NWAStateID, weight: Weight) {
@@ -628,6 +646,12 @@ pub(crate) fn count_vocab_nodes(node: &VocabPrefixTreeNode) -> u64 {
         .sum::<u64>()
 }
 
+/// Check if weight-heavy mode is enabled via environment variable.
+/// Returns true (weight-heavy enabled) unless DISABLE_WEIGHT_HEAVY=1 is set.
+pub fn is_weight_heavy_enabled() -> bool {
+    std::env::var("DISABLE_WEIGHT_HEAVY").map(|v| v != "1").unwrap_or(true)
+}
+
 // Public entry point wrapper
 pub fn run_precompute1(
     tokenizer: &Regex,
@@ -636,8 +660,12 @@ pub fn run_precompute1(
     terminals_count: usize,
     state_to_rep: BTreeMap<TokenizerStateID, TokenizerStateID>,
 ) -> DWA {
-    // Compute num_tsids from tokenizer
-    let num_tsids = tokenizer.dfa.states.len();
+    // Compute num_tsids from tokenizer - 0 means symbol-heavy mode
+    let num_tsids = if is_weight_heavy_enabled() {
+        tokenizer.dfa.states.len()
+    } else {
+        0
+    };
     
     let mut representative_llm_token_map: BTreeMap<Vec<u8>, LLMTokenID> = BTreeMap::new();
     let mut seen_internal_ids = std::collections::HashSet::new();

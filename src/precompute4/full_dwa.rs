@@ -713,11 +713,9 @@ pub fn finalize_and_optimize_and_determinize(parser: &GLRParser, mut combined_nw
     prune_continuations_from_final_states(&mut combined_nwa);
     crate::debug!(4, "Pruned continuations from final states. NWA with {} states and {} transitions remaining.", combined_nwa.states.len(), combined_nwa.states.num_transitions());
     
-    // Full minimize() is actually needed here to reduce the massive combined NWA (1M+ states).
-    // Lightweight pruning left 144K states which caused worse performance downstream.
-    let mut dwa = combined_nwa.determinize_and_minimize("FinalDWA");
-    crate::debug!(4, "Minimized DWA. {} states and {} transitions remaining.", dwa.states.len(), dwa.states.num_transitions());
-    dwa.minimize();
+    // Use unified determinize_and_minimize with "FinalDWA" profile
+    // Pipeline: determinize → prune_dead_ends → minimize
+    let dwa = combined_nwa.determinize_and_minimize("FinalDWA");
     crate::debug!(4, "Final DWA minimization complete. {} states and {} transitions.", dwa.states.len(), dwa.states.num_transitions());
     dwa
 }
