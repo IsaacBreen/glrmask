@@ -237,6 +237,9 @@ impl NWA {
     }
 
     pub fn determinize_and_minimize_with_config(&mut self, config: DeterminizeAndMinimizeConfig) -> DWA {
+        crate::debug!(5, "Determinize and minimize initial stats: {} states, {} transitions, {} ranges ({} interned)",
+            self.states.len(), self.states.num_transitions(), self.num_ranges(), self.num_ranges_interned());
+
         // Run NWA passes
         for pass in config.nwa_passes {
             match pass {
