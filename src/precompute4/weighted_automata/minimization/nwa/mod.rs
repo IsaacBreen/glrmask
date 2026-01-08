@@ -16,6 +16,7 @@ use rustfst::algorithms::minimize_with_config;
 use rustfst::prelude::MinimizeConfig;
 
 use std::collections::HashSet;
+use rustfst::algorithms::rm_epsilon::rm_epsilon;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum NwaPass {
@@ -28,6 +29,27 @@ pub enum NwaPass {
 }
 
 impl NWA {
+    pub fn rm_epsilon(&mut self) {
+        crate::debug!(6, "[NWA] Removing epsilon transitions...");
+        let initial_states = self.states.len();
+        let mut total_epsilons = 0;
+        for st in &self.states.0 {
+            total_epsilons += st.epsilons.len();
+        }
+        crate::debug!(7, "[NWA] Initial number of states: {}, total epsilon transitions: {}", initial_states, total_epsilons);
+
+        let mut fst = self.to_rustfst();
+        rm_epsilon(&mut fst).unwrap();
+        *self = NWA::from_rustfst(&fst);
+
+        let final_states = self.states.len();
+        let mut final_epsilons = 0;
+        for st in &self.states.0 {
+            final_epsilons += st.epsilons.len();
+        }
+        crate::debug!(7, "[NWA] Final number of states: {}, total epsilon transitions: {}", final_states, final_epsilons);
+    }
+
     pub fn minimize(&mut self) {
         if self.states.len() == 0 {
             return;

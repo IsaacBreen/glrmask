@@ -261,17 +261,19 @@ impl<'r> Precomputer1<'r> {
             let json = serde_json::to_string(&self.nwa).unwrap();
             std::fs::write("nwa_dump.json", json).unwrap();
         }
-        
+
         // Step 1: Minimize NWA
         self.nwa.minimize_with_rustfst_full();
-        crate::debug!(5, "After NWA minimize: {} states, {} transitions", 
+        crate::debug!(5, "After NWA minimize: {} states, {} transitions",
                       self.nwa.states.len(), self.nwa.states.num_transitions());
-        
+
         // Step 2: Compress transitions
         self.nwa.compress_transitions();
-        crate::debug!(5, "After compress: {} states, {} transitions", 
+        crate::debug!(5, "After compress: {} states, {} transitions",
                       self.nwa.states.len(), self.nwa.states.num_transitions());
-        
+
+        self.nwa.rm_epsilon();
+
         // Step 3: Determinize
         let mut dwa = self.nwa.determinize();
         crate::debug!(5, "After determinize: {} states, {} transitions", 
