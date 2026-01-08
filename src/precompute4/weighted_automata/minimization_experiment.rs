@@ -144,6 +144,7 @@ pub fn run_nwa_optimization_experiment(nwa: &mut NWA) {
                     NwaPass::CompressTransitions => current_nwa.compress_transitions(),
                     NwaPass::Minimize => current_nwa.minimize_states(),
                     NwaPass::RmEpsilon => { current_nwa.rm_epsilon(); true },
+                    NwaPass::MinimizeRustfst => current_nwa.minimize_with_rustfst_full(),
                 };
                 if changed {
                     current_changing_passes.push(pass);
@@ -197,9 +198,9 @@ impl NWA {
         let config = match context {
             "TerminalDWA" => DeterminizeAndMinimizeConfig {
                 // Full pipeline for Terminal DWA construction (precompute1)
-                // Current best: NWA minimize → compress → rm_epsilon → determinize → DWA minimize
+                // Current best: NWA minimize_rustfst → compress → rm_epsilon → determinize → DWA minimize
                 // Results: 14647 → 5904 → 5904 → 889 → 189 states
-                nwa_passes: vec![NwaPass::Minimize, NwaPass::CompressTransitions, NwaPass::RmEpsilon],
+                nwa_passes: vec![NwaPass::MinimizeRustfst, NwaPass::CompressTransitions, NwaPass::RmEpsilon],
                 dwa_passes: vec![DwaPass::Minimize],
             },
             "Precompute1" => DeterminizeAndMinimizeConfig {
@@ -246,6 +247,7 @@ impl NWA {
                 NwaPass::CompressTransitions => { self.compress_transitions(); },
                 NwaPass::Minimize => { self.minimize_states(); },
                 NwaPass::RmEpsilon => { self.rm_epsilon(); },
+                NwaPass::MinimizeRustfst => { self.minimize_with_rustfst_full(); },
             }
         }
 

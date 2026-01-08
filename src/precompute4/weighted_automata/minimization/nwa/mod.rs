@@ -27,6 +27,7 @@ pub enum NwaPass {
     CompressTransitions,
     Minimize,
     RmEpsilon,
+    MinimizeRustfst,  // Full minimize using rustfst
 }
 
 impl NWA {
@@ -142,6 +143,7 @@ impl NWA {
                     NwaPass::CompressTransitions => self.compress_transitions(),
                     NwaPass::Minimize => self.minimize_states(),
                     NwaPass::RmEpsilon => { self.rm_epsilon(); true },
+                    NwaPass::MinimizeRustfst => self.minimize_with_rustfst_full(),
                 };
                 if pass_changed {
                     current_changing_passes.insert(pass);
