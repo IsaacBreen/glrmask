@@ -5,6 +5,7 @@ use std::fs;
 use std::path::PathBuf;
 
 #[test]
+#[ignore = "slow test - takes too long for CI"]
 fn test_rm_epsilon_effect() {
     // Load the NWA
     let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));

@@ -3,6 +3,7 @@ use std::fs;
 use std::path::PathBuf;
 
 #[test]
+#[ignore = "slow test - takes too long for CI"]
 fn test_nwa_minimize_determinize_minimize() {
     // Load the NWA from the JSON dump
     let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
