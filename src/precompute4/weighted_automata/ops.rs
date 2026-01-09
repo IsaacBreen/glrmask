@@ -1,1 +1,1 @@
-pub mod minimization_experiment;
+pub mod minimization_config;

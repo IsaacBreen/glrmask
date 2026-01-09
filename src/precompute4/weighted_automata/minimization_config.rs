@@ -1,3 +1,18 @@
+//! Minimization and determinization configurations for NWA/DWA.
+//!
+//! This module provides named configurations for different contexts where we need
+//! to determinize and/or minimize automata. Each config specifies which NWA and DWA
+//! optimization passes to run.
+//!
+//! Main configs:
+//! - `TerminalDWA`: Full pipeline for precompute1 (lexical DWA)
+//! - `TemplateDWA`: Template DWAs built from terminal characterizations  
+//! - `Precompute1`: Input to precompute4 (skip unnecessary minimize)
+//! - `FinalDWA`: Final Parser DWA after composition
+//! - `SuperDWA`: Intermediate composition result
+//!
+//! Also includes experimental functions for testing different pass orderings.
+
 #![allow(dead_code)]
 
 use super::common::optimize_debug;

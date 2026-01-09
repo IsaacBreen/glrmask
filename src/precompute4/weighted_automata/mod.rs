@@ -8,7 +8,7 @@ pub mod dwa;
 pub mod json;
 pub mod nwa;
 pub mod minimization;
-pub mod minimization_experiment;
+pub mod minimization_config;
 pub mod unroll;
 pub mod weight_expansion;
 
