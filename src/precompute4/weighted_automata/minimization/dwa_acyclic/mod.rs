@@ -159,17 +159,17 @@ pub fn minimize_acyclic_exact(dwa: &DWA) -> Result<DWA, DWABuildError> {
     // Step 0: Preprocess - tighten weights by removing unreachable tokens
     let step0_start = std::time::Instant::now();
     let dwa = tighten_weights(dwa)?;
-    crate::debug!(4, "Acyclic minimize step 0 (tighten_weights): {:?}", step0_start.elapsed());
+    crate::debug!(6, "Acyclic minimize step 0 (tighten_weights): {:?}", step0_start.elapsed());
 
     // 1. Topological Sort & Reachability Analysis
     let step1_start = std::time::Instant::now();
     let topo_order = compute_topo_order(&dwa)?;
-    crate::debug!(4, "Acyclic minimize step 1 (topo_order): {:?}", step1_start.elapsed());
+    crate::debug!(6, "Acyclic minimize step 1 (topo_order): {:?}", step1_start.elapsed());
 
     // 2. Compute "Needed" sets (Reverse Flow Analysis).
     let step2_start = std::time::Instant::now();
     let needed = compute_needed_sets(&dwa, &topo_order);
-    crate::debug!(4, "Acyclic minimize step 2 (needed_sets): {:?}", step2_start.elapsed());
+    crate::debug!(6, "Acyclic minimize step 2 (needed_sets): {:?}", step2_start.elapsed());
 
     // 3. Layer states by topological height (distance to sink).
     let step3_start = std::time::Instant::now();
@@ -184,7 +184,7 @@ pub fn minimize_acyclic_exact(dwa: &DWA) -> Result<DWA, DWABuildError> {
         }
         states_by_height[h].push(id);
     }
-    crate::debug!(4, "Acyclic minimize step 3 (heights): {:?}, max_height={}, largest_level={}", 
+    crate::debug!(6, "Acyclic minimize step 3 (heights): {:?}, max_height={}, largest_level={}", 
         step3_start.elapsed(), max_height,
         states_by_height.iter().map(|v| v.len()).max().unwrap_or(0));
 
@@ -218,7 +218,8 @@ pub fn minimize_acyclic_exact(dwa: &DWA) -> Result<DWA, DWABuildError> {
             );
             let sig_time = sig_start.elapsed();
             total_incomp_time += sig_time; // Count as incomp time
-            crate::debug!(4, "Height {}: {} candidates, signature coloring took {:?}", 
+            // Only log for significant runs (>500 candidates means this is notable)
+            crate::debug!(5, "Height {}: {} candidates, signature coloring took {:?}", 
                 h, candidates.len(), sig_time);
             result
         } else {
@@ -234,8 +235,9 @@ pub fn minimize_acyclic_exact(dwa: &DWA) -> Result<DWA, DWABuildError> {
             let incomp_time = incomp_start.elapsed();
             total_incomp_time += incomp_time;
             
-            if candidates.len() > 100 {
-                crate::debug!(4, "Height {}: {} candidates, incomp graph took {:?}", 
+            // Only log for levels with many candidates
+            if candidates.len() > 200 {
+                crate::debug!(5, "Height {}: {} candidates, incomp graph took {:?}", 
                     h, candidates.len(), incomp_time);
             }
 
@@ -308,9 +310,9 @@ pub fn minimize_acyclic_exact(dwa: &DWA) -> Result<DWA, DWABuildError> {
         total_merge_time += merge_start.elapsed();
     }
 
-    crate::debug!(4, "Acyclic minimize step 4 totals: incomp={:?}, coloring={:?}, merge={:?}", 
+    crate::debug!(6, "Acyclic minimize step 4 totals: incomp={:?}, coloring={:?}, merge={:?}", 
         total_incomp_time, total_coloring_time, total_merge_time);
-    crate::debug!(4, "Acyclic minimize: {} -> {} states in {:?}", 
+    crate::debug!(6, "Acyclic minimize: {} -> {} states in {:?}", 
         dwa.states.len(), new_states.len(), total_start.elapsed());
 
     // 5. Reconstruct the Final DWA
@@ -814,11 +816,11 @@ fn solve_signature_based_coloring(
         sig_to_indices.entry(sig.clone()).or_default().push(idx);
     }
     
-    // Debug: report signature distribution
+    // Debug: report signature distribution (only at high verbosity)
     let num_groups = sig_to_indices.len();
     let max_group_size = sig_to_indices.values().map(|v| v.len()).max().unwrap_or(0);
     let singleton_groups = sig_to_indices.values().filter(|v| v.len() == 1).count();
-    crate::debug!(4, "  Signature groups: {} total, {} singletons, max_group_size={}", 
+    crate::debug!(6, "  Signature groups: {} total, {} singletons, max_group_size={}", 
         num_groups, singleton_groups, max_group_size);
     
     // Step 3: Assign colors

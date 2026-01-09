@@ -102,11 +102,11 @@ impl<'a> GrammarConstraintState<'a> {
             let terminals_count = self.parent.parser.terminal_map.len();
             let tsid_label = (tokenizer_state_id.0 + terminals_count) as Label;
             
-            crate::debug!(5, "  Looking for tsid transition: tokenizer_state_id={}, tsid_label={}, available transitions: {:?}",
+            crate::debug!(6, "  Looking for tsid transition: tokenizer_state_id={}, tsid_label={}, {} available transitions",
                 tokenizer_state_id.0, tsid_label,
-                dwa_start_state.transitions.keys().collect::<Vec<_>>());
+                dwa_start_state.transitions.len());
             if let Some((target_wa_state_id, weight)) = dwa_start_state.get_transition(tsid_label) {
-                crate::debug!(5, "    Found transition to state {} with weight {:?}", target_wa_state_id, weight);
+                crate::debug!(6, "    Found transition to state {} with weight {:?}", target_wa_state_id, weight);
                 let f = |acc: &Acc| {
                     let new_rsb = acc.llm_tokens_union.inner.as_ref() & &weight.rsb;
                     if new_rsb.is_empty() { None } else { Some(new_rsb) }
@@ -122,7 +122,7 @@ impl<'a> GrammarConstraintState<'a> {
                         .or_insert(weighted_gss);
                 }
             } else {
-                crate::debug!(5, "    NO transition found for tsid_label={}", tsid_label);
+                crate::debug!(6, "    NO transition found for tsid_label={}", tsid_label);
             }
         }
 

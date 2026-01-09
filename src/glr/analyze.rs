@@ -749,7 +749,7 @@ pub fn filter_productions_by_reachability(
 
     let can_derive_set =
         compute_can_derive_interesting(initial_productions, interesting_symbols);
-    crate::debug!(5, "filter_productions_by_reachability: CanDeriveInteresting set: {:?}", can_derive_set.iter().map(|nt| &nt.0).collect::<Vec<_>>());
+    crate::debug!(6, "filter_productions_by_reachability: CanDeriveInteresting set: {:?}", can_derive_set.iter().map(|nt| &nt.0).collect::<Vec<_>>());
 
     let mut kept_productions = Vec::new();
     for production in initial_productions {

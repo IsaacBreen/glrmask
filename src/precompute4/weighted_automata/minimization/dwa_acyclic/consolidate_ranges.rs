@@ -325,18 +325,18 @@ impl DWA {
         high_range_weights.sort_by_key(|(_, _, ranges, _)| std::cmp::Reverse(*ranges));
         
         if !high_range_weights.is_empty() {
-            crate::debug!(5, "  High-range weights (>100 ranges):");
+            crate::debug!(6, "  High-range weights (>100 ranges):");
             for (_, usage_count, num_ranges, cardinality) in high_range_weights.iter().take(5) {
-                crate::debug!(5, "    {} usages, {} ranges, cardinality {}", usage_count, num_ranges, cardinality);
+                crate::debug!(6, "    {} usages, {} ranges, cardinality {}", usage_count, num_ranges, cardinality);
             }
             if high_range_weights.len() > 5 {
-                crate::debug!(5, "    ... and {} more", high_range_weights.len() - 5);
+                crate::debug!(6, "    ... and {} more", high_range_weights.len() - 5);
             }
         }
         
         // Compute potential savings from weight bucketing
         let total_current_ranges: usize = unique_weights.values().map(|(_, r, _)| r).sum();
-        crate::debug!(5, "  Total ranges in unique weights: {}", total_current_ranges);
+        crate::debug!(6, "  Total ranges in unique weights: {}", total_current_ranges);
         
         // Analyze complement efficiency
         let mut complement_better_count = 0;
@@ -360,7 +360,7 @@ impl DWA {
         }
         
         if complement_better_count > 0 {
-            crate::debug!(5, "  Complement representation: {} weights would be smaller, saving {} ranges", 
+            crate::debug!(6, "  Complement representation: {} weights would be smaller, saving {} ranges", 
                 complement_better_count, complement_savings);
         }
     }

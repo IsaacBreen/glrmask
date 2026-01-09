@@ -217,20 +217,20 @@ impl DWA {
         let total_usages: usize = weight_usage.values().map(|(c, _)| c).sum();
         let total_ranges_unique: usize = weight_usage.values().map(|(_, r)| r).sum();
         
-        crate::debug!(5, "DWA Weight Analysis:");
-        crate::debug!(5, "  Unique weights: {}", unique_weights);
-        crate::debug!(5, "  Total weight usages: {}", total_usages);
-        crate::debug!(5, "  Total ranges (unique): {}", total_ranges_unique);
-        crate::debug!(5, "  Avg ranges per unique weight: {:.2}", total_ranges_unique as f64 / unique_weights as f64);
+        crate::debug!(6, "DWA Weight Analysis:");
+        crate::debug!(6, "  Unique weights: {}", unique_weights);
+        crate::debug!(6, "  Total weight usages: {}", total_usages);
+        crate::debug!(6, "  Total ranges (unique): {}", total_ranges_unique);
+        crate::debug!(6, "  Avg ranges per unique weight: {:.2}", total_ranges_unique as f64 / unique_weights as f64);
         
         let mut ranges: Vec<_> = range_histogram.into_iter().collect();
         ranges.sort();
-        crate::debug!(5, "  Range distribution:");
+        crate::debug!(6, "  Range distribution:");
         for (num_ranges, count) in ranges.iter().take(20) {
-            crate::debug!(5, "    {} ranges: {} weights", num_ranges, count);
+            crate::debug!(6, "    {} ranges: {} weights", num_ranges, count);
         }
         if ranges.len() > 20 {
-            crate::debug!(5, "    ... and {} more categories", ranges.len() - 20);
+            crate::debug!(6, "    ... and {} more categories", ranges.len() - 20);
         }
     }
 
