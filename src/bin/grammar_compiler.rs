@@ -8,7 +8,7 @@ use sep1::dfa_u8::{LLMTokenID, LLMTokenMap};
 use sep1::r#macro::{colors::*, is_debug_level_enabled, format_duration};
 use std::collections::BTreeMap;
 use std::fs::File;
-use std::io::{BufReader, BufWriter, Write, Read};
+use std::io::{BufWriter, Write, Read};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -106,7 +106,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Load and compile the grammar.
     let step = std::time::Instant::now();
     
-    let mut grammar_definition = if let Some(json_schema_path) = &args.json_schema {
+    let grammar_definition = if let Some(json_schema_path) = &args.json_schema {
         // Load from JSON Schema
         sep1::debug!(2, "Loading JSON schema...");
         let schema_path_str = json_schema_path.to_str().ok_or_else(|| format!("Path is not valid UTF-8: {:?}", json_schema_path))?;

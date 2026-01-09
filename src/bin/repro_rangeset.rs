@@ -1,6 +1,5 @@
 
 use sep1::dwa_i32::rangeset::RangeSet;
-use range_set_blaze::RangeSetBlaze;
 
 fn main() {
     println!("Testing RangeSet behavior");
@@ -18,7 +17,7 @@ fn main() {
     println!("w0 (from_item 0): {:?}", w0);
 
     // Simulate nwa_special_map logic
-    let mut current_tokens = RangeSet::all();
+    let current_tokens = RangeSet::all();
     let edge_weight = RangeSet::from_item(1);
     
     let intersection = &current_tokens & &edge_weight;
