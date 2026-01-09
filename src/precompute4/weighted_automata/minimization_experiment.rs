@@ -213,14 +213,16 @@ impl NWA {
             "FinalDWA" => DeterminizeAndMinimizeConfig {
                 // Full pipeline for Parser DWA (finalize_and_optimize_and_determinize)
                 // Includes minimize to get optimal state count
-                nwa_passes: vec![],
+                // IMPORTANT: Prune NWA first to reduce state count before determinization
+                nwa_passes: vec![NwaPass::PruneDeadEnds, NwaPass::PruneUnreachable],
                 dwa_passes: vec![DwaPass::PruneDeadEnds, DwaPass::Minimize, DwaPass::ConsolidateRanges],
             },
             "SuperDWA" => DeterminizeAndMinimizeConfig {
-                // Fallback / Default for SuperDWA (was not large enough to trigger experiment in test)
-                // Using a balanced approach
+                // SuperDWA is an intermediate result that gets specialized into multiple DWAs.
+                // Use lightweight pruning only - full minimization is O(n²) and expensive.
+                // The specialized DWAs will be properly minimized later if needed.
                 nwa_passes: vec![NwaPass::CompressTransitions],
-                dwa_passes: vec![DwaPass::PruneDeadEnds, DwaPass::Minimize, DwaPass::ConsolidateRanges],
+                dwa_passes: vec![DwaPass::PruneDeadEnds, DwaPass::PruneUnreachable],
             },
             _ => DeterminizeAndMinimizeConfig {
                 // Default fallback

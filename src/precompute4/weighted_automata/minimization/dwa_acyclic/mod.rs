@@ -7,6 +7,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 impl DWA {
     pub fn minimize_acyclic(&mut self) {
+        // Skip expensive validation in non-debug builds
+        #[cfg(debug_assertions)]
         let x = self.clone();
         
         // Weight pushing enables the diamond case optimization:
@@ -14,11 +16,13 @@ impl DWA {
         // because the different outputs are encoded in the incoming transition weights.
         let pushed = push_weights_acyclic(self);
         
-        // Verify weight pushing is semantics-preserving
+        // Verify weight pushing is semantics-preserving (only in debug mode)
+        #[cfg(debug_assertions)]
         if pushed {
             crate::precompute4::weighted_automata::test_weighted_automata::stochastic_equivalence_test(x.clone(), self.clone());
         }
         
+        #[cfg(debug_assertions)]
         let after_push = self.clone();
         
         match minimize_acyclic_exact(self) {
@@ -28,13 +32,12 @@ impl DWA {
             }
         }
         
-        // Verify minimization is semantics-preserving (vs after-push state)
+        // Verify minimization is semantics-preserving (only in debug mode)
+        #[cfg(debug_assertions)]
         crate::precompute4::weighted_automata::test_weighted_automata::stochastic_equivalence_test(after_push.clone(), self.clone());
         
-        // Consolidate ranges if enabled
-        if DwaPass::ConsolidateRanges.is_enabled() {
-            self.consolidate_ranges();
-        }
+        // NOTE: ConsolidateRanges is NOT called here - it's a separate pass in the config
+        // to avoid running it twice when configs include both Minimize and ConsolidateRanges.
     }
 }
 
@@ -151,21 +154,25 @@ pub fn minimize_acyclic_exact(dwa: &DWA) -> Result<DWA, DWABuildError> {
         return Ok(DWA::new());
     }
     
+    let total_start = std::time::Instant::now();
+    
     // Step 0: Preprocess - tighten weights by removing unreachable tokens
+    let step0_start = std::time::Instant::now();
     let dwa = tighten_weights(dwa)?;
+    crate::debug!(4, "Acyclic minimize step 0 (tighten_weights): {:?}", step0_start.elapsed());
 
     // 1. Topological Sort & Reachability Analysis
-    // We need to process from leaves (End) up to Start.
-    // This also acts as a cycle check.
+    let step1_start = std::time::Instant::now();
     let topo_order = compute_topo_order(&dwa)?;
+    crate::debug!(4, "Acyclic minimize step 1 (topo_order): {:?}", step1_start.elapsed());
 
     // 2. Compute "Needed" sets (Reverse Flow Analysis).
-    // Needed[u] contains all tokens that can ever be accepted by any path starting at u.
-    // This effectively calculates the "Domain" of the state's future function.
+    let step2_start = std::time::Instant::now();
     let needed = compute_needed_sets(&dwa, &topo_order);
+    crate::debug!(4, "Acyclic minimize step 2 (needed_sets): {:?}", step2_start.elapsed());
 
     // 3. Layer states by topological height (distance to sink).
-    // States at height 0 are finals/sinks. States at H point only to states < H.
+    let step3_start = std::time::Instant::now();
     let heights = compute_heights(&dwa, &topo_order);
     let max_height = heights.iter().max().copied().unwrap_or(0);
 
@@ -177,33 +184,71 @@ pub fn minimize_acyclic_exact(dwa: &DWA) -> Result<DWA, DWABuildError> {
         }
         states_by_height[h].push(id);
     }
+    crate::debug!(4, "Acyclic minimize step 3 (heights): {:?}, max_height={}, largest_level={}", 
+        step3_start.elapsed(), max_height,
+        states_by_height.iter().map(|v| v.len()).max().unwrap_or(0));
 
     // 4. Bottom-Up Exact Minimization
+    let step4_start = std::time::Instant::now();
     // We map old_id -> new_id (in the minimized machine).
     let mut old_to_new: HashMap<StateID, StateID> = HashMap::new();
     let mut new_states: Vec<MergedStateBuilder> = Vec::new();
+
+    // Track time spent in major operations
+    let mut total_incomp_time = std::time::Duration::ZERO;
+    let mut total_coloring_time = std::time::Duration::ZERO;
+    let mut total_merge_time = std::time::Duration::ZERO;
 
     // Process from leaves (height 0) upwards
     for h in 0..=max_height {
         let candidates = &states_by_height[h];
         if candidates.is_empty() { continue; }
 
-        // A. Build Incompatibility Graph for this layer
-        // Two states are incompatible if they CANNOT be merged.
-        let adj = build_incompatibility_graph(
-            &dwa,
-            candidates,
-            &needed,
-            &old_to_new,
-            &new_states,
-        );
+        // For large height levels, use fast signature-based coloring
+        // This avoids O(n²) incompatibility graph construction
+        // Threshold lowered because are_compatible is expensive (Weight operations)
+        let coloring = if candidates.len() > 500 {
+            let sig_start = std::time::Instant::now();
+            let result = solve_signature_based_coloring(
+                &dwa,
+                candidates,
+                &needed,
+                &old_to_new,
+                &new_states,
+            );
+            let sig_time = sig_start.elapsed();
+            total_incomp_time += sig_time; // Count as incomp time
+            crate::debug!(4, "Height {}: {} candidates, signature coloring took {:?}", 
+                h, candidates.len(), sig_time);
+            result
+        } else {
+            // A. Build Incompatibility Graph for this layer
+            let incomp_start = std::time::Instant::now();
+            let adj = build_incompatibility_graph(
+                &dwa,
+                candidates,
+                &needed,
+                &old_to_new,
+                &new_states,
+            );
+            let incomp_time = incomp_start.elapsed();
+            total_incomp_time += incomp_time;
+            
+            if candidates.len() > 100 {
+                crate::debug!(4, "Height {}: {} candidates, incomp graph took {:?}", 
+                    h, candidates.len(), incomp_time);
+            }
 
-        // B. Solve Exact Graph Coloring to find minimum cliques
-        // Each color represents a set of states that will be merged into one.
-        let coloring = solve_exact_graph_coloring(&adj);
+            // B. Solve Exact Graph Coloring to find minimum cliques
+            let coloring_start = std::time::Instant::now();
+            let result = solve_exact_graph_coloring(&adj);
+            let coloring_time = coloring_start.elapsed();
+            total_coloring_time += coloring_time;
+            result
+        };
 
         // C. Construct new merged states from color classes
-        // The base ID for new states in this layer
+        let merge_start = std::time::Instant::now();
         let base_new_id = new_states.len();
         let num_colors = coloring.iter().max().map(|&c| c + 1).unwrap_or(0);
 
@@ -260,7 +305,13 @@ pub fn minimize_acyclic_exact(dwa: &DWA) -> Result<DWA, DWABuildError> {
                 }
             }
         }
+        total_merge_time += merge_start.elapsed();
     }
+
+    crate::debug!(4, "Acyclic minimize step 4 totals: incomp={:?}, coloring={:?}, merge={:?}", 
+        total_incomp_time, total_coloring_time, total_merge_time);
+    crate::debug!(4, "Acyclic minimize: {} -> {} states in {:?}", 
+        dwa.states.len(), new_states.len(), total_start.elapsed());
 
     // 5. Reconstruct the Final DWA
     reconstruct_dwa(dwa.body.start_state, &old_to_new, new_states)
@@ -572,6 +623,56 @@ fn are_compatible(
     true
 }
 
+/// Compute a structural signature for a state.
+/// States with identical signatures can potentially be merged.
+/// The signature captures: final_weight + (label, target_new, weight) for each transition
+fn compute_state_signature(
+    state_id: StateID,
+    dwa: &DWA,
+    needed: &[Weight],
+    old_to_new: &HashMap<StateID, StateID>,
+) -> Vec<u64> {
+    let state = &dwa.states[state_id];
+    let mut sig: Vec<u64> = Vec::new();
+    
+    // Include needed set hash (domain)
+    let domain = &needed[state_id];
+    sig.push(domain.fast_hash());
+    
+    // Include final weight restricted to domain
+    let fw_on_domain = state.final_weight.as_ref()
+        .map(|w| w & domain)
+        .unwrap_or_else(Weight::zeros);
+    sig.push(fw_on_domain.fast_hash());
+    
+    // Include transitions sorted by label
+    let mut trans_sigs: Vec<(i32, usize, u64)> = Vec::new();
+    for (&label, &target) in &state.transitions {
+        if target >= dwa.states.len() { continue; }
+        
+        // Get mapped target (if available)
+        let target_new = old_to_new.get(&target).copied().unwrap_or(usize::MAX);
+        
+        // Get weight restricted to domain
+        let w = state.trans_weights.get(&label)
+            .map(|w| w & domain)
+            .unwrap_or_else(Weight::zeros);
+        
+        if !w.is_empty() {
+            trans_sigs.push((label, target_new, w.fast_hash()));
+        }
+    }
+    trans_sigs.sort();
+    
+    for (label, target, hash) in trans_sigs {
+        sig.push(label as u64);
+        sig.push(target as u64);
+        sig.push(hash);
+    }
+    
+    sig
+}
+
 fn build_incompatibility_graph(
     dwa: &DWA,
     candidates: &[StateID],
@@ -580,6 +681,13 @@ fn build_incompatibility_graph(
     new_states: &[MergedStateBuilder]
 ) -> Vec<Vec<usize>> {
     let n = candidates.len();
+    
+    // For large candidate sets, use signature-based pre-grouping
+    if n > 500 {
+        return build_incompatibility_graph_with_signatures(dwa, candidates, needed, old_to_new, new_states);
+    }
+    
+    // For small sets, use the direct O(n²) approach
     let mut adj = vec![vec![]; n];
 
     for i in 0..n {
@@ -591,6 +699,192 @@ fn build_incompatibility_graph(
         }
     }
     adj
+}
+
+fn build_incompatibility_graph_with_signatures(
+    dwa: &DWA,
+    candidates: &[StateID],
+    needed: &[Weight],
+    old_to_new: &HashMap<StateID, StateID>,
+    new_states: &[MergedStateBuilder]
+) -> Vec<Vec<usize>> {
+    let n = candidates.len();
+    
+    // Step 1: Compute signatures for all candidates
+    let signatures: Vec<Vec<u64>> = candidates.iter()
+        .map(|&s| compute_state_signature(s, dwa, needed, old_to_new))
+        .collect();
+    
+    // Step 2: Group candidates by signature
+    let mut sig_to_indices: HashMap<Vec<u64>, Vec<usize>> = HashMap::new();
+    for (idx, sig) in signatures.iter().enumerate() {
+        sig_to_indices.entry(sig.clone()).or_default().push(idx);
+    }
+    
+    let num_groups = sig_to_indices.len();
+    
+    // FAST PATH: For very large problems with many signature groups,
+    // the cross-group comparison is O(groups² * avg_group_size²) which can be huge.
+    // Instead, assume cross-group states are incompatible (conservative but fast).
+    // This loses some diamond-case merging opportunities but avoids O(n²) blowup.
+    if num_groups > 50 && n > 5000 {
+        // Only check pairs within the SAME signature group for incompatibility
+        let mut adj = vec![vec![]; n];
+        
+        for indices in sig_to_indices.values() {
+            if indices.len() <= 1 { continue; }
+            for i in 0..indices.len() {
+                for j in (i+1)..indices.len() {
+                    let idx_i = indices[i];
+                    let idx_j = indices[j];
+                    if !are_compatible(candidates[idx_i], candidates[idx_j], dwa, needed, old_to_new, new_states) {
+                        adj[idx_i].push(idx_j);
+                        adj[idx_j].push(idx_i);
+                    }
+                }
+            }
+        }
+        
+        // We don't add cross-group edges because we'll handle this differently:
+        // We'll use signature-aware coloring that assigns different base colors to different signatures
+        return adj;
+    }
+    
+    // Standard path for smaller problems
+    let mut adj = vec![vec![]; n];
+    
+    // Check pairs within the same signature group
+    for indices in sig_to_indices.values() {
+        if indices.len() <= 1 { continue; }
+        for i in 0..indices.len() {
+            for j in (i+1)..indices.len() {
+                let idx_i = indices[i];
+                let idx_j = indices[j];
+                if !are_compatible(candidates[idx_i], candidates[idx_j], dwa, needed, old_to_new, new_states) {
+                    adj[idx_i].push(idx_j);
+                    adj[idx_j].push(idx_i);
+                }
+            }
+        }
+    }
+    
+    // Check cross-group domain overlaps
+    let sig_keys: Vec<&Vec<u64>> = sig_to_indices.keys().collect();
+    for i in 0..sig_keys.len() {
+        for j in (i+1)..sig_keys.len() {
+            let indices_i = &sig_to_indices[sig_keys[i]];
+            let indices_j = &sig_to_indices[sig_keys[j]];
+            
+            for &idx_i in indices_i {
+                for &idx_j in indices_j {
+                    let domain_overlap = &needed[candidates[idx_i]] & &needed[candidates[idx_j]];
+                    if !domain_overlap.is_empty() {
+                        adj[idx_i].push(idx_j);
+                        adj[idx_j].push(idx_i);
+                    }
+                }
+            }
+        }
+    }
+    
+    adj
+}
+
+/// Fast O(n log n) coloring for very large height levels.
+/// Uses signatures to group states, assigns each signature group a unique color range.
+/// This is conservative (may produce more colors than optimal) but avoids O(n²) blowup.
+fn solve_signature_based_coloring(
+    dwa: &DWA,
+    candidates: &[StateID],
+    needed: &[Weight],
+    old_to_new: &HashMap<StateID, StateID>,
+    _new_states: &[MergedStateBuilder],
+) -> Vec<usize> {
+    let n = candidates.len();
+    if n == 0 { return vec![]; }
+    
+    // Step 1: Compute signatures for all candidates
+    let signatures: Vec<Vec<u64>> = candidates.iter()
+        .map(|&s| compute_state_signature(s, dwa, needed, old_to_new))
+        .collect();
+    
+    // Step 2: Group candidates by signature
+    let mut sig_to_indices: HashMap<Vec<u64>, Vec<usize>> = HashMap::new();
+    for (idx, sig) in signatures.iter().enumerate() {
+        sig_to_indices.entry(sig.clone()).or_default().push(idx);
+    }
+    
+    // Debug: report signature distribution
+    let num_groups = sig_to_indices.len();
+    let max_group_size = sig_to_indices.values().map(|v| v.len()).max().unwrap_or(0);
+    let singleton_groups = sig_to_indices.values().filter(|v| v.len() == 1).count();
+    crate::debug!(4, "  Signature groups: {} total, {} singletons, max_group_size={}", 
+        num_groups, singleton_groups, max_group_size);
+    
+    // Step 3: Assign colors
+    // Each signature group gets its own range of colors
+    // Within a group, we use greedy coloring based on domain conflicts
+    let mut colors = vec![0usize; n];
+    let mut next_color = 0;
+    
+    // For very large groups, we can use a more aggressive strategy:
+    // States with identical needed sets can definitely be merged
+    // So group by actual needed set, not just hash
+    for indices in sig_to_indices.values() {
+        if indices.len() == 1 {
+            // Single state in group - assign one color
+            colors[indices[0]] = next_color;
+            next_color += 1;
+        } else if indices.len() > 1000 {
+            // Very large group - use exact needed grouping to avoid O(n²)
+            // Group by actual needed set (not hash)
+            let mut needed_to_subindices: HashMap<&Weight, Vec<usize>> = HashMap::new();
+            for &idx in indices {
+                needed_to_subindices.entry(&needed[candidates[idx]]).or_default().push(idx);
+            }
+            
+            // Each unique needed set gets one color (states with same needed can be merged)
+            for subindices in needed_to_subindices.values() {
+                for &idx in subindices {
+                    colors[idx] = next_color;
+                }
+                next_color += 1;
+            }
+        } else {
+            // Multiple states with same signature
+            // Build small adjacency list for domain conflicts within this group
+            let group_size = indices.len();
+            let mut local_adj = vec![vec![]; group_size];
+            
+            for i in 0..group_size {
+                for j in (i+1)..group_size {
+                    let idx_i = indices[i];
+                    let idx_j = indices[j];
+                    
+                    // Check if domains overlap
+                    let domain_overlap = &needed[candidates[idx_i]] & &needed[candidates[idx_j]];
+                    if !domain_overlap.is_empty() {
+                        // Domains overlap - these states can't share a color
+                        local_adj[i].push(j);
+                        local_adj[j].push(i);
+                    }
+                }
+            }
+            
+            // Use greedy coloring within this group
+            let local_colors = solve_greedy_coloring(&local_adj);
+            let local_max = local_colors.iter().max().copied().unwrap_or(0);
+            
+            // Map local colors to global colors
+            for (local_idx, &local_color) in local_colors.iter().enumerate() {
+                colors[indices[local_idx]] = next_color + local_color;
+            }
+            
+            next_color += local_max + 1;
+        }
+    }
+    
+    colors
 }
 
 /// Greedy graph coloring - fast but not optimal

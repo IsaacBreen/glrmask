@@ -214,6 +214,10 @@ impl RangeSetInner {
 }
 
 impl RangeSet {
+    /// Returns a fast u64 hash/fingerprint for this RangeSet.
+    /// Two RangeSets with the same content will have the same hash.
+    pub fn fast_hash(&self) -> u64 { self.fp }
+    
     pub fn is_subset_of(&self, rhs: &RangeSet) -> bool { (self & rhs) == *self }
 
     pub fn complement(&self) -> RangeSet {

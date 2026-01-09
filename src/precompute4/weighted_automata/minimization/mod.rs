@@ -42,6 +42,15 @@ impl DWA {
         }
     }
 
+    /// Basic pruning without full minimization.
+    /// Removes unreachable and dead-end states in O(n) time.
+    /// Does NOT do state merging via graph coloring.
+    pub fn prune_basic(&mut self) {
+        // Use the cyclic versions since they work for acyclic too
+        self.prune_unreachable_cyclic();
+        self.prune_dead_ends_cyclic();
+    }
+
     /// Same as minimize(), returns true if any changes were made.
     pub fn minimize_internal(&mut self) -> bool {
         if self.is_cyclic() {
@@ -140,9 +149,13 @@ impl DWA {
     // LEGACY API COMPATIBILITY
     // ========================================================================
 
-    /// Lightweight version - just prunes, no full minimization.
+    /// Lightweight version - just prunes dead states, no full minimization.
+    /// This is much faster than full minimization for intermediate results.
     pub fn minimize_lightweight_acyclic(&mut self) {
-        self.minimize();
+        // For intermediate DWAs, just prune unreachable and dead-end states.
+        // Full minimization is expensive (O(n²) incompatibility graph) and not critical
+        // for intermediate results - we'll do full minimization on the final DWA.
+        self.prune_basic();
     }
 
     /// Single pass - runs full minimization once.

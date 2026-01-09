@@ -500,6 +500,7 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
                 for term in group { if let Some(term) = term { used_terminals.insert(*term); } }
             }
         }
+        crate::debug!(5, "  Used terminals: {}", used_terminals.len());
 
         let mut term_to_bit = BTreeMap::new();
         let mut bit_to_term: Vec<Option<TerminalID>> = Vec::new();
@@ -516,6 +517,7 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
             bit_to_term.push(Some(*term_id));
         }
 
+        let start_super_nwa = std::time::Instant::now();
         let mut super_nwa = NWA::new_empty();
         for (term_id_opt, bit) in &term_to_bit {
             let mut weight = Weight::zeros();
@@ -528,14 +530,19 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
             weighted_dwa.apply_weight_inplace(&weight);
             NWA::union_assign(&mut super_nwa, &NWA::from_dwa(&weighted_dwa));
         }
+        crate::debug!(5, "  Super NWA construction: {:?}, {} states, {} transitions", 
+            start_super_nwa.elapsed(), super_nwa.states.len(), super_nwa.states.num_transitions());
 
         // OPTIMIZATION: Use lightweight minimization for super DWA construction.
         // Full minimization is expensive and not critical for intermediate results.
+        let start_det = std::time::Instant::now();
         let super_dwa = super_nwa.determinize_and_minimize("SuperDWA");
+        crate::debug!(5, "  Super DWA det+min: {:?}, {} states", start_det.elapsed(), super_dwa.states.len());
 
         let super_signature: Signature = bit_to_term.iter().map(|t| vec![*t]).collect();
         
         // Collect all unique weights from super_dwa once
+        let start_weights = std::time::Instant::now();
         let super_dwa_unique_weights: Vec<Weight> = super_dwa.states.0.par_iter()
             .fold(HashSet::new, |mut acc, s| {
                  if let Some(w) = &s.final_weight { acc.insert(w.clone()); }
@@ -547,10 +554,12 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
                 a
             })
             .into_iter().collect();
+        crate::debug!(5, "  Collected {} unique weights in {:?}", super_dwa_unique_weights.len(), start_weights.elapsed());
 
         // PRE-COMPUTE: Build all weight mappings for all complex signatures upfront
         // This avoids redundant computation inside specialize_dwa_relative, which was creating
         // a new weight_map HashMap for each of the 199 complex signatures.
+        let start_mappings = std::time::Instant::now();
         let all_mappings: Vec<(Signature, Vec<Weight>, HashMap<Weight, Weight>)> = complex_signatures.par_iter().map(|target_sig| {
             let target_idx = SignatureIndex::new(target_sig);
             let mapping = can_derive(&super_signature, &target_idx).expect("Super signature must derive target");
@@ -582,13 +591,16 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
             
             (target_sig.clone(), mapping, weight_map)
         }).collect();
+        crate::debug!(5, "  Weight mappings: {:?}", start_mappings.elapsed());
 
         // PARALLEL OPTIMIZATION: Specialize DWAs using pre-computed weight mappings
+        let start_specialize = std::time::Instant::now();
         let results: Vec<(Signature, NWA)> = all_mappings.par_iter().map(|(target_sig, _mapping, weight_map)| {
             let mut derived_dwa = specialize_dwa_relative_with_map(&super_dwa, weight_map);
             derived_dwa.minimize_lightweight();
             (target_sig.clone(), NWA::from_dwa(&derived_dwa))
         }).collect();
+        crate::debug!(5, "  Specialization (149 DWAs): {:?}", start_specialize.elapsed());
 
         for (sig, nwa) in results {
             template_cache.insert(sig, nwa);
@@ -664,11 +676,32 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
             *tokens1 |= &tokens2;
         },
         |node_id, val| {
+            static PROCESS_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            static INSTANTIATE_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            static TOTAL_TEMPLATE_STATES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            
+            let proc_count = PROCESS_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if proc_count % 10000 == 0 {
+                crate::debug!(4, "Process callback #{}, instantiate count: {}, total_states: {}", proc_count, 
+                    INSTANTIATE_COUNT.load(std::sync::atomic::Ordering::Relaxed),
+                    TOTAL_TEMPLATE_STATES.load(std::sync::atomic::Ordering::Relaxed));
+            }
+            
             let (nwa_bodies_map, tokens) = val;
+            let bodies_count = nwa_bodies_map.len();
             let mut nwa_body = NWABody { start_states: vec![] };
             for (right_body, terminal_map) in &nwa_bodies_map {
                 let (signature, concrete_weights) = canonicalize_bundle(terminal_map.clone());
                 let cached_nwa = template_cache.get(&signature).expect_else(|| format!("Template must exist for signature {:?}", signature));
+                
+                let template_size = cached_nwa.states.len();
+                let count = INSTANTIATE_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                TOTAL_TEMPLATE_STATES.fetch_add(template_size, std::sync::atomic::Ordering::Relaxed);
+                if count % 10000 == 0 {
+                    crate::debug!(4, "Template instantiation #{}: {} total states so far, template size {}, bodies_count: {}", 
+                        count, TOTAL_TEMPLATE_STATES.load(std::sync::atomic::Ordering::Relaxed), template_size, bodies_count);
+                }
+                
                 let mut states = states_arena.borrow_mut();
                 let new_states_offset = states.len();
                 let composed_body = instantiate_nwa_template_into(cached_nwa, &concrete_weights, &mut states, right_body);
@@ -692,7 +725,7 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
                         let intersection_bv = &tokens & &edge_bv;
                         if !intersection_bv.is_empty() && !nwa_body.start_states.is_empty() {
                             let final_w = Weight::from_rsb(intersection_bv.inner.as_ref().clone());
-                            crate::debug!(5, "Collecting tsid body at root {} for label {} with {} tokens", 
+                            crate::debug!(6, "Collecting tsid body at root {} for label {} with {} tokens", 
                                 node_id, tsid_label, final_w.len());
                             let mut tb = tsid_bodies_for_process.lock().unwrap();
                             tb.push((nwa_body.clone(), final_w, *tsid_label));
@@ -736,8 +769,8 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
     crate::debug!(4, "Finished Pass 2");
     let final_bodies = Arc::try_unwrap(final_bodies_arc).unwrap().into_inner().unwrap();
     let tsid_bodies = Arc::try_unwrap(tsid_bodies_arc).unwrap().into_inner().unwrap();
-    crate::debug!(5, "Collected {} final bodies, {} tsid bodies", 
-        final_bodies.len(), tsid_bodies.len());
+    crate::debug!(4, "Collected {} final bodies, {} tsid bodies, states_arena has {} states", 
+        final_bodies.len(), tsid_bodies.len(), states_arena.borrow().len());
     let mut combined_nwa_states = states_arena.into_inner();
     let combined_start_state = combined_nwa_states.add_state();
     
@@ -745,7 +778,7 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
         // Symbol-heavy mode: add labeled transitions with tsid labels
         // Use the tsid_bodies collected during traversal
         for (body, weight, tsid_label) in tsid_bodies {
-            crate::debug!(5, "Adding tsid body with label={}, weight len={}", tsid_label, weight.len());
+            crate::debug!(6, "Adding tsid body with label={}, weight len={}", tsid_label, weight.len());
             for &s in &body.start_states {
                 combined_nwa_states.add_transition(combined_start_state, tsid_label, s, weight.clone()).unwrap();
             }
