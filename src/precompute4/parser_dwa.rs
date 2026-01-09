@@ -17,7 +17,7 @@ use crate::precompute4::resolve_negatives::{
     // Note: remove_redundant_default_transitions is called once at the end in finalize_and_optimize_and_determinize,
     // not per-range here, since it requires a global pass over all states.
 };
-use crate::precompute4::template_nwa::{build_ignore_terminal_dwa, build_template_dwas};
+use crate::precompute4::template_dfa::{build_ignore_terminal_dwa, build_template_dwas};
 use crate::dwa_i32::{
     common::Label, determinization_rustfst::determinize_nwa_to_dwa, DWA, NWA, NWABody, NWAStateID, NWAStates,
     StateID, Weight,
@@ -36,7 +36,7 @@ impl MinimizeRustfstConfig {
     fn with_rm_epsilon(mut self, val: bool) -> Self { self.rm_epsilon = val; self }
 }
 
-pub use crate::precompute4::template_nwa::FullDWABuildError;
+pub use crate::precompute4::template_dfa::FullDWABuildError;
 
 /// The Parser DWA - the final precomputed artifact used for get_mask queries.
 /// This is a deterministic weighted automaton where weights are sparse bitvectors

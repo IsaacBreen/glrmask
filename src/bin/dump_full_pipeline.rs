@@ -9,10 +9,10 @@ use sep1::interface::{CompiledGrammar, GrammarDefinition};
 use sep1::glr::grammar::Terminal;
 use sep1::glr::table::{TerminalID, Stage7ShiftsAndReducesLookaheadValue};
 use sep1::precompute4::characterize::compute_all_characterizations;
-use sep1::precompute4::template_nwa::{build_template_dwas, build_ignore_terminal_dwa};
+use sep1::precompute4::template_dfa::{build_template_dwas, build_ignore_terminal_dwa};
 use sep1::dwa_i32::{NWA, NWABody, NWAState, NWAStates, Weight};
 use sep1::dwa_i32::common::Label;
-use sep1::precompute4::full_dwa::finalize_and_optimize_and_determinize;
+use sep1::precompute4::parser_dwa::finalize_and_optimize_and_determinize;
 use sep1::constraint_precompute::run_precompute1;
 use sep1::dfa_u8::LLMTokenID;
 use serde_json::json;
@@ -171,11 +171,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let offset = parser.terminal_map.len() as Label;
 
     // Build individual template NWAs for each terminal
-    let mut individual_template_nwas: HashMap<Option<TerminalID>, NWA> = HashMap::new();
+    let mut individual_template_dfas: HashMap<Option<TerminalID>, NWA> = HashMap::new();
     for (term_id, template_dwa) in &template_dwas {
-        individual_template_nwas.insert(Some(*term_id), NWA::from_dwa(template_dwa));
+        individual_template_dfas.insert(Some(*term_id), NWA::from_dwa(template_dwa));
     }
-    individual_template_nwas.insert(None, NWA::from_dwa(&ignore_dwa));
+    individual_template_dfas.insert(None, NWA::from_dwa(&ignore_dwa));
 
     // Track which states come from which template for visualization
     let template_regions: Arc<Mutex<Vec<(usize, usize, Option<usize>)>>> = Arc::new(Mutex::new(Vec::new()));
@@ -224,12 +224,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 // Terminal edge - copy template DFA and connect
                 let terminal_id = TerminalID(label as usize);
-                let template_nwa = individual_template_nwas.get(&Some(terminal_id))
+                let template_dfa = individual_template_dfas.get(&Some(terminal_id))
                     .expect("Template must exist for terminal");
 
                 // Copy template into NWA states
                 let template_offset = nwa_states.len();
-                let template_end = template_offset + template_nwa.states.len();
+                let template_end = template_offset + template_dfa.states.len();
 
                 // Record this template region for visualization
                 {
@@ -239,7 +239,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 // Copy all template states
                 let dest_nwa = tdwa_to_nwa[dest_tdwa_state];
-                for old_state in &template_nwa.states.0 {
+                for old_state in &template_dfa.states.0 {
                     let mut new_state = NWAState::default();
 
                     // Copy transitions (adjusting state indices)
@@ -266,7 +266,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
 
                 // Create epsilon edge from entry node to template start (full weight)
-                let template_start_states: Vec<usize> = template_nwa.body.start_states.iter()
+                let template_start_states: Vec<usize> = template_dfa.body.start_states.iter()
                     .map(|s| s + template_offset)
                     .collect();
                 for s in template_start_states {

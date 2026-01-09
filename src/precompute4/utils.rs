@@ -1,5 +1,5 @@
 use crate::glr::table::StateID as ParserStateID;
-use crate::precompute4::full_dwa::FullDWABuildError;
+use crate::precompute4::parser_dwa::FullDWABuildError;
 use crate::dwa_i32::common::Label;
 
 pub const DEFAULT_TRANSITION_SYMBOL: Label = Label::MAX - 1;

@@ -28,7 +28,7 @@ use sep1::interface::{
 };
 use sep1::json_schema::{json_schema_to_ebnf, json_schema_to_grammar_exprs, JsonSchemaConverter};
 use sep1::json_serialization::{JSONConvertible, JSONNode};
-use sep1::precompute4::template_nwa::build_template_dwas;
+use sep1::precompute4::template_dfa::build_template_dwas;
 use sep1::precompute4::characterize::compute_all_characterizations;
 use sep1::tokenizer::LLMTokenID;
 use std::collections::hash_map::DefaultHasher;

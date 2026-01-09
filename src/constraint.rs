@@ -31,7 +31,7 @@ use crate::{
     },
     interface::{CompiledGrammar, GrammarDefinition},
     json_serialization::{JSONConvertible, JSONNode},
-    precompute4::full_dwa::{build_parser_dwa, ParserDWA},
+    precompute4::parser_dwa::{build_parser_dwa, ParserDWA},
     r#macro::is_debug_level_enabled,
     dfa_u8::{LLMTokenID, LLMTokenMap, TokenizerStateID},
     types::{TerminalID as GrammarTokenID, TerminalID},
