@@ -213,8 +213,9 @@ impl NWA {
             "FinalDWA" => DeterminizeAndMinimizeConfig {
                 // Full pipeline for Parser DWA (finalize_and_optimize_and_determinize)
                 // Includes minimize to get optimal state count
-                // IMPORTANT: Prune NWA first to reduce state count before determinization
-                nwa_passes: vec![NwaPass::PruneDeadEnds, NwaPass::PruneUnreachable],
+                // NOTE: NWA pruning was tested and found to be a net slowdown (400ms pruning
+                // cost for only ~200ms savings in determinization), so it's disabled.
+                nwa_passes: vec![],
                 dwa_passes: vec![DwaPass::PruneDeadEnds, DwaPass::Minimize, DwaPass::ConsolidateRanges],
             },
             "SuperDWA" => DeterminizeAndMinimizeConfig {
