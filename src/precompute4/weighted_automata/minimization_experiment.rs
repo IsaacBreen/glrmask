@@ -205,10 +205,11 @@ impl NWA {
                 dwa_passes: vec![DwaPass::Minimize, DwaPass::ConsolidateRanges],
             },
             "TemplateDWA" => DeterminizeAndMinimizeConfig {
-                // Template DWAs are built from terminal NWAs in template_nwa.rs
-                // These are relatively small DWAs (usually <2000 states) that get reused
-                // during Parser NWA construction. Full minimization is worthwhile here
-                // since templates are instantiated many times.
+                // Template DWAs are built from terminal characterization NWAs in template_nwa.rs.
+                // Each terminal has a characterization NWA that encodes how it interacts with
+                // the parse stack (shifts, reduces, reduction cascades). These are determinized
+                // into DWAs and then instantiated in the Parser NWA during precompute4.
+                // Full minimization is worthwhile since templates are reused many times.
                 nwa_passes: vec![],  // NWA already processed before determinization
                 dwa_passes: vec![DwaPass::Minimize],
             },

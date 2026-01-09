@@ -135,7 +135,7 @@ pub fn build_template_nwa_from_characterization(tc: &TerminalCharacterization) -
     build_nwa_from_terminal_characterization(tc)
 }
 
-/// Build terminal DWAs for all terminals in the parser.
+/// Build template DWAs for all terminals in the parser.
 /// 
 /// A characterization key that excludes the terminal ID, allowing us to share DWAs
 /// between terminals with identical grammatical behavior.
@@ -201,12 +201,12 @@ pub fn build_template_dwas(parser: &GLRParser) -> Result<BTreeMap<TerminalID, DW
     let mut result = BTreeMap::new();
     for (first_term, terms, mut nwa) in nwas_and_terms {
         // EXPERIMENTAL: Dump NWA JSON for debugging state count issues
-        // Set DUMP_TERMINAL_NWA=1 to enable
-        if std::env::var("DUMP_TERMINAL_NWA").map_or(false, |v| v == "1") {
+        // Set DUMP_TEMPLATE_NWA=1 to enable
+        if std::env::var("DUMP_TEMPLATE_NWA").map_or(false, |v| v == "1") {
             let nwa_json = serde_json::to_string_pretty(&nwa).unwrap();
-            let filename = format!("terminal_nwa_{}.json", first_term.0);
+            let filename = format!("template_nwa_{}.json", first_term.0);
             std::fs::write(&filename, nwa_json).unwrap();
-            crate::debug!(1, "Dumped terminal NWA for terminal {:?} to {}", first_term, filename);
+            crate::debug!(1, "Dumped template NWA for terminal {:?} to {}", first_term, filename);
         }
         
         // Use TemplateDWA config for consistent settings across the codebase

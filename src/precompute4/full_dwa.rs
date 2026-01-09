@@ -348,7 +348,7 @@ pub fn canonicalize_bundle(terminal_map: BTreeMap<Option<TerminalID>, Weight>) -
 /// Build the Parser DWA from the GLR parser and lexical NWA.
 /// 
 /// This is the main precomputation function that:
-/// 1. Builds terminal DWAs from terminal characterizations
+/// 1. Builds template DWAs from terminal characterizations (one per terminal group)
 /// 2. Composes them with the lexical NWA
 /// 3. Determinizes the result into the final Parser DWA
 /// 
@@ -356,9 +356,9 @@ pub fn canonicalize_bundle(terminal_map: BTreeMap<Option<TerminalID>, Weight>) -
 pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
     crate::debug!(4, "Starting Parser DWA construction");
     let now = Instant::now();
-    let terminal_dwas = match build_template_dwas(parser) { Ok(m) => m, Err(e) => panic!("Failed to build terminal DWAs: {:?}", e), };
+    let template_dwas = match build_template_dwas(parser) { Ok(m) => m, Err(e) => panic!("Failed to build template DWAs: {:?}", e), };
     let ignore_dwa = build_ignore_terminal_dwa();
-    crate::debug!(4, "Built {} terminal DWAs in {:?}", terminal_dwas.len(), now.elapsed());
+    crate::debug!(4, "Built {} template DWAs in {:?}", template_dwas.len(), now.elapsed());
 
     // Check if we're in symbol-heavy mode (tsid encoded as labels, not weights)
     let is_symbol_heavy = !crate::constraint_precompute::is_weight_heavy_enabled();
@@ -470,7 +470,7 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
                     if parser.ignore_terminal_ids.contains(term_id) {
                         &ignore_dwa
                     } else {
-                        terminal_dwas.get(term_id).unwrap_or(&ignore_dwa)
+                        template_dwas.get(term_id).unwrap_or(&ignore_dwa)
                     }
                 },
                 None => &ignore_dwa,
@@ -507,7 +507,7 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
         // We ONLY include terminals relevant to the complex signatures to keep bitvectors small
         let mut all_terminals: BTreeSet<TerminalID> = used_terminals;
 
-        // Note: Unlike original code, we don't force ALL terminal_dwas keys into the Super DWA,
+        // Note: Unlike original code, we don't force ALL template_dwas keys into the Super DWA,
         // only those needed for the complex pool. This makes the Super DWA smaller.
 
         term_to_bit.insert(None, 0);
@@ -523,7 +523,7 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
             let mut weight = Weight::zeros();
             weight.set(*bit, true);
             let term_dwa = match term_id_opt {
-                Some(term_id) => if parser.ignore_terminal_ids.contains(term_id) { &ignore_dwa } else { terminal_dwas.get(term_id).unwrap_or(&ignore_dwa) },
+                Some(term_id) => if parser.ignore_terminal_ids.contains(term_id) { &ignore_dwa } else { template_dwas.get(term_id).unwrap_or(&ignore_dwa) },
                 None => &ignore_dwa,
             };
             let mut weighted_dwa = term_dwa.clone();
