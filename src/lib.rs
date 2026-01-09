@@ -1,4 +1,26 @@
+//! Grammar-Constrained Generation (GCG) Library
+//!
+//! This library provides efficient grammar-constrained decoding for language models.
+//!
+//! # Module Organization
+//!
+//! ## Automata Modules
+//! - [`dfa_u8`]: Tokenizer DFA/NFA with u8 (byte) labels
+//! - [`dfa_i32`]: Unweighted DFA/NFA with i32 (parser state) labels  
+//! - [`dwa_i32`]: Weighted DWA/NWA with i32 labels and bitset weights
+//!
+//! ## Core Modules
+//! - [`constraint`]: Grammar constraint implementation and state management
+//! - [`precompute4`]: Parser DWA construction from grammar
+//! - [`constraint_precompute`]: Terminal DWA construction from tokenizer
+//!
+//! ## Supporting Modules
+//! - [`interface`]: Grammar parsing (EBNF, JSON Schema)
+//! - [`glr`]: GLR parser for grammar analysis
+//! - [`datastructures`]: Efficient data structures (bitsets, GSS, etc.)
+
 #![allow(warnings)]
+
 pub mod dfa_u8;
 /// Backward-compatibility re-export from dfa_u8::dfa
 pub mod finite_automata;
@@ -22,7 +44,7 @@ mod profiler;
 pub mod dwa_i32;
 pub mod dfa_i32;
 
-// New lightweight pass framework for Trie3 optimization
+// Parser DWA construction
 pub mod precompute4;
 pub mod constraint_fns;
 pub mod bruteforce_constraint;
