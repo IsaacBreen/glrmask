@@ -28,23 +28,31 @@ impl DWA {
             return false;
         }
         
-        crate::debug!(5, "ConsolidateRanges: Analyzing {} states", self.states.len());
-        
         let before_ranges = self.num_ranges_interned();
         let before_unique = self.count_unique_weights();
         
-        // Run the analysis (for debugging)
-        self.analyze_weights();
-        self.analyze_weight_structure();
+        // Only show detailed debug output for larger DWAs (>50 unique-weight ranges)
+        let show_debug = before_ranges > 50;
+        
+        if show_debug {
+            crate::debug!(5, "ConsolidateRanges: Analyzing {} states", self.states.len());
+            // Run the analysis (for debugging)
+            self.analyze_weights();
+            self.analyze_weight_structure();
+        }
         
         // Compute forward and backward reachability
         let t0 = std::time::Instant::now();
         let forward_reach = self.compute_forward_reachability();
-        crate::debug!(5, "  Forward reachability computed in {:?}", t0.elapsed());
+        if show_debug {
+            crate::debug!(5, "  Forward reachability computed in {:?}", t0.elapsed());
+        }
         
         let t1 = std::time::Instant::now();
         let backward_reach = self.compute_backward_reachability();
-        crate::debug!(5, "  Backward reachability computed in {:?}", t1.elapsed());
+        if show_debug {
+            crate::debug!(5, "  Backward reachability computed in {:?}", t1.elapsed());
+        }
         
         let mut changed = false;
         let mut ranges_removed = 0usize;
@@ -152,19 +160,23 @@ impl DWA {
             }
         }
         
-        crate::debug!(5, "  Main loop took {:?} (intersect: {:?}, optimize: {:?})", 
-            t2.elapsed(), intersect_time, optimize_time);
-        crate::debug!(5, "  Cache: {} hits, {} misses ({:.1}% hit rate)", 
-            cache_hits, cache_misses, 
-            100.0 * cache_hits as f64 / (cache_hits + cache_misses).max(1) as f64);
+        if show_debug {
+            crate::debug!(5, "  Main loop took {:?} (intersect: {:?}, optimize: {:?})", 
+                t2.elapsed(), intersect_time, optimize_time);
+            crate::debug!(5, "  Cache: {} hits, {} misses ({:.1}% hit rate)", 
+                cache_hits, cache_misses, 
+                100.0 * cache_hits as f64 / (cache_hits + cache_misses).max(1) as f64);
+        }
         
         let after_ranges = self.num_ranges_interned();
         let after_unique = self.count_unique_weights();
         
-        crate::debug!(5, "ConsolidateRanges: {} -> {} unique-weight ranges ({} -> {} unique weights)", 
-            before_ranges, after_ranges, before_unique, after_unique);
-        if ranges_removed > 0 || gaps_filled > 0 {
-            crate::debug!(5, "  Removed {} ranges, filled {} gaps", ranges_removed, gaps_filled);
+        if show_debug {
+            crate::debug!(5, "ConsolidateRanges: {} -> {} unique-weight ranges ({} -> {} unique weights)", 
+                before_ranges, after_ranges, before_unique, after_unique);
+            if ranges_removed > 0 || gaps_filled > 0 {
+                crate::debug!(5, "  Removed {} ranges, filled {} gaps", ranges_removed, gaps_filled);
+            }
         }
         
         changed
