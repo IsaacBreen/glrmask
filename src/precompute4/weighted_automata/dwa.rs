@@ -98,6 +98,9 @@ impl DWA {
         let start = states.add_state();
         DWA { states, body: DWABody { start_state: start } }
     }
+    pub fn new_empty() -> Self {
+        DWA { states: DWAStates::default(), body: DWABody::default() }
+    }
     pub fn add_state(&mut self) -> StateID { self.states.add_state() }
     pub fn set_final_weight(&mut self, state: StateID, weight: Weight) -> Result<(), DWABuildError> {
         if state >= self.states.len() { return Err(DWABuildError::StateOutOfBounds { state }); }

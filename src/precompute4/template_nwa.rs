@@ -6,16 +6,23 @@ use crate::precompute4::characterize::{compute_all_characterizations, TerminalCh
 use crate::precompute4::utils;
 use crate::precompute4::utils::DEFAULT_TRANSITION_SYMBOL;
 use crate::precompute4::weighted_automata::{DWA, NWA, NWABuildError, StateID, Weight};
+use crate::precompute4::dfa::{DFA, NFA};
+use crate::precompute4::dfa::nfa::NFABuildError;
 
 /// Error type for building the Parser DWA structures.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FullDWABuildError {
     ParserStateIdOutOfRange { state_id: ParserStateID },
     AutomatonBuild(NWABuildError),
+    NFABuild(NFABuildError),
 }
 
 impl From<NWABuildError> for FullDWABuildError {
     fn from(e: NWABuildError) -> Self { FullDWABuildError::AutomatonBuild(e) }
+}
+
+impl From<NFABuildError> for FullDWABuildError {
+    fn from(e: NFABuildError) -> Self { FullDWABuildError::NFABuild(e) }
 }
 
 /// Build a weighted NWA from a terminal characterization.
@@ -129,15 +136,124 @@ pub fn build_nwa_from_terminal_characterization(tc: &TerminalCharacterization) -
     Ok(nwa)
 }
 
+/// Build an unweighted NFA from a terminal characterization.
+/// 
+/// This is the unweighted version of build_nwa_from_terminal_characterization.
+/// Since template DFAs don't actually need weights during construction (they get
+/// Weight::all() everywhere), we can use simpler/faster unweighted automata.
+pub fn build_nfa_from_terminal_characterization(tc: &TerminalCharacterization) -> Result<NFA, FullDWABuildError> {
+    let mut nfa = NFA::new();
+
+    // Node for each non-terminal.
+    let mut nt_nodes: BTreeMap<NonTerminalID, usize> = BTreeMap::new();
+    for &nt in &tc.all_nts {
+        let id = nfa.add_state();
+        nt_nodes.insert(nt, id);
+    }
+
+    // NFA::new() initializes a single start state.
+    let start = nfa.body.start_states[0];
+
+    // Initial shifts from start.
+    for &(initial_state, shift_state) in &tc.initial_shifts {
+        let pos_initial = utils::encode_symbol_i16(initial_state)?;
+        let neg_initial = utils::encode_negative_i16(initial_state)?;
+        let neg_shift = utils::encode_negative_i16(shift_state)?;
+
+        let s0 = nfa.add_state();
+        let s1 = nfa.add_state();
+        let s2 = nfa.add_state();
+        let s3 = nfa.add_state();
+
+        // start --eps--> s0 --(+initial)--> s1 --(-initial)--> s2 --(-shift)--> s3 (final)
+        nfa.add_epsilon(start, s0);
+        nfa.add_transition(s0, pos_initial, s1)?;
+        nfa.add_transition(s1, neg_initial, s2)?;
+        nfa.add_transition(s2, neg_shift, s3)?;
+        nfa.set_final(s3);
+    }
+
+    // Initial reduces from start.
+    for &(initial_state, len, nt) in &tc.initial_reduces {
+        let pos_initial = utils::encode_symbol_i16(initial_state)?;
+        let target_nt_state = *nt_nodes.get(&nt).expect("nt_node must exist for initial_reduce");
+
+        // start --eps--> s0 --(+initial)--> s1 --(default)*len--> target_nt_state
+        let s0 = nfa.add_state();
+        nfa.add_epsilon(start, s0);
+        let mut from = s0;
+        let next_state = if len == 0 { target_nt_state } else { nfa.add_state() };
+        nfa.add_transition(from, pos_initial, next_state)?;
+        from = next_state;
+
+        for i in 0..len {
+            let to = if i == len - 1 { target_nt_state } else { nfa.add_state() };
+            nfa.states.add_transition(from, DEFAULT_TRANSITION_SYMBOL, to)?;
+            from = to;
+        }
+    }
+
+    // Actions from non-terminal states.
+    for (nt, rc) in &tc.reduce_characterizations {
+        let src_nt_state = *nt_nodes.get(nt).expect("nt_node must exist for reduce_char");
+
+        for &(revealed_state, len, reduce_nt) in &rc.reveal_and_rereduces {
+            let pos_revealed = utils::encode_symbol_i16(revealed_state)?;
+            let dst_nt_state = *nt_nodes.get(&reduce_nt).expect("dst nt_node must exist");
+
+            // src --eps--> s0 --(+revealed)--> s1 --(default)*len--> dst
+            let s0 = nfa.add_state();
+            nfa.add_epsilon(src_nt_state, s0);
+            let mut from = s0;
+            let next_state = if len == 0 { dst_nt_state } else { nfa.add_state() };
+            nfa.add_transition(from, pos_revealed, next_state)?;
+            from = next_state;
+
+            for i in 0..len {
+                let to = if i == len - 1 { dst_nt_state } else { nfa.add_state() };
+                nfa.states.add_transition(from, DEFAULT_TRANSITION_SYMBOL, to)?;
+                from = to;
+            }
+        }
+
+        for &(revealed_state, goto_state, shift_state) in &rc.reveal_goto_shift_escapes {
+            let pos_revealed = utils::encode_symbol_i16(revealed_state)?;
+            let neg_revealed = utils::encode_negative_i16(revealed_state)?;
+            let neg_goto = utils::encode_negative_i16(goto_state)?;
+            let neg_shift = utils::encode_negative_i16(shift_state)?;
+
+            let s0 = nfa.add_state();
+            let s1 = nfa.add_state();
+            let s2 = nfa.add_state();
+            let s3 = nfa.add_state();
+            let s4 = nfa.add_state();
+
+            // src --eps--> s0 --(+revealed)--> s1 --(-revealed)--> s2 --(-goto)--> s3 --(-shift)--> s4 (final)
+            nfa.add_epsilon(src_nt_state, s0);
+            nfa.add_transition(s0, pos_revealed, s1)?;
+            nfa.add_transition(s1, neg_revealed, s2)?;
+            nfa.add_transition(s2, neg_goto, s3)?;
+            nfa.add_transition(s3, neg_shift, s4)?;
+            nfa.set_final(s4);
+        }
+    }
+
+    Ok(nfa)
+}
+
 /// Deprecated alias for build_nwa_from_terminal_characterization
 #[deprecated(since = "0.3.0", note = "Use build_nwa_from_terminal_characterization instead")]
 pub fn build_template_nwa_from_characterization(tc: &TerminalCharacterization) -> Result<NWA, FullDWABuildError> {
     build_nwa_from_terminal_characterization(tc)
 }
 
-/// Build template DWAs for all terminals in the parser.
+/// Build template DFAs for all terminals in the parser.
 /// 
-/// A characterization key that excludes the terminal ID, allowing us to share DWAs
+/// This builds unweighted DFAs which can later be converted to DWAs.
+/// Since template automata don't need weights during construction (they get
+/// Weight::all() everywhere), building unweighted DFAs is simpler and faster.
+/// 
+/// A characterization key that excludes the terminal ID, allowing us to share DFAs
 /// between terminals with identical grammatical behavior.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct CharacterizationKey {
@@ -163,16 +279,18 @@ impl CharacterizationKey {
     }
 }
 
-/// Each terminal gets its own DWA that encodes how it interacts with the parse stack.
-/// These are later composed into the final Parser DWA.
-pub fn build_template_dwas(parser: &GLRParser) -> Result<BTreeMap<TerminalID, DWA>, FullDWABuildError> {
+/// Build template DFAs for all terminals in the parser.
+/// 
+/// Each terminal gets its own DFA that encodes how it interacts with the parse stack.
+/// These are later converted to DWAs and composed into the final Parser DWA.
+pub fn build_template_dfas(parser: &GLRParser) -> Result<BTreeMap<TerminalID, DFA>, FullDWABuildError> {
     use rayon::prelude::*;
     
     let all = compute_all_characterizations(parser);
     crate::debug!(5, "Computed terminal characterizations for {} terminals", all.len());
 
     // OPTIMIZATION: Group terminals by their characterization key (excluding terminal ID).
-    // Terminals with identical grammatical behavior can share the same DWA.
+    // Terminals with identical grammatical behavior can share the same DFA.
     let mut key_to_terms: std::collections::HashMap<CharacterizationKey, Vec<(TerminalID, TerminalCharacterization)>> = 
         std::collections::HashMap::new();
     
@@ -182,38 +300,28 @@ pub fn build_template_dwas(parser: &GLRParser) -> Result<BTreeMap<TerminalID, DW
     }
     
     let unique_chars = key_to_terms.len();
-    crate::debug!(5, "Found {} unique characterizations (sharing DWAs for {} groups)", 
+    crate::debug!(5, "Found {} unique characterizations (sharing DFAs for {} groups)", 
         unique_chars, key_to_terms.values().filter(|v| v.len() > 1).count());
 
-    // Build NWAs in parallel (pure computation, no shared state)
+    // Build NFAs in parallel (pure computation, no shared state)
     let key_term_list: Vec<_> = key_to_terms.into_iter().collect();
-    let nwas_and_terms: Vec<_> = key_term_list
+    let nfas_and_terms: Vec<_> = key_term_list
         .par_iter()
         .map(|(_key, terms)| {
             let (first_term, first_tc) = &terms[0];
-            let nwa = build_nwa_from_terminal_characterization(first_tc).unwrap();
-            (*first_term, terms.clone(), nwa)
+            let nfa = build_nfa_from_terminal_characterization(first_tc).unwrap();
+            (*first_term, terms.clone(), nfa)
         })
         .collect();
     
     // Determinize and minimize serially (memory contention in parallel slows things down)
-    // Tested parallel 2025: 467-494ms vs serial 380-400ms. Serial wins for many small DWAs.
     let mut result = BTreeMap::new();
-    for (first_term, terms, mut nwa) in nwas_and_terms {
-        // EXPERIMENTAL: Dump NWA JSON for debugging state count issues
-        // Set DUMP_TEMPLATE_NWA=1 to enable
-        if std::env::var("DUMP_TEMPLATE_NWA").map_or(false, |v| v == "1") {
-            let nwa_json = serde_json::to_string_pretty(&nwa).unwrap();
-            let filename = format!("template_nwa_{}.json", first_term.0);
-            std::fs::write(&filename, nwa_json).unwrap();
-            crate::debug!(1, "Dumped template NWA for terminal {:?} to {}", first_term, filename);
-        }
+    for (first_term, terms, nfa) in nfas_and_terms {
+        // Determinize and minimize using the unweighted NFA->DFA path
+        let dfa = nfa.determinize_and_minimize();
+        crate::debug!(6, "Terminal {:?}: {} states after minimize", first_term, dfa.states.len());
         
-        // Use TemplateDWA config for consistent settings across the codebase
-        let dwa = nwa.determinize_and_minimize("TemplateDWA");
-        crate::debug!(6, "Terminal {:?}: {} states after minimize", first_term, dwa.states.len());
-        
-        // Debug stats at level 6: print one line per terminal with characterization and DFA stats
+        // Debug stats at level 6
         if crate::r#macro::is_debug_level_enabled(6) {
             for (term, tc) in &terms {
                 let num_rc_nonempty = tc.reduce_characterizations.values().filter(|r| !r.reveal_and_rereduces.is_empty() || !r.reveal_goto_shift_escapes.is_empty()).count();
@@ -222,21 +330,39 @@ pub fn build_template_dwas(parser: &GLRParser) -> Result<BTreeMap<TerminalID, DW
                     tc.initial_shifts.len(), 
                     tc.initial_reduces.len(), 
                     num_rc_nonempty, 
-                    dwa.states.len(),
-                    dwa.states.num_transitions()
+                    dfa.states.len(),
+                    dfa.states.num_transitions()
                 );
-                // At level 7, print the full characterization
                 crate::debug!(7, "{}", tc);
             }
         }
         
-        // Clone the DWA for all terminals with this characterization
+        // Clone the DFA for all terminals with this characterization
         for (term, _) in terms {
-            result.insert(term, dwa.clone());
+            result.insert(term, dfa.clone());
         }
     }
 
     Ok(result)
+}
+
+/// Build template DWAs for all terminals in the parser.
+/// 
+/// Each terminal gets its own DWA that encodes how it interacts with the parse stack.
+/// These are later composed into the final Parser DWA.
+/// 
+/// This function builds unweighted DFAs first (via build_template_dfas), then
+/// converts them to DWAs with Weight::all() on all transitions and finals.
+pub fn build_template_dwas(parser: &GLRParser) -> Result<BTreeMap<TerminalID, DWA>, FullDWABuildError> {
+    let dfas = build_template_dfas(parser)?;
+    
+    // Convert DFAs to DWAs
+    let dwas: BTreeMap<TerminalID, DWA> = dfas
+        .into_iter()
+        .map(|(term_id, dfa)| (term_id, dfa.to_dwa()))
+        .collect();
+    
+    Ok(dwas)
 }
 
 /// Identity DWA used for the "ignore" terminal: start is final and there are no transitions.
