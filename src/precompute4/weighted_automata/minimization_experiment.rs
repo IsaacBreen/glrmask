@@ -204,6 +204,14 @@ impl NWA {
                 nwa_passes: vec![NwaPass::MinimizeRustfst, NwaPass::CompressTransitions, NwaPass::RmEpsilon],
                 dwa_passes: vec![DwaPass::Minimize, DwaPass::ConsolidateRanges],
             },
+            "TemplateDWA" => DeterminizeAndMinimizeConfig {
+                // Template DWAs are built from terminal NWAs in template_nwa.rs
+                // These are relatively small DWAs (usually <2000 states) that get reused
+                // during Parser NWA construction. Full minimization is worthwhile here
+                // since templates are instantiated many times.
+                nwa_passes: vec![],  // NWA already processed before determinization
+                dwa_passes: vec![DwaPass::Minimize],
+            },
             "Precompute1" => DeterminizeAndMinimizeConfig {
                 // OPTIMIZATION: Skip Minimize to save ~420ms - Precompute1 is just input to precompute4
                 // The final DWA will be minimized, so intermediate minimization is redundant.

@@ -199,7 +199,7 @@ pub fn build_template_dwas(parser: &GLRParser) -> Result<BTreeMap<TerminalID, DW
     // Determinize and minimize serially (memory contention in parallel slows things down)
     // Tested parallel 2025: 467-494ms vs serial 380-400ms. Serial wins for many small DWAs.
     let mut result = BTreeMap::new();
-    for (first_term, terms, nwa) in nwas_and_terms {
+    for (first_term, terms, mut nwa) in nwas_and_terms {
         // EXPERIMENTAL: Dump NWA JSON for debugging state count issues
         // Set DUMP_TERMINAL_NWA=1 to enable
         if std::env::var("DUMP_TERMINAL_NWA").map_or(false, |v| v == "1") {
@@ -209,10 +209,8 @@ pub fn build_template_dwas(parser: &GLRParser) -> Result<BTreeMap<TerminalID, DW
             crate::debug!(1, "Dumped terminal NWA for terminal {:?} to {}", first_term, filename);
         }
         
-        let mut dwa = nwa.determinize();
-        crate::debug!(6, "Terminal {:?} (and {} others): {} states before minimize", 
-            first_term, terms.len() - 1, dwa.states.len());
-        dwa.minimize_single_pass();
+        // Use TemplateDWA config for consistent settings across the codebase
+        let dwa = nwa.determinize_and_minimize("TemplateDWA");
         crate::debug!(6, "Terminal {:?}: {} states after minimize", first_term, dwa.states.len());
         
         // Debug stats at level 6: print one line per terminal with characterization and DFA stats
