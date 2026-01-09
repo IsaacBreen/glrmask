@@ -1,4 +1,3 @@
-pub mod dfa;
 pub mod characterize;
 pub mod full_dwa;
 pub mod resolve_negatives;

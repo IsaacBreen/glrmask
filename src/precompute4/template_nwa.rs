@@ -6,8 +6,8 @@ use crate::precompute4::characterize::{compute_all_characterizations, TerminalCh
 use crate::precompute4::utils;
 use crate::precompute4::utils::DEFAULT_TRANSITION_SYMBOL;
 use crate::dwa_i32::{DWA, NWA, NWABuildError, StateID, Weight};
-use crate::precompute4::dfa::{DFA, NFA};
-use crate::precompute4::dfa::nfa::NFABuildError;
+use crate::dfa_i32::{DFA, NFA};
+use crate::dfa_i32::nfa::NFABuildError;
 
 /// Error type for building the Parser DWA structures.
 #[derive(Debug, Clone, PartialEq, Eq)]

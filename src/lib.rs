@@ -20,6 +20,7 @@ mod profiler;
 
 // Automata modules
 pub mod dwa_i32;
+pub mod dfa_i32;
 
 // New lightweight pass framework for Trie3 optimization
 pub mod precompute4;
