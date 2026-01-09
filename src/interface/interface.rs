@@ -110,6 +110,13 @@ pub enum GrammarExpr {
     Choice(Vec<GrammarExpr>),
     Optional(Box<GrammarExpr>),
     Repeat(Box<GrammarExpr>), // Zero or more repetition
+    /// Bounded repetition {min,max}
+    /// min is required copies, max is optional (None = unbounded)
+    RepeatBounded {
+        min: usize,
+        max: Option<usize>,
+        inner: Box<GrammarExpr>,
+    },
     Literal(Vec<u8>),
     CharClass(String),
     AnyChar,
@@ -123,6 +130,7 @@ enum GrammarExprJSON {
     Choice { exprs: Vec<GrammarExprJSON> },
     Optional { expr: Box<GrammarExprJSON> },
     Repeat { expr: Box<GrammarExprJSON> },
+    RepeatBounded { min: usize, max: Option<usize>, inner: Box<GrammarExprJSON> },
     Literal { bytes: Vec<u8> },
     CharClass { def: String },
     AnyChar,
@@ -144,6 +152,11 @@ impl GrammarExprJSON {
             GrammarExpr::Repeat(expr) => GrammarExprJSON::Repeat {
                 expr: Box::new(GrammarExprJSON::from_expr(expr)),
             },
+            GrammarExpr::RepeatBounded { min, max, inner } => GrammarExprJSON::RepeatBounded {
+                min: *min,
+                max: *max,
+                inner: Box::new(GrammarExprJSON::from_expr(inner)),
+            },
             GrammarExpr::Literal(bytes) => GrammarExprJSON::Literal { bytes: bytes.clone() },
             GrammarExpr::CharClass(s) => GrammarExprJSON::CharClass { def: s.clone() },
             GrammarExpr::AnyChar => GrammarExprJSON::AnyChar,
@@ -161,6 +174,11 @@ impl GrammarExprJSON {
             }
             GrammarExprJSON::Optional { expr } => GrammarExpr::Optional(Box::new(expr.to_expr())),
             GrammarExprJSON::Repeat { expr } => GrammarExpr::Repeat(Box::new(expr.to_expr())),
+            GrammarExprJSON::RepeatBounded { min, max, inner } => GrammarExpr::RepeatBounded {
+                min,
+                max,
+                inner: Box::new(inner.to_expr()),
+            },
             GrammarExprJSON::Literal { bytes } => GrammarExpr::Literal(bytes),
             GrammarExprJSON::CharClass { def } => GrammarExpr::CharClass(def),
             GrammarExprJSON::AnyChar => GrammarExpr::AnyChar,
@@ -1209,6 +1227,52 @@ impl GrammarDefinition {
                 memo.insert(expr.clone(), nt.clone());
                 Ok((vec![Symbol::NonTerminal(nt)], all_new_productions))
             }
+            GrammarExpr::RepeatBounded { min, max, inner } => {
+                // Expand bounded repetition to sequence form:
+                // {min,max} -> inner^min (inner?)^(max-min)
+                // {min,} -> inner^min inner*
+                let mut parts = Vec::new();
+                
+                // Add min required copies
+                for _ in 0..*min {
+                    parts.push((**inner).clone());
+                }
+                
+                match max {
+                    Some(max_val) => {
+                        // Add (max - min) optional copies
+                        for _ in 0..(max_val - min) {
+                            parts.push(GrammarExpr::Optional(Box::new((**inner).clone())));
+                        }
+                    }
+                    None => {
+                        // Unbounded: add inner*
+                        parts.push(GrammarExpr::Repeat(Box::new((**inner).clone())));
+                    }
+                }
+                
+                let expanded = if parts.is_empty() {
+                    GrammarExpr::Sequence(vec![])
+                } else if parts.len() == 1 {
+                    parts.pop().unwrap()
+                } else {
+                    GrammarExpr::Sequence(parts)
+                };
+                
+                Self::convert_grammar_expr_to_symbols(
+                    &expanded,
+                    current_rule_name_or_path,
+                    literal_to_group_id,
+                    nonterminal_names,
+                    regex_name_to_group_id,
+                    regex_expr_to_group_id,
+                    next_terminal_group_id,
+                    per_base_counters,
+                    all_names,
+                    memo,
+                    should_optimize,
+                )
+            }
         }
     }
 
@@ -1379,6 +1443,55 @@ impl GrammarDefinition {
                     Box::new(sub_expr),
                     QuantifierType::ZeroOrMore,
                 ))
+            }
+            GrammarExpr::RepeatBounded { min, max, inner } => {
+                let sub_expr = Self::convert_grammar_expr_to_regex_expr(
+                    inner,
+                    unresolved_terminals,
+                    memo,
+                    resolving_stack,
+                )?;
+                // Expand bounded repetition: {min,max} -> inner^min (inner?)^(max-min)
+                // or {min,} -> inner^min inner*
+                match max {
+                    Some(max_val) => {
+                        let mut parts = Vec::new();
+                        // min required copies
+                        for _ in 0..*min {
+                            parts.push(sub_expr.clone());
+                        }
+                        // (max - min) optional copies
+                        for _ in 0..(max_val - min) {
+                            parts.push(Expr::Quantifier(
+                                Box::new(sub_expr.clone()),
+                                QuantifierType::ZeroOrOne,
+                            ));
+                        }
+                        if parts.is_empty() {
+                            Ok(Expr::Epsilon)
+                        } else if parts.len() == 1 {
+                            Ok(parts.pop().unwrap())
+                        } else {
+                            Ok(Expr::Seq(parts))
+                        }
+                    }
+                    None => {
+                        // Unbounded: min required, then *
+                        let mut parts = Vec::new();
+                        for _ in 0..*min {
+                            parts.push(sub_expr.clone());
+                        }
+                        parts.push(Expr::Quantifier(
+                            Box::new(sub_expr),
+                            QuantifierType::ZeroOrMore,
+                        ));
+                        if parts.len() == 1 {
+                            Ok(parts.pop().unwrap())
+                        } else {
+                            Ok(Expr::Seq(parts))
+                        }
+                    }
+                }
             }
         }
     }
@@ -1753,6 +1866,9 @@ impl GrammarDefinition {
                 GrammarExpr::Optional(inner) | GrammarExpr::Repeat(inner) => {
                     contains_regex_features(inner)
                 }
+                GrammarExpr::RepeatBounded { inner, .. } => {
+                    contains_regex_features(inner)
+                }
             }
         }
 
@@ -1785,6 +1901,9 @@ impl GrammarDefinition {
                 }
                 GrammarExpr::Optional(expr_box) | GrammarExpr::Repeat(expr_box) => {
                     gather_referenced_terminals(&*expr_box, terminals, referenced_terminals);
+                }
+                GrammarExpr::RepeatBounded { inner, .. } => {
+                    gather_referenced_terminals(&*inner, terminals, referenced_terminals);
                 }
             }
         }

@@ -49,6 +49,9 @@ fn contains_regex_features(expr: &GrammarExpr) -> bool {
         GrammarExpr::Optional(inner) | GrammarExpr::Repeat(inner) => {
             contains_regex_features(inner)
         }
+        GrammarExpr::RepeatBounded { inner, .. } => {
+            contains_regex_features(inner)
+        }
     }
 }
 
@@ -241,6 +244,9 @@ impl ChoiceFactorer {
             GrammarExpr::Optional(e) | GrammarExpr::Repeat(e) => {
                 self.collect_refs_impl(e, refs);
             }
+            GrammarExpr::RepeatBounded { inner, .. } => {
+                self.collect_refs_impl(inner, refs);
+            }
             GrammarExpr::Literal(_) | GrammarExpr::CharClass(_) | GrammarExpr::AnyChar => {}
         }
     }
@@ -370,6 +376,9 @@ impl ChoiceFactorer {
             }
             GrammarExpr::Optional(e) | GrammarExpr::Repeat(e) => {
                 Self::collect_refs_static(e, refs);
+            }
+            GrammarExpr::RepeatBounded { inner, .. } => {
+                Self::collect_refs_static(inner, refs);
             }
             GrammarExpr::Literal(_) | GrammarExpr::CharClass(_) | GrammarExpr::AnyChar => {}
         }

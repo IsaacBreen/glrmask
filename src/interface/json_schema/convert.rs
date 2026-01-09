@@ -191,29 +191,53 @@ impl SchemaToGrammar {
         match (constraints.min_length, constraints.max_length) {
             (None, None) => GrammarType::primitive(GrammarPrimitive::StringChars),
             (Some(min), None) => {
-                let mut parts = Vec::new();
-                for _ in 0..min {
-                    parts.push(char_or_escape.clone());
+                // min chars required, then unbounded: char_or_escape{min,}
+                let min = min as usize;
+                if min == 0 {
+                    GrammarType::primitive(GrammarPrimitive::StringChars)
+                } else {
+                    GrammarType::seq(vec![
+                        GrammarType::RepeatBounded {
+                            min,
+                            max: None,
+                            inner: Box::new(char_or_escape),
+                        }
+                    ])
                 }
-                parts.push(GrammarType::primitive(GrammarPrimitive::StringChars));
-                GrammarType::seq(parts)
             }
             (None, Some(max)) => {
-                let mut parts = Vec::new();
-                for _ in 0..max {
-                    parts.push(GrammarType::opt(char_or_escape.clone()));
+                // 0 to max chars: char_or_escape{0,max}
+                let max = max as usize;
+                if max == 0 {
+                    GrammarType::seq(vec![]) // empty sequence
+                } else {
+                    GrammarType::RepeatBounded {
+                        min: 0,
+                        max: Some(max),
+                        inner: Box::new(char_or_escape),
+                    }
                 }
-                GrammarType::seq(parts)
             }
             (Some(min), Some(max)) => {
-                let mut parts = Vec::new();
-                for _ in 0..min {
-                    parts.push(char_or_escape.clone());
+                // min to max chars: char_or_escape{min,max}
+                let min = min as usize;
+                let max = max as usize;
+                if max == 0 {
+                    GrammarType::seq(vec![]) // empty sequence
+                } else if min == max {
+                    // Exact count
+                    GrammarType::RepeatBounded {
+                        min,
+                        max: Some(max),
+                        inner: Box::new(char_or_escape),
+                    }
+                } else {
+                    GrammarType::RepeatBounded {
+                        min,
+                        max: Some(max),
+                        inner: Box::new(char_or_escape),
+                    }
                 }
-                for _ in 0..(max - min) {
-                    parts.push(GrammarType::opt(char_or_escape.clone()));
-                }
-                GrammarType::seq(parts)
             }
         }
     }

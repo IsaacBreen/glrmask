@@ -233,6 +233,23 @@ fn grammar_expr_to_ebnf(expr: &GrammarExpr) -> String {
         GrammarExpr::Repeat(e) => {
             format!("( {} )*", grammar_expr_to_ebnf(e))
         }
+        GrammarExpr::RepeatBounded { min, max, inner } => {
+            let inner_str = grammar_expr_to_ebnf(inner);
+            match max {
+                Some(max_val) if *min == *max_val => {
+                    // Exact count: {n}
+                    format!("( {} ){{{}}}", inner_str, min)
+                }
+                Some(max_val) => {
+                    // Range: {min,max}
+                    format!("( {} ){{{},{}}}", inner_str, min, max_val)
+                }
+                None => {
+                    // Unbounded: {min,}
+                    format!("( {} ){{{},}}", inner_str, min)
+                }
+            }
+        }
         GrammarExpr::CharClass(s) => s.clone(),
         GrammarExpr::AnyChar => ".".to_string(),
     }

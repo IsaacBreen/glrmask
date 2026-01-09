@@ -68,6 +68,14 @@ impl GrammarEmitter {
                 ])
             }
             
+            GrammarType::RepeatBounded { min, max, inner } => {
+                GrammarExpr::RepeatBounded {
+                    min: *min,
+                    max: *max,
+                    inner: Box::new(self.emit(inner)),
+                }
+            }
+            
             GrammarType::CharClass(pattern) => {
                 GrammarExpr::CharClass(pattern.clone())
             }

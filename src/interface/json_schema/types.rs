@@ -172,6 +172,14 @@ pub enum GrammarType {
     /// One or more repetitions
     RepeatOnePlus(Box<GrammarType>),
     
+    /// Bounded repetition {min,max}
+    /// min is the minimum count, max is optional (None means unbounded)
+    RepeatBounded {
+        min: usize,
+        max: Option<usize>,
+        inner: Box<GrammarType>,
+    },
+    
     /// A character class pattern
     CharClass(String),
     
