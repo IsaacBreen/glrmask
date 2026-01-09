@@ -102,10 +102,9 @@ impl DWA {
             .collect();
 
         let mut changed = true;
-        let mut iterations = 0;
-        const MAX_ITERATIONS: usize = usize::MAX;
+        let mut iterations: usize = 0;
 
-        while changed && iterations < MAX_ITERATIONS {
+        while changed {
             changed = false;
             iterations += 1;
 
@@ -137,9 +136,8 @@ impl DWA {
             }
         }
 
-        if iterations >= MAX_ITERATIONS {
-            crate::debug!(1, "Warning: backward potential computation did not converge");
-        }
+        // Note: iterations variable available for debugging if convergence issues arise
+        let _ = iterations;
 
         d
     }
