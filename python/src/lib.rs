@@ -30,7 +30,7 @@ use sep1::json_schema::{json_schema_to_ebnf, json_schema_to_grammar_exprs, JsonS
 use sep1::json_serialization::{JSONConvertible, JSONNode};
 use sep1::precompute4::template_dfa::build_template_dwas;
 use sep1::precompute4::characterize::compute_all_characterizations;
-use sep1::tokenizer::LLMTokenID;
+use sep1::dfa_u8::LLMTokenID;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
@@ -253,7 +253,7 @@ impl PyRegex {
     ) -> PyResult<(Option<usize>, Vec<(usize, usize)>)> {
         let exec_result = self
             .inner
-            .execute_from_state(bytes, sep1::tokenizer::TokenizerStateID(state_id));
+            .execute_from_state(bytes, sep1::dfa_u8::TokenizerStateID(state_id));
         let end_state = exec_result.end_state;
         let matches: Vec<(usize, usize)> =
             exec_result.matches.into_iter().map(|m| (m.id, m.width)).collect();
@@ -263,7 +263,7 @@ impl PyRegex {
     fn tokens_accessible_from_state(&self, state_id: usize) -> PyResult<Vec<usize>> {
         let accessible = self
             .inner
-            .tokens_accessible_from_state(sep1::tokenizer::TokenizerStateID(state_id));
+            .tokens_accessible_from_state(sep1::dfa_u8::TokenizerStateID(state_id));
         let out: Vec<usize> = accessible.into_iter().map(|tid| tid.0).collect();
         Ok(out)
     }
@@ -1360,7 +1360,7 @@ fn gss_prune_disallowed_terminals(
 ) -> PyResult<()> {
     let mut rust_terminals_map = BTreeMap::new();
     for (k, v) in terminals_map.iter() {
-        let tokenizer_state_id = sep1::tokenizer::TokenizerStateID(k.extract::<usize>()?);
+        let tokenizer_state_id = sep1::dfa_u8::TokenizerStateID(k.extract::<usize>()?);
         let terminal_bv = v.extract::<PyRef<PyHybridBitset>>()?.inner.clone();
         rust_terminals_map.insert(tokenizer_state_id, terminal_bv);
     }
@@ -1385,7 +1385,7 @@ fn gss_prune_llm_tokens_by_disallowed_terminals(
 ) -> PyResult<()> {
     let mut rust_possible_matches = BTreeMap::new();
     for (k, v) in possible_matches.iter() {
-        let tokenizer_state_id = sep1::tokenizer::TokenizerStateID(k.extract::<usize>()?);
+        let tokenizer_state_id = sep1::dfa_u8::TokenizerStateID(k.extract::<usize>()?);
         let terminal_map_py = v.downcast::<PyDict>()?;
         let mut terminal_map = BTreeMap::new();
         for (term_k, term_v) in terminal_map_py.iter() {
@@ -1403,7 +1403,7 @@ fn gss_prune_llm_tokens_by_disallowed_terminals(
         let mut forbidden_llm_tokens = RustHybridBitset::zeros();
         for (&tokenizer_state_id, disallowed_in_state) in &acc.terminals_union {
             if disallowed_in_state.is_empty() { continue; }
-            if let Some(state_matches) = rust_possible_matches.get(&sep1::tokenizer::TokenizerStateID(tokenizer_state_id)) {
+            if let Some(state_matches) = rust_possible_matches.get(&sep1::dfa_u8::TokenizerStateID(tokenizer_state_id)) {
                 for (terminal_id, llm_tokens) in state_matches {
                     if disallowed_in_state.contains(terminal_id.0) {
                         forbidden_llm_tokens |= llm_tokens;
@@ -1435,8 +1435,8 @@ fn gss_map_allowed_terminals_tokenizer_states(
 ) -> PyResult<()> {
     let mut rust_state_map = BTreeMap::new();
     for (k, v) in state_map.iter() {
-        let from_state = sep1::tokenizer::TokenizerStateID(k.extract::<usize>()?);
-        let to_state = sep1::tokenizer::TokenizerStateID(v.extract::<usize>()?);
+        let from_state = sep1::dfa_u8::TokenizerStateID(k.extract::<usize>()?);
+        let to_state = sep1::dfa_u8::TokenizerStateID(v.extract::<usize>()?);
         rust_state_map.insert(from_state, to_state);
     }
 
@@ -1510,7 +1510,7 @@ impl PyGrammarConstraintState {
 
     fn clone(&self) -> Self {
         let constraint = self.inner.borrow_constraint().clone();
-        let gss_map: BTreeMap<sep1::tokenizer::TokenizerStateID, RustGSS> =
+        let gss_map: BTreeMap<sep1::dfa_u8::TokenizerStateID, RustGSS> =
             self.inner.with_inner(|state| {
                 state
                     .state
@@ -1659,7 +1659,7 @@ impl PyGrammarConstraintState {
                     stack: gss_node.inner.clone(),
                 };
                 new_b_tree_map
-                    .insert(sep1::tokenizer::TokenizerStateID(tokenizer_state_id), glr_state);
+                    .insert(sep1::dfa_u8::TokenizerStateID(tokenizer_state_id), glr_state);
             }
             state.state = new_b_tree_map;
         });
@@ -1705,7 +1705,7 @@ impl PyBruteforceConstraintState {
     /// Clone the state
     fn clone(&self) -> Self {
         let constraint = self.inner.borrow_constraint().clone();
-        let state_map: BTreeMap<sep1::tokenizer::TokenizerStateID, RustGSS> =
+        let state_map: BTreeMap<sep1::dfa_u8::TokenizerStateID, RustGSS> =
             self.inner.with_inner(|state| {
                 state
                     .state
