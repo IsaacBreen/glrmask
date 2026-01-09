@@ -718,7 +718,10 @@ fn solve_exact_graph_coloring(adj: &Vec<Vec<usize>>) -> Vec<usize> {
     let n = adj.len();
     if n == 0 { return vec![]; }
     
-    if n > 50 {
+    // For graphs with more than 30 nodes, use greedy coloring to avoid exponential blowup
+    // The exact solver has worst-case exponential time complexity
+    // Reduced from 50 to 30 because even 45 nodes can cause 4+ second blowup on dense graphs
+    if n > 30 {
         return solve_greedy_coloring(adj);
     }
 
