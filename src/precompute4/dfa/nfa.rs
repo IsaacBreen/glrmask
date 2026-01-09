@@ -15,7 +15,7 @@ use rustfst::algorithms::rm_epsilon::rm_epsilon;
 use rustfst::Semiring;
 
 use super::dfa::{DFA, DFAState, StateID};
-use crate::precompute4::weighted_automata::common::Label;
+use crate::dwa_i32::common::Label;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NFABuildError {

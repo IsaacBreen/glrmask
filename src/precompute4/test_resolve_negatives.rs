@@ -1,8 +1,8 @@
 use crate::precompute4::resolve_negatives::{resolve_negative_codes_in_dwa, resolve_negative_codes_in_nwa};
-use crate::precompute4::weighted_automata::test_weighted_automata::stochastic_equivalence_test;
+use crate::dwa_i32::test_weighted_automata::stochastic_equivalence_test;
 use crate::precompute4::utils::DEFAULT_TRANSITION_SYMBOL;
-use crate::precompute4::weighted_automata::{DWA, NWA, Weight};
-use crate::precompute4::weighted_automata::common::Label;
+use crate::dwa_i32::{DWA, NWA, Weight};
+use crate::dwa_i32::common::Label;
 
 #[test]
 fn test_resolve_negatives_simple_cancellation() {

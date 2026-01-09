@@ -11,14 +11,14 @@ use crate::datastructures::hybrid_bitset::RangeSet;
 use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
 use crate::finite_automata::Regex;
 use crate::glr::parser::GLRParser;
-use crate::precompute4::weighted_automata::rangeset::RangeSet as WARangeSet;
-use crate::precompute4::weighted_automata::{DWA, NWA, NWAStateID, Weight};
-use crate::precompute4::weighted_automata::weight_expansion::{expand_rsb, create_tsid_set_mask};
+use crate::dwa_i32::rangeset::RangeSet as WARangeSet;
+use crate::dwa_i32::{DWA, NWA, NWAStateID, Weight};
+use crate::dwa_i32::weight_expansion::{expand_rsb, create_tsid_set_mask};
 use crate::profiler::{self};
 
 use crate::tokenizer::{LLMTokenID, TokenizerStateID};
 use crate::types::TerminalID as GrammarTokenID;
-use crate::precompute4::weighted_automata::common::Label;
+use crate::dwa_i32::common::Label;
 
 // No-op progress bar replacement
 struct NoOpPb;

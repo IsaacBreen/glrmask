@@ -1,6 +1,6 @@
 use crate::precompute4::utils::DEFAULT_TRANSITION_SYMBOL;
-use crate::precompute4::weighted_automata::common::Label;
-use crate::precompute4::weighted_automata::{DWA, NWA, NWAStateID, NWAStates, Weight};
+use crate::dwa_i32::common::Label;
+use crate::dwa_i32::{DWA, NWA, NWAStateID, NWAStates, Weight};
 
 use rustc_hash::FxHashMap;
 use std::collections::{HashMap, HashSet, VecDeque};

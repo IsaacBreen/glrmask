@@ -39,8 +39,8 @@ use crate::{
 use crate::datastructures::bitset::Bitset;
 use crate::datastructures::gss_acc::Acc;
 use crate::glr::parser::{ExpectElse, ParseStateEdgeContent};
-use crate::precompute4::weighted_automata::{DWA, NWA};
-use crate::precompute4::weighted_automata::{RangeSet as WARangeSet, Weight};
+use crate::dwa_i32::{DWA, NWA};
+use crate::dwa_i32::{RangeSet as WARangeSet, Weight};
 
 pub use crate::constraint_vocab::*;
 use crate::constraint_precompute::run_precompute1;
@@ -1027,8 +1027,8 @@ impl GrammarConstraint {
         // Conclusion: The proposed refactor to encode tsid in weights (using epsilons) is blocked
         // by this explosion. See TODO.md for details.
         if std::env::var("TEST_EPSILON_EXPLOSION").is_ok() {
-            use crate::precompute4::weighted_automata::nwa::NWA;
-            use crate::precompute4::weighted_automata::Weight;
+            use crate::dwa_i32::nwa::NWA;
+            use crate::dwa_i32::Weight;
             use std::collections::{HashSet, VecDeque};
             
             crate::debug!(1, "=== EPSILON EXPLOSION EXPERIMENT: Terminal DWA ===");
@@ -1724,7 +1724,7 @@ impl GrammarConstraint {
         // Test: Build Parser DWA from the epsilon-modified terminal NWA
         // to see if Parser DWA build time is faster/slower
         if std::env::var("TEST_EPSILON_EXPLOSION").is_ok() {
-            use crate::precompute4::weighted_automata::nwa::NWA;
+            use crate::dwa_i32::nwa::NWA;
             use std::time::Instant;
             
             crate::debug!(1, "=== EPSILON EXPLOSION EXPERIMENT: Parser DWA from epsilon terminal NWA ===");
@@ -1746,8 +1746,8 @@ impl GrammarConstraint {
             
             // Replace labeled start transitions with epsilons, keeping track of the first one
             let start_trans = std::mem::take(&mut terminal_nwa_mod.states[start_state].transitions);
-            let mut first_target_saved: Option<(crate::precompute4::weighted_automata::common::StateID, crate::precompute4::weighted_automata::Weight)> = None;
-            let mut first_label_saved: Option<crate::precompute4::weighted_automata::common::Label> = None;
+            let mut first_target_saved: Option<(crate::dwa_i32::common::StateID, crate::dwa_i32::Weight)> = None;
+            let mut first_label_saved: Option<crate::dwa_i32::common::Label> = None;
             
             for (label, targets) in start_trans {
                 for (target, weight) in targets {
@@ -1880,7 +1880,7 @@ impl GrammarConstraint {
         let terminals_count = self.parser.terminal_map.len();
         
         // Convert the DWA
-        self.parser_dwa = crate::precompute4::weighted_automata::weight_expansion::convert_symbol_heavy_to_weight_heavy(
+        self.parser_dwa = crate::dwa_i32::weight_expansion::convert_symbol_heavy_to_weight_heavy(
             &self.parser_dwa,
             num_tsids,
             terminals_count,

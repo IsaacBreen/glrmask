@@ -18,7 +18,7 @@ use crate::precompute4::resolve_negatives::{
     // not per-range here, since it requires a global pass over all states.
 };
 use crate::precompute4::template_nwa::{build_ignore_terminal_dwa, build_template_dwas};
-use crate::precompute4::weighted_automata::{
+use crate::dwa_i32::{
     common::Label, determinization_rustfst::determinize_nwa_to_dwa, DWA, NWA, NWABody, NWAStateID, NWAStates,
     StateID, Weight,
 };
@@ -299,14 +299,14 @@ fn specialize_dwa_relative_with_map(parent_dwa: &DWA, weight_map: &HashMap<Weigh
     // as the weight_map can be computed once and reused.
     
     // We construct the new states in parallel using the pre-computed map.
-    let new_states_vec: Vec<crate::precompute4::weighted_automata::dwa::DWAState> = parent_dwa.states.0.par_iter().map(|state| {
+    let new_states_vec: Vec<crate::dwa_i32::dwa::DWAState> = parent_dwa.states.0.par_iter().map(|state| {
         let map_weight = |w: &Weight| -> Weight {
             if let Some(cw) = weight_map.get(w) { return cw.clone(); }
             // Fallback should not happen if weight_map is complete, but safe to keep
             Weight::zeros() 
         };
 
-        let mut new_state = crate::precompute4::weighted_automata::dwa::DWAState::default();
+        let mut new_state = crate::dwa_i32::dwa::DWAState::default();
         
         // Final weight
         if let Some(fw) = &state.final_weight {
@@ -329,7 +329,7 @@ fn specialize_dwa_relative_with_map(parent_dwa: &DWA, weight_map: &HashMap<Weigh
     }).collect();
 
     DWA {
-        states: crate::precompute4::weighted_automata::dwa::DWAStates(new_states_vec),
+        states: crate::dwa_i32::dwa::DWAStates(new_states_vec),
         body: parent_dwa.body.clone(),
     }
 }
@@ -896,7 +896,7 @@ pub fn instantiate_nwa_template_into(
     };
 
     for old_state in &template.states.0 {
-        let mut new_state = crate::precompute4::weighted_automata::nwa::NWAState::default();
+        let mut new_state = crate::dwa_i32::nwa::NWAState::default();
         
         // Transitions
         for (lbl, targets) in &old_state.transitions {

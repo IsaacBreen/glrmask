@@ -1,4 +1,3 @@
-pub mod weighted_automata;
 pub mod dfa;
 pub mod characterize;
 pub mod full_dwa;

@@ -1,5 +1,5 @@
 
-use sep1::precompute4::weighted_automata::rangeset::RangeSet;
+use sep1::dwa_i32::rangeset::RangeSet;
 use range_set_blaze::RangeSetBlaze;
 
 fn main() {

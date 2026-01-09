@@ -18,6 +18,9 @@ mod test_constraint_basic;
 // mod test_constraint_python;
 mod profiler;
 
+// Automata modules
+pub mod dwa_i32;
+
 // New lightweight pass framework for Trie3 optimization
 pub mod precompute4;
 pub mod constraint_fns;

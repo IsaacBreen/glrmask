@@ -873,7 +873,7 @@ fn test_simple_def_match_non_zero_llm_id() {
 #[test]
 fn test_precompute_a_plus_tokenizer() {
     use crate::constraint_precompute::run_precompute1;
-    use crate::precompute4::weighted_automata::common::Label;
+    use crate::dwa_i32::common::Label;
     use crate::tokenizer::TokenizerStateID;
 
     // Tokenizer for `a+`
@@ -946,7 +946,7 @@ fn test_precompute_a_plus_tokenizer() {
 #[test]
 fn test_precompute_x_eq() {
     use crate::constraint_precompute::run_precompute1;
-    use crate::precompute4::weighted_automata::common::Label;
+    use crate::dwa_i32::common::Label;
     use crate::tokenizer::TokenizerStateID;
 
     // Tokenizer for `=|x| `
@@ -2759,7 +2759,7 @@ fn test_constraint_expression_trivial_direct_limited_vocab() {
 fn test_tokenizer_vocab_to_terminal_dwa_aa() {
     use crate::constraint_precompute::run_precompute1;
     use crate::finite_automata::{Expr, ExprGroups, ExprGroup};
-    use crate::precompute4::weighted_automata::{DWA, Weight};
+    use crate::dwa_i32::{DWA, Weight};
     
     // Build tokenizer: just terminal 0 = 'a'
     let tokenizer = ExprGroups {

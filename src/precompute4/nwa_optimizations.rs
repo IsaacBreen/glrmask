@@ -4,7 +4,7 @@ use crate::constraint::StateIDBV;
 use crate::glr::parser::GLRParser;
 use crate::glr::table::{iter_rows, StateID as ParserStateID};
 use crate::precompute4::utils::{decode_symbol_i16, DEFAULT_TRANSITION_SYMBOL};
-use crate::precompute4::weighted_automata::{NWA, StateID, Weight};
+use crate::dwa_i32::{NWA, StateID, Weight};
 
 /// For any state with a final weight, subtract that weight from all outgoing transitions.
 /// This prunes paths that continue after a word has already been accepted with a given weight.

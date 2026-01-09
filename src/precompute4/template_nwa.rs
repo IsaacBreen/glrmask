@@ -5,7 +5,7 @@ use crate::glr::table::{NonTerminalID, StateID as ParserStateID, TerminalID};
 use crate::precompute4::characterize::{compute_all_characterizations, TerminalCharacterization};
 use crate::precompute4::utils;
 use crate::precompute4::utils::DEFAULT_TRANSITION_SYMBOL;
-use crate::precompute4::weighted_automata::{DWA, NWA, NWABuildError, StateID, Weight};
+use crate::dwa_i32::{DWA, NWA, NWABuildError, StateID, Weight};
 use crate::precompute4::dfa::{DFA, NFA};
 use crate::precompute4::dfa::nfa::NFABuildError;
 

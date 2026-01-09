@@ -3,8 +3,8 @@ use crate::datastructures::hybrid_bitset::RangeSet;
 use crate::datastructures::leveled_gss::LeveledGSS;
 use crate::glr::parser::{GLRParserState, ParseStateEdgeContent};
 use crate::glr::table::TerminalID;
-use crate::precompute4::weighted_automata::common::{Label, StateID as WAStateID};
-use crate::precompute4::weighted_automata::weight_expansion::{create_tsid_mask_rsb, collapse_weight_rsb};
+use crate::dwa_i32::common::{Label, StateID as WAStateID};
+use crate::dwa_i32::weight_expansion::{create_tsid_mask_rsb, collapse_weight_rsb};
 use crate::tokenizer::TokenizerStateID;
 use profiler_macro::time_it;
 use range_set_blaze::RangeSetBlaze;
@@ -258,7 +258,7 @@ impl<'a> GrammarConstraintState<'a> {
             let f = |acc: &Acc| {
                 // Expand the LLM token set to N×M and intersect with tsid mask
                 // This creates weights where only positions i*M + tsid are set
-                let expanded = crate::precompute4::weighted_automata::weight_expansion::expand_rsb(
+                let expanded = crate::dwa_i32::weight_expansion::expand_rsb(
                     &acc.llm_tokens_union.inner, num_tsids
                 );
                 let masked = &expanded & &tsid_mask;

@@ -14,8 +14,8 @@ use rustfst::algorithms::minimize_with_config;
 use rustfst::prelude::MinimizeConfig;
 use rustfst::Semiring;
 
-use crate::precompute4::weighted_automata::{DWA, DWAState, Weight};
-use crate::precompute4::weighted_automata::common::Label;
+use crate::dwa_i32::{DWA, DWAState, Weight};
+use crate::dwa_i32::common::Label;
 
 /// State ID type
 pub type StateID = usize;
@@ -222,7 +222,7 @@ impl DFA {
         let mut dwa = DWA::new_empty();
         
         // Add states
-        let state_map: Vec<crate::precompute4::weighted_automata::StateID> = (0..self.states.len())
+        let state_map: Vec<crate::dwa_i32::StateID> = (0..self.states.len())
             .map(|_| dwa.states.add_state())
             .collect();
         
