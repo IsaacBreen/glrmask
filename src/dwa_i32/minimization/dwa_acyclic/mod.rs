@@ -207,7 +207,9 @@ pub fn minimize_acyclic_exact(dwa: &DWA) -> Result<DWA, DWABuildError> {
         // For large height levels, use fast signature-based coloring
         // This avoids O(n²) incompatibility graph construction
         // Threshold lowered because are_compatible is expensive (Weight operations)
-        let coloring = if candidates.len() > 500 {
+        // Note: 200 threshold chosen because ~200 candidates causes ~20k are_compatible calls
+        // which at ~0.2ms each becomes ~4 seconds
+        let coloring = if candidates.len() > 200 {
             let sig_start = std::time::Instant::now();
             let result = solve_signature_based_coloring(
                 &dwa,
@@ -246,6 +248,12 @@ pub fn minimize_acyclic_exact(dwa: &DWA) -> Result<DWA, DWABuildError> {
             let result = solve_exact_graph_coloring(&adj);
             let coloring_time = coloring_start.elapsed();
             total_coloring_time += coloring_time;
+            
+            // Log slow coloring operations to identify bottlenecks
+            if coloring_time.as_millis() > 100 {
+                crate::debug!(5, "Height {}: {} candidates, graph coloring took {:?}", 
+                    h, candidates.len(), coloring_time);
+            }
             result
         };
 
@@ -685,7 +693,8 @@ fn build_incompatibility_graph(
     let n = candidates.len();
     
     // For large candidate sets, use signature-based pre-grouping
-    if n > 500 {
+    // This avoids O(n²) are_compatible calls which are expensive
+    if n > 200 {
         return build_incompatibility_graph_with_signatures(dwa, candidates, needed, old_to_new, new_states);
     }
     
@@ -921,9 +930,10 @@ fn solve_exact_graph_coloring(adj: &Vec<Vec<usize>>) -> Vec<usize> {
     let n = adj.len();
     if n == 0 { return vec![]; }
     
-    // For graphs with more than 50 nodes, use greedy coloring to avoid exponential blowup
+    // For graphs with more than 30 nodes, use greedy coloring to avoid exponential blowup
     // The exact solver has worst-case exponential time complexity
-    if n > 50 {
+    // Reduced from 50 to 30 because even 45 nodes can cause 4+ second blowup on dense graphs
+    if n > 30 {
         return solve_greedy_coloring(adj);
     }
 
