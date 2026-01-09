@@ -40,9 +40,23 @@ impl NWA {
         }
         crate::debug!(7, "[NWA] Initial number of states: {}, total epsilon transitions: {}", initial_states, total_epsilons);
 
+        let start = std::time::Instant::now();
         let mut fst = self.to_rustfst();
+        let to_rustfst_time = start.elapsed();
+        
+        let start2 = std::time::Instant::now();
         rm_epsilon(&mut fst).unwrap();
+        let rm_epsilon_time = start2.elapsed();
+        
+        let start3 = std::time::Instant::now();
         *self = NWA::from_rustfst(&fst);
+        let from_rustfst_time = start3.elapsed();
+        
+        // Report timing only if >50ms
+        if to_rustfst_time + rm_epsilon_time + from_rustfst_time > std::time::Duration::from_millis(50) {
+            crate::debug!(5, "│   rm_epsilon breakdown: to_rustfst={:.2?}, rm_epsilon={:.2?}, from_rustfst={:.2?}", 
+                to_rustfst_time, rm_epsilon_time, from_rustfst_time);
+        }
 
         let final_states = self.states.len();
         let mut final_epsilons = 0;

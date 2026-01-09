@@ -271,6 +271,7 @@ impl NWA {
 
         // Run NWA passes
         for pass in config.nwa_passes {
+            let pass_start = std::time::Instant::now();
             match pass {
                 NwaPass::PruneUnreachable => { self.prune_unreachable(); },
                 NwaPass::PruneDeadEnds => { self.prune_dead_ends(); },
@@ -280,6 +281,11 @@ impl NWA {
                 NwaPass::Minimize => { self.minimize_states(); },
                 NwaPass::RmEpsilon => { self.rm_epsilon(); },
                 NwaPass::MinimizeRustfst => { self.minimize_with_rustfst_full(); },
+            }
+            let pass_time = pass_start.elapsed();
+            if pass_time.as_millis() > 50 {
+                crate::debug!(5, "NWA Pass {:?}: {} states, {} transitions in {:.2?}", 
+                    pass, self.states.len(), self.states.num_transitions(), pass_time);
             }
         }
         crate::debug!(5, "NWA minimization: {} states, {} transitions, {} ranges ({} interned)", 
