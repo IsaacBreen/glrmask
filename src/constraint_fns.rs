@@ -53,6 +53,10 @@ impl<'a> GrammarConstraintState<'a> {
         let dwa = &self.parent.parser_dwa;
         let dwa_start_state = &dwa.states[dwa.body.start_state];
 
+        crate::debug!(5, "compute_internal_mask: {} tokenizer states in self.state", self.state.len());
+        for (&tsid, glr_state) in &self.state {
+            crate::debug!(6, "  tsid={}, stack_empty={}", tsid.0, glr_state.stack.is_empty());
+        }
 
         crate::debug!(5, ">>> Seeding initial states");
         // 1. Seed initial states
@@ -92,7 +96,17 @@ impl<'a> GrammarConstraintState<'a> {
                 continue;
             }
 
-            if let Some((target_wa_state_id, weight)) = dwa_start_state.get_transition(tokenizer_state_id.0 as Label) {
+            // In symbol-heavy mode, tsid labels are offset by terminals_count
+            // to avoid collision with terminal labels (0 to terminals_count-1).
+            // This matches the labeling in precompute1.
+            let terminals_count = self.parent.parser.terminal_map.len();
+            let tsid_label = (tokenizer_state_id.0 + terminals_count) as Label;
+            
+            crate::debug!(5, "  Looking for tsid transition: tokenizer_state_id={}, tsid_label={}, available transitions: {:?}",
+                tokenizer_state_id.0, tsid_label,
+                dwa_start_state.transitions.keys().collect::<Vec<_>>());
+            if let Some((target_wa_state_id, weight)) = dwa_start_state.get_transition(tsid_label) {
+                crate::debug!(5, "    Found transition to state {} with weight {:?}", target_wa_state_id, weight);
                 let f = |acc: &Acc| {
                     let new_rsb = acc.llm_tokens_union.inner.as_ref() & &weight.rsb;
                     if new_rsb.is_empty() { None } else { Some(new_rsb) }
@@ -107,6 +121,8 @@ impl<'a> GrammarConstraintState<'a> {
                         .and_modify(|existing| *existing = existing.merge(&weighted_gss))
                         .or_insert(weighted_gss);
                 }
+            } else {
+                crate::debug!(5, "    NO transition found for tsid_label={}", tsid_label);
             }
         }
 

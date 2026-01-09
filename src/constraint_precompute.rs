@@ -190,10 +190,16 @@ impl<'r> Precomputer1<'r> {
         if self.num_tsids == 0 {
             // Symbol-heavy mode: create labeled transitions with Weight::all()
             // Label = tsid + terminals_count
-            for (tsid, &state) in &self.roots {
-                let label = (tsid.0 + self.terminals_count) as Label;
-                let weight = Weight::from_rsb(RangeSetBlaze::from_iter([0..=self.internal_max_llm_token]));
-                self.nwa.add_transition(new_start_state, label, state, weight).unwrap();
+            // Important: We need to create labels for ALL tsids (not just representatives),
+            // because at runtime we'll look up by the raw tokenizer state ID.
+            // All tsids that map to the same representative get their own label but point
+            // to the same root state.
+            for (tsid, rep_tsid) in &self.state_to_rep {
+                if let Some(&state) = self.roots.get(rep_tsid) {
+                    let label = (tsid.0 + self.terminals_count) as Label;
+                    let weight = Weight::from_rsb(RangeSetBlaze::from_iter([0..=self.internal_max_llm_token]));
+                    self.nwa.add_transition(new_start_state, label, state, weight).unwrap();
+                }
             }
         } else {
             // Weight-heavy mode: create epsilon transitions with tsid-masked weights

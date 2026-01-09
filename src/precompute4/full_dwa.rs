@@ -360,8 +360,60 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
     let ignore_dwa = build_ignore_terminal_dwa();
     crate::debug!(4, "Built {} terminal DWAs in {:?}", terminal_dwas.len(), now.elapsed());
 
+    // Check if we're in symbol-heavy mode (tsid encoded as labels, not weights)
+    let is_symbol_heavy = !crate::constraint_precompute::is_weight_heavy_enabled();
+    let terminals_count = parser.terminal_map.len();
+    
+    // In symbol-heavy mode, identify the original start state and tsid-labeled incoming edges
+    // These will be used to reconstruct tsid-labeled transitions at the end
+    let original_start_state = terminal_nwa.body.start_states[0];
+    let tsid_to_root: BTreeMap<Label, StateID> = if is_symbol_heavy {
+        let start_transitions = &terminal_nwa.states[original_start_state].transitions;
+        
+        // Collect tsid-labeled transitions (labels >= terminals_count)
+        let mut mapping = BTreeMap::new();
+        for (&label, targets) in start_transitions {
+            if label as usize >= terminals_count {
+                // This is a tsid transition: start --[tsid_label]--> root
+                for &(target, _) in targets {
+                    mapping.insert(label, target);
+                }
+            }
+        }
+        crate::debug!(4, "Symbol-heavy mode: found {} tsid transitions from original start state", mapping.len());
+        mapping
+    } else {
+        BTreeMap::new()
+    };
+
     let reversed_nwa = terminal_nwa.reverse();
     let traversal_data = reversed_nwa.compute_traversal_data();
+    
+    // In symbol-heavy mode, build a map of OUTGOING tsid-labeled edges FROM each root state
+    // In the reversed NWA, root --[tsid_label]--> original_start
+    // We need: root -> [(tsid_label, edge_weight), ...]
+    let outgoing_tsid_edges: BTreeMap<StateID, Vec<(Label, Weight)>> = if is_symbol_heavy {
+        let mut outgoing: BTreeMap<StateID, Vec<(Label, Weight)>> = BTreeMap::new();
+        for (src, state) in reversed_nwa.states.0.iter().enumerate() {
+            for (&label, targets) in &state.transitions {
+                if label as usize >= terminals_count {
+                    // This is a tsid-labeled transition
+                    for (dst, weight) in targets {
+                        if *dst == original_start_state {
+                            outgoing.entry(src).or_default().push((label, weight.clone()));
+                        }
+                    }
+                }
+            }
+        }
+        crate::debug!(5, "Symbol-heavy mode: {} root states with tsid edges", outgoing.len());
+        for (src, edges) in &outgoing {
+            crate::debug!(6, "  Root state {} has tsid edges: {:?}", src, edges.iter().map(|(l,_)|*l).collect::<Vec<_>>());
+        }
+        outgoing
+    } else {
+        BTreeMap::new()
+    };
 
     let initial_tokens = LLMTokenBV::max_ones();
     let mut initial_values_bv = Vec::new();
@@ -557,17 +609,39 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
     let initial_values_full: Vec<(usize, (BTreeMap<NWABody, BTreeMap<Option<TerminalID>, Weight>>, LLMTokenBV))> =
         reversed_nwa.body.start_states.iter().map(|&s| (s, (BTreeMap::from([(initial_body.clone(), initial_term_map.clone())]), LLMTokenBV::max_ones()))).collect();
 
-    // In weight-heavy mode, we don't group by tsid - the weight encodes tsid info
-    let final_bodies_arc: Arc<Mutex<Vec<(NWABody, Weight)>>> = Arc::new(Mutex::new(Vec::new()));
+    // Store (NWABody, Weight, node_id) - node_id is the state ID in reversed NWA where we collected this body
+    // In symbol-heavy mode, we also collect tsid-specific bodies separately
+    let final_bodies_arc: Arc<Mutex<Vec<(NWABody, Weight, StateID)>>> = Arc::new(Mutex::new(Vec::new()));
+    
+    // For symbol-heavy mode: collect (NWABody, Weight, tsid_label) for each tsid-labeled transition
+    // These are transitions from root states to the original start state in the reversed NWA
+    let tsid_bodies_arc: Arc<Mutex<Vec<(NWABody, Weight, Label)>>> = Arc::new(Mutex::new(Vec::new()));
 
     crate::debug!(4, "Beginning NWA traversal");
+
+    // Clone references for use in closures
+    let tsid_bodies_for_process = tsid_bodies_arc.clone();
+    let template_cache_ref = &template_cache;
+    let states_arena_ref = &states_arena;
 
     nwa_special_map(
         &reversed_nwa, &traversal_data, initial_values_full,
         |current_val: &(BTreeMap<NWABody, BTreeMap<Option<TerminalID>, Weight>>, LLMTokenBV), edge_label, transitions| {
             let (current_bodies, current_tokens) = current_val;
-            let terminal_id = edge_label.map(|l| TerminalID(l as usize));
             let mut results = Vec::new();
+            
+            // In symbol-heavy mode, skip tsid-labeled transitions in normal traversal
+            // These will be handled in the process callback when we're at a root state
+            if is_symbol_heavy {
+                if let Some(label) = edge_label {
+                    if label as usize >= terminals_count {
+                        // This is a tsid-labeled transition - skip it
+                        return results;
+                    }
+                }
+            }
+            
+            let terminal_id = edge_label.map(|l| TerminalID(l as usize));
             for (dest_id, weight) in transitions {
                 let edge_bv_tokens: LLMTokenBV = weight.clone().into();
                 let next_tokens = current_tokens & &edge_bv_tokens;
@@ -609,15 +683,44 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
                 nwa_body = NWABody::union(&nwa_body, &composed_body);
             }
             
-            // Check if this is a final state in the reversed NWA (original start state)
-            // If so, collect the accumulated bodies into final_bodies
-            if let Some(fw) = &reversed_nwa.states[node_id].final_weight {
-                let fw_bv: LLMTokenBV = fw.clone().into();
-                let intersection_bv = &tokens & &fw_bv;
-                if !intersection_bv.is_empty() {
-                    let final_w = Weight::from_rsb(intersection_bv.inner.as_ref().clone());
-                    let mut fb = final_bodies_arc.lock().unwrap();
-                    fb.push((nwa_body.clone(), final_w));
+            // In symbol-heavy mode, check if this is a root state (has tsid-labeled edges to original_start_state)
+            // If so, collect the body for each tsid
+            if is_symbol_heavy {
+                if let Some(tsid_edges) = outgoing_tsid_edges.get(&node_id) {
+                    for (tsid_label, edge_weight) in tsid_edges {
+                        let edge_bv: LLMTokenBV = edge_weight.clone().into();
+                        let intersection_bv = &tokens & &edge_bv;
+                        if !intersection_bv.is_empty() && !nwa_body.start_states.is_empty() {
+                            let final_w = Weight::from_rsb(intersection_bv.inner.as_ref().clone());
+                            crate::debug!(5, "Collecting tsid body at root {} for label {} with {} tokens", 
+                                node_id, tsid_label, final_w.len());
+                            let mut tb = tsid_bodies_for_process.lock().unwrap();
+                            tb.push((nwa_body.clone(), final_w, *tsid_label));
+                        }
+                    }
+                }
+            }
+            
+            // Check if this is a final state in the reversed NWA (original start state or root state)
+            // In symbol-heavy mode, we handle the original_start_state specially via tsid_bodies
+            // so don't collect it here
+            let should_collect = if is_symbol_heavy {
+                // In symbol-heavy mode, only collect for states OTHER than original_start_state
+                // (the original start is handled via tsid-labeled transitions)
+                node_id != original_start_state && reversed_nwa.states[node_id].final_weight.is_some()
+            } else {
+                reversed_nwa.states[node_id].final_weight.is_some()
+            };
+            
+            if should_collect {
+                if let Some(fw) = &reversed_nwa.states[node_id].final_weight {
+                    let fw_bv: LLMTokenBV = fw.clone().into();
+                    let intersection_bv = &tokens & &fw_bv;
+                    if !intersection_bv.is_empty() {
+                        let final_w = Weight::from_rsb(intersection_bv.inner.as_ref().clone());
+                        let mut fb = final_bodies_arc.lock().unwrap();
+                        fb.push((nwa_body.clone(), final_w, node_id));
+                    }
                 }
             }
             
@@ -627,17 +730,35 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
             } else { None }
         },
     );
+    // Drop the process closure's reference to tsid_bodies
+    drop(tsid_bodies_for_process);
 
     crate::debug!(4, "Finished Pass 2");
     let final_bodies = Arc::try_unwrap(final_bodies_arc).unwrap().into_inner().unwrap();
+    let tsid_bodies = Arc::try_unwrap(tsid_bodies_arc).unwrap().into_inner().unwrap();
+    crate::debug!(5, "Collected {} final bodies, {} tsid bodies", 
+        final_bodies.len(), tsid_bodies.len());
     let mut combined_nwa_states = states_arena.into_inner();
     let combined_start_state = combined_nwa_states.add_state();
     
-    // In weight-heavy mode: no tsid labels, just add epsilon transitions with weights
-    // The weights encode tsid info (positions in N×M space)
-    for (body, weight) in final_bodies {
-        for &s in &body.start_states {
-            combined_nwa_states.add_epsilon(combined_start_state, s, weight.clone());
+    if is_symbol_heavy && !tsid_bodies.is_empty() {
+        // Symbol-heavy mode: add labeled transitions with tsid labels
+        // Use the tsid_bodies collected during traversal
+        for (body, weight, tsid_label) in tsid_bodies {
+            crate::debug!(5, "Adding tsid body with label={}, weight len={}", tsid_label, weight.len());
+            for &s in &body.start_states {
+                combined_nwa_states.add_transition(combined_start_state, tsid_label, s, weight.clone()).unwrap();
+            }
+        }
+        crate::debug!(4, "Symbol-heavy mode: added {} tsid-labeled transitions", 
+            combined_nwa_states[combined_start_state].transitions.values().map(|v| v.len()).sum::<usize>());
+    } else {
+        // Weight-heavy mode: no tsid labels, just add epsilon transitions with weights
+        // The weights encode tsid info (positions in N×M space)
+        for (body, weight, _node_id) in final_bodies {
+            for &s in &body.start_states {
+                combined_nwa_states.add_epsilon(combined_start_state, s, weight.clone());
+            }
         }
     }
 
