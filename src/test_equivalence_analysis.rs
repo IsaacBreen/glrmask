@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use crate::finite_automata::{Regex, eat_u8, eat_u8_seq, rep, rep1, Expr, QuantifierType};
 use crate::equivalence_analysis::compute_combined_equivalence;
-use crate::tokenizer::LLMTokenID;
+use crate::dfa_u8::LLMTokenID;
 use crate::datastructures::u8set::U8Set;
 use crate::interface::{GrammarDefinition, CompiledGrammar};
 use crate::interface::json_schema::json_schema_to_ebnf;

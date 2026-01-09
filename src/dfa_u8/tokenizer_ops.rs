@@ -1,4 +1,4 @@
-use crate::tokenizer::dfa::{GroupID, Regex};
+use crate::dfa_u8::dfa::{GroupID, Regex};
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use crate::types::TerminalID as GrammarTokenID;
 use bimap::BiBTreeMap;

@@ -9,7 +9,7 @@ use crate::datastructures::{
     hybrid_bitset::RangeSet,
 };
 use crate::datastructures::bitset::Bitset;
-use crate::tokenizer::LLMTokenID;
+use crate::dfa_u8::LLMTokenID;
 use crate::json_serialization::{JSONConvertible, JSONNode};
 
 // ---------------------------------------------------------------------------

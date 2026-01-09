@@ -5,7 +5,7 @@ use crate::glr::parser::{GLRParserState, ParseStateEdgeContent};
 use crate::glr::table::TerminalID;
 use crate::dwa_i32::common::{Label, StateID as WAStateID};
 use crate::dwa_i32::weight_expansion::{create_tsid_mask_rsb, collapse_weight_rsb};
-use crate::tokenizer::TokenizerStateID;
+use crate::dfa_u8::TokenizerStateID;
 use profiler_macro::time_it;
 use range_set_blaze::RangeSetBlaze;
 use std::collections::BTreeMap;

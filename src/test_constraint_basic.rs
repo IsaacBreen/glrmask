@@ -29,7 +29,7 @@ use crate::interface::{
 };
 use crate::json_serialization::JSONConvertible;
 use crate::interface::json_schema::json_schema_to_ebnf;
-use crate::tokenizer::{LLMTokenID, LLMTokenMap, TokenizerStateID};
+use crate::dfa_u8::{LLMTokenID, LLMTokenMap, TokenizerStateID};
 use crate::types::TerminalID;
 use crate::{choice_fast, groups, seq_fast};
 
@@ -874,7 +874,7 @@ fn test_simple_def_match_non_zero_llm_id() {
 fn test_precompute_a_plus_tokenizer() {
     use crate::constraint_precompute::run_precompute1;
     use crate::dwa_i32::common::Label;
-    use crate::tokenizer::TokenizerStateID;
+    use crate::dfa_u8::TokenizerStateID;
 
     // Tokenizer for `a+`
     let tokenizer_expr = groups![repeat1_fast(eat_u8(b'a'))];
@@ -947,7 +947,7 @@ fn test_precompute_a_plus_tokenizer() {
 fn test_precompute_x_eq() {
     use crate::constraint_precompute::run_precompute1;
     use crate::dwa_i32::common::Label;
-    use crate::tokenizer::TokenizerStateID;
+    use crate::dfa_u8::TokenizerStateID;
 
     // Tokenizer for `=|x| `
     let tokenizer_expr = groups![

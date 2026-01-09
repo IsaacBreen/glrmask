@@ -16,7 +16,7 @@ mod tests {
     use crate::interface::{
         choice, r#ref, repeat, sequence, CompiledGrammar, GrammarDefinition, IncrementalParser,
     };
-    use crate::tokenizer::{LLMTokenID, LLMTokenMap};
+    use crate::dfa_u8::{LLMTokenID, LLMTokenMap};
     use crate::{choice_fast, groups, seq_fast};
     use bimap::BiBTreeMap;
     use bitvec::prelude::*;

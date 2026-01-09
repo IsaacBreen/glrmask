@@ -22,7 +22,7 @@ use crate::dwa_i32::{
     common::Label, determinization_rustfst::determinize_nwa_to_dwa, DWA, NWA, NWABody, NWAStateID, NWAStates,
     StateID, Weight,
 };
-use crate::tokenizer::TokenizerStateID;
+use crate::dfa_u8::TokenizerStateID;
 use crate::types::{TerminalID, TerminalID as GrammarTokenID};
 
 struct MinimizeRustfstConfig {

@@ -3,7 +3,7 @@ use flate2::read::GzDecoder;
 use sep1::constraint::GrammarConstraint;
 use sep1::json_serialization::JSONConvertible;
 use sep1::datastructures::bitset::Bitset;
-use sep1::tokenizer::LLMTokenID;
+use sep1::dfa_u8::LLMTokenID;
 use sep1::r#macro::colors::*;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Write};

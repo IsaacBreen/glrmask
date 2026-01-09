@@ -1,7 +1,7 @@
 //! Backward-compatibility re-exports from tokenizer::dfa
 //!
-//! This module is deprecated. Use `crate::tokenizer::dfa` instead.
+//! This module is deprecated. Use `crate::dfa_u8::dfa` instead.
 
-pub use crate::tokenizer::dfa::*;
+pub use crate::dfa_u8::dfa::*;
 
 

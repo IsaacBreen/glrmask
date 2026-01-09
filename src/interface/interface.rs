@@ -2095,7 +2095,7 @@ impl Display for CompiledGrammar {
 
 // --- Incremental Parser ---
 use crate::glr::parser::GLRParserState;
-use crate::tokenizer::{ExecuteResult, LLMTokenID, TokenizerStateID};
+use crate::dfa_u8::{ExecuteResult, LLMTokenID, TokenizerStateID};
 
 #[derive(Clone)]
 pub struct IncrementalParser<'a> {

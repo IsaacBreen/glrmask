@@ -4,7 +4,7 @@ use flate2::Compression;
 use sep1::constraint::{GrammarConstraint, GrammarConstraintConfig};
 use sep1::interface::GrammarDefinition;
 use sep1::json_serialization::JSONConvertible;
-use sep1::tokenizer::{LLMTokenID, LLMTokenMap};
+use sep1::dfa_u8::{LLMTokenID, LLMTokenMap};
 use sep1::r#macro::{colors::*, is_debug_level_enabled, format_duration};
 use std::collections::BTreeMap;
 use std::fs::File;

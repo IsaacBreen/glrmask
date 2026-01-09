@@ -33,7 +33,7 @@ use crate::{
     json_serialization::{JSONConvertible, JSONNode},
     precompute4::full_dwa::{build_parser_dwa, ParserDWA},
     r#macro::is_debug_level_enabled,
-    tokenizer::{LLMTokenID, LLMTokenMap, TokenizerStateID},
+    dfa_u8::{LLMTokenID, LLMTokenMap, TokenizerStateID},
     types::{TerminalID as GrammarTokenID, TerminalID},
 };
 use crate::datastructures::bitset::Bitset;

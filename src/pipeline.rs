@@ -53,7 +53,7 @@ use std::sync::Arc;
 use crate::constraint::GrammarConstraint;
 use crate::interface::{CompiledGrammar, GrammarDefinition, GrammarExpr};
 use crate::finite_automata::Expr;
-use crate::tokenizer::LLMTokenID;
+use crate::dfa_u8::LLMTokenID;
 
 /// Configuration for the grammar compilation pipeline.
 #[derive(Debug, Clone)]

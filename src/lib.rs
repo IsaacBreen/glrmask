@@ -1,6 +1,6 @@
 #![allow(warnings)]
-pub mod tokenizer;
-/// Backward-compatibility re-export from tokenizer::dfa
+pub mod dfa_u8;
+/// Backward-compatibility re-export from dfa_u8::dfa
 pub mod finite_automata;
 pub mod equivalence_analysis;
 pub mod glr;

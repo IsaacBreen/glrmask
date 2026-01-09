@@ -14,7 +14,7 @@ use sep1::dwa_i32::{NWA, NWABody, NWAState, NWAStates, Weight};
 use sep1::dwa_i32::common::Label;
 use sep1::precompute4::full_dwa::finalize_and_optimize_and_determinize;
 use sep1::constraint_precompute::run_precompute1;
-use sep1::tokenizer::LLMTokenID;
+use sep1::dfa_u8::LLMTokenID;
 use serde_json::json;
 use sep1::precompute4::resolve_negatives::resolve_negative_codes_in_nwa;
 use sep1::r#macro::is_debug_level_enabled;
@@ -98,7 +98,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let internal_max_llm_token = max_token_id;
     let terminals_count = parser.terminal_map.len();
-    let state_to_rep: BTreeMap<sep1::tokenizer::TokenizerStateID, sep1::tokenizer::TokenizerStateID> = tokenizer
+    let state_to_rep: BTreeMap<sep1::dfa_u8::TokenizerStateID, sep1::dfa_u8::TokenizerStateID> = tokenizer
         .iter_states()
         .map(|sid| (sid, sid))
         .collect();

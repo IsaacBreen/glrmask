@@ -16,7 +16,7 @@ use crate::dwa_i32::{DWA, NWA, NWAStateID, Weight};
 use crate::dwa_i32::weight_expansion::{expand_rsb, create_tsid_set_mask};
 use crate::profiler::{self};
 
-use crate::tokenizer::{LLMTokenID, TokenizerStateID};
+use crate::dfa_u8::{LLMTokenID, TokenizerStateID};
 use crate::types::TerminalID as GrammarTokenID;
 use crate::dwa_i32::common::Label;
 

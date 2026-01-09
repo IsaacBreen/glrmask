@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 use crate::constraint::GrammarConstraint;
 use crate::glr::parser::{GLRParser, GLRParserState, ParserGSS};
 use crate::glr::table::TerminalID;
-use crate::tokenizer::{TokenizerStateID, LLMTokenID};
+use crate::dfa_u8::{TokenizerStateID, LLMTokenID};
 
 /// A brute-force grammar constraint state that provides guaranteed-correct
 /// mask computation by trying every token in the vocabulary.

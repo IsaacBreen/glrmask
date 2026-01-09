@@ -12,7 +12,7 @@ mod tests {
     use crate::constraint::{GrammarConstraint, GrammarConstraintConfig};
     use crate::interface::GrammarDefinition;
     use crate::interface::json_schema::json_schema_to_ebnf;
-    use crate::tokenizer::{LLMTokenID, LLMTokenMap};
+    use crate::dfa_u8::{LLMTokenID, LLMTokenMap};
     use crate::datastructures::bitset::Bitset;
 
     /// Create a simple token map with all single-byte tokens (256 total).
