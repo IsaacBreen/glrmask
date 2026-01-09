@@ -1,3 +1,14 @@
+//! Terminal DWA construction.
+//!
+//! This module builds the Terminal DWA from the tokenizer and LLM vocabulary.
+//!
+//! The Terminal DWA encodes which LLM tokens can be generated in each tokenizer state.
+//! It's called "Terminal" because it handles the terminal symbols of the grammar -
+//! specifically, how LLM tokens map to grammar terminals via the tokenizer.
+//!
+//! This is distinct from "Template DFAs" (in precompute4/template_dfa.rs) which encode
+//! how each terminal type interacts with the parser stack.
+
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ops::BitOrAssign;
