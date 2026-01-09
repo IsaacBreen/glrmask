@@ -125,8 +125,12 @@ At runtime, mask queries reduce to single automaton transitions and weight reads
 ```
 src/                    # Rust source code
 ├── lib.rs             # Library entry point
-├── precompute4/       # Core precomputation algorithms
-│   ├── full_dwa.rs    # Parser DWA construction
+├── dwa_i32/           # Weighted automata (DWA/NWA) with i32 labels
+├── dfa_i32/           # Unweighted automata (DFA/NFA) with i32 labels
+├── dfa_u8/            # Tokenizer automata with u8 (byte) labels
+├── precompute4/       # Parser DWA construction
+│   ├── parser_dwa.rs  # Parser DWA construction orchestration
+│   ├── template_dfa.rs # Template DFA building
 │   └── characterize.rs # Terminal characterization
 └── constraint.rs      # Grammar constraint implementation
 

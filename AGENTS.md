@@ -43,7 +43,7 @@ SKIP_PLOTS=1 REPEAT=1 AGG_METHOD="min" SKIP_CPP_BUILD=1 SKIP_RUST_BUILD=1 MACRO_
 As a result of debug! macro usages, the stdout of this will contain timings like this:
 
 ```
-src/precompute4/full_dwa.rs
+src/precompute4/parser_dwa.rs
    178  Optimizing precomputed1 via NWA/DWA conversion... +20ms
    187  Unrolling cycles in precomputed1 DWA... +1.35s
 ```
