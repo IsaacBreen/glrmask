@@ -4,7 +4,7 @@ use crate::dwa_i32::common::{Label, StateID, Weight};
 use crate::dwa_i32::dwa::{DWA, DWABuildError, DWAState, DWAStates};
 use crate::dwa_i32::minimization::common::DwaPass;
 use crate::dwa_i32::minimization::graph_coloring::{solve_greedy_coloring, solve_exact_graph_coloring};
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 impl DWA {
     pub fn minimize_acyclic(&mut self) {
@@ -582,41 +582,200 @@ fn build_incompatibility_graph(
     new_states: &[MergedStateBuilder]
 ) -> Vec<Vec<usize>> {
     let n = candidates.len();
+    if n <= 200 {
+        // For small candidate sets, use the simple O(n²) approach
+        return build_incompatibility_graph_simple(dwa, candidates, needed, old_to_new, new_states);
+    }
     
-    let start = std::time::Instant::now();
+    // For large candidate sets, use partition-based approach
+    build_incompatibility_graph_partition(dwa, candidates, needed, old_to_new, new_states)
+}
+
+/// Simple O(n²) approach for small candidate sets.
+fn build_incompatibility_graph_simple(
+    dwa: &DWA,
+    candidates: &[StateID],
+    needed: &[Weight],
+    old_to_new: &HashMap<StateID, StateID>,
+    new_states: &[MergedStateBuilder]
+) -> Vec<Vec<usize>> {
+    let n = candidates.len();
     let mut adj = vec![vec![]; n];
-    let mut edge_count = 0usize;
-    let mut skipped_disjoint = 0usize;
-    let mut full_checks = 0usize;
     
     for i in 0..n {
         for j in (i+1)..n {
-            // Quick check: disjoint domains means compatible (no conflict possible)
-            let domain_overlap = &needed[candidates[i]] & &needed[candidates[j]];
-            if domain_overlap.is_empty() {
-                // Domains don't overlap, so no conflict on the overlap.
-                // But we still need to check if they share transition labels
-                // that go to incompatible targets.
-                // For now, do the full check - we can optimize later.
-                skipped_disjoint += 1;
-            }
-            
-            full_checks += 1;
             if !are_compatible(candidates[i], candidates[j], dwa, needed, old_to_new, new_states) {
                 adj[i].push(j);
                 adj[j].push(i);
-                edge_count += 1;
+            }
+        }
+    }
+    adj
+}
+
+/// Partition-based approach for large candidate sets.
+/// 
+/// Key insight: Two states are incompatible only if they share a "partition element"
+/// (a subset of the token space) where their behavior differs.
+/// 
+/// Algorithm:
+/// 1. Compute all weight boundaries from all candidates
+/// 2. Create partition elements (disjoint intervals) from boundaries
+/// 3. For each partition element, group candidates by their restricted behavioral signature
+/// 4. Candidates with different signatures on a shared partition element are incompatible
+fn build_incompatibility_graph_partition(
+    dwa: &DWA,
+    candidates: &[StateID],
+    needed: &[Weight],
+    old_to_new: &HashMap<StateID, StateID>,
+    new_states: &[MergedStateBuilder]
+) -> Vec<Vec<usize>> {
+    let n = candidates.len();
+    let start = std::time::Instant::now();
+    
+    // Step 1: Compute partition boundaries from all candidate domains
+    let mut boundaries: BTreeSet<usize> = BTreeSet::new();
+    for &s in candidates {
+        // Add all range boundaries from this state's domain
+        for range in needed[s].rsb.ranges() {
+            boundaries.insert(*range.start());
+            if *range.end() < usize::MAX {
+                boundaries.insert(*range.end() + 1);
             }
         }
     }
     
-    if n >= 100 {
-        let total_pairs = n * (n - 1) / 2;
-        crate::debug!(5, "Build incomp graph: {} candidates, {} pairs ({} disjoint), {} full checks, {} edges, {:?}",
-            n, total_pairs, skipped_disjoint, full_checks, edge_count, start.elapsed());
+    // Convert boundaries to partition elements (intervals)
+    let boundary_vec: Vec<usize> = boundaries.into_iter().collect();
+    let num_partitions = boundary_vec.len().saturating_sub(1);
+    
+    if num_partitions == 0 {
+        // All states have empty domain or single point - use simple approach
+        return build_incompatibility_graph_simple(dwa, candidates, needed, old_to_new, new_states);
     }
     
+    // Step 2: For each partition element, compute which candidates have it in their domain
+    // and compute their behavioral signature restricted to that partition
+    
+    // We use a hash-based approach: for each partition element P,
+    // group candidates by their "restricted signature" (a hash of their behavior on P).
+    // Candidates with different signatures on P are incompatible.
+    
+    // Track incompatible pairs using a set (to avoid duplicates)
+    let mut incompatible: HashSet<(usize, usize)> = HashSet::new();
+    
+    // For each partition element...
+    for p_idx in 0..num_partitions {
+        let p_start = boundary_vec[p_idx];
+        let p_end = boundary_vec[p_idx + 1] - 1;
+        let partition_weight = Weight::from_ranges(&[(p_start, p_end)]);
+        
+        // Find candidates that have this partition element in their domain
+        let mut candidates_in_partition: Vec<usize> = Vec::new();
+        for (idx, &s) in candidates.iter().enumerate() {
+            if !(&needed[s] & &partition_weight).is_empty() {
+                candidates_in_partition.push(idx);
+            }
+        }
+        
+        if candidates_in_partition.len() <= 1 {
+            continue; // No pairs to check in this partition
+        }
+        
+        // Compute restricted signature for each candidate
+        // Signature includes: final weight on partition, and for each label: (target, trans_weight on partition)
+        let mut sig_to_candidates: HashMap<Vec<u64>, Vec<usize>> = HashMap::new();
+        
+        for &idx in &candidates_in_partition {
+            let s = candidates[idx];
+            let sig = compute_restricted_signature(s, &partition_weight, dwa, old_to_new);
+            sig_to_candidates.entry(sig).or_default().push(idx);
+        }
+        
+        // Candidates with different signatures on this partition are incompatible
+        let groups: Vec<Vec<usize>> = sig_to_candidates.into_values().collect();
+        for i in 0..groups.len() {
+            for j in (i+1)..groups.len() {
+                for &idx_i in &groups[i] {
+                    for &idx_j in &groups[j] {
+                        let pair = if idx_i < idx_j { (idx_i, idx_j) } else { (idx_j, idx_i) };
+                        incompatible.insert(pair);
+                    }
+                }
+            }
+        }
+    }
+    
+    // Additionally, we need to check target compatibility for states that share transition labels
+    // but may have disjoint domains (the partition approach above handles domain overlap,
+    // but not the case where both states have transitions to different targets).
+    // 
+    // For now, do a pass over pairs that haven't been marked incompatible yet.
+    // TODO: Optimize this using a similar partition approach on transition labels.
+    
+    let mut adj = vec![vec![]; n];
+    let mut additional_checks = 0usize;
+    
+    for i in 0..n {
+        for j in (i+1)..n {
+            let pair = (i, j);
+            if incompatible.contains(&pair) {
+                adj[i].push(j);
+                adj[j].push(i);
+            } else {
+                // Double-check with full compatibility test
+                // (This catches cases missed by signature-only approach)
+                additional_checks += 1;
+                if !are_compatible(candidates[i], candidates[j], dwa, needed, old_to_new, new_states) {
+                    adj[i].push(j);
+                    adj[j].push(i);
+                }
+            }
+        }
+    }
+    
+    let total_pairs = n * (n - 1) / 2;
+    crate::debug!(5, "Partition-based graph: {} candidates, {} partitions, {} pairs, {} partition-incompat, {} additional checks, {:?}",
+        n, num_partitions, total_pairs, incompatible.len(), additional_checks, start.elapsed());
+    
     adj
+}
+
+/// Compute a restricted behavioral signature for a state on a given partition element.
+fn compute_restricted_signature(
+    state_id: StateID,
+    partition: &Weight,
+    dwa: &DWA,
+    old_to_new: &HashMap<StateID, StateID>,
+) -> Vec<u64> {
+    let state = &dwa.states[state_id];
+    
+    // Signature components:
+    // 1. Final weight restricted to partition
+    let fw = state.final_weight.as_ref()
+        .map(|w| w & partition)
+        .unwrap_or_else(Weight::zeros);
+    
+    let mut sig = vec![fw.fast_hash()];
+    
+    // 2. For each transition: (label, mapped_target, trans_weight restricted to partition)
+    let mut trans_sigs: Vec<_> = state.transitions.iter()
+        .filter_map(|(&label, &target)| {
+            let w = state.trans_weights.get(&label)
+                .map(|w| w & partition)
+                .unwrap_or_else(Weight::zeros);
+            if w.is_empty() { return None; }
+            let target_mapped = old_to_new.get(&target).copied().unwrap_or(usize::MAX);
+            Some((label, target_mapped, w.fast_hash()))
+        })
+        .collect();
+    trans_sigs.sort();
+    
+    for (label, target, hash) in trans_sigs {
+        sig.extend([label as u64, target as u64, hash]);
+    }
+    
+    sig
 }
 
 // --- Phase 4: Reconstruction ---
