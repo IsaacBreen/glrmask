@@ -213,6 +213,13 @@ fn compute_height_coloring(
         crate::debug!(5, "  {} new_states (targets) available", new_states.len());
     }
     
+    // Check if this is height 0 (no transitions) with large candidate set
+    // Use optimized direct coloring path
+    let is_height_0 = candidates.iter().all(|&id| dwa.states[id].transitions.is_empty());
+    if is_height_0 && candidates.len() > 1000 {
+        return compute_height_0_coloring_direct(candidates, dwa, needed, start);
+    }
+    
     // Build full incompatibility graph
     let adj = build_incompatibility_graph(dwa, candidates, needed, old_to_new, new_states);
     
@@ -238,6 +245,49 @@ fn compute_height_coloring(
             total_time, candidates.len());
         std::process::exit(1);
     }
+    
+    colors
+}
+
+/// Direct coloring for large height-0 candidate sets.
+/// 
+/// At height 0, states only have final weights (no transitions).
+/// We use signature-based coloring: states with the same signature get the same color.
+/// This is potentially suboptimal (signatures with disjoint needed sets could share colors)
+/// but is O(n) instead of O(n²).
+fn compute_height_0_coloring_direct(
+    candidates: &[StateID],
+    dwa: &DWA,
+    needed: &[Weight],
+    start: std::time::Instant,
+) -> Vec<usize> {
+    use std::hash::{Hash, Hasher};
+    use std::collections::hash_map::DefaultHasher;
+    
+    let n = candidates.len();
+    let mut sig_to_color: HashMap<u64, usize> = HashMap::new();
+    let mut colors = Vec::with_capacity(n);
+    let mut next_color = 0usize;
+    
+    for &id in candidates {
+        let final_on_needed = dwa.states[id].final_weight.as_ref()
+            .map(|w| w & &needed[id])
+            .unwrap_or_else(Weight::zeros);
+        
+        let mut hasher = DefaultHasher::new();
+        final_on_needed.fp.hash(&mut hasher);
+        let sig = hasher.finish();
+        
+        let color = *sig_to_color.entry(sig).or_insert_with(|| {
+            let c = next_color;
+            next_color += 1;
+            c
+        });
+        colors.push(color);
+    }
+    
+    crate::debug!(5, "Height 0 direct coloring: {} candidates -> {} colors in {:?}",
+        n, next_color, start.elapsed());
     
     colors
 }
@@ -623,8 +673,149 @@ fn build_incompatibility_graph(
     
     let start = std::time::Instant::now();
     
+    // Check if this is height 0 (no transitions) - use optimized path
+    let is_height_0 = candidates.iter().all(|&id| dwa.states[id].transitions.is_empty());
+    
+    if is_height_0 {
+        return build_incompatibility_graph_height_0(candidates, dwa, needed);
+    }
+    
+    // For non-height-0: use signature-based approach with needed-set overlap optimization
+    build_incompatibility_graph_general(dwa, candidates, needed, old_to_new, new_states, start)
+}
+
+/// Optimized incompatibility graph construction for height-0 states (no transitions).
+/// 
+/// At height 0, compatibility depends only on:
+/// 1. Whether needed sets overlap
+/// 2. If they overlap, whether final weights match on the overlap
+///
+/// Optimization strategy:
+/// 1. Group states by their "final signature" (final_weight & needed)
+/// 2. States in the same group are definitely compatible (same behavior)
+/// 3. States in different groups are compatible IFF their needed sets don't overlap
+/// 4. Use RangeSet overlap detection to quickly identify incompatible pairs
+fn build_incompatibility_graph_height_0(
+    candidates: &[StateID],
+    dwa: &DWA,
+    needed: &[Weight],
+) -> Vec<Vec<usize>> {
+    let n = candidates.len();
+    let start = std::time::Instant::now();
+    
+    // Compute signatures: hash of (final_weight & needed)
+    let mut sig_to_group: HashMap<u64, Vec<usize>> = HashMap::new();
+    
+    for (idx, &id) in candidates.iter().enumerate() {
+        use std::hash::{Hash, Hasher};
+        use std::collections::hash_map::DefaultHasher;
+        
+        let final_on_needed = dwa.states[id].final_weight.as_ref()
+            .map(|w| w & &needed[id])
+            .unwrap_or_else(Weight::zeros);
+        
+        let mut hasher = DefaultHasher::new();
+        final_on_needed.fp.hash(&mut hasher);
+        let sig = hasher.finish();
+        
+        sig_to_group.entry(sig).or_default().push(idx);
+    }
+    
+    let num_groups = sig_to_group.len();
+    
+    // For smaller sets, build the full graph for optimal coloring
+    let groups: Vec<(u64, Vec<usize>)> = sig_to_group.into_iter().collect();
+    
+    // Compute the "needed footprint" for each group (union of all needed sets)
+    let group_footprints: Vec<Weight> = groups.iter().map(|(_, indices)| {
+        let mut footprint = Weight::zeros();
+        for &idx in indices {
+            footprint |= &needed[candidates[idx]];
+        }
+        footprint
+    }).collect();
+    
+    // Build incompatibility graph
+    let mut adj = vec![vec![]; n];
+    let mut edge_count = 0usize;
+    let mut compare_count = 0usize;
+    let mut skipped_by_footprint = 0usize;
+    
+    // Compare across groups
+    for i in 0..groups.len() {
+        for j in (i+1)..groups.len() {
+            // Quick check: do the group footprints overlap?
+            let overlap = &group_footprints[i] & &group_footprints[j];
+            if overlap.is_empty() {
+                // No overlap in needed sets means all pairs are compatible
+                skipped_by_footprint += groups[i].1.len() * groups[j].1.len();
+                continue;
+            }
+            
+            // Groups have overlapping footprints - need to check individual pairs
+            // But since all states in a group have the same final signature,
+            // if ANY pair is incompatible, ALL cross-group pairs are incompatible
+            // (because final behavior differs on some shared weight)
+            
+            // Check one representative pair
+            let idx_i = groups[i].1[0];
+            let idx_j = groups[j].1[0];
+            let id_i = candidates[idx_i];
+            let id_j = candidates[idx_j];
+            
+            // Check if their needed sets overlap
+            let pair_overlap = &needed[id_i] & &needed[id_j];
+            if pair_overlap.is_empty() {
+                // This specific pair is compatible, but others in the group might not be
+                // Need to check all pairs in this case
+                for &idx_i in &groups[i].1 {
+                    for &idx_j in &groups[j].1 {
+                        compare_count += 1;
+                        let id_i = candidates[idx_i];
+                        let id_j = candidates[idx_j];
+                        let pair_overlap = &needed[id_i] & &needed[id_j];
+                        if !pair_overlap.is_empty() {
+                            // Finals differ on overlap (different groups), so incompatible
+                            adj[idx_i].push(idx_j);
+                            adj[idx_j].push(idx_i);
+                            edge_count += 1;
+                        }
+                    }
+                }
+            } else {
+                // Representative pair has overlapping needed sets AND different signatures
+                // So all pairs between these groups are incompatible
+                for &idx_i in &groups[i].1 {
+                    for &idx_j in &groups[j].1 {
+                        adj[idx_i].push(idx_j);
+                        adj[idx_j].push(idx_i);
+                        edge_count += 1;
+                    }
+                }
+            }
+        }
+    }
+    
+    if n >= 100 {
+        crate::debug!(5, "Incomp graph (h=0): {} candidates, {} signature groups, {} comparisons, {} skipped by footprint, {} edges, {:?}",
+            n, num_groups, compare_count, skipped_by_footprint, edge_count, start.elapsed());
+    }
+    
+    adj
+}
+
+/// General incompatibility graph construction for non-height-0 states.
+fn build_incompatibility_graph_general(
+    dwa: &DWA,
+    candidates: &[StateID],
+    needed: &[Weight],
+    old_to_new: &HashMap<StateID, StateID>,
+    new_states: &[MergedStateBuilder],
+    start: std::time::Instant,
+) -> Vec<Vec<usize>> {
+    let n = candidates.len();
+    
     // Compute signatures for each candidate
-    // Signature captures: final_weight, {(label, trans_weight, target_id)}
     let signatures: Vec<u128> = candidates.iter().map(|&id| {
         compute_state_signature(id, dwa, needed, old_to_new)
     }).collect();
@@ -636,21 +827,16 @@ fn build_incompatibility_graph(
     }
     
     let num_groups = sig_to_candidates.len();
+    let groups: Vec<Vec<usize>> = sig_to_candidates.into_values().collect();
     
     // Build incompatibility graph
-    // Within same signature group: candidates are compatible (no edges needed)
-    // Across different groups: need to check compatibility
     let mut adj = vec![vec![]; n];
     let mut edge_count = 0usize;
     let mut compare_count = 0usize;
     
-    // Get list of (signature, candidates) pairs
-    let groups: Vec<Vec<usize>> = sig_to_candidates.into_values().collect();
-    
     // Compare across groups
     for i in 0..groups.len() {
         for j in (i+1)..groups.len() {
-            // Every pair from group i and group j needs to be checked
             for &idx_i in &groups[i] {
                 for &idx_j in &groups[j] {
                     compare_count += 1;
@@ -664,9 +850,7 @@ fn build_incompatibility_graph(
         }
     }
     
-    // Also need to check within groups (in case signature had collision)
-    // Actually, if signatures are correctly computed, same-signature states ARE compatible
-    // Let's verify this with debug assertions
+    // Debug assertions for signature correctness
     #[cfg(debug_assertions)]
     for group in &groups {
         for (i, &idx_i) in group.iter().enumerate() {
