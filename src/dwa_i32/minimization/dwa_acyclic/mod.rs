@@ -605,7 +605,7 @@ fn are_compatible(
     dwa: &DWA,
     needed: &[Weight],
     old_to_new: &HashMap<StateID, StateID>,
-    _new_states: &[MergedStateBuilder]
+    new_states: &[MergedStateBuilder]
 ) -> bool {
     // Check if domains are disjoint (diamond case)
     let domain_u = &needed[u];
@@ -664,23 +664,30 @@ fn are_compatible(
             }
         }
         // If domains are disjoint, weights can differ (they'll be unioned when merged)
-        // But both must go to the same target (after mapping)
+        // But both must go to the same target (after mapping) OR be equivalent on their combined domain
 
-        // CRITICAL: If BOTH states have transitions on this label, they must go to same target
-        // This is true regardless of whether domains overlap - we can't have two transitions
-        // on the same label going to different states after merging!
+        // CRITICAL: If BOTH states have transitions on this label, they must either:
+        // 1. Go to the same target (after mapping), OR
+        // 2. Go to different targets that are EQUIVALENT on the combined token flow
         let u_has_live_trans = !w_u_effective.is_empty();
         let v_has_live_trans = !w_v_effective.is_empty();
         
         if u_has_live_trans && v_has_live_trans {
-            // Both states have live transitions on this label - targets must match
+            // Both states have live transitions on this label
             match (target_u, target_v) {
                 (Some(&tu), Some(&tv)) => {
                     let target_u_new = old_to_new.get(&tu);
                     let target_v_new = old_to_new.get(&tv);
                     
                     match (target_u_new, target_v_new) {
-                        (Some(u_new), Some(v_new)) if u_new != v_new => return false,
+                        (Some(&u_new), Some(&v_new)) if u_new != v_new => {
+                            // Targets differ - check if they're equivalent on the combined token flow
+                            let w_combined = &w_u_effective | &w_v_effective;
+                            if !targets_equivalent_on_domain(u_new, v_new, &w_combined, new_states) {
+                                return false;
+                            }
+                            // Targets are equivalent on the combined domain - can merge
+                        }
                         (Some(_), None) | (None, Some(_)) => return false,
                         (None, None) => {
                             // Both targets not yet processed - must be same original state
@@ -712,6 +719,56 @@ fn are_compatible(
         // The merged state will just have that transition restricted to its domain
     }
 
+    true
+}
+
+/// Check if two target states (already merged) are equivalent on a given domain.
+/// This enables merging parent states that point to different targets, as long as
+/// those targets behave identically on the tokens that would actually flow through them.
+fn targets_equivalent_on_domain(
+    t_u: StateID,
+    t_v: StateID,
+    domain: &Weight,
+    new_states: &[MergedStateBuilder],
+) -> bool {
+    if t_u >= new_states.len() || t_v >= new_states.len() {
+        return false;
+    }
+    
+    let bu = &new_states[t_u];
+    let bv = &new_states[t_v];
+    
+    // Check final weights on domain
+    let fw_u = &bu.final_weight & domain;
+    let fw_v = &bv.final_weight & domain;
+    if fw_u != fw_v {
+        return false;
+    }
+    
+    // Check transitions on domain
+    let all_labels: BTreeSet<Label> = bu.transitions.keys()
+        .chain(bv.transitions.keys())
+        .copied()
+        .collect();
+    
+    for lbl in all_labels {
+        let (target_u, w_u) = bu.transitions.get(&lbl)
+            .map(|(t, w)| (*t, w & domain))
+            .unwrap_or((usize::MAX, Weight::zeros()));
+        let (target_v, w_v) = bv.transitions.get(&lbl)
+            .map(|(t, w)| (*t, w & domain))
+            .unwrap_or((usize::MAX, Weight::zeros()));
+        
+        // Weights on domain must match
+        if w_u != w_v {
+            return false;
+        }
+        // If there's weight, targets must match
+        if !w_u.is_empty() && target_u != target_v {
+            return false;
+        }
+    }
+    
     true
 }
 

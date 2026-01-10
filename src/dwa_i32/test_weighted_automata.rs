@@ -2558,3 +2558,124 @@ fn test_diamond_structure() {
 
     run_push_optimization_test(input, expected);
 }
+
+/// Test case for relaxed merge conditions in acyclic DWA minimization.
+/// 
+/// This test constructs a DWA where two states (S1 and S2) have:
+/// - Disjoint domains: S1 sees tokens [1], S2 sees tokens [2]  
+/// - Transitions on the same label going to DIFFERENT targets (S3 and S4)
+/// - But S3 and S4 are EQUIVALENT on the combined domain [1,2]
+///
+/// The old minimization code would refuse to merge S1 and S2 because their
+/// targets differ. The new relaxed code checks if targets are equivalent
+/// on the combined token flow, enabling the merge.
+///
+/// Structure:
+/// ```
+///               S0 (start)
+///              /           \
+///     label=1 /             \ label=2
+///    weight=[1]           weight=[2]
+///            /               \
+///          S1                 S2  <-- Should be mergeable with relaxed conditions
+///           |                  |
+///     label=3                label=3
+///    weight=[1]            weight=[2]
+///           |                  |
+///          S3                 S4  <-- Different globally, but equiv on [1,2]
+///     final=[1,2,3]      final=[1,2,4]
+/// ```
+///
+/// S3 and S4 have different final weights globally, but:
+/// - S3 & [1,2] = [1,2]
+/// - S4 & [1,2] = [1,2]
+/// So they're equivalent on the domain that actually flows through.
+#[test]
+fn test_minimize_relaxed_merge_conditions() {
+    // Build the DWA
+    let mut d = DWA::new();
+    let s1 = d.add_state();
+    let s2 = d.add_state();
+    let s3 = d.add_state();
+    let s4 = d.add_state();
+
+    // Transitions from start
+    d.add_transition(0, 1, s1, Weight::from_item(1)).unwrap();
+    d.add_transition(0, 2, s2, Weight::from_item(2)).unwrap();
+
+    // Transitions from S1 and S2 to their respective targets
+    d.add_transition(s1, 3, s3, Weight::from_item(1)).unwrap();
+    d.add_transition(s2, 3, s4, Weight::from_item(2)).unwrap();
+
+    // Final weights: different globally, but equivalent on [1,2]
+    d.set_final_weight(s3, Weight::from_iter([1, 2, 3])).unwrap();
+    d.set_final_weight(s4, Weight::from_iter([1, 2, 4])).unwrap();
+
+    println!("Before minimization:\n{}", d);
+    assert_eq!(d.states.len(), 5, "Should have 5 states before minimization");
+
+    d.minimize();
+    println!("After minimization:\n{}", d);
+
+    // With relaxed merge conditions:
+    // - S1 and S2 CAN be merged (targets equiv on combined domain [1,2])
+    // - S3 and S4 CAN ALSO be merged! Their final weights differ globally,
+    //   but the algorithm computes what's reachable and merges them into
+    //   a single state with final_weight = [1,2] (the common part)
+    // Result: S0 + merged(S1,S2) + merged(S3,S4) = 3 states
+    //
+    // This demonstrates the power of the relaxed conditions - by enabling
+    // more merges at higher levels, the algorithm can also simplify lower levels.
+    assert_eq!(d.states.len(), 3, 
+        "With relaxed merge conditions, should get 3 states (start, mid, final)");
+
+    // For semantic equivalence, check specific paths:
+    // Path [1, 3] should yield weight [1] (token 1 flows, intersects with merged final state)
+    // Path [2, 3] should yield weight [2] (token 2 flows, intersects with merged final state)
+
+    let w13 = d.eval_word_weight(&[1, 3]);
+    let w23 = d.eval_word_weight(&[2, 3]);
+
+    assert_eq!(w13, Weight::from_item(1), "Path [1,3] should yield weight [1]");
+    assert_eq!(w23, Weight::from_item(2), "Path [2,3] should yield weight [2]");
+}
+
+/// Additional test: states that should NOT be merged because targets differ on combined domain
+#[test] 
+fn test_minimize_no_false_merge_when_targets_differ() {
+    // Structure similar to above, but targets ARE different on combined domain
+    let mut d = DWA::new();
+    let s1 = d.add_state();
+    let s2 = d.add_state();
+    let s3 = d.add_state();
+    let s4 = d.add_state();
+
+    d.add_transition(0, 1, s1, Weight::from_item(1)).unwrap();
+    d.add_transition(0, 2, s2, Weight::from_item(2)).unwrap();
+    d.add_transition(s1, 3, s3, Weight::from_item(1)).unwrap();
+    d.add_transition(s2, 3, s4, Weight::from_item(2)).unwrap();
+
+    // Final weights that ARE different on combined domain [1,2]
+    // S3 & [1,2] = [1], S4 & [1,2] = [2] → NOT equivalent
+    d.set_final_weight(s3, Weight::from_item(1)).unwrap();
+    d.set_final_weight(s4, Weight::from_item(2)).unwrap();
+
+    let w13_before = d.eval_word_weight(&[1, 3]);
+    let w23_before = d.eval_word_weight(&[2, 3]);
+
+    println!("Before minimization:\n{}", d);
+    d.minimize();
+    println!("After minimization:\n{}", d);
+
+    let w13_after = d.eval_word_weight(&[1, 3]);
+    let w23_after = d.eval_word_weight(&[2, 3]);
+
+    // Verify semantic preservation
+    assert_eq!(w13_before, w13_after, "Path [1,3] weight should be preserved");
+    assert_eq!(w23_before, w23_after, "Path [2,3] weight should be preserved");
+    assert_eq!(w13_after, Weight::from_item(1));
+    assert_eq!(w23_after, Weight::from_item(2));
+
+    // States should NOT be merged since targets differ on combined domain
+    // (This test ensures we don't have false positives from the relaxed conditions)
+}
