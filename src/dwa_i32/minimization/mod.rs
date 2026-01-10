@@ -22,6 +22,7 @@
 pub mod common;
 pub mod dwa_acyclic;
 pub mod dwa_cyclic;
+pub mod graph_coloring;
 pub mod nwa;
 
 pub use common::{Partition, MAX_OPTIMIZE_ITERATIONS, DwaPass};

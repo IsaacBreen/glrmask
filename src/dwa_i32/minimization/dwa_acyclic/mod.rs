@@ -3,6 +3,7 @@ mod consolidate_ranges;
 use crate::dwa_i32::common::{Label, StateID, Weight};
 use crate::dwa_i32::dwa::{DWA, DWABuildError, DWAState, DWAStates};
 use crate::dwa_i32::minimization::common::DwaPass;
+use crate::dwa_i32::minimization::graph_coloring::{solve_greedy_coloring, solve_exact_graph_coloring};
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 impl DWA {
@@ -1017,91 +1018,6 @@ fn solve_signature_based_coloring(
     }
     
     colors
-}
-
-/// Greedy graph coloring - fast but not optimal
-fn solve_greedy_coloring(adj: &Vec<Vec<usize>>) -> Vec<usize> {
-    let n = adj.len();
-    if n == 0 { return vec![]; }
-
-    let mut colors = vec![usize::MAX; n];
-    
-    // Sort by degree (high degree nodes first)
-    let mut nodes: Vec<usize> = (0..n).collect();
-    nodes.sort_by_key(|&i| std::cmp::Reverse(adj[i].len()));
-
-    for &u in &nodes {
-        // Find smallest color not used by neighbors
-        let neighbor_colors: std::collections::BTreeSet<usize> = 
-            adj[u].iter().filter_map(|&v| {
-                if colors[v] != usize::MAX { Some(colors[v]) } else { None }
-            }).collect();
-        
-        let mut c = 0;
-        while neighbor_colors.contains(&c) {
-            c += 1;
-        }
-        colors[u] = c;
-    }
-    
-    colors
-}
-
-fn solve_exact_graph_coloring(adj: &Vec<Vec<usize>>) -> Vec<usize> {
-    let n = adj.len();
-    if n == 0 { return vec![]; }
-    
-    // For graphs with more than 30 nodes, use greedy coloring to avoid exponential blowup
-    // The exact solver has worst-case exponential time complexity
-    // Reduced from 50 to 30 because even 45 nodes can cause 4+ second blowup on dense graphs
-    if n > 30 {
-        return solve_greedy_coloring(adj);
-    }
-
-    let mut colors = vec![usize::MAX; n];
-    let mut best_coloring = vec![0; n];
-    let mut min_colors_found = n + 1;
-
-    let mut nodes: Vec<usize> = (0..n).collect();
-    nodes.sort_by_key(|&i| std::cmp::Reverse(adj[i].len()));
-
-    fn solve(
-        idx: usize,
-        current_max_color: usize,
-        nodes: &[usize],
-        adj: &Vec<Vec<usize>>,
-        colors: &mut Vec<usize>,
-        min_colors_found: &mut usize,
-        best_coloring: &mut Vec<usize>
-    ) {
-        if current_max_color >= *min_colors_found {
-            return;
-        }
-        if idx == nodes.len() {
-            *min_colors_found = current_max_color;
-            *best_coloring = colors.clone();
-            return;
-        }
-        let u = nodes[idx];
-        for c in 0..=current_max_color {
-            let mut conflict = false;
-            for &v in &adj[u] {
-                if colors[v] == c {
-                    conflict = true;
-                    break;
-                }
-            }
-            if !conflict {
-                colors[u] = c;
-                let next_max = std::cmp::max(current_max_color, c + 1);
-                solve(idx + 1, next_max, nodes, adj, colors, min_colors_found, best_coloring);
-                colors[u] = usize::MAX;
-            }
-        }
-    }
-
-    solve(0, 0, &nodes, adj, &mut colors, &mut min_colors_found, &mut best_coloring);
-    best_coloring
 }
 
 // --- Phase 4: Reconstruction ---
