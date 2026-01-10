@@ -43,34 +43,21 @@ impl DWA {
 }
 
 /// Push weights forward for acyclic DWAs.
-/// 
-/// This computes the "reachable outputs" for each state (union of all outputs
-/// reachable from that state) and pushes this information into transition weights.
-/// 
-/// After this transformation:
-/// - Transition weights represent all possible outputs reachable via that transition
-/// - States with different final_weights but same "transition signature" can be merged
-///   (the diamond case optimization)
+/// Computes reachable outputs and restricts transitions to tokens that can produce output.
 fn push_weights_acyclic(dwa: &mut DWA) -> bool {
     let n = dwa.states.len();
     if n == 0 { return false; }
 
-    // 1. Compute topological order using Kahn's algorithm
+    // Compute topological order using Kahn's algorithm
     let mut in_degree = vec![0usize; n];
     for u in 0..n {
         for &v in dwa.states[u].transitions.values() {
-            if v < n {
-                in_degree[v] += 1;
-            }
+            if v < n { in_degree[v] += 1; }
         }
     }
     
-    let mut queue: VecDeque<usize> = VecDeque::new();
-    for (i, &deg) in in_degree.iter().enumerate() {
-        if deg == 0 {
-            queue.push_back(i);
-        }
-    }
+    let mut queue: VecDeque<_> = in_degree.iter().enumerate()
+        .filter(|(_, &deg)| deg == 0).map(|(i, _)| i).collect();
     
     let mut topo_order = Vec::with_capacity(n);
     while let Some(u) = queue.pop_front() {
@@ -78,63 +65,39 @@ fn push_weights_acyclic(dwa: &mut DWA) -> bool {
         for &v in dwa.states[u].transitions.values() {
             if v < n {
                 in_degree[v] -= 1;
-                if in_degree[v] == 0 {
-                    queue.push_back(v);
-                }
+                if in_degree[v] == 0 { queue.push_back(v); }
             }
         }
     }
     
-    if topo_order.len() != n {
-        // Has cycles, cannot process as acyclic
-        return false;
-    }
+    if topo_order.len() != n { return false; } // Has cycles
 
-    // 2. Compute "reachable outputs" for each state (backward from leaves)
-    // reachable[s] = union of all outputs that can be produced starting from state s
+    // Compute reachable outputs (backward from leaves)
     let mut reachable = vec![Weight::zeros(); n];
-    
-    // Process in reverse topological order (leaves first)
     for &u in topo_order.iter().rev() {
-        let mut reach_u = Weight::zeros();
-        
-        // Include final weight
-        if let Some(fw) = &dwa.states[u].final_weight {
-            reach_u |= fw;
-        }
-        
-        // Include outputs reachable via transitions
-        // Only consider transitions that have explicit weights (dead transitions don't contribute)
+        let mut reach_u = dwa.states[u].final_weight.clone().unwrap_or_else(Weight::zeros);
         for (&label, &target) in &dwa.states[u].transitions {
             if target < n {
-                if let Some(trans_w) = dwa.states[u].trans_weights.get(&label) {
-                    // Tokens that can use this transition AND reach outputs from target
-                    reach_u |= &(trans_w & &reachable[target]);
+                if let Some(w) = dwa.states[u].trans_weights.get(&label) {
+                    reach_u |= &(w & &reachable[target]);
                 }
             }
         }
-        
         reachable[u] = reach_u;
     }
 
-    // 3. Push reachable outputs into transition weights
+    // Push reachable outputs into transition weights
     let mut changed = false;
     for u in 0..n {
         for (&label, &target) in dwa.states[u].transitions.clone().iter() {
             if target < n {
                 if let Some(w) = dwa.states[u].trans_weights.get_mut(&label) {
-                    // New weight = old_weight AND reachable[target]
-                    // This restricts the transition to only tokens that can actually produce output
                     let new_w = &*w & &reachable[target];
-                    if *w != new_w {
-                        *w = new_w;
-                        changed = true;
-                    }
+                    if *w != new_w { *w = new_w; changed = true; }
                 }
             }
         }
     }
-
     changed
 }
 
@@ -179,10 +142,7 @@ pub fn minimize_acyclic_exact(dwa: &DWA) -> Result<DWA, DWABuildError> {
 
     let mut states_by_height: Vec<Vec<StateID>> = vec![vec![]; max_height + 1];
     for (id, &h) in heights.iter().enumerate() {
-        // Only minimize reachable states
-        if needed[id].is_empty() && id != dwa.body.start_state {
-            continue;
-        }
+        if needed[id].is_empty() && id != dwa.body.start_state { continue; }
         states_by_height[h].push(id);
     }
     crate::debug!(6, "Acyclic minimize step 3 (heights): {:?}, max_height={}, largest_level={}", 
@@ -190,150 +150,101 @@ pub fn minimize_acyclic_exact(dwa: &DWA) -> Result<DWA, DWABuildError> {
         states_by_height.iter().map(|v| v.len()).max().unwrap_or(0));
 
     // 4. Bottom-Up Exact Minimization
-    let step4_start = std::time::Instant::now();
-    // We map old_id -> new_id (in the minimized machine).
     let mut old_to_new: HashMap<StateID, StateID> = HashMap::new();
     let mut new_states: Vec<MergedStateBuilder> = Vec::new();
-
-    // Track time spent in major operations
-    let mut total_incomp_time = std::time::Duration::ZERO;
-    let mut total_coloring_time = std::time::Duration::ZERO;
-    let mut total_merge_time = std::time::Duration::ZERO;
 
     // Process from leaves (height 0) upwards
     for h in 0..=max_height {
         let candidates = &states_by_height[h];
         if candidates.is_empty() { continue; }
 
-        // For large height levels, use fast signature-based coloring
-        // This avoids O(n²) incompatibility graph construction
-        // Threshold lowered because are_compatible is expensive (Weight operations)
-        // Note: 200 threshold chosen because ~200 candidates causes ~20k are_compatible calls
-        // which at ~0.2ms each becomes ~4 seconds
-        let coloring = if candidates.len() > 200 {
-            let sig_start = std::time::Instant::now();
-            let result = solve_signature_based_coloring(
-                &dwa,
-                candidates,
-                &needed,
-                &old_to_new,
-                &new_states,
-            );
-            let sig_time = sig_start.elapsed();
-            total_incomp_time += sig_time; // Count as incomp time
-            // Only log for significant runs (>500 candidates means this is notable)
-            crate::debug!(5, "Height {}: {} candidates, signature coloring took {:?}", 
-                h, candidates.len(), sig_time);
-            result
-        } else {
-            // A. Build Incompatibility Graph for this layer
-            let incomp_start = std::time::Instant::now();
-            let adj = build_incompatibility_graph(
-                &dwa,
-                candidates,
-                &needed,
-                &old_to_new,
-                &new_states,
-            );
-            let incomp_time = incomp_start.elapsed();
-            total_incomp_time += incomp_time;
-            
-            // Only log for levels with many candidates
-            if candidates.len() > 200 {
-                crate::debug!(5, "Height {}: {} candidates, incomp graph took {:?}", 
-                    h, candidates.len(), incomp_time);
-            }
+        // Compute coloring - use signature-based method for large candidate sets
+        let coloring = compute_height_coloring(&dwa, candidates, &needed, &old_to_new, &new_states);
 
-            // B. Solve Exact Graph Coloring to find minimum cliques
-            let coloring_start = std::time::Instant::now();
-            let result = solve_exact_graph_coloring(&adj);
-            let coloring_time = coloring_start.elapsed();
-            total_coloring_time += coloring_time;
-            
-            // Log slow coloring operations to identify bottlenecks
-            if coloring_time.as_millis() > 100 {
-                crate::debug!(5, "Height {}: {} candidates, graph coloring took {:?}", 
-                    h, candidates.len(), coloring_time);
-            }
-            result
-        };
-
-        // C. Construct new merged states from color classes
-        let merge_start = std::time::Instant::now();
+        // Construct new merged states from color classes
         let base_new_id = new_states.len();
         let num_colors = coloring.iter().max().map(|&c| c + 1).unwrap_or(0);
 
-        for (old_idx, color) in coloring.iter().enumerate() {
-            let old_id = candidates[old_idx];
-            let new_id = base_new_id + *color;
-            old_to_new.insert(old_id, new_id);
-        }
-
-        // Create the actual builder structs for the new states
-        for _ in 0..num_colors {
-            new_states.push(MergedStateBuilder::default());
-        }
-
-        // Merge logic: Combine transitions and finals
-        // We split new_states to allow immutable access to previously completed layers
-        // while holding a mutable reference to the current layer's builders.
-        let (completed, builders) = new_states.split_at_mut(base_new_id);
-
+        // Map old states to new merged states
         for (old_idx, &color) in coloring.iter().enumerate() {
-            let old_id = candidates[old_idx];
-            let builder = &mut builders[color];
-            let old_state = &dwa.states[old_id];
-
-            // Union Final Weights
-            if let Some(fw) = &old_state.final_weight {
-                builder.final_weight |= fw;
-            }
-
-            // Union Needed Sets (for upstream calculation)
-            builder.needed |= &needed[old_id];
-
-            // Merge Transitions
-            for (&label, &target_old) in &old_state.transitions {
-                if target_old >= dwa.states.len() { continue; }
-                
-                // If the target state was skipped (e.g. not needed), ignore this transition branch
-                if !old_to_new.contains_key(&target_old) { continue; }
-
-                // Only consider transitions that have explicit weights
-                // Transitions without weights are "dead" (get_transition returns None)
-                if let Some(w_orig) = old_state.trans_weights.get(&label) {
-                    let target_new = old_to_new[&target_old];
-
-                    // CRITICAL OPTIMIZATION:
-                    // Effectively w_trans = w_orig & Needed[target_old].
-                    // Since target is already merged, we use completed[target_new].needed.
-                    let mut w_effective = w_orig.clone();
-                    w_effective &= &completed[target_new].needed;
-
-                    if !w_effective.is_empty() {
-                        builder.add_transition(label, target_new, w_effective);
-                    }
-                }
-            }
+            old_to_new.insert(candidates[old_idx], base_new_id + color);
         }
-        total_merge_time += merge_start.elapsed();
+        new_states.extend((0..num_colors).map(|_| MergedStateBuilder::default()));
+
+        // Merge states into builders
+        let (completed, builders) = new_states.split_at_mut(base_new_id);
+        for (old_idx, &color) in coloring.iter().enumerate() {
+            merge_state_into_builder(
+                candidates[old_idx], color, &dwa, &needed, &old_to_new, completed, builders
+            );
+        }
     }
 
-    crate::debug!(6, "Acyclic minimize step 4 totals: incomp={:?}, coloring={:?}, merge={:?}", 
-        total_incomp_time, total_coloring_time, total_merge_time);
     crate::debug!(6, "Acyclic minimize: {} -> {} states in {:?}", 
         dwa.states.len(), new_states.len(), total_start.elapsed());
 
     // 5. Reconstruct the Final DWA
     let result = reconstruct_dwa(dwa.body.start_state, &old_to_new, new_states)?;
     
-    // 6. Stochastic validation: sample random pairs and check for missed merges
-    // Only run when STOCHASTIC_MERGE_VALIDATION=1 is set
+    // 6. Stochastic validation (only when STOCHASTIC_MERGE_VALIDATION=1)
     if std::env::var("STOCHASTIC_MERGE_VALIDATION").is_ok() {
         stochastic_merge_validation(&result)?;
     }
     
     Ok(result)
+}
+
+/// Compute coloring for a height level's candidates.
+fn compute_height_coloring(
+    dwa: &DWA,
+    candidates: &[StateID],
+    needed: &[Weight],
+    old_to_new: &HashMap<StateID, StateID>,
+    new_states: &[MergedStateBuilder],
+) -> Vec<usize> {
+    if candidates.len() > 200 {
+        // Use fast signature-based coloring for large candidate sets
+        solve_signature_based_coloring(dwa, candidates, needed, old_to_new, new_states)
+    } else {
+        // Build incompatibility graph and solve exact coloring
+        let adj = build_incompatibility_graph(dwa, candidates, needed, old_to_new, new_states);
+        solve_exact_graph_coloring(&adj)
+    }
+}
+
+/// Merge an old state into a builder at the given color index.
+fn merge_state_into_builder(
+    old_id: StateID,
+    color: usize,
+    dwa: &DWA,
+    needed: &[Weight],
+    old_to_new: &HashMap<StateID, StateID>,
+    completed: &[MergedStateBuilder],
+    builders: &mut [MergedStateBuilder],
+) {
+    let builder = &mut builders[color];
+    let old_state = &dwa.states[old_id];
+
+    // Union Final Weights
+    if let Some(fw) = &old_state.final_weight {
+        builder.final_weight |= fw;
+    }
+
+    // Union Needed Sets
+    builder.needed |= &needed[old_id];
+
+    // Merge Transitions
+    for (&label, &target_old) in &old_state.transitions {
+        if target_old >= dwa.states.len() { continue; }
+        let Some(&target_new) = old_to_new.get(&target_old) else { continue; };
+        let Some(w_orig) = old_state.trans_weights.get(&label) else { continue; };
+        
+        // Restrict weight to what's actually needed at target
+        let w_effective = w_orig & &completed[target_new].needed;
+        if !w_effective.is_empty() {
+            builder.add_transition(label, target_new, w_effective);
+        }
+    }
 }
 
 /// Stochastic validation: randomly sample pairs of states and check if any could be merged.
@@ -351,13 +262,12 @@ fn stochastic_merge_validation(dwa: &DWA) -> Result<(), DWABuildError> {
     // Sample up to 10000 random pairs
     let num_samples = std::cmp::min(10000, n * n / 2);
     let state_ids: Vec<StateID> = (0..n).collect();
+    let mut rng = rand::rngs::StdRng::seed_from_u64(42);
     
-    let mut rng = rand::rngs::StdRng::seed_from_u64(42); // Deterministic for reproducibility
     let mut mergeable_count = 0;
     let mut total_checked = 0;
     
     for _ in 0..num_samples {
-        // Pick two random distinct states
         let pair: Vec<_> = state_ids.choose_multiple(&mut rng, 2).collect();
         if pair.len() < 2 { continue; }
         let (s1, s2) = (*pair[0], *pair[1]);
@@ -365,48 +275,23 @@ fn stochastic_merge_validation(dwa: &DWA) -> Result<(), DWABuildError> {
         
         total_checked += 1;
         
-        // Check if they're compatible (could be merged)
-        // Two states are compatible if:
-        // 1. Same final weight (or both non-final)
-        // 2. Same transition targets for all labels
-        // 3. Same transition weights
-        let state1 = &dwa.states[s1];
-        let state2 = &dwa.states[s2];
-        
-        // Check final weights
-        if state1.final_weight != state2.final_weight {
-            continue;
+        // States are mergeable if they're identical
+        let (state1, state2) = (&dwa.states[s1], &dwa.states[s2]);
+        if state1.final_weight == state2.final_weight 
+            && state1.transitions == state2.transitions
+            && state1.trans_weights == state2.trans_weights 
+        {
+            mergeable_count += 1;
+            crate::debug!(3, "STOCHASTIC: Found mergeable pair: {:?} and {:?}", s1, s2);
         }
-        
-        // Check transitions - need same domain, same targets
-        if state1.transitions != state2.transitions {
-            continue;
-        }
-        
-        // Check transition weights
-        if state1.trans_weights != state2.trans_weights {
-            continue;
-        }
-        
-        // Found a mergeable pair!
-        mergeable_count += 1;
-        crate::debug!(3, "STOCHASTIC: Found mergeable pair: {:?} and {:?}", s1, s2);
     }
     
-    // If we find a significant number of mergeable pairs, something is wrong
-    let mergeable_rate = mergeable_count as f64 / total_checked as f64;
-    crate::debug!(3, "STOCHASTIC: {} states, checked {} pairs, {} mergeable ({:.2}%)", 
-        n, total_checked, mergeable_count, mergeable_rate * 100.0);
+    crate::debug!(3, "STOCHASTIC: {} states, {} pairs checked, {} mergeable", 
+        n, total_checked, mergeable_count);
     
     if mergeable_count > 0 {
-        // Any mergeable pairs after minimization suggests the minimization is not optimal
-        panic!(
-            "STOCHASTIC MERGE VALIDATION FAILED: Found {} mergeable pairs out of {} checked ({:.2}%). \
-             This suggests minimization is suboptimal.",
-            mergeable_count, total_checked, mergeable_rate * 100.0
-        );
+        panic!("STOCHASTIC MERGE VALIDATION FAILED: Found {} mergeable pairs", mergeable_count);
     }
-    
     Ok(())
 }
 
@@ -464,20 +349,12 @@ fn compute_topo_order(dwa: &DWA) -> Result<Vec<StateID>, DWABuildError> {
 
 fn compute_needed_sets(dwa: &DWA, topo_order: &[StateID]) -> Vec<Weight> {
     let mut needed = vec![Weight::zeros(); dwa.states.len()];
-
     for &u in topo_order {
-        let mut acc = Weight::zeros();
-        if let Some(fw) = &dwa.states[u].final_weight {
-            acc |= fw;
-        }
+        let mut acc = dwa.states[u].final_weight.clone().unwrap_or_else(Weight::zeros);
         for (&lbl, &v) in &dwa.states[u].transitions {
             if v >= dwa.states.len() { continue; }
-            // Only consider transitions that have explicit weights
-            // Transitions without weights are "dead" (get_transition returns None)
-            if let Some(w_trans) = dwa.states[u].trans_weights.get(&lbl) {
-                let mut contribution = w_trans.clone();
-                contribution &= &needed[v];
-                acc |= &contribution;
+            if let Some(w) = dwa.states[u].trans_weights.get(&lbl) {
+                acc |= &(w & &needed[v]);
             }
         }
         needed[u] = acc;
@@ -485,60 +362,38 @@ fn compute_needed_sets(dwa: &DWA, topo_order: &[StateID]) -> Vec<Weight> {
     needed
 }
 
-/// Compute forward reachability: which tokens can reach each state from the start
+/// Compute forward reachability: which tokens can reach each state from start
 fn compute_forward_reachable(dwa: &DWA, topo_order: &[StateID]) -> Vec<Weight> {
     let mut forward = vec![Weight::zeros(); dwa.states.len()];
-    
-    // Start state can reach all tokens
     forward[dwa.body.start_state] = Weight::all();
     
-    // Process in reverse topo order (from start toward leaves)
     for &u in topo_order.iter().rev() {
+        if forward[u].is_empty() { continue; }
         let incoming = forward[u].clone();
-        if incoming.is_empty() { continue; }
         
         for (&lbl, &v) in &dwa.states[u].transitions {
             if v >= dwa.states.len() { continue; }
-            // Only consider transitions that have explicit weights
-            // Transitions without weights are "dead" (get_transition returns None)
-            if let Some(w_trans) = dwa.states[u].trans_weights.get(&lbl) {
-                // Tokens that can reach v through this transition
-                let mut contribution = incoming.clone();
-                contribution &= w_trans;
-                forward[v] |= &contribution;
+            if let Some(w) = dwa.states[u].trans_weights.get(&lbl) {
+                forward[v] |= &(&incoming & w);
             }
         }
     }
-    
     forward
 }
 
 /// Tighten DWA weights by removing tokens that can never reach a transition.
-/// 
-/// This is a semantic-preserving transformation that restricts each transition's
-/// weight to only include tokens that can actually reach that transition from the start.
-/// 
-/// The key insight: if a token T can never reach state S, then the weight of S's
-/// outgoing transitions doesn't matter for T. By removing T from those weights,
-/// we might create more opportunities for state merging (disjoint domains).
+/// Semantic-preserving: restricts weights to tokens that can actually reach each state.
 fn tighten_weights(dwa: &DWA) -> Result<DWA, DWABuildError> {
-    if dwa.states.len() == 0 {
-        return Ok(DWA::new());
-    }
+    if dwa.states.is_empty() { return Ok(DWA::new()); }
     
-    // Compute topo order
     let topo_order = compute_topo_order(dwa)?;
-    
-    // Compute forward reachability
     let forward = compute_forward_reachable(dwa, &topo_order);
     
-    // Create new DWA with tightened weights
     let mut new_states = DWAStates(Vec::with_capacity(dwa.states.len()));
-    
     for (u, state) in dwa.states.0.iter().enumerate() {
         let mut new_state = DWAState::default();
         
-        // Tighten final weight: only keep tokens that can reach this state
+        // Tighten final weight
         if let Some(fw) = &state.final_weight {
             let tightened = fw & &forward[u];
             if !tightened.is_empty() {
@@ -549,39 +404,28 @@ fn tighten_weights(dwa: &DWA) -> Result<DWA, DWABuildError> {
         // Tighten transition weights
         for (&lbl, &target) in &state.transitions {
             if target >= dwa.states.len() { continue; }
-            
-            // Only consider transitions that have explicit weights
-            // Transitions without weights are "dead" (get_transition returns None)
-            if let Some(w_orig) = state.trans_weights.get(&lbl) {
-                // Tighten: only keep tokens that can reach this state
-                let tightened = w_orig & &forward[u];
-                
+            if let Some(w) = state.trans_weights.get(&lbl) {
+                let tightened = w & &forward[u];
                 if !tightened.is_empty() {
                     new_state.transitions.insert(lbl, target);
                     new_state.trans_weights.insert(lbl, tightened);
                 }
             }
         }
-        
         new_states.0.push(new_state);
     }
     
-    Ok(DWA {
-        states: new_states,
-        body: dwa.body.clone(),
-    })
+    Ok(DWA { states: new_states, body: dwa.body.clone() })
 }
 
 fn compute_heights(dwa: &DWA, topo_order: &[StateID]) -> Vec<usize> {
     let mut heights = vec![0; dwa.states.len()];
     for &u in topo_order {
-        let mut h = 0;
-        for &v in dwa.states[u].transitions.values() {
-            if v < dwa.states.len() {
-                h = std::cmp::max(h, heights[v] + 1);
-            }
-        }
-        heights[u] = h;
+        heights[u] = dwa.states[u].transitions.values()
+            .filter(|&&v| v < dwa.states.len())
+            .map(|&v| heights[v] + 1)
+            .max()
+            .unwrap_or(0);
     }
     heights
 }
@@ -590,16 +434,9 @@ fn compute_heights(dwa: &DWA, topo_order: &[StateID]) -> Vec<usize> {
 
 /// Check if two states can be merged.
 /// 
-/// After weight pushing and tightening, states can be merged if:
-/// 1. For each label, the transitions are "compatible":
-///    - Both have the same target (after mapping)
-///    - Their weights are identical on the domain overlap (diamond case)
-/// 2. Final weights are compatible on the domain overlap
-/// 
-/// The diamond case is correct because:
-/// - After tighten_weights, trans weights only include tokens that can reach the state
-/// - If the behavior is identical on overlapping tokens, merging is safe
-/// - Tokens outside the overlap only reach one state anyway (disjoint domains)
+/// States can be merged if their behavior is identical on overlapping tokens,
+/// and for all labels, their transitions either target the same state or
+/// target states that are equivalent on the combined token flow.
 fn are_compatible(
     u: StateID,
     v: StateID,
@@ -608,119 +445,89 @@ fn are_compatible(
     old_to_new: &HashMap<StateID, StateID>,
     new_states: &[MergedStateBuilder]
 ) -> bool {
-    // Check if domains are disjoint (diamond case)
-    let domain_u = &needed[u];
-    let domain_v = &needed[v];
-    let domain_overlap = domain_u & domain_v;
-    let domains_disjoint = domain_overlap.is_empty();
+    let domain_overlap = &needed[u] & &needed[v];
     
-    // Check final weight compatibility on the overlap domain
-    // For tokens in the overlap, final weights must produce the same output
-    if !domains_disjoint {
-        let fw_u = dwa.states[u].final_weight.as_ref()
+    // Helper: get weight restricted to overlap (or zeros if no final/trans weight)
+    let final_on_overlap = |s: StateID| -> Weight {
+        dwa.states[s].final_weight.as_ref()
             .map(|w| w & &domain_overlap)
-            .unwrap_or_else(Weight::zeros);
-        let fw_v = dwa.states[v].final_weight.as_ref()
-            .map(|w| w & &domain_overlap)
-            .unwrap_or_else(Weight::zeros);
-        if fw_u != fw_v {
-            return false;
-        }
+            .unwrap_or_else(Weight::zeros)
+    };
+    
+    // Check final weights match on overlap
+    if !domain_overlap.is_empty() && final_on_overlap(u) != final_on_overlap(v) {
+        return false;
     }
     
-    // Collect all labels present in either state
-    let mut labels: BTreeSet<Label> = dwa.states[u].transitions.keys().copied().collect();
-    labels.extend(dwa.states[v].transitions.keys());
+    // Check each label
+    let labels: BTreeSet<Label> = dwa.states[u].transitions.keys()
+        .chain(dwa.states[v].transitions.keys())
+        .copied().collect();
 
     for lbl in labels {
-        // Check if transitions exist and get their targets
-        let target_u = dwa.states[u].transitions.get(&lbl);
-        let target_v = dwa.states[v].transitions.get(&lbl);
-
-        // Get weights
-        // A transition is only "live" if it has an explicit weight in trans_weights
-        // Missing trans_weights entries mean the transition is "dead" (get_transition returns None)
-        let w_u_raw = if target_u.is_some() {
-            dwa.states[u].trans_weights.get(&lbl).cloned()
-        } else {
-            None
+        // Get effective transition weights (empty if no transition or no weight)
+        let get_weight = |s: StateID| -> Weight {
+            dwa.states[s].transitions.get(&lbl)
+                .and_then(|_| dwa.states[s].trans_weights.get(&lbl))
+                .cloned()
+                .unwrap_or_else(Weight::zeros)
         };
-        let w_v_raw = if target_v.is_some() {
-            dwa.states[v].trans_weights.get(&lbl).cloned()
-        } else {
-            None
-        };
-        
-        // Treat missing weights as empty (dead transitions)
-        let w_u_effective = w_u_raw.as_ref().cloned().unwrap_or_else(Weight::zeros);
-        let w_v_effective = w_v_raw.as_ref().cloned().unwrap_or_else(Weight::zeros);
+        let w_u = get_weight(u);
+        let w_v = get_weight(v);
 
-        // Check weight compatibility on the overlap domain
-        if !domains_disjoint {
-            // For tokens in the overlap, transition weights must produce the same output
-            let w_u_overlap = &w_u_effective & &domain_overlap;
-            let w_v_overlap = &w_v_effective & &domain_overlap;
+        // On overlap domain, weights must match
+        if !domain_overlap.is_empty() {
+            let w_u_overlap = &w_u & &domain_overlap;
+            let w_v_overlap = &w_v & &domain_overlap;
             if w_u_overlap != w_v_overlap {
                 return false;
             }
-        }
-        // If domains are disjoint, weights can differ (they'll be unioned when merged)
-        // But both must go to the same target (after mapping) OR be equivalent on their combined domain
-
-        // CRITICAL: If BOTH states have transitions on this label, they must either:
-        // 1. Go to the same target (after mapping), OR
-        // 2. Go to different targets that are EQUIVALENT on the combined token flow
-        let u_has_live_trans = !w_u_effective.is_empty();
-        let v_has_live_trans = !w_v_effective.is_empty();
-        
-        if u_has_live_trans && v_has_live_trans {
-            // Both states have live transitions on this label
-            match (target_u, target_v) {
-                (Some(&tu), Some(&tv)) => {
-                    let target_u_new = old_to_new.get(&tu);
-                    let target_v_new = old_to_new.get(&tv);
-                    
-                    match (target_u_new, target_v_new) {
-                        (Some(&u_new), Some(&v_new)) if u_new != v_new => {
-                            // Targets differ - check if they're equivalent on the combined token flow
-                            let w_combined = &w_u_effective | &w_v_effective;
-                            if !targets_equivalent_on_domain(u_new, v_new, &w_combined, new_states) {
-                                return false;
-                            }
-                            // Targets are equivalent on the combined domain - can merge
-                        }
-                        (Some(_), None) | (None, Some(_)) => return false,
-                        (None, None) => {
-                            // Both targets not yet processed - must be same original state
-                            if tu != tv {
-                                return false;
-                            }
-                        }
-                        _ => {} // Both mapped to same state
-                    }
-                }
-                (Some(_), None) | (None, Some(_)) => {
-                    // One has target, other doesn't (but both have weights) - shouldn't happen
-                    // If there's a live weight, there should be a transition
-                    return false;
-                }
-                (None, None) => {} // Neither has target (shouldn't happen with live weights)
-            }
-        } else if !domains_disjoint {
-            // Domains overlap, so check if one has live transition on overlap when other doesn't
-            let w_u_overlap = &w_u_effective & &domain_overlap;
-            let w_v_overlap = &w_v_effective & &domain_overlap;
-            if (!w_u_overlap.is_empty() && w_v_overlap.is_empty()) ||
-               (w_u_overlap.is_empty() && !w_v_overlap.is_empty()) {
-                // One has transition on overlap, other doesn't - incompatible
+            // One has transition on overlap, other doesn't = incompatible
+            if w_u_overlap.is_empty() != w_v_overlap.is_empty() {
                 return false;
             }
         }
-        // If domains are disjoint AND only one has transition on this label, that's fine
-        // The merged state will just have that transition restricted to its domain
-    }
 
+        // If both have live transitions, check targets are compatible
+        if !w_u.is_empty() && !w_v.is_empty() {
+            let tu = dwa.states[u].transitions.get(&lbl);
+            let tv = dwa.states[v].transitions.get(&lbl);
+            
+            match (tu, tv) {
+                (Some(&tu), Some(&tv)) => {
+                    if !targets_compatible(tu, tv, &w_u, &w_v, old_to_new, new_states) {
+                        return false;
+                    }
+                }
+                _ => return false, // Both have weights but one lacks target
+            }
+        }
+    }
     true
+}
+
+/// Check if two transition targets are compatible for merging.
+fn targets_compatible(
+    tu: StateID,
+    tv: StateID,
+    w_u: &Weight,
+    w_v: &Weight,
+    old_to_new: &HashMap<StateID, StateID>,
+    new_states: &[MergedStateBuilder],
+) -> bool {
+    let mapped_u = old_to_new.get(&tu);
+    let mapped_v = old_to_new.get(&tv);
+    
+    match (mapped_u, mapped_v) {
+        (Some(&u_new), Some(&v_new)) if u_new != v_new => {
+            // Different targets: must be equivalent on combined domain
+            let w_combined = w_u | w_v;
+            targets_equivalent_on_domain(u_new, v_new, &w_combined, new_states)
+        }
+        (Some(_), None) | (None, Some(_)) => false,
+        (None, None) => tu == tv, // Same-level: must be same original
+        _ => true, // Both map to same target
+    }
 }
 
 /// Check if two target states (already merged) are equivalent on a given domain.
@@ -760,22 +567,14 @@ fn targets_equivalent_on_domain(
             .map(|(t, w)| (*t, w & domain))
             .unwrap_or((usize::MAX, Weight::zeros()));
         
-        // Weights on domain must match
-        if w_u != w_v {
-            return false;
-        }
-        // If there's weight, targets must match
-        if !w_u.is_empty() && target_u != target_v {
+        if w_u != w_v || (!w_u.is_empty() && target_u != target_v) {
             return false;
         }
     }
-    
     true
 }
 
 /// Compute a structural signature for a state.
-/// States with identical signatures can potentially be merged.
-/// The signature captures: final_weight + (label, target_new, weight) for each transition
 fn compute_state_signature(
     state_id: StateID,
     dwa: &DWA,
@@ -783,44 +582,43 @@ fn compute_state_signature(
     old_to_new: &HashMap<StateID, StateID>,
 ) -> Vec<u64> {
     let state = &dwa.states[state_id];
-    let mut sig: Vec<u64> = Vec::new();
-    
-    // Include needed set hash (domain)
     let domain = &needed[state_id];
-    sig.push(domain.fast_hash());
     
-    // Include final weight restricted to domain
-    let fw_on_domain = state.final_weight.as_ref()
-        .map(|w| w & domain)
-        .unwrap_or_else(Weight::zeros);
-    sig.push(fw_on_domain.fast_hash());
+    let mut sig = vec![
+        domain.fast_hash(),
+        state.final_weight.as_ref().map(|w| w & domain).unwrap_or_else(Weight::zeros).fast_hash(),
+    ];
     
-    // Include transitions sorted by label
-    let mut trans_sigs: Vec<(i32, usize, u64)> = Vec::new();
-    for (&label, &target) in &state.transitions {
-        if target >= dwa.states.len() { continue; }
-        
-        // Get mapped target (if available)
-        let target_new = old_to_new.get(&target).copied().unwrap_or(usize::MAX);
-        
-        // Get weight restricted to domain
-        let w = state.trans_weights.get(&label)
-            .map(|w| w & domain)
-            .unwrap_or_else(Weight::zeros);
-        
-        if !w.is_empty() {
-            trans_sigs.push((label, target_new, w.fast_hash()));
-        }
-    }
+    let mut trans_sigs: Vec<_> = state.transitions.iter()
+        .filter(|(&_, &t)| t < dwa.states.len())
+        .filter_map(|(&label, &target)| {
+            let w = state.trans_weights.get(&label).map(|w| w & domain).unwrap_or_else(Weight::zeros);
+            if w.is_empty() { return None; }
+            let target_new = old_to_new.get(&target).copied().unwrap_or(usize::MAX);
+            Some((label, target_new, w.fast_hash()))
+        })
+        .collect();
     trans_sigs.sort();
     
     for (label, target, hash) in trans_sigs {
-        sig.push(label as u64);
-        sig.push(target as u64);
-        sig.push(hash);
+        sig.extend([label as u64, target as u64, hash]);
     }
-    
     sig
+}
+
+/// Group candidates by their structural signature.
+fn group_by_signature(
+    candidates: &[StateID],
+    dwa: &DWA,
+    needed: &[Weight],
+    old_to_new: &HashMap<StateID, StateID>,
+) -> HashMap<Vec<u64>, Vec<usize>> {
+    let mut sig_to_indices: HashMap<Vec<u64>, Vec<usize>> = HashMap::new();
+    for (idx, &s) in candidates.iter().enumerate() {
+        sig_to_indices.entry(compute_state_signature(s, dwa, needed, old_to_new))
+            .or_default().push(idx);
+    }
+    sig_to_indices
 }
 
 fn build_incompatibility_graph(
@@ -833,14 +631,12 @@ fn build_incompatibility_graph(
     let n = candidates.len();
     
     // For large candidate sets, use signature-based pre-grouping
-    // This avoids O(n²) are_compatible calls which are expensive
     if n > 200 {
         return build_incompatibility_graph_with_signatures(dwa, candidates, needed, old_to_new, new_states);
     }
     
     // For small sets, use the direct O(n²) approach
     let mut adj = vec![vec![]; n];
-
     for i in 0..n {
         for j in (i+1)..n {
             if !are_compatible(candidates[i], candidates[j], dwa, needed, old_to_new, new_states) {
@@ -860,76 +656,32 @@ fn build_incompatibility_graph_with_signatures(
     new_states: &[MergedStateBuilder]
 ) -> Vec<Vec<usize>> {
     let n = candidates.len();
-    
-    // Step 1: Compute signatures for all candidates
-    let signatures: Vec<Vec<u64>> = candidates.iter()
-        .map(|&s| compute_state_signature(s, dwa, needed, old_to_new))
-        .collect();
-    
-    // Step 2: Group candidates by signature
-    let mut sig_to_indices: HashMap<Vec<u64>, Vec<usize>> = HashMap::new();
-    for (idx, sig) in signatures.iter().enumerate() {
-        sig_to_indices.entry(sig.clone()).or_default().push(idx);
-    }
-    
+    let sig_to_indices = group_by_signature(candidates, dwa, needed, old_to_new);
     let num_groups = sig_to_indices.len();
     
     // FAST PATH: For very large problems with many signature groups,
-    // the cross-group comparison is O(groups² * avg_group_size²) which can be huge.
-    // Instead, assume cross-group states are incompatible (conservative but fast).
-    // This loses some diamond-case merging opportunities but avoids O(n²) blowup.
+    // assume cross-group states are incompatible (conservative but fast).
     if num_groups > 50 && n > 5000 {
-        // Only check pairs within the SAME signature group for incompatibility
         let mut adj = vec![vec![]; n];
-        
         for indices in sig_to_indices.values() {
-            if indices.len() <= 1 { continue; }
-            for i in 0..indices.len() {
-                for j in (i+1)..indices.len() {
-                    let idx_i = indices[i];
-                    let idx_j = indices[j];
-                    if !are_compatible(candidates[idx_i], candidates[idx_j], dwa, needed, old_to_new, new_states) {
-                        adj[idx_i].push(idx_j);
-                        adj[idx_j].push(idx_i);
-                    }
-                }
-            }
+            add_incompat_edges_within_group(&mut adj, indices, candidates, dwa, needed, old_to_new, new_states);
         }
-        
-        // We don't add cross-group edges because we'll handle this differently:
-        // We'll use signature-aware coloring that assigns different base colors to different signatures
         return adj;
     }
     
-    // Standard path for smaller problems
+    // Standard path: check within groups + cross-group domain overlaps
     let mut adj = vec![vec![]; n];
-    
-    // Check pairs within the same signature group
     for indices in sig_to_indices.values() {
-        if indices.len() <= 1 { continue; }
-        for i in 0..indices.len() {
-            for j in (i+1)..indices.len() {
-                let idx_i = indices[i];
-                let idx_j = indices[j];
-                if !are_compatible(candidates[idx_i], candidates[idx_j], dwa, needed, old_to_new, new_states) {
-                    adj[idx_i].push(idx_j);
-                    adj[idx_j].push(idx_i);
-                }
-            }
-        }
+        add_incompat_edges_within_group(&mut adj, indices, candidates, dwa, needed, old_to_new, new_states);
     }
     
     // Check cross-group domain overlaps
-    let sig_keys: Vec<&Vec<u64>> = sig_to_indices.keys().collect();
-    for i in 0..sig_keys.len() {
-        for j in (i+1)..sig_keys.len() {
-            let indices_i = &sig_to_indices[sig_keys[i]];
-            let indices_j = &sig_to_indices[sig_keys[j]];
-            
-            for &idx_i in indices_i {
-                for &idx_j in indices_j {
-                    let domain_overlap = &needed[candidates[idx_i]] & &needed[candidates[idx_j]];
-                    if !domain_overlap.is_empty() {
+    let groups: Vec<&Vec<usize>> = sig_to_indices.values().collect();
+    for i in 0..groups.len() {
+        for j in (i+1)..groups.len() {
+            for &idx_i in groups[i] {
+                for &idx_j in groups[j] {
+                    if !(&needed[candidates[idx_i]] & &needed[candidates[idx_j]]).is_empty() {
                         adj[idx_i].push(idx_j);
                         adj[idx_j].push(idx_i);
                     }
@@ -937,13 +689,33 @@ fn build_incompatibility_graph_with_signatures(
             }
         }
     }
-    
     adj
 }
 
+/// Add incompatibility edges for pairs within a signature group.
+fn add_incompat_edges_within_group(
+    adj: &mut Vec<Vec<usize>>,
+    indices: &[usize],
+    candidates: &[StateID],
+    dwa: &DWA,
+    needed: &[Weight],
+    old_to_new: &HashMap<StateID, StateID>,
+    new_states: &[MergedStateBuilder],
+) {
+    if indices.len() <= 1 { return; }
+    for i in 0..indices.len() {
+        for j in (i+1)..indices.len() {
+            let (idx_i, idx_j) = (indices[i], indices[j]);
+            if !are_compatible(candidates[idx_i], candidates[idx_j], dwa, needed, old_to_new, new_states) {
+                adj[idx_i].push(idx_j);
+                adj[idx_j].push(idx_i);
+            }
+        }
+    }
+}
+
 /// Fast O(n log n) coloring for very large height levels.
-/// Uses signatures to group states, assigns each signature group a unique color range.
-/// This is conservative (may produce more colors than optimal) but avoids O(n²) blowup.
+/// Each signature group gets its own color range; compatible states within a group share colors.
 fn solve_signature_based_coloring(
     dwa: &DWA,
     candidates: &[StateID],
@@ -954,69 +726,42 @@ fn solve_signature_based_coloring(
     let n = candidates.len();
     if n == 0 { return vec![]; }
     
-    // Step 1: Compute signatures for all candidates
-    let signatures: Vec<Vec<u64>> = candidates.iter()
-        .map(|&s| compute_state_signature(s, dwa, needed, old_to_new))
-        .collect();
+    let sig_to_indices = group_by_signature(candidates, dwa, needed, old_to_new);
     
-    // Step 2: Group candidates by signature
-    let mut sig_to_indices: HashMap<Vec<u64>, Vec<usize>> = HashMap::new();
-    for (idx, sig) in signatures.iter().enumerate() {
-        sig_to_indices.entry(sig.clone()).or_default().push(idx);
-    }
-    
-    // Debug: report signature distribution (only at high verbosity)
-    let num_groups = sig_to_indices.len();
-    let max_group_size = sig_to_indices.values().map(|v| v.len()).max().unwrap_or(0);
-    let singleton_groups = sig_to_indices.values().filter(|v| v.len() == 1).count();
     crate::debug!(6, "  Signature groups: {} total, {} singletons, max_group_size={}", 
-        num_groups, singleton_groups, max_group_size);
+        sig_to_indices.len(),
+        sig_to_indices.values().filter(|v| v.len() == 1).count(),
+        sig_to_indices.values().map(|v| v.len()).max().unwrap_or(0));
     
-    // Step 3: Assign colors
-    // Each signature group gets its own range of colors
-    // States with the same signature hash are LIKELY compatible, but we need to verify
     let mut colors = vec![0usize; n];
     let mut next_color = 0;
     
-    // Process signature groups
-    for (_sig, indices) in sig_to_indices.iter() {
+    for indices in sig_to_indices.values() {
         if indices.len() == 1 {
-            // Single state in group - assign one color
             colors[indices[0]] = next_color;
             next_color += 1;
         } else {
-            // Multiple states with same signature hash
-            // Build incompatibility graph within this group using full are_compatible checks
-            // This is O(m²) where m = group size, which is manageable for reasonable group sizes
+            // Build local incompatibility graph and color it
             let group_size = indices.len();
             let mut local_adj = vec![vec![]; group_size];
-            
             for i in 0..group_size {
                 for j in (i+1)..group_size {
-                    let idx_i = indices[i];
-                    let idx_j = indices[j];
-                    
-                    // Use full are_compatible check to verify actual compatibility
-                    if !are_compatible(candidates[idx_i], candidates[idx_j], dwa, needed, old_to_new, new_states) {
+                    if !are_compatible(candidates[indices[i]], candidates[indices[j]], dwa, needed, old_to_new, new_states) {
                         local_adj[i].push(j);
                         local_adj[j].push(i);
                     }
                 }
             }
             
-            // Use greedy coloring within this group
             let local_colors = solve_greedy_coloring(&local_adj);
             let local_max = local_colors.iter().max().copied().unwrap_or(0);
             
-            // Map local colors to global colors
             for (local_idx, &local_color) in local_colors.iter().enumerate() {
                 colors[indices[local_idx]] = next_color + local_color;
             }
-            
             next_color += local_max + 1;
         }
     }
-    
     colors
 }
 
@@ -1027,9 +772,7 @@ fn reconstruct_dwa(
     old_to_new: &HashMap<StateID, StateID>,
     builders: Vec<MergedStateBuilder>
 ) -> Result<DWA, DWABuildError> {
-    let mut new_dwa_states = DWAStates(Vec::with_capacity(builders.len()));
-
-    for b in builders {
+    let states: Vec<DWAState> = builders.into_iter().map(|b| {
         let mut state = DWAState::default();
         if !b.final_weight.is_empty() {
             state.final_weight = Some(b.final_weight);
@@ -1040,15 +783,13 @@ fn reconstruct_dwa(
                 state.trans_weights.insert(lbl, weight);
             }
         }
-        new_dwa_states.0.push(state);
-    }
-
-    let start_new = old_to_new.get(&start_old).copied().unwrap_or(0);
+        state
+    }).collect();
 
     Ok(DWA {
-        states: new_dwa_states,
+        states: DWAStates(states),
         body: crate::dwa_i32::dwa::DWABody {
-            start_state: start_new,
+            start_state: old_to_new.get(&start_old).copied().unwrap_or(0),
         },
     })
 }
