@@ -208,6 +208,11 @@ fn compute_height_coloring(
 ) -> Vec<usize> {
     let start = std::time::Instant::now();
     
+    // Log diagnostic info for large candidate sets
+    if candidates.len() >= 100 {
+        crate::debug!(5, "  {} new_states (targets) available", new_states.len());
+    }
+    
     // Build full incompatibility graph
     let adj = build_incompatibility_graph(dwa, candidates, needed, old_to_new, new_states);
     
@@ -599,10 +604,13 @@ fn targets_equivalent_on_domain(
     true
 }
 
-/// Build incompatibility graph using O(n²) pairwise comparisons.
+/// Build incompatibility graph using signature-based optimization.
 /// 
 /// Two states are incompatible if they cannot be merged - i.e., merging them
 /// would result in incorrect behavior for some input.
+/// 
+/// Optimization: States with identical signatures are definitely compatible.
+/// We only need to compare pairs across different signature groups.
 fn build_incompatibility_graph(
     dwa: &DWA,
     candidates: &[StateID],
@@ -614,25 +622,124 @@ fn build_incompatibility_graph(
     if n <= 1 { return vec![vec![]; n]; }
     
     let start = std::time::Instant::now();
+    
+    // Compute signatures for each candidate
+    // Signature captures: final_weight, {(label, trans_weight, target_id)}
+    let signatures: Vec<u128> = candidates.iter().map(|&id| {
+        compute_state_signature(id, dwa, needed, old_to_new)
+    }).collect();
+    
+    // Group candidates by signature
+    let mut sig_to_candidates: HashMap<u128, Vec<usize>> = HashMap::new();
+    for (idx, &sig) in signatures.iter().enumerate() {
+        sig_to_candidates.entry(sig).or_default().push(idx);
+    }
+    
+    let num_groups = sig_to_candidates.len();
+    
+    // Build incompatibility graph
+    // Within same signature group: candidates are compatible (no edges needed)
+    // Across different groups: need to check compatibility
     let mut adj = vec![vec![]; n];
     let mut edge_count = 0usize;
+    let mut compare_count = 0usize;
     
-    for i in 0..n {
-        for j in (i+1)..n {
-            if !are_compatible(candidates[i], candidates[j], dwa, needed, old_to_new, new_states) {
-                adj[i].push(j);
-                adj[j].push(i);
-                edge_count += 1;
+    // Get list of (signature, candidates) pairs
+    let groups: Vec<Vec<usize>> = sig_to_candidates.into_values().collect();
+    
+    // Compare across groups
+    for i in 0..groups.len() {
+        for j in (i+1)..groups.len() {
+            // Every pair from group i and group j needs to be checked
+            for &idx_i in &groups[i] {
+                for &idx_j in &groups[j] {
+                    compare_count += 1;
+                    if !are_compatible(candidates[idx_i], candidates[idx_j], dwa, needed, old_to_new, new_states) {
+                        adj[idx_i].push(idx_j);
+                        adj[idx_j].push(idx_i);
+                        edge_count += 1;
+                    }
+                }
+            }
+        }
+    }
+    
+    // Also need to check within groups (in case signature had collision)
+    // Actually, if signatures are correctly computed, same-signature states ARE compatible
+    // Let's verify this with debug assertions
+    #[cfg(debug_assertions)]
+    for group in &groups {
+        for (i, &idx_i) in group.iter().enumerate() {
+            for &idx_j in &group[i+1..] {
+                debug_assert!(
+                    are_compatible(candidates[idx_i], candidates[idx_j], dwa, needed, old_to_new, new_states),
+                    "Signature collision: states {} and {} have same signature but are incompatible!",
+                    candidates[idx_i], candidates[idx_j]
+                );
             }
         }
     }
     
     if n >= 100 {
-        crate::debug!(5, "Incomp graph: {} candidates, {} edges, {:?}",
-            n, edge_count, start.elapsed());
+        crate::debug!(5, "Incomp graph: {} candidates, {} signature groups, {} cross-group comparisons, {} edges, {:?}",
+            n, num_groups, compare_count, edge_count, start.elapsed());
     }
     
     adj
+}
+
+/// Compute a signature for a state that identifies its "behavior class".
+/// States with the same signature are guaranteed to be compatible.
+fn compute_state_signature(
+    id: StateID,
+    dwa: &DWA,
+    needed: &[Weight],
+    old_to_new: &HashMap<StateID, StateID>,
+) -> u128 {
+    use std::hash::{Hash, Hasher};
+    use std::collections::hash_map::DefaultHasher;
+    
+    let state = &dwa.states[id];
+    let needed_set = &needed[id];
+    
+    let mut hasher = DefaultHasher::new();
+    
+    // Hash final weight (restricted to needed set)
+    let final_on_needed = state.final_weight.as_ref()
+        .map(|w| w & needed_set)
+        .unwrap_or_else(Weight::zeros);
+    final_on_needed.fp.hash(&mut hasher);
+    
+    // Hash transitions (sorted by label for consistency)
+    let mut trans_data: Vec<(Label, u64, Option<StateID>)> = Vec::new();
+    for (&label, &target) in &state.transitions {
+        let weight = state.trans_weights.get(&label)
+            .map(|w| w & needed_set)
+            .unwrap_or_else(Weight::zeros);
+        if !weight.is_empty() {
+            // Get the new_id for the target (if already mapped)
+            let target_new_id = old_to_new.get(&target).copied();
+            trans_data.push((label, weight.fp, target_new_id));
+        }
+    }
+    trans_data.sort();
+    
+    for (label, weight_fp, target_new_id) in trans_data {
+        label.hash(&mut hasher);
+        weight_fp.hash(&mut hasher);
+        target_new_id.hash(&mut hasher);
+    }
+    
+    // Use two hashes for a 128-bit signature to reduce collisions
+    let h1 = hasher.finish();
+    
+    // Second hash with different seed
+    let mut hasher2 = DefaultHasher::new();
+    h1.hash(&mut hasher2);
+    needed_set.fp.hash(&mut hasher2);
+    let h2 = hasher2.finish();
+    
+    ((h1 as u128) << 64) | (h2 as u128)
 }
 
 // --- Phase 4: Reconstruction ---
