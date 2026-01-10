@@ -202,14 +202,35 @@ fn compute_height_coloring(
     old_to_new: &HashMap<StateID, StateID>,
     new_states: &[MergedStateBuilder],
 ) -> Vec<usize> {
-    // Build full incompatibility graph and solve coloring
-    // Using greedy for large graphs, exact for small ones
+    let start = std::time::Instant::now();
+    
+    // Build full incompatibility graph
     let adj = build_incompatibility_graph(dwa, candidates, needed, old_to_new, new_states);
-    if candidates.len() > 30 {
+    
+    let graph_time = start.elapsed();
+    
+    // Check for timeout - if graph construction took too long, abort
+    if graph_time.as_secs() > 60 {
+        eprintln!("ERROR: Graph construction took {:?} for {} candidates - aborting", 
+            graph_time, candidates.len());
+        std::process::exit(1);
+    }
+    
+    // Solve coloring: greedy for large graphs, exact for small ones
+    let colors = if candidates.len() > 30 {
         solve_greedy_coloring(&adj)
     } else {
         solve_exact_graph_coloring(&adj)
+    };
+    
+    let total_time = start.elapsed();
+    if total_time.as_secs() > 60 {
+        eprintln!("ERROR: Coloring took {:?} for {} candidates - aborting", 
+            total_time, candidates.len());
+        std::process::exit(1);
     }
+    
+    colors
 }
 
 /// Merge an old state into a builder at the given color index.
