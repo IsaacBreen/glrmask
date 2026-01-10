@@ -265,11 +265,72 @@ fn compute_height_0_coloring_direct(
     use std::collections::hash_map::DefaultHasher;
     
     let n = candidates.len();
-    let mut sig_to_color: HashMap<u64, usize> = HashMap::new();
+    
+    // First, analyze the structure to see if we can do better
+    // Compute needed footprints and signatures
+    let mut sig_groups: HashMap<u64, Vec<usize>> = HashMap::new();
+    let mut footprints: Vec<Weight> = Vec::with_capacity(n);
+    
+    for (idx, &id) in candidates.iter().enumerate() {
+        let final_on_needed = dwa.states[id].final_weight.as_ref()
+            .map(|w| w & &needed[id])
+            .unwrap_or_else(Weight::zeros);
+        
+        let mut hasher = DefaultHasher::new();
+        final_on_needed.fp.hash(&mut hasher);
+        let sig = hasher.finish();
+        
+        sig_groups.entry(sig).or_default().push(idx);
+        footprints.push(needed[id].clone());
+    }
+    
+    // Analyze overlap structure
+    let num_sigs = sig_groups.len();
+    
+    // Check how many signature pairs have disjoint footprints (could share colors)
+    let sig_list: Vec<(u64, Vec<usize>)> = sig_groups.into_iter().collect();
+    
+    // Compute footprint for each signature group (union of all members' footprints)
+    let sig_footprints: Vec<Weight> = sig_list.iter().map(|(_, indices)| {
+        let mut fp = Weight::zeros();
+        for &idx in indices {
+            fp |= &footprints[idx];
+        }
+        fp
+    }).collect();
+    
+    // Count compatible signature pairs
+    let mut compatible_sig_pairs = 0;
+    let mut total_sig_pairs = 0;
+    for i in 0..sig_list.len() {
+        for j in (i+1)..sig_list.len() {
+            total_sig_pairs += 1;
+            let overlap = &sig_footprints[i] & &sig_footprints[j];
+            if overlap.is_empty() {
+                compatible_sig_pairs += 1;
+            }
+        }
+    }
+    
+    // If most signature pairs are compatible (disjoint footprints), try interval scheduling
+    if compatible_sig_pairs > total_sig_pairs / 2 && num_sigs > 50 {
+        // Try greedy interval-scheduling style approach
+        // Sort signatures by footprint start (or size) and greedily assign colors
+        let colors = greedy_interval_coloring(&sig_list, &sig_footprints, n);
+        let num_colors = colors.iter().max().map(|c| c + 1).unwrap_or(0);
+        
+        crate::debug!(5, "Height 0 interval coloring: {} candidates, {} sigs, {}/{} compatible pairs -> {} colors in {:?}",
+            n, num_sigs, compatible_sig_pairs, total_sig_pairs, num_colors, start.elapsed());
+        
+        return colors;
+    }
+    
+    // Fall back to direct signature coloring
     let mut colors = Vec::with_capacity(n);
+    let mut sig_to_color: HashMap<u64, usize> = HashMap::new();
     let mut next_color = 0usize;
     
-    for &id in candidates {
+    for (idx, &id) in candidates.iter().enumerate() {
         let final_on_needed = dwa.states[id].final_weight.as_ref()
             .map(|w| w & &needed[id])
             .unwrap_or_else(Weight::zeros);
@@ -286,10 +347,68 @@ fn compute_height_0_coloring_direct(
         colors.push(color);
     }
     
-    crate::debug!(5, "Height 0 direct coloring: {} candidates -> {} colors in {:?}",
-        n, next_color, start.elapsed());
+    crate::debug!(5, "Height 0 direct coloring: {} candidates, {} sigs, {}/{} compatible pairs -> {} colors in {:?}",
+        n, num_sigs, compatible_sig_pairs, total_sig_pairs, next_color, start.elapsed());
     
     colors
+}
+
+/// Greedy interval-style coloring for height-0 states.
+/// Assigns colors greedily, trying to pack compatible signatures together.
+fn greedy_interval_coloring(
+    sig_list: &[(u64, Vec<usize>)],
+    sig_footprints: &[Weight],
+    total_states: usize,
+) -> Vec<usize> {
+    // Build incompatibility graph between signatures
+    // Two signatures are incompatible if their footprints overlap
+    let num_sigs = sig_list.len();
+    let mut sig_adj: Vec<Vec<usize>> = vec![vec![]; num_sigs];
+    
+    for i in 0..num_sigs {
+        for j in (i+1)..num_sigs {
+            let overlap = &sig_footprints[i] & &sig_footprints[j];
+            if !overlap.is_empty() {
+                sig_adj[i].push(j);
+                sig_adj[j].push(i);
+            }
+        }
+    }
+    
+    // Greedy color the signatures
+    let mut sig_colors: Vec<Option<usize>> = vec![None; num_sigs];
+    let mut num_colors = 0;
+    
+    // Sort signatures by degree (highest first) for better greedy coloring
+    let mut order: Vec<usize> = (0..num_sigs).collect();
+    order.sort_by(|&a, &b| sig_adj[b].len().cmp(&sig_adj[a].len()));
+    
+    for sig_idx in order {
+        let mut used_colors = std::collections::HashSet::new();
+        for &neighbor in &sig_adj[sig_idx] {
+            if let Some(c) = sig_colors[neighbor] {
+                used_colors.insert(c);
+            }
+        }
+        
+        // Find first available color
+        let color = (0..=num_colors).find(|c| !used_colors.contains(c)).unwrap();
+        sig_colors[sig_idx] = Some(color);
+        if color == num_colors {
+            num_colors += 1;
+        }
+    }
+    
+    // Map back to state colors
+    let mut state_colors = vec![0; total_states];
+    for (sig_idx, (_, state_indices)) in sig_list.iter().enumerate() {
+        let color = sig_colors[sig_idx].unwrap();
+        for &state_idx in state_indices {
+            state_colors[state_idx] = color;
+        }
+    }
+    
+    state_colors
 }
 
 /// Merge an old state into a builder at the given color index.
