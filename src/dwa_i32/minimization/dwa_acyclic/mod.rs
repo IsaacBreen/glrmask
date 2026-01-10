@@ -202,12 +202,12 @@ fn compute_height_coloring(
     old_to_new: &HashMap<StateID, StateID>,
     new_states: &[MergedStateBuilder],
 ) -> Vec<usize> {
-    if candidates.len() > 200 {
-        // Use fast signature-based coloring for large candidate sets
-        solve_signature_based_coloring(dwa, candidates, needed, old_to_new, new_states)
+    // Build full incompatibility graph and solve coloring
+    // Using greedy for large graphs, exact for small ones
+    let adj = build_incompatibility_graph(dwa, candidates, needed, old_to_new, new_states);
+    if candidates.len() > 30 {
+        solve_greedy_coloring(&adj)
     } else {
-        // Build incompatibility graph and solve exact coloring
-        let adj = build_incompatibility_graph(dwa, candidates, needed, old_to_new, new_states);
         solve_exact_graph_coloring(&adj)
     }
 }
@@ -574,53 +574,6 @@ fn targets_equivalent_on_domain(
     true
 }
 
-/// Compute a structural signature for a state.
-fn compute_state_signature(
-    state_id: StateID,
-    dwa: &DWA,
-    needed: &[Weight],
-    old_to_new: &HashMap<StateID, StateID>,
-) -> Vec<u64> {
-    let state = &dwa.states[state_id];
-    let domain = &needed[state_id];
-    
-    let mut sig = vec![
-        domain.fast_hash(),
-        state.final_weight.as_ref().map(|w| w & domain).unwrap_or_else(Weight::zeros).fast_hash(),
-    ];
-    
-    let mut trans_sigs: Vec<_> = state.transitions.iter()
-        .filter(|(&_, &t)| t < dwa.states.len())
-        .filter_map(|(&label, &target)| {
-            let w = state.trans_weights.get(&label).map(|w| w & domain).unwrap_or_else(Weight::zeros);
-            if w.is_empty() { return None; }
-            let target_new = old_to_new.get(&target).copied().unwrap_or(usize::MAX);
-            Some((label, target_new, w.fast_hash()))
-        })
-        .collect();
-    trans_sigs.sort();
-    
-    for (label, target, hash) in trans_sigs {
-        sig.extend([label as u64, target as u64, hash]);
-    }
-    sig
-}
-
-/// Group candidates by their structural signature.
-fn group_by_signature(
-    candidates: &[StateID],
-    dwa: &DWA,
-    needed: &[Weight],
-    old_to_new: &HashMap<StateID, StateID>,
-) -> HashMap<Vec<u64>, Vec<usize>> {
-    let mut sig_to_indices: HashMap<Vec<u64>, Vec<usize>> = HashMap::new();
-    for (idx, &s) in candidates.iter().enumerate() {
-        sig_to_indices.entry(compute_state_signature(s, dwa, needed, old_to_new))
-            .or_default().push(idx);
-    }
-    sig_to_indices
-}
-
 fn build_incompatibility_graph(
     dwa: &DWA,
     candidates: &[StateID],
@@ -630,12 +583,7 @@ fn build_incompatibility_graph(
 ) -> Vec<Vec<usize>> {
     let n = candidates.len();
     
-    // For large candidate sets, use signature-based pre-grouping
-    if n > 200 {
-        return build_incompatibility_graph_with_signatures(dwa, candidates, needed, old_to_new, new_states);
-    }
-    
-    // For small sets, use the direct O(n²) approach
+    // Always use the direct O(n²) approach to ensure all compatible states can be merged
     let mut adj = vec![vec![]; n];
     for i in 0..n {
         for j in (i+1)..n {
@@ -646,123 +594,6 @@ fn build_incompatibility_graph(
         }
     }
     adj
-}
-
-fn build_incompatibility_graph_with_signatures(
-    dwa: &DWA,
-    candidates: &[StateID],
-    needed: &[Weight],
-    old_to_new: &HashMap<StateID, StateID>,
-    new_states: &[MergedStateBuilder]
-) -> Vec<Vec<usize>> {
-    let n = candidates.len();
-    let sig_to_indices = group_by_signature(candidates, dwa, needed, old_to_new);
-    let num_groups = sig_to_indices.len();
-    
-    // FAST PATH: For very large problems with many signature groups,
-    // assume cross-group states are incompatible (conservative but fast).
-    if num_groups > 50 && n > 5000 {
-        let mut adj = vec![vec![]; n];
-        for indices in sig_to_indices.values() {
-            add_incompat_edges_within_group(&mut adj, indices, candidates, dwa, needed, old_to_new, new_states);
-        }
-        return adj;
-    }
-    
-    // Standard path: check within groups + cross-group domain overlaps
-    let mut adj = vec![vec![]; n];
-    for indices in sig_to_indices.values() {
-        add_incompat_edges_within_group(&mut adj, indices, candidates, dwa, needed, old_to_new, new_states);
-    }
-    
-    // Check cross-group domain overlaps
-    let groups: Vec<&Vec<usize>> = sig_to_indices.values().collect();
-    for i in 0..groups.len() {
-        for j in (i+1)..groups.len() {
-            for &idx_i in groups[i] {
-                for &idx_j in groups[j] {
-                    if !(&needed[candidates[idx_i]] & &needed[candidates[idx_j]]).is_empty() {
-                        adj[idx_i].push(idx_j);
-                        adj[idx_j].push(idx_i);
-                    }
-                }
-            }
-        }
-    }
-    adj
-}
-
-/// Add incompatibility edges for pairs within a signature group.
-fn add_incompat_edges_within_group(
-    adj: &mut Vec<Vec<usize>>,
-    indices: &[usize],
-    candidates: &[StateID],
-    dwa: &DWA,
-    needed: &[Weight],
-    old_to_new: &HashMap<StateID, StateID>,
-    new_states: &[MergedStateBuilder],
-) {
-    if indices.len() <= 1 { return; }
-    for i in 0..indices.len() {
-        for j in (i+1)..indices.len() {
-            let (idx_i, idx_j) = (indices[i], indices[j]);
-            if !are_compatible(candidates[idx_i], candidates[idx_j], dwa, needed, old_to_new, new_states) {
-                adj[idx_i].push(idx_j);
-                adj[idx_j].push(idx_i);
-            }
-        }
-    }
-}
-
-/// Fast O(n log n) coloring for very large height levels.
-/// Each signature group gets its own color range; compatible states within a group share colors.
-fn solve_signature_based_coloring(
-    dwa: &DWA,
-    candidates: &[StateID],
-    needed: &[Weight],
-    old_to_new: &HashMap<StateID, StateID>,
-    new_states: &[MergedStateBuilder],
-) -> Vec<usize> {
-    let n = candidates.len();
-    if n == 0 { return vec![]; }
-    
-    let sig_to_indices = group_by_signature(candidates, dwa, needed, old_to_new);
-    
-    crate::debug!(6, "  Signature groups: {} total, {} singletons, max_group_size={}", 
-        sig_to_indices.len(),
-        sig_to_indices.values().filter(|v| v.len() == 1).count(),
-        sig_to_indices.values().map(|v| v.len()).max().unwrap_or(0));
-    
-    let mut colors = vec![0usize; n];
-    let mut next_color = 0;
-    
-    for indices in sig_to_indices.values() {
-        if indices.len() == 1 {
-            colors[indices[0]] = next_color;
-            next_color += 1;
-        } else {
-            // Build local incompatibility graph and color it
-            let group_size = indices.len();
-            let mut local_adj = vec![vec![]; group_size];
-            for i in 0..group_size {
-                for j in (i+1)..group_size {
-                    if !are_compatible(candidates[indices[i]], candidates[indices[j]], dwa, needed, old_to_new, new_states) {
-                        local_adj[i].push(j);
-                        local_adj[j].push(i);
-                    }
-                }
-            }
-            
-            let local_colors = solve_greedy_coloring(&local_adj);
-            let local_max = local_colors.iter().max().copied().unwrap_or(0);
-            
-            for (local_idx, &local_color) in local_colors.iter().enumerate() {
-                colors[indices[local_idx]] = next_color + local_color;
-            }
-            next_color += local_max + 1;
-        }
-    }
-    colors
 }
 
 // --- Phase 4: Reconstruction ---
