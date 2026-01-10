@@ -324,7 +324,89 @@ pub fn minimize_acyclic_exact(dwa: &DWA) -> Result<DWA, DWABuildError> {
         dwa.states.len(), new_states.len(), total_start.elapsed());
 
     // 5. Reconstruct the Final DWA
-    reconstruct_dwa(dwa.body.start_state, &old_to_new, new_states)
+    let result = reconstruct_dwa(dwa.body.start_state, &old_to_new, new_states)?;
+    
+    // 6. Stochastic validation: sample random pairs and check for missed merges
+    // Only run when STOCHASTIC_MERGE_VALIDATION=1 is set
+    if std::env::var("STOCHASTIC_MERGE_VALIDATION").is_ok() {
+        stochastic_merge_validation(&result)?;
+    }
+    
+    Ok(result)
+}
+
+/// Stochastic validation: randomly sample pairs of states and check if any could be merged.
+/// If a significant number of mergeable pairs are found, it indicates that minimization
+/// is suboptimal.
+fn stochastic_merge_validation(dwa: &DWA) -> Result<(), DWABuildError> {
+    use rand::prelude::IndexedRandom;
+    use rand::SeedableRng;
+    
+    let n = dwa.states.len();
+    if n < 10 {
+        return Ok(()); // Too small to meaningfully validate
+    }
+    
+    // Sample up to 10000 random pairs
+    let num_samples = std::cmp::min(10000, n * n / 2);
+    let state_ids: Vec<StateID> = (0..n).collect();
+    
+    let mut rng = rand::rngs::StdRng::seed_from_u64(42); // Deterministic for reproducibility
+    let mut mergeable_count = 0;
+    let mut total_checked = 0;
+    
+    for _ in 0..num_samples {
+        // Pick two random distinct states
+        let pair: Vec<_> = state_ids.choose_multiple(&mut rng, 2).collect();
+        if pair.len() < 2 { continue; }
+        let (s1, s2) = (*pair[0], *pair[1]);
+        if s1 == s2 { continue; }
+        
+        total_checked += 1;
+        
+        // Check if they're compatible (could be merged)
+        // Two states are compatible if:
+        // 1. Same final weight (or both non-final)
+        // 2. Same transition targets for all labels
+        // 3. Same transition weights
+        let state1 = &dwa.states[s1];
+        let state2 = &dwa.states[s2];
+        
+        // Check final weights
+        if state1.final_weight != state2.final_weight {
+            continue;
+        }
+        
+        // Check transitions - need same domain, same targets
+        if state1.transitions != state2.transitions {
+            continue;
+        }
+        
+        // Check transition weights
+        if state1.trans_weights != state2.trans_weights {
+            continue;
+        }
+        
+        // Found a mergeable pair!
+        mergeable_count += 1;
+        crate::debug!(3, "STOCHASTIC: Found mergeable pair: {:?} and {:?}", s1, s2);
+    }
+    
+    // If we find a significant number of mergeable pairs, something is wrong
+    let mergeable_rate = mergeable_count as f64 / total_checked as f64;
+    crate::debug!(3, "STOCHASTIC: {} states, checked {} pairs, {} mergeable ({:.2}%)", 
+        n, total_checked, mergeable_count, mergeable_rate * 100.0);
+    
+    if mergeable_count > 0 {
+        // Any mergeable pairs after minimization suggests the minimization is not optimal
+        panic!(
+            "STOCHASTIC MERGE VALIDATION FAILED: Found {} mergeable pairs out of {} checked ({:.2}%). \
+             This suggests minimization is suboptimal.",
+            mergeable_count, total_checked, mergeable_rate * 100.0
+        );
+    }
+    
+    Ok(())
 }
 
 // --- Structures & Helpers ---
