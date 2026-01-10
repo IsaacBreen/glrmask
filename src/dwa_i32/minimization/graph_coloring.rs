@@ -22,6 +22,7 @@ pub fn solve_greedy_coloring(adj: &Vec<Vec<usize>>) -> Vec<usize> {
     let n = adj.len();
     if n == 0 { return vec![]; }
 
+    let start = std::time::Instant::now();
     let mut colors = vec![usize::MAX; n];
     
     // Sort by degree (high degree nodes first) - this heuristic often gives better results
@@ -40,6 +41,12 @@ pub fn solve_greedy_coloring(adj: &Vec<Vec<usize>>) -> Vec<usize> {
             c += 1;
         }
         colors[u] = c;
+    }
+    
+    let num_colors = colors.iter().max().map(|&c| c + 1).unwrap_or(0);
+    if n >= 100 {
+        crate::debug!(5, "Greedy graph coloring: {} nodes → {} colors in {:?}", 
+            n, num_colors, start.elapsed());
     }
     
     colors
@@ -67,9 +74,13 @@ pub fn solve_exact_graph_coloring(adj: &Vec<Vec<usize>>) -> Vec<usize> {
     // The exact solver has worst-case exponential time complexity
     // Reduced from 50 to 30 because even 45 nodes can cause 4+ second blowup on dense graphs
     if n > 30 {
+        if n >= 100 {
+            crate::debug!(5, "Exact coloring fallback to greedy: {} nodes exceeds threshold", n);
+        }
         return solve_greedy_coloring(adj);
     }
 
+    let start = std::time::Instant::now();
     let mut colors = vec![usize::MAX; n];
     let mut best_coloring = vec![0; n];
     let mut min_colors_found = n + 1;
@@ -122,6 +133,14 @@ pub fn solve_exact_graph_coloring(adj: &Vec<Vec<usize>>) -> Vec<usize> {
     }
 
     solve(0, 0, &nodes, adj, &mut colors, &mut min_colors_found, &mut best_coloring);
+    
+    // Log for reasonably large problems (the exact solver only handles <=30 nodes anyway)
+    let elapsed = start.elapsed();
+    if elapsed.as_millis() > 10 {
+        crate::debug!(5, "Exact graph coloring: {} nodes → {} colors in {:?}", 
+            n, min_colors_found, elapsed);
+    }
+    
     best_coloring
 }
 
