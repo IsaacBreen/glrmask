@@ -647,64 +647,110 @@ fn are_compatible(
     old_to_new: &HashMap<StateID, StateID>,
     new_states: &[MergedStateBuilder]
 ) -> bool {
-    let domain_overlap = &needed[u] & &needed[v];
+    let state_u = &dwa.states[u];
+    let state_v = &dwa.states[v];
     
-    // Helper: get weight restricted to overlap (or zeros if no final/trans weight)
-    let final_on_overlap = |s: StateID| -> Weight {
-        dwa.states[s].final_weight.as_ref()
-            .map(|w| w & &domain_overlap)
-            .unwrap_or_else(Weight::zeros)
-    };
-    
-    // Check final weights match on overlap
-    if !domain_overlap.is_empty() && final_on_overlap(u) != final_on_overlap(v) {
-        return false;
+    // Fast path: if fingerprints of needed sets are disjoint, states are trivially compatible
+    if needed[u].fp & needed[v].fp == 0 {
+        return true;
     }
     
-    // Check each label
-    let labels: BTreeSet<Label> = dwa.states[u].transitions.keys()
-        .chain(dwa.states[v].transitions.keys())
-        .copied().collect();
-
-    for lbl in labels {
-        // Get effective transition weights (empty if no transition or no weight)
-        let get_weight = |s: StateID| -> Weight {
-            dwa.states[s].transitions.get(&lbl)
-                .and_then(|_| dwa.states[s].trans_weights.get(&lbl))
-                .cloned()
-                .unwrap_or_else(Weight::zeros)
-        };
-        let w_u = get_weight(u);
-        let w_v = get_weight(v);
-
-        // On overlap domain, weights must match
-        if !domain_overlap.is_empty() {
-            let w_u_overlap = &w_u & &domain_overlap;
-            let w_v_overlap = &w_v & &domain_overlap;
-            if w_u_overlap != w_v_overlap {
-                return false;
-            }
-            // One has transition on overlap, other doesn't = incompatible
-            if w_u_overlap.is_empty() != w_v_overlap.is_empty() {
-                return false;
+    let domain_overlap = &needed[u] & &needed[v];
+    
+    // Check final weights match on overlap
+    if !domain_overlap.is_empty() {
+        let fw_u = state_u.final_weight.as_ref().map(|w| w & &domain_overlap).unwrap_or_else(Weight::zeros);
+        let fw_v = state_v.final_weight.as_ref().map(|w| w & &domain_overlap).unwrap_or_else(Weight::zeros);
+        if fw_u != fw_v {
+            return false;
+        }
+    }
+    
+    // Check labels unique to u
+    for (&lbl, &target_u) in &state_u.transitions {
+        if state_v.transitions.contains_key(&lbl) { continue; } // Will check shared labels below
+        
+        if let Some(w_u) = state_u.trans_weights.get(&lbl) {
+            // Check if u has live weight on domain overlap
+            if w_u.fp & domain_overlap.fp != 0 {
+                let w_u_overlap = w_u & &domain_overlap;
+                if !w_u_overlap.is_empty() {
+                    return false; // u has transition that v doesn't on their shared domain
+                }
             }
         }
-
-        // If both have live transitions, check targets are compatible
-        if !w_u.is_empty() && !w_v.is_empty() {
-            let tu = dwa.states[u].transitions.get(&lbl);
-            let tv = dwa.states[v].transitions.get(&lbl);
-            
-            match (tu, tv) {
-                (Some(&tu), Some(&tv)) => {
-                    if !targets_compatible(tu, tv, &w_u, &w_v, old_to_new, new_states) {
+    }
+    
+    // Check labels unique to v
+    for (&lbl, &target_v) in &state_v.transitions {
+        if state_u.transitions.contains_key(&lbl) { continue; } // Will check shared labels below
+        
+        if let Some(w_v) = state_v.trans_weights.get(&lbl) {
+            if w_v.fp & domain_overlap.fp != 0 {
+                let w_v_overlap = w_v & &domain_overlap;
+                if !w_v_overlap.is_empty() {
+                    return false; // v has transition that u doesn't on their shared domain
+                }
+            }
+        }
+    }
+    
+    // Check shared labels
+    for (&lbl, &target_u) in &state_u.transitions {
+        let target_v = match state_v.transitions.get(&lbl) {
+            Some(&t) => t,
+            None => continue, // Not shared
+        };
+        
+        let w_u = state_u.trans_weights.get(&lbl);
+        let w_v = state_v.trans_weights.get(&lbl);
+        
+        match (w_u, w_v) {
+            (Some(w_u), Some(w_v)) => {
+                // On overlap domain, weights must match
+                if !domain_overlap.is_empty() && w_u.fp & domain_overlap.fp != w_v.fp & domain_overlap.fp {
+                    // Fingerprints differ, do full intersection check
+                    let w_u_overlap = w_u & &domain_overlap;
+                    let w_v_overlap = w_v & &domain_overlap;
+                    if w_u_overlap != w_v_overlap {
+                        return false;
+                    }
+                } else if !domain_overlap.is_empty() {
+                    // Fingerprints same but non-zero: verify
+                    let w_u_overlap = w_u & &domain_overlap;
+                    let w_v_overlap = w_v & &domain_overlap;
+                    if w_u_overlap != w_v_overlap {
                         return false;
                     }
                 }
-                _ => return false, // Both have weights but one lacks target
+                
+                // If both have live weights, check targets are compatible
+                if !w_u.is_empty() && !w_v.is_empty() {
+                    if !targets_compatible(target_u, target_v, w_u, w_v, old_to_new, new_states) {
+                        return false;
+                    }
+                }
             }
+            (Some(w_u), None) => {
+                if w_u.fp & domain_overlap.fp != 0 {
+                    let w_u_overlap = w_u & &domain_overlap;
+                    if !w_u_overlap.is_empty() {
+                        return false;
+                    }
+                }
+            }
+            (None, Some(w_v)) => {
+                if w_v.fp & domain_overlap.fp != 0 {
+                    let w_v_overlap = w_v & &domain_overlap;
+                    if !w_v_overlap.is_empty() {
+                        return false;
+                    }
+                }
+            }
+            (None, None) => {}
         }
     }
+    
     true
 }
 
@@ -748,6 +794,13 @@ fn targets_equivalent_on_domain(
     let bu = &new_states[t_u];
     let bv = &new_states[t_v];
     
+    // Fast fingerprint pre-check for final weights
+    // If the final weight fingerprints masked by domain are different,
+    // then final weights definitely differ on domain
+    if (bu.final_weight.fp & domain.fp) != (bv.final_weight.fp & domain.fp) {
+        return false;
+    }
+    
     // Check final weights on domain
     let fw_u = &bu.final_weight & domain;
     let fw_v = &bv.final_weight & domain;
@@ -755,24 +808,69 @@ fn targets_equivalent_on_domain(
         return false;
     }
     
-    // Check transitions on domain
-    let all_labels: BTreeSet<Label> = bu.transitions.keys()
-        .chain(bv.transitions.keys())
-        .copied()
-        .collect();
+    // Check transitions on domain - collect all labels
+    let labels_u: BTreeSet<Label> = bu.transitions.keys().copied().collect();
+    let labels_v: BTreeSet<Label> = bv.transitions.keys().copied().collect();
     
-    for lbl in all_labels {
-        let (target_u, w_u) = bu.transitions.get(&lbl)
-            .map(|(t, w)| (*t, w & domain))
-            .unwrap_or((usize::MAX, Weight::zeros()));
-        let (target_v, w_v) = bv.transitions.get(&lbl)
-            .map(|(t, w)| (*t, w & domain))
-            .unwrap_or((usize::MAX, Weight::zeros()));
-        
-        if w_u != w_v || (!w_u.is_empty() && target_u != target_v) {
-            return false;
+    // Check labels unique to u
+    for &lbl in labels_u.difference(&labels_v) {
+        let (_, w_u) = bu.transitions.get(&lbl).unwrap();
+        // Fast fingerprint check
+        if w_u.fp & domain.fp != 0 {
+            let w_u_domain = w_u & domain;
+            if !w_u_domain.is_empty() {
+                return false; // u has live transition that v doesn't have
+            }
         }
     }
+    
+    // Check labels unique to v
+    for &lbl in labels_v.difference(&labels_u) {
+        let (_, w_v) = bv.transitions.get(&lbl).unwrap();
+        // Fast fingerprint check
+        if w_v.fp & domain.fp != 0 {
+            let w_v_domain = w_v & domain;
+            if !w_v_domain.is_empty() {
+                return false; // v has live transition that u doesn't have
+            }
+        }
+    }
+    
+    // Check shared labels
+    for &lbl in labels_u.intersection(&labels_v) {
+        let (target_u, w_u) = bu.transitions.get(&lbl).unwrap();
+        let (target_v, w_v) = bv.transitions.get(&lbl).unwrap();
+        
+        // Fast fingerprint check: if masked fingerprints are same AND targets same, skip
+        let fp_u_domain = w_u.fp & domain.fp;
+        let fp_v_domain = w_v.fp & domain.fp;
+        
+        if fp_u_domain != fp_v_domain {
+            // Fingerprints differ, need full check
+            let w_u_domain = w_u & domain;
+            let w_v_domain = w_v & domain;
+            if w_u_domain != w_v_domain {
+                return false;
+            }
+            // If weights equal after full intersection, targets must match if weights non-empty
+            if !w_u_domain.is_empty() && target_u != target_v {
+                return false;
+            }
+        } else if fp_u_domain != 0 {
+            // Fingerprints same but non-zero: need to verify weights match
+            // (fingerprint collision could hide difference)
+            let w_u_domain = w_u & domain;
+            let w_v_domain = w_v & domain;
+            if w_u_domain != w_v_domain {
+                return false;
+            }
+            if !w_u_domain.is_empty() && target_u != target_v {
+                return false;
+            }
+        }
+        // If both fingerprints are 0, weights on domain are definitely empty, so compatible
+    }
+    
     true
 }
 
@@ -951,14 +1049,28 @@ fn build_incompatibility_graph_general(
     let num_groups = sig_to_candidates.len();
     let groups: Vec<Vec<usize>> = sig_to_candidates.into_values().collect();
     
+    // Precompute needed-set fingerprints for each group for fast disjointness check
+    let group_needed_fp: Vec<u64> = groups.iter().map(|group| {
+        // Compute union of needed fingerprints in this group
+        group.iter().fold(0u64, |acc, &idx| acc | needed[candidates[idx]].fp)
+    }).collect();
+    
     // Build incompatibility graph
     let mut adj = vec![vec![]; n];
     let mut edge_count = 0usize;
     let mut compare_count = 0usize;
+    let mut skipped_disjoint = 0usize;
     
     // Compare across groups
     for i in 0..groups.len() {
         for j in (i+1)..groups.len() {
+            // Fast check: if group fingerprints are disjoint, all pairs are compatible
+            // (states with disjoint needed sets can always merge safely)
+            if group_needed_fp[i] & group_needed_fp[j] == 0 {
+                skipped_disjoint += groups[i].len() * groups[j].len();
+                continue;
+            }
+            
             for &idx_i in &groups[i] {
                 for &idx_j in &groups[j] {
                     compare_count += 1;
@@ -987,8 +1099,8 @@ fn build_incompatibility_graph_general(
     }
     
     if n >= 100 {
-        crate::debug!(5, "Incomp graph: {} candidates, {} signature groups, {} cross-group comparisons, {} edges, {:?}",
-            n, num_groups, compare_count, edge_count, start.elapsed());
+        crate::debug!(5, "Incomp graph: {} candidates, {} signature groups, {} cross-group comparisons, {} skipped (disjoint), {} edges, {:?}",
+            n, num_groups, compare_count, skipped_disjoint, edge_count, start.elapsed());
     }
     
     adj
