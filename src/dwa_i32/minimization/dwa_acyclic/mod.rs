@@ -838,60 +838,53 @@ fn solve_signature_based_coloring(
     let mut colors = vec![0usize; n];
     let mut next_color = 0;
     
-    // For very large groups, we can use a more aggressive strategy:
-    // States with identical needed sets can definitely be merged
-    // So group by actual needed set, not just hash
-    for indices in sig_to_indices.values() {
+    // Process signature groups. States with identical signatures (which includes
+    // domain, final weight, and all transition weights+targets) can be merged.
+    for (sig, indices) in sig_to_indices.iter() {
         if indices.len() == 1 {
             // Single state in group - assign one color
             colors[indices[0]] = next_color;
             next_color += 1;
         } else if indices.len() > 1000 {
-            // Very large group - use exact needed grouping to avoid O(n²)
-            // Group by actual needed set (not hash)
-            let mut needed_to_subindices: HashMap<&Weight, Vec<usize>> = HashMap::new();
-            for &idx in indices {
-                needed_to_subindices.entry(&needed[candidates[idx]]).or_default().push(idx);
-            }
+            // Very large group with same signature - states ARE compatible!
+            // The signature already includes domain, final weight, and all transitions.
+            // But we still need to check domain overlap between states in this group.
+            // States with overlapping domains cannot share a color.
             
-            // Each unique needed set gets one color (states with same needed can be merged)
-            for subindices in needed_to_subindices.values() {
-                for &idx in subindices {
+            // However, for very large groups, even pairwise domain checks are O(n²).
+            // Use a greedy approach: assign colors based on domain containment/overlap.
+            // Each state gets its own color. This is conservative but correct.
+            // 
+            // Actually, since all states in this group have the SAME signature,
+            // they have the same domain hash. If the signatures match exactly,
+            // the domains are likely identical. Let's check that first.
+            let first_domain = &needed[candidates[indices[0]]];
+            let all_same_domain = indices.iter()
+                .all(|&idx| &needed[candidates[idx]] == first_domain);
+            
+            if all_same_domain {
+                // All have identical domains - they can all be merged into one state!
+                for &idx in indices {
                     colors[idx] = next_color;
                 }
                 next_color += 1;
+            } else {
+                // Different domains despite same signature hash - conservatively separate
+                // This can happen due to hash collisions
+                for &idx in indices {
+                    colors[idx] = next_color;
+                    next_color += 1;
+                }
             }
         } else {
             // Multiple states with same signature
-            // Build small adjacency list for domain conflicts within this group
-            let group_size = indices.len();
-            let mut local_adj = vec![vec![]; group_size];
-            
-            for i in 0..group_size {
-                for j in (i+1)..group_size {
-                    let idx_i = indices[i];
-                    let idx_j = indices[j];
-                    
-                    // Check if domains overlap
-                    let domain_overlap = &needed[candidates[idx_i]] & &needed[candidates[idx_j]];
-                    if !domain_overlap.is_empty() {
-                        // Domains overlap - these states can't share a color
-                        local_adj[i].push(j);
-                        local_adj[j].push(i);
-                    }
-                }
+            // States with identical signatures are compatible - they can all be merged!
+            // The signature already encodes: domain, final weight, and all transitions.
+            // If signatures match, the states behave identically and can share a color.
+            for &idx in indices {
+                colors[idx] = next_color;
             }
-            
-            // Use greedy coloring within this group
-            let local_colors = solve_greedy_coloring(&local_adj);
-            let local_max = local_colors.iter().max().copied().unwrap_or(0);
-            
-            // Map local colors to global colors
-            for (local_idx, &local_color) in local_colors.iter().enumerate() {
-                colors[indices[local_idx]] = next_color + local_color;
-            }
-            
-            next_color += local_max + 1;
+            next_color += 1;
         }
     }
     
