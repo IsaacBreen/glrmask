@@ -2870,3 +2870,103 @@ fn test_minimize_disjoint_paths_merge() {
     assert_eq!(d.states.len(), 3, "Should minimize to 3 states");
 }
 
+/// Test: Cross-height merging via relaxed merge conditions.
+/// 
+/// This test verifies that the height-based algorithm with relaxed merge conditions
+/// can achieve optimal state counts even when states at different heights could
+/// theoretically be merged.
+/// 
+/// Structure:
+/// ```text
+/// s0: a->s1 [0,1], b->s2 [0], c->s3 [1]
+/// s1: final[0]              <- height 0
+/// s2: d->s4 [0], final[0]   <- height 1
+/// s3: final[1]              <- height 0
+/// s4: final[0]              <- height 0
+/// ```
+/// 
+/// The algorithm achieves 3 states by:
+/// 1. Height-0: Merging {s1, s3, s4} with final[0,1] (disjoint effective behavior)
+/// 2. Height-1: s2 maps to its own state
+/// 3. Transition weights adjusted to preserve semantics
+/// 
+/// This demonstrates that the relaxed merge conditions enable cross-path
+/// merging without explicitly implementing cross-height comparisons.
+#[test]
+fn test_minimize_cross_height_via_relaxed_conditions() {
+    let mut d = DWA::new();
+    let s1 = d.add_state();
+    let s2 = d.add_state();
+    let s3 = d.add_state();
+    let s4 = d.add_state();
+
+    // s0: a->s1 [0,1], b->s2 [0], c->s3 [1]
+    let w01 = Weight::from_item(0) | &Weight::from_item(1);
+    d.add_transition(0, b'a' as i32, s1, w01).unwrap();
+    d.add_transition(0, b'b' as i32, s2, Weight::from_item(0)).unwrap();
+    d.add_transition(0, b'c' as i32, s3, Weight::from_item(1)).unwrap();
+    
+    // s1: final[0]
+    d.set_final_weight(s1, Weight::from_item(0)).unwrap();
+    
+    // s2: d->s4 [0], final[0]
+    d.add_transition(s2, b'd' as i32, s4, Weight::from_item(0)).unwrap();
+    d.set_final_weight(s2, Weight::from_item(0)).unwrap();
+    
+    // s3: final[1]
+    d.set_final_weight(s3, Weight::from_item(1)).unwrap();
+    
+    // s4: final[0]
+    d.set_final_weight(s4, Weight::from_item(0)).unwrap();
+
+    // Capture expected behaviors
+    let a_before = d.eval_word_weight(&[b'a' as i32]);
+    let b_before = d.eval_word_weight(&[b'b' as i32]);
+    let bd_before = d.eval_word_weight(&[b'b' as i32, b'd' as i32]);
+    let c_before = d.eval_word_weight(&[b'c' as i32]);
+    let cd_before = d.eval_word_weight(&[b'c' as i32, b'd' as i32]);
+
+    println!("Before minimization ({} states):", d.states.len());
+    println!("  eval(a) = {:?}", a_before);
+    println!("  eval(b) = {:?}", b_before);
+    println!("  eval(b,d) = {:?}", bd_before);
+    println!("  eval(c) = {:?}", c_before);
+    println!("  eval(c,d) = {:?}", cd_before);
+
+    assert_eq!(a_before, Weight::from_item(0), "a path should accept token 0");
+    assert_eq!(b_before, Weight::from_item(0), "b path should accept token 0");
+    assert_eq!(bd_before, Weight::from_item(0), "b,d path should accept token 0");
+    assert_eq!(c_before, Weight::from_item(1), "c path should accept token 1");
+    assert_eq!(cd_before, Weight::zeros(), "c,d path should be rejected (s3 has no d transition)");
+
+    d.minimize();
+
+    let a_after = d.eval_word_weight(&[b'a' as i32]);
+    let b_after = d.eval_word_weight(&[b'b' as i32]);
+    let bd_after = d.eval_word_weight(&[b'b' as i32, b'd' as i32]);
+    let c_after = d.eval_word_weight(&[b'c' as i32]);
+    let cd_after = d.eval_word_weight(&[b'c' as i32, b'd' as i32]);
+
+    println!("After minimization ({} states):", d.states.len());
+    println!("  eval(a) = {:?}", a_after);
+    println!("  eval(b) = {:?}", b_after);
+    println!("  eval(b,d) = {:?}", bd_after);
+    println!("  eval(c) = {:?}", c_after);
+    println!("  eval(c,d) = {:?}", cd_after);
+    println!("\nMinimized DWA:\n{}", d);
+
+    // Semantics MUST be preserved
+    assert_eq!(a_before, a_after);
+    assert_eq!(b_before, b_after);
+    assert_eq!(bd_before, bd_after);
+    assert_eq!(c_before, c_after);
+    assert_eq!(cd_before, cd_after);
+
+    // The algorithm achieves optimal 3 states via:
+    // 1. Height-0 merging with disjoint needed masks
+    // 2. Transition weight adjustment during merge
+    assert_eq!(d.states.len(), 3, 
+        "Algorithm should achieve optimal 3 states via relaxed merge conditions");
+}
+
+
