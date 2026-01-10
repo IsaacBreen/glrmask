@@ -583,16 +583,39 @@ fn build_incompatibility_graph(
 ) -> Vec<Vec<usize>> {
     let n = candidates.len();
     
-    // Always use the direct O(n²) approach to ensure all compatible states can be merged
+    let start = std::time::Instant::now();
     let mut adj = vec![vec![]; n];
+    let mut edge_count = 0usize;
+    let mut skipped_disjoint = 0usize;
+    let mut full_checks = 0usize;
+    
     for i in 0..n {
         for j in (i+1)..n {
+            // Quick check: disjoint domains means compatible (no conflict possible)
+            let domain_overlap = &needed[candidates[i]] & &needed[candidates[j]];
+            if domain_overlap.is_empty() {
+                // Domains don't overlap, so no conflict on the overlap.
+                // But we still need to check if they share transition labels
+                // that go to incompatible targets.
+                // For now, do the full check - we can optimize later.
+                skipped_disjoint += 1;
+            }
+            
+            full_checks += 1;
             if !are_compatible(candidates[i], candidates[j], dwa, needed, old_to_new, new_states) {
                 adj[i].push(j);
                 adj[j].push(i);
+                edge_count += 1;
             }
         }
     }
+    
+    if n >= 100 {
+        let total_pairs = n * (n - 1) / 2;
+        crate::debug!(5, "Build incomp graph: {} candidates, {} pairs ({} disjoint), {} full checks, {} edges, {:?}",
+            n, total_pairs, skipped_disjoint, full_checks, edge_count, start.elapsed());
+    }
+    
     adj
 }
 
