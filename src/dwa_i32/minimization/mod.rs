@@ -129,7 +129,10 @@ impl DWA {
     }
 
     pub fn minimize_states(&mut self) -> bool {
-        if self.is_cyclic() {
+        let is_cyc = self.is_cyclic();
+        let before = self.states.len();
+        crate::debug!(4, "minimize_states: is_cyclic={}, {} states before", is_cyc, before);
+        if is_cyc {
             self.minimize_states_cyclic()
         } else {
             self.minimize_states_acyclic()

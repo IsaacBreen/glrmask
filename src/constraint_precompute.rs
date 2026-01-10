@@ -205,13 +205,19 @@ impl<'r> Precomputer1<'r> {
             // because at runtime we'll look up by the raw tokenizer state ID.
             // All tsids that map to the same representative get their own label but point
             // to the same root state.
+            let mut transitions_added = 0;
+            let mut unique_targets = std::collections::HashSet::new();
             for (tsid, rep_tsid) in &self.state_to_rep {
                 if let Some(&state) = self.roots.get(rep_tsid) {
                     let label = (tsid.0 + self.terminals_count) as Label;
                     let weight = Weight::from_rsb(RangeSetBlaze::from_iter([0..=self.internal_max_llm_token]));
                     self.nwa.add_transition(new_start_state, label, state, weight).unwrap();
+                    transitions_added += 1;
+                    unique_targets.insert(state);
                 }
             }
+            crate::debug!(3, "Symbol-heavy mode: added {} tsid transitions to {} unique root states", 
+                transitions_added, unique_targets.len());
         } else {
             // Weight-heavy mode: create epsilon transitions with tsid-masked weights
             // Group tsids by their representative to call create_tsid_set_mask once per group
@@ -285,8 +291,8 @@ impl<'r> Precomputer1<'r> {
             crate::debug!(5, "NWA: Found {} pairs of states connected by multiple transitions", parallel_connections);
         }
 
-        crate::debug!(5, "Terminal NWA: {} states, {} transitions", 
-                      self.nwa.states.len(), self.nwa.states.num_transitions());
+        crate::debug!(3, "Terminal NWA: {} states, {} transitions, num_tsids={}", 
+                      self.nwa.states.len(), self.nwa.states.num_transitions(), self.num_tsids);
 
         if std::env::var("DWA_DUMP_NWA").map(|v| v == "1").unwrap_or(false) {
             crate::debug!(5, "Dumping NWA to nwa_dump.json");
@@ -298,8 +304,15 @@ impl<'r> Precomputer1<'r> {
         // Pipeline: NWA minimize → compress → rm_epsilon → determinize → DWA minimize
         // Expected results: 14647 → 5904 → 5904 → 889 → 189 states
         let dwa = self.nwa.determinize_and_minimize("TerminalDWA");
-        crate::debug!(5, "Terminal DWA: {} states, {} transitions", 
-                      dwa.states.len(), dwa.states.num_transitions());
+        crate::debug!(3, "Terminal DWA: {} states, {} transitions, num_tsids={}", 
+                      dwa.states.len(), dwa.states.num_transitions(), self.num_tsids);
+
+        // Analyze terminal DWA structure
+        let start_state = &dwa.states[dwa.body.start_state];
+        let start_transitions = start_state.transitions.len();
+        let unique_trans_targets: std::collections::HashSet<_> = start_state.transitions.values().copied().collect();
+        crate::debug!(3, "Terminal DWA start state: {} transitions to {} unique targets", 
+            start_transitions, unique_trans_targets.len());
 
         dwa
     }

@@ -354,7 +354,8 @@ pub fn canonicalize_bundle(terminal_map: BTreeMap<Option<TerminalID>, Weight>) -
 /// 
 /// The resulting DWA is used at runtime for O(1) mask queries.
 pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
-    crate::debug!(4, "Starting Parser DWA construction");
+    crate::debug!(3, "Starting Parser DWA construction. Input terminal_nwa: {} states, {} transitions", 
+        terminal_nwa.states.len(), terminal_nwa.states.num_transitions());
     let now = Instant::now();
     let template_dwas = match build_template_dwas(parser) { Ok(m) => m, Err(e) => panic!("Failed to build template DWAs: {:?}", e), };
     let ignore_dwa = build_ignore_terminal_dwa();
@@ -796,6 +797,8 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
     }
 
     let combined_nwa = NWA { states: combined_nwa_states, body: NWABody { start_states: vec![combined_start_state] } };
+    crate::debug!(3, "Combined NWA before determinization: {} states, {} transitions, is_symbol_heavy={}", 
+        combined_nwa.states.len(), combined_nwa.states.num_transitions(), is_symbol_heavy);
     let mut final_dwa = finalize_and_optimize_and_determinize(parser, combined_nwa);
     // SKIP final minimization to test performance impact
     // final_dwa.minimize();
