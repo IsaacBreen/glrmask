@@ -214,9 +214,9 @@ impl NWA {
         let config = match context {
             "TerminalDWA" => DeterminizeAndMinimizeConfig {
                 // Full pipeline for Terminal DWA construction (precompute1)
-                // Current best: NWA minimize_rustfst → compress → rm_epsilon → determinize → DWA minimize
-                // Results: 14647 → 5904 → 5904 → 889 → 189 states
-                nwa_passes: vec![NwaPass::MinimizeRustfst, NwaPass::CompressTransitions, NwaPass::RmEpsilon],
+                // OPTIMIZATION: Skip rm_epsilon to save ~2s - determinization can handle epsilons
+                // Trade-off: determinization may be slightly slower but overall faster
+                nwa_passes: vec![NwaPass::MinimizeRustfst, NwaPass::CompressTransitions],
                 dwa_passes: vec![DwaPass::Minimize, DwaPass::ConsolidateRanges],
             },
             "TemplateDWA" => DeterminizeAndMinimizeConfig {
