@@ -809,7 +809,7 @@ fn solve_signature_based_coloring(
     candidates: &[StateID],
     needed: &[Weight],
     old_to_new: &HashMap<StateID, StateID>,
-    _new_states: &[MergedStateBuilder],
+    new_states: &[MergedStateBuilder],
 ) -> Vec<usize> {
     let n = candidates.len();
     if n == 0 { return vec![]; }
@@ -834,57 +834,46 @@ fn solve_signature_based_coloring(
     
     // Step 3: Assign colors
     // Each signature group gets its own range of colors
-    // Within a group, we use greedy coloring based on domain conflicts
+    // States with the same signature hash are LIKELY compatible, but we need to verify
     let mut colors = vec![0usize; n];
     let mut next_color = 0;
     
-    // Process signature groups. States with identical signatures (which includes
-    // domain, final weight, and all transition weights+targets) can be merged.
-    for (sig, indices) in sig_to_indices.iter() {
+    // Process signature groups
+    for (_sig, indices) in sig_to_indices.iter() {
         if indices.len() == 1 {
             // Single state in group - assign one color
             colors[indices[0]] = next_color;
             next_color += 1;
-        } else if indices.len() > 1000 {
-            // Very large group with same signature - states ARE compatible!
-            // The signature already includes domain, final weight, and all transitions.
-            // But we still need to check domain overlap between states in this group.
-            // States with overlapping domains cannot share a color.
-            
-            // However, for very large groups, even pairwise domain checks are O(n²).
-            // Use a greedy approach: assign colors based on domain containment/overlap.
-            // Each state gets its own color. This is conservative but correct.
-            // 
-            // Actually, since all states in this group have the SAME signature,
-            // they have the same domain hash. If the signatures match exactly,
-            // the domains are likely identical. Let's check that first.
-            let first_domain = &needed[candidates[indices[0]]];
-            let all_same_domain = indices.iter()
-                .all(|&idx| &needed[candidates[idx]] == first_domain);
-            
-            if all_same_domain {
-                // All have identical domains - they can all be merged into one state!
-                for &idx in indices {
-                    colors[idx] = next_color;
-                }
-                next_color += 1;
-            } else {
-                // Different domains despite same signature hash - conservatively separate
-                // This can happen due to hash collisions
-                for &idx in indices {
-                    colors[idx] = next_color;
-                    next_color += 1;
-                }
-            }
         } else {
-            // Multiple states with same signature
-            // States with identical signatures are compatible - they can all be merged!
-            // The signature already encodes: domain, final weight, and all transitions.
-            // If signatures match, the states behave identically and can share a color.
-            for &idx in indices {
-                colors[idx] = next_color;
+            // Multiple states with same signature hash
+            // Build incompatibility graph within this group using full are_compatible checks
+            // This is O(m²) where m = group size, which is manageable for reasonable group sizes
+            let group_size = indices.len();
+            let mut local_adj = vec![vec![]; group_size];
+            
+            for i in 0..group_size {
+                for j in (i+1)..group_size {
+                    let idx_i = indices[i];
+                    let idx_j = indices[j];
+                    
+                    // Use full are_compatible check to verify actual compatibility
+                    if !are_compatible(candidates[idx_i], candidates[idx_j], dwa, needed, old_to_new, new_states) {
+                        local_adj[i].push(j);
+                        local_adj[j].push(i);
+                    }
+                }
             }
-            next_color += 1;
+            
+            // Use greedy coloring within this group
+            let local_colors = solve_greedy_coloring(&local_adj);
+            let local_max = local_colors.iter().max().copied().unwrap_or(0);
+            
+            // Map local colors to global colors
+            for (local_idx, &local_color) in local_colors.iter().enumerate() {
+                colors[indices[local_idx]] = next_color + local_color;
+            }
+            
+            next_color += local_max + 1;
         }
     }
     
