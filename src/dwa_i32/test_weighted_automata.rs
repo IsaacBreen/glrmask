@@ -2690,3 +2690,183 @@ fn test_minimize_no_false_merge_when_targets_differ() {
     // States should NOT be merged since targets differ on combined domain
     // (This test ensures we don't have false positives from the relaxed conditions)
 }
+
+/// Test: Cross-height merging opportunity that height-based algorithm misses.
+/// 
+/// This test demonstrates a case where states at DIFFERENT heights can be merged
+/// when they have disjoint weight domains, but our height-based algorithm won't find it.
+/// 
+/// Example DWA:
+/// ```text
+/// s0: a->s1 [0], d->s2 [1]
+/// s1: b->s3 [0], final[0]
+/// s2: final[1]
+/// s3: final[0]
+/// ```
+/// 
+/// Heights: s2=0, s3=0, s1=1, s0=2
+/// 
+/// Height-based minimization:
+/// - H0: s2 (final[1]) vs s3 (final[0]) -> different finals -> can't merge
+/// - H1: s1 alone
+/// - Result: 4 states
+/// 
+/// But s1 and s2 COULD be merged because:
+/// - s1 receives weight [0] from a-transition
+/// - s2 receives weight [1] from d-transition  
+/// - These are DISJOINT! They never both accept the same token.
+/// 
+/// Cross-height optimal merge (3 states):
+/// ```text
+/// s0: a->s1' [0], d->s1' [1]
+/// s1': final[0,1], b->s3 [0]
+/// s3: final[0]
+/// ```
+/// 
+/// Verification:
+/// - Path "a": [0] & [0,1] = [0] ✓
+/// - Path "a,b": [0] & [0] & [0] = [0] ✓
+/// - Path "d": [1] & [0,1] = [1] ✓
+/// - Path "d,b": [1] & [0] = [] (rejected, same as original) ✓
+#[test]
+fn test_minimize_cross_height_merge_opportunity() {
+    let mut d = DWA::new();
+    let s1 = d.add_state();
+    let s2 = d.add_state();
+    let s3 = d.add_state();
+
+    // s0: a->s1 [0], d->s2 [1]
+    d.add_transition(0, b'a' as i32, s1, Weight::from_item(0)).unwrap();
+    d.add_transition(0, b'd' as i32, s2, Weight::from_item(1)).unwrap();
+    
+    // s1: b->s3 [0], final[0]
+    d.add_transition(s1, b'b' as i32, s3, Weight::from_item(0)).unwrap();
+    d.set_final_weight(s1, Weight::from_item(0)).unwrap();
+    
+    // s2: final[1]
+    d.set_final_weight(s2, Weight::from_item(1)).unwrap();
+    
+    // s3: final[0]
+    d.set_final_weight(s3, Weight::from_item(0)).unwrap();
+
+    // Capture expected behaviors
+    let a_before = d.eval_word_weight(&[b'a' as i32]);
+    let ab_before = d.eval_word_weight(&[b'a' as i32, b'b' as i32]);
+    let d_before = d.eval_word_weight(&[b'd' as i32]);
+    let db_before = d.eval_word_weight(&[b'd' as i32, b'b' as i32]);
+
+    println!("Before minimization ({} states):", d.states.len());
+    println!("  eval(a) = {:?}", a_before);
+    println!("  eval(a,b) = {:?}", ab_before);
+    println!("  eval(d) = {:?}", d_before);
+    println!("  eval(d,b) = {:?}", db_before);
+
+    assert_eq!(a_before, Weight::from_item(0));
+    assert_eq!(ab_before, Weight::from_item(0));
+    assert_eq!(d_before, Weight::from_item(1));
+    assert_eq!(db_before, Weight::zeros(), "d,b should be rejected (s2 has no b transition)");
+
+    // Minimize
+    d.minimize();
+
+    // Verify semantics preserved
+    let a_after = d.eval_word_weight(&[b'a' as i32]);
+    let ab_after = d.eval_word_weight(&[b'a' as i32, b'b' as i32]);
+    let d_after = d.eval_word_weight(&[b'd' as i32]);
+    let db_after = d.eval_word_weight(&[b'd' as i32, b'b' as i32]);
+
+    println!("After minimization ({} states):", d.states.len());
+    println!("  eval(a) = {:?}", a_after);
+    println!("  eval(a,b) = {:?}", ab_after);
+    println!("  eval(d) = {:?}", d_after);
+    println!("  eval(d,b) = {:?}", db_after);
+    println!("\nMinimized DWA:\n{}", d);
+
+    assert_eq!(a_before, a_after);
+    assert_eq!(ab_before, ab_after);
+    assert_eq!(d_before, d_after);
+    assert_eq!(db_before, db_after);
+
+    // Document the current behavior vs optimal
+    // Height-based algorithm produces 4 states
+    // Optimal cross-height merge would produce 3 states
+    println!("\nNote: Height-based algorithm produces {} states", d.states.len());
+    println!("Optimal cross-height merge could produce 3 states");
+    println!("This is a known limitation of the height-based approach.");
+    
+    // The current implementation should produce 4 states
+    // If we implement cross-height merging, this assertion should change to 3
+    assert!(d.states.len() <= 4, "Should produce at most 4 states (or 3 with cross-height merging)");
+}
+
+/// Test: Disjoint weight paths should merge when targets are compatible.
+/// 
+/// This tests the relaxed merge conditions when states have transitions
+/// to the same target with different weights.
+/// 
+/// Structure:
+/// ```text
+/// s0: a->s1 [0], b->s2 [1]
+/// s1: c->s3 [0]
+/// s2: c->s4 [1]
+/// s3: final[0]
+/// s4: final[1]
+/// ```
+/// 
+/// Expected minimization:
+/// - H0: s3,s4 merge to s3' (disjoint needed masks [0] vs [1])
+/// - H1: s1,s2 merge to s1' (same target s3', targets_equivalent on combined [0,1])
+/// - Result: 3 states
+#[test]
+fn test_minimize_disjoint_paths_merge() {
+    let mut d = DWA::new();
+    let s1 = d.add_state();
+    let s2 = d.add_state();
+    let s3 = d.add_state();
+    let s4 = d.add_state();
+
+    // s0: a->s1 [0], b->s2 [1]
+    d.add_transition(0, b'a' as i32, s1, Weight::from_item(0)).unwrap();
+    d.add_transition(0, b'b' as i32, s2, Weight::from_item(1)).unwrap();
+    
+    // s1: c->s3 [0]
+    d.add_transition(s1, b'c' as i32, s3, Weight::from_item(0)).unwrap();
+    
+    // s2: c->s4 [1]
+    d.add_transition(s2, b'c' as i32, s4, Weight::from_item(1)).unwrap();
+    
+    // s3: final[0], s4: final[1]
+    d.set_final_weight(s3, Weight::from_item(0)).unwrap();
+    d.set_final_weight(s4, Weight::from_item(1)).unwrap();
+
+    // Expected paths
+    let ac_before = d.eval_word_weight(&[b'a' as i32, b'c' as i32]);
+    let bc_before = d.eval_word_weight(&[b'b' as i32, b'c' as i32]);
+    
+    println!("Before minimization ({} states):", d.states.len());
+    println!("  eval(a,c) = {:?}", ac_before);
+    println!("  eval(b,c) = {:?}", bc_before);
+    
+    assert_eq!(ac_before, Weight::from_item(0));
+    assert_eq!(bc_before, Weight::from_item(1));
+
+    d.minimize();
+
+    let ac_after = d.eval_word_weight(&[b'a' as i32, b'c' as i32]);
+    let bc_after = d.eval_word_weight(&[b'b' as i32, b'c' as i32]);
+    
+    println!("After minimization ({} states):", d.states.len());
+    println!("  eval(a,c) = {:?}", ac_after);
+    println!("  eval(b,c) = {:?}", bc_after);
+    println!("\nMinimized DWA:\n{}", d);
+
+    assert_eq!(ac_before, ac_after);
+    assert_eq!(bc_before, bc_after);
+    
+    // Should minimize to 3 states:
+    // - Start state with a,b transitions
+    // - Merged s1,s2 with c transition
+    // - Merged s3,s4 with final[0,1]
+    assert_eq!(d.states.len(), 3, "Should minimize to 3 states");
+}
+
