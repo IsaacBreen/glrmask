@@ -890,6 +890,14 @@ pub fn finalize_and_optimize_and_determinize(parser: &GLRParser, mut combined_nw
     prune_continuations_from_final_states(&mut combined_nwa);
     crate::debug!(4, "Pruned continuations from final states. NWA with {} states and {} transitions remaining.", combined_nwa.states.len(), combined_nwa.states.num_transitions());
     
+    // After pruning continuations, some transitions may become empty and states may become unreachable.
+    // Prune dead ends before determinization to reduce the NWA size significantly.
+    let before_prune = combined_nwa.states.len();
+    combined_nwa.prune_dead_ends();
+    combined_nwa.prune_unreachable();
+    crate::debug!(4, "After pruning dead ends: NWA {} -> {} states, {} transitions", 
+        before_prune, combined_nwa.states.len(), combined_nwa.states.num_transitions());
+    
     // Use unified determinize_and_minimize with "FinalDWA" profile
     // Pipeline: determinize → prune_dead_ends → minimize
     let dwa = combined_nwa.determinize_and_minimize("FinalDWA");
