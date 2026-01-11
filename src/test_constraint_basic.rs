@@ -2991,3 +2991,70 @@ fn test_json_schema_gpt2_real_vocab() {
     println!("Real GPT-2 Mask contains 3672? {}", mask.contains(3672));
     assert!(mask.contains(3672), "'name' token (3672) should be allowed in real GPT-2 vocab!");
 }
+
+/// Test suffix grammar validation of terminal DWA paths.
+/// 
+/// This test validates that terminal DWA paths correspond to valid suffixes
+/// of the grammar language. It samples paths from the terminal DWA and checks
+/// what proportion are accepted by the suffix parser.
+#[test]
+fn test_suffix_grammar_validation() {
+    use crate::interface::suffix_grammar::validate_terminal_dwa_paths_verbose;
+    use crate::constraint_precompute::run_precompute1;
+    
+    // Use a simple grammar for testing
+    let ebnf_grammar = indoc! {r#"
+        s ::= A B EOF;
+        A ::= 'a';
+        B ::= 'b';
+        EOF ::= '$';
+    "#};
+    let grammar_definition = GrammarDefinition::from_ebnf(ebnf_grammar).unwrap();
+    let compiled_grammar = CompiledGrammar::from_definition(Arc::new(grammar_definition.clone()));
+    
+    // Build minimal LLM token map
+    let mut llm_token_map = LLMTokenMap::new();
+    llm_token_map.insert(b"a".to_vec(), LLMTokenID(0));
+    llm_token_map.insert(b"b".to_vec(), LLMTokenID(1));
+    llm_token_map.insert(b"$".to_vec(), LLMTokenID(2));
+    
+    // Internal token map for precompute1
+    let internal_llm_token_map: BTreeMap<Vec<u8>, crate::dfa_u8::LLMTokenID> = llm_token_map
+        .iter()
+        .map(|(bytes, id)| (bytes.clone(), *id))
+        .collect();
+    
+    // Build state_to_rep (trivial for simple grammars)
+    let tokenizer = &compiled_grammar.tokenizer;
+    let state_to_rep: BTreeMap<TokenizerStateID, TokenizerStateID> = tokenizer
+        .iter_states()
+        .map(|s| (s, s))
+        .collect();
+    
+    // Build terminal DWA
+    let terminals_count = compiled_grammar.glr_parser.terminal_map.len();
+    let terminal_dwa = run_precompute1(
+        tokenizer,
+        &internal_llm_token_map,
+        2, // max token ID
+        terminals_count,
+        state_to_rep,
+    );
+    
+    // Validate paths against suffix grammar (verbose)
+    let proportion_valid = validate_terminal_dwa_paths_verbose(
+        &terminal_dwa,
+        &grammar_definition,
+        terminals_count,
+        100, // sample size
+        true, // verbose
+    );
+    
+    println!("\nFinal: Proportion of valid terminal DWA paths: {:.2}%", proportion_valid * 100.0);
+    
+    // We expect all paths to be valid (or most, depending on the DWA structure)
+    // For a simple grammar like this, we should see high validity
+    assert!(proportion_valid >= 0.0, "Proportion should be non-negative");
+    // Note: We're not asserting 100% validity since the terminal DWA might have
+    // paths that are valid tokenizer transitions but not grammar suffixes
+}

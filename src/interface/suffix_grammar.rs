@@ -148,18 +148,54 @@ pub fn grammar_to_suffix_grammar(grammar: &GrammarDefinition) -> GrammarDefiniti
         }
     }
     
-    // Find the new start production (S•)
+    // Find the new start production (S•) and move it to index 0
+    // This is required because generate_glr_parser_with_maps hardcodes start_production_id = 0
     let original_start_name = &grammar.productions[grammar.start_production_id].lhs.0;
     let suffix_start_name = suffix_nonterminal_name(original_start_name);
     
     // Find the index of the first suffix start production
-    let new_start_production_id = new_productions
+    let suffix_start_idx = new_productions
         .iter()
         .position(|p| p.lhs.0 == suffix_start_name)
         .expect("Suffix start production must exist");
     
+    // Reorder productions: put suffix start first, then other suffix, then helpers, then original
+    // This is required because generate_glr_parser_with_maps hardcodes start_production_id = 0
+    let mut reordered_productions = Vec::new();
+    
+    // First, collect all suffix start productions (the ones for the start nonterminal's suffix)
+    for prod in &new_productions {
+        if prod.lhs.0 == suffix_start_name {
+            reordered_productions.push(prod.clone());
+        }
+    }
+    
+    // Then, collect all OTHER suffix productions (non-start suffix nonterminals)
+    for prod in &new_productions {
+        if prod.lhs.0.ends_with(SUFFIX_MARKER) && prod.lhs.0 != suffix_start_name {
+            reordered_productions.push(prod.clone());
+        }
+    }
+    
+    // Then, collect all terminal helper productions (needed by suffix productions)
+    for prod in &new_productions {
+        if prod.lhs.0.starts_with(TERMINAL_HELPER_PREFIX) {
+            reordered_productions.push(prod.clone());
+        }
+    }
+    
+    // Finally, collect original productions (needed for the "tail" after suffix)
+    for prod in &new_productions {
+        if !prod.lhs.0.ends_with(SUFFIX_MARKER) && !prod.lhs.0.starts_with(TERMINAL_HELPER_PREFIX) {
+            reordered_productions.push(prod.clone());
+        }
+    }
+    
+    // Now reordered_productions[0] should be a suffix start production
+    let new_start_production_id = 0;
+    
     GrammarDefinition {
-        productions: new_productions,
+        productions: reordered_productions,
         start_production_id: new_start_production_id,
         literal_to_group_id: new_literal_to_group_id,
         regex_name_to_group_id: new_regex_name_to_group_id,
@@ -167,6 +203,146 @@ pub fn grammar_to_suffix_grammar(grammar: &GrammarDefinition) -> GrammarDefiniti
         ignore_terminal_ids: grammar.ignore_terminal_ids.clone(),
         external_name_to_group_id: grammar.external_name_to_group_id.clone(),
     }
+}
+
+/// Validate terminal DWA paths against the suffix grammar.
+/// 
+/// Samples paths from the terminal DWA and checks what proportion are accepted
+/// by the suffix parser. This validates that the terminal DWA isn't generating
+/// spurious paths that don't correspond to valid grammar derivations.
+///
+/// # Arguments
+/// * `dwa` - The terminal DWA to sample paths from
+/// * `grammar` - The original grammar definition
+/// * `terminals_count` - Number of terminals in the grammar (labels < this are terminal IDs)
+/// * `num_samples` - Number of paths to sample
+///
+/// # Returns
+/// The proportion of sampled paths that are accepted (0.0 to 1.0)
+pub fn validate_terminal_dwa_paths(
+    dwa: &crate::dwa_i32::DWA,
+    grammar: &GrammarDefinition,
+    terminals_count: usize,
+    num_samples: usize,
+) -> f64 {
+    validate_terminal_dwa_paths_verbose(dwa, grammar, terminals_count, num_samples, false)
+}
+
+/// Verbose version of validate_terminal_dwa_paths that prints debug info
+pub fn validate_terminal_dwa_paths_verbose(
+    dwa: &crate::dwa_i32::DWA,
+    grammar: &GrammarDefinition,
+    terminals_count: usize,
+    num_samples: usize,
+    verbose: bool,
+) -> f64 {
+    use crate::interface::CompiledGrammar;
+    use crate::glr::table::TerminalID;
+    use rand::Rng;
+    use std::sync::Arc;
+    
+    if verbose {
+        println!("\n=== Original Grammar ===");
+        println!("Productions:");
+        for (i, prod) in grammar.productions.iter().enumerate() {
+            let marker = if i == grammar.start_production_id { " <-- START" } else { "" };
+            println!("  {}: {}{}", i, prod, marker);
+        }
+        println!("\nLiteral to group_id:");
+        for (val, id) in &grammar.literal_to_group_id {
+            println!("  {:?} -> {}", val, id);
+        }
+        println!("\nRegex name to group_id:");
+        for (name, id) in &grammar.regex_name_to_group_id {
+            println!("  {} -> {}", name, id);
+        }
+    }
+    
+    // Build suffix grammar and compile it
+    let suffix_grammar = grammar_to_suffix_grammar(grammar);
+    
+    if verbose {
+        println!("\n=== Suffix Grammar Productions ===");
+        for (i, prod) in suffix_grammar.productions.iter().enumerate() {
+            let marker = if i == suffix_grammar.start_production_id { " <-- START" } else { "" };
+            println!("  {}: {}{}", i, prod, marker);
+        }
+    }
+    
+    let suffix_compiled = CompiledGrammar::from_definition(Arc::new(suffix_grammar));
+    let suffix_parser = suffix_compiled.glr_parser();
+    
+    if verbose {
+        println!("\n=== Suffix Parser Terminal Map ===");
+        for (term, tid) in suffix_parser.terminal_map.iter() {
+            println!("  {:?} -> TerminalID({})", term, tid.0);
+        }
+        
+        // Print the parser table to understand what's happening
+        println!("\n=== Suffix Parser Table (first few rows) ===");
+        println!("{}", suffix_parser);
+    }
+    
+    // Sample paths from the terminal DWA
+    let mut rng = rand::thread_rng();
+    let paths = dwa.sample_paths(num_samples, &mut rng);
+    
+    if verbose {
+        println!("\n=== Terminal DWA Info ===");
+        println!("  States: {}", dwa.states.len());
+        println!("  Transitions: {}", dwa.states.num_transitions());
+        println!("  Terminals count: {}", terminals_count);
+        println!("  Sampled {} paths", paths.len());
+    }
+    
+    if paths.is_empty() {
+        return 1.0; // No paths = vacuously valid
+    }
+    
+    let mut valid_count = 0;
+    
+    for (i, path) in paths.iter().enumerate() {
+        // Extract terminal labels (filter out TSID labels which are >= terminals_count)
+        let terminal_ids: Vec<TerminalID> = path
+            .iter()
+            .map(|(label, _state)| *label as usize)
+            .filter(|&label| label < terminals_count)
+            .map(|label| TerminalID(label))
+            .collect();
+        
+        // Parse the terminal sequence with the suffix parser
+        let state = suffix_parser.parse(&terminal_ids, None);
+        let is_valid = state.is_ok();
+        
+        if verbose && i < 10 {
+            let all_labels: Vec<_> = path.iter().map(|(l, _)| *l).collect();
+            let term_labels: Vec<_> = terminal_ids.iter().map(|t| t.0).collect();
+            println!("\nPath {}: all_labels={:?}, terminal_ids={:?}, valid={}", 
+                     i, all_labels, term_labels, is_valid);
+            
+            // Debug: step through parsing terminal by terminal
+            if !is_valid && !terminal_ids.is_empty() {
+                let mut debug_state = suffix_parser.init_glr_parser(None);
+                println!("  Initial: is_ok={}", debug_state.is_ok());
+                for (j, tid) in terminal_ids.iter().enumerate() {
+                    debug_state.step(*tid);
+                    println!("  After step {}: terminal={}, is_ok={}", 
+                             j, tid.0, debug_state.is_ok());
+                }
+            }
+        }
+        
+        if is_valid {
+            valid_count += 1;
+        }
+    }
+    
+    if verbose {
+        println!("\nValid: {}/{} ({:.2}%)", valid_count, paths.len(), 
+                 100.0 * valid_count as f64 / paths.len() as f64);
+    }
+    
+    valid_count as f64 / paths.len() as f64
 }
 
 /// Get the original nonterminal name from a suffix nonterminal name
