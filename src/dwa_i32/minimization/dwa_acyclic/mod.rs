@@ -1,7 +1,5 @@
-mod consolidate_ranges;
+// Partition-based minimization - internal, only used in tests
 mod partition_minimize;
-
-pub use partition_minimize::minimize_partition_based;
 
 use crate::dwa_i32::common::{Label, StateID, Weight};
 use crate::dwa_i32::dwa::{DWA, DWABuildError, DWAState, DWAStates};

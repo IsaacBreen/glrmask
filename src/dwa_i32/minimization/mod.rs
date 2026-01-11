@@ -20,6 +20,7 @@
 //! "active" token domains are disjoint.
 
 pub mod common;
+mod consolidate_ranges;  // Range consolidation pass (general, works for any DWA)
 pub mod dwa_acyclic;
 pub mod dwa_cyclic;
 pub mod graph_coloring;
