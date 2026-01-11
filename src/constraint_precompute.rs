@@ -306,6 +306,9 @@ impl<'r> Precomputer1<'r> {
         let dwa = self.nwa.determinize_and_minimize("TerminalDWA");
         crate::debug!(3, "Terminal DWA: {} states, {} transitions, num_tsids={}", 
                       dwa.states.len(), dwa.states.num_transitions(), self.num_tsids);
+        if let Some(avg_path_len) = dwa.average_path_length() {
+            crate::debug!(4, "Terminal DWA average path length: {:.2}", avg_path_len);
+        }
 
         // Analyze terminal DWA structure
         let start_state = &dwa.states[dwa.body.start_state];

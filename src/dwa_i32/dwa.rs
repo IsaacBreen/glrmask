@@ -147,6 +147,88 @@ impl DWA {
         format!("States: {}, Transitions: {}", self.states.len(), self.states.iter().map(|s| s.transitions.len()).sum::<usize>())
     }
 
+    /// Computes the average path length across all paths from start to final states.
+    /// 
+    /// Returns None if the DWA is cyclic (infinite paths) or has no paths.
+    /// 
+    /// For an acyclic DWA, this computes:
+    /// - total_paths: number of distinct paths from start to any final state  
+    /// - total_length: sum of lengths of all paths
+    /// - average = total_length / total_paths
+    /// 
+    /// Uses O(n + m) time via topological order + dynamic programming.
+    pub fn average_path_length(&self) -> Option<f64> {
+        let n = self.states.len();
+        if n == 0 { return None; }
+        if self.is_cyclic() { return None; }
+        
+        let start = self.body.start_state;
+        if start >= n { return None; }
+        
+        // Build reverse adjacency for topological sort
+        let mut in_degree = vec![0usize; n];
+        for u in 0..n {
+            for &v in self.states[u].transitions.values() {
+                if v < n { in_degree[v] += 1; }
+            }
+        }
+        
+        // Topological sort (Kahn's algorithm)
+        let mut topo = Vec::with_capacity(n);
+        let mut queue = std::collections::VecDeque::new();
+        for (i, &deg) in in_degree.iter().enumerate() {
+            if deg == 0 { queue.push_back(i); }
+        }
+        while let Some(u) = queue.pop_front() {
+            topo.push(u);
+            for &v in self.states[u].transitions.values() {
+                if v < n {
+                    in_degree[v] -= 1;
+                    if in_degree[v] == 0 { queue.push_back(v); }
+                }
+            }
+        }
+        if topo.len() != n { return None; } // Shouldn't happen if is_cyclic() returned false
+        
+        // Forward pass: count paths and sum of lengths reaching each state
+        // paths_to[u] = number of paths from start to u
+        // length_sum_to[u] = sum of path lengths from start to u (summed over all paths)
+        let mut paths_to = vec![0u64; n];
+        let mut length_sum_to = vec![0u64; n];
+        
+        paths_to[start] = 1;
+        length_sum_to[start] = 0;
+        
+        for &u in &topo {
+            if paths_to[u] == 0 { continue; } // Not reachable from start
+            
+            for &v in self.states[u].transitions.values() {
+                if v < n {
+                    // Each path to u contributes one path to v with length+1
+                    paths_to[v] += paths_to[u];
+                    // Sum of lengths to v: sum of (length_to_u + 1) for each path
+                    // = length_sum_to[u] + paths_to[u] (one more step per path)
+                    length_sum_to[v] += length_sum_to[u] + paths_to[u];
+                }
+            }
+        }
+        
+        // Sum up paths and lengths to final states
+        let mut total_paths: u64 = 0;
+        let mut total_length: u64 = 0;
+        
+        for u in 0..n {
+            if self.states[u].final_weight.is_some() && paths_to[u] > 0 {
+                total_paths += paths_to[u];
+                total_length += length_sum_to[u];
+            }
+        }
+        
+        if total_paths == 0 { return None; }
+        
+        Some(total_length as f64 / total_paths as f64)
+    }
+
     /// Counts the total number of ranges across all weights in this DWA.
     /// This includes final weights and transition weights.
     /// Note: If the same weight object appears multiple times, its ranges are counted each time.

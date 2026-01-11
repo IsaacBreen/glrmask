@@ -820,6 +820,9 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
     // SKIP final minimization to test performance impact
     // final_dwa.minimize();
     crate::debug!(4, "Parser DWA construction complete. Stats: {}", final_dwa.stats());
+    if let Some(avg_path_len) = final_dwa.average_path_length() {
+        crate::debug!(4, "Parser DWA average path length: {:.2}", avg_path_len);
+    }
 
     final_dwa
 }
