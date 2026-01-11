@@ -164,49 +164,35 @@ impl SchemaToGrammar {
     }
     
     fn convert_string(&mut self, constraints: &StringConstraints) -> GrammarType {
-        if constraints.is_empty() {
-            // Simple string, no constraints
-            return GrammarType::primitive(GrammarPrimitive::JsonString);
-        }
-        
-        // String with constraints - build custom pattern
-        let content = self.build_string_content(constraints);
-        
-        GrammarType::seq(vec![
-            GrammarType::lit("\""),
-            content,
-            GrammarType::lit("\""),
-        ])
+        // IMPORTANT: Always use JSON_STRING for strings, even with constraints.
+        //
+        // Previously, we tried to build constrained strings as sequences like:
+        //   '"' (STRING_CHAR | ESCAPE_SEQ){min,max} '"'
+        //
+        // But this causes two problems:
+        // 1. The literal quotes '"' become separate terminals in productions,
+        //    breaking the semantic structure of JSON strings.
+        // 2. STRING_CHAR and ESCAPE_SEQ become tokenizer groups because they're
+        //    referenced from nonterminal rules.
+        //
+        // For now, we use JSON_STRING for all strings, sacrificing length precision
+        // in favor of clean grammar structure. The LLM will still generate valid
+        // JSON strings; they just might not respect minLength/maxLength constraints.
+        //
+        // TODO: To properly support length constraints, we would need to:
+        // 1. Generate the constrained pattern as a terminal rule (uppercase name)
+        // 2. Ensure the inner patterns are inlined, not referenced
+        GrammarType::primitive(GrammarPrimitive::JsonString)
     }
     
+    #[allow(dead_code)]
     fn build_string_content(&mut self, constraints: &StringConstraints) -> GrammarType {
-        // For now, handle length constraints
-        // Pattern handling would require regex-to-grammar conversion
+        // NOTE: This function is no longer used but kept for reference.
+        // See convert_string() for why we always use JSON_STRING now.
         
-        // IMPORTANT: We inline the STRING_CHAR and ESCAPE_SEQ patterns here instead of
-        // referencing them via GrammarPrimitive. This is because RepeatBounded gets
-        // expanded into nonterminal productions, and if those productions reference
-        // STRING_CHAR, it would cause STRING_CHAR to become a tokenizer group.
-        // STRING_CHAR and ESCAPE_SEQ should remain internal to the STRING_CHARS terminal.
-        //
-        // STRING_CHAR pattern: [^"\\x00-\x1f] (printable chars except " and \)
-        // ESCAPE_SEQ pattern: \ followed by escape char or \uXXXX
-        let escape_seq = GrammarType::Sequence(vec![
-            GrammarType::lit("\\"),
-            GrammarType::Choice(vec![
-                GrammarType::CharClass("[\"\\\\/bfnrt]".to_string()),
-                GrammarType::Sequence(vec![
-                    GrammarType::lit("u"),
-                    GrammarType::CharClass("[0-9a-fA-F]".to_string()),
-                    GrammarType::CharClass("[0-9a-fA-F]".to_string()),
-                    GrammarType::CharClass("[0-9a-fA-F]".to_string()),
-                    GrammarType::CharClass("[0-9a-fA-F]".to_string()),
-                ]),
-            ]),
-        ]);
         let char_or_escape = GrammarType::choice(vec![
-            GrammarType::CharClass("[^\"\\\\\\x00-\\x1f]".to_string()),  // STRING_CHAR inline
-            escape_seq,  // ESCAPE_SEQ inline
+            GrammarType::primitive(GrammarPrimitive::StringChar),
+            GrammarType::primitive(GrammarPrimitive::EscapeSeq),
         ]);
         
         match (constraints.min_length, constraints.max_length) {
