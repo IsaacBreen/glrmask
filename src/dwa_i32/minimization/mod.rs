@@ -71,11 +71,14 @@ impl DWA {
     /// Dispatches to acyclic or cyclic implementation based on graph structure.
     /// Both paths now use the exact Diamond-aware algorithm with SCC support.
     pub fn minimize(&mut self) {
-        if self.is_cyclic() {
-            self.minimize_cyclic();
-        } else {
-            self.minimize_acyclic();
-        }
+        // TEMPORARY: Force cyclic version for all DWAs to test correctness
+        // TODO: Restore acyclic dispatch once cyclic is verified to work correctly
+        // if self.is_cyclic() {
+        //     self.minimize_cyclic();
+        // } else {
+        //     self.minimize_acyclic();
+        // }
+        self.minimize_cyclic();
     }
 
     /// Basic pruning without full minimization.
@@ -142,12 +145,15 @@ impl DWA {
         let is_cyc = self.is_cyclic();
         let before = self.states.len();
         crate::debug!(4, "minimize_states: is_cyclic={}, {} states before", is_cyc, before);
-        if is_cyc {
-            self.minimize_states_cyclic()
-        } else {
-            self.minimize_acyclic();
-            true
-        }
+        // TEMPORARY: Force cyclic version for all DWAs to test correctness
+        // TODO: Restore acyclic dispatch once cyclic is verified to work correctly
+        // if is_cyc {
+        //     self.minimize_states_cyclic()
+        // } else {
+        //     self.minimize_acyclic();
+        //     true
+        // }
+        self.minimize_states_cyclic()
     }
 
     pub fn loosen_weights_for_minimize(&mut self) -> bool {

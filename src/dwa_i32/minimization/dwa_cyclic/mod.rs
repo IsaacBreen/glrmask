@@ -1,8 +1,8 @@
-//! DWA minimization passes.
+//! DWA minimization passes for cyclic automata.
 //!
-//! This module provides cyclic-specific DWA minimization. The primary algorithm
-//! is `minimize_exact` which extends the acyclic Diamond-aware algorithm to handle
-//! cycles via SCC decomposition and fixed-point iteration.
+//! This module provides cyclic-specific DWA minimization and optimization passes.
+//! The primary algorithm is partition refinement which is guaranteed to preserve
+//! semantics, though it may not achieve optimal state count.
 
 mod prune_unreachable;
 mod prune_dead_ends;
@@ -11,7 +11,6 @@ mod push_to_initial;
 mod residuated_push;
 mod loosen_weights;
 mod minimize;
-mod minimize_exact;
 mod rebuild;
 
 use super::common::{Partition, MAX_OPTIMIZE_ITERATIONS, DwaPass};
@@ -24,20 +23,17 @@ use rustfst::prelude::MinimizeConfig;
 use std::collections::HashSet;
 
 impl DWA {
-    /// Minimizes a cyclic DWA using the exact Diamond-aware algorithm.
+    /// Minimizes a cyclic DWA using partition refinement.
     /// 
-    /// This uses SCC decomposition and fixed-point iteration to extend
-    /// the acyclic algorithm to handle cycles. Falls back to partition
-    /// refinement if the exact algorithm fails.
+    /// This is the safe, conservative approach that preserves semantics.
+    /// It may not achieve optimal state count but is guaranteed correct.
     pub fn minimize_cyclic(&mut self) {
-        eprintln!("WARNING: Using cyclic minimization. This may be poorly optimized.");
-
         if self.states.len() == 0 {
             return;
         }
 
-        // Use the exact minimization algorithm (SCC-based extension of acyclic)
-        self.minimize_exact();
+        // Use simple partition refinement - guaranteed to preserve semantics
+        self.minimize_states_cyclic();
     }
 
     /// Performs linear-time optimizations only (Pruning, Weight Pushing).
