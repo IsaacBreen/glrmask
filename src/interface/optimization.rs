@@ -456,7 +456,7 @@ impl<'a> GrammarOptimizer<'a> {
         // Clear ignore terminal IDs since we're replacing the entire grammar
         self.grammar.ignore_terminal_ids.clear();
 
-        let start_nt = NonTerminal("start'".to_string());
+        let start_nt = NonTerminal("start__aug".to_string());
         self.grammar.productions = vec![
             Production {
                 lhs: start_nt,

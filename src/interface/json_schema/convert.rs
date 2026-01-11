@@ -22,7 +22,7 @@
 use super::types::*;
 use crate::dfa_u8::string_utils::escape_string_for_json;
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 /// Context for schema-to-grammar conversion
 pub struct SchemaToGrammar {
@@ -32,6 +32,8 @@ pub struct SchemaToGrammar {
     rules: Vec<(String, GrammarType)>,
     /// Track which primitives are needed
     needs: PrimitiveNeeds,
+    /// Track which constrained string rules have been defined (to avoid duplicates)
+    defined_string_rules: HashSet<String>,
 }
 
 /// Tracks which primitive JSON types are needed by the grammar
@@ -49,6 +51,7 @@ impl SchemaToGrammar {
             rule_counter: 0,
             rules: Vec::new(),
             needs: PrimitiveNeeds::default(),
+            defined_string_rules: HashSet::new(),
         }
     }
     
@@ -164,25 +167,72 @@ impl SchemaToGrammar {
     }
     
     fn convert_string(&mut self, constraints: &StringConstraints) -> GrammarType {
-        // IMPORTANT: Always use JSON_STRING for strings, even with constraints.
+        // For unconstrained strings, use the simple JSON_STRING primitive
+        if constraints.min_length.is_none() && constraints.max_length.is_none() {
+            return GrammarType::primitive(GrammarPrimitive::JsonString);
+        }
+        
+        // For constrained strings, we need to create a terminal rule.
+        // Terminal rules (uppercase names) are processed differently - they become
+        // tokenizer patterns rather than parser productions.
         //
-        // Previously, we tried to build constrained strings as sequences like:
-        //   '"' (STRING_CHAR | ESCAPE_SEQ){min,max} '"'
-        //
-        // But this causes two problems:
-        // 1. The literal quotes '"' become separate terminals in productions,
-        //    breaking the semantic structure of JSON strings.
-        // 2. STRING_CHAR and ESCAPE_SEQ become tokenizer groups because they're
-        //    referenced from nonterminal rules.
-        //
-        // For now, we use JSON_STRING for all strings, sacrificing length precision
-        // in favor of clean grammar structure. The LLM will still generate valid
-        // JSON strings; they just might not respect minLength/maxLength constraints.
-        //
-        // TODO: To properly support length constraints, we would need to:
-        // 1. Generate the constrained pattern as a terminal rule (uppercase name)
-        // 2. Ensure the inner patterns are inlined, not referenced
-        GrammarType::primitive(GrammarPrimitive::JsonString)
+        // The pattern is: '"' (char_or_escape){min,max} '"'
+        // where char_or_escape is inlined as [^"\\x00-\x1f] | \\["\\\/bfnrt] | \\uHHHH
+        
+        let min = constraints.min_length.unwrap_or(0) as usize;
+        let max = constraints.max_length.map(|m| m as usize);
+        
+        // Generate a unique terminal name based on constraints
+        let name = match max {
+            Some(max_val) => format!("STRING_LEN_{}_{}", min, max_val),
+            None => format!("STRING_LEN_{}_INF", min),
+        };
+        
+        // If we've already defined this constrained string type, just return a reference
+        if self.defined_string_rules.contains(&name) {
+            return GrammarType::RuleRef(name);
+        }
+        
+        // Mark this constraint combination as defined
+        self.defined_string_rules.insert(name.clone());
+        
+        // Build the inner pattern: (STRING_CHAR | ESCAPE_SEQ){min,max}
+        // We inline the character class and escape sequence patterns to avoid
+        // them becoming separate tokenizer groups.
+        let char_or_escape = GrammarType::choice(vec![
+            // STRING_CHAR: any printable char except " and \
+            GrammarType::CharClass("[^\"\\\\\\x00-\\x1f]".to_string()),
+            // ESCAPE_SEQ: \x where x is one of the escape chars, or \uHHHH
+            GrammarType::seq(vec![
+                GrammarType::lit("\\"),
+                GrammarType::choice(vec![
+                    GrammarType::CharClass("[\"\\\\/bfnrt]".to_string()),
+                    GrammarType::seq(vec![
+                        GrammarType::lit("u"),
+                        GrammarType::CharClass("[0-9a-fA-F]".to_string()),
+                        GrammarType::CharClass("[0-9a-fA-F]".to_string()),
+                        GrammarType::CharClass("[0-9a-fA-F]".to_string()),
+                        GrammarType::CharClass("[0-9a-fA-F]".to_string()),
+                    ]),
+                ]),
+            ]),
+        ]);
+        
+        // Build the full string pattern with quotes and bounded repetition
+        let content = GrammarType::RepeatBounded {
+            min,
+            max,
+            inner: Box::new(char_or_escape),
+        };
+        
+        let full_pattern = GrammarType::seq(vec![
+            GrammarType::lit("\""),
+            content,
+            GrammarType::lit("\""),
+        ]);
+        
+        // Create a rule definition with an uppercase name (terminal convention)
+        GrammarType::RuleDefinition(name.clone(), Box::new(full_pattern))
     }
     
     #[allow(dead_code)]

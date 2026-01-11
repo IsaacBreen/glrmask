@@ -782,7 +782,9 @@ impl GrammarDefinition {
             b'\t' => "\\t".to_string(),
             b'\\' => "\\\\".to_string(),
             b']' => "\\]".to_string(),
+            b'[' => "\\[".to_string(),
             b'-' => "\\-".to_string(),
+            b'^' => "\\^".to_string(),
             32..=126 => (b as char).to_string(),
             _ => format!("\\x{:02x}", b),
         }
@@ -1550,13 +1552,13 @@ impl GrammarDefinition {
         let mut per_base_counters: HashMap<String, usize> = HashMap::new();
         let mut memo: BTreeMap<GrammarExpr, NonTerminal> = BTreeMap::new();
 
-        let mut start_production_name = "start'".to_string();
+        let mut start_production_name = "start__aug".to_string();
         let nonterminal_names_from_rules: HashSet<&str> =
             grammar_exprs.iter().map(|(name, _)| name.as_str()).collect();
         while nonterminal_names_from_rules.contains(start_production_name.as_str())
             || all_names.contains(&start_production_name)
         {
-            start_production_name.push('\'');
+            start_production_name.push('_');
         }
         all_names.insert(start_production_name.clone());
         debug!(5, "Augmented start_production_name: {:?}", start_production_name);

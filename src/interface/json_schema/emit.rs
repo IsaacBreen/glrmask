@@ -9,6 +9,7 @@
 
 use super::types::*;
 use crate::interface::GrammarExpr;
+use std::collections::HashSet;
 
 /// Emitter that converts GrammarType to GrammarExpr
 pub struct GrammarEmitter {
@@ -16,6 +17,8 @@ pub struct GrammarEmitter {
     rules: Vec<(String, GrammarExpr)>,
     /// Track which primitives have been added
     primitives_added: bool,
+    /// Track which rule names have been emitted (to avoid duplicates)
+    emitted_rules: HashSet<String>,
 }
 
 impl GrammarEmitter {
@@ -23,6 +26,7 @@ impl GrammarEmitter {
         Self {
             rules: Vec::new(),
             primitives_added: false,
+            emitted_rules: HashSet::new(),
         }
     }
     
@@ -85,8 +89,12 @@ impl GrammarEmitter {
             }
             
             GrammarType::RuleDefinition(name, body) => {
-                let expr = self.emit(body);
-                self.rules.push((name.clone(), expr.clone()));
+                // Only emit the rule definition once
+                if !self.emitted_rules.contains(name) {
+                    self.emitted_rules.insert(name.clone());
+                    let expr = self.emit(body);
+                    self.rules.push((name.clone(), expr.clone()));
+                }
                 GrammarExpr::Ref(name.clone())
             }
             
