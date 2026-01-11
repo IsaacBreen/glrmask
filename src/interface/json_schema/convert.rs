@@ -183,9 +183,30 @@ impl SchemaToGrammar {
         // For now, handle length constraints
         // Pattern handling would require regex-to-grammar conversion
         
+        // IMPORTANT: We inline the STRING_CHAR and ESCAPE_SEQ patterns here instead of
+        // referencing them via GrammarPrimitive. This is because RepeatBounded gets
+        // expanded into nonterminal productions, and if those productions reference
+        // STRING_CHAR, it would cause STRING_CHAR to become a tokenizer group.
+        // STRING_CHAR and ESCAPE_SEQ should remain internal to the STRING_CHARS terminal.
+        //
+        // STRING_CHAR pattern: [^"\\x00-\x1f] (printable chars except " and \)
+        // ESCAPE_SEQ pattern: \ followed by escape char or \uXXXX
+        let escape_seq = GrammarType::Sequence(vec![
+            GrammarType::lit("\\"),
+            GrammarType::Choice(vec![
+                GrammarType::CharClass("[\"\\\\/bfnrt]".to_string()),
+                GrammarType::Sequence(vec![
+                    GrammarType::lit("u"),
+                    GrammarType::CharClass("[0-9a-fA-F]".to_string()),
+                    GrammarType::CharClass("[0-9a-fA-F]".to_string()),
+                    GrammarType::CharClass("[0-9a-fA-F]".to_string()),
+                    GrammarType::CharClass("[0-9a-fA-F]".to_string()),
+                ]),
+            ]),
+        ]);
         let char_or_escape = GrammarType::choice(vec![
-            GrammarType::primitive(GrammarPrimitive::StringChar),
-            GrammarType::primitive(GrammarPrimitive::EscapeSeq),
+            GrammarType::CharClass("[^\"\\\\\\x00-\\x1f]".to_string()),  // STRING_CHAR inline
+            escape_seq,  // ESCAPE_SEQ inline
         ]);
         
         match (constraints.min_length, constraints.max_length) {
