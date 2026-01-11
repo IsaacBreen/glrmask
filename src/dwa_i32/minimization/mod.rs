@@ -42,8 +42,12 @@ impl DWA {
             "SpecializedDWALightweight" => vec![DwaPass::PruneDeadEnds, DwaPass::PruneUnreachable],
             // Single pass minimize - one round of state merging, faster than full
             "SpecializedDWASinglePass" => {
-                // Run single pass minimize directly since it's a method, not a pass
-                self.minimize_single_pass();
+                // Run single pass minimize directly
+                if self.is_cyclic() {
+                    self.minimize_single_pass_cyclic();
+                } else {
+                    self.minimize_acyclic();
+                }
                 return;
             },
             _ => vec![DwaPass::Minimize], // Default: just minimize
@@ -80,32 +84,6 @@ impl DWA {
         // Use the cyclic versions since they work for acyclic too
         self.prune_unreachable_cyclic();
         self.prune_dead_ends_cyclic();
-    }
-
-    /// Same as minimize(), returns true if any changes were made.
-    pub fn minimize_internal(&mut self) -> bool {
-        if self.is_cyclic() {
-            self.minimize_internal_cyclic()
-        } else {
-            self.minimize_acyclic();
-            true
-        }
-    }
-
-    pub fn minimize_lightweight(&mut self) {
-        if self.is_cyclic() {
-            self.minimize_lightweight_cyclic();
-        } else {
-            self.minimize_lightweight_acyclic();
-        }
-    }
-
-    pub fn minimize_single_pass(&mut self) {
-        if self.is_cyclic() {
-            self.minimize_single_pass_cyclic();
-        } else {
-            self.minimize_single_pass_acyclic();
-        }
     }
 
     pub fn minimize_with_rustfst_full(&mut self) -> bool {
@@ -166,7 +144,8 @@ impl DWA {
         if is_cyc {
             self.minimize_states_cyclic()
         } else {
-            self.minimize_states_acyclic()
+            self.minimize_acyclic();
+            true
         }
     }
 
@@ -174,28 +153,14 @@ impl DWA {
         if self.is_cyclic() {
             self.loosen_weights_for_minimize_cyclic()
         } else {
-            self.loosen_weights_for_()
+            false  // Not used in acyclic algorithm
         }
     }
 
-
     // ========================================================================
-    // LEGACY API COMPATIBILITY
+    // ACYCLIC PASS STUBS  
+    // (acyclic algorithm handles these differently or doesn't need them)
     // ========================================================================
-
-    /// Lightweight version - just prunes dead states, no full minimization.
-    /// This is much faster than full minimization for intermediate results.
-    pub fn minimize_lightweight_acyclic(&mut self) {
-        // For intermediate DWAs, just prune unreachable and dead-end states.
-        // Full minimization is expensive (O(n²) incompatibility graph) and not critical
-        // for intermediate results - we'll do full minimization on the final DWA.
-        self.prune_basic();
-    }
-
-    /// Single pass - runs full minimization once.
-    pub fn minimize_single_pass_acyclic(&mut self) {
-        self.minimize_acyclic();
-    }
 
     /// RustFST-based minimization (for comparison/benchmarking).
     pub fn minimize_with_rustfst_full_acyclic(&mut self) -> bool {
@@ -204,24 +169,15 @@ impl DWA {
     }
 
     pub fn push_weights_into_transitions_and_finals_acyclic(&mut self) -> bool {
-        false
+        false  // Acyclic algorithm has weight pushing built-in
     }
 
     pub fn push_weights_to_initial_acyclic(&mut self) -> bool {
-        false // Not used in new algorithm
+        false  // Not used in acyclic algorithm
     }
 
     pub fn residuated_push_acyclic(&mut self) -> bool {
-        false // Not used in new algorithm
-    }
-
-    pub fn minimize_states_acyclic(&mut self) -> bool {
-        self.minimize_acyclic();
-        true
-    }
-
-    pub fn loosen_weights_for_(&mut self) -> bool {
-        false
+        false  // Not used in acyclic algorithm
     }
 
     // Legacy methods for compatibility with old API

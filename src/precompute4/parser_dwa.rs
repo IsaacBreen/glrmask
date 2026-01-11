@@ -482,9 +482,9 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
 
         // OPTIMIZATION: Skip NWA minimization for simple signatures.
         // Determinization will merge states anyway, so pre-minimization has minimal benefit.
-        // Use lightweight minimization on the DWA to avoid expensive minimization.
+        // Use basic pruning on the DWA to avoid expensive minimization.
         let mut dwa = combined_nwa.determinize();
-        dwa.minimize_lightweight();
+        dwa.prune_basic();
 
         template_cache.insert(sig, NWA::from_dwa(&dwa));
 
