@@ -32,6 +32,36 @@ use crate::dwa_i32::dwa::DWA;
 use crate::dwa_i32::Weight;
 
 impl DWA {
+    /// Apply DWA optimization passes based on a named config.
+    /// Config names: "SpecializedDWA", "SpecializedDWALightweight", etc.
+    pub fn optimize(&mut self, config_name: &str) {
+        let passes = match config_name {
+            // Full minimize - good quality but slow for large DWAs
+            "SpecializedDWA" => vec![DwaPass::PruneDeadEnds, DwaPass::Minimize],
+            // Lightweight - just pruning, faster but larger output
+            "SpecializedDWALightweight" => vec![DwaPass::PruneDeadEnds, DwaPass::PruneUnreachable],
+            // Single pass minimize - one round of state merging, faster than full
+            "SpecializedDWASinglePass" => {
+                // Run single pass minimize directly since it's a method, not a pass
+                self.minimize_single_pass();
+                return;
+            },
+            _ => vec![DwaPass::Minimize], // Default: just minimize
+        };
+        
+        for pass in passes {
+            match pass {
+                DwaPass::PruneUnreachable => { self.prune_unreachable(); },
+                DwaPass::PruneDeadEnds => { self.prune_dead_ends(); },
+                DwaPass::PushWeights => { self.push_weights_into_transitions_and_finals(); },
+                DwaPass::PushWeightsToInitial => { self.push_weights_to_initial(); },
+                DwaPass::ResidualPush => { self.residuated_push(); },
+                DwaPass::Minimize => { self.minimize_states(); },
+                DwaPass::ConsolidateRanges => { self.consolidate_ranges(); },
+            }
+        }
+    }
+
     /// Minimizes the DWA to its optimal state count.
     /// Dispatches to acyclic or cyclic implementation based on graph structure.
     /// Both paths now use the exact Diamond-aware algorithm with SCC support.

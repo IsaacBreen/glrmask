@@ -596,18 +596,34 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
 
         // PARALLEL OPTIMIZATION: Specialize DWAs using pre-computed weight mappings
         let start_specialize = std::time::Instant::now();
-        let results: Vec<(Signature, NWA)> = all_mappings.par_iter().map(|(target_sig, _mapping, weight_map)| {
+        let results: Vec<(Signature, NWA, usize, usize)> = all_mappings.par_iter().map(|(target_sig, _mapping, weight_map)| {
             let mut derived_dwa = specialize_dwa_relative_with_map(&super_dwa, weight_map);
-            derived_dwa.minimize_lightweight();
-            (target_sig.clone(), NWA::from_dwa(&derived_dwa))
+            let before = derived_dwa.states.len();
+            // Skip expensive minimization - just prune
+            // Rely on final determinization/minimize to compress
+            derived_dwa.optimize("SpecializedDWALightweight");
+            let after = derived_dwa.states.len();
+            (target_sig.clone(), NWA::from_dwa(&derived_dwa), before, after)
         }).collect();
-        crate::debug!(5, "  Specialization (149 DWAs): {:?}", start_specialize.elapsed());
+        let total_before: usize = results.iter().map(|(_, _, b, _)| b).sum();
+        let total_after: usize = results.iter().map(|(_, _, _, a)| a).sum();
+        crate::debug!(5, "  Specialization ({} DWAs): {:?}, states before/after: {} -> {} ({:.1}% reduction)", 
+            results.len(), start_specialize.elapsed(), total_before, total_after, 
+            100.0 * (1.0 - total_after as f64 / total_before as f64));
 
-        for (sig, nwa) in results {
+        for (sig, nwa, _, _) in results {
             template_cache.insert(sig, nwa);
         }
     }
     // OPTIMIZATION END
+
+    // Log template cache stats
+    let template_sizes: Vec<usize> = template_cache.values().map(|nwa| nwa.states.len()).collect();
+    let total_template_states: usize = template_sizes.iter().sum();
+    let max_template: usize = template_sizes.iter().copied().max().unwrap_or(0);
+    let avg_template: f64 = total_template_states as f64 / template_sizes.len().max(1) as f64;
+    crate::debug!(4, "Template cache: {} templates, {} total states, max={}, avg={:.1}", 
+        template_cache.len(), total_template_states, max_template, avg_template);
 
     crate::debug!(4, "Finished DWA specialization");
 
@@ -770,8 +786,9 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
     crate::debug!(4, "Finished Pass 2");
     let final_bodies = Arc::try_unwrap(final_bodies_arc).unwrap().into_inner().unwrap();
     let tsid_bodies = Arc::try_unwrap(tsid_bodies_arc).unwrap().into_inner().unwrap();
-    crate::debug!(4, "Collected {} final bodies, {} tsid bodies, states_arena has {} states", 
-        final_bodies.len(), tsid_bodies.len(), states_arena.borrow().len());
+    let avg_template_size = states_arena.borrow().len() as f64 / (final_bodies.len() + tsid_bodies.len()).max(1) as f64;
+    crate::debug!(4, "Collected {} final bodies, {} tsid bodies, states_arena has {} states (avg {:.0} states/body)", 
+        final_bodies.len(), tsid_bodies.len(), states_arena.borrow().len(), avg_template_size);
     let mut combined_nwa_states = states_arena.into_inner();
     let combined_start_state = combined_nwa_states.add_state();
     

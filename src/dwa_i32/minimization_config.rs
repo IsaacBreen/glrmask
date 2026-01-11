@@ -237,17 +237,24 @@ impl NWA {
             "FinalDWA" => DeterminizeAndMinimizeConfig {
                 // Full pipeline for Parser DWA (finalize_and_optimize_and_determinize)
                 // Includes minimize to get optimal state count
-                // NOTE: NWA pruning was tested and found to be a net slowdown (400ms pruning
-                // cost for only ~200ms savings in determinization), so it's disabled.
-                nwa_passes: vec![],
+                // NOTE: NWA MinimizeRustfst is too memory-intensive for large NWAs (2M+ states)
+                // Just do basic pruning before determinization
+                nwa_passes: vec![NwaPass::PruneDeadEnds, NwaPass::PruneUnreachable],
                 dwa_passes: vec![DwaPass::PruneDeadEnds, DwaPass::Minimize, DwaPass::ConsolidateRanges],
             },
             "SuperDWA" => DeterminizeAndMinimizeConfig {
-                // SuperDWA is an intermediate result that gets specialized into multiple DWAs.
-                // Use lightweight pruning only - full minimization is O(n²) and expensive.
-                // The specialized DWAs will be properly minimized later if needed.
+                // SuperDWA is the "universal" DWA that gets specialized into many DWAs.
+                // Full minimization here pays off because the smaller SuperDWA means
+                // smaller specialized DWAs and smaller combined NWA.
                 nwa_passes: vec![NwaPass::CompressTransitions],
-                dwa_passes: vec![DwaPass::PruneDeadEnds, DwaPass::PruneUnreachable],
+                dwa_passes: vec![DwaPass::PruneDeadEnds, DwaPass::Minimize],
+            },
+            "SpecializedDWA" => DeterminizeAndMinimizeConfig {
+                // Specialized DWAs derived from SuperDWA by weight mapping.
+                // These are instantiated many times in the combined NWA, so minimization pays off.
+                // Using full minimize but no NWA passes since these are already DWAs.
+                nwa_passes: vec![],
+                dwa_passes: vec![DwaPass::PruneDeadEnds, DwaPass::Minimize],
             },
             _ => DeterminizeAndMinimizeConfig {
                 // Default fallback

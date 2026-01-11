@@ -107,7 +107,6 @@ impl NWA {
     /// - Precomputes epsilon reachability to handle complex epsilon graphs.
     /// - Less prone to state explosion in complex topologies.
     /// - Includes a "singleton loop" heuristic optimization.
-    /// - Enforces a hard state limit (250,000) to prevent OOM, dumping the NWA if exceeded.
     /// - Displays a progress bar for large automata.
     /// - **Formerly:** `determinize_to_dwa2`
     pub fn determinize_robust(&self) -> DWA {

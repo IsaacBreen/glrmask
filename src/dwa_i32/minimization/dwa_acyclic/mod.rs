@@ -11,6 +11,16 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 impl DWA {
     pub fn minimize_acyclic(&mut self) {
+        // Check environment variable for fast minimize option
+        let use_fast_minimize = std::env::var("DWA_FAST_MINIMIZE").map(|v| v == "1").unwrap_or(false);
+        
+        if use_fast_minimize {
+            // Use partition refinement - faster but may produce slightly larger DWA
+            // (doesn't exploit the "diamond case" optimization)
+            self.minimize_states_cyclic();
+            return;
+        }
+        
         // Skip expensive validation in non-debug builds
         #[cfg(debug_assertions)]
         let x = self.clone();
