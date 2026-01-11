@@ -1042,6 +1042,19 @@ impl GrammarConstraint {
                 })
                 .collect();
             
+            // Build reverse map from internal token ID to bytes (sorted by length for shortest)
+            let mut internal_id_to_bytes: std::collections::BTreeMap<usize, Vec<u8>> = std::collections::BTreeMap::new();
+            for (bytes, id) in &internal_llm_token_map {
+                // Only keep the shortest bytes for each internal ID
+                internal_id_to_bytes.entry(id.0)
+                    .and_modify(|existing| {
+                        if bytes.len() < existing.len() {
+                            *existing = bytes.clone();
+                        }
+                    })
+                    .or_insert_with(|| bytes.clone());
+            }
+            
             crate::debug!(5, "Terminal DWA sample paths (n={}):", sample_paths.len());
             for (i, path) in sample_paths.iter().enumerate() {
                 // Convert labels to terminal names
@@ -1079,11 +1092,35 @@ impl GrammarConstraint {
                 }
                 
                 let path_str = path_strs.join(" → ");
-                let weight_str = match &path_weight {
-                    Some(w) => format!("weight={}", w.len()),
+                let weight_info = match &path_weight {
+                    Some(w) if !w.is_empty() => {
+                        // Get the smallest internal token ID from the weight
+                        if let Some(min_internal_id) = w.min_item() {
+                            // Get the bytes for this internal token
+                            let token_str = internal_id_to_bytes.get(&min_internal_id)
+                                .map(|bytes| {
+                                    // Format as escaped string
+                                    let escaped: String = bytes.iter()
+                                        .map(|&b| {
+                                            if b >= 0x20 && b < 0x7f && b != b'"' && b != b'\\' {
+                                                (b as char).to_string()
+                                            } else {
+                                                format!("\\x{:02x}", b)
+                                            }
+                                        })
+                                        .collect();
+                                    format!("\"{}\"", escaped)
+                                })
+                                .unwrap_or_else(|| format!("?tok{}", min_internal_id));
+                            format!("n={}, e.g. {} (id={})", w.len(), token_str, min_internal_id)
+                        } else {
+                            format!("n={}", w.len())
+                        }
+                    }
+                    Some(w) => format!("n={}", w.len()),
                     None => "no_weight".to_string(),
                 };
-                crate::debug!(5, "  Path {}: {} (len={}, {})", i, path_str, path.len(), weight_str);
+                crate::debug!(5, "  Path {}: {} (len={}, {})", i, path_str, path.len(), weight_info);
             }
         }
 
