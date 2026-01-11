@@ -1054,8 +1054,7 @@ impl GrammarConstraint {
             state_to_rep.clone(),
         );
 
-        #[allow(clippy::redundant_closure_call)]
-        crate::debug!(4, "Done precompute1. Terminal DWA stats: {}", terminal_dwa.stats());
+        crate::debug!(4, "Done precompute1. Terminal DWA (before pruning): {}", terminal_dwa.stats());
 
         // Prune terminal DWA using suffix grammar if grammar definition is available
         // This removes transitions that can't possibly lead to valid parses
@@ -1063,6 +1062,7 @@ impl GrammarConstraint {
             grammar_definition.is_some(),
             std::env::var("DISABLE_SUFFIX_PRUNE").is_ok()
         );
+        let mut did_prune = false;
         if let Some(ref grammar_def) = grammar_definition {
             if std::env::var("DISABLE_SUFFIX_PRUNE").is_err() {
                 crate::debug!(4, "Pruning terminal DWA with suffix grammar...");
@@ -1074,8 +1074,57 @@ impl GrammarConstraint {
                     terminals_count,
                 );
                 crate::debug!(4, "Suffix grammar pruning complete. Kept={}, pruned={}", kept, pruned);
-                crate::debug!(4, "Terminal DWA after pruning: {}", terminal_dwa.stats());
+                did_prune = pruned > 0;
             }
+        }
+
+        // Re-minimize after pruning (some states may now be mergeable)
+        if did_prune {
+            crate::debug!(4, "Re-minimizing terminal DWA after suffix pruning...");
+            let before_states = terminal_dwa.states.len();
+            let before_transitions = terminal_dwa.states.num_transitions();
+            terminal_dwa.minimize();
+            crate::debug!(4, "Terminal DWA re-minimization: {} states, {} transitions -> {} states, {} transitions",
+                before_states, before_transitions, 
+                terminal_dwa.states.len(), terminal_dwa.states.num_transitions());
+        }
+
+        // Now print terminal DWA stats (after pruning and re-minimization)
+        crate::debug!(3, "Terminal DWA (final): {} states, {} transitions", 
+            terminal_dwa.states.len(), terminal_dwa.states.num_transitions());
+        
+        if crate::r#macro::is_debug_level_enabled(4) {
+            if let Some(num_paths) = terminal_dwa.count_paths() {
+                crate::debug!(4, "Terminal DWA: {} paths (count_paths)", num_paths);
+            }
+            if let Some(avg_path_len) = terminal_dwa.average_path_length() {
+                crate::debug!(4, "Terminal DWA average path length (exact): {:.2}", avg_path_len);
+            }
+            if let Some((total_paths, total_length, avg)) = terminal_dwa.average_path_length_debug() {
+                crate::debug!(4, "Terminal DWA: total_paths={}, total_length={}, avg={:.2} (debug)", 
+                             total_paths, total_length, avg);
+            }
+            // Sample 100 paths and print their lengths
+            {
+                let mut rng = rand::thread_rng();
+                let sample_paths = terminal_dwa.sample_paths(100, &mut rng);
+                let lengths: Vec<_> = sample_paths.iter().map(|p| p.len()).collect();
+                let min_len = lengths.iter().min().copied().unwrap_or(0);
+                let max_len = lengths.iter().max().copied().unwrap_or(0);
+                let sum_len: usize = lengths.iter().sum();
+                let avg_len = sum_len as f64 / lengths.len() as f64;
+                crate::debug!(4, "Terminal DWA sample (n=100): min={}, max={}, avg={:.2}", min_len, max_len, avg_len);
+            }
+            if let Some(est_avg) = terminal_dwa.estimate_average_path_length(10000) {
+                crate::debug!(4, "Terminal DWA average path length (estimated, 10k samples): {:.2}", est_avg);
+            }
+
+            // Analyze terminal DWA structure
+            let start_state = &terminal_dwa.states[terminal_dwa.body.start_state];
+            let start_transitions = start_state.transitions.len();
+            let unique_trans_targets: std::collections::HashSet<_> = start_state.transitions.values().copied().collect();
+            crate::debug!(4, "Terminal DWA start state: {} transitions to {} unique targets", 
+                start_transitions, unique_trans_targets.len());
         }
 
         // Sample and print terminal DWA paths at debug level 5

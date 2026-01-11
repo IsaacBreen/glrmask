@@ -304,40 +304,11 @@ impl<'r> Precomputer1<'r> {
         // Pipeline: NWA minimize → compress → rm_epsilon → determinize → DWA minimize
         // Expected results: 14647 → 5904 → 5904 → 889 → 189 states
         let dwa = self.nwa.determinize_and_minimize("TerminalDWA");
-        crate::debug!(3, "Terminal DWA: {} states, {} transitions, num_tsids={}", 
-                      dwa.states.len(), dwa.states.num_transitions(), self.num_tsids);
-        if let Some(num_paths) = dwa.count_paths() {
-            crate::debug!(4, "Terminal DWA: {} paths (count_paths)", num_paths);
-        }
-        if let Some(avg_path_len) = dwa.average_path_length() {
-            crate::debug!(4, "Terminal DWA average path length (exact): {:.2}", avg_path_len);
-        }
-        // Also print the exact total paths and total length for debugging
-        if let Some((total_paths, total_length, avg)) = dwa.average_path_length_debug() {
-            crate::debug!(4, "Terminal DWA: total_paths={}, total_length={}, avg={:.2} (debug)", 
-                         total_paths, total_length, avg);
-        }
-        // Sample 100 paths and print their lengths
-        {
-            let mut rng = rand::thread_rng();
-            let sample_paths = dwa.sample_paths(100, &mut rng);
-            let lengths: Vec<_> = sample_paths.iter().map(|p| p.len()).collect();
-            let min_len = lengths.iter().min().copied().unwrap_or(0);
-            let max_len = lengths.iter().max().copied().unwrap_or(0);
-            let sum_len: usize = lengths.iter().sum();
-            let avg_len = sum_len as f64 / lengths.len() as f64;
-            crate::debug!(4, "Terminal DWA sample (n=100): min={}, max={}, avg={:.2}", min_len, max_len, avg_len);
-        }
-        if let Some(est_avg) = dwa.estimate_average_path_length(10000) {
-            crate::debug!(4, "Terminal DWA average path length (estimated, 10k samples): {:.2}", est_avg);
-        }
-
-        // Analyze terminal DWA structure
-        let start_state = &dwa.states[dwa.body.start_state];
-        let start_transitions = start_state.transitions.len();
-        let unique_trans_targets: std::collections::HashSet<_> = start_state.transitions.values().copied().collect();
-        crate::debug!(3, "Terminal DWA start state: {} transitions to {} unique targets", 
-            start_transitions, unique_trans_targets.len());
+        
+        // NOTE: Stats are printed AFTER suffix grammar pruning in constraint.rs
+        // This includes path counts, average path lengths, and sample paths.
+        crate::debug!(4, "Terminal DWA (before suffix pruning): {} states, {} transitions", 
+                      dwa.states.len(), dwa.states.num_transitions());
 
         dwa
     }
