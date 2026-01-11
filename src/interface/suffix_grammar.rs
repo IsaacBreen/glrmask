@@ -360,6 +360,162 @@ pub fn is_terminal_helper(name: &str) -> bool {
     name.starts_with(TERMINAL_HELPER_PREFIX)
 }
 
+/// Prune a terminal DWA using the suffix grammar.
+///
+/// This walks the DWA and removes transitions that would lead to invalid
+/// suffix parser states. A transition on terminal T is pruned if, after
+/// feeding T to the suffix parser, the parser has no valid states.
+///
+/// The DWA labels are:
+/// - 0..(terminals_count-1): terminal IDs  
+/// - terminals_count..: TSID labels (tokenizer state IDs)
+///
+/// TSID transitions are not pruned (they represent tokenizer state changes,
+/// not grammar terminals).
+pub fn prune_dwa_with_suffix_grammar(
+    dwa: &mut crate::dwa_i32::DWA,
+    grammar: &GrammarDefinition,
+    terminal_map: &bimap::BiBTreeMap<Terminal, crate::glr::table::TerminalID>,
+    terminals_count: usize,
+) -> (usize, usize) {
+    use crate::interface::CompiledGrammar;
+    use crate::glr::table::TerminalID;
+    use std::collections::{BTreeMap, BTreeSet, VecDeque};
+    use std::sync::Arc;
+    
+    crate::debug!(4, "Starting suffix grammar DWA pruning");
+    
+    // Build suffix grammar and compile it
+    crate::debug!(4, "  Building suffix grammar...");
+    let suffix_grammar = grammar_to_suffix_grammar(grammar);
+    crate::debug!(4, "  Suffix grammar: {} productions", suffix_grammar.productions.len());
+    
+    crate::debug!(4, "  Compiling suffix grammar...");
+    let suffix_compiled = CompiledGrammar::from_definition(Arc::new(suffix_grammar));
+    crate::debug!(4, "  Suffix grammar compiled");
+    
+    let suffix_parser = suffix_compiled.glr_parser();
+    
+    // Build mapping from original terminal IDs to suffix parser terminal IDs
+    // The suffix parser may have different terminal IDs
+    let mut orig_to_suffix_tid: BTreeMap<usize, TerminalID> = BTreeMap::new();
+    for (term, orig_tid) in terminal_map.iter() {
+        // Look up the same terminal in the suffix parser
+        if let Some(suffix_tid) = suffix_parser.terminal_map.get_by_left(term) {
+            orig_to_suffix_tid.insert(orig_tid.0, *suffix_tid);
+        }
+    }
+    
+    // Track which suffix parser states are reachable at each DWA state
+    // Key: DWA state ID, Value: Set of GLR parser state IDs
+    type ParserStateSet = BTreeSet<crate::glr::table::StateID>;
+    let mut dwa_to_parser_states: BTreeMap<usize, ParserStateSet> = BTreeMap::new();
+    
+    // Initialize: start DWA state maps to initial suffix parser state
+    let initial_parser_state_id = suffix_parser.start_state_id;
+    dwa_to_parser_states.insert(dwa.body.start_state, {
+        let mut set = BTreeSet::new();
+        set.insert(initial_parser_state_id);
+        set
+    });
+    
+    // BFS to propagate parser states through the DWA
+    let mut queue: VecDeque<usize> = VecDeque::new();
+    let mut visited: BTreeSet<usize> = BTreeSet::new();
+    queue.push_back(dwa.body.start_state);
+    visited.insert(dwa.body.start_state);
+    
+    // Track transitions to remove: (from_state, label)
+    let mut transitions_to_remove: Vec<(usize, i32)> = Vec::new();
+    let mut pruned_count = 0;
+    let mut kept_count = 0;
+    
+    while let Some(dwa_state) = queue.pop_front() {
+        let parser_states = dwa_to_parser_states.get(&dwa_state).cloned().unwrap_or_default();
+        
+        // For each transition from this DWA state
+        let transitions: Vec<(i32, usize)> = dwa.states[dwa_state].transitions.iter()
+            .map(|(&label, &dest)| (label, dest))
+            .collect();
+        
+        for (label, dest_dwa_state) in transitions {
+            let label_usize = label as usize;
+            
+            // Skip TSID transitions (not grammar terminals)
+            if label_usize >= terminals_count {
+                // TSID transition - always keep, parser state propagates unchanged
+                let dest_states = dwa_to_parser_states.entry(dest_dwa_state).or_default();
+                for &ps in &parser_states {
+                    dest_states.insert(ps);
+                }
+                if !visited.contains(&dest_dwa_state) {
+                    visited.insert(dest_dwa_state);
+                    queue.push_back(dest_dwa_state);
+                }
+                kept_count += 1;
+                continue;
+            }
+            
+            // Terminal transition - check if suffix parser can accept it
+            if let Some(&suffix_tid) = orig_to_suffix_tid.get(&label_usize) {
+                // Check if ANY parser state can accept this terminal
+                let mut any_valid = false;
+                
+                for &parser_state_id in &parser_states {
+                    if let Some(row) = crate::glr::table::get_row(&suffix_parser.table, parser_state_id) {
+                        // Check if there's any shift or reduce action for this terminal
+                        let has_action = row.get_shifts_and_reduces_for_terminal(&suffix_tid).is_some();
+                        if has_action {
+                            any_valid = true;
+                            break;
+                        }
+                    }
+                }
+                
+                if any_valid {
+                    // Keep the transition, propagate parser states
+                    // (We're being conservative - keeping all states that could reach here)
+                    let dest_states = dwa_to_parser_states.entry(dest_dwa_state).or_default();
+                    for &ps in &parser_states {
+                        dest_states.insert(ps);
+                    }
+                    if !visited.contains(&dest_dwa_state) {
+                        visited.insert(dest_dwa_state);
+                        queue.push_back(dest_dwa_state);
+                    }
+                    kept_count += 1;
+                } else {
+                    // Prune the transition
+                    transitions_to_remove.push((dwa_state, label));
+                    pruned_count += 1;
+                }
+            } else {
+                // Terminal not found in suffix parser - this shouldn't happen
+                // Keep the transition to be safe
+                let dest_states = dwa_to_parser_states.entry(dest_dwa_state).or_default();
+                for &ps in &parser_states {
+                    dest_states.insert(ps);
+                }
+                if !visited.contains(&dest_dwa_state) {
+                    visited.insert(dest_dwa_state);
+                    queue.push_back(dest_dwa_state);
+                }
+                kept_count += 1;
+            }
+        }
+    }
+    
+    // Remove pruned transitions
+    for (from_state, label) in &transitions_to_remove {
+        dwa.states[*from_state].transitions.remove(label);
+        dwa.states[*from_state].trans_weights.remove(label);
+    }
+    
+    crate::debug!(4, "Suffix grammar DWA pruning: kept={}, pruned={}", kept_count, pruned_count);
+    
+    (kept_count, pruned_count)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

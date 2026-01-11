@@ -631,13 +631,14 @@ impl GrammarConstraint {
         config: &GrammarConstraintConfig,
     ) -> Self {
         let token_name_map = compiled_grammar.definition.terminal_to_group_id().clone();
-        Self::build_with_config(
+        Self::build_with_config_and_grammar(
             compiled_grammar.tokenizer,
             compiled_grammar.glr_parser,
             llm_token_map,
             token_name_map,
             max_original_llm_token_id,
             config,
+            compiled_grammar.definition,
         )
     }
 
@@ -872,6 +873,46 @@ impl GrammarConstraint {
         max_original_llm_token_id: usize,
         config: &GrammarConstraintConfig,
     ) -> Self {
+        Self::build_with_config_inner(
+            tokenizer,
+            parser,
+            llm_token_map,
+            token_name_map,
+            max_original_llm_token_id,
+            config,
+            None,
+        )
+    }
+
+    fn build_with_config_and_grammar(
+        tokenizer: Regex,
+        parser: GLRParser,
+        llm_token_map: LLMTokenMap,
+        token_name_map: BiBTreeMap<Terminal, usize>,
+        max_original_llm_token_id: usize,
+        config: &GrammarConstraintConfig,
+        grammar_definition: Arc<GrammarDefinition>,
+    ) -> Self {
+        Self::build_with_config_inner(
+            tokenizer,
+            parser,
+            llm_token_map,
+            token_name_map,
+            max_original_llm_token_id,
+            config,
+            Some(grammar_definition),
+        )
+    }
+
+    fn build_with_config_inner(
+        tokenizer: Regex,
+        parser: GLRParser,
+        llm_token_map: LLMTokenMap,
+        token_name_map: BiBTreeMap<Terminal, usize>,
+        max_original_llm_token_id: usize,
+        config: &GrammarConstraintConfig,
+        grammar_definition: Option<Arc<GrammarDefinition>>,
+    ) -> Self {
         // Epsilon tokens are not supported.
         let epsilon_terminal_group_ids: BTreeSet<_> = tokenizer
             .execute_from_state(&[], tokenizer.initial_state_id())
@@ -1015,6 +1056,27 @@ impl GrammarConstraint {
 
         #[allow(clippy::redundant_closure_call)]
         crate::debug!(4, "Done precompute1. Terminal DWA stats: {}", terminal_dwa.stats());
+
+        // Prune terminal DWA using suffix grammar if grammar definition is available
+        // This removes transitions that can't possibly lead to valid parses
+        crate::debug!(4, "Checking suffix prune conditions: grammar_def={}, env_disabled={}", 
+            grammar_definition.is_some(),
+            std::env::var("DISABLE_SUFFIX_PRUNE").is_ok()
+        );
+        if let Some(ref grammar_def) = grammar_definition {
+            if std::env::var("DISABLE_SUFFIX_PRUNE").is_err() {
+                crate::debug!(4, "Pruning terminal DWA with suffix grammar...");
+                let terminals_count = parser.terminal_map.len();
+                let (kept, pruned) = crate::interface::prune_dwa_with_suffix_grammar(
+                    &mut terminal_dwa,
+                    grammar_def,
+                    &parser.terminal_map,
+                    terminals_count,
+                );
+                crate::debug!(4, "Suffix grammar pruning complete. Kept={}, pruned={}", kept, pruned);
+                crate::debug!(4, "Terminal DWA after pruning: {}", terminal_dwa.stats());
+            }
+        }
 
         // Sample and print terminal DWA paths at debug level 5
         if crate::r#macro::is_debug_level_enabled(5) {
