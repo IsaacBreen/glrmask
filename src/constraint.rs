@@ -1016,6 +1016,77 @@ impl GrammarConstraint {
         #[allow(clippy::redundant_closure_call)]
         crate::debug!(4, "Done precompute1. Terminal DWA stats: {}", terminal_dwa.stats());
 
+        // Sample and print terminal DWA paths at debug level 5
+        if crate::r#macro::is_debug_level_enabled(5) {
+            use rand::Rng;
+            let mut rng = rand::thread_rng();
+            let sample_paths = terminal_dwa.sample_paths(10, &mut rng);
+            
+            // Build reverse map from TerminalID to human-readable terminal name
+            let terminals_count = parser.terminal_map.len();
+            let tid_to_name: std::collections::BTreeMap<usize, String> = parser.terminal_map
+                .iter()
+                .map(|(term, tid)| {
+                    let name = match term {
+                        crate::glr::grammar::Terminal::Literal(bytes) => {
+                            // Convert bytes to string if ASCII printable
+                            if bytes.iter().all(|b| *b >= 0x20 && *b < 0x7f) {
+                                format!("'{}'", String::from_utf8_lossy(bytes))
+                            } else {
+                                format!("Lit[{}]", bytes.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(""))
+                            }
+                        }
+                        crate::glr::grammar::Terminal::RegexName(name) => name.clone(),
+                    };
+                    (tid.0, name)
+                })
+                .collect();
+            
+            crate::debug!(5, "Terminal DWA sample paths (n={}):", sample_paths.len());
+            for (i, path) in sample_paths.iter().enumerate() {
+                // Convert labels to terminal names
+                let mut path_strs: Vec<String> = Vec::new();
+                let mut path_weight: Option<crate::dwa_i32::Weight> = None;
+                let mut current_state = terminal_dwa.body.start_state;
+                
+                for (label, next_state) in path {
+                    let label_usize = *label as usize;
+                    let name = if label_usize < terminals_count {
+                        tid_to_name.get(&label_usize)
+                            .cloned()
+                            .unwrap_or_else(|| format!("T{}", label_usize))
+                    } else {
+                        format!("TSID{}", label_usize - terminals_count)
+                    };
+                    path_strs.push(name);
+                    
+                    // Compute intersected weight along path
+                    if let Some(w) = terminal_dwa.states[current_state].trans_weights.get(label) {
+                        match &mut path_weight {
+                            None => path_weight = Some(w.clone()),
+                            Some(pw) => *pw &= w,
+                        }
+                    }
+                    current_state = *next_state;
+                }
+                
+                // Include final weight if any
+                if let Some(fw) = &terminal_dwa.states[current_state].final_weight {
+                    match &mut path_weight {
+                        None => path_weight = Some(fw.clone()),
+                        Some(pw) => *pw &= fw,
+                    }
+                }
+                
+                let path_str = path_strs.join(" → ");
+                let weight_str = match &path_weight {
+                    Some(w) => format!("weight={}", w.len()),
+                    None => "no_weight".to_string(),
+                };
+                crate::debug!(5, "  Path {}: {} (len={}, {})", i, path_str, path.len(), weight_str);
+            }
+        }
+
         // EPSILON EXPLOSION EXPERIMENT - Terminal DWA
         // This code tests whether replacing labeled tsid transitions with epsilon transitions
         // causes a transition explosion. Enable with: TEST_EPSILON_EXPLOSION=1
