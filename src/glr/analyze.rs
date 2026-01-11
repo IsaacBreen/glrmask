@@ -1257,34 +1257,57 @@ pub fn merge_identical_nonterminals(
     productions: &[Production],
     start_nt: &NonTerminal,
 ) -> Vec<Production> {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    
     // Group productions by LHS and collect RHS sets
     let mut prods_by_lhs: BTreeMap<NonTerminal, BTreeSet<Vec<Symbol>>> = BTreeMap::new();
     for p in productions {
         prods_by_lhs.entry(p.lhs.clone()).or_default().insert(p.rhs.clone());
     }
     
-    // Find pairs of non-terminals with identical production sets
-    let nts: Vec<_> = prods_by_lhs.keys().cloned().collect();
+    // Compute hash for each nonterminal's production set
+    let compute_hash = |rhs_set: &BTreeSet<Vec<Symbol>>| -> u64 {
+        let mut hasher = DefaultHasher::new();
+        for rhs in rhs_set {
+            rhs.hash(&mut hasher);
+        }
+        hasher.finish()
+    };
+    
+    // Group nonterminals by their production set hash
+    let mut hash_to_nts: BTreeMap<u64, Vec<NonTerminal>> = BTreeMap::new();
+    for (nt, rhs_set) in &prods_by_lhs {
+        let h = compute_hash(rhs_set);
+        hash_to_nts.entry(h).or_default().push(nt.clone());
+    }
+    
+    // Find pairs of non-terminals with identical production sets (only within same hash bucket)
     let mut merge_map: BTreeMap<NonTerminal, NonTerminal> = BTreeMap::new();
     
-    for i in 0..nts.len() {
-        if merge_map.contains_key(&nts[i]) {
+    for nts in hash_to_nts.values() {
+        if nts.len() < 2 {
             continue;
         }
-        for j in (i + 1)..nts.len() {
-            if merge_map.contains_key(&nts[j]) {
+        for i in 0..nts.len() {
+            if merge_map.contains_key(&nts[i]) {
                 continue;
             }
-            // Check if nts[i] and nts[j] have the same productions
-            if prods_by_lhs.get(&nts[i]) == prods_by_lhs.get(&nts[j]) {
-                // Prefer to keep the start NT
-                let (keep, remove) = if nts[j] == *start_nt {
-                    (nts[j].clone(), nts[i].clone())
-                } else {
-                    (nts[i].clone(), nts[j].clone())
-                };
-                crate::debug!(6, "Merging identical non-terminals: {} -> {}", remove.0, keep.0);
-                merge_map.insert(remove, keep);
+            for j in (i + 1)..nts.len() {
+                if merge_map.contains_key(&nts[j]) {
+                    continue;
+                }
+                // Check if nts[i] and nts[j] have the same productions
+                if prods_by_lhs.get(&nts[i]) == prods_by_lhs.get(&nts[j]) {
+                    // Prefer to keep the start NT
+                    let (keep, remove) = if nts[j] == *start_nt {
+                        (nts[j].clone(), nts[i].clone())
+                    } else {
+                        (nts[i].clone(), nts[j].clone())
+                    };
+                    crate::debug!(6, "Merging identical non-terminals: {} -> {}", remove.0, keep.0);
+                    merge_map.insert(remove, keep);
+                }
             }
         }
     }

@@ -394,10 +394,24 @@ pub fn prune_dwa_with_suffix_grammar(
         .collect();
     crate::debug!(4, "  Ignored terminal IDs: {:?}", ignored_tids);
     
-    // Build suffix grammar and compile it
+    // Build suffix grammar
     crate::debug!(4, "  Building suffix grammar...");
     let suffix_grammar = grammar_to_suffix_grammar(grammar);
     crate::debug!(4, "  Suffix grammar: {} productions", suffix_grammar.productions.len());
+    
+    // Skip suffix grammar pruning for very complex grammars where the cost
+    // of compiling the suffix grammar outweighs the benefits.
+    // The suffix grammar goes through null inlining which can cause exponential
+    // blow-up. For a 1000+ production suffix grammar, this can take 5+ seconds.
+    // For grammars around 1200 productions, suffix pruning is still beneficial.
+    const MAX_SUFFIX_PRODUCTIONS: usize = 1250;
+    if suffix_grammar.productions.len() > MAX_SUFFIX_PRODUCTIONS {
+        crate::debug!(3, "Skipping suffix grammar compilation: {} productions exceeds threshold of {}",
+            suffix_grammar.productions.len(), MAX_SUFFIX_PRODUCTIONS);
+        // Count transitions as "kept"
+        let total_transitions = dwa.states.num_transitions();
+        return (total_transitions, 0);
+    }
     
     crate::debug!(4, "  Compiling suffix grammar...");
     let suffix_compiled = CompiledGrammar::from_definition(Arc::new(suffix_grammar));
