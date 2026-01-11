@@ -11,7 +11,6 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::constraint::LLMTokenBV;
 use crate::glr::parser::{ExpectElse, GLRParser};
-use crate::precompute4::nwa_optimizations::prune_continuations_from_final_states;
 use crate::precompute4::resolve_negatives::{
     apply_cancellations_range, apply_finality_fixpoint_range, remove_negative_transitions_range
     // Note: remove_redundant_default_transitions is called once at the end in finalize_and_optimize_and_determinize,
@@ -887,7 +886,7 @@ pub fn precompute_token_bvs_and_signatures(reversed_nwa: &NWA, traversal_data: &
 
 pub fn finalize_and_optimize_and_determinize(parser: &GLRParser, mut combined_nwa: NWA) -> DWA {
     crate::debug!(4, "Pruning continuations from final states for NWA with {} states and {} transitions...", combined_nwa.states.len(), combined_nwa.states.num_transitions());
-    prune_continuations_from_final_states(&mut combined_nwa);
+    combined_nwa.subtract_final_weights_from_outgoing();
     crate::debug!(4, "Pruned continuations from final states. NWA with {} states and {} transitions remaining.", combined_nwa.states.len(), combined_nwa.states.num_transitions());
     
     // After pruning continuations, some transitions may become empty and states may become unreachable.

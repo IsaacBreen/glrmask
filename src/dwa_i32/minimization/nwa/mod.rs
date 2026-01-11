@@ -7,6 +7,7 @@ mod push_to_initial;
 mod compress;
 mod minimize;
 mod rebuild;
+mod subtract_final_weights;
 
 use super::common::{Partition, MAX_OPTIMIZE_ITERATIONS};
 use crate::dwa_i32::common::BENCHMARK_DEBUG;

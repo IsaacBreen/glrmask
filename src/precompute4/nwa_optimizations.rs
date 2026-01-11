@@ -6,41 +6,6 @@ use crate::glr::table::{iter_rows, StateID as ParserStateID};
 use crate::precompute4::utils::{decode_symbol_i16, DEFAULT_TRANSITION_SYMBOL};
 use crate::dwa_i32::{NWA, StateID, Weight};
 
-/// For any state with a final weight, subtract that weight from all outgoing transitions.
-/// This prunes paths that continue after a word has already been accepted with a given weight.
-pub(crate) fn prune_continuations_from_final_states(nwa: &mut NWA) -> bool {
-    let mut changed = false;
-    for i in 0..nwa.states.len() {
-        if let Some(final_weight) = nwa.states[i].final_weight.clone() {
-            if final_weight.is_empty() {
-                continue;
-            }
-            let state = &mut nwa.states[i];
-
-            // Epsilon transitions
-            for (_, w) in &mut state.epsilons {
-                let old_w = w.clone();
-                *w -= &final_weight;
-                if *w != old_w {
-                    changed = true;
-                }
-            }
-
-            // Labeled transitions
-            for targets in state.transitions.values_mut() {
-                for (_, w) in targets {
-                    let old_w = w.clone();
-                    *w -= &final_weight;
-                    if *w != old_w {
-                        changed = true;
-                    }
-                }
-            }
-        }
-    }
-    changed
-}
-
 /// If a default transition for A -> B exists with weight W, subtract W from the weights of all
 /// non-default transitions A -> B (and remove if the resulting weight is empty).
 pub(crate) fn minimize_default_transitions(nwa: &mut NWA) -> bool {
