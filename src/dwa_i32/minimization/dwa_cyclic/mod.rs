@@ -30,6 +30,8 @@ impl DWA {
     /// the acyclic algorithm to handle cycles. Falls back to partition
     /// refinement if the exact algorithm fails.
     pub fn minimize_cyclic(&mut self) {
+        eprintln!("WARNING: Using cyclic minimization. This may be poorly optimized.");
+
         if self.states.len() == 0 {
             return;
         }
