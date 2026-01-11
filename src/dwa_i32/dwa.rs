@@ -193,8 +193,9 @@ impl DWA {
         // Forward pass: count paths and sum of lengths reaching each state
         // paths_to[u] = number of paths from start to u
         // length_sum_to[u] = sum of path lengths from start to u (summed over all paths)
-        let mut paths_to = vec![0u64; n];
-        let mut length_sum_to = vec![0u64; n];
+        // Use u128 to avoid overflow (path counts can be astronomical)
+        let mut paths_to = vec![0u128; n];
+        let mut length_sum_to = vec![0u128; n];
         
         paths_to[start] = 1;
         length_sum_to[start] = 0;
@@ -214,8 +215,8 @@ impl DWA {
         }
         
         // Sum up paths and lengths to final states
-        let mut total_paths: u64 = 0;
-        let mut total_length: u64 = 0;
+        let mut total_paths: u128 = 0;
+        let mut total_length: u128 = 0;
         
         for u in 0..n {
             if self.states[u].final_weight.is_some() && paths_to[u] > 0 {
@@ -227,6 +228,292 @@ impl DWA {
         if total_paths == 0 { return None; }
         
         Some(total_length as f64 / total_paths as f64)
+    }
+
+    /// Debug version of average_path_length that returns intermediate values.
+    /// Note: Returns u64 values, clamped from u128 for display purposes.
+    /// The avg returned is the true f64 average computed from u128 values.
+    pub fn average_path_length_debug(&self) -> Option<(u64, u64, f64)> {
+        let n = self.states.len();
+        if n == 0 { return None; }
+        if self.is_cyclic() { return None; }
+        
+        let start = self.body.start_state;
+        if start >= n { return None; }
+        
+        let mut in_degree = vec![0usize; n];
+        for u in 0..n {
+            for &v in self.states[u].transitions.values() {
+                if v < n { in_degree[v] += 1; }
+            }
+        }
+        
+        let mut topo = Vec::with_capacity(n);
+        let mut queue = std::collections::VecDeque::new();
+        for (i, &deg) in in_degree.iter().enumerate() {
+            if deg == 0 { queue.push_back(i); }
+        }
+        while let Some(u) = queue.pop_front() {
+            topo.push(u);
+            for &v in self.states[u].transitions.values() {
+                if v < n {
+                    in_degree[v] -= 1;
+                    if in_degree[v] == 0 { queue.push_back(v); }
+                }
+            }
+        }
+        if topo.len() != n { return None; }
+        
+        // Use u128 to avoid overflow (path counts can be astronomical)
+        let mut paths_to = vec![0u128; n];
+        let mut length_sum_to = vec![0u128; n];
+        
+        paths_to[start] = 1;
+        length_sum_to[start] = 0;
+        
+        for &u in &topo {
+            if paths_to[u] == 0 { continue; }
+            
+            for &v in self.states[u].transitions.values() {
+                if v < n {
+                    paths_to[v] += paths_to[u];
+                    length_sum_to[v] += length_sum_to[u] + paths_to[u];
+                }
+            }
+        }
+        
+        let mut total_paths: u128 = 0;
+        let mut total_length: u128 = 0;
+        
+        for u in 0..n {
+            if self.states[u].final_weight.is_some() && paths_to[u] > 0 {
+                total_paths += paths_to[u];
+                total_length += length_sum_to[u];
+            }
+        }
+        
+        if total_paths == 0 { return None; }
+        
+        // Clamp to u64 for return value (for display), but avg uses full u128 precision
+        let total_paths_u64 = if total_paths > u64::MAX as u128 { u64::MAX } else { total_paths as u64 };
+        let total_length_u64 = if total_length > u64::MAX as u128 { u64::MAX } else { total_length as u64 };
+        
+        Some((total_paths_u64, total_length_u64, total_length as f64 / total_paths as f64))
+    }
+
+    /// Sample paths uniformly at random from an acyclic DWA.
+    /// 
+    /// Each path from start to a final state has equal probability of being sampled.
+    /// Returns a vector of paths, where each path is a sequence of (label, next_state) pairs.
+    /// 
+    /// # Panics
+    /// Panics if the DWA is cyclic (use `is_cyclic()` to check first).
+    /// 
+    /// # Algorithm
+    /// 1. Count paths from each state to final states (backward pass)
+    /// 2. For each sample, walk from start choosing transitions proportionally to path counts
+    /// 
+    /// The path count from state s is: paths_to_final[s] = (1 if s is final else 0) + sum of paths_to_final[t] for each transition s -> t
+    pub fn sample_paths(&self, num_samples: usize, rng: &mut impl rand::Rng) -> Vec<Vec<(Label, StateID)>> {
+        let n = self.states.len();
+        if n == 0 { return vec![]; }
+        assert!(!self.is_cyclic(), "sample_paths requires an acyclic DWA");
+        
+        let start = self.body.start_state;
+        if start >= n { return vec![]; }
+        
+        // Build reverse adjacency for topological sort
+        let mut in_degree = vec![0usize; n];
+        for u in 0..n {
+            for &v in self.states[u].transitions.values() {
+                if v < n { in_degree[v] += 1; }
+            }
+        }
+        
+        // Topological sort (Kahn's algorithm)
+        let mut topo = Vec::with_capacity(n);
+        let mut queue = std::collections::VecDeque::new();
+        for (i, &deg) in in_degree.iter().enumerate() {
+            if deg == 0 { queue.push_back(i); }
+        }
+        while let Some(u) = queue.pop_front() {
+            topo.push(u);
+            for &v in self.states[u].transitions.values() {
+                if v < n {
+                    in_degree[v] -= 1;
+                    if in_degree[v] == 0 { queue.push_back(v); }
+                }
+            }
+        }
+        assert_eq!(topo.len(), n, "Topological sort failed - DWA is cyclic?");
+        
+        // Backward pass: count paths from each state to any final state
+        // paths_from[u] = number of paths from u to any final state
+        // Use u128 to avoid overflow
+        let mut paths_from = vec![0u128; n];
+        
+        // Process in reverse topological order (leaves first)
+        for &u in topo.iter().rev() {
+            // If this state is final, that's one path (ending here)
+            if self.states[u].final_weight.is_some() {
+                paths_from[u] += 1;
+            }
+            // Add paths through each outgoing transition
+            for &v in self.states[u].transitions.values() {
+                if v < n {
+                    paths_from[u] += paths_from[v];
+                }
+            }
+        }
+        
+        let total_paths = paths_from[start];
+        if total_paths == 0 { return vec![]; }
+        
+        // Sample paths
+        // For uniform sampling with u128 counts, we use probability sampling:
+        // probability of choosing successor s = paths_from[s] / current_paths
+        let mut samples = Vec::with_capacity(num_samples);
+        for _ in 0..num_samples {
+            let mut path = Vec::new();
+            let mut current = start;
+            
+            loop {
+                // Collect outgoing transitions with positive path counts
+                let mut choices: Vec<(Label, StateID, u128)> = Vec::new();
+                for (&label, &next) in &self.states[current].transitions {
+                    if next < n && paths_from[next] > 0 {
+                        choices.push((label, next, paths_from[next]));
+                    }
+                }
+                
+                // For uniform path sampling, we use paths_from[current] to determine probabilities.
+                // paths_from[current] = (1 if current is final) + sum(paths_from[successor])
+                // So:
+                // - Probability of ending here (if final) = 1 / paths_from[current]
+                // - Probability of going to successor s = paths_from[s] / paths_from[current]
+                let current_paths = paths_from[current];
+                if current_paths == 0 {
+                    // Dead end
+                    break;
+                }
+                
+                // Can we end here?
+                let can_end = self.states[current].final_weight.is_some();
+                let end_prob = if can_end { 1.0 / current_paths as f64 } else { 0.0 };
+                
+                // Choose: end here or continue through a transition
+                // Use floating point for probability sampling to handle u128 values
+                let roll: f64 = rng.gen();
+                
+                if roll < end_prob {
+                    // End path here
+                    break;
+                } else {
+                    // Continue through a transition
+                    // Scale roll to [0, 1) over transition probabilities
+                    let trans_roll = if end_prob >= 1.0 { 0.0 } else { (roll - end_prob) / (1.0 - end_prob) };
+                    
+                    // Sum of transition probabilities = (current_paths - (1 if can_end else 0)) / current_paths
+                    let trans_paths = current_paths - if can_end { 1 } else { 0 };
+                    
+                    let mut cumulative = 0u128;
+                    let mut selected = None;
+                    for &(label, next, count) in &choices {
+                        cumulative += count;
+                        if trans_roll < (cumulative as f64 / trans_paths as f64) {
+                            selected = Some((label, next));
+                            break;
+                        }
+                    }
+                    
+                    if let Some((label, next)) = selected {
+                        path.push((label, next));
+                        current = next;
+                    } else {
+                        // Shouldn't happen in normal cases
+                        // Fall back to picking the last choice
+                        if let Some(&(label, next, _)) = choices.last() {
+                            path.push((label, next));
+                            current = next;
+                        } else {
+                            break;
+                        }
+                    }
+                }
+            }
+            
+            samples.push(path);
+        }
+        
+        samples
+    }
+
+    /// Returns the total number of distinct paths from start to any final state.
+    /// Returns None if the DWA is cyclic (infinite paths) or empty.
+    /// Note: returns u128 to handle astronomical path counts without overflow.
+    pub fn count_paths(&self) -> Option<u128> {
+        let n = self.states.len();
+        if n == 0 { return None; }
+        if self.is_cyclic() { return None; }
+        
+        let start = self.body.start_state;
+        if start >= n { return None; }
+        
+        // Build reverse adjacency for topological sort
+        let mut in_degree = vec![0usize; n];
+        for u in 0..n {
+            for &v in self.states[u].transitions.values() {
+                if v < n { in_degree[v] += 1; }
+            }
+        }
+        
+        // Topological sort
+        let mut topo = Vec::with_capacity(n);
+        let mut queue = std::collections::VecDeque::new();
+        for (i, &deg) in in_degree.iter().enumerate() {
+            if deg == 0 { queue.push_back(i); }
+        }
+        while let Some(u) = queue.pop_front() {
+            topo.push(u);
+            for &v in self.states[u].transitions.values() {
+                if v < n {
+                    in_degree[v] -= 1;
+                    if in_degree[v] == 0 { queue.push_back(v); }
+                }
+            }
+        }
+        if topo.len() != n { return None; }
+        
+        // Backward pass: count paths from each state to any final state
+        let mut paths_from = vec![0u128; n];
+        for &u in topo.iter().rev() {
+            if self.states[u].final_weight.is_some() {
+                paths_from[u] += 1;
+            }
+            for &v in self.states[u].transitions.values() {
+                if v < n {
+                    paths_from[u] += paths_from[v];
+                }
+            }
+        }
+        
+        if paths_from[start] == 0 { return None; }
+        Some(paths_from[start])
+    }
+
+    /// Estimates average path length by sampling.
+    /// Returns None if the DWA is cyclic or has no paths.
+    pub fn estimate_average_path_length(&self, num_samples: usize) -> Option<f64> {
+        if self.is_cyclic() { return None; }
+        if self.count_paths()? == 0 { return None; }
+        
+        let mut rng = rand::thread_rng();
+        let paths = self.sample_paths(num_samples, &mut rng);
+        
+        if paths.is_empty() { return None; }
+        
+        let total_length: usize = paths.iter().map(|p| p.len()).sum();
+        Some(total_length as f64 / paths.len() as f64)
     }
 
     /// Counts the total number of ranges across all weights in this DWA.
