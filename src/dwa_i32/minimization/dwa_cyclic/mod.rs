@@ -32,7 +32,11 @@ impl DWA {
             return;
         }
 
-        // Use simple partition refinement - guaranteed to preserve semantics
+        // First prune unreachable and dead-end states
+        self.prune_unreachable_cyclic();
+        self.prune_dead_ends_cyclic();
+        
+        // Then use simple partition refinement - guaranteed to preserve semantics
         self.minimize_states_cyclic();
     }
 

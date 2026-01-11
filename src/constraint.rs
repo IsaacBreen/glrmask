@@ -1807,10 +1807,20 @@ impl GrammarConstraint {
                 parser_dwa_mod.states.len(), parser_dwa_mod.states.num_transitions());
         }
 
-        // Weight-heavy mode: Skip clip_weights and optimize_dwa_and_vocab
-        // These assume N-space weights but we now have N×M-space weights
-        // parser_dwa.states.clip_weights(vocab.internal_max_llm_token);
-        // optimize_dwa_and_vocab(&mut parser_dwa, &mut vocab, &mut possible_matches_precompute1);
+        // Check if weight-heavy mode is enabled via environment variable
+        let weight_heavy = crate::constraint_precompute::is_weight_heavy_enabled();
+        let num_tsids = if weight_heavy {
+            tokenizer.dfa.states.len()
+        } else {
+            0
+        };
+        
+        // Symbol-heavy mode: apply clip_weights and optimize_dwa_and_vocab
+        // These optimizations assume N-space weights and reduce the token space
+        if !weight_heavy {
+            parser_dwa.states.clip_weights(vocab.internal_max_llm_token);
+            optimize_dwa_and_vocab(&mut parser_dwa, &mut vocab, &mut possible_matches_precompute1);
+        }
 
         let internal_to_original_sparse_matrix =
             StageVocab::build_internal_to_original_sparse_matrix(
@@ -1823,14 +1833,6 @@ impl GrammarConstraint {
 
         // Build the new trie-based vocab from the LLM token map
         let vocab_trie = Arc::new(LLMVocabTrie::from_token_map(&llm_token_map));
-
-        // Weight-heavy mode: num_tsids > 0 means tsid info is encoded in weight positions
-        // Check if weight-heavy mode is enabled via environment variable
-        let num_tsids = if crate::constraint_precompute::is_weight_heavy_enabled() {
-            tokenizer.dfa.states.len()
-        } else {
-            0
-        };
         
         #[allow(deprecated)]
         GrammarConstraint {
