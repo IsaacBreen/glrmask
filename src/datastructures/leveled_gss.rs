@@ -507,7 +507,95 @@ mod tests {
         assert_eq!(accs.get(&1), expected.get(&1));
         assert_eq!(accs.get(&2), expected.get(&2));
     }
+
+    #[test]
+    fn test_popn_with_underflow_basic() {
+        // Create GSS with stacks of varying depths
+        let gss = gss_from_str_stacks(&[
+            (&["A", "B", "C"], &[1]),  // depth 3
+            (&["X", "Y"], &[2]),       // depth 2
+            (&["Z"], &[3]),            // depth 1
+            (&[], &[4]),               // depth 0 (empty)
+        ]);
+
+        let (result, underflows) = gss.popn_with_underflow(3);
+
+        // Only the depth-3 stack should remain (as empty after popping 3)
+        let result_stacks = result.to_stacks();
+        assert_eq!(result_stacks.len(), 1);
+        // The remaining stack should be empty with acc {1}
+        assert!(result_stacks.iter().any(|(stack, acc)| stack.is_empty() && acc.0.contains(&1)));
+
+        // Underflows should have 3 entries for the 3 stacks that underflowed
+        assert_eq!(underflows.len(), 3);
+        // [X,Y] was 1 short: shortfall = 1
+        assert!(underflows.get(&1).map(|a| a.0.contains(&2)).unwrap_or(false), 
+            "Expected shortfall 1 to contain acc 2, got {:?}", underflows);
+        // [Z] was 2 short: shortfall = 2
+        assert!(underflows.get(&2).map(|a| a.0.contains(&3)).unwrap_or(false),
+            "Expected shortfall 2 to contain acc 3, got {:?}", underflows);
+        // [] was 3 short: shortfall = 3
+        assert!(underflows.get(&3).map(|a| a.0.contains(&4)).unwrap_or(false),
+            "Expected shortfall 3 to contain acc 4, got {:?}", underflows);
+    }
+
+    #[test]
+    fn test_popn_with_underflow_no_underflow() {
+        // All stacks have enough depth
+        let gss = gss_from_str_stacks(&[
+            (&["A", "B", "C"], &[1]),
+            (&["X", "Y", "Z"], &[2]),
+        ]);
+
+        let (result, underflows) = gss.popn_with_underflow(2);
+
+        // Both stacks should remain with 1 element each
+        let result_stacks = result.to_stacks();
+        assert_eq!(result_stacks.len(), 2);
+        
+        // No underflows
+        assert!(underflows.is_empty(), "Expected no underflows, got {:?}", underflows);
+    }
+
+    #[test]
+    fn test_popn_with_underflow_all_underflow() {
+        // All stacks are too short
+        let gss = gss_from_str_stacks(&[
+            (&["A"], &[1]),
+            (&["B"], &[2]),
+            (&[], &[3]),
+        ]);
+
+        let (result, underflows) = gss.popn_with_underflow(5);
+
+        // All stacks underflowed, result should be empty
+        assert!(result.is_empty(), "Expected empty GSS, got {:?}", result.to_stacks());
+
+        // All underflows should be recorded
+        // [A] was 4 short, [B] was 4 short, [] was 5 short
+        assert!(underflows.contains_key(&4), "Expected shortfall 4");
+        assert!(underflows.contains_key(&5), "Expected shortfall 5");
+        
+        // Shortfall 4 should have merged accs {1, 2}
+        let shortfall_4 = underflows.get(&4).unwrap();
+        assert!(shortfall_4.0.contains(&1) && shortfall_4.0.contains(&2));
+    }
+
+    #[test]
+    fn test_popn_with_underflow_n_zero() {
+        let gss = gss_from_str_stacks(&[
+            (&["A", "B"], &[1]),
+            (&[], &[2]),
+        ]);
+
+        let (result, underflows) = gss.popn_with_underflow(0);
+
+        // n=0 should return the GSS unchanged
+        assert_eq!(result.to_stacks().len(), gss.to_stacks().len());
+        assert!(underflows.is_empty());
+    }
 }
+
 
 // --------------------
 // Small, reusable helpers
@@ -2047,13 +2135,154 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             res
         }
 
+
         let new_inner = popn_upper::<T, A>(&self.inner, n, &mut memo_upper, &mut memo_lower);
         LeveledGSS { inner: new_inner }
+    }
+
+    /// Pop n elements from all stacks, returning underflow information.
+    ///
+    /// Returns `(new_gss, underflows)` where:
+    /// - `new_gss` contains only stacks that had >= n elements (now popped)
+    /// - `underflows` maps shortfall -> merged accumulator
+    ///   - Key 1 means the stack was 1 element short of n
+    ///   - Key n means the stack was empty (n levels short)
+    ///
+    /// Unlike `popn`, this method does NOT preserve empty stacks. Stacks that
+    /// underflow are removed from the GSS and their accumulators are collected
+    /// in the returned HashMap.
+    ///
+    /// Example: `popn_with_underflow(3)` on `[[A,B,C], [X,Y], [Z], []]`:
+    /// - Stack `[A,B,C]` -> contributes to `new_gss` as `[]`
+    /// - Stack `[X,Y]` -> `underflows[1]` (1 level short of 3)
+    /// - Stack `[Z]` -> `underflows[2]` (2 levels short of 3)
+    /// - Stack `[]` -> `underflows[3]` (3 levels short of 3)
+    pub fn popn_with_underflow(&self, n: isize) -> (Self, StdHashMap<usize, A>) {
+        if n <= 0 {
+            return (self.clone(), StdHashMap::new());
+        }
+        if self.is_empty() {
+            return (self.clone(), StdHashMap::new());
+        }
+
+        let mut underflows: StdHashMap<usize, A> = StdHashMap::new();
+
+        fn merge_underflow<A: Merge + Clone>(map: &mut StdHashMap<usize, A>, shortfall: usize, acc: A) {
+            map.entry(shortfall)
+                .and_modify(|existing| *existing = existing.merge(&acc))
+                .or_insert(acc);
+        }
+
+        fn popn_lower_uf<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash>(
+            node: &Arc<Lower<T>>,
+            k: isize,
+            underflows: &mut StdHashMap<usize, A>,
+            acc: &A,
+            memo_lower: &mut StdHashMap<(usize, isize), Arc<Lower<T>>>,
+        ) -> Arc<Lower<T>> {
+            if k == 0 {
+                return node.clone();
+            }
+            let key = (Arc::as_ptr(node) as usize, k);
+            if let Some(cached) = memo_lower.get(&key) {
+                return cached.clone();
+            }
+
+            let all_children: Vec<_> = node
+                .children
+                .values()
+                .flat_map(|kids| kids.values())
+                .cloned()
+                .collect();
+
+            let res = if all_children.is_empty() {
+                new_lower(IHashMap::new(), false)
+            } else {
+                let popped_children: Vec<_> = all_children
+                    .into_iter()
+                    .map(|child| popn_lower_uf::<T, A>(&child, k - 1, underflows, acc, memo_lower))
+                    .collect();
+
+                let mut it = popped_children.into_iter();
+                let first = it.next().unwrap();
+                it.fold(first, |acc, next| merge_lower(&acc, &next))
+            };
+
+            // Unlike popn, we do NOT add the empty endpoint here.
+            // Instead, we record it as an underflow.
+            if node.empty && k >= 1 {
+                // This path had fewer than k elements remaining.
+                // Shortfall = k (we needed k more but hit empty)
+                merge_underflow(underflows, k as usize, acc.clone());
+            }
+
+            memo_lower.insert(key, res.clone());
+            res
+        }
+
+        fn popn_upper_uf<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash>(
+            node: &Arc<Upper<T, A>>,
+            k: isize,
+            underflows: &mut StdHashMap<usize, A>,
+            memo_upper: &mut StdHashMap<(usize, isize), Arc<Upper<T, A>>>,
+            memo_lower: &mut StdHashMap<(usize, isize), Arc<Lower<T>>>,
+        ) -> Arc<Upper<T, A>> {
+            if k == 0 {
+                return node.clone();
+            }
+            let key = (Arc::as_ptr(node) as usize, k);
+            if let Some(cached) = memo_upper.get(&key) {
+                return cached.clone();
+            }
+
+            let res = match &**node {
+                Upper::Branch(b) => {
+                    let mut popped = Vec::new();
+                    for kids in b.children.values() {
+                        for child in kids.values() {
+                            popped.push(popn_upper_uf(child, k - 1, underflows, memo_upper, memo_lower));
+                        }
+                    }
+
+                    // Record underflow for empty branches instead of preserving them
+                    if let Some(acc) = &b.empty {
+                        // Shortfall = k (we needed k more but this was empty)
+                        merge_underflow(underflows, k as usize, acc.clone());
+                    }
+
+                    if popped.is_empty() {
+                        empty_upper_inner()
+                    } else {
+                        let mut it = popped.into_iter();
+                        let first = it.next().unwrap();
+                        let merged = it.fold(first, |acc, next| merge_upper(&acc, &next));
+                        try_promote(&merged)
+                    }
+                }
+                Upper::Interface(i) => {
+                    let popped_lower = popn_lower_uf::<T, A>(&i.inner, k, underflows, &i.acc, memo_lower);
+                    if popped_lower.children.is_empty() && !popped_lower.empty {
+                        empty_upper_inner()
+                    } else {
+                        new_interface(popped_lower, i.acc.clone())
+                    }
+                }
+            };
+
+            memo_upper.insert(key, res.clone());
+            res
+        }
+
+        let mut memo_upper: StdHashMap<(usize, isize), Arc<Upper<T, A>>> = StdHashMap::new();
+        let mut memo_lower: StdHashMap<(usize, isize), Arc<Lower<T>>> = StdHashMap::new();
+        let new_inner = popn_upper_uf::<T, A>(&self.inner, n, &mut underflows, &mut memo_upper, &mut memo_lower);
+        (LeveledGSS { inner: new_inner }, underflows)
     }
 
     pub fn pop(&self) -> Self {
         self.popn(1)
     }
+
 
     pub fn is_empty(&self) -> bool {
         match &*self.inner {
