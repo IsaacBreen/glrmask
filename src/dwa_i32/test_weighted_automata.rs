@@ -2987,4 +2987,190 @@ fn test_minimize_cross_height_via_relaxed_conditions() {
         "Algorithm should achieve at most 4 states (optimal=3 with acyclic algorithm)");
 }
 
+// =============================================================================
+// Path Sampling Tests
+// =============================================================================
 
+/// Test basic path sampling on a simple linear DWA
+#[test]
+fn test_sample_paths_linear() {
+    let mut d = DWA::new();
+    let s1 = d.add_state();
+    let s2 = d.add_state();
+    
+    // Linear: start -> s1 -> s2 (final)
+    d.add_transition(d.body.start_state, 'a' as Label, s1, Weight::all()).unwrap();
+    d.add_transition(s1, 'b' as Label, s2, Weight::all()).unwrap();
+    d.set_final_weight(s2, Weight::from_item(0)).unwrap();
+    
+    let mut rng = rand::thread_rng();
+    let paths = d.sample_paths(100, &mut rng);
+    
+    // All paths should be the same: a -> s1, b -> s2
+    assert_eq!(paths.len(), 100);
+    for path in &paths {
+        assert_eq!(path.len(), 2);
+        assert_eq!(path[0].0, 'a' as Label);
+        assert_eq!(path[1].0, 'b' as Label);
+    }
+}
+
+/// Test path counting
+#[test]
+fn test_count_paths_simple() {
+    let mut d = DWA::new();
+    let s1 = d.add_state();
+    let s2 = d.add_state();
+    let s3 = d.add_state();
+    
+    // Diamond: start -> s1 -> s3, start -> s2 -> s3
+    d.add_transition(d.body.start_state, 'a' as Label, s1, Weight::all()).unwrap();
+    d.add_transition(d.body.start_state, 'b' as Label, s2, Weight::all()).unwrap();
+    d.add_transition(s1, 'c' as Label, s3, Weight::all()).unwrap();
+    d.add_transition(s2, 'd' as Label, s3, Weight::all()).unwrap();
+    d.set_final_weight(s3, Weight::from_item(0)).unwrap();
+    
+    // 2 paths: a,c and b,d
+    assert_eq!(d.count_paths(), Some(2));
+}
+
+/// Test path sampling distribution on a branching DWA
+#[test]
+fn test_sample_paths_uniform_distribution() {
+    let mut d = DWA::new();
+    let s1 = d.add_state();
+    let s2 = d.add_state();
+    
+    // Two branches from start, both final
+    d.add_transition(d.body.start_state, 'a' as Label, s1, Weight::all()).unwrap();
+    d.add_transition(d.body.start_state, 'b' as Label, s2, Weight::all()).unwrap();
+    d.set_final_weight(s1, Weight::from_item(0)).unwrap();
+    d.set_final_weight(s2, Weight::from_item(1)).unwrap();
+    
+    // 2 paths: a and b
+    assert_eq!(d.count_paths(), Some(2));
+    
+    let mut rng = rand::thread_rng();
+    let paths = d.sample_paths(10000, &mut rng);
+    
+    // Count how many times each path was sampled
+    let mut a_count = 0;
+    let mut b_count = 0;
+    for path in &paths {
+        assert_eq!(path.len(), 1);
+        match path[0].0 {
+            x if x == 'a' as Label => a_count += 1,
+            x if x == 'b' as Label => b_count += 1,
+            _ => panic!("Unexpected path"),
+        }
+    }
+    
+    // With uniform sampling, each should be around 50%
+    // Allow 10% tolerance for statistical variation
+    let ratio = a_count as f64 / paths.len() as f64;
+    assert!(ratio > 0.4 && ratio < 0.6, 
+        "Expected ~50% 'a' paths, got {:.1}%", ratio * 100.0);
+}
+
+/// Test that start state can be final
+#[test]
+fn test_sample_paths_start_final() {
+    let mut d = DWA::new();
+    let s1 = d.add_state();
+    
+    // Start is final, and there's also a transition to s1 (also final)
+    d.set_final_weight(d.body.start_state, Weight::from_item(0)).unwrap();
+    d.add_transition(d.body.start_state, 'a' as Label, s1, Weight::all()).unwrap();
+    d.set_final_weight(s1, Weight::from_item(1)).unwrap();
+    
+    // 2 paths: empty path (stay at start) and 'a' path
+    assert_eq!(d.count_paths(), Some(2));
+    
+    let mut rng = rand::thread_rng();
+    let paths = d.sample_paths(1000, &mut rng);
+    
+    let empty_count = paths.iter().filter(|p| p.is_empty()).count();
+    let a_count = paths.iter().filter(|p| p.len() == 1 && p[0].0 == 'a' as Label).count();
+    
+    // Both should be sampled roughly equally
+    let empty_ratio = empty_count as f64 / paths.len() as f64;
+    assert!(empty_ratio > 0.3 && empty_ratio < 0.7, 
+        "Expected ~50% empty paths, got {:.1}%", empty_ratio * 100.0);
+    assert_eq!(empty_count + a_count, paths.len());
+}
+
+/// Test average path length estimation
+#[test]
+fn test_estimate_average_path_length() {
+    let mut d = DWA::new();
+    let s1 = d.add_state();
+    let s2 = d.add_state();
+    
+    // Linear: start -> s1 -> s2 (final)
+    d.add_transition(d.body.start_state, 'a' as Label, s1, Weight::all()).unwrap();
+    d.add_transition(s1, 'b' as Label, s2, Weight::all()).unwrap();
+    d.set_final_weight(s2, Weight::from_item(0)).unwrap();
+    
+    // Average path length is exactly 2
+    let exact = d.average_path_length().unwrap();
+    assert_eq!(exact, 2.0);
+    
+    let estimated = d.estimate_average_path_length(1000).unwrap();
+    assert_eq!(estimated, 2.0); // All paths are length 2, so estimate is exact
+}
+
+/// Test comparison of exact vs estimated average path length
+#[test]
+fn test_average_path_length_exact_vs_estimated() {
+    let mut d = DWA::new();
+    let s1 = d.add_state();
+    let s2 = d.add_state();
+    let s3 = d.add_state();
+    
+    // Tree structure:
+    // start -> s1 (final, length 1)
+    // start -> s2 -> s3 (final, length 2)
+    d.add_transition(d.body.start_state, 'a' as Label, s1, Weight::all()).unwrap();
+    d.add_transition(d.body.start_state, 'b' as Label, s2, Weight::all()).unwrap();
+    d.add_transition(s2, 'c' as Label, s3, Weight::all()).unwrap();
+    d.set_final_weight(s1, Weight::from_item(0)).unwrap();
+    d.set_final_weight(s3, Weight::from_item(1)).unwrap();
+    
+    // 2 paths: length 1 and length 2, average = 1.5
+    assert_eq!(d.count_paths(), Some(2));
+    let exact = d.average_path_length().unwrap();
+    assert_eq!(exact, 1.5);
+    
+    // Estimated should be close
+    let estimated = d.estimate_average_path_length(10000).unwrap();
+    assert!((estimated - 1.5).abs() < 0.1, 
+        "Expected ~1.5, got {}", estimated);
+}
+
+/// Test that cyclic DWA panics on sample_paths
+#[test]
+#[should_panic(expected = "sample_paths requires an acyclic DWA")]
+fn test_sample_paths_panics_on_cyclic() {
+    let mut d = DWA::new();
+    let s1 = d.add_state();
+    
+    d.add_transition(d.body.start_state, 'a' as Label, s1, Weight::all()).unwrap();
+    d.add_transition(s1, 'b' as Label, d.body.start_state, Weight::all()).unwrap(); // Cycle!
+    d.set_final_weight(s1, Weight::from_item(0)).unwrap();
+    
+    let mut rng = rand::thread_rng();
+    let _ = d.sample_paths(10, &mut rng); // Should panic
+}
+
+/// Test count_paths returns None for cyclic DWA
+#[test]
+fn test_count_paths_cyclic_returns_none() {
+    let mut d = DWA::new();
+    let s1 = d.add_state();
+    
+    d.add_transition(d.body.start_state, 'a' as Label, s1, Weight::all()).unwrap();
+    d.add_transition(s1, 'b' as Label, d.body.start_state, Weight::all()).unwrap(); // Cycle!
+    d.set_final_weight(s1, Weight::from_item(0)).unwrap();
+    
+    assert_eq!(d.count_paths(), None);
+}
