@@ -372,6 +372,9 @@ pub fn is_terminal_helper(name: &str) -> bool {
 ///
 /// TSID transitions are not pruned (they represent tokenizer state changes,
 /// not grammar terminals).
+///
+/// Ignored terminals (like IGNORE/whitespace) are also not pruned because
+/// they can appear anywhere between other terminals.
 pub fn prune_dwa_with_suffix_grammar(
     dwa: &mut crate::dwa_i32::DWA,
     grammar: &GrammarDefinition,
@@ -384,6 +387,12 @@ pub fn prune_dwa_with_suffix_grammar(
     use std::sync::Arc;
     
     crate::debug!(4, "Starting suffix grammar DWA pruning");
+    
+    // Collect ignored terminal IDs - these should not be pruned
+    let ignored_tids: BTreeSet<usize> = grammar.ignore_terminal_ids.iter()
+        .map(|tid| tid.0)
+        .collect();
+    crate::debug!(4, "  Ignored terminal IDs: {:?}", ignored_tids);
     
     // Build suffix grammar and compile it
     crate::debug!(4, "  Building suffix grammar...");
@@ -405,6 +414,7 @@ pub fn prune_dwa_with_suffix_grammar(
             orig_to_suffix_tid.insert(orig_tid.0, *suffix_tid);
         }
     }
+    crate::debug!(4, "    Terminal mapping: {} of {} terminals mapped", orig_to_suffix_tid.len(), terminal_map.len());
     
     // Track which suffix parser states are reachable at each DWA state
     // Key: DWA state ID, Value: Set of GLR parser state IDs
@@ -456,36 +466,90 @@ pub fn prune_dwa_with_suffix_grammar(
                 continue;
             }
             
+            // Skip ignored terminals (like IGNORE/whitespace) - they can appear anywhere
+            if ignored_tids.contains(&label_usize) {
+                let dest_states = dwa_to_parser_states.entry(dest_dwa_state).or_default();
+                for &ps in &parser_states {
+                    dest_states.insert(ps);
+                }
+                if !visited.contains(&dest_dwa_state) {
+                    visited.insert(dest_dwa_state);
+                    queue.push_back(dest_dwa_state);
+                }
+                kept_count += 1;
+                continue;
+            }
+            
             // Terminal transition - check if suffix parser can accept it
             if let Some(&suffix_tid) = orig_to_suffix_tid.get(&label_usize) {
-                // Check if ANY parser state can accept this terminal
-                let mut any_valid = false;
+                // Check if ANY parser state can accept this terminal and compute successor states
+                let mut successor_states: BTreeSet<crate::glr::table::StateID> = BTreeSet::new();
                 
-                for &parser_state_id in &parser_states {
+                // Process parser states iteratively to handle ε-reduction chains
+                // ε-reductions (len=0) don't consume input, so after the reduce+GOTO,
+                // we need to check if the new state can handle the terminal
+                let mut states_to_process: VecDeque<crate::glr::table::StateID> = parser_states.iter().copied().collect();
+                let mut processed_states: BTreeSet<crate::glr::table::StateID> = BTreeSet::new();
+                
+                while let Some(parser_state_id) = states_to_process.pop_front() {
+                    if !processed_states.insert(parser_state_id) {
+                        continue; // Already processed
+                    }
+                    
                     if let Some(row) = crate::glr::table::get_row(&suffix_parser.table, parser_state_id) {
-                        // Check if there's any shift or reduce action for this terminal
-                        let has_action = row.get_shifts_and_reduces_for_terminal(&suffix_tid).is_some();
-                        if has_action {
-                            any_valid = true;
-                            break;
+                        if let Some(action) = row.get_shifts_and_reduces_for_terminal(&suffix_tid) {
+                            use crate::glr::table::Stage7ShiftsAndReducesLookaheadValue;
+                            match action {
+                                Stage7ShiftsAndReducesLookaheadValue::Shift(target_state) => {
+                                    // Shift actually consumes the terminal
+                                    successor_states.insert(target_state);
+                                }
+                                Stage7ShiftsAndReducesLookaheadValue::Reduce { nonterminal_id, len, .. } => {
+                                    if len == 0 {
+                                        // ε-reduction: compute GOTO and then re-check terminal from new state
+                                        if let Some(goto) = row.get_gotos().get(&nonterminal_id) {
+                                            if let Some(goto_state) = goto.state_id {
+                                                // Don't add to successor_states yet - queue for processing
+                                                states_to_process.push_back(goto_state);
+                                            }
+                                        }
+                                    }
+                                    // For len > 0, we'd need stack simulation - can't handle
+                                }
+                                Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
+                                    // Handle shifts (actually consume terminal)
+                                    if let Some(target_state) = shift {
+                                        successor_states.insert(target_state);
+                                    }
+                                    // Handle ε-reductions
+                                    for (&reduce_len, nonterminals) in reduces.iter() {
+                                        if reduce_len == 0 {
+                                            for nt_id in nonterminals.keys() {
+                                                if let Some(goto) = row.get_gotos().get(nt_id) {
+                                                    if let Some(goto_state) = goto.state_id {
+                                                        states_to_process.push_back(goto_state);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
                 
-                if any_valid {
-                    // Keep the transition, propagate parser states
-                    // (We're being conservative - keeping all states that could reach here)
+                if !successor_states.is_empty() {
+                    // Keep the transition, propagate successor states
                     let dest_states = dwa_to_parser_states.entry(dest_dwa_state).or_default();
-                    for &ps in &parser_states {
-                        dest_states.insert(ps);
-                    }
+                    dest_states.extend(successor_states);
                     if !visited.contains(&dest_dwa_state) {
                         visited.insert(dest_dwa_state);
                         queue.push_back(dest_dwa_state);
                     }
                     kept_count += 1;
                 } else {
-                    // Prune the transition
+                    // No valid actions - prune the transition
                     transitions_to_remove.push((dwa_state, label));
                     pruned_count += 1;
                 }
