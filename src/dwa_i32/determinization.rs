@@ -1,7 +1,6 @@
 #![allow(dead_code)]
 #![allow(clippy::needless_borrow)]
 
-use chrono::Local;
 use rustc_hash::FxHashMap;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -136,8 +135,7 @@ impl NWA {
             return dwa;
         }
 
-        // 2. Setup Limits and Progress
-        const STATE_LIMIT: usize = 250_000; 
+        // 2. Setup
         if self.states.0.is_empty() {
             return DWA::new();
         }
@@ -170,16 +168,6 @@ impl NWA {
 
         // 6. Main Expansion Loop
         while let Some(sid) = det.queue.pop_front() {
-            // Safety Guard
-            if det.seen.len() > STATE_LIMIT {
-                let timestamp = Local::now().format("%Y%m%d-%H%M%S");
-                let filename = format!("nwa_dump_{}.json", timestamp);
-                crate::debug!(5, "Determinization state limit ({}) exceeded. Dumping NWA to {} and panicking.", STATE_LIMIT, filename);
-                let f = std::fs::File::create(&filename).expect("Unable to create dump file");
-                serde_json::to_writer(f, self).expect("Unable to write NWA to file");
-                panic!("Determinization aborted after reaching {} states.", STATE_LIMIT);
-            }
-
             det.expand_state(sid);
         }
 
