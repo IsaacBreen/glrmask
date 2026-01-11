@@ -2129,6 +2129,62 @@ impl CompiledGrammar {
             definition.ignore_terminal_ids.clone(),
         );
 
+        // Report terminal equivalence classes at debug level 5
+        // Two terminals are equivalent if they have the same actions in every state
+        if crate::r#macro::is_debug_level_enabled(5) {
+            use std::collections::BTreeMap;
+            use crate::glr::table::{TerminalID, StateID, Stage7ShiftsAndReducesLookaheadValue};
+            
+            // Build a signature for each terminal: map from state -> action in that state
+            // We use a sorted vec of (state_id, action) pairs as the signature
+            let mut terminal_signatures: BTreeMap<TerminalID, Vec<(StateID, Option<Stage7ShiftsAndReducesLookaheadValue>)>> = BTreeMap::new();
+            
+            for (_term, tid) in glr_parser.terminal_map.iter() {
+                let mut sig: Vec<(StateID, Option<Stage7ShiftsAndReducesLookaheadValue>)> = Vec::new();
+                for (state_id, row) in glr_parser.table.iter() {
+                    let action = row.get_shifts_and_reduces_for_terminal(tid);
+                    sig.push((*state_id, action));
+                }
+                // Sort by state_id for consistent comparison
+                sig.sort_by_key(|(sid, _)| *sid);
+                terminal_signatures.insert(*tid, sig);
+            }
+            
+            // Group terminals by their signature
+            let mut sig_to_terminals: BTreeMap<Vec<(StateID, Option<Stage7ShiftsAndReducesLookaheadValue>)>, Vec<TerminalID>> = BTreeMap::new();
+            for (tid, sig) in terminal_signatures {
+                sig_to_terminals.entry(sig).or_default().push(tid);
+            }
+            
+            let num_classes = sig_to_terminals.len();
+            let num_terminals = glr_parser.terminal_map.len();
+            
+            debug!(5, "GLR terminal equivalence: {} terminals → {} equivalence classes", num_terminals, num_classes);
+            
+            // Report non-singleton equivalence classes (terminals that behave identically)
+            let mut multi_classes: Vec<_> = sig_to_terminals.iter()
+                .filter(|(_, tids)| tids.len() > 1)
+                .collect();
+            multi_classes.sort_by_key(|(_, tids)| std::cmp::Reverse(tids.len()));
+            
+            if !multi_classes.is_empty() {
+                debug!(5, "  Equivalence classes with >1 terminal:");
+                for (i, (_sig, tids)) in multi_classes.iter().take(10).enumerate() {
+                    let names: Vec<String> = tids.iter()
+                        .map(|tid| {
+                            glr_parser.terminal_map.get_by_right(tid)
+                                .map(|t| format!("{}", t))
+                                .unwrap_or_else(|| format!("T{}", tid.0))
+                        })
+                        .collect();
+                    debug!(5, "    Class {}: {} terminals: {}", i, tids.len(), names.join(", "));
+                }
+                if multi_classes.len() > 10 {
+                    debug!(5, "    ... and {} more classes", multi_classes.len() - 10);
+                }
+            }
+        }
+
         Self {
             definition,
             tokenizer,
