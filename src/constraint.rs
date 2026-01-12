@@ -1108,6 +1108,23 @@ impl GrammarConstraint {
         // Now print terminal DWA stats (after pruning and re-minimization)
         crate::debug!(3, "Terminal DWA (final): {} states, {} transitions", 
             terminal_dwa.states.len(), terminal_dwa.states.num_transitions());
+
+        // Weight complexity instrumentation (unique weights are interned).
+        if crate::r#macro::is_debug_level_enabled(5) {
+            let domain_max = if weight_heavy_enabled {
+                let n = vocab.internal_max_llm_token;
+                let m = num_tsids;
+                n.saturating_mul(m).saturating_add(m.saturating_sub(1))
+            } else {
+                vocab.internal_max_llm_token
+            };
+
+            crate::debug!(5, "Terminal DWA weight complexity (unique): total_ranges_unique={} (total_ranges_all={})", 
+                terminal_dwa.num_ranges_interned(),
+                terminal_dwa.num_ranges(),
+            );
+            crate::dwa_i32::weight_bdd_metrics::maybe_print_dwa_weight_bdd_metrics(&terminal_dwa, domain_max, "Terminal DWA");
+        }
         
         if crate::r#macro::is_debug_level_enabled(4) {
             if let Some(num_paths) = terminal_dwa.count_paths() {
@@ -2081,6 +2098,23 @@ impl GrammarConstraint {
         if !weight_heavy {
             parser_dwa.states.clip_weights(vocab.internal_max_llm_token);
             optimize_dwa_and_vocab(&mut parser_dwa, &mut vocab, &mut possible_matches_precompute1);
+        }
+
+        // Weight complexity instrumentation for the parser DWA.
+        if crate::r#macro::is_debug_level_enabled(5) {
+            let domain_max = if weight_heavy {
+                let n = vocab.internal_max_llm_token;
+                let m = num_tsids;
+                n.saturating_mul(m).saturating_add(m.saturating_sub(1))
+            } else {
+                vocab.internal_max_llm_token
+            };
+
+            crate::debug!(5, "Parser DWA weight complexity (unique): total_ranges_unique={} (total_ranges_all={})", 
+                parser_dwa.num_ranges_interned(),
+                parser_dwa.num_ranges(),
+            );
+            crate::dwa_i32::weight_bdd_metrics::maybe_print_dwa_weight_bdd_metrics(&parser_dwa, domain_max, "Parser DWA");
         }
 
         let internal_to_original_sparse_matrix =
