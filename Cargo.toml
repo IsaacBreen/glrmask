@@ -23,6 +23,7 @@ serde_json = { version = "1.0.148", features = ["unbounded_depth", "preserve_ord
 chrono = "0.4.41"
 reqwest = { version = "0.12.15", features = ["blocking", "json"] }
 range-set-blaze = { version = "0.3.0" }
+oxidd = "0.11.0"
 
 # Add the derive macro crate
 json_convertible_derive = { path = "json_convertible_derive" }
