@@ -23,6 +23,7 @@ pub mod unroll;
 pub mod weight_expansion;
 pub mod weight_bdd_metrics;
 pub mod weight_oxidd_metrics;
+pub mod weight_factorization_metrics;
 pub mod test_weighted_automata;
 
 #[cfg(test)]

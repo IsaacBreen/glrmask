@@ -1234,6 +1234,7 @@ impl GrammarConstraint {
             );
             crate::dwa_i32::weight_bdd_metrics::maybe_print_dwa_weight_bdd_metrics(&terminal_dwa, domain_max, "Terminal DWA");
             crate::dwa_i32::weight_oxidd_metrics::maybe_print_dwa_weight_oxidd_metrics(&terminal_dwa, domain_max, "Terminal DWA");
+            crate::dwa_i32::weight_factorization_metrics::maybe_print_dwa_weight_factorization_metrics(&terminal_dwa, "Terminal DWA");
         }
         
         if crate::r#macro::is_debug_level_enabled(4) {
@@ -2226,6 +2227,7 @@ impl GrammarConstraint {
             );
             crate::dwa_i32::weight_bdd_metrics::maybe_print_dwa_weight_bdd_metrics(&parser_dwa, domain_max, "Parser DWA");
             crate::dwa_i32::weight_oxidd_metrics::maybe_print_dwa_weight_oxidd_metrics(&parser_dwa, domain_max, "Parser DWA");
+            crate::dwa_i32::weight_factorization_metrics::maybe_print_dwa_weight_factorization_metrics(&parser_dwa, "Parser DWA");
         }
 
         let internal_to_original_sparse_matrix =
