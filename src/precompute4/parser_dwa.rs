@@ -897,6 +897,17 @@ pub fn finalize_and_optimize_and_determinize(parser: &GLRParser, mut combined_nw
     crate::debug!(4, "After pruning dead ends: NWA {} -> {} states, {} transitions", 
         before_prune, combined_nwa.states.len(), combined_nwa.states.num_transitions());
     
+    // NWA minimization is expensive - skip it for now
+    // The DWA minimization will handle the reduction anyway
+    // let nwa_states = combined_nwa.states.len();
+    // if nwa_states > 100_000 {
+    //     let minimize_start = std::time::Instant::now();
+    //     combined_nwa.minimize_internal();
+    //     let minimize_time = minimize_start.elapsed();
+    //     crate::debug!(4, "NWA minimization: {} -> {} states in {:.2?}", 
+    //         nwa_states, combined_nwa.states.len(), minimize_time);
+    // }
+    
     // Use unified determinize_and_minimize with "FinalDWA" profile
     // Pipeline: determinize → prune_dead_ends → minimize
     let dwa = combined_nwa.determinize_and_minimize("FinalDWA");

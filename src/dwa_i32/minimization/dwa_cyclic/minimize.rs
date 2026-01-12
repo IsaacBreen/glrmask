@@ -4,6 +4,7 @@ use super::super::common::Partition;
 use crate::dwa_i32::common::{Label, StateID, Weight};
 use crate::dwa_i32::dwa::{DWAStates, DWA};
 use rustc_hash::FxHashMap;
+use rayon::prelude::*;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct DwaTransitionSig {
@@ -48,21 +49,38 @@ impl DwaStateSignature {
     }
 }
 
-/// DWA minimization using partition refinement.
+/// DWA minimization using partition refinement with parallel signature computation.
 pub(super) fn minimize_dwa_partition(states: &DWAStates) -> Partition {
     let n = states.len();
     if n == 0 {
         return Partition { class_of: vec![], num_classes: 0 };
     }
 
+    // Use parallel computation for large DWAs
+    let use_parallel = n >= 50_000;
+    
     let mut partition = Partition::new(n);
+    let mut iteration = 0;
     loop {
+        iteration += 1;
+        
+        // Step 1: Compute all signatures (parallel for large DWAs)
+        let signatures: Vec<DwaStateSignature> = if use_parallel {
+            (0..n).into_par_iter()
+                .map(|s| DwaStateSignature::from_state(s, states, &partition.class_of))
+                .collect()
+        } else {
+            (0..n)
+                .map(|s| DwaStateSignature::from_state(s, states, &partition.class_of))
+                .collect()
+        };
+        
+        // Step 2: Build signature -> class mapping (sequential, but hash map ops are fast)
         let mut sig_to_class: FxHashMap<DwaStateSignature, usize> = FxHashMap::default();
         let mut new_classes = vec![0; n];
         let mut next_class = 0;
 
-        for s in 0..n {
-            let sig = DwaStateSignature::from_state(s, states, &partition.class_of);
+        for (s, sig) in signatures.into_iter().enumerate() {
             let entry = sig_to_class.entry(sig).or_insert_with(|| {
                 let id = next_class;
                 next_class += 1;
@@ -72,6 +90,10 @@ pub(super) fn minimize_dwa_partition(states: &DWAStates) -> Partition {
         }
 
         if new_classes == partition.class_of {
+            if n >= 100_000 {
+                crate::debug!(4, "Minimization converged in {} iterations ({} states -> {} classes)", 
+                    iteration, n, next_class);
+            }
             partition.num_classes = next_class;
             return partition;
         }
