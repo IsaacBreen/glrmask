@@ -212,42 +212,25 @@ fn optimize_dwa_and_vocab(
     }
     crate::debug!(5, "DWA Vocab Partition: {:?}", t_partition.elapsed());
 
-    // OPTIMIZATION: Sort classes by co-occurrence signature to minimize range fragmentation
-    // Classes that appear in the same set of weights should get consecutive IDs
+    // OPTIMIZATION: Sort classes by minimum token ID to preserve original ordering
+    // This minimizes range fragmentation by keeping tokens that were adjacent
+    // in the original space adjacent in the new space (as much as possible).
     let t_renumber = std::time::Instant::now();
     
-    // First, collect class_id -> representative_token (first token in each class)
-    let mut class_ids: Vec<usize> = class_to_tokens.keys().cloned().collect();
+    // Collect (min_token_id, class_id) pairs for sorting
+    let mut class_ids_with_min: Vec<(usize, usize)> = class_to_tokens
+        .iter()
+        .filter_map(|(cid, tokens)| {
+            tokens.iter().min().map(|&min_tok| (min_tok, *cid))
+        })
+        .collect();
     
-    // Compute signature for each class: which weights contain a representative token from this class
-    // We use a bitvector/hash of weight indices that contain this class
-    let weights_list: Vec<&Weight> = unique_weights.iter().filter(|w| !w.is_all_fast()).collect();
-    let mut class_signatures: FxHashMap<usize, Vec<usize>> = FxHashMap::default();
-    
-    for (cid, tokens) in &class_to_tokens {
-        if let Some(&rep_token) = tokens.first() {
-            let mut sig = Vec::new();
-            for (wi, w) in weights_list.iter().enumerate() {
-                if w.contains(rep_token) {
-                    sig.push(wi);
-                }
-            }
-            class_signatures.insert(*cid, sig);
-        } else {
-            class_signatures.insert(*cid, Vec::new());
-        }
-    }
-    
-    // Sort classes by their signature (lexicographically) so classes that co-occur get adjacent IDs
-    class_ids.sort_by(|a, b| {
-        let sig_a = class_signatures.get(a).unwrap();
-        let sig_b = class_signatures.get(b).unwrap();
-        sig_a.cmp(sig_b)
-    });
+    // Sort classes by their minimum token ID
+    class_ids_with_min.sort_by_key(|(min_tok, _)| *min_tok);
     
     let mut old_to_new_map: FxHashMap<usize, usize> = FxHashMap::default();
     let mut new_id = 0;
-    for cid in class_ids {
+    for (_, cid) in class_ids_with_min {
         if let Some(tokens) = class_to_tokens.get(&cid) {
             for &t in tokens {
                 old_to_new_map.insert(t, new_id);
@@ -1152,12 +1135,16 @@ impl GrammarConstraint {
                 crate::debug!(4, "Terminal DWA average path length (estimated, 10k samples): {:.2}", est_avg);
             }
 
-            // Analyze terminal DWA structure
-            let start_state = &terminal_dwa.states[terminal_dwa.body.start_state];
-            let start_transitions = start_state.transitions.len();
-            let unique_trans_targets: std::collections::HashSet<_> = start_state.transitions.values().copied().collect();
-            crate::debug!(4, "Terminal DWA start state: {} transitions to {} unique targets", 
-                start_transitions, unique_trans_targets.len());
+            // Analyze terminal DWA structure (skip if empty)
+            if !terminal_dwa.states.0.is_empty() {
+                let start_state = &terminal_dwa.states[terminal_dwa.body.start_state];
+                let start_transitions = start_state.transitions.len();
+                let unique_trans_targets: std::collections::HashSet<_> = start_state.transitions.values().copied().collect();
+                crate::debug!(4, "Terminal DWA start state: {} transitions to {} unique targets", 
+                    start_transitions, unique_trans_targets.len());
+            } else {
+                crate::debug!(4, "Terminal DWA is empty (no valid tokens for this grammar/vocabulary combination)");
+            }
         }
 
         // Sample and print terminal DWA paths at debug level 5

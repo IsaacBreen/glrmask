@@ -399,6 +399,11 @@ pub fn prune_dwa_with_suffix_grammar(
     let suffix_grammar = grammar_to_suffix_grammar(grammar);
     crate::debug!(4, "  Suffix grammar: {} productions", suffix_grammar.productions.len());
     
+    // Print suffix grammar productions at debug level 5
+    for (i, prod) in suffix_grammar.productions.iter().enumerate() {
+        crate::debug!(5, "    Suffix prod {}: {} -> {:?}", i, prod.lhs.0, prod.rhs);
+    }
+    
     // Skip suffix grammar pruning for very complex grammars where the cost
     // of compiling the suffix grammar outweighs the benefits.
     // The suffix grammar goes through null inlining which can cause exponential
@@ -456,6 +461,7 @@ pub fn prune_dwa_with_suffix_grammar(
     
     while let Some(dwa_state) = queue.pop_front() {
         let parser_states = dwa_to_parser_states.get(&dwa_state).cloned().unwrap_or_default();
+        crate::debug!(5, "  BFS: DWA state {} with parser_states {:?}", dwa_state, parser_states);
         
         // For each transition from this DWA state
         let transitions: Vec<(i32, usize)> = dwa.states[dwa_state].transitions.iter()
@@ -464,6 +470,7 @@ pub fn prune_dwa_with_suffix_grammar(
         
         for (label, dest_dwa_state) in transitions {
             let label_usize = label as usize;
+            crate::debug!(5, "    Transition: {} --{}--> {}", dwa_state, label, dest_dwa_state);
             
             // Skip TSID transitions (not grammar terminals)
             if label_usize >= terminals_count {
@@ -499,6 +506,10 @@ pub fn prune_dwa_with_suffix_grammar(
                 // Check if ANY parser state can accept this terminal and compute successor states
                 let mut successor_states: BTreeSet<crate::glr::table::StateID> = BTreeSet::new();
                 
+                // Track if we found any valid action (including reduces we can't fully simulate)
+                // If there's a reduce with len>0, we can't compute successors but the terminal IS valid
+                let mut has_reduce_with_len_gt_0 = false;
+                
                 // Process parser states iteratively to handle ε-reduction chains
                 // ε-reductions (len=0) don't consume input, so after the reduce+GOTO,
                 // we need to check if the new state can handle the terminal
@@ -511,7 +522,9 @@ pub fn prune_dwa_with_suffix_grammar(
                     }
                     
                     if let Some(row) = crate::glr::table::get_row(&suffix_parser.table, parser_state_id) {
+                        crate::debug!(6, "        Checking parser state {} for terminal {}", parser_state_id.0, suffix_tid.0);
                         if let Some(action) = row.get_shifts_and_reduces_for_terminal(&suffix_tid) {
+                            crate::debug!(6, "          Action: {:?}", action);
                             use crate::glr::table::Stage7ShiftsAndReducesLookaheadValue;
                             match action {
                                 Stage7ShiftsAndReducesLookaheadValue::Shift(target_state) => {
@@ -527,17 +540,23 @@ pub fn prune_dwa_with_suffix_grammar(
                                                 states_to_process.push_back(goto_state);
                                             }
                                         }
+                                    } else {
+                                        // Reduce with len > 0: we can't simulate the stack,
+                                        // but this terminal IS valid as a lookahead.
+                                        // Mark that we should keep this transition.
+                                        has_reduce_with_len_gt_0 = true;
+                                        crate::debug!(6, "          -> Reduce len>0, marking as valid");
                                     }
-                                    // For len > 0, we'd need stack simulation - can't handle
                                 }
                                 Stage7ShiftsAndReducesLookaheadValue::Split { shift, reduces } => {
                                     // Handle shifts (actually consume terminal)
                                     if let Some(target_state) = shift {
                                         successor_states.insert(target_state);
                                     }
-                                    // Handle ε-reductions
+                                    // Handle reduces
                                     for (&reduce_len, nonterminals) in reduces.iter() {
                                         if reduce_len == 0 {
+                                            // ε-reduction
                                             for nt_id in nonterminals.keys() {
                                                 if let Some(goto) = row.get_gotos().get(nt_id) {
                                                     if let Some(goto_state) = goto.state_id {
@@ -545,16 +564,23 @@ pub fn prune_dwa_with_suffix_grammar(
                                                     }
                                                 }
                                             }
+                                        } else {
+                                            // Reduce with len > 0: valid lookahead
+                                            has_reduce_with_len_gt_0 = true;
+                                            crate::debug!(6, "          -> Split reduce len>0, marking as valid");
                                         }
                                     }
                                 }
                             }
+                        } else {
+                            crate::debug!(6, "          No action for terminal {} from state {}", suffix_tid.0, parser_state_id.0);
                         }
                     }
                 }
                 
                 if !successor_states.is_empty() {
                     // Keep the transition, propagate successor states
+                    crate::debug!(5, "      KEEP: successor_states = {:?}", successor_states);
                     let dest_states = dwa_to_parser_states.entry(dest_dwa_state).or_default();
                     dest_states.extend(successor_states);
                     if !visited.contains(&dest_dwa_state) {
@@ -562,8 +588,24 @@ pub fn prune_dwa_with_suffix_grammar(
                         queue.push_back(dest_dwa_state);
                     }
                     kept_count += 1;
+                } else if has_reduce_with_len_gt_0 {
+                    // Keep the transition because a reduce action exists for this terminal
+                    // We can't compute exact successor states without stack simulation,
+                    // but we know the terminal is valid as a lookahead for the reduce.
+                    // Don't propagate parser states (we don't know what they'll be after reduce).
+                    crate::debug!(5, "      KEEP (reduce lookahead): terminal {} valid from parser_states {:?}", label_usize, parser_states);
+                    if !visited.contains(&dest_dwa_state) {
+                        visited.insert(dest_dwa_state);
+                        queue.push_back(dest_dwa_state);
+                    }
+                    // Initialize the dest state's parser states with the suffix parser start state
+                    // This is conservative - after reduces, we could end up anywhere
+                    let dest_states = dwa_to_parser_states.entry(dest_dwa_state).or_default();
+                    dest_states.insert(initial_parser_state_id);
+                    kept_count += 1;
                 } else {
                     // No valid actions - prune the transition
+                    crate::debug!(5, "      PRUNE: no successor states for terminal {} from parser_states {:?}", label_usize, parser_states);
                     transitions_to_remove.push((dwa_state, label));
                     pruned_count += 1;
                 }

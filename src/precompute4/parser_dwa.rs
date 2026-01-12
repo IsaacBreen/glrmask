@@ -355,6 +355,18 @@ pub fn canonicalize_bundle(terminal_map: BTreeMap<Option<TerminalID>, Weight>) -
 pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
     crate::debug!(3, "Starting Parser DWA construction. Input terminal_nwa: {} states, {} transitions", 
         terminal_nwa.states.len(), terminal_nwa.states.num_transitions());
+    
+    // Handle empty terminal NWA (no valid tokens for this grammar/vocabulary combination)
+    // Return a minimal DWA with one state and no transitions (always returns empty mask)
+    if terminal_nwa.states.0.is_empty() || terminal_nwa.body.start_states.is_empty() {
+        crate::debug!(3, "Terminal NWA is empty - returning empty Parser DWA");
+        let mut empty_dwa = DWA::new_empty();
+        // Add a single start state with no final weight (no tokens are valid)
+        let start_state = empty_dwa.states.add_state();
+        empty_dwa.body.start_state = start_state;
+        return empty_dwa;
+    }
+    
     let now = Instant::now();
     let template_dwas = match build_template_dwas(parser) { Ok(m) => m, Err(e) => panic!("Failed to build template DWAs: {:?}", e), };
     let ignore_dwa = build_ignore_terminal_dwa();
@@ -896,6 +908,17 @@ pub fn finalize_and_optimize_and_determinize(parser: &GLRParser, mut combined_nw
     combined_nwa.prune_unreachable();
     crate::debug!(4, "After pruning dead ends: NWA {} -> {} states, {} transitions", 
         before_prune, combined_nwa.states.len(), combined_nwa.states.num_transitions());
+    
+    // NWA minimization is expensive - skip it for now
+    // The DWA minimization will handle the reduction anyway
+    // let nwa_states = combined_nwa.states.len();
+    // if nwa_states > 100_000 {
+    //     let minimize_start = std::time::Instant::now();
+    //     combined_nwa.minimize_internal();
+    //     let minimize_time = minimize_start.elapsed();
+    //     crate::debug!(4, "NWA minimization: {} -> {} states in {:.2?}", 
+    //         nwa_states, combined_nwa.states.len(), minimize_time);
+    // }
     
     // Use unified determinize_and_minimize with "FinalDWA" profile
     // Pipeline: determinize → prune_dead_ends → minimize
