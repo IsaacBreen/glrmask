@@ -212,15 +212,48 @@ fn optimize_dwa_and_vocab(
     }
     crate::debug!(5, "DWA Vocab Partition: {:?}", t_partition.elapsed());
 
-    // OPTIMIZATION: Skip expensive frequency counting and sorting - just renumber sequentially
+    // OPTIMIZATION: Sort classes by co-occurrence signature to minimize range fragmentation
+    // Classes that appear in the same set of weights should get consecutive IDs
     let t_renumber = std::time::Instant::now();
+    
+    // First, collect class_id -> representative_token (first token in each class)
+    let mut class_ids: Vec<usize> = class_to_tokens.keys().cloned().collect();
+    
+    // Compute signature for each class: which weights contain a representative token from this class
+    // We use a bitvector/hash of weight indices that contain this class
+    let weights_list: Vec<&Weight> = unique_weights.iter().filter(|w| !w.is_all_fast()).collect();
+    let mut class_signatures: FxHashMap<usize, Vec<usize>> = FxHashMap::default();
+    
+    for (cid, tokens) in &class_to_tokens {
+        if let Some(&rep_token) = tokens.first() {
+            let mut sig = Vec::new();
+            for (wi, w) in weights_list.iter().enumerate() {
+                if w.contains(rep_token) {
+                    sig.push(wi);
+                }
+            }
+            class_signatures.insert(*cid, sig);
+        } else {
+            class_signatures.insert(*cid, Vec::new());
+        }
+    }
+    
+    // Sort classes by their signature (lexicographically) so classes that co-occur get adjacent IDs
+    class_ids.sort_by(|a, b| {
+        let sig_a = class_signatures.get(a).unwrap();
+        let sig_b = class_signatures.get(b).unwrap();
+        sig_a.cmp(sig_b)
+    });
+    
     let mut old_to_new_map: FxHashMap<usize, usize> = FxHashMap::default();
     let mut new_id = 0;
-    for tokens in class_to_tokens.values() {
-        for &t in tokens {
-            old_to_new_map.insert(t, new_id);
+    for cid in class_ids {
+        if let Some(tokens) = class_to_tokens.get(&cid) {
+            for &t in tokens {
+                old_to_new_map.insert(t, new_id);
+            }
+            new_id += 1;
         }
-        new_id += 1;
     }
     let new_max_tok = num_classes.saturating_sub(1);
 
