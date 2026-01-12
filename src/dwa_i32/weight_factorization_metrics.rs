@@ -2,176 +2,53 @@
 
 //! Weight Factorization Metrics
 //!
-//! Analyzes unique weights in a DWA to determine factorization potential.
-//! This helps evaluate whether a weight optimization mapping could reduce
-//! the total range count across all weights.
+//! Analyzes unique weights in a DWA to determine factorization potential using
+//! a Greedy Dictionary Compression (Re-Pair style) approach.
 //!
-//! Key concepts:
-//! - **Partition atoms**: Atomic intervals formed by all range endpoints
-//! - **Sharing ratio**: How many weights contain each atom
-//! - **Theoretical minimum basis**: Lower bound on factorized representation
+//! Key Algorithm:
+//! 1. **Initial Basis**: Unique Ranges (interned from all weights).
+//! 2. **Initial Map**: Weights -> Sets of Range IDs.
+//! 3. **Greedy Merge**: Iteratively find pair (A, B) that appears most frequently.
+//! 4. **Update**: Create new basis element C = A U B. Replace (A, B) with C in weights.
+//! 5. **Cost Metric**: Total Ranges = Ranges(Basis) + sum(len(MappedWeight)).
 //!
 //! Enable with `WEIGHT_FACTORIZATION_METRICS=1`.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ptr;
 
-use range_set_blaze::RangeSetBlaze;
+use range_set_blaze::{RangeSetBlaze, CheckSortedDisjoint};
 
 use crate::dwa_i32::{DWA, Weight};
 
-/// Statistics about weight factorization potential.
-#[derive(Debug, Clone)]
-pub struct FactorizationStats {
-    /// Number of unique weights analyzed
-    pub num_unique_weights: usize,
-    /// Total ranges across all unique weights (baseline)
-    pub total_ranges: usize,
-    /// Number of partition atoms (atomic intervals from all endpoints)
-    pub num_atoms: usize,
-    /// Max overlap: maximum number of weights containing the same atom
-    pub max_overlap: usize,
-    /// Atoms with high overlap (>10% of weights)
-    pub high_overlap_atoms: usize,
-    /// Theoretical minimum ranges if perfectly factorized
-    /// (each atom appears in basis once, weights just refer to it)
-    pub theoretical_min_ranges: usize,
-    /// Compression ratio: theoretical_min / total_ranges
-    pub compression_ratio: f64,
-    /// Number of distinct "patterns" (unique atom-bitmasks across weights)
-    pub num_distinct_patterns: usize,
-}
-
-/// Computes partition atoms from a set of RangeSetBlaze weights.
-/// 
-/// Returns a sorted list of atomic intervals derived from all range endpoints.
-/// Each atom [a, b) is such that every weight either fully contains it or doesn't overlap at all.
+/// Computes partition atoms (for debugging/detailed stats only)
 fn compute_partition_atoms(weights: &[&RangeSetBlaze<usize>]) -> Vec<(usize, usize)> {
-    // Collect all endpoints
     let mut endpoints: BTreeSet<usize> = BTreeSet::new();
-    endpoints.insert(0); // Include 0 as a boundary
+    endpoints.insert(0);
     
     for w in weights {
         for range in w.ranges() {
             endpoints.insert(*range.start());
-            endpoints.insert(range.end().saturating_add(1)); // Exclusive end
+            endpoints.insert(range.end().saturating_add(1));
         }
     }
     
-    // Convert to sorted vec
     let endpoints_vec: Vec<usize> = endpoints.into_iter().collect();
-    
-    // Create atoms from consecutive pairs
     let mut atoms = Vec::new();
     for window in endpoints_vec.windows(2) {
         if window[0] < window[1] {
             atoms.push((window[0], window[1]));
         }
     }
-    
     atoms
 }
 
 /// Check if a weight contains a given atom (half-open interval [lo, hi))
-fn weight_contains_atom(weight: &RangeSetBlaze<usize>, lo: usize, hi: usize) -> bool {
-    // An atom is contained if the weight contains all points in [lo, hi)
-    // Since atoms are derived from endpoints, we just check if lo is in the weight
+fn weight_contains_atom(weight: &RangeSetBlaze<usize>, lo: usize, _hi: usize) -> bool {
     weight.contains(lo)
 }
 
-/// Analyze factorization potential for a set of weights.
-pub fn analyze_factorization(unique_weights: &[Weight]) -> FactorizationStats {
-    if unique_weights.is_empty() {
-        return FactorizationStats {
-            num_unique_weights: 0,
-            total_ranges: 0,
-            num_atoms: 0,
-            max_overlap: 0,
-            high_overlap_atoms: 0,
-            theoretical_min_ranges: 0,
-            compression_ratio: 1.0,
-            num_distinct_patterns: 0,
-        };
-    }
-    
-    let num_unique_weights = unique_weights.len();
-    let total_ranges: usize = unique_weights.iter().map(|w| w.num_ranges()).sum();
-    
-    // Get references to inner RangeSetBlaze
-    let rsbs: Vec<&RangeSetBlaze<usize>> = unique_weights.iter().map(|w| &w.rsb).collect();
-    
-    // Compute partition atoms
-    let atoms = compute_partition_atoms(&rsbs);
-    let num_atoms = atoms.len();
-    
-    if num_atoms == 0 {
-        return FactorizationStats {
-            num_unique_weights,
-            total_ranges,
-            num_atoms: 0,
-            max_overlap: 0,
-            high_overlap_atoms: 0,
-            theoretical_min_ranges: total_ranges,
-            compression_ratio: 1.0,
-            num_distinct_patterns: 0,
-        };
-    }
-    
-    // Count how many weights contain each atom
-    let mut atom_overlap: Vec<usize> = vec![0; num_atoms];
-    
-    // Also track each weight's "pattern" (which atoms it contains)
-    let mut weight_patterns: Vec<Vec<bool>> = Vec::with_capacity(num_unique_weights);
-    
-    for weight in &rsbs {
-        let mut pattern = Vec::with_capacity(num_atoms);
-        for (i, &(lo, hi)) in atoms.iter().enumerate() {
-            let contains = weight_contains_atom(weight, lo, hi);
-            pattern.push(contains);
-            if contains {
-                atom_overlap[i] += 1;
-            }
-        }
-        weight_patterns.push(pattern);
-    }
-    
-    // Compute statistics
-    let max_overlap = atom_overlap.iter().copied().max().unwrap_or(0);
-    let high_overlap_threshold = (num_unique_weights as f64 * 0.1).ceil() as usize;
-    let high_overlap_atoms = atom_overlap.iter().filter(|&&c| c > high_overlap_threshold).count();
-    
-    // Theoretical minimum: each atom that appears in ANY weight contributes 1 range to basis
-    // This is a lower bound if we can perfectly factor
-    let atoms_used = atom_overlap.iter().filter(|&&c| c > 0).count();
-    let theoretical_min_ranges = atoms_used;
-    
-    let compression_ratio = if total_ranges > 0 {
-        theoretical_min_ranges as f64 / total_ranges as f64
-    } else {
-        1.0
-    };
-    
-    // Count distinct patterns
-    let mut pattern_set: BTreeSet<Vec<bool>> = BTreeSet::new();
-    for pattern in weight_patterns {
-        pattern_set.insert(pattern);
-    }
-    let num_distinct_patterns = pattern_set.len();
-    
-    FactorizationStats {
-        num_unique_weights,
-        total_ranges,
-        num_atoms,
-        max_overlap,
-        high_overlap_atoms,
-        theoretical_min_ranges,
-        compression_ratio,
-        num_distinct_patterns,
-    }
-}
-
 /// Print factorization metrics for a DWA's unique weights.
-/// Enabled only when `WEIGHT_FACTORIZATION_METRICS=1`.
 pub fn maybe_print_dwa_weight_factorization_metrics(dwa: &DWA, name: &str) {
     if std::env::var("WEIGHT_FACTORIZATION_METRICS")
         .map(|v| v != "1")
@@ -180,9 +57,8 @@ pub fn maybe_print_dwa_weight_factorization_metrics(dwa: &DWA, name: &str) {
         return;
     }
     
-    // Collect unique weights by Arc pointer address
+    // Collect unique weights
     let mut unique: HashMap<usize, Weight> = HashMap::new();
-    
     for state in &dwa.states.0 {
         if let Some(fw) = &state.final_weight {
             let p = ptr::addr_of!(**fw) as usize;
@@ -195,63 +71,155 @@ pub fn maybe_print_dwa_weight_factorization_metrics(dwa: &DWA, name: &str) {
     }
     
     let unique_weights: Vec<Weight> = unique.into_values().collect();
-    let stats = analyze_factorization(&unique_weights);
-    
-    crate::debug!(5,
-        "[WEIGHT_FACTORIZATION_METRICS] {}: unique_weights={} total_ranges={} num_atoms={} max_overlap={} high_overlap_atoms={} theoretical_min={} compression_ratio={:.3} distinct_patterns={}",
-        name,
-        stats.num_unique_weights,
-        stats.total_ranges,
-        stats.num_atoms,
-        stats.max_overlap,
-        stats.high_overlap_atoms,
-        stats.theoretical_min_ranges,
-        stats.compression_ratio,
-        stats.num_distinct_patterns,
-    );
-    
-    // Additional detailed analysis at debug level 6
-    if crate::r#macro::is_debug_level_enabled(6) {
-        // Show distribution of atom overlaps
-        let mut overlap_histogram: BTreeMap<usize, usize> = BTreeMap::new();
-        
-        let rsbs: Vec<&RangeSetBlaze<usize>> = unique_weights.iter().map(|w| &w.rsb).collect();
-        let atoms = compute_partition_atoms(&rsbs);
-        
-        for weight in &rsbs {
-            for &(lo, hi) in &atoms {
-                if weight_contains_atom(weight, lo, hi) {
-                    *overlap_histogram.entry(1).or_default() += 1;
-                }
-            }
-        }
-        
-        // Count overlap distribution
-        let mut atom_counts: Vec<usize> = Vec::new();
-        for weight in &rsbs {
-            let mut count = 0;
-            for &(lo, _hi) in &atoms {
-                if weight_contains_atom(weight, lo, _hi) {
-                    count += 1;
-                }
-            }
-            atom_counts.push(count);
-        }
-        
-        let avg_atoms_per_weight = if !atom_counts.is_empty() {
-            atom_counts.iter().sum::<usize>() as f64 / atom_counts.len() as f64
-        } else {
-            0.0
-        };
-        
-        crate::debug!(6,
-            "[WEIGHT_FACTORIZATION_METRICS] {} detail: avg_atoms_per_weight={:.2} ranges_per_weight={:.2}",
-            name,
-            avg_atoms_per_weight,
-            if stats.num_unique_weights > 0 { stats.total_ranges as f64 / stats.num_unique_weights as f64 } else { 0.0 },
-        );
-    }
+    if unique_weights.is_empty() { return; }
+
+    // Log basic stats
+    let total_ranges: usize = unique_weights.iter().map(|w| w.num_ranges()).sum();
+    crate::debug!(5, "[WEIGHT_FACTORIZATION_METRICS] {}: unique_weights={} total_ranges={}", 
+        name, unique_weights.len(), total_ranges);
+
+    // Run verified greedy analysis
+    analyze_greedy_factorization(&unique_weights, name);
 }
+
+/// Run Verified Greedy Dictionary Factorization (Range-Based).
+fn analyze_greedy_factorization(unique_weights: &[Weight], name: &str) {
+    // eprintln!("DEBUG: analyze_greedy_factorization start for {}", name);
+    if unique_weights.is_empty() { return; }
+
+    // 1. Intern all ranges
+    let mut range_to_id: HashMap<(usize, usize), usize> = HashMap::new();
+    let mut id_to_range: Vec<(usize, usize)> = Vec::new();
+    let mut next_id = 0;
+    
+    // Mapped weights: Sets of basis IDs
+    let mut mapped_weights: Vec<BTreeSet<usize>> = Vec::with_capacity(unique_weights.len());
+    
+    // eprintln!("DEBUG: starting intern loop");
+    for w in unique_weights {
+        let mut entry = BTreeSet::new();
+        for range in w.rsb.ranges() {
+            let r = (*range.start(), *range.end());
+            let id = if let Some(&id) = range_to_id.get(&r) {
+                id
+            } else {
+                range_to_id.insert(r, next_id);
+                id_to_range.push(r);
+                let id = next_id;
+                next_id += 1;
+                id
+            };
+            entry.insert(id);
+        }
+        mapped_weights.push(entry);
+    }
+    // eprintln!("DEBUG: intern loop done, found {} unique ranges", id_to_range.len());
+    
+    // Initial Basis: Single ranges (constructed efficiently O(1))
+    let mut basis: Vec<RangeSetBlaze<usize>> = id_to_range.iter()
+        .map(|&(s, e)| RangeSetBlaze::from_sorted_disjoint(CheckSortedDisjoint::new(std::iter::once(s..=e))))
+        .collect();
+    
+    let original_total_ranges: usize = unique_weights.iter().map(|w| w.num_ranges()).sum();
+    
+    // Cost calculation
+    let mut current_basis_ranges: usize = basis.iter().map(|b| b.ranges().count()).sum();
+    let mut current_mapping_refs: usize = mapped_weights.iter().map(|w| w.len()).sum();
+    let start_total_cost = current_basis_ranges + current_mapping_refs;
+    
+    // eprintln!("DEBUG: Cost calc done. Printing debug log.");
+
+    crate::debug!(5, "[GREEDY_FACTORIZATION] {} Start: original={} start_cost={} (basis={} + map={}) unique_ranges={}", 
+        name, original_total_ranges, start_total_cost, current_basis_ranges, current_mapping_refs, basis.len());
+
+    // Greedy Loop
+    let max_iterations = 2000; 
+    
+    for _iter in 0..max_iterations {
+        let mut pair_counts: HashMap<(usize, usize), usize> = HashMap::new();
+        
+        for w in &mapped_weights {
+            if w.len() < 2 { continue; }
+            let elements: Vec<usize> = w.iter().copied().collect();
+            // Optimization: Only count ADJACENT pairs in the current mapping.
+            // This is O(L) instead of O(L^2), preventing huge weights from stalling the analysis.
+            for i in 0..(elements.len() - 1) {
+                let pair = (elements[i], elements[i+1]);
+                *pair_counts.entry(pair).or_default() += 1;
+            }
+        }
+        
+        if pair_counts.is_empty() { break; }
+        
+        let mut best_pair = None;
+        let mut best_net_savings: isize = std::isize::MIN;
+        
+        for (&(a, b), &count) in pair_counts.iter() {
+            if count < 2 { continue; }
+            
+            let c_rsb = &basis[a] | &basis[b];
+            let c_ranges = c_rsb.ranges().count();
+            
+            // Savings: (count refs removed) - (basis ranges added)
+            let net_savings = (count as isize) - (c_ranges as isize);
+            
+            if net_savings > best_net_savings {
+                best_net_savings = net_savings;
+                best_pair = Some((a, b));
+            }
+        }
+        
+        if let Some((a, b)) = best_pair {
+            if best_net_savings <= 0 { break; }
+            
+            let new_id = basis.len();
+            let new_rsb = &basis[a] | &basis[b];
+            basis.push(new_rsb);
+            
+            for w in &mut mapped_weights {
+                if w.contains(&a) && w.contains(&b) {
+                    w.remove(&a);
+                    w.remove(&b);
+                    w.insert(new_id);
+                }
+            }
+        } else {
+            break;
+        }
+    }
+    
+    // Final Cost
+    let mut used_indices = BTreeSet::new();
+    for w in &mapped_weights {
+        for &idx in w { used_indices.insert(idx); }
+    }
+    
+    let final_basis_ranges: usize = used_indices.iter().map(|&i| basis[i].ranges().count()).sum();
+    let final_mapping_refs: usize = mapped_weights.iter().map(|w| w.len()).sum();
+    let final_total_cost = final_basis_ranges + final_mapping_refs;
+    let ratio = final_total_cost as f64 / original_total_ranges as f64;
+    
+    crate::debug!(5, 
+        "[GREEDY_FACTORIZATION] {} Result: final_cost={} (basis={} map={}) ratio={:.3}",
+        name, final_total_cost, final_basis_ranges, final_mapping_refs, ratio
+    );
+
+    // Verification
+    for (i, w_idxs) in mapped_weights.iter().enumerate() {
+        let mut reconstructed = RangeSetBlaze::new();
+        for &idx in w_idxs {
+            reconstructed |= &basis[idx];
+        }
+        if reconstructed != unique_weights[i].rsb {
+            crate::debug!(1, "[GREEDY_FACTORIZATION] FATAL: Verification failed for weight {}!", i);
+            panic!("Greedy factorization verification failed!");
+        }
+    }
+    // eprintln!("DEBUG: analyze_greedy_factorization done for {}", name);
+}
+
+// Stub for 2D metrics call
+pub fn maybe_print_2d_factorization_metrics(_: &DWA, _: usize, _: usize, _: &str) {}
 
 #[cfg(test)]
 mod tests {
@@ -266,49 +234,22 @@ mod tests {
     }
     
     #[test]
-    fn test_partition_atoms_simple() {
-        let w1 = make_weight(&[(0, 10)]);
-        let w2 = make_weight(&[(5, 15)]);
-        let rsbs: Vec<&RangeSetBlaze<usize>> = vec![&w1.rsb, &w2.rsb];
-        
-        let atoms = compute_partition_atoms(&rsbs);
-        
-        // Endpoints: 0, 5, 11, 16
-        // Atoms: [0,5), [5,11), [11,16)
-        assert_eq!(atoms.len(), 3);
-        assert_eq!(atoms[0], (0, 5));
-        assert_eq!(atoms[1], (5, 11));
-        assert_eq!(atoms[2], (11, 16));
-    }
-    
-    #[test]
-    fn test_analyze_factorization_sharing() {
-        // Two weights with a common prefix
+    fn test_greedy_factorization_simple() {
         let w1 = make_weight(&[(0, 10), (100, 200)]);
-        let w2 = make_weight(&[(0, 10), (300, 400)]);
+        let w2 = make_weight(&[(0, 10), (300, 400)]); 
         let weights = vec![w1, w2];
-        
-        let stats = analyze_factorization(&weights);
-        
-        assert_eq!(stats.num_unique_weights, 2);
-        assert_eq!(stats.total_ranges, 4); // 2 ranges each
-        // The [0,10] atom is shared, so max_overlap should be 2
-        assert!(stats.max_overlap >= 2);
-        // Theoretical min should be 3 (three distinct contiguous regions: 0-10, 100-200, 300-400)
-        assert!(stats.theoretical_min_ranges <= stats.total_ranges);
+        analyze_greedy_factorization(&weights, "Test");
     }
-    
+
     #[test]
-    fn test_analyze_factorization_no_sharing() {
-        // Two weights with no overlap
-        let w1 = make_weight(&[(0, 10)]);
-        let w2 = make_weight(&[(100, 110)]);
-        let weights = vec![w1, w2];
-        
-        let stats = analyze_factorization(&weights);
-        
-        assert_eq!(stats.num_unique_weights, 2);
-        assert_eq!(stats.total_ranges, 2);
-        assert_eq!(stats.max_overlap, 1); // Each atom in only one weight
+    fn test_rsb_perf() {
+        let start = std::time::Instant::now();
+        let s = 0;
+        let e = 1_000_000_000;
+        // Verify O(1) construction using CheckSortedDisjoint
+        let _rsb = RangeSetBlaze::from_sorted_disjoint(CheckSortedDisjoint::new(std::iter::once(s..=e)));
+        let duration = start.elapsed();
+        println!("RSB construction took {:?}", duration);
+        assert!(duration.as_millis() < 100, "Construction too slow: {:?}", duration);
     }
 }
