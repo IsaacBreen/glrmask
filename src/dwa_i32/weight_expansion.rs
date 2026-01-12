@@ -5,9 +5,12 @@
 // weight space itself).
 //
 // Weight space expansion: N (LLM tokens) -> N×M (LLM tokens × tokenizer states)
-// Layout: position = llm_token * M + tsid
-// This means iterating through weight indices iterates tsids first, so a single
-// LLM token active on ALL tsids uses just ONE range.
+// Layout: position = llm_token * M + tsid_offset
+// By default, tsid_offset == tsid. However, callers may provide a permutation
+// tsid_offset(tsid) to reduce RangeSet fragmentation (by making frequently-used
+// tsid groups contiguous in the offset space).
+//
+// Note: A single LLM token active on ALL tsids uses just ONE range.
 
 #![allow(dead_code)]
 
@@ -15,6 +18,16 @@ use range_set_blaze::RangeSetBlaze;
 use super::common::{Label, Weight};
 use super::dwa::DWA;
 use super::nwa::NWA;
+
+#[inline]
+fn tsid_to_offset(tsid: usize, tsid_offset_map: Option<&[usize]>) -> usize {
+    if let Some(map) = tsid_offset_map {
+        debug_assert!(tsid < map.len());
+        map[tsid]
+    } else {
+        tsid
+    }
+}
 
 /// Expand a weight from N-space to N×M-space.
 /// Each position p in the original weight becomes position p * num_tsids + 0..num_tsids-1.
@@ -56,19 +69,44 @@ pub fn expand_rsb(rsb: &RangeSetBlaze<usize>, num_tsids: usize) -> RangeSetBlaze
 /// The mask has positions: tsid + n*M for n in 0..N
 /// This is equivalent to: all positions where position % M == tsid
 pub fn create_tsid_mask(tsid: usize, num_tsids: usize, max_llm_token: usize) -> Weight {
-    // For tsid m, we want positions: m, m+M, m+2M, ..., m+n*M where n*M + m <= max_llm_token * M
+    create_tsid_mask_with_offset_map(tsid, num_tsids, max_llm_token, None)
+}
+
+/// Create a tsid mask for a specific tokenizer state ID, using an optional tsid->offset map.
+///
+/// The mask has positions: off(tsid) + n*M for n in 0..N.
+/// This is equivalent to: all positions where (position % M) == off(tsid).
+pub fn create_tsid_mask_with_offset_map(
+    tsid: usize,
+    num_tsids: usize,
+    max_llm_token: usize,
+    tsid_offset_map: Option<&[usize]>,
+) -> Weight {
+    // For tsid off, we want positions: off, off+M, off+2M, ..., off+n*M where n <= max_llm_token
+    let off = tsid_to_offset(tsid, tsid_offset_map);
     let mut mask = RangeSetBlaze::new();
     for n in 0..=max_llm_token {
-        mask.insert(tsid + n * num_tsids);
+        mask.insert(off + n * num_tsids);
     }
     Weight::from_rsb(mask)
 }
 
 /// Create a tsid mask as a RangeSetBlaze.
 pub fn create_tsid_mask_rsb(tsid: usize, num_tsids: usize, max_llm_token: usize) -> RangeSetBlaze<usize> {
+    create_tsid_mask_rsb_with_offset_map(tsid, num_tsids, max_llm_token, None)
+}
+
+/// Create a tsid mask as a RangeSetBlaze, using an optional tsid->offset map.
+pub fn create_tsid_mask_rsb_with_offset_map(
+    tsid: usize,
+    num_tsids: usize,
+    max_llm_token: usize,
+    tsid_offset_map: Option<&[usize]>,
+) -> RangeSetBlaze<usize> {
+    let off = tsid_to_offset(tsid, tsid_offset_map);
     let mut mask = RangeSetBlaze::new();
     for n in 0..=max_llm_token {
-        mask.insert(tsid + n * num_tsids);
+        mask.insert(off + n * num_tsids);
     }
     mask
 }
@@ -89,8 +127,24 @@ pub fn create_tsid_set_mask<I>(tsids: I, num_tsids: usize, max_llm_token: usize)
 where
     I: IntoIterator<Item = usize>,
 {
+    create_tsid_set_mask_with_offset_map(tsids, num_tsids, max_llm_token, None)
+}
+
+/// Create a combined tsid mask for a set of tokenizer state IDs, using an optional tsid->offset map.
+pub fn create_tsid_set_mask_with_offset_map<I>(
+    tsids: I,
+    num_tsids: usize,
+    max_llm_token: usize,
+    tsid_offset_map: Option<&[usize]>,
+) -> Weight
+where
+    I: IntoIterator<Item = usize>,
+{
     // Build base pattern from all tsids
-    let base_pattern: RangeSetBlaze<usize> = tsids.into_iter().collect();
+    let base_pattern: RangeSetBlaze<usize> = tsids
+        .into_iter()
+        .map(|t| tsid_to_offset(t, tsid_offset_map))
+        .collect();
     
     if base_pattern.is_empty() {
         return Weight::zeros();

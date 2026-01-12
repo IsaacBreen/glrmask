@@ -4,7 +4,7 @@ use crate::datastructures::leveled_gss::LeveledGSS;
 use crate::glr::parser::{GLRParserState, ParseStateEdgeContent};
 use crate::glr::table::TerminalID;
 use crate::dwa_i32::common::{Label, StateID as WAStateID};
-use crate::dwa_i32::weight_expansion::{create_tsid_mask_rsb, collapse_weight_rsb};
+use crate::dwa_i32::weight_expansion::{create_tsid_mask_rsb_with_offset_map, collapse_weight_rsb};
 use crate::dfa_u8::TokenizerStateID;
 use profiler_macro::time_it;
 use range_set_blaze::RangeSetBlaze;
@@ -222,7 +222,16 @@ impl<'a> GrammarConstraintState<'a> {
             }
             
             let tsid = tokenizer_state_id.0;
-            let tsid_mask = create_tsid_mask_rsb(tsid, num_tsids, max_llm_token);
+            let tsid_mask = create_tsid_mask_rsb_with_offset_map(
+                tsid,
+                num_tsids,
+                max_llm_token,
+                if self.parent.tsid_offset_map.is_empty() {
+                    None
+                } else {
+                    Some(self.parent.tsid_offset_map.as_slice())
+                },
+            );
             
             // Prune GSS based on disallowed terminals (same as symbol-heavy)
             let mut gss = glr_state.stack.clone();

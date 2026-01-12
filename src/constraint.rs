@@ -355,6 +355,15 @@ pub struct GrammarConstraint {
     /// When > 0, indicates weight-heavy mode where weights are in N×M space.
     /// When 0, indicates symbol-heavy mode (tsid as initial transition labels).
     pub num_tsids: usize,
+
+    /// Optional permutation of tokenizer-state IDs into a dense offset in [0, M).
+    ///
+    /// In weight-heavy mode, expanded IDs use: `expanded = internal_token * M + tsid_offset`.
+    /// By default, `tsid_offset == tsid`, but we can permute offsets to make common
+    /// tsid groups contiguous and reduce RangeSet fragmentation.
+    ///
+    /// Empty in symbol-heavy mode.
+    pub tsid_offset_map: Vec<usize>,
 }
 
 impl GrammarConstraint {
@@ -379,6 +388,7 @@ impl GrammarConstraint {
         assert_eq!(self.parser_dwa_vocab, other.parser_dwa_vocab);
         assert_eq!(self.vocab_trie, other.vocab_trie);
         assert_eq!(self.num_tsids, other.num_tsids);
+        assert_eq!(self.tsid_offset_map, other.tsid_offset_map);
     }
 }
 
@@ -461,6 +471,10 @@ struct GrammarConstraintJSON {
     max_orig_id: Option<usize>,
     /// Number of tsids for weight-heavy mode (0 = symbol-heavy)
     num_tsids: usize,
+
+    /// Optional tsid->offset mapping for weight-heavy encoding.
+    /// If missing, defaults to identity.
+    tsid_offset_map: Option<Vec<usize>>,
 }
 
 impl JSONConvertible for GrammarConstraintJSON {
@@ -490,6 +504,10 @@ impl JSONConvertible for GrammarConstraintJSON {
         // num_tsids (0 = symbol-heavy, > 0 = weight-heavy)
         if self.num_tsids > 0 {
             obj.insert("num_tsids".to_string(), JSONNode::UInt(self.num_tsids as u128));
+        }
+
+        if let Some(ref map) = self.tsid_offset_map {
+            obj.insert("tsid_offset_map".to_string(), map.to_json());
         }
         
         JSONNode::Object(obj)
@@ -542,6 +560,16 @@ impl JSONConvertible for GrammarConstraintJSON {
                             _ => None,
                         })
                         .unwrap_or(0),
+
+                    tsid_offset_map: obj.get("tsid_offset_map")
+                        .and_then(|n| {
+                            // Accept null/missing as None.
+                            if matches!(n, JSONNode::Null) {
+                                None
+                            } else {
+                                Vec::<usize>::from_json(n.clone()).ok()
+                            }
+                        }),
                 })
             }
             _ => Err("Expected object for GrammarConstraintJSON".to_string()),
@@ -567,6 +595,7 @@ impl JSONConvertible for GrammarConstraint {
             original_llm_vocab: None,
             max_orig_id: Some(self.parser_dwa_vocab.max_original_llm_token_id),
             num_tsids: self.num_tsids,
+            tsid_offset_map: if self.num_tsids > 0 { Some(self.tsid_offset_map.clone()) } else { None },
         };
         intermediate.to_json()
     }
@@ -618,6 +647,13 @@ impl JSONConvertible for GrammarConstraint {
             possible_matches,
             parser_dwa_vocab: intermediate.vocab,
             num_tsids: intermediate.num_tsids,
+            tsid_offset_map: if intermediate.num_tsids > 0 {
+                intermediate
+                    .tsid_offset_map
+                    .unwrap_or_else(|| (0..intermediate.num_tsids).collect())
+            } else {
+                Vec::new()
+            },
         })
     }
 }
@@ -1060,6 +1096,78 @@ impl GrammarConstraint {
         } else {
             0
         };
+
+        // In weight-heavy mode, we can permute tsid offsets (within each token block) to make
+        // tokenizer-state equivalence classes contiguous in the offset space. This can
+        // significantly reduce RangeSet fragmentation for tsid-set masks.
+        let tsid_offset_map: Vec<usize> = if num_tsids == 0 {
+            Vec::new()
+        } else if std::env::var("DISABLE_TSID_OFFSET_PERMUTE").map(|v| v == "1").unwrap_or(false) {
+            (0..num_tsids).collect()
+        } else {
+            // Heuristic permutation to reduce RangeSet fragmentation in weight-heavy mode:
+            //
+            // - We assign offsets in contiguous blocks per representative tokenizer state.
+            // - We order these representative blocks by a stable "terminal-possibility signature"
+            //   (a 175-bit bitset over parser terminals), so reps which can start with similar
+            //   terminals tend to be adjacent.
+            //
+            // This is a cheap approximation of the co-occurrence structure induced during
+            // determinization (many determinized weights are unions over reps that share
+            // an outgoing label), and usually does better than ordering reps numerically.
+
+            let mut rep_to_tsids: BTreeMap<TokenizerStateID, Vec<usize>> = BTreeMap::new();
+            for (tsid, rep) in &state_to_rep {
+                rep_to_tsids.entry(*rep).or_default().push(tsid.0);
+            }
+            for tsids in rep_to_tsids.values_mut() {
+                tsids.sort_unstable();
+            }
+
+            // terminal signatures are 175 bits => 3x u64 is enough (192 bits)
+            let mut rep_blocks: Vec<([u64; 3], TokenizerStateID, Vec<usize>)> = Vec::with_capacity(rep_to_tsids.len());
+            for (rep, tsids) in rep_to_tsids {
+                let mut sig = [0u64; 3];
+                if let Some(m) = computed_possible_matches.get(&rep) {
+                    for (tid, _mask) in m {
+                        let idx = tid.0;
+                        let word = idx / 64;
+                        let bit = idx % 64;
+                        if word < sig.len() {
+                            sig[word] |= 1u64 << bit;
+                        }
+                    }
+                }
+                rep_blocks.push((sig, rep, tsids));
+            }
+            rep_blocks.sort_by(|(sig_a, rep_a, _), (sig_b, rep_b, _)| sig_a.cmp(sig_b).then_with(|| rep_a.cmp(rep_b)));
+
+            let mut map = vec![usize::MAX; num_tsids];
+            let mut next_offset = 0usize;
+            for (_sig, _rep, tsids) in rep_blocks {
+                for tsid in tsids {
+                    if tsid < map.len() {
+                        map[tsid] = next_offset;
+                        next_offset += 1;
+                    }
+                }
+            }
+
+            // Fill any missing entries conservatively.
+            for slot in map.iter_mut() {
+                if *slot == usize::MAX {
+                    *slot = next_offset;
+                    next_offset += 1;
+                }
+            }
+
+            if next_offset != num_tsids {
+                crate::debug!(2, "WARNING: tsid_offset_map size mismatch (assigned {} != num_tsids {}); falling back to identity", next_offset, num_tsids);
+                (0..num_tsids).collect()
+            } else {
+                map
+            }
+        };
         
         crate::debug!(4, "Running precompute1 (weight_heavy={}, num_tsids={})...", weight_heavy_enabled, num_tsids);
         let mut terminal_dwa = run_precompute1(
@@ -1068,6 +1176,7 @@ impl GrammarConstraint {
             vocab.internal_max_llm_token,
             parser.terminal_map.len(),
             state_to_rep.clone(),
+            tsid_offset_map.clone(),
         );
 
         crate::debug!(4, "Done precompute1. Terminal DWA (before pruning): {}", terminal_dwa.stats());
@@ -1124,6 +1233,7 @@ impl GrammarConstraint {
                 terminal_dwa.num_ranges(),
             );
             crate::dwa_i32::weight_bdd_metrics::maybe_print_dwa_weight_bdd_metrics(&terminal_dwa, domain_max, "Terminal DWA");
+            crate::dwa_i32::weight_oxidd_metrics::maybe_print_dwa_weight_oxidd_metrics(&terminal_dwa, domain_max, "Terminal DWA");
         }
         
         if crate::r#macro::is_debug_level_enabled(4) {
@@ -2115,6 +2225,7 @@ impl GrammarConstraint {
                 parser_dwa.num_ranges(),
             );
             crate::dwa_i32::weight_bdd_metrics::maybe_print_dwa_weight_bdd_metrics(&parser_dwa, domain_max, "Parser DWA");
+            crate::dwa_i32::weight_oxidd_metrics::maybe_print_dwa_weight_oxidd_metrics(&parser_dwa, domain_max, "Parser DWA");
         }
 
         let internal_to_original_sparse_matrix =
@@ -2140,6 +2251,7 @@ impl GrammarConstraint {
             token_name_map,
             parser_dwa_vocab: vocab,
             num_tsids,
+            tsid_offset_map,
         }
     }
 
@@ -2175,6 +2287,10 @@ impl GrammarConstraint {
         
         // Get terminals count (for API compatibility, not actually used)
         let terminals_count = self.parser.terminal_map.len();
+
+        // Default to identity offset mapping when converting.
+        // (This keeps behavior consistent with older serialized constraints.)
+        self.tsid_offset_map = (0..num_tsids).collect();
         
         // Convert the DWA
         self.parser_dwa = crate::dwa_i32::weight_expansion::convert_symbol_heavy_to_weight_heavy(

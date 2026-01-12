@@ -24,7 +24,7 @@ use crate::finite_automata::Regex;
 use crate::glr::parser::GLRParser;
 use crate::dwa_i32::rangeset::RangeSet as WARangeSet;
 use crate::dwa_i32::{DWA, NWA, NWAStateID, Weight};
-use crate::dwa_i32::weight_expansion::{expand_rsb, create_tsid_set_mask};
+use crate::dwa_i32::weight_expansion::{expand_rsb, create_tsid_set_mask_with_offset_map};
 use crate::profiler::{self};
 
 use crate::dfa_u8::{LLMTokenID, TokenizerStateID};
@@ -67,6 +67,8 @@ pub(crate) struct Precomputer1<'r> {
     pub(crate) num_tsids: usize,
     // Max LLM token ID for creating tsid masks
     pub(crate) internal_max_llm_token: usize,
+    /// Optional tsid->offset mapping for weight-heavy encoding (empty = identity).
+    pub(crate) tsid_offset_map: Vec<usize>,
 }
 
 impl<'r> Precomputer1<'r> {
@@ -77,6 +79,7 @@ impl<'r> Precomputer1<'r> {
         terminals_count: usize,
         state_to_rep: BTreeMap<TokenizerStateID, TokenizerStateID>,
         num_tsids: usize,
+        tsid_offset_map: Vec<usize>,
     ) -> Self {
         let tokens: Vec<(usize, Vec<u8>)> = internal_llm_token_map
             .iter()
@@ -132,6 +135,7 @@ impl<'r> Precomputer1<'r> {
             accessible_terminals_cache: HashMap::new(),
             num_tsids,
             internal_max_llm_token,
+            tsid_offset_map,
         }
     }
 
@@ -230,8 +234,20 @@ impl<'r> Precomputer1<'r> {
             for (rep_tsid, tsids) in rep_to_tsids {
                 debug_assert!(tsids.contains(&rep_tsid.0));
                 if let Some(&state) = self.roots.get(&rep_tsid) {
-                    // Create combined tsid mask for all tsids that map to this representative
-                    let tsid_mask = create_tsid_set_mask(tsids, self.num_tsids, self.internal_max_llm_token);
+                    // Create combined tsid mask for all tsids that map to this representative.
+                    // If we have a tsid->offset map, build the mask in the permuted offset space
+                    // (this can substantially reduce RangeSet fragmentation when representative
+                    // groups are scattered across the original tsid numbering).
+                    let tsid_mask = create_tsid_set_mask_with_offset_map(
+                        tsids,
+                        self.num_tsids,
+                        self.internal_max_llm_token,
+                        if self.tsid_offset_map.is_empty() {
+                            None
+                        } else {
+                            Some(self.tsid_offset_map.as_slice())
+                        },
+                    );
                     self.nwa.add_epsilon(new_start_state, state, tsid_mask);
                 }
             }
@@ -686,6 +702,7 @@ pub fn run_precompute1(
     internal_max_llm_token: usize,
     terminals_count: usize,
     state_to_rep: BTreeMap<TokenizerStateID, TokenizerStateID>,
+    tsid_offset_map: Vec<usize>,
 ) -> DWA {
     // Compute num_tsids from tokenizer - 0 means symbol-heavy mode
     let num_tsids = if is_weight_heavy_enabled() {
@@ -710,6 +727,7 @@ pub fn run_precompute1(
         terminals_count,
         state_to_rep,
         num_tsids,
+        tsid_offset_map,
     );
 
     helper.run_dfs();
