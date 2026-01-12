@@ -1,5 +1,14 @@
 # Research Project Makefile
 # Common commands for paper writing and research
+#
+# NOTE: There are TWO separate Rust compilation targets:
+#   1. grammar-compiler binary (built by `cargo build --release`)
+#   2. Python FFI (_sep1, built by `maturin develop -r`)
+# 
+# When source code changes, BOTH may need to be recompiled. This is expected
+# because they have different features (pyo3/extension-module for FFI) and
+# different crate types (bin vs cdylib). Use SKIP_MATURIN=1 or --no-recompile
+# to skip unnecessary rebuilds when testing.
 
 .PHONY: paper paper-watch paper-clean notes-today help build test test-release test-js test-json-schema test-schema-packagejson test-schema-github test-schema-sarif test-schema-meta test-schema-extra test-schema-kestra test-schema-vegalite test-schema-apollo test-schema-liquibase test-diff test-diff-dfa show-schema-id schema-id ffi viz viz-clean all jsonschemabench jsonschemabench-quick jsonschemabench-subset jsonschemabench-analyze jsonschemabench-llg jsonschemabench-llg-analyze jsonschemabench-compare
 
