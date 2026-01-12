@@ -1148,10 +1148,15 @@ impl GrammarConstraint {
         }
 
         // Sample and print terminal DWA paths at debug level 5
+        // Use DWA_SAMPLE_PATHS env var to override the number of paths (default: 10)
         if crate::r#macro::is_debug_level_enabled(5) {
             use rand::Rng;
             let mut rng = rand::thread_rng();
-            let sample_paths = terminal_dwa.sample_paths(10, &mut rng);
+            let num_sample_paths: usize = std::env::var("DWA_SAMPLE_PATHS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(10);
+            let sample_paths = terminal_dwa.sample_paths(num_sample_paths, &mut rng);
             
             // Build reverse map from TerminalID to human-readable terminal name
             let terminals_count = parser.terminal_map.len();
