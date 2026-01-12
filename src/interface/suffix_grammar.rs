@@ -399,9 +399,9 @@ pub fn prune_dwa_with_suffix_grammar(
     let suffix_grammar = grammar_to_suffix_grammar(grammar);
     crate::debug!(4, "  Suffix grammar: {} productions", suffix_grammar.productions.len());
     
-    // Print suffix grammar productions at debug level 5
+    // Print suffix grammar productions at debug level 6 (level 5 is already very noisy).
     for (i, prod) in suffix_grammar.productions.iter().enumerate() {
-        crate::debug!(5, "    Suffix prod {}: {} -> {:?}", i, prod.lhs.0, prod.rhs);
+        crate::debug!(6, "    Suffix prod {}: {} -> {:?}", i, prod.lhs.0, prod.rhs);
     }
     
     // Skip suffix grammar pruning for very complex grammars where the cost
