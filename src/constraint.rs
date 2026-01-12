@@ -1158,6 +1158,14 @@ impl GrammarConstraint {
                 .unwrap_or(10);
             let sample_paths = terminal_dwa.sample_paths(num_sample_paths, &mut rng);
             
+            // In weight-heavy mode, token IDs in weights are expanded: id = internal_id * num_tsids + tsid_offset
+            // We need to convert back to internal token ID to look up bytes
+            let num_tsids_for_conversion = if weight_heavy_enabled {
+                tokenizer.dfa.states.len()
+            } else {
+                0
+            };
+            
             // Build reverse map from TerminalID to human-readable terminal name
             let terminals_count = parser.terminal_map.len();
             let tid_to_name: std::collections::BTreeMap<usize, String> = parser.terminal_map
@@ -1230,25 +1238,35 @@ impl GrammarConstraint {
                 let path_str = path_strs.join(" → ");
                 let weight_info = match &path_weight {
                     Some(w) if !w.is_empty() => {
-                        // Get the smallest internal token ID from the weight
-                        if let Some(min_internal_id) = w.min_item() {
+                        // Get the smallest token ID from the weight
+                        if let Some(min_id) = w.min_item() {
+                            // In weight-heavy mode, convert from expanded ID back to internal ID
+                            // expanded_id = internal_id * num_tsids + tsid_offset
+                            let internal_id = if num_tsids_for_conversion > 0 {
+                                min_id / num_tsids_for_conversion
+                            } else {
+                                min_id
+                            };
                             // Get the bytes for this internal token
-                            let token_str = internal_id_to_bytes.get(&min_internal_id)
+                            let token_str = internal_id_to_bytes.get(&internal_id)
                                 .map(|bytes| {
-                                    // Format as escaped string
+                                    // Format as escaped string with single quotes
+                                    // Escape single quotes within the token, keep double quotes as-is
                                     let escaped: String = bytes.iter()
                                         .map(|&b| {
-                                            if b >= 0x20 && b < 0x7f && b != b'"' && b != b'\\' {
+                                            if b == b'\'' {
+                                                "\\'".to_string() // Escape single quotes
+                                            } else if b >= 0x20 && b < 0x7f && b != b'\\' {
                                                 (b as char).to_string()
                                             } else {
                                                 format!("\\x{:02x}", b)
                                             }
                                         })
                                         .collect();
-                                    format!("\"{}\"", escaped)
+                                    format!("'{}'", escaped)
                                 })
-                                .unwrap_or_else(|| format!("?tok{}", min_internal_id));
-                            format!("n={}, e.g. {} (id={})", w.len(), token_str, min_internal_id)
+                                .unwrap_or_else(|| format!("?tok{}", internal_id));
+                            format!("n={}, e.g. {} (id={})", w.len(), token_str, internal_id)
                         } else {
                             format!("n={}", w.len())
                         }
@@ -1259,7 +1277,6 @@ impl GrammarConstraint {
                 crate::debug!(5, "  Path {}: {} (len={}, {})", i, path_str, path.len(), weight_info);
             }
         }
-
         // EPSILON EXPLOSION EXPERIMENT - Terminal DWA
         // This code tests whether replacing labeled tsid transitions with epsilon transitions
         // causes a transition explosion. Enable with: TEST_EPSILON_EXPLOSION=1
