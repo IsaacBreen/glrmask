@@ -452,7 +452,7 @@ pub fn prune_dwa_with_suffix_grammar(
     
     while let Some(dwa_state) = queue.pop_front() {
         let parser_states = dwa_to_parser_states.get(&dwa_state).cloned().unwrap_or_default();
-        crate::debug!(5, "  BFS: DWA state {} with parser_states {:?}", dwa_state, parser_states);
+        crate::debug!(6, "  BFS: DWA state {} with parser_states {:?}", dwa_state, parser_states);
         
         // For each transition from this DWA state
         let transitions: Vec<(i32, usize)> = dwa.states[dwa_state].transitions.iter()
@@ -461,7 +461,7 @@ pub fn prune_dwa_with_suffix_grammar(
         
         for (label, dest_dwa_state) in transitions {
             let label_usize = label as usize;
-            crate::debug!(5, "    Transition: {} --{}--> {}", dwa_state, label, dest_dwa_state);
+            crate::debug!(6, "    Transition: {} --{}--> {}", dwa_state, label, dest_dwa_state);
             
             // Skip TSID transitions (not grammar terminals)
             if label_usize >= terminals_count {
@@ -571,7 +571,7 @@ pub fn prune_dwa_with_suffix_grammar(
                 
                 if !successor_states.is_empty() {
                     // Keep the transition, propagate successor states
-                    crate::debug!(5, "      KEEP: successor_states = {:?}", successor_states);
+                    crate::debug!(6, "      KEEP: successor_states = {:?}", successor_states);
                     let dest_states = dwa_to_parser_states.entry(dest_dwa_state).or_default();
                     dest_states.extend(successor_states);
                     if !visited.contains(&dest_dwa_state) {
@@ -584,7 +584,7 @@ pub fn prune_dwa_with_suffix_grammar(
                     // We can't compute exact successor states without stack simulation,
                     // but we know the terminal is valid as a lookahead for the reduce.
                     // Don't propagate parser states (we don't know what they'll be after reduce).
-                    crate::debug!(5, "      KEEP (reduce lookahead): terminal {} valid from parser_states {:?}", label_usize, parser_states);
+                    crate::debug!(6, "      KEEP (reduce lookahead): terminal {} valid from parser_states {:?}", label_usize, parser_states);
                     if !visited.contains(&dest_dwa_state) {
                         visited.insert(dest_dwa_state);
                         queue.push_back(dest_dwa_state);
@@ -596,7 +596,7 @@ pub fn prune_dwa_with_suffix_grammar(
                     kept_count += 1;
                 } else {
                     // No valid actions - prune the transition
-                    crate::debug!(5, "      PRUNE: no successor states for terminal {} from parser_states {:?}", label_usize, parser_states);
+                    crate::debug!(6, "      PRUNE: no successor states for terminal {} from parser_states {:?}", label_usize, parser_states);
                     transitions_to_remove.push((dwa_state, label));
                     pruned_count += 1;
                 }

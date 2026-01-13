@@ -2171,7 +2171,7 @@ impl CompiledGrammar {
             multi_classes.sort_by_key(|(_, tids)| std::cmp::Reverse(tids.len()));
             
             if !multi_classes.is_empty() {
-                debug!(5, "  Equivalence classes with >1 terminal:");
+                debug!(6, "  Equivalence classes with >1 terminal:");
                 for (i, (_sig, tids)) in multi_classes.iter().take(10).enumerate() {
                     let names: Vec<String> = tids.iter()
                         .map(|tid| {
@@ -2180,10 +2180,10 @@ impl CompiledGrammar {
                                 .unwrap_or_else(|| format!("T{}", tid.0))
                         })
                         .collect();
-                    debug!(5, "    Class {}: {} terminals: {}", i, tids.len(), names.join(", "));
+                    debug!(6, "    Class {}: {} terminals: {}", i, tids.len(), names.join(", "));
                 }
                 if multi_classes.len() > 10 {
-                    debug!(5, "    ... and {} more classes", multi_classes.len() - 10);
+                    debug!(6, "    ... and {} more classes", multi_classes.len() - 10);
                 }
             }
         }
