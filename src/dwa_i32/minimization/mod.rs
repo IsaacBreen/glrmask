@@ -69,12 +69,14 @@ impl DWA {
 
     /// Minimizes the DWA to its optimal state count.
     /// Dispatches to acyclic or cyclic implementation based on graph structure.
-    /// Both paths now use the exact Diamond-aware algorithm with SCC support.
+    /// Acyclic uses exact graph coloring (optimal but slower).
+    /// Cyclic uses partition refinement (fast but may not be optimal).
     pub fn minimize(&mut self) {
-        // Note: Cyclic minimization is faster but produces larger DWAs.
-        // For now we use cyclic for all DWAs for speed.
-        // Acyclic is more optimal but slower (graph coloring is expensive).
-        self.minimize_cyclic();
+        if self.is_cyclic() {
+            self.minimize_cyclic();
+        } else {
+            self.minimize_acyclic();
+        }
     }
 
     /// Basic pruning without full minimization.
@@ -141,9 +143,13 @@ impl DWA {
         let is_cyc = self.is_cyclic();
         let before = self.states.len();
         crate::debug!(4, "minimize_states: is_cyclic={}, {} states before", is_cyc, before);
-        // Note: Cyclic minimization is faster but produces larger DWAs.
-        // For now we use cyclic for all DWAs for speed.
-        self.minimize_states_cyclic()
+        if is_cyc {
+            self.minimize_states_cyclic()
+        } else {
+            // Acyclic uses the full minimize_acyclic() which does weight pushing + exact coloring
+            self.minimize_acyclic();
+            self.states.len() != before
+        }
     }
 
     pub fn loosen_weights_for_minimize(&mut self) -> bool {
