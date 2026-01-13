@@ -67,8 +67,114 @@ fn export_weights_to_json(unique_weights: &[Weight], name: &str) {
     crate::debug!(5, "[WEIGHT_FACTORIZATION_METRICS] Exported {} weights to {}", export_data.len(), filename);
 }
 
-// Stub for 2D metrics call
-pub fn maybe_print_2d_factorization_metrics(_: &DWA, _: usize, _: usize, _: &str) {}
+/// Compute factored representation metrics for 2D (N×M) weight space.
+/// 
+/// For each weight in N×M space (position = llm_token * num_tsids + tsid),
+/// compute what the range count would be if stored as (base_ranges, tsid_mask).
+pub fn maybe_print_2d_factorization_metrics(dwa: &DWA, max_n: usize, num_tsids: usize, name: &str) {
+    if std::env::var("WEIGHT_FACTORIZATION_METRICS")
+        .map(|v| v != "1")
+        .unwrap_or(true)
+    {
+        return;
+    }
+    
+    if num_tsids == 0 {
+        return;
+    }
+    
+    // Collect unique weights
+    let mut unique: HashMap<usize, Weight> = HashMap::new();
+    for state in &dwa.states.0 {
+        if let Some(fw) = &state.final_weight {
+            let p = ptr::addr_of!(**fw) as usize;
+            unique.entry(p).or_insert_with(|| fw.clone());
+        }
+        for w in state.trans_weights.values() {
+            let p = ptr::addr_of!(**w) as usize;
+            unique.entry(p).or_insert_with(|| w.clone());
+        }
+    }
+    
+    let unique_weights: Vec<Weight> = unique.into_values().collect();
+    if unique_weights.is_empty() { return; }
+    
+    let mut total_current_ranges: usize = 0;
+    let mut total_factored_ranges: usize = 0;
+    
+    for w in &unique_weights {
+        total_current_ranges += w.num_ranges();
+        
+        // "Un-expand" this weight to compute factored representation
+        // For each position in the weight, compute (llm_token, tsid) = divmod(position, num_tsids)
+        // Then count ranges in the projected llm_token set and tsid set
+        
+        let mut tokens = RangeSetBlaze::new();
+        let mut tsids = RangeSetBlaze::new();
+        
+        for range in w.rsb.ranges() {
+            let start = *range.start();
+            let end = *range.end();
+            
+            // Compute token range covered
+            let token_start = start / num_tsids;
+            let token_end = end / num_tsids;
+            tokens.ranges_insert(token_start..=token_end);
+            
+            // Compute tsid range covered
+            // For a range [start, end], the tsids covered depend on the range span
+            if end - start >= num_tsids - 1 {
+                // Range spans at least one full "row" of tsids -> all tsids are covered
+                tsids.ranges_insert(0..=(num_tsids - 1));
+            } else {
+                // Partial coverage: compute actual tsids
+                let tsid_start = start % num_tsids;
+                let tsid_end = end % num_tsids;
+                
+                if tsid_end >= tsid_start {
+                    // Simple case: contiguous within one "row"
+                    tsids.ranges_insert(tsid_start..=tsid_end);
+                } else {
+                    // Wraps around: covers tsid_start..M-1 and 0..tsid_end
+                    tsids.ranges_insert(tsid_start..=(num_tsids - 1));
+                    tsids.ranges_insert(0..=tsid_end);
+                }
+            }
+        }
+        
+        // Count ranges in factored representation
+        let token_ranges = tokens.ranges().count();
+        let tsid_ranges = tsids.ranges().count();
+        total_factored_ranges += token_ranges + tsid_ranges;
+    }
+    
+    crate::debug!(5, "[FACTORED_2D_METRICS] {}: unique_weights={} current_ranges={} factored_ranges={} reduction={:.2}x",
+        name, unique_weights.len(), total_current_ranges, total_factored_ranges,
+        if total_factored_ranges > 0 { total_current_ranges as f64 / total_factored_ranges as f64 } else { 0.0 }
+    );
+
+    // EXTENSION: Export base token sets for clustering analysis
+    if name == "Terminal DWA" {
+        let mut base_sets: Vec<Vec<(usize, usize)>> = Vec::new();
+        for w in &unique_weights {
+             let mut tokens = RangeSetBlaze::new();
+             for range in w.rsb.ranges() {
+                let start = *range.start();
+                let end = *range.end();
+                let token_start = start / num_tsids;
+                let token_end = end / num_tsids;
+                tokens.ranges_insert(token_start..=token_end);
+             }
+             base_sets.push(tokens.ranges().map(|r| (*r.start(), *r.end())).collect());
+        }
+        
+        let filename = "base_token_sets_terminal.json";
+        let file = File::create(filename).expect("Unable to create base token export file");
+        let writer = BufWriter::new(file);
+        serde_json::to_writer(writer, &base_sets).expect("Failed to serialize base tokens");
+        crate::debug!(5, "[WEIGHT_FACTORIZATION_METRICS] Exported {} base sets to {}", base_sets.len(), filename);
+    }
+}
 
 #[cfg(test)]
 mod tests {

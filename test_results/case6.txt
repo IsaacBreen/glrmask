@@ -1,0 +1,897 @@
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+🔗 Found pyo3 bindings
+🐍 Found CPython 3.12 at /Users/isaacbreen/miniforge3/envs/py312/bin/python
+📡 Using build options features from pyproject.toml
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on build directory
+   Compiling sep1 v0.1.0 (/Users/isaacbreen/Projects2/grammars2024)
+   Compiling _sep1 v0.1.0 (/Users/isaacbreen/Projects2/grammars2024/python)
+    Finished `release` profile [optimized] target(s) in 2m 44s
+📦 Built wheel for CPython 3.12 to /var/folders/dy/bfqxrmw10w160dt3drl9_0f80000gn/T/.tmpxSii7I/python-0.1.0-cp312-cp312-macosx_11_0_arm64.whl
+✏️  Setting installed package as editable
+🛠 Installed python-0.1.0
+SCHEMA_ID="ApolloRouter---apollo-router-2.9.0" python scripts/test_json_schema.py
+
+1. Converting JSON schema to EBNF...
+   EBNF conversion: 26.0ms (112533 chars)
+│ [2m  Augmented start_production_name: "start__aug"[0m
+│ • Removing 0 always-null terminals
+│ • Processing 1 may-be-null terminals
+│ [2m  Creating GrammarDefinition struct with 1946 productions[0m [35m+30µs[0m
+│ [2m  Ignore terminal set, about to optimize (should_optimize=false)[0m [35m+33µs[0m
+│ [2m  Optimization complete, returning[0m [35m+5µs[0m
+│ • Grammar stats: 1946 prods, 702 nonterminals, 548 terminals (6 regex, 542 literal, 0 external)
+│ Building tokenizer from definition
+│ [2m  Expr Stats: Nodes: 609, Depth: 9, Seq: 9, Choice: 6, Quant: 11, Shared: 9 (unique: 9, inlineable: 2), U8Seq: 558, U8Class: 16, Eps: 0[0m [35m+171µs[0m
+│ • Optimizing expression
+│ [2m  Optimized expression in 116.54µs[0m [35m+123µs[0m
+│ • Building NFA
+│ • Expr stats: Nodes: 605, Depth: 9, Seq: 9, Choice: 5, Quant: 11, Shared: 9 (unique: 9, inlineable: 2), U8Seq: 552, U8Class: 19, Eps: 0
+│ [2m  Built NFA with 8918 states in 876.67µs[0m [35m+862µs[0m
+│ [2m  Condensed NFA 8918 → 8918 states in 66.54µs[0m [35m+97µs[0m
+│ • Converting NFA to DFA
+│ • Computed 54 input equivalence classes in 212.17µs
+│ [2m  CompactNFA: 8918 states, 581 epsilon transitions[0m [35m+352µs[0m
+│ [2m  Epsilon structure: 18 states have outgoing epsilons, max out-degree 548[0m [35m+33µs[0m
+│ [2m    High out-degree states: 548:1[0m [35m+50µs[0m
+│ [2m  Epsilon density: 18 states with eps, 581 total transitions (0x states)[0m [35m+11µs[0m
+│ [2m  Precomputed 1 high-degree closures (avg size 561) in 88.17µs[0m [35m+91µs[0m
+│ [2m  DFA progress: 1000 states, worklist 31, subset size 6 (max 562), elapsed 10.56ms[0m [35m+9ms[0m
+│ [2m  DFA progress: 2000 states, worklist 28, subset size 6 (max 562), elapsed 26.28ms[0m [35m+15ms[0m
+│ [2m  DFA progress: 3000 states, worklist 22, subset size 6 (max 562), elapsed 35.98ms[0m [35m+9ms[0m
+│ [2m  DFA progress: 4000 states, worklist 13, subset size 6 (max 562), elapsed 47.04ms[0m [35m+11ms[0m
+│ [2m  DFA progress: 5000 states, worklist 8, subset size 6 (max 562), elapsed 58.45ms[0m [35m+11ms[0m
+│ [2m    └─ Timing breakdown (total ns):[0m [35m+116µs[0m
+│ [2m        - Collect: 1ms[0m [35m+6µs[0m
+│ [2m        - Closure: 6ms[0m [35m+4µs[0m
+│ [2m        - Compress: 5ms[0m [35m+4µs[0m
+│ [2m        - Lookup: 4ms[0m [35m+3µs[0m
+│ [2m        - Insert: 8ms[0m [35m+3µs[0m
+│ • NFA → DFA: 8918 → 5022 states (84.37ms)
+│ [2m    └─ Class computation: 212.17µs[0m [35m+43µs[0m
+│ [2m    └─ Remap transitions: 277.67µs[0m [35m+6µs[0m
+│ [2m    └─ Main loop: 57.73ms[0m [35m+4µs[0m
+│ [2m    └─ Metadata: 25.75ms[0m [35m+3µs[0m
+│ [2m    └─ Input classes processed: 231668, cache hits: 226647, misses: 5021[0m [35m+3µs[0m
+│ [2m    └─ Cache hit rate: 97.8%[0m [35m+6µs[0m
+│ [2m  Converted NFA to DFA in 86.45ms[0m [35m+2ms[0m
+│ • Minimizing DFA
+│ Minimized DFA 5022 → 5021 states in 157.94ms [35m+157ms[0m
+│ [2m  Minimized DFA in 160.16ms[0m [35m+2ms[0m
+│ Building GLR parser from definition
+│ • Found 1 nullable terminals that will be transformed
+│ [2m    Nullable terminal: RegexName("WS")[0m [35m+14µs[0m
+│ [2m  Number of productions: 1946[0m [35m+586µs[0m
+│ [2m  Mem: 123 MB (Start of parser generation)[0m [35m+17µs[0m
+│ • Validating initial grammar
+│ [2m  Computing nullable non-terminals[0m [35m+1ms[0m
+│ [2m  Computed nullable non-terminals in 2.26ms[0m [35m+2ms[0m
+│ [2m  Computing nullable non-terminals[0m [35m+1ms[0m
+│ [2m  Computed nullable non-terminals in 3.74ms[0m [35m+4ms[0m
+│ [2m  Mem: 124 MB (After validation)[0m [35m+110µs[0m
+│ • Removing productions with undefined non-terminals
+│ [2m  Mem: 124 MB (After removing undefined)[0m [35m+764µs[0m
+│ [2m  Start nonterminal: start__aug[0m [35m+24µs[0m
+│ [2m  Computing nullable non-terminals[0m [35m+5µs[0m
+│ [2m  Computed nullable non-terminals in 1.93ms[0m [35m+1ms[0m
+│ • Grammar is nullable: false
+│ [2m  Mem: 124 MB (After nullable wrapper minimization)[0m [35m+604µs[0m
+│ • Grammar optimization pass 1
+│ [2m    Phase 2: Inlining null productions[0m [35m+373µs[0m
+│ [2m      Processed 100 / 1946 productions, 137 output productions so far[0m [35m+2ms[0m
+│ [2m      Processed 200 / 1946 productions, 272 output productions so far[0m [35m+235µs[0m
+│ [2m      Processed 300 / 1946 productions, 408 output productions so far[0m [35m+238µs[0m
+│ [2m      Processed 400 / 1946 productions, 556 output productions so far[0m [35m+258µs[0m
+│ [2m      Processed 500 / 1946 productions, 682 output productions so far[0m [35m+246µs[0m
+│ [2m      Processed 600 / 1946 productions, 810 output productions so far[0m [35m+264µs[0m
+│ [2m      Processed 700 / 1946 productions, 960 output productions so far[0m [35m+402µs[0m
+│ [2m      Processed 800 / 1946 productions, 1112 output productions so far[0m [35m+283µs[0m
+│ [2m      Processed 900 / 1946 productions, 1264 output productions so far[0m [35m+338µs[0m
+│ [2m      Processed 1000 / 1946 productions, 1478 output productions so far[0m [35m+2ms[0m
+│ [2m      Processed 1100 / 1946 productions, 1607 output productions so far[0m [35m+511µs[0m
+│ [2m      Processed 1200 / 1946 productions, 1731 output productions so far[0m [35m+453µs[0m
+│ [2m      Processed 1300 / 1946 productions, 1859 output productions so far[0m [35m+259µs[0m
+│ [2m      Processed 1400 / 1946 productions, 1985 output productions so far[0m [35m+296µs[0m
+│ [2m      Processed 1500 / 1946 productions, 2106 output productions so far[0m [35m+741µs[0m
+│ [2m      Processed 1600 / 1946 productions, 2249 output productions so far[0m [35m+416µs[0m
+│ [2m      Processed 1700 / 1946 productions, 2401 output productions so far[0m [35m+511µs[0m
+│ [2m      Processed 1800 / 1946 productions, 2531 output productions so far[0m [35m+244µs[0m
+│ [2m      Processed 1900 / 1946 productions, 2648 output productions so far[0m [35m+225µs[0m
+│ •     Null inlining complete: 1946 input → 2702 output productions
+│ [2m  Computing nullable non-terminals[0m [35m+1ms[0m
+│ [2m  Computed nullable non-terminals in 2.16ms[0m [35m+2ms[0m
+│ [2m    Phase 4: Checking for hidden left recursion[0m [35m+1ms[0m
+│ [2m  Computing nullable non-terminals[0m [35m+20µs[0m
+│ [2m  Computed nullable non-terminals in 1.91ms[0m [35m+1ms[0m
+│ [2m  Iteration 1: 108 cyclic nonterminals[0m [35m+220µs[0m
+│ • No more hidden left recursion to eliminate after 1 iterations
+│ • Phase 5: Removed 1 productions containing ignored terminals
+│ [2m  Computing nullable non-terminals[0m [35m+33µs[0m
+│ [2m  Computed nullable non-terminals in 3.37ms[0m [35m+4ms[0m
+│ • Grammar optimization pass 2
+│ [2m    Phase 2: Inlining null productions[0m [35m+584µs[0m
+│ [2m      Processed 100 / 2430 productions, 101 output productions so far[0m [35m+2ms[0m
+│ [2m      Processed 200 / 2430 productions, 201 output productions so far[0m [35m+264µs[0m
+│ [2m      Processed 300 / 2430 productions, 301 output productions so far[0m [35m+195µs[0m
+│ [2m      Processed 400 / 2430 productions, 401 output productions so far[0m [35m+267µs[0m
+│ [2m      Processed 500 / 2430 productions, 501 output productions so far[0m [35m+210µs[0m
+│ [2m      Processed 600 / 2430 productions, 601 output productions so far[0m [35m+207µs[0m
+│ [2m      Processed 700 / 2430 productions, 701 output productions so far[0m [35m+207µs[0m
+│ [2m      Processed 800 / 2430 productions, 801 output productions so far[0m [35m+569µs[0m
+│ [2m      Processed 900 / 2430 productions, 901 output productions so far[0m [35m+233µs[0m
+│ [2m      Processed 1000 / 2430 productions, 1001 output productions so far[0m [35m+250µs[0m
+│ [2m      Processed 1100 / 2430 productions, 1101 output productions so far[0m [35m+310µs[0m
+│ [2m      Processed 1200 / 2430 productions, 1201 output productions so far[0m [35m+366µs[0m
+│ [2m      Processed 1300 / 2430 productions, 1301 output productions so far[0m [35m+1ms[0m
+│ [2m      Processed 1400 / 2430 productions, 1401 output productions so far[0m [35m+598µs[0m
+│ [2m      Processed 1500 / 2430 productions, 1501 output productions so far[0m [35m+251µs[0m
+│ [2m      Processed 1600 / 2430 productions, 1601 output productions so far[0m [35m+199µs[0m
+│ [2m      Processed 1700 / 2430 productions, 1701 output productions so far[0m [35m+212µs[0m
+│ [2m      Processed 1800 / 2430 productions, 1801 output productions so far[0m [35m+228µs[0m
+│ [2m      Processed 1900 / 2430 productions, 1901 output productions so far[0m [35m+223µs[0m
+│ [2m      Processed 2000 / 2430 productions, 2001 output productions so far[0m [35m+221µs[0m
+│ [2m      Processed 2100 / 2430 productions, 2101 output productions so far[0m [35m+252µs[0m
+│ [2m      Processed 2200 / 2430 productions, 2201 output productions so far[0m [35m+198µs[0m
+│ [2m      Processed 2300 / 2430 productions, 2301 output productions so far[0m [35m+263µs[0m
+│ [2m      Processed 2400 / 2430 productions, 2401 output productions so far[0m [35m+182µs[0m
+│ •     Null inlining complete: 2430 input → 2430 output productions
+│ [2m  Computing nullable non-terminals[0m [35m+1ms[0m
+│ [2m  Computed nullable non-terminals in 1.75ms[0m [35m+1ms[0m
+│ [2m    Phase 4: Checking for hidden left recursion[0m [35m+487µs[0m
+│ [2m  Computing nullable non-terminals[0m [35m+7µs[0m
+│ [2m  Computed nullable non-terminals in 2.52ms[0m [35m+2ms[0m
+│ [2m  Iteration 1: 108 cyclic nonterminals[0m [35m+235µs[0m
+│ • No more hidden left recursion to eliminate after 1 iterations
+│ [2m  Computing nullable non-terminals[0m [35m+7ms[0m
+│ [2m  Computed nullable non-terminals in 1.87ms[0m [35m+1ms[0m
+│ • Grammar optimization converged after 2 passes
+│ [2m  Mem: 119 MB (After grammar normalization loop)[0m [35m+494µs[0m
+│ • Final epsilon production elimination
+│ [2m      Processed 100 / 2430 productions, 101 output productions so far[0m [35m+2ms[0m
+│ [2m      Processed 200 / 2430 productions, 201 output productions so far[0m [35m+328µs[0m
+│ [2m      Processed 300 / 2430 productions, 301 output productions so far[0m [35m+201µs[0m
+│ [2m      Processed 400 / 2430 productions, 401 output productions so far[0m [35m+355µs[0m
+│ [2m      Processed 500 / 2430 productions, 501 output productions so far[0m [35m+232µs[0m
+│ [2m      Processed 600 / 2430 productions, 601 output productions so far[0m [35m+213µs[0m
+│ [2m      Processed 700 / 2430 productions, 701 output productions so far[0m [35m+210µs[0m
+│ [2m      Processed 800 / 2430 productions, 801 output productions so far[0m [35m+577µs[0m
+│ [2m      Processed 900 / 2430 productions, 901 output productions so far[0m [35m+246µs[0m
+│ [2m      Processed 1000 / 2430 productions, 1001 output productions so far[0m [35m+324µs[0m
+│ [2m      Processed 1100 / 2430 productions, 1101 output productions so far[0m [35m+313µs[0m
+│ [2m      Processed 1200 / 2430 productions, 1201 output productions so far[0m [35m+244µs[0m
+│ [2m      Processed 1300 / 2430 productions, 1301 output productions so far[0m [35m+1ms[0m
+│ [2m      Processed 1400 / 2430 productions, 1401 output productions so far[0m [35m+510µs[0m
+│ [2m      Processed 1500 / 2430 productions, 1501 output productions so far[0m [35m+237µs[0m
+│ [2m      Processed 1600 / 2430 productions, 1601 output productions so far[0m [35m+190µs[0m
+│ [2m      Processed 1700 / 2430 productions, 1701 output productions so far[0m [35m+207µs[0m
+│ [2m      Processed 1800 / 2430 productions, 1801 output productions so far[0m [35m+228µs[0m
+│ [2m      Processed 1900 / 2430 productions, 1901 output productions so far[0m [35m+216µs[0m
+│ [2m      Processed 2000 / 2430 productions, 2001 output productions so far[0m [35m+217µs[0m
+│ [2m      Processed 2100 / 2430 productions, 2101 output productions so far[0m [35m+240µs[0m
+│ [2m      Processed 2200 / 2430 productions, 2201 output productions so far[0m [35m+193µs[0m
+│ [2m      Processed 2300 / 2430 productions, 2301 output productions so far[0m [35m+275µs[0m
+│ [2m      Processed 2400 / 2430 productions, 2401 output productions so far[0m [35m+185µs[0m
+│ •     Null inlining complete: 2430 input → 2430 output productions
+│ [2m  Mem: 119 MB (After final epsilon elimination)[0m [35m+1ms[0m
+│ • Eliminated 406 unreachable productions (2430 → 2024)
+│ [2m  Mem: 119 MB (After unreachable elimination)[0m [35m+37µs[0m
+│ • Using 1 ignore terminals (1 explicit, 0 auto-detected)
+│ • Phase 6: Left factoring created 297 new nonterminals (2024 → 2321 productions)
+│ [2m  Mem: 119 MB (After left factoring)[0m [35m+350µs[0m
+│ • Phase 7: Merged identical nonterminals (2321 → 2120 productions)
+│ [2m  Mem: 120 MB (After merge identical nonterminals)[0m [35m+27µs[0m
+│ • Phase 8: Eliminated 11 unit productions (2120 → 2109)
+│ [2m  Mem: 120 MB (After unit production elimination)[0m [35m+400µs[0m
+│ • Validating critical grammar invariants
+│ • Validating grammar after transformations
+│ [2m  Computing nullable non-terminals[0m [35m+4µs[0m
+│ [2m  Computed nullable non-terminals in 1.61ms[0m [35m+1ms[0m
+│ [2m  Computing nullable non-terminals[0m [35m+433µs[0m
+│ [2m  Computed nullable non-terminals in 1.82ms[0m [35m+1ms[0m
+│ [2m  Computing nullable non-terminals[0m [35m+180µs[0m
+│ [2m  Computed nullable non-terminals in 1.80ms[0m [35m+1ms[0m
+│ [2m  HLR check: 0 nullable nonterminals[0m [35m+16µs[0m
+│ [2m  HLR check: 0 cyclic nonterminals in left-reachability graph[0m [35m+13µs[0m
+│ [2m  Computing nullable non-terminals[0m [35m+10µs[0m
+│ [2m  Computed nullable non-terminals in 1.48ms[0m [35m+1ms[0m
+│ [2m  Number of productions: 2109[0m [35m+769µs[0m
+│ [2m  Mem: 118 MB (Before Stage 1)[0m [35m+12µs[0m
+│ [2m  Computing nullable non-terminals[0m [35m+759µs[0m
+│ [2m  Computed nullable non-terminals in 1.53ms[0m [35m+1ms[0m
+│ • Stage 1 (LR(0) Automaton)
+│ [2m  Mem: 121 MB (After Stage 1)[0m [35m+3ms[0m
+│ • Computing First/Follow Sets
+│ [2m  Mem: 121 MB (After First/Follow)[0m [35m+360µs[0m
+│ • Computing Final Table (Merging Stages 2-8)
+│ [2m  Mem: 119 MB (After Final Table)[0m [35m+3ms[0m
+│ • Optimizing Table (state reduction)
+│ [2m  Mem: 120 MB (After Table Optimization)[0m [35m+5ms[0m
+│ • GLR Parser generation complete. 5065 states.
+│ [2m  GLR terminal equivalence: 548 terminals → 524 equivalence classes[0m [35m+119ms[0m
+│ [2m  DFA stats: 5021 states, 551 with finalizers (11.0%)[0m [35m+152ms[0m
+│ • State equiv phase 1: 4395 groups (4317 singletons, 704 ambiguous) in 1.29650075s (50257 tokens) [35m+1.29s[0m
+│ State equivalence analysis took 1.30s. Reduced 5021 states to 4395 (phase 1 complete).
+│ Combined equiv: state reduction 5021 -> 4395 states in 1.298103458s
+│ • Precomputing DFA with 5021 states
+│ fast vocab equivalence: num_states=4395 num_groups=548 precompute=1.756583ms
+│ State transition analysis: avg_transitions=222.9, sparse_states=13/4395 (0.3%)
+│ •   Iterative refinement: 50257 tokens, 4395 states, batch_size=2048
+│ [2m      Batch 1: 49420 active tokens, 1068 classes, compute=1.480380042s[0m [35m+1.48s[0m
+│ [2m      Batch 2: 49004 active tokens, 1541 classes, compute=1.939899084s[0m [35m+1.94s[0m
+│ [2m      Batch 3: 48964 active tokens, 1583 classes, compute=194.518916ms[0m [35m+195ms[0m
+│ •   Timing: refine=3.838876ms
+│ •   Computed 1583 vocab equivalence classes in 3 batches
+│ Combined equiv: vocab analysis 50257 tokens -> 1583 classes in 3.623786166s
+[1mCombined equivalence analysis complete: 1583 vocab classes, 4395 representative states (total 4.921922042s)[0m
+│ Vocab equivalence analysis: 4395 initial states, 50257 tokens
+│ Combined Equivalence Analysis: 50257 tokens -> 1583 mask classes
+│ • internal_llm_token_map has 1583 representative entries (was 50257 total) - built in combined pass
+│ • Building internal_to_original_map
+│ • Done building internal_to_original_map in 2.814708ms
+│ • Building internal vocab prefix tree
+│ [2m  Building vocab prefix tree (fast builder)[0m [35m+56µs[0m
+│ [2m  Computing reachable IDs (fast path)[0m [35m+544µs[0m
+│ [2m  Done computing reachable IDs in 510.083µs[0m [35m+528µs[0m
+│ • Done building internal vocab prefix tree
+│ • Using precomputed state equivalence: 4395 representative states
+│ • Computing maps and possible_matches (fast parallel pass)
+│ • build_maps_and_matches_for_reps: num_states=5021, num_reps=4395, num_terminals=548
+│ • build_maps_and_matches_for_reps: completed in 33.48575ms
+│ • Computing terminal follow sets
+│ [2m  Computing nullable non-terminals[0m [35m+33µs[0m
+│ [2m  Computed nullable non-terminals in 1.77ms[0m [35m+1ms[0m
+│ [2m  Computing first sets for non-terminals[0m [35m+21µs[0m
+│ [2m  Computed first sets in 1.86ms[0m [35m+1ms[0m
+│ [2m  Computing follow sets for non-terminals[0m [35m+317µs[0m
+│ [2m  Computed follow sets in 2.92ms[0m [35m+2ms[0m
+│ • Done computing terminal follow sets
+│ • Running precompute1 (weight_heavy=false, num_tsids=0)...
+│ [2m  Building vocab prefix tree (fast builder)[0m [35m+482µs[0m
+│ [2m  Computing reachable IDs (fast path)[0m [35m+323µs[0m
+│ [2m  Done computing reachable IDs in 246.958µs[0m [35m+253µs[0m
+│ [2m  Created trie1 roots (4395 states for 5021 total tsids)[0m [35m+2ms[0m
+│ [2m  Starting precompute DFS for 4395 tokenizer states[0m [35m+279µs[0m
+│ [2m  Vocab tree has 1584 nodes[0m [35m+65µs[0m
+│ [2m  Precomputation complete[0m [35m+584ms[0m
+│ Symbol-heavy mode: added 5021 tsid transitions to 4395 unique root states
+│ [2m  NWA: Found 11614 pairs of states connected by multiple transitions[0m [35m+43ms[0m
+│ Terminal NWA: 17737 states, 367752 transitions, num_tsids=0
+│ [2m  Determinize and minimize initial stats: 17737 states, 367752 transitions, 596932 ranges (2386 interned)[0m [35m+13ms[0m
+│ [2m  NWA Pass MinimizeRustfst: 12049 states, 279440 transitions in 757.73ms[0m [35m+758ms[0m
+│ [2m  NWA minimization: 12049 states, 229973 transitions, 1737944 ranges (9186 interned)[0m [35m+30ms[0m
+│ [2m  Determinization: 4467 states, 30129 transitions, 172885 ranges (13595 interned) in 2.72s[0m [35m+2.72s[0m
+│ • minimize_states: is_cyclic=false, 4467 states before
+│ [2m  ConsolidateRanges: Analyzing 4457 states[0m [35m+32ms[0m
+│ [2m    Forward reachability computed in 36.612375ms[0m [35m+55ms[0m
+│ [2m    Backward reachability computed in 60.243625ms[0m [35m+60ms[0m
+│ [2m    Main loop took 30.827375ms (intersect: 4.368614ms, optimize: 18.850194ms)[0m [35m+30ms[0m
+│ [2m    Cache: 15670 hits, 14501 misses (51.9% hit rate)[0m [35m+124µs[0m
+│ [2m  ConsolidateRanges: 13595 -> 3693 unique-weight ranges (1495 -> 1480 unique weights)[0m [35m+971µs[0m
+│ [2m    Removed 36779 ranges, filled 1121 gaps[0m [35m+13µs[0m
+│ [2m  DWA Pass ConsolidateRanges: 4457 states, 30119 transitions, 61945 ranges (3693 interned) in 149.07ms[0m [35m+1ms[0m
+│ [2m  DWA minimization: 4457 states, 30119 transitions, 61945 ranges (3693 interned)[0m [35m+599µs[0m
+│ • Terminal DWA (before suffix pruning): 4457 states, 30119 transitions
+│ • Done precompute1. Terminal DWA (before pruning): States: 4457, Transitions: 30119
+│ • Checking suffix prune conditions: grammar_def=true, env_disabled=false
+│ • Pruning terminal DWA with suffix grammar...
+│ • Starting suffix grammar DWA pruning
+│ •   Ignored terminal IDs: {5}
+│ •   Building suffix grammar...
+│ •   Suffix grammar: 9358 productions
+│ •   Compiling suffix grammar...
+│ Building tokenizer from definition
+│ [2m  Expr Stats: Nodes: 609, Depth: 9, Seq: 9, Choice: 6, Quant: 11, Shared: 9 (unique: 9, inlineable: 2), U8Seq: 558, U8Class: 16, Eps: 0[0m [35m+1ms[0m
+│ • Optimizing expression
+│ [2m  Optimized expression in 205.21µs[0m [35m+225µs[0m
+│ • Building NFA
+│ • Expr stats: Nodes: 605, Depth: 9, Seq: 9, Choice: 5, Quant: 11, Shared: 9 (unique: 9, inlineable: 2), U8Seq: 552, U8Class: 19, Eps: 0
+│ [2m  Built NFA with 8918 states in 2.05ms[0m [35m+1ms[0m
+│ [2m  Condensed NFA 8918 → 8918 states in 2.29ms[0m [35m+2ms[0m
+│ • Converting NFA to DFA
+│ • Computed 54 input equivalence classes in 516.58µs
+│ [2m  CompactNFA: 8918 states, 581 epsilon transitions[0m [35m+549µs[0m
+│ [2m  Epsilon structure: 18 states have outgoing epsilons, max out-degree 548[0m [35m+52µs[0m
+│ [2m    High out-degree states: 548:1[0m [35m+38µs[0m
+│ [2m  Epsilon density: 18 states with eps, 581 total transitions (0x states)[0m [35m+309µs[0m
+│ [2m  Precomputed 1 high-degree closures (avg size 561) in 51.58µs[0m [35m+62µs[0m
+│ [2m  DFA progress: 1000 states, worklist 31, subset size 6 (max 562), elapsed 13.73ms[0m [35m+12ms[0m
+│ [2m  DFA progress: 2000 states, worklist 28, subset size 6 (max 562), elapsed 24.63ms[0m [35m+10ms[0m
+│ [2m  DFA progress: 3000 states, worklist 22, subset size 6 (max 562), elapsed 38.42ms[0m [35m+13ms[0m
+│ [2m  DFA progress: 4000 states, worklist 13, subset size 6 (max 562), elapsed 54.57ms[0m [35m+16ms[0m
+│ [2m  DFA progress: 5000 states, worklist 8, subset size 6 (max 562), elapsed 66.09ms[0m [35m+11ms[0m
+│ [2m    └─ Timing breakdown (total ns):[0m [35m+214µs[0m
+│ [2m        - Collect: 1ms[0m [35m+12µs[0m
+│ [2m        - Closure: 7ms[0m [35m+4µs[0m
+│ [2m        - Compress: 5ms[0m [35m+4µs[0m
+│ [2m        - Lookup: 5ms[0m [35m+4µs[0m
+│ [2m        - Insert: 8ms[0m [35m+3µs[0m
+│ • NFA → DFA: 8918 → 5022 states (83.51ms)
+│ [2m    └─ Class computation: 516.58µs[0m [35m+23µs[0m
+│ [2m    └─ Remap transitions: 506.21µs[0m [35m+5µs[0m
+│ [2m    └─ Main loop: 64.65ms[0m [35m+3µs[0m
+│ [2m    └─ Metadata: 17.15ms[0m [35m+3µs[0m
+│ [2m    └─ Input classes processed: 231668, cache hits: 226647, misses: 5021[0m [35m+3µs[0m
+│ [2m    └─ Cache hit rate: 97.8%[0m [35m+4µs[0m
+│ [2m  Converted NFA to DFA in 85.33ms[0m [35m+1ms[0m
+│ • Minimizing DFA
+│ Minimized DFA 5022 → 5021 states in 206.13ms [35m+206ms[0m
+│ [2m  Minimized DFA in 206.98ms[0m [35m+842µs[0m
+│ Building GLR parser from definition
+│ • Found 1 nullable terminals that will be transformed
+│ [2m    Nullable terminal: RegexName("WS")[0m [35m+6µs[0m
+│ [2m  Number of productions: 9358[0m [35m+2ms[0m
+│ [2m  Mem: 465 MB (Start of parser generation)[0m [35m+134µs[0m
+│ • Validating initial grammar
+│ [2m  Computing nullable non-terminals[0m [35m+8ms[0m
+│ [2m  Computed nullable non-terminals in 11.45ms[0m [35m+11ms[0m
+│ [2m  Computing nullable non-terminals[0m [35m+2ms[0m
+│ [2m  Computed nullable non-terminals in 11.03ms[0m [35m+11ms[0m
+│ [2m  Mem: 467 MB (After validation)[0m [35m+1ms[0m
+│ • Removing productions with undefined non-terminals
+│ [2m  Mem: 469 MB (After removing undefined)[0m [35m+5ms[0m
+│ [2m  Start nonterminal: start__aug_suffix[0m [35m+98µs[0m
+│ [2m  Computing nullable non-terminals[0m [35m+5µs[0m
+│ [2m  Computed nullable non-terminals in 11.93ms[0m [35m+11ms[0m
+│ • Grammar is nullable: true
+│ [2m  Mem: 469 MB (After nullable wrapper minimization)[0m [35m+1ms[0m
+│ • Grammar optimization pass 1
+│ [2m    Phase 2: Inlining null productions[0m [35m+1ms[0m
+│ [2m      Processed 100 / 9358 productions, 172 output productions so far[0m [35m+11ms[0m
+│ [2m      Processed 200 / 9358 productions, 546 output productions so far[0m [35m+2ms[0m
+│ [2m      Processed 300 / 9358 productions, 704 output productions so far[0m [35m+539µs[0m
+│ [2m      Processed 400 / 9358 productions, 876 output productions so far[0m [35m+744µs[0m
+│ [2m      Processed 500 / 9358 productions, 1016 output productions so far[0m [35m+1ms[0m
+│ [2m      Processed 600 / 9358 productions, 1203 output productions so far[0m [35m+349µs[0m
+│ [2m      Processed 700 / 9358 productions, 1387 output productions so far[0m [35m+301µs[0m
+│ [2m      Processed 800 / 9358 productions, 1552 output productions so far[0m [35m+1ms[0m
+│ [2m      Processed 900 / 9358 productions, 1689 output productions so far[0m [35m+871µs[0m
+│ [2m      Processed 1000 / 9358 productions, 1839 output productions so far[0m [35m+445µs[0m
+│ [2m      Processed 1100 / 9358 productions, 1989 output productions so far[0m [35m+387µs[0m
+│ [2m      Processed 1200 / 9358 productions, 2183 output productions so far[0m [35m+335µs[0m
+│ [2m      Processed 1300 / 9358 productions, 2352 output productions so far[0m [35m+344µs[0m
+│ [2m      Processed 1400 / 9358 productions, 2515 output productions so far[0m [35m+444µs[0m
+│ [2m      Processed 1500 / 9358 productions, 2671 output productions so far[0m [35m+342µs[0m
+│ [2m      Processed 1600 / 9358 productions, 2812 output productions so far[0m [35m+438µs[0m
+│ [2m      Processed 1700 / 9358 productions, 2979 output productions so far[0m [35m+302µs[0m
+│ [2m      Processed 1800 / 9358 productions, 3168 output productions so far[0m [35m+696µs[0m
+│ [2m      Processed 1900 / 9358 productions, 3537 output productions so far[0m [35m+1ms[0m
+│ [2m      Processed 2000 / 9358 productions, 3892 output productions so far[0m [35m+1ms[0m
+│ [2m      Processed 2100 / 9358 productions, 4046 output productions so far[0m [35m+274µs[0m
+│ [2m      Processed 2200 / 9358 productions, 4185 output productions so far[0m [35m+468µs[0m
+│ [2m      Processed 2300 / 9358 productions, 4334 output productions so far[0m [35m+567µs[0m
+│ [2m      Processed 2400 / 9358 productions, 4469 output productions so far[0m [35m+431µs[0m
+│ [2m      Processed 2500 / 9358 productions, 4560 output productions so far[0m [35m+315µs[0m
+│ [2m      Processed 2600 / 9358 productions, 4708 output productions so far[0m [35m+384µs[0m
+│ [2m      Processed 2700 / 9358 productions, 4824 output productions so far[0m [35m+584µs[0m
+│ [2m      Processed 2800 / 9358 productions, 4973 output productions so far[0m [35m+561µs[0m
+│ [2m      Processed 2900 / 9358 productions, 5142 output productions so far[0m [35m+488µs[0m
+│ [2m      Processed 3000 / 9358 productions, 5290 output productions so far[0m [35m+370µs[0m
+│ [2m      Processed 3100 / 9358 productions, 5493 output productions so far[0m [35m+379µs[0m
+│ [2m      Processed 3200 / 9358 productions, 6330 output productions so far[0m [35m+5ms[0m
+│ [2m      Processed 3300 / 9358 productions, 7165 output productions so far[0m [35m+5ms[0m
+│ [2m      Processed 3400 / 9358 productions, 7346 output productions so far[0m [35m+776µs[0m
+│ [2m      Processed 3500 / 9358 productions, 7550 output productions so far[0m [35m+324µs[0m
+│ [2m      Processed 3600 / 9358 productions, 7655 output productions so far[0m [35m+332µs[0m
+│ [2m      Processed 3700 / 9358 productions, 7807 output productions so far[0m [35m+405µs[0m
+│ [2m      Processed 3800 / 9358 productions, 7951 output productions so far[0m [35m+351µs[0m
+│ [2m      Processed 3900 / 9358 productions, 8114 output productions so far[0m [35m+429µs[0m
+│ [2m      Processed 4000 / 9358 productions, 8271 output productions so far[0m [35m+357µs[0m
+│ [2m      Processed 4100 / 9358 productions, 8421 output productions so far[0m [35m+266µs[0m
+│ [2m      Processed 4200 / 9358 productions, 8584 output productions so far[0m [35m+284µs[0m
+│ [2m      Processed 4300 / 9358 productions, 8716 output productions so far[0m [35m+371µs[0m
+│ [2m      Processed 4400 / 9358 productions, 8888 output productions so far[0m [35m+364µs[0m
+│ [2m      Processed 4500 / 9358 productions, 9028 output productions so far[0m [35m+233µs[0m
+│ [2m      Processed 4600 / 9358 productions, 9160 output productions so far[0m [35m+402µs[0m
+│ [2m      Processed 4700 / 9358 productions, 9319 output productions so far[0m [35m+363µs[0m
+│ [2m      Processed 4800 / 9358 productions, 9471 output productions so far[0m [35m+355µs[0m
+│ [2m      Processed 4900 / 9358 productions, 9710 output productions so far[0m [35m+448µs[0m
+│ [2m      Processed 5000 / 9358 productions, 9889 output productions so far[0m [35m+292µs[0m
+│ [2m      Processed 5100 / 9358 productions, 10102 output productions so far[0m [35m+398µs[0m
+│ [2m      Processed 5200 / 9358 productions, 10300 output productions so far[0m [35m+766µs[0m
+│ [2m      Processed 5300 / 9358 productions, 10444 output productions so far[0m [35m+428µs[0m
+│ [2m      Processed 5400 / 9358 productions, 10568 output productions so far[0m [35m+1ms[0m
+│ [2m      Processed 5500 / 9358 productions, 10749 output productions so far[0m [35m+687µs[0m
+│ [2m      Processed 5600 / 9358 productions, 10958 output productions so far[0m [35m+369µs[0m
+│ [2m      Processed 5700 / 9358 productions, 11092 output productions so far[0m [35m+221µs[0m
+│ [2m      Processed 5800 / 9358 productions, 11234 output productions so far[0m [35m+1ms[0m
+│ [2m      Processed 5900 / 9358 productions, 11380 output productions so far[0m [35m+2ms[0m
+│ [2m      Processed 6000 / 9358 productions, 11527 output productions so far[0m [35m+477µs[0m
+│ [2m      Processed 6100 / 9358 productions, 11681 output productions so far[0m [35m+205µs[0m
+│ [2m      Processed 6200 / 9358 productions, 11829 output productions so far[0m [35m+378µs[0m
+│ [2m      Processed 6300 / 9358 productions, 11923 output productions so far[0m [35m+223µs[0m
+│ [2m      Processed 6400 / 9358 productions, 12034 output productions so far[0m [35m+70µs[0m
+│ [2m      Processed 6500 / 9358 productions, 12134 output productions so far[0m [35m+42µs[0m
+│ [2m      Processed 6600 / 9358 productions, 12234 output productions so far[0m [35m+46µs[0m
+│ [2m      Processed 6700 / 9358 productions, 12334 output productions so far[0m [35m+51µs[0m
+│ [2m      Processed 6800 / 9358 productions, 12434 output productions so far[0m [35m+50µs[0m
+│ [2m      Processed 6900 / 9358 productions, 12534 output productions so far[0m [35m+42µs[0m
+│ [2m      Processed 7000 / 9358 productions, 12634 output productions so far[0m [35m+205µs[0m
+│ [2m      Processed 7100 / 9358 productions, 12734 output productions so far[0m [35m+233µs[0m
+│ [2m      Processed 7200 / 9358 productions, 12834 output productions so far[0m [35m+110µs[0m
+│ [2m      Processed 7300 / 9358 productions, 12934 output productions so far[0m [35m+115µs[0m
+│ [2m      Processed 7400 / 9358 productions, 13034 output productions so far[0m [35m+102µs[0m
+│ [2m      Processed 7500 / 9358 productions, 13159 output productions so far[0m [35m+315µs[0m
+│ [2m      Processed 7600 / 9358 productions, 13302 output productions so far[0m [35m+1ms[0m
+│ [2m      Processed 7700 / 9358 productions, 13434 output productions so far[0m [35m+312µs[0m
+│ [2m      Processed 7800 / 9358 productions, 13587 output productions so far[0m [35m+369µs[0m
+│ [2m      Processed 7900 / 9358 productions, 13713 output productions so far[0m [35m+258µs[0m
+│ [2m      Processed 8000 / 9358 productions, 13837 output productions so far[0m [35m+228µs[0m
+│ [2m      Processed 8100 / 9358 productions, 13991 output productions so far[0m [35m+554µs[0m
+│ [2m      Processed 8200 / 9358 productions, 14135 output productions so far[0m [35m+446µs[0m
+│ [2m      Processed 8300 / 9358 productions, 14294 output productions so far[0m [35m+396µs[0m
+│ [2m      Processed 8400 / 9358 productions, 14510 output productions so far[0m [35m+1ms[0m
+│ [2m      Processed 8500 / 9358 productions, 14637 output productions so far[0m [35m+348µs[0m
+│ [2m      Processed 8600 / 9358 productions, 14761 output productions so far[0m [35m+311µs[0m
+│ [2m      Processed 8700 / 9358 productions, 14890 output productions so far[0m [35m+229µs[0m
+│ [2m      Processed 8800 / 9358 productions, 15017 output productions so far[0m [35m+256µs[0m
+│ [2m      Processed 8900 / 9358 productions, 15137 output productions so far[0m [35m+249µs[0m
+│ [2m      Processed 9000 / 9358 productions, 15280 output productions so far[0m [35m+240µs[0m
+│ [2m      Processed 9100 / 9358 productions, 15425 output productions so far[0m [35m+273µs[0m
+│ [2m      Processed 9200 / 9358 productions, 15563 output productions so far[0m [35m+238µs[0m
+│ [2m      Processed 9300 / 9358 productions, 15679 output productions so far[0m [35m+245µs[0m
+│ •     Null inlining complete: 9358 input → 15747 output productions
+│ [2m  Computing nullable non-terminals[0m [35m+9ms[0m
+│ [2m  Computed nullable non-terminals in 20.79ms[0m [35m+20ms[0m
+│ [2m    Phase 4: Checking for hidden left recursion[0m [35m+3ms[0m
+│ [2m  Computing nullable non-terminals[0m [35m+22µs[0m
+│ [2m  Computed nullable non-terminals in 43.80ms[0m [35m+43ms[0m
+│ [2m  Iteration 1: 234 cyclic nonterminals[0m [35m+8ms[0m
+│ • No more hidden left recursion to eliminate after 1 iterations
+│ • Phase 5: Removed 2 productions containing ignored terminals [35m+100ms[0m
+│ [2m  Computing nullable non-terminals[0m [35m+7ms[0m
+│ [2m  Computed nullable non-terminals in 21.78ms[0m [35m+21ms[0m
+│ • Grammar optimization pass 2
+│ [2m    Phase 2: Inlining null productions[0m [35m+13ms[0m
+│ [2m      Processed 100 / 14224 productions, 101 output productions so far[0m [35m+40ms[0m
+│ [2m      Processed 200 / 14224 productions, 201 output productions so far[0m [35m+170µs[0m
+│ [2m      Processed 300 / 14224 productions, 301 output productions so far[0m [35m+1ms[0m
+│ [2m      Processed 400 / 14224 productions, 401 output productions so far[0m [35m+1ms[0m
+│ [2m      Processed 500 / 14224 productions, 501 output productions so far[0m [35m+377µs[0m
+│ [2m      Processed 600 / 14224 productions, 601 output productions so far[0m [35m+139µs[0m
+│ [2m      Processed 700 / 14224 productions, 701 output productions so far[0m [35m+387µs[0m
+│ [2m      Processed 800 / 14224 productions, 801 output productions so far[0m [35m+505µs[0m
+│ [2m      Processed 900 / 14224 productions, 901 output productions so far[0m [35m+199µs[0m
+│ [2m      Processed 1000 / 14224 productions, 1001 output productions so far[0m [35m+252µs[0m
+│ [2m      Processed 1100 / 14224 productions, 1101 output productions so far[0m [35m+306µs[0m
+│ [2m      Processed 1200 / 14224 productions, 1201 output productions so far[0m [35m+527µs[0m
+│ [2m      Processed 1300 / 14224 productions, 1301 output productions so far[0m [35m+14ms[0m
+│ [2m      Processed 1400 / 14224 productions, 1401 output productions so far[0m [35m+1ms[0m
+│ [2m      Processed 1500 / 14224 productions, 1501 output productions so far[0m [35m+671µs[0m
+│ [2m      Processed 1600 / 14224 productions, 1601 output productions so far[0m [35m+897µs[0m
+│ [2m      Processed 1700 / 14224 productions, 1701 output productions so far[0m [35m+306µs[0m
+│ [2m      Processed 1800 / 14224 productions, 1801 output productions so far[0m [35m+301µs[0m
+│ [2m      Processed 1900 / 14224 productions, 1901 output productions so far[0m [35m+1ms[0m
+│ [2m      Processed 2000 / 14224 productions, 2001 output productions so far[0m [35m+459µs[0m
+│ [2m      Processed 2100 / 14224 productions, 2101 output productions so far[0m [35m+825µs[0m
+│ [2m      Processed 2200 / 14224 productions, 2201 output productions so far[0m [35m+360µs[0m
+│ [2m      Processed 2300 / 14224 productions, 2301 output productions so far[0m [35m+342µs[0m
+│ [2m      Processed 2400 / 14224 productions, 2401 output productions so far[0m [35m+342µs[0m
+│ [2m      Processed 2500 / 14224 productions, 2501 output productions so far[0m [35m+197µs[0m
+│ [2m      Processed 2600 / 14224 productions, 2601 output productions so far[0m [35m+370µs[0m
+│ [2m      Processed 2700 / 14224 productions, 2701 output productions so far[0m [35m+309µs[0m
+│ [2m      Processed 2800 / 14224 productions, 2801 output productions so far[0m [35m+236µs[0m
+│ [2m      Processed 2900 / 14224 productions, 2901 output productions so far[0m [35m+610µs[0m
+│ [2m      Processed 3000 / 14224 productions, 3001 output productions so far[0m [35m+433µs[0m
+│ [2m      Processed 3100 / 14224 productions, 3101 output productions so far[0m [35m+1ms[0m
+│ [2m      Processed 3200 / 14224 productions, 3201 output productions so far[0m [35m+640µs[0m
+│ [2m      Processed 3300 / 14224 productions, 3301 output productions so far[0m [35m+937µs[0m
+│ [2m      Processed 3400 / 14224 productions, 3401 output productions so far[0m [35m+844µs[0m
+│ [2m      Processed 3500 / 14224 productions, 3501 output productions so far[0m [35m+1ms[0m
+│ [2m      Processed 3600 / 14224 productions, 3601 output productions so far[0m [35m+596µs[0m
+│ [2m      Processed 3700 / 14224 productions, 3701 output productions so far[0m [35m+139µs[0m
+│ [2m      Processed 3800 / 14224 productions, 3801 output productions so far[0m [35m+208µs[0m
+│ [2m      Processed 3900 / 14224 productions, 3901 output productions so far[0m [35m+294µs[0m
+│ [2m      Processed 4000 / 14224 productions, 4001 output productions so far[0m [35m+243µs[0m
+│ [2m      Processed 4100 / 14224 productions, 4101 output productions so far[0m [35m+494µs[0m
+│ [2m      Processed 4200 / 14224 productions, 4201 output productions so far[0m [35m+213µs[0m
+│ [2m      Processed 4300 / 14224 productions, 4301 output productions so far[0m [35m+341µs[0m
+│ [2m      Processed 4400 / 14224 productions, 4401 output productions so far[0m [35m+181µs[0m
+│ [2m      Processed 4500 / 14224 productions, 4501 output productions so far[0m [35m+602µs[0m
+│ [2m      Processed 4600 / 14224 productions, 4601 output productions so far[0m [35m+301µs[0m
+│ [2m      Processed 4700 / 14224 productions, 4701 output productions so far[0m [35m+426µs[0m
+│ [2m      Processed 4800 / 14224 productions, 4801 output productions so far[0m [35m+748µs[0m
+│ [2m      Processed 4900 / 14224 productions, 4901 output productions so far[0m [35m+301µs[0m
+│ [2m      Processed 5000 / 14224 productions, 5001 output productions so far[0m [35m+238µs[0m
+│ [2m      Processed 5100 / 14224 productions, 5101 output productions so far[0m [35m+188µs[0m
+│ [2m      Processed 5200 / 14224 productions, 5201 output productions so far[0m [35m+590µs[0m
+│ [2m      Processed 5300 / 14224 productions, 5301 output productions so far[0m [35m+1ms[0m
+│ [2m      Processed 5400 / 14224 productions, 5401 output productions so far[0m [35m+1ms[0m
+│ [2m      Processed 5500 / 14224 productions, 5501 output productions so far[0m [35m+1ms[0m
+│ [2m      Processed 5600 / 14224 productions, 5601 output productions so far[0m [35m+2ms[0m
+│ [2m      Processed 5700 / 14224 productions, 5701 output productions so far[0m [35m+1ms[0m
+│ [2m      Processed 5800 / 14224 productions, 5801 output productions so far[0m [35m+1ms[0m
+│ [2m      Processed 5900 / 14224 productions, 5901 output productions so far[0m [35m+1ms[0m
+│ [2m      Processed 6000 / 14224 productions, 6001 output productions so far[0m [35m+586µs[0m
+│ [2m      Processed 6100 / 14224 productions, 6101 output productions so far[0m [35m+1ms[0m
+│ [2m      Processed 6200 / 14224 productions, 6201 output productions so far[0m [35m+1ms[0m
+│ [2m      Processed 6300 / 14224 productions, 6301 output productions so far[0m [35m+929µs[0m
+│ [2m      Processed 6400 / 14224 productions, 6401 output productions so far[0m [35m+1ms[0m
+│ [2m      Processed 6500 / 14224 productions, 6501 output productions so far[0m [35m+2ms[0m
+│ [2m      Processed 6600 / 14224 productions, 6601 output productions so far[0m [35m+1ms[0m
+│ [2m      Processed 6700 / 14224 productions, 6701 output productions so far[0m [35m+2ms[0m
+│ [2m      Processed 6800 / 14224 productions, 6801 output productions so far[0m [35m+688µs[0m
+│ [2m      Processed 6900 / 14224 productions, 6901 output productions so far[0m [35m+243µs[0m
+│ [2m      Processed 7000 / 14224 productions, 7001 output productions so far[0m [35m+356µs[0m
+│ [2m      Processed 7100 / 14224 productions, 7101 output productions so far[0m [35m+186µs[0m
+│ [2m      Processed 7200 / 14224 productions, 7201 output productions so far[0m [35m+140µs[0m
+│ [2m      Processed 7300 / 14224 productions, 7301 output productions so far[0m [35m+341µs[0m
+│ [2m      Processed 7400 / 14224 productions, 7401 output productions so far[0m [35m+233µs[0m
+│ [2m      Processed 7500 / 14224 productions, 7501 output productions so far[0m [35m+244µs[0m
+│ [2m      Processed 7600 / 14224 productions, 7601 output productions so far[0m [35m+295µs[0m
+│ [2m      Processed 7700 / 14224 productions, 7701 output productions so far[0m [35m+169µs[0m
+│ [2m      Processed 7800 / 14224 productions, 7801 output productions so far[0m [35m+196µs[0m
+│ [2m      Processed 7900 / 14224 productions, 7901 output productions so far[0m [35m+166µs[0m
+│ [2m      Processed 8000 / 14224 productions, 8001 output productions so far[0m [35m+170µs[0m
+│ [2m      Processed 8100 / 14224 productions, 8101 output productions so far[0m [35m+210µs[0m
+│ [2m      Processed 8200 / 14224 productions, 8201 output productions so far[0m [35m+171µs[0m
+│ [2m      Processed 8300 / 14224 productions, 8301 output productions so far[0m [35m+263µs[0m
+│ [2m      Processed 8400 / 14224 productions, 8401 output productions so far[0m [35m+210µs[0m
+│ [2m      Processed 8500 / 14224 productions, 8501 output productions so far[0m [35m+142µs[0m
+│ [2m      Processed 8600 / 14224 productions, 8601 output productions so far[0m [35m+207µs[0m
+│ [2m      Processed 8700 / 14224 productions, 8701 output productions so far[0m [35m+253µs[0m
+│ [2m      Processed 8800 / 14224 productions, 8801 output productions so far[0m [35m+196µs[0m
+│ [2m      Processed 8900 / 14224 productions, 8901 output productions so far[0m [35m+262µs[0m
+│ [2m      Processed 9000 / 14224 productions, 9001 output productions so far[0m [35m+251µs[0m
+│ [2m      Processed 9100 / 14224 productions, 9101 output productions so far[0m [35m+366µs[0m
+│ [2m      Processed 9200 / 14224 productions, 9201 output productions so far[0m [35m+183µs[0m
+│ [2m      Processed 9300 / 14224 productions, 9301 output productions so far[0m [35m+222µs[0m
+│ [2m      Processed 9400 / 14224 productions, 9401 output productions so far[0m [35m+225µs[0m
+│ [2m      Processed 9500 / 14224 productions, 9501 output productions so far[0m [35m+208µs[0m
+│ [2m      Processed 9600 / 14224 productions, 9601 output productions so far[0m [35m+323µs[0m
+│ [2m      Processed 9700 / 14224 productions, 9701 output productions so far[0m [35m+200µs[0m
+│ [2m      Processed 9800 / 14224 productions, 9801 output productions so far[0m [35m+160µs[0m
+│ [2m      Processed 9900 / 14224 productions, 9901 output productions so far[0m [35m+276µs[0m
+│ [2m      Processed 10000 / 14224 productions, 10001 output productions so far[0m [35m+265µs[0m
+│ [2m      Processed 10100 / 14224 productions, 10101 output productions so far[0m [35m+195µs[0m
+│ [2m      Processed 10200 / 14224 productions, 10201 output productions so far[0m [35m+434µs[0m
+│ [2m      Processed 10300 / 14224 productions, 10301 output productions so far[0m [35m+304µs[0m
+│ [2m      Processed 10400 / 14224 productions, 10401 output productions so far[0m [35m+200µs[0m
+│ [2m      Processed 10500 / 14224 productions, 10501 output productions so far[0m [35m+208µs[0m
+│ [2m      Processed 10600 / 14224 productions, 10601 output productions so far[0m [35m+300µs[0m
+│ [2m      Processed 10700 / 14224 productions, 10701 output productions so far[0m [35m+249µs[0m
+│ [2m      Processed 10800 / 14224 productions, 10801 output productions so far[0m [35m+481µs[0m
+│ [2m      Processed 10900 / 14224 productions, 10901 output productions so far[0m [35m+311µs[0m
+│ [2m      Processed 11000 / 14224 productions, 11001 output productions so far[0m [35m+137µs[0m
+│ [2m      Processed 11100 / 14224 productions, 11101 output productions so far[0m [35m+250µs[0m
+│ [2m      Processed 11200 / 14224 productions, 11201 output productions so far[0m [35m+190µs[0m
+│ [2m      Processed 11300 / 14224 productions, 11301 output productions so far[0m [35m+146µs[0m
+│ [2m      Processed 11400 / 14224 productions, 11401 output productions so far[0m [35m+69µs[0m
+│ [2m      Processed 11500 / 14224 productions, 11501 output productions so far[0m [35m+53µs[0m
+│ [2m      Processed 11600 / 14224 productions, 11601 output productions so far[0m [35m+53µs[0m
+│ [2m      Processed 11700 / 14224 productions, 11701 output productions so far[0m [35m+54µs[0m
+│ [2m      Processed 11800 / 14224 productions, 11801 output productions so far[0m [35m+61µs[0m
+│ [2m      Processed 11900 / 14224 productions, 11901 output productions so far[0m [35m+469µs[0m
+│ [2m      Processed 12000 / 14224 productions, 12001 output productions so far[0m [35m+276µs[0m
+│ [2m      Processed 12100 / 14224 productions, 12101 output productions so far[0m [35m+197µs[0m
+│ [2m      Processed 12200 / 14224 productions, 12201 output productions so far[0m [35m+272µs[0m
+│ [2m      Processed 12300 / 14224 productions, 12301 output productions so far[0m [35m+412µs[0m
+│ [2m      Processed 12400 / 14224 productions, 12401 output productions so far[0m [35m+231µs[0m
+│ [2m      Processed 12500 / 14224 productions, 12501 output productions so far[0m [35m+226µs[0m
+│ [2m      Processed 12600 / 14224 productions, 12601 output productions so far[0m [35m+636µs[0m
+│ [2m      Processed 12700 / 14224 productions, 12701 output productions so far[0m [35m+271µs[0m
+│ [2m      Processed 12800 / 14224 productions, 12801 output productions so far[0m [35m+313µs[0m
+│ [2m      Processed 12900 / 14224 productions, 12901 output productions so far[0m [35m+425µs[0m
+│ [2m      Processed 13000 / 14224 productions, 13001 output productions so far[0m [35m+294µs[0m
+│ [2m      Processed 13100 / 14224 productions, 13101 output productions so far[0m [35m+1ms[0m
+│ [2m      Processed 13200 / 14224 productions, 13201 output productions so far[0m [35m+519µs[0m
+│ [2m      Processed 13300 / 14224 productions, 13301 output productions so far[0m [35m+257µs[0m
+│ [2m      Processed 13400 / 14224 productions, 13401 output productions so far[0m [35m+323µs[0m
+│ [2m      Processed 13500 / 14224 productions, 13501 output productions so far[0m [35m+306µs[0m
+│ [2m      Processed 13600 / 14224 productions, 13601 output productions so far[0m [35m+303µs[0m
+│ [2m      Processed 13700 / 14224 productions, 13701 output productions so far[0m [35m+275µs[0m
+│ [2m      Processed 13800 / 14224 productions, 13801 output productions so far[0m [35m+235µs[0m
+│ [2m      Processed 13900 / 14224 productions, 13901 output productions so far[0m [35m+248µs[0m
+│ [2m      Processed 14000 / 14224 productions, 14001 output productions so far[0m [35m+212µs[0m
+│ [2m      Processed 14100 / 14224 productions, 14101 output productions so far[0m [35m+271µs[0m
+│ [2m      Processed 14200 / 14224 productions, 14201 output productions so far[0m [35m+186µs[0m
+│ •     Null inlining complete: 14224 input → 14224 output productions
+│ [2m  Computing nullable non-terminals[0m [35m+11ms[0m
+│ [2m  Computed nullable non-terminals in 16.27ms[0m [35m+16ms[0m
+│ [2m    Phase 4: Checking for hidden left recursion[0m [35m+3ms[0m
+│ [2m  Computing nullable non-terminals[0m [35m+33µs[0m
+│ [2m  Computed nullable non-terminals in 15.89ms[0m [35m+15ms[0m
+│ [2m  Iteration 1: 234 cyclic nonterminals[0m [35m+2ms[0m
+│ • No more hidden left recursion to eliminate after 1 iterations
+│ [2m  Computing nullable non-terminals[0m [35m+65ms[0m
+│ [2m  Computed nullable non-terminals in 13.40ms[0m [35m+13ms[0m
+│ • Grammar optimization converged after 2 passes
+│ [2m  Mem: 398 MB (After grammar normalization loop)[0m [35m+4ms[0m
+│ • Final epsilon production elimination
+│ [2m      Processed 100 / 14224 productions, 101 output productions so far[0m [35m+13ms[0m
+│ [2m      Processed 200 / 14224 productions, 201 output productions so far[0m [35m+180µs[0m
+│ [2m      Processed 300 / 14224 productions, 301 output productions so far[0m [35m+1ms[0m
+│ [2m      Processed 400 / 14224 productions, 401 output productions so far[0m [35m+1ms[0m
+│ [2m      Processed 500 / 14224 productions, 501 output productions so far[0m [35m+407µs[0m
+│ [2m      Processed 600 / 14224 productions, 601 output productions so far[0m [35m+316µs[0m
+│ [2m      Processed 700 / 14224 productions, 701 output productions so far[0m [35m+1ms[0m
+│ [2m      Processed 800 / 14224 productions, 801 output productions so far[0m [35m+600µs[0m
+│ [2m      Processed 900 / 14224 productions, 901 output productions so far[0m [35m+249µs[0m
+│ [2m      Processed 1000 / 14224 productions, 1001 output productions so far[0m [35m+311µs[0m
+│ [2m      Processed 1100 / 14224 productions, 1101 output productions so far[0m [35m+262µs[0m
+│ [2m      Processed 1200 / 14224 productions, 1201 output productions so far[0m [35m+279µs[0m
+│ [2m      Processed 1300 / 14224 productions, 1301 output productions so far[0m [35m+304µs[0m
+│ [2m      Processed 1400 / 14224 productions, 1401 output productions so far[0m [35m+618µs[0m
+│ [2m      Processed 1500 / 14224 productions, 1501 output productions so far[0m [35m+1ms[0m
+│ [2m      Processed 1600 / 14224 productions, 1601 output productions so far[0m [35m+1ms[0m
+│ [2m      Processed 1700 / 14224 productions, 1701 output productions so far[0m [35m+314µs[0m
+│ [2m      Processed 1800 / 14224 productions, 1801 output productions so far[0m [35m+322µs[0m
+│ [2m      Processed 1900 / 14224 productions, 1901 output productions so far[0m [35m+226µs[0m
+│ [2m      Processed 2000 / 14224 productions, 2001 output productions so far[0m [35m+216µs[0m
+│ [2m      Processed 2100 / 14224 productions, 2101 output productions so far[0m [35m+758µs[0m
+│ [2m      Processed 2200 / 14224 productions, 2201 output productions so far[0m [35m+1ms[0m
+│ [2m      Processed 2300 / 14224 productions, 2301 output productions so far[0m [35m+308µs[0m
+│ [2m      Processed 2400 / 14224 productions, 2401 output productions so far[0m [35m+385µs[0m
+│ [2m      Processed 2500 / 14224 productions, 2501 output productions so far[0m [35m+181µs[0m
+│ [2m      Processed 2600 / 14224 productions, 2601 output productions so far[0m [35m+324µs[0m
+│ [2m      Processed 2700 / 14224 productions, 2701 output productions so far[0m [35m+177µs[0m
+│ [2m      Processed 2800 / 14224 productions, 2801 output productions so far[0m [35m+202µs[0m
+│ [2m      Processed 2900 / 14224 productions, 2901 output productions so far[0m [35m+488µs[0m
+│ [2m      Processed 3000 / 14224 productions, 3001 output productions so far[0m [35m+609µs[0m
+│ [2m      Processed 3100 / 14224 productions, 3101 output productions so far[0m [35m+771µs[0m
+│ [2m      Processed 3200 / 14224 productions, 3201 output productions so far[0m [35m+647µs[0m
+│ [2m      Processed 3300 / 14224 productions, 3301 output productions so far[0m [35m+889µs[0m
+│ [2m      Processed 3400 / 14224 productions, 3401 output productions so far[0m [35m+773µs[0m
+│ [2m      Processed 3500 / 14224 productions, 3501 output productions so far[0m [35m+670µs[0m
+│ [2m      Processed 3600 / 14224 productions, 3601 output productions so far[0m [35m+614µs[0m
+│ [2m      Processed 3700 / 14224 productions, 3701 output productions so far[0m [35m+160µs[0m
+│ [2m      Processed 3800 / 14224 productions, 3801 output productions so far[0m [35m+420µs[0m
+│ [2m      Processed 3900 / 14224 productions, 3901 output productions so far[0m [35m+389µs[0m
+│ [2m      Processed 4000 / 14224 productions, 4001 output productions so far[0m [35m+366µs[0m
+│ [2m      Processed 4100 / 14224 productions, 4101 output productions so far[0m [35m+603µs[0m
+│ [2m      Processed 4200 / 14224 productions, 4201 output productions so far[0m [35m+265µs[0m
+│ [2m      Processed 4300 / 14224 productions, 4301 output productions so far[0m [35m+383µs[0m
+│ [2m      Processed 4400 / 14224 productions, 4401 output productions so far[0m [35m+262µs[0m
+│ [2m      Processed 4500 / 14224 productions, 4501 output productions so far[0m [35m+597µs[0m
+│ [2m      Processed 4600 / 14224 productions, 4601 output productions so far[0m [35m+376µs[0m
+│ [2m      Processed 4700 / 14224 productions, 4701 output productions so far[0m [35m+474µs[0m
+│ [2m      Processed 4800 / 14224 productions, 4801 output productions so far[0m [35m+275µs[0m
+│ [2m      Processed 4900 / 14224 productions, 4901 output productions so far[0m [35m+226µs[0m
+│ [2m      Processed 5000 / 14224 productions, 5001 output productions so far[0m [35m+248µs[0m
+│ [2m      Processed 5100 / 14224 productions, 5101 output productions so far[0m [35m+222µs[0m
+│ [2m      Processed 5200 / 14224 productions, 5201 output productions so far[0m [35m+813µs[0m
+│ [2m      Processed 5300 / 14224 productions, 5301 output productions so far[0m [35m+2ms[0m
+│ [2m      Processed 5400 / 14224 productions, 5401 output productions so far[0m [35m+1ms[0m
+│ [2m      Processed 5500 / 14224 productions, 5501 output productions so far[0m [35m+1ms[0m
+│ [2m      Processed 5600 / 14224 productions, 5601 output productions so far[0m [35m+1ms[0m
+│ [2m      Processed 5700 / 14224 productions, 5701 output productions so far[0m [35m+964µs[0m
+│ [2m      Processed 5800 / 14224 productions, 5801 output productions so far[0m [35m+1ms[0m
+│ [2m      Processed 5900 / 14224 productions, 5901 output productions so far[0m [35m+1ms[0m
+│ [2m      Processed 6000 / 14224 productions, 6001 output productions so far[0m [35m+746µs[0m
+│ [2m      Processed 6100 / 14224 productions, 6101 output productions so far[0m [35m+1ms[0m
+│ [2m      Processed 6200 / 14224 productions, 6201 output productions so far[0m [35m+1ms[0m
+│ [2m      Processed 6300 / 14224 productions, 6301 output productions so far[0m [35m+945µs[0m
+│ [2m      Processed 6400 / 14224 productions, 6401 output productions so far[0m [35m+1ms[0m
+│ [2m      Processed 6500 / 14224 productions, 6501 output productions so far[0m [35m+1ms[0m
+│ [2m      Processed 6600 / 14224 productions, 6601 output productions so far[0m [35m+1ms[0m
+│ [2m      Processed 6700 / 14224 productions, 6701 output productions so far[0m [35m+1ms[0m
+│ [2m      Processed 6800 / 14224 productions, 6801 output productions so far[0m [35m+788µs[0m
+│ [2m      Processed 6900 / 14224 productions, 6901 output productions so far[0m [35m+279µs[0m
+│ [2m      Processed 7000 / 14224 productions, 7001 output productions so far[0m [35m+389µs[0m
+│ [2m      Processed 7100 / 14224 productions, 7101 output productions so far[0m [35m+196µs[0m
+│ [2m      Processed 7200 / 14224 productions, 7201 output productions so far[0m [35m+149µs[0m
+│ [2m      Processed 7300 / 14224 productions, 7301 output productions so far[0m [35m+367µs[0m
+│ [2m      Processed 7400 / 14224 productions, 7401 output productions so far[0m [35m+299µs[0m
+│ [2m      Processed 7500 / 14224 productions, 7501 output productions so far[0m [35m+274µs[0m
+│ [2m      Processed 7600 / 14224 productions, 7601 output productions so far[0m [35m+290µs[0m
+│ [2m      Processed 7700 / 14224 productions, 7701 output productions so far[0m [35m+159µs[0m
+│ [2m      Processed 7800 / 14224 productions, 7801 output productions so far[0m [35m+185µs[0m
+│ [2m      Processed 7900 / 14224 productions, 7901 output productions so far[0m [35m+155µs[0m
+│ [2m      Processed 8000 / 14224 productions, 8001 output productions so far[0m [35m+155µs[0m
+│ [2m      Processed 8100 / 14224 productions, 8101 output productions so far[0m [35m+203µs[0m
+│ [2m      Processed 8200 / 14224 productions, 8201 output productions so far[0m [35m+159µs[0m
+│ [2m      Processed 8300 / 14224 productions, 8301 output productions so far[0m [35m+256µs[0m
+│ [2m      Processed 8400 / 14224 productions, 8401 output productions so far[0m [35m+210µs[0m
+│ [2m      Processed 8500 / 14224 productions, 8501 output productions so far[0m [35m+140µs[0m
+│ [2m      Processed 8600 / 14224 productions, 8601 output productions so far[0m [35m+197µs[0m
+│ [2m      Processed 8700 / 14224 productions, 8701 output productions so far[0m [35m+235µs[0m
+│ [2m      Processed 8800 / 14224 productions, 8801 output productions so far[0m [35m+186µs[0m
+│ [2m      Processed 8900 / 14224 productions, 8901 output productions so far[0m [35m+255µs[0m
+│ [2m      Processed 9000 / 14224 productions, 9001 output productions so far[0m [35m+251µs[0m
+│ [2m      Processed 9100 / 14224 productions, 9101 output productions so far[0m [35m+347µs[0m
+│ [2m      Processed 9200 / 14224 productions, 9201 output productions so far[0m [35m+156µs[0m
+│ [2m      Processed 9300 / 14224 productions, 9301 output productions so far[0m [35m+213µs[0m
+│ [2m      Processed 9400 / 14224 productions, 9401 output productions so far[0m [35m+164µs[0m
+│ [2m      Processed 9500 / 14224 productions, 9501 output productions so far[0m [35m+192µs[0m
+│ [2m      Processed 9600 / 14224 productions, 9601 output productions so far[0m [35m+315µs[0m
+│ [2m      Processed 9700 / 14224 productions, 9701 output productions so far[0m [35m+205µs[0m
+│ [2m      Processed 9800 / 14224 productions, 9801 output productions so far[0m [35m+157µs[0m
+│ [2m      Processed 9900 / 14224 productions, 9901 output productions so far[0m [35m+264µs[0m
+│ [2m      Processed 10000 / 14224 productions, 10001 output productions so far[0m [35m+268µs[0m
+│ [2m      Processed 10100 / 14224 productions, 10101 output productions so far[0m [35m+160µs[0m
+│ [2m      Processed 10200 / 14224 productions, 10201 output productions so far[0m [35m+227µs[0m
+│ [2m      Processed 10300 / 14224 productions, 10301 output productions so far[0m [35m+223µs[0m
+│ [2m      Processed 10400 / 14224 productions, 10401 output productions so far[0m [35m+230µs[0m
+│ [2m      Processed 10500 / 14224 productions, 10501 output productions so far[0m [35m+190µs[0m
+│ [2m      Processed 10600 / 14224 productions, 10601 output productions so far[0m [35m+347µs[0m
+│ [2m      Processed 10700 / 14224 productions, 10701 output productions so far[0m [35m+286µs[0m
+│ [2m      Processed 10800 / 14224 productions, 10801 output productions so far[0m [35m+346µs[0m
+│ [2m      Processed 10900 / 14224 productions, 10901 output productions so far[0m [35m+274µs[0m
+│ [2m      Processed 11000 / 14224 productions, 11001 output productions so far[0m [35m+190µs[0m
+│ [2m      Processed 11100 / 14224 productions, 11101 output productions so far[0m [35m+303µs[0m
+│ [2m      Processed 11200 / 14224 productions, 11201 output productions so far[0m [35m+218µs[0m
+│ [2m      Processed 11300 / 14224 productions, 11301 output productions so far[0m [35m+97µs[0m
+│ [2m      Processed 11400 / 14224 productions, 11401 output productions so far[0m [35m+59µs[0m
+│ [2m      Processed 11500 / 14224 productions, 11501 output productions so far[0m [35m+59µs[0m
+│ [2m      Processed 11600 / 14224 productions, 11601 output productions so far[0m [35m+56µs[0m
+│ [2m      Processed 11700 / 14224 productions, 11701 output productions so far[0m [35m+51µs[0m
+│ [2m      Processed 11800 / 14224 productions, 11801 output productions so far[0m [35m+58µs[0m
+│ [2m      Processed 11900 / 14224 productions, 11901 output productions so far[0m [35m+450µs[0m
+│ [2m      Processed 12000 / 14224 productions, 12001 output productions so far[0m [35m+297µs[0m
+│ [2m      Processed 12100 / 14224 productions, 12101 output productions so far[0m [35m+291µs[0m
+│ [2m      Processed 12200 / 14224 productions, 12201 output productions so far[0m [35m+321µs[0m
+│ [2m      Processed 12300 / 14224 productions, 12301 output productions so far[0m [35m+285µs[0m
+│ [2m      Processed 12400 / 14224 productions, 12401 output productions so far[0m [35m+414µs[0m
+│ [2m      Processed 12500 / 14224 productions, 12501 output productions so far[0m [35m+397µs[0m
+│ [2m      Processed 12600 / 14224 productions, 12601 output productions so far[0m [35m+698µs[0m
+│ [2m      Processed 12700 / 14224 productions, 12701 output productions so far[0m [35m+301µs[0m
+│ [2m      Processed 12800 / 14224 productions, 12801 output productions so far[0m [35m+303µs[0m
+│ [2m      Processed 12900 / 14224 productions, 12901 output productions so far[0m [35m+459µs[0m
+│ [2m      Processed 13000 / 14224 productions, 13001 output productions so far[0m [35m+300µs[0m
+│ [2m      Processed 13100 / 14224 productions, 13101 output productions so far[0m [35m+1ms[0m
+│ [2m      Processed 13200 / 14224 productions, 13201 output productions so far[0m [35m+599µs[0m
+│ [2m      Processed 13300 / 14224 productions, 13301 output productions so far[0m [35m+304µs[0m
+│ [2m      Processed 13400 / 14224 productions, 13401 output productions so far[0m [35m+237µs[0m
+│ [2m      Processed 13500 / 14224 productions, 13501 output productions so far[0m [35m+256µs[0m
+│ [2m      Processed 13600 / 14224 productions, 13601 output productions so far[0m [35m+249µs[0m
+│ [2m      Processed 13700 / 14224 productions, 13701 output productions so far[0m [35m+251µs[0m
+│ [2m      Processed 13800 / 14224 productions, 13801 output productions so far[0m [35m+241µs[0m
+│ [2m      Processed 13900 / 14224 productions, 13901 output productions so far[0m [35m+257µs[0m
+│ [2m      Processed 14000 / 14224 productions, 14001 output productions so far[0m [35m+215µs[0m
+│ [2m      Processed 14100 / 14224 productions, 14101 output productions so far[0m [35m+411µs[0m
+│ [2m      Processed 14200 / 14224 productions, 14201 output productions so far[0m [35m+193µs[0m
+│ •     Null inlining complete: 14224 input → 14224 output productions
+│ [2m  Mem: 391 MB (After final epsilon elimination)[0m [35m+11ms[0m
+│ • Eliminated 3494 unreachable productions (14224 → 10730)
+│ [2m  Mem: 390 MB (After unreachable elimination)[0m [35m+35µs[0m
+│ • Using 1 ignore terminals (1 explicit, 0 auto-detected)
+│ • Phase 6: Left factoring created 1780 new nonterminals (10730 → 12510 productions)
+│ [2m  Mem: 390 MB (After left factoring)[0m [35m+3ms[0m
+│ • Phase 7: Merged identical nonterminals (12510 → 9696 productions)
+│ [2m  Mem: 388 MB (After merge identical nonterminals)[0m [35m+538µs[0m
+│ • Phase 8: Eliminated 535 unit productions (9696 → 9161) [35m+109ms[0m
+│ [2m  Mem: 311 MB (After unit production elimination)[0m [35m+4ms[0m
+│ • Phase 9: Re-introducing nullability
+│ • Phase 9: Creating final unique start production
+│ • Validating critical grammar invariants
+│ • Validating grammar after transformations
+│ [2m  Computing nullable non-terminals[0m [35m+5µs[0m
+│ [2m  Computed nullable non-terminals in 16.45ms[0m [35m+16ms[0m
+│ [2m  Computing nullable non-terminals[0m [35m+18ms[0m
+│ [2m  Computed nullable non-terminals in 11.44ms[0m [35m+73ms[0m
+│ [2m  Computing nullable non-terminals[0m [35m+15ms[0m
+│ [2m  Computed nullable non-terminals in 9.95ms[0m [35m+10ms[0m
+│ [2m  HLR check: 2 nullable nonterminals[0m [35m+19µs[0m
+│ [2m  HLR check: 0 cyclic nonterminals in left-reachability graph[0m [35m+147µs[0m
+│ [2m  Computing nullable non-terminals[0m [35m+78µs[0m
+│ [2m  Computed nullable non-terminals in 9.23ms[0m [35m+9ms[0m
+│ [2m  Number of productions: 9164[0m [35m+6ms[0m
+│ [2m  Mem: 245 MB (Before Stage 1)[0m [35m+32µs[0m
+│ [2m  Computing nullable non-terminals[0m [35m+6ms[0m
+│ [2m  Computed nullable non-terminals in 6.76ms[0m [35m+6ms[0m
+│ • Stage 1 (LR(0) Automaton)
+│ [2m  Mem: 239 MB (After Stage 1)[0m [35m+20ms[0m
+│ • Computing First/Follow Sets
+│ [2m  Mem: 240 MB (After First/Follow)[0m [35m+2ms[0m
+│ • Computing Final Table (Merging Stages 2-8)
+│ [2m  Mem: 250 MB (After Final Table)[0m [35m+9ms[0m
+│ • Optimizing Table (state reduction)
+│ [2m  Mem: 256 MB (After Table Optimization)[0m [35m+23ms[0m
+│ • GLR Parser generation complete. 14497 states.
+│ [2m  GLR terminal equivalence: 548 terminals → 524 equivalence classes[0m [35m+321ms[0m
+│ •   Suffix grammar compiled [35m+242ms[0m
+│ •     Terminal mapping: 548 of 548 terminals mapped
+│ • Suffix grammar DWA pruning: kept=20792, pruned=9277 [35m+55ms[0m
+│ • Suffix grammar pruning complete. Kept=20792, pruned=9277
+│ • Re-minimizing terminal DWA after suffix pruning...
+│ • Terminal DWA re-minimization: 4457 states, 20842 transitions -> 4265 states, 20625 transitions
+│ Terminal DWA (final): 4265 states, 20625 transitions
+│ [2m  Terminal DWA weight complexity (unique): total_ranges_unique=3568 (total_ranges_all=51026)[0m [35m+1ms[0m
+│ • Terminal DWA: 16688317 paths (count_paths)
+│ • Terminal DWA average path length (exact): 5.78
+│ • Terminal DWA: total_paths=16688317, total_length=96505903, avg=5.78 (debug)
+│ • Terminal DWA sample (n=100): min=4, max=8, avg=5.70
+│ • Terminal DWA average path length (estimated, 10k samples): 5.79 [35m+310ms[0m
+│ • Terminal DWA start state: 4476 transitions to 4223 unique targets [35m+151ms[0m
+│ [2m  Terminal DWA sample paths (n=10):[0m [35m+1ms[0m
+│ [2m    Path 0: TSID2302 → JSON_STRING → ':' → '[' → '{' → '"static"' (len=6, n=1, e.g. '":[{"' (id=75))[0m [35m+123µs[0m
+│ [2m    Path 1: TSID3097 → JSON_STRING → ']' → ',' → '"query_plan"' (len=5, n=1, e.g. '"],"' (id=80))[0m [35m+75µs[0m
+│ [2m    Path 2: TSID4173 → JSON_STRING → '}' → ',' → '"exporters"' (len=5, n=1, e.g. '"},"' (id=84))[0m [35m+51µs[0m
+│ [2m    Path 3: TSID4758 → JSON_STRING → '}' → ']' → ',' → '"subgraph_request_id"' (len=6, n=1, e.g. '"}],"' (id=86))[0m [35m+20µs[0m
+│ [2m    Path 4: TSID2369 → JSON_STRING → ':' → JSON_STRING → ',' → '"active_subgraph_requests"' (len=6, n=1, e.g. '":"","' (id=69))[0m [35m+214µs[0m
+│ [2m    Path 5: TSID788 → '"concurrent_requests"' → ']' → ',' → '"url.query"' (len=5, n=1, e.g. '"],"' (id=80))[0m [35m+44µs[0m
+│ [2m    Path 6: TSID4513 → JSON_STRING → '}' → ',' → '{' → '"cert"' (len=6, n=1, e.g. '"},{"' (id=85))[0m [35m+17µs[0m
+│ [2m    Path 7: TSID2946 → JSON_STRING → '}' → ']' → ',' → '"zipkin"' (len=6, n=1, e.g. '"}],"' (id=86))[0m [35m+6µs[0m
+│ [2m    Path 8: TSID2403 → JSON_STRING → ':' → '{' → '"operation_kind"' (len=5, n=1, e.g. '":{"' (id=76))[0m [35m+22µs[0m
+│ [2m    Path 9: TSID3807 → JSON_STRING → '}' → ',' → '"queue_capacity"' (len=5, n=1, e.g. '"},"' (id=84))[0m [35m+6µs[0m
+│ Building Parser DWA
+│ Starting Parser DWA construction. Input terminal_nwa: 4265 states, 20625 transitions
+│ [2m  Computed terminal characterizations for 548 terminals[0m [35m+57ms[0m
+│ [2m  Found 524 unique characterizations (sharing DFAs for 1 groups)[0m [35m+150ms[0m
+│ • Built 548 template DWAs in 624.143083ms [35m+416ms[0m
+│ • Symbol-heavy mode: found 4476 tsid transitions from original start state
+│ [2m  Symbol-heavy mode: 4223 root states with tsid edges[0m [35m+4ms[0m
+│ • Pass 1: Tokens & Signatures (5117 sigs, 64.58ms) [35m+64ms[0m
+│ • Optimization: 4847 simple signatures (direct build), 270 complex signatures (derivation)
+│ • Building Super DWA for 270 complex signatures [35m+89ms[0m
+│ [2m    Used terminals: 539[0m [35m+241µs[0m
+│ [2m    Super NWA construction: 8.9955ms, 15196 states, 25542 transitions[0m [35m+9ms[0m
+│ [2m  Determinize and minimize initial stats: 15196 states, 25542 transitions, 26082 ranges (541 interned)[0m [35m+1ms[0m
+│ [2m  NWA minimization: 15196 states, 25542 transitions, 26082 ranges (541 interned)[0m [35m+5ms[0m
+│ [2m  Determinization: 10004 states, 17975 transitions, 27350 ranges (6577 interned) in 53.12ms[0m [35m+53ms[0m
+│ • minimize_states: is_cyclic=false, 10004 states before
+│ [2m  DWA minimization: 9482 states, 17975 transitions, 26828 ranges (6577 interned)[0m [35m+42ms[0m
+│ [2m    Super DWA det+min: 107.3405ms, 9482 states[0m [35m+4ms[0m
+│ [2m    Collected 1716 unique weights in 1.933791ms[0m [35m+2ms[0m
+│ [2m    Weight mappings: 353.447042ms[0m [35m+353ms[0m
+│ [2m    Specialization (270 DWAs): 587.300833ms, states before/after: 2560140 -> 2560140 (0.0% reduction)[0m [35m+587ms[0m
+│ • Template cache: 5117 templates, 2588095 total states, max=9482, avg=505.8
+│ • Finished DWA specialization
+│ • Beginning NWA traversal
+│ • Process callback #0, instantiate count: 0, total_states: 0
+│ • Template instantiation #0: 1 total states so far, template size 1, bodies_count: 1
+│ • Finished Pass 2 [35m+10.91s[0m
+│ • Collected 0 final bodies, 4476 tsid bodies, states_arena has 5491651 states (avg 1227 states/body)
+│ • Symbol-heavy mode: added 8828 tsid-labeled transitions
+│ Combined NWA before determinization: 5491652 states, 6577358 transitions, is_symbol_heavy=true [35m+738ms[0m
+│ • Pruning continuations from final states for NWA with 5491652 states and 6577358 transitions...
+│ • Pruned continuations from final states. NWA with 5491652 states and 6577358 transitions remaining. [35m+1.12s[0m
+│ • After pruning dead ends: NWA 5491652 -> 1559446 states, 3360137 transitions [35m+8.43s[0m
+│ [2m  Determinize and minimize initial stats: 1559446 states, 3360137 transitions, 15158541 ranges (7408 interned)[0m [35m+117ms[0m
+│ [2m  NWA Pass PruneDeadEnds: 1559446 states, 3360137 transitions in 159.97ms[0m [35m+181ms[0m
+│ [2m  NWA minimization: 1559446 states, 3360137 transitions, 15158541 ranges (7408 interned)[0m [35m+140ms[0m
+│ [2m  Determinization: 1544322 states, 19915945 transitions, 32003387 ranges (7933 interned) in 20.83s[0m [35m+21.85s[0m
+│ [2m  DWA Pass PruneDeadEnds: 1544322 states, 19915945 transitions, 32003387 ranges (7933 interned) in 246.83ms[0m [35m+1.15s[0m
+│ • minimize_states: is_cyclic=false, 1544322 states before [35m+157ms[0m
+│ [2m  DWA Pass Minimize: 16710 states, 1100487 transitions, 1211577 ranges (7933 interned) in 16.76s[0m [35m+16.72s[0m
+│ [2m  ConsolidateRanges: Analyzing 16710 states[0m [35m+39ms[0m
+│ [2m    Forward reachability computed in 1.571191959s[0m [35m+1.76s[0m
+│ [2m    Backward reachability computed in 3.910800958s[0m [35m+3.91s[0m
+│ [2m    Main loop took 681.556541ms (intersect: 295.998275ms, optimize: 74.683192ms)[0m [35m+682ms[0m
+│ [2m    Cache: 599402 hits, 505668 misses (54.2% hit rate)[0m [35m+63µs[0m
+│ [2m  ConsolidateRanges: 7933 -> 7163 unique-weight ranges (1827 -> 2704 unique weights)[0m [35m+39ms[0m
+│ [2m    Removed 1222 ranges, filled 26246 gaps[0m [35m+35µs[0m
+│ [2m  DWA Pass ConsolidateRanges: 16710 states, 1100487 transitions, 1202091 ranges (7163 interned) in 6.45s[0m [35m+44ms[0m
+│ [2m  DWA minimization: 16710 states, 1100487 transitions, 1202091 ranges (7163 interned)[0m [35m+31ms[0m
+│ • Final DWA minimization complete. 16710 states and 1100487 transitions. [35m+457ms[0m
+│ • Parser DWA construction complete. Stats: States: 16710, Transitions: 1100487
+│ • Parser DWA average path length: 12.12 [35m+54ms[0m
+│ • DWA Vocab Optimization: Processing 2722 unique weights (max_tok=1582) [35m+2.34s[0m
+│ [2m  DWA Vocab Partition: 16.689833ms[0m [35m+16ms[0m
+│ [2m  DWA Vocab Remap: 32.520208ms[0m [35m+32ms[0m
+│ [2m  DWA Vocab internal_to_original: 4.250417ms[0m [35m+4ms[0m
+│ [2m  DWA Vocab original_to_internal (in-place): 379.541µs[0m [35m+415µs[0m
+│ • DWA Vocab Optimization: Tokens 1583 -> 1530, Ranges 7163 -> 7134. Time: 130.91ms
+│ [2m  Parser DWA weight complexity (unique): total_ranges_unique=7134 (total_ranges_all=1197488)[0m [35m+33ms[0m
+│ [2m  compute_internal_mask: 1 tokenizer states in self.state[0m [35m+105ms[0m
+│ [2m  >>> Seeding initial states[0m [35m+31µs[0m
+│ [2m  compute_internal_mask: 1 tokenizer states in self.state[0m [35m+225ms[0m
+│ [2m  >>> Seeding initial states[0m [35m+37µs[0m
+Loading schema from: gcg-paper/hard_schemas/data/ApolloRouter---apollo-router-2.9.0.json
+Schema title: Configuration
+Loading vocabulary using tiktoken (matching benchmark runner)...
+
+Generation token_to_id map (matching Sep1Adapter._get_token_to_id)...
+   Token map generation: 22.0ms
+
+2. Parsing EBNF to GrammarDefinition...
+   Grammar parsing: 4212.1ms
+
+3. Compiling grammar...
+   Grammar compilation: 557.8ms
+
+4. Creating constraint with vocabulary...
+   Constraint creation: 85153.7ms
+
+5. Testing constraint on valid input...
+   Input: {}
+   Accepted: '{' (token 90)
+   Accepted: '}' (token 92)
+
+   Final state active: True
+   Final state valid: True
+
+=== Total compile time: 89971.6ms ===
