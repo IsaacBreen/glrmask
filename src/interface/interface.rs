@@ -2,6 +2,7 @@ use crate::constraint::GrammarConstraint;
 use crate::datastructures::u8set::U8Set;
 use crate::debug;
 use crate::finite_automata::{greedy_group, groups, Expr, ExprGroup, GroupID, QuantifierType, Regex};
+use crate::dfa_u8::Tokenizer;
 use crate::glr::analyze::minimize_grammar;
 use crate::glr::grammar::regex_name;
 use crate::glr::grammar::{NonTerminal, Production, Symbol, Terminal};
@@ -2045,7 +2046,7 @@ impl GrammarDefinition {
 #[derive(Clone)]
 pub struct CompiledGrammar {
     pub definition: Arc<GrammarDefinition>,
-    pub tokenizer: Regex,
+    pub tokenizer: Tokenizer,
     pub glr_parser: GLRParser,
 }
 
@@ -2053,7 +2054,7 @@ pub struct CompiledGrammar {
 #[derive(JSONConvertible)]
 struct CompiledGrammarJSON {
     definition: GrammarDefinition,
-    tokenizer: Regex,
+    tokenizer: Tokenizer,
     glr_parser: GLRParser,
 }
 
@@ -2091,7 +2092,7 @@ impl CompiledGrammar {
         debug!(3, "Building tokenizer from definition");
         let terminal_expr_groups = definition.get_terminal_expressions_for_tokenizer();
         let tokenizer_expr_groups_obj = groups(terminal_expr_groups);
-        let tokenizer = tokenizer_expr_groups_obj.build();
+        let tokenizer = Tokenizer::new(tokenizer_expr_groups_obj.build());
 
         debug!(3, "Building GLR parser from definition");
         let mut terminal_map: BiBTreeMap<Terminal, TerminalID> =
@@ -2204,7 +2205,7 @@ impl CompiledGrammar {
     pub fn regex_name_to_group_id(&self) -> &BiBTreeMap<String, usize> {
         &self.definition.regex_name_to_group_id
     }
-    pub fn tokenizer(&self) -> &Regex {
+    pub fn tokenizer(&self) -> &Tokenizer {
         &self.tokenizer
     }
     pub fn glr_parser(&self) -> &GLRParser {
@@ -2257,8 +2258,8 @@ impl Display for CompiledGrammar {
         writeln!(
             f,
             "  Tokenizer (States: {}): {}",
-            self.tokenizer.dfa.states.len(),
-            &self.tokenizer.dfa
+            self.tokenizer.dfa().states.len(),
+            &self.tokenizer.dfa()
         )?;
         writeln!(
             f,

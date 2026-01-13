@@ -284,7 +284,7 @@ fn cmd_stats(constraint: &GrammarConstraint) {
     println!("  Internal tokens: {}", constraint.parser_dwa_vocab.internal_to_original.len());
     println!("  DWA states: {}", constraint.parser_dwa.states.len());
     println!("  Parser productions: {}", constraint.parser.productions.len());
-    println!("  Tokenizer DFA states: {}", constraint.tokenizer.dfa.states.len());
+    println!("  Tokenizer DFA states: {}", constraint.tokenizer.dfa().states.len());
 }
 
 fn main() {

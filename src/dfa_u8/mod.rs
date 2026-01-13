@@ -6,7 +6,7 @@
 //!
 //! This module contains:
 //! - `dfa`: Finite automata (DFA/NFA) and regex expression types
-//! - `tokenizer_ops`: Higher-level tokenizer operations
+//! - `tokenizer_ops`: Higher-level tokenizer operations and the `Tokenizer` type
 //! - `string_utils`: String escaping utilities
 
 pub mod dfa;

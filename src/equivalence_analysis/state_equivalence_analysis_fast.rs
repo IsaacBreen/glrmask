@@ -14,7 +14,7 @@
 
 use std::collections::BTreeSet;
 use rayon::prelude::*;
-use crate::finite_automata::Regex;
+use crate::dfa_u8::Tokenizer;
 
 /// The result of state equivalence analysis: sets of state IDs that behave identically.
 pub type StateEquivalenceResult = BTreeSet<BTreeSet<usize>>;
@@ -131,14 +131,14 @@ fn compute_state_signature(
 /// A vector where `result[i]` is the representative state for `states[i]`.
 /// States with the same representative are equivalent.
 pub fn find_state_equivalence_classes(
-    regex: &Regex,
+    regex: &Tokenizer,
     tokens: &[Vec<u8>],
     states: &[usize],
 ) -> Vec<usize> {
     use std::collections::HashMap;
     
     let instant = std::time::Instant::now();
-    let dfa = &regex.dfa;
+    let dfa = regex.dfa();
     
     // Note: Token sampling (STATE_EQUIV_MAX_TOKENS) was tested but causes correctness issues.
     // Sampled state equivalence doesn't fully capture distinguishing states,

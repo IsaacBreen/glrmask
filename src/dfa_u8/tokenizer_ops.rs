@@ -1,4 +1,4 @@
-use crate::dfa_u8::dfa::{GroupID, Regex};
+use crate::dfa_u8::dfa::{GroupID, Regex, DFA};
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use crate::types::TerminalID as GrammarTokenID;
 use bimap::BiBTreeMap;
@@ -30,6 +30,96 @@ pub struct ExecuteResult {
     pub end_state: Option<usize>,
 }
 
+/// A tokenizer that lexes byte sequences into terminal tokens.
+/// 
+/// This is a newtype wrapper around `Regex` that provides a more semantic
+/// interface for tokenization operations. While `Regex` is focused on pattern
+/// matching, `Tokenizer` represents the lexer component that produces terminal
+/// tokens for the GLR parser.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Tokenizer {
+    inner: Regex,
+}
+
+impl Tokenizer {
+    /// Create a new Tokenizer from a Regex.
+    pub fn new(regex: Regex) -> Self {
+        Self { inner: regex }
+    }
+    
+    /// Get the initial state ID.
+    pub fn initial_state_id(&self) -> TokenizerStateID {
+        TokenizerStateID(0)
+    }
+    
+    /// Execute the tokenizer from a given state on a byte slice.
+    /// Returns the matched tokens and the end state (None if no more matches possible).
+    pub fn execute_from_state(&self, text: &[u8], state: TokenizerStateID) -> ExecuteResult {
+        self.inner.execute_from_state(text, state)
+    }
+    
+    /// Get the set of terminal IDs that could be matched from a given state.
+    pub fn tokens_accessible_from_state(&self, state: TokenizerStateID) -> BTreeSet<GrammarTokenID> {
+        self.inner.tokens_accessible_from_state(state)
+    }
+    
+    /// Get the maximum state ID (number of states).
+    pub fn max_state(&self) -> usize {
+        self.inner.max_state()
+    }
+    
+    /// Iterate over all valid state IDs.
+    pub fn iter_states(&self) -> impl Iterator<Item=TokenizerStateID> {
+        (0..self.max_state()).map(|id| TokenizerStateID(id))
+    }
+    
+    /// Access the underlying Regex.
+    pub fn as_regex(&self) -> &Regex {
+        &self.inner
+    }
+    
+    /// Access the underlying DFA.
+    pub fn dfa(&self) -> &DFA {
+        &self.inner.dfa
+    }
+    
+    /// Execute the tokenizer from a given state, filtering out zero-width matches.
+    pub fn execute_from_state_nonzero(&self, text: &[u8], state: usize) -> crate::dfa_u8::dfa::ExecutionResult {
+        self.inner.execute_from_state_nonzero(text, state)
+    }
+    
+    /// Initialize to a specific state (for advanced usage).
+    pub fn init_to_state(&self, state: usize) -> crate::dfa_u8::dfa::RegexState<'_> {
+        self.inner.init_to_state(state)
+    }
+    
+    /// Initialize the tokenizer.
+    pub fn init(&self) -> crate::dfa_u8::dfa::RegexState<'_> {
+        self.inner.init()
+    }
+}
+
+impl From<Regex> for Tokenizer {
+    fn from(regex: Regex) -> Self {
+        Self::new(regex)
+    }
+}
+
+impl std::fmt::Display for Tokenizer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.inner)
+    }
+}
+
+impl JSONConvertible for Tokenizer {
+    fn to_json(&self) -> JSONNode {
+        self.inner.to_json()
+    }
+    
+    fn from_json(node: JSONNode) -> Result<Self, String> {
+        Regex::from_json(node).map(Self::new)
+    }
+}
 
 impl Regex {
     pub fn initial_state_id(&self) -> TokenizerStateID {

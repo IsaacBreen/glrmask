@@ -29,7 +29,7 @@ use crate::interface::{
 };
 use crate::json_serialization::JSONConvertible;
 use crate::interface::json_schema::json_schema_to_ebnf;
-use crate::dfa_u8::{LLMTokenID, LLMTokenMap, TokenizerStateID};
+use crate::dfa_u8::{LLMTokenID, LLMTokenMap, Tokenizer, TokenizerStateID};
 use crate::types::TerminalID;
 use crate::{choice_fast, groups, seq_fast};
 
@@ -467,7 +467,7 @@ fn test_precompute_for_python_name_token() {
     let name_middle = choice_fast!(name_start.clone(), digit);
     let name = seq_fast!(ignore, name_start, repeat0_fast(seq_fast!(name_middle)));
 
-    let tokenizer = name.build();
+    let tokenizer = Tokenizer::new(name.build());
     dbg!(&tokenizer);
 
     let llm_tokens: Vec<Vec<u8>> = (0..2).map(|i| format!("abcdefghijk{}", i).as_bytes().to_vec()).collect();
@@ -878,7 +878,7 @@ fn test_precompute_a_plus_tokenizer() {
 
     // Tokenizer for `a+`
     let tokenizer_expr = groups![repeat1_fast(eat_u8(b'a'))];
-    let tokenizer = tokenizer_expr.build();
+    let tokenizer = Tokenizer::new(tokenizer_expr.build());
 
     // LLM tokens "a" and "aa"
     let mut llm_token_map = LLMTokenMap::new();
@@ -911,7 +911,7 @@ fn test_precompute_a_plus_tokenizer() {
         internal_max_llm_token,
         terminals_count,
         state_to_rep,
-        (0..tokenizer.dfa.states.len()).collect(),
+        (0..tokenizer.dfa().states.len()).collect(),
     );
 
     // --- Verification ---
@@ -957,7 +957,7 @@ fn test_precompute_x_eq() {
         eat_u8(b'='),
         rep1(eat_any_fast()),
     ];
-    let tokenizer = tokenizer_expr.build();
+    let tokenizer = Tokenizer::new(tokenizer_expr.build());
 
     // LLM tokens "x" and " ="
     let mut llm_token_map = LLMTokenMap::new();
@@ -994,7 +994,7 @@ fn test_precompute_x_eq() {
         internal_max_llm_token,
         terminals_count,
         state_to_rep,
-        (0..tokenizer.dfa.states.len()).collect(),
+        (0..tokenizer.dfa().states.len()).collect(),
     );
 
     // --- Verification (weight-heavy mode) ---
@@ -1044,7 +1044,7 @@ fn test_constraint_expression_no_times() {
         eat_u8(b')'),
         eat_u8(b'i'),
     ];
-    let tokenizer = expr.build();
+    let tokenizer = Tokenizer::new(expr.build());
 
     // Grammar productions
     let productions = vec![
@@ -1107,7 +1107,7 @@ fn test_constraint_expression_no_parens() {
         eat_u8(b'*'),
         eat_u8(b'i'),
     ];
-    let tokenizer = expr.build();
+    let tokenizer = Tokenizer::new(expr.build());
 
     // Grammar productions
     let productions = vec![
@@ -1169,7 +1169,7 @@ fn test_constraint_expression_no_plus_times() {
         eat_u8(b')'),
         eat_u8(b'i'),
     ];
-    let tokenizer = expr.build();
+    let tokenizer = Tokenizer::new(expr.build());
 
     // Grammar productions
     let productions = vec![
@@ -1228,7 +1228,7 @@ fn test_constraint_expression_no_times_parens() {
         eat_u8(b'+'),
         eat_u8(b'i'),
     ];
-    let tokenizer = expr.build();
+    let tokenizer = Tokenizer::new(expr.build());
 
     // Grammar productions
     let productions = vec![
@@ -1290,7 +1290,7 @@ fn test_constraint_expression_unbalanced_parens() {
         eat_u8(b'i'),
         eat_u8(b'$'),
     ];
-    let tokenizer = expr.build();
+    let tokenizer = Tokenizer::new(expr.build());
 
     // Grammar productions
     let productions = vec![
@@ -1353,7 +1353,7 @@ fn test_constraint_expression_unbalanced_parens2() {
         eat_u8(b'i'),
         eat_u8(b'$'),
     ];
-    let tokenizer = expr.build();
+    let tokenizer = Tokenizer::new(expr.build());
 
     // Grammar productions
     let productions = vec![
@@ -1410,7 +1410,7 @@ fn test_constraint_expression_cycle() {
         eat_u8(b'i'),
         eat_u8(b'$'),
     ];
-    let tokenizer = expr.build();
+    let tokenizer = Tokenizer::new(expr.build());
 
     // Grammar productions
     let productions = vec![
@@ -2411,7 +2411,7 @@ fn test_ambiguous_tokenizer_no_gss_explosion() {
         eat_u8_fast(b'}'),      // Group 1: CLOSE_BRACE
         repeat1_fast(eat_u8_fast(b'{')) // Group 2: ANYTHING
     ];
-    let tokenizer = tokenizer_expr.build();
+    let tokenizer = Tokenizer::new(tokenizer_expr.build());
 
     // 2. Grammar
     let productions = vec![
@@ -2764,12 +2764,12 @@ fn test_tokenizer_vocab_to_terminal_dwa_aa() {
     use crate::dwa_i32::{DWA, Weight};
     
     // Build tokenizer: just terminal 0 = 'a'
-    let tokenizer = ExprGroups {
+    let tokenizer = Tokenizer::new(ExprGroups {
         groups: vec![ExprGroup {
             expr: Expr::U8Seq(b"a".to_vec()),
             is_non_greedy: false,
         }],
-    }.build();
+    }.build());
     
     println!("Tokenizer DFA:\n{}", tokenizer);
 
@@ -2790,7 +2790,7 @@ fn test_tokenizer_vocab_to_terminal_dwa_aa() {
         0, // max internal token id
         terminals_count,
         state_to_rep,
-        (0..tokenizer.dfa.states.len()).collect(),
+        (0..tokenizer.dfa().states.len()).collect(),
     );
     
     println!("Actual Terminal DWA:\n{}", terminal_dwa);
@@ -3042,7 +3042,7 @@ fn test_suffix_grammar_validation() {
         2, // max token ID
         terminals_count,
         state_to_rep,
-        (0..tokenizer.dfa.states.len()).collect(),
+        (0..tokenizer.dfa().states.len()).collect(),
     );
     
     // Validate paths against suffix grammar (verbose)

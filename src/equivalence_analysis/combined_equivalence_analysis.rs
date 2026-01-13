@@ -13,7 +13,7 @@
 
 use std::collections::BTreeSet;
 
-use crate::finite_automata::Regex;
+use crate::dfa_u8::{Regex, Tokenizer};
 
 use super::state_equivalence_analysis_fast::{self as state_equivalence_analysis, StateEquivalenceResult};
 use super::vocab_equivalence_analysis_fast::{self as vocab_equivalence_analysis, VocabEquivalenceResult};
@@ -42,7 +42,7 @@ pub struct CombinedEquivalenceResult {
 /// # Returns
 /// Combined result containing vocab classes and state classes.
 pub fn compute_combined_equivalence(
-    regex: &Regex,
+    regex: &Tokenizer,
     tokens: &[Vec<u8>],
     initial_states: &[usize],
 ) -> CombinedEquivalenceResult {
@@ -125,7 +125,7 @@ pub fn compute_combined_equivalence(
         // 1. Verify State Equivalence
         if initial_states.len() > state_reduction_threshold {
             let ref_mapping = super::state_equivalence_analysis_reference::find_state_equivalence_classes(
-                regex,
+                regex.as_regex(),
                 tokens,
                 initial_states,
             );
@@ -139,7 +139,7 @@ pub fn compute_combined_equivalence(
             if use_trellis_verification {
                 println!("Performing trellis-based state equivalence verification...");
                 let trellis_mapping = super::trellis_equivalence_analysis::find_state_equivalence_classes_trellis(
-                    regex,
+                    regex.as_regex(),
                     tokens,
                     initial_states,
                 );
@@ -167,7 +167,7 @@ pub fn compute_combined_equivalence(
 
         // 2. Verify Vocab Equivalence
         let ref_vocab_classes = super::vocab_equivalence_analysis_reference::find_vocab_equivalence_classes(
-            regex,
+            regex.as_regex(),
             tokens,
             &reduced_states,
         );
@@ -175,7 +175,7 @@ pub fn compute_combined_equivalence(
         // Trellis-based ground truth verification for small problems
         if use_trellis_verification {
             let trellis_vocab_classes = super::trellis_equivalence_analysis::find_vocab_equivalence_classes_trellis(
-                regex,
+                regex.as_regex(),
                 tokens,
                 &reduced_states,
             );
@@ -212,7 +212,7 @@ pub fn compute_combined_equivalence(
 ///
 /// Use this when you don't need the state mapping information.
 pub fn find_vocab_equivalence_classes_with_state_reduction(
-    regex: &Regex,
+    regex: &Tokenizer,
     tokens: &[Vec<u8>],
     initial_states: &[usize],
 ) -> VocabEquivalenceResult {

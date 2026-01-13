@@ -20,7 +20,7 @@ use range_set_blaze::RangeSetBlaze;
 use crate::constraint_vocab::LLMTokenBV;
 use crate::datastructures::hybrid_bitset::RangeSet;
 use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
-use crate::finite_automata::Regex;
+use crate::dfa_u8::{Tokenizer, Regex};
 use crate::glr::parser::GLRParser;
 use crate::dwa_i32::rangeset::RangeSet as WARangeSet;
 use crate::dwa_i32::{DWA, NWA, NWAStateID, Weight};
@@ -43,7 +43,7 @@ impl NoOpPb {
 // ---------------------------------------------------------------------------
 
 pub(crate) struct Precomputer1<'r> {
-    pub(crate) tokenizer: &'r Regex,
+    pub(crate) tokenizer: &'r Tokenizer,
     pub(crate) vocab: VocabPrefixTree,
     pub(crate) roots: BTreeMap<TokenizerStateID, NWAStateID>,
     pub(crate) state_to_rep: BTreeMap<TokenizerStateID, TokenizerStateID>,
@@ -73,7 +73,7 @@ pub(crate) struct Precomputer1<'r> {
 
 impl<'r> Precomputer1<'r> {
     fn new(
-        tokenizer: &'r Regex,
+        tokenizer: &'r Tokenizer,
         internal_llm_token_map: &BTreeMap<Vec<u8>, LLMTokenID>,
         internal_max_llm_token: usize,
         terminals_count: usize,
@@ -697,7 +697,7 @@ pub fn is_weight_heavy_enabled() -> bool {
 
 // Public entry point wrapper
 pub fn run_precompute1(
-    tokenizer: &Regex,
+    tokenizer: &Tokenizer,
     internal_llm_token_map: &BTreeMap<Vec<u8>, LLMTokenID>,
     internal_max_llm_token: usize,
     terminals_count: usize,
@@ -706,7 +706,7 @@ pub fn run_precompute1(
 ) -> DWA {
     // Compute num_tsids from tokenizer - 0 means symbol-heavy mode
     let num_tsids = if is_weight_heavy_enabled() {
-        tokenizer.dfa.states.len()
+        tokenizer.dfa().states.len()
     } else {
         0
     };

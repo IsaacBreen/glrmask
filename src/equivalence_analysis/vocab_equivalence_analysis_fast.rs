@@ -16,7 +16,7 @@
 // states/tokens for equivalence analysis. Full correctness is mandatory.
 // In-memory memoization is fine, but no "cheating" optimizations that drop work.
 
-use crate::finite_automata::Regex;
+use crate::dfa_u8::{Regex, Tokenizer};
 use crate::r#macro::is_debug_level_enabled;
 use ahash::{AHasher, RandomState};
 use hashbrown::HashMap;
@@ -121,8 +121,8 @@ fn hash_group_list(list: &[usize]) -> u64 {
 // DFA PRECOMPUTATION
 // =============================================================================
 
-fn precompute_dfa(regex: &Regex) -> PrecomputedDfa {
-    let dfa = &regex.dfa;
+fn precompute_dfa(regex: &Tokenizer) -> PrecomputedDfa {
+    let dfa = regex.dfa();
     crate::debug!(4, "Precomputing DFA with {} states", dfa.states.len());
     assert!(
         dfa.states.len() <= u32::MAX as usize,
@@ -773,7 +773,7 @@ fn compute_chunk_signature(
 /// # Returns
 /// Sets of token indices that are equivalent (produce identical parsing behavior).
 pub fn find_vocab_equivalence_classes(
-    regex: &Regex,
+    regex: &Tokenizer,
     strings: &[Vec<u8>],
     initial_states: &[usize],
 ) -> VocabEquivalenceResult {
@@ -987,7 +987,7 @@ pub fn find_vocab_equivalence_classes(
 // =============================================================================
 
 fn compute_suffix_hashes_debug(
-    regex: &Regex,
+    regex: &Tokenizer,
     slice: &[u8],
     all_targets: &[usize],
 ) -> Vec<u64> {
@@ -1011,7 +1011,7 @@ fn compute_suffix_hashes_debug(
     }
 
     while let Some(pos) = queue.pop_front() {
-        let result = regex.execute_from_state_nonzero(&slice[pos..], regex.dfa.start_state);
+        let result = regex.execute_from_state_nonzero(&slice[pos..], regex.dfa().start_state);
 
         let mut edges: EdgeList = result
             .matches
@@ -1037,7 +1037,7 @@ fn compute_suffix_hashes_debug(
     for pos in order {
         if let Some((end_state, edges)) = &nodes[pos] {
             let completion =
-                end_state.map(|id| regex.dfa.states[id].possible_future_group_ids.clone());
+                end_state.map(|id| regex.dfa().states[id].possible_future_group_ids.clone());
             let mut hasher = DefaultHasher::new();
             completion.hash(&mut hasher);
             for (group_id, target) in edges {
@@ -1052,7 +1052,7 @@ fn compute_suffix_hashes_debug(
 }
 
 pub fn compute_signature_debug(
-    regex: &Regex,
+    regex: &Tokenizer,
     slice: &[u8],
     initial_states: &[usize],
 ) -> Vec<u64> {
@@ -1063,7 +1063,7 @@ pub fn compute_signature_debug(
 
     let mut signatures: Vec<u64> = Vec::with_capacity(initial_states.len());
     for (end_state, edges) in pos0_results.iter() {
-        let completion = end_state.map(|id| regex.dfa.states[id].possible_future_group_ids.clone());
+        let completion = end_state.map(|id| regex.dfa().states[id].possible_future_group_ids.clone());
         let mut hasher = DefaultHasher::new();
         completion.hash(&mut hasher);
         for (group_id, target) in edges.iter() {
@@ -1077,7 +1077,7 @@ pub fn compute_signature_debug(
 }
 
 pub fn debug_pos0_edges(
-    regex: &Regex,
+    regex: &Tokenizer,
     slice: &[u8],
     initial_states: &[usize],
 ) -> Vec<EdgeList> {
@@ -1088,7 +1088,7 @@ pub fn debug_pos0_edges(
 }
 
 pub fn compute_signature_actual(
-    regex: &Regex,
+    regex: &Tokenizer,
     slice: &[u8],
     initial_states: &[usize],
 ) -> u64 {

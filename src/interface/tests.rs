@@ -16,7 +16,7 @@ mod tests {
     use crate::interface::{
         choice, r#ref, repeat, sequence, CompiledGrammar, GrammarDefinition, IncrementalParser,
     };
-    use crate::dfa_u8::{LLMTokenID, LLMTokenMap};
+    use crate::dfa_u8::{LLMTokenID, LLMTokenMap, Tokenizer};
     use crate::{choice_fast, groups, seq_fast};
     use bimap::BiBTreeMap;
     use bitvec::prelude::*;
@@ -58,7 +58,7 @@ mod tests {
             repeat0_fast(name_middle_expr.clone())
         );
 
-        let tokenizer = groups![
+        let tokenizer = Tokenizer::new(groups![
             greedy_group(ignore_expr),
             greedy_group(digit_expr),
             greedy_group(alph_lower_expr),
@@ -68,7 +68,7 @@ mod tests {
             greedy_group(name_middle_expr),
             greedy_group(name_expr)
         ]
-        .build();
+        .build());
 
         let llm_tokens: Vec<Vec<u8>> =
             (0..2).map(|i| format!("abcdefghijk{}", i).as_bytes().to_vec()).collect();

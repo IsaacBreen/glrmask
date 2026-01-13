@@ -23,7 +23,7 @@ use crate::{
         compute_combined_equivalence,
         VocabEquivalenceResult,
     },
-    finite_automata::Regex,
+    dfa_u8::{Regex, Tokenizer},
     glr::{
         analyze::compute_terminal_follow_sets,
         grammar::Terminal,
@@ -326,7 +326,7 @@ impl GrammarConstraintConfig {
 
 #[derive(Debug, Clone)]
 pub struct GrammarConstraint {
-    pub tokenizer: Regex,
+    pub tokenizer: Tokenizer,
     pub parser: GLRParser,
 
     /// The Parser DWA - the core precomputed artifact for O(1) mask queries.
@@ -582,7 +582,7 @@ impl JSONConvertible for GrammarConstraint {
         let mut dwa = self.parser_dwa.clone();
 
         let intermediate = GrammarConstraintJSON {
-            tokenizer_dfa: self.tokenizer.dfa.clone(),
+            tokenizer_dfa: self.tokenizer.dfa().clone(),
             dwa,
             vocab: self.parser_dwa_vocab.clone(),
             parser: self.parser.clone(),
@@ -603,7 +603,7 @@ impl JSONConvertible for GrammarConstraint {
     fn from_json(node: JSONNode) -> Result<Self, String> {
         let intermediate = GrammarConstraintJSON::from_json(node)?;
 
-        let tokenizer = Regex { dfa: intermediate.tokenizer_dfa };
+        let tokenizer = Tokenizer::new(Regex { dfa: intermediate.tokenizer_dfa });
         let possible_matches = intermediate.possible_matches.to_possible_matches()?;
 
         // Load vocab_trie, with fallback to legacy formats
@@ -695,7 +695,7 @@ impl GrammarConstraint {
     }
 
     pub fn new(
-        tokenizer: Regex,
+        tokenizer: Tokenizer,
         parser: GLRParser,
         llm_token_map: LLMTokenMap,
         token_name_map: BiBTreeMap<Terminal, usize>,
@@ -712,7 +712,7 @@ impl GrammarConstraint {
     }
 
     pub fn new_with_config(
-        tokenizer: Regex,
+        tokenizer: Tokenizer,
         parser: GLRParser,
         llm_token_map: LLMTokenMap,
         token_name_map: BiBTreeMap<Terminal, usize>,
@@ -751,7 +751,7 @@ impl GrammarConstraint {
     /// Returns: (original_to_internal_map, commit_vocab, internal_llm_token_map, mask_classes, state_to_rep, representative_states)
     fn setup_combined(
         llm_token_map: &LLMTokenMap,
-        tokenizer: &Regex,
+        tokenizer: &Tokenizer,
         max_original_llm_token_id: usize,
         grammar_group_ids: &std::collections::BTreeSet<usize>,
     ) -> (
@@ -822,7 +822,7 @@ impl GrammarConstraint {
                 .iter()
                 .copied()
                 .filter(|&sid| {
-                    let st = &tokenizer.dfa.states[sid];
+                    let st = &tokenizer.dfa().states[sid];
                     st.finalizers.iter().any(|gid| grammar_group_ids.contains(&gid))
                         || st.possible_future_group_ids.iter().any(|gid| grammar_group_ids.contains(&gid))
                 })
@@ -918,7 +918,7 @@ impl GrammarConstraint {
     }
 
     fn build_with_config(
-        tokenizer: Regex,
+        tokenizer: Tokenizer,
         parser: GLRParser,
         llm_token_map: LLMTokenMap,
         token_name_map: BiBTreeMap<Terminal, usize>,
@@ -937,7 +937,7 @@ impl GrammarConstraint {
     }
 
     fn build_with_config_and_grammar(
-        tokenizer: Regex,
+        tokenizer: Tokenizer,
         parser: GLRParser,
         llm_token_map: LLMTokenMap,
         token_name_map: BiBTreeMap<Terminal, usize>,
@@ -957,7 +957,7 @@ impl GrammarConstraint {
     }
 
     fn build_with_config_inner(
-        tokenizer: Regex,
+        tokenizer: Tokenizer,
         parser: GLRParser,
         llm_token_map: LLMTokenMap,
         token_name_map: BiBTreeMap<Terminal, usize>,
@@ -1092,7 +1092,7 @@ impl GrammarConstraint {
         // Number of tokenizer states for weight-heavy encoding
         let weight_heavy_enabled = crate::constraint_precompute::is_weight_heavy_enabled();
         let num_tsids = if weight_heavy_enabled {
-            tokenizer.dfa.states.len()
+            tokenizer.dfa().states.len()
         } else {
             0
         };
@@ -1290,7 +1290,7 @@ impl GrammarConstraint {
             // In weight-heavy mode, token IDs in weights are expanded: id = internal_id * num_tsids + tsid_offset
             // We need to convert back to internal token ID to look up bytes
             let num_tsids_for_conversion = if weight_heavy_enabled {
-                tokenizer.dfa.states.len()
+                tokenizer.dfa().states.len()
             } else {
                 0
             };
@@ -1459,20 +1459,20 @@ impl GrammarConstraint {
                 if iterations > 10000 { break; }
                 
                 // Explore transitions
-                if curr < tokenizer.dfa.states.len() {
+                if curr < tokenizer.dfa().states.len() {
                     // Collect transitions for this state
                     // The DFA structure in typical regex crates might be different, let's look at available fields
                     // Assuming we have access to transitions. 
                     // Since specific crate internals might be hidden, we rely on the fact that we can iterate 256 bytes
                     // Optimization: only check ASCII + some others? Or rely on .transitions field if public?
-                    // Let's rely on `tokenizer.dfa.states[curr].transitions` which is a sparse map or array
+                    // Let's rely on `tokenizer.dfa().states[curr].transitions` which is a sparse map or array
                     
                     // We need to iterate edges. The Tokenizer struct seems to wrap a DFA.
-                    // Let's look at how `tokenizer.dfa.states` is defined.
-                    // Based on previous simple usage: `tokenizer.dfa.states[sid].transitions.get(byte)`
+                    // Let's look at how `tokenizer.dfa().states` is defined.
+                    // Based on previous simple usage: `tokenizer.dfa().states[sid].transitions.get(byte)`
                     // We can just iterate the transitions map directly if it's a map.
                     
-                    for (byte, &next) in &tokenizer.dfa.states[curr].transitions {
+                    for (byte, &next) in &tokenizer.dfa().states[curr].transitions {
                         if !visited.contains(&next) {
                             visited.insert(next);
                             let mut new_bytes = bytes.clone();
@@ -2027,7 +2027,7 @@ impl GrammarConstraint {
                         let mut curr = init_state;
                         let mut dead = false;
                         for &byte in &tok_i[..prefix_len] {
-                            if let Some(&next) = tokenizer.dfa.states[curr].transitions.get(byte) {
+                            if let Some(&next) = tokenizer.dfa().states[curr].transitions.get(byte) {
                                 curr = next;
                             } else {
                                 dead = true;
@@ -2041,7 +2041,7 @@ impl GrammarConstraint {
                         let mut curr_i = state_after_prefix;
                         let mut dead_i = false;
                         for &byte in &tok_i[prefix_len..] {
-                            if let Some(&next) = tokenizer.dfa.states[curr_i].transitions.get(byte) {
+                            if let Some(&next) = tokenizer.dfa().states[curr_i].transitions.get(byte) {
                                 curr_i = next;
                             } else {
                                 dead_i = true;
@@ -2052,7 +2052,7 @@ impl GrammarConstraint {
                         let mut curr_j = state_after_prefix;
                         let mut dead_j = false;
                         for &byte in &tok_j[prefix_len..] {
-                            if let Some(&next) = tokenizer.dfa.states[curr_j].transitions.get(byte) {
+                            if let Some(&next) = tokenizer.dfa().states[curr_j].transitions.get(byte) {
                                 curr_j = next;
                             } else {
                                 dead_j = true;
@@ -2061,10 +2061,10 @@ impl GrammarConstraint {
                         }
 
                         let accessible_i = if dead_i { Vec::new() } else {
-                            tokenizer.dfa.states[curr_i].possible_future_group_ids.iter().copied().collect::<Vec<_>>()
+                            tokenizer.dfa().states[curr_i].possible_future_group_ids.iter().copied().collect::<Vec<_>>()
                         };
                         let accessible_j = if dead_j { Vec::new() } else {
-                            tokenizer.dfa.states[curr_j].possible_future_group_ids.iter().copied().collect::<Vec<_>>()
+                            tokenizer.dfa().states[curr_j].possible_future_group_ids.iter().copied().collect::<Vec<_>>()
                         };
 
                         let exec_i = tokenizer.execute_from_state(tok_i, TokenizerStateID(init_state));
@@ -2200,7 +2200,7 @@ impl GrammarConstraint {
         // Check if weight-heavy mode is enabled via environment variable
         let weight_heavy = crate::constraint_precompute::is_weight_heavy_enabled();
         let num_tsids = if weight_heavy {
-            tokenizer.dfa.states.len()
+            tokenizer.dfa().states.len()
         } else {
             0
         };
@@ -2283,7 +2283,7 @@ impl GrammarConstraint {
         }
         
         // Count the number of tokenizer states from the actual tokenizer
-        let num_tsids = self.tokenizer.dfa.states.len();
+        let num_tsids = self.tokenizer.dfa().states.len();
         
         if num_tsids == 0 {
             return self;
@@ -2369,7 +2369,7 @@ impl GrammarConstraint {
 
     /// Optimized version that only computes for representative states
     pub fn build_maps_and_matches_for_reps(
-        tokenizer: &Regex,
+        tokenizer: &Tokenizer,
         vocab_root: &VocabPrefixTreeNode,
         group_id_to_terminal_idx: &BTreeMap<usize, usize>,
         representative_states: &[usize],
@@ -2452,7 +2452,7 @@ impl GrammarConstraint {
             }
         }
 
-        let dfa = &tokenizer.dfa;
+        let dfa = tokenizer.dfa();
         let num_states = dfa.states.len();
         let mut transitions = vec![u32::MAX; num_states * 256];
         let mut finalizers = Vec::with_capacity(num_states);
@@ -2818,9 +2818,6 @@ impl<'a> GrammarConstraintState<'a> {
     pub fn is_valid(&self) -> bool {
         if self.state.is_empty() {
             return false;
-        }
-        if self.state.contains_key(&self.parent.tokenizer.initial_state_id()) {
-            return true;
         }
         for (tid, glr_state) in self.state.iter() {
             for gtid in
