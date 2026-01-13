@@ -76,9 +76,7 @@ pub fn json_schema_to_ebnf(schema_json: &str) -> Result<String, String> {
         .unwrap_or(false);
     
     // Convert rules to EBNF format
-    // If split_string_keys is set, we don't use ignore(WS) since we can't have implicit WS
-    // between the quote and the key content
-    let ignore_prefix = if no_whitespace || split_string_keys { "" } else { "#![ignore(WS)]\n\n" };
+    let ignore_prefix = if no_whitespace { "" } else { "#![ignore(WS)]\n\n" };
     let mut ebnf = String::from(ignore_prefix);
     let prefix_len = ignore_prefix.len();
     
