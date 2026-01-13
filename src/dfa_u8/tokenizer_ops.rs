@@ -83,6 +83,11 @@ impl Tokenizer {
         &self.inner.dfa
     }
     
+    /// Get the total number of groups (terminal types) in the tokenizer.
+    pub fn num_groups(&self) -> usize {
+        self.inner.num_groups()
+    }
+    
     /// Execute the tokenizer from a given state, filtering out zero-width matches.
     pub fn execute_from_state_nonzero(&self, text: &[u8], state: usize) -> crate::dfa_u8::dfa::ExecutionResult {
         self.inner.execute_from_state_nonzero(text, state)
