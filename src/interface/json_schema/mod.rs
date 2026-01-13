@@ -70,8 +70,15 @@ pub fn json_schema_to_ebnf(schema_json: &str) -> Result<String, String> {
         .map(|v| v == "1")
         .unwrap_or(false);
     
+    // EXPERIMENTAL: Check if we're splitting string keys (which requires no ignore terminal)
+    let split_string_keys = std::env::var("SEP1_SPLIT_STRING_KEYS")
+        .map(|v| v == "1")
+        .unwrap_or(false);
+    
     // Convert rules to EBNF format
-    let ignore_prefix = if no_whitespace { "" } else { "#![ignore(WS)]\n\n" };
+    // If split_string_keys is set, we don't use ignore(WS) since we can't have implicit WS
+    // between the quote and the key content
+    let ignore_prefix = if no_whitespace || split_string_keys { "" } else { "#![ignore(WS)]\n\n" };
     let mut ebnf = String::from(ignore_prefix);
     let prefix_len = ignore_prefix.len();
     

@@ -157,6 +157,29 @@ impl SchemaToGrammar {
         }
     }
     
+    /// Create a grammar type for a JSON string key (like property names).
+    /// 
+    /// EXPERIMENTAL: When SEP1_SPLIT_STRING_KEYS=1, splits `"key"` into `'"' 'key' '"'`
+    /// as three separate terminals. This allows better terminal sharing in the DWA
+    /// but requires removing the ignore(WS) terminal.
+    fn make_string_key(&self, escaped_content: &str) -> GrammarType {
+        let split_keys = std::env::var("SEP1_SPLIT_STRING_KEYS")
+            .map(|v| v == "1")
+            .unwrap_or(false);
+        
+        if split_keys {
+            // Split into: '"' 'content' '"'
+            GrammarType::seq(vec![
+                GrammarType::lit("\""),
+                GrammarType::lit(escaped_content),
+                GrammarType::lit("\""),
+            ])
+        } else {
+            // Original behavior: '"content"' as one terminal
+            GrammarType::lit(&format!("\"{}\"", escaped_content))
+        }
+    }
+    
     fn convert_primitive(&mut self, p: PrimitiveType) -> GrammarType {
         match p {
             PrimitiveType::Integer => GrammarType::primitive(GrammarPrimitive::JsonInteger),
@@ -396,7 +419,7 @@ impl SchemaToGrammar {
             .map(|(name, value, _required)| {
                 let escaped_key = escape_string_for_json(name);
                 GrammarType::JsonKeyValue {
-                    key: Box::new(GrammarType::lit(&format!("\"{}\"", escaped_key))),
+                    key: Box::new(self.make_string_key(&escaped_key)),
                     colon: Box::new(GrammarType::lit(":")),
                     value: Box::new(value.clone()),
                 }
@@ -711,7 +734,7 @@ impl SchemaToGrammar {
             Value::Number(n) => GrammarType::Literal(n.to_string().into_bytes()),
             Value::String(s) => {
                 let escaped = escape_string_for_json(s);
-                GrammarType::Literal(format!("\"{}\"", escaped).into_bytes())
+                self.make_string_key(&escaped)
             }
             Value::Array(items) => {
                 let mut parts = vec![GrammarType::lit("[")];
@@ -731,7 +754,7 @@ impl SchemaToGrammar {
                         parts.push(GrammarType::lit(","));
                     }
                     let escaped_key = escape_string_for_json(key);
-                    parts.push(GrammarType::Literal(format!("\"{}\"", escaped_key).into_bytes()));
+                    parts.push(self.make_string_key(&escaped_key));
                     parts.push(GrammarType::lit(":"));
                     parts.push(self.value_to_grammar(val));
                 }
