@@ -747,7 +747,7 @@ impl PyGrammarConstraint {
 
     fn tokenizer(&self) -> PyRegex {
         PyRegex {
-            inner: self.inner.tokenizer.clone(),
+            inner: self.inner.tokenizer.as_regex().clone(),
         }
     }
 
