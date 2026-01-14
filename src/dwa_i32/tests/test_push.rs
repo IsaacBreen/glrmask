@@ -142,7 +142,7 @@ fn test_merge_branches() {
 
         states[s5].final_weight = Some(all.clone());
 
-        DWA { body: DWABody { start_state: s0 }, states }
+        DWA { body: DWABody { start_state: s0 }, states, dims: None }
     };
 
     run_push_optimization_test(input, expected);
@@ -213,7 +213,7 @@ fn test_field_name_optimization() {
 
         states[sink].final_weight = Some(all.clone());
 
-        DWA { body: DWABody { start_state: start }, states }
+        DWA { body: DWABody { start_state: start }, states, dims: None }
     };
 
     run_push_optimization_test(input, expected);

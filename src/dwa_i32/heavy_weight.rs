@@ -27,12 +27,13 @@
 
 use super::rangeset::RangeSet;
 use range_set_blaze::RangeSetBlaze;
+use serde::{Deserialize, Serialize};
 use std::fmt::{Debug, Display, Formatter};
 use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Not};
 use std::sync::Arc;
 
 /// Dimensions for the 2D weight space (token × tsid).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct WeightDimensions {
     /// Number of LLM tokens (N dimension)
     pub num_tokens: usize,
@@ -466,6 +467,63 @@ impl Not for HeavyWeight {
     fn not(self) -> Self::Output {
         (&self).complement()
     }
+}
+
+// ========== DWA Integration ==========
+
+use super::dwa::DWA;
+use std::collections::HashMap;
+use std::ptr;
+
+impl HeavyWeight {
+    /// Extract unique weights from a DWA as HeavyWeights.
+    /// 
+    /// This is useful for analyzing weights with dimension awareness.
+    pub fn extract_unique_from_dwa(dwa: &DWA, dims: WeightDimensions) -> Vec<HeavyWeight> {
+        let mut unique: HashMap<usize, RangeSet> = HashMap::new();
+        
+        for state in &dwa.states.0 {
+            if let Some(fw) = &state.final_weight {
+                let p = ptr::addr_of!(**fw) as usize;
+                unique.entry(p).or_insert_with(|| fw.clone());
+            }
+            for w in state.trans_weights.values() {
+                let p = ptr::addr_of!(**w) as usize;
+                unique.entry(p).or_insert_with(|| w.clone());
+            }
+        }
+        
+        unique.into_values()
+            .map(|rs| HeavyWeight::from_rangeset(rs, dims))
+            .collect()
+    }
+    
+    /// Compute aggregate statistics for a set of HeavyWeights.
+    pub fn aggregate_stats(weights: &[HeavyWeight]) -> WeightStats {
+        let total_cardinality: usize = weights.iter().map(|w| w.len()).sum();
+        let total_ranges: usize = weights.iter().map(|w| w.num_ranges()).sum();
+        let max_ranges = weights.iter().map(|w| w.num_ranges()).max().unwrap_or(0);
+        
+        WeightStats {
+            num_weights: weights.len(),
+            total_cardinality,
+            total_ranges,
+            max_ranges,
+        }
+    }
+}
+
+/// Aggregate statistics for a collection of weights.
+#[derive(Clone, Copy, Debug)]
+pub struct WeightStats {
+    /// Number of unique weights
+    pub num_weights: usize,
+    /// Total cardinality (sum of all items across weights)
+    pub total_cardinality: usize,
+    /// Total number of ranges
+    pub total_ranges: usize,
+    /// Maximum ranges in any single weight
+    pub max_ranges: usize,
 }
 
 // ========== Tests ==========

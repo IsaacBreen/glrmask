@@ -13,7 +13,7 @@ use std::io::BufWriter;
 
 use range_set_blaze::RangeSetBlaze;
 
-use crate::dwa_i32::{DWA, Weight};
+use crate::dwa_i32::{DWA, Weight, HeavyWeight, WeightDimensions};
 
 /// Print factorization metrics (Export JSON) for a DWA's unique weights.
 pub fn maybe_print_dwa_weight_factorization_metrics(dwa: &DWA, name: &str) {
@@ -83,6 +83,9 @@ pub fn maybe_print_2d_factorization_metrics(dwa: &DWA, max_n: usize, num_tsids: 
         return;
     }
     
+    // Create dimensions for HeavyWeight conversion
+    let dims = WeightDimensions::new(max_n + 1, num_tsids);
+    
     // Collect unique weights
     let mut unique: HashMap<usize, Weight> = HashMap::new();
     for state in &dwa.states.0 {
@@ -105,42 +108,12 @@ pub fn maybe_print_2d_factorization_metrics(dwa: &DWA, max_n: usize, num_tsids: 
     for w in &unique_weights {
         total_current_ranges += w.num_ranges();
         
-        // "Un-expand" this weight to compute factored representation
-        // For each position in the weight, compute (llm_token, tsid) = divmod(position, num_tsids)
-        // Then count ranges in the projected llm_token set and tsid set
+        // Convert to HeavyWeight for 2D operations
+        let hw = HeavyWeight::from_rangeset(w.clone(), dims);
         
-        let mut tokens = RangeSetBlaze::new();
-        let mut tsids = RangeSetBlaze::new();
-        
-        for range in w.rsb.ranges() {
-            let start = *range.start();
-            let end = *range.end();
-            
-            // Compute token range covered
-            let token_start = start / num_tsids;
-            let token_end = end / num_tsids;
-            tokens.ranges_insert(token_start..=token_end);
-            
-            // Compute tsid range covered
-            // For a range [start, end], the tsids covered depend on the range span
-            if end - start >= num_tsids - 1 {
-                // Range spans at least one full "row" of tsids -> all tsids are covered
-                tsids.ranges_insert(0..=(num_tsids - 1));
-            } else {
-                // Partial coverage: compute actual tsids
-                let tsid_start = start % num_tsids;
-                let tsid_end = end % num_tsids;
-                
-                if tsid_end >= tsid_start {
-                    // Simple case: contiguous within one "row"
-                    tsids.ranges_insert(tsid_start..=tsid_end);
-                } else {
-                    // Wraps around: covers tsid_start..M-1 and 0..tsid_end
-                    tsids.ranges_insert(tsid_start..=(num_tsids - 1));
-                    tsids.ranges_insert(0..=tsid_end);
-                }
-            }
-        }
+        // Project to tokens and tsids
+        let tokens = hw.project_tokens();
+        let tsids = hw.project_tsids();
         
         // Count ranges in factored representation
         let token_ranges = tokens.ranges().count();
@@ -157,15 +130,10 @@ pub fn maybe_print_2d_factorization_metrics(dwa: &DWA, max_n: usize, num_tsids: 
     if name == "Terminal DWA" {
         let mut base_sets: Vec<Vec<(usize, usize)>> = Vec::new();
         for w in &unique_weights {
-             let mut tokens = RangeSetBlaze::new();
-             for range in w.rsb.ranges() {
-                let start = *range.start();
-                let end = *range.end();
-                let token_start = start / num_tsids;
-                let token_end = end / num_tsids;
-                tokens.ranges_insert(token_start..=token_end);
-             }
-             base_sets.push(tokens.ranges().map(|r| (*r.start(), *r.end())).collect());
+            // Convert to HeavyWeight and project
+            let hw = HeavyWeight::from_rangeset(w.clone(), dims);
+            let tokens = hw.project_tokens();
+            base_sets.push(tokens.ranges().map(|r| (*r.start(), *r.end())).collect());
         }
         
         let filename = "base_token_sets_terminal.json";

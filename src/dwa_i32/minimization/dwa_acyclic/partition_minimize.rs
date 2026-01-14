@@ -275,6 +275,7 @@ pub fn minimize_partition_based(dwa: &DWA) -> Result<DWA, DWABuildError> {
     Ok(DWA {
         states: new_states,
         body: crate::dwa_i32::dwa::DWABody { start_state: new_start },
+        dims: dwa.dims.clone(),
     })
 }
 

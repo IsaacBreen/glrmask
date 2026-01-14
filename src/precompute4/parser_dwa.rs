@@ -330,6 +330,7 @@ fn specialize_dwa_relative_with_map(parent_dwa: &DWA, weight_map: &HashMap<Weigh
     DWA {
         states: crate::dwa_i32::dwa::DWAStates(new_states_vec),
         body: parent_dwa.body.clone(),
+        dims: parent_dwa.dims.clone(),
     }
 }
 
@@ -824,7 +825,7 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
         }
     }
 
-    let combined_nwa = NWA { states: combined_nwa_states, body: NWABody { start_states: vec![combined_start_state] } };
+    let combined_nwa = NWA { states: combined_nwa_states, body: NWABody { start_states: vec![combined_start_state] }, dims: None };
     crate::debug!(3, "Combined NWA before determinization: {} states, {} transitions, is_symbol_heavy={}", 
         combined_nwa.states.len(), combined_nwa.states.num_transitions(), is_symbol_heavy);
     let mut final_dwa = finalize_and_optimize_and_determinize(parser, combined_nwa);

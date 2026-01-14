@@ -108,6 +108,8 @@ impl DWAStates {
     }
 }
 
+use super::heavy_weight::WeightDimensions;
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DWABody {
     pub start_state: StateID,
@@ -117,18 +119,36 @@ pub struct DWABody {
 pub struct DWA {
     pub states: DWAStates,
     pub body: DWABody,
+    /// Weight space dimensions (num_tokens × num_tsids).
+    /// None if dimensions are unknown or not applicable.
+    pub dims: Option<WeightDimensions>,
 }
 
 impl DWA {
     pub fn new() -> Self {
         let mut states = DWAStates::default();
         let start = states.add_state();
-        DWA { states, body: DWABody { start_state: start } }
+        DWA { states, body: DWABody { start_state: start }, dims: None }
+    }
+    pub fn new_with_dims(dims: WeightDimensions) -> Self {
+        let mut states = DWAStates::default();
+        let start = states.add_state();
+        DWA { states, body: DWABody { start_state: start }, dims: Some(dims) }
     }
     pub fn new_empty() -> Self {
-        DWA { states: DWAStates::default(), body: DWABody::default() }
+        DWA { states: DWAStates::default(), body: DWABody::default(), dims: None }
+    }
+    pub fn new_empty_with_dims(dims: WeightDimensions) -> Self {
+        DWA { states: DWAStates::default(), body: DWABody::default(), dims: Some(dims) }
     }
     pub fn add_state(&mut self) -> StateID { self.states.add_state() }
+    
+    /// Get the weight dimensions, if set.
+    pub fn dimensions(&self) -> Option<WeightDimensions> { self.dims }
+    
+    /// Set the weight dimensions.
+    pub fn set_dimensions(&mut self, dims: WeightDimensions) { self.dims = Some(dims); }
+    
     pub fn set_final_weight(&mut self, state: StateID, weight: Weight) -> Result<(), DWABuildError> {
         if state >= self.states.len() { return Err(DWABuildError::StateOutOfBounds { state }); }
         self.states[state].final_weight = Some(weight); Ok(())

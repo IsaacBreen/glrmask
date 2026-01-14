@@ -666,7 +666,7 @@ fn tighten_weights(dwa: &DWA) -> Result<DWA, DWABuildError> {
         new_states.0.push(new_state);
     }
     
-    Ok(DWA { states: new_states, body: dwa.body.clone() })
+    Ok(DWA { states: new_states, body: dwa.body.clone(), dims: dwa.dims.clone() })
 }
 
 fn compute_heights(dwa: &DWA, topo_order: &[StateID]) -> Vec<usize> {
@@ -1237,5 +1237,6 @@ fn reconstruct_dwa(
         body: crate::dwa_i32::dwa::DWABody {
             start_state: old_to_new.get(&start_old).copied().unwrap_or(0),
         },
+        dims: None,  // Note: caller should propagate dims if needed
     })
 }
