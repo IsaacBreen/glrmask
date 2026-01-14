@@ -70,6 +70,10 @@ pub fn run_dwa_optimization_experiment(dwa: &mut DWA) {
             let mut changed_in_iteration = false;
             let mut current_changing_passes: Vec<DwaPass> = Vec::new();
             for &pass in ordering {
+                // Skip passes disabled via environment variables
+                if !pass.is_enabled() {
+                    continue;
+                }
                 let changed = match pass {
                     DwaPass::PruneUnreachable => current_dwa.prune_unreachable(),
                     DwaPass::PruneDeadEnds => current_dwa.prune_dead_ends(),
@@ -308,6 +312,10 @@ impl NWA {
 
         // Run DWA passes
         for pass in config.dwa_passes.clone() {
+            // Skip passes disabled via environment variables
+            if !pass.is_enabled() {
+                continue;
+            }
             let pass_start = std::time::Instant::now();
             match pass {
                 DwaPass::PruneUnreachable => { dwa.prune_unreachable(); },

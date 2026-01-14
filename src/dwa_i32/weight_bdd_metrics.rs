@@ -174,14 +174,18 @@ pub fn maybe_print_dwa_bdd_compare_metrics(dwa: &DWA, name: &str) {
     use crate::dwa_i32::bdd_weight::BddWeight;
 
     // Collect unique weights by Arc pointer address.
+    // Also count total weight slots to verify deduplication.
     let mut unique: HashMap<usize, Weight> = HashMap::new();
+    let mut total_weight_slots = 0usize;
 
     for state in &dwa.states.0 {
         if let Some(fw) = &state.final_weight {
+            total_weight_slots += 1;
             let p = ptr::addr_of!(**fw) as usize;
             unique.entry(p).or_insert_with(|| fw.clone());
         }
         for w in state.trans_weights.values() {
+            total_weight_slots += 1;
             let p = ptr::addr_of!(**w) as usize;
             unique.entry(p).or_insert_with(|| w.clone());
         }
@@ -220,12 +224,15 @@ pub fn maybe_print_dwa_bdd_compare_metrics(dwa: &DWA, name: &str) {
     let rangeset_bytes = total_rangeset_ranges * 16;
     let avg_ranges = total_rangeset_ranges as f64 / unique_weights as f64;
     let avg_nodes = total_bdd_nodes as f64 / unique_weights as f64;
+    let reuse_factor = if unique_weights > 0 { total_weight_slots as f64 / unique_weights as f64 } else { 0.0 };
 
-    crate::debug!(5, "[WEIGHT_BDD_COMPARE] {}: dims={}x{} weights={} | RangeSet: {} ranges ({:.1} avg), {} KB | BddWeight: {} nodes ({:.1} avg), {} KB | Ratio: {:.2}x | Build: {}µs",
+    crate::debug!(5, "[WEIGHT_BDD_COMPARE] {}: dims={}x{} slots={} unique={} (reuse {:.1}x) | RangeSet: {} ranges ({:.1} avg), {} KB | BddWeight: {} nodes ({:.1} avg), {} KB | Ratio: {:.2}x | Build: {}µs",
         name,
         token_dim,
         tsid_dim,
+        total_weight_slots,
         unique_weights,
+        reuse_factor,
         total_rangeset_ranges,
         avg_ranges,
         rangeset_bytes / 1024,
