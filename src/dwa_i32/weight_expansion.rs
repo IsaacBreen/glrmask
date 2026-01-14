@@ -18,6 +18,7 @@ use range_set_blaze::RangeSetBlaze;
 use super::common::{Label, Weight};
 use super::dwa::DWA;
 use super::nwa::NWA;
+use super::heavy_weight::WeightDimensions;
 
 #[inline]
 fn tsid_to_offset(tsid: usize, tsid_offset_map: Option<&[usize]>) -> usize {
@@ -520,7 +521,7 @@ mod tests {
         let input_dwa = DWA {
             states: DWAStates(vec![state0, state1, state2, state3]),
             body: DWABody { start_state: 0 },
-            dims: None,
+            dims: WeightDimensions::UNKNOWN,
         };
         
         println!("INPUT DWA:");
@@ -551,7 +552,7 @@ mod tests {
         let expected_dwa = DWA {
             states: DWAStates(vec![exp_state0, exp_state1, exp_state2]),
             body: DWABody { start_state: 0 },
-            dims: None,
+            dims: WeightDimensions::UNKNOWN,
         };
         
         println!("EXPECTED DWA:");
@@ -597,7 +598,7 @@ mod tests {
         let input_dwa = DWA {
             states: DWAStates(vec![state0, state1]),
             body: DWABody { start_state: 0 },
-            dims: None,
+            dims: WeightDimensions::UNKNOWN,
         };
 
         println!("INPUT DWA:");
@@ -614,7 +615,7 @@ mod tests {
         let expected_dwa = DWA {
             states: DWAStates(vec![exp_state0]),
             body: DWABody { start_state: 0 },
-            dims: None,
+            dims: WeightDimensions::UNKNOWN,
         };
 
         println!("EXPECTED DWA:");

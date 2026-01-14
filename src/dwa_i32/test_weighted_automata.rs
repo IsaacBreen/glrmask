@@ -1,4 +1,5 @@
 use crate::dwa_i32::{DWAState, RangeSet, DWA, DWABuildError, NWA, NWABuildError, Weight, format_word, DWAStates, StateID, DWABody};
+use crate::dwa_i32::heavy_weight::WeightDimensions;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::time::{SystemTime, UNIX_EPOCH};
 use crate::dwa_i32::common::Label;
@@ -2568,7 +2569,7 @@ fn test_diamond_structure() {
         states[abc].final_weight = Some(w012.clone());
         states[end].final_weight = Some(w3.clone());
 
-        DWA { body: DWABody { start_state: start }, states, dims: None }
+        DWA { body: DWABody { start_state: start }, states, dims: WeightDimensions::UNKNOWN }
     };
 
     run_push_optimization_test(input, expected);

@@ -3,6 +3,7 @@ mod partition_minimize;
 
 use crate::dwa_i32::common::{Label, StateID, Weight};
 use crate::dwa_i32::dwa::{DWA, DWABuildError, DWAState, DWAStates};
+use crate::dwa_i32::heavy_weight::WeightDimensions;
 use crate::dwa_i32::minimization::common::DwaPass;
 use crate::dwa_i32::minimization::graph_coloring::{solve_greedy_coloring, solve_exact_graph_coloring};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
@@ -666,7 +667,7 @@ fn tighten_weights(dwa: &DWA) -> Result<DWA, DWABuildError> {
         new_states.0.push(new_state);
     }
     
-    Ok(DWA { states: new_states, body: dwa.body.clone(), dims: dwa.dims.clone() })
+    Ok(DWA { states: new_states, body: dwa.body.clone(), dims: dwa.dims })
 }
 
 fn compute_heights(dwa: &DWA, topo_order: &[StateID]) -> Vec<usize> {
@@ -1237,6 +1238,6 @@ fn reconstruct_dwa(
         body: crate::dwa_i32::dwa::DWABody {
             start_state: old_to_new.get(&start_old).copied().unwrap_or(0),
         },
-        dims: None,  // Note: caller should propagate dims if needed
+        dims: WeightDimensions::UNKNOWN,  // Note: caller should propagate dims if needed
     })
 }

@@ -7,6 +7,7 @@ use super::rangeset::RangeSet;
 use super::common::{Label, StateID, Weight};
 use super::dwa::{DWABody, DWAState, DWAStates, DWA, DWABuildError};
 use super::nwa::{NWABody, NWAState, NWAStates, NWA};
+use super::heavy_weight::WeightDimensions;
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use crate::json_serialization::JSONNode::Array;
 use range_set_blaze::RangeSetBlaze;
@@ -82,7 +83,7 @@ impl JSONConvertible for NWA {
                     obj.remove("start_states").ok_or("Missing start_states")?,
                 )?,
             },
-            dims: None,
+            dims: WeightDimensions::UNKNOWN,
         })
     }
 }
@@ -296,7 +297,7 @@ impl JSONConvertible for DWA {
                     obj.remove("start_state").ok_or("Missing start_state")?,
                 )?,
             },
-            dims: None,
+            dims: WeightDimensions::UNKNOWN,
         })
     }
 }

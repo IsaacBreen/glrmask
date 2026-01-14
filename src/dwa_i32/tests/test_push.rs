@@ -19,6 +19,7 @@
 use crate::dwa_i32::*;
 use crate::dwa_i32::common::Label;
 use crate::dwa_i32::dwa::{DWABody, DWAStates};
+use crate::dwa_i32::heavy_weight::WeightDimensions;
 use crate::dwa_i32::test_weighted_automata::stochastic_equivalence_test;
 
 fn dwa_stats(dwa: &DWA) -> (usize, usize) {
@@ -142,7 +143,7 @@ fn test_merge_branches() {
 
         states[s5].final_weight = Some(all.clone());
 
-        DWA { body: DWABody { start_state: s0 }, states, dims: None }
+        DWA { body: DWABody { start_state: s0 }, states, dims: WeightDimensions::UNKNOWN }
     };
 
     run_push_optimization_test(input, expected);
@@ -213,7 +214,7 @@ fn test_field_name_optimization() {
 
         states[sink].final_weight = Some(all.clone());
 
-        DWA { body: DWABody { start_state: start }, states, dims: None }
+        DWA { body: DWABody { start_state: start }, states, dims: WeightDimensions::UNKNOWN }
     };
 
     run_push_optimization_test(input, expected);

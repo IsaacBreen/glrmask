@@ -173,17 +173,24 @@ impl Display for NWAStats {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NWA {
     pub states: NWAStates,
     pub body: NWABody,
+    /// Weight space dimensions (num_tokens × num_tsids).
     #[serde(default)]
-    pub dims: Option<WeightDimensions>,
+    pub dims: WeightDimensions,
+}
+
+impl Default for NWA {
+    fn default() -> Self {
+        Self { states: NWAStates::default(), body: NWABody::default(), dims: WeightDimensions::UNKNOWN }
+    }
 }
 
 impl NWA {
     pub fn new_empty() -> Self {
-        Self { states: NWAStates::default(), body: NWABody::default(), dims: None }
+        Self { states: NWAStates::default(), body: NWABody::default(), dims: WeightDimensions::UNKNOWN }
     }
     pub fn new() -> Self {
         let mut nwa = Self::new_empty();
@@ -193,17 +200,17 @@ impl NWA {
     }
     pub fn new_with_dims(dims: WeightDimensions) -> Self {
         let mut nwa = Self::new();
-        nwa.dims = Some(dims);
+        nwa.dims = dims;
         nwa
     }
     pub fn new_empty_with_dims(dims: WeightDimensions) -> Self {
-        Self { states: NWAStates::default(), body: NWABody::default(), dims: Some(dims) }
+        Self { states: NWAStates::default(), body: NWABody::default(), dims }
     }
-    pub fn dimensions(&self) -> Option<&WeightDimensions> {
-        self.dims.as_ref()
+    pub fn dimensions(&self) -> WeightDimensions {
+        self.dims
     }
     pub fn set_dimensions(&mut self, dims: WeightDimensions) {
-        self.dims = Some(dims);
+        self.dims = dims;
     }
     pub fn add_state(&mut self) -> NWAStateID { self.states.add_state() }
     pub fn add_epsilon(&mut self, u: NWAStateID, v: NWAStateID, w: Weight) { self.states.add_epsilon(u, v, w); }
@@ -213,7 +220,7 @@ impl NWA {
 
     pub fn reverse(&self) -> NWA {
         let mut rev = NWA::new_empty();
-        rev.dims = self.dims.clone(); // Propagate dimensions
+        rev.dims = self.dims; // Propagate dimensions
         // Pre-allocate states
         for _ in 0..self.states.len() { rev.add_state(); }
 
@@ -250,8 +257,8 @@ impl NWA {
 
     pub fn concatenate(left: &NWA, right: &NWA) -> NWA {
         let mut res = NWA::new_empty();
-        // Propagate dimensions (prefer left's if both have them)
-        res.dims = left.dims.clone().or_else(|| right.dims.clone());
+        // Propagate dimensions (prefer left's if known, otherwise right's)
+        res.dims = if left.dims.is_known() { left.dims } else { right.dims };
         let _ = res.states.append(&right.states); // Right is at offset 0
         // Construct a body for the right segment
         let right_body = right.body.clone(); // indices are 0-based, valid
@@ -263,25 +270,31 @@ impl NWA {
 
     pub fn union(a: &NWA, b: &NWA) -> NWA {
         let mut a = a.clone();
-        // Dimensions are preserved from a (or take from b if a doesn't have them)
-        if a.dims.is_none() && b.dims.is_some() {
-            a.dims = b.dims.clone();
+        // Dimensions are preserved from a (or take from b if a doesn't have known dims)
+        if !a.dims.is_known() && b.dims.is_known() {
+            a.dims = b.dims;
         }
         a.body = NWAStates::union_in_place(&mut a.states, &b, &a.body);
         a
     }
 
     pub fn union_assign(&mut self, other: &NWA) {
+        if !self.dims.is_known() && other.dims.is_known() {
+            self.dims = other.dims;
+        }
         self.body = NWAStates::union_in_place(&mut self.states, &other, &self.body);
     }
 
     pub fn concatenate_assign(&mut self, other: &NWA) {
+        if !self.dims.is_known() && other.dims.is_known() {
+            self.dims = other.dims;
+        }
         self.body = NWAStates::concatenate_in_place(&mut self.states, &other, &self.body);
     }
 
     pub fn from_dwa(dwa: &DWA) -> Self {
         let mut nwa = NWA::new_empty();
-        nwa.dims = dwa.dims.clone(); // Propagate dimensions from DWA
+        nwa.dims = dwa.dims; // Propagate dimensions from DWA
         for _ in 0..dwa.states.len() { nwa.add_state(); }
         nwa.body.start_states = vec![dwa.body.start_state];
 

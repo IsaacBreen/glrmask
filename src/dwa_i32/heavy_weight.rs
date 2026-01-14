@@ -33,7 +33,7 @@ use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Not};
 use std::sync::Arc;
 
 /// Dimensions for the 2D weight space (token × tsid).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct WeightDimensions {
     /// Number of LLM tokens (N dimension)
     pub num_tokens: usize,
@@ -41,12 +41,29 @@ pub struct WeightDimensions {
     pub num_tsids: usize,
 }
 
+impl Default for WeightDimensions {
+    /// Default returns UNKNOWN dimensions (0, 0).
+    /// This should only be used for deserialization of old data.
+    fn default() -> Self {
+        Self::UNKNOWN
+    }
+}
+
 impl WeightDimensions {
+    /// Sentinel value for unknown/uninitialized dimensions.
+    /// Dimensions of (0, 0) indicate the dimensions have not been set.
+    pub const UNKNOWN: Self = Self { num_tokens: 0, num_tsids: 0 };
+    
     /// Create new weight dimensions.
     pub fn new(num_tokens: usize, num_tsids: usize) -> Self {
         assert!(num_tokens > 0, "num_tokens must be positive");
         assert!(num_tsids > 0, "num_tsids must be positive");
         Self { num_tokens, num_tsids }
+    }
+    
+    /// Check if dimensions are known (non-zero).
+    pub fn is_known(&self) -> bool {
+        self.num_tokens > 0 && self.num_tsids > 0
     }
     
     /// Total size of the 2D space (N × M).
