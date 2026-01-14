@@ -189,7 +189,7 @@ fn weight_to_dd<F: oxidd::BooleanFunction>(
 
     let mut acc = f.clone();
 
-    for r in weight.rsb.ranges() {
+    for r in weight.rsb().ranges() {
         let start = *r.start();
         let end = *r.end();
 
@@ -365,11 +365,11 @@ pub fn maybe_print_dwa_weight_oxidd_metrics(dwa: &DWA, domain_max: usize, name: 
 
     for state in &dwa.states.0 {
         if let Some(fw) = &state.final_weight {
-            let p = ptr::addr_of!(**fw) as usize;
+            let p = fw.intern_id();
             unique.entry(p).or_insert_with(|| fw.clone());
         }
         for w in state.trans_weights.values() {
-            let p = ptr::addr_of!(**w) as usize;
+            let p = w.intern_id();
             unique.entry(p).or_insert_with(|| w.clone());
         }
     }

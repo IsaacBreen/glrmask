@@ -71,7 +71,7 @@ impl NWA {
             for (v, w) in &mut st.epsilons {
                 if *v < n {
                     let d_v = &d[*v];
-                    let new_w = (&*w & d_v) | &inv_d_u;
+                    let new_w = (&*w & d_v) | inv_d_u.clone();
                     if *w != new_w {
                         *w = new_w;
                         changed = true;
@@ -83,7 +83,7 @@ impl NWA {
                 for (v, w) in targets {
                     if *v < n {
                         let d_v = &d[*v];
-                        let new_w = (&*w & d_v) | &inv_d_u;
+                        let new_w = (&*w & d_v) | inv_d_u.clone();
                         if *w != new_w {
                             *w = new_w;
                             changed = true;
@@ -93,7 +93,7 @@ impl NWA {
             }
             // Final weights
             if let Some(fw) = &mut st.final_weight {
-                let new_fw = &*fw | &inv_d_u;
+                let new_fw = fw.clone() | inv_d_u.clone();
                 if *fw != new_fw {
                     *fw = new_fw;
                     changed = true;

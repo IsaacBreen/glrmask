@@ -491,12 +491,12 @@ impl HeavyWeight {
         
         for state in &dwa.states.0 {
             if let Some(fw) = &state.final_weight {
-                let p = ptr::addr_of!(**fw) as usize;
-                unique.entry(p).or_insert_with(|| fw.clone());
+                let p = fw.intern_id();
+                unique.entry(p).or_insert_with(|| fw.clone().into());
             }
             for w in state.trans_weights.values() {
-                let p = ptr::addr_of!(**w) as usize;
-                unique.entry(p).or_insert_with(|| w.clone());
+                let p = w.intern_id();
+                unique.entry(p).or_insert_with(|| w.clone().into());
             }
         }
         

@@ -296,7 +296,7 @@ impl NWA {
                 // Division in Boolean semiring (loosening): w / v = w | !v.
                 let normalized_subset: FxHashMap<NWAStateID, Weight> = next_subset
                     .into_iter()
-                    .map(|(id, w)| (id, w | &w_edge_inv))
+                    .map(|(id, w)| (id, &w | &w_edge_inv))
                     .collect();
 
                 let t_map = std::time::Instant::now();
@@ -504,7 +504,7 @@ impl<'a> Determinizer<'a> {
             let w_edge_inv = !&w_edge;
             let mut dest_subset: WeightedSubset = dest_map
                 .into_iter()
-                .map(|(sid, w)| (sid, w | &w_edge_inv))
+                .map(|(sid, w)| (sid, &w | &w_edge_inv))
                 .collect();
             dest_subset.sort_unstable_by(|a, b| a.0.cmp(&b.0));
 

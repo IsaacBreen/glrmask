@@ -513,7 +513,7 @@ mod tests {
             println!("  Label {} -> target {:?}", label, target);
         }
         if let Some(fw) = &dwa_start_state.final_weight {
-            let fw_tokens: Vec<usize> = fw.rsb.iter().take(20).collect();
+            let fw_tokens: Vec<usize> = fw.rsb().iter().take(20).collect();
             println!("Start state final_weight (first 20): {:?}", fw_tokens);
         } else {
             println!("Start state has no final_weight");

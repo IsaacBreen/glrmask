@@ -643,15 +643,14 @@ impl DWA {
     /// If the same interned weight appears multiple times, it is only counted once.
     pub fn num_ranges_interned(&self) -> usize {
         use std::collections::HashSet;
-        use std::ptr;
         
-        // Track unique weights by their Arc pointer address
+        // Track unique weights by their intern ID
         let mut seen: HashSet<usize> = HashSet::new();
         let mut total = 0;
         
         let mut process_weight = |w: &Weight| {
-            // Get the Arc pointer address as a unique identifier
-            let ptr = ptr::addr_of!(**w) as usize;
+            // Get the intern ID as a unique identifier
+            let ptr = w.intern_id();
             if seen.insert(ptr) {
                 total += w.num_ranges();
             }
@@ -671,21 +670,20 @@ impl DWA {
     /// Analyze weight distribution to understand range fragmentation
     pub fn analyze_weights(&self) {
         use std::collections::HashMap;
-        use std::ptr;
         
         // Collect all unique weights
-        let mut weight_usage: HashMap<usize, (usize, usize)> = HashMap::new(); // ptr -> (count, num_ranges)
+        let mut weight_usage: HashMap<usize, (usize, usize)> = HashMap::new(); // intern_id -> (count, num_ranges)
         let mut range_histogram: HashMap<usize, usize> = HashMap::new(); // num_ranges -> count
         
         for state in &self.states.0 {
             if let Some(fw) = &state.final_weight {
-                let ptr = ptr::addr_of!(**fw) as usize;
+                let ptr = fw.intern_id();
                 let entry = weight_usage.entry(ptr).or_insert((0, fw.num_ranges()));
                 entry.0 += 1;
                 *range_histogram.entry(fw.num_ranges()).or_insert(0) += 1;
             }
             for w in state.trans_weights.values() {
-                let ptr = ptr::addr_of!(**w) as usize;
+                let ptr = w.intern_id();
                 let entry = weight_usage.entry(ptr).or_insert((0, w.num_ranges()));
                 entry.0 += 1;
                 *range_histogram.entry(w.num_ranges()).or_insert(0) += 1;
@@ -935,7 +933,7 @@ impl DWA {
                 json!({"is_empty": true})
             } else {
                 // Export as ranges
-                let ranges: Vec<(usize, usize)> = w.rsb.ranges()
+                let ranges: Vec<(usize, usize)> = w.rsb().ranges()
                     .map(|r| (*r.start(), *r.end()))
                     .collect();
                 json!({

@@ -17,20 +17,20 @@ pub fn benchmark_dwa_weights(dwa: &DWA, name: &str) {
     for state in &dwa.states.0 {
         if let Some(fw) = &state.final_weight {
             if !fw.is_empty() && !fw.is_all_fast() {
-                let key = fw.rsb.ranges().map(|r| (*r.start(), *r.end())).collect::<Vec<_>>();
+                let key = fw.rsb().ranges().map(|r| (*r.start(), *r.end())).collect::<Vec<_>>();
                 if !seen.contains(&key) {
                     seen.insert(key);
-                    unique_weights.push(fw.clone());
+                    unique_weights.push(fw.clone().into());
                 }
             }
         }
         
         for tw in state.trans_weights.values() {
             if !tw.is_empty() && !tw.is_all_fast() {
-                let key = tw.rsb.ranges().map(|r| (*r.start(), *r.end())).collect::<Vec<_>>();
+                let key = tw.rsb().ranges().map(|r| (*r.start(), *r.end())).collect::<Vec<_>>();
                 if !seen.contains(&key) {
                     seen.insert(key);
-                    unique_weights.push(tw.clone());
+                    unique_weights.push(tw.clone().into());
                 }
             }
         }
@@ -115,7 +115,7 @@ mod tests {
                 .step_by(3)
                 .collect();
             if !final_ranges.is_empty() {
-                states[sid].final_weight = Some(RangeSet::from_iter(final_ranges));
+                states[sid].final_weight = Some(Weight::from_iter(final_ranges));
             }
             
             // Transition weights
@@ -124,7 +124,7 @@ mod tests {
                     .step_by(2)
                     .collect();
                 states[sid].transitions.insert(i as i32, sid + 1);
-                states[sid].trans_weights.insert(i as i32, RangeSet::from_iter(trans_ranges));
+                states[sid].trans_weights.insert(i as i32, Weight::from_iter(trans_ranges));
             }
         }
         

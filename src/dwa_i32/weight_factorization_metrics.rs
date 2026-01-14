@@ -28,11 +28,11 @@ pub fn maybe_print_dwa_weight_factorization_metrics(dwa: &DWA, name: &str) {
     let mut unique: HashMap<usize, Weight> = HashMap::new();
     for state in &dwa.states.0 {
         if let Some(fw) = &state.final_weight {
-            let p = ptr::addr_of!(**fw) as usize;
+            let p = fw.intern_id();
             unique.entry(p).or_insert_with(|| fw.clone());
         }
         for w in state.trans_weights.values() {
-            let p = ptr::addr_of!(**w) as usize;
+            let p = w.intern_id();
             unique.entry(p).or_insert_with(|| w.clone());
         }
     }
@@ -56,7 +56,7 @@ fn export_weights_to_json(unique_weights: &[Weight], name: &str) {
     // Convert to serializable format: Vec<Vec<(usize, usize)>>
     // Each weight is a list of [start, end] inclusive ranges.
     let export_data: Vec<Vec<(usize, usize)>> = unique_weights.iter().map(|w| {
-        w.rsb.ranges().map(|r| (*r.start(), *r.end())).collect()
+        w.rsb().ranges().map(|r| (*r.start(), *r.end())).collect()
     }).collect();
     
     let file = File::create(&filename).expect("Unable to create export file");
@@ -90,11 +90,11 @@ pub fn maybe_print_2d_factorization_metrics(dwa: &DWA, max_n: usize, num_tsids: 
     let mut unique: HashMap<usize, Weight> = HashMap::new();
     for state in &dwa.states.0 {
         if let Some(fw) = &state.final_weight {
-            let p = ptr::addr_of!(**fw) as usize;
+            let p = fw.intern_id();
             unique.entry(p).or_insert_with(|| fw.clone());
         }
         for w in state.trans_weights.values() {
-            let p = ptr::addr_of!(**w) as usize;
+            let p = w.intern_id();
             unique.entry(p).or_insert_with(|| w.clone());
         }
     }
@@ -109,7 +109,7 @@ pub fn maybe_print_2d_factorization_metrics(dwa: &DWA, max_n: usize, num_tsids: 
         total_current_ranges += w.num_ranges();
         
         // Convert to HeavyWeight for 2D operations
-        let hw = HeavyWeight::from_rangeset(w.clone(), dims);
+        let hw = HeavyWeight::from_rangeset(w.clone().into(), dims);
         
         // Project to tokens and tsids
         let tokens = hw.project_tokens();
@@ -131,7 +131,7 @@ pub fn maybe_print_2d_factorization_metrics(dwa: &DWA, max_n: usize, num_tsids: 
         let mut base_sets: Vec<Vec<(usize, usize)>> = Vec::new();
         for w in &unique_weights {
             // Convert to HeavyWeight and project
-            let hw = HeavyWeight::from_rangeset(w.clone(), dims);
+            let hw = HeavyWeight::from_rangeset(w.clone().into(), dims);
             let tokens = hw.project_tokens();
             base_sets.push(tokens.ranges().map(|r| (*r.start(), *r.end())).collect());
         }

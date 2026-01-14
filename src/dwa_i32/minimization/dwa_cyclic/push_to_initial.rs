@@ -66,7 +66,7 @@ impl DWA {
                 if v < n {
                     let d_v = &d[v];
                     if let Some(w) = st.trans_weights.get_mut(&label) {
-                        let new_w = (&*w & d_v) | &inv_d_u;
+                        let new_w = (&*w & d_v) | inv_d_u.clone();
                         if *w != new_w {
                             *w = new_w;
                             changed = true;
@@ -77,7 +77,7 @@ impl DWA {
             
             // Final weights
             if let Some(fw) = &mut st.final_weight {
-                let new_fw = &*fw | &inv_d_u;
+                let new_fw = fw.clone() | inv_d_u.clone();
                 if *fw != new_fw {
                     *fw = new_fw;
                     changed = true;

@@ -244,7 +244,7 @@ impl DWA {
                 let live_target = &live[target];
 
                 if let Some(tw) = self.states.0[q].trans_weights.get_mut(&label) {
-                    *tw = tw.clone() & live_target;
+                    *tw = tw.clone() & live_target.clone();
                 }
             }
         }
@@ -273,7 +273,7 @@ impl DWA {
                 let dead_target = live[target].complement();
 
                 if let Some(tw) = self.states.0[q].trans_weights.get_mut(&label) {
-                    *tw = tw.clone() | &dead_target;
+                    *tw = tw.clone() | dead_target;
                 }
             }
         }

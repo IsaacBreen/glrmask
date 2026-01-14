@@ -338,13 +338,13 @@ impl NWA {
         use std::collections::HashSet;
         use std::ptr;
         
-        // Track unique weights by their Arc pointer address
+        // Track unique weights by their intern ID
         let mut seen: HashSet<usize> = HashSet::new();
         let mut total = 0;
         
         let mut process_weight = |w: &Weight| {
-            // Get the Arc pointer address as a unique identifier
-            let ptr = ptr::addr_of!(**w) as usize;
+            // Get the intern ID as a unique identifier
+            let ptr = w.intern_id();
             if seen.insert(ptr) {
                 total += w.num_ranges();
             }

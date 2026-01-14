@@ -291,7 +291,7 @@ fn test_simple_bitset_ops() {
     assert!((&set1 & &all).contains(1));
     assert!((&set1 | &zeros).contains(1));
     assert_eq!((&set1 | &zeros).len(), 3);
-    assert_eq!((&set1 & &zeros), Weight::zeros());
+    assert_eq!((&set1 & &zeros), RangeSet::zeros());
 }
 
 #[test]
@@ -304,19 +304,19 @@ fn test_dwa_builder() {
     assert_eq!(s1, 1);
     assert_eq!(dwa.states.len(), 2);
 
-    dwa.set_final_weight(1, RangeSet::from_item(20)).unwrap();
+    dwa.set_final_weight(1, Weight::from_item(20)).unwrap();
 
-    assert_eq!(dwa.states[1].final_weight, Some(RangeSet::from_item(20)));
+    assert_eq!(dwa.states[1].final_weight, Some(Weight::from_item(20)));
 
-    dwa.add_transition(0, b'a' as Label, 1, RangeSet::from_item(30)).unwrap();
+    dwa.add_transition(0, b'a' as Label, 1, Weight::from_item(30)).unwrap();
     assert_eq!(*dwa.states[0].transitions.get(&(b'a' as Label)).unwrap(), 1);
-    assert_eq!(*dwa.states[0].trans_weights.get(&(b'a' as Label)).unwrap(), RangeSet::from_item(30));
+    assert_eq!(*dwa.states[0].trans_weights.get(&(b'a' as Label)).unwrap(), Weight::from_item(30));
 
     // Test error cases
-    let res = dwa.add_transition(0, b'a' as Label, 1, RangeSet::zeros());
+    let res = dwa.add_transition(0, b'a' as Label, 1, Weight::zeros());
     assert!(matches!(res, Err(DWABuildError::TransitionAlreadyExists { from: 0, on: 97 })));
 
-    let res = dwa.set_final_weight(10, RangeSet::zeros());
+    let res = dwa.set_final_weight(10, Weight::zeros());
     assert!(matches!(res, Err(DWABuildError::StateOutOfBounds { state: 10 })));
 }
 
@@ -2918,7 +2918,7 @@ fn test_minimize_cross_height_via_relaxed_conditions() {
     let s4 = d.add_state();
 
     // s0: a->s1 [0,1], b->s2 [0], c->s3 [1]
-    let w01 = Weight::from_item(0) | &Weight::from_item(1);
+    let w01 = Weight::from_item(0) | Weight::from_item(1);
     d.add_transition(0, b'a' as i32, s1, w01).unwrap();
     d.add_transition(0, b'b' as i32, s2, Weight::from_item(0)).unwrap();
     d.add_transition(0, b'c' as i32, s3, Weight::from_item(1)).unwrap();

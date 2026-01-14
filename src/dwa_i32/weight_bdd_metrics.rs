@@ -77,7 +77,7 @@ fn weight_to_bdd(vars: &BddVariableSet, weight: &Weight, domain_max: usize, k: u
 
     let mut acc = bdd_false(vars);
 
-    for r in weight.rsb.ranges() {
+    for r in weight.rsb().ranges() {
         let start = *r.start();
         let end = *r.end();
 
@@ -117,11 +117,11 @@ pub fn maybe_print_dwa_weight_bdd_metrics(dwa: &DWA, domain_max: usize, name: &s
 
     for state in &dwa.states.0 {
         if let Some(fw) = &state.final_weight {
-            let p = ptr::addr_of!(**fw) as usize;
+            let p = fw.intern_id();
             unique.entry(p).or_insert_with(|| (fw.clone(), fw.num_ranges()));
         }
         for w in state.trans_weights.values() {
-            let p = ptr::addr_of!(**w) as usize;
+            let p = w.intern_id();
             unique.entry(p).or_insert_with(|| (w.clone(), w.num_ranges()));
         }
     }
@@ -181,12 +181,12 @@ pub fn maybe_print_dwa_bdd_compare_metrics(dwa: &DWA, name: &str) {
     for state in &dwa.states.0 {
         if let Some(fw) = &state.final_weight {
             total_weight_slots += 1;
-            let p = ptr::addr_of!(**fw) as usize;
+            let p = fw.intern_id();
             unique.entry(p).or_insert_with(|| fw.clone());
         }
         for w in state.trans_weights.values() {
             total_weight_slots += 1;
-            let p = ptr::addr_of!(**w) as usize;
+            let p = w.intern_id();
             unique.entry(p).or_insert_with(|| w.clone());
         }
     }
@@ -211,7 +211,7 @@ pub fn maybe_print_dwa_bdd_compare_metrics(dwa: &DWA, name: &str) {
         total_rangeset_ranges += w.num_ranges();
 
         let start = std::time::Instant::now();
-        let ranges = w.rsb.ranges().map(|r| (*r.start(), *r.end()));
+        let ranges = w.rsb().ranges().map(|r| (*r.start(), *r.end()));
         let bdd = BddWeight::from_ranges(ranges, tsid_dim, token_dim);
         bdd_build_us += start.elapsed().as_micros();
 

@@ -164,21 +164,21 @@ mod tests {
             let q = rng.gen_usize(n);
             if let Some(fw) = &mut nwa.states[q].final_weight {
                 if !fw.is_empty() {
-                     let first = fw.rsb.ranges().next().unwrap();
+                     let first = fw.rsb().ranges().next().unwrap();
                      *fw = Weight::from_item(*first.start());
                 }
             }
             for targets in nwa.states[q].transitions.values_mut() {
                 for (_, w) in targets {
                     if !w.is_empty() {
-                        let first = w.rsb.ranges().next().unwrap();
+                        let first = w.rsb().ranges().next().unwrap();
                         *w = Weight::from_item(*first.start());
                     }
                 }
             }
              for (_, w) in &mut nwa.states[q].epsilons {
                 if !w.is_empty() {
-                    let first = w.rsb.ranges().next().unwrap();
+                    let first = w.rsb().ranges().next().unwrap();
                     *w = Weight::from_item(*first.start());
                 }
             }

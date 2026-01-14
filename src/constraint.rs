@@ -68,7 +68,7 @@ fn count_dwa_ranges(dwa: &DWA) -> usize {
         if let Some(w) = &state.final_weight { unique_weights.insert(w); }
         for w in state.trans_weights.values() { unique_weights.insert(w); }
     }
-    unique_weights.iter().map(|w| w.rsb.ranges_len()).sum()
+    unique_weights.iter().map(|w| w.ranges_len()).sum()
 }
 
 /// Compute the token partition that optimize_dwa_and_vocab would produce,
@@ -187,7 +187,7 @@ fn optimize_dwa_and_vocab(
     // Previously limited to 500 weights, but this caused incorrect token merging when
     // tokens differed only in weights beyond the limit.
     let mut weights_vec: Vec<&Weight> = unique_weights.iter().filter(|w| !w.is_all_fast()).collect();
-    weights_vec.sort_by_key(|w| w.rsb.ranges_len()); // Process smaller weights first for efficiency
+    weights_vec.sort_by_key(|w| w.ranges_len()); // Process smaller weights first for efficiency
     crate::debug!(4, "DWA Vocab Optimization: Processing {} unique weights (max_tok={})", weights_vec.len(), max_tok);
 
     let t_partition = std::time::Instant::now();
@@ -248,7 +248,7 @@ fn optimize_dwa_and_vocab(
         for t in w.iter_up_to(max_tok) {
             if let Some(&new_t) = old_to_new_map.get(&t) { new_vals.push(new_t); }
         }
-        let new_w = WARangeSet::from_iter(new_vals);
+        let new_w: Weight = new_vals.into_iter().collect();
         cache.insert(w.clone(), new_w.clone());
         new_w
     };
@@ -1534,7 +1534,7 @@ impl GrammarConstraint {
                     };
                     // Get weight from target state
                     let target_weight_str = match &orig_dwa_for_min.states[target].final_weight {
-                        Some(w) if w.len() <= 10 => format!("{:?}", w.rsb.iter().collect::<Vec<_>>()),
+                        Some(w) if w.len() <= 10 => format!("{:?}", w.iter().collect::<Vec<_>>()),
                         Some(w) if w.len() == u64::MAX as usize => "ALL".to_string(),
                         Some(w) => format!("(len={})", w.len()),
                         None => "".to_string(),
