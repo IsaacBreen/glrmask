@@ -390,6 +390,16 @@ impl GrammarConstraint {
         assert_eq!(self.num_tsids, other.num_tsids);
         assert_eq!(self.tsid_offset_map, other.tsid_offset_map);
     }
+    
+    /// Get the weight dimensions for this constraint.
+    /// 
+    /// In weight-heavy mode: `num_tokens × num_tsids` (full 2D space)
+    /// In symbol-heavy mode: `num_tokens × 1` (degenerate 2D space)
+    pub fn weight_dimensions(&self) -> crate::dwa_i32::heavy_weight::WeightDimensions {
+        let num_tokens = self.parser_dwa_vocab.internal_max_llm_token + 1;
+        let num_tsids = if self.num_tsids > 0 { self.num_tsids } else { 1 };
+        crate::dwa_i32::heavy_weight::WeightDimensions::new(num_tokens, num_tsids)
+    }
 }
 
 // ---------------------------------------------------------------------------
