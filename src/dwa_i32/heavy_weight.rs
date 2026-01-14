@@ -250,10 +250,6 @@ impl HeavyWeight {
         self.inner.len()
     }
     
-    /// Get the number of ranges in the underlying representation.
-    pub fn num_ranges(&self) -> usize {
-        self.inner.num_ranges()
-    }
     
     /// Get the minimum and maximum positions, if any.
     pub fn bounds(&self) -> Option<(usize, usize)> {
@@ -404,7 +400,6 @@ impl Debug for HeavyWeight {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("HeavyWeight")
             .field("dims", &format!("{}", self.dims))
-            .field("num_ranges", &self.num_ranges())
             .field("cardinality", &self.len())
             .finish()
     }
@@ -412,8 +407,8 @@ impl Debug for HeavyWeight {
 
 impl Display for HeavyWeight {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "HeavyWeight({}, {} ranges, {} items)", 
-               self.dims, self.num_ranges(), self.len())
+        write!(f, "HeavyWeight({}, {} items)", 
+               self.dims, self.len())
     }
 }
 
@@ -513,29 +508,20 @@ impl HeavyWeight {
     /// Compute aggregate statistics for a set of HeavyWeights.
     pub fn aggregate_stats(weights: &[HeavyWeight]) -> WeightStats {
         let total_cardinality: usize = weights.iter().map(|w| w.len()).sum();
-        let total_ranges: usize = weights.iter().map(|w| w.num_ranges()).sum();
-        let max_ranges = weights.iter().map(|w| w.num_ranges()).max().unwrap_or(0);
         
         WeightStats {
             num_weights: weights.len(),
             total_cardinality,
-            total_ranges,
-            max_ranges,
         }
     }
 }
 
-/// Aggregate statistics for a collection of weights.
 #[derive(Clone, Copy, Debug)]
 pub struct WeightStats {
     /// Number of unique weights
     pub num_weights: usize,
     /// Total cardinality (sum of all items across weights)
     pub total_cardinality: usize,
-    /// Total number of ranges
-    pub total_ranges: usize,
-    /// Maximum ranges in any single weight
-    pub max_ranges: usize,
 }
 
 // ========== Tests ==========
