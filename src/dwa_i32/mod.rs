@@ -28,6 +28,7 @@ pub mod factored_weight;
 pub mod shared_bdd;
 pub mod heavy_weight;
 pub mod bdd_weight;
+pub mod bdd_weight_biodivine;
 pub mod weight_storage;
 pub mod weight_impl;
 pub mod abstract_weight;
