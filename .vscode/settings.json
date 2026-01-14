@@ -2,5 +2,6 @@
     "kiroAgent.configureMCP": "Enabled",
     "[latex]": {
         "editor.wordWrap": "on"
-    }
+    },
+    "cmake.sourceDirectory": "/Users/isaacbreen/Projects2/grammars2024/.build/boost_1_83_0/libs/bimap"
 }
