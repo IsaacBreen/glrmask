@@ -135,7 +135,7 @@ where
 pub fn create_tsid_set_mask_with_offset_map<I>(
     tsids: I,
     num_tsids: usize,
-    _max_llm_token: usize,  // No longer needed for optimized path
+    max_llm_token: usize,
     tsid_offset_map: Option<&[usize]>,
 ) -> Weight
 where
@@ -151,9 +151,9 @@ where
         return Weight::zeros();
     }
     
-    // Use optimized tsid_columns construction
+    // Use optimized tsid_columns construction with explicit dimensions
     // This is O(|tsids|) for BDD backends instead of O(|tsids| * |tokens|)
-    Weight::tsid_columns(mapped_tsids)
+    Weight::tsid_columns_with_dims(mapped_tsids, num_tsids, max_llm_token + 1)
 }
 
 /// Collapse a weight from N×M-space back to N-space.
