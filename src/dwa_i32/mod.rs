@@ -25,6 +25,7 @@ pub mod weight_bdd_metrics;
 pub mod weight_oxidd_metrics;
 pub mod weight_factorization_metrics;
 pub mod factored_weight;
+pub mod shared_bdd;
 pub mod test_weighted_automata;
 
 #[cfg(test)]
