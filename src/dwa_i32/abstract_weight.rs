@@ -2,7 +2,8 @@
 //!
 //! This module provides an `AbstractWeight` enum that wraps either:
 //! - `RangeSet`: Sparse range-based storage (default, fast operations, good for sparse weights)
-//! - `BddWeight`: Binary Decision Diagram storage (experimental, compact for structured weights)
+//! - `BddWeight`: Binary Decision Diagram storage (custom 5-byte nodes, memory efficient)
+//! - `BddWeightBiodivine`: BDD storage using biodivine_lib_bdd (battle-tested, fewer nodes)
 //!
 //! The backend is selected at compile time via the `WEIGHT_BACKEND` environment variable,
 //! checked once at startup. See `get_weight_backend()` for details.
@@ -22,7 +23,8 @@
 //! # Backend Selection
 //!
 //! - `WEIGHT_BACKEND=rangeset` (default): Uses RangeSet with interning
-//! - `WEIGHT_BACKEND=bdd`: Uses BddWeight (requires `set_weight_dimensions` first)
+//! - `WEIGHT_BACKEND=bdd`: Uses custom BddWeight with 5-byte nodes (memory efficient)
+//! - `WEIGHT_BACKEND=bdd-biodivine`: Uses biodivine_lib_bdd (battle-tested, more features)
 
 use std::fmt::{Debug, Display, Formatter};
 use std::hash::{Hash, Hasher};
@@ -35,6 +37,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::rangeset::RangeSet;
 use super::bdd_weight::BddWeight;
+use super::bdd_weight_biodivine::BddWeightBiodivine;
 use super::heavy_weight::WeightDimensions;
 
 // ============================================================================
@@ -46,8 +49,10 @@ use super::heavy_weight::WeightDimensions;
 pub enum WeightBackend {
     /// Sparse range-based storage (default).
     RangeSet,
-    /// Binary Decision Diagram storage (experimental).
+    /// Binary Decision Diagram storage (custom 5-byte nodes, memory efficient).
     Bdd,
+    /// Binary Decision Diagram using biodivine_lib_bdd (battle-tested, more features).
+    BddBiodivine,
 }
 
 impl Default for WeightBackend {
@@ -60,11 +65,17 @@ impl Default for WeightBackend {
 /// 
 /// Reads `WEIGHT_BACKEND` env var once and caches the result.
 /// Returns `RangeSet` by default.
+/// 
+/// Options:
+/// - `rangeset` (default): RangeSet with interning
+/// - `bdd`: Custom BDD with 5-byte nodes (memory efficient)
+/// - `bdd-biodivine`: biodivine_lib_bdd (battle-tested, fewer nodes but more memory)
 pub fn get_weight_backend() -> WeightBackend {
     static BACKEND: OnceLock<WeightBackend> = OnceLock::new();
     *BACKEND.get_or_init(|| {
         match std::env::var("WEIGHT_BACKEND").as_deref() {
             Ok("bdd") | Ok("BDD") => WeightBackend::Bdd,
+            Ok("bdd-biodivine") | Ok("BDD-BIODIVINE") | Ok("biodivine") => WeightBackend::BddBiodivine,
             _ => WeightBackend::RangeSet,
         }
     })
@@ -89,14 +100,16 @@ pub fn get_weight_dimensions() -> WeightDimensions {
 
 /// Abstract weight type that can use different storage backends.
 /// 
-/// This is a thin wrapper around either `RangeSet` (default) or `BddWeight`.
+/// This is a thin wrapper around either `RangeSet` (default), `BddWeight`, or `BddWeightBiodivine`.
 /// All operations delegate to the underlying implementation.
 #[derive(Clone)]
 pub enum AbstractWeight {
     /// RangeSet backend (default, interned).
     Rs(RangeSet),
-    /// BddWeight backend (experimental).
+    /// Custom BddWeight backend (5-byte nodes, memory efficient).
     Bdd(Arc<BddWeight>),
+    /// Biodivine BddWeight backend (battle-tested, fewer nodes).
+    BddBiodivine(Arc<BddWeightBiodivine>),
 }
 
 impl AbstractWeight {
@@ -112,6 +125,10 @@ impl AbstractWeight {
                 let dims = get_weight_dimensions();
                 Self::Bdd(Arc::new(BddWeight::empty(dims.num_tsids as u16, dims.num_tokens as u16)))
             }
+            WeightBackend::BddBiodivine => {
+                let dims = get_weight_dimensions();
+                Self::BddBiodivine(Arc::new(BddWeightBiodivine::empty(dims.num_tsids as u16, dims.num_tokens as u16)))
+            }
         }
     }
 
@@ -122,6 +139,10 @@ impl AbstractWeight {
             WeightBackend::Bdd => {
                 let dims = get_weight_dimensions();
                 Self::Bdd(Arc::new(BddWeight::full(dims.num_tsids as u16, dims.num_tokens as u16)))
+            }
+            WeightBackend::BddBiodivine => {
+                let dims = get_weight_dimensions();
+                Self::BddBiodivine(Arc::new(BddWeightBiodivine::full(dims.num_tsids as u16, dims.num_tokens as u16)))
             }
         }
     }
@@ -138,6 +159,14 @@ impl AbstractWeight {
                     dims.num_tokens as u16,
                 )))
             }
+            WeightBackend::BddBiodivine => {
+                let dims = get_weight_dimensions();
+                Self::BddBiodivine(Arc::new(BddWeightBiodivine::from_ranges(
+                    std::iter::once((item, item)),
+                    dims.num_tsids as u16,
+                    dims.num_tokens as u16,
+                )))
+            }
         }
     }
 
@@ -148,6 +177,14 @@ impl AbstractWeight {
             WeightBackend::Bdd => {
                 let dims = get_weight_dimensions();
                 Self::Bdd(Arc::new(BddWeight::from_ranges(
+                    ranges.iter().copied(),
+                    dims.num_tsids as u16,
+                    dims.num_tokens as u16,
+                )))
+            }
+            WeightBackend::BddBiodivine => {
+                let dims = get_weight_dimensions();
+                Self::BddBiodivine(Arc::new(BddWeightBiodivine::from_ranges(
                     ranges.iter().copied(),
                     dims.num_tsids as u16,
                     dims.num_tokens as u16,
@@ -169,6 +206,15 @@ impl AbstractWeight {
                     dims.num_tokens as u16,
                 )))
             }
+            WeightBackend::BddBiodivine => {
+                let dims = get_weight_dimensions();
+                let ranges: Vec<(usize, usize)> = rsb.ranges().map(|r| (*r.start(), *r.end())).collect();
+                Self::BddBiodivine(Arc::new(BddWeightBiodivine::from_ranges(
+                    ranges.into_iter(),
+                    dims.num_tsids as u16,
+                    dims.num_tokens as u16,
+                )))
+            }
         }
     }
 
@@ -179,6 +225,14 @@ impl AbstractWeight {
             WeightBackend::Bdd => {
                 let dims = get_weight_dimensions();
                 Self::Bdd(Arc::new(BddWeight::from_ranges(
+                    std::iter::once((0, len.saturating_sub(1))),
+                    dims.num_tsids as u16,
+                    dims.num_tokens as u16,
+                )))
+            }
+            WeightBackend::BddBiodivine => {
+                let dims = get_weight_dimensions();
+                Self::BddBiodivine(Arc::new(BddWeightBiodivine::from_ranges(
                     std::iter::once((0, len.saturating_sub(1))),
                     dims.num_tsids as u16,
                     dims.num_tokens as u16,
@@ -196,6 +250,7 @@ impl AbstractWeight {
         match self {
             Self::Rs(rs) => rs.is_empty(),
             Self::Bdd(bdd) => bdd.is_empty(),
+            Self::BddBiodivine(bdd) => bdd.is_empty(),
         }
     }
 
@@ -204,6 +259,7 @@ impl AbstractWeight {
         match self {
             Self::Rs(rs) => rs.is_all_fast(),
             Self::Bdd(bdd) => bdd.is_full(),
+            Self::BddBiodivine(bdd) => bdd.is_full(),
         }
     }
 
@@ -212,6 +268,7 @@ impl AbstractWeight {
         match self {
             Self::Rs(rs) => rs.contains(pos),
             Self::Bdd(bdd) => bdd.contains_pos(pos),
+            Self::BddBiodivine(bdd) => bdd.contains_pos(pos),
         }
     }
 
@@ -229,6 +286,7 @@ impl AbstractWeight {
         match self {
             Self::Rs(rs) => rs.num_ranges(),
             Self::Bdd(bdd) => bdd.to_rangeset().ranges_len(),
+            Self::BddBiodivine(bdd) => bdd.to_rangeset().ranges_len(),
         }
     }
 
@@ -237,6 +295,7 @@ impl AbstractWeight {
         match self {
             Self::Rs(rs) => rs.len(),
             Self::Bdd(bdd) => bdd.len(),
+            Self::BddBiodivine(bdd) => bdd.len(),
         }
     }
 
@@ -250,7 +309,7 @@ impl AbstractWeight {
     pub fn fp(&self) -> u64 {
         match self {
             Self::Rs(rs) => rs.fast_hash(),
-            Self::Bdd(_) => {
+            Self::Bdd(_) | Self::BddBiodivine(_) => {
                 // For BDD, compute a hash of the ranges
                 use std::hash::{Hash, Hasher};
                 use std::collections::hash_map::DefaultHasher;
@@ -268,6 +327,7 @@ impl AbstractWeight {
         match self {
             Self::Rs(rs) => rs.min_item(),
             Self::Bdd(bdd) => bdd.iter().next(),
+            Self::BddBiodivine(bdd) => bdd.iter().next(),
         }
     }
 
@@ -276,6 +336,7 @@ impl AbstractWeight {
         match self {
             Self::Rs(rs) => rs.max_item(),
             Self::Bdd(bdd) => bdd.iter().last(),
+            Self::BddBiodivine(bdd) => bdd.iter().last(),
         }
     }
 
@@ -283,7 +344,7 @@ impl AbstractWeight {
     pub fn insert(&mut self, item: usize) {
         match self {
             Self::Rs(rs) => rs.insert(item),
-            Self::Bdd(_) => {
+            Self::Bdd(_) | Self::BddBiodivine(_) => {
                 // For BDD, convert to RangeSet, insert, convert back
                 let mut rs: RangeSet = self.to_rangeset();
                 rs.insert(item);
@@ -296,7 +357,7 @@ impl AbstractWeight {
     pub fn remove(&mut self, item: usize) {
         match self {
             Self::Rs(rs) => rs.remove(item),
-            Self::Bdd(_) => {
+            Self::Bdd(_) | Self::BddBiodivine(_) => {
                 // For BDD, convert to RangeSet, remove, convert back
                 let mut rs: RangeSet = self.to_rangeset();
                 rs.remove(item);
@@ -342,6 +403,17 @@ impl AbstractWeight {
                     .collect();
                 Self::from_ranges(&ranges)
             }
+            Self::BddBiodivine(bdd) => {
+                // For BDD, convert to ranges, filter, and rebuild
+                let ranges: Vec<_> = bdd.to_rangeset().into_ranges()
+                    .filter_map(|r| {
+                        let start = *r.start();
+                        let end = (*r.end()).min(max);
+                        if start <= max { Some((start, end)) } else { None }
+                    })
+                    .collect();
+                Self::from_ranges(&ranges)
+            }
         }
     }
 
@@ -354,6 +426,7 @@ impl AbstractWeight {
         match self {
             Self::Rs(rs) => rs.clone(),
             Self::Bdd(bdd) => RangeSet::from_rsb(bdd.to_rangeset()),
+            Self::BddBiodivine(bdd) => RangeSet::from_rsb(bdd.to_rangeset()),
         }
     }
 
@@ -362,6 +435,7 @@ impl AbstractWeight {
         match self {
             Self::Rs(rs) => rs.rsb.clone(),
             Self::Bdd(bdd) => bdd.to_rangeset(),
+            Self::BddBiodivine(bdd) => bdd.to_rangeset(),
         }
     }
 
@@ -369,7 +443,7 @@ impl AbstractWeight {
     pub fn as_rangeset(&self) -> &RangeSet {
         match self {
             Self::Rs(rs) => rs,
-            Self::Bdd(_) => panic!("Cannot get RangeSet reference from BDD weight"),
+            Self::Bdd(_) | Self::BddBiodivine(_) => panic!("Cannot get RangeSet reference from BDD weight"),
         }
     }
 
@@ -382,6 +456,7 @@ impl AbstractWeight {
         match self {
             Self::Rs(rs) => Box::new(rs.rsb.iter()),
             Self::Bdd(bdd) => Box::new(bdd.iter()),
+            Self::BddBiodivine(bdd) => Box::new(bdd.iter()),
         }
     }
 
@@ -390,6 +465,7 @@ impl AbstractWeight {
         match self {
             Self::Rs(rs) => Box::new(rs.iter_up_to(max)),
             Self::Bdd(bdd) => Box::new(bdd.iter().take_while(move |&p| p <= max)),
+            Self::BddBiodivine(bdd) => Box::new(bdd.iter().take_while(move |&p| p <= max)),
         }
     }
 
@@ -398,6 +474,7 @@ impl AbstractWeight {
         match self {
             Self::Rs(rs) => Box::new(rs.rsb.ranges()),
             Self::Bdd(bdd) => Box::new(bdd.to_rangeset().into_ranges()),
+            Self::BddBiodivine(bdd) => Box::new(bdd.to_rangeset().into_ranges()),
         }
     }
 
@@ -410,7 +487,7 @@ impl AbstractWeight {
     pub fn rsb(&self) -> &RangeSetBlaze<usize> {
         match self {
             Self::Rs(rs) => &rs.rsb,
-            Self::Bdd(_) => panic!("Cannot access rsb on BDD weight - use to_rsb() instead"),
+            Self::Bdd(_) | Self::BddBiodivine(_) => panic!("Cannot access rsb on BDD weight - use to_rsb() instead"),
         }
     }
 
@@ -437,6 +514,7 @@ impl AbstractWeight {
         match self {
             Self::Rs(rs) => rs.intern_id(),
             Self::Bdd(bdd) => Arc::as_ptr(bdd) as usize,
+            Self::BddBiodivine(bdd) => Arc::as_ptr(bdd) as usize,
         }
     }
 }
@@ -453,6 +531,9 @@ impl BitOr for &AbstractWeight {
             (AbstractWeight::Rs(a), AbstractWeight::Rs(b)) => AbstractWeight::Rs(a | b),
             (AbstractWeight::Bdd(a), AbstractWeight::Bdd(b)) => {
                 AbstractWeight::Bdd(Arc::new(a.union(b)))
+            }
+            (AbstractWeight::BddBiodivine(a), AbstractWeight::BddBiodivine(b)) => {
+                AbstractWeight::BddBiodivine(Arc::new(a.union(b)))
             }
             _ => {
                 // Cross-backend: convert to common format
@@ -487,6 +568,9 @@ impl BitAnd for &AbstractWeight {
             (AbstractWeight::Bdd(a), AbstractWeight::Bdd(b)) => {
                 AbstractWeight::Bdd(Arc::new(a.intersection(b)))
             }
+            (AbstractWeight::BddBiodivine(a), AbstractWeight::BddBiodivine(b)) => {
+                AbstractWeight::BddBiodivine(Arc::new(a.intersection(b)))
+            }
             _ => {
                 let a_rs = self.to_rangeset();
                 let b_rs = rhs.to_rangeset();
@@ -517,6 +601,7 @@ impl Not for &AbstractWeight {
         match self {
             AbstractWeight::Rs(rs) => AbstractWeight::Rs(!rs),
             AbstractWeight::Bdd(bdd) => AbstractWeight::Bdd(Arc::new(bdd.complement())),
+            AbstractWeight::BddBiodivine(bdd) => AbstractWeight::BddBiodivine(Arc::new(bdd.complement())),
         }
     }
 }
@@ -537,6 +622,9 @@ impl Sub for &AbstractWeight {
             (AbstractWeight::Rs(a), AbstractWeight::Rs(b)) => AbstractWeight::Rs(a - b),
             (AbstractWeight::Bdd(a), AbstractWeight::Bdd(b)) => {
                 AbstractWeight::Bdd(Arc::new(a.subtract(b)))
+            }
+            (AbstractWeight::BddBiodivine(a), AbstractWeight::BddBiodivine(b)) => {
+                AbstractWeight::BddBiodivine(Arc::new(a.subtract(b)))
             }
             _ => {
                 let a_rs = self.to_rangeset();
@@ -628,6 +716,12 @@ impl Hash for AbstractWeight {
                     pos.hash(state);
                 }
             }
+            Self::BddBiodivine(bdd) => {
+                // Hash based on sorted positions for consistency
+                for pos in bdd.iter() {
+                    pos.hash(state);
+                }
+            }
         }
     }
 }
@@ -637,6 +731,7 @@ impl Debug for AbstractWeight {
         match self {
             Self::Rs(rs) => write!(f, "Weight::Rs({:?})", rs),
             Self::Bdd(bdd) => write!(f, "Weight::Bdd({} nodes)", bdd.num_nodes()),
+            Self::BddBiodivine(bdd) => write!(f, "Weight::BddBiodivine({} nodes)", bdd.num_nodes()),
         }
     }
 }
@@ -658,6 +753,19 @@ impl Display for AbstractWeight {
                     write!(f, "[{} ranges]", ranges.len())
                 }
             }
+            Self::BddBiodivine(bdd) => {
+                let ranges: Vec<_> = bdd.to_rangeset().into_ranges().collect();
+                if ranges.is_empty() {
+                    write!(f, "∅")
+                } else if ranges.len() <= 5 {
+                    let strs: Vec<String> = ranges.iter()
+                        .map(|r| format!("{}..={}", r.start(), r.end()))
+                        .collect();
+                    write!(f, "[{}]", strs.join(", "))
+                } else {
+                    write!(f, "[{} ranges]", ranges.len())
+                }
+            }
         }
     }
 }
@@ -666,7 +774,7 @@ impl FromIterator<usize> for AbstractWeight {
     fn from_iter<I: IntoIterator<Item = usize>>(iter: I) -> Self {
         match get_weight_backend() {
             WeightBackend::RangeSet => Self::Rs(RangeSet::from_iter(iter)),
-            WeightBackend::Bdd => {
+            WeightBackend::Bdd | WeightBackend::BddBiodivine => {
                 let rsb: RangeSetBlaze<usize> = iter.into_iter().collect();
                 Self::from_rsb(rsb)
             }
@@ -685,7 +793,7 @@ impl FromIterator<std::ops::RangeInclusive<usize>> for AbstractWeight {
     fn from_iter<I: IntoIterator<Item = std::ops::RangeInclusive<usize>>>(iter: I) -> Self {
         match get_weight_backend() {
             WeightBackend::RangeSet => Self::Rs(RangeSet::from_iter(iter)),
-            WeightBackend::Bdd => {
+            WeightBackend::Bdd | WeightBackend::BddBiodivine => {
                 let ranges: Vec<_> = iter.into_iter().map(|r| (*r.start(), *r.end())).collect();
                 Self::from_ranges(&ranges)
             }
@@ -720,6 +828,15 @@ impl<'de> Deserialize<'de> for AbstractWeight {
                 let dims = get_weight_dimensions();
                 let ranges: Vec<_> = rs.rsb.ranges().map(|r| (*r.start(), *r.end())).collect();
                 Ok(Self::Bdd(Arc::new(BddWeight::from_ranges(
+                    ranges.into_iter(),
+                    dims.num_tsids as u16,
+                    dims.num_tokens as u16,
+                ))))
+            }
+            WeightBackend::BddBiodivine => {
+                let dims = get_weight_dimensions();
+                let ranges: Vec<_> = rs.rsb.ranges().map(|r| (*r.start(), *r.end())).collect();
+                Ok(Self::BddBiodivine(Arc::new(BddWeightBiodivine::from_ranges(
                     ranges.into_iter(),
                     dims.num_tsids as u16,
                     dims.num_tokens as u16,
@@ -760,6 +877,15 @@ impl From<RangeSet> for AbstractWeight {
                 let dims = get_weight_dimensions();
                 let ranges: Vec<_> = rs.rsb.ranges().map(|r| (*r.start(), *r.end())).collect();
                 Self::Bdd(Arc::new(BddWeight::from_ranges(
+                    ranges.into_iter(),
+                    dims.num_tsids as u16,
+                    dims.num_tokens as u16,
+                )))
+            }
+            WeightBackend::BddBiodivine => {
+                let dims = get_weight_dimensions();
+                let ranges: Vec<_> = rs.rsb.ranges().map(|r| (*r.start(), *r.end())).collect();
+                Self::BddBiodivine(Arc::new(BddWeightBiodivine::from_ranges(
                     ranges.into_iter(),
                     dims.num_tsids as u16,
                     dims.num_tokens as u16,
