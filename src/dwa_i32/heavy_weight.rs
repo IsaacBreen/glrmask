@@ -24,7 +24,14 @@
 //! let weight = HeavyWeight::from_item(pos, &dims);
 //! let expanded = weight.to_rangeset();
 //! ```
+//!
+//! ## Factored Representation
+//!
+//! HeavyWeight supports conversion to/from `FactoredWeight`, a compact representation
+//! that stores weights as union of `(TokenRangeSet, TsidRangeSet)` Cartesian products.
+//! This can achieve ~5-10x compression for weights with structured 2D patterns.
 
+use super::factored_weight::FactoredWeight;
 use super::rangeset::RangeSet;
 use range_set_blaze::RangeSetBlaze;
 use serde::{Deserialize, Serialize};
@@ -383,6 +390,60 @@ impl HeavyWeight {
         result
     }
     
+    // ========== Factored Representation ==========
+    
+    /// Convert this weight to a factored representation.
+    /// 
+    /// The factored representation stores the weight as a union of
+    /// `(TokenRangeSet, TsidRangeSet)` Cartesian products, which can
+    /// achieve significant compression when weights have structured
+    /// 2D patterns.
+    /// 
+    /// # Example
+    /// 
+    /// ```ignore
+    /// let hw = HeavyWeight::from_ranges(ranges, dims);
+    /// let factored = hw.to_factored();
+    /// println!("Compressed: {} terms, {} ranges", 
+    ///          factored.num_terms(), factored.total_ranges());
+    /// ```
+    pub fn to_factored(&self) -> FactoredWeight {
+        FactoredWeight::from_1d_ranges(
+            self.ranges(),
+            self.dims.num_tsids,
+        )
+    }
+    
+    /// Create a HeavyWeight from a factored representation.
+    /// 
+    /// This expands the factored representation back to a flat RangeSet.
+    pub fn from_factored(factored: FactoredWeight, dims: WeightDimensions) -> Self {
+        debug_assert_eq!(
+            factored.num_tsids as usize, dims.num_tsids,
+            "num_tsids mismatch: factored has {}, dims has {}",
+            factored.num_tsids, dims.num_tsids
+        );
+        let rsb = factored.expand();
+        Self::from_rangeset(RangeSet::from_rsb(rsb), dims)
+    }
+    
+    /// Estimate the storage bytes if this weight were stored as factored.
+    /// 
+    /// Returns (factored_bytes, rangeset_bytes, num_terms).
+    /// 
+    /// This is useful for deciding whether factored representation would
+    /// save space for this particular weight.
+    pub fn factored_storage_estimate(&self) -> (usize, usize, usize) {
+        let factored = self.to_factored();
+        let factored_bytes = factored.estimated_storage_bytes();
+        
+        // RangeSet: 2 × usize per range = 16 bytes per range
+        let num_ranges: usize = self.inner.rsb.ranges_len();
+        let rangeset_bytes = num_ranges * 16;
+        
+        (factored_bytes, rangeset_bytes, factored.num_terms())
+    }
+    
     // ========== Internal Helpers ==========
     
     fn check_dims(&self, other: &Self) {
@@ -686,5 +747,57 @@ mod tests {
         let w2 = HeavyWeight::zeros(dims2);
         
         let _ = w1.union(&w2);  // Should panic
+    }
+    
+    #[test]
+    fn test_factored_roundtrip() {
+        let dims = WeightDimensions::new(100, 10);
+        
+        // Create a complex weight with multiple rectangles
+        let w1 = HeavyWeight::from_rect(0, 10, 0, 5, dims);
+        let w2 = HeavyWeight::from_rect(5, 20, 3, 9, dims);
+        let original = w1.union(&w2);
+        
+        // Convert to factored
+        let factored = original.to_factored();
+        
+        // Check factored contains correct points
+        for (start, end) in original.ranges() {
+            for pos in start..=end {
+                let (token, tsid) = dims.decode(pos);
+                assert!(factored.contains(token as u16, tsid as u16),
+                    "factored missing ({}, {})", token, tsid);
+            }
+        }
+        
+        // Convert back
+        let recovered = HeavyWeight::from_factored(factored, dims);
+        
+        // Should be identical
+        assert_eq!(original.len(), recovered.len());
+        for (start, end) in original.ranges() {
+            for pos in start..=end {
+                assert!(recovered.contains(pos), "recovered missing position {}", pos);
+            }
+        }
+    }
+    
+    #[test]
+    fn test_factored_storage_estimate() {
+        let dims = WeightDimensions::new(100, 10);
+        
+        // Create a weight that benefits from factoring (full rows)
+        let w = HeavyWeight::from_rect(10, 30, 0, 9, dims);  // 21 tokens × 10 tsids = full rows
+        
+        let (factored_bytes, rangeset_bytes, num_terms) = w.factored_storage_estimate();
+        
+        // Full rows should factor into 1 term
+        assert_eq!(num_terms, 1, "full rows should produce 1 term");
+        
+        // Factored should be smaller than rangeset for this pattern
+        // 21 full rows = 21 ranges in RangeSet, but 1 term in factored
+        assert!(factored_bytes < rangeset_bytes,
+            "factored ({}) should be smaller than rangeset ({}) for full rows",
+            factored_bytes, rangeset_bytes);
     }
 }
