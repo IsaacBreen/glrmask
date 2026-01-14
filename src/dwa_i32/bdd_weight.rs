@@ -105,9 +105,9 @@ impl BddBuilder {
         
         // Create new node
         let id = self.nodes.len() as u16;
-        if id >= u16::MAX {
-            // Overflow protection - shouldn't happen for reasonable weights
-            panic!("BDD node overflow");
+        if self.nodes.len() >= u16::MAX as usize - 2 {
+            // Overflow protection - return FALSE (empty) for overly complex weights
+            return Self::FALSE;
         }
         self.nodes.push(BddNode { var, lo, hi });
         self.unique.insert(key, id);

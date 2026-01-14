@@ -11,6 +11,7 @@ use sep1::glr::table::{TerminalID, Stage7ShiftsAndReducesLookaheadValue};
 use sep1::precompute4::characterize::compute_all_characterizations;
 use sep1::precompute4::template_dfa::{build_template_dwas, build_ignore_terminal_dwa};
 use sep1::dwa_i32::{NWA, NWABody, NWAState, NWAStates, Weight};
+use sep1::dwa_i32::heavy_weight::WeightDimensions;
 use sep1::dwa_i32::common::Label;
 use sep1::precompute4::parser_dwa::finalize_and_optimize_and_determinize;
 use sep1::constraint_precompute::run_precompute1;
@@ -279,7 +280,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut unresolved_nwa = NWA { 
         states: nwa_states, 
-        body: NWABody { start_states: vec![combined_start_state] } 
+        body: NWABody { start_states: vec![combined_start_state] },
+        dims: WeightDimensions::default(),
     };
     if is_debug_level_enabled(4) {
         println!("Unresolved NWA:");
