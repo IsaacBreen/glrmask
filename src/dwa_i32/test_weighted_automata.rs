@@ -2569,7 +2569,7 @@ fn test_diamond_structure() {
         states[abc].final_weight = Some(w012.clone());
         states[end].final_weight = Some(w3.clone());
 
-        DWA { body: DWABody { start_state: start }, states, dims: WeightDimensions::UNKNOWN }
+        DWA { body: DWABody { start_state: start }, states, dims: WeightDimensions::TEST }
     };
 
     run_push_optimization_test(input, expected);

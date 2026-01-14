@@ -83,7 +83,7 @@ impl JSONConvertible for NWA {
                     obj.remove("start_states").ok_or("Missing start_states")?,
                 )?,
             },
-            dims: WeightDimensions::UNKNOWN,
+            dims: WeightDimensions::TEST,
         })
     }
 }
@@ -297,7 +297,7 @@ impl JSONConvertible for DWA {
                     obj.remove("start_state").ok_or("Missing start_state")?,
                 )?,
             },
-            dims: WeightDimensions::UNKNOWN,
+            dims: WeightDimensions::TEST,
         })
     }
 }

@@ -357,11 +357,14 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
     crate::debug!(3, "Starting Parser DWA construction. Input terminal_nwa: {} states, {} transitions", 
         terminal_nwa.states.len(), terminal_nwa.states.num_transitions());
     
+    // Get dimensions from terminal_nwa - should always be set
+    let dims = terminal_nwa.dims;
+    
     // Handle empty terminal NWA (no valid tokens for this grammar/vocabulary combination)
     // Return a minimal DWA with one state and no transitions (always returns empty mask)
     if terminal_nwa.states.0.is_empty() || terminal_nwa.body.start_states.is_empty() {
         crate::debug!(3, "Terminal NWA is empty - returning empty Parser DWA");
-        let mut empty_dwa = DWA::new_empty();
+        let mut empty_dwa = DWA::new_empty_with_dims(dims);
         // Add a single start state with no final weight (no tokens are valid)
         let start_state = empty_dwa.states.add_state();
         empty_dwa.body.start_state = start_state;
@@ -825,7 +828,7 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
         }
     }
 
-    let combined_nwa = NWA { states: combined_nwa_states, body: NWABody { start_states: vec![combined_start_state] }, dims: WeightDimensions::UNKNOWN };
+    let combined_nwa = NWA { states: combined_nwa_states, body: NWABody { start_states: vec![combined_start_state] }, dims };
     crate::debug!(3, "Combined NWA before determinization: {} states, {} transitions, is_symbol_heavy={}", 
         combined_nwa.states.len(), combined_nwa.states.num_transitions(), is_symbol_heavy);
     let mut final_dwa = finalize_and_optimize_and_determinize(parser, combined_nwa);

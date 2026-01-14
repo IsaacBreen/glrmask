@@ -407,6 +407,7 @@ impl<'a> Determinizer<'a> {
         let mut dwa = DWA::new();
         dwa.states.0.clear();
         dwa.body.start_state = 0;
+        dwa.dims = nwa.dims; // Propagate dimensions from NWA
         Determinizer {
             nwa,
             eps_reach,

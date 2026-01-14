@@ -521,7 +521,7 @@ mod tests {
         let input_dwa = DWA {
             states: DWAStates(vec![state0, state1, state2, state3]),
             body: DWABody { start_state: 0 },
-            dims: WeightDimensions::UNKNOWN,
+            dims: WeightDimensions::TEST,
         };
         
         println!("INPUT DWA:");
@@ -552,7 +552,7 @@ mod tests {
         let expected_dwa = DWA {
             states: DWAStates(vec![exp_state0, exp_state1, exp_state2]),
             body: DWABody { start_state: 0 },
-            dims: WeightDimensions::UNKNOWN,
+            dims: WeightDimensions::TEST,
         };
         
         println!("EXPECTED DWA:");
@@ -598,7 +598,7 @@ mod tests {
         let input_dwa = DWA {
             states: DWAStates(vec![state0, state1]),
             body: DWABody { start_state: 0 },
-            dims: WeightDimensions::UNKNOWN,
+            dims: WeightDimensions::TEST,
         };
 
         println!("INPUT DWA:");
@@ -615,7 +615,7 @@ mod tests {
         let expected_dwa = DWA {
             states: DWAStates(vec![exp_state0]),
             body: DWABody { start_state: 0 },
-            dims: WeightDimensions::UNKNOWN,
+            dims: WeightDimensions::TEST,
         };
 
         println!("EXPECTED DWA:");

@@ -184,13 +184,13 @@ pub struct NWA {
 
 impl Default for NWA {
     fn default() -> Self {
-        Self { states: NWAStates::default(), body: NWABody::default(), dims: WeightDimensions::UNKNOWN }
+        Self { states: NWAStates::default(), body: NWABody::default(), dims: WeightDimensions::TEST }
     }
 }
 
 impl NWA {
     pub fn new_empty() -> Self {
-        Self { states: NWAStates::default(), body: NWABody::default(), dims: WeightDimensions::UNKNOWN }
+        Self { states: NWAStates::default(), body: NWABody::default(), dims: WeightDimensions::TEST }
     }
     pub fn new() -> Self {
         let mut nwa = Self::new_empty();
@@ -257,8 +257,8 @@ impl NWA {
 
     pub fn concatenate(left: &NWA, right: &NWA) -> NWA {
         let mut res = NWA::new_empty();
-        // Propagate dimensions (prefer left's if known, otherwise right's)
-        res.dims = if left.dims.is_known() { left.dims } else { right.dims };
+        // Propagate dimensions from left (primary operand)
+        res.dims = left.dims;
         let _ = res.states.append(&right.states); // Right is at offset 0
         // Construct a body for the right segment
         let right_body = right.body.clone(); // indices are 0-based, valid
@@ -270,25 +270,18 @@ impl NWA {
 
     pub fn union(a: &NWA, b: &NWA) -> NWA {
         let mut a = a.clone();
-        // Dimensions are preserved from a (or take from b if a doesn't have known dims)
-        if !a.dims.is_known() && b.dims.is_known() {
-            a.dims = b.dims;
-        }
+        // Dimensions are preserved from a (primary operand)
         a.body = NWAStates::union_in_place(&mut a.states, &b, &a.body);
         a
     }
 
     pub fn union_assign(&mut self, other: &NWA) {
-        if !self.dims.is_known() && other.dims.is_known() {
-            self.dims = other.dims;
-        }
+        // Keep self's dimensions
         self.body = NWAStates::union_in_place(&mut self.states, &other, &self.body);
     }
 
     pub fn concatenate_assign(&mut self, other: &NWA) {
-        if !self.dims.is_known() && other.dims.is_known() {
-            self.dims = other.dims;
-        }
+        // Keep self's dimensions
         self.body = NWAStates::concatenate_in_place(&mut self.states, &other, &self.body);
     }
 

@@ -24,6 +24,7 @@ use crate::dfa_u8::{Tokenizer, Regex};
 use crate::glr::parser::GLRParser;
 use crate::dwa_i32::rangeset::RangeSet as WARangeSet;
 use crate::dwa_i32::{DWA, NWA, NWAStateID, Weight};
+use crate::dwa_i32::heavy_weight::WeightDimensions;
 use crate::dwa_i32::weight_expansion::{expand_rsb, create_tsid_set_mask_with_offset_map};
 use crate::profiler::{self};
 
@@ -92,6 +93,10 @@ impl<'r> Precomputer1<'r> {
 
         let mut nwa = NWA::new();
         nwa.states.0.clear(); // Clear default start state
+        // Set dimensions: num_tokens = max_llm_token + 1, num_tsids (1 if symbol-heavy)
+        let num_tokens = internal_max_llm_token + 1;
+        let actual_num_tsids = if num_tsids == 0 { 1 } else { num_tsids };
+        nwa.dims = WeightDimensions::new(num_tokens, actual_num_tsids);
 
         let mut roots = BTreeMap::new();
         for &rep_sid in state_to_rep.values() {

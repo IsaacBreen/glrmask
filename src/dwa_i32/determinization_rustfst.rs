@@ -395,7 +395,9 @@ pub fn determinize_nwa_to_dwa(nwa: &NWA) -> DWA {
     let det_config = DeterminizeConfig::default().with_det_type(DeterminizeType::DeterminizeFunctional);
     let det_fst: VectorFst<BitsetWeight> = determinize_with_config(&fst, det_config).unwrap();
 
-    vector_fst_to_dwa(&det_fst)
+    let mut dwa = vector_fst_to_dwa(&det_fst);
+    dwa.dims = nwa.dims; // Propagate dimensions from NWA
+    dwa
 }
 
 impl DWA {
@@ -427,6 +429,8 @@ impl NWA {
         let mut fst = nwa_to_vector_fst(self);
         fst.compute_and_update_properties_all().unwrap();
         rm_epsilon(&mut fst).unwrap();
-        vector_fst_to_nwa(&fst)
+        let mut result = vector_fst_to_nwa(&fst);
+        result.dims = self.dims; // Propagate dimensions
+        result
     }
 }

@@ -1238,6 +1238,6 @@ fn reconstruct_dwa(
         body: crate::dwa_i32::dwa::DWABody {
             start_state: old_to_new.get(&start_old).copied().unwrap_or(0),
         },
-        dims: WeightDimensions::UNKNOWN,  // Note: caller should propagate dims if needed
+        dims: WeightDimensions::TEST,  // Note: caller should propagate dims if needed
     })
 }

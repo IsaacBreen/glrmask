@@ -120,13 +120,13 @@ pub struct DWA {
     pub states: DWAStates,
     pub body: DWABody,
     /// Weight space dimensions (num_tokens × num_tsids).
-    /// WeightDimensions::UNKNOWN if not set.
+    /// WeightDimensions::TEST if not set.
     pub dims: WeightDimensions,
 }
 
 impl Default for DWA {
     fn default() -> Self {
-        Self { states: DWAStates::default(), body: DWABody::default(), dims: WeightDimensions::UNKNOWN }
+        Self { states: DWAStates::default(), body: DWABody::default(), dims: WeightDimensions::TEST }
     }
 }
 
@@ -134,7 +134,7 @@ impl DWA {
     pub fn new() -> Self {
         let mut states = DWAStates::default();
         let start = states.add_state();
-        DWA { states, body: DWABody { start_state: start }, dims: WeightDimensions::UNKNOWN }
+        DWA { states, body: DWABody { start_state: start }, dims: WeightDimensions::TEST }
     }
     pub fn new_with_dims(dims: WeightDimensions) -> Self {
         let mut states = DWAStates::default();
@@ -142,7 +142,7 @@ impl DWA {
         DWA { states, body: DWABody { start_state: start }, dims }
     }
     pub fn new_empty() -> Self {
-        DWA { states: DWAStates::default(), body: DWABody::default(), dims: WeightDimensions::UNKNOWN }
+        DWA { states: DWAStates::default(), body: DWABody::default(), dims: WeightDimensions::TEST }
     }
     pub fn new_empty_with_dims(dims: WeightDimensions) -> Self {
         DWA { states: DWAStates::default(), body: DWABody::default(), dims }
