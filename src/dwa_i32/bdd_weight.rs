@@ -48,7 +48,7 @@ impl BddNode {
 ///
 /// Each weight stores its own independent BDD node array.
 /// This enables parallel construction and avoids lock contention.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BddWeight {
     /// This weight's BDD nodes. Node 0 = FALSE, Node 1 = TRUE.
     nodes: Vec<BddNode>,
@@ -507,7 +507,186 @@ impl BddWeight {
         self.enumerate_rec(n.lo, var + 1, new_tsid_lo, new_token_lo, tsid_bits, token_bits, positions);
         self.enumerate_rec(n.hi, var + 1, new_tsid_hi, new_token_hi, tsid_bits, token_bits, positions);
     }
+    
+    // ========================================================================
+    // Binary Operations (union, intersection, etc.)
+    // ========================================================================
+    
+    /// Compute the union of two BDD weights.
+    /// 
+    /// Returns a new BddWeight containing positions that are in either self or other.
+    pub fn union(&self, other: &Self) -> Self {
+        self.apply_binary(other, true) // is_or = true
+    }
+    
+    /// Compute the intersection of two BDD weights.
+    /// 
+    /// Returns a new BddWeight containing positions that are in both self and other.
+    pub fn intersection(&self, other: &Self) -> Self {
+        self.apply_binary(other, false) // is_or = false
+    }
+    
+    /// Compute the complement of this BDD weight.
+    /// 
+    /// Returns a new BddWeight containing positions NOT in self.
+    /// Note: This complements within the valid (token, tsid) domain.
+    pub fn complement(&self) -> Self {
+        // Complement is NOT(self): swap all 0s and 1s in the terminal nodes
+        // This is equivalent to swapping lo and hi for all non-terminal nodes,
+        // but we can do it more simply by negating the root.
+        
+        if self.is_empty() {
+            return Self::full(self.tsid_dim, self.token_dim);
+        }
+        if self.is_full() {
+            return Self::empty(self.tsid_dim, self.token_dim);
+        }
+        
+        // Build complement by recursively negating
+        let tsid_bits = Self::bits_for(self.tsid_dim.saturating_sub(1));
+        let token_bits = Self::bits_for(self.token_dim.saturating_sub(1));
+        let mut builder = BddBuilder::new(tsid_bits, token_bits);
+        
+        // Copy nodes from self into builder, remapping indices
+        let mut remap: Vec<u16> = vec![0; self.nodes.len()];
+        remap[0] = 1;  // FALSE -> TRUE (complement)
+        remap[1] = 0;  // TRUE -> FALSE (complement)
+        
+        // Process non-terminal nodes in order
+        for (old_idx, node) in self.nodes.iter().enumerate().skip(2) {
+            let new_lo = remap[node.lo as usize];
+            let new_hi = remap[node.hi as usize];
+            remap[old_idx] = builder.mk(node.var, new_lo, new_hi);
+        }
+        
+        let new_root = remap[self.root as usize];
+        builder.finish(new_root, self.tsid_dim, self.token_dim)
+    }
+    
+    /// Compute subtraction: self - other (positions in self but not in other).
+    pub fn subtract(&self, other: &Self) -> Self {
+        self.intersection(&other.complement())
+    }
+    
+    /// Internal helper for binary operations.
+    /// 
+    /// Merges two BDD weights and applies OR (is_or=true) or AND (is_or=false).
+    fn apply_binary(&self, other: &Self, is_or: bool) -> Self {
+        // Validate dimensions match
+        assert_eq!(self.tsid_dim, other.tsid_dim, "BDD tsid dimensions must match");
+        assert_eq!(self.token_dim, other.token_dim, "BDD token dimensions must match");
+        
+        // Fast paths
+        if is_or {
+            if self.is_full() || other.is_full() {
+                return Self::full(self.tsid_dim, self.token_dim);
+            }
+            if self.is_empty() { return other.clone(); }
+            if other.is_empty() { return self.clone(); }
+        } else {
+            if self.is_empty() || other.is_empty() {
+                return Self::empty(self.tsid_dim, self.token_dim);
+            }
+            if self.is_full() { return other.clone(); }
+            if other.is_full() { return self.clone(); }
+        }
+        
+        // Build a new BDD by merging both
+        let tsid_bits = Self::bits_for(self.tsid_dim.saturating_sub(1));
+        let token_bits = Self::bits_for(self.token_dim.saturating_sub(1));
+        let mut builder = BddBuilder::new(tsid_bits, token_bits);
+        
+        // Copy nodes from self, building remap table
+        let mut self_remap: Vec<u16> = vec![0; self.nodes.len()];
+        self_remap[0] = 0; // FALSE stays FALSE
+        self_remap[1] = 1; // TRUE stays TRUE
+        
+        for (old_idx, node) in self.nodes.iter().enumerate().skip(2) {
+            let new_lo = self_remap[node.lo as usize];
+            let new_hi = self_remap[node.hi as usize];
+            self_remap[old_idx] = builder.mk(node.var, new_lo, new_hi);
+        }
+        
+        // Copy nodes from other, building remap table
+        let mut other_remap: Vec<u16> = vec![0; other.nodes.len()];
+        other_remap[0] = 0;
+        other_remap[1] = 1;
+        
+        for (old_idx, node) in other.nodes.iter().enumerate().skip(2) {
+            let new_lo = other_remap[node.lo as usize];
+            let new_hi = other_remap[node.hi as usize];
+            other_remap[old_idx] = builder.mk(node.var, new_lo, new_hi);
+        }
+        
+        // Now apply the operation on the remapped roots
+        let self_root = self_remap[self.root as usize];
+        let other_root = other_remap[other.root as usize];
+        
+        let result_root = if is_or {
+            builder.apply_or(self_root, other_root)
+        } else {
+            builder.apply_and(self_root, other_root)
+        };
+        
+        builder.finish(result_root, self.tsid_dim, self.token_dim)
+    }
+    
+    /// Iterate over all positions in this BDD weight.
+    /// 
+    /// Positions are returned in sorted order.
+    pub fn iter(&self) -> impl Iterator<Item = usize> + '_ {
+        BddWeightIter::new(self)
+    }
+    
+    /// Get the number of positions in this BDD.
+    /// 
+    /// Note: This enumerates all positions, which can be slow for large BDDs.
+    /// Use `is_empty()` for quick emptiness check.
+    pub fn len(&self) -> usize {
+        if self.is_empty() { return 0; }
+        if self.is_full() { 
+            return self.token_dim as usize * self.tsid_dim as usize;
+        }
+        self.iter().count()
+    }
 }
+
+/// Iterator over positions in a BddWeight.
+struct BddWeightIter<'a> {
+    bdd: &'a BddWeight,
+    positions: Vec<usize>,
+    index: usize,
+}
+
+impl<'a> BddWeightIter<'a> {
+    fn new(bdd: &'a BddWeight) -> Self {
+        let mut positions = Vec::new();
+        bdd.enumerate_positions(&mut positions);
+        positions.sort_unstable();
+        BddWeightIter { bdd, positions, index: 0 }
+    }
+}
+
+impl<'a> Iterator for BddWeightIter<'a> {
+    type Item = usize;
+    
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.index < self.positions.len() {
+            let pos = self.positions[self.index];
+            self.index += 1;
+            Some(pos)
+        } else {
+            None
+        }
+    }
+    
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.positions.len() - self.index;
+        (remaining, Some(remaining))
+    }
+}
+
+impl<'a> ExactSizeIterator for BddWeightIter<'a> {}
 
 /// Decompose a 1D range into 2D rectangles.
 ///
@@ -750,5 +929,204 @@ mod tests {
         assert_eq!(BddWeight::bits_for(4), 3);
         assert_eq!(BddWeight::bits_for(255), 8);
         assert_eq!(BddWeight::bits_for(256), 9);
+    }
+    
+    // ========================================================================
+    // Tests for binary operations
+    // ========================================================================
+    
+    #[test]
+    fn test_union_disjoint() {
+        let tsid_dim = 10u16;
+        let token_dim = 10u16;
+        
+        // Two disjoint ranges
+        let a = BddWeight::from_ranges(vec![(0, 5)].into_iter(), tsid_dim, token_dim);
+        let b = BddWeight::from_ranges(vec![(10, 15)].into_iter(), tsid_dim, token_dim);
+        
+        let c = a.union(&b);
+        
+        // Check all positions from both ranges are in union
+        for pos in 0..=5 {
+            assert!(c.contains_pos(pos), "Position {} should be in union", pos);
+        }
+        for pos in 10..=15 {
+            assert!(c.contains_pos(pos), "Position {} should be in union", pos);
+        }
+        // Check positions between ranges are NOT in union
+        for pos in 6..10 {
+            assert!(!c.contains_pos(pos), "Position {} should NOT be in union", pos);
+        }
+    }
+    
+    #[test]
+    fn test_union_overlapping() {
+        let tsid_dim = 10u16;
+        let token_dim = 10u16;
+        
+        let a = BddWeight::from_ranges(vec![(0, 10)].into_iter(), tsid_dim, token_dim);
+        let b = BddWeight::from_ranges(vec![(5, 15)].into_iter(), tsid_dim, token_dim);
+        
+        let c = a.union(&b);
+        
+        // Union should be [0, 15]
+        for pos in 0..=15 {
+            assert!(c.contains_pos(pos), "Position {} should be in union", pos);
+        }
+        assert!(!c.contains_pos(16));
+    }
+    
+    #[test]
+    fn test_intersection() {
+        let tsid_dim = 10u16;
+        let token_dim = 10u16;
+        
+        let a = BddWeight::from_ranges(vec![(0, 10)].into_iter(), tsid_dim, token_dim);
+        let b = BddWeight::from_ranges(vec![(5, 15)].into_iter(), tsid_dim, token_dim);
+        
+        let c = a.intersection(&b);
+        
+        // Intersection should be [5, 10]
+        for pos in 0..5 {
+            assert!(!c.contains_pos(pos), "Position {} should NOT be in intersection", pos);
+        }
+        for pos in 5..=10 {
+            assert!(c.contains_pos(pos), "Position {} should be in intersection", pos);
+        }
+        for pos in 11..=15 {
+            assert!(!c.contains_pos(pos), "Position {} should NOT be in intersection", pos);
+        }
+    }
+    
+    #[test]
+    fn test_intersection_empty() {
+        let tsid_dim = 10u16;
+        let token_dim = 10u16;
+        
+        let a = BddWeight::from_ranges(vec![(0, 5)].into_iter(), tsid_dim, token_dim);
+        let b = BddWeight::from_ranges(vec![(10, 15)].into_iter(), tsid_dim, token_dim);
+        
+        let c = a.intersection(&b);
+        assert!(c.is_empty());
+    }
+    
+    #[test]
+    fn test_complement_basic() {
+        let tsid_dim = 10u16;
+        let token_dim = 10u16;
+        
+        // Create a BDD with positions 0-4
+        let a = BddWeight::from_ranges(vec![(0, 4)].into_iter(), tsid_dim, token_dim);
+        let not_a = a.complement();
+        
+        // Positions 0-4 should NOT be in complement
+        for pos in 0..=4 {
+            assert!(!not_a.contains_pos(pos), "Position {} should NOT be in complement", pos);
+        }
+        // Position 5+ should be in complement (within valid domain)
+        for pos in 5..20 {
+            assert!(not_a.contains_pos(pos), "Position {} should be in complement", pos);
+        }
+    }
+    
+    #[test]
+    fn test_complement_full_empty() {
+        let tsid_dim = 10u16;
+        let token_dim = 10u16;
+        
+        let empty = BddWeight::empty(tsid_dim, token_dim);
+        let full = BddWeight::full(tsid_dim, token_dim);
+        
+        assert!(empty.complement().is_full());
+        assert!(full.complement().is_empty());
+    }
+    
+    #[test]
+    fn test_double_complement() {
+        let tsid_dim = 10u16;
+        let token_dim = 10u16;
+        
+        let a = BddWeight::from_ranges(vec![(5, 15)].into_iter(), tsid_dim, token_dim);
+        let a_rs = a.to_rangeset();
+        
+        let double = a.complement().complement();
+        let double_rs = double.to_rangeset();
+        
+        assert_eq!(a_rs, double_rs, "Double complement should equal original");
+    }
+    
+    #[test]
+    fn test_subtract() {
+        let tsid_dim = 10u16;
+        let token_dim = 10u16;
+        
+        let a = BddWeight::from_ranges(vec![(0, 10)].into_iter(), tsid_dim, token_dim);
+        let b = BddWeight::from_ranges(vec![(5, 15)].into_iter(), tsid_dim, token_dim);
+        
+        let c = a.subtract(&b);
+        
+        // a - b should be [0, 4]
+        for pos in 0..5 {
+            assert!(c.contains_pos(pos), "Position {} should be in subtraction", pos);
+        }
+        for pos in 5..=10 {
+            assert!(!c.contains_pos(pos), "Position {} should NOT be in subtraction", pos);
+        }
+    }
+    
+    #[test]
+    fn test_union_with_empty() {
+        let tsid_dim = 10u16;
+        let token_dim = 10u16;
+        
+        let a = BddWeight::from_ranges(vec![(0, 5)].into_iter(), tsid_dim, token_dim);
+        let empty = BddWeight::empty(tsid_dim, token_dim);
+        
+        let c = a.union(&empty);
+        assert_eq!(a.to_rangeset(), c.to_rangeset());
+        
+        let d = empty.union(&a);
+        assert_eq!(a.to_rangeset(), d.to_rangeset());
+    }
+    
+    #[test]
+    fn test_intersection_with_full() {
+        let tsid_dim = 10u16;
+        let token_dim = 10u16;
+        
+        let a = BddWeight::from_ranges(vec![(0, 5)].into_iter(), tsid_dim, token_dim);
+        let full = BddWeight::full(tsid_dim, token_dim);
+        
+        let c = a.intersection(&full);
+        assert_eq!(a.to_rangeset(), c.to_rangeset());
+        
+        let d = full.intersection(&a);
+        assert_eq!(a.to_rangeset(), d.to_rangeset());
+    }
+    
+    #[test]
+    fn test_iter() {
+        let tsid_dim = 10u16;
+        let token_dim = 10u16;
+        
+        let a = BddWeight::from_ranges(vec![(0, 5), (10, 12)].into_iter(), tsid_dim, token_dim);
+        let positions: Vec<usize> = a.iter().collect();
+        
+        assert_eq!(positions, vec![0, 1, 2, 3, 4, 5, 10, 11, 12]);
+    }
+    
+    #[test]
+    fn test_len() {
+        let tsid_dim = 10u16;
+        let token_dim = 10u16;
+        
+        let a = BddWeight::from_ranges(vec![(0, 5)].into_iter(), tsid_dim, token_dim);
+        assert_eq!(a.len(), 6); // positions 0, 1, 2, 3, 4, 5
+        
+        let empty = BddWeight::empty(tsid_dim, token_dim);
+        assert_eq!(empty.len(), 0);
+        
+        let full = BddWeight::full(tsid_dim, token_dim);
+        assert_eq!(full.len(), 100); // 10 * 10
     }
 }
