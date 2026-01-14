@@ -27,6 +27,8 @@ pub mod weight_factorization_metrics;
 pub mod factored_weight;
 pub mod shared_bdd;
 pub mod heavy_weight;
+pub mod bdd_weight;
+pub mod weight_storage;
 pub mod test_weighted_automata;
 
 #[cfg(test)]
@@ -37,3 +39,5 @@ pub use self::common::{format_i16_char, format_pos_code, format_word, NWAStateID
 pub use self::dwa::{DWABody, DWABuildError, DWAState, DWAStates, DWA};
 pub use self::nwa::{NWABody, NWABuildError, NWAState, NWAStates, NWA};
 pub use self::heavy_weight::{HeavyWeight, WeightDimensions, WeightStats};
+pub use self::bdd_weight::BddWeight;
+pub use self::weight_storage::{WeightStorage, WeightStorageFactory, RangeSetStorage, RangeSetStorageFactory, BddStorage, BddStorageFactory, StorageMetrics, compare_storages};

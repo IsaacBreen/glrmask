@@ -17,3 +17,4 @@ mod test_push;
 mod test_repro;
 mod test_rm_epsilon_effect;
 mod test_weight_loosening;
+mod test_weight_storage;
