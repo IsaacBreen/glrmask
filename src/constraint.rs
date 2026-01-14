@@ -1218,16 +1218,20 @@ impl GrammarConstraint {
         crate::debug!(3, "Terminal DWA (final): {} states, {} transitions", 
             terminal_dwa.states.len(), terminal_dwa.states.num_transitions());
 
+        // Compute domain_max for weight trimming and metrics
+        let domain_max = if weight_heavy_enabled {
+            let n = vocab.internal_max_llm_token;
+            let m = num_tsids;
+            n.saturating_mul(m).saturating_add(m.saturating_sub(1))
+        } else {
+            vocab.internal_max_llm_token
+        };
+        
+        // Trim weights to domain_max to remove unnecessary range extensions to usize::MAX
+        terminal_dwa.trim_weights_to_domain(domain_max);
+
         // Weight complexity instrumentation (unique weights are interned).
         if crate::r#macro::is_debug_level_enabled(5) {
-            let domain_max = if weight_heavy_enabled {
-                let n = vocab.internal_max_llm_token;
-                let m = num_tsids;
-                n.saturating_mul(m).saturating_add(m.saturating_sub(1))
-            } else {
-                vocab.internal_max_llm_token
-            };
-
             crate::debug!(5, "Terminal DWA weight complexity (unique): total_ranges_unique={} (total_ranges_all={})", 
                 terminal_dwa.num_ranges_interned(),
                 terminal_dwa.num_ranges(),
@@ -2205,6 +2209,18 @@ impl GrammarConstraint {
             0
         };
         
+        // Compute domain_max for weight trimming
+        let domain_max = if weight_heavy {
+            let n = vocab.internal_max_llm_token;
+            let m = num_tsids;
+            n.saturating_mul(m).saturating_add(m.saturating_sub(1))
+        } else {
+            vocab.internal_max_llm_token
+        };
+        
+        // Trim weights to domain_max to remove unnecessary range extensions to usize::MAX
+        parser_dwa.trim_weights_to_domain(domain_max);
+        
         // Symbol-heavy mode: apply clip_weights and optimize_dwa_and_vocab
         // These optimizations assume N-space weights and reduce the token space
         if !weight_heavy {
@@ -2214,14 +2230,6 @@ impl GrammarConstraint {
 
         // Weight complexity instrumentation for the parser DWA.
         if crate::r#macro::is_debug_level_enabled(5) {
-            let domain_max = if weight_heavy {
-                let n = vocab.internal_max_llm_token;
-                let m = num_tsids;
-                n.saturating_mul(m).saturating_add(m.saturating_sub(1))
-            } else {
-                vocab.internal_max_llm_token
-            };
-
             crate::debug!(5, "Parser DWA weight complexity (unique): total_ranges_unique={} (total_ranges_all={})", 
                 parser_dwa.num_ranges_interned(),
                 parser_dwa.num_ranges(),

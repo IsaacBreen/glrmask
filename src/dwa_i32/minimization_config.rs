@@ -78,6 +78,7 @@ pub fn run_dwa_optimization_experiment(dwa: &mut DWA) {
                     DwaPass::ResidualPush => current_dwa.residuated_push(),
                     DwaPass::Minimize => current_dwa.minimize_states(),
                     DwaPass::ConsolidateRanges => current_dwa.consolidate_ranges(),
+                    DwaPass::TrimWeights => current_dwa.trim_weights(),
                 };
                 if changed {
                     current_changing_passes.push(pass);
@@ -217,7 +218,7 @@ impl NWA {
                 // OPTIMIZATION: Skip rm_epsilon to save ~2s - determinization can handle epsilons
                 // Trade-off: determinization may be slightly slower but overall faster
                 nwa_passes: vec![NwaPass::MinimizeRustfst, NwaPass::CompressTransitions],
-                dwa_passes: vec![DwaPass::Minimize, DwaPass::ConsolidateRanges],
+                dwa_passes: vec![DwaPass::Minimize, DwaPass::ConsolidateRanges, DwaPass::TrimWeights],
             },
             "TemplateDWA" => DeterminizeAndMinimizeConfig {
                 // Template DWAs are built from terminal characterization NWAs in template_dfa.rs.
@@ -240,7 +241,7 @@ impl NWA {
                 // NOTE: NWA MinimizeRustfst is too memory-intensive for large NWAs (2M+ states)
                 // Just do basic pruning before determinization
                 nwa_passes: vec![NwaPass::PruneDeadEnds, NwaPass::PruneUnreachable],
-                dwa_passes: vec![DwaPass::PruneDeadEnds, DwaPass::Minimize, DwaPass::ConsolidateRanges],
+                dwa_passes: vec![DwaPass::PruneDeadEnds, DwaPass::Minimize, DwaPass::ConsolidateRanges, DwaPass::TrimWeights],
             },
             "SuperDWA" => DeterminizeAndMinimizeConfig {
                 // SuperDWA is the "universal" DWA that gets specialized into many DWAs.
@@ -266,6 +267,7 @@ impl NWA {
                     DwaPass::PushWeightsToInitial,
                     DwaPass::PruneUnreachable,
                     DwaPass::ConsolidateRanges,
+                    DwaPass::TrimWeights,
                 ],
             }
         };
@@ -315,6 +317,7 @@ impl NWA {
                 DwaPass::ResidualPush => { dwa.residuated_push(); },
                 DwaPass::Minimize => { dwa.minimize_states(); },
                 DwaPass::ConsolidateRanges => { dwa.consolidate_ranges(); },
+                DwaPass::TrimWeights => { dwa.trim_weights(); },
             }
             let pass_time = pass_start.elapsed();
             if pass_time.as_millis() > 50 {

@@ -70,6 +70,7 @@ impl DWA {
                     DwaPass::ResidualPush => self.residuated_push_cyclic(),
                     DwaPass::Minimize => false,
                     DwaPass::ConsolidateRanges => self.consolidate_ranges(),
+                    DwaPass::TrimWeights => self.trim_weights(),
                 };
                 changed_in_iteration |= pass_changed;
             }
@@ -172,6 +173,7 @@ impl DWA {
                         changed
                     },
                     DwaPass::ConsolidateRanges => self.consolidate_ranges(),
+                    DwaPass::TrimWeights => self.trim_weights(),
                 };
                 if pass_changed {
                     current_changing_passes.insert(pass);

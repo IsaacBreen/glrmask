@@ -31,6 +31,7 @@ pub enum DwaPass {
     ResidualPush,
     Minimize,
     ConsolidateRanges,
+    TrimWeights,
 }
 
 impl DwaPass {
@@ -44,6 +45,8 @@ impl DwaPass {
             DwaPass::Minimize => std::env::var("DWA_DISABLE_MINIMIZE").map(|v| v != "1").unwrap_or(true),
             // ConsolidateRanges is now fast (~52ms) after optimization, enabled by default
             DwaPass::ConsolidateRanges => std::env::var("DWA_DISABLE_CONSOLIDATE_RANGES").map(|v| v != "1").unwrap_or(true),
+            // TrimWeights clips ranges to actual max values, removing unnecessary usize::MAX extensions
+            DwaPass::TrimWeights => std::env::var("DWA_DISABLE_TRIM_WEIGHTS").map(|v| v != "1").unwrap_or(true),
         }
     }
 }

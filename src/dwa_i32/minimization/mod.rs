@@ -63,6 +63,7 @@ impl DWA {
                 DwaPass::ResidualPush => { self.residuated_push(); },
                 DwaPass::Minimize => { self.minimize_states(); },
                 DwaPass::ConsolidateRanges => { self.consolidate_ranges(); },
+                DwaPass::TrimWeights => { self.trim_weights(); },
             }
         }
     }
