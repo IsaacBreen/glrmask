@@ -17,7 +17,15 @@
 
 use biodivine_lib_bdd::{Bdd, BddValuation, BddVariable, BddVariableSet};
 use range_set_blaze::RangeSetBlaze;
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::sync::Arc;
+
+// Thread-local cache for BddVariableSets to avoid repeated allocation.
+// Key is (tsid_bits, token_bits).
+thread_local! {
+    static VAR_SET_CACHE: RefCell<HashMap<(u8, u8), Arc<BddVariableSet>>> = RefCell::new(HashMap::new());
+}
 
 /// Per-weight BDD representation using biodivine_lib_bdd.
 ///
@@ -64,6 +72,16 @@ impl BddWeightBiodivine {
     fn create_vars(tsid_bits: u8, token_bits: u8) -> BddVariableSet {
         let total_bits = (tsid_bits + token_bits) as u16;
         BddVariableSet::new_anonymous(total_bits)
+    }
+
+    /// Get or create a cached variable set for the given bit widths.
+    fn get_vars(tsid_bits: u8, token_bits: u8) -> Arc<BddVariableSet> {
+        VAR_SET_CACHE.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            cache.entry((tsid_bits, token_bits))
+                .or_insert_with(|| Arc::new(Self::create_vars(tsid_bits, token_bits)))
+                .clone()
+        })
     }
 
     /// Build a BDD for the interval [lo, hi] over k bits, MSB to LSB.
@@ -129,14 +147,20 @@ impl BddWeightBiodivine {
     }
 
     /// Build a BDD for rectangle: token in [t1, t2] AND tsid in [s1, s2].
-    fn rect(&self, t1: u16, t2: u16, s1: u16, s2: u16) -> Bdd {
+    /// This is a static method for efficient construction.
+    fn rect_static(vars: &BddVariableSet, tsid_bits: u8, token_bits: u8, t1: u16, t2: u16, s1: u16, s2: u16) -> Bdd {
         // TSID interval (first tsid_bits variables)
-        let tsid_bdd = Self::interval(&self.vars, 0, self.tsid_bits, s1, s2);
+        let tsid_bdd = Self::interval(vars, 0, tsid_bits, s1, s2);
         
         // Token interval (next token_bits variables)
-        let token_bdd = Self::interval(&self.vars, self.tsid_bits, self.token_bits, t1, t2);
+        let token_bdd = Self::interval(vars, tsid_bits, token_bits, t1, t2);
         
         tsid_bdd.and(&token_bdd)
+    }
+
+    /// Build a BDD for rectangle: token in [t1, t2] AND tsid in [s1, s2].
+    fn rect(&self, t1: u16, t2: u16, s1: u16, s2: u16) -> Bdd {
+        Self::rect_static(&self.vars, self.tsid_bits, self.token_bits, t1, t2, s1, s2)
     }
 
     /// Create from 1D ranges using dimension info.
@@ -149,7 +173,8 @@ impl BddWeightBiodivine {
     ) -> Self {
         let tsid_bits = Self::bits_for(tsid_dim.saturating_sub(1));
         let token_bits = Self::bits_for(token_dim.saturating_sub(1));
-        let vars = Arc::new(Self::create_vars(tsid_bits, token_bits));
+        // Use cached variable set for efficiency
+        let vars = Self::get_vars(tsid_bits, token_bits);
 
         let mut result = vars.mk_false();
 
@@ -162,18 +187,8 @@ impl BddWeightBiodivine {
 
             let rects = decompose_range_to_rects(tok_s, tsid_s, tok_e, tsid_e, tsid_dim);
 
-            // Create temp BddWeightBiodivine for rect building
-            let temp = Self {
-                bdd: result.clone(),
-                vars: vars.clone(),
-                tsid_dim,
-                token_dim,
-                tsid_bits,
-                token_bits,
-            };
-
             for (t1, t2, s1, s2) in rects {
-                let rect_bdd = temp.rect(t1, t2, s1, s2);
+                let rect_bdd = Self::rect_static(&vars, tsid_bits, token_bits, t1, t2, s1, s2);
                 result = result.or(&rect_bdd);
 
                 // Short-circuit if result is TRUE
@@ -201,7 +216,7 @@ impl BddWeightBiodivine {
     pub fn empty(tsid_dim: u16, token_dim: u16) -> Self {
         let tsid_bits = Self::bits_for(tsid_dim.saturating_sub(1));
         let token_bits = Self::bits_for(token_dim.saturating_sub(1));
-        let vars = Arc::new(Self::create_vars(tsid_bits, token_bits));
+        let vars = Self::get_vars(tsid_bits, token_bits);
         
         Self {
             bdd: vars.mk_false(),
@@ -217,10 +232,63 @@ impl BddWeightBiodivine {
     pub fn full(tsid_dim: u16, token_dim: u16) -> Self {
         let tsid_bits = Self::bits_for(tsid_dim.saturating_sub(1));
         let token_bits = Self::bits_for(token_dim.saturating_sub(1));
-        let vars = Arc::new(Self::create_vars(tsid_bits, token_bits));
+        let vars = Self::get_vars(tsid_bits, token_bits);
         
         Self {
             bdd: vars.mk_true(),
+            vars,
+            tsid_dim,
+            token_dim,
+            tsid_bits,
+            token_bits,
+        }
+    }
+
+    /// Create a TSID column mask: all tokens for a specific TSID value.
+    /// This is much more efficient than from_ranges for strided patterns.
+    /// 
+    /// Represents: {t, t+M, t+2M, ..., t+N*M} where M = tsid_dim, N = token_dim
+    /// In BDD terms: tsid == specific_tsid AND token in [0, token_dim)
+    pub fn tsid_column(tsid: u16, tsid_dim: u16, token_dim: u16) -> Self {
+        let tsid_bits = Self::bits_for(tsid_dim.saturating_sub(1));
+        let token_bits = Self::bits_for(token_dim.saturating_sub(1));
+        let vars = Self::get_vars(tsid_bits, token_bits);
+
+        // tsid must equal the specific value (interval [tsid, tsid])
+        let tsid_bdd = Self::interval(&vars, 0, tsid_bits, tsid, tsid);
+        
+        // token can be any valid value [0, token_dim - 1]
+        let token_bdd = Self::interval(&vars, tsid_bits, token_bits, 0, token_dim.saturating_sub(1));
+        
+        Self {
+            bdd: tsid_bdd.and(&token_bdd),
+            vars,
+            tsid_dim,
+            token_dim,
+            tsid_bits,
+            token_bits,
+        }
+    }
+
+    /// Create a multi-TSID column mask: all tokens for a set of TSID values.
+    /// More efficient than building from ranges for strided patterns.
+    pub fn tsid_columns<I: IntoIterator<Item = u16>>(tsids: I, tsid_dim: u16, token_dim: u16) -> Self {
+        let tsid_bits = Self::bits_for(tsid_dim.saturating_sub(1));
+        let token_bits = Self::bits_for(token_dim.saturating_sub(1));
+        let vars = Self::get_vars(tsid_bits, token_bits);
+
+        // token can be any valid value [0, token_dim - 1]
+        let token_bdd = Self::interval(&vars, tsid_bits, token_bits, 0, token_dim.saturating_sub(1));
+
+        // Union of all tsid values
+        let mut tsid_union = vars.mk_false();
+        for tsid in tsids {
+            let tsid_bdd = Self::interval(&vars, 0, tsid_bits, tsid, tsid);
+            tsid_union = tsid_union.or(&tsid_bdd);
+        }
+        
+        Self {
+            bdd: tsid_union.and(&token_bdd),
             vars,
             tsid_dim,
             token_dim,
@@ -654,6 +722,56 @@ mod tests {
                 biodivine_bytes
             );
         }
+    }
+
+    #[test]
+    fn test_tsid_column() {
+        // Test single TSID column
+        let tsid_dim = 100u16;
+        let token_dim = 1000u16;
+        
+        // Create column for tsid=5
+        let column = BddWeightBiodivine::tsid_column(5, tsid_dim, token_dim);
+        
+        // Should contain (token, tsid=5) for all tokens
+        for t in 0..token_dim {
+            assert!(column.contains(t, 5), "should contain token {} with tsid 5", t);
+            assert!(!column.contains(t, 6), "should not contain token {} with tsid 6", t);
+        }
+        
+        // Length should be token_dim (one per token)
+        assert_eq!(column.len(), token_dim as usize);
+    }
+
+    #[test]
+    fn test_tsid_columns() {
+        // Test multiple TSID columns
+        let tsid_dim = 100u16;
+        let token_dim = 1000u16;
+        
+        // Create columns for tsids 10, 20, 30
+        let columns = BddWeightBiodivine::tsid_columns(
+            vec![10u16, 20, 30],
+            tsid_dim,
+            token_dim,
+        );
+        
+        // Should contain (token, tsid) for tsid in {10, 20, 30}
+        for t in 0..token_dim {
+            assert!(columns.contains(t, 10));
+            assert!(columns.contains(t, 20));
+            assert!(columns.contains(t, 30));
+            assert!(!columns.contains(t, 5));
+            assert!(!columns.contains(t, 15));
+        }
+        
+        // Length should be 3 * token_dim
+        assert_eq!(columns.len(), 3 * token_dim as usize);
+        
+        // Node count should be small (efficient representation)
+        println!("tsid_columns node count: {}", columns.num_nodes());
+        // With good BDD structure, should be roughly O(tsid_bits + token_bits)
+        assert!(columns.num_nodes() < 100, "BDD should be compact, got {} nodes", columns.num_nodes());
     }
 
     #[test]

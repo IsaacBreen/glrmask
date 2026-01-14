@@ -135,33 +135,25 @@ where
 pub fn create_tsid_set_mask_with_offset_map<I>(
     tsids: I,
     num_tsids: usize,
-    max_llm_token: usize,
+    _max_llm_token: usize,  // No longer needed for optimized path
     tsid_offset_map: Option<&[usize]>,
 ) -> Weight
 where
     I: IntoIterator<Item = usize>,
 {
-    // Build base pattern from all tsids
-    let base_pattern: RangeSetBlaze<usize> = tsids
+    // Build base pattern from all tsids (with offset mapping if provided)
+    let mapped_tsids: Vec<usize> = tsids
         .into_iter()
         .map(|t| tsid_to_offset(t, tsid_offset_map))
         .collect();
     
-    if base_pattern.is_empty() {
+    if mapped_tsids.is_empty() {
         return Weight::zeros();
     }
     
-    // Tile the pattern across all LLM tokens
-    // For each LLM token n, shift the base pattern by n * num_tsids
-    let mut mask = RangeSetBlaze::new();
-    for n in 0..=max_llm_token {
-        let offset = n * num_tsids;
-        for tsid in base_pattern.iter() {
-            mask.insert(tsid + offset);
-        }
-    }
-    
-    Weight::from_rsb(mask)
+    // Use optimized tsid_columns construction
+    // This is O(|tsids|) for BDD backends instead of O(|tsids| * |tokens|)
+    Weight::tsid_columns(mapped_tsids)
 }
 
 /// Collapse a weight from N×M-space back to N-space.

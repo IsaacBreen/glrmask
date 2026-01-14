@@ -241,6 +241,61 @@ impl AbstractWeight {
         }
     }
 
+    /// Create a weight representing all tokens for specific TSID columns.
+    /// This is optimized for BDD backends where it's O(|tsids|) instead of O(|tsids| * |tokens|).
+    ///
+    /// For weight-heavy mode: represents {t*M + s : t in 0..N, s in tsids} where M = num_tsids, N = num_tokens
+    pub fn tsid_columns<I: IntoIterator<Item = usize>>(tsids: I) -> Self {
+        match get_weight_backend() {
+            WeightBackend::RangeSet => {
+                // For RangeSet, fall back to generic construction
+                let dims = get_weight_dimensions();
+                let num_tsids = dims.num_tsids;
+                let num_tokens = dims.num_tokens;
+                let tsids: Vec<usize> = tsids.into_iter().collect();
+                
+                // Build ranges efficiently
+                let mut rsb = RangeSetBlaze::new();
+                for n in 0..num_tokens {
+                    let offset = n * num_tsids;
+                    for &tsid in &tsids {
+                        rsb.insert(tsid + offset);
+                    }
+                }
+                Self::Rs(RangeSet::from_rsb(rsb))
+            }
+            WeightBackend::Bdd => {
+                // For custom BDD, fall back to generic construction (could optimize later)
+                let dims = get_weight_dimensions();
+                let num_tsids = dims.num_tsids;
+                let num_tokens = dims.num_tokens;
+                let tsids: Vec<usize> = tsids.into_iter().collect();
+                
+                let mut rsb = RangeSetBlaze::new();
+                for n in 0..num_tokens {
+                    let offset = n * num_tsids;
+                    for &tsid in &tsids {
+                        rsb.insert(tsid + offset);
+                    }
+                }
+                Self::Bdd(Arc::new(BddWeight::from_ranges(
+                    rsb.ranges().map(|r| (*r.start(), *r.end())),
+                    num_tsids as u16,
+                    num_tokens as u16,
+                )))
+            }
+            WeightBackend::BddBiodivine => {
+                // Optimized: use BDD structure directly
+                let dims = get_weight_dimensions();
+                Self::BddBiodivine(Arc::new(BddWeightBiodivine::tsid_columns(
+                    tsids.into_iter().map(|t| t as u16),
+                    dims.num_tsids as u16,
+                    dims.num_tokens as u16,
+                )))
+            }
+        }
+    }
+
     // ------------------------------------------------------------------------
     // Queries
     // ------------------------------------------------------------------------
