@@ -768,6 +768,24 @@ impl AbstractWeight {
         dispatch_backend_ctor!(ones, len)
     }
 
+    /// Create a weight representing the full universe for the given dimensions.
+    /// 
+    /// This creates a weight containing all positions from 0 to dims.total_size()-1,
+    /// representing the complete token × TSID space.
+    /// 
+    /// # Arguments
+    /// * `dims` - The weight dimensions specifying num_tokens and num_tsids
+    /// 
+    /// # Example
+    /// ```ignore
+    /// let dims = WeightDimensions::new(1000, 10);
+    /// let all = AbstractWeight::all(dims);
+    /// assert_eq!(all.len(), 10000);
+    /// ```
+    pub fn all(dims: WeightDimensions) -> Self {
+        Self::ones(dims.total_size())
+    }
+
     /// Create a weight representing all tokens for specific TSID columns.
     /// This is optimized for BDD backends where it's O(|tsids|) instead of O(|tsids| * |tokens|).
     ///

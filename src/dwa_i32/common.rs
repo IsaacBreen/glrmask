@@ -20,9 +20,12 @@ pub type NWAStateID = usize;
 pub type Label = i32;
 
 /// Create a weight representing the full universe for the current dimensions.
+/// 
+/// This is a convenience function that uses the global weight dimensions.
+/// For explicit dimension control, use `Weight::all(dims)` instead.
 pub fn weight_all() -> Weight {
     let dims = get_weight_dimensions();
-    Weight::ones(dims.total_size())
+    Weight::all(dims)
 }
 
 /// Create the complement of a weight relative to the full universe.
