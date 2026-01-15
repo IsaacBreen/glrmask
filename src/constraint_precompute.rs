@@ -113,6 +113,7 @@ impl<'r> Precomputer1<'r> {
             if !roots.contains_key(&rep_sid) {
                 let root_state = nwa.add_state();
                 roots.insert(rep_sid, root_state);
+                println!("roots: rep_tsid {} -> NWA state {}", rep_sid.0, root_state);
             }
         }
         crate::debug!(5, "Created trie1 roots ({} states for {} total tsids)", roots.len(), state_to_rep.len());
@@ -251,15 +252,20 @@ impl<'r> Precomputer1<'r> {
             }
 
             // Create one epsilon transition per representative with combined tsid mask
+            println!("finish: rep_to_tsids groups = {:?}", rep_to_tsids.iter().map(|(k,v)| (k.0, v.len())).collect::<Vec<_>>());
             for (rep_tsid, tsids) in rep_to_tsids {
                 debug_assert!(tsids.contains(&rep_tsid.0));
+                println!("finish: rep_tsid={} tsids={:?} root_state={:?}", rep_tsid.0, tsids, self.roots.get(&rep_tsid));
                 if let Some(&state) = self.roots.get(&rep_tsid) {
                     // Create combined tsid mask for all tsids that map to this representative.
                     // If we have a tsid->offset map, build the mask in the permuted offset space
                     // (this can substantially reduce RangeSet fragmentation when representative
                     // groups are scattered across the original tsid numbering).
+                    let use_offset_map = !self.tsid_offset_map.is_empty();
+                    println!("finish: creating tsid_mask for state {} with tsids={:?}, use_offset_map={}, offset_map={:?}", 
+                        state, tsids, use_offset_map, &self.tsid_offset_map[..5.min(self.tsid_offset_map.len())]);
                     let tsid_mask = create_tsid_set_mask_with_offset_map(
-                        tsids,
+                        tsids.clone(),
                         self.num_tsids,
                         self.internal_max_llm_token,
                         if self.tsid_offset_map.is_empty() {
@@ -268,6 +274,8 @@ impl<'r> Precomputer1<'r> {
                             Some(self.tsid_offset_map.as_slice())
                         },
                     );
+                    let first_few_rsb: Vec<_> = tsid_mask.to_rsb().ranges().take(5).collect();
+                    println!("finish: tsid_mask created for state {} first_few={:?}", state, first_few_rsb);
                     self.nwa.add_epsilon(new_start_state, state, tsid_mask);
                 }
             }
@@ -279,13 +287,13 @@ impl<'r> Precomputer1<'r> {
         for (src, state) in self.nwa.states.0.iter().enumerate() {
             for (label, targets) in &state.transitions {
                 for (dst, weight) in targets {
-                    println!("finish: transition {} --{}--> {} empty={} len={}",
-                        src, label, dst, weight.is_empty(), weight.len());
+                    println!("finish: transition {} --{}--> {} empty={} len={} first_few={:?}",
+                        src, label, dst, weight.is_empty(), weight.len(), weight.to_rsb().ranges().take(5).collect::<Vec<_>>());
                 }
             }
             for (dst, weight) in &state.epsilons {
-                println!("finish: epsilon {} --eps--> {} empty={} len={}",
-                    src, dst, weight.is_empty(), weight.len());
+                println!("finish: epsilon {} --eps--> {} empty={} len={} first_few={:?}",
+                    src, dst, weight.is_empty(), weight.len(), weight.to_rsb().ranges().take(5).collect::<Vec<_>>());
             }
         }
 

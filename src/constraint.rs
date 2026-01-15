@@ -1040,6 +1040,10 @@ impl GrammarConstraint {
             .collect();
         println!("build_with_config_inner: internal_to_original_map done");
         crate::debug!(4, "Done building internal_to_original_map in {:?}", t_i2o.elapsed());
+        // Debug: show the internal_to_original mapping
+        for (int_id, orig_bv) in &internal_to_original_map {
+            crate::debug!(5, "  internal {} -> original {:?}", int_id, orig_bv.iter_up_to(100).collect::<Vec<_>>());
+        }
 
         // internal_llm_token_map was already computed in setup_combined - no need to iterate 50K tokens again!
 

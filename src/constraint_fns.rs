@@ -298,21 +298,24 @@ impl<'a> GrammarConstraintState<'a> {
                 if let Some(final_weight) = &dwa_state.final_weight {
                     if let Some(reduced_acc) = gss.reduce_acc() {
                         let final_weight_rsb = final_weight.to_rsb();
-                        crate::debug!(7, "  Final weight RSB: ranges_len={}, first_few={:?}",
+                        crate::debug!(7, "  Final weight RSB: ranges_len={}, ALL={:?}",
                             final_weight_rsb.ranges_len(),
-                            final_weight_rsb.ranges().take(3).collect::<Vec<_>>());
-                        crate::debug!(7, "  Reduced acc RSB: ranges_len={}, first_few={:?}",
+                            final_weight_rsb.ranges().collect::<Vec<_>>());
+                        crate::debug!(7, "  Reduced acc RSB: ranges_len={}, ALL={:?}",
                             reduced_acc.ranges_len(),
-                            reduced_acc.ranges().take(3).collect::<Vec<_>>());
+                            reduced_acc.ranges().collect::<Vec<_>>());
                         let final_tokens = &reduced_acc & &final_weight_rsb;
                         crate::debug!(7, "  After intersection: ranges_len={}", final_tokens.ranges_len());
                         if !final_tokens.is_empty() {
                             // Collapse from N×M to N before adding to result
                             let collapsed = collapse_weight_rsb(&final_tokens, num_tsids);
-                            crate::debug!(7, "  Collapsed: ranges_len={}, first_few={:?}",
+                            crate::debug!(7, "  Collapsed: ranges_len={}, ALL={:?}",
                                 collapsed.ranges_len(),
-                                collapsed.ranges().take(3).collect::<Vec<_>>());
+                                collapsed.ranges().collect::<Vec<_>>());
                             final_mask_internal |= RangeSet::from(collapsed);
+                            crate::debug!(7, "  final_mask_internal after: ranges_len={}, ALL={:?}",
+                                final_mask_internal.inner.ranges_len(),
+                                final_mask_internal.inner.ranges().collect::<Vec<_>>());
                         }
                     }
                 }

@@ -689,7 +689,12 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
             for (dest_id, weight) in transitions {
                 // Project weight to token space for intersection with current tokens
                 let edge_tokens: LLMTokenBV = weight.project_to_tokens(dims).into();
+                crate::debug!(8, "Step: edge to {} has edge_tokens={:?}, current_tokens={:?}",
+                    dest_id,
+                    edge_tokens.inner.ranges().take(10).collect::<Vec<_>>(),
+                    current_tokens.inner.ranges().take(10).collect::<Vec<_>>());
                 let next_tokens = current_tokens & &edge_tokens;
+                crate::debug!(8, "  next_tokens={:?}", next_tokens.inner.ranges().take(10).collect::<Vec<_>>());
                 if next_tokens.is_empty() { continue; }
                 let mut terminal_map = BTreeMap::new();
                 terminal_map.insert(terminal_id, weight.clone());
@@ -785,7 +790,12 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
                 if let Some(fw) = &reversed_nwa.states[node_id].final_weight {
                     // Project final weight to token space for intersection with current tokens
                     let fw_tokens: LLMTokenBV = fw.project_to_tokens(dims).into();
+                    crate::debug!(7, "Collecting at node {}: tokens={:?}, fw_tokens={:?}",
+                        node_id, 
+                        tokens.inner.ranges().take(10).collect::<Vec<_>>(),
+                        fw_tokens.inner.ranges().take(10).collect::<Vec<_>>());
                     let intersection_bv = &tokens & &fw_tokens;
+                    crate::debug!(7, "  intersection_bv={:?}", intersection_bv.inner.ranges().take(10).collect::<Vec<_>>());
                     if !intersection_bv.is_empty() {
                         // The weight we store should be the intersection in token space,
                         // but we need to expand it back to position space (N×M) for the parser DWA
@@ -877,7 +887,10 @@ pub fn precompute_token_bvs_and_signatures(reversed_nwa: &NWA, traversal_data: &
             let mut results = Vec::new();
             for (dest_id, weight) in transitions {
                 // Project the weight to token space (handles weight-heavy mode)
+                crate::debug!(9, "precompute step: dest={}, weight_len={}, raw_weight_ALL={:?}",
+                    dest_id, weight.len(), weight.to_rsb().ranges().collect::<Vec<_>>());
                 let edge_bv: LLMTokenBV = weight.project_to_tokens(dims).into();
+                crate::debug!(9, "  projected edge_bv={:?}", edge_bv.inner.ranges().take(10).collect::<Vec<_>>());
                 let next = tokens & &edge_bv;
                 if !next.is_empty() { results.push((*dest_id, next)); }
             }
