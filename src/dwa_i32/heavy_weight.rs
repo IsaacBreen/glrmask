@@ -423,7 +423,7 @@ impl HeavyWeight {
             "num_tsids mismatch: factored has {}, dims has {}",
             factored.num_tsids, dims.num_tsids
         );
-        let rsb = factored.expand();
+        let rsb = factored.expand_impl();
         Self::from_rangeset(RangeSet::from_rsb(rsb), dims)
     }
     

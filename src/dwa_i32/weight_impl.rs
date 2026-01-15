@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::fmt::{Debug, Display, Formatter};
 use std::hash::{Hash, Hasher};
 use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Not, Sub, SubAssign};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 use range_set_blaze::RangeSetBlaze;
 use once_cell::sync::Lazy;
@@ -47,18 +47,19 @@ pub fn get_weight_backend() -> WeightBackend {
     })
 }
 
-/// Global weight dimensions (needed for BDD backend).
-/// Set once at the start of constraint building.
-static WEIGHT_DIMS: OnceLock<WeightDimensions> = OnceLock::new();
+/// Global weight dimensions (needed for Factored/BDD backends).
+/// Uses RwLock to allow updating when building multiple constraints.
+static WEIGHT_DIMS: RwLock<Option<WeightDimensions>> = RwLock::new(None);
 
-/// Set the global weight dimensions. Must be called before creating BDD weights.
+/// Set the global weight dimensions. Can be called multiple times.
 pub fn set_weight_dimensions(dims: WeightDimensions) {
-    let _ = WEIGHT_DIMS.set(dims);
+    let mut guard = WEIGHT_DIMS.write().unwrap();
+    *guard = Some(dims);
 }
 
 /// Get the global weight dimensions.
 pub fn get_weight_dimensions() -> WeightDimensions {
-    WEIGHT_DIMS.get().copied().unwrap_or_default()
+    WEIGHT_DIMS.read().unwrap().unwrap_or_default()
 }
 
 // For now, just re-export RangeSet as Weight.

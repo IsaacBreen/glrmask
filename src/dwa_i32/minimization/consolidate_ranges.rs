@@ -206,7 +206,7 @@ impl DWA {
             for (&label, &dest) in &self.states[state_id].transitions {
                 if let Some(weight) = self.states[state_id].trans_weights.get(&label) {
                     // Tokens that can reach dest through this edge
-                    let edge_tokens = &current_reach & weight.rsb();
+                    let edge_tokens = &current_reach & &weight.to_rsb();
                     
                     if !edge_tokens.is_empty() {
                         let old_reach = reach[dest].clone();
@@ -236,7 +236,7 @@ impl DWA {
         
         for state_id in 0..n {
             if let Some(fw) = &self.states[state_id].final_weight {
-                reach[state_id] = fw.rsb().clone();
+                reach[state_id] = fw.to_rsb();
                 if !in_queue[state_id] {
                     queue.push_back(state_id);
                     in_queue[state_id] = true;
@@ -261,7 +261,7 @@ impl DWA {
             for &(src, label) in &rev_edges[state_id] {
                 if let Some(weight) = self.states[src].trans_weights.get(&label) {
                     // Tokens that can reach acceptance through this edge
-                    let edge_tokens = &current_reach & weight.rsb();
+                    let edge_tokens = &current_reach & &weight.to_rsb();
                     
                     if !edge_tokens.is_empty() {
                         let old_reach = reach[src].clone();
@@ -376,7 +376,7 @@ fn optimize_weight_ranges(weight: &Weight, tokens_for_removal: &RangeSetBlaze<us
     }
     
     // Step 1: Remove ranges that don't intersect tokens_for_removal
-    let pruned = weight.rsb() & tokens_for_removal;
+    let pruned = &weight.to_rsb() & tokens_for_removal;
     
     if pruned.is_empty() {
         return (Weight::zeros(), original_ranges, 0);

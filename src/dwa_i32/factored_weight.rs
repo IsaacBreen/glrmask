@@ -12,18 +12,31 @@
 //! - AND: Pairwise intersection of terms, filter empty results
 //! - OR:  Concatenate terms, optionally merge same-profile terms
 //! - contains: Check if any term contains the (token, tsid) pair
+//!
+//! NOTE: This is a pure 2D representation. No 1D expansion is cached.
+//! Expansion to 1D is only for debugging purposes.
 
 use range_set_blaze::RangeSetBlaze;
+use std::fmt;
 
 /// A weight represented as a union of 2D profiles.
 /// Each term is a Cartesian product: TokenSet × TsidSet.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct FactoredWeight {
     /// List of (TokenRangeSet, TsidRangeSet) pairs.
     /// The weight is the union of all these Cartesian products.
-    pub terms: Vec<(RangeSetBlaze<u16>, RangeSetBlaze<u16>)>,
+    terms: Vec<(RangeSetBlaze<u16>, RangeSetBlaze<u16>)>,
     /// Number of tokenizer states (M in the N×M expansion)
     pub num_tsids: u16,
+}
+
+impl fmt::Debug for FactoredWeight {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FactoredWeight")
+            .field("num_terms", &self.terms.len())
+            .field("num_tsids", &self.num_tsids)
+            .finish()
+    }
 }
 
 impl FactoredWeight {
@@ -45,6 +58,50 @@ impl FactoredWeight {
         Self { terms: vec![(tokens, tsids)], num_tsids }
     }
     
+    /// Create a factored weight from a token set (N-space) × all TSIDs.
+    /// This is efficient for weight-heavy mode where we have tokens and want all tsids.
+    pub fn from_token_set_all_tsids(tokens: RangeSetBlaze<usize>, num_tsids: u16) -> Self {
+        if tokens.is_empty() || num_tsids == 0 {
+            return Self::empty(num_tsids);
+        }
+        // Convert usize to u16 for token set
+        let tok_u16: RangeSetBlaze<u16> = tokens.ranges()
+            .map(|r| (*r.start() as u16)..=(*r.end() as u16))
+            .collect();
+        // All tsids = [0, num_tsids - 1]
+        let mut all_tsids = RangeSetBlaze::new();
+        all_tsids.ranges_insert(0..=(num_tsids - 1));
+        Self::from_product(tok_u16, all_tsids, num_tsids)
+    }
+    
+    /// Create a factored weight from a token set (N-space) × specific TSID.
+    /// This is the correct method for weight-heavy precomputation where we know the tsid.
+    pub fn from_token_set_specific_tsid(tokens: RangeSetBlaze<usize>, tsid: usize, num_tsids: u16) -> Self {
+        if tokens.is_empty() || num_tsids == 0 {
+            return Self::empty(num_tsids);
+        }
+        // Convert usize to u16 for token set
+        let tok_u16: RangeSetBlaze<u16> = tokens.ranges()
+            .map(|r| (*r.start() as u16)..=(*r.end() as u16))
+            .collect();
+        // Just this one tsid
+        let mut tsid_set = RangeSetBlaze::new();
+        tsid_set.ranges_insert(tsid as u16..=tsid as u16);
+        Self::from_product(tok_u16, tsid_set, num_tsids)
+    }
+    
+    /// Create a "full" weight covering all tokens × all tsids.
+    pub fn full(num_tokens: usize, num_tsids: u16) -> Self {
+        if num_tokens == 0 || num_tsids == 0 {
+            return Self::empty(num_tsids);
+        }
+        let mut all_tokens = RangeSetBlaze::new();
+        all_tokens.ranges_insert(0..=(num_tokens as u16 - 1));
+        let mut all_tsids = RangeSetBlaze::new();
+        all_tsids.ranges_insert(0..=(num_tsids - 1));
+        Self::from_product(all_tokens, all_tsids, num_tsids)
+    }
+    
     /// Check if this weight is empty.
     pub fn is_empty(&self) -> bool {
         self.terms.is_empty() || self.terms.iter().all(|(t, s)| t.is_empty() || s.is_empty())
@@ -57,10 +114,35 @@ impl FactoredWeight {
         })
     }
     
+    /// Check if a 1D position is contained in this weight.
+    /// Position = token * num_tsids + tsid
+    pub fn contains_pos(&self, pos: usize) -> bool {
+        let num_tsids = self.num_tsids as usize;
+        let token = (pos / num_tsids) as u16;
+        let tsid = (pos % num_tsids) as u16;
+        self.contains(token, tsid)
+    }
+    
     /// Compute the union of two factored weights.
     /// Simply concatenates the terms and optionally merges same-profile terms.
     pub fn union(&self, other: &FactoredWeight) -> FactoredWeight {
         debug_assert_eq!(self.num_tsids, other.num_tsids);
+        
+        // Fast path: if either is empty, return the other
+        if self.is_empty() {
+            return other.clone();
+        }
+        if other.is_empty() {
+            return self.clone();
+        }
+        
+        // Fast path: if either is full, return a "full" weight
+        if self.is_full() {
+            return self.clone();
+        }
+        if other.is_full() {
+            return other.clone();
+        }
         
         let mut terms = self.terms.clone();
         terms.extend(other.terms.iter().cloned());
@@ -75,6 +157,20 @@ impl FactoredWeight {
     /// Returns a new weight containing all (token, tsid) pairs in both weights.
     pub fn intersection(&self, other: &FactoredWeight) -> FactoredWeight {
         debug_assert_eq!(self.num_tsids, other.num_tsids);
+        
+        // Fast path: if either is empty, return empty
+        if self.is_empty() || other.is_empty() {
+            return FactoredWeight::empty(self.num_tsids);
+        }
+        
+        // Fast path: if self is full, return other
+        if self.is_full() {
+            return other.clone();
+        }
+        // Fast path: if other is full, return self
+        if other.is_full() {
+            return self.clone();
+        }
         
         let mut result = Vec::new();
         for (tok_a, tsid_a) in &self.terms {
@@ -110,9 +206,7 @@ impl FactoredWeight {
             let tsid_e = (end % num_tsids) as u16;
             
             // Generate rectangles for this range
-            let rects: Vec<(u16, u16, u16, u16)> = decompose_range_to_rects(
-                tok_s, tsid_s, tok_e, tsid_e, num_tsids_u16
-            );
+            let rects = decompose_range_to_rects(tok_s, tsid_s, tok_e, tsid_e, num_tsids_u16);
             
             for (t1, t2, s1, s2) in rects {
                 profile_map.entry((s1, s2))
@@ -133,35 +227,14 @@ impl FactoredWeight {
         FactoredWeight { terms, num_tsids: num_tsids_u16 }
     }
     
-    /// Expand this factored weight to the full 1D N×M-space representation.
-    /// This is the inverse of from_1d_ranges.
-    /// 
-    /// Position = token * num_tsids + tsid
-    pub fn expand(&self) -> RangeSetBlaze<usize> {
-        let mut result = RangeSetBlaze::new();
-        let num_tsids = self.num_tsids as usize;
-        
-        for (tok_set, tsid_set) in &self.terms {
-            // For each token range and tsid range, compute expanded positions
-            for tok_range in tok_set.ranges() {
-                let tok_start = *tok_range.start() as usize;
-                let tok_end = *tok_range.end() as usize;
-                
-                for tsid_range in tsid_set.ranges() {
-                    let tsid_start = *tsid_range.start() as usize;
-                    let tsid_end = *tsid_range.end() as usize;
-                    
-                    // Each token in the range maps to a contiguous range of positions
-                    for token in tok_start..=tok_end {
-                        let pos_start = token * num_tsids + tsid_start;
-                        let pos_end = token * num_tsids + tsid_end;
-                        result.ranges_insert(pos_start..=pos_end);
-                    }
-                }
-            }
-        }
-        
-        result
+    /// Convert from a RangeSetBlaze to factored representation.
+    pub fn from_rsb(rsb: &RangeSetBlaze<usize>, num_tsids: usize) -> Self {
+        Self::from_1d_ranges(rsb.ranges().map(|r| (*r.start(), *r.end())), num_tsids)
+    }
+    
+    /// Get a reference to the 2D factored terms.
+    pub fn terms(&self) -> &[(RangeSetBlaze<u16>, RangeSetBlaze<u16>)] {
+        &self.terms
     }
     
     /// Count the total number of terms.
@@ -180,6 +253,276 @@ impl FactoredWeight {
     /// Each range is (u16, u16) = 4 bytes per range.
     pub fn estimated_storage_bytes(&self) -> usize {
         self.total_ranges() * 4
+    }
+    
+    /// Check if this weight represents "all" (contains all positions).
+    /// Uses global dimensions to determine the full token × tsid space.
+    pub fn is_full(&self) -> bool {
+        let dims = crate::dwa_i32::get_weight_dimensions();
+        let num_tokens = dims.num_tokens;
+        let num_tsids = dims.num_tsids;
+        
+        // Check if we have a single term that covers all tokens × all tsids
+        if self.terms.len() == 1 {
+            let (tok_set, tsid_set) = &self.terms[0];
+            // Token set should be [0..=num_tokens-1]
+            let tok_full = tok_set.len() as usize == num_tokens 
+                && tok_set.first() == Some(0u16) 
+                && tok_set.last() == Some(num_tokens as u16 - 1);
+            // Tsid set should be [0..=num_tsids-1]
+            let tsid_full = tsid_set.len() as usize == num_tsids 
+                && tsid_set.first() == Some(0u16) 
+                && tsid_set.last() == Some(num_tsids as u16 - 1);
+            return tok_full && tsid_full;
+        }
+        
+        // For multiple terms, we'd need to check union covers all
+        // This is expensive, so return false conservatively
+        false
+    }
+    
+    /// Count the total number of positions (cardinality) in this weight.
+    /// This computes the sum of |TokenSet_i| × |TsidSet_i|.
+    /// 
+    /// Note: This may overcount if terms overlap. For exact count, use expand().len().
+    pub fn len(&self) -> usize {
+        self.terms.iter()
+            .map(|(t, s)| t.len() as usize * s.len() as usize)
+            .sum()
+    }
+    
+    /// Project this weight onto the token dimension only.
+    /// Returns the set of tokens that appear in any (token, tsid) pair.
+    pub fn project_tokens(&self) -> RangeSetBlaze<usize> {
+        let mut result = RangeSetBlaze::new();
+        for (tok_set, _) in &self.terms {
+            for r in tok_set.ranges() {
+                result.ranges_insert(*r.start() as usize..=*r.end() as usize);
+            }
+        }
+        result
+    }
+    
+    /// Project this weight onto the TSID dimension only.
+    /// Returns the set of TSIDs that appear in any (token, tsid) pair.
+    pub fn project_tsids(&self) -> RangeSetBlaze<usize> {
+        let mut result = RangeSetBlaze::new();
+        for (_, tsid_set) in &self.terms {
+            for r in tsid_set.ranges() {
+                result.ranges_insert(*r.start() as usize..=*r.end() as usize);
+            }
+        }
+        result
+    }
+    
+    /// Expand this factored weight to the full 1D N×M-space representation.
+    /// 
+    /// WARNING: This is expensive and should only be used for debugging or
+    /// interfacing with code that requires 1D representation.
+    /// 
+    /// Position = token * num_tsids + tsid
+    #[cfg(any(test, debug_assertions))]
+    pub fn expand(&self) -> RangeSetBlaze<usize> {
+        self.expand_impl()
+    }
+    
+    /// Internal expand implementation - for debugging only.
+    pub(crate) fn expand_impl(&self) -> RangeSetBlaze<usize> {
+        let mut result = RangeSetBlaze::new();
+        let num_tsids = self.num_tsids as usize;
+        
+        for (tok_set, tsid_set) in &self.terms {
+            for tok_range in tok_set.ranges() {
+                let tok_start = *tok_range.start() as usize;
+                let tok_end = *tok_range.end() as usize;
+                
+                for tsid_range in tsid_set.ranges() {
+                    let tsid_start = *tsid_range.start() as usize;
+                    let tsid_end = *tsid_range.end() as usize;
+                    
+                    for token in tok_start..=tok_end {
+                        let pos_start = token * num_tsids + tsid_start;
+                        let pos_end = token * num_tsids + tsid_end;
+                        result.ranges_insert(pos_start..=pos_end);
+                    }
+                }
+            }
+        }
+        
+        result
+    }
+    
+    /// Get number of ranges in the 1D expansion (for debugging/comparison).
+    /// WARNING: This is expensive - it requires full expansion.
+    #[cfg(any(test, debug_assertions))]
+    pub fn num_1d_ranges(&self) -> usize {
+        self.expand_impl().ranges_len() as usize
+    }
+    
+    /// Iterate over (token, tsid) pairs in this weight.
+    /// This is more efficient than expanding to 1D for iteration.
+    pub fn iter_2d(&self) -> impl Iterator<Item = (u16, u16)> + '_ {
+        self.terms.iter().flat_map(|(tok_set, tsid_set)| {
+            tok_set.iter().flat_map(move |token| {
+                tsid_set.iter().map(move |tsid| (token, tsid))
+            })
+        })
+    }
+    
+    /// Iterate over 1D positions in this weight.
+    /// Position = token * num_tsids + tsid
+    pub fn iter_positions(&self) -> impl Iterator<Item = usize> + '_ {
+        let num_tsids = self.num_tsids as usize;
+        self.iter_2d().map(move |(token, tsid)| {
+            token as usize * num_tsids + tsid as usize
+        })
+    }
+    
+    /// Get the minimum position in this weight (if non-empty).
+    pub fn min_position(&self) -> Option<usize> {
+        let num_tsids = self.num_tsids as usize;
+        self.terms.iter()
+            .filter(|(t, s)| !t.is_empty() && !s.is_empty())
+            .map(|(t, s)| {
+                let min_tok = t.first().unwrap() as usize;
+                let min_tsid = s.first().unwrap() as usize;
+                min_tok * num_tsids + min_tsid
+            })
+            .min()
+    }
+    
+    /// Get the maximum position in this weight (if non-empty).
+    pub fn max_position(&self) -> Option<usize> {
+        let num_tsids = self.num_tsids as usize;
+        self.terms.iter()
+            .filter(|(t, s)| !t.is_empty() && !s.is_empty())
+            .map(|(t, s)| {
+                let max_tok = t.last().unwrap() as usize;
+                let max_tsid = s.last().unwrap() as usize;
+                max_tok * num_tsids + max_tsid
+            })
+            .max()
+    }
+    
+    /// Check if this weight is a subset of another weight.
+    /// Returns true if every (token, tsid) in self is also in other.
+    pub fn is_subset_of(&self, other: &FactoredWeight) -> bool {
+        // Fast path: empty is subset of anything
+        if self.is_empty() {
+            return true;
+        }
+        
+        // Fast path: if other is full, then any weight is a subset
+        if other.is_full() {
+            return true;
+        }
+        
+        // Fast path: if self is full but other isn't, not a subset
+        if self.is_full() && !other.is_full() {
+            return false;
+        }
+        
+        // For every term (TokenSet × TsidSet) in self, check that each
+        // (token, tsid) pair is contained in other.
+        // This is equivalent to: self ∩ other == self
+        // Or: (self - other).is_empty()
+        
+        // The most efficient 2D check: for each pair in self, check other.contains()
+        // However, this is still O(|self|) where |self| is cardinality.
+        // An alternative: intersection and check equality of terms
+        
+        // For efficiency, iter self's 2D pairs and check all are in other
+        for (tok, tsid) in self.iter_2d() {
+            if !other.contains(tok, tsid) {
+                return false;
+            }
+        }
+        true
+    }
+    
+    /// Clip this weight to only include positions up to max (1D position).
+    /// Returns a new FactoredWeight with positions > max removed.
+    pub fn clip_max(&self, max_pos: usize) -> FactoredWeight {
+        let num_tsids = self.num_tsids as usize;
+        let max_tok = (max_pos / num_tsids) as u16;
+        let max_tsid = (max_pos % num_tsids) as u16;
+        
+        let mut new_terms = Vec::new();
+        
+        for (tok_set, tsid_set) in &self.terms {
+            // Clip token set: only keep tokens <= max_tok
+            let clipped_tok: RangeSetBlaze<u16> = tok_set.iter()
+                .filter(|&t| t <= max_tok)
+                .collect();
+            
+            if clipped_tok.is_empty() {
+                continue;
+            }
+            
+            // For tokens < max_tok, all tsids are ok
+            // For token == max_tok, only tsids <= max_tsid are ok
+            
+            if clipped_tok.contains(max_tok) {
+                // Split into two parts:
+                // 1. Tokens < max_tok: all tsids ok
+                // 2. Token == max_tok: only tsids <= max_tsid
+                
+                let below_max_tok: RangeSetBlaze<u16> = clipped_tok.iter()
+                    .filter(|&t| t < max_tok)
+                    .collect();
+                
+                if !below_max_tok.is_empty() {
+                    new_terms.push((below_max_tok, tsid_set.clone()));
+                }
+                
+                // Token == max_tok: clip tsids
+                let clipped_tsid: RangeSetBlaze<u16> = tsid_set.iter()
+                    .filter(|&s| s <= max_tsid)
+                    .collect();
+                
+                if !clipped_tsid.is_empty() {
+                    let mut just_max: RangeSetBlaze<u16> = RangeSetBlaze::new();
+                    just_max.insert(max_tok);
+                    new_terms.push((just_max, clipped_tsid));
+                }
+            } else {
+                // All tokens are < max_tok, so all tsids are ok
+                new_terms.push((clipped_tok, tsid_set.clone()));
+            }
+        }
+        
+        FactoredWeight { terms: merge_same_profile_terms(new_terms), num_tsids: self.num_tsids }
+    }
+    
+    /// Iterate over 1D positions up to a maximum value.
+    pub fn iter_positions_up_to(&self, max: usize) -> impl Iterator<Item = usize> + '_ {
+        let num_tsids = self.num_tsids as usize;
+        self.iter_2d()
+            .map(move |(token, tsid)| token as usize * num_tsids + tsid as usize)
+            .take_while(move |&pos| pos <= max)
+    }
+    
+    /// Hash the 2D structure (for implementing Hash on AbstractWeight).
+    /// This hashes the terms in a canonical order.
+    pub fn hash_2d<H: std::hash::Hasher>(&self, state: &mut H) {
+        use std::hash::Hash;
+        // Hash num_tsids first
+        self.num_tsids.hash(state);
+        
+        // Collect and sort terms for canonical ordering
+        let mut sorted_terms: Vec<_> = self.terms.iter()
+            .map(|(tok_set, tsid_set)| {
+                let tok_ranges: Vec<(u16, u16)> = tok_set.ranges().map(|r| (*r.start(), *r.end())).collect();
+                let tsid_ranges: Vec<(u16, u16)> = tsid_set.ranges().map(|r| (*r.start(), *r.end())).collect();
+                (tok_ranges, tsid_ranges)
+            })
+            .collect();
+        sorted_terms.sort();
+        
+        for (tok_ranges, tsid_ranges) in sorted_terms {
+            tok_ranges.hash(state);
+            tsid_ranges.hash(state);
+        }
     }
 }
 
@@ -202,8 +545,6 @@ fn decompose_range_to_rects(tok_s: u16, tsid_s: u16, tok_e: u16, tsid_e: u16, nu
     // Partial first row (if not starting at tsid 0)
     if tsid_s > 0 {
         rects.push((tok_s, tok_s, tsid_s, max_tsid));
-    } else {
-        // First row is complete, include it in full rows
     }
     
     // Full middle rows

@@ -23,7 +23,7 @@ use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeN
 use crate::dfa_u8::{Tokenizer, Regex};
 use crate::glr::parser::GLRParser;
 use crate::dwa_i32::rangeset::RangeSet as WARangeSet;
-use crate::dwa_i32::{DWA, NWA, NWAStateID, Weight};
+use crate::dwa_i32::{DWA, NWA, NWAStateID, Weight, set_weight_dimensions};
 use crate::dwa_i32::heavy_weight::WeightDimensions;
 use crate::dwa_i32::weight_expansion::{expand_rsb, create_tsid_set_mask_with_offset_map};
 use crate::profiler::{self};
@@ -97,6 +97,11 @@ impl<'r> Precomputer1<'r> {
         let num_tokens = internal_max_llm_token + 1;
         let actual_num_tsids = if num_tsids == 0 { 1 } else { num_tsids };
         nwa.dims = WeightDimensions::new(num_tokens, actual_num_tsids);
+        
+        // CRITICAL: Set global weight dimensions for Weight::all() and other constructors
+        // This must be done before any Weight construction that uses dimensions
+        crate::debug!(3, "Setting global weight dimensions: num_tokens={}, num_tsids={}", num_tokens, actual_num_tsids);
+        set_weight_dimensions(nwa.dims);
 
         let mut roots = BTreeMap::new();
         for &rep_sid in state_to_rep.values() {
@@ -425,45 +430,42 @@ impl<'r> Precomputer1<'r> {
     /// Expands from N-space to N×M-space where M = num_tsids.
     /// If num_tsids == 0 (symbol-heavy mode), returns the token ID directly in N-space.
     #[inline]
-    fn expanded_weight_from_item(&self, token_id: usize) -> Weight {
+    fn expanded_weight_from_item(&self, token_id: usize, tsid: usize) -> Weight {
         if self.num_tsids == 0 {
             // Symbol-heavy mode: just use the token ID directly
             Weight::from_rsb(RangeSetBlaze::from_iter([token_id..=token_id]))
         } else {
-            // Weight-heavy mode: A single token ID in N-space becomes a range in N×M-space
-            // Token i becomes positions [i*M, i*M + M - 1]
-            let start = token_id * self.num_tsids;
-            let end = start + self.num_tsids - 1;
-            // IMPORTANT: Use [start..=end] to create from ONE range, not iterate over all integers!
-            Weight::from_rsb(RangeSetBlaze::from_iter([start..=end]))
+            // Weight-heavy mode: Use efficient path for FactoredWeight
+            // A single token with specific tsid: {token} × {tsid}
+            Weight::from_token_set_specific_tsid(RangeSetBlaze::from_iter([token_id..=token_id]), tsid)
         }
     }
 
     /// Create an expanded weight from a RangeSetBlaze of token IDs.
     /// If num_tsids == 0 (symbol-heavy mode), returns the rsb directly.
     #[inline]
-    fn expanded_weight_from_rsb(&self, rsb: RangeSetBlaze<usize>) -> Weight {
+    fn expanded_weight_from_rsb(&self, rsb: RangeSetBlaze<usize>, tsid: usize) -> Weight {
         if self.num_tsids == 0 {
             // Symbol-heavy mode: use rsb directly
             Weight::from_rsb(rsb)
         } else {
-            // Weight-heavy mode: expand to N×M space
-            Weight::from_rsb(expand_rsb(&rsb, self.num_tsids))
+            // Weight-heavy mode: Use efficient path for FactoredWeight
+            // Token set with specific tsid: token_set × {tsid}
+            Weight::from_token_set_specific_tsid(rsb, tsid)
         }
     }
 
-    /// Create an expanded "all" weight (all tokens for all tsids).
+    /// Create an expanded "all" weight for a specific tsid.
     /// If num_tsids == 0 (symbol-heavy mode), returns Weight::all().
     #[inline]
-    fn expanded_weight_all(&self) -> Weight {
+    fn expanded_weight_all(&self, tsid: usize) -> Weight {
         if self.num_tsids == 0 {
             // Symbol-heavy mode: all tokens in N-space
             Weight::from_rsb(RangeSetBlaze::from_iter([0..=self.internal_max_llm_token]))
         } else {
-            // Weight-heavy mode: All tokens in N×M space
-            let max_pos = self.internal_max_llm_token * self.num_tsids + self.num_tsids - 1;
-            // IMPORTANT: Use [0..=max_pos] to create from ONE range, not iterate over all integers!
-            Weight::from_rsb(RangeSetBlaze::from_iter([0..=max_pos]))
+            // Weight-heavy mode: Use efficient path for FactoredWeight
+            // All tokens × specific tsid
+            Weight::from_token_set_specific_tsid(RangeSetBlaze::from_iter([0..=self.internal_max_llm_token]), tsid)
         }
     }
 
@@ -546,8 +548,8 @@ impl<'r> Precomputer1<'r> {
                     for (tokenizer_state_id, node) in states_at_pos {
                         let next = self.get_or_create_next_state(node, tokenizer_state_id, &mut next_level_assoc);
                         crate::debug!(7, "     State {} (tsid={:?}) -> epsilon to state {}", node, tokenizer_state_id, next);
-                        // Use expanded "all" weight
-                        self.add_pending_epsilon(node, next, self.expanded_weight_all());
+                        // Use expanded "all" weight with specific tsid
+                        self.add_pending_epsilon(node, next, self.expanded_weight_all(tokenizer_state_id.0));
                     }
                     continue;
                 }
@@ -582,8 +584,8 @@ impl<'r> Precomputer1<'r> {
                         // Leaf check: if match consumes remainder of segment
                         if next_pos == segment_bytes.len() {
                             let leaf = self.leaf_state;
-                            // Use expanded weight from single token
-                            let weight = self.expanded_weight_from_item(child_token_id);
+                            // Use expanded weight from single token with specific tsid
+                            let weight = self.expanded_weight_from_item(child_token_id, tokenizer_state_id.0);
                             crate::debug!(7, "      -> LEAF transition: {} --{}--> {} (leaf_state), weight={:?}", 
                                 src_node, terminal_id.0, leaf, weight);
                             self.add_pending_transition(src_node, terminal_id.0 as Label, leaf, weight);
@@ -613,8 +615,9 @@ impl<'r> Precomputer1<'r> {
                         let dest_map = pending.entry(next_pos).or_default();
 
                         let initial_tsid = self.tokenizer.initial_state_id();
-                        // Use expanded weight from rsb
-                        let weight = self.expanded_weight_from_rsb(final_bv.into_owned());
+                        // Use expanded weight from rsb with specific tsid
+                        // Note: After a match, we return to the initial tokenizer state
+                        let weight = self.expanded_weight_from_rsb(final_bv.into_owned(), initial_tsid.0);
 
                         let target_entry = dest_map.entry(initial_tsid);
                         let target = match target_entry {
@@ -652,8 +655,9 @@ impl<'r> Precomputer1<'r> {
                         
                         crate::debug!(7, "    accessible_terminals={:?}", accessible_terminals.as_slice());
 
-                        // Create expanded weight once, it's just a single token expanded to N×M space
-                        let single_token_weight = self.expanded_weight_from_item(child_token_id);
+                        // Create expanded weight once, it's just a single token with specific tsid
+                        // Use tokenizer_state_id (the current state) for the weight
+                        let single_token_weight = self.expanded_weight_from_item(child_token_id, tokenizer_state_id.0);
 
                         let end_idx = self.leaf_state;
                         
@@ -670,8 +674,8 @@ impl<'r> Precomputer1<'r> {
 
                         let next = self.get_or_create_next_state(src_node, final_tokenizer_state, &mut next_level_assoc);
                         crate::debug!(7, "    -> END_STATE epsilon: {} --eps--> {}", src_node, next);
-                        // Use expanded "all" weight
-                        self.add_pending_epsilon(src_node, next, self.expanded_weight_all());
+                        // Use expanded "all" weight with specific tsid (the final tokenizer state)
+                        self.add_pending_epsilon(src_node, next, self.expanded_weight_all(final_tokenizer_state.0));
                     }
                 }
             }

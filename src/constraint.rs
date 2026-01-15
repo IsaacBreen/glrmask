@@ -40,7 +40,7 @@ use crate::datastructures::bitset::Bitset;
 use crate::datastructures::gss_acc::Acc;
 use crate::glr::parser::{ExpectElse, ParseStateEdgeContent};
 use crate::dwa_i32::{DWA, NWA};
-use crate::dwa_i32::{RangeSet as WARangeSet, Weight};
+use crate::dwa_i32::{RangeSet as WARangeSet, Weight, set_weight_dimensions};
 
 pub use crate::constraint_vocab::*;
 use crate::constraint_precompute::run_precompute1;
@@ -612,6 +612,11 @@ impl JSONConvertible for GrammarConstraint {
 
     fn from_json(node: JSONNode) -> Result<Self, String> {
         let intermediate = GrammarConstraintJSON::from_json(node)?;
+
+        // Set global weight dimensions from the loaded DWA
+        // This is critical for Weight::all() and other dimension-dependent constructors
+        crate::debug!(3, "from_json: Setting global weight dimensions from DWA: {:?}", intermediate.dwa.dims);
+        set_weight_dimensions(intermediate.dwa.dims);
 
         let tokenizer = Tokenizer::new(Regex { dfa: intermediate.tokenizer_dfa });
         let possible_matches = intermediate.possible_matches.to_possible_matches()?;

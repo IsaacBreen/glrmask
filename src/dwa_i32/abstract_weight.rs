@@ -4,6 +4,7 @@
 //! - `RangeSet`: Sparse range-based storage (default, fast operations, good for sparse weights)
 //! - `BddWeight`: Binary Decision Diagram storage (custom 5-byte nodes, memory efficient)
 //! - `BddWeightBiodivine`: BDD storage using biodivine_lib_bdd (battle-tested, fewer nodes)
+//! - `FactoredWeight`: 2D factored representation (union of Cartesian products)
 //!
 //! The backend is selected at compile time via the `WEIGHT_BACKEND` environment variable,
 //! checked once at startup. See `get_weight_backend()` for details.
@@ -25,6 +26,7 @@
 //! - `WEIGHT_BACKEND=rangeset` (default): Uses RangeSet with interning
 //! - `WEIGHT_BACKEND=bdd`: Uses custom BddWeight with 5-byte nodes (memory efficient)
 //! - `WEIGHT_BACKEND=bdd-biodivine`: Uses biodivine_lib_bdd (battle-tested, more features)
+//! - `WEIGHT_BACKEND=factored`: Uses 2D factored representation (experimental)
 
 use std::fmt::{Debug, Display, Formatter};
 use std::hash::{Hash, Hasher};
@@ -38,6 +40,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use super::rangeset::RangeSet;
 use super::bdd_weight::BddWeight;
 use super::bdd_weight_biodivine::BddWeightBiodivine;
+use super::factored_weight::FactoredWeight;
 use super::heavy_weight::WeightDimensions;
 
 // ============================================================================
@@ -53,6 +56,8 @@ pub enum WeightBackend {
     Bdd,
     /// Binary Decision Diagram using biodivine_lib_bdd (battle-tested, more features).
     BddBiodivine,
+    /// 2D factored representation (union of Cartesian products).
+    Factored,
 }
 
 impl Default for WeightBackend {
@@ -70,12 +75,14 @@ impl Default for WeightBackend {
 /// - `rangeset` (default): RangeSet with interning
 /// - `bdd`: Custom BDD with 5-byte nodes (memory efficient)
 /// - `bdd-biodivine`: biodivine_lib_bdd (battle-tested, fewer nodes but more memory)
+/// - `factored`: 2D factored representation (experimental)
 pub fn get_weight_backend() -> WeightBackend {
     static BACKEND: OnceLock<WeightBackend> = OnceLock::new();
     *BACKEND.get_or_init(|| {
         match std::env::var("WEIGHT_BACKEND").as_deref() {
             Ok("bdd") | Ok("BDD") => WeightBackend::Bdd,
             Ok("bdd-biodivine") | Ok("BDD-BIODIVINE") | Ok("biodivine") => WeightBackend::BddBiodivine,
+            Ok("factored") | Ok("FACTORED") => WeightBackend::Factored,
             _ => WeightBackend::RangeSet,
         }
     })
@@ -100,7 +107,7 @@ pub fn get_weight_dimensions() -> WeightDimensions {
 
 /// Abstract weight type that can use different storage backends.
 /// 
-/// This is a thin wrapper around either `RangeSet` (default), `BddWeight`, or `BddWeightBiodivine`.
+/// This is a thin wrapper around either `RangeSet` (default), `BddWeight`, `BddWeightBiodivine`, or `FactoredWeight`.
 /// All operations delegate to the underlying implementation.
 #[derive(Clone)]
 pub enum AbstractWeight {
@@ -110,6 +117,8 @@ pub enum AbstractWeight {
     Bdd(Arc<BddWeight>),
     /// Biodivine BddWeight backend (battle-tested, fewer nodes).
     BddBiodivine(Arc<BddWeightBiodivine>),
+    /// 2D factored representation (union of Cartesian products).
+    Factored(Arc<FactoredWeight>),
 }
 
 impl AbstractWeight {
@@ -129,6 +138,10 @@ impl AbstractWeight {
                 let dims = get_weight_dimensions();
                 Self::BddBiodivine(Arc::new(BddWeightBiodivine::empty(dims.num_tsids as u16, dims.num_tokens as u16)))
             }
+            WeightBackend::Factored => {
+                let dims = get_weight_dimensions();
+                Self::Factored(Arc::new(FactoredWeight::empty(dims.num_tsids as u16)))
+            }
         }
     }
 
@@ -143,6 +156,15 @@ impl AbstractWeight {
             WeightBackend::BddBiodivine => {
                 let dims = get_weight_dimensions();
                 Self::BddBiodivine(Arc::new(BddWeightBiodivine::full(dims.num_tsids as u16, dims.num_tokens as u16)))
+            }
+            WeightBackend::Factored => {
+                let dims = get_weight_dimensions();
+                // Full weight: all tokens × all tsids
+                let mut tokens = RangeSetBlaze::new();
+                tokens.ranges_insert(0..=(dims.num_tokens as u16 - 1));
+                let mut tsids = RangeSetBlaze::new();
+                tsids.ranges_insert(0..=(dims.num_tsids as u16 - 1));
+                Self::Factored(Arc::new(FactoredWeight::from_product(tokens, tsids, dims.num_tsids as u16)))
             }
         }
     }
@@ -167,6 +189,13 @@ impl AbstractWeight {
                     dims.num_tokens as u16,
                 )))
             }
+            WeightBackend::Factored => {
+                let dims = get_weight_dimensions();
+                Self::Factored(Arc::new(FactoredWeight::from_1d_ranges(
+                    std::iter::once((item, item)),
+                    dims.num_tsids as usize,
+                )))
+            }
         }
     }
 
@@ -188,6 +217,13 @@ impl AbstractWeight {
                     ranges.iter().copied(),
                     dims.num_tsids as u16,
                     dims.num_tokens as u16,
+                )))
+            }
+            WeightBackend::Factored => {
+                let dims = get_weight_dimensions();
+                Self::Factored(Arc::new(FactoredWeight::from_1d_ranges(
+                    ranges.iter().copied(),
+                    dims.num_tsids as usize,
                 )))
             }
         }
@@ -215,6 +251,62 @@ impl AbstractWeight {
                     dims.num_tokens as u16,
                 )))
             }
+            WeightBackend::Factored => {
+                let dims = get_weight_dimensions();
+                let ranges: Vec<(usize, usize)> = rsb.ranges().map(|r| (*r.start(), *r.end())).collect();
+                Self::Factored(Arc::new(FactoredWeight::from_1d_ranges(
+                    ranges.into_iter(),
+                    dims.num_tsids as usize,
+                )))
+            }
+        }
+    }
+    
+    /// Create a weight from a token set (N-space) × all TSIDs.
+    /// This is efficient for weight-heavy mode where we have tokens in N-space
+    /// and want the weight to cover all TSID values.
+    /// 
+    /// For FactoredWeight, this is O(n_ranges) instead of O(n_tokens × n_tsids).
+    pub fn from_token_set_all_tsids(tokens: RangeSetBlaze<usize>) -> Self {
+        let dims = get_weight_dimensions();
+        match get_weight_backend() {
+            WeightBackend::Factored => {
+                Self::Factored(Arc::new(FactoredWeight::from_token_set_all_tsids(
+                    tokens,
+                    dims.num_tsids as u16,
+                )))
+            }
+            // For other backends, fall back to expanding to N×M space
+            _ => {
+                let expanded = crate::dwa_i32::weight_expansion::expand_rsb(&tokens, dims.num_tsids);
+                Self::from_rsb(expanded)
+            }
+        }
+    }
+    
+    /// Create a weight from a token set (N-space) × specific TSID.
+    /// This is efficient for weight-heavy precomputation where we know the exact tsid.
+    /// 
+    /// For FactoredWeight, this is O(n_ranges) instead of O(n_tokens × n_tsids).
+    pub fn from_token_set_specific_tsid(tokens: RangeSetBlaze<usize>, tsid: usize) -> Self {
+        let dims = get_weight_dimensions();
+        match get_weight_backend() {
+            WeightBackend::Factored => {
+                Self::Factored(Arc::new(FactoredWeight::from_token_set_specific_tsid(
+                    tokens,
+                    tsid,
+                    dims.num_tsids as u16,
+                )))
+            }
+            // For other backends, fall back to explicit 1D expansion
+            _ => {
+                // Create 1D positions: token * num_tsids + tsid for each token
+                let num_tsids = dims.num_tsids;
+                let positions: RangeSetBlaze<usize> = tokens.iter()
+                    .map(|t| t * num_tsids + tsid)
+                    .collect();
+                Self::from_rsb(positions)
+            }
         }
     }
 
@@ -236,6 +328,13 @@ impl AbstractWeight {
                     std::iter::once((0, len.saturating_sub(1))),
                     dims.num_tsids as u16,
                     dims.num_tokens as u16,
+                )))
+            }
+            WeightBackend::Factored => {
+                let dims = get_weight_dimensions();
+                Self::Factored(Arc::new(FactoredWeight::from_1d_ranges(
+                    std::iter::once((0, len.saturating_sub(1))),
+                    dims.num_tsids as usize,
                 )))
             }
         }
@@ -294,6 +393,12 @@ impl AbstractWeight {
                     num_tokens as u16,
                 )))
             }
+            WeightBackend::Factored => {
+                // For FactoredWeight, create a product of all tokens × specified tsids
+                let tsid_set: RangeSetBlaze<u16> = tsids.into_iter().map(|t| t as u16).collect();
+                let token_set: RangeSetBlaze<u16> = (0..num_tokens as u16).collect();
+                Self::Factored(Arc::new(FactoredWeight::from_product(token_set, tsid_set, num_tsids as u16)))
+            }
         }
     }
     
@@ -315,6 +420,7 @@ impl AbstractWeight {
             Self::Rs(rs) => rs.is_empty(),
             Self::Bdd(bdd) => bdd.is_empty(),
             Self::BddBiodivine(bdd) => bdd.is_empty(),
+            Self::Factored(fw) => fw.is_empty(),
         }
     }
 
@@ -324,6 +430,7 @@ impl AbstractWeight {
             Self::Rs(rs) => rs.is_all_fast(),
             Self::Bdd(bdd) => bdd.is_full(),
             Self::BddBiodivine(bdd) => bdd.is_full(),
+            Self::Factored(fw) => fw.is_full(),
         }
     }
 
@@ -333,6 +440,7 @@ impl AbstractWeight {
             Self::Rs(rs) => rs.contains(pos),
             Self::Bdd(bdd) => bdd.contains_pos(pos),
             Self::BddBiodivine(bdd) => bdd.contains_pos(pos),
+            Self::Factored(fw) => fw.contains_pos(pos),
         }
     }
 
@@ -341,16 +449,19 @@ impl AbstractWeight {
         match (self, other) {
             (Self::Rs(a), Self::Rs(b)) => a.is_disjoint(b),
             (Self::Bdd(a), Self::Bdd(b)) => a.intersection(b).is_empty(),
+            (Self::Factored(a), Self::Factored(b)) => a.intersection(b).is_empty(),
             _ => self.to_rangeset().is_disjoint(&other.to_rangeset()),
         }
     }
 
     /// Get the number of ranges (only meaningful for RangeSet backend).
+    /// For Factored backend, returns total_ranges() which is an approximation.
     pub fn num_ranges(&self) -> usize {
         match self {
             Self::Rs(rs) => rs.num_ranges(),
             Self::Bdd(bdd) => bdd.to_rangeset().ranges_len(),
             Self::BddBiodivine(bdd) => bdd.to_rangeset().ranges_len(),
+            Self::Factored(fw) => fw.total_ranges(),
         }
     }
 
@@ -360,6 +471,7 @@ impl AbstractWeight {
             Self::Rs(rs) => rs.len(),
             Self::Bdd(bdd) => bdd.len(),
             Self::BddBiodivine(bdd) => bdd.len(),
+            Self::Factored(fw) => fw.len(),
         }
     }
 
@@ -373,8 +485,8 @@ impl AbstractWeight {
     pub fn fp(&self) -> u64 {
         match self {
             Self::Rs(rs) => rs.fast_hash(),
-            Self::Bdd(_) | Self::BddBiodivine(_) => {
-                // For BDD, compute a hash of the ranges
+            Self::Bdd(_) | Self::BddBiodivine(_) | Self::Factored(_) => {
+                // For BDD/Factored, compute a hash of the ranges
                 use std::hash::{Hash, Hasher};
                 use std::collections::hash_map::DefaultHasher;
                 let mut hasher = DefaultHasher::new();
@@ -392,6 +504,7 @@ impl AbstractWeight {
             Self::Rs(rs) => rs.min_item(),
             Self::Bdd(bdd) => bdd.iter().next(),
             Self::BddBiodivine(bdd) => bdd.iter().next(),
+            Self::Factored(fw) => fw.min_position(),
         }
     }
 
@@ -401,6 +514,7 @@ impl AbstractWeight {
             Self::Rs(rs) => rs.max_item(),
             Self::Bdd(bdd) => bdd.iter().last(),
             Self::BddBiodivine(bdd) => bdd.iter().last(),
+            Self::Factored(fw) => fw.max_position(),
         }
     }
 
@@ -408,8 +522,8 @@ impl AbstractWeight {
     pub fn insert(&mut self, item: usize) {
         match self {
             Self::Rs(rs) => rs.insert(item),
-            Self::Bdd(_) | Self::BddBiodivine(_) => {
-                // For BDD, convert to RangeSet, insert, convert back
+            Self::Bdd(_) | Self::BddBiodivine(_) | Self::Factored(_) => {
+                // For BDD/Factored, convert to RangeSet, insert, convert back
                 let mut rs: RangeSet = self.to_rangeset();
                 rs.insert(item);
                 *self = Self::Rs(rs);
@@ -421,8 +535,8 @@ impl AbstractWeight {
     pub fn remove(&mut self, item: usize) {
         match self {
             Self::Rs(rs) => rs.remove(item),
-            Self::Bdd(_) | Self::BddBiodivine(_) => {
-                // For BDD, convert to RangeSet, remove, convert back
+            Self::Bdd(_) | Self::BddBiodivine(_) | Self::Factored(_) => {
+                // For BDD/Factored, convert to RangeSet, remove, convert back
                 let mut rs: RangeSet = self.to_rangeset();
                 rs.remove(item);
                 *self = Self::Rs(rs);
@@ -441,9 +555,23 @@ impl AbstractWeight {
 
     /// Check if this weight is a subset of another.
     pub fn is_subset_of(&self, other: &Self) -> bool {
+        // Fast path: empty is subset of anything
+        if self.is_empty() {
+            return true;
+        }
+        
+        // Fast path: if other is "all", any weight is subset
+        if other.is_all_fast() {
+            return true;
+        }
+        
         match (self, other) {
             (Self::Rs(a), Self::Rs(b)) => a.is_subset_of(b),
             (Self::Bdd(a), Self::Bdd(b)) => a.subtract(b).is_empty(),
+            (Self::Factored(a), Self::Factored(b)) => {
+                // Use native 2D subset check
+                a.is_subset_of(b)
+            }
             _ => self.to_rangeset().is_subset_of(&other.to_rangeset()),
         }
     }
@@ -478,6 +606,10 @@ impl AbstractWeight {
                     .collect();
                 Self::from_ranges(&ranges)
             }
+            Self::Factored(fw) => {
+                // Use native 2D clip_max
+                Self::Factored(Arc::new(fw.clip_max(max)))
+            }
         }
     }
 
@@ -486,28 +618,32 @@ impl AbstractWeight {
     // ------------------------------------------------------------------------
 
     /// Convert to RangeSet (for compatibility with existing code).
+    /// NOTE: For Factored backend, this requires 1D expansion.
     pub fn to_rangeset(&self) -> RangeSet {
         match self {
             Self::Rs(rs) => rs.clone(),
             Self::Bdd(bdd) => RangeSet::from_rsb(bdd.to_rangeset()),
             Self::BddBiodivine(bdd) => RangeSet::from_rsb(bdd.to_rangeset()),
+            Self::Factored(fw) => RangeSet::from_rsb(fw.expand_impl()),
         }
     }
 
     /// Get the underlying RangeSetBlaze.
+    /// NOTE: For Factored backend, this requires 1D expansion.
     pub fn to_rsb(&self) -> RangeSetBlaze<usize> {
         match self {
             Self::Rs(rs) => rs.rsb.clone(),
             Self::Bdd(bdd) => bdd.to_rangeset(),
             Self::BddBiodivine(bdd) => bdd.to_rangeset(),
+            Self::Factored(fw) => fw.expand_impl(),
         }
     }
 
-    /// Get the underlying RangeSet reference (panics if BDD backend).
+    /// Get the underlying RangeSet reference (panics if BDD/Factored backend).
     pub fn as_rangeset(&self) -> &RangeSet {
         match self {
             Self::Rs(rs) => rs,
-            Self::Bdd(_) | Self::BddBiodivine(_) => panic!("Cannot get RangeSet reference from BDD weight"),
+            Self::Bdd(_) | Self::BddBiodivine(_) | Self::Factored(_) => panic!("Cannot get RangeSet reference from BDD/Factored weight"),
         }
     }
 
@@ -521,6 +657,7 @@ impl AbstractWeight {
             Self::Rs(rs) => Box::new(rs.rsb.iter()),
             Self::Bdd(bdd) => Box::new(bdd.iter()),
             Self::BddBiodivine(bdd) => Box::new(bdd.iter()),
+            Self::Factored(fw) => Box::new(fw.iter_positions()),
         }
     }
 
@@ -530,15 +667,18 @@ impl AbstractWeight {
             Self::Rs(rs) => Box::new(rs.iter_up_to(max)),
             Self::Bdd(bdd) => Box::new(bdd.iter().take_while(move |&p| p <= max)),
             Self::BddBiodivine(bdd) => Box::new(bdd.iter().take_while(move |&p| p <= max)),
+            Self::Factored(fw) => Box::new(fw.iter_positions_up_to(max)),
         }
     }
 
     /// Iterate over ranges.
+    /// NOTE: For Factored backend, this requires 1D expansion.
     pub fn ranges(&self) -> Box<dyn Iterator<Item = std::ops::RangeInclusive<usize>> + '_> {
         match self {
             Self::Rs(rs) => Box::new(rs.rsb.ranges()),
             Self::Bdd(bdd) => Box::new(bdd.to_rangeset().into_ranges()),
             Self::BddBiodivine(bdd) => Box::new(bdd.to_rangeset().into_ranges()),
+            Self::Factored(fw) => Box::new(fw.expand_impl().into_ranges()),
         }
     }
 
@@ -546,12 +686,12 @@ impl AbstractWeight {
     // Access to internal RangeSetBlaze (for compatibility)
     // ------------------------------------------------------------------------
 
-    /// Access the internal RangeSetBlaze (panics if BDD backend).
+    /// Access the internal RangeSetBlaze (panics if BDD/Factored backend).
     /// This is provided for compatibility with existing code that accesses `.rsb`.
     pub fn rsb(&self) -> &RangeSetBlaze<usize> {
         match self {
             Self::Rs(rs) => &rs.rsb,
-            Self::Bdd(_) | Self::BddBiodivine(_) => panic!("Cannot access rsb on BDD weight - use to_rsb() instead"),
+            Self::Bdd(_) | Self::BddBiodivine(_) | Self::Factored(_) => panic!("Cannot access rsb on BDD/Factored weight - use to_rsb() instead"),
         }
     }
 
@@ -579,6 +719,7 @@ impl AbstractWeight {
             Self::Rs(rs) => rs.intern_id(),
             Self::Bdd(bdd) => Arc::as_ptr(bdd) as usize,
             Self::BddBiodivine(bdd) => Arc::as_ptr(bdd) as usize,
+            Self::Factored(fw) => Arc::as_ptr(fw) as usize,
         }
     }
 }
@@ -591,6 +732,22 @@ impl BitOr for &AbstractWeight {
     type Output = AbstractWeight;
 
     fn bitor(self, rhs: Self) -> Self::Output {
+        // Fast path: if either is empty, return the other
+        if self.is_empty() {
+            return rhs.clone();
+        }
+        if rhs.is_empty() {
+            return self.clone();
+        }
+        
+        // Fast path: if either is "all", return "all"
+        if self.is_all_fast() {
+            return self.clone();
+        }
+        if rhs.is_all_fast() {
+            return rhs.clone();
+        }
+        
         match (self, rhs) {
             (AbstractWeight::Rs(a), AbstractWeight::Rs(b)) => AbstractWeight::Rs(a | b),
             (AbstractWeight::Bdd(a), AbstractWeight::Bdd(b)) => {
@@ -598,6 +755,9 @@ impl BitOr for &AbstractWeight {
             }
             (AbstractWeight::BddBiodivine(a), AbstractWeight::BddBiodivine(b)) => {
                 AbstractWeight::BddBiodivine(Arc::new(a.union(b)))
+            }
+            (AbstractWeight::Factored(a), AbstractWeight::Factored(b)) => {
+                AbstractWeight::Factored(Arc::new(a.union(b)))
             }
             _ => {
                 // Cross-backend: convert to common format
@@ -627,6 +787,19 @@ impl BitAnd for &AbstractWeight {
     type Output = AbstractWeight;
 
     fn bitand(self, rhs: Self) -> Self::Output {
+        // Fast path: if either is empty, return empty
+        if self.is_empty() || rhs.is_empty() {
+            return AbstractWeight::zeros();
+        }
+        
+        // Fast path: if one is "all", return the other
+        if self.is_all_fast() {
+            return rhs.clone();
+        }
+        if rhs.is_all_fast() {
+            return self.clone();
+        }
+        
         match (self, rhs) {
             (AbstractWeight::Rs(a), AbstractWeight::Rs(b)) => AbstractWeight::Rs(a & b),
             (AbstractWeight::Bdd(a), AbstractWeight::Bdd(b)) => {
@@ -634,6 +807,9 @@ impl BitAnd for &AbstractWeight {
             }
             (AbstractWeight::BddBiodivine(a), AbstractWeight::BddBiodivine(b)) => {
                 AbstractWeight::BddBiodivine(Arc::new(a.intersection(b)))
+            }
+            (AbstractWeight::Factored(a), AbstractWeight::Factored(b)) => {
+                AbstractWeight::Factored(Arc::new(a.intersection(b)))
             }
             _ => {
                 let a_rs = self.to_rangeset();
@@ -666,6 +842,10 @@ impl Not for &AbstractWeight {
             AbstractWeight::Rs(rs) => AbstractWeight::Rs(!rs),
             AbstractWeight::Bdd(bdd) => AbstractWeight::Bdd(Arc::new(bdd.complement())),
             AbstractWeight::BddBiodivine(bdd) => AbstractWeight::BddBiodivine(Arc::new(bdd.complement())),
+            AbstractWeight::Factored(_) => {
+                // FactoredWeight doesn't support complement, fall back to RangeSet
+                AbstractWeight::Rs(!&self.to_rangeset())
+            }
         }
     }
 }
@@ -689,6 +869,12 @@ impl Sub for &AbstractWeight {
             }
             (AbstractWeight::BddBiodivine(a), AbstractWeight::BddBiodivine(b)) => {
                 AbstractWeight::BddBiodivine(Arc::new(a.subtract(b)))
+            }
+            (AbstractWeight::Factored(_), AbstractWeight::Factored(_)) => {
+                // FactoredWeight doesn't support subtract, fall back to RangeSet
+                let a_rs = self.to_rangeset();
+                let b_rs = rhs.to_rangeset();
+                AbstractWeight::Rs(&a_rs - &b_rs)
             }
             _ => {
                 let a_rs = self.to_rangeset();
@@ -786,6 +972,10 @@ impl Hash for AbstractWeight {
                     pos.hash(state);
                 }
             }
+            Self::Factored(fw) => {
+                // Hash based on 2D structure for consistency
+                fw.hash_2d(state);
+            }
         }
     }
 }
@@ -796,6 +986,7 @@ impl Debug for AbstractWeight {
             Self::Rs(rs) => write!(f, "Weight::Rs({:?})", rs),
             Self::Bdd(bdd) => write!(f, "Weight::Bdd({} nodes)", bdd.num_nodes()),
             Self::BddBiodivine(bdd) => write!(f, "Weight::BddBiodivine({} nodes)", bdd.num_nodes()),
+            Self::Factored(fw) => write!(f, "Weight::Factored({} terms)", fw.num_terms()),
         }
     }
 }
@@ -830,6 +1021,16 @@ impl Display for AbstractWeight {
                     write!(f, "[{} ranges]", ranges.len())
                 }
             }
+            Self::Factored(fw) => {
+                let num_terms = fw.num_terms();
+                if fw.is_empty() {
+                    write!(f, "∅")
+                } else if num_terms <= 3 {
+                    write!(f, "[Factored: {} terms]", num_terms)
+                } else {
+                    write!(f, "[Factored: {} terms]", num_terms)
+                }
+            }
         }
     }
 }
@@ -838,7 +1039,7 @@ impl FromIterator<usize> for AbstractWeight {
     fn from_iter<I: IntoIterator<Item = usize>>(iter: I) -> Self {
         match get_weight_backend() {
             WeightBackend::RangeSet => Self::Rs(RangeSet::from_iter(iter)),
-            WeightBackend::Bdd | WeightBackend::BddBiodivine => {
+            WeightBackend::Bdd | WeightBackend::BddBiodivine | WeightBackend::Factored => {
                 let rsb: RangeSetBlaze<usize> = iter.into_iter().collect();
                 Self::from_rsb(rsb)
             }
@@ -857,7 +1058,7 @@ impl FromIterator<std::ops::RangeInclusive<usize>> for AbstractWeight {
     fn from_iter<I: IntoIterator<Item = std::ops::RangeInclusive<usize>>>(iter: I) -> Self {
         match get_weight_backend() {
             WeightBackend::RangeSet => Self::Rs(RangeSet::from_iter(iter)),
-            WeightBackend::Bdd | WeightBackend::BddBiodivine => {
+            WeightBackend::Bdd | WeightBackend::BddBiodivine | WeightBackend::Factored => {
                 let ranges: Vec<_> = iter.into_iter().map(|r| (*r.start(), *r.end())).collect();
                 Self::from_ranges(&ranges)
             }
@@ -904,6 +1105,14 @@ impl<'de> Deserialize<'de> for AbstractWeight {
                     ranges.into_iter(),
                     dims.num_tsids as u16,
                     dims.num_tokens as u16,
+                ))))
+            }
+            WeightBackend::Factored => {
+                let dims = get_weight_dimensions();
+                let ranges: Vec<_> = rs.rsb.ranges().map(|r| (*r.start(), *r.end())).collect();
+                Ok(Self::Factored(Arc::new(FactoredWeight::from_1d_ranges(
+                    ranges.into_iter(),
+                    dims.num_tsids,
                 ))))
             }
         }
@@ -953,6 +1162,14 @@ impl From<RangeSet> for AbstractWeight {
                     ranges.into_iter(),
                     dims.num_tsids as u16,
                     dims.num_tokens as u16,
+                )))
+            }
+            WeightBackend::Factored => {
+                let dims = get_weight_dimensions();
+                let ranges: Vec<_> = rs.rsb.ranges().map(|r| (*r.start(), *r.end())).collect();
+                Self::Factored(Arc::new(FactoredWeight::from_1d_ranges(
+                    ranges.into_iter(),
+                    dims.num_tsids,
                 )))
             }
         }
@@ -1082,5 +1299,47 @@ mod tests {
         let back = AbstractWeight::from(rs);
 
         assert_eq!(original, back);
+    }
+
+    #[test]
+    fn test_factored_complement_via_rangeset() {
+        use super::set_weight_dimensions;
+        
+        // Set small dimensions for testing
+        let dims = WeightDimensions::new(10, 5);  // 10 tokens, 5 tsids
+        set_weight_dimensions(dims);
+        
+        // Create a factored weight: all tokens × tsid 0
+        let fw = FactoredWeight::from_product(
+            (0..10u16).collect(),  // all tokens
+            std::iter::once(0u16).collect(),  // just tsid 0
+            5,  // num_tsids
+        );
+        let w = AbstractWeight::Factored(Arc::new(fw));
+        
+        // Check that it contains expected positions
+        assert!(w.contains(0));   // token 0, tsid 0 -> pos 0
+        assert!(w.contains(5));   // token 1, tsid 0 -> pos 5
+        assert!(!w.contains(1));  // token 0, tsid 1 -> pos 1
+        
+        // Get the complement (which converts to RangeSet)
+        let w_not = !&w;
+        
+        // The complement should contain tsids 1-4 for all tokens
+        assert!(!w_not.contains(0));   // token 0, tsid 0 -> NOT in complement
+        assert!(!w_not.contains(5));   // token 1, tsid 0 -> NOT in complement
+        assert!(w_not.contains(1));    // token 0, tsid 1 -> IN complement
+        assert!(w_not.contains(2));    // token 0, tsid 2 -> IN complement
+        
+        // Union should be all()
+        let union = &w | &w_not;
+        
+        // Check that all positions are in union
+        for token in 0..10 {
+            for tsid in 0..5 {
+                let pos = token * 5 + tsid;
+                assert!(union.contains(pos), "pos {} should be in union", pos);
+            }
+        }
     }
 }

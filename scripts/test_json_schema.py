@@ -169,12 +169,19 @@ state = _sep1.GrammarConstraintState(constraint)
 test_input = "{}"
 print(f"   Input: {test_input}")
 
+mask = state.get_mask()
+print(f"   Mask size: {len(mask)}, sum: {mask.sum() if len(mask) > 0 else 'N/A'}")
+
 for char in test_input:
     char_bytes = char.encode('utf-8')
     # Find token ID for this character
     if char_bytes in token_to_id:
         token_id = token_to_id[char_bytes]
         mask = state.get_mask()
+        print(f"   Mask size: {len(mask)}, token_id: {token_id}")
+        if len(mask) == 0:
+            print(f"   ERROR: Empty mask!")
+            break
         if mask[token_id]:
             state.commit(token_id)
             print(f"   Accepted: '{char}' (token {token_id})")

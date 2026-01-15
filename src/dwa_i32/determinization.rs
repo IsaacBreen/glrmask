@@ -138,6 +138,10 @@ impl NWA {
         if self.states.0.is_empty() {
             return DWA::new();
         }
+        
+        // Debug: Check weight dimensions
+        let dims = crate::dwa_i32::get_weight_dimensions();
+        crate::debug!(5, "Determinization: Using weight dims {:?}", dims);
 
         crate::debug!(6, "Determinization: Precomputing epsilon closures...");
         
@@ -267,6 +271,9 @@ impl NWA {
                 for (label, targets) in &self.states[*nwa_id].transitions {
                     for (target_nwa_id, trans_weight) in targets {
                         let next_path_weight = path_weight & trans_weight;
+                        crate::debug!(7, "  Det: nwa_id={}, label={}, target={}, path_weight={:?}, trans_weight={:?}, next_path_weight={:?}",
+                            nwa_id, label, target_nwa_id, 
+                            path_weight.fp(), trans_weight.fp(), next_path_weight.fp());
                         if !next_path_weight.is_empty() {
                             edge_weights.entry(*label).or_insert_with(Weight::zeros).bitor_assign(&next_path_weight);
                             let entry = transitions.entry(*label).or_default();
@@ -451,6 +458,30 @@ impl<'a> Determinizer<'a> {
             return;
         }
 
+        let dims = crate::dwa_i32::get_weight_dimensions();
+        let num_tsids = dims.num_tsids.max(1);
+
+        let debug_weight_sample = |w: &Weight| -> String {
+            use std::collections::BTreeSet;
+
+            let mut tsids = BTreeSet::new();
+            let mut tokens = BTreeSet::new();
+            for pos in w.iter().take(64) {
+                let tsid = (pos % num_tsids) as usize;
+                let tok = (pos / num_tsids) as usize;
+                tsids.insert(tsid);
+                tokens.insert(tok);
+            }
+            format!(
+                "len={}, tsids={:?}, tokens={:?}, min={:?}, max={:?}",
+                w.len(),
+                tsids.iter().take(8).collect::<Vec<_>>(),
+                tokens.iter().take(8).collect::<Vec<_>>(),
+                w.min_item(),
+                w.max_item()
+            )
+        };
+
         // Transitions accumulation: Label -> TargetNWA -> Weight
         // Use BTreeMap for labels to keep them sorted (cleaner DWA), HashMap for targets for speed.
         let mut transitions: BTreeMap<Label, HashMap<NWAStateID, Weight>> = BTreeMap::new();
@@ -467,6 +498,18 @@ impl<'a> Determinizer<'a> {
 
                 for (v, w_trans) in targets {
                     let w_out = w_u & w_trans;
+                    if w_out.is_empty() && !w_u.is_empty() && !w_trans.is_empty() {
+                        crate::debug!(
+                            7,
+                            "  det: empty w_out (sid={}, lbl={}, u={}, v={}) w_u=[{}] w_trans=[{}]",
+                            sid,
+                            lbl,
+                            u,
+                            v,
+                            debug_weight_sample(w_u),
+                            debug_weight_sample(w_trans)
+                        );
+                    }
                     if !w_out.is_empty() {
                         *edge_acc |= &w_out;
                         
@@ -594,20 +637,29 @@ fn epsilon_closure_optimized(nwa_states: &NWAStates, seed: &WeightedSubset) -> W
 /// Heuristic optimization for single-state loop unions.
 fn try_build_singleton_loop_union(nwa: &NWA) -> Option<DWA> {
     if nwa.states.0.is_empty() || nwa.body.start_states.len() != 1 {
+        crate::debug!(5, "Singleton loop heuristic: skipping (empty or multiple starts)");
         return None;
     }
 
     let start = nwa.body.start_states[0];
-    if start >= nwa.states.len() { return None; }
+    if start >= nwa.states.len() { 
+        crate::debug!(5, "Singleton loop heuristic: skipping (start out of bounds)");
+        return None; 
+    }
 
     if !nwa.states[start].transitions.is_empty() {
+        crate::debug!(5, "Singleton loop heuristic: skipping (start has transitions)");
         return None;
     }
 
     let mut seed: WeightedSubset = Vec::new();
-    seed.push((start, Weight::all()));
+    let all_weight = Weight::all();
+    crate::debug!(5, "Singleton loop heuristic: Weight::all() is_empty={}, is_all_fast={}", 
+        all_weight.is_empty(), all_weight.is_all_fast());
+    seed.push((start, all_weight));
     // Use the local helper here to avoid precomputing everything for this fast path
     let start_closure = epsilon_closure_optimized(&nwa.states, &seed);
+    crate::debug!(5, "Singleton loop heuristic: start_closure has {} states", start_closure.len());
 
     let mut comps: Vec<(NWAStateID, Weight)> = Vec::new();
     for (sid, cw) in start_closure.iter() {
@@ -617,11 +669,13 @@ fn try_build_singleton_loop_union(nwa: &NWA) -> Option<DWA> {
         let st = &nwa.states[*sid];
 
         if !st.epsilons.is_empty() {
+            crate::debug!(5, "Singleton loop heuristic: skipping (state {} has epsilons)", sid);
             return None;
         }
         for (_lbl, vec_targets) in st.transitions.iter() {
             for (to, _) in vec_targets {
                 if *to != *sid {
+                    crate::debug!(5, "Singleton loop heuristic: skipping (state {} has non-self-loop transition to {})", sid, to);
                     return None;
                 }
             }
@@ -636,16 +690,23 @@ fn try_build_singleton_loop_union(nwa: &NWA) -> Option<DWA> {
     }
 
     if comps.is_empty() {
+        crate::debug!(5, "Singleton loop heuristic: skipping (no components found)");
         return None;
     }
+
+    crate::debug!(5, "Singleton loop heuristic: found {} components, checking pairwise disjointness", comps.len());
 
     for i in 0..comps.len() {
         for j in (i + 1)..comps.len() {
             if !(comps[i].1.clone() & comps[j].1.clone()).is_empty() {
+                crate::debug!(5, "Singleton loop heuristic: skipping (components {} and {} overlap)", i, j);
                 return None;
             }
         }
     }
+
+    crate::debug!(5, "Singleton loop heuristic: SUCCESS - building single-state DWA with {} labels", 
+        comps.iter().flat_map(|(sid, _)| nwa.states[*sid].transitions.keys()).count());
 
     let mut label_to_weight: BTreeMap<Label, Weight> = BTreeMap::new();
     for (sid, base) in &comps {
@@ -673,13 +734,16 @@ fn try_build_singleton_loop_union(nwa: &NWA) -> Option<DWA> {
     let mut dwa = DWA::new();
     let s0 = dwa.body.start_state;
     if !final_union.is_empty() {
-        let _ = dwa.set_final_weight(s0, final_union);
+        let _ = dwa.set_final_weight(s0, final_union.clone());
     }
-    for (lbl, w) in label_to_weight {
+    for (lbl, w) in label_to_weight.iter() {
         if !w.is_empty() {
-            let _ = dwa.add_transition(s0, lbl, s0, w);
+            let _ = dwa.add_transition(s0, *lbl, s0, w.clone());
         }
     }
+    
+    crate::debug!(5, "Singleton loop heuristic: built DWA with {} transitions, final_weight len = {}", 
+        label_to_weight.len(), final_union.len());
 
     Some(dwa)
 }

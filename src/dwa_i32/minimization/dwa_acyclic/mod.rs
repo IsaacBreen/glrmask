@@ -10,10 +10,18 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 impl DWA {
     pub fn minimize_acyclic(&mut self) {
+        use crate::dwa_i32::abstract_weight::{get_weight_backend, WeightBackend};
+        
         // Check environment variable for fast minimize option
         let use_fast_minimize = std::env::var("DWA_FAST_MINIMIZE").map(|v| v == "1").unwrap_or(false);
         
-        if use_fast_minimize {
+        // For FactoredWeight, use cyclic minimization because the acyclic algorithm's
+        // weight composition (needed sets, forward reachability) doesn't work correctly
+        // with the 2D (token, tsid) structure. The tsid dimension causes false negatives.
+        if use_fast_minimize || matches!(get_weight_backend(), WeightBackend::Factored) {
+            if matches!(get_weight_backend(), WeightBackend::Factored) {
+                crate::debug!(5, "Using cyclic minimization for FactoredWeight (acyclic algorithm incompatible)");
+            }
             // Use partition refinement - faster but may produce slightly larger DWA
             // (doesn't exploit the "diamond case" optimization)
             self.minimize_states_cyclic();
@@ -56,7 +64,21 @@ impl DWA {
 
 /// Push weights forward for acyclic DWAs.
 /// Computes reachable outputs and restricts transitions to tokens that can produce output.
+///
+/// NOTE: This optimization is skipped for FactoredWeight because the 2D (token, tsid)
+/// structure doesn't compose well with backward reachability. The backward reachability
+/// computes "what (token, tsid) pairs can reach acceptance from state u", but transition
+/// weights encode "when processing (token, tsid), go to target". These tsids may not 
+/// match, causing false negatives when pushing weights.
 fn push_weights_acyclic(dwa: &mut DWA) -> bool {
+    use crate::dwa_i32::abstract_weight::{get_weight_backend, WeightBackend};
+    
+    // Skip weight pushing for FactoredWeight - see doc comment above
+    if matches!(get_weight_backend(), WeightBackend::Factored) {
+        crate::debug!(6, "Skipping push_weights_acyclic for FactoredWeight backend");
+        return false;
+    }
+    
     let n = dwa.states.len();
     if n == 0 { return false; }
 
@@ -635,8 +657,22 @@ fn compute_forward_reachable(dwa: &DWA, topo_order: &[StateID]) -> Vec<Weight> {
 
 /// Tighten DWA weights by removing tokens that can never reach a transition.
 /// Semantic-preserving: restricts weights to tokens that can actually reach each state.
+/// 
+/// NOTE: This optimization is skipped for FactoredWeight because the 2D (token, tsid)
+/// structure doesn't compose well with forward reachability. The forward reachability
+/// computes "what (token, tsid) pairs can reach state u", but transition weights encode
+/// "when processing (token, tsid), go to target". These tsids may not match, causing
+/// false negatives when tightening.
 fn tighten_weights(dwa: &DWA) -> Result<DWA, DWABuildError> {
+    use crate::dwa_i32::abstract_weight::{get_weight_backend, WeightBackend};
+    
     if dwa.states.is_empty() { return Ok(DWA::new()); }
+    
+    // Skip tightening for FactoredWeight - see doc comment above
+    if matches!(get_weight_backend(), WeightBackend::Factored) {
+        crate::debug!(6, "Skipping tighten_weights for FactoredWeight backend");
+        return Ok(dwa.clone());
+    }
     
     let topo_order = compute_topo_order(dwa)?;
     let forward = compute_forward_reachable(dwa, &topo_order);

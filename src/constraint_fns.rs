@@ -107,8 +107,9 @@ impl<'a> GrammarConstraintState<'a> {
                 dwa_start_state.transitions.len());
             if let Some((target_wa_state_id, weight)) = dwa_start_state.get_transition(tsid_label) {
                 crate::debug!(6, "    Found transition to state {} with weight {:?}", target_wa_state_id, weight);
+                let weight_rsb = weight.to_rsb();
                 let f = |acc: &Acc| {
-                    let new_rsb = acc.llm_tokens_union.inner.as_ref() & weight.rsb();
+                    let new_rsb = acc.llm_tokens_union.inner.as_ref() & &weight_rsb;
                     if new_rsb.is_empty() { None } else { Some(new_rsb) }
                 };
                 let weighted_gss = gss.apply_and_prune(f);
@@ -134,7 +135,8 @@ impl<'a> GrammarConstraintState<'a> {
                 // Check for final state
                 if let Some(final_weight) = &dwa_state.final_weight {
                     if let Some(reduced_acc) = gss.reduce_acc() {
-                        let final_tokens = &reduced_acc & final_weight.rsb();
+                        let final_weight_rsb = final_weight.to_rsb();
+                        let final_tokens = &reduced_acc & &final_weight_rsb;
                         if !final_tokens.is_empty() {
                             crate::debug!(7, "Adding {} tokens from final state {}", final_tokens.ranges_len(), current_wa_state_id);
                             final_mask_internal |= RangeSet::from(final_tokens);
@@ -150,8 +152,9 @@ impl<'a> GrammarConstraintState<'a> {
                         let popped_gss = isolated_gss.pop();
                         if popped_gss.is_empty() { continue; }
 
+                        let trans_weight_rsb = trans_weight.to_rsb();
                         let f = |rsb: &RangeSetBlaze<usize>| {
-                            let new_rsb = rsb & trans_weight.rsb();
+                            let new_rsb = rsb & &trans_weight_rsb;
                             if new_rsb.is_empty() { None } else { Some(new_rsb) }
                         };
                         let final_gss = popped_gss.apply_and_prune(f);
@@ -171,8 +174,9 @@ impl<'a> GrammarConstraintState<'a> {
                         let popped_gss = isolated_gss.pop();
                         if popped_gss.is_empty() { continue; }
 
+                        let trans_weight_rsb = trans_weight.to_rsb();
                         let f = |rsb: &RangeSetBlaze<usize>| {
-                            let new_rsb = rsb & trans_weight.rsb();
+                            let new_rsb = rsb & &trans_weight_rsb;
                             if new_rsb.is_empty() { None } else { Some(new_rsb) }
                         };
                         let final_gss = popped_gss.apply_and_prune(f);
@@ -293,10 +297,21 @@ impl<'a> GrammarConstraintState<'a> {
                 // Check for final state
                 if let Some(final_weight) = &dwa_state.final_weight {
                     if let Some(reduced_acc) = gss.reduce_acc() {
-                        let final_tokens = &reduced_acc & final_weight.rsb();
+                        let final_weight_rsb = final_weight.to_rsb();
+                        crate::debug!(7, "  Final weight RSB: ranges_len={}, first_few={:?}",
+                            final_weight_rsb.ranges_len(),
+                            final_weight_rsb.ranges().take(3).collect::<Vec<_>>());
+                        crate::debug!(7, "  Reduced acc RSB: ranges_len={}, first_few={:?}",
+                            reduced_acc.ranges_len(),
+                            reduced_acc.ranges().take(3).collect::<Vec<_>>());
+                        let final_tokens = &reduced_acc & &final_weight_rsb;
+                        crate::debug!(7, "  After intersection: ranges_len={}", final_tokens.ranges_len());
                         if !final_tokens.is_empty() {
                             // Collapse from N×M to N before adding to result
                             let collapsed = collapse_weight_rsb(&final_tokens, num_tsids);
+                            crate::debug!(7, "  Collapsed: ranges_len={}, first_few={:?}",
+                                collapsed.ranges_len(),
+                                collapsed.ranges().take(3).collect::<Vec<_>>());
                             final_mask_internal |= RangeSet::from(collapsed);
                         }
                     }
@@ -310,8 +325,9 @@ impl<'a> GrammarConstraintState<'a> {
                         let popped_gss = isolated_gss.pop();
                         if popped_gss.is_empty() { continue; }
 
+                        let trans_weight_rsb = trans_weight.to_rsb();
                         let f = |rsb: &RangeSetBlaze<usize>| {
-                            let new_rsb = rsb & trans_weight.rsb();
+                            let new_rsb = rsb & &trans_weight_rsb;
                             if new_rsb.is_empty() { None } else { Some(new_rsb) }
                         };
                         let final_gss = popped_gss.apply_and_prune(f);
@@ -331,8 +347,9 @@ impl<'a> GrammarConstraintState<'a> {
                         let popped_gss = isolated_gss.pop();
                         if popped_gss.is_empty() { continue; }
 
+                        let trans_weight_rsb = trans_weight.to_rsb();
                         let f = |rsb: &RangeSetBlaze<usize>| {
-                            let new_rsb = rsb & trans_weight.rsb();
+                            let new_rsb = rsb & &trans_weight_rsb;
                             if new_rsb.is_empty() { None } else { Some(new_rsb) }
                         };
                         let final_gss = popped_gss.apply_and_prune(f);
