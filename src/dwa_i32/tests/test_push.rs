@@ -19,7 +19,6 @@
 use crate::dwa_i32::*;
 use crate::dwa_i32::common::Label;
 use crate::dwa_i32::dwa::{DWABody, DWAStates};
-use crate::dwa_i32::heavy_weight::WeightDimensions;
 use crate::dwa_i32::test_weighted_automata::stochastic_equivalence_test;
 
 fn dwa_stats(dwa: &DWA) -> (usize, usize) {
@@ -85,7 +84,7 @@ fn test_merge_branches() {
     let b: Label = 98;
     let colon: Label = 58;
     let x: Label = 120;
-    let all = weight_all();
+    let all = Weight::all();
     let w100 = Weight::from_item(100);
     let w200 = Weight::from_item(200);
 
@@ -143,7 +142,7 @@ fn test_merge_branches() {
 
         states[s5].final_weight = Some(all.clone());
 
-        DWA { body: DWABody { start_state: s0 }, states, dims: WeightDimensions::TEST }
+        DWA { body: DWABody { start_state: s0 }, states }
     };
 
     run_push_optimization_test(input, expected);
@@ -166,7 +165,7 @@ fn test_field_name_optimization() {
     let num_fields = 5;
     let colon: Label = 58;
     let value: Label = 200;
-    let all = weight_all();
+    let all = Weight::all();
 
     let input = {
         let mut nwa = NWA::new();
@@ -214,7 +213,7 @@ fn test_field_name_optimization() {
 
         states[sink].final_weight = Some(all.clone());
 
-        DWA { body: DWABody { start_state: start }, states, dims: WeightDimensions::TEST }
+        DWA { body: DWABody { start_state: start }, states }
     };
 
     run_push_optimization_test(input, expected);

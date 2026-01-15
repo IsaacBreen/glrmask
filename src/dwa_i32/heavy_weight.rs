@@ -24,23 +24,15 @@
 //! let weight = HeavyWeight::from_item(pos, &dims);
 //! let expanded = weight.to_rangeset();
 //! ```
-//!
-//! ## Factored Representation
-//!
-//! HeavyWeight supports conversion to/from `FactoredWeight`, a compact representation
-//! that stores weights as union of `(TokenRangeSet, TsidRangeSet)` Cartesian products.
-//! This can achieve ~5-10x compression for weights with structured 2D patterns.
 
-use super::factored_weight::FactoredWeight;
 use super::rangeset::RangeSet;
 use range_set_blaze::RangeSetBlaze;
-use serde::{Deserialize, Serialize};
 use std::fmt::{Debug, Display, Formatter};
 use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Not};
 use std::sync::Arc;
 
 /// Dimensions for the 2D weight space (token × tsid).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct WeightDimensions {
     /// Number of LLM tokens (N dimension)
     pub num_tokens: usize,
@@ -48,19 +40,7 @@ pub struct WeightDimensions {
     pub num_tsids: usize,
 }
 
-impl Default for WeightDimensions {
-    /// Default returns TEST dimensions (1000, 100).
-    /// This provides sensible defaults for tests and legacy code.
-    fn default() -> Self {
-        Self::TEST
-    }
-}
-
 impl WeightDimensions {
-    /// Test/fallback dimensions (1000 tokens × 100 tsids).
-    /// Use this for tests or when dimensions aren't critical.
-    pub const TEST: Self = Self { num_tokens: 1000, num_tsids: 100 };
-    
     /// Create new weight dimensions.
     pub fn new(num_tokens: usize, num_tsids: usize) -> Self {
         assert!(num_tokens > 0, "num_tokens must be positive");
@@ -257,6 +237,10 @@ impl HeavyWeight {
         self.inner.len()
     }
     
+    /// Get the number of ranges in the underlying representation.
+    pub fn num_ranges(&self) -> usize {
+        self.inner.num_ranges()
+    }
     
     /// Get the minimum and maximum positions, if any.
     pub fn bounds(&self) -> Option<(usize, usize)> {
@@ -390,60 +374,6 @@ impl HeavyWeight {
         result
     }
     
-    // ========== Factored Representation ==========
-    
-    /// Convert this weight to a factored representation.
-    /// 
-    /// The factored representation stores the weight as a union of
-    /// `(TokenRangeSet, TsidRangeSet)` Cartesian products, which can
-    /// achieve significant compression when weights have structured
-    /// 2D patterns.
-    /// 
-    /// # Example
-    /// 
-    /// ```ignore
-    /// let hw = HeavyWeight::from_ranges(ranges, dims);
-    /// let factored = hw.to_factored();
-    /// println!("Compressed: {} terms, {} ranges", 
-    ///          factored.num_terms(), factored.total_ranges());
-    /// ```
-    pub fn to_factored(&self) -> FactoredWeight {
-        FactoredWeight::from_1d_ranges(
-            self.ranges(),
-            self.dims.num_tsids,
-        )
-    }
-    
-    /// Create a HeavyWeight from a factored representation.
-    /// 
-    /// This expands the factored representation back to a flat RangeSet.
-    pub fn from_factored(factored: FactoredWeight, dims: WeightDimensions) -> Self {
-        debug_assert_eq!(
-            factored.num_tsids as usize, dims.num_tsids,
-            "num_tsids mismatch: factored has {}, dims has {}",
-            factored.num_tsids, dims.num_tsids
-        );
-        let rsb = factored.expand_impl();
-        Self::from_rangeset(RangeSet::from_rsb(rsb), dims)
-    }
-    
-    /// Estimate the storage bytes if this weight were stored as factored.
-    /// 
-    /// Returns (factored_bytes, rangeset_bytes, num_terms).
-    /// 
-    /// This is useful for deciding whether factored representation would
-    /// save space for this particular weight.
-    pub fn factored_storage_estimate(&self) -> (usize, usize, usize) {
-        let factored = self.to_factored();
-        let factored_bytes = factored.estimated_storage_bytes();
-        
-        // RangeSet: 2 × usize per range = 16 bytes per range
-        let num_ranges: usize = self.inner.rsb.ranges_len();
-        let rangeset_bytes = num_ranges * 16;
-        
-        (factored_bytes, rangeset_bytes, factored.num_terms())
-    }
-    
     // ========== Internal Helpers ==========
     
     fn check_dims(&self, other: &Self) {
@@ -461,6 +391,7 @@ impl Debug for HeavyWeight {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("HeavyWeight")
             .field("dims", &format!("{}", self.dims))
+            .field("num_ranges", &self.num_ranges())
             .field("cardinality", &self.len())
             .finish()
     }
@@ -468,8 +399,8 @@ impl Debug for HeavyWeight {
 
 impl Display for HeavyWeight {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "HeavyWeight({}, {} items)", 
-               self.dims, self.len())
+        write!(f, "HeavyWeight({}, {} ranges, {} items)", 
+               self.dims, self.num_ranges(), self.len())
     }
 }
 
@@ -535,54 +466,6 @@ impl Not for HeavyWeight {
     fn not(self) -> Self::Output {
         (&self).complement()
     }
-}
-
-// ========== DWA Integration ==========
-
-use super::dwa::DWA;
-use std::collections::HashMap;
-use std::ptr;
-
-impl HeavyWeight {
-    /// Extract unique weights from a DWA as HeavyWeights.
-    /// 
-    /// This is useful for analyzing weights with dimension awareness.
-    pub fn extract_unique_from_dwa(dwa: &DWA, dims: WeightDimensions) -> Vec<HeavyWeight> {
-        let mut unique: HashMap<usize, RangeSet> = HashMap::new();
-        
-        for state in &dwa.states.0 {
-            if let Some(fw) = &state.final_weight {
-                let p = fw.intern_id();
-                unique.entry(p).or_insert_with(|| fw.clone().into());
-            }
-            for w in state.trans_weights.values() {
-                let p = w.intern_id();
-                unique.entry(p).or_insert_with(|| w.clone().into());
-            }
-        }
-        
-        unique.into_values()
-            .map(|rs| HeavyWeight::from_rangeset(rs, dims))
-            .collect()
-    }
-    
-    /// Compute aggregate statistics for a set of HeavyWeights.
-    pub fn aggregate_stats(weights: &[HeavyWeight]) -> WeightStats {
-        let total_cardinality: usize = weights.iter().map(|w| w.len()).sum();
-        
-        WeightStats {
-            num_weights: weights.len(),
-            total_cardinality,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct WeightStats {
-    /// Number of unique weights
-    pub num_weights: usize,
-    /// Total cardinality (sum of all items across weights)
-    pub total_cardinality: usize,
 }
 
 // ========== Tests ==========
@@ -747,57 +630,5 @@ mod tests {
         let w2 = HeavyWeight::zeros(dims2);
         
         let _ = w1.union(&w2);  // Should panic
-    }
-    
-    #[test]
-    fn test_factored_roundtrip() {
-        let dims = WeightDimensions::new(100, 10);
-        
-        // Create a complex weight with multiple rectangles
-        let w1 = HeavyWeight::from_rect(0, 10, 0, 5, dims);
-        let w2 = HeavyWeight::from_rect(5, 20, 3, 9, dims);
-        let original = w1.union(&w2);
-        
-        // Convert to factored
-        let factored = original.to_factored();
-        
-        // Check factored contains correct points
-        for (start, end) in original.ranges() {
-            for pos in start..=end {
-                let (token, tsid) = dims.decode(pos);
-                assert!(factored.contains(token as u16, tsid as u16),
-                    "factored missing ({}, {})", token, tsid);
-            }
-        }
-        
-        // Convert back
-        let recovered = HeavyWeight::from_factored(factored, dims);
-        
-        // Should be identical
-        assert_eq!(original.len(), recovered.len());
-        for (start, end) in original.ranges() {
-            for pos in start..=end {
-                assert!(recovered.contains(pos), "recovered missing position {}", pos);
-            }
-        }
-    }
-    
-    #[test]
-    fn test_factored_storage_estimate() {
-        let dims = WeightDimensions::new(100, 10);
-        
-        // Create a weight that benefits from factoring (full rows)
-        let w = HeavyWeight::from_rect(10, 30, 0, 9, dims);  // 21 tokens × 10 tsids = full rows
-        
-        let (factored_bytes, rangeset_bytes, num_terms) = w.factored_storage_estimate();
-        
-        // Full rows should factor into 1 term
-        assert_eq!(num_terms, 1, "full rows should produce 1 term");
-        
-        // Factored should be smaller than rangeset for this pattern
-        // 21 full rows = 21 ranges in RangeSet, but 1 term in factored
-        assert!(factored_bytes < rangeset_bytes,
-            "factored ({}) should be smaller than rangeset ({}) for full rows",
-            factored_bytes, rangeset_bytes);
     }
 }

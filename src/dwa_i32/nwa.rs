@@ -3,9 +3,8 @@
 #![allow(dead_code)]
 #![allow(clippy::needless_borrow)]
 
-use super::common::{format_i16_char, Label, NWAStateID, Weight, weight_all, BENCHMARK_DEBUG};
+use super::common::{format_i16_char, Label, NWAStateID, Weight, BENCHMARK_DEBUG};
 use super::dwa::DWA;
-use super::heavy_weight::WeightDimensions;
 use crate::dwa_i32::{DWAState, StateID};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -173,44 +172,21 @@ impl Display for NWAStats {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NWA {
     pub states: NWAStates,
     pub body: NWABody,
-    /// Weight space dimensions (num_tokens × num_tsids).
-    #[serde(default)]
-    pub dims: WeightDimensions,
-}
-
-impl Default for NWA {
-    fn default() -> Self {
-        Self { states: NWAStates::default(), body: NWABody::default(), dims: WeightDimensions::TEST }
-    }
 }
 
 impl NWA {
     pub fn new_empty() -> Self {
-        Self { states: NWAStates::default(), body: NWABody::default(), dims: WeightDimensions::TEST }
+        Self { states: NWAStates::default(), body: NWABody::default() }
     }
     pub fn new() -> Self {
         let mut nwa = Self::new_empty();
         let start = nwa.add_state();
         nwa.body.start_states.push(start);
         nwa
-    }
-    pub fn new_with_dims(dims: WeightDimensions) -> Self {
-        let mut nwa = Self::new();
-        nwa.dims = dims;
-        nwa
-    }
-    pub fn new_empty_with_dims(dims: WeightDimensions) -> Self {
-        Self { states: NWAStates::default(), body: NWABody::default(), dims }
-    }
-    pub fn dimensions(&self) -> WeightDimensions {
-        self.dims
-    }
-    pub fn set_dimensions(&mut self, dims: WeightDimensions) {
-        self.dims = dims;
     }
     pub fn add_state(&mut self) -> NWAStateID { self.states.add_state() }
     pub fn add_epsilon(&mut self, u: NWAStateID, v: NWAStateID, w: Weight) { self.states.add_epsilon(u, v, w); }
@@ -220,7 +196,6 @@ impl NWA {
 
     pub fn reverse(&self) -> NWA {
         let mut rev = NWA::new_empty();
-        rev.dims = self.dims; // Propagate dimensions
         // Pre-allocate states
         for _ in 0..self.states.len() { rev.add_state(); }
 
@@ -248,7 +223,7 @@ impl NWA {
         for &s in &self.body.start_states {
             if s < rev.states.len() {
                 let old = rev.states[s].final_weight.clone().unwrap_or_else(Weight::zeros);
-                rev.states[s].final_weight = Some(old | weight_all());
+                rev.states[s].final_weight = Some(old | Weight::all());
             }
         }
         
@@ -257,8 +232,6 @@ impl NWA {
 
     pub fn concatenate(left: &NWA, right: &NWA) -> NWA {
         let mut res = NWA::new_empty();
-        // Propagate dimensions from left (primary operand)
-        res.dims = left.dims;
         let _ = res.states.append(&right.states); // Right is at offset 0
         // Construct a body for the right segment
         let right_body = right.body.clone(); // indices are 0-based, valid
@@ -270,31 +243,27 @@ impl NWA {
 
     pub fn union(a: &NWA, b: &NWA) -> NWA {
         let mut a = a.clone();
-        // Dimensions are preserved from a (primary operand)
         a.body = NWAStates::union_in_place(&mut a.states, &b, &a.body);
         a
     }
 
     pub fn union_assign(&mut self, other: &NWA) {
-        // Keep self's dimensions
         self.body = NWAStates::union_in_place(&mut self.states, &other, &self.body);
     }
 
     pub fn concatenate_assign(&mut self, other: &NWA) {
-        // Keep self's dimensions
         self.body = NWAStates::concatenate_in_place(&mut self.states, &other, &self.body);
     }
 
     pub fn from_dwa(dwa: &DWA) -> Self {
         let mut nwa = NWA::new_empty();
-        nwa.dims = dwa.dims; // Propagate dimensions from DWA
         for _ in 0..dwa.states.len() { nwa.add_state(); }
         nwa.body.start_states = vec![dwa.body.start_state];
 
         for (i, st) in dwa.states.0.iter().enumerate() {
             nwa.states[i].final_weight = st.final_weight.clone();
             for (lbl, to) in &st.transitions {
-                let w = st.trans_weights.get(lbl).cloned().unwrap_or_else(weight_all);
+                let w = st.trans_weights.get(lbl).cloned().unwrap_or_else(Weight::all);
                 nwa.add_transition(i, *lbl, *to, w).unwrap();
             }
         }
@@ -338,13 +307,13 @@ impl NWA {
         use std::collections::HashSet;
         use std::ptr;
         
-        // Track unique weights by their intern ID
+        // Track unique weights by their Arc pointer address
         let mut seen: HashSet<usize> = HashSet::new();
         let mut total = 0;
         
         let mut process_weight = |w: &Weight| {
-            // Get the intern ID as a unique identifier
-            let ptr = w.intern_id();
+            // Get the Arc pointer address as a unique identifier
+            let ptr = ptr::addr_of!(**w) as usize;
             if seen.insert(ptr) {
                 total += w.num_ranges();
             }
@@ -400,7 +369,7 @@ impl NWA {
             }
             // BFS/DFS through epsilon edges
             let mut visited: std::collections::HashSet<usize> = std::collections::HashSet::new();
-            let mut stack: Vec<(usize, Weight)> = vec![(start, weight_all())];
+            let mut stack: Vec<(usize, Weight)> = vec![(start, Weight::all())];
             while let Some((state, w)) = stack.pop() {
                 if !visited.insert(state) {
                     continue;
@@ -497,7 +466,7 @@ impl NWA {
         let mut forward: Vec<Weight> = vec![Weight::zeros(); n];
         for &s in &self.body.start_states {
             if s < n {
-                forward[s] |= &weight_all();
+                forward[s] |= &Weight::all();
             }
         }
 

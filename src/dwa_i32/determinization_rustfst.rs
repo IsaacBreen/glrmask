@@ -3,7 +3,7 @@
 #![allow(dead_code)]
 #![allow(clippy::needless_borrow)]
 
-use super::common::{Label, StateID, Weight, weight_all};
+use super::common::{Label, StateID, Weight};
 use super::dwa::DWA;
 use super::nwa::NWA;
 use crate::dwa_i32::NWAStateID;
@@ -84,7 +84,7 @@ impl Semiring for BitsetWeight {
     type ReverseWeight = BitsetWeight;
 
     fn zero() -> Self { BitsetWeight(intern_weight(Weight::zeros())) }
-    fn one() -> Self { BitsetWeight(intern_weight(weight_all())) }
+    fn one() -> Self { BitsetWeight(intern_weight(Weight::all())) }
     fn new(value: Self::Type) -> Self { BitsetWeight(intern_weight(value)) }
 
     fn plus_assign<P: Borrow<Self>>(&mut self, rhs: P) -> Result<()> {
@@ -120,9 +120,7 @@ impl ReverseBack<BitsetWeight> for BitsetWeight {
 
 impl WeaklyDivisibleSemiring for BitsetWeight {
     fn divide_assign(&mut self, rhs: &Self, _divide_type: DivideType) -> Result<()> {
-        let all_weight = weight_all();
-        let rhs_inv = &all_weight - &*rhs.0;
-        let new_weight = &*self.0 | &rhs_inv;
+        let new_weight = &*self.0 | &!&*rhs.0;
         self.0 = intern_weight(new_weight);
         Ok(())
     }
@@ -151,8 +149,7 @@ impl SerializableSemiring for BitsetWeight {
     }
 
     fn write_binary<F: Write>(&self, file: &mut F) -> Result<()> {
-        let rsb = self.0.to_rsb();
-        let ranges: Vec<_> = rsb.ranges().collect();
+        let ranges: Vec<_> = self.0.rsb.ranges().collect();
         file.write_all(&(ranges.len() as u64).to_le_bytes())?;
         for range in ranges {
             file.write_all(&(*range.start() as u64).to_le_bytes())?;
@@ -398,9 +395,7 @@ pub fn determinize_nwa_to_dwa(nwa: &NWA) -> DWA {
     let det_config = DeterminizeConfig::default().with_det_type(DeterminizeType::DeterminizeFunctional);
     let det_fst: VectorFst<BitsetWeight> = determinize_with_config(&fst, det_config).unwrap();
 
-    let mut dwa = vector_fst_to_dwa(&det_fst);
-    dwa.dims = nwa.dims; // Propagate dimensions from NWA
-    dwa
+    vector_fst_to_dwa(&det_fst)
 }
 
 impl DWA {
@@ -432,8 +427,6 @@ impl NWA {
         let mut fst = nwa_to_vector_fst(self);
         fst.compute_and_update_properties_all().unwrap();
         rm_epsilon(&mut fst).unwrap();
-        let mut result = vector_fst_to_nwa(&fst);
-        result.dims = self.dims; // Propagate dimensions
-        result
+        vector_fst_to_nwa(&fst)
     }
 }

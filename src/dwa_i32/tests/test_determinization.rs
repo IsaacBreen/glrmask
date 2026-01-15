@@ -10,20 +10,20 @@ fn test_determinize_simple_divergence() {
     let s0 = nwa.states.add_state();
     let s1 = nwa.states.add_state();
     let s2 = nwa.states.add_state();
-    nwa.add_transition(s0, 'a' as Label, s1, weight_all()).unwrap();
-    nwa.add_transition(s1, 'c' as Label, s2, weight_all()).unwrap();
+    nwa.add_transition(s0, 'a' as Label, s1, Weight::all()).unwrap();
+    nwa.add_transition(s1, 'c' as Label, s2, Weight::all()).unwrap();
     nwa.states[s2].final_weight = Some(Weight::from_item(0));
 
     let s3 = nwa.states.add_state();
     let s4 = nwa.states.add_state();
     let s5 = nwa.states.add_state();
-    nwa.add_transition(s3, 'b' as Label, s4, weight_all()).unwrap();
-    nwa.add_transition(s4, 'c' as Label, s5, weight_all()).unwrap();
+    nwa.add_transition(s3, 'b' as Label, s4, Weight::all()).unwrap();
+    nwa.add_transition(s4, 'c' as Label, s5, Weight::all()).unwrap();
     nwa.states[s5].final_weight = Some(Weight::from_item(1));
 
     let start = nwa.states.add_state();
-    nwa.add_epsilon(start, s0, weight_all());
-    nwa.add_epsilon(start, s3, weight_all());
+    nwa.add_epsilon(start, s0, Weight::all());
+    nwa.add_epsilon(start, s3, Weight::all());
     nwa.body.start_states = vec![start];
 
     let dwa = nwa.determinize();
@@ -45,10 +45,10 @@ fn test_determinize_hypercube_catastrophe() {
         let s = nwa.states.add_state();
         component_starts.push(s);
         nwa.states[s].final_weight = Some(atoms[i].clone());
-        for j in 0..N { if i != j { nwa.add_transition(s, alphabet[j], s, weight_all()).unwrap(); } }
+        for j in 0..N { if i != j { nwa.add_transition(s, alphabet[j], s, Weight::all()).unwrap(); } }
     }
     let start = nwa.states.add_state();
-    for &s_comp in &component_starts { nwa.add_epsilon(start, s_comp, weight_all()); }
+    for &s_comp in &component_starts { nwa.add_epsilon(start, s_comp, Weight::all()); }
     nwa.body.start_states = vec![start];
     let dwa = nwa.determinize();
     assert!(dwa.states.len() <= 2);
@@ -83,9 +83,9 @@ fn test_epsilon_explosion_minimal() {
         let final_state = nwa_labeled.states.add_state();
         
         // Labeled transition: start --i--> intermediate
-        nwa_labeled.add_transition(start_labeled, i as Label, intermediate, weight_all()).unwrap();
+        nwa_labeled.add_transition(start_labeled, i as Label, intermediate, Weight::all()).unwrap();
         // Pattern transition: intermediate --char--> final
-        nwa_labeled.add_transition(intermediate, char_label, final_state, weight_all()).unwrap();
+        nwa_labeled.add_transition(intermediate, char_label, final_state, Weight::all()).unwrap();
         // Final weight
         nwa_labeled.states[final_state].final_weight = Some(Weight::from_item(i));
     }
@@ -105,9 +105,9 @@ fn test_epsilon_explosion_minimal() {
         let final_state = nwa_epsilon.states.add_state();
         
         // EPSILON transition: start --eps--> intermediate
-        nwa_epsilon.add_epsilon(start_eps, intermediate, weight_all());
+        nwa_epsilon.add_epsilon(start_eps, intermediate, Weight::all());
         // Pattern transition: intermediate --char--> final
-        nwa_epsilon.add_transition(intermediate, char_label, final_state, weight_all()).unwrap();
+        nwa_epsilon.add_transition(intermediate, char_label, final_state, Weight::all()).unwrap();
         // Final weight
         nwa_epsilon.states[final_state].final_weight = Some(Weight::from_item(i));
     }
@@ -159,9 +159,9 @@ fn test_epsilon_explosion_diverging_patterns() {
         let q_i_a = nwa_labeled.states.add_state();
         let f_i = nwa_labeled.states.add_state();
         
-        nwa_labeled.add_transition(start_labeled, i as Label, q_i, weight_all()).unwrap();
-        nwa_labeled.add_transition(q_i, shared_char, q_i_a, weight_all()).unwrap();
-        nwa_labeled.add_transition(q_i_a, (i + 100) as Label, f_i, weight_all()).unwrap();  // Unique second char
+        nwa_labeled.add_transition(start_labeled, i as Label, q_i, Weight::all()).unwrap();
+        nwa_labeled.add_transition(q_i, shared_char, q_i_a, Weight::all()).unwrap();
+        nwa_labeled.add_transition(q_i_a, (i + 100) as Label, f_i, Weight::all()).unwrap();  // Unique second char
         nwa_labeled.states[f_i].final_weight = Some(Weight::from_item(i));
     }
     
@@ -180,9 +180,9 @@ fn test_epsilon_explosion_diverging_patterns() {
         let q_i_a = nwa_epsilon.states.add_state();
         let f_i = nwa_epsilon.states.add_state();
         
-        nwa_epsilon.add_epsilon(start_eps, q_i, weight_all());
-        nwa_epsilon.add_transition(q_i, shared_char, q_i_a, weight_all()).unwrap();
-        nwa_epsilon.add_transition(q_i_a, (i + 100) as Label, f_i, weight_all()).unwrap();
+        nwa_epsilon.add_epsilon(start_eps, q_i, Weight::all());
+        nwa_epsilon.add_transition(q_i, shared_char, q_i_a, Weight::all()).unwrap();
+        nwa_epsilon.add_transition(q_i_a, (i + 100) as Label, f_i, Weight::all()).unwrap();
         nwa_epsilon.states[f_i].final_weight = Some(Weight::from_item(i));
     }
     
@@ -265,16 +265,16 @@ fn test_epsilon_explosion_overlapping_alphabet() {
     for i in 0..N {
         // Terminal i matches 'a' repeated (i+1) times
         let mut prev = nwa_labeled.states.add_state();
-        nwa_labeled.add_transition(start_labeled, i as Label, prev, weight_all()).unwrap();
+        nwa_labeled.add_transition(start_labeled, i as Label, prev, Weight::all()).unwrap();
         
         for _ in 0..i {
             let next = nwa_labeled.states.add_state();
-            nwa_labeled.add_transition(prev, char_a, next, weight_all()).unwrap();
+            nwa_labeled.add_transition(prev, char_a, next, Weight::all()).unwrap();
             prev = next;
         }
         
         let final_state = nwa_labeled.states.add_state();
-        nwa_labeled.add_transition(prev, char_a, final_state, weight_all()).unwrap();
+        nwa_labeled.add_transition(prev, char_a, final_state, Weight::all()).unwrap();
         nwa_labeled.states[final_state].final_weight = Some(Weight::from_item(i));
     }
     
@@ -290,16 +290,16 @@ fn test_epsilon_explosion_overlapping_alphabet() {
     
     for i in 0..N {
         let mut prev = nwa_epsilon.states.add_state();
-        nwa_epsilon.add_epsilon(start_eps, prev, weight_all());
+        nwa_epsilon.add_epsilon(start_eps, prev, Weight::all());
         
         for _ in 0..i {
             let next = nwa_epsilon.states.add_state();
-            nwa_epsilon.add_transition(prev, char_a, next, weight_all()).unwrap();
+            nwa_epsilon.add_transition(prev, char_a, next, Weight::all()).unwrap();
             prev = next;
         }
         
         let final_state = nwa_epsilon.states.add_state();
-        nwa_epsilon.add_transition(prev, char_a, final_state, weight_all()).unwrap();
+        nwa_epsilon.add_transition(prev, char_a, final_state, Weight::all()).unwrap();
         nwa_epsilon.states[final_state].final_weight = Some(Weight::from_item(i));
     }
     
@@ -347,12 +347,12 @@ fn test_epsilon_explosion_shared_second_hop() {
     
     // One shared second-hop state
     let shared_state = nwa_labeled.states.add_state();
-    nwa_labeled.states[shared_state].final_weight = Some(weight_all());
+    nwa_labeled.states[shared_state].final_weight = Some(Weight::all());
     
     for i in 0..N {
         let first_hop = nwa_labeled.states.add_state();
         // Labeled transition: start --i--> first_hop
-        nwa_labeled.add_transition(start_labeled, i as Label, first_hop, weight_all()).unwrap();
+        nwa_labeled.add_transition(start_labeled, i as Label, first_hop, Weight::all()).unwrap();
         // All first_hops go to shared_state on 'x', but with DIFFERENT weights
         nwa_labeled.add_transition(first_hop, char_x, shared_state, Weight::from_item(i)).unwrap();
     }
@@ -369,12 +369,12 @@ fn test_epsilon_explosion_shared_second_hop() {
     
     // One shared second-hop state
     let shared_state_eps = nwa_epsilon.states.add_state();
-    nwa_epsilon.states[shared_state_eps].final_weight = Some(weight_all());
+    nwa_epsilon.states[shared_state_eps].final_weight = Some(Weight::all());
     
     for i in 0..N {
         let first_hop = nwa_epsilon.states.add_state();
         // EPSILON transition: start --eps--> first_hop
-        nwa_epsilon.add_epsilon(start_eps, first_hop, weight_all());
+        nwa_epsilon.add_epsilon(start_eps, first_hop, Weight::all());
         // All first_hops go to shared_state on 'x', but with DIFFERENT weights
         nwa_epsilon.add_transition(first_hop, char_x, shared_state_eps, Weight::from_item(i)).unwrap();
     }
@@ -421,7 +421,7 @@ fn test_epsilon_explosion_shared_then_diverge() {
     
     for i in 0..N {
         let first_hop = nwa_labeled.states.add_state();
-        nwa_labeled.add_transition(start_labeled, i as Label, first_hop, weight_all()).unwrap();
+        nwa_labeled.add_transition(start_labeled, i as Label, first_hop, Weight::all()).unwrap();
         
         // Transition to SHARED second hop on 'a'
         nwa_labeled.add_transition(first_hop, 'a' as Label, shared_second, Weight::from_item(i)).unwrap();
@@ -447,7 +447,7 @@ fn test_epsilon_explosion_shared_then_diverge() {
     
     for i in 0..N {
         let first_hop = nwa_epsilon.states.add_state();
-        nwa_epsilon.add_epsilon(start_eps, first_hop, weight_all());
+        nwa_epsilon.add_epsilon(start_eps, first_hop, Weight::all());
         
         nwa_epsilon.add_transition(first_hop, 'a' as Label, shared_second_eps, Weight::from_item(i)).unwrap();
         
@@ -510,14 +510,14 @@ fn test_epsilon_explosion_paths_through_shared() {
     nwa_labeled.body.start_states = vec![start_labeled];
     
     let final_state = nwa_labeled.states.add_state();
-    nwa_labeled.states[final_state].final_weight = Some(weight_all());
+    nwa_labeled.states[final_state].final_weight = Some(Weight::all());
     
     // Create N first-hop states
     // Each pair of consecutive first-hops shares a second-hop state
     let mut first_hops = vec![];
     for i in 0..N {
         let fh = nwa_labeled.states.add_state();
-        nwa_labeled.add_transition(start_labeled, i as Label, fh, weight_all()).unwrap();
+        nwa_labeled.add_transition(start_labeled, i as Label, fh, Weight::all()).unwrap();
         first_hops.push(fh);
     }
     
@@ -529,7 +529,7 @@ fn test_epsilon_explosion_paths_through_shared() {
         nwa_labeled.add_transition(first_hops[i], label, sh, Weight::from_item(i)).unwrap();
         nwa_labeled.add_transition(first_hops[i+1], label, sh, Weight::from_item(i+1)).unwrap();
         // From shared, go to final
-        nwa_labeled.add_transition(sh, 'f' as Label, final_state, weight_all()).unwrap();
+        nwa_labeled.add_transition(sh, 'f' as Label, final_state, Weight::all()).unwrap();
     }
     
     let dwa_labeled = nwa_labeled.determinize();
@@ -543,12 +543,12 @@ fn test_epsilon_explosion_paths_through_shared() {
     nwa_epsilon.body.start_states = vec![start_eps];
     
     let final_state_eps = nwa_epsilon.states.add_state();
-    nwa_epsilon.states[final_state_eps].final_weight = Some(weight_all());
+    nwa_epsilon.states[final_state_eps].final_weight = Some(Weight::all());
     
     let mut first_hops_eps = vec![];
     for _ in 0..N {
         let fh = nwa_epsilon.states.add_state();
-        nwa_epsilon.add_epsilon(start_eps, fh, weight_all());
+        nwa_epsilon.add_epsilon(start_eps, fh, Weight::all());
         first_hops_eps.push(fh);
     }
     
@@ -557,7 +557,7 @@ fn test_epsilon_explosion_paths_through_shared() {
         let label = (100 + i) as Label;
         nwa_epsilon.add_transition(first_hops_eps[i], label, sh, Weight::from_item(i)).unwrap();
         nwa_epsilon.add_transition(first_hops_eps[i+1], label, sh, Weight::from_item(i+1)).unwrap();
-        nwa_epsilon.add_transition(sh, 'f' as Label, final_state_eps, weight_all()).unwrap();
+        nwa_epsilon.add_transition(sh, 'f' as Label, final_state_eps, Weight::all()).unwrap();
     }
     
     let dwa_epsilon = nwa_epsilon.determinize();
@@ -600,7 +600,7 @@ fn test_epsilon_explosion_many_sources_same_label() {
     
     for i in 0..N {
         let first_hop = nwa_labeled.states.add_state();
-        nwa_labeled.add_transition(start_labeled, i as Label, first_hop, weight_all()).unwrap();
+        nwa_labeled.add_transition(start_labeled, i as Label, first_hop, Weight::all()).unwrap();
         
         // Each first-hop has the shared_label transition to its OWN unique target
         let target = nwa_labeled.states.add_state();
@@ -620,7 +620,7 @@ fn test_epsilon_explosion_many_sources_same_label() {
     
     for i in 0..N {
         let first_hop = nwa_epsilon.states.add_state();
-        nwa_epsilon.add_epsilon(start_eps, first_hop, weight_all());
+        nwa_epsilon.add_epsilon(start_eps, first_hop, Weight::all());
         
         let target = nwa_epsilon.states.add_state();
         nwa_epsilon.add_transition(first_hop, shared_label, target, Weight::from_item(i)).unwrap();
@@ -678,12 +678,12 @@ fn test_epsilon_explosion_many_sources_with_continuation() {
     
     // More states after the shared target
     let after_shared = nwa_labeled.states.add_state();
-    nwa_labeled.add_transition(shared_target, 'X' as Label, after_shared, weight_all()).unwrap();
-    nwa_labeled.states[after_shared].final_weight = Some(weight_all());
+    nwa_labeled.add_transition(shared_target, 'X' as Label, after_shared, Weight::all()).unwrap();
+    nwa_labeled.states[after_shared].final_weight = Some(Weight::all());
     
     for i in 0..N {
         let first_hop = nwa_labeled.states.add_state();
-        nwa_labeled.add_transition(start_labeled, i as Label, first_hop, weight_all()).unwrap();
+        nwa_labeled.add_transition(start_labeled, i as Label, first_hop, Weight::all()).unwrap();
         
         if i < K {
             // These K first-hops share label L going to shared_target
@@ -709,12 +709,12 @@ fn test_epsilon_explosion_many_sources_with_continuation() {
     
     let shared_target_eps = nwa_epsilon.states.add_state();
     let after_shared_eps = nwa_epsilon.states.add_state();
-    nwa_epsilon.add_transition(shared_target_eps, 'X' as Label, after_shared_eps, weight_all()).unwrap();
-    nwa_epsilon.states[after_shared_eps].final_weight = Some(weight_all());
+    nwa_epsilon.add_transition(shared_target_eps, 'X' as Label, after_shared_eps, Weight::all()).unwrap();
+    nwa_epsilon.states[after_shared_eps].final_weight = Some(Weight::all());
     
     for i in 0..N {
         let first_hop = nwa_epsilon.states.add_state();
-        nwa_epsilon.add_epsilon(start_eps, first_hop, weight_all());
+        nwa_epsilon.add_epsilon(start_eps, first_hop, Weight::all());
         
         if i < K {
             nwa_epsilon.add_transition(first_hop, shared_label, shared_target_eps, Weight::from_item(i)).unwrap();
@@ -795,7 +795,7 @@ fn test_epsilon_explosion_different_alphabets() {
     // Create N roots with overlapping label sets
     for i in 0..N {
         let root = nwa_labeled.states.add_state();
-        nwa_labeled.add_transition(start_labeled, i as Label, root, weight_all()).unwrap();
+        nwa_labeled.add_transition(start_labeled, i as Label, root, Weight::all()).unwrap();
         
         // Root i responds to labels [i*10..i*10+P] (overlapping)
         let mut current = vec![root];
@@ -829,7 +829,7 @@ fn test_epsilon_explosion_different_alphabets() {
     
     for i in 0..N {
         let root = nwa_epsilon.states.add_state();
-        nwa_epsilon.add_epsilon(start_eps, root, weight_all());
+        nwa_epsilon.add_epsilon(start_eps, root, Weight::all());
         
         let mut current = vec![root];
         for d in 0..DEPTH {
@@ -912,7 +912,7 @@ fn test_epsilon_explosion_json_like() {
     // Different roots have DIFFERENT subsets (like different JSON positions)
     for root_idx in 0..NUM_ROOTS {
         let root = nwa_labeled.states.add_state();
-        nwa_labeled.add_transition(start_labeled, root_idx as Label, root, weight_all()).unwrap();
+        nwa_labeled.add_transition(start_labeled, root_idx as Label, root, Weight::all()).unwrap();
         
         // This root can transition on labels [root_idx..root_idx + 5] mod NUM_LABELS
         // Different roots have overlapping but not identical label sets
@@ -945,7 +945,7 @@ fn test_epsilon_explosion_json_like() {
     
     for root_idx in 0..NUM_ROOTS {
         let root = nwa_epsilon.states.add_state();
-        nwa_epsilon.add_epsilon(start_eps, root, weight_all());
+        nwa_epsilon.add_epsilon(start_eps, root, Weight::all());
         
         for j in 0..5 {
             let label = ((root_idx + j) % NUM_LABELS) as Label;

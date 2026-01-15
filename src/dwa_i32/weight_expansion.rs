@@ -15,10 +15,9 @@
 #![allow(dead_code)]
 
 use range_set_blaze::RangeSetBlaze;
-use super::common::{Label, Weight, weight_all};
+use super::common::{Label, Weight};
 use super::dwa::DWA;
 use super::nwa::NWA;
-use super::heavy_weight::WeightDimensions;
 
 #[inline]
 fn tsid_to_offset(tsid: usize, tsid_offset_map: Option<&[usize]>) -> usize {
@@ -37,11 +36,10 @@ pub fn expand_weight(weight: &Weight, num_tsids: usize) -> Weight {
         return Weight::zeros();
     }
     if weight.is_all_fast() {
-        return weight_all();
+        return Weight::all();
     }
     
-    let rsb = weight.to_rsb();
-    Weight::from_rsb(expand_rsb(&rsb, num_tsids))
+    Weight::from_rsb(expand_rsb(&weight.rsb, num_tsids))
 }
 
 /// Expand a RangeSetBlaze from N-space to N×M-space.
@@ -142,19 +140,27 @@ pub fn create_tsid_set_mask_with_offset_map<I>(
 where
     I: IntoIterator<Item = usize>,
 {
-    // Build base pattern from all tsids (with offset mapping if provided)
-    let mapped_tsids: Vec<usize> = tsids
+    // Build base pattern from all tsids
+    let base_pattern: RangeSetBlaze<usize> = tsids
         .into_iter()
         .map(|t| tsid_to_offset(t, tsid_offset_map))
         .collect();
     
-    if mapped_tsids.is_empty() {
+    if base_pattern.is_empty() {
         return Weight::zeros();
     }
     
-    // Use optimized tsid_columns construction with explicit dimensions
-    // This is O(|tsids|) for BDD backends instead of O(|tsids| * |tokens|)
-    Weight::tsid_columns_with_dims(mapped_tsids, num_tsids, max_llm_token + 1)
+    // Tile the pattern across all LLM tokens
+    // For each LLM token n, shift the base pattern by n * num_tsids
+    let mut mask = RangeSetBlaze::new();
+    for n in 0..=max_llm_token {
+        let offset = n * num_tsids;
+        for tsid in base_pattern.iter() {
+            mask.insert(tsid + offset);
+        }
+    }
+    
+    Weight::from_rsb(mask)
 }
 
 /// Collapse a weight from N×M-space back to N-space.
@@ -318,11 +324,10 @@ pub fn collapse_weight(weight: &Weight, num_tsids: usize) -> Weight {
         return weight.clone();
     }
     if weight.is_all_fast() {
-        return weight_all();
+        return Weight::all();
     }
     
-    let rsb = weight.to_rsb();
-    Weight::from_rsb(collapse_weight_rsb(&rsb, num_tsids))
+    Weight::from_rsb(collapse_weight_rsb(&weight.rsb, num_tsids))
 }
 
 /// Create an initial weight for weight-heavy mode given an active tokenizer state ID.
@@ -418,8 +423,7 @@ mod tests {
         let combined = &(&mask0 | &mask2) | &mask4;
         
         assert_eq!(mask.len(), combined.len());
-        let combined_rsb = combined.to_rsb();
-        for pos in combined_rsb.iter() {
+        for pos in combined.rsb.iter() {
             assert!(mask.contains(pos), "mask missing position {}", pos);
         }
     }
@@ -516,7 +520,6 @@ mod tests {
         let input_dwa = DWA {
             states: DWAStates(vec![state0, state1, state2, state3]),
             body: DWABody { start_state: 0 },
-            dims: WeightDimensions::TEST,
         };
         
         println!("INPUT DWA:");
@@ -547,7 +550,6 @@ mod tests {
         let expected_dwa = DWA {
             states: DWAStates(vec![exp_state0, exp_state1, exp_state2]),
             body: DWABody { start_state: 0 },
-            dims: WeightDimensions::TEST,
         };
         
         println!("EXPECTED DWA:");
@@ -593,7 +595,6 @@ mod tests {
         let input_dwa = DWA {
             states: DWAStates(vec![state0, state1]),
             body: DWABody { start_state: 0 },
-            dims: WeightDimensions::TEST,
         };
 
         println!("INPUT DWA:");
@@ -610,7 +611,6 @@ mod tests {
         let expected_dwa = DWA {
             states: DWAStates(vec![exp_state0]),
             body: DWABody { start_state: 0 },
-            dims: WeightDimensions::TEST,
         };
 
         println!("EXPECTED DWA:");

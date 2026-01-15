@@ -3,7 +3,7 @@
 #![allow(dead_code)]
 #![allow(clippy::needless_borrow)]
 
-pub(crate) use super::common::{format_pos_code, Label, StateID, Weight, weight_all};
+pub(crate) use super::common::{format_pos_code, Label, StateID, Weight};
 use std::collections::BTreeMap;
 use std::fmt::{self, Display, Formatter};
 use std::ops::{Deref, Index, IndexMut};
@@ -108,53 +108,27 @@ impl DWAStates {
     }
 }
 
-use super::heavy_weight::WeightDimensions;
-
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DWABody {
     pub start_state: StateID,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DWA {
     pub states: DWAStates,
     pub body: DWABody,
-    /// Weight space dimensions (num_tokens × num_tsids).
-    /// WeightDimensions::TEST if not set.
-    pub dims: WeightDimensions,
-}
-
-impl Default for DWA {
-    fn default() -> Self {
-        Self { states: DWAStates::default(), body: DWABody::default(), dims: WeightDimensions::TEST }
-    }
 }
 
 impl DWA {
     pub fn new() -> Self {
         let mut states = DWAStates::default();
         let start = states.add_state();
-        DWA { states, body: DWABody { start_state: start }, dims: WeightDimensions::TEST }
-    }
-    pub fn new_with_dims(dims: WeightDimensions) -> Self {
-        let mut states = DWAStates::default();
-        let start = states.add_state();
-        DWA { states, body: DWABody { start_state: start }, dims }
+        DWA { states, body: DWABody { start_state: start } }
     }
     pub fn new_empty() -> Self {
-        DWA { states: DWAStates::default(), body: DWABody::default(), dims: WeightDimensions::TEST }
-    }
-    pub fn new_empty_with_dims(dims: WeightDimensions) -> Self {
-        DWA { states: DWAStates::default(), body: DWABody::default(), dims }
+        DWA { states: DWAStates::default(), body: DWABody::default() }
     }
     pub fn add_state(&mut self) -> StateID { self.states.add_state() }
-    
-    /// Get the weight dimensions.
-    pub fn dimensions(&self) -> WeightDimensions { self.dims }
-    
-    /// Set the weight dimensions.
-    pub fn set_dimensions(&mut self, dims: WeightDimensions) { self.dims = dims; }
-    
     pub fn set_final_weight(&mut self, state: StateID, weight: Weight) -> Result<(), DWABuildError> {
         if state >= self.states.len() { return Err(DWABuildError::StateOutOfBounds { state }); }
         self.states[state].final_weight = Some(weight); Ok(())
@@ -170,7 +144,7 @@ impl DWA {
     pub fn eval_word_weight(&self, word: &[Label]) -> Weight {
         if self.states.0.is_empty() { return Weight::zeros(); }
         let mut s = self.body.start_state;
-        let mut acc = weight_all();
+        let mut acc = Weight::all();
 
         if s < self.states.len() {
         } else { return Weight::zeros(); }
@@ -643,14 +617,15 @@ impl DWA {
     /// If the same interned weight appears multiple times, it is only counted once.
     pub fn num_ranges_interned(&self) -> usize {
         use std::collections::HashSet;
+        use std::ptr;
         
-        // Track unique weights by their intern ID
+        // Track unique weights by their Arc pointer address
         let mut seen: HashSet<usize> = HashSet::new();
         let mut total = 0;
         
         let mut process_weight = |w: &Weight| {
-            // Get the intern ID as a unique identifier
-            let ptr = w.intern_id();
+            // Get the Arc pointer address as a unique identifier
+            let ptr = ptr::addr_of!(**w) as usize;
             if seen.insert(ptr) {
                 total += w.num_ranges();
             }
@@ -670,20 +645,21 @@ impl DWA {
     /// Analyze weight distribution to understand range fragmentation
     pub fn analyze_weights(&self) {
         use std::collections::HashMap;
+        use std::ptr;
         
         // Collect all unique weights
-        let mut weight_usage: HashMap<usize, (usize, usize)> = HashMap::new(); // intern_id -> (count, num_ranges)
+        let mut weight_usage: HashMap<usize, (usize, usize)> = HashMap::new(); // ptr -> (count, num_ranges)
         let mut range_histogram: HashMap<usize, usize> = HashMap::new(); // num_ranges -> count
         
         for state in &self.states.0 {
             if let Some(fw) = &state.final_weight {
-                let ptr = fw.intern_id();
+                let ptr = ptr::addr_of!(**fw) as usize;
                 let entry = weight_usage.entry(ptr).or_insert((0, fw.num_ranges()));
                 entry.0 += 1;
                 *range_histogram.entry(fw.num_ranges()).or_insert(0) += 1;
             }
             for w in state.trans_weights.values() {
-                let ptr = w.intern_id();
+                let ptr = ptr::addr_of!(**w) as usize;
                 let entry = weight_usage.entry(ptr).or_insert((0, w.num_ranges()));
                 entry.0 += 1;
                 *range_histogram.entry(w.num_ranges()).or_insert(0) += 1;
@@ -760,7 +736,7 @@ impl DWA {
         }
 
         let mut forward: Vec<Weight> = vec![Weight::zeros(); n];
-        forward[start] = weight_all();
+        forward[start] = Weight::all();
 
         let mut changed = true;
         while changed {
@@ -780,7 +756,7 @@ impl DWA {
                         .trans_weights
                         .get(lbl)
                         .cloned()
-                        .unwrap_or_else(weight_all);
+                        .unwrap_or_else(Weight::all);
                     let mut flow = fu.clone();
                     flow &= &w;
                     if !flow.is_subset_of(&forward[v]) {
@@ -814,7 +790,7 @@ impl DWA {
                         .trans_weights
                         .get(lbl)
                         .cloned()
-                        .unwrap_or_else(weight_all);
+                        .unwrap_or_else(Weight::all);
                     let contribution = &w & &backward[v];
                     if !contribution.is_subset_of(&bu_new) {
                         bu_new |= &contribution;
@@ -854,7 +830,7 @@ impl DWA {
                     .trans_weights
                     .get(&lbl)
                     .cloned()
-                    .unwrap_or_else(weight_all);
+                    .unwrap_or_else(Weight::all);
 
                 let mut new_w = old_w;
                 new_w &= &forward[s];
@@ -885,7 +861,7 @@ impl DWA {
                     .trans_weights
                     .get(&lbl)
                     .cloned()
-                    .unwrap_or_else(weight_all);
+                    .unwrap_or_else(Weight::all);
 
                 let mut new_w = old_w;
                 new_w &= &forward[s];
@@ -908,7 +884,7 @@ impl Display for DWA {
             writeln!(f, "  State {}:", id)?;
             if let Some(w) = &state.final_weight { writeln!(f, "    final_weight: {}", w)?; }
             for (on, to) in &state.transitions {
-                let w = state.trans_weights.get(on).cloned().unwrap_or_else(weight_all);
+                let w = state.trans_weights.get(on).cloned().unwrap_or_else(Weight::all);
                 if w.is_all_fast() {
                     writeln!(f, "    {} -> {}", format_pos_code(*on), to)?;
                 } else {
@@ -933,8 +909,7 @@ impl DWA {
                 json!({"is_empty": true})
             } else {
                 // Export as ranges
-                let rsb = w.to_rsb();
-                let ranges: Vec<(usize, usize)> = rsb.ranges()
+                let ranges: Vec<(usize, usize)> = w.rsb.ranges()
                     .map(|r| (*r.start(), *r.end()))
                     .collect();
                 json!({
@@ -952,7 +927,7 @@ impl DWA {
             let transitions: Vec<Value> = state.transitions.iter().map(|(label, target)| {
                 let weight = state.trans_weights.get(label)
                     .cloned()
-                    .unwrap_or_else(weight_all);
+                    .unwrap_or_else(Weight::all);
                 json!({
                     "label": label,
                     "target": target,

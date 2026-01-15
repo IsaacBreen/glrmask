@@ -25,26 +25,15 @@ pub mod weight_bdd_metrics;
 pub mod weight_oxidd_metrics;
 pub mod weight_factorization_metrics;
 pub mod factored_weight;
-pub mod factored_validate_weight;
 pub mod shared_bdd;
 pub mod heavy_weight;
-pub mod bdd_weight;
-pub mod bdd_weight_biodivine;
-pub mod weight_storage;
-pub mod weight_impl;
-pub mod abstract_weight;
 pub mod test_weighted_automata;
 
 #[cfg(test)]
 mod tests;
 
 pub use self::rangeset::RangeSet;
-pub use self::common::{format_i16_char, format_pos_code, format_word, weight_all, weight_complement, NWAStateID, StateID, Weight, Label};
+pub use self::common::{format_i16_char, format_pos_code, format_word, NWAStateID, StateID, Weight, Label};
 pub use self::dwa::{DWABody, DWABuildError, DWAState, DWAStates, DWA};
 pub use self::nwa::{NWABody, NWABuildError, NWAState, NWAStates, NWA};
-pub use self::heavy_weight::{HeavyWeight, WeightDimensions, WeightStats};
-pub use self::bdd_weight::BddWeight;
-pub use self::weight_storage::{WeightStorage, WeightStorageFactory, RangeSetStorage, RangeSetStorageFactory, BddStorage, BddStorageFactory, StorageMetrics, compare_storages};
-pub use self::weight_impl::{WeightBackend, get_weight_backend, set_weight_dimensions, get_weight_dimensions};
-pub use self::abstract_weight::AbstractWeight;
-
+pub use self::heavy_weight::{HeavyWeight, WeightDimensions};

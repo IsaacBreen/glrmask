@@ -1,6 +1,6 @@
 //! Push weights toward initial state in NWA.
 
-use crate::dwa_i32::common::{Label, NWAStateID, Weight, weight_complement};
+use crate::dwa_i32::common::{Label, NWAStateID, Weight};
 use crate::dwa_i32::nwa::NWA;
 use std::collections::{HashSet, VecDeque};
 
@@ -65,13 +65,13 @@ impl NWA {
 
         for (u, st) in self.states.0.iter_mut().enumerate() {
             let d_u = &d[u];
-            let inv_d_u = if starts.contains(&u) { Weight::zeros() } else { weight_complement(d_u) };
+            let inv_d_u = if starts.contains(&u) { Weight::zeros() } else { d_u.complement() };
 
             // Epsilons
             for (v, w) in &mut st.epsilons {
                 if *v < n {
                     let d_v = &d[*v];
-                    let new_w = (&*w & d_v) | inv_d_u.clone();
+                    let new_w = (&*w & d_v) | &inv_d_u;
                     if *w != new_w {
                         *w = new_w;
                         changed = true;
@@ -83,7 +83,7 @@ impl NWA {
                 for (v, w) in targets {
                     if *v < n {
                         let d_v = &d[*v];
-                        let new_w = (&*w & d_v) | inv_d_u.clone();
+                        let new_w = (&*w & d_v) | &inv_d_u;
                         if *w != new_w {
                             *w = new_w;
                             changed = true;
@@ -93,7 +93,7 @@ impl NWA {
             }
             // Final weights
             if let Some(fw) = &mut st.final_weight {
-                let new_fw = fw.clone() | inv_d_u.clone();
+                let new_fw = &*fw | &inv_d_u;
                 if *fw != new_fw {
                     *fw = new_fw;
                     changed = true;

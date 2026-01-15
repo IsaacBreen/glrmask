@@ -1,8 +1,7 @@
 #![allow(dead_code)]
 #![allow(clippy::needless_borrow)]
 
-use super::abstract_weight::AbstractWeight;
-use super::get_weight_dimensions;
+use super::rangeset::RangeSet;
 
 pub(crate) const STOCHASTIC_DEBUG: bool = false;
 pub(crate) const DETERMINIZE_DEBUG: bool = false;
@@ -15,23 +14,9 @@ pub(crate) fn optimize_debug() -> bool {
 }
 
 pub type StateID = usize;
-pub type Weight = AbstractWeight;
+pub type Weight = RangeSet;
 pub type NWAStateID = usize;
 pub type Label = i32;
-
-/// Create a weight representing the full universe for the current dimensions.
-/// 
-/// This is a convenience function that uses the global weight dimensions.
-/// For explicit dimension control, use `Weight::all(dims)` instead.
-pub fn weight_all() -> Weight {
-    let dims = get_weight_dimensions();
-    Weight::all(dims)
-}
-
-/// Create the complement of a weight relative to the full universe.
-pub fn weight_complement(w: &Weight) -> Weight {
-    &weight_all() - w
-}
 
 pub fn format_pos_code(code: Label) -> String { code.to_string() }
 

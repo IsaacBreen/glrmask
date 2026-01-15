@@ -2,7 +2,6 @@
 
 use crate::dwa_i32::dwa::DWA;
 use crate::dwa_i32::common::Weight;
-use crate::dwa_i32::weight_all;
 
 /// Test that weight loosening preserves semantics on a simple acyclic DWA.
 /// 
@@ -135,8 +134,8 @@ fn test_weight_loosening_skips_cyclic() {
     let s1 = dwa.add_state();
     
     // Create a cycle: 0 -> 1 -> 0
-    dwa.add_transition(0, 1, s1, weight_all()).unwrap();
-    dwa.add_transition(s1, 2, 0, weight_all()).unwrap();
+    dwa.add_transition(0, 1, s1, Weight::all()).unwrap();
+    dwa.add_transition(s1, 2, 0, Weight::all()).unwrap();
     
     // Verify it's cyclic
     assert!(dwa.is_cyclic(), "DWA should be cyclic");

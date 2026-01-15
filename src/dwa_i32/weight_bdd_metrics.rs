@@ -77,8 +77,7 @@ fn weight_to_bdd(vars: &BddVariableSet, weight: &Weight, domain_max: usize, k: u
 
     let mut acc = bdd_false(vars);
 
-    let rsb = weight.to_rsb();
-    for r in rsb.ranges() {
+    for r in weight.rsb.ranges() {
         let start = *r.start();
         let end = *r.end();
 
@@ -118,11 +117,11 @@ pub fn maybe_print_dwa_weight_bdd_metrics(dwa: &DWA, domain_max: usize, name: &s
 
     for state in &dwa.states.0 {
         if let Some(fw) = &state.final_weight {
-            let p = fw.intern_id();
+            let p = ptr::addr_of!(**fw) as usize;
             unique.entry(p).or_insert_with(|| (fw.clone(), fw.num_ranges()));
         }
         for w in state.trans_weights.values() {
-            let p = w.intern_id();
+            let p = ptr::addr_of!(**w) as usize;
             unique.entry(p).or_insert_with(|| (w.clone(), w.num_ranges()));
         }
     }
@@ -160,88 +159,5 @@ pub fn maybe_print_dwa_weight_bdd_metrics(dwa: &DWA, domain_max: usize, name: &s
         max_bdd_nodes,
         total_build_ms,
         if unique_weights == 0 { 0.0 } else { total_build_ms as f64 / unique_weights as f64 },
-    );
-}
-/// Print metrics comparing RangeSet vs our new TSID-first BddWeight storage.
-///
-/// Enabled only when `WEIGHT_BDD_COMPARE=1`.
-pub fn maybe_print_dwa_bdd_compare_metrics(dwa: &DWA, name: &str) {
-    if std::env::var("WEIGHT_BDD_COMPARE").map(|v| v != "1").unwrap_or(true) {
-        return;
-    }
-
-    use std::collections::HashMap;
-    use std::ptr;
-    use crate::dwa_i32::bdd_weight::BddWeight;
-
-    // Collect unique weights by Arc pointer address.
-    // Also count total weight slots to verify deduplication.
-    let mut unique: HashMap<usize, Weight> = HashMap::new();
-    let mut total_weight_slots = 0usize;
-
-    for state in &dwa.states.0 {
-        if let Some(fw) = &state.final_weight {
-            total_weight_slots += 1;
-            let p = fw.intern_id();
-            unique.entry(p).or_insert_with(|| fw.clone());
-        }
-        for w in state.trans_weights.values() {
-            total_weight_slots += 1;
-            let p = w.intern_id();
-            unique.entry(p).or_insert_with(|| w.clone());
-        }
-    }
-
-    let unique_weights = unique.len();
-    if unique_weights == 0 {
-        crate::debug!(5, "[WEIGHT_BDD_COMPARE] {}: no weights", name);
-        return;
-    }
-
-    let dims = dwa.dims;
-    let tsid_dim = dims.num_tsids as u16;
-    let token_dim = dims.num_tokens as u16;
-
-    let mut total_rangeset_ranges: usize = 0;
-    let mut total_bdd_nodes: usize = 0;
-    let mut total_bdd_bytes: usize = 0;
-    let mut max_bdd_nodes: usize = 0;
-    let mut bdd_build_us: u128 = 0;
-
-    for w in unique.values() {
-        total_rangeset_ranges += w.num_ranges();
-
-        let start = std::time::Instant::now();
-        let rsb = w.to_rsb();
-        let ranges = rsb.ranges().map(|r| (*r.start(), *r.end()));
-        let bdd = BddWeight::from_ranges(ranges, tsid_dim, token_dim);
-        bdd_build_us += start.elapsed().as_micros();
-
-        let nodes = bdd.num_nodes();
-        total_bdd_nodes += nodes;
-        total_bdd_bytes += bdd.storage_bytes();
-        max_bdd_nodes = max_bdd_nodes.max(nodes);
-    }
-
-    let rangeset_bytes = total_rangeset_ranges * 16;
-    let avg_ranges = total_rangeset_ranges as f64 / unique_weights as f64;
-    let avg_nodes = total_bdd_nodes as f64 / unique_weights as f64;
-    let reuse_factor = if unique_weights > 0 { total_weight_slots as f64 / unique_weights as f64 } else { 0.0 };
-
-    crate::debug!(5, "[WEIGHT_BDD_COMPARE] {}: dims={}x{} slots={} unique={} (reuse {:.1}x) | RangeSet: {} ranges ({:.1} avg), {} KB | BddWeight: {} nodes ({:.1} avg), {} KB | Ratio: {:.2}x | Build: {}µs",
-        name,
-        token_dim,
-        tsid_dim,
-        total_weight_slots,
-        unique_weights,
-        reuse_factor,
-        total_rangeset_ranges,
-        avg_ranges,
-        rangeset_bytes / 1024,
-        total_bdd_nodes,
-        avg_nodes,
-        total_bdd_bytes / 1024,
-        if total_bdd_bytes > 0 { rangeset_bytes as f64 / total_bdd_bytes as f64 } else { 0.0 },
-        bdd_build_us,
     );
 }

@@ -82,7 +82,7 @@ impl DWA {
                 let reach_dest = &backward_reach[dest];
                 
                 if let Some(weight) = self.states[state_id].trans_weights.get(&label).cloned() {
-                    let weight_ptr = weight.intern_id();
+                    let weight_ptr = ptr::addr_of!(*weight) as usize;
                     let cache_key = (weight_ptr, state_id, dest);
                     
                     let new_weight = if let Some(cached) = weight_cache.get(&cache_key) {
@@ -115,7 +115,7 @@ impl DWA {
             
             // Process final weight
             if let Some(fw) = self.states[state_id].final_weight.clone() {
-                let weight_ptr = fw.intern_id();
+                let weight_ptr = ptr::addr_of!(*fw) as usize;
                 // For final weights, use state_id as both source and dest (since it's self-contained)
                 let cache_key = (weight_ptr, state_id, state_id);
                 
@@ -206,7 +206,7 @@ impl DWA {
             for (&label, &dest) in &self.states[state_id].transitions {
                 if let Some(weight) = self.states[state_id].trans_weights.get(&label) {
                     // Tokens that can reach dest through this edge
-                    let edge_tokens = &current_reach & &weight.to_rsb();
+                    let edge_tokens = &current_reach & &weight.rsb;
                     
                     if !edge_tokens.is_empty() {
                         let old_reach = reach[dest].clone();
@@ -236,7 +236,7 @@ impl DWA {
         
         for state_id in 0..n {
             if let Some(fw) = &self.states[state_id].final_weight {
-                reach[state_id] = fw.to_rsb();
+                reach[state_id] = fw.rsb.clone();
                 if !in_queue[state_id] {
                     queue.push_back(state_id);
                     in_queue[state_id] = true;
@@ -261,7 +261,7 @@ impl DWA {
             for &(src, label) in &rev_edges[state_id] {
                 if let Some(weight) = self.states[src].trans_weights.get(&label) {
                     // Tokens that can reach acceptance through this edge
-                    let edge_tokens = &current_reach & &weight.to_rsb();
+                    let edge_tokens = &current_reach & &weight.rsb;
                     
                     if !edge_tokens.is_empty() {
                         let old_reach = reach[src].clone();
@@ -281,14 +281,17 @@ impl DWA {
     
     /// Count the number of unique weights in this DWA
     fn count_unique_weights(&self) -> usize {
+        use std::ptr;
         let mut seen: HashSet<usize> = HashSet::new();
         
         for state in &self.states.0 {
             if let Some(fw) = &state.final_weight {
-                seen.insert(fw.intern_id());
+                let ptr = ptr::addr_of!(**fw) as usize;
+                seen.insert(ptr);
             }
             for w in state.trans_weights.values() {
-                seen.insert(w.intern_id());
+                let ptr = ptr::addr_of!(**w) as usize;
+                seen.insert(ptr);
             }
         }
         seen.len()
@@ -296,17 +299,19 @@ impl DWA {
     
     /// Analyze the structure of weights to understand fragmentation patterns
     fn analyze_weight_structure(&self) {
+        use std::ptr;
+        
         // Collect all unique weights with their ranges
         let mut unique_weights: HashMap<usize, (usize, usize, usize)> = HashMap::new(); // ptr -> (usage_count, num_ranges, cardinality)
         
         for state in &self.states.0 {
             if let Some(fw) = &state.final_weight {
-                let ptr = fw.intern_id();
+                let ptr = ptr::addr_of!(**fw) as usize;
                 let entry = unique_weights.entry(ptr).or_insert((0, fw.num_ranges(), fw.len()));
                 entry.0 += 1;
             }
             for w in state.trans_weights.values() {
-                let ptr = w.intern_id();
+                let ptr = ptr::addr_of!(**w) as usize;
                 let entry = unique_weights.entry(ptr).or_insert((0, w.num_ranges(), w.len()));
                 entry.0 += 1;
             }
@@ -376,7 +381,7 @@ fn optimize_weight_ranges(weight: &Weight, tokens_for_removal: &RangeSetBlaze<us
     }
     
     // Step 1: Remove ranges that don't intersect tokens_for_removal
-    let pruned = &weight.to_rsb() & tokens_for_removal;
+    let pruned = &weight.rsb & tokens_for_removal;
     
     if pruned.is_empty() {
         return (Weight::zeros(), original_ranges, 0);

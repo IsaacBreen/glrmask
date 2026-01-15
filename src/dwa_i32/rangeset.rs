@@ -218,12 +218,6 @@ impl RangeSet {
     /// Two RangeSets with the same content will have the same hash.
     pub fn fast_hash(&self) -> u64 { self.fp }
     
-    /// Returns a unique identifier for this interned weight.
-    /// This is the Arc pointer address of the underlying data.
-    pub fn intern_id(&self) -> usize {
-        Arc::as_ptr(&self.0) as usize
-    }
-    
     pub fn is_subset_of(&self, rhs: &RangeSet) -> bool { (self & rhs) == *self }
 
     pub fn complement(&self) -> RangeSet {

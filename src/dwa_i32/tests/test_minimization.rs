@@ -231,8 +231,7 @@ fn test_minimization_889() {
     for state in &dwa_no_rm_eps.states.0 {
         for (label, _target) in &state.transitions {
             if let Some(weight) = state.trans_weights.get(label) {
-                let rsb = weight.to_rsb();
-                weight_ranges_no_rm += rsb.ranges().count() as u64;
+                weight_ranges_no_rm += weight.rsb.ranges().count() as u64;
                 transition_count_no_rm += 1;
             }
         }
@@ -243,8 +242,7 @@ fn test_minimization_889() {
     for state in &dwa_builtin.states.0 {
         for (label, _target) in &state.transitions {
             if let Some(weight) = state.trans_weights.get(label) {
-                let rsb = weight.to_rsb();
-                weight_ranges_rm += rsb.ranges().count() as u64;
+                weight_ranges_rm += weight.rsb.ranges().count() as u64;
                 transition_count_rm += 1;
             }
         }

@@ -10,8 +10,7 @@ use sep1::glr::grammar::Terminal;
 use sep1::glr::table::{TerminalID, Stage7ShiftsAndReducesLookaheadValue};
 use sep1::precompute4::characterize::compute_all_characterizations;
 use sep1::precompute4::template_dfa::{build_template_dwas, build_ignore_terminal_dwa};
-use sep1::dwa_i32::{NWA, NWABody, NWAState, NWAStates, Weight, weight_all};
-use sep1::dwa_i32::heavy_weight::WeightDimensions;
+use sep1::dwa_i32::{NWA, NWABody, NWAState, NWAStates, Weight};
 use sep1::dwa_i32::common::Label;
 use sep1::precompute4::parser_dwa::finalize_and_optimize_and_determinize;
 use sep1::constraint_precompute::run_precompute1;
@@ -216,7 +215,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         for (&label, &dest_tdwa_state) in &tdwa_state.transitions {
             let edge_weight = tdwa_state.trans_weights.get(&label)
                 .cloned()
-                .unwrap_or_else(weight_all);
+                .unwrap_or_else(Weight::all);
 
             if label >= offset {
                 // Tokenizer state transition - add to combined start state
@@ -272,7 +271,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .map(|s| s + template_offset)
                     .collect();
                 for s in template_start_states {
-                    nwa_states[nwa_entry].epsilons.push((s, weight_all()));
+                    nwa_states[nwa_entry].epsilons.push((s, Weight::all()));
                 }
             }
         }
@@ -280,8 +279,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut unresolved_nwa = NWA { 
         states: nwa_states, 
-        body: NWABody { start_states: vec![combined_start_state] },
-        dims: WeightDimensions::default(),
+        body: NWABody { start_states: vec![combined_start_state] } 
     };
     if is_debug_level_enabled(4) {
         println!("Unresolved NWA:");

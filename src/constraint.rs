@@ -40,7 +40,7 @@ use crate::datastructures::bitset::Bitset;
 use crate::datastructures::gss_acc::Acc;
 use crate::glr::parser::{ExpectElse, ParseStateEdgeContent};
 use crate::dwa_i32::{DWA, NWA};
-use crate::dwa_i32::{RangeSet as WARangeSet, Weight, set_weight_dimensions, weight_all};
+use crate::dwa_i32::{RangeSet as WARangeSet, Weight};
 
 pub use crate::constraint_vocab::*;
 use crate::constraint_precompute::run_precompute1;
@@ -68,7 +68,7 @@ fn count_dwa_ranges(dwa: &DWA) -> usize {
         if let Some(w) = &state.final_weight { unique_weights.insert(w); }
         for w in state.trans_weights.values() { unique_weights.insert(w); }
     }
-    unique_weights.iter().map(|w| w.ranges_len()).sum()
+    unique_weights.iter().map(|w| w.rsb.ranges_len()).sum()
 }
 
 /// Compute the token partition that optimize_dwa_and_vocab would produce,
@@ -187,7 +187,7 @@ fn optimize_dwa_and_vocab(
     // Previously limited to 500 weights, but this caused incorrect token merging when
     // tokens differed only in weights beyond the limit.
     let mut weights_vec: Vec<&Weight> = unique_weights.iter().filter(|w| !w.is_all_fast()).collect();
-    weights_vec.sort_by_key(|w| w.ranges_len()); // Process smaller weights first for efficiency
+    weights_vec.sort_by_key(|w| w.rsb.ranges_len()); // Process smaller weights first for efficiency
     crate::debug!(4, "DWA Vocab Optimization: Processing {} unique weights (max_tok={})", weights_vec.len(), max_tok);
 
     let t_partition = std::time::Instant::now();
@@ -243,12 +243,12 @@ fn optimize_dwa_and_vocab(
     let mut weight_cache: FxHashMap<Weight, Weight> = FxHashMap::default();
     let mut map_weight = |w: &Weight, cache: &mut FxHashMap<Weight, Weight>| -> Weight {
         if let Some(cached) = cache.get(w) { return cached.clone(); }
-        if w.is_all_fast() { return weight_all(); }
+        if w.is_all_fast() { return Weight::all(); }
         let mut new_vals = Vec::new();
         for t in w.iter_up_to(max_tok) {
             if let Some(&new_t) = old_to_new_map.get(&t) { new_vals.push(new_t); }
         }
-        let new_w: Weight = new_vals.into_iter().collect();
+        let new_w = WARangeSet::from_iter(new_vals);
         cache.insert(w.clone(), new_w.clone());
         new_w
     };
@@ -613,11 +613,6 @@ impl JSONConvertible for GrammarConstraint {
     fn from_json(node: JSONNode) -> Result<Self, String> {
         let intermediate = GrammarConstraintJSON::from_json(node)?;
 
-        // Set global weight dimensions from the loaded DWA
-        // This is critical for Weight::all() and other dimension-dependent constructors
-        crate::debug!(3, "from_json: Setting global weight dimensions from DWA: {:?}", intermediate.dwa.dims);
-        set_weight_dimensions(intermediate.dwa.dims);
-
         let tokenizer = Tokenizer::new(Regex { dfa: intermediate.tokenizer_dfa });
         let possible_matches = intermediate.possible_matches.to_possible_matches()?;
 
@@ -751,9 +746,7 @@ impl GrammarConstraint {
         max_original_llm_token_id: usize,
         config: &GrammarConstraintConfig,
     ) -> Self {
-        println!("new_from_grammar_definition: start");
         let compiled_grammar = CompiledGrammar::from_definition(grammar_definition.clone());
-        println!("new_from_grammar_definition: compiled_grammar");
         
         Self::from_compiled_grammar_with_config(
             compiled_grammar,
@@ -779,7 +772,6 @@ impl GrammarConstraint {
         BTreeMap<TokenizerStateID, TokenizerStateID>,
         Vec<usize>,
     ) {
-        println!("setup_combined: start");
         if llm_token_map.is_empty() {
             return (
                 BTreeMap::new(),
@@ -810,13 +802,11 @@ impl GrammarConstraint {
         
         // Use combined equivalence analysis
         // State reduction threshold of 0 means always apply state reduction
-        println!("setup_combined: running compute_combined_equivalence");
         let combined_result = compute_combined_equivalence(
             tokenizer,
             &llm_token_strings,
             &all_states,
         );
-        println!("setup_combined: combined_equivalence done");
         
         // Derive state_to_rep and representative_states from state_classes
         let mut state_to_rep: BTreeMap<TokenizerStateID, TokenizerStateID> = BTreeMap::new();
@@ -1016,7 +1006,6 @@ impl GrammarConstraint {
             max_original_llm_token_id,
             &grammar_group_ids,
         );
-        println!("build_with_config_inner: setup_combined done");
         let commit_vocab = Arc::new(commit_vocab_data);
 
         let internal_max_llm_token = original_to_internal_map
@@ -1038,12 +1027,7 @@ impl GrammarConstraint {
             .filter(|(_, v)| !v.is_empty())
             .map(|(int_id, origs)| (int_id, LLMTokenBV::from_iter(origs)))
             .collect();
-        println!("build_with_config_inner: internal_to_original_map done");
         crate::debug!(4, "Done building internal_to_original_map in {:?}", t_i2o.elapsed());
-        // Debug: show the internal_to_original mapping
-        for (int_id, orig_bv) in &internal_to_original_map {
-            crate::debug!(5, "  internal {} -> original {:?}", int_id, orig_bv.iter_up_to(100).collect::<Vec<_>>());
-        }
 
         // internal_llm_token_map was already computed in setup_combined - no need to iterate 50K tokens again!
 
@@ -1053,7 +1037,6 @@ impl GrammarConstraint {
             internal_llm_token_map.iter().map(|(b, id)| (id.0, b.clone())).collect();
         
         let vocab_tree = VocabPrefixTree::build(&internal_tokens_for_vocab);
-        println!("build_with_config_inner: vocab_tree built");
         crate::debug!(4, "Done building internal vocab prefix tree");
 
         // State equivalence already computed in setup_combined - reuse it
@@ -1075,7 +1058,6 @@ impl GrammarConstraint {
         // Only compute for representative states, then expand to non-representatives
         let rep_possible_matches =
             Self::build_maps_and_matches_for_reps(&tokenizer, &vocab_tree.root, &group_id_to_terminal_idx, &representative_states);
-        println!("build_with_config_inner: rep_possible_matches done");
         
         // Expand results to all states via state_to_rep mapping
         let mut computed_possible_matches: BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>> = BTreeMap::new();
@@ -1106,7 +1088,6 @@ impl GrammarConstraint {
                 terminal_follow_map.insert(t1_id, following_ids);
             }
         }
-        println!("build_with_config_inner: terminal_follow_map done");
 
         // commit_vocab is already computed in setup_combined above
 
@@ -1117,7 +1098,6 @@ impl GrammarConstraint {
             max_original_llm_token_id,
             internal_to_original_sparse_matrix: vec![],
         };
-        println!("build_with_config_inner: StageVocab built");
 
         // Number of tokenizer states for weight-heavy encoding
         let weight_heavy_enabled = crate::constraint_precompute::is_weight_heavy_enabled();
@@ -1199,7 +1179,6 @@ impl GrammarConstraint {
             }
         };
         
-        println!("build_with_config_inner: before run_precompute1");
         crate::debug!(4, "Running precompute1 (weight_heavy={}, num_tsids={})...", weight_heavy_enabled, num_tsids);
         let mut terminal_dwa = run_precompute1(
             &tokenizer,
@@ -1209,10 +1188,6 @@ impl GrammarConstraint {
             state_to_rep.clone(),
             tsid_offset_map.clone(),
         );
-        println!("build_with_config_inner: after run_precompute1");
-        println!("build_with_config_inner: terminal_dwa states={} trans={}",
-            terminal_dwa.states.len(), terminal_dwa.states.num_transitions());
-        println!("build_with_config_inner: terminal_dwa dims={:?}", terminal_dwa.dims);
 
         crate::debug!(4, "Done precompute1. Terminal DWA (before pruning): {}", terminal_dwa.stats());
 
@@ -1272,7 +1247,6 @@ impl GrammarConstraint {
                 terminal_dwa.num_ranges(),
             );
             crate::dwa_i32::weight_bdd_metrics::maybe_print_dwa_weight_bdd_metrics(&terminal_dwa, domain_max, "Terminal DWA");
-            crate::dwa_i32::weight_bdd_metrics::maybe_print_dwa_bdd_compare_metrics(&terminal_dwa, "Terminal DWA");
             crate::dwa_i32::weight_oxidd_metrics::maybe_print_dwa_weight_oxidd_metrics(&terminal_dwa, domain_max, "Terminal DWA");
             crate::dwa_i32::weight_factorization_metrics::maybe_print_dwa_weight_factorization_metrics(&terminal_dwa, "Terminal DWA");
             crate::dwa_i32::weight_factorization_metrics::maybe_print_2d_factorization_metrics(&terminal_dwa, vocab.internal_max_llm_token + 1, num_tsids, "Terminal DWA");
@@ -1559,7 +1533,7 @@ impl GrammarConstraint {
                     };
                     // Get weight from target state
                     let target_weight_str = match &orig_dwa_for_min.states[target].final_weight {
-                        Some(w) if w.len() <= 10 => format!("{:?}", w.iter().collect::<Vec<_>>()),
+                        Some(w) if w.len() <= 10 => format!("{:?}", w.rsb.iter().collect::<Vec<_>>()),
                         Some(w) if w.len() == u64::MAX as usize => "ALL".to_string(),
                         Some(w) => format!("(len={})", w.len()),
                         None => "".to_string(),
@@ -2271,7 +2245,6 @@ impl GrammarConstraint {
                 parser_dwa.num_ranges(),
             );
             crate::dwa_i32::weight_bdd_metrics::maybe_print_dwa_weight_bdd_metrics(&parser_dwa, domain_max, "Parser DWA");
-            crate::dwa_i32::weight_bdd_metrics::maybe_print_dwa_bdd_compare_metrics(&parser_dwa, "Parser DWA");
             crate::dwa_i32::weight_oxidd_metrics::maybe_print_dwa_weight_oxidd_metrics(&parser_dwa, domain_max, "Parser DWA");
             crate::dwa_i32::weight_factorization_metrics::maybe_print_dwa_weight_factorization_metrics(&parser_dwa, "Parser DWA");
             crate::dwa_i32::weight_factorization_metrics::maybe_print_2d_factorization_metrics(&parser_dwa, vocab.internal_max_llm_token + 1, num_tsids, "Parser DWA");

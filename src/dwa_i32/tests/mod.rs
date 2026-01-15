@@ -4,7 +4,7 @@
 pub use crate::dwa_i32::{
     DWA, DWABody, DWABuildError, DWAState, DWAStates,
     NWA, NWABuildError, NWAState, NWAStates,
-    Weight, StateID, RangeSet, format_word, weight_all,
+    Weight, StateID, RangeSet, format_word,
 };
 pub use crate::dwa_i32::common::Label;
 
@@ -17,4 +17,3 @@ mod test_push;
 mod test_repro;
 mod test_rm_epsilon_effect;
 mod test_weight_loosening;
-mod test_weight_storage;

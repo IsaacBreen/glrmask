@@ -932,8 +932,7 @@ fn test_precompute_a_plus_tokenizer() {
     let mut found_expanded_weight = false;
     for state in &dwa.states.0 {
         if let Some(ref w) = state.final_weight {
-            let rsb = w.to_rsb();
-            if let Some(max_pos) = rsb.last() {
+            if let Some(max_pos) = w.rsb.last() {
                 if max_pos > internal_max_llm_token {
                     found_expanded_weight = true;
                     break;
@@ -1015,8 +1014,7 @@ fn test_precompute_x_eq() {
     let mut found_expanded_weight = false;
     for state in &dwa.states.0 {
         if let Some(ref w) = state.final_weight {
-            let rsb = w.to_rsb();
-            if let Some(max_pos) = rsb.last() {
+            if let Some(max_pos) = w.rsb.last() {
                 if max_pos > internal_max_llm_token {
                     found_expanded_weight = true;
                     break;

@@ -3,25 +3,16 @@ mod partition_minimize;
 
 use crate::dwa_i32::common::{Label, StateID, Weight};
 use crate::dwa_i32::dwa::{DWA, DWABuildError, DWAState, DWAStates};
-use crate::dwa_i32::heavy_weight::WeightDimensions;
 use crate::dwa_i32::minimization::common::DwaPass;
 use crate::dwa_i32::minimization::graph_coloring::{solve_greedy_coloring, solve_exact_graph_coloring};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 impl DWA {
     pub fn minimize_acyclic(&mut self) {
-        use crate::dwa_i32::abstract_weight::{get_weight_backend, WeightBackend};
-        
         // Check environment variable for fast minimize option
         let use_fast_minimize = std::env::var("DWA_FAST_MINIMIZE").map(|v| v == "1").unwrap_or(false);
         
-        // For FactoredWeight, use cyclic minimization because the acyclic algorithm's
-        // weight composition (needed sets, forward reachability) doesn't work correctly
-        // with the 2D (token, tsid) structure. The tsid dimension causes false negatives.
-        if use_fast_minimize || matches!(get_weight_backend(), WeightBackend::Factored | WeightBackend::FactoredValidate) {
-            if matches!(get_weight_backend(), WeightBackend::Factored | WeightBackend::FactoredValidate) {
-                crate::debug!(5, "Using cyclic minimization for FactoredWeight (acyclic algorithm incompatible)");
-            }
+        if use_fast_minimize {
             // Use partition refinement - faster but may produce slightly larger DWA
             // (doesn't exploit the "diamond case" optimization)
             self.minimize_states_cyclic();
@@ -64,21 +55,7 @@ impl DWA {
 
 /// Push weights forward for acyclic DWAs.
 /// Computes reachable outputs and restricts transitions to tokens that can produce output.
-///
-/// NOTE: This optimization is skipped for FactoredWeight because the 2D (token, tsid)
-/// structure doesn't compose well with backward reachability. The backward reachability
-/// computes "what (token, tsid) pairs can reach acceptance from state u", but transition
-/// weights encode "when processing (token, tsid), go to target". These tsids may not 
-/// match, causing false negatives when pushing weights.
 fn push_weights_acyclic(dwa: &mut DWA) -> bool {
-    use crate::dwa_i32::abstract_weight::{get_weight_backend, WeightBackend};
-    
-    // Skip weight pushing for FactoredWeight - see doc comment above
-    if matches!(get_weight_backend(), WeightBackend::Factored | WeightBackend::FactoredValidate) {
-        crate::debug!(6, "Skipping push_weights_acyclic for FactoredWeight backend");
-        return false;
-    }
-    
     let n = dwa.states.len();
     if n == 0 { return false; }
 
@@ -222,7 +199,7 @@ pub fn minimize_acyclic_exact(dwa: &DWA) -> Result<DWA, DWABuildError> {
         dwa.states.len(), new_states.len(), total_start.elapsed());
 
     // 5. Reconstruct the Final DWA
-    let result = reconstruct_dwa(dwa.body.start_state, &old_to_new, new_states, dwa.dims)?;
+    let result = reconstruct_dwa(dwa.body.start_state, &old_to_new, new_states)?;
     
     // 6. Stochastic validation (only when STOCHASTIC_MERGE_VALIDATION=1)
     if std::env::var("STOCHASTIC_MERGE_VALIDATION").is_ok() {
@@ -352,7 +329,7 @@ fn compute_height_0_coloring_direct(
             .unwrap_or_else(Weight::zeros);
         
         let mut hasher = DefaultHasher::new();
-        final_on_needed.fp().hash(&mut hasher);
+        final_on_needed.fp.hash(&mut hasher);
         let sig = hasher.finish();
         
         sig_groups.entry(sig).or_default().push(idx);
@@ -411,7 +388,7 @@ fn compute_height_0_coloring_direct(
             .unwrap_or_else(Weight::zeros);
         
         let mut hasher = DefaultHasher::new();
-        final_on_needed.fp().hash(&mut hasher);
+        final_on_needed.fp.hash(&mut hasher);
         let sig = hasher.finish();
         
         let color = *sig_to_color.entry(sig).or_insert_with(|| {
@@ -639,7 +616,7 @@ fn compute_needed_sets(dwa: &DWA, topo_order: &[StateID]) -> Vec<Weight> {
 /// Compute forward reachability: which tokens can reach each state from start
 fn compute_forward_reachable(dwa: &DWA, topo_order: &[StateID]) -> Vec<Weight> {
     let mut forward = vec![Weight::zeros(); dwa.states.len()];
-    forward[dwa.body.start_state] = crate::dwa_i32::weight_all();
+    forward[dwa.body.start_state] = Weight::all();
     
     for &u in topo_order.iter().rev() {
         if forward[u].is_empty() { continue; }
@@ -657,22 +634,8 @@ fn compute_forward_reachable(dwa: &DWA, topo_order: &[StateID]) -> Vec<Weight> {
 
 /// Tighten DWA weights by removing tokens that can never reach a transition.
 /// Semantic-preserving: restricts weights to tokens that can actually reach each state.
-/// 
-/// NOTE: This optimization is skipped for FactoredWeight because the 2D (token, tsid)
-/// structure doesn't compose well with forward reachability. The forward reachability
-/// computes "what (token, tsid) pairs can reach state u", but transition weights encode
-/// "when processing (token, tsid), go to target". These tsids may not match, causing
-/// false negatives when tightening.
 fn tighten_weights(dwa: &DWA) -> Result<DWA, DWABuildError> {
-    use crate::dwa_i32::abstract_weight::{get_weight_backend, WeightBackend};
-    
     if dwa.states.is_empty() { return Ok(DWA::new()); }
-    
-    // Skip tightening for FactoredWeight - see doc comment above
-    if matches!(get_weight_backend(), WeightBackend::Factored | WeightBackend::FactoredValidate) {
-        crate::debug!(6, "Skipping tighten_weights for FactoredWeight backend");
-        return Ok(dwa.clone());
-    }
     
     let topo_order = compute_topo_order(dwa)?;
     let forward = compute_forward_reachable(dwa, &topo_order);
@@ -703,7 +666,7 @@ fn tighten_weights(dwa: &DWA) -> Result<DWA, DWABuildError> {
         new_states.0.push(new_state);
     }
     
-    Ok(DWA { states: new_states, body: dwa.body.clone(), dims: dwa.dims })
+    Ok(DWA { states: new_states, body: dwa.body.clone() })
 }
 
 fn compute_heights(dwa: &DWA, topo_order: &[StateID]) -> Vec<usize> {
@@ -923,7 +886,7 @@ fn build_incompatibility_graph_height_0(
             .unwrap_or_else(Weight::zeros);
         
         let mut hasher = DefaultHasher::new();
-        final_on_needed.fp().hash(&mut hasher);
+        final_on_needed.fp.hash(&mut hasher);
         let sig = hasher.finish();
         
         sig_to_group.entry(sig).or_default().push(idx);
@@ -1214,7 +1177,7 @@ fn compute_state_signature(
     let final_on_needed = state.final_weight.as_ref()
         .map(|w| w & needed_set)
         .unwrap_or_else(Weight::zeros);
-    final_on_needed.fp().hash(&mut hasher);
+    final_on_needed.fp.hash(&mut hasher);
     
     // Hash transitions (sorted by label for consistency)
     let mut trans_data: Vec<(Label, u64, Option<StateID>)> = Vec::new();
@@ -1225,7 +1188,7 @@ fn compute_state_signature(
         if !weight.is_empty() {
             // Get the new_id for the target (if already mapped)
             let target_new_id = old_to_new.get(&target).copied();
-            trans_data.push((label, weight.fp(), target_new_id));
+            trans_data.push((label, weight.fp, target_new_id));
         }
     }
     trans_data.sort();
@@ -1242,7 +1205,7 @@ fn compute_state_signature(
     // Second hash with different seed
     let mut hasher2 = DefaultHasher::new();
     h1.hash(&mut hasher2);
-    needed_set.fp().hash(&mut hasher2);
+    needed_set.fp.hash(&mut hasher2);
     let h2 = hasher2.finish();
     
     ((h1 as u128) << 64) | (h2 as u128)
@@ -1253,8 +1216,7 @@ fn compute_state_signature(
 fn reconstruct_dwa(
     start_old: StateID,
     old_to_new: &HashMap<StateID, StateID>,
-    builders: Vec<MergedStateBuilder>,
-    dims: WeightDimensions,
+    builders: Vec<MergedStateBuilder>
 ) -> Result<DWA, DWABuildError> {
     let states: Vec<DWAState> = builders.into_iter().map(|b| {
         let mut state = DWAState::default();
@@ -1275,6 +1237,5 @@ fn reconstruct_dwa(
         body: crate::dwa_i32::dwa::DWABody {
             start_state: old_to_new.get(&start_old).copied().unwrap_or(0),
         },
-        dims,
     })
 }

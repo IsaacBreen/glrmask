@@ -19,7 +19,7 @@
 //! final'(q) = final(q) ∪ ¬d[q]
 //! ```
 
-use crate::dwa_i32::common::{Label, Weight, weight_all, weight_complement};
+use crate::dwa_i32::common::{Label, Weight};
 use crate::dwa_i32::dwa::DWA;
 
 impl DWA {
@@ -51,7 +51,7 @@ impl DWA {
                     .trans_weights
                     .get(&label)
                     .cloned()
-                    .unwrap_or_else(weight_all);
+                    .unwrap_or_else(Weight::all);
 
                 let d_target = &d[target];
                 let new_weight = &w & d_target;
@@ -74,7 +74,7 @@ impl DWA {
                 continue;
             }
             let d_q = &d[q];
-            let complement_d_q = weight_complement(d_q);
+            let complement_d_q = d_q.complement();
 
             if let Some(fw) = &self.states[q].final_weight {
                 let new_fw = fw | &complement_d_q;
@@ -123,7 +123,7 @@ impl DWA {
                         .trans_weights
                         .get(&label)
                         .cloned()
-                        .unwrap_or_else(weight_all);
+                        .unwrap_or_else(Weight::all);
 
                     let contribution = &w & &d[target];
                     new_d |= &contribution;

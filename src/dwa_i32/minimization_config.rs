@@ -70,10 +70,6 @@ pub fn run_dwa_optimization_experiment(dwa: &mut DWA) {
             let mut changed_in_iteration = false;
             let mut current_changing_passes: Vec<DwaPass> = Vec::new();
             for &pass in ordering {
-                // Skip passes disabled via environment variables
-                if !pass.is_enabled() {
-                    continue;
-                }
                 let changed = match pass {
                     DwaPass::PruneUnreachable => current_dwa.prune_unreachable(),
                     DwaPass::PruneDeadEnds => current_dwa.prune_dead_ends(),
@@ -81,7 +77,7 @@ pub fn run_dwa_optimization_experiment(dwa: &mut DWA) {
                     DwaPass::PushWeightsToInitial => current_dwa.push_weights_to_initial(),
                     DwaPass::ResidualPush => current_dwa.residuated_push(),
                     DwaPass::Minimize => current_dwa.minimize_states(),
-                    DwaPass::ConsolidateRanges => false,
+                    DwaPass::ConsolidateRanges => current_dwa.consolidate_ranges(),
                     DwaPass::TrimWeights => current_dwa.trim_weights(),
                 };
                 if changed {
@@ -221,8 +217,7 @@ impl NWA {
                 // Full pipeline for Terminal DWA construction (precompute1)
                 // OPTIMIZATION: Skip rm_epsilon to save ~2s - determinization can handle epsilons
                 // Trade-off: determinization may be slightly slower but overall faster
-                // NOTE: MinimizeRustfst is too slow for large NWAs (22k states), use lightweight passes
-                nwa_passes: vec![NwaPass::PruneDeadEnds, NwaPass::PruneUnreachable, NwaPass::CompressTransitions],
+                nwa_passes: vec![NwaPass::MinimizeRustfst, NwaPass::CompressTransitions],
                 dwa_passes: vec![DwaPass::Minimize, DwaPass::ConsolidateRanges, DwaPass::TrimWeights],
             },
             "TemplateDWA" => DeterminizeAndMinimizeConfig {
@@ -310,16 +305,9 @@ impl NWA {
         let det_time = det_start.elapsed();
         crate::debug!(5, "Determinization: {} states, {} transitions, {} ranges ({} interned) in {:.2?}", 
             dwa.states.len(), dwa.states.num_transitions(), dwa.num_ranges(), dwa.num_ranges_interned(), det_time);
-        let final_count = dwa.states.0.iter().filter(|s| s.final_weight.is_some()).count();
-        println!("determinize_and_minimize: after determinize states={} trans={} final_states={}",
-            dwa.states.len(), dwa.states.num_transitions(), final_count);
 
         // Run DWA passes
         for pass in config.dwa_passes.clone() {
-            // Skip passes disabled via environment variables
-            if !pass.is_enabled() {
-                continue;
-            }
             let pass_start = std::time::Instant::now();
             match pass {
                 DwaPass::PruneUnreachable => { dwa.prune_unreachable(); },
@@ -328,7 +316,7 @@ impl NWA {
                 DwaPass::PushWeightsToInitial => { dwa.push_weights_to_initial(); },
                 DwaPass::ResidualPush => { dwa.residuated_push(); },
                 DwaPass::Minimize => { dwa.minimize_states(); },
-                DwaPass::ConsolidateRanges => { /* disabled */ },
+                DwaPass::ConsolidateRanges => { dwa.consolidate_ranges(); },
                 DwaPass::TrimWeights => { dwa.trim_weights(); },
             }
             let pass_time = pass_start.elapsed();
@@ -339,9 +327,6 @@ impl NWA {
         }
         crate::debug!(5, "DWA minimization: {} states, {} transitions, {} ranges ({} interned)",
             dwa.states.len(), dwa.states.num_transitions(), dwa.num_ranges(), dwa.num_ranges_interned());
-        let final_count = dwa.states.0.iter().filter(|s| s.final_weight.is_some()).count();
-        println!("determinize_and_minimize: after passes states={} trans={} final_states={}",
-            dwa.states.len(), dwa.states.num_transitions(), final_count);
         dwa
     }
 

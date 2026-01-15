@@ -53,7 +53,7 @@ fn compute_partition(dwa: &DWA) -> (usize, HashMap<u64, PartitionElement>) {
         let state = &dwa.states[id];
         
         if let Some(fw) = &state.final_weight {
-            fp_to_elem.entry(fw.fp()).or_insert_with(|| {
+            fp_to_elem.entry(fw.fp).or_insert_with(|| {
                 let elem = PartitionElement(next_idx);
                 next_idx += 1;
                 elem
@@ -61,7 +61,7 @@ fn compute_partition(dwa: &DWA) -> (usize, HashMap<u64, PartitionElement>) {
         }
         
         for tw in state.trans_weights.values() {
-            fp_to_elem.entry(tw.fp()).or_insert_with(|| {
+            fp_to_elem.entry(tw.fp).or_insert_with(|| {
                 let elem = PartitionElement(next_idx);
                 next_idx += 1;
                 elem
@@ -104,10 +104,10 @@ fn compute_signatures(
         
         // Hash final behavior
         if let Some(fw) = &state.final_weight {
-            if let Some(&elem) = fp_to_elem.get(&fw.fp()) {
+            if let Some(&elem) = fp_to_elem.get(&fw.fp) {
                 let mut hasher = DefaultHasher::new();
                 "final".hash(&mut hasher);
-                fw.fp().hash(&mut hasher);
+                fw.fp.hash(&mut hasher);
                 let hash = hasher.finish();
                 sig.combine_hash(elem, hash);
             }
@@ -116,7 +116,7 @@ fn compute_signatures(
         // Hash transition behavior
         for (&label, &target) in &state.transitions {
             let Some(tw) = state.trans_weights.get(&label) else { continue };
-            let Some(&tw_elem) = fp_to_elem.get(&tw.fp()) else { continue };
+            let Some(&tw_elem) = fp_to_elem.get(&tw.fp) else { continue };
             
             // Recursively get target's signature
             let target_sig = compute_sig_recursive(target, dwa, fp_to_elem, signatures, in_progress);
@@ -129,7 +129,7 @@ fn compute_signatures(
                 label.hash(&mut hasher);
                 target_elem.0.hash(&mut hasher);
                 target_hash.hash(&mut hasher);
-                tw.fp().hash(&mut hasher);
+                tw.fp.hash(&mut hasher);
                 let combined = hasher.finish();
                 sig.combine_hash(tw_elem, combined);
             }
@@ -275,7 +275,6 @@ pub fn minimize_partition_based(dwa: &DWA) -> Result<DWA, DWABuildError> {
     Ok(DWA {
         states: new_states,
         body: crate::dwa_i32::dwa::DWABody { start_state: new_start },
-        dims: dwa.dims,
     })
 }
 
