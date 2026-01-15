@@ -705,16 +705,16 @@ mod tests {
             
             assert_eq!(
                 custom_rs, biodivine_rs,
-                "Test case {} failed: custom and biodivine produce different results",
+                "Test case {} failed: wrapper and biodivine produce different results",
                 i
             );
             
-            // Print stats for comparison
-            // Custom: 5 bytes per node, biodivine: ~24 bytes per node (estimate)
+            // Print stats for comparison.
+            // Note: `BddWeight` is a compatibility wrapper; both are biodivine-backed.
             let custom_bytes = custom.storage_bytes();
             let biodivine_bytes = biodivine.storage_bytes();
             eprintln!(
-                "Test case {}: custom={} nodes ({} bytes), biodivine={} nodes ({} bytes)",
+                "Test case {}: wrapper={} nodes ({} bytes), biodivine={} nodes ({} bytes)",
                 i,
                 custom.num_nodes(),
                 custom_bytes,

@@ -1,25 +1,15 @@
-//! Per-Weight BDD Storage with TSID-First Variable Ordering.
+//! Per-Weight BDD Storage (biodivine-backed).
 //!
-//! This module implements a compact BDD representation for individual weights.
-//! Unlike `SharedBdd` which shares nodes across weights, `BddWeight` stores
-//! an independent BDD per weight, optimized for space efficiency.
+//! This module preserves the historical `BddWeight` public API, but the actual
+//! implementation is now backed by `biodivine_lib_bdd` (via `BddWeightBiodivine`).
 //!
-//! ## Key Features
-//!
-//! - **TSID-First Ordering**: TSID bits first (MSB to LSB), then token bits.
-//!   This exploits the fact that many tokens share similar TSID patterns.
-//!   Variable order: `tsid_12, tsid_11, ..., tsid_0, tok_11, tok_10, ..., tok_0`
-//!
-//! - **5-Byte Compact Nodes**: Each node is:
-//!   - 1 byte: variable index (0-24), or 0xFF for terminal
-//!   - 2 bytes: low child index (0 = FALSE, 1 = TRUE for terminals)
-//!   - 2 bytes: high child index
-//!
-//! - **Per-Weight Independence**: Each weight has its own node array,
-//!   enabling parallel construction and avoiding lock contention.
-//!
-//! ## Position Encoding
-//! Position = token * num_tsids + tsid
+//! Position encoding: pos = token * tsid_dim + tsid
+
+/*
+LEGACY (disabled): The original custom 5-byte-node `BddWeight` implementation.
+Kept for reference while we migrate fully to biodivine.
+
+The active biodivine-backed wrapper is appended after this comment block.
 
 use range_set_blaze::RangeSetBlaze;
 use std::collections::HashMap;
@@ -1128,5 +1118,335 @@ mod tests {
         
         let full = BddWeight::full(tsid_dim, token_dim);
         assert_eq!(full.len(), 100); // 10 * 10
+    }
+}
+
+*/
+
+use range_set_blaze::RangeSetBlaze;
+
+use super::bdd_weight_biodivine::BddWeightBiodivine;
+
+/// Per-weight BDD representation.
+///
+/// This is a compatibility wrapper that preserves the historical `BddWeight` API.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BddWeight {
+    inner: BddWeightBiodivine,
+}
+
+impl BddWeight {
+    /// Calculate bits needed to represent values 0..max_val (inclusive).
+    pub fn bits_for(max_val: u16) -> u8 {
+        BddWeightBiodivine::bits_for(max_val)
+    }
+
+    /// Create from 1D ranges using dimension info.
+    ///
+    /// Position encoding: pos = token * tsid_dim + tsid
+    pub fn from_ranges(
+        ranges: impl Iterator<Item = (usize, usize)>,
+        tsid_dim: u16,
+        token_dim: u16,
+    ) -> Self {
+        Self {
+            inner: BddWeightBiodivine::from_ranges(ranges, tsid_dim, token_dim),
+        }
+    }
+
+    /// Create an empty BDD (accepts nothing).
+    pub fn empty(tsid_dim: u16, token_dim: u16) -> Self {
+        Self {
+            inner: BddWeightBiodivine::empty(tsid_dim, token_dim),
+        }
+    }
+
+    /// Create a full BDD (accepts everything).
+    pub fn full(tsid_dim: u16, token_dim: u16) -> Self {
+        Self {
+            inner: BddWeightBiodivine::full(tsid_dim, token_dim),
+        }
+    }
+
+    /// Check if this BDD is empty.
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
+    /// Check if this BDD is full.
+    pub fn is_full(&self) -> bool {
+        self.inner.is_full()
+    }
+
+    /// Get the number of BDD nodes.
+    pub fn num_nodes(&self) -> usize {
+        self.inner.num_nodes()
+    }
+
+    /// Get approximate storage bytes.
+    pub fn storage_bytes(&self) -> usize {
+        self.inner.storage_bytes()
+    }
+
+    /// Get the TSID dimension.
+    pub fn tsid_dim(&self) -> u16 {
+        self.inner.tsid_dim()
+    }
+
+    /// Get the Token dimension.
+    pub fn token_dim(&self) -> u16 {
+        self.inner.token_dim()
+    }
+
+    /// Check if (token, tsid) is in this weight.
+    pub fn contains(&self, token: u16, tsid: u16) -> bool {
+        self.inner.contains(token, tsid)
+    }
+
+    /// Check if a 1D position is in this weight.
+    pub fn contains_pos(&self, pos: usize) -> bool {
+        self.inner.contains_pos(pos)
+    }
+
+    /// Convert to RangeSetBlaze.
+    pub fn to_rangeset(&self) -> RangeSetBlaze<usize> {
+        self.inner.to_rangeset()
+    }
+
+    /// Enumerate all positions in this BDD into the provided vector.
+    pub fn enumerate_positions(&self, positions: &mut Vec<usize>) {
+        positions.clear();
+        positions.extend(self.iter());
+    }
+
+    /// Returns a new BddWeight containing positions that are in either self or other.
+    pub fn union(&self, other: &Self) -> Self {
+        Self {
+            inner: self.inner.union(&other.inner),
+        }
+    }
+
+    /// Returns a new BddWeight containing positions that are in both self and other.
+    pub fn intersection(&self, other: &Self) -> Self {
+        Self {
+            inner: self.inner.intersection(&other.inner),
+        }
+    }
+
+    /// Returns a new BddWeight containing positions NOT in self.
+    pub fn complement(&self) -> Self {
+        Self {
+            inner: self.inner.complement(),
+        }
+    }
+
+    /// Returns a new BddWeight containing positions that are in self but not in other.
+    pub fn subtract(&self, other: &Self) -> Self {
+        Self {
+            inner: self.inner.subtract(&other.inner),
+        }
+    }
+
+    /// Iterator over positions in this BddWeight.
+    pub fn iter(&self) -> impl Iterator<Item = usize> + '_ {
+        self.inner.iter()
+    }
+
+    /// Number of positions in this BddWeight.
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod wrapper_tests {
+    use super::*;
+
+    #[test]
+    fn test_empty_bdd() {
+        let bdd = BddWeight::empty(100, 100);
+        assert!(bdd.is_empty());
+        assert!(!bdd.is_full());
+        assert!(!bdd.contains(0, 0));
+        assert!(!bdd.contains(50, 50));
+    }
+
+    #[test]
+    fn test_full_bdd() {
+        let bdd = BddWeight::full(100, 100);
+        assert!(bdd.is_full());
+        assert!(!bdd.is_empty());
+        assert!(bdd.contains(0, 0));
+        assert!(bdd.contains(50, 50));
+        assert!(bdd.contains(99, 99));
+        assert!(!bdd.contains(100, 0));
+    }
+
+    #[test]
+    fn test_single_point() {
+        let tsid_dim = 100u16;
+        let token_dim = 100u16;
+
+        let pos = 5 * tsid_dim as usize + 3;
+        let bdd = BddWeight::from_ranges(std::iter::once((pos, pos)), tsid_dim, token_dim);
+
+        assert!(!bdd.is_empty());
+        assert!(bdd.contains(5, 3));
+        assert!(!bdd.contains(5, 2));
+        assert!(!bdd.contains(4, 3));
+        assert!(!bdd.contains(0, 0));
+    }
+
+    #[test]
+    fn test_single_row() {
+        let tsid_dim = 10u16;
+        let token_dim = 10u16;
+
+        let bdd = BddWeight::from_ranges(std::iter::once((30usize, 39usize)), tsid_dim, token_dim);
+
+        for tsid in 0..10 {
+            assert!(bdd.contains(3, tsid), "Should contain (3, {})", tsid);
+        }
+        for token in 0..10 {
+            if token != 3 {
+                for tsid in 0..10 {
+                    assert!(!bdd.contains(token, tsid), "Should not contain ({}, {})", token, tsid);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_to_rangeset_roundtrip() {
+        let tsid_dim = 20u16;
+        let token_dim = 20u16;
+
+        let original_ranges: Vec<(usize, usize)> = vec![(5, 15), (40, 45), (100, 100)];
+
+        let bdd = BddWeight::from_ranges(original_ranges.clone().into_iter(), tsid_dim, token_dim);
+        let recovered = bdd.to_rangeset();
+
+        for (start, end) in &original_ranges {
+            for pos in *start..=*end {
+                assert!(recovered.contains(pos), "Position {} should be in recovered set", pos);
+            }
+        }
+
+        for pos in recovered.iter() {
+            let mut found = false;
+            for (start, end) in &original_ranges {
+                if pos >= *start && pos <= *end {
+                    found = true;
+                    break;
+                }
+            }
+            assert!(found, "Position {} shouldn't be in recovered set", pos);
+        }
+    }
+
+    #[test]
+    fn test_bits_for() {
+        assert_eq!(BddWeight::bits_for(0), 1);
+        assert_eq!(BddWeight::bits_for(1), 1);
+        assert_eq!(BddWeight::bits_for(2), 2);
+        assert_eq!(BddWeight::bits_for(3), 2);
+        assert_eq!(BddWeight::bits_for(4), 3);
+        assert_eq!(BddWeight::bits_for(255), 8);
+        assert_eq!(BddWeight::bits_for(256), 9);
+    }
+
+    #[test]
+    fn test_union_disjoint() {
+        let tsid_dim = 10u16;
+        let token_dim = 10u16;
+
+        let a = BddWeight::from_ranges(vec![(0, 5)].into_iter(), tsid_dim, token_dim);
+        let b = BddWeight::from_ranges(vec![(10, 15)].into_iter(), tsid_dim, token_dim);
+        let c = a.union(&b);
+
+        for pos in 0..=5 {
+            assert!(c.contains_pos(pos), "Position {} should be in union", pos);
+        }
+        for pos in 10..=15 {
+            assert!(c.contains_pos(pos), "Position {} should be in union", pos);
+        }
+        for pos in 6..10 {
+            assert!(!c.contains_pos(pos), "Position {} should NOT be in union", pos);
+        }
+    }
+
+    #[test]
+    fn test_intersection() {
+        let tsid_dim = 10u16;
+        let token_dim = 10u16;
+
+        let a = BddWeight::from_ranges(vec![(0, 10)].into_iter(), tsid_dim, token_dim);
+        let b = BddWeight::from_ranges(vec![(5, 15)].into_iter(), tsid_dim, token_dim);
+        let c = a.intersection(&b);
+
+        for pos in 0..5 {
+            assert!(!c.contains_pos(pos), "Position {} should NOT be in intersection", pos);
+        }
+        for pos in 5..=10 {
+            assert!(c.contains_pos(pos), "Position {} should be in intersection", pos);
+        }
+        for pos in 11..=15 {
+            assert!(!c.contains_pos(pos), "Position {} should NOT be in intersection", pos);
+        }
+    }
+
+    #[test]
+    fn test_complement_basic() {
+        let tsid_dim = 10u16;
+        let token_dim = 10u16;
+
+        let a = BddWeight::from_ranges(vec![(0, 4)].into_iter(), tsid_dim, token_dim);
+        let not_a = a.complement();
+
+        for pos in 0..=4 {
+            assert!(!not_a.contains_pos(pos), "Position {} should NOT be in complement", pos);
+        }
+        for pos in 5..20 {
+            assert!(not_a.contains_pos(pos), "Position {} should be in complement", pos);
+        }
+    }
+
+    #[test]
+    fn test_subtract() {
+        let tsid_dim = 10u16;
+        let token_dim = 10u16;
+
+        let a = BddWeight::from_ranges(vec![(0, 10)].into_iter(), tsid_dim, token_dim);
+        let b = BddWeight::from_ranges(vec![(5, 15)].into_iter(), tsid_dim, token_dim);
+        let c = a.subtract(&b);
+
+        for pos in 0..5 {
+            assert!(c.contains_pos(pos), "Position {} should be in subtraction", pos);
+        }
+        for pos in 5..=10 {
+            assert!(!c.contains_pos(pos), "Position {} should NOT be in subtraction", pos);
+        }
+    }
+
+    #[test]
+    fn test_iter_and_len() {
+        let tsid_dim = 10u16;
+        let token_dim = 10u16;
+
+        let a = BddWeight::from_ranges(vec![(0, 5), (10, 12)].into_iter(), tsid_dim, token_dim);
+        let positions: Vec<usize> = a.iter().collect();
+
+        assert_eq!(positions, vec![0, 1, 2, 3, 4, 5, 10, 11, 12]);
+        assert_eq!(a.len(), 9);
+
+        let empty = BddWeight::empty(tsid_dim, token_dim);
+        assert_eq!(empty.len(), 0);
+
+        let full = BddWeight::full(tsid_dim, token_dim);
+        assert_eq!(full.len(), 100);
     }
 }

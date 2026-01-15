@@ -2,8 +2,8 @@
 //!
 //! This module provides an `AbstractWeight` enum that wraps either:
 //! - `RangeSet`: Sparse range-based storage (default, fast operations, good for sparse weights)
-//! - `BddWeight`: Binary Decision Diagram storage (custom 5-byte nodes, memory efficient)
-//! - `BddWeightBiodivine`: BDD storage using biodivine_lib_bdd (battle-tested, fewer nodes)
+//! - `BddWeight`: Binary Decision Diagram storage (biodivine-backed)
+//! - `BddWeightBiodivine`: BDD storage using biodivine_lib_bdd (kept for compatibility/experiments)
 //! - `FactoredWeight`: 2D factored representation (union of Cartesian products)
 //! - `FactoredValidate`: factored + RangeSet with validation
 //!
@@ -25,8 +25,8 @@
 //! # Backend Selection
 //!
 //! - `WEIGHT_BACKEND=rangeset` (default): Uses RangeSet with interning
-//! - `WEIGHT_BACKEND=bdd`: Uses custom BddWeight with 5-byte nodes (memory efficient)
-//! - `WEIGHT_BACKEND=bdd-biodivine`: Uses biodivine_lib_bdd (battle-tested, more features)
+//! - `WEIGHT_BACKEND=bdd`: Uses `BddWeight` (biodivine-backed)
+//! - `WEIGHT_BACKEND=bdd-biodivine`: Uses `BddWeightBiodivine` (biodivine_lib_bdd)
 //! - `WEIGHT_BACKEND=factored`: Uses 2D factored representation (experimental)
 //! - `WEIGHT_BACKEND=factored-validate`: Uses factored + RangeSet with validation
 
@@ -55,7 +55,7 @@ use super::heavy_weight::WeightDimensions;
 pub enum WeightBackend {
     /// Sparse range-based storage (default).
     RangeSet,
-    /// Binary Decision Diagram storage (custom 5-byte nodes, memory efficient).
+    /// Binary Decision Diagram storage.
     Bdd,
     /// Binary Decision Diagram using biodivine_lib_bdd (battle-tested, more features).
     BddBiodivine,
@@ -78,8 +78,8 @@ impl Default for WeightBackend {
 /// 
 /// Options:
 /// - `rangeset` (default): RangeSet with interning
-/// - `bdd`: Custom BDD with 5-byte nodes (memory efficient)
-/// - `bdd-biodivine`: biodivine_lib_bdd (battle-tested, fewer nodes but more memory)
+/// - `bdd`: BddWeight (biodivine-backed)
+/// - `bdd-biodivine`: biodivine_lib_bdd (BddWeightBiodivine)
 /// - `factored`: 2D factored representation (experimental)
 pub fn get_weight_backend() -> WeightBackend {
     static BACKEND: OnceLock<WeightBackend> = OnceLock::new();
@@ -121,7 +121,7 @@ pub fn get_weight_dimensions() -> WeightDimensions {
 pub enum AbstractWeight {
     /// RangeSet backend (default, interned).
     Rs(RangeSet),
-    /// Custom BddWeight backend (5-byte nodes, memory efficient).
+    /// BddWeight backend.
     Bdd(Arc<BddWeight>),
     /// Biodivine BddWeight backend (battle-tested, fewer nodes).
     BddBiodivine(Arc<BddWeightBiodivine>),
@@ -1423,8 +1423,16 @@ impl From<AbstractWeight> for crate::datastructures::hybrid_bitset::RangeSet {
 mod tests {
     use super::*;
 
+    fn ensure_test_dims() {
+        // BDD/factored backends require dimensions for correct position encoding.
+        // Use a small domain that still covers the positions used in these tests.
+        let dims = WeightDimensions::new(10, 5); // 10 tokens, 5 tsids -> domain size 50
+        set_weight_dimensions(dims);
+    }
+
     #[test]
     fn test_zeros_and_all() {
+        ensure_test_dims();
         let z = AbstractWeight::zeros();
         assert!(z.is_empty());
         assert!(!z.is_all_fast());
@@ -1436,6 +1444,7 @@ mod tests {
 
     #[test]
     fn test_from_item() {
+        ensure_test_dims();
         let w = AbstractWeight::from_item(42);
         assert!(w.contains(42));
         assert!(!w.contains(41));
@@ -1444,6 +1453,7 @@ mod tests {
 
     #[test]
     fn test_from_ranges() {
+        ensure_test_dims();
         let w = AbstractWeight::from_ranges(&[(0, 10), (20, 30)]);
         assert!(w.contains(5));
         assert!(w.contains(25));
@@ -1452,6 +1462,7 @@ mod tests {
 
     #[test]
     fn test_union() {
+        ensure_test_dims();
         let a = AbstractWeight::from_ranges(&[(0, 5)]);
         let b = AbstractWeight::from_ranges(&[(10, 15)]);
         let c = &a | &b;
@@ -1463,6 +1474,7 @@ mod tests {
 
     #[test]
     fn test_intersection() {
+        ensure_test_dims();
         let a = AbstractWeight::from_ranges(&[(0, 10)]);
         let b = AbstractWeight::from_ranges(&[(5, 15)]);
         let c = &a & &b;
@@ -1474,6 +1486,7 @@ mod tests {
 
     #[test]
     fn test_subtraction() {
+        ensure_test_dims();
         let a = AbstractWeight::from_ranges(&[(0, 10)]);
         let b = AbstractWeight::from_ranges(&[(5, 15)]);
         let c = &a - &b;
@@ -1484,6 +1497,7 @@ mod tests {
 
     #[test]
     fn test_complement() {
+        ensure_test_dims();
         let a = AbstractWeight::from_ranges(&[(5, 10)]);
         let b = !&a;
 
@@ -1494,6 +1508,7 @@ mod tests {
 
     #[test]
     fn test_equality() {
+        ensure_test_dims();
         let a = AbstractWeight::from_ranges(&[(0, 10)]);
         let b = AbstractWeight::from_ranges(&[(0, 10)]);
         let c = AbstractWeight::from_ranges(&[(0, 11)]);
@@ -1504,6 +1519,7 @@ mod tests {
 
     #[test]
     fn test_from_iter() {
+        ensure_test_dims();
         let w: AbstractWeight = vec![1, 3, 5, 7].into_iter().collect();
         assert!(w.contains(1));
         assert!(w.contains(5));
@@ -1512,6 +1528,7 @@ mod tests {
 
     #[test]
     fn test_to_rangeset_roundtrip() {
+        ensure_test_dims();
         let original = AbstractWeight::from_ranges(&[(5, 15), (25, 35)]);
         let rs = original.to_rangeset();
         let back = AbstractWeight::from(rs);
@@ -1521,11 +1538,7 @@ mod tests {
 
     #[test]
     fn test_factored_complement_via_rangeset() {
-        use super::set_weight_dimensions;
-        
-        // Set small dimensions for testing
-        let dims = WeightDimensions::new(10, 5);  // 10 tokens, 5 tsids
-        set_weight_dimensions(dims);
+        ensure_test_dims();
         
         // Create a factored weight: all tokens × tsid 0
         let fw = FactoredWeight::from_product(
