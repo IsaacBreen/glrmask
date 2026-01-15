@@ -19,7 +19,7 @@ use crate::precompute4::resolve_negatives::{
 use crate::precompute4::template_dfa::{build_ignore_terminal_dwa, build_template_dwas};
 use crate::dwa_i32::{
     common::Label, determinization_rustfst::determinize_nwa_to_dwa, DWA, NWA, NWABody, NWAStateID, NWAStates,
-    StateID, Weight, heavy_weight::WeightDimensions, weight_all,
+    RangeSet, StateID, Weight, heavy_weight::WeightDimensions, weight_all,
 };
 use crate::dfa_u8::TokenizerStateID;
 use crate::types::{TerminalID, TerminalID as GrammarTokenID};
@@ -686,17 +686,10 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
             }
             
             let terminal_id = edge_label.map(|l| TerminalID(l as usize));
-            if reversed_nwa.states.len() <= 10 {
-                println!("step edge_label={:?} transitions={} current_tokens_len={}",
-                    edge_label, transitions.len(), current_tokens.len());
-            }
             for (dest_id, weight) in transitions {
-                let edge_bv_tokens: LLMTokenBV = weight.clone().into();
-                let next_tokens = current_tokens & &edge_bv_tokens;
-                if reversed_nwa.states.len() <= 10 {
-                    println!("  step -> dest {} weight_len={} next_tokens_len={}",
-                        dest_id, edge_bv_tokens.len(), next_tokens.len());
-                }
+                // Project weight to token space for intersection with current tokens
+                let edge_tokens: LLMTokenBV = weight.project_to_tokens(dims).into();
+                let next_tokens = current_tokens & &edge_tokens;
                 if next_tokens.is_empty() { continue; }
                 let mut terminal_map = BTreeMap::new();
                 terminal_map.insert(terminal_id, weight.clone());
@@ -728,10 +721,6 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
             }
             
             let (nwa_bodies_map, tokens) = val;
-            if reversed_nwa.states.len() <= 10 {
-                println!("process node {}: tokens_len={} final_weight_present={}",
-                    node_id, tokens.len(), reversed_nwa.states[node_id].final_weight.is_some());
-            }
             let bodies_count = nwa_bodies_map.len();
             let mut nwa_body = NWABody { start_states: vec![] };
             for (right_body, terminal_map) in &nwa_bodies_map {
@@ -765,10 +754,13 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
             if is_symbol_heavy {
                 if let Some(tsid_edges) = outgoing_tsid_edges.get(&node_id) {
                     for (tsid_label, edge_weight) in tsid_edges {
-                        let edge_bv: LLMTokenBV = edge_weight.clone().into();
-                        let intersection_bv = &tokens & &edge_bv;
+                        // Project edge weight to token space for intersection check
+                        let edge_tokens: LLMTokenBV = edge_weight.project_to_tokens(dims).into();
+                        let intersection_bv = &tokens & &edge_tokens;
                         if !intersection_bv.is_empty() && !nwa_body.start_states.is_empty() {
-                            let final_w = Weight::from_rsb(intersection_bv.inner.as_ref().clone());
+                            // Create weight from valid tokens × all tsids
+                            let valid_tokens_rsb = intersection_bv.inner.as_ref().clone();
+                            let final_w = Weight::from_token_set_all_tsids(valid_tokens_rsb);
                             crate::debug!(6, "Collecting tsid body at root {} for label {} with {} tokens", 
                                 node_id, tsid_label, final_w.len());
                             let mut tb = tsid_bodies_for_process.lock().unwrap();
@@ -791,10 +783,20 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
             
             if should_collect {
                 if let Some(fw) = &reversed_nwa.states[node_id].final_weight {
-                    let fw_bv: LLMTokenBV = fw.clone().into();
-                    let intersection_bv = &tokens & &fw_bv;
+                    // Project final weight to token space for intersection with current tokens
+                    let fw_tokens: LLMTokenBV = fw.project_to_tokens(dims).into();
+                    let intersection_bv = &tokens & &fw_tokens;
                     if !intersection_bv.is_empty() {
-                        let final_w = Weight::from_rsb(intersection_bv.inner.as_ref().clone());
+                        // The weight we store should be the intersection in token space,
+                        // but we need to expand it back to position space (N×M) for the parser DWA
+                        // Actually, in weight-heavy mode, we want the positions, not just tokens
+                        // The final_w should contain the positions that correspond to valid (token, any_tsid) pairs
+                        // This is the intersection of tokens with the original fw (projected to tokens),
+                        // then expanded to cover all tsids for those tokens
+                        // 
+                        // For now, create a weight from all positions matching the valid tokens
+                        let valid_tokens_rsb = intersection_bv.inner.as_ref().clone();
+                        let final_w = Weight::from_token_set_all_tsids(valid_tokens_rsb);
                         let mut fb = final_bodies_arc.lock().unwrap();
                         fb.push((nwa_body.clone(), final_w, node_id));
                     }
@@ -813,7 +815,6 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
     crate::debug!(4, "Finished Pass 2");
     let final_bodies = Arc::try_unwrap(final_bodies_arc).unwrap().into_inner().unwrap();
     let tsid_bodies = Arc::try_unwrap(tsid_bodies_arc).unwrap().into_inner().unwrap();
-    println!("build_parser_dwa: final_bodies={} tsid_bodies={}", final_bodies.len(), tsid_bodies.len());
     let avg_template_size = states_arena.borrow().len() as f64 / (final_bodies.len() + tsid_bodies.len()).max(1) as f64;
     crate::debug!(4, "Collected {} final bodies, {} tsid bodies, states_arena has {} states (avg {:.0} states/body)", 
         final_bodies.len(), tsid_bodies.len(), states_arena.borrow().len(), avg_template_size);
@@ -867,12 +868,16 @@ pub fn precompute_token_bvs_and_signatures(reversed_nwa: &NWA, traversal_data: &
 
     let node_tokens_clone = node_tokens.clone();
     let signatures_clone = signatures.clone();
+    
+    // Get dimensions for projecting weights to token space
+    let dims = reversed_nwa.dims;
 
     nwa_special_map(reversed_nwa, traversal_data, initial_values,
         move |tokens: &LLMTokenBV, _edge_label, transitions| {
             let mut results = Vec::new();
             for (dest_id, weight) in transitions {
-                let edge_bv: LLMTokenBV = weight.clone().into();
+                // Project the weight to token space (handles weight-heavy mode)
+                let edge_bv: LLMTokenBV = weight.project_to_tokens(dims).into();
                 let next = tokens & &edge_bv;
                 if !next.is_empty() { results.push((*dest_id, next)); }
             }
@@ -886,20 +891,22 @@ pub fn precompute_token_bvs_and_signatures(reversed_nwa: &NWA, traversal_data: &
             for (label, targets) in &state.transitions {
                 let term = Some(TerminalID(*label as usize));
                 for (v, w) in targets {
-                    let edge_bv: LLMTokenBV = w.clone().into();
-                    let combined = &tokens & &edge_bv;
+                    // Project weight to token space for intersection check
+                    let edge_tokens: LLMTokenBV = w.project_to_tokens(dims).into();
+                    let combined = &tokens & &edge_tokens;
                     if !combined.is_empty() {
-                        let w_weight = Weight::from_rsb(edge_bv.inner.as_ref().clone());
-                        bundles_by_dest.entry(*v).or_default().insert(term, w_weight);
+                        // Keep the original weight (in position space) for signature tracking
+                        bundles_by_dest.entry(*v).or_default().insert(term, w.clone());
                     }
                 }
             }
             for (v, w) in &state.epsilons {
-                let edge_bv: LLMTokenBV = w.clone().into();
-                let combined = &tokens & &edge_bv;
+                // Project weight to token space for intersection check
+                let edge_tokens: LLMTokenBV = w.project_to_tokens(dims).into();
+                let combined = &tokens & &edge_tokens;
                 if !combined.is_empty() {
-                    let w_weight = Weight::from_rsb(edge_bv.inner.as_ref().clone());
-                    bundles_by_dest.entry(*v).or_default().insert(None, w_weight);
+                    // Keep the original weight (in position space) for signature tracking
+                    bundles_by_dest.entry(*v).or_default().insert(None, w.clone());
                 }
             }
             let mut sigs = signatures_clone.lock().unwrap();

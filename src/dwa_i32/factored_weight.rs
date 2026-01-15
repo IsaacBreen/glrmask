@@ -712,6 +712,7 @@ fn subtract_rect(a: Rect, b: Rect) -> Vec<Rect> {
 
     let mut out = Vec::new();
 
+    // Left piece: tokens before the intersection
     if a.tok_lo < tok_lo {
         out.push(Rect {
             tok_lo: a.tok_lo,
@@ -721,15 +722,17 @@ fn subtract_rect(a: Rect, b: Rect) -> Vec<Rect> {
         });
     }
 
+    // Right piece: tokens after the intersection
     if tok_hi < a.tok_hi {
         out.push(Rect {
-            tok_lo,
+            tok_lo: tok_hi + 1,  // Fixed: was tok_lo, should be tok_hi + 1
             tok_hi: a.tok_hi,
             tsid_lo: a.tsid_lo,
             tsid_hi: a.tsid_hi,
         });
     }
 
+    // Top piece: tsids before the intersection (within token intersection range)
     if a.tsid_lo < tsid_lo {
         out.push(Rect {
             tok_lo,
@@ -739,6 +742,7 @@ fn subtract_rect(a: Rect, b: Rect) -> Vec<Rect> {
         });
     }
 
+    // Bottom piece: tsids after the intersection (within token intersection range)
     if tsid_hi < a.tsid_hi {
         out.push(Rect {
             tok_lo,

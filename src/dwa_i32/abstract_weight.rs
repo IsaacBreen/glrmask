@@ -96,18 +96,8 @@ pub fn get_weight_backend() -> WeightBackend {
     })
 }
 
-/// Global weight dimensions for BDD backend.
-static WEIGHT_DIMS: OnceLock<WeightDimensions> = OnceLock::new();
-
-/// Set the global weight dimensions. Must be called before creating BDD weights.
-pub fn set_weight_dimensions(dims: WeightDimensions) {
-    let _ = WEIGHT_DIMS.set(dims);
-}
-
-/// Get the global weight dimensions.
-pub fn get_weight_dimensions() -> WeightDimensions {
-    WEIGHT_DIMS.get().copied().unwrap_or_default()
-}
+// Use the shared weight dimensions from weight_impl, not a local copy
+pub use super::weight_impl::{get_weight_dimensions, set_weight_dimensions};
 
 // ============================================================================
 // AbstractWeight
@@ -933,6 +923,35 @@ impl AbstractWeight {
     pub fn to_rsb(&self) -> RangeSetBlaze<usize> {
         dispatch_ref!(self, to_rsb)
     }
+    
+    /// Project this weight to token space (first dimension).
+    /// 
+    /// In weight-heavy mode, weights encode positions in N×M space (tokens × tsids).
+    /// This method extracts the unique token values from those positions.
+    /// 
+    /// Returns a RangeSetBlaze of unique token values.
+    /// 
+    /// If dims.num_tsids is 0 (symbol-heavy mode), returns the weight as-is
+    /// since it already represents tokens.
+    pub fn project_to_tokens(&self, dims: WeightDimensions) -> RangeSetBlaze<usize> {
+        if dims.num_tsids == 0 {
+            // Symbol-heavy mode: weight is already in token space
+            return self.to_rsb();
+        }
+        
+        let m = dims.num_tsids;
+        let mut result = RangeSetBlaze::new();
+        
+        for range in self.ranges() {
+            let start = *range.start();
+            let end = *range.end();
+            let t_start = start / m;
+            let t_end = end / m;
+            result.ranges_insert(t_start..=t_end);
+        }
+        
+        result
+    }
 
     /// Get the underlying RangeSet reference (panics if BDD/Factored backend).
     pub fn as_rangeset(&self) -> &RangeSet {
@@ -1399,16 +1418,26 @@ impl From<AbstractWeight> for crate::datastructures::hybrid_bitset::RangeSet {
 mod tests {
     use super::*;
 
-    fn ensure_test_dims() {
+    struct DimsGuard(WeightDimensions);
+
+    impl Drop for DimsGuard {
+        fn drop(&mut self) {
+            set_weight_dimensions(self.0);
+        }
+    }
+
+    fn ensure_test_dims() -> DimsGuard {
         // BDD/factored backends require dimensions for correct position encoding.
         // Use a small domain that still covers the positions used in these tests.
+        let prev_dims = get_weight_dimensions();
         let dims = WeightDimensions::new(10, 5); // 10 tokens, 5 tsids -> domain size 50
         set_weight_dimensions(dims);
+        DimsGuard(prev_dims)
     }
 
     #[test]
     fn test_zeros_and_all() {
-        ensure_test_dims();
+        let _guard = ensure_test_dims();
         let z = AbstractWeight::zeros();
         assert!(z.is_empty());
         assert!(!z.is_all_fast());
@@ -1420,7 +1449,7 @@ mod tests {
 
     #[test]
     fn test_from_item() {
-        ensure_test_dims();
+        let _guard = ensure_test_dims();
         let w = AbstractWeight::from_item(42);
         assert!(w.contains(42));
         assert!(!w.contains(41));
@@ -1429,7 +1458,7 @@ mod tests {
 
     #[test]
     fn test_from_ranges() {
-        ensure_test_dims();
+        let _guard = ensure_test_dims();
         let w = AbstractWeight::from_ranges(&[(0, 10), (20, 30)]);
         assert!(w.contains(5));
         assert!(w.contains(25));
@@ -1438,7 +1467,7 @@ mod tests {
 
     #[test]
     fn test_union() {
-        ensure_test_dims();
+        let _guard = ensure_test_dims();
         let a = AbstractWeight::from_ranges(&[(0, 5)]);
         let b = AbstractWeight::from_ranges(&[(10, 15)]);
         let c = &a | &b;
@@ -1450,7 +1479,7 @@ mod tests {
 
     #[test]
     fn test_intersection() {
-        ensure_test_dims();
+        let _guard = ensure_test_dims();
         let a = AbstractWeight::from_ranges(&[(0, 10)]);
         let b = AbstractWeight::from_ranges(&[(5, 15)]);
         let c = &a & &b;
@@ -1462,7 +1491,7 @@ mod tests {
 
     #[test]
     fn test_subtraction() {
-        ensure_test_dims();
+        let _guard = ensure_test_dims();
         let a = AbstractWeight::from_ranges(&[(0, 10)]);
         let b = AbstractWeight::from_ranges(&[(5, 15)]);
         let c = &a - &b;
@@ -1473,7 +1502,7 @@ mod tests {
 
     #[test]
     fn test_complement() {
-        ensure_test_dims();
+        let _guard = ensure_test_dims();
         let a = AbstractWeight::from_ranges(&[(5, 10)]);
         let all = crate::dwa_i32::weight_all();
         let b = &all - &a;
@@ -1485,7 +1514,7 @@ mod tests {
 
     #[test]
     fn test_equality() {
-        ensure_test_dims();
+        let _guard = ensure_test_dims();
         let a = AbstractWeight::from_ranges(&[(0, 10)]);
         let b = AbstractWeight::from_ranges(&[(0, 10)]);
         let c = AbstractWeight::from_ranges(&[(0, 11)]);
@@ -1496,7 +1525,7 @@ mod tests {
 
     #[test]
     fn test_from_iter() {
-        ensure_test_dims();
+        let _guard = ensure_test_dims();
         let w: AbstractWeight = vec![1, 3, 5, 7].into_iter().collect();
         assert!(w.contains(1));
         assert!(w.contains(5));
@@ -1505,7 +1534,7 @@ mod tests {
 
     #[test]
     fn test_to_rangeset_roundtrip() {
-        ensure_test_dims();
+        let _guard = ensure_test_dims();
         let original = AbstractWeight::from_ranges(&[(5, 15), (25, 35)]);
         let rs = original.to_rangeset();
         let back = AbstractWeight::from(rs);
@@ -1515,7 +1544,7 @@ mod tests {
 
     #[test]
     fn test_factored_complement_via_rangeset() {
-        ensure_test_dims();
+        let _guard = ensure_test_dims();
         
         // Create a factored weight: all tokens × tsid 0
         let fw = FactoredWeight::from_product(
@@ -1530,9 +1559,10 @@ mod tests {
         assert!(w.contains(5));   // token 1, tsid 0 -> pos 5
         assert!(!w.contains(1));  // token 0, tsid 1 -> pos 1
         
-        // Get the complement (which converts to RangeSet)
+        // Get the complement (convert to RangeSet to avoid cross-backend ops)
+        let w_rs = AbstractWeight::from(w.to_rangeset());
         let all = crate::dwa_i32::weight_all();
-        let w_not = &all - &w;
+        let w_not = &all - &w_rs;
         
         // The complement should contain tsids 1-4 for all tokens
         assert!(!w_not.contains(0));   // token 0, tsid 0 -> NOT in complement
@@ -1541,7 +1571,7 @@ mod tests {
         assert!(w_not.contains(2));    // token 0, tsid 2 -> IN complement
         
         // Union should be all()
-        let union = &w | &w_not;
+        let union = &w_rs | &w_not;
         
         // Check that all positions are in union
         for token in 0..10 {
