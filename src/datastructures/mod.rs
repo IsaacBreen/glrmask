@@ -1,3 +1,4 @@
+pub mod abstract_weight;
 pub mod charmap;
 pub mod char_transitions;
 pub mod frozenset;
@@ -13,4 +14,5 @@ pub mod gss_acc;
 pub mod compressed_state_set;
 pub mod state_set;
 
+pub use abstract_weight::{AbstractWeight, WeightDimensions};
 pub use entry_api::{EntryApi, OrderedMapEntry};

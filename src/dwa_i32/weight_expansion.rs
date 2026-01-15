@@ -65,6 +65,12 @@ pub fn expand_rsb(rsb: &RangeSetBlaze<usize>, num_tsids: usize) -> RangeSetBlaze
         .collect()
 }
 
+/// Expand a RangeSetBlaze from N-space to N×M-space using WeightDimensions.
+/// Each position p becomes positions p * num_tsids through p * num_tsids + num_tsids - 1.
+pub fn expand_rsb_with_dims(rsb: &RangeSetBlaze<usize>, dims: crate::datastructures::WeightDimensions) -> RangeSetBlaze<usize> {
+    expand_rsb(rsb, dims.num_tsids)
+}
+
 /// Create a tsid mask for a specific tokenizer state ID.
 /// The mask has positions: tsid + n*M for n in 0..N
 /// This is equivalent to: all positions where position % M == tsid
@@ -161,6 +167,22 @@ where
     }
     
     Weight::from_rsb(mask)
+}
+
+/// Create a combined tsid mask using WeightDimensions.
+/// 
+/// This version takes WeightDimensions to specify the N×M space.
+pub fn create_tsid_set_mask_with_dims<I>(
+    tsids: I,
+    dims: crate::datastructures::WeightDimensions,
+    tsid_offset_map: Option<&[usize]>,
+) -> Weight
+where
+    I: IntoIterator<Item = usize>,
+{
+    // max_llm_token is num_tokens - 1, or 0 if num_tokens is 0
+    let max_llm_token = dims.num_tokens.saturating_sub(1);
+    create_tsid_set_mask_with_offset_map(tsids, dims.num_tsids, max_llm_token, tsid_offset_map)
 }
 
 /// Collapse a weight from N×M-space back to N-space.
