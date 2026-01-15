@@ -4,7 +4,8 @@
 //! different weight representations. Currently only supports RangeSetBlaze.
 
 use range_set_blaze::RangeSetBlaze;
-use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Not};
+use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign};
+use crate::datastructures::leveled_gss::Merge;
 
 /// Dimensions for weight-heavy mode encoding.
 /// 
@@ -70,7 +71,7 @@ impl WeightDimensions {
 /// This enum provides a unified interface for weight operations.
 /// Currently only supports RangeSetBlaze, but the enum structure
 /// allows for future extensions to other representations.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum AbstractWeight {
     /// Weight represented as a RangeSetBlaze.
     RangeSet(RangeSetBlaze<usize>),
@@ -233,28 +234,12 @@ impl BitOrAssign<&AbstractWeight> for AbstractWeight {
     }
 }
 
-impl Not for AbstractWeight {
-    type Output = Self;
-
-    fn not(self) -> Self::Output {
-        // Note: This requires knowing the domain size, which we don't have here.
-        // For now, this is a placeholder that should be used carefully.
-        panic!("Not operation on AbstractWeight requires domain knowledge. Use complement_with_dims instead.");
+impl Merge for AbstractWeight {
+    fn merge(&self, other: &Self) -> Self {
+        self | other
     }
 }
 
-impl AbstractWeight {
-    /// Compute the complement within the given dimensions.
-    pub fn complement_with_dims(&self, dims: WeightDimensions) -> Self {
-        if dims.domain_size() == 0 {
-            return Self::empty();
-        }
-        let all = RangeSetBlaze::from_iter([0..=dims.max_position()]);
-        match self {
-            AbstractWeight::RangeSet(rsb) => AbstractWeight::RangeSet(&all - rsb),
-        }
-    }
-}
 
 // Conversion traits
 

@@ -7,6 +7,24 @@ use crate::dwa_i32::common::Label;
 const VALIDATION_SAMPLES: usize = 32;
 const VALIDATION_MAX_STEPS: usize = 32;
 const SAMPLING_TRIES: usize = 100;
+const DEFAULT_FULL_WEIGHT_LEN: usize = 4096;
+
+fn full_weight_for_dwa(dwa: &DWA) -> Weight {
+    dwa.states
+        .find_actual_max()
+        .map(|max| Weight::ones(max.saturating_add(1)))
+        .unwrap_or_else(Weight::zeros)
+}
+
+trait WeightAll {
+    fn all() -> Weight;
+}
+
+impl WeightAll for Weight {
+    fn all() -> Weight {
+        Weight::ones(DEFAULT_FULL_WEIGHT_LEN)
+    }
+}
 
 #[derive(Clone, Debug)]
 struct SimpleRng(u64);
@@ -108,7 +126,7 @@ impl DWA {
         for _attempt in 0..SAMPLING_TRIES {
             let mut word: Vec<Label> = Vec::new();
             let mut s = self.body.start_state;
-            let mut acc = Weight::all();
+            let mut acc = full_weight_for_dwa(self);
 
             for step in 0..max_steps {
                 // Early stop with some probability if we can accept here.
@@ -282,7 +300,7 @@ pub fn stochastic_equivalence_test(mut a: DWA, mut b: DWA) {
 fn test_simple_bitset_ops() {
     let set1 = RangeSet::from_iter(vec![1, 2, 5]);
     let set2 = RangeSet::from_iter(vec![2, 3, 5, 6]);
-    let all = RangeSet::all();
+    let all = RangeSet::ones(11);
     let zeros = RangeSet::zeros();
 
     assert_eq!((&set1 & &set2).iter_up_to(10).collect::<Vec<_>>(), vec![2, 5]);

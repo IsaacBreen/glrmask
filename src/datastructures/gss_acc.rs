@@ -1,49 +1,22 @@
-use crate::datastructures::hybrid_bitset::RangeSet;
 use crate::datastructures::leveled_gss::Merge as LGMerge;
-use std::collections::BTreeMap;
-use std::ops::BitOrAssign;
+use std::collections::{BTreeMap, BTreeSet};
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Acc {
-    pub llm_tokens_union: RangeSet,
-    pub terminals_union: BTreeMap<usize, RangeSet>,
-}
+/// Type alias for terminals disallowed at each tokenizer state.
+/// Maps tokenizer_state_id -> set of terminal IDs that are disallowed.
+pub type TerminalsDisallowed = BTreeMap<usize, BTreeSet<usize>>;
 
-impl Acc {
-    pub fn new_fresh() -> Self {
-        Self {
-            llm_tokens_union: RangeSet::max_ones(),
-            terminals_union: BTreeMap::new(),
-        }
-    }
-
-    pub fn new_dead() -> Self {
-        Self {
-            llm_tokens_union: RangeSet::zeros(),
-            terminals_union: BTreeMap::new(),
-        }
-    }
-
-    pub fn is_default(&self) -> bool {
-        self.llm_tokens_union == RangeSet::max_ones()
-            && self.terminals_union.is_empty()
-    }
-
-    pub fn union_llm_tokens(&self) -> RangeSet {
-        self.llm_tokens_union.clone()
-    }
-}
-
-impl LGMerge for Acc {
+/// Merge implementation for TerminalsDisallowed (combines disallowed terminal sets).
+impl LGMerge for TerminalsDisallowed {
     fn merge(&self, other: &Self) -> Self {
-        let mut new_terminals_union = self.terminals_union.clone();
-        for (k, v) in &other.terminals_union {
-            new_terminals_union.entry(*k).or_default().bitor_assign(v);
+        let mut result = self.clone();
+        for (k, v) in other {
+            result.entry(*k).or_default().extend(v);
         }
-
-        Acc {
-            llm_tokens_union: &self.llm_tokens_union | &other.llm_tokens_union,
-            terminals_union: new_terminals_union,
-        }
+        result
     }
+}
+
+/// Create a fresh (empty) TerminalsDisallowed - no terminals disallowed yet.
+pub fn terminals_disallowed_fresh() -> TerminalsDisallowed {
+    BTreeMap::new()
 }

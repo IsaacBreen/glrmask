@@ -16,7 +16,12 @@ impl DWA {
             return new_dwa;
         }
 
-        let mut start_weight = Weight::all();
+        let full_weight = self
+            .states
+            .find_actual_max()
+            .map(|max| Weight::ones(max.saturating_add(1)))
+            .unwrap_or_else(Weight::zeros);
+        let mut start_weight = full_weight;
 
         // visited[original_state_id] -> HashMap<Weight, new_state_id>
         // Use Option to lazy initialize HashMaps to save memory/time for sparse traversals

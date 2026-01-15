@@ -28,6 +28,9 @@ impl DWA {
         if start >= n {
             return false;
         }
+
+        let max_weight_pos = self.states.find_actual_max().unwrap_or(0);
+        let full_weight = Weight::ones(max_weight_pos.saturating_add(1));
         
         // === Phase 1: Compute Pre(q) using Topological Sort (Kahn's Algorithm) ===
         let mut in_degree = vec![0; n];
@@ -40,7 +43,7 @@ impl DWA {
         }
         
         let mut pre: Vec<Weight> = vec![Weight::zeros(); n];
-        pre[start] = Weight::all();
+        pre[start] = full_weight.clone();
         
         let mut queue: VecDeque<StateID> = VecDeque::new();
         for i in 0..n {
@@ -63,7 +66,12 @@ impl DWA {
                 }
                 
                 if u_is_reachable {
-                    let w = self.states[u].trans_weights.get(&label).cloned().unwrap_or_else(Weight::all);
+                    let w = self
+                        .states[u]
+                        .trans_weights
+                        .get(&label)
+                        .cloned()
+                        .unwrap_or_else(|| full_weight.clone());
                     if !w.is_empty() {
                         let flow = &pre_u & &w;
                         if !flow.is_empty() {
@@ -90,7 +98,7 @@ impl DWA {
         // 1. Loosen final weights based on Pre(q)
         for q in 0..n {
             if let Some(ref mut fw) = self.states[q].final_weight {
-                let dont_care = pre[q].complement();
+                let dont_care = &full_weight - &pre[q];
                 if !dont_care.is_empty() && !dont_care.is_subset_of(fw) {
                     let new_fw = &*fw | &dont_care;
                     if new_fw != *fw {
@@ -103,7 +111,7 @@ impl DWA {
         
         // 2. Loosen transition weights based on Pre(p)
         for p in 0..n {
-            let dont_care = pre[p].complement();
+            let dont_care = &full_weight - &pre[p];
             if dont_care.is_empty() {
                 continue;
             }

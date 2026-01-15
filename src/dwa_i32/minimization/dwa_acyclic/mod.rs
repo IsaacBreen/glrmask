@@ -616,7 +616,12 @@ fn compute_needed_sets(dwa: &DWA, topo_order: &[StateID]) -> Vec<Weight> {
 /// Compute forward reachability: which tokens can reach each state from start
 fn compute_forward_reachable(dwa: &DWA, topo_order: &[StateID]) -> Vec<Weight> {
     let mut forward = vec![Weight::zeros(); dwa.states.len()];
-    forward[dwa.body.start_state] = Weight::all();
+    let full_weight = dwa
+        .states
+        .find_actual_max()
+        .map(|max| Weight::ones(max.saturating_add(1)))
+        .unwrap_or_else(Weight::zeros);
+    forward[dwa.body.start_state] = full_weight;
     
     for &u in topo_order.iter().rev() {
         if forward[u].is_empty() { continue; }

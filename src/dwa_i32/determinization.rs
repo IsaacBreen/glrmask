@@ -34,6 +34,42 @@ type WeightedSubset = Vec<(NWAStateID, Weight)>;
 
 fn is_zero(w: &Weight) -> bool { w.is_empty() }
 
+fn find_nwa_actual_max(nwa: &NWA) -> Option<usize> {
+    let mut max_val: Option<usize> = None;
+    for state in &nwa.states.0 {
+        if let Some(fw) = &state.final_weight {
+            if !fw.is_empty() {
+                if let Some(m) = fw.max_item() {
+                    max_val = Some(max_val.map_or(m, |cur| cur.max(m)));
+                }
+            }
+        }
+        for targets in state.transitions.values() {
+            for (_, w) in targets {
+                if !w.is_empty() {
+                    if let Some(m) = w.max_item() {
+                        max_val = Some(max_val.map_or(m, |cur| cur.max(m)));
+                    }
+                }
+            }
+        }
+        for (_, w) in &state.epsilons {
+            if !w.is_empty() {
+                if let Some(m) = w.max_item() {
+                    max_val = Some(max_val.map_or(m, |cur| cur.max(m)));
+                }
+            }
+        }
+    }
+    max_val
+}
+
+fn full_weight_for_nwa(nwa: &NWA) -> Weight {
+    find_nwa_actual_max(nwa)
+        .map(|max| Weight::ones(max.saturating_add(1)))
+        .unwrap_or_else(Weight::zeros)
+}
+
 /// A pre-hashed wrapper for a weighted subset using sorted Vec for fast iteration.
 #[derive(Clone)]
 struct HashedSubset {
@@ -140,12 +176,14 @@ impl NWA {
         }
 
         crate::debug!(6, "Determinization: Precomputing epsilon closures...");
-        
+
+        let full_weight = full_weight_for_nwa(self);
+
         // 3. Precompute Reachability
-        let eps_reach = precompute_all_epsilon_closures(&self.states);
+        let eps_reach = precompute_all_epsilon_closures(&self.states, &full_weight);
 
         // 4. Initialize Determinizer
-        let mut det = Determinizer::new(self, &eps_reach);
+        let mut det = Determinizer::new(self, &eps_reach, full_weight);
 
         // 5. Initial State Construction
         let mut start_map: HashMap<NWAStateID, Weight> = HashMap::new();
@@ -217,10 +255,11 @@ impl NWA {
         let det_start = std::time::Instant::now();
 
         // Initial States
+        let full_weight = full_weight_for_nwa(self);
         let mut start_subset = BTreeMap::new();
         for &s in &self.body.start_states {
             if s < self.states.len() {
-                start_subset.insert(s, Weight::all());
+                start_subset.insert(s, full_weight.clone());
             }
         }
 
@@ -290,10 +329,10 @@ impl NWA {
                 }
                 
                 let w_edge = edge_weights.remove(&label).unwrap();
-                let w_edge_inv = !&w_edge;
+                let w_edge_inv = &full_weight - &w_edge;
 
                 // Normalize weights in the subset by dividing by w_edge.
-                // Division in Boolean semiring (loosening): w / v = w | !v.
+                // Division in Boolean semiring (loosening): w / v = w | (full_weight - v).
                 let normalized_subset: FxHashMap<NWAStateID, Weight> = next_subset
                     .into_iter()
                     .map(|(id, w)| (id, w | &w_edge_inv))
@@ -392,6 +431,7 @@ impl NWA {
 struct Determinizer<'a> {
     nwa: &'a NWA,
     eps_reach: &'a [WeightedSubset],
+    full_weight: Weight,
     
     // Map from canonical closure (Sorted Vec) to DWA State ID
     seen: HashMap<WeightedSubset, usize>,
@@ -403,13 +443,14 @@ struct Determinizer<'a> {
 }
 
 impl<'a> Determinizer<'a> {
-    fn new(nwa: &'a NWA, eps_reach: &'a [WeightedSubset]) -> Self {
+    fn new(nwa: &'a NWA, eps_reach: &'a [WeightedSubset], full_weight: Weight) -> Self {
         let mut dwa = DWA::new();
         dwa.states.0.clear();
         dwa.body.start_state = 0;
         Determinizer {
             nwa,
             eps_reach,
+            full_weight,
             seen: HashMap::new(),
             queue: VecDeque::new(),
             closures: Vec::new(),
@@ -499,8 +540,8 @@ impl<'a> Determinizer<'a> {
             }
 
             // Normalize weights in the subset by dividing by w_edge.
-            // Division in Boolean semiring (loosening): w / v = w | !v.
-            let w_edge_inv = !&w_edge;
+            // Division in Boolean semiring (loosening): w / v = w | (full_weight - v).
+            let w_edge_inv = &self.full_weight - &w_edge;
             let mut dest_subset: WeightedSubset = dest_map
                 .into_iter()
                 .map(|(sid, w)| (sid, w | &w_edge_inv))
@@ -514,7 +555,7 @@ impl<'a> Determinizer<'a> {
 }
 
 /// Precomputes the epsilon closure for every state in the NWA.
-fn precompute_all_epsilon_closures(states: &NWAStates) -> Vec<WeightedSubset> {
+fn precompute_all_epsilon_closures(states: &NWAStates, full_weight: &Weight) -> Vec<WeightedSubset> {
     let n = states.len();
     let mut reachability = Vec::with_capacity(n);
 
@@ -523,7 +564,7 @@ fn precompute_all_epsilon_closures(states: &NWAStates) -> Vec<WeightedSubset> {
         let mut queue: VecDeque<NWAStateID> = VecDeque::new();
 
         // Self-reachability is identity
-        dists.insert(start_node, Weight::all());
+        dists.insert(start_node, full_weight.clone());
         queue.push_back(start_node);
 
         while let Some(u) = queue.pop_front() {
@@ -603,8 +644,9 @@ fn try_build_singleton_loop_union(nwa: &NWA) -> Option<DWA> {
         return None;
     }
 
+    let full_weight = full_weight_for_nwa(nwa);
     let mut seed: WeightedSubset = Vec::new();
-    seed.push((start, Weight::all()));
+    seed.push((start, full_weight));
     // Use the local helper here to avoid precomputing everything for this fast path
     let start_closure = epsilon_closure_optimized(&nwa.states, &seed);
 

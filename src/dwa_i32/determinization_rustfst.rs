@@ -53,6 +53,7 @@ fn label_to_fst_label(label: Label) -> u32 {
 }
 
 static WEIGHT_INTERNER: Lazy<Mutex<HashSet<Arc<Weight>>>> = Lazy::new(|| Mutex::new(HashSet::new()));
+static FULL_WEIGHT: Lazy<Mutex<Arc<Weight>>> = Lazy::new(|| Mutex::new(Arc::new(Weight::zeros())));
 
 fn intern_weight(weight: Weight) -> Arc<Weight> {
     let mut interner = WEIGHT_INTERNER.lock().unwrap();
@@ -62,6 +63,51 @@ fn intern_weight(weight: Weight) -> Arc<Weight> {
     let arc_weight = Arc::new(weight);
     interner.insert(arc_weight.clone());
     arc_weight
+}
+
+fn set_full_weight(weight: Weight) {
+    let mut guard = FULL_WEIGHT.lock().unwrap();
+    *guard = intern_weight(weight);
+}
+
+fn get_full_weight() -> Arc<Weight> {
+    FULL_WEIGHT.lock().unwrap().clone()
+}
+
+fn find_nwa_actual_max(nwa: &NWA) -> Option<usize> {
+    let mut max_val: Option<usize> = None;
+    for state in &nwa.states.0 {
+        if let Some(fw) = &state.final_weight {
+            if !fw.is_empty() {
+                if let Some(m) = fw.max_item() {
+                    max_val = Some(max_val.map_or(m, |cur| cur.max(m)));
+                }
+            }
+        }
+        for targets in state.transitions.values() {
+            for (_, w) in targets {
+                if !w.is_empty() {
+                    if let Some(m) = w.max_item() {
+                        max_val = Some(max_val.map_or(m, |cur| cur.max(m)));
+                    }
+                }
+            }
+        }
+        for (_, w) in &state.epsilons {
+            if !w.is_empty() {
+                if let Some(m) = w.max_item() {
+                    max_val = Some(max_val.map_or(m, |cur| cur.max(m)));
+                }
+            }
+        }
+    }
+    max_val
+}
+
+fn full_weight_for_nwa(nwa: &NWA) -> Weight {
+    find_nwa_actual_max(nwa)
+        .map(|max| Weight::ones(max.saturating_add(1)))
+        .unwrap_or_else(Weight::zeros)
 }
 
 /// Semiring over bitset weights: plus = union, times = intersection.
@@ -84,7 +130,7 @@ impl Semiring for BitsetWeight {
     type ReverseWeight = BitsetWeight;
 
     fn zero() -> Self { BitsetWeight(intern_weight(Weight::zeros())) }
-    fn one() -> Self { BitsetWeight(intern_weight(Weight::all())) }
+    fn one() -> Self { BitsetWeight(get_full_weight()) }
     fn new(value: Self::Type) -> Self { BitsetWeight(intern_weight(value)) }
 
     fn plus_assign<P: Borrow<Self>>(&mut self, rhs: P) -> Result<()> {
@@ -120,7 +166,8 @@ impl ReverseBack<BitsetWeight> for BitsetWeight {
 
 impl WeaklyDivisibleSemiring for BitsetWeight {
     fn divide_assign(&mut self, rhs: &Self, _divide_type: DivideType) -> Result<()> {
-        let new_weight = &*self.0 | &!&*rhs.0;
+        let full_weight = get_full_weight();
+        let new_weight = &*self.0 | &(&*full_weight - &*rhs.0);
         self.0 = intern_weight(new_weight);
         Ok(())
     }
@@ -175,6 +222,7 @@ impl std::fmt::Display for BitsetWeight {
 }
 
 pub fn nwa_to_vector_fst(nwa: &NWA) -> VectorFst<BitsetWeight> {
+    set_full_weight(full_weight_for_nwa(nwa));
     let mut fst = VectorFst::<BitsetWeight>::new();
     let mut state_map = HashMap::<NWAStateID, StateId>::new();
 
@@ -340,12 +388,31 @@ pub fn vector_fst_to_nwa(fst: &VectorFst<BitsetWeight>) -> NWA {
 
         // The super-start is always the last state added
         if candidate == last_idx && candidate > 0 {
+            let mut max_weight_pos = 0usize;
+            for st in &nwa.states.0 {
+                if let Some(ref fw) = st.final_weight {
+                    if let Some(m) = fw.max_item() {
+                        max_weight_pos = max_weight_pos.max(m);
+                    }
+                }
+                for weight in st.transitions.values().flat_map(|targets| targets.iter().map(|(_, w)| w)) {
+                    if let Some(m) = weight.max_item() {
+                        max_weight_pos = max_weight_pos.max(m);
+                    }
+                }
+                for (_, weight) in &st.epsilons {
+                    if let Some(m) = weight.max_item() {
+                        max_weight_pos = max_weight_pos.max(m);
+                    }
+                }
+            }
+            let full_weight = Weight::ones(max_weight_pos.saturating_add(1));
             let is_candidate_prop = {
                 let st = &nwa.states[candidate];
                 st.final_weight.as_ref().map_or(true, |w| w.is_empty())
                     && st.transitions.is_empty()
                     && !st.epsilons.is_empty()
-                    && st.epsilons.iter().all(|(_, w)| w.is_all_fast())
+                    && st.epsilons.iter().all(|(_, w)| *w == full_weight)
             };
 
             if is_candidate_prop {

@@ -29,6 +29,8 @@ impl DWA {
         if n == 0 {
             return false;
         }
+        let max_weight_pos = self.states.find_actual_max().unwrap_or(0);
+        let full_weight = Weight::ones(max_weight_pos.saturating_add(1));
 
         // Phase 1: Compute backward potentials d[q]
         let d = self.compute_backward_potentials_cyclic();
@@ -51,7 +53,7 @@ impl DWA {
                     .trans_weights
                     .get(&label)
                     .cloned()
-                    .unwrap_or_else(Weight::all);
+                    .unwrap_or_else(|| full_weight.clone());
 
                 let d_target = &d[target];
                 let new_weight = &w & d_target;
@@ -74,7 +76,7 @@ impl DWA {
                 continue;
             }
             let d_q = &d[q];
-            let complement_d_q = d_q.complement();
+            let complement_d_q = &full_weight - d_q;
 
             if let Some(fw) = &self.states[q].final_weight {
                 let new_fw = fw | &complement_d_q;
@@ -91,6 +93,8 @@ impl DWA {
     /// Compute backward potentials d[q] for all states.
     pub(crate) fn compute_backward_potentials_cyclic(&self) -> Vec<Weight> {
         let n = self.states.len();
+        let max_weight_pos = self.states.find_actual_max().unwrap_or(0);
+        let full_weight = Weight::ones(max_weight_pos.saturating_add(1));
         
         let mut d: Vec<Weight> = (0..n)
             .map(|q| {
@@ -123,7 +127,7 @@ impl DWA {
                         .trans_weights
                         .get(&label)
                         .cloned()
-                        .unwrap_or_else(Weight::all);
+                        .unwrap_or_else(|| full_weight.clone());
 
                     let contribution = &w & &d[target];
                     new_d |= &contribution;

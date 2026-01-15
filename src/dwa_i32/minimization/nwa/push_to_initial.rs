@@ -9,6 +9,28 @@ impl NWA {
         let n = self.states.len();
         if n == 0 { return false; }
 
+        let mut max_weight_pos = 0usize;
+        for st in &self.states.0 {
+            if let Some(ref fw) = st.final_weight {
+                if let Some(m) = fw.max_item() {
+                    max_weight_pos = max_weight_pos.max(m);
+                }
+            }
+            for (_, w) in &st.epsilons {
+                if let Some(m) = w.max_item() {
+                    max_weight_pos = max_weight_pos.max(m);
+                }
+            }
+            for targets in st.transitions.values() {
+                for (_, w) in targets {
+                    if let Some(m) = w.max_item() {
+                        max_weight_pos = max_weight_pos.max(m);
+                    }
+                }
+            }
+        }
+        let full_weight = Weight::ones(max_weight_pos.saturating_add(1));
+
         // 1. Compute backward distance (accumulated weight to final)
         let mut d = vec![Weight::zeros(); n];
         let mut q = VecDeque::new();
@@ -65,7 +87,7 @@ impl NWA {
 
         for (u, st) in self.states.0.iter_mut().enumerate() {
             let d_u = &d[u];
-            let inv_d_u = if starts.contains(&u) { Weight::zeros() } else { d_u.complement() };
+            let inv_d_u = if starts.contains(&u) { Weight::zeros() } else { &full_weight - d_u };
 
             // Epsilons
             for (v, w) in &mut st.epsilons {

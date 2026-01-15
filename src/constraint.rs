@@ -37,7 +37,7 @@ use crate::{
     types::{TerminalID as GrammarTokenID, TerminalID},
 };
 use crate::datastructures::bitset::Bitset;
-use crate::datastructures::gss_acc::Acc;
+use crate::datastructures::gss_acc::TerminalsDisallowed;
 use crate::glr::parser::{ExpectElse, ParseStateEdgeContent};
 use crate::dwa_i32::{DWA, NWA};
 use crate::dwa_i32::{RangeSet as WARangeSet, Weight};
@@ -45,7 +45,7 @@ use crate::dwa_i32::{RangeSet as WARangeSet, Weight};
 pub use crate::constraint_vocab::*;
 use crate::constraint_precompute::run_precompute1;
 
-type GSSNode = LeveledGSS<ParseStateEdgeContent, Acc>;
+type GSSNode = LeveledGSS<ParseStateEdgeContent, TerminalsDisallowed>;
 
 // Thread-local storage for verification mode
 // ---------------------------------------------------------------------------
@@ -123,7 +123,7 @@ fn compute_dwa_partition(
     class_to_tokens.insert(0, (0..=max_tok).collect());
     let mut num_classes = 1;
 
-    let weights_vec: Vec<&Weight> = unique_weights.iter().filter(|w| !w.is_all_fast()).collect();
+    let weights_vec: Vec<&Weight> = unique_weights.iter().collect();
 
     for w in weights_vec.iter() {
         let mut tokens_in_w_by_class: FxHashMap<usize, Vec<usize>> = FxHashMap::default();
@@ -186,7 +186,7 @@ fn optimize_dwa_and_vocab(
     // Process all non-trivial weights to ensure correct equivalence class partitioning.
     // Previously limited to 500 weights, but this caused incorrect token merging when
     // tokens differed only in weights beyond the limit.
-    let mut weights_vec: Vec<&Weight> = unique_weights.iter().filter(|w| !w.is_all_fast()).collect();
+    let mut weights_vec: Vec<&Weight> = unique_weights.iter().collect();
     weights_vec.sort_by_key(|w| w.rsb.ranges_len()); // Process smaller weights first for efficiency
     crate::debug!(4, "DWA Vocab Optimization: Processing {} unique weights (max_tok={})", weights_vec.len(), max_tok);
 
@@ -243,7 +243,6 @@ fn optimize_dwa_and_vocab(
     let mut weight_cache: FxHashMap<Weight, Weight> = FxHashMap::default();
     let mut map_weight = |w: &Weight, cache: &mut FxHashMap<Weight, Weight>| -> Weight {
         if let Some(cached) = cache.get(w) { return cached.clone(); }
-        if w.is_all_fast() { return Weight::all(); }
         let mut new_vals = Vec::new();
         for t in w.iter_up_to(max_tok) {
             if let Some(&new_t) = old_to_new_map.get(&t) { new_vals.push(new_t); }
@@ -262,7 +261,6 @@ fn optimize_dwa_and_vocab(
     let mut bv_cache: FxHashMap<LLMTokenBV, LLMTokenBV> = FxHashMap::default();
     let mut map_bv = |bv: &LLMTokenBV| -> LLMTokenBV {
         if let Some(cached) = bv_cache.get(bv) { return cached.clone(); }
-        if bv.is_all() { return LLMTokenBV::max_ones(); }
         let mut new_vals = Vec::new();
         for t in bv.iter_up_to(max_tok) {
             if let Some(&new_t) = old_to_new_map.get(&t) { new_vals.push(new_t); }
@@ -1091,12 +1089,14 @@ impl GrammarConstraint {
 
         // commit_vocab is already computed in setup_combined above
 
+        let all_llm_tokens = range_set_blaze::RangeSetBlaze::from_iter([0..=internal_max_llm_token]);
         let mut vocab = StageVocab {
             original_to_internal: original_to_internal_map.clone(),
             internal_to_original: internal_to_original_map.clone(),
             internal_max_llm_token,
             max_original_llm_token_id,
             internal_to_original_sparse_matrix: vec![],
+            all_llm_tokens,
         };
 
         // Number of tokenizer states for weight-heavy encoding
@@ -1663,9 +1663,8 @@ impl GrammarConstraint {
             weight_samples.sort();
             crate::debug!(1, "Sample weight cardinalities: {:?}", weight_samples);
             
-            // Check if weights are all Weight::all()
-            let all_weights_are_all = eps_with_weights.iter().all(|(_, w)| w.is_all_fast());
-            crate::debug!(1, "All epsilon weights are Weight::all(): {}", all_weights_are_all);
+            // Check if weights are full sets (requires domain size; omitted here)
+            crate::debug!(1, "All epsilon weights are full sets: (domain size required)");
             
             // ANALYZE: What does the NWA look like after epsilon replacement?
             // Count epsilon targets and their out-degrees
@@ -2554,11 +2553,9 @@ impl GrammarConstraint {
             .flat_map(|(sid, tmap)| {
                 let mut local_triples = Vec::new();
                 for (term, bv) in tmap {
-                    if !bv.is_all() {
-                        for tok in bv.iter_up_to(usize::MAX) {
-                            local_triples
-                                .push((tok as u32, sid.0 as u32, term.0 as u32));
-                        }
+                    for tok in bv.iter_indices() {
+                        local_triples
+                            .push((tok as u32, sid.0 as u32, term.0 as u32));
                     }
                 }
                 local_triples

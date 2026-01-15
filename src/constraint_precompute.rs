@@ -203,7 +203,7 @@ impl<'r> Precomputer1<'r> {
         let new_start_state = self.nwa.add_state();
         
         if self.num_tsids == 0 {
-            // Symbol-heavy mode: create labeled transitions with Weight::all()
+            // Symbol-heavy mode: create labeled transitions with full weight
             // Label = tsid + terminals_count
             // Important: We need to create labels for ALL tsids (not just representatives),
             // because at runtime we'll look up by the raw tokenizer state ID.
@@ -407,7 +407,7 @@ impl<'r> Precomputer1<'r> {
                 // NOTE: The previous state reuse optimization was removed because it
                 // iterated through all pending_epsilons (~84 items on avg) but NEVER
                 // found a reusable state (0 reuses in 500k+ calls, 42M+ loop iterations).
-                // The check `live.is_disjoint(&Weight::all())` can only be true if the
+                // The check `live.is_disjoint(&full_weight)` can only be true if the
                 // live_tokens entry is empty, which almost never happens.
                 let t = self.nwa.add_state();
                 v.insert(t);
@@ -448,7 +448,7 @@ impl<'r> Precomputer1<'r> {
     }
 
     /// Create an expanded "all" weight (all tokens for all tsids).
-    /// If num_tsids == 0 (symbol-heavy mode), returns Weight::all().
+    /// If num_tsids == 0 (symbol-heavy mode), returns full weight.
     #[inline]
     fn expanded_weight_all(&self) -> Weight {
         if self.num_tsids == 0 {

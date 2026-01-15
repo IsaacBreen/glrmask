@@ -8,14 +8,14 @@ use crate::dwa_i32::weight_expansion::{create_tsid_mask_rsb_with_offset_map, col
 use crate::dfa_u8::TokenizerStateID;
 use profiler_macro::time_it;
 use range_set_blaze::RangeSetBlaze;
-use std::collections::BTreeMap;
-use std::ops::BitOrAssign;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
 use crate::datastructures::bitset::Bitset;
-use crate::datastructures::gss_acc::Acc;
+use crate::datastructures::gss_acc::TerminalsDisallowed;
+use crate::datastructures::abstract_weight::AbstractWeight;
 
-type ParserGSS = LeveledGSS<ParseStateEdgeContent, Acc>;
+type ParserGSS = LeveledGSS<ParseStateEdgeContent, TerminalsDisallowed>;
 
 // Benchmark mode for capturing Rust-native timings without Python overhead
 static BENCHMARK_MODE: AtomicBool = AtomicBool::new(false);
@@ -32,7 +32,6 @@ pub fn set_benchmark_mode(enabled: bool) {
 pub fn get_last_mask_time_ns() -> u64 {
     LAST_MASK_TIME_NS.load(Ordering::Relaxed)
 }
-
 impl<'a> GrammarConstraintState<'a> {
     /// Expose compute_internal_mask for testing/debugging.
     #[cfg(test)]
@@ -49,9 +48,11 @@ impl<'a> GrammarConstraintState<'a> {
             return final_mask_internal;
         }
 
-        let mut queue: BTreeMap<isize, BTreeMap<WAStateID, LeveledGSS<ParseStateEdgeContent, RangeSetBlaze<usize>>>> = BTreeMap::new();
+        let mut queue: BTreeMap<isize, BTreeMap<WAStateID, LeveledGSS<ParseStateEdgeContent, AbstractWeight>>> = BTreeMap::new();
         let dwa = &self.parent.parser_dwa;
         let dwa_start_state = &dwa.states[dwa.body.start_state];
+        let possible_matches = &self.parent.possible_matches;
+        let all_llm_tokens = &self.parent.parser_dwa_vocab.all_llm_tokens;
 
         crate::debug!(5, "compute_internal_mask: {} tokenizer states in self.state", self.state.len());
         for (&tsid, glr_state) in &self.state {
@@ -65,37 +66,9 @@ impl<'a> GrammarConstraintState<'a> {
                 continue;
             }
 
-            // Prune GSS based on disallowed terminals before starting.
-            let mut gss = glr_state.stack.clone();
-            let possible_matches = &self.parent.possible_matches;
-            gss = gss.apply_and_prune(|acc| {
-                if acc.terminals_union.is_empty() {
-                    return Some(acc.clone());
-                }
-                let mut forbidden_llm_tokens = RangeSet::zeros();
-                for (&tokenizer_state_id, disallowed_in_state) in &acc.terminals_union {
-                    if disallowed_in_state.is_empty() { continue; }
-                    if let Some(state_matches) = possible_matches.get(&TokenizerStateID(tokenizer_state_id)) {
-                        for (terminal_id, llm_tokens) in state_matches {
-                            if disallowed_in_state.contains(terminal_id.0) {
-                                forbidden_llm_tokens |= llm_tokens;
-                            }
-                        }
-                    }
-                }
-
-                if forbidden_llm_tokens.is_empty() {
-                    return Some(acc.clone());
-                }
-                let mut new_acc = acc.clone();
-                new_acc.llm_tokens_union -= &forbidden_llm_tokens;
-                if new_acc.llm_tokens_union.is_empty() { None } else { Some(new_acc) }
-            });
-
-            if gss.is_empty() {
-                continue;
-            }
-
+            // Convert TerminalsAllowed to LLM token RangeSetBlaze
+            let gss = glr_state.stack.clone();
+            
             // In symbol-heavy mode, tsid labels are offset by terminals_count
             // to avoid collision with terminal labels (0 to terminals_count-1).
             // This matches the labeling in precompute1.
@@ -107,9 +80,24 @@ impl<'a> GrammarConstraintState<'a> {
                 dwa_start_state.transitions.len());
             if let Some((target_wa_state_id, weight)) = dwa_start_state.get_transition(tsid_label) {
                 crate::debug!(6, "    Found transition to state {} with weight {:?}", target_wa_state_id, weight);
-                let f = |acc: &Acc| {
-                    let new_rsb = acc.llm_tokens_union.inner.as_ref() & &weight.rsb;
-                    if new_rsb.is_empty() { None } else { Some(new_rsb) }
+                
+                // Convert TerminalsDisallowed to LLM tokens: start with all tokens, subtract forbidden
+                let f = |terminals_disallowed: &TerminalsDisallowed| {
+                    // Compute forbidden tokens from terminals_disallowed
+                    let mut allowed_tokens = all_llm_tokens.clone();
+                    for (&ts_id, disallowed_terminals) in terminals_disallowed {
+                        if disallowed_terminals.is_empty() { continue; }
+                        if let Some(state_matches) = possible_matches.get(&TokenizerStateID(ts_id)) {
+                            for (terminal_id, llm_tokens) in state_matches {
+                                if disallowed_terminals.contains(&terminal_id.0) {
+                                    allowed_tokens = &allowed_tokens - llm_tokens.inner.as_ref();
+                                }
+                            }
+                        }
+                    }
+                    // Intersect with transition weight
+                    let new_rsb = &allowed_tokens & &weight.rsb;
+                    if new_rsb.is_empty() { None } else { Some(AbstractWeight::from_rsb(new_rsb)) }
                 };
                 let weighted_gss = gss.apply_and_prune(f);
 
@@ -134,7 +122,9 @@ impl<'a> GrammarConstraintState<'a> {
                 // Check for final state
                 if let Some(final_weight) = &dwa_state.final_weight {
                     if let Some(reduced_acc) = gss.reduce_acc() {
-                        let final_tokens = &reduced_acc & &final_weight.rsb;
+                        let final_tokens = match reduced_acc {
+                            AbstractWeight::RangeSet(rsb) => &rsb & &final_weight.rsb,
+                        };
                         if !final_tokens.is_empty() {
                             crate::debug!(7, "Adding {} tokens from final state {}", final_tokens.ranges_len(), current_wa_state_id);
                             final_mask_internal |= RangeSet::from(final_tokens);
@@ -150,9 +140,11 @@ impl<'a> GrammarConstraintState<'a> {
                         let popped_gss = isolated_gss.pop();
                         if popped_gss.is_empty() { continue; }
 
-                        let f = |rsb: &RangeSetBlaze<usize>| {
-                            let new_rsb = rsb & &trans_weight.rsb;
-                            if new_rsb.is_empty() { None } else { Some(new_rsb) }
+                        let f = |aw: &AbstractWeight| {
+                            let new_rsb = match aw {
+                                AbstractWeight::RangeSet(rsb) => rsb & &trans_weight.rsb,
+                            };
+                            if new_rsb.is_empty() { None } else { Some(AbstractWeight::from_rsb(new_rsb)) }
                         };
                         let final_gss = popped_gss.apply_and_prune(f);
 
@@ -171,9 +163,11 @@ impl<'a> GrammarConstraintState<'a> {
                         let popped_gss = isolated_gss.pop();
                         if popped_gss.is_empty() { continue; }
 
-                        let f = |rsb: &RangeSetBlaze<usize>| {
-                            let new_rsb = rsb & &trans_weight.rsb;
-                            if new_rsb.is_empty() { None } else { Some(new_rsb) }
+                        let f = |aw: &AbstractWeight| {
+                            let new_rsb = match aw {
+                                AbstractWeight::RangeSet(rsb) => rsb & &trans_weight.rsb,
+                            };
+                            if new_rsb.is_empty() { None } else { Some(AbstractWeight::from_rsb(new_rsb)) }
                         };
                         let final_gss = popped_gss.apply_and_prune(f);
 
@@ -211,9 +205,11 @@ impl<'a> GrammarConstraintState<'a> {
 
         let dwa = &self.parent.parser_dwa;
         let dwa_start_state_id = dwa.body.start_state;
+        let possible_matches = &self.parent.possible_matches;
+        let all_llm_tokens = &self.parent.parser_dwa_vocab.all_llm_tokens;
         
         // Queue: depth -> (dwa_state -> GSS with N×M weights)
-        let mut queue: BTreeMap<isize, BTreeMap<WAStateID, LeveledGSS<ParseStateEdgeContent, RangeSetBlaze<usize>>>> = BTreeMap::new();
+        let mut queue: BTreeMap<isize, BTreeMap<WAStateID, LeveledGSS<ParseStateEdgeContent, AbstractWeight>>> = BTreeMap::new();
 
         // 1. Seed: For each tokenizer state, apply tsid mask and seed at DWA start
         for (&tokenizer_state_id, glr_state) in &self.state {
@@ -233,45 +229,30 @@ impl<'a> GrammarConstraintState<'a> {
                 },
             );
             
-            // Prune GSS based on disallowed terminals (same as symbol-heavy)
-            let mut gss = glr_state.stack.clone();
-            let possible_matches = &self.parent.possible_matches;
-            gss = gss.apply_and_prune(|acc| {
-                if acc.terminals_union.is_empty() {
-                    return Some(acc.clone());
-                }
-                let mut forbidden_llm_tokens = RangeSet::zeros();
-                for (&ts_id, disallowed_in_state) in &acc.terminals_union {
-                    if disallowed_in_state.is_empty() { continue; }
+            let gss = glr_state.stack.clone();
+
+            // Convert GSS accumulator to N×M space with tsid mask applied
+            // Converting TerminalsDisallowed to LLM tokens on-the-fly
+            let f = |terminals_disallowed: &TerminalsDisallowed| {
+                // Compute allowed LLM tokens: start with all, subtract forbidden
+                let mut allowed_tokens = all_llm_tokens.clone();
+                for (&ts_id, disallowed_terminals) in terminals_disallowed {
+                    if disallowed_terminals.is_empty() { continue; }
                     if let Some(state_matches) = possible_matches.get(&TokenizerStateID(ts_id)) {
                         for (terminal_id, llm_tokens) in state_matches {
-                            if disallowed_in_state.contains(terminal_id.0) {
-                                forbidden_llm_tokens |= llm_tokens;
+                            if disallowed_terminals.contains(&terminal_id.0) {
+                                allowed_tokens = &allowed_tokens - llm_tokens.inner.as_ref();
                             }
                         }
                     }
                 }
-                if forbidden_llm_tokens.is_empty() {
-                    return Some(acc.clone());
-                }
-                let mut new_acc = acc.clone();
-                new_acc.llm_tokens_union -= &forbidden_llm_tokens;
-                if new_acc.llm_tokens_union.is_empty() { None } else { Some(new_acc) }
-            });
-
-            if gss.is_empty() {
-                continue;
-            }
-
-            // Convert GSS accumulator to N×M space with tsid mask applied
-            let f = |acc: &Acc| {
                 // Expand the LLM token set to N×M and intersect with tsid mask
                 // This creates weights where only positions i*M + tsid are set
                 let expanded = crate::dwa_i32::weight_expansion::expand_rsb(
-                    &acc.llm_tokens_union.inner, num_tsids
+                    &allowed_tokens, num_tsids
                 );
                 let masked = &expanded & &tsid_mask;
-                if masked.is_empty() { None } else { Some(masked) }
+                if masked.is_empty() { None } else { Some(AbstractWeight::from_rsb(masked)) }
             };
             let weighted_gss = gss.apply_and_prune(f);
 
@@ -293,7 +274,9 @@ impl<'a> GrammarConstraintState<'a> {
                 // Check for final state
                 if let Some(final_weight) = &dwa_state.final_weight {
                     if let Some(reduced_acc) = gss.reduce_acc() {
-                        let final_tokens = &reduced_acc & &final_weight.rsb;
+                        let final_tokens = match reduced_acc {
+                            AbstractWeight::RangeSet(rsb) => &rsb & &final_weight.rsb,
+                        };
                         if !final_tokens.is_empty() {
                             // Collapse from N×M to N before adding to result
                             let collapsed = collapse_weight_rsb(&final_tokens, num_tsids);
@@ -310,9 +293,11 @@ impl<'a> GrammarConstraintState<'a> {
                         let popped_gss = isolated_gss.pop();
                         if popped_gss.is_empty() { continue; }
 
-                        let f = |rsb: &RangeSetBlaze<usize>| {
-                            let new_rsb = rsb & &trans_weight.rsb;
-                            if new_rsb.is_empty() { None } else { Some(new_rsb) }
+                        let f = |aw: &AbstractWeight| {
+                            let new_rsb = match aw {
+                                AbstractWeight::RangeSet(rsb) => rsb & &trans_weight.rsb,
+                            };
+                            if new_rsb.is_empty() { None } else { Some(AbstractWeight::from_rsb(new_rsb)) }
                         };
                         let final_gss = popped_gss.apply_and_prune(f);
 
@@ -331,9 +316,11 @@ impl<'a> GrammarConstraintState<'a> {
                         let popped_gss = isolated_gss.pop();
                         if popped_gss.is_empty() { continue; }
 
-                        let f = |rsb: &RangeSetBlaze<usize>| {
-                            let new_rsb = rsb & &trans_weight.rsb;
-                            if new_rsb.is_empty() { None } else { Some(new_rsb) }
+                        let f = |aw: &AbstractWeight| {
+                            let new_rsb = match aw {
+                                AbstractWeight::RangeSet(rsb) => rsb & &trans_weight.rsb,
+                            };
+                            if new_rsb.is_empty() { None } else { Some(AbstractWeight::from_rsb(new_rsb)) }
                         };
                         let final_gss = popped_gss.apply_and_prune(f);
 
@@ -434,27 +421,28 @@ impl<'a> GrammarConstraintState<'a> {
         for glr_state in self.state.values_mut() {
             let mut gss = glr_state.stack.clone();
             // Prune based on matched terminals
-            gss = gss.apply_and_prune(|acc| {
+            gss = gss.apply_and_prune(|terminals_disallowed| {
                 for (sid, matched_terminals) in &terminals_map {
-                    if let Some(disallowed) = acc.terminals_union.get(&sid.0) {
-                        if matched_terminals.intersects(disallowed) {
-                            return None;
+                    if let Some(disallowed) = terminals_disallowed.get(&sid.0) {
+                        // Check if any matched terminal is in the disallowed set
+                        for tid in matched_terminals.iter_indices() {
+                            if disallowed.contains(&tid) {
+                                return None;
+                            }
                         }
                     }
                 }
-                Some(acc.clone())
+                Some(terminals_disallowed.clone())
             });
             // Remap tokenizer states
-            gss = gss.apply(|acc| {
-                let mut new_terminals_union: BTreeMap<usize, RangeSet> = BTreeMap::new();
+            gss = gss.apply(|terminals_disallowed| {
+                let mut new_terminals_disallowed: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
                 for (old, new) in &state_map {
-                    if let Some(bv) = acc.terminals_union.get(&old.0) {
-                        new_terminals_union.entry(new.0).or_default().bitor_assign(bv);
+                    if let Some(disallowed_set) = terminals_disallowed.get(&old.0) {
+                        new_terminals_disallowed.entry(new.0).or_default().extend(disallowed_set);
                     }
                 }
-                let mut new_acc = acc.clone();
-                new_acc.terminals_union = new_terminals_union;
-                new_acc
+                new_terminals_disallowed
             });
             glr_state.stack = gss;
         }
@@ -487,10 +475,10 @@ impl<'a> GrammarConstraintState<'a> {
                         if let Some(end_state_id) = exec_result.end_state {
                             if self.parent.tokenizer.tokens_accessible_from_state(TokenizerStateID(end_state_id)).contains(&terminal_id) {
                                 let terminal_to_disallow = match_info.id;
-                                gss = gss.apply(|acc| {
-                                    let mut na = acc.clone();
-                                    na.terminals_union.entry(end_state_id).or_default().insert(terminal_to_disallow);
-                                    na
+                                gss = gss.apply(|terminals_disallowed| {
+                                    let mut new_td = terminals_disallowed.clone();
+                                    new_td.entry(end_state_id).or_default().insert(terminal_to_disallow);
+                                    new_td
                                 });
                             }
                         }
@@ -516,12 +504,8 @@ impl<'a> GrammarConstraintState<'a> {
 
         self.state = new_overall_state;
 
+        // No more LLM tokens to reset - they're computed on-the-fly from TerminalsDisallowed now
         for glr_state in self.state.values_mut() {
-            glr_state.stack = glr_state.stack.apply(|acc| {
-                let mut new_acc = acc.clone();
-                new_acc.llm_tokens_union = RangeSet::max_ones();
-                new_acc
-            });
             glr_state.stack = glr_state.stack.fuse(Some(1));
         }
         self.state.retain(|_, glr_parser_state| glr_parser_state.is_ok());

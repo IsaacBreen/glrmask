@@ -191,6 +191,9 @@ impl DWA {
             return vec![];
         }
 
+        let max_weight_pos = self.states.find_actual_max().unwrap_or(0);
+        let full_weight = Weight::ones(max_weight_pos.saturating_add(1));
+
         // let topo_order = self.reverse_topological_order();
         let topo_order: Vec<_> = todo!();
         let mut b: Vec<Weight> = vec![Weight::zeros(); n];
@@ -209,7 +212,7 @@ impl DWA {
                     .trans_weights
                     .get(&label)
                     .cloned()
-                    .unwrap_or_else(Weight::all);
+                    .unwrap_or_else(|| full_weight.clone());
                 b_q = &b_q | &(&tw & &b[target]);
             }
 
@@ -261,6 +264,8 @@ impl DWA {
         if n == 0 {
             return;
         }
+        let max_weight_pos = self.states.find_actual_max().unwrap_or(0);
+        let full_weight = Weight::ones(max_weight_pos.saturating_add(1));
 
         for q in 0..n {
             let labels: Vec<i32> = self.states[q].transitions.keys().copied().collect();
@@ -270,7 +275,7 @@ impl DWA {
                     continue;
                 }
 
-                let dead_target = live[target].complement();
+                let dead_target = &full_weight - &live[target];
 
                 if let Some(tw) = self.states.0[q].trans_weights.get_mut(&label) {
                     *tw = tw.clone() | &dead_target;

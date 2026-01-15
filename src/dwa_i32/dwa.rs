@@ -81,25 +81,21 @@ impl DWAStates {
     }
     
     /// Find the actual maximum value present in any weight across all states.
-    /// Returns None if there are no weights or all weights are empty/ALL.
+    /// Returns None if there are no weights or all weights are empty.
     pub fn find_actual_max(&self) -> Option<usize> {
         let mut max_val: Option<usize> = None;
         for state in &self.0 {
             if let Some(fw) = &state.final_weight {
-                if !fw.is_all_fast() && !fw.is_empty() {
+                if !fw.is_empty() {
                     if let Some(m) = fw.max_item() {
-                        if m != usize::MAX {  // Skip if extends to MAX
-                            max_val = Some(max_val.map_or(m, |cur| cur.max(m)));
-                        }
+                        max_val = Some(max_val.map_or(m, |cur| cur.max(m)));
                     }
                 }
             }
             for w in state.trans_weights.values() {
-                if !w.is_all_fast() && !w.is_empty() {
+                if !w.is_empty() {
                     if let Some(m) = w.max_item() {
-                        if m != usize::MAX {  // Skip if extends to MAX
-                            max_val = Some(max_val.map_or(m, |cur| cur.max(m)));
-                        }
+                        max_val = Some(max_val.map_or(m, |cur| cur.max(m)));
                     }
                 }
             }
@@ -144,7 +140,12 @@ impl DWA {
     pub fn eval_word_weight(&self, word: &[Label]) -> Weight {
         if self.states.0.is_empty() { return Weight::zeros(); }
         let mut s = self.body.start_state;
-        let mut acc = Weight::all();
+        let full_weight = self
+            .states
+            .find_actual_max()
+            .map(|max| Weight::ones(max.saturating_add(1)))
+            .unwrap_or_else(Weight::zeros);
+        let mut acc = full_weight;
 
         if s < self.states.len() {
         } else { return Weight::zeros(); }
@@ -735,8 +736,14 @@ impl DWA {
             return;
         }
 
+        let full_weight = self
+            .states
+            .find_actual_max()
+            .map(|max| Weight::ones(max.saturating_add(1)))
+            .unwrap_or_else(Weight::zeros);
+
         let mut forward: Vec<Weight> = vec![Weight::zeros(); n];
-        forward[start] = Weight::all();
+        forward[start] = full_weight.clone();
 
         let mut changed = true;
         while changed {
@@ -756,7 +763,7 @@ impl DWA {
                         .trans_weights
                         .get(lbl)
                         .cloned()
-                        .unwrap_or_else(Weight::all);
+                        .unwrap_or_else(|| full_weight.clone());
                     let mut flow = fu.clone();
                     flow &= &w;
                     if !flow.is_subset_of(&forward[v]) {
@@ -790,7 +797,7 @@ impl DWA {
                         .trans_weights
                         .get(lbl)
                         .cloned()
-                        .unwrap_or_else(Weight::all);
+                        .unwrap_or_else(|| full_weight.clone());
                     let contribution = &w & &backward[v];
                     if !contribution.is_subset_of(&bu_new) {
                         bu_new |= &contribution;
@@ -830,7 +837,7 @@ impl DWA {
                     .trans_weights
                     .get(&lbl)
                     .cloned()
-                    .unwrap_or_else(Weight::all);
+                    .unwrap_or_else(|| full_weight.clone());
 
                 let mut new_w = old_w;
                 new_w &= &forward[s];
@@ -861,7 +868,7 @@ impl DWA {
                     .trans_weights
                     .get(&lbl)
                     .cloned()
-                    .unwrap_or_else(Weight::all);
+                    .unwrap_or_else(|| full_weight.clone());
 
                 let mut new_w = old_w;
                 new_w &= &forward[s];
@@ -880,12 +887,14 @@ impl DWA {
 impl Display for DWA {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "DWA (start: {})", self.body.start_state)?;
+        let max_weight_pos = self.states.find_actual_max().unwrap_or(0);
+        let full_weight = Weight::ones(max_weight_pos.saturating_add(1));
         for (id, state) in self.states.0.iter().enumerate() {
             writeln!(f, "  State {}:", id)?;
             if let Some(w) = &state.final_weight { writeln!(f, "    final_weight: {}", w)?; }
             for (on, to) in &state.transitions {
-                let w = state.trans_weights.get(on).cloned().unwrap_or_else(Weight::all);
-                if w.is_all_fast() {
+                let w = state.trans_weights.get(on).cloned().unwrap_or_else(|| full_weight.clone());
+                if w == full_weight {
                     writeln!(f, "    {} -> {}", format_pos_code(*on), to)?;
                 } else {
                     writeln!(f, "    {} -> {} (weight: {})", format_pos_code(*on), to, w)?;
@@ -900,12 +909,12 @@ impl DWA {
     /// Export the DWA to a JSON-serializable format for Python analysis
     pub fn to_json_value(&self) -> serde_json::Value {
         use serde_json::{json, Map, Value};
+        let max_weight_pos = self.states.find_actual_max().unwrap_or(0);
+        let full_weight = Weight::ones(max_weight_pos.saturating_add(1));
         
         // Helper to convert Weight to JSON representation
         fn weight_to_json(w: &Weight) -> Value {
-            if w.is_all_fast() {
-                json!({"is_all": true})
-            } else if w.is_empty() {
+            if w.is_empty() {
                 json!({"is_empty": true})
             } else {
                 // Export as ranges
@@ -927,11 +936,11 @@ impl DWA {
             let transitions: Vec<Value> = state.transitions.iter().map(|(label, target)| {
                 let weight = state.trans_weights.get(label)
                     .cloned()
-                    .unwrap_or_else(Weight::all);
+                    .unwrap_or_else(|| full_weight.clone());
                 json!({
                     "label": label,
                     "target": target,
-                    "weight": weight_to_json(&weight)
+                    "weight": if weight == full_weight { json!({"is_all": true}) } else { weight_to_json(&weight) }
                 })
             }).collect();
             state_obj.insert("transitions".to_string(), json!(transitions));

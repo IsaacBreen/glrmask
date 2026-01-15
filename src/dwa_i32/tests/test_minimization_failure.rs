@@ -5,6 +5,10 @@ use std::collections::{BTreeSet, HashSet};
 #[cfg(test)]
 mod test_minimization_failure {
     use super::*;
+
+    fn full_weight() -> Weight {
+        Weight::ones(1024)
+    }
     
     /// Create an NWA with epsilon transitions that will produce different results
     /// with vs without rm_epsilon before determinization.
@@ -104,7 +108,7 @@ mod test_minimization_failure {
             use std::collections::BTreeMap;
             let mut start_subset = BTreeMap::new();
             for &s in &nwa.body.start_states {
-                start_subset.insert(s, Weight::all());
+                start_subset.insert(s, full_weight());
             }
             println!("  Initial subset before eps closure: {:?}", start_subset);
             
@@ -172,8 +176,8 @@ mod test_minimization_failure {
                 println!("  ✓ Edge weight MATCHES expected");
             } else {
                 println!("  ✗ Edge weight DIFFERS from expected!");
-                println!("    Missing in actual: {:?}", &expected_edge_weight & &!actual_weight);
-                println!("    Extra in actual: {:?}", actual_weight & &!&expected_edge_weight);
+                println!("    Missing in actual: {:?}", &expected_edge_weight & &(&full_weight() - actual_weight));
+                println!("    Extra in actual: {:?}", actual_weight & &(&full_weight() - &expected_edge_weight));
             }
         }
         
@@ -350,7 +354,7 @@ mod test_minimization_failure {
         
         nwa.body.start_states = vec![s0];
         
-        let w_all = Weight::all();
+        let w_all = full_weight();
         let w_a = Weight::from_rsb(RangeSetBlaze::from_iter(0..100));
         let w_b = Weight::from_rsb(RangeSetBlaze::from_iter(50..150));
         let w_x = Weight::from_rsb(RangeSetBlaze::from_iter(0..50));

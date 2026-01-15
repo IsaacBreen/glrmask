@@ -300,6 +300,8 @@ impl DWA {
     /// Analyze the structure of weights to understand fragmentation patterns
     fn analyze_weight_structure(&self) {
         use std::ptr;
+        let max_weight_pos = self.states.find_actual_max().unwrap_or(0);
+        let full_weight = Weight::ones(max_weight_pos.saturating_add(1));
         
         // Collect all unique weights with their ranges
         let mut unique_weights: HashMap<usize, (usize, usize, usize)> = HashMap::new(); // ptr -> (usage_count, num_ranges, cardinality)
@@ -344,14 +346,14 @@ impl DWA {
         
         for state in &self.states.0 {
             if let Some(fw) = &state.final_weight {
-                let complement_ranges = fw.complement().num_ranges();
+                let complement_ranges = (&full_weight - fw).num_ranges();
                 if complement_ranges < fw.num_ranges() {
                     complement_better_count += 1;
                     complement_savings += fw.num_ranges() - complement_ranges;
                 }
             }
             for w in state.trans_weights.values() {
-                let complement_ranges = w.complement().num_ranges();
+                let complement_ranges = (&full_weight - w).num_ranges();
                 if complement_ranges < w.num_ranges() {
                     complement_better_count += 1;
                     complement_savings += w.num_ranges() - complement_ranges;

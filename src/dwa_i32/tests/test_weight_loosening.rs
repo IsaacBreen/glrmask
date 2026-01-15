@@ -130,12 +130,13 @@ fn test_weight_loosening_loosens_unreachable() {
 #[test]
 fn test_weight_loosening_skips_cyclic() {
     let mut dwa = DWA::new();
+    let full_weight = Weight::ones(1);
     
     let s1 = dwa.add_state();
     
     // Create a cycle: 0 -> 1 -> 0
-    dwa.add_transition(0, 1, s1, Weight::all()).unwrap();
-    dwa.add_transition(s1, 2, 0, Weight::all()).unwrap();
+    dwa.add_transition(0, 1, s1, full_weight.clone()).unwrap();
+    dwa.add_transition(s1, 2, 0, full_weight.clone()).unwrap();
     
     // Verify it's cyclic
     assert!(dwa.is_cyclic(), "DWA should be cyclic");
