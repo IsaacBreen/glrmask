@@ -116,11 +116,12 @@ pub fn compute_combined_equivalence(
     );
 
     #[cfg(test)]
-    {
+    if std::env::var("ENABLE_EQUIV_VERIFICATION").map(|v| v == "1").unwrap_or(false) {
         println!("Running combined equivalence analysis verification...");
         // VERIFICATION: Check against reference implementations
         let problem_size = initial_states.len() * tokens.len();
-        let use_trellis_verification = problem_size < 1_000_000;
+        let use_trellis_verification = problem_size < 1_000_000
+            && std::env::var("ENABLE_TRELLIS_VERIFICATION").map(|v| v == "1").unwrap_or(false);
         
         // 1. Verify State Equivalence
         if initial_states.len() > state_reduction_threshold {

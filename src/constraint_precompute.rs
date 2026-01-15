@@ -82,14 +82,19 @@ impl<'r> Precomputer1<'r> {
         num_tsids: usize,
         tsid_offset_map: Vec<usize>,
     ) -> Self {
+        println!("Precomputer1::new: start (tokens={}, internal_max_llm_token={}, terminals_count={}, num_tsids={})",
+            internal_llm_token_map.len(), internal_max_llm_token, terminals_count, num_tsids);
         let tokens: Vec<(usize, Vec<u8>)> = internal_llm_token_map
             .iter()
             .map(|(bytes, id)| (id.0 as usize, bytes.clone()))
             .collect();
 
+        println!("Precomputer1::new: building vocab prefix tree");
         crate::debug!(6, "Building vocab prefix tree");
         let vocab = VocabPrefixTree::build(&tokens);
         crate::debug!(6, "Done building vocab prefix tree");
+        println!("Precomputer1::new: vocab prefix tree built (max_token_id={}, root_children={})",
+            vocab.max_token_id(), vocab.root.children().len());
 
         let mut nwa = NWA::new();
         nwa.states.0.clear(); // Clear default start state
@@ -150,6 +155,8 @@ impl<'r> Precomputer1<'r> {
     }
 
     fn finish(mut self) -> DWA {
+        println!("finish: pending_transitions={} pending_epsilons={}",
+            self.pending_transitions.len(), self.pending_epsilons.len());
         // Debug: print all states and transitions before processing
         crate::debug!(7, "=== NWA before flush (leaf_state={}, roots={:?}) ===", self.leaf_state, self.roots);
         for (i, state) in self.nwa.states.0.iter().enumerate() {
@@ -208,6 +215,9 @@ impl<'r> Precomputer1<'r> {
                 self.nwa.add_epsilon(src, dst, weight);
             }
         }
+        println!("finish: after flush states={} trans={} eps={}",
+            self.nwa.states.len(), self.nwa.states.num_transitions(),
+            self.nwa.states.0.iter().map(|s| s.epsilons.len()).sum::<usize>());
 
         // Create start state with transitions to root states
         let new_start_state = self.nwa.add_state();
@@ -263,6 +273,21 @@ impl<'r> Precomputer1<'r> {
             }
         }
         self.nwa.body.start_states = vec![new_start_state];
+        println!("finish: after start state add states={} trans={} eps={}",
+            self.nwa.states.len(), self.nwa.states.num_transitions(),
+            self.nwa.states.0.iter().map(|s| s.epsilons.len()).sum::<usize>());
+        for (src, state) in self.nwa.states.0.iter().enumerate() {
+            for (label, targets) in &state.transitions {
+                for (dst, weight) in targets {
+                    println!("finish: transition {} --{}--> {} empty={} len={}",
+                        src, label, dst, weight.is_empty(), weight.len());
+                }
+            }
+            for (dst, weight) in &state.epsilons {
+                println!("finish: epsilon {} --eps--> {} empty={} len={}",
+                    src, dst, weight.is_empty(), weight.len());
+            }
+        }
 
         // Stats
         // Find cases where there's multiple instances of same transition - incl symbol/epsilon transition - from one state to another, regardless of weight.
@@ -330,6 +355,8 @@ impl<'r> Precomputer1<'r> {
         // Pipeline: NWA minimize → compress → rm_epsilon → determinize → DWA minimize
         // Expected results: 14647 → 5904 → 5904 → 889 → 189 states
         let dwa = self.nwa.determinize_and_minimize("TerminalDWA");
+        println!("finish: determinize_and_minimize -> states={} trans={}",
+            dwa.states.len(), dwa.states.num_transitions());
         
         // NOTE: Stats are printed AFTER suffix grammar pruning in constraint.rs
         // This includes path counts, average path lengths, and sample paths.
@@ -470,6 +497,7 @@ impl<'r> Precomputer1<'r> {
     }
 
     fn add_pending_transition(&mut self, src: NWAStateID, label: Label, dst: NWAStateID, weight: Weight) {
+        println!("add_pending_transition: start (src={}, label={}, dst={})", src, label, dst);
         self.pending_transitions
             .entry(src)
             .or_default()
@@ -478,7 +506,14 @@ impl<'r> Precomputer1<'r> {
             .entry(dst)
             .and_modify(|w| *w |= &weight)
             .or_insert(weight.clone());
-        *self.live_tokens.entry(dst).or_insert_with(Weight::zeros) |= &weight;
+        println!("add_pending_transition: pending_transitions updated");
+        let entry = self.live_tokens.entry(dst).or_insert_with(|| {
+            println!("add_pending_transition: live_tokens inserting zeros");
+            Weight::zeros()
+        });
+        println!("add_pending_transition: live_tokens entry ready");
+        *entry |= &weight;
+        println!("add_pending_transition: live_tokens updated");
     }
 
     fn add_pending_epsilon(&mut self, src: NWAStateID, dst: NWAStateID, weight: Weight) {
@@ -493,19 +528,25 @@ impl<'r> Precomputer1<'r> {
 
     fn run_dfs(&mut self) {
         let assoc = self.roots.clone();
+        println!("run_dfs: start (roots={})", self.roots.len());
         crate::debug!(5, "Starting precompute DFS for {} tokenizer states", self.roots.len());
         profiler::reset();
         let vocab = std::mem::replace(&mut self.vocab, VocabPrefixTree::new());
         
         // Count vocab nodes for progress tracking
+        println!("run_dfs: counting vocab nodes");
         let vocab_node_count = count_vocab_nodes(&vocab.root);
+        println!("run_dfs: vocab_node_count={}", vocab_node_count);
         crate::debug!(5, "Vocab tree has {} nodes", vocab_node_count);
         
+        println!("run_dfs: starting dfs");
         self.dfs(&vocab.root, assoc);
+        println!("run_dfs: dfs complete");
         self.vocab = vocab;
         self.pb.finish();
         profiler::print_summary();
         crate::debug!(5, "Precomputation complete");
+        println!("run_dfs: complete");
     }
 
     fn dfs(
@@ -513,6 +554,8 @@ impl<'r> Precomputer1<'r> {
         vocab_node: &VocabPrefixTreeNode,
         assoc_by_state: BTreeMap<TokenizerStateID, NWAStateID>,
     ) {
+        println!("dfs: enter node token_id={} children={} assoc_states={}",
+            vocab_node.token_id(), vocab_node.children().len(), assoc_by_state.len());
         self.pb.inc(1);
         crate::debug!(5, "DFS node: token_id={:?} children={} assoc_states={}",
             vocab_node.token_id(),
@@ -520,6 +563,8 @@ impl<'r> Precomputer1<'r> {
             assoc_by_state.len()
         );
         for (segment_bytes, child_vocab_node) in vocab_node.iter_children() {
+            println!("dfs: child segment_len={} child_token_id={} reachable_tokens={}",
+                segment_bytes.len(), child_vocab_node.token_id(), child_vocab_node.reachable_token_ids().len());
             let child_reachable = child_vocab_node.reachable_token_ids();
             crate::debug!(5, "DFS child segment len={} token_id={:?} reachable_tokens={}",
                 segment_bytes.len(),
@@ -549,6 +594,8 @@ impl<'r> Precomputer1<'r> {
             > = HashMap::new();
 
             while let Some((pos, states_at_pos)) = pending.pop_first() {
+                println!("dfs: segment_len={} pos={} states_at_pos={}",
+                    segment_bytes.len(), pos, states_at_pos.len());
                 crate::debug!(7, "--- Position {} (segment len={}) ---", pos, segment_bytes.len());
                 crate::debug!(7, "States at pos: {:?}", states_at_pos);
                 
@@ -566,15 +613,20 @@ impl<'r> Precomputer1<'r> {
 
                 for (tokenizer_state_id, src_node) in states_at_pos {
                     let slice = &segment_bytes[pos..];
+                    println!("dfs: execute_from_state slice_len={} tsid={:?} src_node={}",
+                        slice.len(), tokenizer_state_id, src_node);
                     let exec_result = self
                         .tokenizer
                         .execute_from_state(slice, tokenizer_state_id);
+                    println!("dfs: exec_result matches={} end_state={:?}",
+                        exec_result.matches.len(), exec_result.end_state);
                     
                     crate::debug!(7, "  Tokenizer on {:?} from state {:?} (src_node={}): matches={:?}, end_state={:?}",
                         String::from_utf8_lossy(slice), tokenizer_state_id, src_node, exec_result.matches, exec_result.end_state);
 
                     let possible_matches_at_end = if let Some(end_val) = exec_result.end_state {
                         let ts = TokenizerStateID(end_val);
+                        println!("dfs: possible_matches for end_state={:?}", ts);
                         possible_matches_at_end_cache
                             .entry(ts)
                             .or_insert_with(|| self.possible_matches(child_vocab_node, ts))
@@ -595,10 +647,14 @@ impl<'r> Precomputer1<'r> {
                         if next_pos == segment_bytes.len() {
                             let leaf = self.leaf_state;
                             // Use expanded weight from single token with specific tsid
+                            println!("dfs: creating leaf weight (child_token_id={}, tsid={})", child_token_id, tokenizer_state_id.0);
                             let weight = self.expanded_weight_from_item(child_token_id, tokenizer_state_id.0);
+                            println!("dfs: leaf weight created");
                             crate::debug!(7, "      -> LEAF transition: {} --{}--> {} (leaf_state), weight={:?}", 
                                 src_node, terminal_id.0, leaf, weight);
+                            println!("dfs: adding leaf transition src_node={} label={} dst={}", src_node, terminal_id.0, leaf);
                             self.add_pending_transition(src_node, terminal_id.0 as Label, leaf, weight);
+                            println!("dfs: leaf transition added");
                         }
 
                         // Continuation logic
@@ -645,7 +701,9 @@ impl<'r> Precomputer1<'r> {
 
                         crate::debug!(7, "      -> CONT transition: {} --{}--> {}, weight={:?}", 
                             src_node, terminal_id.0, target, weight);
+                        println!("dfs: adding continuation transition src_node={} label={} dst={}", src_node, terminal_id.0, target);
                         self.add_pending_transition(src_node, terminal_id.0 as Label, target, weight);
+                        println!("dfs: continuation transition added");
                     }
 
                     // 2. Handle End State -> Continuation
@@ -723,12 +781,15 @@ pub fn run_precompute1(
     state_to_rep: BTreeMap<TokenizerStateID, TokenizerStateID>,
     tsid_offset_map: Vec<usize>,
 ) -> DWA {
+    println!("run_precompute1: start (internal_max_llm_token={}, terminals_count={})",
+        internal_max_llm_token, terminals_count);
     // Compute num_tsids from tokenizer - 0 means symbol-heavy mode
     let num_tsids = if is_weight_heavy_enabled() {
         tokenizer.dfa().states.len()
     } else {
         0
     };
+    println!("run_precompute1: num_tsids={} (weight_heavy={})", num_tsids, is_weight_heavy_enabled());
     
     let mut representative_llm_token_map: BTreeMap<Vec<u8>, LLMTokenID> = BTreeMap::new();
     let mut seen_internal_ids = std::collections::HashSet::new();
@@ -738,6 +799,8 @@ pub fn run_precompute1(
             representative_llm_token_map.insert(bytes.clone(), *id);
         }
     }
+
+    println!("run_precompute1: representative_llm_token_map size={}", representative_llm_token_map.len());
 
     let mut helper = Precomputer1::new(
         tokenizer,
@@ -749,6 +812,10 @@ pub fn run_precompute1(
         tsid_offset_map,
     );
 
+    println!("run_precompute1: starting run_dfs");
     helper.run_dfs();
-    helper.finish()
+    println!("run_precompute1: run_dfs complete");
+    let dwa = helper.finish();
+    println!("run_precompute1: finish complete");
+    dwa
 }

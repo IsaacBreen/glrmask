@@ -8,7 +8,7 @@
 //! This is O(tokens × states × token_length × trellis_size) and should
 //! only be used when the problem size is small enough (< 1M operations).
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::collections::hash_map::DefaultHasher;
 use std::sync::Arc;
@@ -18,38 +18,68 @@ use crate::finite_automata::{Regex, TokenTrellisWithCompletion, GroupID, Trellis
 pub type VocabEquivalenceResult = BTreeSet<Vec<usize>>;
 pub type StateEquivalenceResult = BTreeSet<BTreeSet<usize>>;
 
-/// Hash a trellis structure recursively.
+/// Hash a trellis structure without recursion (cycle-safe).
 /// This captures the full structural information including:
 /// - End state (possible_future_group_ids)
 /// - All edges (group_id -> child trellis hash)
 fn hash_trellis(trellis: &TokenTrellisWithCompletion) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    hash_trellis_recursive(trellis, &mut hasher);
-    hasher.finish()
-}
+    const CYCLE_MARKER: u64 = 0xC1C1_EA7E_5EED_F00D;
 
-fn hash_trellis_recursive<H: Hasher>(trellis: &Trellis<BTreeSet<GroupID>>, hasher: &mut H) {
-    // Hash the end state (None vs Some(set of group IDs))
-    match &trellis.end_state {
-        None => {
-            0u8.hash(hasher);
+    let mut memo: HashMap<*const Trellis<BTreeSet<GroupID>>, u64> = HashMap::new();
+    let mut in_progress: HashSet<*const Trellis<BTreeSet<GroupID>>> = HashSet::new();
+
+    let mut stack: Vec<(&Trellis<BTreeSet<GroupID>>, bool)> = Vec::new();
+    stack.push((trellis, false));
+
+    while let Some((node, processed)) = stack.pop() {
+        let ptr = node as *const Trellis<BTreeSet<GroupID>>;
+        if memo.contains_key(&ptr) {
+            continue;
         }
-        Some(groups) => {
-            1u8.hash(hasher);
-            groups.len().hash(hasher);
-            for gid in groups {
-                gid.hash(hasher);
+
+        if !processed {
+            if !in_progress.insert(ptr) {
+                continue;
             }
+            stack.push((node, true));
+            for child in node.edges.values() {
+                let child_ref = child.as_ref();
+                let child_ptr = child_ref as *const Trellis<BTreeSet<GroupID>>;
+                if !memo.contains_key(&child_ptr) {
+                    stack.push((child_ref, false));
+                }
+            }
+        } else {
+            let mut hasher = DefaultHasher::new();
+            match &node.end_state {
+                None => {
+                    0u8.hash(&mut hasher);
+                }
+                Some(groups) => {
+                    1u8.hash(&mut hasher);
+                    groups.len().hash(&mut hasher);
+                    for gid in groups {
+                        gid.hash(&mut hasher);
+                    }
+                }
+            }
+
+            node.edges.len().hash(&mut hasher);
+            for (group_id, child) in &node.edges {
+                group_id.hash(&mut hasher);
+                let child_ptr = child.as_ref() as *const Trellis<BTreeSet<GroupID>>;
+                let child_hash = memo.get(&child_ptr).copied().unwrap_or(CYCLE_MARKER);
+                child_hash.hash(&mut hasher);
+            }
+
+            let hash = hasher.finish();
+            memo.insert(ptr, hash);
+            in_progress.remove(&ptr);
         }
     }
-    
-    // Hash edges in order (BTreeMap is ordered)
-    trellis.edges.len().hash(hasher);
-    for (group_id, child) in &trellis.edges {
-        group_id.hash(hasher);
-        // Recursively hash child trellis
-        hash_trellis_recursive(child, hasher);
-    }
+
+    let root_ptr = trellis as *const Trellis<BTreeSet<GroupID>>;
+    memo.get(&root_ptr).copied().unwrap_or(0)
 }
 
 /// Find vocab equivalence classes using trellis hashing.

@@ -39,7 +39,7 @@ use std::iter::FromIterator;
 use range_set_blaze::RangeSetBlaze;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use super::rangeset::RangeSet;
+use super::rangeset::{RangeSet, RangeSetInner};
 use super::bdd_weight::BddWeight;
 use super::bdd_weight_biodivine::BddWeightBiodivine;
 use super::factored_weight::FactoredWeight;
@@ -302,20 +302,22 @@ impl BackendOps for RangeSet {
         RangeSet::from_rsb(rsb)
     }
 
-    fn num_ranges(&self) -> usize { self.num_ranges() }
-    fn len(&self) -> usize { self.len() }
-    fn is_empty(&self) -> bool { self.is_empty() }
-    fn is_all_fast(&self) -> bool { self.is_all_fast() }
-    fn contains(&self, pos: usize) -> bool { self.contains(pos) }
-    fn is_disjoint(&self, other: &Self) -> bool { self.is_disjoint(other) }
-    fn is_subset_of(&self, other: &Self) -> bool { self.is_subset_of(other) }
-    fn min_item(&self) -> Option<usize> { self.min_item() }
-    fn max_item(&self) -> Option<usize> { self.max_item() }
-    fn fp(&self) -> u64 { self.fast_hash() }
-    fn intern_id(&self) -> usize { self.intern_id() }
+    fn num_ranges(&self) -> usize { RangeSetInner::num_ranges(self) }
+    fn len(&self) -> usize { RangeSetInner::len(self) }
+    fn is_empty(&self) -> bool { RangeSetInner::is_empty(self) }
+    fn is_all_fast(&self) -> bool { RangeSetInner::is_all_fast(self) }
+    fn contains(&self, pos: usize) -> bool { RangeSetInner::contains(self, pos) }
+    fn is_disjoint(&self, other: &Self) -> bool { RangeSetInner::is_disjoint(self, other) }
+    fn is_subset_of(&self, other: &Self) -> bool { RangeSet::is_subset_of(self, other) }
+    fn min_item(&self) -> Option<usize> { RangeSetInner::min_item(self) }
+    fn max_item(&self) -> Option<usize> { RangeSetInner::max_item(self) }
+    fn fp(&self) -> u64 { RangeSet::fast_hash(self) }
+    fn intern_id(&self) -> usize { RangeSet::intern_id(self) }
 
     fn iter<'a>(&'a self) -> Box<dyn Iterator<Item = usize> + 'a> { Box::new(self.rsb.iter()) }
-    fn iter_up_to<'a>(&'a self, max: usize) -> Box<dyn Iterator<Item = usize> + 'a> { Box::new(self.iter_up_to(max)) }
+    fn iter_up_to<'a>(&'a self, max: usize) -> Box<dyn Iterator<Item = usize> + 'a> {
+        Box::new(RangeSetInner::iter_up_to(self, max))
+    }
     fn ranges<'a>(&'a self) -> Box<dyn Iterator<Item = std::ops::RangeInclusive<usize>> + 'a> { Box::new(self.rsb.ranges()) }
     fn to_rangeset(&self) -> RangeSet { self.clone() }
     fn to_rsb(&self) -> RangeSetBlaze<usize> { self.rsb.clone() }
@@ -326,11 +328,11 @@ impl BackendOps for RangeSet {
     fn subtract(&self, other: &Self) -> Self { self - other }
     fn clip_max(&self, max: usize) -> Self {
         let mut clipped = self.clone();
-        clipped.clip_max(max);
+        RangeSet::clip_max(&mut clipped, max);
         clipped
     }
-    fn insert(&mut self, item: usize) { self.insert(item); }
-    fn remove(&mut self, item: usize) { self.remove(item); }
+    fn insert(&mut self, item: usize) { RangeSet::insert(self, item); }
+    fn remove(&mut self, item: usize) { RangeSet::remove(self, item); }
 
     fn fmt_display(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         if self.is_empty() {

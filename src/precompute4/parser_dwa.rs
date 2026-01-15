@@ -686,9 +686,17 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
             }
             
             let terminal_id = edge_label.map(|l| TerminalID(l as usize));
+            if reversed_nwa.states.len() <= 10 {
+                println!("step edge_label={:?} transitions={} current_tokens_len={}",
+                    edge_label, transitions.len(), current_tokens.len());
+            }
             for (dest_id, weight) in transitions {
                 let edge_bv_tokens: LLMTokenBV = weight.clone().into();
                 let next_tokens = current_tokens & &edge_bv_tokens;
+                if reversed_nwa.states.len() <= 10 {
+                    println!("  step -> dest {} weight_len={} next_tokens_len={}",
+                        dest_id, edge_bv_tokens.len(), next_tokens.len());
+                }
                 if next_tokens.is_empty() { continue; }
                 let mut terminal_map = BTreeMap::new();
                 terminal_map.insert(terminal_id, weight.clone());
@@ -720,6 +728,10 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
             }
             
             let (nwa_bodies_map, tokens) = val;
+            if reversed_nwa.states.len() <= 10 {
+                println!("process node {}: tokens_len={} final_weight_present={}",
+                    node_id, tokens.len(), reversed_nwa.states[node_id].final_weight.is_some());
+            }
             let bodies_count = nwa_bodies_map.len();
             let mut nwa_body = NWABody { start_states: vec![] };
             for (right_body, terminal_map) in &nwa_bodies_map {
@@ -801,6 +813,7 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
     crate::debug!(4, "Finished Pass 2");
     let final_bodies = Arc::try_unwrap(final_bodies_arc).unwrap().into_inner().unwrap();
     let tsid_bodies = Arc::try_unwrap(tsid_bodies_arc).unwrap().into_inner().unwrap();
+    println!("build_parser_dwa: final_bodies={} tsid_bodies={}", final_bodies.len(), tsid_bodies.len());
     let avg_template_size = states_arena.borrow().len() as f64 / (final_bodies.len() + tsid_bodies.len()).max(1) as f64;
     crate::debug!(4, "Collected {} final bodies, {} tsid bodies, states_arena has {} states (avg {:.0} states/body)", 
         final_bodies.len(), tsid_bodies.len(), states_arena.borrow().len(), avg_template_size);

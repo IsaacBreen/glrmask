@@ -310,6 +310,8 @@ impl NWA {
         let det_time = det_start.elapsed();
         crate::debug!(5, "Determinization: {} states, {} transitions, {} ranges ({} interned) in {:.2?}", 
             dwa.states.len(), dwa.states.num_transitions(), dwa.num_ranges(), dwa.num_ranges_interned(), det_time);
+        println!("determinize_and_minimize: after determinize states={} trans={}",
+            dwa.states.len(), dwa.states.num_transitions());
 
         // Run DWA passes
         for pass in config.dwa_passes.clone() {
