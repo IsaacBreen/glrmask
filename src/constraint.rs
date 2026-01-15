@@ -2277,49 +2277,6 @@ impl GrammarConstraint {
         }
     }
     
-    /// Convert this constraint from symbol-heavy to weight-heavy encoding.
-    /// 
-    /// In weight-heavy mode:
-    /// - The DWA weights are in N×M space (N = LLM tokens, M = tokenizer states)
-    /// - Tokenizer state info is encoded in the weight positions, not as labels
-    /// - This can be more efficient for mask computation with many tokenizer states
-    ///
-    /// # Returns
-    /// A new GrammarConstraint in weight-heavy mode, or the same constraint if already weight-heavy.
-    pub fn convert_to_weight_heavy(mut self) -> Self {
-        if self.num_tsids > 0 {
-            // Already weight-heavy
-            return self;
-        }
-        
-        // Count the number of tokenizer states from the actual tokenizer
-        let num_tsids = self.tokenizer.dfa().states.len();
-        
-        if num_tsids == 0 {
-            return self;
-        }
-        
-        // Get terminals count (for API compatibility, not actually used)
-        let terminals_count = self.parser.terminal_map.len();
-
-        // Default to identity offset mapping when converting.
-        // (This keeps behavior consistent with older serialized constraints.)
-        self.tsid_offset_map = (0..num_tsids).collect();
-        
-        // Convert the DWA
-        self.parser_dwa = crate::dwa_i32::weight_expansion::convert_symbol_heavy_to_weight_heavy(
-            &self.parser_dwa,
-            num_tsids,
-            terminals_count,
-        );
-        self.num_tsids = num_tsids;
-        
-        crate::debug!(2, "Converted to weight-heavy: {} tsids, {} DWA states", 
-            num_tsids, self.parser_dwa.states.len());
-        
-        self
-    }
-    
     /// Check if this constraint is in weight-heavy mode.
     pub fn is_weight_heavy(&self) -> bool {
         self.num_tsids > 0
