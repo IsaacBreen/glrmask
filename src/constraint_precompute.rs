@@ -471,6 +471,7 @@ impl<'r> Precomputer1<'r> {
         } else {
             // Weight-heavy mode: Use efficient path for FactoredWeight
             // A single token with specific tsid: {token} × {tsid}
+            let tsid = self.tsid_to_offset(tsid);
             Weight::from_token_set_specific_tsid(RangeSetBlaze::from_iter([token_id..=token_id]), tsid)
         }
     }
@@ -485,6 +486,7 @@ impl<'r> Precomputer1<'r> {
         } else {
             // Weight-heavy mode: Use efficient path for FactoredWeight
             // Token set with specific tsid: token_set × {tsid}
+            let tsid = self.tsid_to_offset(tsid);
             Weight::from_token_set_specific_tsid(rsb, tsid)
         }
     }
@@ -499,7 +501,18 @@ impl<'r> Precomputer1<'r> {
         } else {
             // Weight-heavy mode: Use efficient path for FactoredWeight
             // All tokens × specific tsid
+            let tsid = self.tsid_to_offset(tsid);
             Weight::from_token_set_specific_tsid(RangeSetBlaze::from_iter([0..=self.internal_max_llm_token]), tsid)
+        }
+    }
+
+    #[inline]
+    fn tsid_to_offset(&self, tsid: usize) -> usize {
+        if self.tsid_offset_map.is_empty() {
+            tsid
+        } else {
+            debug_assert!(tsid < self.tsid_offset_map.len());
+            self.tsid_offset_map[tsid]
         }
     }
 
