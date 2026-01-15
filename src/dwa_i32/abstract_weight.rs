@@ -32,7 +32,7 @@
 
 use std::fmt::{Debug, Display, Formatter};
 use std::hash::{Hash, Hasher};
-use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Not, Sub, SubAssign};
+use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Sub, SubAssign};
 use std::sync::{Arc, OnceLock};
 use std::iter::FromIterator;
 
@@ -138,7 +138,6 @@ pub enum AbstractWeight {
 trait BackendOps: Sized {
     // Constructors
     fn zeros() -> Self;
-    fn all() -> Self;
     fn from_item(item: usize) -> Self;
     fn from_ranges(ranges: &[(usize, usize)]) -> Self;
     fn from_rsb(rsb: RangeSetBlaze<usize>) -> Self;
@@ -170,7 +169,6 @@ trait BackendOps: Sized {
     // Operations
     fn union(&self, other: &Self) -> Self;
     fn intersection(&self, other: &Self) -> Self;
-    fn complement(&self) -> Self;
     fn subtract(&self, other: &Self) -> Self;
     fn clip_max(&self, max: usize) -> Self;
     fn insert(&mut self, item: usize);
@@ -278,7 +276,6 @@ macro_rules! dispatch_backend_ctor {
 
 impl BackendOps for RangeSet {
     fn zeros() -> Self { RangeSet::zeros() }
-    fn all() -> Self { RangeSet::all() }
     fn from_item(item: usize) -> Self { RangeSet::from_item(item) }
     fn from_ranges(ranges: &[(usize, usize)]) -> Self { RangeSet::from_ranges(ranges) }
     fn from_rsb(rsb: RangeSetBlaze<usize>) -> Self { RangeSet::from_rsb(rsb) }
@@ -324,7 +321,6 @@ impl BackendOps for RangeSet {
 
     fn union(&self, other: &Self) -> Self { self | other }
     fn intersection(&self, other: &Self) -> Self { self & other }
-    fn complement(&self) -> Self { !self }
     fn subtract(&self, other: &Self) -> Self { self - other }
     fn clip_max(&self, max: usize) -> Self {
         let mut clipped = self.clone();
@@ -353,10 +349,6 @@ impl BackendOps for Arc<BddWeight> {
     fn zeros() -> Self {
         let dims = get_weight_dimensions();
         Arc::new(BddWeight::empty(dims.num_tsids as u16, dims.num_tokens as u16))
-    }
-    fn all() -> Self {
-        let dims = get_weight_dimensions();
-        Arc::new(BddWeight::full(dims.num_tsids as u16, dims.num_tokens as u16))
     }
     fn from_item(item: usize) -> Self {
         let dims = get_weight_dimensions();
@@ -416,7 +408,6 @@ impl BackendOps for Arc<BddWeight> {
 
     fn union(&self, other: &Self) -> Self { Arc::new(self.as_ref().union(other.as_ref())) }
     fn intersection(&self, other: &Self) -> Self { Arc::new(self.as_ref().intersection(other.as_ref())) }
-    fn complement(&self) -> Self { Arc::new(self.as_ref().complement()) }
     fn subtract(&self, other: &Self) -> Self { Arc::new(self.as_ref().subtract(other.as_ref())) }
     fn clip_max(&self, max: usize) -> Self {
         let ranges: Vec<_> = self.as_ref().to_rangeset().into_ranges()
@@ -449,10 +440,6 @@ impl BackendOps for Arc<BddWeightBiodivine> {
     fn zeros() -> Self {
         let dims = get_weight_dimensions();
         Arc::new(BddWeightBiodivine::empty(dims.num_tsids as u16, dims.num_tokens as u16))
-    }
-    fn all() -> Self {
-        let dims = get_weight_dimensions();
-        Arc::new(BddWeightBiodivine::full(dims.num_tsids as u16, dims.num_tokens as u16))
     }
     fn from_item(item: usize) -> Self {
         let dims = get_weight_dimensions();
@@ -505,7 +492,6 @@ impl BackendOps for Arc<BddWeightBiodivine> {
 
     fn union(&self, other: &Self) -> Self { Arc::new(self.as_ref().union(other.as_ref())) }
     fn intersection(&self, other: &Self) -> Self { Arc::new(self.as_ref().intersection(other.as_ref())) }
-    fn complement(&self) -> Self { Arc::new(self.as_ref().complement()) }
     fn subtract(&self, other: &Self) -> Self { Arc::new(self.as_ref().subtract(other.as_ref())) }
     fn clip_max(&self, max: usize) -> Self {
         let ranges: Vec<_> = self.as_ref().to_rangeset().into_ranges()
@@ -538,10 +524,6 @@ impl BackendOps for Arc<FactoredWeight> {
     fn zeros() -> Self {
         let dims = get_weight_dimensions();
         Arc::new(FactoredWeight::empty(dims.num_tsids as u16))
-    }
-    fn all() -> Self {
-        let dims = get_weight_dimensions();
-        Arc::new(FactoredWeight::full(dims.num_tokens, dims.num_tsids as u16))
     }
     fn from_item(item: usize) -> Self {
         let dims = get_weight_dimensions();
@@ -598,10 +580,6 @@ impl BackendOps for Arc<FactoredWeight> {
 
     fn union(&self, other: &Self) -> Self { Arc::new(self.as_ref().union(other.as_ref())) }
     fn intersection(&self, other: &Self) -> Self { Arc::new(self.as_ref().intersection(other.as_ref())) }
-    fn complement(&self) -> Self {
-        let dims = get_weight_dimensions();
-        Arc::new(self.as_ref().complement(dims.num_tokens))
-    }
     fn subtract(&self, other: &Self) -> Self { Arc::new(self.as_ref().subtract(other.as_ref())) }
     fn clip_max(&self, max: usize) -> Self { Arc::new(self.as_ref().clip_max(max)) }
     fn insert(&mut self, item: usize) { *self = Arc::new(self.as_ref().insert_pos(item)); }
@@ -622,12 +600,6 @@ impl BackendOps for Arc<FactoredValidateWeight> {
         let dims = get_weight_dimensions();
         let factored = FactoredWeight::empty(dims.num_tsids as u16);
         let rangeset = RangeSet::zeros();
-        Arc::new(FactoredValidateWeight::new(factored, rangeset))
-    }
-    fn all() -> Self {
-        let dims = get_weight_dimensions();
-        let factored = FactoredWeight::full(dims.num_tokens, dims.num_tsids as u16);
-        let rangeset = RangeSet::all();
         Arc::new(FactoredValidateWeight::new(factored, rangeset))
     }
     fn from_item(item: usize) -> Self {
@@ -714,12 +686,6 @@ impl BackendOps for Arc<FactoredValidateWeight> {
         let rangeset = self.rangeset() & other.rangeset();
         Arc::new(FactoredValidateWeight::new(factored, rangeset))
     }
-    fn complement(&self) -> Self {
-        let dims = get_weight_dimensions();
-        let factored = self.factored().complement(dims.num_tokens);
-        let rangeset = !self.rangeset();
-        Arc::new(FactoredValidateWeight::new(factored, rangeset))
-    }
     fn subtract(&self, other: &Self) -> Self {
         let factored = self.factored().subtract(other.factored());
         let rangeset = self.rangeset() - other.rangeset();
@@ -761,11 +727,6 @@ impl AbstractWeight {
     /// Create an empty weight (accepts nothing).
     pub fn zeros() -> Self {
         dispatch_backend_ctor!(zeros)
-    }
-
-    /// Create a full weight (accepts everything).
-    pub fn all() -> Self {
-        dispatch_backend_ctor!(all)
     }
 
     /// Create a weight containing a single position.
@@ -866,11 +827,6 @@ impl AbstractWeight {
     /// Get the number of elements in this weight.
     pub fn len(&self) -> usize {
         dispatch_ref!(self, len)
-    }
-
-    /// Returns the complement of this weight.
-    pub fn complement(&self) -> Self {
-        !self
     }
 
     /// Get a fast hash/fingerprint for this weight.
@@ -1089,22 +1045,6 @@ impl BitAnd for AbstractWeight {
 impl BitAndAssign<&AbstractWeight> for AbstractWeight {
     fn bitand_assign(&mut self, rhs: &Self) {
         *self = &*self & rhs;
-    }
-}
-
-impl Not for &AbstractWeight {
-    type Output = AbstractWeight;
-
-    fn not(self) -> Self::Output {
-        dispatch_ref_to_weight!(self, complement)
-    }
-}
-
-impl Not for AbstractWeight {
-    type Output = AbstractWeight;
-
-    fn not(self) -> Self::Output {
-        !&self
     }
 }
 
@@ -1439,7 +1379,7 @@ mod tests {
         assert!(z.is_empty());
         assert!(!z.is_all_fast());
 
-        let a = AbstractWeight::all();
+        let a = crate::dwa_i32::weight_all();
         assert!(!a.is_empty());
         assert!(a.is_all_fast());
     }
@@ -1501,7 +1441,8 @@ mod tests {
     fn test_complement() {
         ensure_test_dims();
         let a = AbstractWeight::from_ranges(&[(5, 10)]);
-        let b = !&a;
+        let all = crate::dwa_i32::weight_all();
+        let b = &all - &a;
 
         assert!(!b.contains(7));
         assert!(b.contains(3));
@@ -1556,7 +1497,8 @@ mod tests {
         assert!(!w.contains(1));  // token 0, tsid 1 -> pos 1
         
         // Get the complement (which converts to RangeSet)
-        let w_not = !&w;
+        let all = crate::dwa_i32::weight_all();
+        let w_not = &all - &w;
         
         // The complement should contain tsids 1-4 for all tokens
         assert!(!w_not.contains(0));   // token 0, tsid 0 -> NOT in complement

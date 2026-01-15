@@ -3,7 +3,7 @@
 #![allow(dead_code)]
 #![allow(clippy::needless_borrow)]
 
-use super::common::{Label, StateID, Weight};
+use super::common::{Label, StateID, Weight, weight_all};
 use super::dwa::DWA;
 use super::nwa::NWA;
 use crate::dwa_i32::NWAStateID;
@@ -84,7 +84,7 @@ impl Semiring for BitsetWeight {
     type ReverseWeight = BitsetWeight;
 
     fn zero() -> Self { BitsetWeight(intern_weight(Weight::zeros())) }
-    fn one() -> Self { BitsetWeight(intern_weight(Weight::all())) }
+    fn one() -> Self { BitsetWeight(intern_weight(weight_all())) }
     fn new(value: Self::Type) -> Self { BitsetWeight(intern_weight(value)) }
 
     fn plus_assign<P: Borrow<Self>>(&mut self, rhs: P) -> Result<()> {
@@ -120,7 +120,9 @@ impl ReverseBack<BitsetWeight> for BitsetWeight {
 
 impl WeaklyDivisibleSemiring for BitsetWeight {
     fn divide_assign(&mut self, rhs: &Self, _divide_type: DivideType) -> Result<()> {
-        let new_weight = &*self.0 | &!&*rhs.0;
+        let all_weight = weight_all();
+        let rhs_inv = &all_weight - &*rhs.0;
+        let new_weight = &*self.0 | &rhs_inv;
         self.0 = intern_weight(new_weight);
         Ok(())
     }

@@ -1,7 +1,7 @@
 use crate::precompute4::resolve_negatives::{resolve_negative_codes_in_dwa, resolve_negative_codes_in_nwa};
 use crate::dwa_i32::test_weighted_automata::stochastic_equivalence_test;
 use crate::precompute4::utils::DEFAULT_TRANSITION_SYMBOL;
-use crate::dwa_i32::{DWA, NWA, Weight};
+use crate::dwa_i32::{DWA, NWA, Weight, weight_all};
 use crate::dwa_i32::common::Label;
 
 #[test]
@@ -14,8 +14,8 @@ fn test_resolve_negatives_simple_cancellation() {
     let neg_code_a = Label::MIN + code_a;
 
     d.add_transition(d.body.start_state, code_a, s1, Weight::from_item(2)).unwrap();
-    d.add_transition(s1, neg_code_a, s2, Weight::all()).unwrap();
-    d.set_final_weight(s2, Weight::all()).unwrap();
+    d.add_transition(s1, neg_code_a, s2, weight_all()).unwrap();
+    d.set_final_weight(s2, weight_all()).unwrap();
 
     resolve_negative_codes_in_dwa(&mut d);
 

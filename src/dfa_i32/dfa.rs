@@ -14,7 +14,7 @@ use rustfst::algorithms::minimize_with_config;
 use rustfst::prelude::MinimizeConfig;
 use rustfst::Semiring;
 
-use crate::dwa_i32::{DWA, DWAState, Weight};
+use crate::dwa_i32::{DWA, DWAState, Weight, weight_all};
 use crate::dwa_i32::common::Label;
 
 /// State ID type
@@ -236,11 +236,11 @@ impl DFA {
             for (&label, &dst_id) in &state.transitions {
                 let dwa_dst = state_map[dst_id];
                 dwa.states[dwa_src].transitions.insert(label, dwa_dst);
-                dwa.states[dwa_src].trans_weights.insert(label, Weight::all());
+                dwa.states[dwa_src].trans_weights.insert(label, weight_all());
             }
             
             if state.is_final {
-                dwa.states[dwa_src].final_weight = Some(Weight::all());
+                dwa.states[dwa_src].final_weight = Some(weight_all());
             }
         }
         

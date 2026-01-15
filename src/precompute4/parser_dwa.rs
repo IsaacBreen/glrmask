@@ -19,7 +19,7 @@ use crate::precompute4::resolve_negatives::{
 use crate::precompute4::template_dfa::{build_ignore_terminal_dwa, build_template_dwas};
 use crate::dwa_i32::{
     common::Label, determinization_rustfst::determinize_nwa_to_dwa, DWA, NWA, NWABody, NWAStateID, NWAStates,
-    StateID, Weight, heavy_weight::WeightDimensions,
+    StateID, Weight, heavy_weight::WeightDimensions, weight_all,
 };
 use crate::dfa_u8::TokenizerStateID;
 use crate::types::{TerminalID, TerminalID as GrammarTokenID};
@@ -281,7 +281,7 @@ fn specialize_dwa_relative(parent_dwa: &DWA, mapping: &[Weight], parent_unique_w
             }
 
             let new_w = if is_all {
-                Weight::all()
+                weight_all()
             } else {
                 Weight::from_rsb(accumulator)
             };
@@ -597,7 +597,7 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
                     }
 
                     let new_w = if is_all {
-                        Weight::all()
+                        weight_all()
                     } else {
                         Weight::from_rsb(accumulator)
                     };
@@ -646,10 +646,10 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
     let initial_body = {
         let mut states = states_arena.borrow_mut();
         let start = states.add_state();
-        states[start].final_weight = Some(Weight::all());
+        states[start].final_weight = Some(weight_all());
         NWABody { start_states: vec![start] }
     };
-    let initial_term_map: BTreeMap<Option<TerminalID>, Weight> = BTreeMap::from([(None, Weight::all())]);
+    let initial_term_map: BTreeMap<Option<TerminalID>, Weight> = BTreeMap::from([(None, weight_all())]);
     let initial_values_full: Vec<(usize, (BTreeMap<NWABody, BTreeMap<Option<TerminalID>, Weight>>, LLMTokenBV))> =
         reversed_nwa.body.start_states.iter().map(|&s| (s, (BTreeMap::from([(initial_body.clone(), initial_term_map.clone())]), LLMTokenBV::max_ones()))).collect();
 

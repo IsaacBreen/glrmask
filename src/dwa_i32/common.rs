@@ -2,6 +2,7 @@
 #![allow(clippy::needless_borrow)]
 
 use super::abstract_weight::AbstractWeight;
+use range_set_blaze::RangeSetBlaze;
 
 pub(crate) const STOCHASTIC_DEBUG: bool = false;
 pub(crate) const DETERMINIZE_DEBUG: bool = false;
@@ -17,6 +18,11 @@ pub type StateID = usize;
 pub type Weight = AbstractWeight;
 pub type NWAStateID = usize;
 pub type Label = i32;
+
+/// Create a weight representing the full universe (0..=usize::MAX).
+pub fn weight_all() -> Weight {
+    Weight::from_rsb(RangeSetBlaze::from_iter([0..=usize::MAX]))
+}
 
 pub fn format_pos_code(code: Label) -> String { code.to_string() }
 

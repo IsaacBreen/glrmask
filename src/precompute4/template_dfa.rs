@@ -5,7 +5,7 @@ use crate::glr::table::{NonTerminalID, StateID as ParserStateID, TerminalID};
 use crate::precompute4::characterize::{compute_all_characterizations, TerminalCharacterization};
 use crate::precompute4::utils;
 use crate::precompute4::utils::DEFAULT_TRANSITION_SYMBOL;
-use crate::dwa_i32::{DWA, NWA, NWABuildError, StateID, Weight};
+use crate::dwa_i32::{DWA, NWA, NWABuildError, StateID, Weight, weight_all};
 use crate::dfa_i32::{DFA, NFA};
 use crate::dfa_i32::nfa::NFABuildError;
 
@@ -37,7 +37,7 @@ impl From<NFABuildError> for FullDWABuildError {
 /// After determinization, these are resolved into a true DWA.
 pub fn build_nwa_from_terminal_characterization(tc: &TerminalCharacterization) -> Result<NWA, FullDWABuildError> {
     let mut nwa = NWA::new();
-    let w_all = Weight::all();
+    let w_all = weight_all();
 
     // Node for each non-terminal.
     let mut nt_nodes: BTreeMap<NonTerminalID, StateID> = BTreeMap::new();
@@ -368,7 +368,7 @@ pub fn build_template_dwas(parser: &GLRParser) -> Result<BTreeMap<TerminalID, DW
 /// Identity DWA used for the "ignore" terminal: start is final and there are no transitions.
 pub fn build_ignore_terminal_dwa() -> DWA {
     let mut dwa = DWA::new();
-    dwa.states[dwa.body.start_state].final_weight = Some(Weight::all());
+    dwa.states[dwa.body.start_state].final_weight = Some(weight_all());
     dwa
 }
 

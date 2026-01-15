@@ -172,8 +172,11 @@ mod test_minimization_failure {
                 println!("  ✓ Edge weight MATCHES expected");
             } else {
                 println!("  ✗ Edge weight DIFFERS from expected!");
-                println!("    Missing in actual: {:?}", &expected_edge_weight & &!actual_weight);
-                println!("    Extra in actual: {:?}", actual_weight & &!&expected_edge_weight);
+                let all_weight = Weight::all();
+                let missing = &expected_edge_weight & &(&all_weight - actual_weight);
+                let extra = actual_weight & &(&all_weight - &expected_edge_weight);
+                println!("    Missing in actual: {:?}", missing);
+                println!("    Extra in actual: {:?}", extra);
             }
         }
         

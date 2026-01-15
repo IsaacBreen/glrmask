@@ -40,7 +40,7 @@ use crate::datastructures::bitset::Bitset;
 use crate::datastructures::gss_acc::Acc;
 use crate::glr::parser::{ExpectElse, ParseStateEdgeContent};
 use crate::dwa_i32::{DWA, NWA};
-use crate::dwa_i32::{RangeSet as WARangeSet, Weight, set_weight_dimensions};
+use crate::dwa_i32::{RangeSet as WARangeSet, Weight, set_weight_dimensions, weight_all};
 
 pub use crate::constraint_vocab::*;
 use crate::constraint_precompute::run_precompute1;
@@ -243,7 +243,7 @@ fn optimize_dwa_and_vocab(
     let mut weight_cache: FxHashMap<Weight, Weight> = FxHashMap::default();
     let mut map_weight = |w: &Weight, cache: &mut FxHashMap<Weight, Weight>| -> Weight {
         if let Some(cached) = cache.get(w) { return cached.clone(); }
-        if w.is_all_fast() { return Weight::all(); }
+        if w.is_all_fast() { return weight_all(); }
         let mut new_vals = Vec::new();
         for t in w.iter_up_to(max_tok) {
             if let Some(&new_t) = old_to_new_map.get(&t) { new_vals.push(new_t); }

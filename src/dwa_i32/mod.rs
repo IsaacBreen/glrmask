@@ -39,7 +39,7 @@ pub mod test_weighted_automata;
 mod tests;
 
 pub use self::rangeset::RangeSet;
-pub use self::common::{format_i16_char, format_pos_code, format_word, NWAStateID, StateID, Weight, Label};
+pub use self::common::{format_i16_char, format_pos_code, format_word, weight_all, NWAStateID, StateID, Weight, Label};
 pub use self::dwa::{DWABody, DWABuildError, DWAState, DWAStates, DWA};
 pub use self::nwa::{NWABody, NWABuildError, NWAState, NWAStates, NWA};
 pub use self::heavy_weight::{HeavyWeight, WeightDimensions, WeightStats};

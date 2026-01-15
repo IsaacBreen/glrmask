@@ -8,7 +8,7 @@ use std::hash::{Hash, Hasher};
 use std::ops::BitOrAssign;
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use crate::dwa_i32::test_weighted_automata;
-use super::common::{DETERMINIZE_DEBUG, Label, NWAStateID, Weight};
+use super::common::{DETERMINIZE_DEBUG, Label, NWAStateID, Weight, weight_all};
 use super::dwa::DWA;
 use super::nwa::{NWA, NWAStates};
 
@@ -219,12 +219,13 @@ impl NWA {
         let mut total_subset_size = 0u64;
         let mut max_subset_size = 0usize;
         let det_start = std::time::Instant::now();
+        let all_weight = weight_all();
 
         // Initial States
         let mut start_subset = BTreeMap::new();
         for &s in &self.body.start_states {
             if s < self.states.len() {
-                start_subset.insert(s, Weight::all());
+                start_subset.insert(s, weight_all());
             }
         }
 
@@ -297,7 +298,7 @@ impl NWA {
                 }
                 
                 let w_edge = edge_weights.remove(&label).unwrap();
-                let w_edge_inv = !&w_edge;
+                let w_edge_inv = &all_weight - &w_edge;
 
                 // Normalize weights in the subset by dividing by w_edge.
                 // Division in Boolean semiring (loosening): w / v = w | !v.
@@ -458,6 +459,8 @@ impl<'a> Determinizer<'a> {
             return;
         }
 
+        let all_weight = weight_all();
+
         let dims = crate::dwa_i32::get_weight_dimensions();
         let num_tsids = dims.num_tsids.max(1);
 
@@ -544,7 +547,7 @@ impl<'a> Determinizer<'a> {
 
             // Normalize weights in the subset by dividing by w_edge.
             // Division in Boolean semiring (loosening): w / v = w | !v.
-            let w_edge_inv = !&w_edge;
+            let w_edge_inv = &all_weight - &w_edge;
             let mut dest_subset: WeightedSubset = dest_map
                 .into_iter()
                 .map(|(sid, w)| (sid, &w | &w_edge_inv))
@@ -567,7 +570,7 @@ fn precompute_all_epsilon_closures(states: &NWAStates) -> Vec<WeightedSubset> {
         let mut queue: VecDeque<NWAStateID> = VecDeque::new();
 
         // Self-reachability is identity
-        dists.insert(start_node, Weight::all());
+        dists.insert(start_node, weight_all());
         queue.push_back(start_node);
 
         while let Some(u) = queue.pop_front() {
@@ -653,8 +656,8 @@ fn try_build_singleton_loop_union(nwa: &NWA) -> Option<DWA> {
     }
 
     let mut seed: WeightedSubset = Vec::new();
-    let all_weight = Weight::all();
-    crate::debug!(5, "Singleton loop heuristic: Weight::all() is_empty={}, is_all_fast={}", 
+    let all_weight = weight_all();
+    crate::debug!(5, "Singleton loop heuristic: weight_all() is_empty={}, is_all_fast={}", 
         all_weight.is_empty(), all_weight.is_all_fast());
     seed.push((start, all_weight));
     // Use the local helper here to avoid precomputing everything for this fast path
