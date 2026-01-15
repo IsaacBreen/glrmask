@@ -39,15 +39,23 @@ impl fmt::Debug for FactoredWeight {
     }
 }
 
+impl PartialEq for FactoredWeight {
+    fn eq(&self, other: &Self) -> bool {
+        self.num_tsids == other.num_tsids && self.rsb_cached() == other.rsb_cached()
+    }
+}
+
+impl Eq for FactoredWeight {}
+
 impl FactoredWeight {
     /// Create a new factored weight with the given terms.
     pub fn new(terms: Vec<(RangeSetBlaze<u16>, RangeSetBlaze<u16>)>, num_tsids: u16) -> Self {
-        Self { terms, num_tsids }
+        Self { terms, num_tsids, rsb_cache: OnceLock::new() }
     }
     
     /// Create an empty factored weight.
     pub fn empty(num_tsids: u16) -> Self {
-        Self { terms: Vec::new(), num_tsids }
+        Self { terms: Vec::new(), num_tsids, rsb_cache: OnceLock::new() }
     }
     
     /// Create a factored weight from a single Cartesian product.
@@ -55,7 +63,7 @@ impl FactoredWeight {
         if tokens.is_empty() || tsids.is_empty() {
             return Self::empty(num_tsids);
         }
-        Self { terms: vec![(tokens, tsids)], num_tsids }
+        Self { terms: vec![(tokens, tsids)], num_tsids, rsb_cache: OnceLock::new() }
     }
     
     /// Create a factored weight from a token set (N-space) × all TSIDs.
@@ -150,7 +158,7 @@ impl FactoredWeight {
         // Optional: merge terms with identical TsidSets
         let merged = merge_same_profile_terms(terms);
         
-        FactoredWeight { terms: merged, num_tsids: self.num_tsids }
+        FactoredWeight { terms: merged, num_tsids: self.num_tsids, rsb_cache: OnceLock::new() }
     }
     
     /// Compute the intersection of two factored weights.
@@ -183,7 +191,97 @@ impl FactoredWeight {
             }
         }
         
-        FactoredWeight { terms: result, num_tsids: self.num_tsids }
+        FactoredWeight { terms: result, num_tsids: self.num_tsids, rsb_cache: OnceLock::new() }
+    }
+
+    /// Subtract another factored weight (A \ B).
+    /// Produces a union of rectangles representing the difference.
+    pub fn subtract(&self, other: &FactoredWeight) -> FactoredWeight {
+        debug_assert_eq!(self.num_tsids, other.num_tsids);
+
+        if self.is_empty() {
+            return self.clone();
+        }
+        if other.is_empty() {
+            return self.clone();
+        }
+        if other.is_full() {
+            return FactoredWeight::empty(self.num_tsids);
+        }
+
+        let other_rects = rects_from_terms(&other.terms);
+        let mut out_rects: Vec<Rect> = Vec::new();
+
+        for rect in rects_from_terms(&self.terms) {
+            let mut current = vec![rect];
+            for other_rect in &other_rects {
+                if current.is_empty() {
+                    break;
+                }
+                let mut next = Vec::new();
+                for r in current {
+                    next.extend(subtract_rect(r, *other_rect));
+                }
+                current = next;
+            }
+            out_rects.extend(current);
+        }
+
+        if out_rects.is_empty() {
+            return FactoredWeight::empty(self.num_tsids);
+        }
+
+        let mut terms = Vec::with_capacity(out_rects.len());
+        for rect in out_rects {
+            let mut tok_set = RangeSetBlaze::new();
+            tok_set.ranges_insert(rect.tok_lo..=rect.tok_hi);
+            let mut tsid_set = RangeSetBlaze::new();
+            tsid_set.ranges_insert(rect.tsid_lo..=rect.tsid_hi);
+            terms.push((tok_set, tsid_set));
+        }
+
+        FactoredWeight { terms: merge_same_profile_terms(terms), num_tsids: self.num_tsids, rsb_cache: OnceLock::new() }
+    }
+
+    /// Complement within the bounded N×M domain (num_tokens × num_tsids).
+    pub fn complement(&self, num_tokens: usize) -> FactoredWeight {
+        let full = FactoredWeight::full(num_tokens, self.num_tsids);
+        full.subtract(self)
+    }
+
+    /// Insert a single 1D position (token * num_tsids + tsid).
+    pub fn insert_pos(&self, pos: usize) -> FactoredWeight {
+        let num_tsids = self.num_tsids as usize;
+        let token = (pos / num_tsids) as u16;
+        let tsid = (pos % num_tsids) as u16;
+        let mut tok_set = RangeSetBlaze::new();
+        tok_set.insert(token);
+        let mut tsid_set = RangeSetBlaze::new();
+        tsid_set.insert(tsid);
+        let single = FactoredWeight::from_product(tok_set, tsid_set, self.num_tsids);
+        self.union(&single)
+    }
+
+    /// Remove a single 1D position (token * num_tsids + tsid).
+    pub fn remove_pos(&self, pos: usize) -> FactoredWeight {
+        let num_tsids = self.num_tsids as usize;
+        let token = (pos / num_tsids) as u16;
+        let tsid = (pos % num_tsids) as u16;
+        let mut tok_set = RangeSetBlaze::new();
+        tok_set.insert(token);
+        let mut tsid_set = RangeSetBlaze::new();
+        tsid_set.insert(tsid);
+        let single = FactoredWeight::from_product(tok_set, tsid_set, self.num_tsids);
+        self.subtract(&single)
+    }
+
+    /// Set a single 1D position to true/false.
+    pub fn set_pos(&self, pos: usize, value: bool) -> FactoredWeight {
+        if value {
+            self.insert_pos(pos)
+        } else {
+            self.remove_pos(pos)
+        }
     }
     
     /// Convert from 1D ranges (N×M space) to factored representation.
@@ -224,7 +322,7 @@ impl FactoredWeight {
             })
             .collect();
         
-        FactoredWeight { terms, num_tsids: num_tsids_u16 }
+        FactoredWeight { terms, num_tsids: num_tsids_u16, rsb_cache: OnceLock::new() }
     }
     
     /// Convert from a RangeSetBlaze to factored representation.
@@ -328,18 +426,31 @@ impl FactoredWeight {
     
     /// Internal expand implementation - for debugging only.
     pub(crate) fn expand_impl(&self) -> RangeSetBlaze<usize> {
+        self.rsb_cached().clone()
+    }
+
+    /// Efficiently expand to 1D RangeSetBlaze without iterating every position.
+    /// Runs in O(num_token_ranges * num_tsid_ranges) with fast-path for full TSID rows.
+    fn expand_rsb_fast(&self) -> RangeSetBlaze<usize> {
         let mut result = RangeSetBlaze::new();
         let num_tsids = self.num_tsids as usize;
-        
+
         for (tok_set, tsid_set) in &self.terms {
             for tok_range in tok_set.ranges() {
                 let tok_start = *tok_range.start() as usize;
                 let tok_end = *tok_range.end() as usize;
-                
+
                 for tsid_range in tsid_set.ranges() {
                     let tsid_start = *tsid_range.start() as usize;
                     let tsid_end = *tsid_range.end() as usize;
-                    
+
+                    if tsid_start == 0 && tsid_end + 1 == num_tsids {
+                        let pos_start = tok_start * num_tsids;
+                        let pos_end = (tok_end + 1) * num_tsids - 1;
+                        result.ranges_insert(pos_start..=pos_end);
+                        continue;
+                    }
+
                     for token in tok_start..=tok_end {
                         let pos_start = token * num_tsids + tsid_start;
                         let pos_end = token * num_tsids + tsid_end;
@@ -348,8 +459,13 @@ impl FactoredWeight {
                 }
             }
         }
-        
+
         result
+    }
+
+    /// Get cached 1D expansion (computed on first use).
+    pub(crate) fn rsb_cached(&self) -> &RangeSetBlaze<usize> {
+        self.rsb_cache.get_or_init(|| self.expand_rsb_fast())
     }
     
     /// Get number of ranges in the 1D expansion (for debugging/comparison).
@@ -491,7 +607,7 @@ impl FactoredWeight {
             }
         }
         
-        FactoredWeight { terms: merge_same_profile_terms(new_terms), num_tsids: self.num_tsids }
+        FactoredWeight { terms: merge_same_profile_terms(new_terms), num_tsids: self.num_tsids, rsb_cache: OnceLock::new() }
     }
     
     /// Iterate over 1D positions up to a maximum value.
@@ -561,6 +677,82 @@ fn decompose_range_to_rects(tok_s: u16, tsid_s: u16, tok_e: u16, tsid_e: u16, nu
     }
     
     rects
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Rect {
+    tok_lo: u16,
+    tok_hi: u16,
+    tsid_lo: u16,
+    tsid_hi: u16,
+}
+
+fn rects_from_terms(terms: &[(RangeSetBlaze<u16>, RangeSetBlaze<u16>)]) -> Vec<Rect> {
+    let mut rects = Vec::new();
+    for (tok_set, tsid_set) in terms {
+        for tok_range in tok_set.ranges() {
+            for tsid_range in tsid_set.ranges() {
+                rects.push(Rect {
+                    tok_lo: *tok_range.start(),
+                    tok_hi: *tok_range.end(),
+                    tsid_lo: *tsid_range.start(),
+                    tsid_hi: *tsid_range.end(),
+                });
+            }
+        }
+    }
+    rects
+}
+
+fn subtract_rect(a: Rect, b: Rect) -> Vec<Rect> {
+    let tok_lo = a.tok_lo.max(b.tok_lo);
+    let tok_hi = a.tok_hi.min(b.tok_hi);
+    let tsid_lo = a.tsid_lo.max(b.tsid_lo);
+    let tsid_hi = a.tsid_hi.min(b.tsid_hi);
+
+    if tok_lo > tok_hi || tsid_lo > tsid_hi {
+        return vec![a];
+    }
+
+    let mut out = Vec::new();
+
+    if a.tok_lo < tok_lo {
+        out.push(Rect {
+            tok_lo: a.tok_lo,
+            tok_hi: tok_lo - 1,
+            tsid_lo: a.tsid_lo,
+            tsid_hi: a.tsid_hi,
+        });
+    }
+
+    if tok_hi < a.tok_hi {
+        out.push(Rect {
+            tok_lo,
+            tok_hi: a.tok_hi,
+            tsid_lo: a.tsid_lo,
+            tsid_hi: a.tsid_hi,
+        });
+    }
+
+    if a.tsid_lo < tsid_lo {
+        out.push(Rect {
+            tok_lo,
+            tok_hi,
+            tsid_lo: a.tsid_lo,
+            tsid_hi: tsid_lo - 1,
+        });
+    }
+
+    if tsid_hi < a.tsid_hi {
+        out.push(Rect {
+            tok_lo,
+            tok_hi,
+            tsid_lo: tsid_hi + 1,
+            tsid_hi: a.tsid_hi,
+        });
+    }
+
+    out
 }
 
 /// Merge terms that have identical TSID profiles by unioning their token sets.

@@ -7,6 +7,9 @@
 //! The backend is selected via the `WEIGHT_BACKEND` environment variable:
 //! - `WEIGHT_BACKEND=rangeset` (default): Use RangeSet
 //! - `WEIGHT_BACKEND=bdd`: Use BddWeight
+//! - `WEIGHT_BACKEND=bdd-biodivine`: Use biodivine_lib_bdd backend
+//! - `WEIGHT_BACKEND=factored`: Use FactoredWeight
+//! - `WEIGHT_BACKEND=factored-validate`: Use FactoredWeight + RangeSet validation
 //!
 //! Note: BDD backend requires dimension info for proper encoding.
 
@@ -28,6 +31,9 @@ use super::heavy_weight::WeightDimensions;
 pub enum WeightBackend {
     RangeSet,
     Bdd,
+    BddBiodivine,
+    Factored,
+    FactoredValidate,
 }
 
 impl Default for WeightBackend {
@@ -42,6 +48,11 @@ pub fn get_weight_backend() -> WeightBackend {
     *BACKEND.get_or_init(|| {
         match std::env::var("WEIGHT_BACKEND").as_deref() {
             Ok("bdd") | Ok("BDD") => WeightBackend::Bdd,
+            Ok("bdd-biodivine") | Ok("BDD-BIODIVINE") | Ok("biodivine") => WeightBackend::BddBiodivine,
+            Ok("factored") | Ok("FACTORED") => WeightBackend::Factored,
+            Ok("factored-validate") | Ok("FACTORED-VALIDATE") | Ok("factored_validate") | Ok("FACTORED_VALIDATE") => {
+                WeightBackend::FactoredValidate
+            }
             _ => WeightBackend::RangeSet,
         }
     })

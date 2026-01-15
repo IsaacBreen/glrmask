@@ -25,6 +25,7 @@ pub mod weight_bdd_metrics;
 pub mod weight_oxidd_metrics;
 pub mod weight_factorization_metrics;
 pub mod factored_weight;
+pub mod factored_validate_weight;
 pub mod shared_bdd;
 pub mod heavy_weight;
 pub mod bdd_weight;

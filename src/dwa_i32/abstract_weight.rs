@@ -5,6 +5,7 @@
 //! - `BddWeight`: Binary Decision Diagram storage (custom 5-byte nodes, memory efficient)
 //! - `BddWeightBiodivine`: BDD storage using biodivine_lib_bdd (battle-tested, fewer nodes)
 //! - `FactoredWeight`: 2D factored representation (union of Cartesian products)
+//! - `FactoredValidate`: factored + RangeSet with validation
 //!
 //! The backend is selected at compile time via the `WEIGHT_BACKEND` environment variable,
 //! checked once at startup. See `get_weight_backend()` for details.
@@ -27,6 +28,7 @@
 //! - `WEIGHT_BACKEND=bdd`: Uses custom BddWeight with 5-byte nodes (memory efficient)
 //! - `WEIGHT_BACKEND=bdd-biodivine`: Uses biodivine_lib_bdd (battle-tested, more features)
 //! - `WEIGHT_BACKEND=factored`: Uses 2D factored representation (experimental)
+//! - `WEIGHT_BACKEND=factored-validate`: Uses factored + RangeSet with validation
 
 use std::fmt::{Debug, Display, Formatter};
 use std::hash::{Hash, Hasher};
@@ -41,6 +43,7 @@ use super::rangeset::RangeSet;
 use super::bdd_weight::BddWeight;
 use super::bdd_weight_biodivine::BddWeightBiodivine;
 use super::factored_weight::FactoredWeight;
+use super::factored_validate_weight::FactoredValidateWeight;
 use super::heavy_weight::WeightDimensions;
 
 // ============================================================================
@@ -58,6 +61,8 @@ pub enum WeightBackend {
     BddBiodivine,
     /// 2D factored representation (union of Cartesian products).
     Factored,
+    /// Factored + RangeSet with validation.
+    FactoredValidate,
 }
 
 impl Default for WeightBackend {
@@ -83,6 +88,9 @@ pub fn get_weight_backend() -> WeightBackend {
             Ok("bdd") | Ok("BDD") => WeightBackend::Bdd,
             Ok("bdd-biodivine") | Ok("BDD-BIODIVINE") | Ok("biodivine") => WeightBackend::BddBiodivine,
             Ok("factored") | Ok("FACTORED") => WeightBackend::Factored,
+            Ok("factored-validate") | Ok("FACTORED-VALIDATE") | Ok("factored_validate") | Ok("FACTORED_VALIDATE") => {
+                WeightBackend::FactoredValidate
+            }
             _ => WeightBackend::RangeSet,
         }
     })
@@ -119,6 +127,8 @@ pub enum AbstractWeight {
     BddBiodivine(Arc<BddWeightBiodivine>),
     /// 2D factored representation (union of Cartesian products).
     Factored(Arc<FactoredWeight>),
+    /// Factored + RangeSet with validation.
+    FactoredValidate(Arc<FactoredValidateWeight>),
 }
 
 impl AbstractWeight {
@@ -141,6 +151,12 @@ impl AbstractWeight {
             WeightBackend::Factored => {
                 let dims = get_weight_dimensions();
                 Self::Factored(Arc::new(FactoredWeight::empty(dims.num_tsids as u16)))
+            }
+            WeightBackend::FactoredValidate => {
+                let dims = get_weight_dimensions();
+                let factored = FactoredWeight::empty(dims.num_tsids as u16);
+                let rangeset = RangeSet::zeros();
+                Self::FactoredValidate(Arc::new(FactoredValidateWeight::new(factored, rangeset)))
             }
         }
     }
@@ -165,6 +181,16 @@ impl AbstractWeight {
                 let mut tsids = RangeSetBlaze::new();
                 tsids.ranges_insert(0..=(dims.num_tsids as u16 - 1));
                 Self::Factored(Arc::new(FactoredWeight::from_product(tokens, tsids, dims.num_tsids as u16)))
+            }
+            WeightBackend::FactoredValidate => {
+                let dims = get_weight_dimensions();
+                let mut tokens = RangeSetBlaze::new();
+                tokens.ranges_insert(0..=(dims.num_tokens as u16 - 1));
+                let mut tsids = RangeSetBlaze::new();
+                tsids.ranges_insert(0..=(dims.num_tsids as u16 - 1));
+                let factored = FactoredWeight::from_product(tokens, tsids, dims.num_tsids as u16);
+                let rangeset = RangeSet::all();
+                Self::FactoredValidate(Arc::new(FactoredValidateWeight::new(factored, rangeset)))
             }
         }
     }
@@ -196,6 +222,15 @@ impl AbstractWeight {
                     dims.num_tsids as usize,
                 )))
             }
+            WeightBackend::FactoredValidate => {
+                let dims = get_weight_dimensions();
+                let factored = FactoredWeight::from_1d_ranges(
+                    std::iter::once((item, item)),
+                    dims.num_tsids as usize,
+                );
+                let rangeset = RangeSet::from_item(item);
+                Self::FactoredValidate(Arc::new(FactoredValidateWeight::new(factored, rangeset)))
+            }
         }
     }
 
@@ -225,6 +260,12 @@ impl AbstractWeight {
                     ranges.iter().copied(),
                     dims.num_tsids as usize,
                 )))
+            }
+            WeightBackend::FactoredValidate => {
+                let dims = get_weight_dimensions();
+                let factored = FactoredWeight::from_1d_ranges(ranges.iter().copied(), dims.num_tsids as usize);
+                let rangeset = RangeSet::from_ranges(ranges);
+                Self::FactoredValidate(Arc::new(FactoredValidateWeight::new(factored, rangeset)))
             }
         }
     }
@@ -259,6 +300,13 @@ impl AbstractWeight {
                     dims.num_tsids as usize,
                 )))
             }
+            WeightBackend::FactoredValidate => {
+                let dims = get_weight_dimensions();
+                let ranges: Vec<(usize, usize)> = rsb.ranges().map(|r| (*r.start(), *r.end())).collect();
+                let factored = FactoredWeight::from_1d_ranges(ranges.into_iter(), dims.num_tsids as usize);
+                let rangeset = RangeSet::from_rsb(rsb);
+                Self::FactoredValidate(Arc::new(FactoredValidateWeight::new(factored, rangeset)))
+            }
         }
     }
     
@@ -275,6 +323,12 @@ impl AbstractWeight {
                     tokens,
                     dims.num_tsids as u16,
                 )))
+            }
+            WeightBackend::FactoredValidate => {
+                let factored = FactoredWeight::from_token_set_all_tsids(tokens.clone(), dims.num_tsids as u16);
+                let expanded = crate::dwa_i32::weight_expansion::expand_rsb(&tokens, dims.num_tsids);
+                let rangeset = RangeSet::from_rsb(expanded);
+                Self::FactoredValidate(Arc::new(FactoredValidateWeight::new(factored, rangeset)))
             }
             // For other backends, fall back to expanding to N×M space
             _ => {
@@ -297,6 +351,15 @@ impl AbstractWeight {
                     tsid,
                     dims.num_tsids as u16,
                 )))
+            }
+            WeightBackend::FactoredValidate => {
+                let factored = FactoredWeight::from_token_set_specific_tsid(tokens.clone(), tsid, dims.num_tsids as u16);
+                let num_tsids = dims.num_tsids;
+                let positions: RangeSetBlaze<usize> = tokens.iter()
+                    .map(|t| t * num_tsids + tsid)
+                    .collect();
+                let rangeset = RangeSet::from_rsb(positions);
+                Self::FactoredValidate(Arc::new(FactoredValidateWeight::new(factored, rangeset)))
             }
             // For other backends, fall back to explicit 1D expansion
             _ => {
@@ -336,6 +399,15 @@ impl AbstractWeight {
                     std::iter::once((0, len.saturating_sub(1))),
                     dims.num_tsids as usize,
                 )))
+            }
+            WeightBackend::FactoredValidate => {
+                let dims = get_weight_dimensions();
+                let factored = FactoredWeight::from_1d_ranges(
+                    std::iter::once((0, len.saturating_sub(1))),
+                    dims.num_tsids as usize,
+                );
+                let rangeset = RangeSet::ones(len);
+                Self::FactoredValidate(Arc::new(FactoredValidateWeight::new(factored, rangeset)))
             }
         }
     }
@@ -399,6 +471,21 @@ impl AbstractWeight {
                 let token_set: RangeSetBlaze<u16> = (0..num_tokens as u16).collect();
                 Self::Factored(Arc::new(FactoredWeight::from_product(token_set, tsid_set, num_tsids as u16)))
             }
+            WeightBackend::FactoredValidate => {
+                let tsid_vec: Vec<usize> = tsids.into_iter().collect();
+                let tsid_set: RangeSetBlaze<u16> = tsid_vec.iter().map(|t| *t as u16).collect();
+                let token_set: RangeSetBlaze<u16> = (0..num_tokens as u16).collect();
+                let factored = FactoredWeight::from_product(token_set, tsid_set, num_tsids as u16);
+                let mut rsb = RangeSetBlaze::new();
+                for n in 0..num_tokens {
+                    let offset = n * num_tsids;
+                    for &tsid in &tsid_vec {
+                        rsb.insert(tsid + offset);
+                    }
+                }
+                let rangeset = RangeSet::from_rsb(rsb);
+                Self::FactoredValidate(Arc::new(FactoredValidateWeight::new(factored, rangeset)))
+            }
         }
     }
     
@@ -421,6 +508,7 @@ impl AbstractWeight {
             Self::Bdd(bdd) => bdd.is_empty(),
             Self::BddBiodivine(bdd) => bdd.is_empty(),
             Self::Factored(fw) => fw.is_empty(),
+            Self::FactoredValidate(fw) => fw.rangeset().is_empty(),
         }
     }
 
@@ -431,6 +519,7 @@ impl AbstractWeight {
             Self::Bdd(bdd) => bdd.is_full(),
             Self::BddBiodivine(bdd) => bdd.is_full(),
             Self::Factored(fw) => fw.is_full(),
+            Self::FactoredValidate(fw) => fw.rangeset().is_all_fast(),
         }
     }
 
@@ -441,6 +530,7 @@ impl AbstractWeight {
             Self::Bdd(bdd) => bdd.contains_pos(pos),
             Self::BddBiodivine(bdd) => bdd.contains_pos(pos),
             Self::Factored(fw) => fw.contains_pos(pos),
+            Self::FactoredValidate(fw) => fw.rangeset().contains(pos),
         }
     }
 
@@ -450,6 +540,7 @@ impl AbstractWeight {
             (Self::Rs(a), Self::Rs(b)) => a.is_disjoint(b),
             (Self::Bdd(a), Self::Bdd(b)) => a.intersection(b).is_empty(),
             (Self::Factored(a), Self::Factored(b)) => a.intersection(b).is_empty(),
+            (Self::FactoredValidate(a), Self::FactoredValidate(b)) => a.rangeset().is_disjoint(b.rangeset()),
             _ => self.to_rangeset().is_disjoint(&other.to_rangeset()),
         }
     }
@@ -462,6 +553,7 @@ impl AbstractWeight {
             Self::Bdd(bdd) => bdd.to_rangeset().ranges_len(),
             Self::BddBiodivine(bdd) => bdd.to_rangeset().ranges_len(),
             Self::Factored(fw) => fw.total_ranges(),
+            Self::FactoredValidate(fw) => fw.rangeset().num_ranges(),
         }
     }
 
@@ -472,6 +564,7 @@ impl AbstractWeight {
             Self::Bdd(bdd) => bdd.len(),
             Self::BddBiodivine(bdd) => bdd.len(),
             Self::Factored(fw) => fw.len(),
+            Self::FactoredValidate(fw) => fw.rangeset().len(),
         }
     }
 
@@ -485,7 +578,7 @@ impl AbstractWeight {
     pub fn fp(&self) -> u64 {
         match self {
             Self::Rs(rs) => rs.fast_hash(),
-            Self::Bdd(_) | Self::BddBiodivine(_) | Self::Factored(_) => {
+            Self::Bdd(_) | Self::BddBiodivine(_) | Self::Factored(_) | Self::FactoredValidate(_) => {
                 // For BDD/Factored, compute a hash of the ranges
                 use std::hash::{Hash, Hasher};
                 use std::collections::hash_map::DefaultHasher;
@@ -505,6 +598,7 @@ impl AbstractWeight {
             Self::Bdd(bdd) => bdd.iter().next(),
             Self::BddBiodivine(bdd) => bdd.iter().next(),
             Self::Factored(fw) => fw.min_position(),
+            Self::FactoredValidate(fw) => fw.rangeset().min_item(),
         }
     }
 
@@ -515,6 +609,7 @@ impl AbstractWeight {
             Self::Bdd(bdd) => bdd.iter().last(),
             Self::BddBiodivine(bdd) => bdd.iter().last(),
             Self::Factored(fw) => fw.max_position(),
+            Self::FactoredValidate(fw) => fw.rangeset().max_item(),
         }
     }
 
@@ -522,6 +617,13 @@ impl AbstractWeight {
     pub fn insert(&mut self, item: usize) {
         match self {
             Self::Rs(rs) => rs.insert(item),
+            Self::FactoredValidate(fw) => {
+                let mut rs: RangeSet = fw.rangeset().clone();
+                rs.insert(item);
+                let dims = get_weight_dimensions();
+                let factored = FactoredWeight::from_rsb(&rs.rsb, dims.num_tsids as usize);
+                *self = Self::FactoredValidate(Arc::new(FactoredValidateWeight::new(factored, rs)));
+            }
             Self::Bdd(_) | Self::BddBiodivine(_) | Self::Factored(_) => {
                 // For BDD/Factored, convert to RangeSet, insert, convert back
                 let mut rs: RangeSet = self.to_rangeset();
@@ -535,6 +637,13 @@ impl AbstractWeight {
     pub fn remove(&mut self, item: usize) {
         match self {
             Self::Rs(rs) => rs.remove(item),
+            Self::FactoredValidate(fw) => {
+                let mut rs: RangeSet = fw.rangeset().clone();
+                rs.remove(item);
+                let dims = get_weight_dimensions();
+                let factored = FactoredWeight::from_rsb(&rs.rsb, dims.num_tsids as usize);
+                *self = Self::FactoredValidate(Arc::new(FactoredValidateWeight::new(factored, rs)));
+            }
             Self::Bdd(_) | Self::BddBiodivine(_) | Self::Factored(_) => {
                 // For BDD/Factored, convert to RangeSet, remove, convert back
                 let mut rs: RangeSet = self.to_rangeset();
@@ -571,6 +680,9 @@ impl AbstractWeight {
             (Self::Factored(a), Self::Factored(b)) => {
                 // Use native 2D subset check
                 a.is_subset_of(b)
+            }
+            (Self::FactoredValidate(a), Self::FactoredValidate(b)) => {
+                a.rangeset().is_subset_of(b.rangeset())
             }
             _ => self.to_rangeset().is_subset_of(&other.to_rangeset()),
         }
@@ -610,6 +722,13 @@ impl AbstractWeight {
                 // Use native 2D clip_max
                 Self::Factored(Arc::new(fw.clip_max(max)))
             }
+            Self::FactoredValidate(fw) => {
+                let mut rs = fw.rangeset().clone();
+                rs.clip_max(max);
+                let dims = get_weight_dimensions();
+                let factored = FactoredWeight::from_rsb(&rs.rsb, dims.num_tsids as usize);
+                Self::FactoredValidate(Arc::new(FactoredValidateWeight::new(factored, rs)))
+            }
         }
     }
 
@@ -625,6 +744,7 @@ impl AbstractWeight {
             Self::Bdd(bdd) => RangeSet::from_rsb(bdd.to_rangeset()),
             Self::BddBiodivine(bdd) => RangeSet::from_rsb(bdd.to_rangeset()),
             Self::Factored(fw) => RangeSet::from_rsb(fw.expand_impl()),
+            Self::FactoredValidate(fw) => fw.rangeset().clone(),
         }
     }
 
@@ -636,6 +756,7 @@ impl AbstractWeight {
             Self::Bdd(bdd) => bdd.to_rangeset(),
             Self::BddBiodivine(bdd) => bdd.to_rangeset(),
             Self::Factored(fw) => fw.expand_impl(),
+            Self::FactoredValidate(fw) => fw.rangeset().rsb.clone(),
         }
     }
 
@@ -643,7 +764,10 @@ impl AbstractWeight {
     pub fn as_rangeset(&self) -> &RangeSet {
         match self {
             Self::Rs(rs) => rs,
-            Self::Bdd(_) | Self::BddBiodivine(_) | Self::Factored(_) => panic!("Cannot get RangeSet reference from BDD/Factored weight"),
+            Self::FactoredValidate(fw) => fw.rangeset(),
+            Self::Bdd(_) | Self::BddBiodivine(_) | Self::Factored(_) => {
+                panic!("Cannot get RangeSet reference from BDD/Factored weight")
+            }
         }
     }
 
@@ -658,6 +782,7 @@ impl AbstractWeight {
             Self::Bdd(bdd) => Box::new(bdd.iter()),
             Self::BddBiodivine(bdd) => Box::new(bdd.iter()),
             Self::Factored(fw) => Box::new(fw.iter_positions()),
+            Self::FactoredValidate(fw) => Box::new(fw.rangeset().rsb.iter()),
         }
     }
 
@@ -668,6 +793,7 @@ impl AbstractWeight {
             Self::Bdd(bdd) => Box::new(bdd.iter().take_while(move |&p| p <= max)),
             Self::BddBiodivine(bdd) => Box::new(bdd.iter().take_while(move |&p| p <= max)),
             Self::Factored(fw) => Box::new(fw.iter_positions_up_to(max)),
+            Self::FactoredValidate(fw) => Box::new(fw.rangeset().iter_up_to(max)),
         }
     }
 
@@ -679,6 +805,7 @@ impl AbstractWeight {
             Self::Bdd(bdd) => Box::new(bdd.to_rangeset().into_ranges()),
             Self::BddBiodivine(bdd) => Box::new(bdd.to_rangeset().into_ranges()),
             Self::Factored(fw) => Box::new(fw.expand_impl().into_ranges()),
+            Self::FactoredValidate(fw) => Box::new(fw.rangeset().rsb.ranges()),
         }
     }
 
@@ -691,7 +818,10 @@ impl AbstractWeight {
     pub fn rsb(&self) -> &RangeSetBlaze<usize> {
         match self {
             Self::Rs(rs) => &rs.rsb,
-            Self::Bdd(_) | Self::BddBiodivine(_) | Self::Factored(_) => panic!("Cannot access rsb on BDD/Factored weight - use to_rsb() instead"),
+            Self::FactoredValidate(fw) => &fw.rangeset().rsb,
+            Self::Bdd(_) | Self::BddBiodivine(_) | Self::Factored(_) => {
+                panic!("Cannot access rsb on BDD/Factored weight - use to_rsb() instead")
+            }
         }
     }
 
@@ -720,6 +850,7 @@ impl AbstractWeight {
             Self::Bdd(bdd) => Arc::as_ptr(bdd) as usize,
             Self::BddBiodivine(bdd) => Arc::as_ptr(bdd) as usize,
             Self::Factored(fw) => Arc::as_ptr(fw) as usize,
+            Self::FactoredValidate(fw) => Arc::as_ptr(fw) as usize,
         }
     }
 }
@@ -758,6 +889,11 @@ impl BitOr for &AbstractWeight {
             }
             (AbstractWeight::Factored(a), AbstractWeight::Factored(b)) => {
                 AbstractWeight::Factored(Arc::new(a.union(b)))
+            }
+            (AbstractWeight::FactoredValidate(a), AbstractWeight::FactoredValidate(b)) => {
+                let factored = a.factored().union(b.factored());
+                let rangeset = a.rangeset() | b.rangeset();
+                AbstractWeight::FactoredValidate(Arc::new(FactoredValidateWeight::new(factored, rangeset)))
             }
             _ => {
                 // Cross-backend: convert to common format
@@ -811,6 +947,11 @@ impl BitAnd for &AbstractWeight {
             (AbstractWeight::Factored(a), AbstractWeight::Factored(b)) => {
                 AbstractWeight::Factored(Arc::new(a.intersection(b)))
             }
+            (AbstractWeight::FactoredValidate(a), AbstractWeight::FactoredValidate(b)) => {
+                let factored = a.factored().intersection(b.factored());
+                let rangeset = a.rangeset() & b.rangeset();
+                AbstractWeight::FactoredValidate(Arc::new(FactoredValidateWeight::new(factored, rangeset)))
+            }
             _ => {
                 let a_rs = self.to_rangeset();
                 let b_rs = rhs.to_rangeset();
@@ -846,6 +987,12 @@ impl Not for &AbstractWeight {
                 // FactoredWeight doesn't support complement, fall back to RangeSet
                 AbstractWeight::Rs(!&self.to_rangeset())
             }
+            AbstractWeight::FactoredValidate(fw) => {
+                let rangeset = !fw.rangeset();
+                let dims = get_weight_dimensions();
+                let factored = FactoredWeight::from_rsb(&rangeset.rsb, dims.num_tsids as usize);
+                AbstractWeight::FactoredValidate(Arc::new(FactoredValidateWeight::new(factored, rangeset)))
+            }
         }
     }
 }
@@ -875,6 +1022,12 @@ impl Sub for &AbstractWeight {
                 let a_rs = self.to_rangeset();
                 let b_rs = rhs.to_rangeset();
                 AbstractWeight::Rs(&a_rs - &b_rs)
+            }
+            (AbstractWeight::FactoredValidate(a), AbstractWeight::FactoredValidate(b)) => {
+                let rangeset = a.rangeset() - b.rangeset();
+                let dims = get_weight_dimensions();
+                let factored = FactoredWeight::from_rsb(&rangeset.rsb, dims.num_tsids as usize);
+                AbstractWeight::FactoredValidate(Arc::new(FactoredValidateWeight::new(factored, rangeset)))
             }
             _ => {
                 let a_rs = self.to_rangeset();
@@ -976,6 +1129,9 @@ impl Hash for AbstractWeight {
                 // Hash based on 2D structure for consistency
                 fw.hash_2d(state);
             }
+            Self::FactoredValidate(fw) => {
+                fw.rangeset().hash(state);
+            }
         }
     }
 }
@@ -1031,6 +1187,14 @@ impl Display for AbstractWeight {
                     write!(f, "[Factored: {} terms]", num_terms)
                 }
             }
+            Self::FactoredValidate(fw) => {
+                let num_terms = fw.factored().num_terms();
+                if fw.rangeset().is_empty() {
+                    write!(f, "∅")
+                } else {
+                    write!(f, "[FactoredValidate: {} terms, {} ranges]", num_terms, fw.rangeset().num_ranges())
+                }
+            }
         }
     }
 }
@@ -1039,7 +1203,7 @@ impl FromIterator<usize> for AbstractWeight {
     fn from_iter<I: IntoIterator<Item = usize>>(iter: I) -> Self {
         match get_weight_backend() {
             WeightBackend::RangeSet => Self::Rs(RangeSet::from_iter(iter)),
-            WeightBackend::Bdd | WeightBackend::BddBiodivine | WeightBackend::Factored => {
+            WeightBackend::Bdd | WeightBackend::BddBiodivine | WeightBackend::Factored | WeightBackend::FactoredValidate => {
                 let rsb: RangeSetBlaze<usize> = iter.into_iter().collect();
                 Self::from_rsb(rsb)
             }
@@ -1058,7 +1222,7 @@ impl FromIterator<std::ops::RangeInclusive<usize>> for AbstractWeight {
     fn from_iter<I: IntoIterator<Item = std::ops::RangeInclusive<usize>>>(iter: I) -> Self {
         match get_weight_backend() {
             WeightBackend::RangeSet => Self::Rs(RangeSet::from_iter(iter)),
-            WeightBackend::Bdd | WeightBackend::BddBiodivine | WeightBackend::Factored => {
+            WeightBackend::Bdd | WeightBackend::BddBiodivine | WeightBackend::Factored | WeightBackend::FactoredValidate => {
                 let ranges: Vec<_> = iter.into_iter().map(|r| (*r.start(), *r.end())).collect();
                 Self::from_ranges(&ranges)
             }
@@ -1114,6 +1278,12 @@ impl<'de> Deserialize<'de> for AbstractWeight {
                     ranges.into_iter(),
                     dims.num_tsids,
                 ))))
+            }
+            WeightBackend::FactoredValidate => {
+                let dims = get_weight_dimensions();
+                let ranges: Vec<_> = rs.rsb.ranges().map(|r| (*r.start(), *r.end())).collect();
+                let factored = FactoredWeight::from_1d_ranges(ranges.into_iter(), dims.num_tsids);
+                Ok(Self::FactoredValidate(Arc::new(FactoredValidateWeight::new(factored, rs))))
             }
         }
     }
@@ -1171,6 +1341,12 @@ impl From<RangeSet> for AbstractWeight {
                     ranges.into_iter(),
                     dims.num_tsids,
                 )))
+            }
+            WeightBackend::FactoredValidate => {
+                let dims = get_weight_dimensions();
+                let ranges: Vec<_> = rs.rsb.ranges().map(|r| (*r.start(), *r.end())).collect();
+                let factored = FactoredWeight::from_1d_ranges(ranges.into_iter(), dims.num_tsids);
+                Self::FactoredValidate(Arc::new(FactoredValidateWeight::new(factored, rs)))
             }
         }
     }

@@ -18,8 +18,8 @@ impl DWA {
         // For FactoredWeight, use cyclic minimization because the acyclic algorithm's
         // weight composition (needed sets, forward reachability) doesn't work correctly
         // with the 2D (token, tsid) structure. The tsid dimension causes false negatives.
-        if use_fast_minimize || matches!(get_weight_backend(), WeightBackend::Factored) {
-            if matches!(get_weight_backend(), WeightBackend::Factored) {
+        if use_fast_minimize || matches!(get_weight_backend(), WeightBackend::Factored | WeightBackend::FactoredValidate) {
+            if matches!(get_weight_backend(), WeightBackend::Factored | WeightBackend::FactoredValidate) {
                 crate::debug!(5, "Using cyclic minimization for FactoredWeight (acyclic algorithm incompatible)");
             }
             // Use partition refinement - faster but may produce slightly larger DWA
@@ -74,7 +74,7 @@ fn push_weights_acyclic(dwa: &mut DWA) -> bool {
     use crate::dwa_i32::abstract_weight::{get_weight_backend, WeightBackend};
     
     // Skip weight pushing for FactoredWeight - see doc comment above
-    if matches!(get_weight_backend(), WeightBackend::Factored) {
+    if matches!(get_weight_backend(), WeightBackend::Factored | WeightBackend::FactoredValidate) {
         crate::debug!(6, "Skipping push_weights_acyclic for FactoredWeight backend");
         return false;
     }
@@ -669,7 +669,7 @@ fn tighten_weights(dwa: &DWA) -> Result<DWA, DWABuildError> {
     if dwa.states.is_empty() { return Ok(DWA::new()); }
     
     // Skip tightening for FactoredWeight - see doc comment above
-    if matches!(get_weight_backend(), WeightBackend::Factored) {
+    if matches!(get_weight_backend(), WeightBackend::Factored | WeightBackend::FactoredValidate) {
         crate::debug!(6, "Skipping tighten_weights for FactoredWeight backend");
         return Ok(dwa.clone());
     }
