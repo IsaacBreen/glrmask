@@ -17,7 +17,8 @@ pub fn benchmark_dwa_weights(dwa: &DWA, name: &str) {
     for state in &dwa.states.0 {
         if let Some(fw) = &state.final_weight {
             if !fw.is_empty() && !fw.is_all_fast() {
-                let key = fw.rsb().ranges().map(|r| (*r.start(), *r.end())).collect::<Vec<_>>();
+                let rsb = fw.to_rsb();
+                let key = rsb.ranges().map(|r| (*r.start(), *r.end())).collect::<Vec<_>>();
                 if !seen.contains(&key) {
                     seen.insert(key);
                     unique_weights.push(fw.clone().into());
@@ -27,7 +28,8 @@ pub fn benchmark_dwa_weights(dwa: &DWA, name: &str) {
         
         for tw in state.trans_weights.values() {
             if !tw.is_empty() && !tw.is_all_fast() {
-                let key = tw.rsb().ranges().map(|r| (*r.start(), *r.end())).collect::<Vec<_>>();
+                let rsb = tw.to_rsb();
+                let key = rsb.ranges().map(|r| (*r.start(), *r.end())).collect::<Vec<_>>();
                 if !seen.contains(&key) {
                     seen.insert(key);
                     unique_weights.push(tw.clone().into());

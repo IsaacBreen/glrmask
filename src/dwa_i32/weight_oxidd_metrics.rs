@@ -189,7 +189,8 @@ fn weight_to_dd<F: oxidd::BooleanFunction>(
 
     let mut acc = f.clone();
 
-    for r in weight.rsb().ranges() {
+    let rsb = weight.to_rsb();
+    for r in rsb.ranges() {
         let start = *r.start();
         let end = *r.end();
 

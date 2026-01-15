@@ -149,7 +149,8 @@ impl SerializableSemiring for BitsetWeight {
     }
 
     fn write_binary<F: Write>(&self, file: &mut F) -> Result<()> {
-        let ranges: Vec<_> = self.0.rsb().ranges().collect();
+        let rsb = self.0.to_rsb();
+        let ranges: Vec<_> = rsb.ranges().collect();
         file.write_all(&(ranges.len() as u64).to_le_bytes())?;
         for range in ranges {
             file.write_all(&(*range.start() as u64).to_le_bytes())?;

@@ -77,7 +77,8 @@ fn weight_to_bdd(vars: &BddVariableSet, weight: &Weight, domain_max: usize, k: u
 
     let mut acc = bdd_false(vars);
 
-    for r in weight.rsb().ranges() {
+    let rsb = weight.to_rsb();
+    for r in rsb.ranges() {
         let start = *r.start();
         let end = *r.end();
 
@@ -211,7 +212,8 @@ pub fn maybe_print_dwa_bdd_compare_metrics(dwa: &DWA, name: &str) {
         total_rangeset_ranges += w.num_ranges();
 
         let start = std::time::Instant::now();
-        let ranges = w.rsb().ranges().map(|r| (*r.start(), *r.end()));
+        let rsb = w.to_rsb();
+        let ranges = rsb.ranges().map(|r| (*r.start(), *r.end()));
         let bdd = BddWeight::from_ranges(ranges, tsid_dim, token_dim);
         bdd_build_us += start.elapsed().as_micros();
 

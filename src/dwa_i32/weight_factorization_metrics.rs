@@ -56,7 +56,8 @@ fn export_weights_to_json(unique_weights: &[Weight], name: &str) {
     // Convert to serializable format: Vec<Vec<(usize, usize)>>
     // Each weight is a list of [start, end] inclusive ranges.
     let export_data: Vec<Vec<(usize, usize)>> = unique_weights.iter().map(|w| {
-        w.rsb().ranges().map(|r| (*r.start(), *r.end())).collect()
+        let rsb = w.to_rsb();
+        rsb.ranges().map(|r| (*r.start(), *r.end())).collect()
     }).collect();
     
     let file = File::create(&filename).expect("Unable to create export file");

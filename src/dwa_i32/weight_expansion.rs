@@ -40,7 +40,8 @@ pub fn expand_weight(weight: &Weight, num_tsids: usize) -> Weight {
         return Weight::all();
     }
     
-    Weight::from_rsb(expand_rsb(&weight.rsb(), num_tsids))
+    let rsb = weight.to_rsb();
+    Weight::from_rsb(expand_rsb(&rsb, num_tsids))
 }
 
 /// Expand a RangeSetBlaze from N-space to N×M-space.
@@ -320,7 +321,8 @@ pub fn collapse_weight(weight: &Weight, num_tsids: usize) -> Weight {
         return Weight::all();
     }
     
-    Weight::from_rsb(collapse_weight_rsb(&weight.rsb(), num_tsids))
+    let rsb = weight.to_rsb();
+    Weight::from_rsb(collapse_weight_rsb(&rsb, num_tsids))
 }
 
 /// Create an initial weight for weight-heavy mode given an active tokenizer state ID.
@@ -416,7 +418,8 @@ mod tests {
         let combined = &(&mask0 | &mask2) | &mask4;
         
         assert_eq!(mask.len(), combined.len());
-        for pos in combined.rsb().iter() {
+        let combined_rsb = combined.to_rsb();
+        for pos in combined_rsb.iter() {
             assert!(mask.contains(pos), "mask missing position {}", pos);
         }
     }

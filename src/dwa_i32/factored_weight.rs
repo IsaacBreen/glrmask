@@ -41,7 +41,7 @@ impl fmt::Debug for FactoredWeight {
 
 impl PartialEq for FactoredWeight {
     fn eq(&self, other: &Self) -> bool {
-        self.num_tsids == other.num_tsids && self.rsb_cached() == other.rsb_cached()
+        self.num_tsids == other.num_tsids && self.expand_rsb_fast() == other.expand_rsb_fast()
     }
 }
 
@@ -50,12 +50,12 @@ impl Eq for FactoredWeight {}
 impl FactoredWeight {
     /// Create a new factored weight with the given terms.
     pub fn new(terms: Vec<(RangeSetBlaze<u16>, RangeSetBlaze<u16>)>, num_tsids: u16) -> Self {
-        Self { terms, num_tsids, rsb_cache: OnceLock::new() }
+        Self { terms, num_tsids }
     }
     
     /// Create an empty factored weight.
     pub fn empty(num_tsids: u16) -> Self {
-        Self { terms: Vec::new(), num_tsids, rsb_cache: OnceLock::new() }
+        Self { terms: Vec::new(), num_tsids }
     }
     
     /// Create a factored weight from a single Cartesian product.
@@ -63,7 +63,7 @@ impl FactoredWeight {
         if tokens.is_empty() || tsids.is_empty() {
             return Self::empty(num_tsids);
         }
-        Self { terms: vec![(tokens, tsids)], num_tsids, rsb_cache: OnceLock::new() }
+        Self { terms: vec![(tokens, tsids)], num_tsids }
     }
     
     /// Create a factored weight from a token set (N-space) × all TSIDs.
@@ -158,7 +158,7 @@ impl FactoredWeight {
         // Optional: merge terms with identical TsidSets
         let merged = merge_same_profile_terms(terms);
         
-        FactoredWeight { terms: merged, num_tsids: self.num_tsids, rsb_cache: OnceLock::new() }
+        FactoredWeight { terms: merged, num_tsids: self.num_tsids }
     }
     
     /// Compute the intersection of two factored weights.
@@ -191,7 +191,7 @@ impl FactoredWeight {
             }
         }
         
-        FactoredWeight { terms: result, num_tsids: self.num_tsids, rsb_cache: OnceLock::new() }
+        FactoredWeight { terms: result, num_tsids: self.num_tsids }
     }
 
     /// Subtract another factored weight (A \ B).
@@ -240,7 +240,7 @@ impl FactoredWeight {
             terms.push((tok_set, tsid_set));
         }
 
-        FactoredWeight { terms: merge_same_profile_terms(terms), num_tsids: self.num_tsids, rsb_cache: OnceLock::new() }
+        FactoredWeight { terms: merge_same_profile_terms(terms), num_tsids: self.num_tsids }
     }
 
     /// Complement within the bounded N×M domain (num_tokens × num_tsids).
@@ -322,7 +322,7 @@ impl FactoredWeight {
             })
             .collect();
         
-        FactoredWeight { terms, num_tsids: num_tsids_u16, rsb_cache: OnceLock::new() }
+        FactoredWeight { terms, num_tsids: num_tsids_u16 }
     }
     
     /// Convert from a RangeSetBlaze to factored representation.
@@ -426,7 +426,7 @@ impl FactoredWeight {
     
     /// Internal expand implementation - for debugging only.
     pub(crate) fn expand_impl(&self) -> RangeSetBlaze<usize> {
-        self.rsb_cached().clone()
+        self.expand_rsb_fast()
     }
 
     /// Efficiently expand to 1D RangeSetBlaze without iterating every position.
@@ -463,10 +463,6 @@ impl FactoredWeight {
         result
     }
 
-    /// Get cached 1D expansion (computed on first use).
-    pub(crate) fn rsb_cached(&self) -> &RangeSetBlaze<usize> {
-        self.rsb_cache.get_or_init(|| self.expand_rsb_fast())
-    }
     
     /// Get number of ranges in the 1D expansion (for debugging/comparison).
     /// WARNING: This is expensive - it requires full expansion.
@@ -607,7 +603,7 @@ impl FactoredWeight {
             }
         }
         
-        FactoredWeight { terms: merge_same_profile_terms(new_terms), num_tsids: self.num_tsids, rsb_cache: OnceLock::new() }
+        FactoredWeight { terms: merge_same_profile_terms(new_terms), num_tsids: self.num_tsids }
     }
     
     /// Iterate over 1D positions up to a maximum value.
