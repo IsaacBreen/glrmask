@@ -81,7 +81,7 @@ pub fn run_dwa_optimization_experiment(dwa: &mut DWA) {
                     DwaPass::PushWeightsToInitial => current_dwa.push_weights_to_initial(),
                     DwaPass::ResidualPush => current_dwa.residuated_push(),
                     DwaPass::Minimize => current_dwa.minimize_states(),
-                    DwaPass::ConsolidateRanges => current_dwa.consolidate_ranges(),
+                    DwaPass::ConsolidateRanges => false,
                     DwaPass::TrimWeights => current_dwa.trim_weights(),
                 };
                 if changed {
@@ -310,8 +310,9 @@ impl NWA {
         let det_time = det_start.elapsed();
         crate::debug!(5, "Determinization: {} states, {} transitions, {} ranges ({} interned) in {:.2?}", 
             dwa.states.len(), dwa.states.num_transitions(), dwa.num_ranges(), dwa.num_ranges_interned(), det_time);
-        println!("determinize_and_minimize: after determinize states={} trans={}",
-            dwa.states.len(), dwa.states.num_transitions());
+        let final_count = dwa.states.0.iter().filter(|s| s.final_weight.is_some()).count();
+        println!("determinize_and_minimize: after determinize states={} trans={} final_states={}",
+            dwa.states.len(), dwa.states.num_transitions(), final_count);
 
         // Run DWA passes
         for pass in config.dwa_passes.clone() {
@@ -327,7 +328,7 @@ impl NWA {
                 DwaPass::PushWeightsToInitial => { dwa.push_weights_to_initial(); },
                 DwaPass::ResidualPush => { dwa.residuated_push(); },
                 DwaPass::Minimize => { dwa.minimize_states(); },
-                DwaPass::ConsolidateRanges => { dwa.consolidate_ranges(); },
+                DwaPass::ConsolidateRanges => { /* disabled */ },
                 DwaPass::TrimWeights => { dwa.trim_weights(); },
             }
             let pass_time = pass_start.elapsed();
@@ -338,6 +339,9 @@ impl NWA {
         }
         crate::debug!(5, "DWA minimization: {} states, {} transitions, {} ranges ({} interned)",
             dwa.states.len(), dwa.states.num_transitions(), dwa.num_ranges(), dwa.num_ranges_interned());
+        let final_count = dwa.states.0.iter().filter(|s| s.final_weight.is_some()).count();
+        println!("determinize_and_minimize: after passes states={} trans={} final_states={}",
+            dwa.states.len(), dwa.states.num_transitions(), final_count);
         dwa
     }
 

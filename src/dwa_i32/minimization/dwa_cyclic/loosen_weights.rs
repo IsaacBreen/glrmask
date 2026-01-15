@@ -3,7 +3,7 @@
 //! For each state, computes "don't care" weights - tokens that can't reach this state.
 //! These are added to transition and final weights, making states more similar.
 
-use crate::dwa_i32::common::{StateID, Weight};
+use crate::dwa_i32::common::{StateID, Weight, weight_all, weight_complement};
 use crate::dwa_i32::dwa::DWA;
 use std::collections::VecDeque;
 
@@ -40,7 +40,7 @@ impl DWA {
         }
         
         let mut pre: Vec<Weight> = vec![Weight::zeros(); n];
-        pre[start] = Weight::all();
+        pre[start] = weight_all();
         
         let mut queue: VecDeque<StateID> = VecDeque::new();
         for i in 0..n {
@@ -63,7 +63,7 @@ impl DWA {
                 }
                 
                 if u_is_reachable {
-                    let w = self.states[u].trans_weights.get(&label).cloned().unwrap_or_else(Weight::all);
+                    let w = self.states[u].trans_weights.get(&label).cloned().unwrap_or_else(weight_all);
                     if !w.is_empty() {
                         let flow = &pre_u & &w;
                         if !flow.is_empty() {
@@ -90,7 +90,7 @@ impl DWA {
         // 1. Loosen final weights based on Pre(q)
         for q in 0..n {
             if let Some(ref mut fw) = self.states[q].final_weight {
-                let dont_care = pre[q].complement();
+                let dont_care = weight_complement(&pre[q]);
                 if !dont_care.is_empty() && !dont_care.is_subset_of(fw) {
                     let new_fw = &*fw | &dont_care;
                     if new_fw != *fw {
@@ -103,7 +103,7 @@ impl DWA {
         
         // 2. Loosen transition weights based on Pre(p)
         for p in 0..n {
-            let dont_care = pre[p].complement();
+            let dont_care = weight_complement(&pre[p]);
             if dont_care.is_empty() {
                 continue;
             }

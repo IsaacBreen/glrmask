@@ -4,7 +4,7 @@
 pub use crate::dwa_i32::{
     DWA, DWABody, DWABuildError, DWAState, DWAStates,
     NWA, NWABuildError, NWAState, NWAStates,
-    Weight, StateID, RangeSet, format_word,
+    Weight, StateID, RangeSet, format_word, weight_all,
 };
 pub use crate::dwa_i32::common::Label;
 

@@ -351,6 +351,13 @@ impl<'r> Precomputer1<'r> {
             std::fs::write("nwa_dump.json", json).unwrap();
         }
 
+        let nwa_final_count = self.nwa.states.0.iter().filter(|s| s.final_weight.is_some()).count();
+        let leaf_final_len = self.nwa.states.0.get(self.leaf_state)
+            .and_then(|s| s.final_weight.as_ref().map(|w| w.len()))
+            .unwrap_or(0);
+        println!("finish: terminal_nwa dims={:?} final_states={} leaf_final_len={}",
+            self.nwa.dims, nwa_final_count, leaf_final_len);
+
         // Use unified determinize_and_minimize with "TerminalDWA" profile
         // Pipeline: NWA minimize → compress → rm_epsilon → determinize → DWA minimize
         // Expected results: 14647 → 5904 → 5904 → 889 → 189 states

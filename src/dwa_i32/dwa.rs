@@ -3,7 +3,7 @@
 #![allow(dead_code)]
 #![allow(clippy::needless_borrow)]
 
-pub(crate) use super::common::{format_pos_code, Label, StateID, Weight};
+pub(crate) use super::common::{format_pos_code, Label, StateID, Weight, weight_all};
 use std::collections::BTreeMap;
 use std::fmt::{self, Display, Formatter};
 use std::ops::{Deref, Index, IndexMut};
@@ -170,7 +170,7 @@ impl DWA {
     pub fn eval_word_weight(&self, word: &[Label]) -> Weight {
         if self.states.0.is_empty() { return Weight::zeros(); }
         let mut s = self.body.start_state;
-        let mut acc = Weight::all();
+        let mut acc = weight_all();
 
         if s < self.states.len() {
         } else { return Weight::zeros(); }
@@ -760,7 +760,7 @@ impl DWA {
         }
 
         let mut forward: Vec<Weight> = vec![Weight::zeros(); n];
-        forward[start] = Weight::all();
+        forward[start] = weight_all();
 
         let mut changed = true;
         while changed {
@@ -780,7 +780,7 @@ impl DWA {
                         .trans_weights
                         .get(lbl)
                         .cloned()
-                        .unwrap_or_else(Weight::all);
+                        .unwrap_or_else(weight_all);
                     let mut flow = fu.clone();
                     flow &= &w;
                     if !flow.is_subset_of(&forward[v]) {
@@ -814,7 +814,7 @@ impl DWA {
                         .trans_weights
                         .get(lbl)
                         .cloned()
-                        .unwrap_or_else(Weight::all);
+                        .unwrap_or_else(weight_all);
                     let contribution = &w & &backward[v];
                     if !contribution.is_subset_of(&bu_new) {
                         bu_new |= &contribution;
@@ -854,7 +854,7 @@ impl DWA {
                     .trans_weights
                     .get(&lbl)
                     .cloned()
-                    .unwrap_or_else(Weight::all);
+                    .unwrap_or_else(weight_all);
 
                 let mut new_w = old_w;
                 new_w &= &forward[s];
@@ -885,7 +885,7 @@ impl DWA {
                     .trans_weights
                     .get(&lbl)
                     .cloned()
-                    .unwrap_or_else(Weight::all);
+                    .unwrap_or_else(weight_all);
 
                 let mut new_w = old_w;
                 new_w &= &forward[s];
@@ -908,7 +908,7 @@ impl Display for DWA {
             writeln!(f, "  State {}:", id)?;
             if let Some(w) = &state.final_weight { writeln!(f, "    final_weight: {}", w)?; }
             for (on, to) in &state.transitions {
-                let w = state.trans_weights.get(on).cloned().unwrap_or_else(Weight::all);
+                let w = state.trans_weights.get(on).cloned().unwrap_or_else(weight_all);
                 if w.is_all_fast() {
                     writeln!(f, "    {} -> {}", format_pos_code(*on), to)?;
                 } else {
@@ -952,7 +952,7 @@ impl DWA {
             let transitions: Vec<Value> = state.transitions.iter().map(|(label, target)| {
                 let weight = state.trans_weights.get(label)
                     .cloned()
-                    .unwrap_or_else(Weight::all);
+                    .unwrap_or_else(weight_all);
                 json!({
                     "label": label,
                     "target": target,

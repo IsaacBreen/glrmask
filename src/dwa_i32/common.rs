@@ -2,7 +2,7 @@
 #![allow(clippy::needless_borrow)]
 
 use super::abstract_weight::AbstractWeight;
-use range_set_blaze::RangeSetBlaze;
+use super::get_weight_dimensions;
 
 pub(crate) const STOCHASTIC_DEBUG: bool = false;
 pub(crate) const DETERMINIZE_DEBUG: bool = false;
@@ -19,9 +19,15 @@ pub type Weight = AbstractWeight;
 pub type NWAStateID = usize;
 pub type Label = i32;
 
-/// Create a weight representing the full universe (0..=usize::MAX).
+/// Create a weight representing the full universe for the current dimensions.
 pub fn weight_all() -> Weight {
-    Weight::from_rsb(RangeSetBlaze::from_iter([0..=usize::MAX]))
+    let dims = get_weight_dimensions();
+    Weight::ones(dims.total_size())
+}
+
+/// Create the complement of a weight relative to the full universe.
+pub fn weight_complement(w: &Weight) -> Weight {
+    &weight_all() - w
 }
 
 pub fn format_pos_code(code: Label) -> String { code.to_string() }

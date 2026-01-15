@@ -1208,6 +1208,7 @@ impl GrammarConstraint {
         println!("build_with_config_inner: after run_precompute1");
         println!("build_with_config_inner: terminal_dwa states={} trans={}",
             terminal_dwa.states.len(), terminal_dwa.states.num_transitions());
+        println!("build_with_config_inner: terminal_dwa dims={:?}", terminal_dwa.dims);
 
         crate::debug!(4, "Done precompute1. Terminal DWA (before pruning): {}", terminal_dwa.stats());
 

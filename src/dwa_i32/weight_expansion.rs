@@ -15,7 +15,7 @@
 #![allow(dead_code)]
 
 use range_set_blaze::RangeSetBlaze;
-use super::common::{Label, Weight};
+use super::common::{Label, Weight, weight_all};
 use super::dwa::DWA;
 use super::nwa::NWA;
 use super::heavy_weight::WeightDimensions;
@@ -37,7 +37,7 @@ pub fn expand_weight(weight: &Weight, num_tsids: usize) -> Weight {
         return Weight::zeros();
     }
     if weight.is_all_fast() {
-        return Weight::all();
+        return weight_all();
     }
     
     let rsb = weight.to_rsb();
@@ -318,7 +318,7 @@ pub fn collapse_weight(weight: &Weight, num_tsids: usize) -> Weight {
         return weight.clone();
     }
     if weight.is_all_fast() {
-        return Weight::all();
+        return weight_all();
     }
     
     let rsb = weight.to_rsb();

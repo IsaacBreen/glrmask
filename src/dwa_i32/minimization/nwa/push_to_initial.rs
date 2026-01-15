@@ -1,6 +1,6 @@
 //! Push weights toward initial state in NWA.
 
-use crate::dwa_i32::common::{Label, NWAStateID, Weight};
+use crate::dwa_i32::common::{Label, NWAStateID, Weight, weight_complement};
 use crate::dwa_i32::nwa::NWA;
 use std::collections::{HashSet, VecDeque};
 
@@ -65,7 +65,7 @@ impl NWA {
 
         for (u, st) in self.states.0.iter_mut().enumerate() {
             let d_u = &d[u];
-            let inv_d_u = if starts.contains(&u) { Weight::zeros() } else { d_u.complement() };
+            let inv_d_u = if starts.contains(&u) { Weight::zeros() } else { weight_complement(d_u) };
 
             // Epsilons
             for (v, w) in &mut st.epsilons {

@@ -3,7 +3,7 @@
 #![allow(dead_code)]
 #![allow(clippy::needless_borrow)]
 
-use super::common::{format_i16_char, Label, NWAStateID, Weight, BENCHMARK_DEBUG};
+use super::common::{format_i16_char, Label, NWAStateID, Weight, weight_all, BENCHMARK_DEBUG};
 use super::dwa::DWA;
 use super::heavy_weight::WeightDimensions;
 use crate::dwa_i32::{DWAState, StateID};
@@ -248,7 +248,7 @@ impl NWA {
         for &s in &self.body.start_states {
             if s < rev.states.len() {
                 let old = rev.states[s].final_weight.clone().unwrap_or_else(Weight::zeros);
-                rev.states[s].final_weight = Some(old | Weight::all());
+                rev.states[s].final_weight = Some(old | weight_all());
             }
         }
         
@@ -294,7 +294,7 @@ impl NWA {
         for (i, st) in dwa.states.0.iter().enumerate() {
             nwa.states[i].final_weight = st.final_weight.clone();
             for (lbl, to) in &st.transitions {
-                let w = st.trans_weights.get(lbl).cloned().unwrap_or_else(Weight::all);
+                let w = st.trans_weights.get(lbl).cloned().unwrap_or_else(weight_all);
                 nwa.add_transition(i, *lbl, *to, w).unwrap();
             }
         }
@@ -400,7 +400,7 @@ impl NWA {
             }
             // BFS/DFS through epsilon edges
             let mut visited: std::collections::HashSet<usize> = std::collections::HashSet::new();
-            let mut stack: Vec<(usize, Weight)> = vec![(start, Weight::all())];
+            let mut stack: Vec<(usize, Weight)> = vec![(start, weight_all())];
             while let Some((state, w)) = stack.pop() {
                 if !visited.insert(state) {
                     continue;
@@ -497,7 +497,7 @@ impl NWA {
         let mut forward: Vec<Weight> = vec![Weight::zeros(); n];
         for &s in &self.body.start_states {
             if s < n {
-                forward[s] |= &Weight::all();
+                forward[s] |= &weight_all();
             }
         }
 

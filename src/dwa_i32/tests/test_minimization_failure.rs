@@ -104,7 +104,7 @@ mod test_minimization_failure {
             use std::collections::BTreeMap;
             let mut start_subset = BTreeMap::new();
             for &s in &nwa.body.start_states {
-                start_subset.insert(s, Weight::all());
+                start_subset.insert(s, weight_all());
             }
             println!("  Initial subset before eps closure: {:?}", start_subset);
             
@@ -172,7 +172,7 @@ mod test_minimization_failure {
                 println!("  ✓ Edge weight MATCHES expected");
             } else {
                 println!("  ✗ Edge weight DIFFERS from expected!");
-                let all_weight = Weight::all();
+                let all_weight = weight_all();
                 let missing = &expected_edge_weight & &(&all_weight - actual_weight);
                 let extra = actual_weight & &(&all_weight - &expected_edge_weight);
                 println!("    Missing in actual: {:?}", missing);
@@ -353,7 +353,7 @@ mod test_minimization_failure {
         
         nwa.body.start_states = vec![s0];
         
-        let w_all = Weight::all();
+        let w_all = weight_all();
         let w_a = Weight::from_rsb(RangeSetBlaze::from_iter(0..100));
         let w_b = Weight::from_rsb(RangeSetBlaze::from_iter(50..150));
         let w_x = Weight::from_rsb(RangeSetBlaze::from_iter(0..50));

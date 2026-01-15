@@ -1,6 +1,6 @@
 //! Push weights toward initial state.
 
-use crate::dwa_i32::common::{Label, StateID, Weight};
+use crate::dwa_i32::common::{Label, StateID, Weight, weight_all, weight_complement};
 use crate::dwa_i32::dwa::DWA;
 use std::collections::VecDeque;
 
@@ -30,7 +30,7 @@ impl DWA {
         for (u, st) in self.states.0.iter().enumerate() {
             for (&label, &v) in &st.transitions {
                 if v < n {
-                    let w = st.trans_weights.get(&label).cloned().unwrap_or_else(Weight::all);
+                    let w = st.trans_weights.get(&label).cloned().unwrap_or_else(weight_all);
                     preds[v].push((u, label, w));
                 }
             }
@@ -59,7 +59,7 @@ impl DWA {
         let start_node = self.body.start_state;
         for (u, st) in self.states.0.iter_mut().enumerate() {
             let d_u = &d[u];
-            let inv_d_u = if u == start_node { Weight::zeros() } else { d_u.complement() };
+            let inv_d_u = if u == start_node { Weight::zeros() } else { weight_complement(d_u) };
 
             // Transitions
             for (&label, &v) in &st.transitions {

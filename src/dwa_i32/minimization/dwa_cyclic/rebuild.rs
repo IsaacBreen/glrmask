@@ -1,7 +1,7 @@
 //! Rebuild DWA from partition (after minimization).
 
 use super::super::common::Partition;
-use crate::dwa_i32::common::{Label, StateID, Weight};
+use crate::dwa_i32::common::{Label, StateID, Weight, weight_all};
 use crate::dwa_i32::dwa::{DWAStates, DWA};
 use rustc_hash::FxHashMap;
 use std::collections::BTreeMap;
@@ -47,7 +47,7 @@ impl DWA {
             }
 
             for (&label, &dest) in &st.transitions {
-                let w = st.trans_weights.get(&label).cloned().unwrap_or_else(Weight::all);
+                let w = st.trans_weights.get(&label).cloned().unwrap_or_else(weight_all);
                 if w.is_empty() {
                     continue;
                 }

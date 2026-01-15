@@ -222,7 +222,7 @@ pub fn minimize_acyclic_exact(dwa: &DWA) -> Result<DWA, DWABuildError> {
         dwa.states.len(), new_states.len(), total_start.elapsed());
 
     // 5. Reconstruct the Final DWA
-    let result = reconstruct_dwa(dwa.body.start_state, &old_to_new, new_states)?;
+    let result = reconstruct_dwa(dwa.body.start_state, &old_to_new, new_states, dwa.dims)?;
     
     // 6. Stochastic validation (only when STOCHASTIC_MERGE_VALIDATION=1)
     if std::env::var("STOCHASTIC_MERGE_VALIDATION").is_ok() {
@@ -1253,7 +1253,8 @@ fn compute_state_signature(
 fn reconstruct_dwa(
     start_old: StateID,
     old_to_new: &HashMap<StateID, StateID>,
-    builders: Vec<MergedStateBuilder>
+    builders: Vec<MergedStateBuilder>,
+    dims: WeightDimensions,
 ) -> Result<DWA, DWABuildError> {
     let states: Vec<DWAState> = builders.into_iter().map(|b| {
         let mut state = DWAState::default();
@@ -1274,6 +1275,6 @@ fn reconstruct_dwa(
         body: crate::dwa_i32::dwa::DWABody {
             start_state: old_to_new.get(&start_old).copied().unwrap_or(0),
         },
-        dims: WeightDimensions::TEST,  // Note: caller should propagate dims if needed
+        dims,
     })
 }

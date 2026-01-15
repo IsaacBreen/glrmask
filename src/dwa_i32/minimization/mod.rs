@@ -20,7 +20,6 @@
 //! "active" token domains are disjoint.
 
 pub mod common;
-mod consolidate_ranges;  // Range consolidation pass (general, works for any DWA)
 pub mod dwa_acyclic;
 pub mod dwa_cyclic;
 pub mod graph_coloring;
@@ -30,7 +29,7 @@ pub use common::{Partition, MAX_OPTIMIZE_ITERATIONS, DwaPass};
 pub use nwa::NwaPass;
 
 use crate::dwa_i32::dwa::DWA;
-use crate::dwa_i32::Weight;
+use crate::dwa_i32::{Weight, weight_all, weight_complement};
 
 impl DWA {
     /// Apply DWA optimization passes based on a named config.
@@ -62,7 +61,7 @@ impl DWA {
                 DwaPass::PushWeightsToInitial => { self.push_weights_to_initial(); },
                 DwaPass::ResidualPush => { self.residuated_push(); },
                 DwaPass::Minimize => { self.minimize_states(); },
-                DwaPass::ConsolidateRanges => { self.consolidate_ranges(); },
+                DwaPass::ConsolidateRanges => { /* disabled */ },
                 DwaPass::TrimWeights => { self.trim_weights(); },
             }
         }
@@ -209,7 +208,7 @@ impl DWA {
                     .trans_weights
                     .get(&label)
                     .cloned()
-                    .unwrap_or_else(Weight::all);
+                    .unwrap_or_else(weight_all);
                 b_q = &b_q | &(&tw & &b[target]);
             }
 
@@ -270,7 +269,7 @@ impl DWA {
                     continue;
                 }
 
-                let dead_target = live[target].complement();
+                let dead_target = weight_complement(&live[target]);
 
                 if let Some(tw) = self.states.0[q].trans_weights.get_mut(&label) {
                     *tw = tw.clone() | dead_target;

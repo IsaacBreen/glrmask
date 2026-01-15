@@ -431,7 +431,7 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
         BTreeMap::new()
     };
 
-    let initial_tokens = LLMTokenBV::max_ones();
+    let initial_tokens = LLMTokenBV::ones(dims.num_tokens);
     let mut initial_values_bv = Vec::new();
     for &start in &reversed_nwa.body.start_states {
         initial_values_bv.push((start, initial_tokens.clone()));
@@ -651,7 +651,7 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
     };
     let initial_term_map: BTreeMap<Option<TerminalID>, Weight> = BTreeMap::from([(None, weight_all())]);
     let initial_values_full: Vec<(usize, (BTreeMap<NWABody, BTreeMap<Option<TerminalID>, Weight>>, LLMTokenBV))> =
-        reversed_nwa.body.start_states.iter().map(|&s| (s, (BTreeMap::from([(initial_body.clone(), initial_term_map.clone())]), LLMTokenBV::max_ones()))).collect();
+        reversed_nwa.body.start_states.iter().map(|&s| (s, (BTreeMap::from([(initial_body.clone(), initial_term_map.clone())]), LLMTokenBV::ones(dims.num_tokens)))).collect();
 
     // Store (NWABody, Weight, node_id) - node_id is the state ID in reversed NWA where we collected this body
     // In symbol-heavy mode, we also collect tsid-specific bodies separately

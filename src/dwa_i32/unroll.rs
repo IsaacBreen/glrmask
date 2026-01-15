@@ -1,4 +1,4 @@
-use super::common::{StateID, Weight};
+use super::common::{StateID, Weight, weight_all};
 use super::dwa::DWA;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
@@ -16,7 +16,7 @@ impl DWA {
             return new_dwa;
         }
 
-        let mut start_weight = Weight::all();
+        let mut start_weight = weight_all();
 
         // visited[original_state_id] -> HashMap<Weight, new_state_id>
         // Use Option to lazy initialize HashMaps to save memory/time for sparse traversals

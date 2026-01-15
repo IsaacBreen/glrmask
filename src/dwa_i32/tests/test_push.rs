@@ -85,7 +85,7 @@ fn test_merge_branches() {
     let b: Label = 98;
     let colon: Label = 58;
     let x: Label = 120;
-    let all = Weight::all();
+    let all = weight_all();
     let w100 = Weight::from_item(100);
     let w200 = Weight::from_item(200);
 
@@ -166,7 +166,7 @@ fn test_field_name_optimization() {
     let num_fields = 5;
     let colon: Label = 58;
     let value: Label = 200;
-    let all = Weight::all();
+    let all = weight_all();
 
     let input = {
         let mut nwa = NWA::new();

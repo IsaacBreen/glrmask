@@ -805,7 +805,23 @@ impl AbstractWeight {
 
     /// Fast check if this weight is "all" (accepts everything).
     pub fn is_all_fast(&self) -> bool {
-        dispatch_ref!(self, is_all_fast)
+        if dispatch_ref!(self, is_all_fast) {
+            return true;
+        }
+
+        match self {
+            AbstractWeight::Rs(_) | AbstractWeight::Factored(_) | AbstractWeight::FactoredValidate(_) => {
+                let dims = get_weight_dimensions();
+                if dims.num_tokens == 0 || dims.num_tsids == 0 {
+                    return false;
+                }
+                let max_pos = dims.max_pos();
+                self.min_item() == Some(0)
+                    && self.max_item() == Some(max_pos)
+                    && self.len() == dims.total_size()
+            }
+            _ => false,
+        }
     }
 
     /// Check if a position is contained in this weight.
