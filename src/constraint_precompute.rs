@@ -514,7 +514,18 @@ impl<'r> Precomputer1<'r> {
         assoc_by_state: BTreeMap<TokenizerStateID, NWAStateID>,
     ) {
         self.pb.inc(1);
+        crate::debug!(5, "DFS node: token_id={:?} children={} assoc_states={}",
+            vocab_node.token_id(),
+            vocab_node.children().len(),
+            assoc_by_state.len()
+        );
         for (segment_bytes, child_vocab_node) in vocab_node.iter_children() {
+            let child_reachable = child_vocab_node.reachable_token_ids();
+            crate::debug!(5, "DFS child segment len={} token_id={:?} reachable_tokens={}",
+                segment_bytes.len(),
+                child_vocab_node.token_id(),
+                child_reachable.len()
+            );
             crate::debug!(7, "=== Processing vocab segment: {:?} (token_id={}) ===",
                 String::from_utf8_lossy(segment_bytes), child_vocab_node.token_id());
             crate::debug!(7, "Initial assoc_by_state: {:?}", assoc_by_state);
@@ -529,7 +540,6 @@ impl<'r> Precomputer1<'r> {
             > = BTreeMap::new();
             pending.insert(0, assoc_by_state.clone());
 
-            let child_reachable = child_vocab_node.reachable_token_ids();
             let child_token_id = child_vocab_node.token_id();
 
             // Caches possible matches for end states to prune edge_bv

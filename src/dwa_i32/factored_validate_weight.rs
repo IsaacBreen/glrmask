@@ -45,6 +45,8 @@ impl FactoredValidateWeight {
         let domain_max = dims.num_tokens.saturating_mul(dims.num_tsids);
         let max = domain_max.saturating_sub(1);
 
+        let start = std::time::Instant::now();
+
         let mut clipped = self.rangeset.clone();
         if domain_max > 0 {
             clipped.clip_max(max);
@@ -52,6 +54,17 @@ impl FactoredValidateWeight {
 
         let expanded: RangeSetBlaze<usize> = self.factored.expand_impl();
         let rsb: RangeSetBlaze<usize> = clipped.rsb.clone();
+
+        let elapsed = start.elapsed();
+        if elapsed.as_millis() >= 5 {
+            crate::debug!(5, "FactoredValidate validate: terms={} rs_ranges={} expanded_ranges={} len={} elapsed={:?}",
+                self.factored.num_terms(),
+                rsb.ranges_len(),
+                expanded.ranges().count(),
+                rsb.len(),
+                elapsed
+            );
+        }
 
         if expanded != rsb {
             let only_factored = &expanded - &rsb;
