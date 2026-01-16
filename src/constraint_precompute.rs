@@ -19,6 +19,7 @@ use range_set_blaze::RangeSetBlaze;
 
 use crate::constraint_vocab::LLMTokenBV;
 use crate::datastructures::hybrid_bitset::RangeSet;
+use crate::datastructures::WeightDimensions;
 use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
 use crate::dfa_u8::{Tokenizer, Regex};
 use crate::glr::parser::GLRParser;
@@ -711,6 +712,9 @@ pub fn run_precompute1(
         0
     };
     
+    let num_tokens = internal_max_llm_token.saturating_add(1);
+    Weight::set_weight_dimensions(WeightDimensions::new(num_tokens, num_tsids));
+
     let mut representative_llm_token_map: BTreeMap<Vec<u8>, LLMTokenID> = BTreeMap::new();
     let mut seen_internal_ids = std::collections::HashSet::new();
 

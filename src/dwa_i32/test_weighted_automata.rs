@@ -308,7 +308,7 @@ fn test_simple_bitset_ops() {
     assert!((&set1 & &all).contains(1));
     assert!((&set1 | &zeros).contains(1));
     assert_eq!((&set1 | &zeros).len(), 3);
-    assert_eq!((&set1 & &zeros), Weight::zeros());
+    assert_eq!((&set1 & &zeros), RangeSet::zeros());
 }
 
 #[test]
@@ -321,19 +321,19 @@ fn test_dwa_builder() {
     assert_eq!(s1, 1);
     assert_eq!(dwa.states.len(), 2);
 
-    dwa.set_final_weight(1, RangeSet::from_item(20)).unwrap();
+    dwa.set_final_weight(1, Weight::from_item(20)).unwrap();
 
-    assert_eq!(dwa.states[1].final_weight, Some(RangeSet::from_item(20)));
+    assert_eq!(dwa.states[1].final_weight, Some(Weight::from_item(20)));
 
-    dwa.add_transition(0, b'a' as Label, 1, RangeSet::from_item(30)).unwrap();
+    dwa.add_transition(0, b'a' as Label, 1, Weight::from_item(30)).unwrap();
     assert_eq!(*dwa.states[0].transitions.get(&(b'a' as Label)).unwrap(), 1);
-    assert_eq!(*dwa.states[0].trans_weights.get(&(b'a' as Label)).unwrap(), RangeSet::from_item(30));
+    assert_eq!(*dwa.states[0].trans_weights.get(&(b'a' as Label)).unwrap(), Weight::from_item(30));
 
     // Test error cases
-    let res = dwa.add_transition(0, b'a' as Label, 1, RangeSet::zeros());
+    let res = dwa.add_transition(0, b'a' as Label, 1, Weight::zeros());
     assert!(matches!(res, Err(DWABuildError::TransitionAlreadyExists { from: 0, on: 97 })));
 
-    let res = dwa.set_final_weight(10, RangeSet::zeros());
+    let res = dwa.set_final_weight(10, Weight::zeros());
     assert!(matches!(res, Err(DWABuildError::StateOutOfBounds { state: 10 })));
 }
 
@@ -600,7 +600,7 @@ fn test_minimize_propagates_future_weights() {
     let s1 = a.add_state();
     let s2 = a.add_state();
     a.add_transition(0, 'a' as Label, s1, Weight::all()).unwrap();
-    a.add_transition(s1, 'b' as Label, s2, Weight::from_iter([1..=2])).unwrap();
+    a.add_transition(s1, 'b' as Label, s2, Weight::from_ranges(&[(1, 2)])).unwrap();
     a.set_final_weight(s2, Weight::from_item(2)).unwrap();
 
     // DWA B is the expected minimized form. The transition 1 -> 2 has its

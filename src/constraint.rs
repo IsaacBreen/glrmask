@@ -247,7 +247,7 @@ fn optimize_dwa_and_vocab(
         for t in w.iter_up_to(max_tok) {
             if let Some(&new_t) = old_to_new_map.get(&t) { new_vals.push(new_t); }
         }
-        let new_w = WARangeSet::from_iter(new_vals);
+        let new_w: Weight = WARangeSet::from_iter(new_vals).into();
         cache.insert(w.clone(), new_w.clone());
         new_w
     };
