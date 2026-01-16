@@ -1,5 +1,6 @@
 use range_set_blaze::RangeSetBlaze;
 use std::collections::BTreeMap;
+use std::hash::{Hash, Hasher};
 
 use crate::datastructures::abstract_weight::{current_num_tsids, normalize_num_tsids, WeightBackend};
 
@@ -166,6 +167,24 @@ impl FactorizedWeight {
         }
 
         RangeSetBlaze::from_iter(ranges)
+    }
+}
+
+fn hash_rangeset<H: Hasher>(rsb: &RangeSetBlaze<usize>, state: &mut H) {
+    for range in rsb.ranges() {
+        range.start().hash(state);
+        range.end().hash(state);
+    }
+}
+
+impl Hash for FactorizedWeight {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.num_tsids.hash(state);
+        self.pairs.len().hash(state);
+        for (tsid_set, token_set) in &self.pairs {
+            hash_rangeset(tsid_set, state);
+            hash_rangeset(token_set, state);
+        }
     }
 }
 

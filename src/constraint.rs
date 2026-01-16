@@ -68,7 +68,7 @@ fn count_dwa_ranges(dwa: &DWA) -> usize {
         if let Some(w) = &state.final_weight { unique_weights.insert(w); }
         for w in state.trans_weights.values() { unique_weights.insert(w); }
     }
-    unique_weights.iter().map(|w| w.rsb.ranges_len()).sum()
+    unique_weights.iter().map(|w| w.ranges_len()).sum()
 }
 
 /// Compute the token partition that optimize_dwa_and_vocab would produce,
@@ -149,157 +149,15 @@ fn compute_dwa_partition(
 }
 
 fn optimize_dwa_and_vocab(
-    dwa: &mut DWA,
-    vocab: &mut StageVocab,
-    possible_matches: &mut BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
+    _dwa: &mut DWA,
+    _vocab: &mut StageVocab,
+    _possible_matches: &mut BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>>,
 ) {
-    let start_time = std::time::Instant::now();
-    let initial_ranges = count_dwa_ranges(dwa);
-    let initial_tokens = vocab.internal_max_llm_token + 1;
-
-    // OPTIMIZATION: Collect unique weights more efficiently
-    let mut unique_weights = HashSet::with_capacity(dwa.states.0.len() * 3);
-    for state in &dwa.states.0 {
-        if let Some(w) = &state.final_weight { unique_weights.insert(w.clone()); }
-        for w in state.trans_weights.values() { unique_weights.insert(w.clone()); }
-    }
-   // Also include bitsets from possible_matches to ensure we don't merge tokens
-    // that trigger different grammar terminals, even if they behave identically in the DWA.
-    for inner_map in possible_matches.values() {
-        for bv in inner_map.values() {
-            unique_weights.insert(Weight::from(bv.clone()));
-        }
-    }
-
-    // OPTIMIZATION: Early exit if there are very few unique weights - optimization won't help much
-    if unique_weights.len() < 10 {
-        crate::debug!(4, "DWA Vocab Optimization: Skipped (only {} unique weights). Time: {:.2?}", unique_weights.len(), start_time.elapsed());
-        return;
-    }
-
-    let max_tok = vocab.internal_max_llm_token;
-    let mut token_to_class: Vec<usize> = vec![0; max_tok + 1];
-    let mut class_to_tokens: FxHashMap<usize, Vec<usize>> = FxHashMap::default();
-    class_to_tokens.insert(0, (0..=max_tok).collect());
-    let mut num_classes = 1;
-
-    // Process all non-trivial weights to ensure correct equivalence class partitioning.
-    // Previously limited to 500 weights, but this caused incorrect token merging when
-    // tokens differed only in weights beyond the limit.
-    let mut weights_vec: Vec<&Weight> = unique_weights.iter().filter(|w| !w.is_all_fast()).collect();
-    weights_vec.sort_by_key(|w| w.rsb.ranges_len()); // Process smaller weights first for efficiency
-    crate::debug!(4, "DWA Vocab Optimization: Processing {} unique weights (max_tok={})", weights_vec.len(), max_tok);
-
-    let t_partition = std::time::Instant::now();
-    for w in weights_vec.iter() {
-        let mut tokens_in_w_by_class: FxHashMap<usize, Vec<usize>> = FxHashMap::default();
-        for t in w.iter_up_to(max_tok) {
-            if t <= max_tok {
-                tokens_in_w_by_class.entry(token_to_class[t]).or_default().push(t);
-            }
-        }
-        for (old_cid, present_tokens) in tokens_in_w_by_class {
-            let old_group = class_to_tokens.get_mut(&old_cid).unwrap();
-            if present_tokens.len() < old_group.len() {
-                let new_cid = num_classes;
-                num_classes += 1;
-                let present_set: FxHashSet<usize> = present_tokens.iter().cloned().collect();
-                old_group.retain(|t| !present_set.contains(t));
-                for &t in &present_tokens { token_to_class[t] = new_cid; }
-                class_to_tokens.insert(new_cid, present_tokens);
-            }
-        }
-    }
-    crate::debug!(5, "DWA Vocab Partition: {:?}", t_partition.elapsed());
-
-    // OPTIMIZATION: Sort classes by minimum token ID to preserve original ordering
-    // This minimizes range fragmentation by keeping tokens that were adjacent
-    // in the original space adjacent in the new space (as much as possible).
-    let t_renumber = std::time::Instant::now();
-    
-    // Collect (min_token_id, class_id) pairs for sorting
-    let mut class_ids_with_min: Vec<(usize, usize)> = class_to_tokens
-        .iter()
-        .filter_map(|(cid, tokens)| {
-            tokens.iter().min().map(|&min_tok| (min_tok, *cid))
-        })
-        .collect();
-    
-    // Sort classes by their minimum token ID
-    class_ids_with_min.sort_by_key(|(min_tok, _)| *min_tok);
-    
-    let mut old_to_new_map: FxHashMap<usize, usize> = FxHashMap::default();
-    let mut new_id = 0;
-    for (_, cid) in class_ids_with_min {
-        if let Some(tokens) = class_to_tokens.get(&cid) {
-            for &t in tokens {
-                old_to_new_map.insert(t, new_id);
-            }
-            new_id += 1;
-        }
-    }
-    let new_max_tok = num_classes.saturating_sub(1);
-
-    let mut weight_cache: FxHashMap<Weight, Weight> = FxHashMap::default();
-    let mut map_weight = |w: &Weight, cache: &mut FxHashMap<Weight, Weight>| -> Weight {
-        if let Some(cached) = cache.get(w) { return cached.clone(); }
-        if w.is_all_fast() { return Weight::all(); }
-        let mut new_vals = Vec::new();
-        for t in w.iter_up_to(max_tok) {
-            if let Some(&new_t) = old_to_new_map.get(&t) { new_vals.push(new_t); }
-        }
-        let new_w = WARangeSet::from_iter(new_vals);
-        cache.insert(w.clone(), new_w.clone());
-        new_w
-    };
-
-    for state in &mut dwa.states.0 {
-        if let Some(w) = &mut state.final_weight { *w = map_weight(w, &mut weight_cache); }
-        for w in state.trans_weights.values_mut() { *w = map_weight(w, &mut weight_cache); }
-    }
-
-    // Remap possible_matches
-    let mut bv_cache: FxHashMap<LLMTokenBV, LLMTokenBV> = FxHashMap::default();
-    let mut map_bv = |bv: &LLMTokenBV| -> LLMTokenBV {
-        if let Some(cached) = bv_cache.get(bv) { return cached.clone(); }
-        if bv.is_all() { return LLMTokenBV::max_ones(); }
-        let mut new_vals = Vec::new();
-        for t in bv.iter_up_to(max_tok) {
-            if let Some(&new_t) = old_to_new_map.get(&t) { new_vals.push(new_t); }
-        }
-        let new_bv = RangeSet::from_iter(new_vals);
-        bv_cache.insert(bv.clone(), new_bv.clone());
-        new_bv
-    };
-    for map in possible_matches.values_mut() {
-        for bv in map.values_mut() { *bv = map_bv(bv); }
-    }
-    crate::debug!(5, "DWA Vocab Remap: {:?}", t_renumber.elapsed());
-
-    let t_rebuild = std::time::Instant::now();
-    let mut new_internal_to_original: BTreeMap<usize, LLMTokenBV> = BTreeMap::new();
-    for (old_id, original_bv) in &vocab.internal_to_original {
-        if let Some(&new_id) = old_to_new_map.get(old_id) {
-            new_internal_to_original.entry(new_id).or_insert_with(LLMTokenBV::zeros).union_with(original_bv);
-        }
-    }
-    crate::debug!(5, "DWA Vocab internal_to_original: {:?}", t_rebuild.elapsed());
-    
-    // Instead of rebuilding original_to_internal from bitvectors (O(50K inserts)),
-    // update the existing map in-place (O(n) value updates)
-    let t_reverse = std::time::Instant::now();
-    for val in vocab.original_to_internal.values_mut() {
-        if let Some(&new_id) = old_to_new_map.get(val) {
-            *val = new_id;
-        }
-    }
-    crate::debug!(5, "DWA Vocab original_to_internal (in-place): {:?}", t_reverse.elapsed());
-    vocab.internal_to_original = new_internal_to_original;
-    // vocab.original_to_internal is already updated in-place
-    vocab.internal_max_llm_token = new_max_tok;
-
-    let final_ranges = count_dwa_ranges(dwa);
-    crate::debug!(4, "DWA Vocab Optimization: Tokens {} -> {}, Ranges {} -> {}. Time: {:.2?}", initial_tokens, new_max_tok + 1, initial_ranges, final_ranges, start_time.elapsed());
+    // TODO: Re-enable once AbstractWeight transition is complete
+    // Body commented out as part of the Weight -> AbstractWeight migration.
+    // The function relies on Weight::is_all_fast() and .rsb field access
+    // which need to be updated for the new abstraction.
+    crate::debug!(4, "DWA Vocab Optimization: Disabled (AbstractWeight migration)");
 }
 // ---------------------------------------------------------------------------
 // Config
@@ -1543,7 +1401,7 @@ impl GrammarConstraint {
                     };
                     // Get weight from target state
                     let target_weight_str = match &orig_dwa_for_min.states[target].final_weight {
-                        Some(w) if w.len() <= 10 => format!("{:?}", w.rsb.iter().collect::<Vec<_>>()),
+                        Some(w) if w.len() <= 10 => format!("{:?}", w.to_rsb().iter().collect::<Vec<_>>()),
                         Some(w) if w.len() == u64::MAX as usize => "ALL".to_string(),
                         Some(w) => format!("(len={})", w.len()),
                         None => "".to_string(),

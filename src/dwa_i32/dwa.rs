@@ -909,7 +909,7 @@ impl DWA {
                 json!({"is_empty": true})
             } else {
                 // Export as ranges
-                let ranges: Vec<(usize, usize)> = w.rsb.ranges()
+                let ranges: Vec<(usize, usize)> = w.to_rsb().ranges()
                     .map(|r| (*r.start(), *r.end()))
                     .collect();
                 json!({

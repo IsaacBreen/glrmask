@@ -18,6 +18,7 @@
 
 use range_set_blaze::RangeSetBlaze;
 use crate::datastructures::factorized_weight::FactorizedWeight;
+use std::hash::{Hash, Hasher};
 use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Not};
 
 /// Dimensions for weight-heavy mode encoding.
@@ -282,7 +283,7 @@ impl Default for AbstractWeight {
 }
 
 impl AbstractWeight {
-    /// Create an empty weight.
+    /// Create an empty weight (no positions).
     pub fn empty() -> Self {
         match backend_choice() {
             BackendChoice::RangeSet => AbstractWeight::RangeSet(RangeSetBlaze::<usize>::empty()),
@@ -291,9 +292,32 @@ impl AbstractWeight {
             }
         }
     }
+    
+    /// Create an empty weight (alias for `empty()`).
+    pub fn zeros() -> Self {
+        Self::empty()
+    }
+    
+    /// Create a weight containing all positions.
+    /// 
+    /// Uses the global dims (from set_global_dims) to determine the domain.
+    /// This is the preferred no-arg version.
+    pub fn ones() -> Self {
+        let max_llm_token = crate::datastructures::get_max_llm_token();
+        let num_tsids = crate::datastructures::get_num_tsids();
+        let dims = WeightDimensions::new(max_llm_token + 1, num_tsids);
+        Self::all_with_dims(dims)
+    }
+    
+    /// Create a weight containing all positions (alias for `ones()`).
+    /// 
+    /// Uses the global dims (from set_global_dims) to determine the domain.
+    pub fn all() -> Self {
+        Self::ones()
+    }
 
     /// Create a weight containing all positions in the given range.
-    pub fn all(dims: WeightDimensions) -> Self {
+    pub fn all_with_dims(dims: WeightDimensions) -> Self {
         if dims.domain_size() == 0 {
             return Self::empty();
         }
@@ -386,6 +410,41 @@ impl AbstractWeight {
             AbstractWeight::Factorized(fw) => WeightBackend::ranges_len(fw),
         }
     }
+    
+    /// Alias for `ranges_len()`.
+    pub fn num_ranges(&self) -> usize {
+        self.ranges_len()
+    }
+    
+    /// Fast check if weight represents all positions in the domain.
+    /// 
+    /// Uses global dims to determine domain size.
+    pub fn is_all_fast(&self) -> bool {
+        let max_llm_token = crate::datastructures::get_max_llm_token();
+        let num_tsids = crate::datastructures::get_num_tsids();
+        let domain_size = (max_llm_token + 1) * num_tsids;
+        // Check if ranges_len == 1 and len == domain_size
+        self.ranges_len() == 1 && self.len() == domain_size
+    }
+    
+    /// Check if self is a subset of other.
+    pub fn is_subset_of(&self, other: &Self) -> bool {
+        // self is subset of other if (self - other) is empty
+        match (self, other) {
+            (AbstractWeight::RangeSet(a), AbstractWeight::RangeSet(b)) => {
+                a.clone().difference(&b.clone()).is_empty()
+            }
+            (AbstractWeight::Factorized(a), AbstractWeight::Factorized(b)) => {
+                WeightBackend::difference(a, b).is_empty()
+            }
+            _ => {
+                // Mixed variants: expand both to RangeSet and compare
+                let a_rsb = self.to_rsb();
+                let b_rsb = other.to_rsb();
+                a_rsb.difference(&b_rsb).is_empty()
+            }
+        }
+    }
 
     /// Iterate over ranges as (start, end) inclusive pairs.
     pub fn iter_ranges(&self) -> Box<dyn Iterator<Item = (usize, usize)> + '_> {
@@ -450,6 +509,28 @@ impl AbstractWeight {
         match self {
             AbstractWeight::RangeSet(rsb) => WeightBackend::clip_max(rsb, max),
             AbstractWeight::Factorized(fw) => WeightBackend::clip_max(fw, max),
+        }
+    }
+}
+
+fn hash_rangeset<H: Hasher>(rsb: &RangeSetBlaze<usize>, state: &mut H) {
+    for range in rsb.ranges() {
+        range.start().hash(state);
+        range.end().hash(state);
+    }
+}
+
+impl Hash for AbstractWeight {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        match self {
+            AbstractWeight::RangeSet(rsb) => {
+                0u8.hash(state);
+                hash_rangeset(rsb, state);
+            }
+            AbstractWeight::Factorized(fw) => {
+                1u8.hash(state);
+                fw.hash(state);
+            }
         }
     }
 }
@@ -612,6 +693,18 @@ impl From<&RangeSetBlaze<usize>> for AbstractWeight {
     }
 }
 
+impl From<crate::datastructures::hybrid_bitset::RangeSet> for AbstractWeight {
+    fn from(rsb: crate::datastructures::hybrid_bitset::RangeSet) -> Self {
+        AbstractWeight::from_rsb(std::sync::Arc::unwrap_or_clone(rsb.inner))
+    }
+}
+
+impl From<&crate::datastructures::hybrid_bitset::RangeSet> for AbstractWeight {
+    fn from(rsb: &crate::datastructures::hybrid_bitset::RangeSet) -> Self {
+        AbstractWeight::from_rsb(std::sync::Arc::unwrap_or_clone(rsb.inner.clone()))
+    }
+}
+
 impl From<FactorizedWeight> for AbstractWeight {
     fn from(weight: FactorizedWeight) -> Self {
         AbstractWeight::Factorized(weight)
@@ -695,7 +788,7 @@ mod tests {
     #[test]
     fn test_abstract_weight_all() {
         let dims = WeightDimensions::new(5, 3);
-        let w = AbstractWeight::all(dims);
+        let w = AbstractWeight::all_with_dims(dims);
         assert_eq!(w.len(), 15);
         assert!(w.contains(0));
         assert!(w.contains(14));

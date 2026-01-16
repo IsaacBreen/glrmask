@@ -402,7 +402,7 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
     for (i, state) in terminal_nwa.states.0.iter().enumerate() {
         crate::debug!(6, "  Input State {}: final_weight={:?}, epsilons={}, transitions={:?}", 
             i, 
-            state.final_weight.as_ref().map(|w| w.rsb.ranges().take(5).map(|r| format!("{}..={}", r.start(), r.end())).collect::<Vec<_>>().join(",")),
+            state.final_weight.as_ref().map(|w| w.to_rsb().ranges().take(5).map(|r| format!("{}..={}", r.start(), r.end())).collect::<Vec<_>>().join(",")),
             state.epsilons.len(),
             state.transitions.iter().map(|(&l, targets)| format!("{}:{}", l, targets.len())).collect::<Vec<_>>()
         );
@@ -413,8 +413,8 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
     for (i, state) in reversed_nwa.states.0.iter().enumerate() {
         crate::debug!(6, "  State {}: final_weight={:?}, epsilons={:?}, transitions={}", 
             i, 
-            state.final_weight.as_ref().map(|w| w.rsb.ranges().take(5).map(|r| format!("{}..={}", r.start(), r.end())).collect::<Vec<_>>().join(",")),
-            state.epsilons.iter().take(3).map(|(v, w)| format!("->{}({:?})", v, w.rsb.ranges().take(3).collect::<Vec<_>>())).collect::<Vec<_>>(),
+            state.final_weight.as_ref().map(|w| w.to_rsb().ranges().take(5).map(|r| format!("{}..={}", r.start(), r.end())).collect::<Vec<_>>().join(",")),
+            state.epsilons.iter().take(3).map(|(v, w)| format!("->{}({:?})", v, w.to_rsb().ranges().take(3).collect::<Vec<_>>())).collect::<Vec<_>>(),
             state.transitions.len()
         );
     }
