@@ -1113,14 +1113,19 @@ mod tests {
 
     #[test]
     fn test_factorized_expand_roundtrip() {
+        // Allow expansion for this test
+        std::env::set_var("ALLOW_FACTORIZED_EXPANSION", "1");
         let num_tsids = 3;
         let rsb = RangeSetBlaze::from_iter([0..=2, 4..=5, 8..=8, 10..=12]);
         let fw = FactorizedWeight::from_rsb_with_num_tsids(&rsb, num_tsids);
         assert_eq!(fw.expand_to_rsb(), rsb);
+        std::env::remove_var("ALLOW_FACTORIZED_EXPANSION");
     }
 
     #[test]
     fn test_factorized_set_ops_match_rsb() {
+        // Allow expansion for this test
+        std::env::set_var("ALLOW_FACTORIZED_EXPANSION", "1");
         let num_tsids = 4;
         let a_rsb = RangeSetBlaze::from_iter([0..=7, 10..=12]);
         let b_rsb = RangeSetBlaze::from_iter([5..=9, 12..=15]);
@@ -1132,5 +1137,6 @@ mod tests {
 
         assert_eq!(inter.expand_to_rsb(), &a_rsb & &b_rsb);
         assert_eq!(union.expand_to_rsb(), &a_rsb | &b_rsb);
+        std::env::remove_var("ALLOW_FACTORIZED_EXPANSION");
     }
 }
