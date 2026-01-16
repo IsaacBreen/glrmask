@@ -314,7 +314,11 @@ impl std::fmt::Display for AbstractWeight {
                 }
             }
             AbstractWeight::Factorized(fw) => {
-                write!(f, "FactorizedWeight({} pairs)", fw.pairs.len())
+                if fw.is_expanded() {
+                    write!(f, "FactorizedWeight(expanded, {} ranges)", fw.ranges_len())
+                } else {
+                    write!(f, "FactorizedWeight({} pairs)", fw.pairs_len())
+                }
             }
         }
     }
@@ -419,24 +423,36 @@ impl JSONConvertible for AbstractWeight {
                 JSONNode::Object(obj)
             }
             AbstractWeight::Factorized(fw) => {
-                // Serialize factorized representation: pairs of (tsid_set, token_set)
-                let pairs: Vec<(Vec<Vec<usize>>, Vec<Vec<usize>>)> = fw.pairs()
-                    .iter()
-                    .map(|(tsid_set, token_set)| {
-                        let tsid_ranges: Vec<Vec<usize>> = tsid_set.ranges()
-                            .map(|ri| vec![*ri.start(), *ri.end()])
-                            .collect();
-                        let token_ranges: Vec<Vec<usize>> = token_set.ranges()
-                            .map(|ri| vec![*ri.start(), *ri.end()])
-                            .collect();
-                        (tsid_ranges, token_ranges)
-                    })
-                    .collect();
-                let mut obj = std::collections::BTreeMap::new();
-                obj.insert("type".to_string(), JSONNode::String("factorized".to_string()));
-                obj.insert("num_tsids".to_string(), JSONNode::UInt(fw.num_tsids() as u128));
-                obj.insert("pairs".to_string(), pairs.to_json());
-                JSONNode::Object(obj)
+                if fw.is_expanded() {
+                    let rsb = fw.expand_to_rsb_unchecked();
+                    let ranges_vec: Vec<Vec<usize>> = rsb
+                        .ranges()
+                        .map(|ri| vec![*ri.start(), *ri.end()])
+                        .collect();
+                    let mut obj = std::collections::BTreeMap::new();
+                    obj.insert("type".to_string(), JSONNode::String("rangeset".to_string()));
+                    obj.insert("ranges".to_string(), ranges_vec.to_json());
+                    JSONNode::Object(obj)
+                } else {
+                    // Serialize factorized representation: pairs of (tsid_set, token_set)
+                    let pairs: Vec<(Vec<Vec<usize>>, Vec<Vec<usize>>)> = fw.pairs()
+                        .iter()
+                        .map(|(tsid_set, token_set)| {
+                            let tsid_ranges: Vec<Vec<usize>> = tsid_set.ranges()
+                                .map(|ri| vec![*ri.start(), *ri.end()])
+                                .collect();
+                            let token_ranges: Vec<Vec<usize>> = token_set.ranges()
+                                .map(|ri| vec![*ri.start(), *ri.end()])
+                                .collect();
+                            (tsid_ranges, token_ranges)
+                        })
+                        .collect();
+                    let mut obj = std::collections::BTreeMap::new();
+                    obj.insert("type".to_string(), JSONNode::String("factorized".to_string()));
+                    obj.insert("num_tsids".to_string(), JSONNode::UInt(fw.num_tsids() as u128));
+                    obj.insert("pairs".to_string(), pairs.to_json());
+                    JSONNode::Object(obj)
+                }
             }
         }
     }

@@ -7,14 +7,20 @@ use crate::datastructures::abstract_weight::{current_num_tsids, normalize_num_ts
 /// Factorized weight representation as a union of (tsid_set × token_set) pairs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FactorizedWeight {
-    pub(crate) pairs: Vec<(RangeSetBlaze<usize>, RangeSetBlaze<usize>)>,
+    repr: FactorizedRepr,
     num_tsids: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum FactorizedRepr {
+    Pairs(Vec<(RangeSetBlaze<usize>, RangeSetBlaze<usize>)>),
+    Expanded(RangeSetBlaze<usize>),
 }
 
 impl FactorizedWeight {
     pub(crate) fn new(num_tsids: usize) -> Self {
         Self {
-            pairs: Vec::new(),
+            repr: FactorizedRepr::Pairs(Vec::new()),
             num_tsids: normalize_num_tsids(num_tsids),
         }
     }
@@ -22,53 +28,127 @@ impl FactorizedWeight {
     /// Create a factorized weight from pairs directly.
     pub fn from_pairs(pairs: Vec<(RangeSetBlaze<usize>, RangeSetBlaze<usize>)>, num_tsids: usize) -> Self {
         let mut fw = Self {
-            pairs,
+            repr: FactorizedRepr::Pairs(pairs),
             num_tsids: normalize_num_tsids(num_tsids),
         };
         fw.normalize_pairs();
         fw
     }
 
+    fn from_expanded_rsb(rsb: RangeSetBlaze<usize>, num_tsids: usize) -> Self {
+        Self {
+            repr: FactorizedRepr::Expanded(rsb),
+            num_tsids: normalize_num_tsids(num_tsids),
+        }
+    }
+
     pub(crate) fn num_tsids(&self) -> usize {
         normalize_num_tsids(self.num_tsids)
     }
 
+    pub fn is_expanded(&self) -> bool {
+        matches!(self.repr, FactorizedRepr::Expanded(_))
+    }
+
+    pub fn expanded(&self) -> Option<&RangeSetBlaze<usize>> {
+        match &self.repr {
+            FactorizedRepr::Expanded(rsb) => Some(rsb),
+            _ => None,
+        }
+    }
+
     pub fn pairs(&self) -> &[(RangeSetBlaze<usize>, RangeSetBlaze<usize>)] {
-        &self.pairs
+        match &self.repr {
+            FactorizedRepr::Pairs(pairs) => pairs,
+            FactorizedRepr::Expanded(_) => &[],
+        }
+    }
+
+    pub fn pairs_len(&self) -> usize {
+        match &self.repr {
+            FactorizedRepr::Pairs(pairs) => pairs.len(),
+            FactorizedRepr::Expanded(_) => 0,
+        }
     }
 
     fn add_pair(&mut self, tsid_set: RangeSetBlaze<usize>, token_set: RangeSetBlaze<usize>) {
         if tsid_set.is_empty() || token_set.is_empty() {
             return;
         }
-        for (existing_tsids, existing_tokens) in &mut self.pairs {
-            if *existing_tsids == tsid_set {
-                *existing_tokens |= &token_set;
-                return;
+        let num_tsids = self.num_tsids();
+        match &mut self.repr {
+            FactorizedRepr::Pairs(pairs) => {
+                for (existing_tsids, existing_tokens) in pairs.iter_mut() {
+                    if *existing_tsids == tsid_set {
+                        *existing_tokens |= &token_set;
+                        return;
+                    }
+                }
+                pairs.push((tsid_set, token_set));
+            }
+            FactorizedRepr::Expanded(expanded) => {
+                let pair_rsb = Self::expand_pair_to_rsb(&tsid_set, &token_set, num_tsids);
+                *expanded |= &pair_rsb;
             }
         }
-        self.pairs.push((tsid_set, token_set));
     }
 
     fn normalize_pairs(&mut self) {
-        let mut normalized = Vec::with_capacity(self.pairs.len());
-        for (tsid_set, token_set) in std::mem::take(&mut self.pairs) {
-            if tsid_set.is_empty() || token_set.is_empty() {
-                continue;
-            }
-            let mut merged = false;
-            for (existing_tsids, existing_tokens) in &mut normalized {
-                if *existing_tsids == tsid_set {
-                    *existing_tokens |= &token_set;
-                    merged = true;
-                    break;
+        const PAIR_THRESHOLD: usize = 200;
+        let pairs = match &mut self.repr {
+            FactorizedRepr::Pairs(pairs) => pairs,
+            FactorizedRepr::Expanded(_) => return,
+        };
+
+        loop {
+            let before_count = pairs.len();
+
+            // First pass: merge by identical tsid_set
+            let mut by_tsids = Vec::with_capacity(pairs.len());
+            for (tsid_set, token_set) in std::mem::take(pairs) {
+                if tsid_set.is_empty() || token_set.is_empty() {
+                    continue;
+                }
+                let mut merged = false;
+                for (existing_tsids, existing_tokens) in &mut by_tsids {
+                    if *existing_tsids == tsid_set {
+                        *existing_tokens |= &token_set;
+                        merged = true;
+                        break;
+                    }
+                }
+                if !merged {
+                    by_tsids.push((tsid_set, token_set));
                 }
             }
-            if !merged {
-                normalized.push((tsid_set, token_set));
+
+            // Second pass: merge by identical token_set
+            let mut by_tokens = Vec::with_capacity(by_tsids.len());
+            for (tsid_set, token_set) in by_tsids {
+                let mut merged = false;
+                for (existing_tsids, existing_tokens) in &mut by_tokens {
+                    if *existing_tokens == token_set {
+                        *existing_tsids |= &tsid_set;
+                        merged = true;
+                        break;
+                    }
+                }
+                if !merged {
+                    by_tokens.push((tsid_set, token_set));
+                }
+            }
+
+            *pairs = by_tokens;
+
+            if pairs.len() >= before_count {
+                break;
             }
         }
-        self.pairs = normalized;
+
+        if pairs.len() > PAIR_THRESHOLD {
+            let expanded = self.expand_to_rsb_internal();
+            self.repr = FactorizedRepr::Expanded(expanded);
+        }
     }
 
     pub(crate) fn from_position_with_num_tsids(pos: usize, num_tsids: usize) -> Self {
@@ -78,7 +158,7 @@ impl FactorizedWeight {
         let tsid_set = RangeSetBlaze::from_iter([tsid..=tsid]);
         let token_set = RangeSetBlaze::from_iter([token..=token]);
         let mut weight = Self {
-            pairs: vec![(tsid_set, token_set)],
+            repr: FactorizedRepr::Pairs(vec![(tsid_set, token_set)]),
             num_tsids,
         };
         weight.normalize_pairs();
@@ -172,27 +252,53 @@ impl FactorizedWeight {
     }
 
     fn expand_to_rsb_internal(&self) -> RangeSetBlaze<usize> {
-        if self.pairs.is_empty() {
-            return RangeSetBlaze::new();
-        }
-        let num_tsids = self.num_tsids();
-        let mut ranges: Vec<std::ops::RangeInclusive<usize>> = Vec::new();
+        match &self.repr {
+            FactorizedRepr::Expanded(rsb) => rsb.clone(),
+            FactorizedRepr::Pairs(pairs) => {
+                if pairs.is_empty() {
+                    return RangeSetBlaze::new();
+                }
+                let num_tsids = self.num_tsids();
+                let mut ranges: Vec<std::ops::RangeInclusive<usize>> = Vec::new();
 
-        for (tsid_set, token_set) in &self.pairs {
-            for token_range in token_set.ranges() {
-                let token_start = *token_range.start();
-                let token_end = *token_range.end();
-                for tsid_range in tsid_set.ranges() {
-                    let tsid_start = *tsid_range.start();
-                    let tsid_end = *tsid_range.end();
-                    for token in token_start..=token_end {
-                        let base = token.saturating_mul(num_tsids);
-                        ranges.push(base.saturating_add(tsid_start)..=base.saturating_add(tsid_end));
+                for (tsid_set, token_set) in pairs {
+                    for token_range in token_set.ranges() {
+                        let token_start = *token_range.start();
+                        let token_end = *token_range.end();
+                        for tsid_range in tsid_set.ranges() {
+                            let tsid_start = *tsid_range.start();
+                            let tsid_end = *tsid_range.end();
+                            for token in token_start..=token_end {
+                                let base = token.saturating_mul(num_tsids);
+                                ranges.push(base.saturating_add(tsid_start)..=base.saturating_add(tsid_end));
+                            }
+                        }
                     }
+                }
+
+                RangeSetBlaze::from_iter(ranges)
+            }
+        }
+    }
+
+    fn expand_pair_to_rsb(
+        tsid_set: &RangeSetBlaze<usize>,
+        token_set: &RangeSetBlaze<usize>,
+        num_tsids: usize,
+    ) -> RangeSetBlaze<usize> {
+        let mut ranges: Vec<std::ops::RangeInclusive<usize>> = Vec::new();
+        for token_range in token_set.ranges() {
+            let token_start = *token_range.start();
+            let token_end = *token_range.end();
+            for tsid_range in tsid_set.ranges() {
+                let tsid_start = *tsid_range.start();
+                let tsid_end = *tsid_range.end();
+                for token in token_start..=token_end {
+                    let base = token.saturating_mul(num_tsids);
+                    ranges.push(base.saturating_add(tsid_start)..=base.saturating_add(tsid_end));
                 }
             }
         }
-
         RangeSetBlaze::from_iter(ranges)
     }
 }
@@ -207,10 +313,19 @@ fn hash_rangeset<H: Hasher>(rsb: &RangeSetBlaze<usize>, state: &mut H) {
 impl Hash for FactorizedWeight {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.num_tsids.hash(state);
-        self.pairs.len().hash(state);
-        for (tsid_set, token_set) in &self.pairs {
-            hash_rangeset(tsid_set, state);
-            hash_rangeset(token_set, state);
+        match &self.repr {
+            FactorizedRepr::Pairs(pairs) => {
+                0u8.hash(state);
+                pairs.len().hash(state);
+                for (tsid_set, token_set) in pairs {
+                    hash_rangeset(tsid_set, state);
+                    hash_rangeset(token_set, state);
+                }
+            }
+            FactorizedRepr::Expanded(rsb) => {
+                1u8.hash(state);
+                hash_rangeset(rsb, state);
+            }
         }
     }
 }
@@ -234,65 +349,105 @@ impl WeightBackend for FactorizedWeight {
     }
 
     fn is_empty(&self) -> bool {
-        self.pairs.is_empty() || self.pairs.iter().all(|(a, b)| a.is_empty() || b.is_empty())
+        match &self.repr {
+            FactorizedRepr::Pairs(pairs) => {
+                pairs.is_empty() || pairs.iter().all(|(a, b)| a.is_empty() || b.is_empty())
+            }
+            FactorizedRepr::Expanded(rsb) => rsb.is_empty(),
+        }
     }
 
     fn len(&self) -> usize {
-        let mut total: u128 = 0;
-        for (tsid_set, token_set) in &self.pairs {
-            let pair_count = tsid_set.len().saturating_mul(token_set.len());
-            total = total.saturating_add(pair_count);
-        }
-        if total > usize::MAX as u128 {
-            usize::MAX
-        } else {
-            total as usize
+        match &self.repr {
+            FactorizedRepr::Pairs(pairs) => {
+                let mut total: u128 = 0;
+                for (tsid_set, token_set) in pairs {
+                    let pair_count = tsid_set.len().saturating_mul(token_set.len());
+                    total = total.saturating_add(pair_count);
+                }
+                if total > usize::MAX as u128 {
+                    usize::MAX
+                } else {
+                    total as usize
+                }
+            }
+            FactorizedRepr::Expanded(rsb) => {
+                let len = rsb.len();
+                if len > usize::MAX as u128 {
+                    usize::MAX
+                } else {
+                    len as usize
+                }
+            }
         }
     }
 
     fn contains(&self, pos: usize) -> bool {
-        if self.pairs.is_empty() {
-            return false;
+        match &self.repr {
+            FactorizedRepr::Pairs(pairs) => {
+                if pairs.is_empty() {
+                    return false;
+                }
+                let num_tsids = self.num_tsids();
+                let token = pos / num_tsids;
+                let tsid = pos % num_tsids;
+                pairs.iter().any(|(tsid_set, token_set)| {
+                    tsid_set.contains(tsid) && token_set.contains(token)
+                })
+            }
+            FactorizedRepr::Expanded(rsb) => rsb.contains(pos),
         }
-        let num_tsids = self.num_tsids();
-        let token = pos / num_tsids;
-        let tsid = pos % num_tsids;
-        self.pairs.iter().any(|(tsid_set, token_set)| {
-            tsid_set.contains(tsid) && token_set.contains(token)
-        })
     }
 
     fn ranges_len(&self) -> usize {
-        self.pairs
-            .iter()
-            .map(|(tsid_set, token_set)| tsid_set.ranges_len() + token_set.ranges_len())
-            .sum()
+        match &self.repr {
+            FactorizedRepr::Pairs(pairs) => pairs
+                .iter()
+                .map(|(tsid_set, token_set)| tsid_set.ranges_len() + token_set.ranges_len())
+                .sum(),
+            FactorizedRepr::Expanded(rsb) => rsb.ranges_len(),
+        }
     }
 
     fn insert(&mut self, pos: usize) {
-        let num_tsids = self.num_tsids();
-        let token = pos / num_tsids;
-        let tsid = pos % num_tsids;
-        let tsid_set = RangeSetBlaze::from_iter([tsid..=tsid]);
-        let token_set = RangeSetBlaze::from_iter([token..=token]);
-        self.add_pair(tsid_set, token_set);
-        self.normalize_pairs();
+        match &mut self.repr {
+            FactorizedRepr::Pairs(_) => {
+                let num_tsids = self.num_tsids();
+                let token = pos / num_tsids;
+                let tsid = pos % num_tsids;
+                let tsid_set = RangeSetBlaze::from_iter([tsid..=tsid]);
+                let token_set = RangeSetBlaze::from_iter([token..=token]);
+                self.add_pair(tsid_set, token_set);
+                self.normalize_pairs();
+            }
+            FactorizedRepr::Expanded(rsb) => {
+                *rsb |= &RangeSetBlaze::from_iter([pos..=pos]);
+            }
+        }
     }
 
     fn intersect(&self, other: &Self) -> Self {
         assert_eq!(self.num_tsids(), other.num_tsids(), "FactorizedWeight num_tsids mismatch");
-        let mut out = FactorizedWeight::new(self.num_tsids());
-        for (tsid_a, token_a) in &self.pairs {
-            for (tsid_b, token_b) in &other.pairs {
-                let tsid_inter = tsid_a & tsid_b;
-                let token_inter = token_a & token_b;
-                if !tsid_inter.is_empty() && !token_inter.is_empty() {
-                    out.add_pair(tsid_inter, token_inter);
+        match (&self.repr, &other.repr) {
+            (FactorizedRepr::Expanded(_), _) | (_, FactorizedRepr::Expanded(_)) => {
+                let rsb = self.expand_to_rsb_internal() & other.expand_to_rsb_internal();
+                FactorizedWeight::from_expanded_rsb(rsb, self.num_tsids())
+            }
+            (FactorizedRepr::Pairs(self_pairs), FactorizedRepr::Pairs(other_pairs)) => {
+                let mut out = FactorizedWeight::new(self.num_tsids());
+                for (tsid_a, token_a) in self_pairs {
+                    for (tsid_b, token_b) in other_pairs {
+                        let tsid_inter = tsid_a & tsid_b;
+                        let token_inter = token_a & token_b;
+                        if !tsid_inter.is_empty() && !token_inter.is_empty() {
+                            out.add_pair(tsid_inter, token_inter);
+                        }
+                    }
                 }
+                out.normalize_pairs();
+                out
             }
         }
-        out.normalize_pairs();
-        out
     }
 
     fn intersect_assign(&mut self, other: &Self) {
@@ -301,67 +456,91 @@ impl WeightBackend for FactorizedWeight {
 
     fn union(&self, other: &Self) -> Self {
         assert_eq!(self.num_tsids(), other.num_tsids(), "FactorizedWeight num_tsids mismatch");
-        let mut out = self.clone();
-        for (tsid_set, token_set) in &other.pairs {
-            out.add_pair(tsid_set.clone(), token_set.clone());
+        match (&self.repr, &other.repr) {
+            (FactorizedRepr::Expanded(_), _) | (_, FactorizedRepr::Expanded(_)) => {
+                let rsb = self.expand_to_rsb_internal() | other.expand_to_rsb_internal();
+                FactorizedWeight::from_expanded_rsb(rsb, self.num_tsids())
+            }
+            (FactorizedRepr::Pairs(_), FactorizedRepr::Pairs(other_pairs)) => {
+                let mut out = self.clone();
+                for (tsid_set, token_set) in other_pairs {
+                    out.add_pair(tsid_set.clone(), token_set.clone());
+                }
+                out.normalize_pairs();
+                out
+            }
         }
-        out.normalize_pairs();
-        out
     }
 
     fn union_assign(&mut self, other: &Self) {
         assert_eq!(self.num_tsids(), other.num_tsids(), "FactorizedWeight num_tsids mismatch");
-        for (tsid_set, token_set) in &other.pairs {
-            self.add_pair(tsid_set.clone(), token_set.clone());
+        match (&self.repr, &other.repr) {
+            (FactorizedRepr::Expanded(_), _) | (_, FactorizedRepr::Expanded(_)) => {
+                let rsb = self.expand_to_rsb_internal() | other.expand_to_rsb_internal();
+                self.repr = FactorizedRepr::Expanded(rsb);
+            }
+            (FactorizedRepr::Pairs(_), FactorizedRepr::Pairs(other_pairs)) => {
+                for (tsid_set, token_set) in other_pairs {
+                    self.add_pair(tsid_set.clone(), token_set.clone());
+                }
+                self.normalize_pairs();
+            }
         }
-        self.normalize_pairs();
     }
 
     fn difference(&self, other: &Self) -> Self {
         assert_eq!(self.num_tsids(), other.num_tsids(), "FactorizedWeight num_tsids mismatch");
-        if self.is_empty() {
-            return FactorizedWeight::new(self.num_tsids());
-        }
-        if other.is_empty() {
-            return self.clone();
-        }
-
-        let mut out = FactorizedWeight::new(self.num_tsids());
-        for (tsid_set, token_set) in &self.pairs {
-            let mut remainders = vec![(tsid_set.clone(), token_set.clone())];
-            for (other_tsids, other_tokens) in &other.pairs {
-                if remainders.is_empty() {
-                    break;
-                }
-                let mut next = Vec::new();
-                for (rem_tsids, rem_tokens) in remainders {
-                    let tsid_inter = &rem_tsids & other_tsids;
-                    let token_inter = &rem_tokens & other_tokens;
-                    if tsid_inter.is_empty() || token_inter.is_empty() {
-                        next.push((rem_tsids, rem_tokens));
-                        continue;
-                    }
-
-                    let tsid_diff = &rem_tsids - other_tsids;
-                    if !tsid_diff.is_empty() {
-                        next.push((tsid_diff, rem_tokens.clone()));
-                    }
-
-                    let token_diff = &rem_tokens - other_tokens;
-                    if !token_diff.is_empty() && !tsid_inter.is_empty() {
-                        next.push((tsid_inter, token_diff));
-                    }
-                }
-                remainders = next;
+        match (&self.repr, &other.repr) {
+            (FactorizedRepr::Expanded(_), _) | (_, FactorizedRepr::Expanded(_)) => {
+                let rsb = self.expand_to_rsb_internal() - other.expand_to_rsb_internal();
+                FactorizedWeight::from_expanded_rsb(rsb, self.num_tsids())
             }
+            (FactorizedRepr::Pairs(self_pairs), FactorizedRepr::Pairs(other_pairs)) => {
+                if self.is_empty() {
+                    return FactorizedWeight::new(self.num_tsids());
+                }
+                if other.is_empty() {
+                    return self.clone();
+                }
 
-            for (rem_tsids, rem_tokens) in remainders {
-                out.add_pair(rem_tsids, rem_tokens);
+                let mut out = FactorizedWeight::new(self.num_tsids());
+                for (tsid_set, token_set) in self_pairs {
+                    let mut remainders = vec![(tsid_set.clone(), token_set.clone())];
+                    for (other_tsids, other_tokens) in other_pairs {
+                        if remainders.is_empty() {
+                            break;
+                        }
+                        let mut next = Vec::new();
+                        for (rem_tsids, rem_tokens) in remainders {
+                            let tsid_inter = &rem_tsids & other_tsids;
+                            let token_inter = &rem_tokens & other_tokens;
+                            if tsid_inter.is_empty() || token_inter.is_empty() {
+                                next.push((rem_tsids, rem_tokens));
+                                continue;
+                            }
+
+                            let tsid_diff = &rem_tsids - other_tsids;
+                            if !tsid_diff.is_empty() {
+                                next.push((tsid_diff, rem_tokens.clone()));
+                            }
+
+                            let token_diff = &rem_tokens - other_tokens;
+                            if !token_diff.is_empty() && !tsid_inter.is_empty() {
+                                next.push((tsid_inter, token_diff));
+                            }
+                        }
+                        remainders = next;
+                    }
+
+                    for (rem_tsids, rem_tokens) in remainders {
+                        out.add_pair(rem_tsids, rem_tokens);
+                    }
+                }
+
+                out.normalize_pairs();
+                out
             }
         }
-
-        out.normalize_pairs();
-        out
     }
 
     fn complement(&self, max_position: usize) -> Self {
@@ -370,27 +549,37 @@ impl WeightBackend for FactorizedWeight {
     }
 
     fn min_item(&self) -> Option<usize> {
-        let num_tsids = self.num_tsids();
-        self.pairs
-            .iter()
-            .filter_map(|(tsid_set, token_set)| {
-                let min_token = token_set.ranges().next().map(|r| *r.start())?;
-                let min_tsid = tsid_set.ranges().next().map(|r| *r.start())?;
-                Some(min_token.saturating_mul(num_tsids).saturating_add(min_tsid))
-            })
-            .min()
+        match &self.repr {
+            FactorizedRepr::Expanded(rsb) => rsb.ranges().next().map(|r| *r.start()),
+            FactorizedRepr::Pairs(pairs) => {
+                let num_tsids = self.num_tsids();
+                pairs
+                    .iter()
+                    .filter_map(|(tsid_set, token_set)| {
+                        let min_token = token_set.ranges().next().map(|r| *r.start())?;
+                        let min_tsid = tsid_set.ranges().next().map(|r| *r.start())?;
+                        Some(min_token.saturating_mul(num_tsids).saturating_add(min_tsid))
+                    })
+                    .min()
+            }
+        }
     }
 
     fn max_item(&self) -> Option<usize> {
-        let num_tsids = self.num_tsids();
-        self.pairs
-            .iter()
-            .filter_map(|(tsid_set, token_set)| {
-                let max_token = token_set.ranges().last().map(|r| *r.end())?;
-                let max_tsid = tsid_set.ranges().last().map(|r| *r.end())?;
-                Some(max_token.saturating_mul(num_tsids).saturating_add(max_tsid))
-            })
-            .max()
+        match &self.repr {
+            FactorizedRepr::Expanded(rsb) => rsb.ranges().last().map(|r| *r.end()),
+            FactorizedRepr::Pairs(pairs) => {
+                let num_tsids = self.num_tsids();
+                pairs
+                    .iter()
+                    .filter_map(|(tsid_set, token_set)| {
+                        let max_token = token_set.ranges().last().map(|r| *r.end())?;
+                        let max_tsid = tsid_set.ranges().last().map(|r| *r.end())?;
+                        Some(max_token.saturating_mul(num_tsids).saturating_add(max_tsid))
+                    })
+                    .max()
+            }
+        }
     }
 
 }
