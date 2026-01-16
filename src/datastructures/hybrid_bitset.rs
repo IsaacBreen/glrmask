@@ -6,6 +6,7 @@ use crate::datastructures::bitset::Bitset;
 // Added
 use range_set_blaze::RangeSetBlaze;
 // Import RangeSetBlaze
+use std::cell::Cell;
 use std::cmp::Ordering;
 use std::convert::TryInto;
 use std::fmt::{Debug, Display, Formatter};
@@ -17,19 +18,19 @@ use std::ops::{
     BitAnd, BitAndAssign, BitOr, BitOrAssign, BitXor, BitXorAssign, Sub, SubAssign,
 };
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
-
 // ---------------------------------------------------------------------------
-// Global dimensions for weight-heavy/symbol-heavy mode
+// Thread-local dimensions for weight-heavy/symbol-heavy mode
 // ---------------------------------------------------------------------------
 
-/// Maximum LLM token ID (internal). Set during constraint initialization.
-/// Default is usize::MAX for backwards compatibility.
-static MAX_LLM_TOKEN: AtomicUsize = AtomicUsize::new(usize::MAX);
+thread_local! {
+    /// Maximum LLM token ID (internal). Set during constraint initialization.
+    /// Default is usize::MAX for backwards compatibility.
+    static MAX_LLM_TOKEN: Cell<usize> = Cell::new(usize::MAX);
 
-/// Number of tokenizer states. Set during constraint initialization.
-/// Default is 1 for symbol-heavy mode.
-static NUM_TSIDS: AtomicUsize = AtomicUsize::new(1);
+    /// Number of tokenizer states. Set during constraint initialization.
+    /// Default is 1 for symbol-heavy mode.
+    static NUM_TSIDS: Cell<usize> = Cell::new(1);
+}
 
 /// Set the global LLM token dimension.
 /// 
@@ -37,18 +38,18 @@ static NUM_TSIDS: AtomicUsize = AtomicUsize::new(1);
 /// maximum internal LLM token ID.
 pub fn set_global_dims(max_llm_token: usize, num_tsids: usize) {
     crate::debug!(4, "set_global_dims: max_llm_token={}, num_tsids={}", max_llm_token, num_tsids);
-    MAX_LLM_TOKEN.store(max_llm_token, AtomicOrdering::SeqCst);
-    NUM_TSIDS.store(num_tsids, AtomicOrdering::SeqCst);
+    MAX_LLM_TOKEN.with(|value| value.set(max_llm_token));
+    NUM_TSIDS.with(|value| value.set(num_tsids));
 }
 
 /// Get the current global max LLM token ID.
 pub fn get_max_llm_token() -> usize {
-    MAX_LLM_TOKEN.load(AtomicOrdering::SeqCst)
+    MAX_LLM_TOKEN.with(|value| value.get())
 }
 
 /// Get the current global number of tokenizer states.
 pub fn get_num_tsids() -> usize {
-    NUM_TSIDS.load(AtomicOrdering::SeqCst)
+    NUM_TSIDS.with(|value| value.get())
 }
 
 // --- The Hybrid Bitset Struct ---
