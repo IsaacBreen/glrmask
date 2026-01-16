@@ -38,8 +38,16 @@ impl DWAState {
     }
 
     pub fn clip_weights(&mut self, max: usize) {
-        if let Some(fw) = &mut self.final_weight { fw.clip_max(max); if fw.is_empty() { self.final_weight = None; } }
-        for w in self.trans_weights.values_mut() { w.clip_max(max); }
+        let clip = Weight::from_ranges([0..=max]);
+        if let Some(fw) = &mut self.final_weight {
+            *fw &= &clip;
+            if fw.is_empty() {
+                self.final_weight = None;
+            }
+        }
+        for w in self.trans_weights.values_mut() {
+            *w &= &clip;
+        }
     }
 }
 

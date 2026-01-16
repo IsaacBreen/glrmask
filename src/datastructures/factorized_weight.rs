@@ -227,16 +227,10 @@ impl WeightBackend for FactorizedWeight {
     }
 
     fn ranges_len(&self) -> usize {
-        self.expand_to_rsb().ranges_len()
-    }
-
-    fn iter_ranges(&self) -> Box<dyn Iterator<Item = (usize, usize)> + '_> {
-        let ranges: Vec<(usize, usize)> = self
-            .expand_to_rsb()
-            .ranges()
-            .map(|r| (*r.start(), *r.end()))
-            .collect();
-        Box::new(ranges.into_iter())
+        self.pairs
+            .iter()
+            .map(|(tsid_set, token_set)| tsid_set.ranges_len() + token_set.ranges_len())
+            .sum()
     }
 
     fn insert(&mut self, pos: usize) {
@@ -326,9 +320,4 @@ impl WeightBackend for FactorizedWeight {
             .max()
     }
 
-    fn clip_max(&mut self, max: usize) {
-        let expanded = self.expand_to_rsb();
-        let clipped = expanded.intersect(&RangeSetBlaze::from_iter([0..=max]));
-        *self = FactorizedWeight::from_rsb_with_num_tsids(&clipped, self.num_tsids());
-    }
 }

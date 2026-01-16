@@ -177,7 +177,7 @@ impl HeavyWeight {
     
     /// Create a weight from a RangeSet, clamping to valid bounds.
     pub fn from_rangeset_clamped(mut inner: RangeSet, dims: WeightDimensions) -> Self {
-        inner.clip_max(dims.max_pos());
+        inner.clip_to_range(0, dims.max_pos());
         Self { inner, dims }
     }
     
@@ -304,7 +304,7 @@ impl HeavyWeight {
     
     /// Clip the weight to a maximum position.
     pub fn clip_max(&mut self, max: usize) {
-        self.inner.clip_max(max);
+        self.inner.clip_to_range(0, max);
     }
     
     // ========== Iteration ==========

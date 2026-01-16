@@ -140,9 +140,6 @@ pub trait WeightBackend: Clone + PartialEq + Eq + std::fmt::Debug {
     /// Get the number of ranges in the weight.
     fn ranges_len(&self) -> usize;
     
-    /// Iterate over ranges as (start, end) inclusive pairs.
-    fn iter_ranges(&self) -> Box<dyn Iterator<Item = (usize, usize)> + '_>;
-    
     /// Insert a position into the weight.
     fn insert(&mut self, pos: usize);
     
@@ -169,9 +166,6 @@ pub trait WeightBackend: Clone + PartialEq + Eq + std::fmt::Debug {
     
     /// Get the maximum position, if any.
     fn max_item(&self) -> Option<usize>;
-    
-    /// Clip to positions <= max.
-    fn clip_max(&mut self, max: usize);
 }
 
 // ---------------------------------------------------------------------------
@@ -211,10 +205,6 @@ impl WeightBackend for RangeSetBlaze<usize> {
         RangeSetBlaze::ranges_len(self)
     }
     
-    fn iter_ranges(&self) -> Box<dyn Iterator<Item = (usize, usize)> + '_> {
-        Box::new(self.ranges().map(|r| (*r.start(), *r.end())))
-    }
-    
     fn insert(&mut self, pos: usize) {
         RangeSetBlaze::insert(self, pos);
     }
@@ -250,11 +240,6 @@ impl WeightBackend for RangeSetBlaze<usize> {
     
     fn max_item(&self) -> Option<usize> {
         self.ranges().last().map(|r| *r.end())
-    }
-    
-    fn clip_max(&mut self, max: usize) {
-        let clipped = self.intersect(&RangeSetBlaze::from_iter([0..=max]));
-        *self = clipped;
     }
 }
 
@@ -640,14 +625,6 @@ impl AbstractWeight {
         }
     }
 
-    /// Iterate over ranges as (start, end) inclusive pairs.
-    pub fn iter_ranges(&self) -> Box<dyn Iterator<Item = (usize, usize)> + '_> {
-        match self {
-            AbstractWeight::RangeSet(rsb) => WeightBackend::iter_ranges(rsb),
-            AbstractWeight::Factorized(fw) => WeightBackend::iter_ranges(fw),
-        }
-    }
-
     /// Iterate over ranges.
     pub fn ranges(&self) -> Box<dyn Iterator<Item = std::ops::RangeInclusive<usize>> + '_> {
         match self {
@@ -713,13 +690,6 @@ impl AbstractWeight {
         }
     }
     
-    /// Clip to positions <= max.
-    pub fn clip_max(&mut self, max: usize) {
-        match self {
-            AbstractWeight::RangeSet(rsb) => WeightBackend::clip_max(rsb, max),
-            AbstractWeight::Factorized(fw) => WeightBackend::clip_max(fw, max),
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1114,7 +1084,10 @@ mod tests {
     fn test_backend_ranges_and_len() {
         let backend = <Backend as WeightBackend>::from_ranges([1..=3, 7..=9]);
         assert_eq!(<Backend as WeightBackend>::ranges_len(&backend), 2);
-        let ranges: Vec<(usize, usize)> = <Backend as WeightBackend>::iter_ranges(&backend).collect();
+        let ranges: Vec<(usize, usize)> = backend
+            .ranges()
+            .map(|r| (*r.start(), *r.end()))
+            .collect();
         assert_eq!(ranges, vec![(1, 3), (7, 9)]);
         assert_eq!(<Backend as WeightBackend>::len(&backend), 6);
     }
@@ -1138,15 +1111,10 @@ mod tests {
     }
 
     #[test]
-    fn test_backend_min_max_and_clip() {
-        let mut backend = <Backend as WeightBackend>::from_ranges([2..=4, 8..=10]);
+    fn test_backend_min_max() {
+        let backend = <Backend as WeightBackend>::from_ranges([2..=4, 8..=10]);
         assert_eq!(<Backend as WeightBackend>::min_item(&backend), Some(2));
         assert_eq!(<Backend as WeightBackend>::max_item(&backend), Some(10));
-
-        <Backend as WeightBackend>::clip_max(&mut backend, 5);
-        assert_eq!(<Backend as WeightBackend>::max_item(&backend), Some(4));
-        assert!(<Backend as WeightBackend>::contains(&backend, 2));
-        assert!(!<Backend as WeightBackend>::contains(&backend, 8));
     }
 
     #[test]
