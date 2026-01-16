@@ -609,20 +609,7 @@ impl AbstractWeight {
     /// Check if self is a subset of other.
     pub fn is_subset_of(&self, other: &Self) -> bool {
         // self is subset of other if (self - other) is empty
-        match (self, other) {
-            (AbstractWeight::RangeSet(a), AbstractWeight::RangeSet(b)) => {
-                a.clone().difference(&b.clone()).is_empty()
-            }
-            (AbstractWeight::Factorized(a), AbstractWeight::Factorized(b)) => {
-                WeightBackend::difference(a, b).is_empty()
-            }
-            _ => {
-                // Mixed variants: expand both to RangeSet and compare
-                let a_rsb = self.to_rsb();
-                let b_rsb = other.to_rsb();
-                a_rsb.difference(&b_rsb).is_empty()
-            }
-        }
+        self.difference(other).is_empty()
     }
 
     /// Iterate over ranges.
