@@ -1,8 +1,321 @@
 use range_set_blaze::RangeSetBlaze;
-use std::collections::BTreeMap;
+use std::cell::RefCell;
+use std::collections::{BTreeMap, HashMap};
 use std::hash::{Hash, Hasher};
+use std::sync::OnceLock;
+use std::time::Instant;
 
 use crate::datastructures::abstract_weight::{current_num_tsids, normalize_num_tsids, WeightBackend};
+
+const PROFILE_PRINT_EVERY_SECS: u64 = 5;
+const PROFILE_PRINT_EVERY_CALLS: u64 = 20_000;
+const PROFILE_MAX_SAMPLES: usize = 4096;
+const DIFFERENCE_EXPAND_THRESHOLD: usize = 128;
+
+#[derive(Copy, Clone, Debug)]
+enum OpKind {
+    Intersect,
+    Union,
+    Difference,
+    NormalizePairs,
+    FromRsb,
+    ExpandToRsb,
+}
+
+#[derive(Clone, Debug)]
+struct RangeSetKey(RangeSetBlaze<usize>);
+
+impl PartialEq for RangeSetKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+
+impl Eq for RangeSetKey {}
+
+impl Hash for RangeSetKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        hash_rangeset(&self.0, state);
+    }
+}
+
+impl OpKind {
+    fn idx(self) -> usize {
+        match self {
+            OpKind::Intersect => 0,
+            OpKind::Union => 1,
+            OpKind::Difference => 2,
+            OpKind::NormalizePairs => 3,
+            OpKind::FromRsb => 4,
+            OpKind::ExpandToRsb => 5,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            OpKind::Intersect => "intersect",
+            OpKind::Union => "union",
+            OpKind::Difference => "difference",
+            OpKind::NormalizePairs => "normalize_pairs",
+            OpKind::FromRsb => "from_rsb",
+            OpKind::ExpandToRsb => "expand_to_rsb",
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug)]
+struct OpSample {
+    duration_ns: u64,
+    in_pairs: usize,
+    out_pairs: usize,
+    in_ranges: usize,
+    out_ranges: usize,
+}
+
+#[derive(Default, Debug)]
+struct OpStats {
+    calls: u64,
+    total_ns: u128,
+    samples: Vec<OpSample>,
+}
+
+impl OpStats {
+    fn record(&mut self, sample: OpSample) {
+        self.calls = self.calls.saturating_add(1);
+        self.total_ns = self.total_ns.saturating_add(sample.duration_ns as u128);
+        if self.samples.len() < PROFILE_MAX_SAMPLES {
+            self.samples.push(sample);
+        } else {
+            let idx = (self.calls as usize) % PROFILE_MAX_SAMPLES;
+            self.samples[idx] = sample;
+        }
+    }
+
+    fn clear_window(&mut self) {
+        self.calls = 0;
+        self.total_ns = 0;
+        self.samples.clear();
+    }
+}
+
+struct FactorizedWeightStats {
+    ops: [OpStats; 6],
+    last_print: Instant,
+}
+
+impl FactorizedWeightStats {
+    fn new() -> Self {
+        Self {
+            ops: std::array::from_fn(|_| OpStats::default()),
+            last_print: Instant::now(),
+        }
+    }
+
+    fn record(&mut self, op: OpKind, sample: OpSample) {
+        self.ops[op.idx()].record(sample);
+        self.maybe_report();
+    }
+
+    fn maybe_report(&mut self) {
+        let total_calls: u64 = self.ops.iter().map(|op| op.calls).sum();
+        if total_calls == 0 {
+            return;
+        }
+        let elapsed = self.last_print.elapsed();
+        if elapsed.as_secs() < PROFILE_PRINT_EVERY_SECS && total_calls < PROFILE_PRINT_EVERY_CALLS {
+            return;
+        }
+        self.print(false);
+    }
+
+    fn print(&mut self, final_summary: bool) {
+        let total_calls: u64 = self.ops.iter().map(|op| op.calls).sum();
+        if total_calls == 0 {
+            return;
+        }
+        let elapsed = self.last_print.elapsed();
+        crate::debug!(
+            4,
+            "FactorizedWeight profiling{}: {} calls in {:.2?}",
+            if final_summary { " (final)" } else { "" },
+            total_calls,
+            elapsed
+        );
+
+        for (idx, op) in [
+            OpKind::Intersect,
+            OpKind::Union,
+            OpKind::Difference,
+            OpKind::NormalizePairs,
+            OpKind::FromRsb,
+            OpKind::ExpandToRsb,
+        ]
+        .iter()
+        .enumerate()
+        {
+            let stats = &self.ops[idx];
+            if stats.calls == 0 {
+                continue;
+            }
+            let summary = summarize_samples(&stats.samples);
+            let total_ms = (stats.total_ns as f64) / 1_000_000.0;
+            if let Some(summary) = summary {
+                crate::debug!(
+                    4,
+                    "  {:>16}: calls={}, total={:.2}ms, time_us p50/p99/max={}/{}/{}, pairs in p50/p99/max={}/{}/{}, out p50/p99/max={}/{}/{}, ranges in p50/p99/max={}/{}/{}, out p50/p99/max={}/{}/{},",
+                    op.name(),
+                    stats.calls,
+                    total_ms,
+                    summary.time_p50_us,
+                    summary.time_p99_us,
+                    summary.time_p100_us,
+                    summary.in_pairs_p50,
+                    summary.in_pairs_p99,
+                    summary.in_pairs_p100,
+                    summary.out_pairs_p50,
+                    summary.out_pairs_p99,
+                    summary.out_pairs_p100,
+                    summary.in_ranges_p50,
+                    summary.in_ranges_p99,
+                    summary.in_ranges_p100,
+                    summary.out_ranges_p50,
+                    summary.out_ranges_p99,
+                    summary.out_ranges_p100,
+                );
+            } else {
+                crate::debug!(
+                    4,
+                    "  {:>16}: calls={}, total={:.2}ms",
+                    op.name(),
+                    stats.calls,
+                    total_ms
+                );
+            }
+        }
+
+        for op in &mut self.ops {
+            op.clear_window();
+        }
+        self.last_print = Instant::now();
+    }
+}
+
+impl Drop for FactorizedWeightStats {
+    fn drop(&mut self) {
+        if profiling_enabled() {
+            self.print(true);
+        }
+    }
+}
+
+thread_local! {
+    static FACTORIZED_WEIGHT_STATS: RefCell<FactorizedWeightStats> = RefCell::new(FactorizedWeightStats::new());
+}
+
+#[derive(Debug)]
+struct Summary {
+    time_p50_us: u64,
+    time_p99_us: u64,
+    time_p100_us: u64,
+    in_pairs_p50: u64,
+    in_pairs_p99: u64,
+    in_pairs_p100: u64,
+    out_pairs_p50: u64,
+    out_pairs_p99: u64,
+    out_pairs_p100: u64,
+    in_ranges_p50: u64,
+    in_ranges_p99: u64,
+    in_ranges_p100: u64,
+    out_ranges_p50: u64,
+    out_ranges_p99: u64,
+    out_ranges_p100: u64,
+}
+
+fn summarize_samples(samples: &[OpSample]) -> Option<Summary> {
+    if samples.is_empty() {
+        return None;
+    }
+
+    let mut times: Vec<u64> = samples.iter().map(|s| s.duration_ns / 1_000).collect();
+    let mut in_pairs: Vec<u64> = samples.iter().map(|s| s.in_pairs as u64).collect();
+    let mut out_pairs: Vec<u64> = samples.iter().map(|s| s.out_pairs as u64).collect();
+    let mut in_ranges: Vec<u64> = samples.iter().map(|s| s.in_ranges as u64).collect();
+    let mut out_ranges: Vec<u64> = samples.iter().map(|s| s.out_ranges as u64).collect();
+
+    Some(Summary {
+        time_p50_us: percentile(&mut times, 0.50),
+        time_p99_us: percentile(&mut times, 0.99),
+        time_p100_us: *times.iter().max().unwrap_or(&0),
+        in_pairs_p50: percentile(&mut in_pairs, 0.50),
+        in_pairs_p99: percentile(&mut in_pairs, 0.99),
+        in_pairs_p100: *in_pairs.iter().max().unwrap_or(&0),
+        out_pairs_p50: percentile(&mut out_pairs, 0.50),
+        out_pairs_p99: percentile(&mut out_pairs, 0.99),
+        out_pairs_p100: *out_pairs.iter().max().unwrap_or(&0),
+        in_ranges_p50: percentile(&mut in_ranges, 0.50),
+        in_ranges_p99: percentile(&mut in_ranges, 0.99),
+        in_ranges_p100: *in_ranges.iter().max().unwrap_or(&0),
+        out_ranges_p50: percentile(&mut out_ranges, 0.50),
+        out_ranges_p99: percentile(&mut out_ranges, 0.99),
+        out_ranges_p100: *out_ranges.iter().max().unwrap_or(&0),
+    })
+}
+
+fn percentile(values: &mut [u64], pct: f64) -> u64 {
+    if values.is_empty() {
+        return 0;
+    }
+    values.sort_unstable();
+    let idx = ((values.len() - 1) as f64 * pct).round() as usize;
+    values[idx.min(values.len() - 1)]
+}
+
+fn profiling_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        if let Ok(val) = std::env::var("PROFILE_FACTORIZED_WEIGHT") {
+            let v = val.to_ascii_lowercase();
+            return matches!(v.as_str(), "1" | "true" | "yes" | "y" | "on");
+        }
+        std::env::var("ABSTRACT_WEIGHT_BACKEND")
+            .map(|v| v.eq_ignore_ascii_case("factorized"))
+            .unwrap_or(false)
+    })
+}
+
+fn record_profile(
+    op: OpKind,
+    start: Instant,
+    in_pairs: usize,
+    in_ranges: usize,
+    out_pairs: usize,
+    out_ranges: usize,
+) {
+    if !profiling_enabled() {
+        return;
+    }
+    let elapsed_ns = start.elapsed().as_nanos();
+    let duration_ns = if elapsed_ns > u64::MAX as u128 {
+        u64::MAX
+    } else {
+        elapsed_ns as u64
+    };
+    let sample = OpSample {
+        duration_ns,
+        in_pairs,
+        out_pairs,
+        in_ranges,
+        out_ranges,
+    };
+    FACTORIZED_WEIGHT_STATS.with(|stats| stats.borrow_mut().record(op, sample));
+}
+
+fn pairs_ranges_len(pairs: &[(RangeSetBlaze<usize>, RangeSetBlaze<usize>)]) -> usize {
+    pairs
+        .iter()
+        .map(|(tsid_set, token_set)| tsid_set.ranges_len() + token_set.ranges_len())
+        .sum()
+}
 
 /// Factorized weight representation as a union of (tsid_set × token_set) pairs.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,25 +363,242 @@ impl FactorizedWeight {
         self.pairs.push((tsid_set, token_set));
     }
 
+    /// Normalize pairs to find a more compact representation.
+    ///
+    /// This applies iterative merging plus two greedy re-factorizations:
+    /// 1. Merge pairs with identical tsid_sets (union their token_sets)
+    /// 2. Merge pairs with identical token_sets (union their tsid_sets)
+    /// 3. Rebuild by grouping tokens by their combined tsid_set
+    /// 4. Rebuild by grouping tsids by their combined token_set
+    /// 5. Pick the smallest representation
     fn normalize_pairs(&mut self) {
-        let mut normalized = Vec::with_capacity(self.pairs.len());
-        for (tsid_set, token_set) in std::mem::take(&mut self.pairs) {
-            if tsid_set.is_empty() || token_set.is_empty() {
-                continue;
+        let profile = profiling_enabled();
+        let in_pairs = if profile { self.pairs.len() } else { 0 };
+        let in_ranges = if profile { pairs_ranges_len(&self.pairs) } else { 0 };
+        let start = if profile { Some(Instant::now()) } else { None };
+
+        if self.pairs.is_empty() {
+            if let Some(start) = start {
+                record_profile(OpKind::NormalizePairs, start, in_pairs, in_ranges, 0, 0);
             }
-            let mut merged = false;
-            for (existing_tsids, existing_tokens) in &mut normalized {
-                if *existing_tsids == tsid_set {
-                    *existing_tokens |= &token_set;
-                    merged = true;
-                    break;
-                }
+            return;
+        }
+
+        let mut pairs = std::mem::take(&mut self.pairs);
+        pairs.retain(|(tsid_set, token_set)| !tsid_set.is_empty() && !token_set.is_empty());
+
+        let mut best = Self::merge_identical_pairs(pairs);
+        if best.len() <= 1 {
+            self.pairs = best;
+            if let Some(start) = start {
+                record_profile(
+                    OpKind::NormalizePairs,
+                    start,
+                    in_pairs,
+                    in_ranges,
+                    self.pairs.len(),
+                    pairs_ranges_len(&self.pairs),
+                );
             }
-            if !merged {
-                normalized.push((tsid_set, token_set));
+            return;
+        }
+
+        let mut candidates: Vec<Vec<(RangeSetBlaze<usize>, RangeSetBlaze<usize>)>> = Vec::new();
+        let best_len = best.len();
+
+        if let Some(max_token) = Self::max_token_in_pairs(&best) {
+            let token_bound = max_token.saturating_add(1);
+            if token_bound < best_len {
+                candidates.push(Self::normalize_by_tokens(&best));
             }
         }
-        self.pairs = normalized;
+
+        let num_tsids = self.num_tsids();
+        if num_tsids < best_len {
+            candidates.push(Self::normalize_by_tsids(&best, num_tsids));
+        }
+
+        if !candidates.is_empty() {
+            for candidate in candidates {
+                if candidate.is_empty() {
+                    continue;
+                }
+                let candidate = Self::merge_identical_pairs(candidate);
+                if Self::is_better_candidate(&candidate, &best) {
+                    best = candidate;
+                }
+            }
+        }
+
+        self.pairs = best;
+
+        if let Some(start) = start {
+            record_profile(
+                OpKind::NormalizePairs,
+                start,
+                in_pairs,
+                in_ranges,
+                self.pairs.len(),
+                pairs_ranges_len(&self.pairs),
+            );
+        }
+    }
+
+    fn merge_identical_pairs(
+        mut pairs: Vec<(RangeSetBlaze<usize>, RangeSetBlaze<usize>)>,
+    ) -> Vec<(RangeSetBlaze<usize>, RangeSetBlaze<usize>)> {
+        loop {
+            let before_count = pairs.len();
+
+            // First pass: merge by identical tsid_set
+            let mut by_tsids: HashMap<RangeSetKey, RangeSetBlaze<usize>> = HashMap::with_capacity(pairs.len());
+            for (tsid_set, token_set) in pairs {
+                if tsid_set.is_empty() || token_set.is_empty() {
+                    continue;
+                }
+                by_tsids
+                    .entry(RangeSetKey(tsid_set))
+                    .and_modify(|existing_tokens| *existing_tokens |= &token_set)
+                    .or_insert(token_set);
+            }
+
+            // Second pass: merge by identical token_set
+            let mut by_tokens: HashMap<RangeSetKey, RangeSetBlaze<usize>> = HashMap::with_capacity(by_tsids.len());
+            for (tsid_key, token_set) in by_tsids {
+                let tsid_set = tsid_key.0;
+                by_tokens
+                    .entry(RangeSetKey(token_set))
+                    .and_modify(|existing_tsids| *existing_tsids |= &tsid_set)
+                    .or_insert(tsid_set);
+            }
+
+            pairs = by_tokens
+                .into_iter()
+                .map(|(token_key, tsid_set)| (tsid_set, token_key.0))
+                .collect();
+
+            if pairs.len() >= before_count {
+                break;
+            }
+        }
+
+        pairs
+    }
+
+    fn max_token_in_pairs(
+        pairs: &[(RangeSetBlaze<usize>, RangeSetBlaze<usize>)],
+    ) -> Option<usize> {
+        pairs
+            .iter()
+            .filter_map(|(_, token_set)| token_set.ranges().last().map(|r| *r.end()))
+            .max()
+    }
+
+    fn normalize_by_tokens(
+        pairs: &[(RangeSetBlaze<usize>, RangeSetBlaze<usize>)],
+    ) -> Vec<(RangeSetBlaze<usize>, RangeSetBlaze<usize>)> {
+        let max_token = pairs
+            .iter()
+            .filter_map(|(_, token_set)| token_set.ranges().last().map(|r| *r.end()))
+            .max();
+        let Some(max_token) = max_token else {
+            return Vec::new();
+        };
+
+        let mut token_tsids: Vec<RangeSetBlaze<usize>> = vec![RangeSetBlaze::new(); max_token + 1];
+
+        for (tsid_set, token_set) in pairs {
+            for token_range in token_set.ranges() {
+                for token in *token_range.start()..=*token_range.end() {
+                    if token_tsids[token].is_empty() {
+                        token_tsids[token] = tsid_set.clone();
+                    } else {
+                        token_tsids[token] |= tsid_set;
+                    }
+                }
+            }
+        }
+
+        let mut grouped: HashMap<RangeSetKey, RangeSetBlaze<usize>> = HashMap::new();
+        for (token, tsid_set) in token_tsids.into_iter().enumerate() {
+            if tsid_set.is_empty() {
+                continue;
+            }
+            let token_set = RangeSetBlaze::from_iter([token..=token]);
+            grouped
+                .entry(RangeSetKey(tsid_set))
+                .and_modify(|existing_tokens| *existing_tokens |= &token_set)
+                .or_insert(token_set);
+        }
+
+        grouped
+            .into_iter()
+            .map(|(tsid_key, token_set)| (tsid_key.0, token_set))
+            .collect()
+    }
+
+    fn normalize_by_tsids(
+        pairs: &[(RangeSetBlaze<usize>, RangeSetBlaze<usize>)],
+        num_tsids: usize,
+    ) -> Vec<(RangeSetBlaze<usize>, RangeSetBlaze<usize>)> {
+        let num_tsids = normalize_num_tsids(num_tsids);
+        let mut tsid_tokens: Vec<RangeSetBlaze<usize>> = vec![RangeSetBlaze::new(); num_tsids];
+
+        for (tsid_set, token_set) in pairs {
+            for tsid_range in tsid_set.ranges() {
+                for tsid in *tsid_range.start()..=*tsid_range.end() {
+                    if tsid_tokens[tsid].is_empty() {
+                        tsid_tokens[tsid] = token_set.clone();
+                    } else {
+                        tsid_tokens[tsid] |= token_set;
+                    }
+                }
+            }
+        }
+
+        let mut grouped: HashMap<RangeSetKey, RangeSetBlaze<usize>> = HashMap::new();
+        for (tsid, token_set) in tsid_tokens.into_iter().enumerate() {
+            if token_set.is_empty() {
+                continue;
+            }
+            let tsid_set = RangeSetBlaze::from_iter([tsid..=tsid]);
+            grouped
+                .entry(RangeSetKey(token_set))
+                .and_modify(|existing_tsids| *existing_tsids |= &tsid_set)
+                .or_insert(tsid_set);
+        }
+
+        grouped
+            .into_iter()
+            .map(|(token_key, tsid_set)| (tsid_set, token_key.0))
+            .collect()
+    }
+
+    fn is_better_candidate(
+        candidate: &[(RangeSetBlaze<usize>, RangeSetBlaze<usize>)],
+        best: &[(RangeSetBlaze<usize>, RangeSetBlaze<usize>)],
+    ) -> bool {
+        let candidate_cost = Self::candidate_cost(candidate);
+        let best_cost = Self::candidate_cost(best);
+        candidate_cost < best_cost
+    }
+
+    fn candidate_cost(
+        pairs: &[(RangeSetBlaze<usize>, RangeSetBlaze<usize>)],
+    ) -> (usize, usize, u128) {
+        let total_ranges: usize = pairs
+            .iter()
+            .map(|(tsid_set, token_set)| tsid_set.ranges_len() + token_set.ranges_len())
+            .sum();
+        let total_items: u128 = pairs
+            .iter()
+            .map(|(tsid_set, token_set)| {
+                let tsid_len = tsid_set.len() as u128;
+                let token_len = token_set.len() as u128;
+                tsid_len.saturating_mul(token_len)
+            })
+            .sum();
+        (pairs.len(), total_ranges, total_items)
     }
 
     pub(crate) fn from_position_with_num_tsids(pos: usize, num_tsids: usize) -> Self {
@@ -113,9 +643,25 @@ impl FactorizedWeight {
     }
 
     pub(crate) fn from_rsb_with_num_tsids(rsb: &RangeSetBlaze<usize>, num_tsids: usize) -> Self {
+        let profile = profiling_enabled();
+        let in_pairs = 0usize;
+        let in_ranges = if profile { rsb.ranges_len() } else { 0 };
+        let start = if profile { Some(Instant::now()) } else { None };
+
         let num_tsids = normalize_num_tsids(num_tsids);
         if rsb.is_empty() {
-            return Self::new(num_tsids);
+            let empty = Self::new(num_tsids);
+            if let Some(start) = start {
+                record_profile(
+                    OpKind::FromRsb,
+                    start,
+                    in_pairs,
+                    in_ranges,
+                    empty.pairs.len(),
+                    pairs_ranges_len(&empty.pairs),
+                );
+            }
+            return empty;
         }
 
         let mut token_to_tsids: BTreeMap<usize, RangeSetBlaze<usize>> = BTreeMap::new();
@@ -155,6 +701,16 @@ impl FactorizedWeight {
             weight.add_pair(tsid_set, token_set);
         }
         weight.normalize_pairs();
+        if let Some(start) = start {
+            record_profile(
+                OpKind::FromRsb,
+                start,
+                in_pairs,
+                in_ranges,
+                weight.pairs.len(),
+                pairs_ranges_len(&weight.pairs),
+            );
+        }
         weight
     }
 
@@ -172,8 +728,17 @@ impl FactorizedWeight {
     }
 
     fn expand_to_rsb_internal(&self) -> RangeSetBlaze<usize> {
+        let profile = profiling_enabled();
+        let in_pairs = if profile { self.pairs.len() } else { 0 };
+        let in_ranges = if profile { pairs_ranges_len(&self.pairs) } else { 0 };
+        let start = if profile { Some(Instant::now()) } else { None };
+
         if self.pairs.is_empty() {
-            return RangeSetBlaze::new();
+            let empty = RangeSetBlaze::new();
+            if let Some(start) = start {
+                record_profile(OpKind::ExpandToRsb, start, in_pairs, in_ranges, 0, empty.ranges_len());
+            }
+            return empty;
         }
         let num_tsids = self.num_tsids();
         let mut ranges: Vec<std::ops::RangeInclusive<usize>> = Vec::new();
@@ -193,7 +758,11 @@ impl FactorizedWeight {
             }
         }
 
-        RangeSetBlaze::from_iter(ranges)
+        let rsb = RangeSetBlaze::from_iter(ranges);
+        if let Some(start) = start {
+            record_profile(OpKind::ExpandToRsb, start, in_pairs, in_ranges, 0, rsb.ranges_len());
+        }
+        rsb
     }
 }
 
@@ -281,6 +850,15 @@ impl WeightBackend for FactorizedWeight {
 
     fn intersect(&self, other: &Self) -> Self {
         assert_eq!(self.num_tsids(), other.num_tsids(), "FactorizedWeight num_tsids mismatch");
+        let profile = profiling_enabled();
+        let in_pairs = if profile { self.pairs.len().saturating_add(other.pairs.len()) } else { 0 };
+        let in_ranges = if profile {
+            pairs_ranges_len(&self.pairs).saturating_add(pairs_ranges_len(&other.pairs))
+        } else {
+            0
+        };
+        let start = if profile { Some(Instant::now()) } else { None };
+
         let mut out = FactorizedWeight::new(self.num_tsids());
         for (tsid_a, token_a) in &self.pairs {
             for (tsid_b, token_b) in &other.pairs {
@@ -292,6 +870,16 @@ impl WeightBackend for FactorizedWeight {
             }
         }
         out.normalize_pairs();
+        if let Some(start) = start {
+            record_profile(
+                OpKind::Intersect,
+                start,
+                in_pairs,
+                in_ranges,
+                out.pairs.len(),
+                pairs_ranges_len(&out.pairs),
+            );
+        }
         out
     }
 
@@ -301,29 +889,116 @@ impl WeightBackend for FactorizedWeight {
 
     fn union(&self, other: &Self) -> Self {
         assert_eq!(self.num_tsids(), other.num_tsids(), "FactorizedWeight num_tsids mismatch");
+        let profile = profiling_enabled();
+        let in_pairs = if profile { self.pairs.len().saturating_add(other.pairs.len()) } else { 0 };
+        let in_ranges = if profile {
+            pairs_ranges_len(&self.pairs).saturating_add(pairs_ranges_len(&other.pairs))
+        } else {
+            0
+        };
+        let start = if profile { Some(Instant::now()) } else { None };
+
         let mut out = self.clone();
         for (tsid_set, token_set) in &other.pairs {
             out.add_pair(tsid_set.clone(), token_set.clone());
         }
         out.normalize_pairs();
+        if let Some(start) = start {
+            record_profile(
+                OpKind::Union,
+                start,
+                in_pairs,
+                in_ranges,
+                out.pairs.len(),
+                pairs_ranges_len(&out.pairs),
+            );
+        }
         out
     }
 
     fn union_assign(&mut self, other: &Self) {
         assert_eq!(self.num_tsids(), other.num_tsids(), "FactorizedWeight num_tsids mismatch");
+        let profile = profiling_enabled();
+        let in_pairs = if profile { self.pairs.len().saturating_add(other.pairs.len()) } else { 0 };
+        let in_ranges = if profile {
+            pairs_ranges_len(&self.pairs).saturating_add(pairs_ranges_len(&other.pairs))
+        } else {
+            0
+        };
+        let start = if profile { Some(Instant::now()) } else { None };
+
         for (tsid_set, token_set) in &other.pairs {
             self.add_pair(tsid_set.clone(), token_set.clone());
         }
         self.normalize_pairs();
+        if let Some(start) = start {
+            record_profile(
+                OpKind::Union,
+                start,
+                in_pairs,
+                in_ranges,
+                self.pairs.len(),
+                pairs_ranges_len(&self.pairs),
+            );
+        }
     }
 
     fn difference(&self, other: &Self) -> Self {
         assert_eq!(self.num_tsids(), other.num_tsids(), "FactorizedWeight num_tsids mismatch");
+        let profile = profiling_enabled();
+        let in_pairs = if profile { self.pairs.len().saturating_add(other.pairs.len()) } else { 0 };
+        let in_ranges = if profile {
+            pairs_ranges_len(&self.pairs).saturating_add(pairs_ranges_len(&other.pairs))
+        } else {
+            0
+        };
+        let start = if profile { Some(Instant::now()) } else { None };
+
         if self.is_empty() {
-            return FactorizedWeight::new(self.num_tsids());
+            let empty = FactorizedWeight::new(self.num_tsids());
+            if let Some(start) = start {
+                record_profile(
+                    OpKind::Difference,
+                    start,
+                    in_pairs,
+                    in_ranges,
+                    empty.pairs.len(),
+                    pairs_ranges_len(&empty.pairs),
+                );
+            }
+            return empty;
         }
         if other.is_empty() {
-            return self.clone();
+            let out = self.clone();
+            if let Some(start) = start {
+                record_profile(
+                    OpKind::Difference,
+                    start,
+                    in_pairs,
+                    in_ranges,
+                    out.pairs.len(),
+                    pairs_ranges_len(&out.pairs),
+                );
+            }
+            return out;
+        }
+
+        if self.pairs.len() > DIFFERENCE_EXPAND_THRESHOLD && other.pairs.len() > DIFFERENCE_EXPAND_THRESHOLD {
+            let self_rsb = self.expand_to_rsb_internal();
+            let other_rsb = other.expand_to_rsb_internal();
+            let result_rsb = &self_rsb - &other_rsb;
+            let out = FactorizedWeight::from_rsb_with_num_tsids(&result_rsb, self.num_tsids());
+            if let Some(start) = start {
+                record_profile(
+                    OpKind::Difference,
+                    start,
+                    in_pairs,
+                    in_ranges,
+                    out.pairs.len(),
+                    pairs_ranges_len(&out.pairs),
+                );
+            }
+            return out;
         }
 
         let mut out = FactorizedWeight::new(self.num_tsids());
@@ -361,6 +1036,16 @@ impl WeightBackend for FactorizedWeight {
         }
 
         out.normalize_pairs();
+        if let Some(start) = start {
+            record_profile(
+                OpKind::Difference,
+                start,
+                in_pairs,
+                in_ranges,
+                out.pairs.len(),
+                pairs_ranges_len(&out.pairs),
+            );
+        }
         out
     }
 
