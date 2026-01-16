@@ -162,28 +162,31 @@ constraint_time = time.time() - start
 print(f"   Constraint creation: {constraint_time*1000:.1f}ms")
 
 # Step 5: Test stepping through a valid input
-print("\n5. Testing constraint on valid input...")
-state = _sep1.GrammarConstraintState(constraint)
+if os.environ.get("SKIP_STEP_5"):
+    print("\n5. Skipping constraint testing on valid input (SKIP_STEP_5 set).")
+else:
+    print("\n5. Testing constraint on valid input...")
+    state = _sep1.GrammarConstraintState(constraint)
 
-# A minimal valid JSON that should match most schemas
-test_input = "{}"
-print(f"   Input: {test_input}")
+    # A minimal valid JSON that should match most schemas
+    test_input = "{}"
+    print(f"   Input: {test_input}")
 
-for char in test_input:
-    char_bytes = char.encode('utf-8')
-    # Find token ID for this character
-    if char_bytes in token_to_id:
-        token_id = token_to_id[char_bytes]
-        mask = state.get_mask()
-        if mask[token_id]:
-            state.commit(token_id)
-            print(f"   Accepted: '{char}' (token {token_id})")
-        else:
-            print(f"   Rejected: '{char}' (token {token_id}) - not in mask")
-            break
+    for char in test_input:
+        char_bytes = char.encode('utf-8')
+        # Find token ID for this character
+        if char_bytes in token_to_id:
+            token_id = token_to_id[char_bytes]
+            mask = state.get_mask()
+            if mask[token_id]:
+                state.commit(token_id)
+                print(f"   Accepted: '{char}' (token {token_id})")
+            else:
+                print(f"   Rejected: '{char}' (token {token_id}) - not in mask")
+                break
 
-print(f"\n   Final state active: {state.is_active()}")
-print(f"   Final state valid: {state.is_valid()}")
+    print(f"\n   Final state active: {state.is_active()}")
+    print(f"   Final state valid: {state.is_valid()}")
 
 # Summary
 total_time = vocab_time + ebnf_time + parse_time + compile_time + constraint_time
