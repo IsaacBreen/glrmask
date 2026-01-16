@@ -4,7 +4,6 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use rayon::prelude::*;
-use range_set_blaze::RangeSetBlaze;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 
@@ -265,8 +264,8 @@ fn specialize_dwa_relative(parent_dwa: &DWA, mapping: &[Weight], parent_unique_w
     // and allows us to use a read-only map during the parallel state construction.
     let weight_map: HashMap<Weight, Weight> = parent_unique_weights.iter()
         .map(|w| {
-            // OPTIMIZATION: Accumulate in a local RangeSetBlaze to avoid SimpleBitset lock contention
-            let mut accumulator = RangeSetBlaze::new();
+            // OPTIMIZATION: Accumulate in a local Weight to avoid SimpleBitset lock contention
+            let mut accumulator = Weight::zeros();
             let mut is_all = false;
 
             for bit in w.iter_up_to(mapping.len()) {
@@ -276,14 +275,14 @@ fn specialize_dwa_relative(parent_dwa: &DWA, mapping: &[Weight], parent_unique_w
                         break;
                     }
                     // Access the inner RSB directly to avoid locking
-                    accumulator |= &target_w.rsb;
+                    accumulator |= &target_w;
                 }
             }
 
             let new_w = if is_all {
                 Weight::all()
             } else {
-                Weight::from_rsb(accumulator)
+                accumulator
             };
             (w.clone(), new_w)
         })
@@ -599,7 +598,7 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
             // Pre-compute the weight mapping for this target signature
             let weight_map: HashMap<Weight, Weight> = super_dwa_unique_weights.iter()
                 .map(|w| {
-                    let mut accumulator = RangeSetBlaze::new();
+                    let mut accumulator = Weight::zeros();
                     let mut is_all = false;
 
                     for bit in w.iter_up_to(mapping.len()) {
@@ -608,14 +607,14 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
                                 is_all = true;
                                 break;
                             }
-                            accumulator |= &target_w.rsb;
+                            accumulator |= &target_w;
                         }
                     }
 
                     let new_w = if is_all {
                         Weight::all()
                     } else {
-                        Weight::from_rsb(accumulator)
+                        accumulator
                     };
                     (w.clone(), new_w)
                 })
