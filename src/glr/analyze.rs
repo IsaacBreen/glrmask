@@ -1407,7 +1407,7 @@ pub fn inline_null_productions(productions: &[Production]) -> Vec<Production> {
         
         // Progress logging
         if i > 0 && i % 100 == 0 {
-            crate::debug!(5, "    Processed {} / {} productions, {} output productions so far", i, productions.len(), out.len());
+            crate::debug!(6, "    Processed {} / {} productions, {} output productions so far", i, productions.len(), out.len());
         }
     }
     
