@@ -20,6 +20,8 @@ use range_set_blaze::RangeSetBlaze;
 use crate::datastructures::factorized_weight::FactorizedWeight;
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use serde::{Deserialize, Serialize};
+use serde::de::Error;
+use serde_json::Value as JsonValue;
 use std::hash::{Hash, Hasher};
 use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Not};
 
@@ -346,9 +348,74 @@ impl Serialize for AbstractWeight {
 
 impl<'de> Deserialize<'de> for AbstractWeight {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let ranges: Vec<(usize, usize)> = Vec::deserialize(deserializer)?;
-        let rsb = RangeSetBlaze::from_iter(ranges.into_iter().map(|(start, end)| start..=end));
-        Ok(AbstractWeight::from_rsb(rsb))
+        let value = JsonValue::deserialize(deserializer)?;
+        let arr = match value {
+            JsonValue::Array(arr) => arr,
+            other => {
+                return Err(D::Error::custom(format!(
+                    "Expected weight as JSON array, got {}",
+                    other
+                )))
+            }
+        };
+
+        if arr.is_empty() {
+            return Ok(AbstractWeight::empty());
+        }
+
+        if arr.iter().all(|v| v.is_array()) {
+            let mut ranges = Vec::with_capacity(arr.len());
+            for item in arr {
+                let pair = item
+                    .as_array()
+                    .ok_or_else(|| D::Error::custom("Expected array for range pair"))?;
+                if pair.len() != 2 {
+                    return Err(D::Error::custom(format!(
+                        "Expected 2-element range pair, got {}",
+                        pair.len()
+                    )));
+                }
+                let start = pair[0]
+                    .as_u64()
+                    .ok_or_else(|| D::Error::custom("Range start must be a non-negative integer"))?
+                    as usize;
+                let end = pair[1]
+                    .as_u64()
+                    .ok_or_else(|| D::Error::custom("Range end must be a non-negative integer"))?
+                    as usize;
+                ranges.push(start..=end);
+            }
+            let rsb = RangeSetBlaze::from_iter(ranges);
+            return Ok(AbstractWeight::from_rsb(rsb));
+        }
+
+        if arr.iter().all(|v| v.is_number()) {
+            if arr.len() % 2 != 0 {
+                return Err(D::Error::custom(format!(
+                    "Expected even number of flattened range endpoints, got {}",
+                    arr.len()
+                )));
+            }
+            let mut ranges = Vec::with_capacity(arr.len() / 2);
+            let mut iter = arr.into_iter();
+            while let (Some(start_val), Some(end_val)) = (iter.next(), iter.next()) {
+                let start = start_val
+                    .as_u64()
+                    .ok_or_else(|| D::Error::custom("Range start must be a non-negative integer"))?
+                    as usize;
+                let end = end_val
+                    .as_u64()
+                    .ok_or_else(|| D::Error::custom("Range end must be a non-negative integer"))?
+                    as usize;
+                ranges.push(start..=end);
+            }
+            let rsb = RangeSetBlaze::from_iter(ranges);
+            return Ok(AbstractWeight::from_rsb(rsb));
+        }
+
+        Err(D::Error::custom(
+            "Expected weight as array of [start,end] pairs or flattened endpoints",
+        ))
     }
 }
 
