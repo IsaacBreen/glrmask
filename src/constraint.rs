@@ -37,7 +37,7 @@ use crate::{
     types::{TerminalID as GrammarTokenID, TerminalID},
 };
 use crate::datastructures::bitset::Bitset;
-use crate::datastructures::gss_acc::Acc;
+use crate::datastructures::gss_acc::TerminalsDisallowed;
 use crate::glr::parser::{ExpectElse, ParseStateEdgeContent};
 use crate::dwa_i32::{DWA, NWA};
 use crate::dwa_i32::{RangeSet as WARangeSet, Weight};
@@ -45,7 +45,7 @@ use crate::dwa_i32::{RangeSet as WARangeSet, Weight};
 pub use crate::constraint_vocab::*;
 use crate::constraint_precompute::run_precompute1;
 
-type GSSNode = LeveledGSS<ParseStateEdgeContent, Acc>;
+type GSSNode = LeveledGSS<ParseStateEdgeContent, TerminalsDisallowed>;
 
 // Thread-local storage for verification mode
 // ---------------------------------------------------------------------------

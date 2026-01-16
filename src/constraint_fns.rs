@@ -8,14 +8,13 @@ use crate::dwa_i32::weight_expansion::{create_tsid_mask_rsb_with_offset_map, col
 use crate::dfa_u8::TokenizerStateID;
 use profiler_macro::time_it;
 use range_set_blaze::RangeSetBlaze;
-use std::collections::BTreeMap;
-use std::ops::BitOrAssign;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
 use crate::datastructures::bitset::Bitset;
-use crate::datastructures::gss_acc::Acc;
+use crate::datastructures::gss_acc::TerminalsDisallowed;
 
-type ParserGSS = LeveledGSS<ParseStateEdgeContent, Acc>;
+type ParserGSS = LeveledGSS<ParseStateEdgeContent, TerminalsDisallowed>;
 
 // Benchmark mode for capturing Rust-native timings without Python overhead
 static BENCHMARK_MODE: AtomicBool = AtomicBool::new(false);
@@ -65,36 +64,7 @@ impl<'a> GrammarConstraintState<'a> {
                 continue;
             }
 
-            // Prune GSS based on disallowed terminals before starting.
-            let mut gss = glr_state.stack.clone();
-            let possible_matches = &self.parent.possible_matches;
-            gss = gss.apply_and_prune(|acc| {
-                if acc.terminals_union.is_empty() {
-                    return Some(acc.clone());
-                }
-                let mut forbidden_llm_tokens = RangeSet::zeros();
-                for (&tokenizer_state_id, disallowed_in_state) in &acc.terminals_union {
-                    if disallowed_in_state.is_empty() { continue; }
-                    if let Some(state_matches) = possible_matches.get(&TokenizerStateID(tokenizer_state_id)) {
-                        for (terminal_id, llm_tokens) in state_matches {
-                            if disallowed_in_state.contains(terminal_id.0) {
-                                forbidden_llm_tokens |= llm_tokens;
-                            }
-                        }
-                    }
-                }
-
-                if forbidden_llm_tokens.is_empty() {
-                    return Some(acc.clone());
-                }
-                let mut new_acc = acc.clone();
-                new_acc.llm_tokens_union -= &forbidden_llm_tokens;
-                if new_acc.llm_tokens_union.is_empty() { None } else { Some(new_acc) }
-            });
-
-            if gss.is_empty() {
-                continue;
-            }
+            let gss = glr_state.stack.clone();
 
             // In symbol-heavy mode, tsid labels are offset by terminals_count
             // to avoid collision with terminal labels (0 to terminals_count-1).
@@ -107,9 +77,27 @@ impl<'a> GrammarConstraintState<'a> {
                 dwa_start_state.transitions.len());
             if let Some((target_wa_state_id, weight)) = dwa_start_state.get_transition(tsid_label) {
                 crate::debug!(6, "    Found transition to state {} with weight {:?}", target_wa_state_id, weight);
-                let f = |acc: &Acc| {
-                    let new_rsb = acc.llm_tokens_union.inner.as_ref() & &weight.rsb;
-                    if new_rsb.is_empty() { None } else { Some(new_rsb) }
+                let possible_matches = &self.parent.possible_matches;
+                
+                // Convert TerminalsDisallowed -> RangeSetBlaze<usize> (LLM tokens allowed)
+                // by computing forbidden tokens and subtracting from weight
+                let f = |terminals_disallowed: &TerminalsDisallowed| {
+                    // Start with all tokens allowed by the weight
+                    let mut allowed = weight.rsb.clone();
+                    
+                    // Subtract forbidden tokens based on disallowed terminals
+                    for (&tsid, disallowed_in_state) in terminals_disallowed {
+                        if disallowed_in_state.is_empty() { continue; }
+                        if let Some(state_matches) = possible_matches.get(&TokenizerStateID(tsid)) {
+                            for (terminal_id, llm_tokens) in state_matches {
+                                if disallowed_in_state.contains(&terminal_id.0) {
+                                    allowed = &allowed - llm_tokens.inner.as_ref();
+                                }
+                            }
+                        }
+                    }
+                    
+                    if allowed.is_empty() { None } else { Some(allowed) }
                 };
                 let weighted_gss = gss.apply_and_prune(f);
 
@@ -233,43 +221,29 @@ impl<'a> GrammarConstraintState<'a> {
                 },
             );
             
-            // Prune GSS based on disallowed terminals (same as symbol-heavy)
-            let mut gss = glr_state.stack.clone();
+            let gss = glr_state.stack.clone();
             let possible_matches = &self.parent.possible_matches;
-            gss = gss.apply_and_prune(|acc| {
-                if acc.terminals_union.is_empty() {
-                    return Some(acc.clone());
-                }
-                let mut forbidden_llm_tokens = RangeSet::zeros();
-                for (&ts_id, disallowed_in_state) in &acc.terminals_union {
+
+            // Convert GSS accumulator (TerminalsDisallowed) to N×M space with tsid mask applied
+            let f = |terminals_disallowed: &TerminalsDisallowed| {
+                // Start with all LLM tokens in N-space
+                let mut allowed_n: RangeSetBlaze<usize> = RangeSetBlaze::from_iter([0..=max_llm_token]);
+                
+                // Subtract forbidden tokens based on disallowed terminals
+                for (&ts_id, disallowed_in_state) in terminals_disallowed {
                     if disallowed_in_state.is_empty() { continue; }
                     if let Some(state_matches) = possible_matches.get(&TokenizerStateID(ts_id)) {
                         for (terminal_id, llm_tokens) in state_matches {
-                            if disallowed_in_state.contains(terminal_id.0) {
-                                forbidden_llm_tokens |= llm_tokens;
+                            if disallowed_in_state.contains(&terminal_id.0) {
+                                allowed_n = &allowed_n - llm_tokens.inner.as_ref();
                             }
                         }
                     }
                 }
-                if forbidden_llm_tokens.is_empty() {
-                    return Some(acc.clone());
-                }
-                let mut new_acc = acc.clone();
-                new_acc.llm_tokens_union -= &forbidden_llm_tokens;
-                if new_acc.llm_tokens_union.is_empty() { None } else { Some(new_acc) }
-            });
-
-            if gss.is_empty() {
-                continue;
-            }
-
-            // Convert GSS accumulator to N×M space with tsid mask applied
-            let f = |acc: &Acc| {
+                
                 // Expand the LLM token set to N×M and intersect with tsid mask
                 // This creates weights where only positions i*M + tsid are set
-                let expanded = crate::dwa_i32::weight_expansion::expand_rsb(
-                    &acc.llm_tokens_union.inner, num_tsids
-                );
+                let expanded = crate::dwa_i32::weight_expansion::expand_rsb(&allowed_n, num_tsids);
                 let masked = &expanded & &tsid_mask;
                 if masked.is_empty() { None } else { Some(masked) }
             };
@@ -434,27 +408,28 @@ impl<'a> GrammarConstraintState<'a> {
         for glr_state in self.state.values_mut() {
             let mut gss = glr_state.stack.clone();
             // Prune based on matched terminals
-            gss = gss.apply_and_prune(|acc| {
+            gss = gss.apply_and_prune(|terminals_disallowed: &TerminalsDisallowed| {
                 for (sid, matched_terminals) in &terminals_map {
-                    if let Some(disallowed) = acc.terminals_union.get(&sid.0) {
-                        if matched_terminals.intersects(disallowed) {
-                            return None;
+                    if let Some(disallowed) = terminals_disallowed.get(&sid.0) {
+                        // Check if any matched terminal is in the disallowed set
+                        for t in matched_terminals.iter_indices() {
+                            if disallowed.contains(&t) {
+                                return None;
+                            }
                         }
                     }
                 }
-                Some(acc.clone())
+                Some(terminals_disallowed.clone())
             });
             // Remap tokenizer states
-            gss = gss.apply(|acc| {
-                let mut new_terminals_union: BTreeMap<usize, RangeSet> = BTreeMap::new();
+            gss = gss.apply(|terminals_disallowed: &TerminalsDisallowed| {
+                let mut new_terminals_union: TerminalsDisallowed = BTreeMap::new();
                 for (old, new) in &state_map {
-                    if let Some(bv) = acc.terminals_union.get(&old.0) {
-                        new_terminals_union.entry(new.0).or_default().bitor_assign(bv);
+                    if let Some(disallowed) = terminals_disallowed.get(&old.0) {
+                        new_terminals_union.entry(new.0).or_default().extend(disallowed.iter().cloned());
                     }
                 }
-                let mut new_acc = acc.clone();
-                new_acc.terminals_union = new_terminals_union;
-                new_acc
+                new_terminals_union
             });
             glr_state.stack = gss;
         }
@@ -487,10 +462,10 @@ impl<'a> GrammarConstraintState<'a> {
                         if let Some(end_state_id) = exec_result.end_state {
                             if self.parent.tokenizer.tokens_accessible_from_state(TokenizerStateID(end_state_id)).contains(&terminal_id) {
                                 let terminal_to_disallow = match_info.id;
-                                gss = gss.apply(|acc| {
-                                    let mut na = acc.clone();
-                                    na.terminals_union.entry(end_state_id).or_default().insert(terminal_to_disallow);
-                                    na
+                                gss = gss.apply(|terminals_disallowed: &TerminalsDisallowed| {
+                                    let mut new_td = terminals_disallowed.clone();
+                                    new_td.entry(end_state_id).or_default().insert(terminal_to_disallow);
+                                    new_td
                                 });
                             }
                         }
@@ -516,12 +491,8 @@ impl<'a> GrammarConstraintState<'a> {
 
         self.state = new_overall_state;
 
+        // Fuse GSS levels - no longer need to reset llm_tokens_union since we compute it on-the-fly
         for glr_state in self.state.values_mut() {
-            glr_state.stack = glr_state.stack.apply(|acc| {
-                let mut new_acc = acc.clone();
-                new_acc.llm_tokens_union = RangeSet::max_ones();
-                new_acc
-            });
             glr_state.stack = glr_state.stack.fuse(Some(1));
         }
         self.state.retain(|_, glr_parser_state| glr_parser_state.is_ok());

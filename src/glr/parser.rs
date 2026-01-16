@@ -1,5 +1,5 @@
 use crate::constraint::LLMVocab;
-use crate::datastructures::gss_acc::Acc;
+use crate::datastructures::gss_acc::{TerminalsDisallowed, terminals_disallowed_fresh};
 use crate::datastructures::leveled_gss::{LeveledGSS, LeveledGSSStats};
 use crate::glr::grammar::{NonTerminal, Production};
 use crate::glr::items::Item;
@@ -72,8 +72,8 @@ pub struct ParseStateEdgeContent {
     pub state_id: StateID,
 }
 
-pub type ParserGSS = LeveledGSS<ParseStateEdgeContent, Acc>;
-pub type GSSStats = LeveledGSSStats<ParseStateEdgeContent, Acc>;
+pub type ParserGSS = LeveledGSS<ParseStateEdgeContent, TerminalsDisallowed>;
+pub type GSSStats = LeveledGSSStats<ParseStateEdgeContent, TerminalsDisallowed>;
 
 #[derive(Clone)]
 pub struct ParseState {
@@ -388,7 +388,7 @@ impl GLRParser {
         let initial_edge = ParseStateEdgeContent {
             state_id: self.start_state_id,
         };
-        let acc = Acc::new_fresh();
+        let acc = terminals_disallowed_fresh();
         let gss = LeveledGSS::from_stacks(&[(vec![], acc)]).push(initial_edge);
         ParseState::with_stack(gss)
     }
