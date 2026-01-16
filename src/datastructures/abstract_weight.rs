@@ -571,7 +571,14 @@ impl AbstractWeight {
     pub fn to_rsb(&self) -> RangeSetBlaze<usize> {
         match self {
             AbstractWeight::RangeSet(rsb) => rsb.clone(),
-            AbstractWeight::Factorized(fw) => fw.expand_to_rsb(),
+            AbstractWeight::Factorized(fw) => {
+                if std::env::var("ALLOW_FACTORIZED_EXPANSION").is_err() {
+                    panic!(
+                        "Unexpected factorized weight expansion at: AbstractWeight::to_rsb(). Set ALLOW_FACTORIZED_EXPANSION=1 to allow."
+                    );
+                }
+                fw.expand_to_rsb()
+            }
         }
     }
 

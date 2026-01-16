@@ -145,6 +145,11 @@ impl FactorizedWeight {
     }
 
     pub fn expand_to_rsb(&self) -> RangeSetBlaze<usize> {
+        if std::env::var("ALLOW_FACTORIZED_EXPANSION").is_err() {
+            panic!(
+                "Unexpected factorized weight expansion at: FactorizedWeight::expand_to_rsb(). Set ALLOW_FACTORIZED_EXPANSION=1 to allow."
+            );
+        }
         if self.pairs.is_empty() {
             return RangeSetBlaze::new();
         }
