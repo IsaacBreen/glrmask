@@ -564,6 +564,16 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
                 None => &ignore_dwa,
             };
             let mut weighted_dwa = term_dwa.clone();
+            // Reset weights to current terminal-space dims before applying bit weights.
+            let all_weight = Weight::all();
+            for state in weighted_dwa.states.0.iter_mut() {
+                if state.final_weight.is_some() {
+                    state.final_weight = Some(all_weight.clone());
+                }
+                for w in state.trans_weights.values_mut() {
+                    *w = all_weight.clone();
+                }
+            }
             weighted_dwa.apply_weight_inplace(&weight);
             NWA::union_assign(&mut super_nwa, &NWA::from_dwa(&weighted_dwa));
         }

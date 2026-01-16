@@ -955,15 +955,11 @@ impl From<crate::datastructures::AbstractWeight> for RangeSet {
                 if num_tsids <= 1 {
                     // Symbol-heavy mode: pairs are (tsid_set, token_set) where token_set
                     // contains the actual token positions directly
-                    if let Some(expanded) = fw.expanded() {
-                        RangeSet::from(expanded)
-                    } else {
-                        let mut result = RangeSetBlaze::new();
-                        for (_tsid_set, token_set) in fw.pairs() {
-                            result |= token_set;
-                        }
-                        RangeSet::from(result)
+                    let mut result = RangeSetBlaze::new();
+                    for (_tsid_set, token_set) in fw.pairs() {
+                        result |= token_set;
                     }
+                    RangeSet::from(result)
                 } else {
                     // Weight-heavy mode: need full expansion (O(N×M))
                     // This triggers the guard if ALLOW_FACTORIZED_EXPANSION is not set
