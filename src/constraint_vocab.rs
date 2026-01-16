@@ -385,9 +385,17 @@ impl StageVocab {
 
     /// Convert an internal BV (using `self.vocab`) back to original IDs.
     pub fn internal_bv_to_original(&self, internal_bv: &LLMTokenBV) -> Bitset {
-        if internal_bv.is_all() {
-            let mut internal_bv_ones = RangeSet::ones(self.internal_max_llm_token + 1);
-            return self.internal_bv_to_original(&internal_bv_ones);
+        // Optimization: if the internal BV is a superset of all valid internal tokens,
+        // we can skip the range iteration. Check without using is_all() to avoid
+        // recursion issues with global dims.
+        let is_all_internal = internal_bv.inner.ranges_len() == 1 
+            && internal_bv.inner.ranges().next().map(|r| *r.start() == 0 && *r.end() >= self.internal_max_llm_token).unwrap_or(false);
+        
+        if is_all_internal {
+            let internal_bv_ones = RangeSet::ones(self.internal_max_llm_token + 1);
+            if &internal_bv_ones != internal_bv {
+                return self.internal_bv_to_original(&internal_bv_ones);
+            }
         }
 
         type Word = u64;
@@ -425,7 +433,12 @@ impl StageVocab {
         // Zero the output first
         out.fill(0);
         
-        if internal_bv.is_all() {
+        // Check if this is "all" internal tokens without using is_all() to avoid 
+        // recursion issues with global dims
+        let is_all_internal = internal_bv.inner.ranges_len() == 1 
+            && internal_bv.inner.ranges().next().map(|r| *r.start() == 0 && *r.end() >= self.internal_max_llm_token).unwrap_or(false);
+        
+        if is_all_internal {
             let internal_bv_ones = RangeSet::ones(self.internal_max_llm_token + 1);
             self.fill_internal_bv_to_original_i32_nozeroing(&internal_bv_ones, out);
             return;

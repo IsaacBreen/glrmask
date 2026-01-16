@@ -17,6 +17,39 @@ use std::ops::{
     BitAnd, BitAndAssign, BitOr, BitOrAssign, BitXor, BitXorAssign, Sub, SubAssign,
 };
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+// ---------------------------------------------------------------------------
+// Global dimensions for weight-heavy/symbol-heavy mode
+// ---------------------------------------------------------------------------
+
+/// Maximum LLM token ID (internal). Set during constraint initialization.
+/// Default is usize::MAX for backwards compatibility.
+static MAX_LLM_TOKEN: AtomicUsize = AtomicUsize::new(usize::MAX);
+
+/// Number of tokenizer states. Set during constraint initialization.
+/// Default is 1 for symbol-heavy mode.
+static NUM_TSIDS: AtomicUsize = AtomicUsize::new(1);
+
+/// Set the global LLM token dimension.
+/// 
+/// This should be called once during constraint initialization with the actual
+/// maximum internal LLM token ID.
+pub fn set_global_dims(max_llm_token: usize, num_tsids: usize) {
+    crate::debug!(4, "set_global_dims: max_llm_token={}, num_tsids={}", max_llm_token, num_tsids);
+    MAX_LLM_TOKEN.store(max_llm_token, AtomicOrdering::SeqCst);
+    NUM_TSIDS.store(num_tsids, AtomicOrdering::SeqCst);
+}
+
+/// Get the current global max LLM token ID.
+pub fn get_max_llm_token() -> usize {
+    MAX_LLM_TOKEN.load(AtomicOrdering::SeqCst)
+}
+
+/// Get the current global number of tokenizer states.
+pub fn get_num_tsids() -> usize {
+    NUM_TSIDS.load(AtomicOrdering::SeqCst)
+}
 
 // --- The Hybrid Bitset Struct ---
 #[derive(Default, Clone, Eq)]
@@ -163,8 +196,37 @@ impl RangeSet {
     }
 
     pub fn max_ones() -> Self {
+        // Use global dimensions if set, otherwise fall back to usize::MAX for backwards compatibility
+        // In weight-heavy mode (num_tsids > 1), the domain is expanded to N×M space
+        let max_token = get_max_llm_token();
+        let num_tsids = get_num_tsids();
+        let domain_max = if num_tsids > 1 {
+            // N×M space: max position is (N-1)*M + (M-1) = N*M - 1
+            // where N = max_token + 1, M = num_tsids
+            max_token.saturating_mul(num_tsids).saturating_add(num_tsids.saturating_sub(1))
+        } else {
+            max_token
+        };
         RangeSet {
-            inner: cache::intern_l1(RangeSetBlaze::from_iter([0..=usize::MAX])),
+            inner: cache::intern_l1(RangeSetBlaze::from_iter([0..=domain_max])),
+        }
+    }
+    
+    /// Creates a RangeSet containing all LLM tokens based on global dimensions.
+    /// 
+    /// This should be used instead of `max_ones()` when the global dimensions have been set.
+    /// In weight-heavy mode (num_tsids > 1), returns the full expanded N×M domain.
+    pub fn all_llm_tokens() -> Self {
+        let max_token = get_max_llm_token();
+        let num_tsids = get_num_tsids();
+        let domain_max = if num_tsids > 1 {
+            // N×M space: max position is (N-1)*M + (M-1) = N*M - 1
+            max_token.saturating_mul(num_tsids).saturating_add(num_tsids.saturating_sub(1))
+        } else {
+            max_token
+        };
+        RangeSet {
+            inner: cache::intern_l1(RangeSetBlaze::from_iter([0..=domain_max])),
         }
     }
 
@@ -200,8 +262,27 @@ impl RangeSet {
     pub fn is_empty(&self) -> bool {
         self.inner.is_empty()
     }
+    
+    /// Returns true if the bitset is "all" (contains 0..=max where max is global max_llm_token).
+    /// 
+    /// This checks if the bitset spans from 0 to the current global max_llm_token.
+    /// For backwards compatibility, also returns true if it spans 0..=usize::MAX.
     pub fn is_all(&self) -> bool {
-        self == &RangeSet::max_ones()
+        if self.inner.ranges_len() != 1 {
+            return false;
+        }
+        if let Some(range) = self.inner.ranges().next() {
+            let start = *range.start();
+            let end = *range.end();
+            if start != 0 {
+                return false;
+            }
+            // Check against global max OR usize::MAX for backwards compatibility
+            let max_token = get_max_llm_token();
+            end == max_token || end == usize::MAX
+        } else {
+            false
+        }
     }
 
     /// Checks if a specific index is set.

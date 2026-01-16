@@ -16,3 +16,4 @@ pub mod state_set;
 
 pub use abstract_weight::{AbstractWeight, WeightDimensions};
 pub use entry_api::{EntryApi, OrderedMapEntry};
+pub use hybrid_bitset::{set_global_dims, get_max_llm_token, get_num_tsids};

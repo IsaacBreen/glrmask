@@ -398,7 +398,27 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
         BTreeMap::new()
     };
 
+    // Debug: dump input terminal NWA
+    crate::debug!(5, "Input terminal NWA: {} states, start_states={:?}", terminal_nwa.states.len(), terminal_nwa.body.start_states);
+    for (i, state) in terminal_nwa.states.0.iter().enumerate() {
+        crate::debug!(6, "  Input State {}: final_weight={:?}, epsilons={}, transitions={:?}", 
+            i, 
+            state.final_weight.as_ref().map(|w| w.rsb.ranges().take(5).map(|r| format!("{}..={}", r.start(), r.end())).collect::<Vec<_>>().join(",")),
+            state.epsilons.len(),
+            state.transitions.iter().map(|(&l, targets)| format!("{}:{}", l, targets.len())).collect::<Vec<_>>()
+        );
+    }
+
     let reversed_nwa = terminal_nwa.reverse();
+    crate::debug!(5, "Reversed NWA: {} states, start_states={:?}", reversed_nwa.states.len(), reversed_nwa.body.start_states);
+    for (i, state) in reversed_nwa.states.0.iter().enumerate() {
+        crate::debug!(6, "  State {}: final_weight={:?}, epsilons={:?}, transitions={}", 
+            i, 
+            state.final_weight.as_ref().map(|w| w.rsb.ranges().take(5).map(|r| format!("{}..={}", r.start(), r.end())).collect::<Vec<_>>().join(",")),
+            state.epsilons.iter().take(3).map(|(v, w)| format!("->{}({:?})", v, w.rsb.ranges().take(3).collect::<Vec<_>>())).collect::<Vec<_>>(),
+            state.transitions.len()
+        );
+    }
     let traversal_data = reversed_nwa.compute_traversal_data();
     
     // In symbol-heavy mode, build a map of OUTGOING tsid-labeled edges FROM each root state
@@ -765,6 +785,8 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
             // Check if this is a final state in the reversed NWA (original start state or root state)
             // In symbol-heavy mode, we handle the original_start_state specially via tsid_bodies
             // so don't collect it here
+            let has_final_weight = reversed_nwa.states[node_id].final_weight.is_some();
+            crate::debug!(7, "Process node_id={}, is_symbol_heavy={}, has_final_weight={}", node_id, is_symbol_heavy, has_final_weight);
             let should_collect = if is_symbol_heavy {
                 // In symbol-heavy mode, only collect for states OTHER than original_start_state
                 // (the original start is handled via tsid-labeled transitions)
@@ -777,6 +799,8 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
                 if let Some(fw) = &reversed_nwa.states[node_id].final_weight {
                     let fw_bv: LLMTokenBV = fw.clone().into();
                     let intersection_bv = &tokens & &fw_bv;
+                    crate::debug!(7, "Final body candidate: node_id={}, tokens={:?}, fw_bv={:?}, intersection={:?}", 
+                        node_id, tokens.inner.ranges().collect::<Vec<_>>(), fw_bv.inner.ranges().collect::<Vec<_>>(), intersection_bv.inner.ranges().collect::<Vec<_>>());
                     if !intersection_bv.is_empty() {
                         let final_w = Weight::from_rsb(intersection_bv.inner.as_ref().clone());
                         let mut fb = final_bodies_arc.lock().unwrap();
