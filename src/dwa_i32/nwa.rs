@@ -305,16 +305,13 @@ impl NWA {
     /// If the same interned weight appears multiple times, it is only counted once.
     pub fn num_ranges_interned(&self) -> usize {
         use std::collections::HashSet;
-        use std::ptr;
         
-        // Track unique weights by their Arc pointer address
-        let mut seen: HashSet<usize> = HashSet::new();
+        // Track unique weights by value
+        let mut seen: HashSet<Weight> = HashSet::new();
         let mut total = 0;
         
         let mut process_weight = |w: &Weight| {
-            // Get the Arc pointer address as a unique identifier
-            let ptr = ptr::addr_of!(**w) as usize;
-            if seen.insert(ptr) {
+            if seen.insert(w.clone()) {
                 total += w.num_ranges();
             }
         };

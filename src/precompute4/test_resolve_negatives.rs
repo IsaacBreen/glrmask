@@ -100,7 +100,7 @@ fn test_resolve_negatives_from_large_nwa_log() {
     // State 18:
     nwa.add_epsilon(states[18], states[3], Weight::all());
     // State 19:
-    nwa.add_epsilon(states[19], states[2], Weight::from_ranges(&[(0, 5)]));
+    nwa.add_epsilon(states[19], states[2], Weight::from_ranges([0..=5]));
     // State 20:
     nwa.add_epsilon(states[20], states[19], Weight::all());
     // State 21:
@@ -219,7 +219,7 @@ fn test_resolve_negatives_from_large_nwa_log() {
     nwa.add_epsilon(states[52], states[53], Weight::all());
     nwa.add_epsilon(states[52], states[54], Weight::all());
     // State 53:
-    nwa.add_epsilon(states[53], states[51], Weight::from_ranges(&[(2, 2), (4, 5)]));
+    nwa.add_epsilon(states[53], states[51], Weight::from_ranges([2..=2, 4..=5]));
     // State 54:
     nwa.add_transition(states[54], 0, states[55], Weight::all()).unwrap();
     nwa.add_transition(states[54], 69, states[55], Weight::all()).unwrap();

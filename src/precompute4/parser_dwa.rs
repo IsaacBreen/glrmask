@@ -275,7 +275,7 @@ fn specialize_dwa_relative(parent_dwa: &DWA, mapping: &[Weight], parent_unique_w
                         break;
                     }
                     // Access the inner RSB directly to avoid locking
-                    accumulator |= &target_w;
+                    accumulator |= target_w;
                 }
             }
 
@@ -607,7 +607,7 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
                                 is_all = true;
                                 break;
                             }
-                            accumulator |= &target_w;
+                            accumulator |= target_w;
                         }
                     }
 

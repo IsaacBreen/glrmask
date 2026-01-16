@@ -16,7 +16,7 @@ use std::iter::FromIterator;
 impl JSONConvertible for RangeSet {
     fn to_json(&self) -> JSONNode {
         let ranges_vec: Vec<Vec<usize>> = self
-            .to_rsb()
+            .rsb
             .ranges()
             .map(|ri| vec![*ri.start(), *ri.end()])
             .collect();

@@ -61,8 +61,7 @@ impl DWA {
         // Build a cache of optimized weights indexed by (weight_ptr, state_id, dest_state_id)
         // Since forward_reach depends only on state_id and backward_reach depends only on dest,
         // we can use these as cache keys
-        use std::ptr;
-        type WeightKey = (usize, StateID, StateID); // (weight_ptr, state_id, dest_state_id)
+        type WeightKey = (Weight, StateID, StateID); // (weight, state_id, dest_state_id)
         let mut weight_cache: HashMap<WeightKey, Weight> = HashMap::new();
         
         let t2 = std::time::Instant::now();
@@ -82,8 +81,7 @@ impl DWA {
                 let reach_dest = &backward_reach[dest];
                 
                 if let Some(weight) = self.states[state_id].trans_weights.get(&label).cloned() {
-                    let weight_ptr = ptr::addr_of!(*weight) as usize;
-                    let cache_key = (weight_ptr, state_id, dest);
+                    let cache_key = (weight.clone(), state_id, dest);
                     
                     let new_weight = if let Some(cached) = weight_cache.get(&cache_key) {
                         cache_hits += 1;
@@ -115,9 +113,8 @@ impl DWA {
             
             // Process final weight
             if let Some(fw) = self.states[state_id].final_weight.clone() {
-                let weight_ptr = ptr::addr_of!(*fw) as usize;
                 // For final weights, use state_id as both source and dest (since it's self-contained)
-                let cache_key = (weight_ptr, state_id, state_id);
+                let cache_key = (fw.clone(), state_id, state_id);
                 
                 let new_fw = if let Some(cached) = weight_cache.get(&cache_key) {
                     cache_hits += 1;
@@ -206,7 +203,8 @@ impl DWA {
             for (&label, &dest) in &self.states[state_id].transitions {
                 if let Some(weight) = self.states[state_id].trans_weights.get(&label) {
                     // Tokens that can reach dest through this edge
-                    let edge_tokens = &current_reach & &weight.rsb;
+                    let weight_rsb = weight.to_rsb();
+                    let edge_tokens = &current_reach & &weight_rsb;
                     
                     if !edge_tokens.is_empty() {
                         let old_reach = reach[dest].clone();
@@ -236,7 +234,7 @@ impl DWA {
         
         for state_id in 0..n {
             if let Some(fw) = &self.states[state_id].final_weight {
-                reach[state_id] = fw.rsb.clone();
+                reach[state_id] = fw.to_rsb();
                 if !in_queue[state_id] {
                     queue.push_back(state_id);
                     in_queue[state_id] = true;
@@ -261,7 +259,8 @@ impl DWA {
             for &(src, label) in &rev_edges[state_id] {
                 if let Some(weight) = self.states[src].trans_weights.get(&label) {
                     // Tokens that can reach acceptance through this edge
-                    let edge_tokens = &current_reach & &weight.rsb;
+                    let weight_rsb = weight.to_rsb();
+                    let edge_tokens = &current_reach & &weight_rsb;
                     
                     if !edge_tokens.is_empty() {
                         let old_reach = reach[src].clone();
@@ -281,17 +280,14 @@ impl DWA {
     
     /// Count the number of unique weights in this DWA
     fn count_unique_weights(&self) -> usize {
-        use std::ptr;
-        let mut seen: HashSet<usize> = HashSet::new();
+        let mut seen: HashSet<Weight> = HashSet::new();
         
         for state in &self.states.0 {
             if let Some(fw) = &state.final_weight {
-                let ptr = ptr::addr_of!(**fw) as usize;
-                seen.insert(ptr);
+                seen.insert(fw.clone());
             }
             for w in state.trans_weights.values() {
-                let ptr = ptr::addr_of!(**w) as usize;
-                seen.insert(ptr);
+                seen.insert(w.clone());
             }
         }
         seen.len()
@@ -299,20 +295,20 @@ impl DWA {
     
     /// Analyze the structure of weights to understand fragmentation patterns
     fn analyze_weight_structure(&self) {
-        use std::ptr;
-        
         // Collect all unique weights with their ranges
-        let mut unique_weights: HashMap<usize, (usize, usize, usize)> = HashMap::new(); // ptr -> (usage_count, num_ranges, cardinality)
+        let mut unique_weights: HashMap<Weight, (usize, usize, usize)> = HashMap::new(); // weight -> (usage_count, num_ranges, cardinality)
         
         for state in &self.states.0 {
             if let Some(fw) = &state.final_weight {
-                let ptr = ptr::addr_of!(**fw) as usize;
-                let entry = unique_weights.entry(ptr).or_insert((0, fw.num_ranges(), fw.len()));
+                let entry = unique_weights
+                    .entry(fw.clone())
+                    .or_insert((0, fw.num_ranges(), fw.len()));
                 entry.0 += 1;
             }
             for w in state.trans_weights.values() {
-                let ptr = ptr::addr_of!(**w) as usize;
-                let entry = unique_weights.entry(ptr).or_insert((0, w.num_ranges(), w.len()));
+                let entry = unique_weights
+                    .entry(w.clone())
+                    .or_insert((0, w.num_ranges(), w.len()));
                 entry.0 += 1;
             }
         }
@@ -320,13 +316,13 @@ impl DWA {
         // Find weights with high range count
         let mut high_range_weights: Vec<_> = unique_weights.iter()
             .filter(|(_, (_, ranges, _))| *ranges > 100)
-            .map(|(ptr, (count, ranges, card))| (*ptr, *count, *ranges, *card))
+            .map(|(_weight, (count, ranges, card))| (*count, *ranges, *card))
             .collect();
-        high_range_weights.sort_by_key(|(_, _, ranges, _)| std::cmp::Reverse(*ranges));
+        high_range_weights.sort_by_key(|(_, ranges, _)| std::cmp::Reverse(*ranges));
         
         if !high_range_weights.is_empty() {
             crate::debug!(6, "  High-range weights (>100 ranges):");
-            for (_, usage_count, num_ranges, cardinality) in high_range_weights.iter().take(5) {
+            for (usage_count, num_ranges, cardinality) in high_range_weights.iter().take(5) {
                 crate::debug!(6, "    {} usages, {} ranges, cardinality {}", usage_count, num_ranges, cardinality);
             }
             if high_range_weights.len() > 5 {
@@ -381,7 +377,8 @@ fn optimize_weight_ranges(weight: &Weight, tokens_for_removal: &RangeSetBlaze<us
     }
     
     // Step 1: Remove ranges that don't intersect tokens_for_removal
-    let pruned = &weight.rsb & tokens_for_removal;
+    let weight_rsb = weight.to_rsb();
+    let pruned = &weight_rsb & tokens_for_removal;
     
     if pruned.is_empty() {
         return (Weight::zeros(), original_ranges, 0);

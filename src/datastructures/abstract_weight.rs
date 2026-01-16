@@ -18,6 +18,8 @@
 
 use range_set_blaze::RangeSetBlaze;
 use crate::datastructures::factorized_weight::FactorizedWeight;
+use crate::json_serialization::{JSONConvertible, JSONNode};
+use serde::{Deserialize, Serialize};
 use std::hash::{Hash, Hasher};
 use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Not};
 
@@ -275,6 +277,108 @@ pub enum AbstractWeight {
     // Explicit(Vec<usize>),
 }
 
+impl std::hash::Hash for AbstractWeight {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        match self {
+            AbstractWeight::RangeSet(rsb) => {
+                0u8.hash(state);
+                for range in rsb.ranges() {
+                    range.start().hash(state);
+                    range.end().hash(state);
+                }
+            }
+            AbstractWeight::Factorized(fw) => {
+                1u8.hash(state);
+                fw.hash(state);
+            }
+        }
+    }
+}
+
+impl PartialOrd for AbstractWeight {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        // Compare by len, then by first range
+        match self.len().cmp(&other.len()) {
+            std::cmp::Ordering::Equal => {
+                let self_first = self.min_item();
+                let other_first = other.min_item();
+                self_first.partial_cmp(&other_first)
+            }
+            ord => Some(ord),
+        }
+    }
+}
+
+impl Ord for AbstractWeight {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.partial_cmp(other).unwrap_or(std::cmp::Ordering::Equal)
+    }
+}
+
+impl std::fmt::Display for AbstractWeight {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AbstractWeight::RangeSet(rsb) => {
+                let ranges: Vec<_> = rsb.ranges().take(5).collect();
+                if ranges.len() < rsb.ranges_len() {
+                    write!(f, "Weight({} ranges, {} items)", rsb.ranges_len(), self.len())
+                } else {
+                    write!(f, "Weight({:?})", ranges)
+                }
+            }
+            AbstractWeight::Factorized(fw) => {
+                write!(f, "FactorizedWeight({} pairs)", fw.pairs.len())
+            }
+        }
+    }
+}
+
+impl Serialize for AbstractWeight {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let ranges: Vec<(usize, usize)> = self
+            .to_rsb()
+            .ranges()
+            .map(|r| (*r.start(), *r.end()))
+            .collect();
+        ranges.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for AbstractWeight {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let ranges: Vec<(usize, usize)> = Vec::deserialize(deserializer)?;
+        let rsb = RangeSetBlaze::from_iter(ranges.into_iter().map(|(start, end)| start..=end));
+        Ok(AbstractWeight::from_rsb(rsb))
+    }
+}
+
+impl JSONConvertible for AbstractWeight {
+    fn to_json(&self) -> JSONNode {
+        let rsb = self.to_rsb();
+        crate::datastructures::hybrid_bitset::RangeSet::from(rsb).to_json()
+    }
+
+    fn from_json(node: JSONNode) -> Result<Self, String> {
+        let rsb = crate::datastructures::hybrid_bitset::RangeSet::from_json(node)?;
+        Ok(AbstractWeight::from_rsb(std::sync::Arc::unwrap_or_clone(rsb.inner)))
+    }
+}
+
+impl std::ops::Not for AbstractWeight {
+    type Output = AbstractWeight;
+    
+    fn not(self) -> Self::Output {
+        self.complement()
+    }
+}
+
+impl std::ops::Not for &AbstractWeight {
+    type Output = AbstractWeight;
+    
+    fn not(self) -> Self::Output {
+        self.complement()
+    }
+}
 
 impl Default for AbstractWeight {
     fn default() -> Self {
@@ -305,8 +409,24 @@ impl AbstractWeight {
     pub fn ones() -> Self {
         let max_llm_token = crate::datastructures::get_max_llm_token();
         let num_tsids = crate::datastructures::get_num_tsids();
-        let dims = WeightDimensions::new(max_llm_token + 1, num_tsids);
-        Self::all_with_dims(dims)
+        let domain_max = if num_tsids > 1 {
+            max_llm_token
+                .saturating_mul(num_tsids)
+                .saturating_add(num_tsids.saturating_sub(1))
+        } else {
+            max_llm_token
+        };
+        match backend_choice() {
+            BackendChoice::RangeSet => {
+                AbstractWeight::RangeSet(RangeSetBlaze::<usize>::from_iter([0..=domain_max]))
+            }
+            BackendChoice::Factorized => AbstractWeight::Factorized(
+                FactorizedWeight::all_with_max_position(
+                    domain_max,
+                    normalize_num_tsids(num_tsids),
+                ),
+            ),
+        }
     }
     
     /// Create a weight containing all positions (alias for `ones()`).
@@ -344,6 +464,11 @@ impl AbstractWeight {
                 FactorizedWeight::from_position_with_num_tsids(pos, current_num_tsids()),
             ),
         }
+    }
+
+    /// Create a weight from a single position (alias for `from_position`).
+    pub fn from_item(pos: usize) -> Self {
+        Self::from_position(pos)
     }
 
     /// Create a weight from an iterator of positions.
@@ -421,8 +546,10 @@ impl AbstractWeight {
     /// Uses global dims to determine domain size.
     pub fn is_all_fast(&self) -> bool {
         let max_llm_token = crate::datastructures::get_max_llm_token();
-        let num_tsids = crate::datastructures::get_num_tsids();
-        let domain_size = (max_llm_token + 1) * num_tsids;
+        let num_tsids = normalize_num_tsids(crate::datastructures::get_num_tsids());
+        let domain_size = max_llm_token
+            .saturating_add(1)
+            .saturating_mul(num_tsids);
         // Check if ranges_len == 1 and len == domain_size
         self.ranges_len() == 1 && self.len() == domain_size
     }
@@ -472,6 +599,21 @@ impl AbstractWeight {
             AbstractWeight::Factorized(fw) => WeightBackend::insert(fw, pos),
         }
     }
+
+    /// Remove a position.
+    pub fn remove(&mut self, pos: usize) {
+        let single = AbstractWeight::from_position(pos);
+        *self = self.difference(&single);
+    }
+
+    /// Set or clear a position.
+    pub fn set(&mut self, pos: usize, value: bool) {
+        if value {
+            self.insert(pos);
+        } else {
+            self.remove(pos);
+        }
+    }
     
     /// Get the minimum position, if any.
     pub fn min_item(&self) -> Option<usize> {
@@ -513,28 +655,6 @@ impl AbstractWeight {
     }
 }
 
-fn hash_rangeset<H: Hasher>(rsb: &RangeSetBlaze<usize>, state: &mut H) {
-    for range in rsb.ranges() {
-        range.start().hash(state);
-        range.end().hash(state);
-    }
-}
-
-impl Hash for AbstractWeight {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        match self {
-            AbstractWeight::RangeSet(rsb) => {
-                0u8.hash(state);
-                hash_rangeset(rsb, state);
-            }
-            AbstractWeight::Factorized(fw) => {
-                1u8.hash(state);
-                fw.hash(state);
-            }
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Bitwise Operations - dispatch to backends with variant checking
 // ---------------------------------------------------------------------------
@@ -549,6 +669,22 @@ impl BitAnd for AbstractWeight {
             }
             (AbstractWeight::Factorized(a), AbstractWeight::Factorized(b)) => {
                 AbstractWeight::Factorized(WeightBackend::intersect(&a, &b))
+            }
+            _ => panic!("AbstractWeight operation requires both operands to be the same variant"),
+        }
+    }
+}
+
+impl BitAnd<&AbstractWeight> for AbstractWeight {
+    type Output = AbstractWeight;
+
+    fn bitand(self, rhs: &AbstractWeight) -> Self::Output {
+        match (self, rhs) {
+            (AbstractWeight::RangeSet(a), AbstractWeight::RangeSet(b)) => {
+                AbstractWeight::RangeSet(WeightBackend::intersect(&a, b))
+            }
+            (AbstractWeight::Factorized(a), AbstractWeight::Factorized(b)) => {
+                AbstractWeight::Factorized(WeightBackend::intersect(&a, b))
             }
             _ => panic!("AbstractWeight operation requires both operands to be the same variant"),
         }
@@ -585,6 +721,20 @@ impl BitAndAssign for AbstractWeight {
     }
 }
 
+impl BitAndAssign<&AbstractWeight> for AbstractWeight {
+    fn bitand_assign(&mut self, rhs: &AbstractWeight) {
+        match (self, rhs) {
+            (AbstractWeight::RangeSet(a), AbstractWeight::RangeSet(b)) => {
+                WeightBackend::intersect_assign(a, b);
+            }
+            (AbstractWeight::Factorized(a), AbstractWeight::Factorized(b)) => {
+                WeightBackend::intersect_assign(a, b);
+            }
+            _ => panic!("AbstractWeight operation requires both operands to be the same variant"),
+        }
+    }
+}
+
 impl BitOr for AbstractWeight {
     type Output = Self;
 
@@ -595,6 +745,22 @@ impl BitOr for AbstractWeight {
             }
             (AbstractWeight::Factorized(a), AbstractWeight::Factorized(b)) => {
                 AbstractWeight::Factorized(WeightBackend::union(&a, &b))
+            }
+            _ => panic!("AbstractWeight operation requires both operands to be the same variant"),
+        }
+    }
+}
+
+impl BitOr<&AbstractWeight> for AbstractWeight {
+    type Output = AbstractWeight;
+
+    fn bitor(self, rhs: &AbstractWeight) -> Self::Output {
+        match (self, rhs) {
+            (AbstractWeight::RangeSet(a), AbstractWeight::RangeSet(b)) => {
+                AbstractWeight::RangeSet(WeightBackend::union(&a, b))
+            }
+            (AbstractWeight::Factorized(a), AbstractWeight::Factorized(b)) => {
+                AbstractWeight::Factorized(WeightBackend::union(&a, b))
             }
             _ => panic!("AbstractWeight operation requires both operands to be the same variant"),
         }
@@ -645,17 +811,100 @@ impl BitOrAssign<&AbstractWeight> for AbstractWeight {
     }
 }
 
-impl Not for AbstractWeight {
-    type Output = Self;
+impl BitOrAssign<&&AbstractWeight> for AbstractWeight {
+    fn bitor_assign(&mut self, rhs: &&AbstractWeight) {
+        self.bitor_assign(*rhs);
+    }
+}
 
-    fn not(self) -> Self::Output {
-        // Note: This requires knowing the domain size, which we don't have here.
-        // For now, this is a placeholder that should be used carefully.
-        panic!("Not operation on AbstractWeight requires domain knowledge. Use complement_with_dims instead.");
+impl std::ops::Sub for AbstractWeight {
+    type Output = AbstractWeight;
+
+    fn sub(self, rhs: Self) -> Self::Output {
+        match (self, rhs) {
+            (AbstractWeight::RangeSet(a), AbstractWeight::RangeSet(b)) => {
+                AbstractWeight::RangeSet(WeightBackend::difference(&a, &b))
+            }
+            (AbstractWeight::Factorized(a), AbstractWeight::Factorized(b)) => {
+                AbstractWeight::Factorized(WeightBackend::difference(&a, &b))
+            }
+            _ => panic!("AbstractWeight operation requires both operands to be the same variant"),
+        }
+    }
+}
+
+impl std::ops::Sub for &AbstractWeight {
+    type Output = AbstractWeight;
+
+    fn sub(self, rhs: Self) -> Self::Output {
+        match (self, rhs) {
+            (AbstractWeight::RangeSet(a), AbstractWeight::RangeSet(b)) => {
+                AbstractWeight::RangeSet(WeightBackend::difference(a, b))
+            }
+            (AbstractWeight::Factorized(a), AbstractWeight::Factorized(b)) => {
+                AbstractWeight::Factorized(WeightBackend::difference(a, b))
+            }
+            _ => panic!("AbstractWeight operation requires both operands to be the same variant"),
+        }
+    }
+}
+
+impl std::ops::SubAssign<&AbstractWeight> for AbstractWeight {
+    fn sub_assign(&mut self, rhs: &AbstractWeight) {
+        match (self, rhs) {
+            (AbstractWeight::RangeSet(a), AbstractWeight::RangeSet(b)) => {
+                *a = WeightBackend::difference(a, b);
+            }
+            (AbstractWeight::Factorized(a), AbstractWeight::Factorized(b)) => {
+                *a = WeightBackend::difference(a, b);
+            }
+            _ => panic!("AbstractWeight operation requires both operands to be the same variant"),
+        }
     }
 }
 
 impl AbstractWeight {
+    /// Compute the complement using global dimensions.
+    pub fn complement(&self) -> Self {
+        let max_llm_token = crate::datastructures::get_max_llm_token();
+        let num_tsids = crate::datastructures::get_num_tsids();
+        let domain_max = if num_tsids > 1 {
+            max_llm_token
+                .saturating_mul(num_tsids)
+                .saturating_add(num_tsids.saturating_sub(1))
+        } else {
+            max_llm_token
+        };
+        match self {
+            AbstractWeight::RangeSet(rsb) => {
+                AbstractWeight::RangeSet(WeightBackend::complement(rsb, domain_max))
+            }
+            AbstractWeight::Factorized(fw) => {
+                assert_eq!(
+                    fw.num_tsids(),
+                    normalize_num_tsids(num_tsids),
+                    "FactorizedWeight dimensions mismatch in complement"
+                );
+                AbstractWeight::Factorized(WeightBackend::complement(fw, domain_max))
+            }
+        }
+    }
+
+    /// Compute a stable fingerprint for hashing/grouping weights.
+    pub fn fingerprint(&self) -> u64 {
+        use std::collections::hash_map::DefaultHasher;
+        let mut hasher = DefaultHasher::new();
+        self.hash(&mut hasher);
+        hasher.finish()
+    }
+    
+    /// Iterate over positions up to and including max.
+    pub fn iter_up_to(&self, max: usize) -> impl Iterator<Item = usize> + '_ {
+        let rsb = self.to_rsb();
+        let clipped = &rsb & &RangeSetBlaze::from_iter([0..=max]);
+        clipped.into_iter()
+    }
+    
     /// Compute the complement within the given dimensions.
     pub fn complement_with_dims(&self, dims: WeightDimensions) -> Self {
         if dims.domain_size() == 0 {

@@ -942,6 +942,12 @@ impl From<Bitset> for RangeSet {
     }
 }
 
+impl From<crate::datastructures::AbstractWeight> for RangeSet {
+    fn from(aw: crate::datastructures::AbstractWeight) -> Self {
+        RangeSet::from(aw.to_rsb())
+    }
+}
+
 // --- Operations on owned values ---
 impl BitAnd<RangeSet> for RangeSet {
     type Output = RangeSet;

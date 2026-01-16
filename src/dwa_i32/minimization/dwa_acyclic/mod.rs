@@ -329,7 +329,7 @@ fn compute_height_0_coloring_direct(
             .unwrap_or_else(Weight::zeros);
         
         let mut hasher = DefaultHasher::new();
-        final_on_needed.fp.hash(&mut hasher);
+        final_on_needed.fingerprint().hash(&mut hasher);
         let sig = hasher.finish();
         
         sig_groups.entry(sig).or_default().push(idx);
@@ -388,7 +388,7 @@ fn compute_height_0_coloring_direct(
             .unwrap_or_else(Weight::zeros);
         
         let mut hasher = DefaultHasher::new();
-        final_on_needed.fp.hash(&mut hasher);
+        final_on_needed.fingerprint().hash(&mut hasher);
         let sig = hasher.finish();
         
         let color = *sig_to_color.entry(sig).or_insert_with(|| {
@@ -886,7 +886,7 @@ fn build_incompatibility_graph_height_0(
             .unwrap_or_else(Weight::zeros);
         
         let mut hasher = DefaultHasher::new();
-        final_on_needed.fp.hash(&mut hasher);
+        final_on_needed.fingerprint().hash(&mut hasher);
         let sig = hasher.finish();
         
         sig_to_group.entry(sig).or_default().push(idx);
@@ -1177,7 +1177,7 @@ fn compute_state_signature(
     let final_on_needed = state.final_weight.as_ref()
         .map(|w| w & needed_set)
         .unwrap_or_else(Weight::zeros);
-    final_on_needed.fp.hash(&mut hasher);
+    final_on_needed.fingerprint().hash(&mut hasher);
     
     // Hash transitions (sorted by label for consistency)
     let mut trans_data: Vec<(Label, u64, Option<StateID>)> = Vec::new();
@@ -1188,7 +1188,7 @@ fn compute_state_signature(
         if !weight.is_empty() {
             // Get the new_id for the target (if already mapped)
             let target_new_id = old_to_new.get(&target).copied();
-            trans_data.push((label, weight.fp, target_new_id));
+            trans_data.push((label, weight.fingerprint(), target_new_id));
         }
     }
     trans_data.sort();
@@ -1205,7 +1205,7 @@ fn compute_state_signature(
     // Second hash with different seed
     let mut hasher2 = DefaultHasher::new();
     h1.hash(&mut hasher2);
-    needed_set.fp.hash(&mut hasher2);
+    needed_set.fingerprint().hash(&mut hasher2);
     let h2 = hasher2.finish();
     
     ((h1 as u128) << 64) | (h2 as u128)

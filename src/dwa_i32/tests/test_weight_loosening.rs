@@ -24,13 +24,13 @@ fn test_weight_loosening_preserves_semantics() {
     
     // Add transitions
     // State 0 --label=1--> State 1, weight = [5..=100]
-    dwa.add_transition(0, 1, s1, Weight::from_ranges(&[(5, 100)])).unwrap();
+    dwa.add_transition(0, 1, s1, Weight::from_ranges([5..=100])).unwrap();
     
     // State 1 --label=2--> State 2, weight = [0..=50]
-    dwa.add_transition(s1, 2, s2, Weight::from_ranges(&[(0, 50)])).unwrap();
+    dwa.add_transition(s1, 2, s2, Weight::from_ranges([0..=50])).unwrap();
     
     // State 2 is final with weight [0..=10]
-    dwa.set_final_weight(s2, Weight::from_ranges(&[(0, 10)])).unwrap();
+    dwa.set_final_weight(s2, Weight::from_ranges([0..=10])).unwrap();
     
     // Collect semantics before loosening
     let test_words: Vec<Vec<i32>> = vec![
@@ -97,8 +97,8 @@ fn test_weight_loosening_loosens_unreachable() {
     dwa.add_transition(0, 1, s1, Weight::from_item(0)).unwrap();
     
     // State 1 is final but only for tokens [5..=10]
-    dwa.set_final_weight(s1, Weight::from_ranges(&[(5, 10)])).unwrap();
-    
+    dwa.set_final_weight(s1, Weight::from_ranges([5..=10])).unwrap();
+
     println!("Before minimization:");
     println!("  State 1 final weight: {:?}", dwa.states[s1].final_weight);
     println!("  Transition 0->1 weight: {:?}", dwa.states[0].trans_weights.get(&1));
