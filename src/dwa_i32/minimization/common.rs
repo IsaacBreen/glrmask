@@ -43,8 +43,21 @@ impl DwaPass {
             DwaPass::PushWeightsToInitial => std::env::var("DWA_DISABLE_PUSH_WEIGHTS_TO_INITIAL").map(|v| v != "1").unwrap_or(true),
             DwaPass::ResidualPush => std::env::var("DWA_DISABLE_RESIDUAL_PUSH").map(|v| v != "1").unwrap_or(true),
             DwaPass::Minimize => std::env::var("DWA_DISABLE_MINIMIZE").map(|v| v != "1").unwrap_or(true),
-            // ConsolidateRanges is now fast (~52ms) after optimization, enabled by default
-            DwaPass::ConsolidateRanges => std::env::var("DWA_DISABLE_CONSOLIDATE_RANGES").map(|v| v != "1").unwrap_or(true),
+            // ConsolidateRanges is slow in weight-heavy mode due to large weight domain
+            // Disabled by default in weight-heavy mode (num_tsids > 1)
+            DwaPass::ConsolidateRanges => {
+                if std::env::var("DWA_DISABLE_CONSOLIDATE_RANGES").map(|v| v == "1").unwrap_or(false) {
+                    return false;
+                }
+                // Check if weight-heavy mode is enabled (num_tsids > 1)
+                let num_tsids = crate::datastructures::get_num_tsids();
+                if num_tsids > 1 {
+                    // Disabled by default in weight-heavy mode, can be explicitly enabled
+                    std::env::var("DWA_ENABLE_CONSOLIDATE_RANGES_WEIGHT_HEAVY").map(|v| v == "1").unwrap_or(false)
+                } else {
+                    true // Enabled by default in symbol-heavy mode
+                }
+            },
             // TrimWeights clips ranges to actual max values, removing unnecessary usize::MAX extensions
             DwaPass::TrimWeights => std::env::var("DWA_DISABLE_TRIM_WEIGHTS").map(|v| v != "1").unwrap_or(true),
         }
