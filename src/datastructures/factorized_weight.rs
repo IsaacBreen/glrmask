@@ -211,7 +211,16 @@ impl WeightBackend for FactorizedWeight {
     }
 
     fn len(&self) -> usize {
-        self.expand_to_rsb().len() as usize
+        let mut total: u128 = 0;
+        for (tsid_set, token_set) in &self.pairs {
+            let pair_count = tsid_set.len().saturating_mul(token_set.len());
+            total = total.saturating_add(pair_count);
+        }
+        if total > usize::MAX as u128 {
+            usize::MAX
+        } else {
+            total as usize
+        }
     }
 
     fn contains(&self, pos: usize) -> bool {
@@ -283,17 +292,54 @@ impl WeightBackend for FactorizedWeight {
 
     fn difference(&self, other: &Self) -> Self {
         assert_eq!(self.num_tsids(), other.num_tsids(), "FactorizedWeight num_tsids mismatch");
-        let expanded_self = self.expand_to_rsb();
-        let expanded_other = other.expand_to_rsb();
-        let diff = &expanded_self - &expanded_other;
-        FactorizedWeight::from_rsb_with_num_tsids(&diff, self.num_tsids())
+        if self.is_empty() {
+            return FactorizedWeight::new(self.num_tsids());
+        }
+        if other.is_empty() {
+            return self.clone();
+        }
+
+        let mut out = FactorizedWeight::new(self.num_tsids());
+        for (tsid_set, token_set) in &self.pairs {
+            let mut remainders = vec![(tsid_set.clone(), token_set.clone())];
+            for (other_tsids, other_tokens) in &other.pairs {
+                if remainders.is_empty() {
+                    break;
+                }
+                let mut next = Vec::new();
+                for (rem_tsids, rem_tokens) in remainders {
+                    let tsid_inter = &rem_tsids & other_tsids;
+                    let token_inter = &rem_tokens & other_tokens;
+                    if tsid_inter.is_empty() || token_inter.is_empty() {
+                        next.push((rem_tsids, rem_tokens));
+                        continue;
+                    }
+
+                    let tsid_diff = &rem_tsids - other_tsids;
+                    if !tsid_diff.is_empty() {
+                        next.push((tsid_diff, rem_tokens.clone()));
+                    }
+
+                    let token_diff = &rem_tokens - other_tokens;
+                    if !token_diff.is_empty() && !tsid_inter.is_empty() {
+                        next.push((tsid_inter, token_diff));
+                    }
+                }
+                remainders = next;
+            }
+
+            for (rem_tsids, rem_tokens) in remainders {
+                out.add_pair(rem_tsids, rem_tokens);
+            }
+        }
+
+        out.normalize_pairs();
+        out
     }
 
     fn complement(&self, max_position: usize) -> Self {
-        let all = RangeSetBlaze::from_iter([0..=max_position]);
-        let expanded_self = self.expand_to_rsb();
-        let diff = &all - &expanded_self;
-        FactorizedWeight::from_rsb_with_num_tsids(&diff, self.num_tsids())
+        let all = FactorizedWeight::all_with_max_position(max_position, self.num_tsids());
+        all.difference(self)
     }
 
     fn min_item(&self) -> Option<usize> {
