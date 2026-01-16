@@ -11,42 +11,6 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fmt::{self, Display, Formatter};
 use std::ops::{Index, IndexMut};
 
-fn find_nwa_actual_max(states: &NWAStates) -> Option<usize> {
-    let mut max_val: Option<usize> = None;
-    for state in &states.0 {
-        if let Some(fw) = &state.final_weight {
-            if !fw.is_empty() {
-                if let Some(m) = fw.max_item() {
-                    max_val = Some(max_val.map_or(m, |cur| cur.max(m)));
-                }
-            }
-        }
-        for targets in state.transitions.values() {
-            for (_, w) in targets {
-                if !w.is_empty() {
-                    if let Some(m) = w.max_item() {
-                        max_val = Some(max_val.map_or(m, |cur| cur.max(m)));
-                    }
-                }
-            }
-        }
-        for (_, w) in &state.epsilons {
-            if !w.is_empty() {
-                if let Some(m) = w.max_item() {
-                    max_val = Some(max_val.map_or(m, |cur| cur.max(m)));
-                }
-            }
-        }
-    }
-    max_val
-}
-
-fn full_weight_for_nwa(states: &NWAStates) -> Weight {
-    find_nwa_actual_max(states)
-        .map(|max| Weight::ones(max.saturating_add(1)))
-        .unwrap_or_else(Weight::zeros)
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NWABuildError {
     StateOutOfBounds { state: NWAStateID },
@@ -238,7 +202,6 @@ impl NWA {
         // Create a super-start for the reversed NWA that connects to all old final states
         let super_start = rev.add_state();
         rev.body.start_states = vec![super_start];
-        let full_weight = full_weight_for_nwa(&self.states);
 
         for (u, state) in self.states.0.iter().enumerate() {
             // Reverse transitions: u -> v becomes v -> u
@@ -256,11 +219,11 @@ impl NWA {
             }
         }
 
-        // Old start states become final in the reversed NWA with full weight
+        // Old start states become final in the reversed NWA with Weight::all()
         for &s in &self.body.start_states {
             if s < rev.states.len() {
                 let old = rev.states[s].final_weight.clone().unwrap_or_else(Weight::zeros);
-                rev.states[s].final_weight = Some(old | full_weight.clone());
+                rev.states[s].final_weight = Some(old | Weight::all());
             }
         }
         
@@ -296,13 +259,11 @@ impl NWA {
         let mut nwa = NWA::new_empty();
         for _ in 0..dwa.states.len() { nwa.add_state(); }
         nwa.body.start_states = vec![dwa.body.start_state];
-        let max_weight_pos = dwa.states.find_actual_max().unwrap_or(0);
-        let full_weight = Weight::ones(max_weight_pos.saturating_add(1));
 
         for (i, st) in dwa.states.0.iter().enumerate() {
             nwa.states[i].final_weight = st.final_weight.clone();
             for (lbl, to) in &st.transitions {
-                let w = st.trans_weights.get(lbl).cloned().unwrap_or_else(|| full_weight.clone());
+                let w = st.trans_weights.get(lbl).cloned().unwrap_or_else(Weight::all);
                 nwa.add_transition(i, *lbl, *to, w).unwrap();
             }
         }
@@ -389,8 +350,6 @@ impl NWA {
             return;
         }
 
-        let full_weight = full_weight_for_nwa(&self.states);
-
         // Identify epsilon-only states
         let mut epsilon_only: Vec<bool> = vec![false; n];
         for (i, state) in self.states.0.iter().enumerate() {
@@ -410,7 +369,7 @@ impl NWA {
             }
             // BFS/DFS through epsilon edges
             let mut visited: std::collections::HashSet<usize> = std::collections::HashSet::new();
-            let mut stack: Vec<(usize, Weight)> = vec![(start, full_weight.clone())];
+            let mut stack: Vec<(usize, Weight)> = vec![(start, Weight::all())];
             while let Some((state, w)) = stack.pop() {
                 if !visited.insert(state) {
                     continue;
@@ -504,11 +463,10 @@ impl NWA {
         }
 
         // 1. Forward tokens: tokens that can reach each state from some start state.
-        let full_weight = full_weight_for_nwa(&self.states);
         let mut forward: Vec<Weight> = vec![Weight::zeros(); n];
         for &s in &self.body.start_states {
             if s < n {
-                forward[s] |= &full_weight;
+                forward[s] |= &Weight::all();
             }
         }
 

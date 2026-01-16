@@ -35,9 +35,9 @@ impl From<NFABuildError> for FullDWABuildError {
 /// Note: The "pop" transitions (DEFAULT_TRANSITION_SYMBOL) are what make this
 /// conceptually a Weighted Pushdown System - they consume stack symbols.
 /// After determinization, these are resolved into a true DWA.
-pub fn build_nwa_from_terminal_characterization(tc: &TerminalCharacterization, full_weight: &Weight) -> Result<NWA, FullDWABuildError> {
+pub fn build_nwa_from_terminal_characterization(tc: &TerminalCharacterization) -> Result<NWA, FullDWABuildError> {
     let mut nwa = NWA::new();
-    let w_all = full_weight.clone();
+    let w_all = Weight::all();
 
     // Node for each non-terminal.
     let mut nt_nodes: BTreeMap<NonTerminalID, StateID> = BTreeMap::new();
@@ -140,7 +140,7 @@ pub fn build_nwa_from_terminal_characterization(tc: &TerminalCharacterization, f
 /// 
 /// This is the unweighted version of build_nwa_from_terminal_characterization.
 /// Since template DFAs don't actually need weights during construction (they get
-/// full weight everywhere), we can use simpler/faster unweighted automata.
+/// Weight::all() everywhere), we can use simpler/faster unweighted automata.
 pub fn build_nfa_from_terminal_characterization(tc: &TerminalCharacterization) -> Result<NFA, FullDWABuildError> {
     let mut nfa = NFA::new();
 
@@ -243,15 +243,15 @@ pub fn build_nfa_from_terminal_characterization(tc: &TerminalCharacterization) -
 
 /// Deprecated alias for build_nwa_from_terminal_characterization
 #[deprecated(since = "0.3.0", note = "Use build_nwa_from_terminal_characterization instead")]
-pub fn build_template_nwa_from_characterization(tc: &TerminalCharacterization, full_weight: &Weight) -> Result<NWA, FullDWABuildError> {
-    build_nwa_from_terminal_characterization(tc, full_weight)
+pub fn build_template_nwa_from_characterization(tc: &TerminalCharacterization) -> Result<NWA, FullDWABuildError> {
+    build_nwa_from_terminal_characterization(tc)
 }
 
 /// Build template DFAs for all terminals in the parser.
 /// 
 /// This builds unweighted DFAs which can later be converted to DWAs.
 /// Since template automata don't need weights during construction (they get
-/// full weight everywhere), building unweighted DFAs is simpler and faster.
+/// Weight::all() everywhere), building unweighted DFAs is simpler and faster.
 /// 
 /// A characterization key that excludes the terminal ID, allowing us to share DFAs
 /// between terminals with identical grammatical behavior.
@@ -352,24 +352,23 @@ pub fn build_template_dfas(parser: &GLRParser) -> Result<BTreeMap<TerminalID, DF
 /// These are later composed into the final Parser DWA.
 /// 
 /// This function builds unweighted DFAs first (via build_template_dfas), then
-/// converts them to DWAs with full weight on all transitions and finals.
-pub fn build_template_dwas(parser: &GLRParser, max_weight_pos: usize) -> Result<BTreeMap<TerminalID, DWA>, FullDWABuildError> {
+/// converts them to DWAs with Weight::all() on all transitions and finals.
+pub fn build_template_dwas(parser: &GLRParser) -> Result<BTreeMap<TerminalID, DWA>, FullDWABuildError> {
     let dfas = build_template_dfas(parser)?;
-    let full_weight = Weight::ones(max_weight_pos.saturating_add(1));
     
     // Convert DFAs to DWAs
     let dwas: BTreeMap<TerminalID, DWA> = dfas
         .into_iter()
-        .map(|(term_id, dfa)| (term_id, dfa.to_dwa(&full_weight)))
+        .map(|(term_id, dfa)| (term_id, dfa.to_dwa()))
         .collect();
     
     Ok(dwas)
 }
 
 /// Identity DWA used for the "ignore" terminal: start is final and there are no transitions.
-pub fn build_ignore_terminal_dwa(full_weight: &Weight) -> DWA {
+pub fn build_ignore_terminal_dwa() -> DWA {
     let mut dwa = DWA::new();
-    dwa.states[dwa.body.start_state].final_weight = Some(full_weight.clone());
+    dwa.states[dwa.body.start_state].final_weight = Some(Weight::all());
     dwa
 }
 

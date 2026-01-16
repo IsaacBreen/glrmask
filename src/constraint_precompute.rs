@@ -19,7 +19,6 @@ use range_set_blaze::RangeSetBlaze;
 
 use crate::constraint_vocab::LLMTokenBV;
 use crate::datastructures::hybrid_bitset::RangeSet;
-use crate::datastructures::WeightDimensions;
 use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
 use crate::dfa_u8::{Tokenizer, Regex};
 use crate::glr::parser::GLRParser;
@@ -204,7 +203,7 @@ impl<'r> Precomputer1<'r> {
         let new_start_state = self.nwa.add_state();
         
         if self.num_tsids == 0 {
-            // Symbol-heavy mode: create labeled transitions with full weight
+            // Symbol-heavy mode: create labeled transitions with Weight::all()
             // Label = tsid + terminals_count
             // Important: We need to create labels for ALL tsids (not just representatives),
             // because at runtime we'll look up by the raw tokenizer state ID.
@@ -408,7 +407,7 @@ impl<'r> Precomputer1<'r> {
                 // NOTE: The previous state reuse optimization was removed because it
                 // iterated through all pending_epsilons (~84 items on avg) but NEVER
                 // found a reusable state (0 reuses in 500k+ calls, 42M+ loop iterations).
-                // The check `live.is_disjoint(&full_weight)` can only be true if the
+                // The check `live.is_disjoint(&Weight::all())` can only be true if the
                 // live_tokens entry is empty, which almost never happens.
                 let t = self.nwa.add_state();
                 v.insert(t);
@@ -449,7 +448,7 @@ impl<'r> Precomputer1<'r> {
     }
 
     /// Create an expanded "all" weight (all tokens for all tsids).
-    /// If num_tsids == 0 (symbol-heavy mode), returns full weight.
+    /// If num_tsids == 0 (symbol-heavy mode), returns Weight::all().
     #[inline]
     fn expanded_weight_all(&self) -> Weight {
         if self.num_tsids == 0 {
@@ -712,9 +711,6 @@ pub fn run_precompute1(
         0
     };
     
-    let num_tokens = internal_max_llm_token.saturating_add(1);
-    Weight::set_weight_dimensions(WeightDimensions::new(num_tokens, num_tsids));
-
     let mut representative_llm_token_map: BTreeMap<Vec<u8>, LLMTokenID> = BTreeMap::new();
     let mut seen_internal_ids = std::collections::HashSet::new();
 

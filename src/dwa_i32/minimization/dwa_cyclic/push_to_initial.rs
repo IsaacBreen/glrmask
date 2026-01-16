@@ -8,8 +8,6 @@ impl DWA {
     pub fn push_weights_to_initial_cyclic(&mut self) -> bool {
         let n = self.states.len();
         if n == 0 { return false; }
-        let max_weight_pos = self.states.find_actual_max().unwrap_or(0);
-        let full_weight = Weight::ones(max_weight_pos.saturating_add(1));
 
         // 1. Compute backward distance (accumulated weight to final)
         let mut d = vec![Weight::zeros(); n];
@@ -32,7 +30,7 @@ impl DWA {
         for (u, st) in self.states.0.iter().enumerate() {
             for (&label, &v) in &st.transitions {
                 if v < n {
-                    let w = st.trans_weights.get(&label).cloned().unwrap_or_else(|| full_weight.clone());
+                    let w = st.trans_weights.get(&label).cloned().unwrap_or_else(Weight::all);
                     preds[v].push((u, label, w));
                 }
             }
@@ -61,7 +59,7 @@ impl DWA {
         let start_node = self.body.start_state;
         for (u, st) in self.states.0.iter_mut().enumerate() {
             let d_u = &d[u];
-            let inv_d_u = if u == start_node { Weight::zeros() } else { &full_weight - d_u };
+            let inv_d_u = if u == start_node { Weight::zeros() } else { d_u.complement() };
 
             // Transitions
             for (&label, &v) in &st.transitions {

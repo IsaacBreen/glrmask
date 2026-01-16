@@ -145,10 +145,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 4. Build ALL Template DFAs
     println!("Building all Template DFAs...");
-    let max_weight_pos = terminal_dwa.states.find_actual_max().unwrap_or(0);
-    let template_dwas = build_template_dwas(parser, max_weight_pos).expect("Failed to build template DWAs");
-    let full_weight = sep1::dwa_i32::Weight::ones(max_weight_pos.saturating_add(1));
-    let ignore_dwa = build_ignore_terminal_dwa(&full_weight);
+    let template_dwas = build_template_dwas(parser).expect("Failed to build template DWAs");
+    let ignore_dwa = build_ignore_terminal_dwa();
 
     if is_debug_level_enabled(4) {
         println!("Template DFAs:");
@@ -215,11 +213,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Process each outgoing edge
         for (&label, &dest_tdwa_state) in &tdwa_state.transitions {
-            let edge_weight = tdwa_state
-                .trans_weights
-                .get(&label)
+            let edge_weight = tdwa_state.trans_weights.get(&label)
                 .cloned()
-                .unwrap_or_else(|| full_weight.clone());
+                .unwrap_or_else(Weight::all);
 
             if label >= offset {
                 // Tokenizer state transition - add to combined start state
@@ -275,7 +271,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .map(|s| s + template_offset)
                     .collect();
                 for s in template_start_states {
-                    nwa_states[nwa_entry].epsilons.push((s, full_weight.clone()));
+                    nwa_states[nwa_entry].epsilons.push((s, Weight::all()));
                 }
             }
         }

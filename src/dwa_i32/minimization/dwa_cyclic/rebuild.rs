@@ -18,8 +18,6 @@ impl DWA {
         if n == 0 {
             return;
         }
-        let max_weight_pos = self.states.find_actual_max().unwrap_or(0);
-        let full_weight = Weight::ones(max_weight_pos.saturating_add(1));
         let mut class_to_new: FxHashMap<usize, StateID> = FxHashMap::default();
         let mut builders: Vec<DwaStateBuilder> = Vec::new();
 
@@ -49,7 +47,7 @@ impl DWA {
             }
 
             for (&label, &dest) in &st.transitions {
-                let w = st.trans_weights.get(&label).cloned().unwrap_or_else(|| full_weight.clone());
+                let w = st.trans_weights.get(&label).cloned().unwrap_or_else(Weight::all);
                 if w.is_empty() {
                     continue;
                 }

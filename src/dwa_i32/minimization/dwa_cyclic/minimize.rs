@@ -18,14 +18,14 @@ struct DwaStateSignature {
 }
 
 impl DwaStateSignature {
-    fn from_state(state_id: StateID, states: &DWAStates, classes: &[usize], full_weight: &Weight) -> Self {
+    fn from_state(state_id: StateID, states: &DWAStates, classes: &[usize]) -> Self {
         let st = &states[state_id];
 
         let mut outgoing: Vec<(Label, DwaTransitionSig)> = st
             .transitions
             .iter()
             .filter_map(|(&label, &dest)| {
-                let w = st.trans_weights.get(&label).cloned().unwrap_or_else(|| full_weight.clone());
+                let w = st.trans_weights.get(&label).cloned().unwrap_or_else(Weight::all);
                 if w.is_empty() {
                     None
                 } else {
@@ -55,9 +55,6 @@ pub(super) fn minimize_dwa_partition(states: &DWAStates) -> Partition {
         return Partition { class_of: vec![], num_classes: 0 };
     }
 
-    let max_weight_pos = states.find_actual_max().unwrap_or(0);
-    let full_weight = Weight::ones(max_weight_pos.saturating_add(1));
-
     let mut partition = Partition::new(n);
     loop {
         let mut sig_to_class: FxHashMap<DwaStateSignature, usize> = FxHashMap::default();
@@ -65,7 +62,7 @@ pub(super) fn minimize_dwa_partition(states: &DWAStates) -> Partition {
         let mut next_class = 0;
 
         for s in 0..n {
-            let sig = DwaStateSignature::from_state(s, states, &partition.class_of, &full_weight);
+            let sig = DwaStateSignature::from_state(s, states, &partition.class_of);
             let entry = sig_to_class.entry(sig).or_insert_with(|| {
                 let id = next_class;
                 next_class += 1;

@@ -8,10 +8,6 @@ pub use crate::dwa_i32::{
 };
 pub use crate::dwa_i32::common::Label;
 
-pub fn full_weight() -> Weight {
-    Weight::ones(1024)
-}
-
 mod test_debug_min;
 mod test_determinization;
 mod test_minimization;

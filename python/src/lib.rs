@@ -1,6 +1,6 @@
 #![recursion_limit = "256"]
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use numpy::{IntoPyArray, PyArray1, PyReadwriteArray1};
 use ouroboros::self_referencing;
 use pyo3::basic::CompareOp;
@@ -9,7 +9,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::types::{PyDict, PyIterator, PySet, PyTuple};
 use sep1::constraint::{GrammarConstraint, GrammarConstraintState, StageVocab};
 use sep1::datastructures::bitset::{Bitset as RustBitset, Bitset};
-use sep1::datastructures::gss_acc::{TerminalsDisallowed, terminals_disallowed_fresh};
+use sep1::datastructures::gss_acc::{Acc as RustAcc, Acc};
 use sep1::datastructures::hybrid_bitset::{RangeSet as RustHybridBitset, RangeSet};
 use sep1::datastructures::leveled_gss::LeveledGSS;
 use sep1::datastructures::u8set::U8Set;
@@ -36,7 +36,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::sync::Mutex;
 
-type RustGSS = LeveledGSS<ParseStateEdgeContent, TerminalsDisallowed>;
+type RustGSS = LeveledGSS<ParseStateEdgeContent, Acc>;
 
 #[pyclass(name = "GrammarExpr")]
 #[derive(Clone)]
@@ -541,9 +541,8 @@ impl PyGLRParser {
     /// encoded parser state IDs (positive = push, negative = pop).
     /// 
     /// Returns a dict mapping terminal_id -> dict with DFA structure.
-    fn get_template_dfas<'py>(&self, py: Python<'py>, max_weight_pos: Option<usize>) -> PyResult<Bound<'py, PyDict>> {
-        let max_weight_pos = max_weight_pos.unwrap_or(0);
-        let result = build_template_dwas(&self.inner, max_weight_pos).map_err(|e| {
+    fn get_template_dfas<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let result = build_template_dwas(&self.inner).map_err(|e| {
             PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
                 "Failed to build template DWAs: {:?}",
                 e
@@ -1205,7 +1204,7 @@ impl PyGSSNode {
     #[new]
     fn new() -> Self {
         PyGSSNode {
-            inner: RustGSS::from_stacks(&[(vec![], terminals_disallowed_fresh())]),
+            inner: RustGSS::from_stacks(&[(vec![], RustAcc::new_fresh())]),
         }
     }
 
@@ -1217,14 +1216,20 @@ impl PyGSSNode {
         !self.inner.is_empty()
     }
 
-    /// Returns the disallowed terminals for each tokenizer state.
-    /// This replaces the old allowed_llm_tokens method - LLM tokens are now computed on-the-fly.
+    fn allowed_llm_tokens(&self) -> PyHybridBitset {
+        PyHybridBitset::from(
+            self.inner.reduce_acc().map_or(RustHybridBitset::zeros(), |acc| acc.llm_tokens_union),
+        )
+    }
+
     fn disallowed_terminals(&self, py: Python) -> PyResult<PyObject> {
         let dict = PyDict::new_bound(py);
-        if let Some(terminals_disallowed) = self.inner.reduce_acc() {
-            for (&tokenizer_state_id, disallowed_set) in terminals_disallowed {
-                let py_set = PySet::new_bound(py, disallowed_set.iter().collect::<Vec<_>>().as_slice())?;
-                dict.set_item(tokenizer_state_id, py_set)?;
+        if let Some(acc) = self.inner.reduce_acc() {
+            for (&tokenizer_state_id, bitset) in &acc.terminals_union {
+                dict.set_item(
+                    tokenizer_state_id,
+                    PyHybridBitset { inner: bitset.clone() },
+                )?;
             }
         }
         Ok(dict.into())
@@ -1243,18 +1248,20 @@ impl PyGSSNode {
         self.inner.to_graph_string(false)
     }
 
-    fn flatten<'py>(&self, py: Python<'py>) -> PyResult<Vec<(Vec<usize>, PyObject)>> {
+    fn flatten<'py>(&self, py: Python<'py>) -> PyResult<Vec<(Vec<usize>, (PyHybridBitset, PyObject))>> {
         let flattened = self.inner.to_stacks();
         flattened
             .into_iter()
-            .map(|(path, terminals_disallowed)| {
+            .map(|(path, acc)| {
                 let path_ids: Vec<usize> = path.into_iter().map(|edge| edge.state_id.0).collect();
-                let py_terminals_disallowed = PyDict::new_bound(py);
-                for (&sid, disallowed_set) in &terminals_disallowed {
-                    let py_set = PySet::new_bound(py, disallowed_set.iter().collect::<Vec<_>>().as_slice())?;
-                    py_terminals_disallowed.set_item(sid, py_set)?;
+                let py_llm_tokens = PyHybridBitset {
+                    inner: acc.llm_tokens_union,
+                };
+                let py_terminals_union = PyDict::new_bound(py);
+                for (&sid, bv) in &acc.terminals_union {
+                    py_terminals_union.set_item(sid, PyHybridBitset { inner: bv.clone() })?;
                 }
-                Ok((path_ids, py_terminals_disallowed.to_object(py)))
+                Ok((path_ids, (py_llm_tokens, py_terminals_union.to_object(py))))
             })
             .collect()
     }
@@ -1326,15 +1333,24 @@ fn gss_merge_many_with_depth(nodes: Vec<PyGSSNode>, depth: usize) -> PyGSSNode {
 
 #[pyfunction]
 fn gss_allow_only_llm_tokens_and_prune(node: &mut PyGSSNode, bv: &PyHybridBitset) {
-    // Deprecated: LLM token masks are computed on-the-fly from TerminalsDisallowed.
-    let _ = node;
-    let _ = bv;
+    node.inner = node.inner.apply_and_prune(|acc| {
+        let mut new_acc = acc.clone();
+        new_acc.llm_tokens_union &= &bv.inner;
+        if new_acc.llm_tokens_union.is_empty() {
+            None
+        } else {
+            Some(new_acc)
+        }
+    });
 }
 
 #[pyfunction]
 fn gss_reset_llm_tokens(node: &mut PyGSSNode) {
-    // Deprecated: LLM token masks are computed on-the-fly from TerminalsDisallowed.
-    let _ = node;
+    node.inner = node.inner.apply(|acc| {
+        let mut new_acc = acc.clone();
+        new_acc.llm_tokens_union = RustHybridBitset::max_ones();
+        new_acc
+    });
 }
 
 #[pyfunction]
@@ -1342,26 +1358,22 @@ fn gss_prune_disallowed_terminals(
     node: &mut PyGSSNode,
     terminals_map: &Bound<'_, PyDict>,
 ) -> PyResult<()> {
-    let mut rust_terminals_map: BTreeMap<sep1::dfa_u8::TokenizerStateID, BTreeSet<usize>> = BTreeMap::new();
+    let mut rust_terminals_map = BTreeMap::new();
     for (k, v) in terminals_map.iter() {
         let tokenizer_state_id = sep1::dfa_u8::TokenizerStateID(k.extract::<usize>()?);
-        let mut set = BTreeSet::new();
-        let iter = PyIterator::from_object(v)?;
-        for item in iter {
-            set.insert(item?.extract::<usize>()?);
-        }
-        rust_terminals_map.insert(tokenizer_state_id, set);
+        let terminal_bv = v.extract::<PyRef<PyHybridBitset>>()?.inner.clone();
+        rust_terminals_map.insert(tokenizer_state_id, terminal_bv);
     }
 
-    node.inner = node.inner.apply_and_prune(|terminals_disallowed| {
-        for (sid, disallowed_set) in &rust_terminals_map {
-            if let Some(existing) = terminals_disallowed.get(&sid.0) {
-                if disallowed_set.iter().any(|t| existing.contains(t)) {
+    node.inner = node.inner.apply_and_prune(|acc| {
+        for (sid, bv) in &rust_terminals_map {
+            if let Some(disallowed) = acc.terminals_union.get(&sid.0) {
+                if bv.intersects(disallowed) {
                     return None;
                 }
             }
         }
-        Some(terminals_disallowed.clone())
+        Some(acc.clone())
     });
     Ok(())
 }
@@ -1371,9 +1383,48 @@ fn gss_prune_llm_tokens_by_disallowed_terminals(
     node: &mut PyGSSNode,
     possible_matches: &Bound<'_, PyDict>,
 ) -> PyResult<()> {
-    // Deprecated: LLM token masks are computed on-the-fly from TerminalsDisallowed.
-    let _ = node;
-    let _ = possible_matches;
+    let mut rust_possible_matches = BTreeMap::new();
+    for (k, v) in possible_matches.iter() {
+        let tokenizer_state_id = sep1::dfa_u8::TokenizerStateID(k.extract::<usize>()?);
+        let terminal_map_py = v.downcast::<PyDict>()?;
+        let mut terminal_map = BTreeMap::new();
+        for (term_k, term_v) in terminal_map_py.iter() {
+            let terminal_id = sep1::glr::table::TerminalID(term_k.extract::<usize>()?);
+            let llm_token_bv = term_v.extract::<PyRef<PyHybridBitset>>()?.inner.clone();
+            terminal_map.insert(terminal_id, llm_token_bv);
+        }
+        rust_possible_matches.insert(tokenizer_state_id, terminal_map);
+    }
+
+    node.inner = node.inner.apply_and_prune(|acc| {
+        if acc.terminals_union.is_empty() {
+            return Some(acc.clone());
+        }
+        let mut forbidden_llm_tokens = RustHybridBitset::zeros();
+        for (&tokenizer_state_id, disallowed_in_state) in &acc.terminals_union {
+            if disallowed_in_state.is_empty() { continue; }
+            if let Some(state_matches) = rust_possible_matches.get(&sep1::dfa_u8::TokenizerStateID(tokenizer_state_id)) {
+                for (terminal_id, llm_tokens) in state_matches {
+                    if disallowed_in_state.contains(terminal_id.0) {
+                        forbidden_llm_tokens |= llm_tokens;
+                    }
+                }
+            }
+        }
+
+        if forbidden_llm_tokens.is_empty() {
+            return Some(acc.clone());
+        }
+
+        let mut new_acc = acc.clone();
+        new_acc.llm_tokens_union -= &forbidden_llm_tokens;
+
+        if new_acc.llm_tokens_union.is_empty() {
+            None
+        } else {
+            Some(new_acc)
+        }
+    });
     Ok(())
 }
 
@@ -1389,14 +1440,19 @@ fn gss_map_allowed_terminals_tokenizer_states(
         rust_state_map.insert(from_state, to_state);
     }
 
-    node.inner = node.inner.apply(|terminals_disallowed| {
-        let mut new_map: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
+    node.inner = node.inner.apply(|acc| {
+        let mut new_map = BTreeMap::new();
         for (old, new) in &rust_state_map {
-            if let Some(disallowed_set) = terminals_disallowed.get(&old.0) {
-                new_map.entry(new.0).or_default().extend(disallowed_set);
+            if let Some(bv) = acc.terminals_union.get(&old.0) {
+                new_map
+                    .entry(new.0)
+                    .and_modify(|b: &mut RustHybridBitset| *b |= bv.clone())
+                    .or_insert_with(|| bv.clone());
             }
         }
-        new_map
+        let mut na = acc.clone();
+        na.terminals_union = new_map;
+        na
     });
     Ok(())
 }

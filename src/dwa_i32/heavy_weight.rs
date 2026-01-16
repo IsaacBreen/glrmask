@@ -28,7 +28,7 @@
 use super::rangeset::RangeSet;
 use range_set_blaze::RangeSetBlaze;
 use std::fmt::{Debug, Display, Formatter};
-use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign};
+use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Not};
 use std::sync::Arc;
 
 /// Dimensions for the 2D weight space (token × tsid).
@@ -88,6 +88,7 @@ impl WeightDimensions {
             (start, end)
         })
     }
+    
     /// Check if this dimension matches another.
     pub fn matches(&self, other: &WeightDimensions) -> bool {
         self.num_tokens == other.num_tokens && self.num_tsids == other.num_tsids
@@ -283,6 +284,15 @@ impl HeavyWeight {
         }
     }
     
+    /// Complement within the valid domain.
+    pub fn complement(&self) -> Self {
+        let all = Self::all(self.dims);
+        Self {
+            inner: &all.inner - &self.inner,
+            dims: self.dims,
+        }
+    }
+    
     /// Set difference (self - other).
     pub fn difference(&self, other: &Self) -> Self {
         self.check_dims(other);
@@ -444,6 +454,20 @@ impl BitAndAssign<&HeavyWeight> for HeavyWeight {
     }
 }
 
+impl Not for &HeavyWeight {
+    type Output = HeavyWeight;
+    fn not(self) -> Self::Output {
+        self.complement()
+    }
+}
+
+impl Not for HeavyWeight {
+    type Output = HeavyWeight;
+    fn not(self) -> Self::Output {
+        (&self).complement()
+    }
+}
+
 // ========== Tests ==========
 
 #[cfg(test)]
@@ -536,26 +560,16 @@ mod tests {
     }
     
     #[test]
-    fn test_complement_single_point() {
+    fn test_complement() {
         let dims = WeightDimensions::new(10, 10);  // 100 total
         let w = HeavyWeight::from_rect(0, 0, 0, 0, dims);  // Just one point
-        let all = HeavyWeight::all(dims);
-        let c = all.difference(&w);
+        
+        let c = w.complement();
         assert_eq!(c.len(), 99);
         assert!(!c.contains_point(0, 0));
         assert!(c.contains_point(0, 1));
     }
     
-    #[test]
-    fn test_complement_range() {
-        let dims = WeightDimensions::new(10, 10);
-        let w = HeavyWeight::from_rect(2, 4, 2, 4, dims);
-        let all = HeavyWeight::all(dims);
-        let c = all.difference(&w);
-        assert!(c.contains_point(0, 0));
-        assert!(!c.contains_point(3, 3));
-        assert!(c.contains_point(9, 9));
-    }
     #[test]
     fn test_projection() {
         let dims = WeightDimensions::new(100, 10);

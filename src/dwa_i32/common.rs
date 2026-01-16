@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 #![allow(clippy::needless_borrow)]
 
-use crate::datastructures::AbstractWeight;
+use super::rangeset::RangeSet;
 
 pub(crate) const STOCHASTIC_DEBUG: bool = false;
 pub(crate) const DETERMINIZE_DEBUG: bool = false;
@@ -14,7 +14,7 @@ pub(crate) fn optimize_debug() -> bool {
 }
 
 pub type StateID = usize;
-pub type Weight = AbstractWeight;
+pub type Weight = RangeSet;
 pub type NWAStateID = usize;
 pub type Label = i32;
 

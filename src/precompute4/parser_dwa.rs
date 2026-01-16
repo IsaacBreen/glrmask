@@ -267,14 +267,24 @@ fn specialize_dwa_relative(parent_dwa: &DWA, mapping: &[Weight], parent_unique_w
         .map(|w| {
             // OPTIMIZATION: Accumulate in a local RangeSetBlaze to avoid SimpleBitset lock contention
             let mut accumulator = RangeSetBlaze::new();
+            let mut is_all = false;
+
             for bit in w.iter_up_to(mapping.len()) {
                 if let Some(target_w) = mapping.get(bit) {
+                    if target_w.is_all_fast() {
+                        is_all = true;
+                        break;
+                    }
                     // Access the inner RSB directly to avoid locking
                     accumulator |= &target_w.rsb;
                 }
             }
 
-            let new_w = Weight::from_rsb(accumulator);
+            let new_w = if is_all {
+                Weight::all()
+            } else {
+                Weight::from_rsb(accumulator)
+            };
             (w.clone(), new_w)
         })
         .collect();
@@ -357,31 +367,9 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
         return empty_dwa;
     }
     
-    let mut max_weight_pos = 0usize;
-    for state in &terminal_nwa.states.0 {
-        if let Some(ref fw) = state.final_weight {
-            if let Some(m) = fw.max_item() {
-                max_weight_pos = max_weight_pos.max(m);
-            }
-        }
-        for targets in state.transitions.values() {
-            for (_, weight) in targets {
-                if let Some(m) = weight.max_item() {
-                    max_weight_pos = max_weight_pos.max(m);
-                }
-            }
-        }
-        for (_, weight) in &state.epsilons {
-            if let Some(m) = weight.max_item() {
-                max_weight_pos = max_weight_pos.max(m);
-            }
-        }
-    }
-    let full_weight = Weight::ones(max_weight_pos.saturating_add(1));
-
     let now = Instant::now();
-    let template_dwas = match build_template_dwas(parser, max_weight_pos) { Ok(m) => m, Err(e) => panic!("Failed to build template DWAs: {:?}", e), };
-    let ignore_dwa = build_ignore_terminal_dwa(&full_weight);
+    let template_dwas = match build_template_dwas(parser) { Ok(m) => m, Err(e) => panic!("Failed to build template DWAs: {:?}", e), };
+    let ignore_dwa = build_ignore_terminal_dwa();
     crate::debug!(4, "Built {} template DWAs in {:?}", template_dwas.len(), now.elapsed());
 
     // Check if we're in symbol-heavy mode (tsid encoded as labels, not weights)
@@ -439,7 +427,7 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
         BTreeMap::new()
     };
 
-    let initial_tokens = LLMTokenBV::ones(max_weight_pos.saturating_add(1));
+    let initial_tokens = LLMTokenBV::max_ones();
     let mut initial_values_bv = Vec::new();
     for &start in &reversed_nwa.body.start_states {
         initial_values_bv.push((start, initial_tokens.clone()));
@@ -592,14 +580,23 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
             let weight_map: HashMap<Weight, Weight> = super_dwa_unique_weights.iter()
                 .map(|w| {
                     let mut accumulator = RangeSetBlaze::new();
+                    let mut is_all = false;
 
                     for bit in w.iter_up_to(mapping.len()) {
                         if let Some(target_w) = mapping.get(bit) {
+                            if target_w.is_all_fast() {
+                                is_all = true;
+                                break;
+                            }
                             accumulator |= &target_w.rsb;
                         }
                     }
 
-                    let new_w = Weight::from_rsb(accumulator);
+                    let new_w = if is_all {
+                        Weight::all()
+                    } else {
+                        Weight::from_rsb(accumulator)
+                    };
                     (w.clone(), new_w)
                 })
                 .collect();
@@ -645,12 +642,12 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
     let initial_body = {
         let mut states = states_arena.borrow_mut();
         let start = states.add_state();
-        states[start].final_weight = Some(Weight::ones(max_weight_pos.saturating_add(1)));
+        states[start].final_weight = Some(Weight::all());
         NWABody { start_states: vec![start] }
     };
-    let initial_term_map: BTreeMap<Option<TerminalID>, Weight> = BTreeMap::from([(None, Weight::ones(max_weight_pos.saturating_add(1)))]);
+    let initial_term_map: BTreeMap<Option<TerminalID>, Weight> = BTreeMap::from([(None, Weight::all())]);
     let initial_values_full: Vec<(usize, (BTreeMap<NWABody, BTreeMap<Option<TerminalID>, Weight>>, LLMTokenBV))> =
-        reversed_nwa.body.start_states.iter().map(|&s| (s, (BTreeMap::from([(initial_body.clone(), initial_term_map.clone())]), LLMTokenBV::ones(max_weight_pos.saturating_add(1))))).collect();
+        reversed_nwa.body.start_states.iter().map(|&s| (s, (BTreeMap::from([(initial_body.clone(), initial_term_map.clone())]), LLMTokenBV::max_ones()))).collect();
 
     // Store (NWABody, Weight, node_id) - node_id is the state ID in reversed NWA where we collected this body
     // In symbol-heavy mode, we also collect tsid-specific bodies separately

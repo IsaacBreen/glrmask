@@ -35,6 +35,9 @@ pub fn expand_weight(weight: &Weight, num_tsids: usize) -> Weight {
     if weight.is_empty() {
         return Weight::zeros();
     }
+    if weight.is_all_fast() {
+        return Weight::all();
+    }
     
     Weight::from_rsb(expand_rsb(&weight.rsb, num_tsids))
 }
@@ -223,14 +226,18 @@ fn find_max_weight_position(dwa: &DWA) -> usize {
     
     for state in &dwa.states.0 {
         if let Some(ref fw) = state.final_weight {
-            if let Some(m) = fw.max_item() {
-                max_pos = max_pos.max(m);
+            if !fw.is_all_fast() {
+                if let Some(m) = fw.max_item() {
+                    max_pos = max_pos.max(m);
+                }
             }
         }
         
         for weight in state.trans_weights.values() {
-            if let Some(m) = weight.max_item() {
-                max_pos = max_pos.max(m);
+            if !weight.is_all_fast() {
+                if let Some(m) = weight.max_item() {
+                    max_pos = max_pos.max(m);
+                }
             }
         }
     }
@@ -247,6 +254,9 @@ pub fn collapse_weight(weight: &Weight, num_tsids: usize) -> Weight {
     }
     if num_tsids == 0 {
         return weight.clone();
+    }
+    if weight.is_all_fast() {
+        return Weight::all();
     }
     
     Weight::from_rsb(collapse_weight_rsb(&weight.rsb, num_tsids))

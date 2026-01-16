@@ -12,11 +12,11 @@ use std::fmt::{Debug, Display, Formatter};
 use std::hash::{Hash, Hasher};
 use std::iter::FromIterator;
 use std::num::NonZeroUsize;
-use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, BitXor, BitXorAssign, Deref, Sub, SubAssign};
+use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, BitXor, BitXorAssign, Deref, Not, Sub, SubAssign};
 use std::sync::{Arc, Mutex};
 use crate::datastructures::hybrid_bitset::RangeSet as OtherRangeSet;
 
-/// Thin wrapper around `RangeSetBlaze<usize>` with cached fingerprint.
+/// Thin wrapper around `RangeSetBlaze<usize>` with cached fingerprint and `is_all` flag.
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd)]
 pub struct RangeSet(Arc<RangeSetInner>);
 
@@ -24,6 +24,7 @@ pub struct RangeSet(Arc<RangeSetInner>);
 pub struct RangeSetInner {
     pub(crate) rsb: RangeSetBlaze<usize>,
     pub(crate) fp: u64,
+    is_all: bool,
 }
 
 impl Deref for RangeSet {
@@ -64,7 +65,10 @@ impl ShardedInterner {
 static INTERNER: Lazy<ShardedInterner> = Lazy::new(ShardedInterner::new);
 
 static ZEROS: Lazy<RangeSet> =
-    Lazy::new(|| RangeSet(Arc::new(RangeSetInner { rsb: RangeSetBlaze::new(), fp: FP_ZERO })));
+    Lazy::new(|| RangeSet(Arc::new(RangeSetInner { rsb: RangeSetBlaze::new(), fp: FP_ZERO, is_all: false })));
+static ALL: Lazy<RangeSet> = Lazy::new(|| {
+    RangeSet(Arc::new(RangeSetInner { rsb: universe_rsb(), fp: FP_ALL, is_all: true }))
+});
 
 type OpCache = LruCache<(usize, usize), RangeSet>;
 const CACHE_SIZE: NonZeroUsize = unsafe { NonZeroUsize::new_unchecked(1024) }; // Per shard
@@ -95,6 +99,7 @@ static XOR_CACHE: Lazy<ShardedCache> = Lazy::new(ShardedCache::new);
 static SUB_CACHE: Lazy<ShardedCache> = Lazy::new(ShardedCache::new);
 
 pub(crate) const FP_ZERO: u64 = 0x9E37_79B9_7F4A_7C15;
+const FP_ALL: u64 = 0xD6E8_FEB8_6659_FD93;
 pub(crate) const FP_K1: u64 = 0xC2B2_AE3D_27D4_EB4F;
 pub(crate) const FP_K2: u64 = 0x1656_67B1_F3E1_5A6D;
 const FP_K3: u64 = 0x9E37_79B1_1F37_9B97;
@@ -109,18 +114,21 @@ pub(crate) fn mix3(a: u64, b: u64, c: u64) -> u64 {
 }
 
 #[inline]
-fn calc_fp(rsb: &RangeSetBlaze<usize>) -> u64 {
+fn calc_is_all_and_fp(rsb: &RangeSetBlaze<usize>) -> (bool, u64) {
     let mut it = rsb.ranges();
     if let Some(first) = it.next() {
+        if *first.start() == 0 && *first.end() == usize::MAX && it.next().is_none() {
+            return (true, FP_ALL);
+        }
         let mut fp = mix3(FP_ZERO, *first.start() as u64, (*first.end() as u64).wrapping_mul(FP_K1));
         for r in it {
             let s = *r.start() as u64;
             let e = *r.end() as u64;
             fp = mix3(fp, s.wrapping_mul(FP_K2), e.wrapping_mul(FP_K3));
         }
-        fp
+        (false, fp)
     } else {
-        FP_ZERO
+        (false, FP_ZERO)
     }
 }
 
@@ -128,7 +136,10 @@ fn intern(rsb: RangeSetBlaze<usize>) -> RangeSet {
     if rsb.is_empty() {
         return ZEROS.clone();
     }
-    let fp = calc_fp(&rsb);
+    let (is_all, fp) = calc_is_all_and_fp(&rsb);
+    if is_all {
+        return ALL.clone();
+    }
 
     let mut interner = INTERNER.get(fp).lock().unwrap();
     let candidates = interner.0.entry(fp).or_default();
@@ -138,20 +149,25 @@ fn intern(rsb: RangeSetBlaze<usize>) -> RangeSet {
         }
     }
 
-    let new_inner = Arc::new(RangeSetInner { rsb, fp });
+    let new_inner = Arc::new(RangeSetInner { rsb, fp, is_all });
     candidates.push(new_inner.clone());
     RangeSet(new_inner)
 }
+
+#[inline]
+fn universe_rsb() -> RangeSetBlaze<usize> { RangeSetBlaze::from_iter([0usize..=usize::MAX]) }
+
+#[inline]
+fn complement_rsb(rsb: &RangeSetBlaze<usize>) -> RangeSetBlaze<usize> { &universe_rsb() - rsb }
 
 impl RangeSet {
     pub fn zeros() -> Self { ZEROS.clone() }
 
     pub fn ones(len: usize) -> Self {
-        if len == 0 {
-            return Self::zeros();
-        }
         intern(RangeSetBlaze::from_iter([0..=len - 1]))
     }
+
+    pub fn all() -> Self { ALL.clone() }
 
     pub fn from_item(item: usize) -> Self { intern(RangeSetBlaze::from_iter([item])) }
 
@@ -168,9 +184,15 @@ impl RangeSetInner {
 
     pub fn is_empty(&self) -> bool { self.rsb.is_empty() }
 
+    #[inline]
+    pub fn is_all_fast(&self) -> bool { self.is_all }
+
     pub fn is_disjoint(&self, other: &RangeSet) -> bool {
         if self.is_empty() || other.is_empty() {
             return true;
+        }
+        if self.is_all_fast() || other.is_all_fast() {
+            return false;
         }
         (&self.rsb & &other.rsb).is_empty()
     }
@@ -198,7 +220,21 @@ impl RangeSet {
     
     pub fn is_subset_of(&self, rhs: &RangeSet) -> bool { (self & rhs) == *self }
 
+    pub fn complement(&self) -> RangeSet {
+        if self.is_empty() {
+            return RangeSet::all();
+        }
+        if self.is_all_fast() {
+            return RangeSet::zeros();
+        }
+        let rsb = complement_rsb(&self.rsb);
+        intern(rsb)
+    }
+
     pub fn insert(&mut self, item: usize) {
+        if self.is_all_fast() {
+            return;
+        }
         let mut rsb = self.rsb.clone();
         rsb.insert(item);
         *self = intern(rsb);
@@ -232,6 +268,10 @@ impl RangeSet {
             *self = Self::zeros();
             return;
         }
+        if self.is_all_fast() {
+            *self = Self::from_ranges(&[(min, max)]);
+            return;
+        }
 
         // Since not empty, min/max will be Some.
         let self_min = self.min_item().unwrap();
@@ -246,13 +286,7 @@ impl RangeSet {
         *self = intern(rsb);
     }
 
-    pub fn clip_min(&mut self, min: usize) {
-        if let Some(max) = self.max_item() {
-            self.clip_to_range(min, max);
-        } else {
-            *self = Self::zeros();
-        }
-    }
+    pub fn clip_min(&mut self, min: usize) { self.clip_to_range(min, usize::MAX); }
 
     pub fn clip_max(&mut self, max: usize) { self.clip_to_range(0, max); }
 }
@@ -263,17 +297,26 @@ impl Hash for RangeSet {
 
 impl Debug for RangeSet {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        Debug::fmt(&self.0.rsb, f)
+        if self.is_all_fast() {
+            write!(f, "RangeSet(ALL)")
+        } else {
+            Debug::fmt(&self.0.rsb, f)
+        }
     }
 }
 
 impl Display for RangeSet {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        if self.is_all_fast() {
+            return write!(f, "ALL");
+        }
         write!(f, "[")?;
         let mut ranges = self.rsb.ranges().peekable();
         while let Some(range) = ranges.next() {
             if range.start() == range.end() {
                 write!(f, "{}", range.start())?;
+            } else if *range.end() == usize::MAX {
+                write!(f, "{}..", range.start())?;
             } else {
                 write!(f, "{}..={}", range.start(), range.end())?;
             }
@@ -318,6 +361,12 @@ impl<'a> BitAnd<&'a RangeSet> for &'a RangeSet {
         if self.is_empty() || rhs.is_empty() {
             return RangeSet::zeros();
         }
+        if self.is_all_fast() {
+            return rhs.clone();
+        }
+        if rhs.is_all_fast() {
+            return self.clone();
+        }
 
         let p1 = Arc::as_ptr(&self.0) as usize;
         let p2 = Arc::as_ptr(&rhs.0) as usize;
@@ -339,6 +388,9 @@ impl<'a> BitOr<&'a RangeSet> for &'a RangeSet {
     fn bitor(self, rhs: &'a RangeSet) -> Self::Output {
         if Arc::ptr_eq(&self.0, &rhs.0) {
             return self.clone();
+        }
+        if self.is_all_fast() || rhs.is_all_fast() {
+            return RangeSet::all();
         }
         if self.is_empty() {
             return rhs.clone();
@@ -477,6 +529,9 @@ impl<'a> Sub<&'a RangeSet> for &'a RangeSet {
         if self.is_empty() || rhs.is_empty() {
             return self.clone();
         }
+        if rhs.is_all_fast() {
+            return RangeSet::zeros();
+        }
 
         let p1 = Arc::as_ptr(&self.0) as usize;
         let p2 = Arc::as_ptr(&rhs.0) as usize;
@@ -487,9 +542,39 @@ impl<'a> Sub<&'a RangeSet> for &'a RangeSet {
             return result.clone();
         }
 
-        let result = intern(&self.rsb - &rhs.rsb);
+        let result = if self.is_all_fast() {
+            rhs.complement()
+        } else {
+            intern(&self.rsb - &rhs.rsb)
+        };
         cache.put(key, result.clone());
         result
+    }
+}
+
+impl Not for RangeSet {
+    type Output = RangeSet;
+    fn not(self) -> Self::Output {
+        if self.is_empty() {
+            return RangeSet::all();
+        }
+        if self.is_all_fast() {
+            return RangeSet::zeros();
+        }
+        intern(complement_rsb(&self.rsb))
+    }
+}
+
+impl Not for &RangeSet {
+    type Output = RangeSet;
+    fn not(self) -> Self::Output {
+        if self.is_empty() {
+            return RangeSet::all();
+        }
+        if self.is_all_fast() {
+            return RangeSet::zeros();
+        }
+        intern(complement_rsb(&self.rsb))
     }
 }
 
@@ -498,39 +583,71 @@ impl Serialize for RangeSet {
     where S: Serializer {
         #[derive(Serialize)]
         #[serde(untagged)]
+        enum Repr<'a> {
+            All(&'a str),
+            Ranges(Vec<RangeRepr>),
+        }
+
+        #[derive(Serialize)]
+        #[serde(untagged)]
         enum RangeRepr {
             Single(usize),
             Range((usize, usize)),
         }
-        let ranges: Vec<RangeRepr> = self
-            .rsb
-            .ranges()
-            .map(|r| {
-                if r.start() == r.end() {
-                    RangeRepr::Single(*r.start())
-                } else {
-                    RangeRepr::Range((*r.start(), *r.end()))
-                }
-            })
-            .collect();
-        ranges.serialize(serializer)
+
+        if self.is_all {
+            Repr::All("ALL").serialize(serializer)
+        } else {
+            let ranges: Vec<RangeRepr> = self
+                .rsb
+                .ranges()
+                .map(|r| {
+                    if r.start() == r.end() {
+                        RangeRepr::Single(*r.start())
+                    } else {
+                        RangeRepr::Range((*r.start(), *r.end()))
+                    }
+                })
+                .collect();
+            Repr::Ranges(ranges).serialize(serializer)
+        }
     }
 }
 
 impl<'de> Deserialize<'de> for RangeSet {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where D: Deserializer<'de> {
+        use serde::de;
+
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Repr {
+            All(String),
+            Ranges(Vec<RangeRepr>),
+        }
+
         #[derive(Deserialize)]
         #[serde(untagged)]
         enum RangeRepr {
             Single(usize),
             Range((usize, usize)),
         }
-        let ranges: Vec<RangeRepr> = Vec::deserialize(deserializer)?;
-        let rsb = RangeSetBlaze::from_iter(ranges.into_iter().map(|rr| match rr {
-            RangeRepr::Single(i) => i..=i,
-            RangeRepr::Range((s, e)) => s..=e,
-        }));
-        Ok(intern(rsb))
+
+        match Repr::deserialize(deserializer)? {
+            Repr::All(s) => {
+                if s == "ALL" {
+                    Ok(RangeSet::all())
+                } else {
+                    Err(de::Error::custom("expected string 'ALL' for all-bitset"))
+                }
+            }
+            Repr::Ranges(ranges) => {
+                let rsb = RangeSetBlaze::from_iter(ranges.into_iter().map(|rr| match rr {
+                    RangeRepr::Single(i) => i..=i,
+                    RangeRepr::Range((s, e)) => s..=e,
+                }));
+                Ok(intern(rsb))
+            }
+        }
     }
 }

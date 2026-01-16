@@ -7,12 +7,10 @@ mod tests {
     use super::*;
 
     fn remove_weights(dwa: &mut DWA) {
-        let max_weight_pos = dwa.states.find_actual_max().unwrap_or(0);
-        let full_weight = Weight::ones(max_weight_pos.saturating_add(1));
         for s in dwa.states.0.iter_mut() {
-            s.final_weight = s.final_weight.as_ref().map(|_| full_weight.clone());
+            s.final_weight = s.final_weight.as_ref().map(|_| Weight::all());
             for w in s.trans_weights.values_mut() {
-                *w = full_weight.clone();
+                *w = Weight::all();
             }
         }
     }

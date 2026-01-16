@@ -246,8 +246,6 @@ pub struct StageVocab {
     pub internal_max_llm_token: usize,
     pub max_original_llm_token_id: usize,
     pub internal_to_original_sparse_matrix: Vec<Vec<(u16, u64)>>,
-    /// All internal LLM tokens as a RangeSetBlaze (0..=internal_max_llm_token).
-    pub all_llm_tokens: range_set_blaze::RangeSetBlaze<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -324,15 +322,12 @@ impl JSONConvertible for StageVocab {
             intermediate.internal_max_llm_token,
         );
 
-        let all_llm_tokens = range_set_blaze::RangeSetBlaze::from_iter([0..=intermediate.internal_max_llm_token]);
-
         Ok(StageVocab {
             original_to_internal: intermediate.original_to_internal,
             internal_to_original,
             internal_max_llm_token: intermediate.internal_max_llm_token,
             max_original_llm_token_id: intermediate.max_original_llm_token_id,
             internal_to_original_sparse_matrix,
-            all_llm_tokens,
         })
     }
 }
@@ -390,6 +385,11 @@ impl StageVocab {
 
     /// Convert an internal BV (using `self.vocab`) back to original IDs.
     pub fn internal_bv_to_original(&self, internal_bv: &LLMTokenBV) -> Bitset {
+        if internal_bv.is_all() {
+            let mut internal_bv_ones = RangeSet::ones(self.internal_max_llm_token + 1);
+            return self.internal_bv_to_original(&internal_bv_ones);
+        }
+
         type Word = u64;
         const WORD_BITS: usize = 64;
 
@@ -424,6 +424,13 @@ impl StageVocab {
     pub fn fill_internal_bv_to_original_i32(&self, internal_bv: &LLMTokenBV, out: &mut [i32]) {
         // Zero the output first
         out.fill(0);
+        
+        if internal_bv.is_all() {
+            let internal_bv_ones = RangeSet::ones(self.internal_max_llm_token + 1);
+            self.fill_internal_bv_to_original_i32_nozeroing(&internal_bv_ones, out);
+            return;
+        }
+        
         self.fill_internal_bv_to_original_i32_nozeroing(internal_bv, out);
     }
     
@@ -488,9 +495,15 @@ impl StageVocab {
 
     pub fn original_bv_to_internal(&self, original_bv: &LLMTokenBV) -> LLMTokenBV {
         let mut internal_bv = RangeSet::zeros();
-        for i in original_bv.iter_up_to(self.max_original_llm_token_id) {
-            if let Some(&internal_id) = self.original_to_internal.get(&i) {
+        if original_bv.is_all() {
+            for &internal_id in self.original_to_internal.values() {
                 internal_bv.insert(internal_id);
+            }
+        } else {
+            for i in original_bv.iter_up_to(self.max_original_llm_token_id) {
+                if let Some(&internal_id) = self.original_to_internal.get(&i) {
+                    internal_bv.insert(internal_id);
+                }
             }
         }
         internal_bv

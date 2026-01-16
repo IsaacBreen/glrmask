@@ -212,8 +212,8 @@ impl DFA {
         }
     }
     
-    /// Convert this DFA to a DWA with full weight on all transitions and finals.
-    pub fn to_dwa(&self, full_weight: &Weight) -> DWA {
+    /// Convert this DFA to a DWA with Weight::all() on all transitions and finals.
+    pub fn to_dwa(&self) -> DWA {
         if self.states.is_empty() {
             // Return a minimal DWA with just a start state
             return DWA::new();
@@ -229,18 +229,18 @@ impl DFA {
         // Set start state
         dwa.body.start_state = state_map[self.body.start_state];
         
-        // Copy transitions with full weight
+        // Copy transitions with Weight::all()
         for (src_id, state) in self.states.0.iter().enumerate() {
             let dwa_src = state_map[src_id];
             
             for (&label, &dst_id) in &state.transitions {
                 let dwa_dst = state_map[dst_id];
                 dwa.states[dwa_src].transitions.insert(label, dwa_dst);
-                dwa.states[dwa_src].trans_weights.insert(label, full_weight.clone());
+                dwa.states[dwa_src].trans_weights.insert(label, Weight::all());
             }
             
             if state.is_final {
-                dwa.states[dwa_src].final_weight = Some(full_weight.clone());
+                dwa.states[dwa_src].final_weight = Some(Weight::all());
             }
         }
         
@@ -310,8 +310,8 @@ mod tests {
         let s1 = dfa.add_state();
         dfa.add_transition(dfa.body.start_state, 1, s1).unwrap();
         dfa.set_final(s1);
-
-        let dwa = dfa.to_dwa(&Weight::ones(1));
+        
+        let dwa = dfa.to_dwa();
         assert_eq!(dwa.states.len(), 2);
         assert!(dwa.states[1].final_weight.is_some());
         assert_eq!(dwa.states[0].transitions.get(&1), Some(&1));

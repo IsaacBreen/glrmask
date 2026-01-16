@@ -89,6 +89,13 @@ impl<'a> Debug for DebugRangesTruncated<'a> {
 
 impl Debug for RangeSet {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        if self.is_all() {
+            return f
+                .debug_struct("HybridBitset")
+                .field("inner", &format_args!("0..=usize::MAX"))
+                .finish();
+        }
+
         const MAX_RANGES_IN_DEBUG: usize = 10; // Threshold for truncation in normal debug mode
         let is_alternate_mode = f.alternate(); // Call alternate() before the mutable borrow for debug_struct
 
@@ -116,6 +123,8 @@ impl Display for RangeSet {
 
             if start == end {
                 write!(f, "{}", start)?;
+            } else if end == usize::MAX {
+                write!(f, "{}..", start)?;
             } else {
                 write!(f, "{}..{}", start, end)?;
             }
@@ -153,6 +162,12 @@ impl RangeSet {
         }
     }
 
+    pub fn max_ones() -> Self {
+        RangeSet {
+            inner: cache::intern_l1(RangeSetBlaze::from_iter([0..=usize::MAX])),
+        }
+    }
+
     /// Creates a HybridBitset from an iterator of indices.
     pub fn from_iter<I: IntoIterator<Item = usize>>(iter: I) -> Self {
         RangeSet {
@@ -184,6 +199,9 @@ impl RangeSet {
     /// Returns true if the bitset contains no set bits.
     pub fn is_empty(&self) -> bool {
         self.inner.is_empty()
+    }
+    pub fn is_all(&self) -> bool {
+        self == &RangeSet::max_ones()
     }
 
     /// Checks if a specific index is set.
@@ -266,6 +284,10 @@ impl RangeSet {
         self.inner = cache::intern_l1(RangeSetBlaze::new());
     }
 
+    pub fn inverted(&self) -> Self {
+        &Self::max_ones() - self
+    }
+
     pub fn union_with(&mut self, other: &Self) {
         *Arc::make_mut(&mut self.inner) |= &*other.inner;
     }
@@ -279,7 +301,9 @@ impl RangeSet {
         Iter {
             iter_inner: self.inner.iter(),
             remaining: self.len(),
-            max_val: None,
+            is_all: self.is_all(),
+            count: 0,
+            max_val: usize::MAX,
         }
     }
 
@@ -298,7 +322,9 @@ impl RangeSet {
         Iter {
             iter_inner: self.inner.iter(),
             remaining: count.try_into().unwrap_or(usize::MAX),
-            max_val: Some(max),
+            is_all: self.is_all(),
+            count: 0,
+            max_val: max,
         }
     }
 
@@ -311,11 +337,14 @@ impl RangeSet {
     /// up to the largest index present in the set (inclusive) whether it's set or not.
     /// If the set is empty, the iterator is empty.
     pub fn iter_bits(&self) -> BitsIter<'_> {
+        let is_all = self.is_all();
         if self.is_empty() {
             BitsIter {
                 bitset: self,
                 current_idx: 1, // Start beyond max_idx_to_iterate to yield nothing
                 max_idx_to_iterate: 0,
+                is_all,
+                count: 0,
             }
         } else {
             let max_val_in_set = self.inner.last().unwrap_or(0); // unwrap is safe due to is_empty check
@@ -323,6 +352,8 @@ impl RangeSet {
                 bitset: self,
                 current_idx: 0,
                 max_idx_to_iterate: max_val_in_set,
+                is_all,
+                count: 0,
             }
         }
     }
@@ -449,7 +480,9 @@ const FULL_ITER_WARNING_THRESHOLD: usize = 1_000_000;
 pub struct Iter<'a> {
     iter_inner: range_set_blaze::Iter<usize, range_set_blaze::RangesIter<'a, usize>>,
     remaining: usize,
-    max_val: Option<usize>,
+    is_all: bool,
+    count: usize,
+    max_val: usize,
 }
 
 impl<'a> Iterator for Iter<'a> {
@@ -459,13 +492,22 @@ impl<'a> Iterator for Iter<'a> {
         if self.remaining == 0 {
             return None;
         }
+        if self.is_all {
+            self.count += 1;
+            if self.count == FULL_ITER_WARNING_THRESHOLD {
+                // eprintln!(
+                //     "Warning: Iterating over a full HybridBitset. This may take a very long time."
+                // );
+                panic!(
+                    "Warning: Iterating over a full HybridBitset. This may take a very long time."
+                );
+            }
+        }
         match self.iter_inner.next() {
             Some(item) => {
-                if let Some(max_val) = self.max_val {
-                    if item > max_val {
-                        self.remaining = 0;
-                        return None;
-                    }
+                if item > self.max_val {
+                    self.remaining = 0;
+                    return None;
                 }
                 self.remaining -= 1;
                 Some(item)
@@ -508,12 +550,22 @@ pub struct BitsIter<'a> {
     bitset: &'a RangeSet,
     current_idx: usize,
     max_idx_to_iterate: usize, // Inclusive
+    is_all: bool,
+    count: usize,
 }
 
 impl<'a> Iterator for BitsIter<'a> {
     type Item = bool;
 
     fn next(&mut self) -> Option<Self::Item> {
+        if self.is_all {
+            self.count += 1;
+            if self.count == FULL_ITER_WARNING_THRESHOLD {
+                eprintln!(
+                    "Warning: Iterating bits over a full HybridBitset. This may take a very long time."
+                );
+            }
+        }
         if self.current_idx > self.max_idx_to_iterate {
             None
         } else {
@@ -1389,9 +1441,7 @@ mod tests {
         let set_b = RangeSet::from_iter(vec![2, 3, 20, 100]);
 
         let diff = &set_a - &set_b;
-        let max_val = 100;
-        let inverted = &RangeSet::ones(max_val + 1) - &set_b;
-        let diff_with_inverted = &set_a & &inverted;
+        let diff_with_inverted = &set_a & &set_b.inverted();
 
         let expected_diff = RangeSet::from_iter(vec![1, 10]);
 

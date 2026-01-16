@@ -1,21 +1,10 @@
 //! Abstract weight type for DWA/NWA operations.
 //! 
 //! This module provides a unified weight type that can be used across
-//! different weight representations. Currently only supports RangeSet.
+//! different weight representations. Currently only supports RangeSetBlaze.
 
-use crate::datastructures::hybrid_bitset::RangeSet as HybridRangeSet;
-use crate::datastructures::leveled_gss::Merge;
-use crate::dwa_i32::rangeset::RangeSet;
-use crate::json_serialization::{JSONConvertible, JSONNode};
-use once_cell::sync::Lazy;
 use range_set_blaze::RangeSetBlaze;
-use serde::{Deserialize, Serialize};
-use std::fmt::{Display, Formatter};
-use std::ops::{
-    BitAnd, BitAndAssign, BitOr, BitOrAssign, BitXor, BitXorAssign, Deref, DerefMut, Not, Sub,
-    SubAssign,
-};
-use std::sync::RwLock;
+use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Not};
 
 /// Dimensions for weight-heavy mode encoding.
 /// 
@@ -28,31 +17,30 @@ use std::sync::RwLock;
 /// - Tokenizer state ID (tsid): p % num_tsids
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct WeightDimensions {
-    /// Number of LLM tokens (vocab size). 0 for unset.
+    /// Number of LLM tokens (vocab size). 0 for symbol-heavy mode.
     pub num_tokens: usize,
-    /// Number of tokenizer states. Symbol-heavy mode uses 1.
+    /// Number of tokenizer states. 0 or 1 for symbol-heavy mode.
     pub num_tsids: usize,
 }
 
 impl WeightDimensions {
     /// Create new dimensions.
     pub fn new(num_tokens: usize, num_tsids: usize) -> Self {
-        Self { num_tokens, num_tsids: num_tsids.max(1) }
+        Self { num_tokens, num_tsids }
     }
 
-    /// Check if this is weight-heavy mode (has tsid dimension > 1).
+    /// Check if this is weight-heavy mode (has tsid dimension).
     pub fn is_weight_heavy(&self) -> bool {
         self.num_tsids > 1
     }
 
     /// Total domain size: num_tokens × num_tsids.
     pub fn domain_size(&self) -> usize {
-        if self.num_tokens == 0 || self.num_tsids == 0 {
-            return 0;
+        if self.num_tsids == 0 {
+            self.num_tokens
+        } else {
+            self.num_tokens * self.num_tsids
         }
-        self.num_tokens
-            .checked_mul(self.num_tsids)
-            .expect("weight domain size overflow")
     }
 
     /// Get the maximum position value (domain_size - 1).
@@ -77,135 +65,99 @@ impl WeightDimensions {
     }
 }
 
-const DEFAULT_TEST_TOKENS: usize = 4096;
-
-static WEIGHT_DIMS: Lazy<RwLock<WeightDimensions>> = Lazy::new(|| {
-    let dims = if cfg!(test) {
-        WeightDimensions::new(DEFAULT_TEST_TOKENS, 1)
-    } else {
-        WeightDimensions::new(0, 1)
-    };
-    RwLock::new(dims)
-});
-
-/// Abstract weight type wrapping RangeSet.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct AbstractWeight(RangeSet);
+/// Abstract weight type wrapping RangeSetBlaze.
+/// 
+/// This enum provides a unified interface for weight operations.
+/// Currently only supports RangeSetBlaze, but the enum structure
+/// allows for future extensions to other representations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AbstractWeight {
+    /// Weight represented as a RangeSetBlaze.
+    RangeSet(RangeSetBlaze<usize>),
+}
 
 impl Default for AbstractWeight {
     fn default() -> Self {
-        Self::zeros()
+        AbstractWeight::RangeSet(RangeSetBlaze::new())
     }
 }
 
 impl AbstractWeight {
-    /// Update global weight dimensions.
-    pub fn set_weight_dimensions(dims: WeightDimensions) {
-        *WEIGHT_DIMS.write().expect("weight dims lock poisoned") = dims;
-    }
-
-    /// Read global weight dimensions.
-    pub fn weight_dimensions() -> WeightDimensions {
-        *WEIGHT_DIMS.read().expect("weight dims lock poisoned")
-    }
-
     /// Create an empty weight.
     pub fn empty() -> Self {
-        Self::zeros()
+        AbstractWeight::RangeSet(RangeSetBlaze::new())
     }
 
-    /// Create an empty weight.
-    pub fn zeros() -> Self {
-        Self(RangeSet::zeros())
-    }
-
-    /// Create a weight containing all positions in a length.
-    pub fn ones(len: usize) -> Self {
-        Self(RangeSet::ones(len))
-    }
-
-    /// Create a weight containing all positions in the configured domain.
-    pub fn all() -> Self {
-        let size = Self::weight_dimensions().domain_size();
-        if size == 0 {
-            return Self::zeros();
+    /// Create a weight containing all positions in the given range.
+    pub fn all(dims: WeightDimensions) -> Self {
+        if dims.domain_size() == 0 {
+            return Self::empty();
         }
-        Self::ones(size)
-    }
-
-    /// Create a weight containing all positions in the given domain.
-    pub fn all_for_dims(dims: WeightDimensions) -> Self {
-        let size = dims.domain_size();
-        if size == 0 {
-            return Self::zeros();
-        }
-        Self::ones(size)
+        AbstractWeight::RangeSet(RangeSetBlaze::from_iter([0..=dims.max_position()]))
     }
 
     /// Create a weight from a single position.
-    pub fn from_item(pos: usize) -> Self {
-        Self(RangeSet::from_item(pos))
-    }
-
-    /// Create a weight from a range list.
-    pub fn from_ranges(ranges: &[(usize, usize)]) -> Self {
-        Self(RangeSet::from_ranges(ranges))
+    pub fn from_position(pos: usize) -> Self {
+        AbstractWeight::RangeSet(RangeSetBlaze::from_iter([pos..=pos]))
     }
 
     /// Create a weight from an iterator of positions.
     pub fn from_iter<I: IntoIterator<Item = usize>>(iter: I) -> Self {
-        Self(RangeSet::from_iter(iter))
+        AbstractWeight::RangeSet(RangeSetBlaze::from_iter(iter))
     }
 
     /// Create a weight from a RangeSetBlaze.
     pub fn from_rsb(rsb: RangeSetBlaze<usize>) -> Self {
-        Self(RangeSet::from_rsb(rsb))
+        AbstractWeight::RangeSet(rsb)
     }
 
-    /// Create a weight from an existing RangeSet.
-    pub fn from_rangeset(rangeset: RangeSet) -> Self {
-        Self(rangeset)
+    /// Check if the weight is empty.
+    pub fn is_empty(&self) -> bool {
+        match self {
+            AbstractWeight::RangeSet(rsb) => rsb.is_empty(),
+        }
     }
 
-    /// Borrow the underlying RangeSetBlaze.
-    pub fn as_rsb(&self) -> &RangeSetBlaze<usize> {
-        &self.0.rsb
+    /// Get the number of positions in the weight.
+    pub fn len(&self) -> usize {
+        match self {
+            AbstractWeight::RangeSet(rsb) => rsb.len() as usize,
+        }
     }
 
-    /// Clone the underlying RangeSetBlaze.
+    /// Check if a position is in the weight.
+    pub fn contains(&self, pos: usize) -> bool {
+        match self {
+            AbstractWeight::RangeSet(rsb) => rsb.contains(pos),
+        }
+    }
+
+    /// Get the underlying RangeSetBlaze (if applicable).
     pub fn to_rsb(&self) -> RangeSetBlaze<usize> {
-        self.0.rsb.clone()
+        match self {
+            AbstractWeight::RangeSet(rsb) => rsb.clone(),
+        }
     }
 
-    /// Compute the bounded complement within the configured domain.
-    pub fn complement(&self) -> Self {
-        &Self::all() - self
+    /// Get the number of ranges in the weight.
+    pub fn ranges_len(&self) -> usize {
+        match self {
+            AbstractWeight::RangeSet(rsb) => rsb.ranges_len(),
+        }
     }
 
-    /// Consume into the underlying RangeSet.
-    pub fn into_rangeset(self) -> RangeSet {
-        self.0
+    /// Iterate over ranges.
+    pub fn ranges(&self) -> impl Iterator<Item = std::ops::RangeInclusive<usize>> + '_ {
+        match self {
+            AbstractWeight::RangeSet(rsb) => rsb.ranges(),
+        }
     }
-}
 
-impl Deref for AbstractWeight {
-    type Target = RangeSet;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl DerefMut for AbstractWeight {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
-}
-
-impl Display for AbstractWeight {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        Display::fmt(&self.0, f)
+    /// Insert a position.
+    pub fn insert(&mut self, pos: usize) {
+        match self {
+            AbstractWeight::RangeSet(rsb) => { rsb.insert(pos); },
+        }
     }
 }
 
@@ -215,7 +167,11 @@ impl BitAnd for AbstractWeight {
     type Output = Self;
 
     fn bitand(self, rhs: Self) -> Self::Output {
-        AbstractWeight(&self.0 & &rhs.0)
+        match (self, rhs) {
+            (AbstractWeight::RangeSet(a), AbstractWeight::RangeSet(b)) => {
+                AbstractWeight::RangeSet(&a & &b)
+            }
+        }
     }
 }
 
@@ -223,35 +179,17 @@ impl BitAnd for &AbstractWeight {
     type Output = AbstractWeight;
 
     fn bitand(self, rhs: Self) -> Self::Output {
-        AbstractWeight(&self.0 & &rhs.0)
-    }
-}
-
-impl<'a> BitAnd<&'a AbstractWeight> for AbstractWeight {
-    type Output = AbstractWeight;
-
-    fn bitand(self, rhs: &'a AbstractWeight) -> Self::Output {
-        AbstractWeight(&self.0 & &rhs.0)
-    }
-}
-
-impl<'a> BitAnd<AbstractWeight> for &'a AbstractWeight {
-    type Output = AbstractWeight;
-
-    fn bitand(self, rhs: AbstractWeight) -> Self::Output {
-        AbstractWeight(&self.0 & &rhs.0)
+        match (self, rhs) {
+            (AbstractWeight::RangeSet(a), AbstractWeight::RangeSet(b)) => {
+                AbstractWeight::RangeSet(a & b)
+            }
+        }
     }
 }
 
 impl BitAndAssign for AbstractWeight {
     fn bitand_assign(&mut self, rhs: Self) {
-        self.0 &= &rhs.0;
-    }
-}
-
-impl BitAndAssign<&AbstractWeight> for AbstractWeight {
-    fn bitand_assign(&mut self, rhs: &AbstractWeight) {
-        self.0 &= &rhs.0;
+        *self = std::mem::take(self) & rhs;
     }
 }
 
@@ -259,7 +197,11 @@ impl BitOr for AbstractWeight {
     type Output = Self;
 
     fn bitor(self, rhs: Self) -> Self::Output {
-        AbstractWeight(&self.0 | &rhs.0)
+        match (self, rhs) {
+            (AbstractWeight::RangeSet(a), AbstractWeight::RangeSet(b)) => {
+                AbstractWeight::RangeSet(&a | &b)
+            }
+        }
     }
 }
 
@@ -267,123 +209,27 @@ impl BitOr for &AbstractWeight {
     type Output = AbstractWeight;
 
     fn bitor(self, rhs: Self) -> Self::Output {
-        AbstractWeight(&self.0 | &rhs.0)
-    }
-}
-
-impl<'a> BitOr<&'a AbstractWeight> for AbstractWeight {
-    type Output = AbstractWeight;
-
-    fn bitor(self, rhs: &'a AbstractWeight) -> Self::Output {
-        AbstractWeight(&self.0 | &rhs.0)
-    }
-}
-
-impl<'a> BitOr<AbstractWeight> for &'a AbstractWeight {
-    type Output = AbstractWeight;
-
-    fn bitor(self, rhs: AbstractWeight) -> Self::Output {
-        AbstractWeight(&self.0 | &rhs.0)
+        match (self, rhs) {
+            (AbstractWeight::RangeSet(a), AbstractWeight::RangeSet(b)) => {
+                AbstractWeight::RangeSet(a | b)
+            }
+        }
     }
 }
 
 impl BitOrAssign for AbstractWeight {
     fn bitor_assign(&mut self, rhs: Self) {
-        self.0 |= &rhs.0;
+        *self = std::mem::take(self) | rhs;
     }
 }
 
 impl BitOrAssign<&AbstractWeight> for AbstractWeight {
     fn bitor_assign(&mut self, rhs: &AbstractWeight) {
-        self.0 |= &rhs.0;
-    }
-}
-
-impl BitXor for AbstractWeight {
-    type Output = Self;
-
-    fn bitxor(self, rhs: Self) -> Self::Output {
-        AbstractWeight(&self.0 ^ &rhs.0)
-    }
-}
-
-impl BitXor for &AbstractWeight {
-    type Output = AbstractWeight;
-
-    fn bitxor(self, rhs: Self) -> Self::Output {
-        AbstractWeight(&self.0 ^ &rhs.0)
-    }
-}
-
-impl<'a> BitXor<&'a AbstractWeight> for AbstractWeight {
-    type Output = AbstractWeight;
-
-    fn bitxor(self, rhs: &'a AbstractWeight) -> Self::Output {
-        AbstractWeight(&self.0 ^ &rhs.0)
-    }
-}
-
-impl<'a> BitXor<AbstractWeight> for &'a AbstractWeight {
-    type Output = AbstractWeight;
-
-    fn bitxor(self, rhs: AbstractWeight) -> Self::Output {
-        AbstractWeight(&self.0 ^ &rhs.0)
-    }
-}
-
-impl BitXorAssign for AbstractWeight {
-    fn bitxor_assign(&mut self, rhs: Self) {
-        self.0 ^= &rhs.0;
-    }
-}
-
-impl BitXorAssign<&AbstractWeight> for AbstractWeight {
-    fn bitxor_assign(&mut self, rhs: &AbstractWeight) {
-        self.0 ^= &rhs.0;
-    }
-}
-
-impl Sub for AbstractWeight {
-    type Output = Self;
-
-    fn sub(self, rhs: Self) -> Self::Output {
-        AbstractWeight(&self.0 - &rhs.0)
-    }
-}
-
-impl Sub for &AbstractWeight {
-    type Output = AbstractWeight;
-
-    fn sub(self, rhs: Self) -> Self::Output {
-        AbstractWeight(&self.0 - &rhs.0)
-    }
-}
-
-impl<'a> Sub<&'a AbstractWeight> for AbstractWeight {
-    type Output = AbstractWeight;
-
-    fn sub(self, rhs: &'a AbstractWeight) -> Self::Output {
-        AbstractWeight(&self.0 - &rhs.0)
-    }
-}
-
-impl<'a> Sub<AbstractWeight> for &'a AbstractWeight {
-    type Output = AbstractWeight;
-
-    fn sub(self, rhs: AbstractWeight) -> Self::Output {
-        AbstractWeight(&self.0 - &rhs.0)
-    }
-}
-
-impl SubAssign for AbstractWeight {
-    fn sub_assign(&mut self, rhs: Self) {
-        self.0 -= &rhs.0;
-    }
-}
-
-impl SubAssign<&AbstractWeight> for AbstractWeight {
-    fn sub_assign(&mut self, rhs: &AbstractWeight) {
-        self.0 -= &rhs.0;
+        match (self, rhs) {
+            (AbstractWeight::RangeSet(a), AbstractWeight::RangeSet(b)) => {
+                *a |= b;
+            }
+        }
     }
 }
 
@@ -391,93 +237,36 @@ impl Not for AbstractWeight {
     type Output = Self;
 
     fn not(self) -> Self::Output {
-        &AbstractWeight::all() - &self
+        // Note: This requires knowing the domain size, which we don't have here.
+        // For now, this is a placeholder that should be used carefully.
+        panic!("Not operation on AbstractWeight requires domain knowledge. Use complement_with_dims instead.");
     }
 }
 
-impl Not for &AbstractWeight {
-    type Output = AbstractWeight;
-
-    fn not(self) -> Self::Output {
-        &AbstractWeight::all() - self
-    }
-}
-
-impl Merge for AbstractWeight {
-    fn merge(&self, other: &Self) -> Self {
-        self | other
+impl AbstractWeight {
+    /// Compute the complement within the given dimensions.
+    pub fn complement_with_dims(&self, dims: WeightDimensions) -> Self {
+        if dims.domain_size() == 0 {
+            return Self::empty();
+        }
+        let all = RangeSetBlaze::from_iter([0..=dims.max_position()]);
+        match self {
+            AbstractWeight::RangeSet(rsb) => AbstractWeight::RangeSet(&all - rsb),
+        }
     }
 }
 
 // Conversion traits
 
-impl From<RangeSet> for AbstractWeight {
-    fn from(rsb: RangeSet) -> Self {
-        AbstractWeight(rsb)
-    }
-}
-
-impl From<&RangeSet> for AbstractWeight {
-    fn from(rsb: &RangeSet) -> Self {
-        AbstractWeight(rsb.clone())
-    }
-}
-
 impl From<RangeSetBlaze<usize>> for AbstractWeight {
     fn from(rsb: RangeSetBlaze<usize>) -> Self {
-        AbstractWeight(RangeSet::from_rsb(rsb))
+        AbstractWeight::RangeSet(rsb)
     }
 }
 
 impl From<&RangeSetBlaze<usize>> for AbstractWeight {
     fn from(rsb: &RangeSetBlaze<usize>) -> Self {
-        AbstractWeight(RangeSet::from_rsb(rsb.clone()))
-    }
-}
-
-impl From<HybridRangeSet> for AbstractWeight {
-    fn from(rsb: HybridRangeSet) -> Self {
-        AbstractWeight(RangeSet::from_rsb(rsb.inner.as_ref().clone()))
-    }
-}
-
-impl From<&HybridRangeSet> for AbstractWeight {
-    fn from(rsb: &HybridRangeSet) -> Self {
-        AbstractWeight(RangeSet::from_rsb(rsb.inner.as_ref().clone()))
-    }
-}
-
-impl From<AbstractWeight> for HybridRangeSet {
-    fn from(weight: AbstractWeight) -> Self {
-        HybridRangeSet::from(weight.0)
-    }
-}
-
-impl From<&AbstractWeight> for HybridRangeSet {
-    fn from(weight: &AbstractWeight) -> Self {
-        HybridRangeSet::from(weight.0.clone())
-    }
-}
-
-impl From<AbstractWeight> for RangeSet {
-    fn from(weight: AbstractWeight) -> Self {
-        weight.0
-    }
-}
-
-impl From<&AbstractWeight> for RangeSet {
-    fn from(weight: &AbstractWeight) -> Self {
-        weight.0.clone()
-    }
-}
-
-impl JSONConvertible for AbstractWeight {
-    fn to_json(&self) -> JSONNode {
-        self.0.to_json()
-    }
-
-    fn from_json(node: JSONNode) -> Result<Self, String> {
-        Ok(AbstractWeight(RangeSet::from_json(node)?))
+        AbstractWeight::RangeSet(rsb.clone())
     }
 }
 
@@ -546,12 +335,9 @@ mod tests {
     #[test]
     fn test_abstract_weight_all() {
         let dims = WeightDimensions::new(5, 3);
-        let prev_dims = AbstractWeight::weight_dimensions();
-        AbstractWeight::set_weight_dimensions(dims);
-        let w = AbstractWeight::all();
+        let w = AbstractWeight::all(dims);
         assert_eq!(w.len(), 15);
         assert!(w.contains(0));
         assert!(w.contains(14));
-        AbstractWeight::set_weight_dimensions(prev_dims);
     }
 }
