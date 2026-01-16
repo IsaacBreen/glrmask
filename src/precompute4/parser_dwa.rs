@@ -547,13 +547,6 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
             bit_to_term.push(Some(*term_id));
         }
 
-        // Super NWA weights are in terminal-space (num_bits x 1), not weight-heavy space.
-        // Temporarily set global dims to terminal-space for correct weight operations.
-        let prev_max_llm_token = crate::datastructures::get_max_llm_token();
-        let prev_num_tsids = crate::datastructures::get_num_tsids();
-        let num_bits = bit_to_term.len();
-        crate::datastructures::set_global_dims(num_bits.saturating_sub(1), 1);
-
         let start_super_nwa = std::time::Instant::now();
         let mut super_nwa = NWA::new_empty();
         for (term_id_opt, bit) in &term_to_bit {
@@ -564,16 +557,6 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
                 None => &ignore_dwa,
             };
             let mut weighted_dwa = term_dwa.clone();
-            // Reset weights to current terminal-space dims before applying bit weights.
-            let all_weight = Weight::all();
-            for state in weighted_dwa.states.0.iter_mut() {
-                if state.final_weight.is_some() {
-                    state.final_weight = Some(all_weight.clone());
-                }
-                for w in state.trans_weights.values_mut() {
-                    *w = all_weight.clone();
-                }
-            }
             weighted_dwa.apply_weight_inplace(&weight);
             NWA::union_assign(&mut super_nwa, &NWA::from_dwa(&weighted_dwa));
         }
@@ -602,9 +585,6 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
             })
             .into_iter().collect();
         crate::debug!(5, "  Collected {} unique weights in {:?}", super_dwa_unique_weights.len(), start_weights.elapsed());
-
-        // Restore original dims before specialization mappings.
-        crate::datastructures::set_global_dims(prev_max_llm_token, prev_num_tsids);
 
         // PRE-COMPUTE: Build all weight mappings for all complex signatures upfront
         // This avoids redundant computation inside specialize_dwa_relative, which was creating

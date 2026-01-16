@@ -314,7 +314,7 @@ impl std::fmt::Display for AbstractWeight {
                 }
             }
             AbstractWeight::Factorized(fw) => {
-                write!(f, "FactorizedWeight({} pairs)", fw.pairs_len())
+                write!(f, "FactorizedWeight({} pairs)", fw.pairs.len())
             }
         }
     }
@@ -1005,15 +1005,11 @@ impl AbstractWeight {
                 AbstractWeight::RangeSet(WeightBackend::complement(rsb, domain_max))
             }
             AbstractWeight::Factorized(fw) => {
-                // If num_tsids mismatch (weight from different dims context), 
-                // fall back to expanding and computing complement as RangeSet
-                if fw.num_tsids() != normalize_num_tsids(num_tsids) {
-                    let rsb = fw.expand_to_rsb_unchecked();
-                    let complement_rsb = WeightBackend::complement(&rsb, domain_max);
-                    return AbstractWeight::Factorized(
-                        FactorizedWeight::from_rsb_with_num_tsids(&complement_rsb, normalize_num_tsids(num_tsids))
-                    );
-                }
+                assert_eq!(
+                    fw.num_tsids(),
+                    normalize_num_tsids(num_tsids),
+                    "FactorizedWeight dimensions mismatch in complement"
+                );
                 AbstractWeight::Factorized(WeightBackend::complement(fw, domain_max))
             }
         }
