@@ -8,7 +8,6 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 
 
-use crate::constraint::LLMTokenBV;
 use crate::glr::parser::{ExpectElse, GLRParser};
 use crate::precompute4::resolve_negatives::{
     apply_cancellations_range, apply_finality_fixpoint_range, remove_negative_transitions_range
@@ -268,7 +267,7 @@ fn specialize_dwa_relative(parent_dwa: &DWA, mapping: &[Weight], parent_unique_w
             let mut accumulator = Weight::zeros();
             let mut is_all = false;
 
-            for bit in w.iter_up_to(mapping.len()) {
+            for bit in w.iter_up_to_allow_expansion(mapping.len()) {
                 if let Some(target_w) = mapping.get(bit) {
                     if target_w.is_all_fast() {
                         is_all = true;
@@ -402,7 +401,7 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
     for (i, state) in terminal_nwa.states.0.iter().enumerate() {
         crate::debug!(6, "  Input State {}: final_weight={:?}, epsilons={}, transitions={:?}", 
             i, 
-            state.final_weight.as_ref().map(|w| w.to_rsb().ranges().take(5).map(|r| format!("{}..={}", r.start(), r.end())).collect::<Vec<_>>().join(",")),
+            state.final_weight.as_ref().map(|w| format!("len={}, ranges={}", w.len(), w.ranges_len())),
             state.epsilons.len(),
             state.transitions.iter().map(|(&l, targets)| format!("{}:{}", l, targets.len())).collect::<Vec<_>>()
         );
@@ -413,8 +412,8 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
     for (i, state) in reversed_nwa.states.0.iter().enumerate() {
         crate::debug!(6, "  State {}: final_weight={:?}, epsilons={:?}, transitions={}", 
             i, 
-            state.final_weight.as_ref().map(|w| w.to_rsb().ranges().take(5).map(|r| format!("{}..={}", r.start(), r.end())).collect::<Vec<_>>().join(",")),
-            state.epsilons.iter().take(3).map(|(v, w)| format!("->{}({:?})", v, w.to_rsb().ranges().take(3).collect::<Vec<_>>())).collect::<Vec<_>>(),
+            state.final_weight.as_ref().map(|w| format!("len={}, ranges={}", w.len(), w.ranges_len())),
+            state.epsilons.iter().take(3).map(|(v, w)| format!("->{}(len={}, ranges={})", v, w.len(), w.ranges_len())).collect::<Vec<_>>(),
             state.transitions.len()
         );
     }
@@ -446,7 +445,7 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
         BTreeMap::new()
     };
 
-    let initial_tokens = LLMTokenBV::max_ones();
+    let initial_tokens = Weight::all();
     let mut initial_values_bv = Vec::new();
     for &start in &reversed_nwa.body.start_states {
         initial_values_bv.push((start, initial_tokens.clone()));
@@ -601,7 +600,7 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
                     let mut accumulator = Weight::zeros();
                     let mut is_all = false;
 
-                    for bit in w.iter_up_to(mapping.len()) {
+                    for bit in w.iter_up_to_allow_expansion(mapping.len()) {
                         if let Some(target_w) = mapping.get(bit) {
                             if target_w.is_all_fast() {
                                 is_all = true;
@@ -665,8 +664,8 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
         NWABody { start_states: vec![start] }
     };
     let initial_term_map: BTreeMap<Option<TerminalID>, Weight> = BTreeMap::from([(None, Weight::all())]);
-    let initial_values_full: Vec<(usize, (BTreeMap<NWABody, BTreeMap<Option<TerminalID>, Weight>>, LLMTokenBV))> =
-        reversed_nwa.body.start_states.iter().map(|&s| (s, (BTreeMap::from([(initial_body.clone(), initial_term_map.clone())]), LLMTokenBV::max_ones()))).collect();
+    let initial_values_full: Vec<(usize, (BTreeMap<NWABody, BTreeMap<Option<TerminalID>, Weight>>, Weight))> =
+        reversed_nwa.body.start_states.iter().map(|&s| (s, (BTreeMap::from([(initial_body.clone(), initial_term_map.clone())]), Weight::all()))).collect();
 
     // Store (NWABody, Weight, node_id) - node_id is the state ID in reversed NWA where we collected this body
     // In symbol-heavy mode, we also collect tsid-specific bodies separately
@@ -685,7 +684,7 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
 
     nwa_special_map(
         &reversed_nwa, &traversal_data, initial_values_full,
-        |current_val: &(BTreeMap<NWABody, BTreeMap<Option<TerminalID>, Weight>>, LLMTokenBV), edge_label, transitions| {
+        |current_val: &(BTreeMap<NWABody, BTreeMap<Option<TerminalID>, Weight>>, Weight), edge_label, transitions| {
             let (current_bodies, current_tokens) = current_val;
             let mut results = Vec::new();
             
@@ -702,8 +701,7 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
             
             let terminal_id = edge_label.map(|l| TerminalID(l as usize));
             for (dest_id, weight) in transitions {
-                let edge_bv_tokens: LLMTokenBV = weight.clone().into();
-                let next_tokens = current_tokens & &edge_bv_tokens;
+                let next_tokens = current_tokens & weight;
                 if next_tokens.is_empty() { continue; }
                 let mut terminal_map = BTreeMap::new();
                 terminal_map.insert(terminal_id, weight.clone());
@@ -768,10 +766,9 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
             if is_symbol_heavy {
                 if let Some(tsid_edges) = outgoing_tsid_edges.get(&node_id) {
                     for (tsid_label, edge_weight) in tsid_edges {
-                        let edge_bv: LLMTokenBV = edge_weight.clone().into();
-                        let intersection_bv = &tokens & &edge_bv;
-                        if !intersection_bv.is_empty() && !nwa_body.start_states.is_empty() {
-                            let final_w = Weight::from_rsb(intersection_bv.inner.as_ref().clone());
+                        let intersection_w = &tokens & edge_weight;
+                        if !intersection_w.is_empty() && !nwa_body.start_states.is_empty() {
+                            let final_w = intersection_w;
                             crate::debug!(6, "Collecting tsid body at root {} for label {} with {} tokens", 
                                 node_id, tsid_label, final_w.len());
                             let mut tb = tsid_bodies_for_process.lock().unwrap();
@@ -796,12 +793,11 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
             
             if should_collect {
                 if let Some(fw) = &reversed_nwa.states[node_id].final_weight {
-                    let fw_bv: LLMTokenBV = fw.clone().into();
-                    let intersection_bv = &tokens & &fw_bv;
-                    crate::debug!(7, "Final body candidate: node_id={}, tokens={:?}, fw_bv={:?}, intersection={:?}", 
-                        node_id, tokens.inner.ranges().collect::<Vec<_>>(), fw_bv.inner.ranges().collect::<Vec<_>>(), intersection_bv.inner.ranges().collect::<Vec<_>>());
-                    if !intersection_bv.is_empty() {
-                        let final_w = Weight::from_rsb(intersection_bv.inner.as_ref().clone());
+                    let intersection_w = &tokens & fw;
+                    crate::debug!(7, "Final body candidate: node_id={}, tokens_len={}, tokens_ranges={}, fw_len={}, fw_ranges={}, intersection_len={}, intersection_ranges={}", 
+                        node_id, tokens.len(), tokens.ranges_len(), fw.len(), fw.ranges_len(), intersection_w.len(), intersection_w.ranges_len());
+                    if !intersection_w.is_empty() {
+                        let final_w = intersection_w;
                         let mut fb = final_bodies_arc.lock().unwrap();
                         fb.push((nwa_body.clone(), final_w, node_id));
                     }
@@ -867,19 +863,18 @@ pub fn precompute4(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
     build_parser_dwa(parser, terminal_nwa)
 }
 
-pub fn precompute_token_bvs_and_signatures(reversed_nwa: &NWA, traversal_data: &NwaTraversalData, initial_values: Vec<(StateID, LLMTokenBV)>) -> (HashMap<StateID, LLMTokenBV>, HashSet<Signature>) {
-    let node_tokens: Arc<Mutex<HashMap<StateID, LLMTokenBV>>> = Arc::new(Mutex::new(HashMap::new()));
+pub fn precompute_token_bvs_and_signatures(reversed_nwa: &NWA, traversal_data: &NwaTraversalData, initial_values: Vec<(StateID, Weight)>) -> (HashMap<StateID, Weight>, HashSet<Signature>) {
+    let node_tokens: Arc<Mutex<HashMap<StateID, Weight>>> = Arc::new(Mutex::new(HashMap::new()));
     let signatures: Arc<Mutex<HashSet<Signature>>> = Arc::new(Mutex::new(HashSet::new()));
 
     let node_tokens_clone = node_tokens.clone();
     let signatures_clone = signatures.clone();
 
     nwa_special_map(reversed_nwa, traversal_data, initial_values,
-        move |tokens: &LLMTokenBV, _edge_label, transitions| {
+        move |tokens: &Weight, _edge_label, transitions| {
             let mut results = Vec::new();
             for (dest_id, weight) in transitions {
-                let edge_bv: LLMTokenBV = weight.clone().into();
-                let next = tokens & &edge_bv;
+                let next = tokens & weight;
                 if !next.is_empty() { results.push((*dest_id, next)); }
             }
             results
@@ -892,20 +887,16 @@ pub fn precompute_token_bvs_and_signatures(reversed_nwa: &NWA, traversal_data: &
             for (label, targets) in &state.transitions {
                 let term = Some(TerminalID(*label as usize));
                 for (v, w) in targets {
-                    let edge_bv: LLMTokenBV = w.clone().into();
-                    let combined = &tokens & &edge_bv;
+                    let combined = &tokens & w;
                     if !combined.is_empty() {
-                        let w_weight = Weight::from_rsb(edge_bv.inner.as_ref().clone());
-                        bundles_by_dest.entry(*v).or_default().insert(term, w_weight);
+                        bundles_by_dest.entry(*v).or_default().insert(term, w.clone());
                     }
                 }
             }
             for (v, w) in &state.epsilons {
-                let edge_bv: LLMTokenBV = w.clone().into();
-                let combined = &tokens & &edge_bv;
+                let combined = &tokens & w;
                 if !combined.is_empty() {
-                    let w_weight = Weight::from_rsb(edge_bv.inner.as_ref().clone());
-                    bundles_by_dest.entry(*v).or_default().insert(None, w_weight);
+                    bundles_by_dest.entry(*v).or_default().insert(None, w.clone());
                 }
             }
             let mut sigs = signatures_clone.lock().unwrap();
@@ -964,7 +955,7 @@ pub fn instantiate_nwa_template_into(
         if w.is_empty() { return Weight::zeros(); }
         if let Some(res) = union_cache.get(w) { return res.clone(); }
         let mut concrete = Weight::zeros();
-        for idx in w.iter_up_to(ordered_weights.len()) {
+        for idx in w.iter_up_to_allow_expansion(ordered_weights.len()) {
             if let Some(concrete_w) = ordered_weights.get(idx) { concrete |= concrete_w; }
         }
         union_cache.insert(w.clone(), concrete.clone());

@@ -944,7 +944,29 @@ impl From<Bitset> for RangeSet {
 
 impl From<crate::datastructures::AbstractWeight> for RangeSet {
     fn from(aw: crate::datastructures::AbstractWeight) -> Self {
-        RangeSet::from(aw.to_rsb())
+        use crate::datastructures::AbstractWeight;
+        match aw {
+            AbstractWeight::RangeSet(rsb) => RangeSet::from(rsb),
+            AbstractWeight::Factorized(fw) => {
+                // For factorized weights, we can extract the token sets directly
+                // without the expensive N×M expansion if we're in symbol-heavy mode
+                // (num_tsids == 1) where each pair represents just token positions.
+                let num_tsids = get_num_tsids();
+                if num_tsids <= 1 {
+                    // Symbol-heavy mode: pairs are (tsid_set, token_set) where token_set
+                    // contains the actual token positions directly
+                    let mut result = RangeSetBlaze::new();
+                    for (_tsid_set, token_set) in fw.pairs() {
+                        result |= token_set;
+                    }
+                    RangeSet::from(result)
+                } else {
+                    // Weight-heavy mode: need full expansion (O(N×M))
+                    // This triggers the guard if ALLOW_FACTORIZED_EXPANSION is not set
+                    RangeSet::from(fw.expand_to_rsb())
+                }
+            }
+        }
     }
 }
 

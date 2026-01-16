@@ -2514,6 +2514,10 @@ impl Merge for RangeSetBlaze<usize> {
     fn merge(&self, other: &Self) -> Self { self | other }
 }
 
+impl Merge for Weight {
+    fn merge(&self, other: &Self) -> Self { self | other }
+}
+
 impl Merge for Arc<RangeSetBlaze<usize>> {
     fn merge(&self, other: &Self) -> Self {
         if Arc::ptr_eq(self, other) {

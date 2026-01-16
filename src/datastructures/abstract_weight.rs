@@ -406,11 +406,95 @@ impl<'de> Deserialize<'de> for AbstractWeight {
 
 impl JSONConvertible for AbstractWeight {
     fn to_json(&self) -> JSONNode {
-        let rsb = self.to_rsb();
-        crate::datastructures::hybrid_bitset::RangeSet::from(rsb).to_json()
+        match self {
+            AbstractWeight::RangeSet(rsb) => {
+                // Serialize as ranges: [[start, end], ...]
+                let ranges_vec: Vec<Vec<usize>> = rsb
+                    .ranges()
+                    .map(|ri| vec![*ri.start(), *ri.end()])
+                    .collect();
+                let mut obj = std::collections::BTreeMap::new();
+                obj.insert("type".to_string(), JSONNode::String("rangeset".to_string()));
+                obj.insert("ranges".to_string(), ranges_vec.to_json());
+                JSONNode::Object(obj)
+            }
+            AbstractWeight::Factorized(fw) => {
+                // Serialize factorized representation: pairs of (tsid_set, token_set)
+                let pairs: Vec<(Vec<Vec<usize>>, Vec<Vec<usize>>)> = fw.pairs()
+                    .iter()
+                    .map(|(tsid_set, token_set)| {
+                        let tsid_ranges: Vec<Vec<usize>> = tsid_set.ranges()
+                            .map(|ri| vec![*ri.start(), *ri.end()])
+                            .collect();
+                        let token_ranges: Vec<Vec<usize>> = token_set.ranges()
+                            .map(|ri| vec![*ri.start(), *ri.end()])
+                            .collect();
+                        (tsid_ranges, token_ranges)
+                    })
+                    .collect();
+                let mut obj = std::collections::BTreeMap::new();
+                obj.insert("type".to_string(), JSONNode::String("factorized".to_string()));
+                obj.insert("num_tsids".to_string(), JSONNode::UInt(fw.num_tsids() as u128));
+                obj.insert("pairs".to_string(), pairs.to_json());
+                JSONNode::Object(obj)
+            }
+        }
     }
 
     fn from_json(node: JSONNode) -> Result<Self, String> {
+        // Try to parse as new format (with "type" field)
+        if let Ok(mut obj) = node.clone().into_object() {
+            if let Some(type_node) = obj.remove("type") {
+                let type_str = match type_node {
+                    JSONNode::String(s) => s,
+                    other => return Err(format!("Expected string for type, got {:?}", other)),
+                };
+                match type_str.as_str() {
+                    "rangeset" => {
+                        let ranges_vec: Vec<Vec<usize>> = Vec::from_json(
+                            obj.remove("ranges").ok_or("Missing ranges")?
+                        )?;
+                        let mut ranges = Vec::new();
+                        for mut v in ranges_vec {
+                            if v.len() != 2 {
+                                return Err(format!("Expected 2-element array, got {:?}", v));
+                            }
+                            let end = v.pop().unwrap();
+                            let start = v.pop().unwrap();
+                            ranges.push(start..=end);
+                        }
+                        return Ok(AbstractWeight::RangeSet(RangeSetBlaze::from_iter(ranges)));
+                    }
+                    "factorized" => {
+                        let num_tsids: usize = match obj.remove("num_tsids") {
+                            Some(JSONNode::UInt(n)) => n as usize,
+                            Some(JSONNode::Int(n)) => n as usize,
+                            _ => return Err("Missing or invalid num_tsids".to_string()),
+                        };
+                        let pairs_json = obj.remove("pairs").ok_or("Missing pairs")?;
+                        let pairs_vec: Vec<(Vec<Vec<usize>>, Vec<Vec<usize>>)> = Vec::from_json(pairs_json)?;
+                        let pairs: Vec<(RangeSetBlaze<usize>, RangeSetBlaze<usize>)> = pairs_vec
+                            .into_iter()
+                            .map(|(tsid_ranges, token_ranges)| {
+                                let tsid_set = RangeSetBlaze::from_iter(
+                                    tsid_ranges.into_iter().map(|v| v[0]..=v[1])
+                                );
+                                let token_set = RangeSetBlaze::from_iter(
+                                    token_ranges.into_iter().map(|v| v[0]..=v[1])
+                                );
+                                (tsid_set, token_set)
+                            })
+                            .collect();
+                        return Ok(AbstractWeight::Factorized(
+                            FactorizedWeight::from_pairs(pairs, num_tsids)
+                        ));
+                    }
+                    _ => return Err(format!("Unknown weight type: {}", type_str)),
+                }
+            }
+        }
+        
+        // Fall back to old format (just ranges array) for backward compatibility
         let rsb = crate::datastructures::hybrid_bitset::RangeSet::from_json(node)?;
         Ok(AbstractWeight::from_rsb(std::sync::Arc::unwrap_or_clone(rsb.inner)))
     }
@@ -579,6 +663,16 @@ impl AbstractWeight {
                 }
                 fw.expand_to_rsb()
             }
+        }
+    }
+
+    /// Expand to a RangeSetBlaze representation, allowing expansion.
+    ///
+    /// Use sparingly in runtime paths where expansion is acceptable.
+    pub fn to_rsb_allow_expansion(&self) -> RangeSetBlaze<usize> {
+        match self {
+            AbstractWeight::RangeSet(rsb) => rsb.clone(),
+            AbstractWeight::Factorized(fw) => fw.expand_to_rsb_unchecked(),
         }
     }
 
@@ -934,6 +1028,24 @@ impl AbstractWeight {
         let rsb = self.to_rsb();
         let clipped = &rsb & &RangeSetBlaze::from_iter([0..=max]);
         clipped.into_iter()
+    }
+
+    /// Iterate over positions up to and including max, allowing expansion.
+    ///
+    /// This should only be used in terminal-space weight operations where
+    /// expansion is known to be safe and bounded.
+    pub fn iter_up_to_allow_expansion(&self, max: usize) -> impl Iterator<Item = usize> + '_ {
+        match self {
+            AbstractWeight::RangeSet(rsb) => {
+                let clipped = rsb & &RangeSetBlaze::from_iter([0..=max]);
+                clipped.into_iter()
+            }
+            AbstractWeight::Factorized(fw) => {
+                let rsb = fw.expand_to_rsb_unchecked();
+                let clipped = &rsb & &RangeSetBlaze::from_iter([0..=max]);
+                clipped.into_iter()
+            }
+        }
     }
     
     /// Compute the complement within the given dimensions.

@@ -18,9 +18,23 @@ impl FactorizedWeight {
             num_tsids: normalize_num_tsids(num_tsids),
         }
     }
+    
+    /// Create a factorized weight from pairs directly.
+    pub fn from_pairs(pairs: Vec<(RangeSetBlaze<usize>, RangeSetBlaze<usize>)>, num_tsids: usize) -> Self {
+        let mut fw = Self {
+            pairs,
+            num_tsids: normalize_num_tsids(num_tsids),
+        };
+        fw.normalize_pairs();
+        fw
+    }
 
     pub(crate) fn num_tsids(&self) -> usize {
         normalize_num_tsids(self.num_tsids)
+    }
+
+    pub fn pairs(&self) -> &[(RangeSetBlaze<usize>, RangeSetBlaze<usize>)] {
+        &self.pairs
     }
 
     fn add_pair(&mut self, tsid_set: RangeSetBlaze<usize>, token_set: RangeSetBlaze<usize>) {
@@ -150,6 +164,14 @@ impl FactorizedWeight {
                 "Unexpected factorized weight expansion at: FactorizedWeight::expand_to_rsb(). Set ALLOW_FACTORIZED_EXPANSION=1 to allow."
             );
         }
+        self.expand_to_rsb_internal()
+    }
+
+    pub(crate) fn expand_to_rsb_unchecked(&self) -> RangeSetBlaze<usize> {
+        self.expand_to_rsb_internal()
+    }
+
+    fn expand_to_rsb_internal(&self) -> RangeSetBlaze<usize> {
         if self.pairs.is_empty() {
             return RangeSetBlaze::new();
         }

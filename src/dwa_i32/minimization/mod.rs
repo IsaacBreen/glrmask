@@ -55,6 +55,10 @@ impl DWA {
         };
         
         for pass in passes {
+            // Check if pass is enabled (e.g., ConsolidateRanges is disabled in weight-heavy mode)
+            if !pass.is_enabled() {
+                continue;
+            }
             match pass {
                 DwaPass::PruneUnreachable => { self.prune_unreachable(); },
                 DwaPass::PruneDeadEnds => { self.prune_dead_ends(); },

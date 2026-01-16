@@ -31,6 +31,19 @@ pub enum NwaPass {
     MinimizeRustfst,  // Full minimize using rustfst
 }
 
+impl NwaPass {
+    pub fn is_enabled(&self) -> bool {
+        match self {
+            NwaPass::MinimizeRustfst => {
+                std::env::var("NWA_DISABLE_MINIMIZE_RUSTFST")
+                    .map(|v| v != "1")
+                    .unwrap_or(true)
+            }
+            _ => true,
+        }
+    }
+}
+
 impl NWA {
     pub fn rm_epsilon(&mut self) {
         crate::debug!(6, "[NWA] Removing epsilon transitions...");

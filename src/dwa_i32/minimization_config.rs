@@ -280,6 +280,9 @@ impl NWA {
 
         // Run NWA passes
         for pass in config.nwa_passes {
+            if !pass.is_enabled() {
+                continue;
+            }
             let pass_start = std::time::Instant::now();
             match pass {
                 NwaPass::PruneUnreachable => { self.prune_unreachable(); },
@@ -308,6 +311,10 @@ impl NWA {
 
         // Run DWA passes
         for pass in config.dwa_passes.clone() {
+            // Check if pass is enabled (e.g., ConsolidateRanges is disabled in weight-heavy mode)
+            if !pass.is_enabled() {
+                continue;
+            }
             let pass_start = std::time::Instant::now();
             match pass {
                 DwaPass::PruneUnreachable => { dwa.prune_unreachable(); },
