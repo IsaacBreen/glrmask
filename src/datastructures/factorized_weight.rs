@@ -747,54 +747,94 @@ impl FactorizedWeight {
     }
 
     fn difference_disjoint(&self, other: &Self) -> Self {
-        let mut other_by_tsid: HashMap<usize, RangeSetBlaze<usize>> = HashMap::new();
-        for (tsid_set, token_set) in &other.pairs {
+        // Build sorted interval list from other's pairs: (tsid_start, tsid_end, token_set_ref_index)
+        // Since other.disjoint_tsids is true, intervals don't overlap
+        let mut other_intervals: Vec<(usize, usize, usize)> = Vec::new();
+        for (pair_idx, (tsid_set, _token_set)) in other.pairs.iter().enumerate() {
             for range in tsid_set.ranges() {
-                let start = *range.start();
-                let end = *range.end();
-                for tsid in start..=end {
-                    other_by_tsid.insert(tsid, token_set.clone());
-                }
+                other_intervals.push((*range.start(), *range.end(), pair_idx));
             }
         }
+        // Sort by interval start
+        other_intervals.sort_by_key(|(start, _, _)| *start);
 
         let mut out = FactorizedWeight::new(self.num_tsids());
-        for (tsid_set, token_set) in &self.pairs {
-            if tsid_set.len() == 1 {
-                if let Some(range) = tsid_set.ranges().next() {
-                    let tsid = *range.start();
-                    if let Some(other_tokens) = other_by_tsid.get(&tsid) {
-                        let token_diff = token_set - other_tokens;
-                        if !token_diff.is_empty() {
-                            out.add_pair(tsid_set.clone(), token_diff);
-                        }
-                    } else {
-                        out.add_pair(tsid_set.clone(), token_set.clone());
-                    }
-                }
-                continue;
-            }
 
+        for (tsid_set, token_set) in &self.pairs {
+            // For each range in tsid_set, find overlapping intervals in other
+            // and compute the difference
             let mut by_tokens: HashMap<RangeSetKey, RangeSetBlaze<usize>> = HashMap::new();
-            for range in tsid_set.ranges() {
-                let start = *range.start();
-                let end = *range.end();
-                for tsid in start..=end {
-                    let token_diff = match other_by_tsid.get(&tsid) {
-                        Some(other_tokens) => token_set - other_tokens,
-                        None => token_set.clone(),
-                    };
-                    if token_diff.is_empty() {
+
+            for self_range in tsid_set.ranges() {
+                let self_start = *self_range.start();
+                let self_end = *self_range.end();
+
+                // Find all other_intervals that might overlap with [self_start, self_end]
+                let search_start_idx = other_intervals.partition_point(|(s, _, _)| *s <= self_start);
+                let search_end_idx = other_intervals.partition_point(|(s, _, _)| *s <= self_end);
+                let mut idx = search_start_idx.saturating_sub(1);
+
+                // Track the current position in self_range that we've processed
+                let mut pos = self_start;
+
+                // Iterate through potentially overlapping intervals
+                while idx < search_end_idx {
+                    let (other_start, other_end, pair_idx) = other_intervals[idx];
+
+                    // Skip intervals that end before our current position
+                    if other_end < pos {
+                        idx = idx.saturating_add(1);
                         continue;
                     }
-                    let entry = by_tokens
-                        .entry(RangeSetKey(token_diff))
-                        .or_insert_with(RangeSetBlaze::new);
-                    *entry |= &RangeSetBlaze::from_iter([tsid..=tsid]);
+                    // Skip intervals that start after our range ends
+                    if other_start > self_end {
+                        break;
+                    }
+
+                    // Handle gap before this interval (if any)
+                    if other_start > pos {
+                        let gap_end = (other_start - 1).min(self_end);
+                        if pos <= gap_end {
+                            // No overlap with other - keep original tokens
+                            let gap_range = RangeSetBlaze::from_iter([pos..=gap_end]);
+                            *by_tokens
+                                .entry(RangeSetKey(token_set.clone()))
+                                .or_insert_with(RangeSetBlaze::new) |= &gap_range;
+                        }
+                    }
+
+                    // Handle the overlap
+                    let overlap_start = pos.max(other_start);
+                    let overlap_end = self_end.min(other_end);
+                    if overlap_start <= overlap_end {
+                        let other_tokens = &other.pairs[pair_idx].1;
+                        let token_diff = token_set - other_tokens;
+                        if !token_diff.is_empty() {
+                            let overlap_range = RangeSetBlaze::from_iter([overlap_start..=overlap_end]);
+                            *by_tokens
+                                .entry(RangeSetKey(token_diff))
+                                .or_insert_with(RangeSetBlaze::new) |= &overlap_range;
+                        }
+                        pos = overlap_end.saturating_add(1);
+                    }
+
+                    idx = idx.saturating_add(1);
+                }
+
+                // Handle remaining gap after all intervals
+                if pos <= self_end {
+                    let remaining_range = RangeSetBlaze::from_iter([pos..=self_end]);
+                    *by_tokens
+                        .entry(RangeSetKey(token_set.clone()))
+                        .or_insert_with(RangeSetBlaze::new) |= &remaining_range;
                 }
             }
+
+            // Add all accumulated pairs
             for (token_key, tsids) in by_tokens {
-                out.add_pair(tsids, token_key.0);
+                if !tsids.is_empty() {
+                    out.add_pair(tsids, token_key.0);
+                }
             }
         }
 
