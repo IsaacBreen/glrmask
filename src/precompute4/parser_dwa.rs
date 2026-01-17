@@ -1054,7 +1054,16 @@ pub fn instantiate_nwa_template_into(
         if let Some(res) = union_cache.get(w) { return res.clone(); }
         let mut concrete = Weight::zeros();
         for idx in w.iter_up_to_allow_expansion(ordered_weights.len()) {
-            if let Some(concrete_w) = ordered_weights.get(idx) { concrete |= concrete_w; }
+            if let Some(concrete_w) = ordered_weights.get(idx) {
+                if matches!(concrete, Weight::Factorized(_)) {
+                    if let Weight::RangeSet(rsb) = concrete_w {
+                        let converted = Weight::from_rsb(rsb.clone());
+                        concrete |= &converted;
+                        continue;
+                    }
+                }
+                concrete |= concrete_w;
+            }
         }
         union_cache.insert(w.clone(), concrete.clone());
         concrete

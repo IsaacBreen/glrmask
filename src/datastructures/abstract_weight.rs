@@ -1029,7 +1029,7 @@ impl AbstractWeight {
     /// For small test weights this is acceptable. For production hot paths,
     /// consider using contains() checks instead if possible.
     pub fn iter_up_to(&self, max: usize) -> impl Iterator<Item = usize> + '_ {
-        let rsb = self.to_rsb_allow_expansion();
+        let rsb = self.to_rsb();
         let clipped = &rsb & &RangeSetBlaze::from_iter([0..=max]);
         clipped.into_iter()
     }

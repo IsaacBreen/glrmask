@@ -575,6 +575,7 @@ impl FactorizedWeight {
     /// 5. Pick the smallest representation
     fn normalize_pairs(&mut self) {
         let profile = profiling_enabled();
+        let debug_profile = profile && profiling_active();
         let in_pairs = if profile { self.pairs.len() } else { 0 };
         let in_ranges = if profile { pairs_ranges_len(&self.pairs) } else { 0 };
         let start = if profile { Some(Instant::now()) } else { None };
@@ -590,7 +591,19 @@ impl FactorizedWeight {
         let mut pairs = std::mem::take(&mut self.pairs);
         pairs.retain(|(tsid_set, token_set)| !tsid_set.is_empty() && !token_set.is_empty());
 
+        let merge_start = if debug_profile { Some(Instant::now()) } else { None };
         let mut best = Self::merge_identical_pairs(pairs);
+        if let Some(merge_start) = merge_start {
+            crate::debug!(
+                6,
+                "normalize_pairs merge_identical_pairs: in_pairs={} in_ranges={} out_pairs={} out_ranges={} took={}ms",
+                in_pairs,
+                in_ranges,
+                best.len(),
+                pairs_ranges_len(&best),
+                merge_start.elapsed().as_millis()
+            );
+        }
         if best.len() > 500 {
             let mut tsid_size_dist: BTreeMap<usize, usize> = BTreeMap::new();
             let mut token_size_dist: BTreeMap<usize, usize> = BTreeMap::new();
@@ -681,18 +694,67 @@ impl FactorizedWeight {
 
         // Always try both normalizations for larger pair counts.
         if best_len > 50 {
-            candidates.push(Self::normalize_by_tokens(&best));
-            candidates.push(Self::normalize_by_tsids(&best, num_tsids));
+            let tokens_start = if debug_profile { Some(Instant::now()) } else { None };
+            let tokens_candidate = Self::normalize_by_tokens(&best);
+            if let Some(tokens_start) = tokens_start {
+                crate::debug!(
+                    6,
+                    "normalize_pairs normalize_by_tokens: in_pairs={} out_pairs={} out_ranges={} took={}ms",
+                    best_len,
+                    tokens_candidate.len(),
+                    pairs_ranges_len(&tokens_candidate),
+                    tokens_start.elapsed().as_millis()
+                );
+            }
+            candidates.push(tokens_candidate);
+
+            let tsids_start = if debug_profile { Some(Instant::now()) } else { None };
+            let tsids_candidate = Self::normalize_by_tsids(&best, num_tsids);
+            if let Some(tsids_start) = tsids_start {
+                crate::debug!(
+                    6,
+                    "normalize_pairs normalize_by_tsids: in_pairs={} out_pairs={} out_ranges={} took={}ms",
+                    best_len,
+                    tsids_candidate.len(),
+                    pairs_ranges_len(&tsids_candidate),
+                    tsids_start.elapsed().as_millis()
+                );
+            }
+            candidates.push(tsids_candidate);
         } else {
             if let Some(max_token) = Self::max_token_in_pairs(&best) {
                 let token_bound = max_token.saturating_add(1);
                 if token_bound < best_len {
-                    candidates.push(Self::normalize_by_tokens(&best));
+                    let tokens_start = if debug_profile { Some(Instant::now()) } else { None };
+                    let tokens_candidate = Self::normalize_by_tokens(&best);
+                    if let Some(tokens_start) = tokens_start {
+                        crate::debug!(
+                            6,
+                            "normalize_pairs normalize_by_tokens: in_pairs={} out_pairs={} out_ranges={} took={}ms",
+                            best_len,
+                            tokens_candidate.len(),
+                            pairs_ranges_len(&tokens_candidate),
+                            tokens_start.elapsed().as_millis()
+                        );
+                    }
+                    candidates.push(tokens_candidate);
                 }
             }
 
             if num_tsids < best_len {
-                candidates.push(Self::normalize_by_tsids(&best, num_tsids));
+                let tsids_start = if debug_profile { Some(Instant::now()) } else { None };
+                let tsids_candidate = Self::normalize_by_tsids(&best, num_tsids);
+                if let Some(tsids_start) = tsids_start {
+                    crate::debug!(
+                        6,
+                        "normalize_pairs normalize_by_tsids: in_pairs={} out_pairs={} out_ranges={} took={}ms",
+                        best_len,
+                        tsids_candidate.len(),
+                        pairs_ranges_len(&tsids_candidate),
+                        tsids_start.elapsed().as_millis()
+                    );
+                }
+                candidates.push(tsids_candidate);
             }
         }
 
@@ -701,7 +763,17 @@ impl FactorizedWeight {
                 if candidate.is_empty() {
                     continue;
                 }
+                let candidate_merge_start = if debug_profile { Some(Instant::now()) } else { None };
                 let candidate = Self::merge_identical_pairs(candidate);
+                if let Some(candidate_merge_start) = candidate_merge_start {
+                    crate::debug!(
+                        6,
+                        "normalize_pairs merge_candidate: out_pairs={} out_ranges={} took={}ms",
+                        candidate.len(),
+                        pairs_ranges_len(&candidate),
+                        candidate_merge_start.elapsed().as_millis()
+                    );
+                }
                 if Self::is_better_candidate(&candidate, &best) {
                     best = candidate;
                 }
