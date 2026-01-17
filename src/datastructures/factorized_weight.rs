@@ -1,4 +1,5 @@
 use range_set_blaze::RangeSetBlaze;
+use std::backtrace::Backtrace;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::hash::{Hash, Hasher};
@@ -15,8 +16,14 @@ const DIFFERENCE_EXPAND_THRESHOLD: usize = 128;
 /// Global collection of weights for analysis (protected by mutex for thread safety)
 static WEIGHT_DUMP: OnceLock<Mutex<WeightDumpState>> = OnceLock::new();
 
+struct WeightDumpEntry {
+    label: String,
+    data: serde_json::Value,
+    backtrace: String,
+}
+
 struct WeightDumpState {
-    weights: Vec<(String, serde_json::Value)>,
+    weights: Vec<WeightDumpEntry>,
     max_weights: usize,
 }
 
@@ -66,7 +73,12 @@ pub fn record_weight_for_dump(label: &str, weight: &FactorizedWeight) {
     let mut should_flush = false;
     if let Ok(mut guard) = state.lock() {
         if guard.weights.len() < guard.max_weights {
-            guard.weights.push((label.to_string(), weight.to_json_value()));
+            let backtrace = Backtrace::capture().to_string();
+            guard.weights.push(WeightDumpEntry {
+                label: label.to_string(),
+                data: weight.to_json_value(),
+                backtrace,
+            });
             let len = guard.weights.len();
             if len == guard.max_weights {
                 should_flush = true;
@@ -91,12 +103,17 @@ pub fn flush_weight_dump(path: &str) -> std::io::Result<()> {
         }
         eprintln!("[DUMP] Writing {} weights to {}", guard.weights.len(), path);
         let json = serde_json::json!({
-            "weights": guard.weights.iter().map(|(label, value)| {
-                serde_json::json!({
-                    "label": label,
-                    "data": value,
+            "weights": guard
+                .weights
+                .iter()
+                .map(|entry| {
+                    serde_json::json!({
+                        "label": entry.label,
+                        "data": entry.data,
+                        "backtrace": entry.backtrace,
+                    })
                 })
-            }).collect::<Vec<_>>(),
+                .collect::<Vec<_>>(),
         });
         std::fs::write(path, serde_json::to_string_pretty(&json).unwrap())?;
     }
