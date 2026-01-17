@@ -36,6 +36,27 @@ fn dump_enabled() -> bool {
     })
 }
 
+fn dump_min_pairs() -> usize {
+    static MIN_PAIRS: OnceLock<usize> = OnceLock::new();
+    *MIN_PAIRS.get_or_init(|| {
+        std::env::var("FACTORIZED_WEIGHT_DUMP_THRESHOLD")
+            .or_else(|_| std::env::var("DUMP_FACTORIZED_WEIGHTS_MIN_PAIRS"))
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(10)
+    })
+}
+
+fn dump_path() -> String {
+    static PATH: OnceLock<String> = OnceLock::new();
+    PATH.get_or_init(|| {
+        std::env::var("FACTORIZED_WEIGHT_DUMP_FILE")
+            .or_else(|_| std::env::var("DUMP_FACTORIZED_WEIGHTS_FILE"))
+            .unwrap_or_else(|_| ".cache/factorized_weights_dump.json".to_string())
+    })
+    .clone()
+}
+
 fn dump_flush_every() -> usize {
     static FLUSH_EVERY: OnceLock<usize> = OnceLock::new();
     *FLUSH_EVERY.get_or_init(|| {
@@ -64,7 +85,8 @@ pub fn record_weight_for_dump(label: &str, weight: &FactorizedWeight) {
     if !dump_enabled() {
         return;
     }
-    if weight.pairs.len() < 10 {
+    let min_pairs = dump_min_pairs();
+    if weight.pairs.len() < min_pairs {
         // Only record "interesting" weights with many pairs
         return;
     }
@@ -89,7 +111,8 @@ pub fn record_weight_for_dump(label: &str, weight: &FactorizedWeight) {
         }
     }
     if should_flush {
-        let _ = flush_weight_dump(".cache/factorized_weights_dump.json");
+        let path = dump_path();
+        let _ = flush_weight_dump(&path);
     }
 }
 
