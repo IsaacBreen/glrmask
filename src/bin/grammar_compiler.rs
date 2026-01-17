@@ -6,6 +6,7 @@ use sep1::interface::GrammarDefinition;
 use sep1::json_serialization::JSONConvertible;
 use sep1::dfa_u8::{LLMTokenID, LLMTokenMap};
 use sep1::r#macro::{colors::*, is_debug_level_enabled, format_duration};
+use sep1::datastructures::flush_weight_dump;
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{BufWriter, Write, Read};
@@ -285,6 +286,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     if show_output {
         println!("\n{DIM}─────────────────────────────────────────{RESET}");
         println!("{BOLD_GREEN}{CHECK} Complete in {}{RESET}\n", format_duration(total_start.elapsed()));
+    }
+
+    // Flush any collected factorized weights for analysis
+    if let Err(e) = flush_weight_dump(".cache/factorized_weights_dump.json") {
+        eprintln!("Warning: failed to flush weight dump: {}", e);
     }
 
     Ok(())

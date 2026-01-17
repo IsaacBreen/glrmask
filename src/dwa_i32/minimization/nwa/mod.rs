@@ -18,6 +18,7 @@ use rustfst::prelude::MinimizeConfig;
 
 use std::collections::HashSet;
 use rustfst::algorithms::rm_epsilon::rm_epsilon;
+use std::time::Instant;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum NwaPass {
@@ -128,9 +129,38 @@ impl NWA {
 
     pub fn minimize_with_rustfst_full(&mut self) -> bool {
         let min_config = MinimizeConfig::default().with_allow_nondet(true);
+        let start = Instant::now();
         let mut fst = self.to_rustfst();
+        let to_time = start.elapsed();
+
+        let start = Instant::now();
         minimize_with_config(&mut fst, min_config).unwrap();
+        let min_time = start.elapsed();
+
+        let start = Instant::now();
         *self = NWA::from_rustfst(&fst);
+        let from_time = start.elapsed();
+
+        let mut slowest_label = "to_rustfst";
+        let mut slowest_time = to_time;
+        if min_time > slowest_time {
+            slowest_label = "minimize";
+            slowest_time = min_time;
+        }
+        if from_time > slowest_time {
+            slowest_label = "from_rustfst";
+            slowest_time = from_time;
+        }
+
+        crate::debug!(
+            4,
+            "[NWA::minimize_with_rustfst_full] to_rustfst={:?}, minimize={:?}, from_rustfst={:?}, slowest={} ({:?})",
+            to_time,
+            min_time,
+            from_time,
+            slowest_label,
+            slowest_time,
+        );
         true
     }
 

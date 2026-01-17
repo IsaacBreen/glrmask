@@ -16,6 +16,6 @@ pub mod compressed_state_set;
 pub mod state_set;
 
 pub use abstract_weight::{AbstractWeight, WeightDimensions};
-pub use factorized_weight::FactorizedWeight;
+pub use factorized_weight::{FactorizedWeight, flush_weight_dump, record_weight_for_dump};
 pub use entry_api::{EntryApi, OrderedMapEntry};
 pub use hybrid_bitset::{set_global_dims, get_max_llm_token, get_num_tsids};

@@ -2,7 +2,7 @@ use range_set_blaze::RangeSetBlaze;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::hash::{Hash, Hasher};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
 use crate::datastructures::abstract_weight::{current_num_tsids, normalize_num_tsids, WeightBackend};
@@ -11,6 +11,97 @@ const PROFILE_PRINT_EVERY_SECS: u64 = 5;
 const PROFILE_PRINT_EVERY_CALLS: u64 = 20_000;
 const PROFILE_MAX_SAMPLES: usize = 4096;
 const DIFFERENCE_EXPAND_THRESHOLD: usize = 128;
+
+/// Global collection of weights for analysis (protected by mutex for thread safety)
+static WEIGHT_DUMP: OnceLock<Mutex<WeightDumpState>> = OnceLock::new();
+
+struct WeightDumpState {
+    weights: Vec<(String, serde_json::Value)>,
+    max_weights: usize,
+}
+
+fn dump_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("DUMP_FACTORIZED_WEIGHTS")
+            .map(|v| v.eq_ignore_ascii_case("1") || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    })
+}
+
+fn dump_flush_every() -> usize {
+    static FLUSH_EVERY: OnceLock<usize> = OnceLock::new();
+    *FLUSH_EVERY.get_or_init(|| {
+        std::env::var("DUMP_FACTORIZED_WEIGHTS_FLUSH_EVERY")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0)
+    })
+}
+
+fn get_weight_dump() -> &'static Mutex<WeightDumpState> {
+    WEIGHT_DUMP.get_or_init(|| {
+        let max_weights = std::env::var("DUMP_FACTORIZED_WEIGHTS_MAX")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1000);
+        Mutex::new(WeightDumpState {
+            weights: Vec::new(),
+            max_weights,
+        })
+    })
+}
+
+/// Record a weight for later analysis
+pub fn record_weight_for_dump(label: &str, weight: &FactorizedWeight) {
+    if !dump_enabled() {
+        return;
+    }
+    if weight.pairs.len() < 10 {
+        // Only record "interesting" weights with many pairs
+        return;
+    }
+    let state = get_weight_dump();
+    let flush_every = dump_flush_every();
+    let mut should_flush = false;
+    if let Ok(mut guard) = state.lock() {
+        if guard.weights.len() < guard.max_weights {
+            guard.weights.push((label.to_string(), weight.to_json_value()));
+            let len = guard.weights.len();
+            if len == guard.max_weights {
+                should_flush = true;
+            }
+            if flush_every > 0 && len % flush_every == 0 {
+                should_flush = true;
+            }
+        }
+    }
+    if should_flush {
+        let _ = flush_weight_dump(".cache/factorized_weights_dump.json");
+    }
+}
+
+/// Write all recorded weights to a file
+pub fn flush_weight_dump(path: &str) -> std::io::Result<()> {
+    let state = get_weight_dump();
+    if let Ok(guard) = state.lock() {
+        if guard.weights.is_empty() {
+            eprintln!("[DUMP] No weights collected (min threshold: 10 pairs)");
+            return Ok(());
+        }
+        eprintln!("[DUMP] Writing {} weights to {}", guard.weights.len(), path);
+        let json = serde_json::json!({
+            "weights": guard.weights.iter().map(|(label, value)| {
+                serde_json::json!({
+                    "label": label,
+                    "data": value,
+                })
+            }).collect::<Vec<_>>(),
+        });
+        std::fs::write(path, serde_json::to_string_pretty(&json).unwrap())?;
+    }
+    Ok(())
+}
 
 #[derive(Copy, Clone, Debug)]
 enum OpKind {
@@ -322,6 +413,7 @@ fn pairs_ranges_len(pairs: &[(RangeSetBlaze<usize>, RangeSetBlaze<usize>)]) -> u
 pub struct FactorizedWeight {
     pub(crate) pairs: Vec<(RangeSetBlaze<usize>, RangeSetBlaze<usize>)>,
     num_tsids: usize,
+    disjoint_tsids: bool,
 }
 
 impl FactorizedWeight {
@@ -329,6 +421,7 @@ impl FactorizedWeight {
         Self {
             pairs: Vec::new(),
             num_tsids: normalize_num_tsids(num_tsids),
+            disjoint_tsids: true,
         }
     }
     
@@ -337,6 +430,7 @@ impl FactorizedWeight {
         let mut fw = Self {
             pairs,
             num_tsids: normalize_num_tsids(num_tsids),
+            disjoint_tsids: true,
         };
         fw.normalize_pairs();
         fw
@@ -348,6 +442,32 @@ impl FactorizedWeight {
 
     pub fn pairs(&self) -> &[(RangeSetBlaze<usize>, RangeSetBlaze<usize>)] {
         &self.pairs
+    }
+
+    /// Serialize to a JSON-compatible format for analysis.
+    /// Returns a JSON object with:
+    /// - num_tsids: the total number of terminal signature IDs
+    /// - disjoint_tsids: whether the tsid sets are disjoint
+    /// - pairs: array of {tsid_ranges: [[start, end], ...], token_ranges: [[start, end], ...]}
+    pub fn to_json_value(&self) -> serde_json::Value {
+        let pairs_json: Vec<serde_json::Value> = self.pairs.iter().map(|(tsid_set, token_set)| {
+            let tsid_ranges: Vec<Vec<usize>> = tsid_set.ranges().map(|r| vec![*r.start(), *r.end()]).collect();
+            let token_ranges: Vec<Vec<usize>> = token_set.ranges().map(|r| vec![*r.start(), *r.end()]).collect();
+            serde_json::json!({
+                "tsid_ranges": tsid_ranges,
+                "token_ranges": token_ranges,
+                "tsid_count": tsid_set.len(),
+                "token_count": token_set.len(),
+            })
+        }).collect();
+        
+        serde_json::json!({
+            "num_tsids": self.num_tsids,
+            "disjoint_tsids": self.disjoint_tsids,
+            "num_pairs": self.pairs.len(),
+            "total_ranges": pairs_ranges_len(&self.pairs),
+            "pairs": pairs_json,
+        })
     }
 
     fn add_pair(&mut self, tsid_set: RangeSetBlaze<usize>, token_set: RangeSetBlaze<usize>) {
@@ -378,6 +498,7 @@ impl FactorizedWeight {
         let start = if profile { Some(Instant::now()) } else { None };
 
         if self.pairs.is_empty() {
+            self.disjoint_tsids = true;
             if let Some(start) = start {
                 record_profile(OpKind::NormalizePairs, start, in_pairs, in_ranges, 0, 0);
             }
@@ -388,8 +509,77 @@ impl FactorizedWeight {
         pairs.retain(|(tsid_set, token_set)| !tsid_set.is_empty() && !token_set.is_empty());
 
         let mut best = Self::merge_identical_pairs(pairs);
+        if best.len() > 500 {
+            let mut tsid_size_dist: BTreeMap<usize, usize> = BTreeMap::new();
+            let mut token_size_dist: BTreeMap<usize, usize> = BTreeMap::new();
+            for (tsid_set, token_set) in &best {
+                let tsid_len = usize::try_from(tsid_set.len()).unwrap_or(usize::MAX);
+                let token_len = usize::try_from(token_set.len()).unwrap_or(usize::MAX);
+                *tsid_size_dist.entry(tsid_len).or_insert(0) += 1;
+                *token_size_dist.entry(token_len).or_insert(0) += 1;
+            }
+
+            let sample_size = 50.min(best.len());
+            let mut tsid_overlap_counts: Vec<usize> = Vec::with_capacity(sample_size);
+            let mut token_overlap_counts: Vec<usize> = Vec::with_capacity(sample_size);
+            for i in 0..sample_size {
+                let tsid_i = &best[i].0;
+                let token_i = &best[i].1;
+                let mut tsid_overlap = 0usize;
+                let mut token_overlap = 0usize;
+                for (j, (tsid_j, token_j)) in best.iter().enumerate() {
+                    if i == j {
+                        continue;
+                    }
+                    if !(tsid_i & tsid_j).is_empty() {
+                        tsid_overlap += 1;
+                    }
+                    if !(token_i & token_j).is_empty() {
+                        token_overlap += 1;
+                    }
+                }
+                tsid_overlap_counts.push(tsid_overlap);
+                token_overlap_counts.push(token_overlap);
+            }
+
+            let tsid_overlap_sum: usize = tsid_overlap_counts.iter().sum();
+            let token_overlap_sum: usize = token_overlap_counts.iter().sum();
+            let tsid_overlap_min = tsid_overlap_counts.iter().min().copied().unwrap_or(0);
+            let tsid_overlap_max = tsid_overlap_counts.iter().max().copied().unwrap_or(0);
+            let token_overlap_min = token_overlap_counts.iter().min().copied().unwrap_or(0);
+            let token_overlap_max = token_overlap_counts.iter().max().copied().unwrap_or(0);
+            let tsid_overlap_avg = tsid_overlap_sum as f64 / sample_size as f64;
+            let token_overlap_avg = token_overlap_sum as f64 / sample_size as f64;
+
+            crate::debug!(
+                3,
+                "normalize_pairs pair_count={} tsid_size_dist={:?} token_size_dist={:?}",
+                best.len(),
+                tsid_size_dist,
+                token_size_dist,
+            );
+            crate::debug!(
+                3,
+                "normalize_pairs tsid_overlap_counts(first {}): min={} avg={:.1} max={} counts={:?}",
+                sample_size,
+                tsid_overlap_min,
+                tsid_overlap_avg,
+                tsid_overlap_max,
+                tsid_overlap_counts,
+            );
+            crate::debug!(
+                3,
+                "normalize_pairs token_overlap_counts(first {}): min={} avg={:.1} max={} counts={:?}",
+                sample_size,
+                token_overlap_min,
+                token_overlap_avg,
+                token_overlap_max,
+                token_overlap_counts,
+            );
+        }
         if best.len() <= 1 {
             self.pairs = best;
+            self.disjoint_tsids = Self::compute_disjoint_tsids(&self.pairs);
             if let Some(start) = start {
                 record_profile(
                     OpKind::NormalizePairs,
@@ -405,17 +595,23 @@ impl FactorizedWeight {
 
         let mut candidates: Vec<Vec<(RangeSetBlaze<usize>, RangeSetBlaze<usize>)>> = Vec::new();
         let best_len = best.len();
-
-        if let Some(max_token) = Self::max_token_in_pairs(&best) {
-            let token_bound = max_token.saturating_add(1);
-            if token_bound < best_len {
-                candidates.push(Self::normalize_by_tokens(&best));
-            }
-        }
-
         let num_tsids = self.num_tsids();
-        if num_tsids < best_len {
+
+        // Always try both normalizations for larger pair counts.
+        if best_len > 50 {
+            candidates.push(Self::normalize_by_tokens(&best));
             candidates.push(Self::normalize_by_tsids(&best, num_tsids));
+        } else {
+            if let Some(max_token) = Self::max_token_in_pairs(&best) {
+                let token_bound = max_token.saturating_add(1);
+                if token_bound < best_len {
+                    candidates.push(Self::normalize_by_tokens(&best));
+                }
+            }
+
+            if num_tsids < best_len {
+                candidates.push(Self::normalize_by_tsids(&best, num_tsids));
+            }
         }
 
         if !candidates.is_empty() {
@@ -431,6 +627,12 @@ impl FactorizedWeight {
         }
 
         self.pairs = best;
+        self.disjoint_tsids = Self::compute_disjoint_tsids(&self.pairs);
+
+        // Record weights with many pairs for analysis - these are the "stuck" ones
+        if self.pairs.len() >= 100 {
+            record_weight_for_dump("normalize_pairs_large", self);
+        }
 
         if let Some(start) = start {
             record_profile(
@@ -442,6 +644,80 @@ impl FactorizedWeight {
                 pairs_ranges_len(&self.pairs),
             );
         }
+    }
+
+    fn compute_disjoint_tsids(
+        pairs: &[(RangeSetBlaze<usize>, RangeSetBlaze<usize>)],
+    ) -> bool {
+        if pairs.len() <= 1 {
+            return true;
+        }
+        let mut union = RangeSetBlaze::new();
+        let mut total: u128 = 0;
+        for (tsid_set, _) in pairs {
+            total = total.saturating_add(tsid_set.len());
+            union |= tsid_set;
+            if union.len() < total {
+                return false;
+            }
+        }
+        union.len() == total
+    }
+
+    fn difference_disjoint(&self, other: &Self) -> Self {
+        let mut other_by_tsid: HashMap<usize, RangeSetBlaze<usize>> = HashMap::new();
+        for (tsid_set, token_set) in &other.pairs {
+            for range in tsid_set.ranges() {
+                let start = *range.start();
+                let end = *range.end();
+                for tsid in start..=end {
+                    other_by_tsid.insert(tsid, token_set.clone());
+                }
+            }
+        }
+
+        let mut out = FactorizedWeight::new(self.num_tsids());
+        for (tsid_set, token_set) in &self.pairs {
+            if tsid_set.len() == 1 {
+                if let Some(range) = tsid_set.ranges().next() {
+                    let tsid = *range.start();
+                    if let Some(other_tokens) = other_by_tsid.get(&tsid) {
+                        let token_diff = token_set - other_tokens;
+                        if !token_diff.is_empty() {
+                            out.add_pair(tsid_set.clone(), token_diff);
+                        }
+                    } else {
+                        out.add_pair(tsid_set.clone(), token_set.clone());
+                    }
+                }
+                continue;
+            }
+
+            let mut by_tokens: HashMap<RangeSetKey, RangeSetBlaze<usize>> = HashMap::new();
+            for range in tsid_set.ranges() {
+                let start = *range.start();
+                let end = *range.end();
+                for tsid in start..=end {
+                    let token_diff = match other_by_tsid.get(&tsid) {
+                        Some(other_tokens) => token_set - other_tokens,
+                        None => token_set.clone(),
+                    };
+                    if token_diff.is_empty() {
+                        continue;
+                    }
+                    let entry = by_tokens
+                        .entry(RangeSetKey(token_diff))
+                        .or_insert_with(RangeSetBlaze::new);
+                    *entry |= &RangeSetBlaze::from_iter([tsid..=tsid]);
+                }
+            }
+            for (token_key, tsids) in by_tokens {
+                out.add_pair(tsids, token_key.0);
+            }
+        }
+
+        out.normalize_pairs();
+        out
     }
 
     fn merge_identical_pairs(
@@ -610,6 +886,7 @@ impl FactorizedWeight {
         let mut weight = Self {
             pairs: vec![(tsid_set, token_set)],
             num_tsids,
+            disjoint_tsids: true,
         };
         weight.normalize_pairs();
         weight
@@ -662,6 +939,144 @@ impl FactorizedWeight {
                 );
             }
             return empty;
+        }
+
+        let ranges_len = rsb.ranges_len();
+        if rsb.len() == 1 {
+            if let Some(pos) = rsb.ranges().next().map(|r| *r.start()) {
+                let token = pos / num_tsids;
+                let tsid = pos % num_tsids;
+                let weight = Self {
+                    pairs: vec![(
+                        RangeSetBlaze::from_iter([tsid..=tsid]),
+                        RangeSetBlaze::from_iter([token..=token]),
+                    )],
+                    num_tsids,
+                    disjoint_tsids: true,
+                };
+                if let Some(start) = start {
+                    record_profile(
+                        OpKind::FromRsb,
+                        start,
+                        in_pairs,
+                        in_ranges,
+                        weight.pairs.len(),
+                        pairs_ranges_len(&weight.pairs),
+                    );
+                }
+                return weight;
+            }
+        }
+
+        if ranges_len == 1 {
+            if let Some(range) = rsb.ranges().next() {
+                let range_start = *range.start();
+                let range_end = *range.end();
+                let start_token = range_start / num_tsids;
+                let end_token = range_end / num_tsids;
+                let start_tsid = range_start % num_tsids;
+                let end_tsid = range_end % num_tsids;
+
+                let full_tsid_set = RangeSetBlaze::from_iter([0..=num_tsids - 1]);
+                let mut pairs = Vec::new();
+                if start_token == end_token {
+                    pairs.push((
+                        RangeSetBlaze::from_iter([start_tsid..=end_tsid]),
+                        RangeSetBlaze::from_iter([start_token..=start_token]),
+                    ));
+                } else {
+                    pairs.push((
+                        RangeSetBlaze::from_iter([start_tsid..=num_tsids - 1]),
+                        RangeSetBlaze::from_iter([start_token..=start_token]),
+                    ));
+
+                    if start_token + 1 <= end_token.saturating_sub(1) {
+                        pairs.push((
+                            full_tsid_set.clone(),
+                            RangeSetBlaze::from_iter([start_token + 1..=end_token - 1]),
+                        ));
+                    }
+
+                    pairs.push((
+                        RangeSetBlaze::from_iter([0..=end_tsid]),
+                        RangeSetBlaze::from_iter([end_token..=end_token]),
+                    ));
+                }
+
+                let weight = Self {
+                    disjoint_tsids: Self::compute_disjoint_tsids(&pairs),
+                    pairs,
+                    num_tsids,
+                };
+                if let Some(start) = start {
+                    record_profile(
+                        OpKind::FromRsb,
+                        start,
+                        in_pairs,
+                        in_ranges,
+                        weight.pairs.len(),
+                        pairs_ranges_len(&weight.pairs),
+                    );
+                }
+                return weight;
+            }
+        }
+
+        if ranges_len <= 5 {
+            let mut ranges = rsb.ranges();
+            if let Some(first_range) = ranges.next() {
+                let first_start = *first_range.start();
+                let first_end = *first_range.end();
+                let first_token = first_start / num_tsids;
+                let first_end_token = first_end / num_tsids;
+                let mut all_same_token = first_token == first_end_token;
+                let mut tsid_set = if all_same_token {
+                    let start_tsid = first_start % num_tsids;
+                    let end_tsid = first_end % num_tsids;
+                    RangeSetBlaze::from_iter([start_tsid..=end_tsid])
+                } else {
+                    RangeSetBlaze::new()
+                };
+
+                for range in ranges {
+                    if !all_same_token {
+                        break;
+                    }
+                    let start = *range.start();
+                    let end = *range.end();
+                    let start_token = start / num_tsids;
+                    let end_token = end / num_tsids;
+                    if start_token != first_token || end_token != first_token {
+                        all_same_token = false;
+                        break;
+                    }
+                    let start_tsid = start % num_tsids;
+                    let end_tsid = end % num_tsids;
+                    tsid_set |= &RangeSetBlaze::from_iter([start_tsid..=end_tsid]);
+                }
+
+                if all_same_token {
+                    let weight = Self {
+                        pairs: vec![(
+                            tsid_set,
+                            RangeSetBlaze::from_iter([first_token..=first_token]),
+                        )],
+                        num_tsids,
+                        disjoint_tsids: true,
+                    };
+                    if let Some(start) = start {
+                        record_profile(
+                            OpKind::FromRsb,
+                            start,
+                            in_pairs,
+                            in_ranges,
+                            weight.pairs.len(),
+                            pairs_ranges_len(&weight.pairs),
+                        );
+                    }
+                    return weight;
+                }
+            }
         }
 
         let mut token_to_tsids: BTreeMap<usize, RangeSetBlaze<usize>> = BTreeMap::new();
@@ -776,6 +1191,7 @@ fn hash_rangeset<H: Hasher>(rsb: &RangeSetBlaze<usize>, state: &mut H) {
 impl Hash for FactorizedWeight {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.num_tsids.hash(state);
+        self.disjoint_tsids.hash(state);
         self.pairs.len().hash(state);
         for (tsid_set, token_set) in &self.pairs {
             hash_rangeset(tsid_set, state);
@@ -870,6 +1286,12 @@ impl WeightBackend for FactorizedWeight {
             }
         }
         out.normalize_pairs();
+        
+        // Record for analysis if dumping is enabled
+        if dump_enabled() && out.pairs.len() >= 10 {
+            record_weight_for_dump("intersect_result", &out);
+        }
+        
         if let Some(start) = start {
             record_profile(
                 OpKind::Intersect,
@@ -903,6 +1325,12 @@ impl WeightBackend for FactorizedWeight {
             out.add_pair(tsid_set.clone(), token_set.clone());
         }
         out.normalize_pairs();
+        
+        // Record for analysis if dumping is enabled
+        if dump_enabled() && out.pairs.len() >= 10 {
+            record_weight_for_dump("union_result", &out);
+        }
+        
         if let Some(start) = start {
             record_profile(
                 OpKind::Union,
@@ -970,6 +1398,21 @@ impl WeightBackend for FactorizedWeight {
         }
         if other.is_empty() {
             let out = self.clone();
+            if let Some(start) = start {
+                record_profile(
+                    OpKind::Difference,
+                    start,
+                    in_pairs,
+                    in_ranges,
+                    out.pairs.len(),
+                    pairs_ranges_len(&out.pairs),
+                );
+            }
+            return out;
+        }
+
+        if self.disjoint_tsids && other.disjoint_tsids {
+            let out = self.difference_disjoint(other);
             if let Some(start) = start {
                 record_profile(
                     OpKind::Difference,

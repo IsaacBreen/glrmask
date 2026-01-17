@@ -46,6 +46,27 @@ pub type Precomputed4 = DWA;
 
 pub type Signature = Vec<Vec<Option<TerminalID>>>;
 
+struct WeightBackendOverride {
+    previous: Option<String>,
+}
+
+impl WeightBackendOverride {
+    fn new(backend: &str) -> Self {
+        let previous = std::env::var("ABSTRACT_WEIGHT_BACKEND").ok();
+        std::env::set_var("ABSTRACT_WEIGHT_BACKEND", backend);
+        Self { previous }
+    }
+}
+
+impl Drop for WeightBackendOverride {
+    fn drop(&mut self) {
+        match &self.previous {
+            Some(value) => std::env::set_var("ABSTRACT_WEIGHT_BACKEND", value),
+            None => std::env::remove_var("ABSTRACT_WEIGHT_BACKEND"),
+        }
+    }
+}
+
 pub struct NwaTraversalData {
     pub comp_id: Vec<usize>,
     pub sccs: Vec<Vec<usize>>,
@@ -466,7 +487,11 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
         }
     }
 
-    let mut template_cache: FxHashMap<Signature, NWA> = FxHashMap::default();
+    let mut super_dwa_opt: Option<DWA> = None;
+    let mut super_signature_opt: Option<Signature> = None;
+    let mut super_dwa_unique_weights_opt: Option<Vec<Weight>> = None;
+
+    let template_cache: RefCell<FxHashMap<Signature, Arc<NWA>>> = RefCell::new(FxHashMap::default());
 
     // OPTIMIZATION START: Split signatures into Simple (Direct Union) and Complex (Bitvector Derivation)
     let mut simple_signatures = Vec::new();
@@ -515,7 +540,7 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
         let mut dwa = combined_nwa.determinize();
         dwa.prune_basic();
 
-        template_cache.insert(sig, NWA::from_dwa(&dwa));
+        template_cache.borrow_mut().insert(sig, Arc::new(NWA::from_dwa(&dwa)));
 
     }
 
@@ -547,14 +572,28 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
             bit_to_term.push(Some(*term_id));
         }
 
+        let _rangeset_backend = WeightBackendOverride::new("rangeset");
+        let template_dwas_rsb = match build_template_dwas(parser) {
+            Ok(m) => m,
+            Err(e) => panic!("Failed to build template DWAs for Super DWA: {:?}", e),
+        };
+        let ignore_dwa_rsb = build_ignore_terminal_dwa();
+        crate::debug!(5, "  Built {} template DWAs with rangeset backend", template_dwas_rsb.len());
+
         let start_super_nwa = std::time::Instant::now();
         let mut super_nwa = NWA::new_empty();
         for (term_id_opt, bit) in &term_to_bit {
             let mut weight = Weight::zeros();
             weight.set(*bit, true);
             let term_dwa = match term_id_opt {
-                Some(term_id) => if parser.ignore_terminal_ids.contains(term_id) { &ignore_dwa } else { template_dwas.get(term_id).unwrap_or(&ignore_dwa) },
-                None => &ignore_dwa,
+                Some(term_id) => {
+                    if parser.ignore_terminal_ids.contains(term_id) {
+                        &ignore_dwa_rsb
+                    } else {
+                        template_dwas_rsb.get(term_id).unwrap_or(&ignore_dwa_rsb)
+                    }
+                }
+                None => &ignore_dwa_rsb,
             };
             let mut weighted_dwa = term_dwa.clone();
             weighted_dwa.apply_weight_inplace(&weight);
@@ -641,18 +680,24 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
             100.0 * (1.0 - total_after as f64 / total_before as f64));
 
         for (sig, nwa, _, _) in results {
-            template_cache.insert(sig, nwa);
+            template_cache.borrow_mut().insert(sig, Arc::new(nwa));
         }
+
+        super_dwa_opt = Some(super_dwa);
+        super_signature_opt = Some(super_signature);
+        super_dwa_unique_weights_opt = Some(super_dwa_unique_weights);
     }
     // OPTIMIZATION END
 
     // Log template cache stats
-    let template_sizes: Vec<usize> = template_cache.values().map(|nwa| nwa.states.len()).collect();
+    let template_cache_snapshot = template_cache.borrow();
+    let template_sizes: Vec<usize> = template_cache_snapshot.values().map(|nwa| nwa.states.len()).collect();
     let total_template_states: usize = template_sizes.iter().sum();
     let max_template: usize = template_sizes.iter().copied().max().unwrap_or(0);
     let avg_template: f64 = total_template_states as f64 / template_sizes.len().max(1) as f64;
     crate::debug!(4, "Template cache: {} templates, {} total states, max={}, avg={:.1}", 
-        template_cache.len(), total_template_states, max_template, avg_template);
+        template_cache_snapshot.len(), total_template_states, max_template, avg_template);
+    drop(template_cache_snapshot);
 
     crate::debug!(4, "Finished DWA specialization");
 
@@ -680,6 +725,9 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
     // Clone references for use in closures
     let tsid_bodies_for_process = tsid_bodies_arc.clone();
     let template_cache_ref = &template_cache;
+    let super_dwa_opt_ref = &super_dwa_opt;
+    let super_signature_opt_ref = &super_signature_opt;
+    let super_dwa_unique_weights_opt_ref = &super_dwa_unique_weights_opt;
     let states_arena_ref = &states_arena;
 
     nwa_special_map(
@@ -737,7 +785,57 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
             let mut nwa_body = NWABody { start_states: vec![] };
             for (right_body, terminal_map) in &nwa_bodies_map {
                 let (signature, concrete_weights) = canonicalize_bundle(terminal_map.clone());
-                let cached_nwa = template_cache.get(&signature).expect_else(|| format!("Template must exist for signature {:?}", signature));
+                let cached_nwa = {
+                    let cached = template_cache_ref.borrow().get(&signature).cloned();
+                    if let Some(nwa) = cached { nwa } else {
+                    let _rangeset_backend = WeightBackendOverride::new("rangeset");
+                    crate::debug!(5, "Dynamic derivation for signature {:?}", signature);
+
+                    let super_dwa = super_dwa_opt_ref
+                        .as_ref()
+                        .expect("Super DWA missing for dynamic derivation");
+                    let super_signature = super_signature_opt_ref
+                        .as_ref()
+                        .expect("Super signature missing for dynamic derivation");
+                    let super_dwa_unique_weights = super_dwa_unique_weights_opt_ref
+                        .as_ref()
+                        .expect("Super DWA weights missing for dynamic derivation");
+
+                    let target_idx = SignatureIndex::new(&signature);
+                    let mapping = can_derive(super_signature, &target_idx)
+                        .expect("Super signature must derive target");
+
+                    let weight_map: HashMap<Weight, Weight> = super_dwa_unique_weights
+                        .iter()
+                        .map(|w| {
+                            let mut accumulator = Weight::zeros();
+                            let mut is_all = false;
+
+                            for bit in w.iter_up_to_allow_expansion(mapping.len()) {
+                                if let Some(target_w) = mapping.get(bit) {
+                                    if target_w.is_all_fast() {
+                                        is_all = true;
+                                        break;
+                                    }
+                                    accumulator |= target_w;
+                                }
+                            }
+
+                            let new_w = if is_all { Weight::all() } else { accumulator };
+                            (w.clone(), new_w)
+                        })
+                        .collect();
+
+                    let mut derived_dwa = specialize_dwa_relative_with_map(super_dwa, &weight_map);
+                    derived_dwa.optimize("DynamicSpecializedDWA");
+                    let nwa = Arc::new(NWA::from_dwa(&derived_dwa));
+                    template_cache_ref
+                        .borrow_mut()
+                        .insert(signature.clone(), nwa.clone());
+                    nwa
+                    }
+                };
+                let cached_nwa = cached_nwa.as_ref();
                 
                 let template_size = cached_nwa.states.len();
                 let count = INSTANTIATE_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

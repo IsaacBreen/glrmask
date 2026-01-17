@@ -217,7 +217,11 @@ impl NWA {
                 // Full pipeline for Terminal DWA construction (precompute1)
                 // OPTIMIZATION: Skip rm_epsilon to save ~2s - determinization can handle epsilons
                 // Trade-off: determinization may be slightly slower but overall faster
-                nwa_passes: vec![NwaPass::MinimizeRustfst, NwaPass::CompressTransitions],
+                nwa_passes: if std::env::var("SKIP_RUSTFST_MIN").map_or(false, |v| v == "1") {
+                    vec![NwaPass::CompressTransitions]
+                } else {
+                    vec![NwaPass::MinimizeRustfst, NwaPass::CompressTransitions]
+                },
                 dwa_passes: vec![DwaPass::Minimize, DwaPass::ConsolidateRanges, DwaPass::TrimWeights],
             },
             "TemplateDWA" => DeterminizeAndMinimizeConfig {
