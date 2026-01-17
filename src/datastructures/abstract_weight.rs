@@ -22,6 +22,7 @@ use crate::json_serialization::{JSONConvertible, JSONNode};
 use serde::{Deserialize, Serialize};
 use serde::de::Error;
 use serde_json::Value as JsonValue;
+use std::cell::RefCell;
 use std::hash::{Hash, Hasher};
 use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Not};
 
@@ -85,12 +86,54 @@ impl WeightDimensions {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BackendChoice {
+pub enum BackendChoice {
     RangeSet,
     Factorized,
 }
 
+thread_local! {
+    static BACKEND_OVERRIDE: RefCell<Option<BackendChoice>> = RefCell::new(None);
+}
+
+thread_local! {
+    static ALLOW_EXPANSION_OVERRIDE: RefCell<Option<bool>> = RefCell::new(None);
+}
+
+/// Temporarily override the backend choice for the current thread.
+/// Returns the previous value (if any) which should be restored later.
+pub fn override_backend(choice: BackendChoice) -> Option<BackendChoice> {
+    BACKEND_OVERRIDE.with(|cell| cell.borrow_mut().replace(choice))
+}
+
+/// Restore a previous backend override.
+pub fn restore_backend(previous: Option<BackendChoice>) {
+    BACKEND_OVERRIDE.with(|cell| *cell.borrow_mut() = previous);
+}
+
+/// Check if factorized weight expansion is allowed for the current thread.
+pub fn is_expansion_allowed() -> bool {
+    ALLOW_EXPANSION_OVERRIDE.with(|cell| {
+        if let Some(value) = *cell.borrow() {
+            return value;
+        }
+        std::env::var("ALLOW_FACTORIZED_EXPANSION").is_ok()
+    })
+}
+
+/// Override expansion allowance for the current thread.
+pub fn override_expansion_allowed(allow: bool) -> Option<bool> {
+    ALLOW_EXPANSION_OVERRIDE.with(|cell| cell.borrow_mut().replace(allow))
+}
+
+/// Restore previous expansion allowance override for the current thread.
+pub fn restore_expansion_allowed(previous: Option<bool>) {
+    ALLOW_EXPANSION_OVERRIDE.with(|cell| *cell.borrow_mut() = previous);
+}
+
 fn backend_choice() -> BackendChoice {
+    if let Some(choice) = BACKEND_OVERRIDE.with(|cell| *cell.borrow()) {
+        return choice;
+    }
     match std::env::var("ABSTRACT_WEIGHT_BACKEND") {
         Ok(value) if value.eq_ignore_ascii_case("rsb") || value.eq_ignore_ascii_case("rangeset") => BackendChoice::RangeSet,
         _ => BackendChoice::Factorized, // Default to factorized
@@ -463,7 +506,7 @@ impl JSONConvertible for AbstractWeight {
                             let start = v.pop().unwrap();
                             ranges.push(start..=end);
                         }
-                        return Ok(AbstractWeight::RangeSet(RangeSetBlaze::from_iter(ranges)));
+                        return Ok(AbstractWeight::from_rsb(RangeSetBlaze::from_iter(ranges)));
                     }
                     "factorized" => {
                         let num_tsids: usize = match obj.remove("num_tsids") {
@@ -485,9 +528,13 @@ impl JSONConvertible for AbstractWeight {
                                 (tsid_set, token_set)
                             })
                             .collect();
-                        return Ok(AbstractWeight::Factorized(
-                            FactorizedWeight::from_pairs(pairs, num_tsids)
-                        ));
+                        let fw = FactorizedWeight::from_pairs(pairs, num_tsids);
+                        return Ok(match backend_choice() {
+                            BackendChoice::RangeSet => {
+                                AbstractWeight::from_rsb(fw.expand_to_rsb_unchecked())
+                            }
+                            BackendChoice::Factorized => AbstractWeight::Factorized(fw),
+                        });
                     }
                     _ => return Err(format!("Unknown weight type: {}", type_str)),
                 }
@@ -656,7 +703,7 @@ impl AbstractWeight {
         match self {
             AbstractWeight::RangeSet(rsb) => rsb.clone(),
             AbstractWeight::Factorized(fw) => {
-                if std::env::var("ALLOW_FACTORIZED_EXPANSION").is_err() {
+                if !is_expansion_allowed() {
                     panic!(
                         "Unexpected factorized weight expansion at: AbstractWeight::to_rsb(). Set ALLOW_FACTORIZED_EXPANSION=1 to allow."
                     );
@@ -1226,18 +1273,18 @@ mod tests {
     #[test]
     fn test_factorized_expand_roundtrip() {
         // Allow expansion for this test
-        std::env::set_var("ALLOW_FACTORIZED_EXPANSION", "1");
+        let prev = override_expansion_allowed(true);
         let num_tsids = 3;
         let rsb = RangeSetBlaze::from_iter([0..=2, 4..=5, 8..=8, 10..=12]);
         let fw = FactorizedWeight::from_rsb_with_num_tsids(&rsb, num_tsids);
         assert_eq!(fw.expand_to_rsb(), rsb);
-        std::env::remove_var("ALLOW_FACTORIZED_EXPANSION");
+        restore_expansion_allowed(prev);
     }
 
     #[test]
     fn test_factorized_set_ops_match_rsb() {
         // Allow expansion for this test
-        std::env::set_var("ALLOW_FACTORIZED_EXPANSION", "1");
+        let prev = override_expansion_allowed(true);
         let num_tsids = 4;
         let a_rsb = RangeSetBlaze::from_iter([0..=7, 10..=12]);
         let b_rsb = RangeSetBlaze::from_iter([5..=9, 12..=15]);
@@ -1249,6 +1296,6 @@ mod tests {
 
         assert_eq!(inter.expand_to_rsb(), &a_rsb & &b_rsb);
         assert_eq!(union.expand_to_rsb(), &a_rsb | &b_rsb);
-        std::env::remove_var("ALLOW_FACTORIZED_EXPANSION");
+        restore_expansion_allowed(prev);
     }
 }

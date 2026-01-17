@@ -21,6 +21,7 @@ use crate::dwa_i32::{
 };
 use crate::dfa_u8::TokenizerStateID;
 use crate::types::{TerminalID, TerminalID as GrammarTokenID};
+use crate::datastructures::abstract_weight::{BackendChoice, override_backend, restore_backend};
 
 struct MinimizeRustfstConfig {
     rm_epsilon: bool,
@@ -47,23 +48,23 @@ pub type Precomputed4 = DWA;
 pub type Signature = Vec<Vec<Option<TerminalID>>>;
 
 struct WeightBackendOverride {
-    previous: Option<String>,
+    previous: Option<BackendChoice>,
 }
 
 impl WeightBackendOverride {
     fn new(backend: &str) -> Self {
-        let previous = std::env::var("ABSTRACT_WEIGHT_BACKEND").ok();
-        std::env::set_var("ABSTRACT_WEIGHT_BACKEND", backend);
+        let choice = match backend {
+            "rangeset" | "rsb" => BackendChoice::RangeSet,
+            _ => BackendChoice::Factorized,
+        };
+        let previous = override_backend(choice);
         Self { previous }
     }
 }
 
 impl Drop for WeightBackendOverride {
     fn drop(&mut self) {
-        match &self.previous {
-            Some(value) => std::env::set_var("ABSTRACT_WEIGHT_BACKEND", value),
-            None => std::env::remove_var("ABSTRACT_WEIGHT_BACKEND"),
-        }
+        restore_backend(self.previous);
     }
 }
 

@@ -7,7 +7,7 @@ use std::sync::{Mutex, OnceLock};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
-use crate::datastructures::abstract_weight::{current_num_tsids, normalize_num_tsids, WeightBackend};
+use crate::datastructures::abstract_weight::{current_num_tsids, is_expansion_allowed, normalize_num_tsids, WeightBackend};
 
 const PROFILE_PRINT_EVERY_SECS: u64 = 5;
 const PROFILE_PRINT_EVERY_CALLS: u64 = 20_000;
@@ -1463,7 +1463,7 @@ impl FactorizedWeight {
     }
 
     pub fn expand_to_rsb(&self) -> RangeSetBlaze<usize> {
-        if std::env::var("ALLOW_FACTORIZED_EXPANSION").is_err() {
+        if !is_expansion_allowed() {
             panic!(
                 "Unexpected factorized weight expansion at: FactorizedWeight::expand_to_rsb(). Set ALLOW_FACTORIZED_EXPANSION=1 to allow."
             );
