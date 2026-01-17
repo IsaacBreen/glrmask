@@ -642,6 +642,49 @@ impl RangeMapWeight {
         result
     }
 
+    pub(crate) fn clip_to_max(&mut self, max: usize) {
+        if self.map.is_empty() {
+            return;
+        }
+
+        let num_tsids = self.num_tsids();
+        let max_token = max / num_tsids;
+        let max_tsid = max % num_tsids;
+        let tsid_clip = Self::rangeset_from_ranges([0..=max_tsid]);
+
+        let mut new_map = RangeMapBlaze::new();
+        for (token_range, tsid_set) in self.map.range_values() {
+            let start = *token_range.start();
+            if start > max_token {
+                break;
+            }
+            let end = (*token_range.end()).min(max_token);
+            if start > end {
+                continue;
+            }
+
+            if end < max_token {
+                if !tsid_set.is_empty() {
+                    new_map.ranges_insert(start..=end, tsid_set.clone());
+                }
+                continue;
+            }
+
+            if start < max_token {
+                if !tsid_set.is_empty() {
+                    new_map.ranges_insert(start..=max_token.saturating_sub(1), tsid_set.clone());
+                }
+            }
+
+            let clipped = tsid_set & &tsid_clip;
+            if !clipped.is_empty() {
+                new_map.ranges_insert(max_token..=max_token, clipped);
+            }
+        }
+
+        self.map = new_map;
+    }
+
     pub(crate) fn expand_to_rsb(&self) -> RangeSetBlaze<usize> {
         if self.map.is_empty() {
             return RangeSetBlaze::new();

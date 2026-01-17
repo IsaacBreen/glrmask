@@ -873,6 +873,26 @@ impl AbstractWeight {
         }
     }
 
+    /// Clip this weight to the range 0..=max without building a large clip weight.
+    pub fn clip_to_max(&mut self, max: usize) {
+        match self {
+            AbstractWeight::RangeSet(rsb) => {
+                let clip = RangeSet::from(RangeSetBlaze::from_iter([0..=max]));
+                *rsb &= &clip;
+            }
+            AbstractWeight::Factorized(fw) => {
+                let num_tsids = fw.num_tsids();
+                let clip = intern_factorized(FactorizedWeight::all_with_max_position(max, num_tsids));
+                *fw = WeightBackend::intersect(fw, &clip);
+            }
+            AbstractWeight::RangeMap(rm) => {
+                let mut new = (**rm).clone();
+                new.clip_to_max(max);
+                *rm = intern_rangemap(new);
+            }
+        }
+    }
+
     /// Remove a position.
     pub fn remove(&mut self, pos: usize) {
         let single = AbstractWeight::from_position(pos);
