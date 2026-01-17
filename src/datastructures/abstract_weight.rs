@@ -1029,9 +1029,15 @@ impl AbstractWeight {
     /// For small test weights this is acceptable. For production hot paths,
     /// consider using contains() checks instead if possible.
     pub fn iter_up_to(&self, max: usize) -> impl Iterator<Item = usize> + '_ {
-        let rsb = self.to_rsb();
-        let clipped = &rsb & &RangeSetBlaze::from_iter([0..=max]);
-        clipped.into_iter()
+        match self {
+            AbstractWeight::RangeSet(rsb) => {
+                let clipped = rsb & &RangeSetBlaze::from_iter([0..=max]);
+                clipped.into_iter()
+            }
+            AbstractWeight::Factorized(fw) => {
+                fw.expand_to_rsb_bounded(max).into_iter()
+            }
+        }
     }
 
     /// Iterate over positions up to and including max, allowing expansion.
@@ -1039,17 +1045,7 @@ impl AbstractWeight {
     /// This should only be used in terminal-space weight operations where
     /// expansion is known to be safe and bounded.
     pub fn iter_up_to_allow_expansion(&self, max: usize) -> impl Iterator<Item = usize> + '_ {
-        match self {
-            AbstractWeight::RangeSet(rsb) => {
-                let clipped = rsb & &RangeSetBlaze::from_iter([0..=max]);
-                clipped.into_iter()
-            }
-            AbstractWeight::Factorized(fw) => {
-                let rsb = fw.expand_to_rsb_unchecked();
-                let clipped = &rsb & &RangeSetBlaze::from_iter([0..=max]);
-                clipped.into_iter()
-            }
-        }
+        self.iter_up_to(max)
     }
     
     /// Compute the complement within the given dimensions.

@@ -1401,7 +1401,7 @@ impl GrammarConstraint {
                     };
                     // Get weight from target state
                     let target_weight_str = match &orig_dwa_for_min.states[target].final_weight {
-                        Some(w) if w.len() <= 10 => format!("{:?}", w.to_rsb().iter().collect::<Vec<_>>()),
+                        Some(w) if w.len() <= 10 => format!("{:?}", w.to_rsb_allow_expansion().iter().collect::<Vec<_>>()),
                         Some(w) if w.len() == u64::MAX as usize => "ALL".to_string(),
                         Some(w) => format!("(len={})", w.len()),
                         None => "".to_string(),

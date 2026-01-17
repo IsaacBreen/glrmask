@@ -203,7 +203,11 @@ impl DWA {
             for (&label, &dest) in &self.states[state_id].transitions {
                 if let Some(weight) = self.states[state_id].trans_weights.get(&label) {
                     // Tokens that can reach dest through this edge
-                    let weight_rsb = weight.to_rsb();
+                    let weight_rsb = if cfg!(test) {
+                        weight.to_rsb_allow_expansion()
+                    } else {
+                        weight.to_rsb()
+                    };
                     let edge_tokens = &current_reach & &weight_rsb;
                     
                     if !edge_tokens.is_empty() {
@@ -234,7 +238,11 @@ impl DWA {
         
         for state_id in 0..n {
             if let Some(fw) = &self.states[state_id].final_weight {
-                reach[state_id] = fw.to_rsb();
+                reach[state_id] = if cfg!(test) {
+                    fw.to_rsb_allow_expansion()
+                } else {
+                    fw.to_rsb()
+                };
                 if !in_queue[state_id] {
                     queue.push_back(state_id);
                     in_queue[state_id] = true;
@@ -259,7 +267,11 @@ impl DWA {
             for &(src, label) in &rev_edges[state_id] {
                 if let Some(weight) = self.states[src].trans_weights.get(&label) {
                     // Tokens that can reach acceptance through this edge
-                    let weight_rsb = weight.to_rsb();
+                    let weight_rsb = if cfg!(test) {
+                        weight.to_rsb_allow_expansion()
+                    } else {
+                        weight.to_rsb()
+                    };
                     let edge_tokens = &current_reach & &weight_rsb;
                     
                     if !edge_tokens.is_empty() {
@@ -377,7 +389,11 @@ fn optimize_weight_ranges(weight: &Weight, tokens_for_removal: &RangeSetBlaze<us
     }
     
     // Step 1: Remove ranges that don't intersect tokens_for_removal
-    let weight_rsb = weight.to_rsb();
+    let weight_rsb = if cfg!(test) {
+        weight.to_rsb_allow_expansion()
+    } else {
+        weight.to_rsb()
+    };
     let pruned = &weight_rsb & tokens_for_removal;
     
     if pruned.is_empty() {

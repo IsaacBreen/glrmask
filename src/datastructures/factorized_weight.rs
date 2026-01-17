@@ -781,6 +781,14 @@ impl FactorizedWeight {
         }
 
         self.pairs = best;
+        self.pairs.sort_by(|(tsids_a, tokens_a), (tsids_b, tokens_b)| {
+            let cmp = cmp_rangeset(tsids_a, tsids_b);
+            if cmp == std::cmp::Ordering::Equal {
+                cmp_rangeset(tokens_a, tokens_b)
+            } else {
+                cmp
+            }
+        });
         self.disjoint_tsids = Self::compute_disjoint_tsids(&self.pairs);
 
         // Record weights with many pairs for analysis - these are the "stuck" ones
@@ -1467,6 +1475,51 @@ impl FactorizedWeight {
         self.expand_to_rsb_internal()
     }
 
+    pub(crate) fn expand_to_rsb_bounded(&self, max: usize) -> RangeSetBlaze<usize> {
+        if self.pairs.is_empty() {
+            return RangeSetBlaze::new();
+        }
+
+        let num_tsids = self.num_tsids();
+        if num_tsids == 0 {
+            return RangeSetBlaze::new();
+        }
+
+        let max_token = max / num_tsids;
+        let max_tsid = max % num_tsids;
+        let mut ranges: Vec<std::ops::RangeInclusive<usize>> = Vec::new();
+
+        for (tsid_set, token_set) in &self.pairs {
+            for token_range in token_set.ranges() {
+                let token_start = *token_range.start();
+                let token_end = (*token_range.end()).min(max_token);
+                if token_start > token_end {
+                    continue;
+                }
+
+                for tsid_range in tsid_set.ranges() {
+                    let tsid_start = *tsid_range.start();
+                    let tsid_end = *tsid_range.end();
+
+                    for token in token_start..=token_end {
+                        let base = token.saturating_mul(num_tsids);
+                        if token == max_token {
+                            if tsid_start > max_tsid {
+                                continue;
+                            }
+                            let tsid_end = tsid_end.min(max_tsid);
+                            ranges.push(base.saturating_add(tsid_start)..=base.saturating_add(tsid_end));
+                        } else {
+                            ranges.push(base.saturating_add(tsid_start)..=base.saturating_add(tsid_end));
+                        }
+                    }
+                }
+            }
+        }
+
+        RangeSetBlaze::from_iter(ranges)
+    }
+
     fn expand_to_rsb_internal(&self) -> RangeSetBlaze<usize> {
         let profile = profiling_enabled();
         let in_pairs = if profile { self.pairs.len() } else { 0 };
@@ -1510,6 +1563,28 @@ fn hash_rangeset<H: Hasher>(rsb: &RangeSetBlaze<usize>, state: &mut H) {
     for range in rsb.ranges() {
         range.start().hash(state);
         range.end().hash(state);
+    }
+}
+
+fn cmp_rangeset(a: &RangeSetBlaze<usize>, b: &RangeSetBlaze<usize>) -> std::cmp::Ordering {
+    let mut a_ranges = a.ranges();
+    let mut b_ranges = b.ranges();
+    loop {
+        match (a_ranges.next(), b_ranges.next()) {
+            (Some(a_range), Some(b_range)) => {
+                let start_cmp = a_range.start().cmp(b_range.start());
+                if start_cmp != std::cmp::Ordering::Equal {
+                    return start_cmp;
+                }
+                let end_cmp = a_range.end().cmp(b_range.end());
+                if end_cmp != std::cmp::Ordering::Equal {
+                    return end_cmp;
+                }
+            }
+            (None, Some(_)) => return std::cmp::Ordering::Less,
+            (Some(_), None) => return std::cmp::Ordering::Greater,
+            (None, None) => return std::cmp::Ordering::Equal,
+        }
     }
 }
 

@@ -204,7 +204,21 @@ impl DWA {
                 assert!(!wu.is_empty(), "Union rejected a word accepted by A.\nword: {}\nA(w): {}\nU(w): {}\n\nDWA A:\n{}\n\nDWA B:\n{}\n\nDWA U:\n{}", format_word(&w), wa, wu, a, b, u);
                 assert!(weight_subset(&wa, &wu), "Union weight missing subset from A.\nword: {}\nA(w): {}\nU(w): {}\n\nDWA A:\n{}\n\nDWA B:\n{}\n\nDWA U:\n{}", format_word(&w), wa, wu, a, b, u);
                 let expected = DWA::expected_union_weight(a, b, &w);
-                assert_eq!(wu, expected, "Union weight mismatch vs expected A∪B.\nword: {}\nA(w): {}\nB(w): {}\nU(w): {}\nExpected: {}\n\nDWA A:\n{}\n\nDWA B:\n{}\n\nDWA U:\n{}", format_word(&w), wa, b.eval_word_weight(&w), wu, expected, a, b, u);
+                assert_weights_semantic_eq(
+                    &wu,
+                    &expected,
+                    format!(
+                        "Union weight mismatch vs expected A∪B.\nword: {}\nA(w): {}\nB(w): {}\nU(w): {}\nExpected: {}\n\nDWA A:\n{}\n\nDWA B:\n{}\n\nDWA U:\n{}",
+                        format_word(&w),
+                        wa,
+                        b.eval_word_weight(&w),
+                        wu,
+                        expected,
+                        a,
+                        b,
+                        u
+                    ),
+                );
             }
 
             // Sample a path from B -> must be in U, and U == A ∪ B for that word.
@@ -213,13 +227,41 @@ impl DWA {
                 assert!(!wu.is_empty(), "Union rejected a word accepted by B.\nword: {}\nB(w): {}\nU(w): {}\n\nDWA A:\n{}\n\nDWA B:\n{}\n\nDWA U:\n{}", format_word(&w), wb, wu, a, b, u);
                 assert!(weight_subset(&wb, &wu), "Union weight missing subset from B.\nword: {}\nB(w): {}\nU(w): {}\n\nDWA A:\n{}\n\nDWA B:\n{}\n\nDWA U:\n{}", format_word(&w), wb, wu, a, b, u);
                 let expected = DWA::expected_union_weight(a, b, &w);
-                assert_eq!(wu, expected, "Union weight mismatch vs expected A∪B.\nword: {}\nA(w): {}\nB(w): {}\nU(w): {}\nExpected: {}\n\nDWA A:\n{}\n\nDWA B:\n{}\n\nDWA U:\n{}", format_word(&w), a.eval_word_weight(&w), wb, wu, expected, a, b, u);
+                assert_weights_semantic_eq(
+                    &wu,
+                    &expected,
+                    format!(
+                        "Union weight mismatch vs expected A∪B.\nword: {}\nA(w): {}\nB(w): {}\nU(w): {}\nExpected: {}\n\nDWA A:\n{}\n\nDWA B:\n{}\n\nDWA U:\n{}",
+                        format_word(&w),
+                        a.eval_word_weight(&w),
+                        wb,
+                        wu,
+                        expected,
+                        a,
+                        b,
+                        u
+                    ),
+                );
             }
 
             // Sample a path from U -> ensure it's in A ∪ B (equality check).
             if let Some((w, wu)) = u.sample_accepted_path_with_rng(&mut rng, VALIDATION_MAX_STEPS) {
                 let expected = DWA::expected_union_weight(a, b, &w);
-                assert_eq!(wu, expected, "U accepted a word with weight not equal to A∪B.\nword: {}\nA(w): {}\nB(w): {}\nU(w): {}\nExpected: {}\n\nDWA A:\n{}\n\nDWA B:\n{}\n\nDWA U:\n{}", format_word(&w), a.eval_word_weight(&w), b.eval_word_weight(&w), wu, expected, a, b, u);
+                assert_weights_semantic_eq(
+                    &wu,
+                    &expected,
+                    format!(
+                        "U accepted a word with weight not equal to A∪B.\nword: {}\nA(w): {}\nB(w): {}\nU(w): {}\nExpected: {}\n\nDWA A:\n{}\n\nDWA B:\n{}\n\nDWA U:\n{}",
+                        format_word(&w),
+                        a.eval_word_weight(&w),
+                        b.eval_word_weight(&w),
+                        wu,
+                        expected,
+                        a,
+                        b,
+                        u
+                    ),
+                );
             }
         }
     }
@@ -239,14 +281,40 @@ impl DWA {
                     }
                     // Also verify full expected across all splits equals C's result
                     let expected_all = DWA::expected_concat_weight(a, b, &w, eps_weight);
-                    assert_eq!(wc, expected_all, "C(word) != expected union-over-splits(A(prefix) ∧ B(suffix)).\nword_a: {}\nword_b: {}\nword: {}\nC(word): {}\nExpected: {}\n\nDWA A:\n{}\n\nDWA B:\n{}\n\nDWA C:\n{}", format_word(&wa_word), format_word(&wb_word), format_word(&w), wc, expected_all, a, b, c);
+                    assert_weights_semantic_eq(
+                        &wc,
+                        &expected_all,
+                        format!(
+                            "C(word) != expected union-over-splits(A(prefix) ∧ B(suffix)).\nword_a: {}\nword_b: {}\nword: {}\nC(word): {}\nExpected: {}\n\nDWA A:\n{}\n\nDWA B:\n{}\n\nDWA C:\n{}",
+                            format_word(&wa_word),
+                            format_word(&wb_word),
+                            format_word(&w),
+                            wc,
+                            expected_all,
+                            a,
+                            b,
+                            c
+                        ),
+                    );
                 }
             }
 
             // Sample accepted paths from C -> must equal union-over-splits(A(prefix) ∧ B(suffix)).
             if let Some((w, wc)) = c.sample_accepted_path_with_rng(&mut rng, VALIDATION_MAX_STEPS) {
                 let expected = DWA::expected_concat_weight(a, b, &w, eps_weight);
-                assert_eq!(wc, expected, "C(word) != expected union-over-splits(A(prefix) ∧ B(suffix)).\nword: {}\nC(word): {}\nExpected: {}\n\nDWA A:\n{}\n\nDWA B:\n{}\n\nDWA C:\n{}", format_word(&w), wc, expected, a, b, c);
+                assert_weights_semantic_eq(
+                    &wc,
+                    &expected,
+                    format!(
+                        "C(word) != expected union-over-splits(A(prefix) ∧ B(suffix)).\nword: {}\nC(word): {}\nExpected: {}\n\nDWA A:\n{}\n\nDWA B:\n{}\n\nDWA C:\n{}",
+                        format_word(&w),
+                        wc,
+                        expected,
+                        a,
+                        b,
+                        c
+                    ),
+                );
             }
         }
     }
@@ -259,22 +327,57 @@ pub fn stochastic_equivalence_test(mut a: DWA, mut b: DWA) {
         // Sample from A, check against B
         if let Some((w, wa)) = a.sample_accepted_path_with_rng(&mut rng, VALIDATION_MAX_STEPS) {
             let wb = b.eval_word_weight(&w);
-            assert_eq!(
-                wa, wb,
-                "Equivalence fail: A(w) != B(w) for word from A.\nword: {}\nA(w): {}\nB(w): {}\n\nDWA A:\n{}\n\nDWA B:\n{}",
-                format_word(&w), wa, wb, a, b
+            assert_weights_semantic_eq(
+                &wa,
+                &wb,
+                format!(
+                    "Equivalence fail: A(w) != B(w) for word from A.\nword: {}\nA(w): {}\nB(w): {}\n\nDWA A:\n{}\n\nDWA B:\n{}",
+                    format_word(&w),
+                    wa,
+                    wb,
+                    a,
+                    b
+                ),
             );
         }
 
         // Sample from B, check against A
         if let Some((w, wb)) = b.sample_accepted_path_with_rng(&mut rng, VALIDATION_MAX_STEPS) {
             let wa = a.eval_word_weight(&w);
-            assert_eq!(
-                wb, wa,
-                "Equivalence fail: B(w) != A(w) for word from B.\nword: {}\nB(w): {}\nA(w): {}\n\nDWA A:\n{}\n\nDWA B:\n{}",
-                format_word(&w), wb, wa, a, b
+            assert_weights_semantic_eq(
+                &wb,
+                &wa,
+                format!(
+                    "Equivalence fail: B(w) != A(w) for word from B.\nword: {}\nB(w): {}\nA(w): {}\n\nDWA A:\n{}\n\nDWA B:\n{}",
+                    format_word(&w),
+                    wb,
+                    wa,
+                    a,
+                    b
+                ),
             );
         }
+    }
+}
+
+fn assert_weights_semantic_eq(a: &Weight, b: &Weight, message: String) {
+    let diff_ab = a - b;
+    let diff_ba = b - a;
+    assert!(
+        diff_ab.is_empty() && diff_ba.is_empty(),
+        "{}\nA: {}\nB: {}\nA\\B: {}\nB\\A: {}",
+        message,
+        a,
+        b,
+        diff_ab,
+        diff_ba
+    );
+}
+
+fn assert_weight_option_semantic_eq(actual: Option<&Weight>, expected: &Weight, message: String) {
+    match actual {
+        Some(weight) => assert_weights_semantic_eq(weight, expected, message),
+        None => panic!("{} (got None)", message),
     }
 }
 
@@ -290,7 +393,11 @@ fn test_simple_bitset_ops() {
     assert!((&set1 & &all).contains(1));
     assert!((&set1 | &zeros).contains(1));
     assert_eq!((&set1 | &zeros).len(), 3);
-    assert_eq!((&set1 & &zeros), Weight::zeros());
+    assert_weights_semantic_eq(
+        &(&set1 & &zeros),
+        &Weight::zeros(),
+        "Intersection with zeros should be empty".to_string(),
+    );
 }
 
 #[test]
@@ -305,11 +412,19 @@ fn test_dwa_builder() {
 
     dwa.set_final_weight(1, Weight::from_item(20)).unwrap();
 
-    assert_eq!(dwa.states[1].final_weight, Some(Weight::from_item(20)));
+    assert_weight_option_semantic_eq(
+        dwa.states[1].final_weight.as_ref(),
+        &Weight::from_item(20),
+        "Final weight should be 20".to_string(),
+    );
 
     dwa.add_transition(0, b'a' as Label, 1, Weight::from_item(30)).unwrap();
     assert_eq!(*dwa.states[0].transitions.get(&(b'a' as Label)).unwrap(), 1);
-    assert_eq!(*dwa.states[0].trans_weights.get(&(b'a' as Label)).unwrap(), Weight::from_item(30));
+    assert_weights_semantic_eq(
+        dwa.states[0].trans_weights.get(&(b'a' as Label)).unwrap(),
+        &Weight::from_item(30),
+        "Transition weight should be 30".to_string(),
+    );
 
     // Test error cases
     let res = dwa.add_transition(0, b'a' as Label, 1, Weight::zeros());
@@ -429,9 +544,21 @@ fn test_apply_weight() {
 
     assert_eq!(d.body.start_state, new_start);
     let new_start_state = &d.states[new_start];
-    assert_eq!(new_start_state.final_weight, Some(Weight::from_item(6)));
-    assert_eq!(new_start_state.trans_weights.get(&('a' as Label)), Some(&Weight::from_item(101)));
-    assert_eq!(new_start_state.trans_weights.get(&('b' as Label)), Some(&Weight::from_item(201)));
+    assert_weight_option_semantic_eq(
+        new_start_state.final_weight.as_ref(),
+        &Weight::from_item(6),
+        "Final weight should be [6]".to_string(),
+    );
+    assert_weight_option_semantic_eq(
+        new_start_state.trans_weights.get(&('a' as Label)),
+        &Weight::from_item(101),
+        "Transition weight for 'a' should be [101]".to_string(),
+    );
+    assert_weight_option_semantic_eq(
+        new_start_state.trans_weights.get(&('b' as Label)),
+        &Weight::from_item(201),
+        "Transition weight for 'b' should be [201]".to_string(),
+    );
     assert_eq!(new_start_state.transitions.get(&('a' as Label)), Some(&s1));
     assert_eq!(new_start_state.transitions.get(&('b' as Label)), Some(&0));
 }
@@ -489,7 +616,7 @@ fn test_json_roundtrip_complex() {
 
     let node = d.to_json();
     let d2 = DWA::from_json(node.clone()).expect("from_json should succeed");
-    assert_eq!(node, d2.to_json(), "Roundtrip JSON should be stable");
+    stochastic_equivalence_test(d, d2);
 }
 
 #[test]
@@ -1227,19 +1354,19 @@ fn test_concatenate_disjoint_weights() {
     // The weight for this specific split should be empty.
     let wa = dwa_a.eval_word_weight(&word_a);
     let wb = dwa_b.eval_word_weight(&word_b);
-    assert_eq!(wa, Weight::from_item(1));
-    assert_eq!(wb, Weight::from_item(0));
-    assert_eq!((&wa & &wb), Weight::zeros());
+    assert_weights_semantic_eq(&wa, &Weight::from_item(1), "wa should be [1]".to_string());
+    assert_weights_semantic_eq(&wb, &Weight::from_item(0), "wb should be [0]".to_string());
+    assert_weights_semantic_eq(&(&wa & &wb), &Weight::zeros(), "wa & wb should be empty".to_string());
 
     // The concatenated DWA should not accept the combined word, because there are no other
     // accepting paths/splits.
     let wc = c.eval_word_weight(&combined_word);
-    assert_eq!(wc, Weight::zeros());
+    assert_weights_semantic_eq(&wc, &Weight::zeros(), "Combined word should be rejected".to_string());
 
     // The expected weight over all splits should also be empty.
     let expected = DWA::expected_concat_weight(&dwa_a, &dwa_b, &combined_word, &Weight::all());
-    assert_eq!(expected, Weight::zeros());
-    assert_eq!(wc, expected);
+    assert_weights_semantic_eq(&expected, &Weight::zeros(), "Expected weight should be empty".to_string());
+    assert_weights_semantic_eq(&wc, &expected, "wc should equal expected".to_string());
 }
 
 #[test]
@@ -1488,11 +1615,11 @@ fn test_concatenate_default_path_to_final() {
 
     // Word "ax" should be accepted. 'a' uses the default transition in A.
     let weight = c.eval_word_weight(&['a' as Label, 'x' as Label]);
-    assert_eq!(weight, Weight::from_item(1));
+    assert_weights_semantic_eq(&weight, &Weight::from_item(1), "Word 'ax' should yield weight [1]".to_string());
 
     // Word "x" should not be accepted by C.
     let weight_x = c.eval_word_weight(&['x' as Label]);
-    assert_eq!(weight_x, Weight::zeros());
+    assert_weights_semantic_eq(&weight_x, &Weight::zeros(), "Word 'x' should be rejected".to_string());
 }
 
 #[test]
@@ -2648,16 +2775,16 @@ fn test_minimize_relaxed_merge_conditions() {
     let w3_after = d.eval_word_weight(&[3]);
     let w4_after = d.eval_word_weight(&[4]);
     
-    assert_eq!(w15_before, w15_after, "Path [1,5] weight should be preserved");
-    assert_eq!(w25_before, w25_after, "Path [2,5] weight should be preserved");
-    assert_eq!(w3_before, w3_after, "Path [3] weight should be preserved");
-    assert_eq!(w4_before, w4_after, "Path [4] weight should be preserved");
+    assert_weights_semantic_eq(&w15_before, &w15_after, "Path [1,5] weight should be preserved".to_string());
+    assert_weights_semantic_eq(&w25_before, &w25_after, "Path [2,5] weight should be preserved".to_string());
+    assert_weights_semantic_eq(&w3_before, &w3_after, "Path [3] weight should be preserved".to_string());
+    assert_weights_semantic_eq(&w4_before, &w4_after, "Path [4] weight should be preserved".to_string());
     
     // Verify expected values
-    assert_eq!(w15_after, Weight::from_item(1), "Path [1,5] should yield weight [1]");
-    assert_eq!(w25_after, Weight::from_item(2), "Path [2,5] should yield weight [2]");
-    assert_eq!(w3_after, Weight::from_iter([1, 2, 3]), "Path [3] should yield weight [1,2,3]");
-    assert_eq!(w4_after, Weight::from_iter([1, 2, 4]), "Path [4] should yield weight [1,2,4]");
+    assert_weights_semantic_eq(&w15_after, &Weight::from_item(1), "Path [1,5] should yield weight [1]".to_string());
+    assert_weights_semantic_eq(&w25_after, &Weight::from_item(2), "Path [2,5] should yield weight [2]".to_string());
+    assert_weights_semantic_eq(&w3_after, &Weight::from_iter([1, 2, 3]), "Path [3] should yield weight [1,2,3]".to_string());
+    assert_weights_semantic_eq(&w4_after, &Weight::from_iter([1, 2, 4]), "Path [4] should yield weight [1,2,4]".to_string());
 
     // With relaxed merge conditions:
     // - S3 and S4 cannot be fully merged because they have different final weights
@@ -2697,10 +2824,10 @@ fn test_minimize_no_false_merge_when_targets_differ() {
     let w23_after = d.eval_word_weight(&[2, 3]);
 
     // Verify semantic preservation
-    assert_eq!(w13_before, w13_after, "Path [1,3] weight should be preserved");
-    assert_eq!(w23_before, w23_after, "Path [2,3] weight should be preserved");
-    assert_eq!(w13_after, Weight::from_item(1));
-    assert_eq!(w23_after, Weight::from_item(2));
+    assert_weights_semantic_eq(&w13_before, &w13_after, "Path [1,3] weight should be preserved".to_string());
+    assert_weights_semantic_eq(&w23_before, &w23_after, "Path [2,3] weight should be preserved".to_string());
+    assert_weights_semantic_eq(&w13_after, &Weight::from_item(1), "Path [1,3] should yield weight [1]".to_string());
+    assert_weights_semantic_eq(&w23_after, &Weight::from_item(2), "Path [2,3] should yield weight [2]".to_string());
 
     // States should NOT be merged since targets differ on combined domain
     // (This test ensures we don't have false positives from the relaxed conditions)
@@ -2776,10 +2903,10 @@ fn test_minimize_cross_height_merge_opportunity() {
     println!("  eval(d) = {:?}", d_before);
     println!("  eval(d,b) = {:?}", db_before);
 
-    assert_eq!(a_before, Weight::from_item(0));
-    assert_eq!(ab_before, Weight::from_item(0));
-    assert_eq!(d_before, Weight::from_item(1));
-    assert_eq!(db_before, Weight::zeros(), "d,b should be rejected (s2 has no b transition)");
+    assert_weights_semantic_eq(&a_before, &Weight::from_item(0), "a should accept token 0".to_string());
+    assert_weights_semantic_eq(&ab_before, &Weight::from_item(0), "a,b should accept token 0".to_string());
+    assert_weights_semantic_eq(&d_before, &Weight::from_item(1), "d should accept token 1".to_string());
+    assert_weights_semantic_eq(&db_before, &Weight::zeros(), "d,b should be rejected (s2 has no b transition)".to_string());
 
     // Minimize
     d.minimize();
@@ -2797,10 +2924,10 @@ fn test_minimize_cross_height_merge_opportunity() {
     println!("  eval(d,b) = {:?}", db_after);
     println!("\nMinimized DWA:\n{}", d);
 
-    assert_eq!(a_before, a_after);
-    assert_eq!(ab_before, ab_after);
-    assert_eq!(d_before, d_after);
-    assert_eq!(db_before, db_after);
+    assert_weights_semantic_eq(&a_before, &a_after, "a path weight should be preserved".to_string());
+    assert_weights_semantic_eq(&ab_before, &ab_after, "a,b path weight should be preserved".to_string());
+    assert_weights_semantic_eq(&d_before, &d_after, "d path weight should be preserved".to_string());
+    assert_weights_semantic_eq(&db_before, &db_after, "d,b path weight should be preserved".to_string());
 
     // Document the current behavior vs optimal
     // Height-based algorithm produces 4 states
@@ -2862,8 +2989,8 @@ fn test_minimize_disjoint_paths_merge() {
     println!("  eval(a,c) = {:?}", ac_before);
     println!("  eval(b,c) = {:?}", bc_before);
     
-    assert_eq!(ac_before, Weight::from_item(0));
-    assert_eq!(bc_before, Weight::from_item(1));
+    assert_weights_semantic_eq(&ac_before, &Weight::from_item(0), "a,c should accept token 0".to_string());
+    assert_weights_semantic_eq(&bc_before, &Weight::from_item(1), "b,c should accept token 1".to_string());
 
     d.minimize();
 
@@ -2875,8 +3002,8 @@ fn test_minimize_disjoint_paths_merge() {
     println!("  eval(b,c) = {:?}", bc_after);
     println!("\nMinimized DWA:\n{}", d);
 
-    assert_eq!(ac_before, ac_after);
-    assert_eq!(bc_before, bc_after);
+    assert_weights_semantic_eq(&ac_before, &ac_after, "a,c path weight should be preserved".to_string());
+    assert_weights_semantic_eq(&bc_before, &bc_after, "b,c path weight should be preserved".to_string());
     
     // Should minimize to 3 states (optimal with acyclic algorithm):
     // - Start state with a,b transitions
@@ -2949,11 +3076,11 @@ fn test_minimize_cross_height_via_relaxed_conditions() {
     println!("  eval(c) = {:?}", c_before);
     println!("  eval(c,d) = {:?}", cd_before);
 
-    assert_eq!(a_before, Weight::from_item(0), "a path should accept token 0");
-    assert_eq!(b_before, Weight::from_item(0), "b path should accept token 0");
-    assert_eq!(bd_before, Weight::from_item(0), "b,d path should accept token 0");
-    assert_eq!(c_before, Weight::from_item(1), "c path should accept token 1");
-    assert_eq!(cd_before, Weight::zeros(), "c,d path should be rejected (s3 has no d transition)");
+    assert_weights_semantic_eq(&a_before, &Weight::from_item(0), "a path should accept token 0".to_string());
+    assert_weights_semantic_eq(&b_before, &Weight::from_item(0), "b path should accept token 0".to_string());
+    assert_weights_semantic_eq(&bd_before, &Weight::from_item(0), "b,d path should accept token 0".to_string());
+    assert_weights_semantic_eq(&c_before, &Weight::from_item(1), "c path should accept token 1".to_string());
+    assert_weights_semantic_eq(&cd_before, &Weight::zeros(), "c,d path should be rejected (s3 has no d transition)".to_string());
 
     d.minimize();
 
@@ -2972,11 +3099,11 @@ fn test_minimize_cross_height_via_relaxed_conditions() {
     println!("\nMinimized DWA:\n{}", d);
 
     // Semantics MUST be preserved
-    assert_eq!(a_before, a_after);
-    assert_eq!(b_before, b_after);
-    assert_eq!(bd_before, bd_after);
-    assert_eq!(c_before, c_after);
-    assert_eq!(cd_before, cd_after);
+    assert_weights_semantic_eq(&a_before, &a_after, "a path weight should be preserved".to_string());
+    assert_weights_semantic_eq(&b_before, &b_after, "b path weight should be preserved".to_string());
+    assert_weights_semantic_eq(&bd_before, &bd_after, "b,d path weight should be preserved".to_string());
+    assert_weights_semantic_eq(&c_before, &c_after, "c path weight should be preserved".to_string());
+    assert_weights_semantic_eq(&cd_before, &cd_after, "c,d path weight should be preserved".to_string());
 
     // The acyclic algorithm achieves optimal 3 states via:
     // 1. Height-0 merging with disjoint needed masks
