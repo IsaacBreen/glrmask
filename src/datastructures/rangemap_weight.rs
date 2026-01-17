@@ -188,6 +188,153 @@ impl RangeMapWeight {
         out
     }
 
+    fn intersect_asymmetric(
+        small: &RangeMapBlaze<usize, RangeSet>,
+        large: &RangeMapBlaze<usize, RangeSet>,
+    ) -> RangeMapBlaze<usize, RangeSet> {
+        let mut out = RangeMapBlaze::new();
+        let mut large_iter = large.range_values();
+        let mut large_current = large_iter.next();
+
+        let mut current_start: Option<usize> = None;
+        let mut current_end: usize = 0;
+        let mut current_value = RangeSet::zeros();
+
+        for (s_range, s_val) in small.range_values() {
+            let s_start = *s_range.start();
+            let s_end = *s_range.end();
+
+            loop {
+                let advance = match large_current.as_ref() {
+                    Some((l_range, _)) if *l_range.end() < s_start => true,
+                    _ => false,
+                };
+                if advance {
+                    large_current = large_iter.next();
+                } else {
+                    break;
+                }
+            }
+
+            let mut l_opt = large_current.take();
+            while let Some((l_range, l_val)) = l_opt {
+                if *l_range.start() > s_end {
+                    large_current = Some((l_range, l_val));
+                    break;
+                }
+
+                let overlap_start = s_start.max(*l_range.start());
+                let overlap_end = s_end.min(*l_range.end());
+                if overlap_start <= overlap_end {
+                    let combined = s_val & l_val;
+                    if combined.is_empty() {
+                        if let Some(range_start) = current_start.take() {
+                            out.ranges_insert(range_start..=current_end, current_value.clone());
+                        }
+                    } else if let Some(range_start) = current_start {
+                        let is_same = Arc::ptr_eq(&current_value.inner, &combined.inner)
+                            || current_value == combined;
+                        if is_same && current_end.saturating_add(1) == overlap_start {
+                            current_end = overlap_end;
+                        } else {
+                            out.ranges_insert(range_start..=current_end, current_value.clone());
+                            current_start = Some(overlap_start);
+                            current_end = overlap_end;
+                            current_value = combined;
+                        }
+                    } else {
+                        current_start = Some(overlap_start);
+                        current_end = overlap_end;
+                        current_value = combined;
+                    }
+                }
+
+                if *l_range.end() <= s_end {
+                    l_opt = large_iter.next();
+                } else {
+                    large_current = Some((l_range, l_val));
+                    break;
+                }
+            }
+        }
+
+        if let Some(range_start) = current_start {
+            out.ranges_insert(range_start..=current_end, current_value);
+        }
+
+        out
+    }
+
+    fn union_asymmetric(
+        small: &RangeMapBlaze<usize, RangeSet>,
+        large: &RangeMapBlaze<usize, RangeSet>,
+    ) -> RangeMapBlaze<usize, RangeSet> {
+        let mut result = large.clone();
+        let mut large_iter = large.range_values();
+        let mut large_current = large_iter.next();
+
+        for (s_range, s_val) in small.range_values() {
+            let s_start = *s_range.start();
+            let s_end = *s_range.end();
+            let mut cursor = s_start;
+
+            loop {
+                let advance = match large_current.as_ref() {
+                    Some((l_range, _)) if *l_range.end() < cursor => true,
+                    _ => false,
+                };
+                if advance {
+                    large_current = large_iter.next();
+                } else {
+                    break;
+                }
+            }
+
+            let mut l_opt = large_current.take();
+            let mut keep_current: Option<(std::ops::RangeInclusive<usize>, &RangeSet)> = None;
+            while let Some((l_range, l_val)) = l_opt {
+                if *l_range.start() > s_end {
+                    keep_current = Some((l_range, l_val));
+                    break;
+                }
+
+                let overlap_start = cursor.max(*l_range.start());
+                let overlap_end = s_end.min(*l_range.end());
+
+                if cursor < overlap_start {
+                    result.ranges_insert(cursor..=overlap_start.saturating_sub(1), s_val.clone());
+                }
+
+                if overlap_start <= overlap_end {
+                    let combined = s_val | l_val;
+                    result.ranges_insert(overlap_start..=overlap_end, combined);
+                    cursor = overlap_end.saturating_add(1);
+                }
+
+                if cursor > s_end {
+                    if *l_range.end() > s_end {
+                        keep_current = Some((l_range, l_val));
+                    }
+                    break;
+                }
+
+                if *l_range.end() <= s_end {
+                    l_opt = large_iter.next();
+                } else {
+                    keep_current = Some((l_range, l_val));
+                    break;
+                }
+            }
+            large_current = keep_current;
+
+            if cursor <= s_end {
+                result.ranges_insert(cursor..=s_end, s_val.clone());
+            }
+        }
+
+        result
+    }
+
     fn from_token_map(map: BTreeMap<usize, RangeSet>, num_tsids: usize) -> Self {
         let num_tsids = normalize_num_tsids(num_tsids);
         if map.is_empty() {
@@ -263,27 +410,57 @@ impl RangeMapWeight {
     }
 
     fn union_non_negated(&self, other: &Self) -> Self {
-        let map = Self::merge_maps(&self.map, &other.map, |left, right| match (left, right) {
-            (Some(a), Some(b)) => a | b,
-            (Some(a), None) => a.clone(),
-            (None, Some(b)) => b.clone(),
-            (None, None) => RangeSet::zeros(),
-        });
-        Self {
-            map,
-            num_tsids: self.num_tsids(),
+        let left_ranges = self.map.range_values().count();
+        let right_ranges = other.map.range_values().count();
+        if left_ranges == 0 {
+            return other.clone();
         }
+        if right_ranges == 0 {
+            return self.clone();
+        }
+
+        let (smaller, larger, small_ranges, large_ranges) = if left_ranges <= right_ranges {
+            (self, other, left_ranges, right_ranges)
+        } else {
+            (other, self, right_ranges, left_ranges)
+        };
+
+        let map = if small_ranges.saturating_mul(10) < large_ranges {
+            Self::union_asymmetric(&smaller.map, &larger.map)
+        } else {
+            Self::merge_maps(&self.map, &other.map, |left, right| match (left, right) {
+                (Some(a), Some(b)) => a | b,
+                (Some(a), None) => a.clone(),
+                (None, Some(b)) => b.clone(),
+                (None, None) => RangeSet::zeros(),
+            })
+        };
+        Self { map, num_tsids: self.num_tsids() }
     }
 
     fn intersect_non_negated(&self, other: &Self) -> Self {
-        let map = Self::merge_maps(&self.map, &other.map, |left, right| match (left, right) {
-            (Some(a), Some(b)) => a & b,
-            _ => RangeSet::zeros(),
-        });
-        Self {
-            map,
-            num_tsids: self.num_tsids(),
+        let left_ranges = self.map.range_values().count();
+        let right_ranges = other.map.range_values().count();
+        if left_ranges == 0 || right_ranges == 0 {
+            return Self::new(self.num_tsids());
         }
+
+        let (smaller, larger, small_ranges, large_ranges) = if left_ranges <= right_ranges {
+            (self, other, left_ranges, right_ranges)
+        } else {
+            (other, self, right_ranges, left_ranges)
+        };
+
+        let map = if small_ranges.saturating_mul(10) < large_ranges {
+            Self::intersect_asymmetric(&smaller.map, &larger.map)
+        } else {
+            Self::merge_maps(&self.map, &other.map, |left, right| match (left, right) {
+                (Some(a), Some(b)) => a & b,
+                _ => RangeSet::zeros(),
+            })
+        };
+
+        Self { map, num_tsids: self.num_tsids() }
     }
 
     fn difference_non_negated(&self, other: &Self) -> Self {

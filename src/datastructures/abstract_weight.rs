@@ -996,6 +996,15 @@ impl BitAnd for &AbstractWeight {
     type Output = AbstractWeight;
 
     fn bitand(self, rhs: Self) -> Self::Output {
+        if self.is_empty() || rhs.is_empty() {
+            return AbstractWeight::zeros();
+        }
+        if self.is_all_fast() {
+            return rhs.clone();
+        }
+        if rhs.is_all_fast() {
+            return self.clone();
+        }
         match (self, rhs) {
             (AbstractWeight::RangeSet(a), AbstractWeight::RangeSet(b)) => {
                 AbstractWeight::RangeSet(WeightBackend::intersect(a, b))

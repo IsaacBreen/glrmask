@@ -230,18 +230,60 @@ pub fn minimize_acyclic_exact(dwa: &DWA) -> Result<DWA, DWABuildError> {
         let num_colors = coloring.iter().max().map(|&c| c + 1).unwrap_or(0);
 
         // Map old states to new merged states
+        let insert_start = std::time::Instant::now();
         for (old_idx, &color) in coloring.iter().enumerate() {
             old_to_new.insert(candidates[old_idx], base_new_id + color);
         }
+        crate::debug!(5, "Height {}: old_to_new insert {:?} ({} items)", h, insert_start.elapsed(), candidates.len());
+
+        let extend_start = std::time::Instant::now();
         new_states.extend((0..num_colors).map(|_| MergedStateBuilder::default()));
+        crate::debug!(5, "Height {}: new_states extend {:?} ({} new)", h, extend_start.elapsed(), num_colors);
 
         // Merge states into builders
         let (completed, builders) = new_states.split_at_mut(base_new_id);
+        let merge_start = std::time::Instant::now();
+        let mut merge_stats = MergeStats::default();
         for (old_idx, &color) in coloring.iter().enumerate() {
             merge_state_into_builder(
-                candidates[old_idx], color, &dwa, &needed, &old_to_new, completed, builders
+                candidates[old_idx],
+                color,
+                &dwa,
+                &needed,
+                &old_to_new,
+                completed,
+                builders,
+                &mut merge_stats,
             );
         }
+        let avg_w_orig_ranges = if merge_stats.and_ops > 0 {
+            merge_stats.w_orig_ranges as f64 / merge_stats.and_ops as f64
+        } else {
+            0.0
+        };
+        let avg_needed_ranges = if merge_stats.and_ops > 0 {
+            merge_stats.needed_ranges as f64 / merge_stats.and_ops as f64
+        } else {
+            0.0
+        };
+        let needed_all_pct = if merge_stats.and_ops > 0 {
+            (merge_stats.needed_all as f64) * 100.0 / merge_stats.and_ops as f64
+        } else {
+            0.0
+        };
+        crate::debug!(
+            5,
+            "Height {}: merge_state_into_builder {:?} (transitions {}, and_ops {}, and_time {} us, avg_w_orig_ranges {:.2}, avg_needed_ranges {:.2}, needed_all {} ({:.1}%))",
+            h,
+            merge_start.elapsed(),
+            merge_stats.transitions,
+            merge_stats.and_ops,
+            merge_stats.and_time_us,
+            avg_w_orig_ranges,
+            avg_needed_ranges,
+            merge_stats.needed_all,
+            needed_all_pct,
+        );
     }
 
     crate::debug!(6, "Acyclic minimize: {} -> {} states in {:?}", 
@@ -512,6 +554,16 @@ fn greedy_interval_coloring(
     state_colors
 }
 
+#[derive(Default)]
+struct MergeStats {
+    transitions: usize,
+    and_ops: usize,
+    and_time_us: u64,
+    w_orig_ranges: u64,
+    needed_ranges: u64,
+    needed_all: u64,
+}
+
 /// Merge an old state into a builder at the given color index.
 fn merge_state_into_builder(
     old_id: StateID,
@@ -521,6 +573,7 @@ fn merge_state_into_builder(
     old_to_new: &HashMap<StateID, StateID>,
     completed: &[MergedStateBuilder],
     builders: &mut [MergedStateBuilder],
+    stats: &mut MergeStats,
 ) {
     let builder = &mut builders[color];
     let old_state = &dwa.states[old_id];
@@ -535,12 +588,26 @@ fn merge_state_into_builder(
 
     // Merge Transitions
     for (&label, &target_old) in &old_state.transitions {
+        stats.transitions += 1;
         if target_old >= dwa.states.len() { continue; }
         let Some(&target_new) = old_to_new.get(&target_old) else { continue; };
         let Some(w_orig) = old_state.trans_weights.get(&label) else { continue; };
+        let needed_weight = &completed[target_new].needed;
+        stats.w_orig_ranges = stats.w_orig_ranges.saturating_add(w_orig.num_ranges() as u64);
+        stats.needed_ranges = stats
+            .needed_ranges
+            .saturating_add(needed_weight.num_ranges() as u64);
+        if needed_weight.is_all_fast() {
+            stats.needed_all = stats.needed_all.saturating_add(1);
+        }
         
         // Restrict weight to what's actually needed at target
-        let w_effective = w_orig & &completed[target_new].needed;
+        let and_start = std::time::Instant::now();
+        let w_effective = w_orig & needed_weight;
+        stats.and_time_us = stats
+            .and_time_us
+            .saturating_add(and_start.elapsed().as_micros() as u64);
+        stats.and_ops += 1;
         if !w_effective.is_empty() {
             builder.add_transition(label, target_new, w_effective);
         }
@@ -664,20 +731,86 @@ fn compute_needed_sets(dwa: &DWA, topo_order: &[StateID]) -> Vec<Weight> {
 
 /// Compute forward reachability: which tokens can reach each state from start
 fn compute_forward_reachable(dwa: &DWA, topo_order: &[StateID]) -> Vec<Weight> {
+    let mut time_init = std::time::Duration::ZERO;
+    let mut time_loop_outer = std::time::Duration::ZERO;
+    let mut time_clone = std::time::Duration::ZERO;
+    let mut time_and = std::time::Duration::ZERO;
+    let mut time_or = std::time::Duration::ZERO;
+    let mut count_transitions = 0usize;
+    let mut count_clones = 0usize;
+    let mut count_ands = 0usize;
+    let mut count_ors = 0usize;
+
+    let init_start = std::time::Instant::now();
     let mut forward = vec![Weight::zeros(); dwa.states.len()];
+    let mut forward_is_all = vec![false; dwa.states.len()];
     forward[dwa.body.start_state] = Weight::all();
+    forward_is_all[dwa.body.start_state] = true;
+    time_init = init_start.elapsed();
     
     for &u in topo_order.iter().rev() {
-        if forward[u].is_empty() { continue; }
-        let incoming = forward[u].clone();
+        let outer_start = std::time::Instant::now();
+        let incoming_all = forward_is_all[u];
+        if !incoming_all && forward[u].is_empty() {
+            time_loop_outer += outer_start.elapsed();
+            continue;
+        }
+        let clone_start = std::time::Instant::now();
+        let incoming = if incoming_all {
+            None
+        } else {
+            count_clones += 1;
+            Some(forward[u].clone())
+        };
+        time_clone += clone_start.elapsed();
         
         for (&lbl, &v) in &dwa.states[u].transitions {
+            count_transitions += 1;
             if v >= dwa.states.len() { continue; }
+            if forward_is_all[v] { continue; }
             if let Some(w) = dwa.states[u].trans_weights.get(&lbl) {
-                forward[v] |= &(&incoming & w);
+                if w.is_empty() { continue; }
+                if incoming_all {
+                    let or_start = std::time::Instant::now();
+                    forward[v] |= w;
+                    time_or += or_start.elapsed();
+                    count_ors += 1;
+                } else if let Some(incoming) = &incoming {
+                    let and_start = std::time::Instant::now();
+                    let result = incoming & w;
+                    time_and += and_start.elapsed();
+                    count_ands += 1;
+
+                    let or_start = std::time::Instant::now();
+                    forward[v] |= &result;
+                    time_or += or_start.elapsed();
+                    count_ors += 1;
+                }
+                if !forward_is_all[v] && forward[v].is_all_fast() {
+                    forward_is_all[v] = true;
+                }
             }
         }
+        time_loop_outer += outer_start.elapsed();
     }
+
+    crate::debug!(
+        5,
+        "forward_reachable breakdown: init={:?}, loop_outer={:?}, clone={:?}, and={:?}, or={:?}",
+        time_init,
+        time_loop_outer,
+        time_clone,
+        time_and,
+        time_or,
+    );
+    crate::debug!(
+        5,
+        "forward_reachable counts: transitions={}, clones={}, ands={}, ors={}",
+        count_transitions,
+        count_clones,
+        count_ands,
+        count_ors,
+    );
     forward
 }
 
