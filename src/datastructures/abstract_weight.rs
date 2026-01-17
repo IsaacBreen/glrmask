@@ -923,6 +923,20 @@ impl AbstractWeight {
             _ => panic!("AbstractWeight operation requires both operands to be the same variant"),
         }
     }
+
+    /// Compute semiring divide (self ∪ complement(other)).
+    pub fn divide(&self, other: &Self) -> Self {
+        match (self, other) {
+            (AbstractWeight::RangeMap(a), AbstractWeight::RangeMap(b)) => {
+                AbstractWeight::RangeMap(intern_rangemap(a.divide(b)))
+            }
+            (AbstractWeight::RangeSet(_), AbstractWeight::RangeSet(_))
+            | (AbstractWeight::Factorized(_), AbstractWeight::Factorized(_)) => {
+                self | &other.complement()
+            }
+            _ => panic!("AbstractWeight operation requires both operands to be the same variant"),
+        }
+    }
     
 }
 

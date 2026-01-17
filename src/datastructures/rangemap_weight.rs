@@ -250,6 +250,57 @@ impl RangeMapWeight {
         Self::from_token_map(token_map, num_tsids)
     }
 
+    fn union_non_negated(&self, other: &Self) -> Self {
+        let map = Self::merge_maps(&self.map, &other.map, |left, right| match (left, right) {
+            (Some(a), Some(b)) => a | b,
+            (Some(a), None) => a.clone(),
+            (None, Some(b)) => b.clone(),
+            (None, None) => RangeSet::zeros(),
+        });
+        Self {
+            map,
+            num_tsids: self.num_tsids(),
+        }
+    }
+
+    fn intersect_non_negated(&self, other: &Self) -> Self {
+        let map = Self::merge_maps(&self.map, &other.map, |left, right| match (left, right) {
+            (Some(a), Some(b)) => a & b,
+            _ => RangeSet::zeros(),
+        });
+        Self {
+            map,
+            num_tsids: self.num_tsids(),
+        }
+    }
+
+    fn difference_non_negated(&self, other: &Self) -> Self {
+        let map = Self::merge_maps(&self.map, &other.map, |left, right| match (left, right) {
+            (Some(a), Some(b)) => a - b,
+            (Some(a), None) => a.clone(),
+            _ => RangeSet::zeros(),
+        });
+        Self {
+            map,
+            num_tsids: self.num_tsids(),
+        }
+    }
+
+    pub(crate) fn divide(&self, other: &Self) -> Self {
+        assert_eq!(self.num_tsids(), other.num_tsids(), "RangeMapWeight num_tsids mismatch");
+        let full_tsids = Self::rangeset_from_ranges([0..=self.num_tsids().saturating_sub(1)]);
+        let map = Self::merge_maps(&self.map, &other.map, |left, right| match (left, right) {
+            (Some(a), Some(b)) => a | &(full_tsids.clone() - b),
+            (Some(a), None) => a.clone(),
+            (None, Some(b)) => &full_tsids - b,
+            (None, None) => full_tsids.clone(),
+        });
+        Self {
+            map,
+            num_tsids: self.num_tsids(),
+        }
+    }
+
     pub(crate) fn expand_to_rsb(&self) -> RangeSetBlaze<usize> {
         if self.map.is_empty() {
             return RangeSetBlaze::new();
@@ -409,13 +460,7 @@ impl WeightBackend for RangeMapWeight {
     }
 
     fn num_ranges(&self) -> usize {
-        let map_ranges = self.map.range_values().count();
-        let tsid_ranges: usize = self
-            .map
-            .range_values()
-            .map(|(_, tsid_set)| tsid_set.ranges_len())
-            .sum();
-        map_ranges.saturating_add(tsid_ranges)
+        self.ranges_len()
     }
 
     fn insert(&mut self, pos: usize) {
@@ -430,13 +475,8 @@ impl WeightBackend for RangeMapWeight {
     }
 
     fn intersect(&self, other: &Self) -> Self {
-        let map = Self::merge_maps(&self.map, &other.map, |left, right| {
-            match (left, right) {
-                (Some(a), Some(b)) => a & b,
-                _ => RangeSet::zeros(),
-            }
-        });
-        Self { map, num_tsids: self.num_tsids() }
+        assert_eq!(self.num_tsids(), other.num_tsids(), "RangeMapWeight num_tsids mismatch");
+        self.intersect_non_negated(other)
     }
 
     fn intersect_assign(&mut self, other: &Self) {
@@ -444,15 +484,8 @@ impl WeightBackend for RangeMapWeight {
     }
 
     fn union(&self, other: &Self) -> Self {
-        let map = Self::merge_maps(&self.map, &other.map, |left, right| {
-            match (left, right) {
-                (Some(a), Some(b)) => a | b,
-                (Some(a), None) => a.clone(),
-                (None, Some(b)) => b.clone(),
-                (None, None) => RangeSet::zeros(),
-            }
-        });
-        Self { map, num_tsids: self.num_tsids() }
+        assert_eq!(self.num_tsids(), other.num_tsids(), "RangeMapWeight num_tsids mismatch");
+        self.union_non_negated(other)
     }
 
     fn union_assign(&mut self, other: &Self) {
@@ -460,14 +493,8 @@ impl WeightBackend for RangeMapWeight {
     }
 
     fn difference(&self, other: &Self) -> Self {
-        let map = Self::merge_maps(&self.map, &other.map, |left, right| {
-            match (left, right) {
-                (Some(a), Some(b)) => a - b,
-                (Some(a), None) => a.clone(),
-                _ => RangeSet::zeros(),
-            }
-        });
-        Self { map, num_tsids: self.num_tsids() }
+        assert_eq!(self.num_tsids(), other.num_tsids(), "RangeMapWeight num_tsids mismatch");
+        self.difference_non_negated(other)
     }
 
     fn complement(&self, max_position: usize) -> Self {
