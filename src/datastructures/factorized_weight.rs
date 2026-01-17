@@ -855,38 +855,98 @@ impl FactorizedWeight {
     fn normalize_by_tokens(
         pairs: &[(RangeSetBlaze<usize>, RangeSetBlaze<usize>)],
     ) -> Vec<(RangeSetBlaze<usize>, RangeSetBlaze<usize>)> {
-        let max_token = pairs
-            .iter()
-            .filter_map(|(_, token_set)| token_set.ranges().last().map(|r| *r.end()))
-            .max();
-        let Some(max_token) = max_token else {
-            return Vec::new();
-        };
-
-        let mut token_tsids: Vec<RangeSetBlaze<usize>> = vec![RangeSetBlaze::new(); max_token + 1];
+        let mut events: BTreeMap<usize, (Vec<RangeSetBlaze<usize>>, Vec<RangeSetBlaze<usize>>)> =
+            BTreeMap::new();
+        let mut max_token: Option<usize> = None;
 
         for (tsid_set, token_set) in pairs {
             for token_range in token_set.ranges() {
-                for token in *token_range.start()..=*token_range.end() {
-                    if token_tsids[token].is_empty() {
-                        token_tsids[token] = tsid_set.clone();
-                    } else {
-                        token_tsids[token] |= tsid_set;
-                    }
+                let start = *token_range.start();
+                let end = *token_range.end();
+                max_token = Some(max_token.map_or(end, |current| current.max(end)));
+                events
+                    .entry(start)
+                    .or_insert_with(|| (Vec::new(), Vec::new()))
+                    .0
+                    .push(tsid_set.clone());
+                if end != usize::MAX {
+                    events
+                        .entry(end.saturating_add(1))
+                        .or_insert_with(|| (Vec::new(), Vec::new()))
+                        .1
+                        .push(tsid_set.clone());
                 }
             }
         }
 
+        let Some(max_token) = max_token else {
+            return Vec::new();
+        };
+        if events.is_empty() {
+            return Vec::new();
+        }
+
+        let mut active_counts: HashMap<RangeSetKey, usize> = HashMap::new();
+        let mut active_union = RangeSetBlaze::new();
         let mut grouped: HashMap<RangeSetKey, RangeSetBlaze<usize>> = HashMap::new();
-        for (token, tsid_set) in token_tsids.into_iter().enumerate() {
-            if tsid_set.is_empty() {
-                continue;
+        let mut last_pos: Option<usize> = None;
+        let mut dirty = false;
+
+        for (pos, (adds, removes)) in events {
+            if let Some(last) = last_pos {
+                if last < pos && !active_union.is_empty() {
+                    let token_range = RangeSetBlaze::from_iter([last..=pos.saturating_sub(1)]);
+                    grouped
+                        .entry(RangeSetKey(active_union.clone()))
+                        .and_modify(|existing_tokens| *existing_tokens |= &token_range)
+                        .or_insert(token_range);
+                }
             }
-            let token_set = RangeSetBlaze::from_iter([token..=token]);
-            grouped
-                .entry(RangeSetKey(tsid_set))
-                .and_modify(|existing_tokens| *existing_tokens |= &token_set)
-                .or_insert(token_set);
+
+            for tsid_set in adds {
+                let key = RangeSetKey(tsid_set);
+                match active_counts.entry(key.clone()) {
+                    std::collections::hash_map::Entry::Vacant(vacant) => {
+                        vacant.insert(1);
+                        active_union |= &key.0;
+                    }
+                    std::collections::hash_map::Entry::Occupied(mut occupied) => {
+                        *occupied.get_mut() += 1;
+                    }
+                }
+            }
+
+            for tsid_set in removes {
+                let key = RangeSetKey(tsid_set);
+                if let Some(count) = active_counts.get_mut(&key) {
+                    if *count > 1 {
+                        *count -= 1;
+                    } else {
+                        active_counts.remove(&key);
+                        dirty = true;
+                    }
+                }
+            }
+
+            if dirty {
+                active_union = RangeSetBlaze::new();
+                for key in active_counts.keys() {
+                    active_union |= &key.0;
+                }
+                dirty = false;
+            }
+
+            last_pos = Some(pos);
+        }
+
+        if let Some(last) = last_pos {
+            if last <= max_token && !active_union.is_empty() {
+                let token_range = RangeSetBlaze::from_iter([last..=max_token]);
+                grouped
+                    .entry(RangeSetKey(active_union))
+                    .and_modify(|existing_tokens| *existing_tokens |= &token_range)
+                    .or_insert(token_range);
+            }
         }
 
         grouped
@@ -900,30 +960,101 @@ impl FactorizedWeight {
         num_tsids: usize,
     ) -> Vec<(RangeSetBlaze<usize>, RangeSetBlaze<usize>)> {
         let num_tsids = normalize_num_tsids(num_tsids);
-        let mut tsid_tokens: Vec<RangeSetBlaze<usize>> = vec![RangeSetBlaze::new(); num_tsids];
+        let mut events: BTreeMap<usize, (Vec<RangeSetBlaze<usize>>, Vec<RangeSetBlaze<usize>>)> =
+            BTreeMap::new();
+        let mut max_tsid: Option<usize> = None;
 
         for (tsid_set, token_set) in pairs {
             for tsid_range in tsid_set.ranges() {
-                for tsid in *tsid_range.start()..=*tsid_range.end() {
-                    if tsid_tokens[tsid].is_empty() {
-                        tsid_tokens[tsid] = token_set.clone();
-                    } else {
-                        tsid_tokens[tsid] |= token_set;
-                    }
+                let start = *tsid_range.start();
+                let end = *tsid_range.end();
+                max_tsid = Some(max_tsid.map_or(end, |current| current.max(end)));
+                events
+                    .entry(start)
+                    .or_insert_with(|| (Vec::new(), Vec::new()))
+                    .0
+                    .push(token_set.clone());
+                if end != usize::MAX {
+                    events
+                        .entry(end.saturating_add(1))
+                        .or_insert_with(|| (Vec::new(), Vec::new()))
+                        .1
+                        .push(token_set.clone());
                 }
             }
         }
 
+        let Some(mut max_tsid) = max_tsid else {
+            return Vec::new();
+        };
+        if num_tsids > 0 {
+            max_tsid = max_tsid.min(num_tsids.saturating_sub(1));
+        }
+        if events.is_empty() {
+            return Vec::new();
+        }
+
+        let mut active_counts: HashMap<RangeSetKey, usize> = HashMap::new();
+        let mut active_union = RangeSetBlaze::new();
         let mut grouped: HashMap<RangeSetKey, RangeSetBlaze<usize>> = HashMap::new();
-        for (tsid, token_set) in tsid_tokens.into_iter().enumerate() {
-            if token_set.is_empty() {
-                continue;
+        let mut last_pos: Option<usize> = None;
+        let mut dirty = false;
+
+        for (pos, (adds, removes)) in events {
+            if let Some(last) = last_pos {
+                if last < pos && !active_union.is_empty() {
+                    let tsid_range = RangeSetBlaze::from_iter([last..=pos.saturating_sub(1)]);
+                    grouped
+                        .entry(RangeSetKey(active_union.clone()))
+                        .and_modify(|existing_tsids| *existing_tsids |= &tsid_range)
+                        .or_insert(tsid_range);
+                }
             }
-            let tsid_set = RangeSetBlaze::from_iter([tsid..=tsid]);
-            grouped
-                .entry(RangeSetKey(token_set))
-                .and_modify(|existing_tsids| *existing_tsids |= &tsid_set)
-                .or_insert(tsid_set);
+
+            for token_set in adds {
+                let key = RangeSetKey(token_set);
+                match active_counts.entry(key.clone()) {
+                    std::collections::hash_map::Entry::Vacant(vacant) => {
+                        vacant.insert(1);
+                        active_union |= &key.0;
+                    }
+                    std::collections::hash_map::Entry::Occupied(mut occupied) => {
+                        *occupied.get_mut() += 1;
+                    }
+                }
+            }
+
+            for token_set in removes {
+                let key = RangeSetKey(token_set);
+                if let Some(count) = active_counts.get_mut(&key) {
+                    if *count > 1 {
+                        *count -= 1;
+                    } else {
+                        active_counts.remove(&key);
+                        dirty = true;
+                    }
+                }
+            }
+
+            if dirty {
+                active_union = RangeSetBlaze::new();
+                for key in active_counts.keys() {
+                    active_union |= &key.0;
+                }
+                dirty = false;
+            }
+
+            last_pos = Some(pos);
+        }
+
+        if let Some(last) = last_pos {
+            if last <= max_tsid && !active_union.is_empty() {
+                let tsid_range = RangeSetBlaze::from_iter([last..=max_tsid]);
+                grouped
+                    .entry(RangeSetKey(active_union))
+                    .and_modify(|existing_tsids| *existing_tsids |= &tsid_range)
+                    .or_insert(tsid_range);
+            }
         }
 
         grouped
