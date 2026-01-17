@@ -92,8 +92,8 @@ enum BackendChoice {
 
 fn backend_choice() -> BackendChoice {
     match std::env::var("ABSTRACT_WEIGHT_BACKEND") {
-        Ok(value) if value.eq_ignore_ascii_case("factorized") => BackendChoice::Factorized,
-        _ => BackendChoice::RangeSet,
+        Ok(value) if value.eq_ignore_ascii_case("rsb") || value.eq_ignore_ascii_case("rangeset") => BackendChoice::RangeSet,
+        _ => BackendChoice::Factorized, // Default to factorized
     }
 }
 
@@ -1024,8 +1024,12 @@ impl AbstractWeight {
     }
     
     /// Iterate over positions up to and including max.
+    /// 
+    /// Note: This will expand factorized weights to RSB for iteration.
+    /// For small test weights this is acceptable. For production hot paths,
+    /// consider using contains() checks instead if possible.
     pub fn iter_up_to(&self, max: usize) -> impl Iterator<Item = usize> + '_ {
-        let rsb = self.to_rsb();
+        let rsb = self.to_rsb_allow_expansion();
         let clipped = &rsb & &RangeSetBlaze::from_iter([0..=max]);
         clipped.into_iter()
     }
