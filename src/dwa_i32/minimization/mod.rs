@@ -97,10 +97,7 @@ impl DWA {
         if self.is_cyclic() {
             self.minimize_with_rustfst_full_cyclic()
         } else {
-            // OPTIMIZATION: Use native minimize instead of RustFST for acyclic performance
-            // self.minimize_with_rustfst_full_acyclic()
-            self.minimize_acyclic();
-            true
+            self.minimize_with_rustfst_full_acyclic()
         }
     }
 

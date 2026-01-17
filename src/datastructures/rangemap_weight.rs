@@ -475,6 +475,8 @@ impl WeightBackend for RangeMapWeight {
         all.difference(self)
     }
 
+    // Note: divide uses default trait implementation (self.union(&other.complement(max_position)))
+
     fn min_item(&self) -> Option<usize> {
         let num_tsids = self.num_tsids();
         let mut min_pos: Option<usize> = None;

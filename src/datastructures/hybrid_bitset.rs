@@ -59,6 +59,8 @@ pub static PROF_COUNT_OR: std::sync::atomic::AtomicU64 = std::sync::atomic::Atom
 pub static PROF_TIME_OR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub static PROF_COUNT_SUB: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub static PROF_TIME_SUB: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static PROF_COUNT_NOT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static PROF_TIME_NOT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 pub fn reset_profiling() {
     PROF_COUNT_AND.store(0, std::sync::atomic::Ordering::Relaxed);
@@ -67,18 +69,34 @@ pub fn reset_profiling() {
     PROF_TIME_OR.store(0, std::sync::atomic::Ordering::Relaxed);
     PROF_COUNT_SUB.store(0, std::sync::atomic::Ordering::Relaxed);
     PROF_TIME_SUB.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_COUNT_NOT.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_TIME_NOT.store(0, std::sync::atomic::Ordering::Relaxed);
 }
 
 pub fn print_profiling(label: &str) {
-    let c_and = PROF_COUNT_AND.load(std::sync::atomic::Ordering::Relaxed);
-    let c_or = PROF_COUNT_OR.load(std::sync::atomic::Ordering::Relaxed);
-    let c_sub = PROF_COUNT_SUB.load(std::sync::atomic::Ordering::Relaxed);
-    
-    if c_and > 0 || c_or > 0 || c_sub > 0 {
-        eprintln!("WEIGHT_PROF [{}]:", label);
-        if c_and > 0 { eprintln!("  AND: {:9} ops", c_and); }
-        if c_or  > 0 { eprintln!("  OR : {:9} ops", c_or); }
-        if c_sub > 0 { eprintln!("  SUB: {:9} ops", c_sub); }
+    let count_and = PROF_COUNT_AND.load(std::sync::atomic::Ordering::Relaxed);
+    let time_and = PROF_TIME_AND.load(std::sync::atomic::Ordering::Relaxed);
+    let count_or = PROF_COUNT_OR.load(std::sync::atomic::Ordering::Relaxed);
+    let time_or = PROF_TIME_OR.load(std::sync::atomic::Ordering::Relaxed);
+    let count_sub = PROF_COUNT_SUB.load(std::sync::atomic::Ordering::Relaxed);
+    let time_sub = PROF_TIME_SUB.load(std::sync::atomic::Ordering::Relaxed);
+    let count_not = PROF_COUNT_NOT.load(std::sync::atomic::Ordering::Relaxed);
+    let time_not = PROF_TIME_NOT.load(std::sync::atomic::Ordering::Relaxed);
+
+    if count_and > 0 || count_or > 0 || count_sub > 0 || count_not > 0 {
+        println!("WEIGHT_PROF [{}]:", label);
+        if count_and > 0 {
+            println!("  AND: {:9} ops, {:9} us (avg {:.2} us)", count_and, time_and, time_and as f64 / count_and as f64);
+        }
+        if count_or > 0 {
+            println!("  OR : {:9} ops, {:9} us (avg {:.2} us)", count_or, time_or, time_or as f64 / count_or as f64);
+        }
+        if count_sub > 0 {
+            println!("  SUB: {:9} ops, {:9} us (avg {:.2} us)", count_sub, time_sub, time_sub as f64 / count_sub as f64);
+        }
+        if count_not > 0 {
+            println!("  NOT: {:9} ops, {:9} us (avg {:.2} us)", count_not, time_not, time_not as f64 / count_not as f64);
+        }
     }
 }
 

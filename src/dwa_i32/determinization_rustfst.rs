@@ -120,7 +120,8 @@ impl ReverseBack<BitsetWeight> for BitsetWeight {
 
 impl WeaklyDivisibleSemiring for BitsetWeight {
     fn divide_assign(&mut self, rhs: &Self, _divide_type: DivideType) -> Result<()> {
-        let new_weight = &*self.0 | &!&*rhs.0;
+        // Use optimized divide: self | !other, avoiding expensive complement
+        let new_weight = self.0.divide(&rhs.0);
         self.0 = intern_weight(new_weight);
         Ok(())
     }
