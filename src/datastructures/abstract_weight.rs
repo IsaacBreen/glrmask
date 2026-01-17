@@ -1271,6 +1271,72 @@ impl AbstractWeight {
             }
         }
     }
+
+    /// Collect all unique interned RangeSet Arc pointers from this weight.
+    /// 
+    /// This is used for computing the true "interned" range count across
+    /// multiple weights. Instead of counting by value equality, we count
+    /// by Arc pointer identity - if two weights share the same interned
+    /// RangeSet, it's only counted once.
+    /// 
+    /// Returns the set of Arc<RangeSetBlaze> raw pointers.
+    pub fn collect_interned_rangesets(&self, seen: &mut std::collections::HashSet<usize>) {
+        match self {
+            AbstractWeight::RangeSet(rsb) => {
+                // The inner Arc is the interned RangeSetBlaze
+                seen.insert(Arc::as_ptr(&rsb.inner) as usize);
+            }
+            AbstractWeight::Factorized(fw) => {
+                // Collect from all pairs
+                for (tsid_set, token_set) in &fw.pairs {
+                    seen.insert(Arc::as_ptr(&tsid_set.inner) as usize);
+                    seen.insert(Arc::as_ptr(&token_set.inner) as usize);
+                }
+            }
+            AbstractWeight::RangeMap(rm) => {
+                // Collect from all map values
+                for (_, tsid_set) in rm.map.range_values() {
+                    seen.insert(Arc::as_ptr(&tsid_set.inner) as usize);
+                }
+            }
+        }
+    }
+
+    /// Count ranges from unique interned RangeSets in this weight.
+    /// 
+    /// For multi-level interning, this sums up the ranges of each unique
+    /// Arc<RangeSetBlaze> found within the weight structure.
+    pub fn count_interned_ranges(&self) -> usize {
+        match self {
+            AbstractWeight::RangeSet(rsb) => rsb.ranges_len(),
+            AbstractWeight::Factorized(fw) => {
+                let mut seen: std::collections::HashSet<usize> = std::collections::HashSet::new();
+                let mut total = 0;
+                for (tsid_set, token_set) in &fw.pairs {
+                    let ptr1 = Arc::as_ptr(&tsid_set.inner) as usize;
+                    let ptr2 = Arc::as_ptr(&token_set.inner) as usize;
+                    if seen.insert(ptr1) {
+                        total += tsid_set.ranges_len();
+                    }
+                    if seen.insert(ptr2) {
+                        total += token_set.ranges_len();
+                    }
+                }
+                total
+            }
+            AbstractWeight::RangeMap(rm) => {
+                let mut seen: std::collections::HashSet<usize> = std::collections::HashSet::new();
+                let mut total = 0;
+                for (_, tsid_set) in rm.map.range_values() {
+                    let ptr = Arc::as_ptr(&tsid_set.inner) as usize;
+                    if seen.insert(ptr) {
+                        total += tsid_set.ranges_len();
+                    }
+                }
+                total
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -621,29 +621,90 @@ impl DWA {
         total
     }
 
-    /// Counts the total number of ranges across unique (interned) weights in this DWA.
-    /// If the same interned weight appears multiple times, it is only counted once.
+    /// Counts the total number of ranges across unique interned RangeSets in this DWA.
+    /// 
+    /// This properly handles multi-level interning:
+    /// - For RangeSet weights: counts the interned Arc<RangeSetBlaze>
+    /// - For Factorized weights: counts unique RangeSets in all pairs
+    /// - For RangeMap weights: counts unique RangeSets in all map values
+    /// 
+    /// If the same Arc<RangeSetBlaze> appears multiple times (across weights or
+    /// within a weight's structure), it is only counted once.
     pub fn num_ranges_interned(&self) -> usize {
         use std::collections::HashSet;
-        // Track unique weights by value
-        let mut seen: HashSet<Weight> = HashSet::new();
-        let mut total = 0;
+        // Track unique RangeSet Arc pointers (not weight values!)
+        let mut seen_pointers: HashSet<usize> = HashSet::new();
         
-        let mut process_weight = |w: &Weight| {
-            if seen.insert(w.clone()) {
-                total += w.num_ranges();
+        // First pass: collect all unique interned RangeSet pointers
+        for state in &self.states.0 {
+            if let Some(fw) = &state.final_weight {
+                fw.collect_interned_rangesets(&mut seen_pointers);
             }
-        };
+            for w in state.trans_weights.values() {
+                w.collect_interned_rangesets(&mut seen_pointers);
+            }
+        }
+        
+        // Second pass: sum ranges for each unique pointer
+        // We need to revisit the weights to get the actual range counts
+        let mut counted_pointers: HashSet<usize> = HashSet::new();
+        let mut total = 0;
         
         for state in &self.states.0 {
             if let Some(fw) = &state.final_weight {
-                process_weight(fw);
+                total += Self::count_ranges_for_weight(fw, &seen_pointers, &mut counted_pointers);
             }
             for w in state.trans_weights.values() {
-                process_weight(w);
+                total += Self::count_ranges_for_weight(w, &seen_pointers, &mut counted_pointers);
             }
         }
+        
         total
+    }
+    
+    /// Helper to count ranges for a weight, only counting each unique interned RangeSet once.
+    fn count_ranges_for_weight(
+        w: &Weight, 
+        _all_pointers: &std::collections::HashSet<usize>,
+        counted: &mut std::collections::HashSet<usize>,
+    ) -> usize {
+        use crate::datastructures::AbstractWeight;
+        use std::sync::Arc;
+        
+        match w {
+            AbstractWeight::RangeSet(rsb) => {
+                let ptr = Arc::as_ptr(&rsb.inner) as usize;
+                if counted.insert(ptr) {
+                    rsb.ranges_len()
+                } else {
+                    0
+                }
+            }
+            AbstractWeight::Factorized(fw) => {
+                let mut local_total = 0;
+                for (tsid_set, token_set) in &fw.pairs {
+                    let ptr1 = Arc::as_ptr(&tsid_set.inner) as usize;
+                    let ptr2 = Arc::as_ptr(&token_set.inner) as usize;
+                    if counted.insert(ptr1) {
+                        local_total += tsid_set.ranges_len();
+                    }
+                    if counted.insert(ptr2) {
+                        local_total += token_set.ranges_len();
+                    }
+                }
+                local_total
+            }
+            AbstractWeight::RangeMap(rm) => {
+                let mut local_total = 0;
+                for (_, tsid_set) in rm.map.range_values() {
+                    let ptr = Arc::as_ptr(&tsid_set.inner) as usize;
+                    if counted.insert(ptr) {
+                        local_total += tsid_set.ranges_len();
+                    }
+                }
+                local_total
+            }
+        }
     }
     
     /// Analyze weight distribution to understand range fragmentation

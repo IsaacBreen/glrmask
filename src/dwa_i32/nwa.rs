@@ -301,32 +301,66 @@ impl NWA {
         total
     }
 
-    /// Counts the total number of ranges across unique (interned) weights in this NWA.
-    /// If the same interned weight appears multiple times, it is only counted once.
+    /// Counts the total number of ranges across unique interned RangeSets in this NWA.
+    /// 
+    /// This properly handles multi-level interning:
+    /// - For RangeSet weights: counts the interned Arc<RangeSetBlaze>
+    /// - For Factorized weights: counts unique RangeSets in all pairs
+    /// - For RangeMap weights: counts unique RangeSets in all map values
+    /// 
+    /// If the same Arc<RangeSetBlaze> appears multiple times (across weights or
+    /// within a weight's structure), it is only counted once.
     pub fn num_ranges_interned(&self) -> usize {
         use std::collections::HashSet;
+        use crate::datastructures::AbstractWeight;
+        use std::sync::Arc;
         
-        // Track unique weights by value
-        let mut seen: HashSet<Weight> = HashSet::new();
+        // Track unique RangeSet Arc pointers (not weight values!)
+        let mut counted: HashSet<usize> = HashSet::new();
         let mut total = 0;
         
-        let mut process_weight = |w: &Weight| {
-            if seen.insert(w.clone()) {
-                total += w.num_ranges();
+        let mut count_weight = |w: &Weight| {
+            match w {
+                AbstractWeight::RangeSet(rsb) => {
+                    let ptr = Arc::as_ptr(&rsb.inner) as usize;
+                    if counted.insert(ptr) {
+                        total += rsb.ranges_len();
+                    }
+                }
+                AbstractWeight::Factorized(fw) => {
+                    for (tsid_set, token_set) in &fw.pairs {
+                        let ptr1 = Arc::as_ptr(&tsid_set.inner) as usize;
+                        let ptr2 = Arc::as_ptr(&token_set.inner) as usize;
+                        if counted.insert(ptr1) {
+                            total += tsid_set.ranges_len();
+                        }
+                        if counted.insert(ptr2) {
+                            total += token_set.ranges_len();
+                        }
+                    }
+                }
+                AbstractWeight::RangeMap(rm) => {
+                    for (_, tsid_set) in rm.map.range_values() {
+                        let ptr = Arc::as_ptr(&tsid_set.inner) as usize;
+                        if counted.insert(ptr) {
+                            total += tsid_set.ranges_len();
+                        }
+                    }
+                }
             }
         };
         
         for state in &self.states.0 {
             if let Some(fw) = &state.final_weight {
-                process_weight(fw);
+                count_weight(fw);
             }
             for targets in state.transitions.values() {
                 for (_, w) in targets {
-                    process_weight(w);
+                    count_weight(w);
                 }
             }
             for (_, w) in &state.epsilons {
-                process_weight(w);
+                count_weight(w);
             }
         }
         total
