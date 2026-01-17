@@ -268,7 +268,7 @@ impl FactorizedWeightStats {
         }
         let elapsed = self.last_print.elapsed();
         crate::debug!(
-            2,
+            6,
             "FactorizedWeight profiling{}: {} calls in {:.2?}",
             if final_summary { " (final)" } else { "" },
             total_calls,
@@ -294,7 +294,7 @@ impl FactorizedWeightStats {
             let total_ms = (stats.total_ns as f64) / 1_000_000.0;
             if let Some(summary) = summary {
                 crate::debug!(
-                    2,
+                    6,
                     "  {:>16}: calls={}, total={:.2}ms, time_us p50/p99/max={}/{}/{}, pairs in p50/p99/max={}/{}/{}, out p50/p99/max={}/{}/{}, ranges in p50/p99/max={}/{}/{}, out p50/p99/max={}/{}/{},",
                     op.name(),
                     stats.calls,
@@ -317,7 +317,7 @@ impl FactorizedWeightStats {
                 );
             } else {
                 crate::debug!(
-                    2,
+                    6,
                     "  {:>16}: calls={}, total={:.2}ms",
                     op.name(),
                     stats.calls,
@@ -452,7 +452,7 @@ pub fn flush_factorized_weight_profile(label: &str) {
     if !profiling_enabled() {
         return;
     }
-    crate::debug!(2, "FactorizedWeight profiling window: {}", label);
+    crate::debug!(6, "FactorizedWeight profiling window: {}", label);
     FACTORIZED_WEIGHT_STATS.with(|stats| stats.borrow_mut().print(true));
 }
 
@@ -634,14 +634,14 @@ impl FactorizedWeight {
             let token_overlap_avg = token_overlap_sum as f64 / sample_size as f64;
 
             crate::debug!(
-                3,
+                6,
                 "normalize_pairs pair_count={} tsid_size_dist={:?} token_size_dist={:?}",
                 best.len(),
                 tsid_size_dist,
                 token_size_dist,
             );
             crate::debug!(
-                3,
+                6,
                 "normalize_pairs tsid_overlap_counts(first {}): min={} avg={:.1} max={} counts={:?}",
                 sample_size,
                 tsid_overlap_min,
@@ -650,7 +650,7 @@ impl FactorizedWeight {
                 tsid_overlap_counts,
             );
             crate::debug!(
-                3,
+                6,
                 "normalize_pairs token_overlap_counts(first {}): min={} avg={:.1} max={} counts={:?}",
                 sample_size,
                 token_overlap_min,
