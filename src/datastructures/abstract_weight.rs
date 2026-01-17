@@ -185,6 +185,9 @@ pub trait WeightBackend: Clone + PartialEq + Eq + std::fmt::Debug {
     
     /// Get the number of ranges in the weight.
     fn ranges_len(&self) -> usize;
+
+    /// Get the number of ranges in the weight (backend-specific definition).
+    fn num_ranges(&self) -> usize;
     
     /// Insert a position into the weight.
     fn insert(&mut self, pos: usize);
@@ -248,6 +251,10 @@ impl WeightBackend for RangeSetBlaze<usize> {
     }
     
     fn ranges_len(&self) -> usize {
+        RangeSetBlaze::ranges_len(self)
+    }
+
+    fn num_ranges(&self) -> usize {
         RangeSetBlaze::ranges_len(self)
     }
     
@@ -812,7 +819,11 @@ impl AbstractWeight {
     
     /// Alias for `ranges_len()`.
     pub fn num_ranges(&self) -> usize {
-        self.ranges_len()
+        match self {
+            AbstractWeight::RangeSet(rsb) => WeightBackend::num_ranges(rsb),
+            AbstractWeight::Factorized(fw) => WeightBackend::num_ranges(fw),
+            AbstractWeight::RangeMap(rm) => WeightBackend::num_ranges(rm),
+        }
     }
     
     /// Fast check if weight represents all positions in the domain.

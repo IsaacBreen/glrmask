@@ -329,12 +329,23 @@ impl WeightBackend for RangeMapWeight {
     }
 
     fn ranges_len(&self) -> usize {
-        let mut total = 0usize;
-        for (token_range, tsid_set) in self.map.range_values() {
-            let range_len = (*token_range.end()).saturating_sub(*token_range.start()).saturating_add(1);
-            total = total.saturating_add(range_len.saturating_mul(tsid_set.ranges_len()));
-        }
-        total
+        let map_ranges = self.map.range_values().count();
+        let tsid_ranges: usize = self
+            .map
+            .range_values()
+            .map(|(_, tsid_set)| tsid_set.ranges_len())
+            .sum();
+        map_ranges.saturating_add(tsid_ranges)
+    }
+
+    fn num_ranges(&self) -> usize {
+        let map_ranges = self.map.range_values().count();
+        let tsid_ranges: usize = self
+            .map
+            .range_values()
+            .map(|(_, tsid_set)| tsid_set.ranges_len())
+            .sum();
+        map_ranges.saturating_add(tsid_ranges)
     }
 
     fn insert(&mut self, pos: usize) {

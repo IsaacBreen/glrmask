@@ -1654,6 +1654,13 @@ impl WeightBackend for FactorizedWeight {
             .sum()
     }
 
+    fn num_ranges(&self) -> usize {
+        self.pairs
+            .iter()
+            .map(|(tsid_set, token_set)| tsid_set.ranges_len() + token_set.ranges_len())
+            .sum()
+    }
+
     fn insert(&mut self, pos: usize) {
         let num_tsids = self.num_tsids();
         let token = pos / num_tsids;
