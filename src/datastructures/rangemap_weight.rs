@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
@@ -18,6 +18,8 @@ static RANGEMAP_WEIGHT_INTERNER: Lazy<Mutex<HashSet<Arc<RangeMapWeight>>>> =
 static RANGEMAP_OP_CACHE: Lazy<Mutex<LruCache<OpKey, Arc<RangeMapWeight>>>> = Lazy::new(|| {
     Mutex::new(LruCache::new(NonZeroUsize::new(WEIGHT_OP_CACHE_CAPACITY).unwrap()))
 });
+static FULL_TSIDS_CACHE: Lazy<Mutex<HashMap<usize, RangeSet>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct OpKey {
@@ -77,6 +79,16 @@ pub struct RangeMapWeight {
 }
 
 impl RangeMapWeight {
+    fn full_tsids(num_tsids: usize) -> RangeSet {
+        let mut cache = FULL_TSIDS_CACHE.lock().unwrap();
+        if let Some(cached) = cache.get(&num_tsids) {
+            return cached.clone();
+        }
+        let full = Self::rangeset_from_ranges([0..=num_tsids.saturating_sub(1)]);
+        cache.insert(num_tsids, full.clone());
+        full
+    }
+
     fn rangeset_from_ranges<I: IntoIterator<Item = std::ops::RangeInclusive<usize>>>(
         ranges: I,
     ) -> RangeSet {
@@ -288,17 +300,169 @@ impl RangeMapWeight {
 
     pub(crate) fn divide(&self, other: &Self) -> Self {
         assert_eq!(self.num_tsids(), other.num_tsids(), "RangeMapWeight num_tsids mismatch");
-        let full_tsids = Self::rangeset_from_ranges([0..=self.num_tsids().saturating_sub(1)]);
-        let map = Self::merge_maps(&self.map, &other.map, |left, right| match (left, right) {
-            (Some(a), Some(b)) => a | &(full_tsids.clone() - b),
-            (Some(a), None) => a.clone(),
-            (None, Some(b)) => &full_tsids - b,
-            (None, None) => full_tsids.clone(),
-        });
-        Self {
-            map,
-            num_tsids: self.num_tsids(),
+        crate::datastructures::hybrid_bitset::PROF_COUNT_DIVIDE.fetch_add(
+            1,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        let start = std::time::Instant::now();
+        let num_tsids = self.num_tsids();
+        let full_tsids = Self::full_tsids(num_tsids);
+
+        let mut left_iter = self.map.range_values();
+        let mut right_iter = other.map.range_values();
+        let mut left = left_iter.next();
+        let mut right = right_iter.next();
+
+        if left.is_none() && right.is_none() {
+            let result = Self {
+                map: RangeMapBlaze::new(),
+                num_tsids,
+            };
+            crate::datastructures::hybrid_bitset::PROF_TIME_DIVIDE.fetch_add(
+                start.elapsed().as_micros() as u64,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            return result;
         }
+
+        let mut pos = match (left.as_ref(), right.as_ref()) {
+            (Some((l_range, _)), Some((r_range, _))) => {
+                (*l_range.start()).min(*r_range.start())
+            }
+            (Some((l_range, _)), None) => *l_range.start(),
+            (None, Some((r_range, _))) => *r_range.start(),
+            (None, None) => 0,
+        };
+
+        let mut out = RangeMapBlaze::new();
+        let mut current_start: Option<usize> = None;
+        let mut current_end: usize = 0;
+        let mut current_value = RangeSet::zeros();
+
+        let mut right_comp: Option<RangeSet> = None;
+        let mut right_ptr: Option<*const RangeSetBlaze<usize>> = None;
+
+        loop {
+            loop {
+                let advance = match left.as_ref() {
+                    Some((range, _)) if pos > *range.end() => true,
+                    _ => false,
+                };
+                if advance {
+                    left = left_iter.next();
+                } else {
+                    break;
+                }
+            }
+            loop {
+                let advance = match right.as_ref() {
+                    Some((range, _)) if pos > *range.end() => true,
+                    _ => false,
+                };
+                if advance {
+                    right = right_iter.next();
+                } else {
+                    break;
+                }
+            }
+
+            let (left_val, next_left_change) = match left.as_ref() {
+                Some((range, val)) => {
+                    if pos < *range.start() {
+                        (None, Some(*range.start()))
+                    } else {
+                        (Some(*val), range.end().checked_add(1))
+                    }
+                }
+                None => (None, None),
+            };
+
+            let (right_val, next_right_change) = match right.as_ref() {
+                Some((range, val)) => {
+                    if pos < *range.start() {
+                        (None, Some(*range.start()))
+                    } else {
+                        (Some(*val), range.end().checked_add(1))
+                    }
+                }
+                None => (None, None),
+            };
+
+            if let Some(rv) = right_val {
+                let ptr = Arc::as_ptr(&rv.inner);
+                if right_ptr != Some(ptr) {
+                    right_comp = Some(&full_tsids - rv);
+                    right_ptr = Some(ptr);
+                }
+            } else {
+                right_comp = None;
+                right_ptr = None;
+            }
+
+            let combined = match (left_val, right_val) {
+                (Some(a), Some(_)) => {
+                    let comp = right_comp.as_ref().expect("missing right complement");
+                    a | comp
+                }
+                (Some(a), None) => a.clone(),
+                (None, Some(_)) => right_comp
+                    .as_ref()
+                    .expect("missing right complement")
+                    .clone(),
+                (None, None) => full_tsids.clone(),
+            };
+
+            let next_change = match (next_left_change, next_right_change) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (Some(a), None) => Some(a),
+                (None, Some(b)) => Some(b),
+                (None, None) => None,
+            };
+            let end = match next_change {
+                Some(next) => next.saturating_sub(1),
+                None => usize::MAX,
+            };
+
+            if combined.is_empty() {
+                if let Some(range_start) = current_start.take() {
+                    out.ranges_insert(range_start..=current_end, current_value.clone());
+                }
+            } else if let Some(range_start) = current_start {
+                let is_same = Arc::ptr_eq(&current_value.inner, &combined.inner)
+                    || current_value == combined;
+                if is_same && current_end.saturating_add(1) == pos {
+                    current_end = end;
+                } else {
+                    out.ranges_insert(range_start..=current_end, current_value.clone());
+                    current_start = Some(pos);
+                    current_end = end;
+                    current_value = combined;
+                }
+            } else {
+                current_start = Some(pos);
+                current_end = end;
+                current_value = combined;
+            }
+
+            if end == usize::MAX {
+                break;
+            }
+            pos = end.saturating_add(1);
+        }
+
+        if let Some(range_start) = current_start {
+            out.ranges_insert(range_start..=current_end, current_value);
+        }
+
+        let result = Self {
+            map: out,
+            num_tsids,
+        };
+        crate::datastructures::hybrid_bitset::PROF_TIME_DIVIDE.fetch_add(
+            start.elapsed().as_micros() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        result
     }
 
     pub(crate) fn expand_to_rsb(&self) -> RangeSetBlaze<usize> {

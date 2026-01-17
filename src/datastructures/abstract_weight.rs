@@ -926,7 +926,12 @@ impl AbstractWeight {
 
     /// Compute semiring divide (self ∪ complement(other)).
     pub fn divide(&self, other: &Self) -> Self {
-        match (self, other) {
+        crate::datastructures::hybrid_bitset::PROF_COUNT_DIVIDE.fetch_add(
+            1,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        let start = std::time::Instant::now();
+        let result = match (self, other) {
             (AbstractWeight::RangeMap(a), AbstractWeight::RangeMap(b)) => {
                 AbstractWeight::RangeMap(intern_rangemap(a.divide(b)))
             }
@@ -935,7 +940,12 @@ impl AbstractWeight {
                 self | &other.complement()
             }
             _ => panic!("AbstractWeight operation requires both operands to be the same variant"),
-        }
+        };
+        crate::datastructures::hybrid_bitset::PROF_TIME_DIVIDE.fetch_add(
+            start.elapsed().as_micros() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        result
     }
     
 }
