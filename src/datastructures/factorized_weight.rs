@@ -4,6 +4,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::hash::{Hash, Hasher};
 use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use crate::datastructures::abstract_weight::{current_num_tsids, normalize_num_tsids, WeightBackend};
@@ -15,6 +16,7 @@ const DIFFERENCE_EXPAND_THRESHOLD: usize = 128;
 
 /// Global collection of weights for analysis (protected by mutex for thread safety)
 static WEIGHT_DUMP: OnceLock<Mutex<WeightDumpState>> = OnceLock::new();
+static PROFILE_ACTIVE: OnceLock<AtomicBool> = OnceLock::new();
 
 struct WeightDumpEntry {
     label: String,
@@ -266,7 +268,7 @@ impl FactorizedWeightStats {
         }
         let elapsed = self.last_print.elapsed();
         crate::debug!(
-            4,
+            2,
             "FactorizedWeight profiling{}: {} calls in {:.2?}",
             if final_summary { " (final)" } else { "" },
             total_calls,
@@ -292,7 +294,7 @@ impl FactorizedWeightStats {
             let total_ms = (stats.total_ns as f64) / 1_000_000.0;
             if let Some(summary) = summary {
                 crate::debug!(
-                    4,
+                    2,
                     "  {:>16}: calls={}, total={:.2}ms, time_us p50/p99/max={}/{}/{}, pairs in p50/p99/max={}/{}/{}, out p50/p99/max={}/{}/{}, ranges in p50/p99/max={}/{}/{}, out p50/p99/max={}/{}/{},",
                     op.name(),
                     stats.calls,
@@ -315,7 +317,7 @@ impl FactorizedWeightStats {
                 );
             } else {
                 crate::debug!(
-                    4,
+                    2,
                     "  {:>16}: calls={}, total={:.2}ms",
                     op.name(),
                     stats.calls,
@@ -324,6 +326,13 @@ impl FactorizedWeightStats {
             }
         }
 
+        for op in &mut self.ops {
+            op.clear_window();
+        }
+        self.last_print = Instant::now();
+    }
+
+    fn reset_window(&mut self) {
         for op in &mut self.ops {
             op.clear_window();
         }
@@ -414,6 +423,39 @@ fn profiling_enabled() -> bool {
     })
 }
 
+fn minimize_only_enabled() -> bool {
+    std::env::var("PROFILE_FACTORIZED_WEIGHT_MINIMIZE_ONLY")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+fn profiling_active() -> bool {
+    PROFILE_ACTIVE
+    .get_or_init(|| AtomicBool::new(!minimize_only_enabled()))
+        .load(Ordering::Relaxed)
+}
+
+pub fn set_factorized_weight_profile_active(active: bool) {
+    PROFILE_ACTIVE
+        .get_or_init(|| AtomicBool::new(true))
+        .store(active, Ordering::Relaxed);
+}
+
+pub fn reset_factorized_weight_profile() {
+    if !profiling_enabled() {
+        return;
+    }
+    FACTORIZED_WEIGHT_STATS.with(|stats| stats.borrow_mut().reset_window());
+}
+
+pub fn flush_factorized_weight_profile(label: &str) {
+    if !profiling_enabled() {
+        return;
+    }
+    crate::debug!(2, "FactorizedWeight profiling window: {}", label);
+    FACTORIZED_WEIGHT_STATS.with(|stats| stats.borrow_mut().print(true));
+}
+
 fn record_profile(
     op: OpKind,
     start: Instant,
@@ -422,7 +464,7 @@ fn record_profile(
     out_pairs: usize,
     out_ranges: usize,
 ) {
-    if !profiling_enabled() {
+    if !profiling_enabled() || !profiling_active() {
         return;
     }
     let elapsed_ns = start.elapsed().as_nanos();

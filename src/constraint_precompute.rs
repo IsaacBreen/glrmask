@@ -319,7 +319,18 @@ impl<'r> Precomputer1<'r> {
         // Use unified determinize_and_minimize with "TerminalDWA" profile
         // Pipeline: NWA minimize → compress → rm_epsilon → determinize → DWA minimize
         // Expected results: 14647 → 5904 → 5904 → 889 → 189 states
+        let profile_minimize_only = std::env::var("PROFILE_FACTORIZED_WEIGHT_MINIMIZE_ONLY")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        if profile_minimize_only {
+            crate::datastructures::factorized_weight::set_factorized_weight_profile_active(true);
+            crate::datastructures::factorized_weight::reset_factorized_weight_profile();
+        }
         let dwa = self.nwa.determinize_and_minimize("TerminalDWA");
+        if profile_minimize_only {
+            crate::datastructures::factorized_weight::flush_factorized_weight_profile("terminal_dwa_minimize");
+            crate::datastructures::factorized_weight::set_factorized_weight_profile_active(false);
+        }
         
         // NOTE: Stats are printed AFTER suffix grammar pruning in constraint.rs
         // This includes path counts, average path lengths, and sample paths.
@@ -710,6 +721,13 @@ pub fn run_precompute1(
     } else {
         0
     };
+
+    let profile_minimize_only = std::env::var("PROFILE_FACTORIZED_WEIGHT_MINIMIZE_ONLY")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if profile_minimize_only {
+        crate::datastructures::factorized_weight::set_factorized_weight_profile_active(false);
+    }
     
     let mut representative_llm_token_map: BTreeMap<Vec<u8>, LLMTokenID> = BTreeMap::new();
     let mut seen_internal_ids = std::collections::HashSet::new();
