@@ -128,6 +128,8 @@ impl NWA {
     }
 
     pub fn minimize_with_rustfst_full(&mut self) -> bool {
+        crate::datastructures::hybrid_bitset::reset_profiling();
+        
         let min_config = MinimizeConfig::default().with_allow_nondet(true);
         let start = Instant::now();
         let mut fst = self.to_rustfst();
@@ -140,6 +142,8 @@ impl NWA {
         let start = Instant::now();
         *self = NWA::from_rustfst(&fst);
         let from_time = start.elapsed();
+        
+        crate::datastructures::hybrid_bitset::print_profiling("NWA Minimize RustFST");
 
         let mut slowest_label = "to_rustfst";
         let mut slowest_time = to_time;

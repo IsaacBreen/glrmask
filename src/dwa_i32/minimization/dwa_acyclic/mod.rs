@@ -132,19 +132,26 @@ pub fn minimize_acyclic_exact(dwa: &DWA) -> Result<DWA, DWABuildError> {
     let total_start = std::time::Instant::now();
     
     // Step 0: Preprocess - tighten weights by removing unreachable tokens
+    // SKIPPING tighten_weights as it's too expensive (O(M * WeightComplexity))
+    /*
     let step0_start = std::time::Instant::now();
+    eprintln!("Acyclic minimize step 0 (tighten_weights) START");
     let dwa = tighten_weights(dwa)?;
-    crate::debug!(6, "Acyclic minimize step 0 (tighten_weights): {:?}", step0_start.elapsed());
+    eprintln!("Acyclic minimize step 0 (tighten_weights) DONE: {:?}", step0_start.elapsed());
+    */
+    // Instead use original DWA
+    let dwa = dwa.clone();
 
     // 1. Topological Sort & Reachability Analysis
     let step1_start = std::time::Instant::now();
     let topo_order = compute_topo_order(&dwa)?;
-    crate::debug!(6, "Acyclic minimize step 1 (topo_order): {:?}", step1_start.elapsed());
+    eprintln!("Acyclic minimize step 1 (topo_order) DONE: {:?}", step1_start.elapsed());
 
     // 2. Compute "Needed" sets (Reverse Flow Analysis).
     let step2_start = std::time::Instant::now();
+    eprintln!("Acyclic minimize step 2 (needed_sets) START");
     let needed = compute_needed_sets(&dwa, &topo_order);
-    crate::debug!(6, "Acyclic minimize step 2 (needed_sets): {:?}", step2_start.elapsed());
+    eprintln!("Acyclic minimize step 2 (needed_sets) DONE: {:?}", step2_start.elapsed());
 
     // 3. Layer states by topological height (distance to sink).
     let step3_start = std::time::Instant::now();
@@ -600,7 +607,12 @@ fn compute_topo_order(dwa: &DWA) -> Result<Vec<StateID>, DWABuildError> {
 
 fn compute_needed_sets(dwa: &DWA, topo_order: &[StateID]) -> Vec<Weight> {
     let mut needed = vec![Weight::zeros(); dwa.states.len()];
-    for &u in topo_order {
+    let mut last_log = std::time::Instant::now();
+    for (i, &u) in topo_order.iter().enumerate() {
+        if i % 1000 == 0 && last_log.elapsed().as_secs() >= 1 {
+            eprintln!("  compute_needed_sets: {}/{} states processed", i, dwa.states.len());
+            last_log = std::time::Instant::now();
+        }
         let mut acc = dwa.states[u].final_weight.clone().unwrap_or_else(Weight::zeros);
         for (&lbl, &v) in &dwa.states[u].transitions {
             if v >= dwa.states.len() { continue; }
@@ -618,7 +630,12 @@ fn compute_forward_reachable(dwa: &DWA, topo_order: &[StateID]) -> Vec<Weight> {
     let mut forward = vec![Weight::zeros(); dwa.states.len()];
     forward[dwa.body.start_state] = Weight::all();
     
-    for &u in topo_order.iter().rev() {
+    let mut last_log = std::time::Instant::now();
+    for (i, &u) in topo_order.iter().rev().enumerate() {
+        if i % 1000 == 0 && last_log.elapsed().as_secs() >= 1 {
+            eprintln!("  compute_forward_reachable: {}/{} states processed", i, dwa.states.len());
+            last_log = std::time::Instant::now();
+        }
         if forward[u].is_empty() { continue; }
         let incoming = forward[u].clone();
         

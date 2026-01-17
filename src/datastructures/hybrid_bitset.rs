@@ -52,6 +52,38 @@ pub fn get_num_tsids() -> usize {
     NUM_TSIDS.with(|value| value.get())
 }
 
+// --- Profiling ---
+pub static PROF_COUNT_AND: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static PROF_TIME_AND: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static PROF_COUNT_OR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static PROF_TIME_OR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static PROF_COUNT_SUB: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static PROF_TIME_SUB: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub fn reset_profiling() {
+    PROF_COUNT_AND.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_TIME_AND.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_COUNT_OR.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_TIME_OR.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_COUNT_SUB.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_TIME_SUB.store(0, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn print_profiling(label: &str) {
+    let c_and = PROF_COUNT_AND.load(std::sync::atomic::Ordering::Relaxed);
+    let c_or = PROF_COUNT_OR.load(std::sync::atomic::Ordering::Relaxed);
+    let c_sub = PROF_COUNT_SUB.load(std::sync::atomic::Ordering::Relaxed);
+    
+    if c_and > 0 || c_or > 0 || c_sub > 0 {
+        eprintln!("WEIGHT_PROF [{}]:", label);
+        if c_and > 0 { eprintln!("  AND: {:9} ops", c_and); }
+        if c_or  > 0 { eprintln!("  OR : {:9} ops", c_or); }
+        if c_sub > 0 { eprintln!("  SUB: {:9} ops", c_sub); }
+    }
+}
+
+
+
 // --- The Hybrid Bitset Struct ---
 #[derive(Default, Clone, Eq)]
 pub struct RangeSet {
@@ -700,9 +732,13 @@ impl BitAnd for &RangeSet {
     type Output = RangeSet;
 
     fn bitand(self, rhs: Self) -> Self::Output {
+        // Optimization: if pointers are equal, return clone
         if Arc::ptr_eq(&self.inner, &rhs.inner) {
             return self.clone();
         }
+
+        PROF_COUNT_AND.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
         if self.is_simple() || rhs.is_simple() {
             let result_inner = &*self.inner & &*rhs.inner;
             return RangeSet {
@@ -737,6 +773,9 @@ impl BitOr for &RangeSet {
         if Arc::ptr_eq(&self.inner, &rhs.inner) {
             return self.clone();
         }
+
+        PROF_COUNT_OR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
         if self.is_simple() || rhs.is_simple() {
             let result_inner = &*self.inner | &*rhs.inner;
             return RangeSet {
@@ -805,6 +844,9 @@ impl Sub for &RangeSet {
         if Arc::ptr_eq(&self.inner, &rhs.inner) {
             return RangeSet::zeros();
         }
+
+        PROF_COUNT_SUB.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
         if self.is_simple() || rhs.is_simple() {
             let result_inner = &*self.inner - &*rhs.inner;
             return RangeSet {
