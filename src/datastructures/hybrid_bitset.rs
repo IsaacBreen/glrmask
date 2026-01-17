@@ -291,6 +291,16 @@ impl RangeSet {
         self.inner.contains(index)
     }
 
+    /// Returns an iterator over the inclusive [start, end] ranges of the set.
+    pub fn ranges(&self) -> impl Iterator<Item = std::ops::RangeInclusive<usize>> + '_ {
+        self.inner.ranges()
+    }
+
+    /// Returns the number of ranges in the set.
+    pub fn ranges_len(&self) -> usize {
+        self.inner.ranges_len()
+    }
+
     pub fn is_subset(&self, other: &Self) -> bool {
         self.inner.is_subset(&other.inner)
     }
@@ -946,7 +956,7 @@ impl From<crate::datastructures::AbstractWeight> for RangeSet {
     fn from(aw: crate::datastructures::AbstractWeight) -> Self {
         use crate::datastructures::AbstractWeight;
         match aw {
-            AbstractWeight::RangeSet(rsb) => RangeSet::from(rsb),
+            AbstractWeight::RangeSet(rsb) => rsb,
             AbstractWeight::Factorized(fw) => {
                 // For factorized weights, we can extract the token sets directly
                 // without the expensive N×M expansion if we're in symbol-heavy mode
@@ -955,11 +965,11 @@ impl From<crate::datastructures::AbstractWeight> for RangeSet {
                 if num_tsids <= 1 {
                     // Symbol-heavy mode: pairs are (tsid_set, token_set) where token_set
                     // contains the actual token positions directly
-                    let mut result = RangeSetBlaze::new();
+                    let mut result = RangeSet::zeros();
                     for (_tsid_set, token_set) in fw.pairs() {
                         result |= token_set;
                     }
-                    RangeSet::from(result)
+                    result
                 } else {
                     // Weight-heavy mode: need full expansion (O(N×M))
                     // This triggers the guard if ALLOW_FACTORIZED_EXPANSION is not set
@@ -969,13 +979,13 @@ impl From<crate::datastructures::AbstractWeight> for RangeSet {
             AbstractWeight::RangeMap(rm) => {
                 let num_tsids = get_num_tsids();
                 if num_tsids <= 1 {
-                    let mut result = RangeSetBlaze::new();
+                    let mut result = RangeSet::zeros();
                     for (token_range, tsid_set) in rm.map.range_values() {
                         if tsid_set.contains(0) {
-                            result |= &RangeSetBlaze::from_iter([token_range.clone()]);
+                            result |= &RangeSet::from(RangeSetBlaze::from_iter([token_range.clone()]));
                         }
                     }
-                    RangeSet::from(result)
+                    result
                 } else {
                     RangeSet::from(rm.expand_to_rsb())
                 }

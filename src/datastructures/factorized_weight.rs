@@ -1,18 +1,31 @@
 use range_set_blaze::RangeSetBlaze;
 use std::backtrace::Backtrace;
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
-use std::sync::{Mutex, OnceLock};
+use std::num::NonZeroUsize;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
+use lru::LruCache;
+use once_cell::sync::Lazy;
+
 use crate::datastructures::abstract_weight::{current_num_tsids, is_expansion_allowed, normalize_num_tsids, WeightBackend};
+use crate::datastructures::cache;
+use crate::datastructures::hybrid_bitset::RangeSet;
 
 const PROFILE_PRINT_EVERY_SECS: u64 = 5;
 const PROFILE_PRINT_EVERY_CALLS: u64 = 20_000;
 const PROFILE_MAX_SAMPLES: usize = 4096;
 const DIFFERENCE_EXPAND_THRESHOLD: usize = 128;
+const WEIGHT_OP_CACHE_CAPACITY: usize = 100_000;
+
+static FACTORIZED_WEIGHT_INTERNER: Lazy<Mutex<HashSet<Arc<FactorizedWeight>>>> =
+    Lazy::new(|| Mutex::new(HashSet::new()));
+static FACTORIZED_OP_CACHE: Lazy<Mutex<LruCache<OpKey, Arc<FactorizedWeight>>>> = Lazy::new(|| {
+    Mutex::new(LruCache::new(NonZeroUsize::new(WEIGHT_OP_CACHE_CAPACITY).unwrap()))
+});
 
 /// Global collection of weights for analysis (protected by mutex for thread safety)
 static WEIGHT_DUMP: OnceLock<Mutex<WeightDumpState>> = OnceLock::new();
@@ -156,7 +169,7 @@ enum OpKind {
 }
 
 #[derive(Clone, Debug)]
-struct RangeSetKey(RangeSetBlaze<usize>);
+struct RangeSetKey(RangeSet);
 
 impl PartialEq for RangeSetKey {
     fn eq(&self, other: &Self) -> bool {
@@ -170,6 +183,56 @@ impl Hash for RangeSetKey {
     fn hash<H: Hasher>(&self, state: &mut H) {
         hash_rangeset(&self.0, state);
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct OpKey {
+    op: cache::BinOp,
+    a: usize,
+    b: usize,
+}
+
+fn op_key(op: cache::BinOp, a: &Arc<FactorizedWeight>, b: &Arc<FactorizedWeight>) -> OpKey {
+    OpKey {
+        op,
+        a: Arc::as_ptr(a) as usize,
+        b: Arc::as_ptr(b) as usize,
+    }
+}
+
+fn get_op_cache(op: cache::BinOp, a: &Arc<FactorizedWeight>, b: &Arc<FactorizedWeight>) -> Option<Arc<FactorizedWeight>> {
+    let mut cache = FACTORIZED_OP_CACHE.lock().unwrap();
+    let key = op_key(op, a, b);
+    if let Some(hit) = cache.get(&key) {
+        return Some(hit.clone());
+    }
+    if matches!(op, cache::BinOp::And | cache::BinOp::Or | cache::BinOp::Xor) {
+        let swapped = op_key(op, b, a);
+        if let Some(hit) = cache.get(&swapped) {
+            return Some(hit.clone());
+        }
+    }
+    None
+}
+
+fn put_op_cache(
+    op: cache::BinOp,
+    a: Arc<FactorizedWeight>,
+    b: Arc<FactorizedWeight>,
+    result: Arc<FactorizedWeight>,
+) {
+    let mut cache = FACTORIZED_OP_CACHE.lock().unwrap();
+    cache.put(op_key(op, &a, &b), result);
+}
+
+pub fn intern_factorized(weight: FactorizedWeight) -> Arc<FactorizedWeight> {
+    let mut interner = FACTORIZED_WEIGHT_INTERNER.lock().unwrap();
+    if let Some(existing) = interner.get(&weight) {
+        return existing.clone();
+    }
+    let arc = Arc::new(weight);
+    interner.insert(arc.clone());
+    arc
 }
 
 impl OpKind {
@@ -483,17 +546,23 @@ fn record_profile(
     FACTORIZED_WEIGHT_STATS.with(|stats| stats.borrow_mut().record(op, sample));
 }
 
-fn pairs_ranges_len(pairs: &[(RangeSetBlaze<usize>, RangeSetBlaze<usize>)]) -> usize {
+fn pairs_ranges_len(pairs: &[(RangeSet, RangeSet)]) -> usize {
     pairs
         .iter()
         .map(|(tsid_set, token_set)| tsid_set.ranges_len() + token_set.ranges_len())
         .sum()
 }
 
+fn rangeset_from_ranges<I: IntoIterator<Item = std::ops::RangeInclusive<usize>>>(
+    ranges: I,
+) -> RangeSet {
+    RangeSet::from(RangeSetBlaze::from_iter(ranges))
+}
+
 /// Factorized weight representation as a union of (tsid_set × token_set) pairs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FactorizedWeight {
-    pub(crate) pairs: Vec<(RangeSetBlaze<usize>, RangeSetBlaze<usize>)>,
+    pub(crate) pairs: Vec<(RangeSet, RangeSet)>,
     num_tsids: usize,
     disjoint_tsids: bool,
 }
@@ -508,7 +577,7 @@ impl FactorizedWeight {
     }
     
     /// Create a factorized weight from pairs directly.
-    pub fn from_pairs(pairs: Vec<(RangeSetBlaze<usize>, RangeSetBlaze<usize>)>, num_tsids: usize) -> Self {
+    pub fn from_pairs(pairs: Vec<(RangeSet, RangeSet)>, num_tsids: usize) -> Self {
         let mut fw = Self {
             pairs,
             num_tsids: normalize_num_tsids(num_tsids),
@@ -522,7 +591,7 @@ impl FactorizedWeight {
         normalize_num_tsids(self.num_tsids)
     }
 
-    pub fn pairs(&self) -> &[(RangeSetBlaze<usize>, RangeSetBlaze<usize>)] {
+    pub fn pairs(&self) -> &[(RangeSet, RangeSet)] {
         &self.pairs
     }
 
@@ -552,7 +621,7 @@ impl FactorizedWeight {
         })
     }
 
-    fn add_pair(&mut self, tsid_set: RangeSetBlaze<usize>, token_set: RangeSetBlaze<usize>) {
+    fn add_pair(&mut self, tsid_set: RangeSet, token_set: RangeSet) {
         if tsid_set.is_empty() || token_set.is_empty() {
             return;
         }
@@ -688,7 +757,7 @@ impl FactorizedWeight {
             return;
         }
 
-        let mut candidates: Vec<Vec<(RangeSetBlaze<usize>, RangeSetBlaze<usize>)>> = Vec::new();
+        let mut candidates: Vec<Vec<(RangeSet, RangeSet)>> = Vec::new();
         let best_len = best.len();
         let num_tsids = self.num_tsids();
 
@@ -809,21 +878,21 @@ impl FactorizedWeight {
     }
 
     fn compute_disjoint_tsids(
-        pairs: &[(RangeSetBlaze<usize>, RangeSetBlaze<usize>)],
+        pairs: &[(RangeSet, RangeSet)],
     ) -> bool {
         if pairs.len() <= 1 {
             return true;
         }
-        let mut union = RangeSetBlaze::new();
+        let mut union = RangeSet::zeros();
         let mut total: u128 = 0;
         for (tsid_set, _) in pairs {
-            total = total.saturating_add(tsid_set.len());
+            total = total.saturating_add(tsid_set.len() as u128);
             union |= tsid_set;
-            if union.len() < total {
+            if (union.len() as u128) < total {
                 return false;
             }
         }
-        union.len() == total
+        (union.len() as u128) == total
     }
 
     fn difference_disjoint(&self, other: &Self) -> Self {
@@ -843,7 +912,7 @@ impl FactorizedWeight {
         for (tsid_set, token_set) in &self.pairs {
             // For each range in tsid_set, find overlapping intervals in other
             // and compute the difference
-            let mut by_tokens: HashMap<RangeSetKey, RangeSetBlaze<usize>> = HashMap::new();
+            let mut by_tokens: HashMap<RangeSetKey, RangeSet> = HashMap::new();
 
             for self_range in tsid_set.ranges() {
                 let self_start = *self_range.start();
@@ -876,10 +945,10 @@ impl FactorizedWeight {
                         let gap_end = (other_start - 1).min(self_end);
                         if pos <= gap_end {
                             // No overlap with other - keep original tokens
-                            let gap_range = RangeSetBlaze::from_iter([pos..=gap_end]);
+                            let gap_range = rangeset_from_ranges([pos..=gap_end]);
                             *by_tokens
                                 .entry(RangeSetKey(token_set.clone()))
-                                .or_insert_with(RangeSetBlaze::new) |= &gap_range;
+                                .or_insert_with(RangeSet::zeros) |= &gap_range;
                         }
                     }
 
@@ -890,10 +959,10 @@ impl FactorizedWeight {
                         let other_tokens = &other.pairs[pair_idx].1;
                         let token_diff = token_set - other_tokens;
                         if !token_diff.is_empty() {
-                            let overlap_range = RangeSetBlaze::from_iter([overlap_start..=overlap_end]);
+                            let overlap_range = rangeset_from_ranges([overlap_start..=overlap_end]);
                             *by_tokens
                                 .entry(RangeSetKey(token_diff))
-                                .or_insert_with(RangeSetBlaze::new) |= &overlap_range;
+                                .or_insert_with(RangeSet::zeros) |= &overlap_range;
                         }
                         pos = overlap_end.saturating_add(1);
                     }
@@ -903,10 +972,10 @@ impl FactorizedWeight {
 
                 // Handle remaining gap after all intervals
                 if pos <= self_end {
-                    let remaining_range = RangeSetBlaze::from_iter([pos..=self_end]);
+                    let remaining_range = rangeset_from_ranges([pos..=self_end]);
                     *by_tokens
                         .entry(RangeSetKey(token_set.clone()))
-                        .or_insert_with(RangeSetBlaze::new) |= &remaining_range;
+                        .or_insert_with(RangeSet::zeros) |= &remaining_range;
                 }
             }
 
@@ -923,13 +992,13 @@ impl FactorizedWeight {
     }
 
     fn merge_identical_pairs(
-        mut pairs: Vec<(RangeSetBlaze<usize>, RangeSetBlaze<usize>)>,
-    ) -> Vec<(RangeSetBlaze<usize>, RangeSetBlaze<usize>)> {
+        mut pairs: Vec<(RangeSet, RangeSet)>,
+    ) -> Vec<(RangeSet, RangeSet)> {
         loop {
             let before_count = pairs.len();
 
             // First pass: merge by identical tsid_set
-            let mut by_tsids: HashMap<RangeSetKey, RangeSetBlaze<usize>> = HashMap::with_capacity(pairs.len());
+            let mut by_tsids: HashMap<RangeSetKey, RangeSet> = HashMap::with_capacity(pairs.len());
             for (tsid_set, token_set) in pairs {
                 if tsid_set.is_empty() || token_set.is_empty() {
                     continue;
@@ -941,7 +1010,7 @@ impl FactorizedWeight {
             }
 
             // Second pass: merge by identical token_set
-            let mut by_tokens: HashMap<RangeSetKey, RangeSetBlaze<usize>> = HashMap::with_capacity(by_tsids.len());
+            let mut by_tokens: HashMap<RangeSetKey, RangeSet> = HashMap::with_capacity(by_tsids.len());
             for (tsid_key, token_set) in by_tsids {
                 let tsid_set = tsid_key.0;
                 by_tokens
@@ -964,7 +1033,7 @@ impl FactorizedWeight {
     }
 
     fn max_token_in_pairs(
-        pairs: &[(RangeSetBlaze<usize>, RangeSetBlaze<usize>)],
+        pairs: &[(RangeSet, RangeSet)],
     ) -> Option<usize> {
         pairs
             .iter()
@@ -973,9 +1042,9 @@ impl FactorizedWeight {
     }
 
     fn normalize_by_tokens(
-        pairs: &[(RangeSetBlaze<usize>, RangeSetBlaze<usize>)],
-    ) -> Vec<(RangeSetBlaze<usize>, RangeSetBlaze<usize>)> {
-        let mut events: BTreeMap<usize, (Vec<RangeSetBlaze<usize>>, Vec<RangeSetBlaze<usize>>)> =
+        pairs: &[(RangeSet, RangeSet)],
+    ) -> Vec<(RangeSet, RangeSet)> {
+        let mut events: BTreeMap<usize, (Vec<RangeSet>, Vec<RangeSet>)> =
             BTreeMap::new();
         let mut max_token: Option<usize> = None;
 
@@ -1007,15 +1076,15 @@ impl FactorizedWeight {
         }
 
         let mut active_counts: HashMap<RangeSetKey, usize> = HashMap::new();
-        let mut active_union = RangeSetBlaze::new();
-        let mut grouped: HashMap<RangeSetKey, RangeSetBlaze<usize>> = HashMap::new();
+        let mut active_union = RangeSet::zeros();
+        let mut grouped: HashMap<RangeSetKey, RangeSet> = HashMap::new();
         let mut last_pos: Option<usize> = None;
         let mut dirty = false;
 
         for (pos, (adds, removes)) in events {
             if let Some(last) = last_pos {
                 if last < pos && !active_union.is_empty() {
-                    let token_range = RangeSetBlaze::from_iter([last..=pos.saturating_sub(1)]);
+                    let token_range = rangeset_from_ranges([last..=pos.saturating_sub(1)]);
                     grouped
                         .entry(RangeSetKey(active_union.clone()))
                         .and_modify(|existing_tokens| *existing_tokens |= &token_range)
@@ -1049,7 +1118,7 @@ impl FactorizedWeight {
             }
 
             if dirty {
-                active_union = RangeSetBlaze::new();
+                active_union = RangeSet::zeros();
                 for key in active_counts.keys() {
                     active_union |= &key.0;
                 }
@@ -1061,7 +1130,7 @@ impl FactorizedWeight {
 
         if let Some(last) = last_pos {
             if last <= max_token && !active_union.is_empty() {
-                let token_range = RangeSetBlaze::from_iter([last..=max_token]);
+                let token_range = rangeset_from_ranges([last..=max_token]);
                 grouped
                     .entry(RangeSetKey(active_union))
                     .and_modify(|existing_tokens| *existing_tokens |= &token_range)
@@ -1076,11 +1145,11 @@ impl FactorizedWeight {
     }
 
     fn normalize_by_tsids(
-        pairs: &[(RangeSetBlaze<usize>, RangeSetBlaze<usize>)],
+        pairs: &[(RangeSet, RangeSet)],
         num_tsids: usize,
-    ) -> Vec<(RangeSetBlaze<usize>, RangeSetBlaze<usize>)> {
+    ) -> Vec<(RangeSet, RangeSet)> {
         let num_tsids = normalize_num_tsids(num_tsids);
-        let mut events: BTreeMap<usize, (Vec<RangeSetBlaze<usize>>, Vec<RangeSetBlaze<usize>>)> =
+        let mut events: BTreeMap<usize, (Vec<RangeSet>, Vec<RangeSet>)> =
             BTreeMap::new();
         let mut max_tsid: Option<usize> = None;
 
@@ -1115,15 +1184,15 @@ impl FactorizedWeight {
         }
 
         let mut active_counts: HashMap<RangeSetKey, usize> = HashMap::new();
-        let mut active_union = RangeSetBlaze::new();
-        let mut grouped: HashMap<RangeSetKey, RangeSetBlaze<usize>> = HashMap::new();
+        let mut active_union = RangeSet::zeros();
+        let mut grouped: HashMap<RangeSetKey, RangeSet> = HashMap::new();
         let mut last_pos: Option<usize> = None;
         let mut dirty = false;
 
         for (pos, (adds, removes)) in events {
             if let Some(last) = last_pos {
                 if last < pos && !active_union.is_empty() {
-                    let tsid_range = RangeSetBlaze::from_iter([last..=pos.saturating_sub(1)]);
+                    let tsid_range = rangeset_from_ranges([last..=pos.saturating_sub(1)]);
                     grouped
                         .entry(RangeSetKey(active_union.clone()))
                         .and_modify(|existing_tsids| *existing_tsids |= &tsid_range)
@@ -1157,7 +1226,7 @@ impl FactorizedWeight {
             }
 
             if dirty {
-                active_union = RangeSetBlaze::new();
+                active_union = RangeSet::zeros();
                 for key in active_counts.keys() {
                     active_union |= &key.0;
                 }
@@ -1169,7 +1238,7 @@ impl FactorizedWeight {
 
         if let Some(last) = last_pos {
             if last <= max_tsid && !active_union.is_empty() {
-                let tsid_range = RangeSetBlaze::from_iter([last..=max_tsid]);
+                let tsid_range = rangeset_from_ranges([last..=max_tsid]);
                 grouped
                     .entry(RangeSetKey(active_union))
                     .and_modify(|existing_tsids| *existing_tsids |= &tsid_range)
@@ -1184,8 +1253,8 @@ impl FactorizedWeight {
     }
 
     fn is_better_candidate(
-        candidate: &[(RangeSetBlaze<usize>, RangeSetBlaze<usize>)],
-        best: &[(RangeSetBlaze<usize>, RangeSetBlaze<usize>)],
+        candidate: &[(RangeSet, RangeSet)],
+        best: &[(RangeSet, RangeSet)],
     ) -> bool {
         let candidate_cost = Self::candidate_cost(candidate);
         let best_cost = Self::candidate_cost(best);
@@ -1193,7 +1262,7 @@ impl FactorizedWeight {
     }
 
     fn candidate_cost(
-        pairs: &[(RangeSetBlaze<usize>, RangeSetBlaze<usize>)],
+        pairs: &[(RangeSet, RangeSet)],
     ) -> (usize, usize, u128) {
         let total_ranges: usize = pairs
             .iter()
@@ -1214,8 +1283,8 @@ impl FactorizedWeight {
         let num_tsids = normalize_num_tsids(num_tsids);
         let token = pos / num_tsids;
         let tsid = pos % num_tsids;
-        let tsid_set = RangeSetBlaze::from_iter([tsid..=tsid]);
-        let token_set = RangeSetBlaze::from_iter([token..=token]);
+        let tsid_set = rangeset_from_ranges([tsid..=tsid]);
+        let token_set = rangeset_from_ranges([token..=token]);
         let mut weight = Self {
             pairs: vec![(tsid_set, token_set)],
             num_tsids,
@@ -1231,21 +1300,21 @@ impl FactorizedWeight {
             return Self::from_position_with_num_tsids(0, num_tsids);
         }
 
-        let full_tsids = RangeSetBlaze::from_iter([0..=num_tsids - 1]);
+        let full_tsids = rangeset_from_ranges([0..=num_tsids - 1]);
         let full_tokens = max_position / num_tsids;
         let last_tsid = max_position % num_tsids;
 
         let mut weight = Self::new(num_tsids);
         if last_tsid == num_tsids - 1 {
-            let token_set = RangeSetBlaze::from_iter([0..=full_tokens]);
+            let token_set = rangeset_from_ranges([0..=full_tokens]);
             weight.add_pair(full_tsids, token_set);
         } else {
             if full_tokens > 0 {
-                let token_set = RangeSetBlaze::from_iter([0..=full_tokens - 1]);
+                let token_set = rangeset_from_ranges([0..=full_tokens - 1]);
                 weight.add_pair(full_tsids.clone(), token_set);
             }
-            let token_set = RangeSetBlaze::from_iter([full_tokens..=full_tokens]);
-            let tsid_set = RangeSetBlaze::from_iter([0..=last_tsid]);
+            let token_set = rangeset_from_ranges([full_tokens..=full_tokens]);
+            let tsid_set = rangeset_from_ranges([0..=last_tsid]);
             weight.add_pair(tsid_set, token_set);
         }
         weight.normalize_pairs();
@@ -1281,8 +1350,8 @@ impl FactorizedWeight {
                 let tsid = pos % num_tsids;
                 let weight = Self {
                     pairs: vec![(
-                        RangeSetBlaze::from_iter([tsid..=tsid]),
-                        RangeSetBlaze::from_iter([token..=token]),
+                        rangeset_from_ranges([tsid..=tsid]),
+                        rangeset_from_ranges([token..=token]),
                     )],
                     num_tsids,
                     disjoint_tsids: true,
@@ -1310,29 +1379,29 @@ impl FactorizedWeight {
                 let start_tsid = range_start % num_tsids;
                 let end_tsid = range_end % num_tsids;
 
-                let full_tsid_set = RangeSetBlaze::from_iter([0..=num_tsids - 1]);
+                let full_tsid_set = rangeset_from_ranges([0..=num_tsids - 1]);
                 let mut pairs = Vec::new();
                 if start_token == end_token {
                     pairs.push((
-                        RangeSetBlaze::from_iter([start_tsid..=end_tsid]),
-                        RangeSetBlaze::from_iter([start_token..=start_token]),
+                        rangeset_from_ranges([start_tsid..=end_tsid]),
+                        rangeset_from_ranges([start_token..=start_token]),
                     ));
                 } else {
                     pairs.push((
-                        RangeSetBlaze::from_iter([start_tsid..=num_tsids - 1]),
-                        RangeSetBlaze::from_iter([start_token..=start_token]),
+                        rangeset_from_ranges([start_tsid..=num_tsids - 1]),
+                        rangeset_from_ranges([start_token..=start_token]),
                     ));
 
                     if start_token + 1 <= end_token.saturating_sub(1) {
                         pairs.push((
                             full_tsid_set.clone(),
-                            RangeSetBlaze::from_iter([start_token + 1..=end_token - 1]),
+                            rangeset_from_ranges([start_token + 1..=end_token - 1]),
                         ));
                     }
 
                     pairs.push((
-                        RangeSetBlaze::from_iter([0..=end_tsid]),
-                        RangeSetBlaze::from_iter([end_token..=end_token]),
+                        rangeset_from_ranges([0..=end_tsid]),
+                        rangeset_from_ranges([end_token..=end_token]),
                     ));
                 }
 
@@ -1366,9 +1435,9 @@ impl FactorizedWeight {
                 let mut tsid_set = if all_same_token {
                     let start_tsid = first_start % num_tsids;
                     let end_tsid = first_end % num_tsids;
-                    RangeSetBlaze::from_iter([start_tsid..=end_tsid])
+                    rangeset_from_ranges([start_tsid..=end_tsid])
                 } else {
-                    RangeSetBlaze::new()
+                    RangeSet::zeros()
                 };
 
                 for range in ranges {
@@ -1385,14 +1454,14 @@ impl FactorizedWeight {
                     }
                     let start_tsid = start % num_tsids;
                     let end_tsid = end % num_tsids;
-                    tsid_set |= &RangeSetBlaze::from_iter([start_tsid..=end_tsid]);
+                    tsid_set |= &rangeset_from_ranges([start_tsid..=end_tsid]);
                 }
 
                 if all_same_token {
                     let weight = Self {
                         pairs: vec![(
                             tsid_set,
-                            RangeSetBlaze::from_iter([first_token..=first_token]),
+                            rangeset_from_ranges([first_token..=first_token]),
                         )],
                         num_tsids,
                         disjoint_tsids: true,
@@ -1412,8 +1481,8 @@ impl FactorizedWeight {
             }
         }
 
-        let mut token_to_tsids: BTreeMap<usize, RangeSetBlaze<usize>> = BTreeMap::new();
-        let full_tsid_set = RangeSetBlaze::from_iter([0..=num_tsids - 1]);
+        let mut token_to_tsids: BTreeMap<usize, RangeSet> = BTreeMap::new();
+        let full_tsid_set = rangeset_from_ranges([0..=num_tsids - 1]);
 
         for range in rsb.ranges() {
             let start = *range.start();
@@ -1424,28 +1493,28 @@ impl FactorizedWeight {
             let end_tsid = end % num_tsids;
 
             if start_token == end_token {
-                let entry = token_to_tsids.entry(start_token).or_insert_with(RangeSetBlaze::new);
-                *entry |= &RangeSetBlaze::from_iter([start_tsid..=end_tsid]);
+                let entry = token_to_tsids.entry(start_token).or_insert_with(RangeSet::zeros);
+                *entry |= &rangeset_from_ranges([start_tsid..=end_tsid]);
                 continue;
             }
 
-            let entry = token_to_tsids.entry(start_token).or_insert_with(RangeSetBlaze::new);
-            *entry |= &RangeSetBlaze::from_iter([start_tsid..=num_tsids - 1]);
+            let entry = token_to_tsids.entry(start_token).or_insert_with(RangeSet::zeros);
+            *entry |= &rangeset_from_ranges([start_tsid..=num_tsids - 1]);
 
             if start_token + 1 <= end_token.saturating_sub(1) {
                 for token in (start_token + 1)..=end_token - 1 {
-                    let entry = token_to_tsids.entry(token).or_insert_with(RangeSetBlaze::new);
+                    let entry = token_to_tsids.entry(token).or_insert_with(RangeSet::zeros);
                     *entry |= &full_tsid_set;
                 }
             }
 
-            let entry = token_to_tsids.entry(end_token).or_insert_with(RangeSetBlaze::new);
-            *entry |= &RangeSetBlaze::from_iter([0..=end_tsid]);
+            let entry = token_to_tsids.entry(end_token).or_insert_with(RangeSet::zeros);
+            *entry |= &rangeset_from_ranges([0..=end_tsid]);
         }
 
         let mut weight = Self::new(num_tsids);
         for (token, tsid_set) in token_to_tsids {
-            let token_set = RangeSetBlaze::from_iter([token..=token]);
+            let token_set = rangeset_from_ranges([token..=token]);
             weight.add_pair(tsid_set, token_set);
         }
         weight.normalize_pairs();
@@ -1559,14 +1628,14 @@ impl FactorizedWeight {
     }
 }
 
-fn hash_rangeset<H: Hasher>(rsb: &RangeSetBlaze<usize>, state: &mut H) {
+fn hash_rangeset<H: Hasher>(rsb: &RangeSet, state: &mut H) {
     for range in rsb.ranges() {
         range.start().hash(state);
         range.end().hash(state);
     }
 }
 
-fn cmp_rangeset(a: &RangeSetBlaze<usize>, b: &RangeSetBlaze<usize>) -> std::cmp::Ordering {
+fn cmp_rangeset(a: &RangeSet, b: &RangeSet) -> std::cmp::Ordering {
     let mut a_ranges = a.ranges();
     let mut b_ranges = b.ranges();
     loop {
@@ -1625,7 +1694,7 @@ impl WeightBackend for FactorizedWeight {
     fn len(&self) -> usize {
         let mut total: u128 = 0;
         for (tsid_set, token_set) in &self.pairs {
-            let pair_count = tsid_set.len().saturating_mul(token_set.len());
+            let pair_count = (tsid_set.len() as u128).saturating_mul(token_set.len() as u128);
             total = total.saturating_add(pair_count);
         }
         if total > usize::MAX as u128 {
@@ -1665,8 +1734,8 @@ impl WeightBackend for FactorizedWeight {
         let num_tsids = self.num_tsids();
         let token = pos / num_tsids;
         let tsid = pos % num_tsids;
-        let tsid_set = RangeSetBlaze::from_iter([tsid..=tsid]);
-        let token_set = RangeSetBlaze::from_iter([token..=token]);
+        let tsid_set = rangeset_from_ranges([tsid..=tsid]);
+        let token_set = rangeset_from_ranges([token..=token]);
         self.add_pair(tsid_set, token_set);
         self.normalize_pairs();
     }
@@ -1928,4 +1997,109 @@ impl WeightBackend for FactorizedWeight {
             .max()
     }
 
+}
+
+impl WeightBackend for Arc<FactorizedWeight> {
+    fn empty() -> Self {
+        intern_factorized(FactorizedWeight::new(current_num_tsids()))
+    }
+
+    fn all(max_position: usize) -> Self {
+        intern_factorized(FactorizedWeight::all_with_max_position(max_position, current_num_tsids()))
+    }
+
+    fn from_position(pos: usize) -> Self {
+        intern_factorized(FactorizedWeight::from_position_with_num_tsids(pos, current_num_tsids()))
+    }
+
+    fn from_ranges<I: IntoIterator<Item = std::ops::RangeInclusive<usize>>>(ranges: I) -> Self {
+        let rsb = RangeSetBlaze::from_iter(ranges);
+        intern_factorized(FactorizedWeight::from_rsb_with_num_tsids(&rsb, current_num_tsids()))
+    }
+
+    fn is_empty(&self) -> bool {
+        WeightBackend::is_empty(self.as_ref())
+    }
+
+    fn len(&self) -> usize {
+        WeightBackend::len(self.as_ref())
+    }
+
+    fn contains(&self, pos: usize) -> bool {
+        WeightBackend::contains(self.as_ref(), pos)
+    }
+
+    fn ranges_len(&self) -> usize {
+        WeightBackend::ranges_len(self.as_ref())
+    }
+
+    fn num_ranges(&self) -> usize {
+        WeightBackend::num_ranges(self.as_ref())
+    }
+
+    fn insert(&mut self, pos: usize) {
+        let mut new = (**self).clone();
+        new.insert(pos);
+        *self = intern_factorized(new);
+    }
+
+    fn intersect(&self, other: &Self) -> Self {
+        if Arc::ptr_eq(self, other) {
+            return self.clone();
+        }
+        if let Some(hit) = get_op_cache(cache::BinOp::And, self, other) {
+            return hit;
+        }
+        let out = WeightBackend::intersect(self.as_ref(), other.as_ref());
+        let out = intern_factorized(out);
+        put_op_cache(cache::BinOp::And, self.clone(), other.clone(), out.clone());
+        out
+    }
+
+    fn intersect_assign(&mut self, other: &Self) {
+        *self = self.intersect(other);
+    }
+
+    fn union(&self, other: &Self) -> Self {
+        if Arc::ptr_eq(self, other) {
+            return self.clone();
+        }
+        if let Some(hit) = get_op_cache(cache::BinOp::Or, self, other) {
+            return hit;
+        }
+        let out = WeightBackend::union(self.as_ref(), other.as_ref());
+        let out = intern_factorized(out);
+        put_op_cache(cache::BinOp::Or, self.clone(), other.clone(), out.clone());
+        out
+    }
+
+    fn union_assign(&mut self, other: &Self) {
+        *self = self.union(other);
+    }
+
+    fn difference(&self, other: &Self) -> Self {
+        if Arc::ptr_eq(self, other) {
+            return intern_factorized(FactorizedWeight::new(self.num_tsids()));
+        }
+        if let Some(hit) = get_op_cache(cache::BinOp::Sub, self, other) {
+            return hit;
+        }
+        let out = WeightBackend::difference(self.as_ref(), other.as_ref());
+        let out = intern_factorized(out);
+        put_op_cache(cache::BinOp::Sub, self.clone(), other.clone(), out.clone());
+        out
+    }
+
+    fn complement(&self, max_position: usize) -> Self {
+        let out = WeightBackend::complement(self.as_ref(), max_position);
+        intern_factorized(out)
+    }
+
+    fn min_item(&self) -> Option<usize> {
+        WeightBackend::min_item(self.as_ref())
+    }
+
+    fn max_item(&self) -> Option<usize> {
+        WeightBackend::max_item(self.as_ref())
+    }
 }

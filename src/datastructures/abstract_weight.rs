@@ -17,8 +17,9 @@
 //! `rangeset` (default) and `factorized` backends.
 
 use range_set_blaze::RangeSetBlaze;
-use crate::datastructures::factorized_weight::FactorizedWeight;
-use crate::datastructures::rangemap_weight::RangeMapWeight;
+use crate::datastructures::factorized_weight::{FactorizedWeight, intern_factorized};
+use crate::datastructures::hybrid_bitset::RangeSet;
+use crate::datastructures::rangemap_weight::{RangeMapWeight, intern_rangemap};
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use serde::{Deserialize, Serialize};
 use serde::de::Error;
@@ -26,6 +27,7 @@ use serde_json::Value as JsonValue;
 use std::cell::RefCell;
 use std::hash::{Hash, Hasher};
 use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Not};
+use std::sync::Arc;
 
 /// Dimensions for weight-heavy mode encoding.
 /// 
@@ -218,48 +220,48 @@ pub trait WeightBackend: Clone + PartialEq + Eq + std::fmt::Debug {
 }
 
 // ---------------------------------------------------------------------------
-// RangeSetBlaze Backend Implementation
+// RangeSet (HybridBitset) Backend Implementation
 // ---------------------------------------------------------------------------
 
-impl WeightBackend for RangeSetBlaze<usize> {
+impl WeightBackend for RangeSet {
     fn empty() -> Self {
-        RangeSetBlaze::new()
+        RangeSet::zeros()
     }
     
     fn all(max_position: usize) -> Self {
-        RangeSetBlaze::from_iter([0..=max_position])
+        RangeSet::from(RangeSetBlaze::from_iter([0..=max_position]))
     }
     
     fn from_position(pos: usize) -> Self {
-        RangeSetBlaze::from_iter([pos..=pos])
+        RangeSet::from(RangeSetBlaze::from_iter([pos..=pos]))
     }
     
     fn from_ranges<I: IntoIterator<Item = std::ops::RangeInclusive<usize>>>(ranges: I) -> Self {
-        RangeSetBlaze::from_iter(ranges)
+        RangeSet::from(RangeSetBlaze::from_iter(ranges))
     }
     
     fn is_empty(&self) -> bool {
-        RangeSetBlaze::is_empty(self)
+        RangeSet::is_empty(self)
     }
     
     fn len(&self) -> usize {
-        RangeSetBlaze::len(self) as usize
+        RangeSet::len(self)
     }
     
     fn contains(&self, pos: usize) -> bool {
-        RangeSetBlaze::contains(self, pos)
+        RangeSet::contains(self, pos)
     }
     
     fn ranges_len(&self) -> usize {
-        RangeSetBlaze::ranges_len(self)
+        RangeSet::ranges_len(self)
     }
 
     fn num_ranges(&self) -> usize {
-        RangeSetBlaze::ranges_len(self)
+        RangeSet::ranges_len(self)
     }
     
     fn insert(&mut self, pos: usize) {
-        RangeSetBlaze::insert(self, pos);
+        RangeSet::insert_with_intern(self, pos);
     }
     
     fn intersect(&self, other: &Self) -> Self {
@@ -283,7 +285,7 @@ impl WeightBackend for RangeSetBlaze<usize> {
     }
     
     fn complement(&self, max_position: usize) -> Self {
-        let all = RangeSetBlaze::from_iter([0..=max_position]);
+        let all = RangeSet::from(RangeSetBlaze::from_iter([0..=max_position]));
         &all - self
     }
     
@@ -308,12 +310,12 @@ impl WeightBackend for RangeSetBlaze<usize> {
 /// computation must use the same backend.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AbstractWeight {
-    /// Weight represented as a RangeSetBlaze.
-    RangeSet(RangeSetBlaze<usize>),
+    /// Weight represented as a RangeSet (HybridBitset).
+    RangeSet(RangeSet),
     /// Weight represented as a factorized (tsid_set × token_set) union.
-    Factorized(FactorizedWeight),
+    Factorized(Arc<FactorizedWeight>),
     /// Weight represented as a RangeMapBlaze token->tsid mapping.
-    RangeMap(RangeMapWeight),
+    RangeMap(Arc<RangeMapWeight>),
     // Future variants can be added here, e.g.:
     // Bdd(BddWeight),
     // Explicit(Vec<usize>),
@@ -555,15 +557,15 @@ impl JSONConvertible for AbstractWeight {
                         };
                         let pairs_json = obj.remove("pairs").ok_or("Missing pairs")?;
                         let pairs_vec: Vec<(Vec<Vec<usize>>, Vec<Vec<usize>>)> = Vec::from_json(pairs_json)?;
-                        let pairs: Vec<(RangeSetBlaze<usize>, RangeSetBlaze<usize>)> = pairs_vec
+                        let pairs: Vec<(RangeSet, RangeSet)> = pairs_vec
                             .into_iter()
                             .map(|(tsid_ranges, token_ranges)| {
-                                let tsid_set = RangeSetBlaze::from_iter(
+                                let tsid_set = RangeSet::from(RangeSetBlaze::from_iter(
                                     tsid_ranges.into_iter().map(|v| v[0]..=v[1])
-                                );
-                                let token_set = RangeSetBlaze::from_iter(
+                                ));
+                                let token_set = RangeSet::from(RangeSetBlaze::from_iter(
                                     token_ranges.into_iter().map(|v| v[0]..=v[1])
-                                );
+                                ));
                                 (tsid_set, token_set)
                             })
                             .collect();
@@ -572,11 +574,13 @@ impl JSONConvertible for AbstractWeight {
                             BackendChoice::RangeSet => {
                                 AbstractWeight::from_rsb(fw.expand_to_rsb_unchecked())
                             }
-                            BackendChoice::Factorized => AbstractWeight::Factorized(fw),
+                            BackendChoice::Factorized => AbstractWeight::Factorized(intern_factorized(fw)),
                             BackendChoice::RangeMap => {
-                                AbstractWeight::RangeMap(RangeMapWeight::from_rsb_with_num_tsids(
-                                    &fw.expand_to_rsb_unchecked(),
-                                    num_tsids,
+                                AbstractWeight::RangeMap(intern_rangemap(
+                                    RangeMapWeight::from_rsb_with_num_tsids(
+                                        &fw.expand_to_rsb_unchecked(),
+                                        num_tsids,
+                                    ),
                                 ))
                             }
                         });
@@ -633,12 +637,12 @@ impl AbstractWeight {
     /// Create an empty weight (no positions).
     pub fn empty() -> Self {
         match backend_choice() {
-            BackendChoice::RangeSet => AbstractWeight::RangeSet(RangeSetBlaze::<usize>::empty()),
+            BackendChoice::RangeSet => AbstractWeight::RangeSet(RangeSet::zeros()),
             BackendChoice::Factorized => {
-                AbstractWeight::Factorized(FactorizedWeight::new(current_num_tsids()))
+                AbstractWeight::Factorized(intern_factorized(FactorizedWeight::new(current_num_tsids())))
             }
             BackendChoice::RangeMap => {
-                AbstractWeight::RangeMap(RangeMapWeight::new(current_num_tsids()))
+                AbstractWeight::RangeMap(intern_rangemap(RangeMapWeight::new(current_num_tsids())))
             }
         }
     }
@@ -664,16 +668,16 @@ impl AbstractWeight {
         };
         match backend_choice() {
             BackendChoice::RangeSet => {
-                AbstractWeight::RangeSet(RangeSetBlaze::<usize>::from_iter([0..=domain_max]))
+                AbstractWeight::RangeSet(RangeSet::from(RangeSetBlaze::from_iter([0..=domain_max])))
             }
             BackendChoice::Factorized => AbstractWeight::Factorized(
-                FactorizedWeight::all_with_max_position(
+                intern_factorized(FactorizedWeight::all_with_max_position(
                     domain_max,
                     normalize_num_tsids(num_tsids),
-                ),
+                )),
             ),
             BackendChoice::RangeMap => AbstractWeight::RangeMap(
-                RangeMapWeight::all(domain_max),
+                intern_rangemap(<RangeMapWeight as WeightBackend>::all(domain_max)),
             ),
         }
     }
@@ -692,16 +696,16 @@ impl AbstractWeight {
         }
         match backend_choice() {
             BackendChoice::RangeSet => {
-                AbstractWeight::RangeSet(RangeSetBlaze::<usize>::all(dims.max_position()))
+                AbstractWeight::RangeSet(RangeSet::from(RangeSetBlaze::from_iter([0..=dims.max_position()])))
             }
             BackendChoice::Factorized => AbstractWeight::Factorized(
-                FactorizedWeight::all_with_max_position(
+                intern_factorized(FactorizedWeight::all_with_max_position(
                     dims.max_position(),
                     normalize_num_tsids(dims.num_tsids),
-                ),
+                )),
             ),
             BackendChoice::RangeMap => AbstractWeight::RangeMap(
-                RangeMapWeight::all(dims.max_position()),
+                intern_rangemap(<RangeMapWeight as WeightBackend>::all(dims.max_position())),
             ),
         }
     }
@@ -710,13 +714,13 @@ impl AbstractWeight {
     pub fn from_position(pos: usize) -> Self {
         match backend_choice() {
             BackendChoice::RangeSet => {
-                AbstractWeight::RangeSet(RangeSetBlaze::<usize>::from_position(pos))
+                AbstractWeight::RangeSet(RangeSet::from_item(pos))
             }
             BackendChoice::Factorized => AbstractWeight::Factorized(
-                FactorizedWeight::from_position_with_num_tsids(pos, current_num_tsids()),
+                intern_factorized(FactorizedWeight::from_position_with_num_tsids(pos, current_num_tsids())),
             ),
             BackendChoice::RangeMap => AbstractWeight::RangeMap(
-                RangeMapWeight::from_position(pos),
+                intern_rangemap(<RangeMapWeight as WeightBackend>::from_position(pos)),
             ),
         }
     }
@@ -733,18 +737,18 @@ impl AbstractWeight {
     
     /// Create a weight from an iterator of inclusive ranges.
     pub fn from_ranges<I: IntoIterator<Item = std::ops::RangeInclusive<usize>>>(ranges: I) -> Self {
-        AbstractWeight::from_rsb(RangeSetBlaze::<usize>::from_ranges(ranges))
+        AbstractWeight::from_rsb(RangeSetBlaze::<usize>::from_iter(ranges))
     }
 
     /// Create a weight from a RangeSetBlaze.
     pub fn from_rsb(rsb: RangeSetBlaze<usize>) -> Self {
         match backend_choice() {
-            BackendChoice::RangeSet => AbstractWeight::RangeSet(rsb),
+            BackendChoice::RangeSet => AbstractWeight::RangeSet(RangeSet::from(rsb)),
             BackendChoice::Factorized => AbstractWeight::Factorized(
-                FactorizedWeight::from_rsb_with_num_tsids(&rsb, current_num_tsids()),
+                intern_factorized(FactorizedWeight::from_rsb_with_num_tsids(&rsb, current_num_tsids())),
             ),
             BackendChoice::RangeMap => AbstractWeight::RangeMap(
-                RangeMapWeight::from_rsb_with_num_tsids(&rsb, current_num_tsids()),
+                intern_rangemap(RangeMapWeight::from_rsb_with_num_tsids(&rsb, current_num_tsids())),
             ),
         }
     }
@@ -779,7 +783,7 @@ impl AbstractWeight {
     /// Expand to a RangeSetBlaze representation.
     pub fn to_rsb(&self) -> RangeSetBlaze<usize> {
         match self {
-            AbstractWeight::RangeSet(rsb) => rsb.clone(),
+            AbstractWeight::RangeSet(rsb) => rsb.inner().clone(),
             AbstractWeight::Factorized(fw) => {
                 if !is_expansion_allowed() {
                     panic!(
@@ -797,7 +801,7 @@ impl AbstractWeight {
     /// Use sparingly in runtime paths where expansion is acceptable.
     pub fn to_rsb_allow_expansion(&self) -> RangeSetBlaze<usize> {
         match self {
-            AbstractWeight::RangeSet(rsb) => rsb.clone(),
+            AbstractWeight::RangeSet(rsb) => rsb.inner().clone(),
             AbstractWeight::Factorized(fw) => fw.expand_to_rsb_unchecked(),
             AbstractWeight::RangeMap(rm) => rm.expand_to_rsb(),
         }
@@ -1220,7 +1224,7 @@ impl AbstractWeight {
     pub fn iter_up_to(&self, max: usize) -> impl Iterator<Item = usize> + '_ {
         match self {
             AbstractWeight::RangeSet(rsb) => {
-                let clipped = rsb & &RangeSetBlaze::from_iter([0..=max]);
+                let clipped = rsb & &RangeSet::from(RangeSetBlaze::from_iter([0..=max]));
                 clipped.into_iter()
             }
             AbstractWeight::Factorized(fw) => {
@@ -1299,25 +1303,25 @@ impl From<&crate::datastructures::hybrid_bitset::RangeSet> for AbstractWeight {
 
 impl From<FactorizedWeight> for AbstractWeight {
     fn from(weight: FactorizedWeight) -> Self {
-        AbstractWeight::Factorized(weight)
+        AbstractWeight::Factorized(intern_factorized(weight))
     }
 }
 
 impl From<&FactorizedWeight> for AbstractWeight {
     fn from(weight: &FactorizedWeight) -> Self {
-        AbstractWeight::Factorized(weight.clone())
+        AbstractWeight::Factorized(intern_factorized(weight.clone()))
     }
 }
 
 impl From<RangeMapWeight> for AbstractWeight {
     fn from(weight: RangeMapWeight) -> Self {
-        AbstractWeight::RangeMap(weight)
+        AbstractWeight::RangeMap(intern_rangemap(weight))
     }
 }
 
 impl From<&RangeMapWeight> for AbstractWeight {
     fn from(weight: &RangeMapWeight) -> Self {
-        AbstractWeight::RangeMap(weight.clone())
+        AbstractWeight::RangeMap(intern_rangemap(weight.clone()))
     }
 }
 
@@ -1329,7 +1333,7 @@ impl From<&RangeMapWeight> for AbstractWeight {
 mod tests {
     use super::*;
 
-    type Backend = RangeSetBlaze<usize>;
+    type Backend = RangeSet;
 
     #[test]
     fn test_weight_dimensions_encoding() {

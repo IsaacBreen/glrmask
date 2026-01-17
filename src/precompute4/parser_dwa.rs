@@ -1058,7 +1058,7 @@ pub fn instantiate_nwa_template_into(
             if let Some(concrete_w) = ordered_weights.get(idx) {
                 if matches!(concrete, Weight::Factorized(_)) {
                     if let Weight::RangeSet(rsb) = concrete_w {
-                        let converted = Weight::from_rsb(rsb.clone());
+                        let converted = Weight::from_rsb(rsb.inner().clone());
                         concrete |= &converted;
                         continue;
                     }
