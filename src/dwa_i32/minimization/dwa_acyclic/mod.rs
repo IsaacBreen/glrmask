@@ -59,6 +59,9 @@ fn push_weights_acyclic(dwa: &mut DWA) -> bool {
     let n = dwa.states.len();
     if n == 0 { return false; }
 
+    let start = std::time::Instant::now();
+    crate::datastructures::hybrid_bitset::reset_profiling();
+
     // Compute topological order using Kahn's algorithm
     let mut in_degree = vec![0usize; n];
     for u in 0..n {
@@ -85,30 +88,59 @@ fn push_weights_acyclic(dwa: &mut DWA) -> bool {
 
     // Compute reachable outputs (backward from leaves)
     let mut reachable = vec![Weight::zeros(); n];
+    let mut reachable_is_empty = vec![true; n];
+    let mut reachable_is_all = vec![false; n];
     for &u in topo_order.iter().rev() {
         let mut reach_u = dwa.states[u].final_weight.clone().unwrap_or_else(Weight::zeros);
-        for (&label, &target) in &dwa.states[u].transitions {
-            if target < n {
-                if let Some(w) = dwa.states[u].trans_weights.get(&label) {
+        let mut reach_all = reach_u.is_all_fast();
+        if !reach_all {
+            for (&label, &target) in &dwa.states[u].transitions {
+                if target >= n { continue; }
+                if reachable_is_empty[target] { continue; }
+                let Some(w) = dwa.states[u].trans_weights.get(&label) else { continue; };
+                if w.is_empty() { continue; }
+                if reachable_is_all[target] {
+                    reach_u |= w;
+                } else {
                     reach_u |= &(w & &reachable[target]);
+                }
+                if reach_u.is_all_fast() {
+                    reach_all = true;
+                    break;
                 }
             }
         }
+        reachable_is_empty[u] = reach_u.is_empty();
+        reachable_is_all[u] = reach_all || reach_u.is_all_fast();
         reachable[u] = reach_u;
     }
 
     // Push reachable outputs into transition weights
     let mut changed = false;
     for u in 0..n {
-        for (&label, &target) in dwa.states[u].transitions.clone().iter() {
-            if target < n {
-                if let Some(w) = dwa.states[u].trans_weights.get_mut(&label) {
-                    let new_w = &*w & &reachable[target];
-                    if *w != new_w { *w = new_w; changed = true; }
-                }
+        let (transitions, trans_weights) = {
+            let state = &mut dwa.states[u];
+            (&state.transitions, &mut state.trans_weights)
+        };
+        for (&label, &target) in transitions.iter() {
+            if target >= n { continue; }
+            let Some(w) = trans_weights.get_mut(&label) else { continue; };
+            if w.is_empty() { continue; }
+            if reachable_is_all[target] { continue; }
+            if reachable_is_empty[target] {
+                *w = Weight::zeros();
+                changed = true;
+                continue;
+            }
+            let new_w = &*w & &reachable[target];
+            if *w != new_w {
+                *w = new_w;
+                changed = true;
             }
         }
     }
+    crate::datastructures::hybrid_bitset::print_profiling("push_weights_acyclic");
+    crate::debug!(5, "push_weights_acyclic: {:?} (changed={})", start.elapsed(), changed);
     changed
 }
 
@@ -132,27 +164,36 @@ pub fn minimize_acyclic_exact(dwa: &DWA) -> Result<DWA, DWABuildError> {
     let total_start = std::time::Instant::now();
     
     // Step 0: Preprocess - tighten weights by removing unreachable tokens
+    crate::debug!(5, "Acyclic minimize step 0 start (tighten_weights)");
     let step0_start = std::time::Instant::now();
     crate::datastructures::hybrid_bitset::reset_profiling();
     let dwa = tighten_weights(dwa)?;
     crate::datastructures::hybrid_bitset::print_profiling("tighten_weights");
-    crate::debug!(6, "Acyclic minimize step 0 (tighten_weights): {:?}", step0_start.elapsed());
+    crate::debug!(5, "Acyclic minimize step 0 end (tighten_weights): {:?}", step0_start.elapsed());
+    crate::debug!(5, "Acyclic minimize step 0 (tighten_weights): {:?}", step0_start.elapsed());
 
     // 1. Topological Sort & Reachability Analysis
+    crate::debug!(5, "Acyclic minimize step 1 start (topo_order)");
     let step1_start = std::time::Instant::now();
     let topo_order = compute_topo_order(&dwa)?;
-    crate::debug!(6, "Acyclic minimize step 1 (topo_order): {:?}", step1_start.elapsed());
+    crate::debug!(5, "Acyclic minimize step 1 end (topo_order): {:?}", step1_start.elapsed());
+    crate::debug!(5, "Acyclic minimize step 1 (topo_order): {:?}", step1_start.elapsed());
 
     // 2. Compute "Needed" sets (Reverse Flow Analysis).
+    crate::debug!(5, "Acyclic minimize step 2 start (needed_sets)");
     let step2_start = std::time::Instant::now();
     crate::datastructures::hybrid_bitset::reset_profiling();
     let needed = compute_needed_sets(&dwa, &topo_order);
     crate::datastructures::hybrid_bitset::print_profiling("compute_needed_sets");
-    crate::debug!(6, "Acyclic minimize step 2 (needed_sets): {:?}", step2_start.elapsed());
+    crate::debug!(5, "Acyclic minimize step 2 end (needed_sets): {:?}", step2_start.elapsed());
+    crate::debug!(5, "Acyclic minimize step 2 (needed_sets): {:?}", step2_start.elapsed());
 
     // 3. Layer states by topological height (distance to sink).
     let step3_start = std::time::Instant::now();
     let heights = compute_heights(&dwa, &topo_order);
+    crate::debug!(5, "Acyclic minimize step 3a (compute_heights): {:?}", step3_start.elapsed());
+
+    let step3b_start = std::time::Instant::now();
     let max_height = heights.iter().max().copied().unwrap_or(0);
 
     let mut states_by_height: Vec<Vec<StateID>> = vec![vec![]; max_height + 1];
@@ -160,8 +201,8 @@ pub fn minimize_acyclic_exact(dwa: &DWA) -> Result<DWA, DWABuildError> {
         if needed[id].is_empty() && id != dwa.body.start_state { continue; }
         states_by_height[h].push(id);
     }
-    crate::debug!(6, "Acyclic minimize step 3 (heights): {:?}, max_height={}, largest_level={}", 
-        step3_start.elapsed(), max_height,
+    crate::debug!(5, "Acyclic minimize step 3b (states_by_height): {:?}, max_height={}, largest_level={}", 
+        step3b_start.elapsed(), max_height,
         states_by_height.iter().map(|v| v.len()).max().unwrap_or(0));
 
     // 4. Bottom-Up Exact Minimization
@@ -169,8 +210,12 @@ pub fn minimize_acyclic_exact(dwa: &DWA) -> Result<DWA, DWABuildError> {
     let mut new_states: Vec<MergedStateBuilder> = Vec::new();
 
     // Process from leaves (height 0) upwards
+    let mut last_height_debug = std::time::Instant::now();
     for h in 0..=max_height {
         let candidates = &states_by_height[h];
+        let since_last = last_height_debug.elapsed();
+        crate::debug!(5, "Height {} start: {} candidates, {:?}", h, candidates.len(), since_last);
+        last_height_debug = std::time::Instant::now();
         if candidates.is_empty() { continue; }
 
         if candidates.len() >= 100 {
@@ -641,9 +686,15 @@ fn compute_forward_reachable(dwa: &DWA, topo_order: &[StateID]) -> Vec<Weight> {
 fn tighten_weights(dwa: &DWA) -> Result<DWA, DWABuildError> {
     if dwa.states.is_empty() { return Ok(DWA::new()); }
     
+    let topo_start = std::time::Instant::now();
     let topo_order = compute_topo_order(dwa)?;
+    crate::debug!(5, "tighten_weights: topo_order computed in {:?}", topo_start.elapsed());
+
+    let forward_start = std::time::Instant::now();
     let forward = compute_forward_reachable(dwa, &topo_order);
+    crate::debug!(5, "tighten_weights: forward_reachable computed in {:?}", forward_start.elapsed());
     
+    let build_start = std::time::Instant::now();
     let mut new_states = DWAStates(Vec::with_capacity(dwa.states.len()));
     for (u, state) in dwa.states.0.iter().enumerate() {
         let mut new_state = DWAState::default();
@@ -669,6 +720,7 @@ fn tighten_weights(dwa: &DWA) -> Result<DWA, DWABuildError> {
         }
         new_states.0.push(new_state);
     }
+    crate::debug!(5, "tighten_weights: new DWA built in {:?}", build_start.elapsed());
     
     Ok(DWA { states: new_states, body: dwa.body.clone() })
 }
