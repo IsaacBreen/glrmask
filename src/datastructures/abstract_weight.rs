@@ -18,6 +18,7 @@
 
 use range_set_blaze::RangeSetBlaze;
 use crate::datastructures::factorized_weight::FactorizedWeight;
+use crate::datastructures::rangemap_weight::RangeMapWeight;
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use serde::{Deserialize, Serialize};
 use serde::de::Error;
@@ -89,6 +90,7 @@ impl WeightDimensions {
 pub enum BackendChoice {
     RangeSet,
     Factorized,
+    RangeMap,
 }
 
 thread_local! {
@@ -136,7 +138,8 @@ fn backend_choice() -> BackendChoice {
     }
     match std::env::var("ABSTRACT_WEIGHT_BACKEND") {
         Ok(value) if value.eq_ignore_ascii_case("rsb") || value.eq_ignore_ascii_case("rangeset") => BackendChoice::RangeSet,
-        _ => BackendChoice::Factorized, // Default to factorized
+        Ok(value) if value.eq_ignore_ascii_case("factorized") => BackendChoice::Factorized,
+        _ => BackendChoice::RangeMap, // Default to rangemap
     }
 }
 
@@ -302,6 +305,8 @@ pub enum AbstractWeight {
     RangeSet(RangeSetBlaze<usize>),
     /// Weight represented as a factorized (tsid_set × token_set) union.
     Factorized(FactorizedWeight),
+    /// Weight represented as a RangeMapBlaze token->tsid mapping.
+    RangeMap(RangeMapWeight),
     // Future variants can be added here, e.g.:
     // Bdd(BddWeight),
     // Explicit(Vec<usize>),
@@ -320,6 +325,18 @@ impl std::hash::Hash for AbstractWeight {
             AbstractWeight::Factorized(fw) => {
                 1u8.hash(state);
                 fw.hash(state);
+            }
+            AbstractWeight::RangeMap(rm) => {
+                2u8.hash(state);
+                rm.num_tsids.hash(state);
+                for (token_range, tsid_set) in rm.map.range_values() {
+                    token_range.start().hash(state);
+                    token_range.end().hash(state);
+                    for tsid_range in tsid_set.ranges() {
+                        tsid_range.start().hash(state);
+                        tsid_range.end().hash(state);
+                    }
+                }
             }
         }
     }
@@ -358,6 +375,9 @@ impl std::fmt::Display for AbstractWeight {
             }
             AbstractWeight::Factorized(fw) => {
                 write!(f, "FactorizedWeight({} pairs)", fw.pairs.len())
+            }
+            AbstractWeight::RangeMap(rm) => {
+                write!(f, "RangeMapWeight({} ranges)", rm.map.range_values().count())
             }
         }
     }
@@ -481,6 +501,18 @@ impl JSONConvertible for AbstractWeight {
                 obj.insert("pairs".to_string(), pairs.to_json());
                 JSONNode::Object(obj)
             }
+            AbstractWeight::RangeMap(rm) => {
+                let ranges_vec: Vec<Vec<usize>> = rm
+                    .expand_to_rsb()
+                    .ranges()
+                    .map(|ri| vec![*ri.start(), *ri.end()])
+                    .collect();
+                let mut obj = std::collections::BTreeMap::new();
+                obj.insert("type".to_string(), JSONNode::String("rangemap".to_string()));
+                obj.insert("num_tsids".to_string(), JSONNode::UInt(rm.num_tsids() as u128));
+                obj.insert("ranges".to_string(), ranges_vec.to_json());
+                JSONNode::Object(obj)
+            }
         }
     }
 
@@ -534,7 +566,28 @@ impl JSONConvertible for AbstractWeight {
                                 AbstractWeight::from_rsb(fw.expand_to_rsb_unchecked())
                             }
                             BackendChoice::Factorized => AbstractWeight::Factorized(fw),
+                            BackendChoice::RangeMap => {
+                                AbstractWeight::RangeMap(RangeMapWeight::from_rsb_with_num_tsids(
+                                    &fw.expand_to_rsb_unchecked(),
+                                    num_tsids,
+                                ))
+                            }
                         });
+                    }
+                    "rangemap" => {
+                        let ranges_vec: Vec<Vec<usize>> = Vec::from_json(
+                            obj.remove("ranges").ok_or("Missing ranges")?
+                        )?;
+                        let mut ranges = Vec::new();
+                        for mut v in ranges_vec {
+                            if v.len() != 2 {
+                                return Err(format!("Expected 2-element array, got {:?}", v));
+                            }
+                            let end = v.pop().unwrap();
+                            let start = v.pop().unwrap();
+                            ranges.push(start..=end);
+                        }
+                        return Ok(AbstractWeight::from_rsb(RangeSetBlaze::from_iter(ranges)));
                     }
                     _ => return Err(format!("Unknown weight type: {}", type_str)),
                 }
@@ -577,6 +630,9 @@ impl AbstractWeight {
             BackendChoice::Factorized => {
                 AbstractWeight::Factorized(FactorizedWeight::new(current_num_tsids()))
             }
+            BackendChoice::RangeMap => {
+                AbstractWeight::RangeMap(RangeMapWeight::new(current_num_tsids()))
+            }
         }
     }
     
@@ -609,6 +665,9 @@ impl AbstractWeight {
                     normalize_num_tsids(num_tsids),
                 ),
             ),
+            BackendChoice::RangeMap => AbstractWeight::RangeMap(
+                RangeMapWeight::all(domain_max),
+            ),
         }
     }
     
@@ -634,6 +693,9 @@ impl AbstractWeight {
                     normalize_num_tsids(dims.num_tsids),
                 ),
             ),
+            BackendChoice::RangeMap => AbstractWeight::RangeMap(
+                RangeMapWeight::all(dims.max_position()),
+            ),
         }
     }
 
@@ -645,6 +707,9 @@ impl AbstractWeight {
             }
             BackendChoice::Factorized => AbstractWeight::Factorized(
                 FactorizedWeight::from_position_with_num_tsids(pos, current_num_tsids()),
+            ),
+            BackendChoice::RangeMap => AbstractWeight::RangeMap(
+                RangeMapWeight::from_position(pos),
             ),
         }
     }
@@ -671,6 +736,9 @@ impl AbstractWeight {
             BackendChoice::Factorized => AbstractWeight::Factorized(
                 FactorizedWeight::from_rsb_with_num_tsids(&rsb, current_num_tsids()),
             ),
+            BackendChoice::RangeMap => AbstractWeight::RangeMap(
+                RangeMapWeight::from_rsb_with_num_tsids(&rsb, current_num_tsids()),
+            ),
         }
     }
 
@@ -679,6 +747,7 @@ impl AbstractWeight {
         match self {
             AbstractWeight::RangeSet(rsb) => WeightBackend::is_empty(rsb),
             AbstractWeight::Factorized(fw) => WeightBackend::is_empty(fw),
+            AbstractWeight::RangeMap(rm) => WeightBackend::is_empty(rm),
         }
     }
 
@@ -687,6 +756,7 @@ impl AbstractWeight {
         match self {
             AbstractWeight::RangeSet(rsb) => WeightBackend::len(rsb),
             AbstractWeight::Factorized(fw) => WeightBackend::len(fw),
+            AbstractWeight::RangeMap(rm) => WeightBackend::len(rm),
         }
     }
 
@@ -695,6 +765,7 @@ impl AbstractWeight {
         match self {
             AbstractWeight::RangeSet(rsb) => WeightBackend::contains(rsb, pos),
             AbstractWeight::Factorized(fw) => WeightBackend::contains(fw, pos),
+            AbstractWeight::RangeMap(rm) => WeightBackend::contains(rm, pos),
         }
     }
 
@@ -710,6 +781,7 @@ impl AbstractWeight {
                 }
                 fw.expand_to_rsb()
             }
+            AbstractWeight::RangeMap(rm) => rm.expand_to_rsb(),
         }
     }
 
@@ -720,6 +792,7 @@ impl AbstractWeight {
         match self {
             AbstractWeight::RangeSet(rsb) => rsb.clone(),
             AbstractWeight::Factorized(fw) => fw.expand_to_rsb_unchecked(),
+            AbstractWeight::RangeMap(rm) => rm.expand_to_rsb(),
         }
     }
 
@@ -733,6 +806,7 @@ impl AbstractWeight {
         match self {
             AbstractWeight::RangeSet(rsb) => WeightBackend::ranges_len(rsb),
             AbstractWeight::Factorized(fw) => WeightBackend::ranges_len(fw),
+            AbstractWeight::RangeMap(rm) => WeightBackend::ranges_len(rm),
         }
     }
     
@@ -768,6 +842,10 @@ impl AbstractWeight {
                 let ranges: Vec<_> = fw.expand_to_rsb().ranges().collect();
                 Box::new(ranges.into_iter())
             }
+            AbstractWeight::RangeMap(rm) => {
+                let ranges: Vec<_> = rm.expand_to_rsb().ranges().collect();
+                Box::new(ranges.into_iter())
+            }
         }
     }
 
@@ -776,6 +854,7 @@ impl AbstractWeight {
         match self {
             AbstractWeight::RangeSet(rsb) => WeightBackend::insert(rsb, pos),
             AbstractWeight::Factorized(fw) => WeightBackend::insert(fw, pos),
+            AbstractWeight::RangeMap(rm) => WeightBackend::insert(rm, pos),
         }
     }
 
@@ -799,6 +878,7 @@ impl AbstractWeight {
         match self {
             AbstractWeight::RangeSet(rsb) => WeightBackend::min_item(rsb),
             AbstractWeight::Factorized(fw) => WeightBackend::min_item(fw),
+            AbstractWeight::RangeMap(rm) => WeightBackend::min_item(rm),
         }
     }
     
@@ -807,6 +887,7 @@ impl AbstractWeight {
         match self {
             AbstractWeight::RangeSet(rsb) => WeightBackend::max_item(rsb),
             AbstractWeight::Factorized(fw) => WeightBackend::max_item(fw),
+            AbstractWeight::RangeMap(rm) => WeightBackend::max_item(rm),
         }
     }
     
@@ -820,6 +901,9 @@ impl AbstractWeight {
             }
             (AbstractWeight::Factorized(a), AbstractWeight::Factorized(b)) => {
                 AbstractWeight::Factorized(WeightBackend::difference(a, b))
+            }
+            (AbstractWeight::RangeMap(a), AbstractWeight::RangeMap(b)) => {
+                AbstractWeight::RangeMap(WeightBackend::difference(a, b))
             }
             _ => panic!("AbstractWeight operation requires both operands to be the same variant"),
         }
@@ -842,6 +926,9 @@ impl BitAnd for AbstractWeight {
             (AbstractWeight::Factorized(a), AbstractWeight::Factorized(b)) => {
                 AbstractWeight::Factorized(WeightBackend::intersect(&a, &b))
             }
+            (AbstractWeight::RangeMap(a), AbstractWeight::RangeMap(b)) => {
+                AbstractWeight::RangeMap(WeightBackend::intersect(&a, &b))
+            }
             _ => panic!("AbstractWeight operation requires both operands to be the same variant"),
         }
     }
@@ -857,6 +944,9 @@ impl BitAnd<&AbstractWeight> for AbstractWeight {
             }
             (AbstractWeight::Factorized(a), AbstractWeight::Factorized(b)) => {
                 AbstractWeight::Factorized(WeightBackend::intersect(&a, b))
+            }
+            (AbstractWeight::RangeMap(a), AbstractWeight::RangeMap(b)) => {
+                AbstractWeight::RangeMap(WeightBackend::intersect(&a, b))
             }
             _ => panic!("AbstractWeight operation requires both operands to be the same variant"),
         }
@@ -874,6 +964,9 @@ impl BitAnd for &AbstractWeight {
             (AbstractWeight::Factorized(a), AbstractWeight::Factorized(b)) => {
                 AbstractWeight::Factorized(WeightBackend::intersect(a, b))
             }
+            (AbstractWeight::RangeMap(a), AbstractWeight::RangeMap(b)) => {
+                AbstractWeight::RangeMap(WeightBackend::intersect(a, b))
+            }
             _ => panic!("AbstractWeight operation requires both operands to be the same variant"),
         }
     }
@@ -888,6 +981,9 @@ impl BitAndAssign for AbstractWeight {
             (AbstractWeight::Factorized(a), AbstractWeight::Factorized(b)) => {
                 WeightBackend::intersect_assign(a, b);
             }
+            (AbstractWeight::RangeMap(a), AbstractWeight::RangeMap(b)) => {
+                WeightBackend::intersect_assign(a, b);
+            }
             _ => panic!("AbstractWeight operation requires both operands to be the same variant"),
         }
     }
@@ -900,6 +996,9 @@ impl BitAndAssign<&AbstractWeight> for AbstractWeight {
                 WeightBackend::intersect_assign(a, b);
             }
             (AbstractWeight::Factorized(a), AbstractWeight::Factorized(b)) => {
+                WeightBackend::intersect_assign(a, b);
+            }
+            (AbstractWeight::RangeMap(a), AbstractWeight::RangeMap(b)) => {
                 WeightBackend::intersect_assign(a, b);
             }
             _ => panic!("AbstractWeight operation requires both operands to be the same variant"),
@@ -918,6 +1017,9 @@ impl BitOr for AbstractWeight {
             (AbstractWeight::Factorized(a), AbstractWeight::Factorized(b)) => {
                 AbstractWeight::Factorized(WeightBackend::union(&a, &b))
             }
+            (AbstractWeight::RangeMap(a), AbstractWeight::RangeMap(b)) => {
+                AbstractWeight::RangeMap(WeightBackend::union(&a, &b))
+            }
             _ => panic!("AbstractWeight operation requires both operands to be the same variant"),
         }
     }
@@ -933,6 +1035,9 @@ impl BitOr<&AbstractWeight> for AbstractWeight {
             }
             (AbstractWeight::Factorized(a), AbstractWeight::Factorized(b)) => {
                 AbstractWeight::Factorized(WeightBackend::union(&a, b))
+            }
+            (AbstractWeight::RangeMap(a), AbstractWeight::RangeMap(b)) => {
+                AbstractWeight::RangeMap(WeightBackend::union(&a, b))
             }
             _ => panic!("AbstractWeight operation requires both operands to be the same variant"),
         }
@@ -950,6 +1055,9 @@ impl BitOr for &AbstractWeight {
             (AbstractWeight::Factorized(a), AbstractWeight::Factorized(b)) => {
                 AbstractWeight::Factorized(WeightBackend::union(a, b))
             }
+            (AbstractWeight::RangeMap(a), AbstractWeight::RangeMap(b)) => {
+                AbstractWeight::RangeMap(WeightBackend::union(a, b))
+            }
             _ => panic!("AbstractWeight operation requires both operands to be the same variant"),
         }
     }
@@ -964,6 +1072,9 @@ impl BitOrAssign for AbstractWeight {
             (AbstractWeight::Factorized(a), AbstractWeight::Factorized(b)) => {
                 WeightBackend::union_assign(a, b);
             }
+            (AbstractWeight::RangeMap(a), AbstractWeight::RangeMap(b)) => {
+                WeightBackend::union_assign(a, b);
+            }
             _ => panic!("AbstractWeight operation requires both operands to be the same variant"),
         }
     }
@@ -976,6 +1087,9 @@ impl BitOrAssign<&AbstractWeight> for AbstractWeight {
                 WeightBackend::union_assign(a, b);
             }
             (AbstractWeight::Factorized(a), AbstractWeight::Factorized(b)) => {
+                WeightBackend::union_assign(a, b);
+            }
+            (AbstractWeight::RangeMap(a), AbstractWeight::RangeMap(b)) => {
                 WeightBackend::union_assign(a, b);
             }
             _ => panic!("AbstractWeight operation requires both operands to be the same variant"),
@@ -1000,6 +1114,9 @@ impl std::ops::Sub for AbstractWeight {
             (AbstractWeight::Factorized(a), AbstractWeight::Factorized(b)) => {
                 AbstractWeight::Factorized(WeightBackend::difference(&a, &b))
             }
+            (AbstractWeight::RangeMap(a), AbstractWeight::RangeMap(b)) => {
+                AbstractWeight::RangeMap(WeightBackend::difference(&a, &b))
+            }
             _ => panic!("AbstractWeight operation requires both operands to be the same variant"),
         }
     }
@@ -1016,6 +1133,9 @@ impl std::ops::Sub for &AbstractWeight {
             (AbstractWeight::Factorized(a), AbstractWeight::Factorized(b)) => {
                 AbstractWeight::Factorized(WeightBackend::difference(a, b))
             }
+            (AbstractWeight::RangeMap(a), AbstractWeight::RangeMap(b)) => {
+                AbstractWeight::RangeMap(WeightBackend::difference(a, b))
+            }
             _ => panic!("AbstractWeight operation requires both operands to be the same variant"),
         }
     }
@@ -1028,6 +1148,9 @@ impl std::ops::SubAssign<&AbstractWeight> for AbstractWeight {
                 *a = WeightBackend::difference(a, b);
             }
             (AbstractWeight::Factorized(a), AbstractWeight::Factorized(b)) => {
+                *a = WeightBackend::difference(a, b);
+            }
+            (AbstractWeight::RangeMap(a), AbstractWeight::RangeMap(b)) => {
                 *a = WeightBackend::difference(a, b);
             }
             _ => panic!("AbstractWeight operation requires both operands to be the same variant"),
@@ -1059,6 +1182,14 @@ impl AbstractWeight {
                 );
                 AbstractWeight::Factorized(WeightBackend::complement(fw, domain_max))
             }
+            AbstractWeight::RangeMap(rm) => {
+                assert_eq!(
+                    rm.num_tsids(),
+                    normalize_num_tsids(num_tsids),
+                    "RangeMapWeight dimensions mismatch in complement"
+                );
+                AbstractWeight::RangeMap(WeightBackend::complement(rm, domain_max))
+            }
         }
     }
 
@@ -1083,6 +1214,9 @@ impl AbstractWeight {
             }
             AbstractWeight::Factorized(fw) => {
                 fw.expand_to_rsb_bounded(max).into_iter()
+            }
+            AbstractWeight::RangeMap(rm) => {
+                rm.expand_to_rsb_bounded(max).into_iter()
             }
         }
     }
@@ -1111,6 +1245,14 @@ impl AbstractWeight {
                     "FactorizedWeight dimensions mismatch in complement_with_dims"
                 );
                 AbstractWeight::Factorized(WeightBackend::complement(fw, dims.max_position()))
+            }
+            AbstractWeight::RangeMap(rm) => {
+                assert_eq!(
+                    rm.num_tsids(),
+                    normalize_num_tsids(dims.num_tsids),
+                    "RangeMapWeight dimensions mismatch in complement_with_dims"
+                );
+                AbstractWeight::RangeMap(WeightBackend::complement(rm, dims.max_position()))
             }
         }
     }
@@ -1153,6 +1295,18 @@ impl From<FactorizedWeight> for AbstractWeight {
 impl From<&FactorizedWeight> for AbstractWeight {
     fn from(weight: &FactorizedWeight) -> Self {
         AbstractWeight::Factorized(weight.clone())
+    }
+}
+
+impl From<RangeMapWeight> for AbstractWeight {
+    fn from(weight: RangeMapWeight) -> Self {
+        AbstractWeight::RangeMap(weight)
+    }
+}
+
+impl From<&RangeMapWeight> for AbstractWeight {
+    fn from(weight: &RangeMapWeight) -> Self {
+        AbstractWeight::RangeMap(weight.clone())
     }
 }
 

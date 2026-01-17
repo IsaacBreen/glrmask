@@ -966,6 +966,20 @@ impl From<crate::datastructures::AbstractWeight> for RangeSet {
                     RangeSet::from(fw.expand_to_rsb())
                 }
             }
+            AbstractWeight::RangeMap(rm) => {
+                let num_tsids = get_num_tsids();
+                if num_tsids <= 1 {
+                    let mut result = RangeSetBlaze::new();
+                    for (token_range, tsid_set) in rm.map.range_values() {
+                        if tsid_set.contains(0) {
+                            result |= &RangeSetBlaze::from_iter([token_range.clone()]);
+                        }
+                    }
+                    RangeSet::from(result)
+                } else {
+                    RangeSet::from(rm.expand_to_rsb())
+                }
+            }
         }
     }
 }
