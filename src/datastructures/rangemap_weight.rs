@@ -18,6 +18,9 @@ static RANGEMAP_WEIGHT_INTERNER: Lazy<Mutex<HashSet<Arc<RangeMapWeight>>>> =
 static RANGEMAP_OP_CACHE: Lazy<Mutex<LruCache<OpKey, Arc<RangeMapWeight>>>> = Lazy::new(|| {
     Mutex::new(LruCache::new(NonZeroUsize::new(WEIGHT_OP_CACHE_CAPACITY).unwrap()))
 });
+static RANGEMAP_OP_CACHE_INDEX: Lazy<Mutex<HashMap<usize, HashSet<OpKey>>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+static RANGEMAP_WEIGHT_PTRS: Lazy<Mutex<HashSet<usize>>> = Lazy::new(|| Mutex::new(HashSet::new()));
 static FULL_TSIDS_CACHE: Lazy<Mutex<HashMap<usize, RangeSet>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
@@ -36,7 +39,51 @@ fn op_key(op: cache::BinOp, a: &Arc<RangeMapWeight>, b: &Arc<RangeMapWeight>) ->
     }
 }
 
+fn is_interned_rangemap(weight: &Arc<RangeMapWeight>) -> bool {
+    let ptr = Arc::as_ptr(weight) as usize;
+    {
+        let ptrs = RANGEMAP_WEIGHT_PTRS.lock().unwrap();
+        if ptrs.contains(&ptr) {
+            return true;
+        }
+    }
+    let interner = RANGEMAP_WEIGHT_INTERNER.lock().unwrap();
+    let found = interner.iter().any(|arc| Arc::as_ptr(arc) as usize == ptr);
+    if found {
+        RANGEMAP_WEIGHT_PTRS.lock().unwrap().insert(ptr);
+    }
+    found
+}
+
+fn remove_op_key_from_index(index: &mut HashMap<usize, HashSet<OpKey>>, key: OpKey) {
+    if let Some(set) = index.get_mut(&key.a) {
+        set.remove(&key);
+        if set.is_empty() {
+            index.remove(&key.a);
+        }
+    }
+    if let Some(set) = index.get_mut(&key.b) {
+        set.remove(&key);
+        if set.is_empty() {
+            index.remove(&key.b);
+        }
+    }
+}
+
+fn invalidate_rangemap_op_cache_for_ptr(ptr: usize) {
+    let mut cache = RANGEMAP_OP_CACHE.lock().unwrap();
+    let mut index = RANGEMAP_OP_CACHE_INDEX.lock().unwrap();
+    let Some(keys) = index.remove(&ptr) else { return; };
+    for key in keys {
+        cache.pop(&key);
+        remove_op_key_from_index(&mut index, key);
+    }
+}
+
 fn get_op_cache(op: cache::BinOp, a: &Arc<RangeMapWeight>, b: &Arc<RangeMapWeight>) -> Option<Arc<RangeMapWeight>> {
+    if !is_interned_rangemap(a) || !is_interned_rangemap(b) {
+        return None;
+    }
     let mut cache = RANGEMAP_OP_CACHE.lock().unwrap();
     let key = op_key(op, a, b);
     if let Some(hit) = cache.get(&key) {
@@ -57,17 +104,31 @@ fn put_op_cache(
     b: Arc<RangeMapWeight>,
     result: Arc<RangeMapWeight>,
 ) {
+    if !is_interned_rangemap(&a) || !is_interned_rangemap(&b) {
+        return;
+    }
+    let key = op_key(op, &a, &b);
     let mut cache = RANGEMAP_OP_CACHE.lock().unwrap();
-    cache.put(op_key(op, &a, &b), result);
+    let mut index = RANGEMAP_OP_CACHE_INDEX.lock().unwrap();
+    if let Some((evicted_key, _)) = cache.push(key, result) {
+        remove_op_key_from_index(&mut index, evicted_key);
+    }
+    index.entry(key.a).or_default().insert(key);
+    index.entry(key.b).or_default().insert(key);
 }
 
 pub fn intern_rangemap(weight: RangeMapWeight) -> Arc<RangeMapWeight> {
     let mut interner = RANGEMAP_WEIGHT_INTERNER.lock().unwrap();
     if let Some(existing) = interner.get(&weight) {
+        let ptr = Arc::as_ptr(existing) as usize;
+        RANGEMAP_WEIGHT_PTRS.lock().unwrap().insert(ptr);
         return existing.clone();
     }
     let arc = Arc::new(weight);
+    let ptr = Arc::as_ptr(&arc) as usize;
+    invalidate_rangemap_op_cache_for_ptr(ptr);
     interner.insert(arc.clone());
+    RANGEMAP_WEIGHT_PTRS.lock().unwrap().insert(ptr);
     arc
 }
 

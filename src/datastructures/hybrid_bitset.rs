@@ -3,21 +3,25 @@
 use crate::datastructures::cache::{self, Acc};
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use crate::datastructures::bitset::Bitset;
+use lru::LruCache;
+use once_cell::sync::Lazy;
 // Added
 use range_set_blaze::RangeSetBlaze;
 // Import RangeSetBlaze
 use std::cell::Cell;
 use std::cmp::Ordering;
+use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
 use std::fmt::{Debug, Display, Formatter};
 use std::hash::{Hash, Hasher};
 // Added
 use std::iter::FromIterator;
+use std::num::NonZeroUsize;
 // Needed for collect into BTreeSet in tests
 use std::ops::{
     BitAnd, BitAndAssign, BitOr, BitOrAssign, BitXor, BitXorAssign, Sub, SubAssign,
 };
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 // ---------------------------------------------------------------------------
 // Thread-local dimensions for weight-heavy/symbol-heavy mode
 // ---------------------------------------------------------------------------
@@ -31,6 +35,22 @@ thread_local! {
     /// Default is 1 for symbol-heavy mode.
     static NUM_TSIDS: Cell<usize> = Cell::new(1);
 }
+
+const L1_OP_CACHE_CAPACITY: usize = 100_000;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct L1OpKey {
+    op: cache::BinOp,
+    a: usize,
+    b: usize,
+}
+
+static L1_OP_CACHE: Lazy<Mutex<LruCache<L1OpKey, Acc<RangeSetBlaze<usize>>>>> = Lazy::new(|| {
+    Mutex::new(LruCache::new(NonZeroUsize::new(L1_OP_CACHE_CAPACITY).unwrap()))
+});
+static L1_OP_CACHE_INDEX: Lazy<Mutex<HashMap<usize, HashSet<L1OpKey>>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+static L1_INTERNED_PTRS: Lazy<Mutex<HashSet<usize>>> = Lazy::new(|| Mutex::new(HashSet::new()));
 
 /// Set the global LLM token dimension.
 /// 
@@ -109,6 +129,84 @@ pub fn print_profiling(label: &str) {
     }
 }
 
+fn l1_op_key(op: cache::BinOp, a: &Acc<RangeSetBlaze<usize>>, b: &Acc<RangeSetBlaze<usize>>) -> L1OpKey {
+    L1OpKey {
+        op,
+        a: Arc::as_ptr(a) as usize,
+        b: Arc::as_ptr(b) as usize,
+    }
+}
+
+fn is_interned_l1(acc: &Acc<RangeSetBlaze<usize>>) -> bool {
+    let ptr = Arc::as_ptr(acc) as usize;
+    L1_INTERNED_PTRS.lock().unwrap().contains(&ptr)
+}
+
+fn remove_l1_op_key_from_index(index: &mut HashMap<usize, HashSet<L1OpKey>>, key: L1OpKey) {
+    if let Some(set) = index.get_mut(&key.a) {
+        set.remove(&key);
+        if set.is_empty() {
+            index.remove(&key.a);
+        }
+    }
+    if let Some(set) = index.get_mut(&key.b) {
+        set.remove(&key);
+        if set.is_empty() {
+            index.remove(&key.b);
+        }
+    }
+}
+
+fn invalidate_l1_op_cache_for_ptr(ptr: usize) {
+    let mut cache = L1_OP_CACHE.lock().unwrap();
+    let mut index = L1_OP_CACHE_INDEX.lock().unwrap();
+    let Some(keys) = index.remove(&ptr) else { return; };
+    for key in keys {
+        cache.pop(&key);
+        remove_l1_op_key_from_index(&mut index, key);
+    }
+}
+
+fn intern_l1_tracked(rs: RangeSetBlaze<usize>) -> Acc<RangeSetBlaze<usize>> {
+    let acc = cache::intern_l1(rs);
+    let ptr = Arc::as_ptr(&acc) as usize;
+    invalidate_l1_op_cache_for_ptr(ptr);
+    L1_INTERNED_PTRS.lock().unwrap().insert(ptr);
+    acc
+}
+
+fn get_l1_op_cache_tracked(
+    op: cache::BinOp,
+    a: &Acc<RangeSetBlaze<usize>>,
+    b: &Acc<RangeSetBlaze<usize>>,
+) -> Option<Acc<RangeSetBlaze<usize>>> {
+    if !is_interned_l1(a) || !is_interned_l1(b) {
+        return None;
+    }
+    let mut cache = L1_OP_CACHE.lock().unwrap();
+    let key = l1_op_key(op, a, b);
+    cache.get(&key).cloned()
+}
+
+fn put_l1_op_cache_tracked(
+    op: cache::BinOp,
+    a: Acc<RangeSetBlaze<usize>>,
+    b: Acc<RangeSetBlaze<usize>>,
+    result: Acc<RangeSetBlaze<usize>>,
+) {
+    if !is_interned_l1(&a) || !is_interned_l1(&b) {
+        return;
+    }
+    let key = l1_op_key(op, &a, &b);
+    let mut cache = L1_OP_CACHE.lock().unwrap();
+    let mut index = L1_OP_CACHE_INDEX.lock().unwrap();
+    if let Some((evicted_key, _)) = cache.push(key, result) {
+        remove_l1_op_key_from_index(&mut index, evicted_key);
+    }
+    index.entry(key.a).or_default().insert(key);
+    index.entry(key.b).or_default().insert(key);
+}
+
 
 
 // --- The Hybrid Bitset Struct ---
@@ -144,7 +242,7 @@ impl JSONConvertible for RangeSet {
                     ranges.push(start..=end);
                 }
                 Ok(RangeSet {
-                    inner: cache::intern_l1(RangeSetBlaze::from_iter(ranges)),
+                    inner: intern_l1_tracked(RangeSetBlaze::from_iter(ranges)),
                 })
             }
             _ => Err("Expected JSONNode::Array for HybridBitset".to_string()),
@@ -236,7 +334,7 @@ impl RangeSet {
     /// Creates a new, empty HybridBitset.
     pub fn zeros() -> Self {
         RangeSet {
-            inner: cache::intern_l1(RangeSetBlaze::new()),
+            inner: intern_l1_tracked(RangeSetBlaze::new()),
         }
     }
 
@@ -250,7 +348,7 @@ impl RangeSet {
             RangeSet::zeros()
         } else {
             RangeSet {
-                inner: cache::intern_l1(RangeSetBlaze::from_iter([0..=len - 1])),
+                inner: intern_l1_tracked(RangeSetBlaze::from_iter([0..=len - 1])),
             }
         }
     }
@@ -268,7 +366,7 @@ impl RangeSet {
             max_token
         };
         RangeSet {
-            inner: cache::intern_l1(RangeSetBlaze::from_iter([0..=domain_max])),
+            inner: intern_l1_tracked(RangeSetBlaze::from_iter([0..=domain_max])),
         }
     }
     
@@ -286,20 +384,20 @@ impl RangeSet {
             max_token
         };
         RangeSet {
-            inner: cache::intern_l1(RangeSetBlaze::from_iter([0..=domain_max])),
+            inner: intern_l1_tracked(RangeSetBlaze::from_iter([0..=domain_max])),
         }
     }
 
     /// Creates a HybridBitset from an iterator of indices.
     pub fn from_iter<I: IntoIterator<Item = usize>>(iter: I) -> Self {
         RangeSet {
-            inner: cache::intern_l1(RangeSetBlaze::from_iter(iter)),
+            inner: intern_l1_tracked(RangeSetBlaze::from_iter(iter)),
         }
     }
 
     pub fn from_item(item: usize) -> Self {
         RangeSet {
-            inner: cache::intern_l1(RangeSetBlaze::from_iter([item..=item])),
+            inner: intern_l1_tracked(RangeSetBlaze::from_iter([item..=item])),
         }
     }
 
@@ -380,7 +478,7 @@ impl RangeSet {
         }
         let mut new_inner = (*self.inner).clone();
         let result = new_inner.insert(index);
-        self.inner = cache::intern_l1(new_inner);
+        self.inner = intern_l1_tracked(new_inner);
         result
     }
 
@@ -399,7 +497,7 @@ impl RangeSet {
         } else {
             new_inner.remove(index);
         }
-        self.inner = cache::intern_l1(new_inner);
+        self.inner = intern_l1_tracked(new_inner);
     }
 
     pub fn set(&mut self, index: usize, value: bool) {
@@ -418,7 +516,7 @@ impl RangeSet {
             return false;
         }
         let result = Arc::make_mut(&mut self.inner).remove(index);
-        self.inner = cache::intern_l1(Arc::unwrap_or_clone(std::mem::take(&mut self.inner)));
+        self.inner = intern_l1_tracked(Arc::unwrap_or_clone(std::mem::take(&mut self.inner)));
         result
     }
 
@@ -427,12 +525,12 @@ impl RangeSet {
     }
 
     pub fn ensure_interned(&mut self) {
-        self.inner = cache::intern_l1(Arc::unwrap_or_clone(std::mem::take(&mut self.inner)));
+        self.inner = intern_l1_tracked(Arc::unwrap_or_clone(std::mem::take(&mut self.inner)));
     }
 
     /// Removes all elements from the set.
     pub fn clear(&mut self) {
-        self.inner = cache::intern_l1(RangeSetBlaze::new());
+        self.inner = intern_l1_tracked(RangeSetBlaze::new());
     }
 
     pub fn inverted(&self) -> Self {
@@ -749,7 +847,7 @@ impl Extend<usize> for RangeSet {
         // Avoids clone if Arc is unique
         Arc::make_mut(&mut self.inner).extend(iter);
         // Re-intern the potentially modified RangeSetBlaze
-        self.inner = cache::intern_l1((*self.inner).clone());
+        self.inner = intern_l1_tracked((*self.inner).clone());
     }
 }
 
@@ -770,7 +868,7 @@ impl BitAnd for &RangeSet {
             let start = std::time::Instant::now();
             let result_inner = &*self.inner & &*rhs.inner;
             let result = RangeSet {
-                inner: cache::intern_l1(result_inner),
+                inner: intern_l1_tracked(result_inner),
             };
             PROF_TIME_AND.fetch_add(
                 start.elapsed().as_micros() as u64,
@@ -778,18 +876,18 @@ impl BitAnd for &RangeSet {
             );
             return result;
         }
-        if let Some(cached) = cache::get_l1_op_cache(cache::BinOp::And, &self.inner, &rhs.inner) {
+        if let Some(cached) = get_l1_op_cache_tracked(cache::BinOp::And, &self.inner, &rhs.inner) {
             return RangeSet { inner: cached };
         }
-        if let Some(cached) = cache::get_l1_op_cache(cache::BinOp::And, &rhs.inner, &self.inner) {
+        if let Some(cached) = get_l1_op_cache_tracked(cache::BinOp::And, &rhs.inner, &self.inner) {
             return RangeSet { inner: cached };
         }
 
         let start = std::time::Instant::now();
         let result_inner = &*self.inner & &*rhs.inner;
-        let result_acc = cache::intern_l1(result_inner);
+        let result_acc = intern_l1_tracked(result_inner);
 
-        cache::put_l1_op_cache(
+        put_l1_op_cache_tracked(
             cache::BinOp::And,
             self.inner.clone(),
             rhs.inner.clone(),
@@ -819,7 +917,7 @@ impl BitOr for &RangeSet {
             let start = std::time::Instant::now();
             let result_inner = &*self.inner | &*rhs.inner;
             let result = RangeSet {
-                inner: cache::intern_l1(result_inner),
+                inner: intern_l1_tracked(result_inner),
             };
             PROF_TIME_OR.fetch_add(
                 start.elapsed().as_micros() as u64,
@@ -827,18 +925,18 @@ impl BitOr for &RangeSet {
             );
             return result;
         }
-        if let Some(cached) = cache::get_l1_op_cache(cache::BinOp::Or, &self.inner, &rhs.inner) {
+        if let Some(cached) = get_l1_op_cache_tracked(cache::BinOp::Or, &self.inner, &rhs.inner) {
             return RangeSet { inner: cached };
         }
-        if let Some(cached) = cache::get_l1_op_cache(cache::BinOp::Or, &rhs.inner, &self.inner) {
+        if let Some(cached) = get_l1_op_cache_tracked(cache::BinOp::Or, &rhs.inner, &self.inner) {
             return RangeSet { inner: cached };
         }
 
         let start = std::time::Instant::now();
         let result_inner = &*self.inner | &*rhs.inner;
-        let result_acc = cache::intern_l1(result_inner);
+        let result_acc = intern_l1_tracked(result_inner);
 
-        cache::put_l1_op_cache(
+        put_l1_op_cache_tracked(
             cache::BinOp::Or,
             self.inner.clone(),
             rhs.inner.clone(),
@@ -864,20 +962,20 @@ impl BitXor for &RangeSet {
         if self.is_simple() || rhs.is_simple() {
             let result_inner = &*self.inner ^ &*rhs.inner;
             return RangeSet {
-                inner: cache::intern_l1(result_inner),
+                inner: intern_l1_tracked(result_inner),
             };
         }
-        if let Some(cached) = cache::get_l1_op_cache(cache::BinOp::Xor, &self.inner, &rhs.inner) {
+        if let Some(cached) = get_l1_op_cache_tracked(cache::BinOp::Xor, &self.inner, &rhs.inner) {
             return RangeSet { inner: cached };
         }
-        if let Some(cached) = cache::get_l1_op_cache(cache::BinOp::Xor, &rhs.inner, &self.inner) {
+        if let Some(cached) = get_l1_op_cache_tracked(cache::BinOp::Xor, &rhs.inner, &self.inner) {
             return RangeSet { inner: cached };
         }
 
         let result_inner = &*self.inner ^ &*rhs.inner;
-        let result_acc = cache::intern_l1(result_inner);
+        let result_acc = intern_l1_tracked(result_inner);
 
-        cache::put_l1_op_cache(
+        put_l1_op_cache_tracked(
             cache::BinOp::Xor,
             self.inner.clone(),
             rhs.inner.clone(),
@@ -902,7 +1000,7 @@ impl Sub for &RangeSet {
             let start = std::time::Instant::now();
             let result_inner = &*self.inner - &*rhs.inner;
             let result = RangeSet {
-                inner: cache::intern_l1(result_inner),
+                inner: intern_l1_tracked(result_inner),
             };
             PROF_TIME_SUB.fetch_add(
                 start.elapsed().as_micros() as u64,
@@ -910,15 +1008,15 @@ impl Sub for &RangeSet {
             );
             return result;
         }
-        if let Some(cached) = cache::get_l1_op_cache(cache::BinOp::Sub, &self.inner, &rhs.inner) {
+        if let Some(cached) = get_l1_op_cache_tracked(cache::BinOp::Sub, &self.inner, &rhs.inner) {
             return RangeSet { inner: cached };
         }
 
         let start = std::time::Instant::now();
         let result_inner = &*self.inner - &*rhs.inner;
-        let result_acc = cache::intern_l1(result_inner);
+        let result_acc = intern_l1_tracked(result_inner);
 
-        cache::put_l1_op_cache(
+        put_l1_op_cache_tracked(
             cache::BinOp::Sub,
             self.inner.clone(),
             rhs.inner.clone(),
@@ -970,7 +1068,7 @@ impl BitOrAssign<&RangeSet> for RangeSet {
         // This avoids the overhead of the full caching logic in the `bitor` operator.
         let mut new_inner = (*self.inner).clone();
         new_inner |= (*rhs.inner).clone();
-        self.inner = cache::intern_l1(new_inner);
+        self.inner = intern_l1_tracked(new_inner);
     }
 }
 impl BitXorAssign<&RangeSet> for RangeSet {
@@ -1024,7 +1122,7 @@ impl Into<BitVec<usize, Lsb0>> for RangeSet {
 impl From<BitVec<usize, Lsb0>> for RangeSet {
     fn from(bitvec: BitVec<usize, Lsb0>) -> Self {
         RangeSet {
-            inner: cache::intern_l1(RangeSetBlaze::from_iter(bitvec.iter_ones())),
+            inner: intern_l1_tracked(RangeSetBlaze::from_iter(bitvec.iter_ones())),
         }
     }
 }
@@ -1032,7 +1130,7 @@ impl From<BitVec<usize, Lsb0>> for RangeSet {
 impl From<RangeSetBlaze<usize>> for RangeSet {
     fn from(range_set: RangeSetBlaze<usize>) -> Self {
         RangeSet {
-            inner: cache::intern_l1(range_set),
+            inner: intern_l1_tracked(range_set),
         }
     }
 }
@@ -1040,7 +1138,7 @@ impl From<RangeSetBlaze<usize>> for RangeSet {
 impl From<&RangeSetBlaze<usize>> for RangeSet {
     fn from(range_set: &RangeSetBlaze<usize>) -> Self {
         RangeSet {
-            inner: cache::intern_l1(range_set.clone()),
+            inner: intern_l1_tracked(range_set.clone()),
         }
     }
 }
