@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use rayon::prelude::*;
@@ -46,6 +47,83 @@ pub type ParserDWA = DWA;
 pub type Precomputed4 = DWA;
 
 pub type Signature = Vec<Vec<Option<TerminalID>>>;
+
+struct Pass2Profile {
+    process_total_us: AtomicU64,
+    process_count: AtomicU64,
+    template_count: AtomicU64,
+    canonicalize_us: AtomicU64,
+    cache_lookup_us: AtomicU64,
+    cache_insert_us: AtomicU64,
+    dynamic_derive_us: AtomicU64,
+    instantiate_us: AtomicU64,
+    apply_cancellations_us: AtomicU64,
+    apply_finality_us: AtomicU64,
+    remove_negative_us: AtomicU64,
+    union_us: AtomicU64,
+    tsid_collect_us: AtomicU64,
+    final_collect_us: AtomicU64,
+}
+
+impl Pass2Profile {
+    fn new() -> Self {
+        Self {
+            process_total_us: AtomicU64::new(0),
+            process_count: AtomicU64::new(0),
+            template_count: AtomicU64::new(0),
+            canonicalize_us: AtomicU64::new(0),
+            cache_lookup_us: AtomicU64::new(0),
+            cache_insert_us: AtomicU64::new(0),
+            dynamic_derive_us: AtomicU64::new(0),
+            instantiate_us: AtomicU64::new(0),
+            apply_cancellations_us: AtomicU64::new(0),
+            apply_finality_us: AtomicU64::new(0),
+            remove_negative_us: AtomicU64::new(0),
+            union_us: AtomicU64::new(0),
+            tsid_collect_us: AtomicU64::new(0),
+            final_collect_us: AtomicU64::new(0),
+        }
+    }
+
+    fn log(&self) {
+        let process_count = self.process_count.load(Ordering::Relaxed);
+        if process_count == 0 {
+            return;
+        }
+        let template_count = self.template_count.load(Ordering::Relaxed);
+        let process_total_us = self.process_total_us.load(Ordering::Relaxed);
+        let canonicalize_us = self.canonicalize_us.load(Ordering::Relaxed);
+        let cache_lookup_us = self.cache_lookup_us.load(Ordering::Relaxed);
+        let cache_insert_us = self.cache_insert_us.load(Ordering::Relaxed);
+        let dynamic_derive_us = self.dynamic_derive_us.load(Ordering::Relaxed);
+        let instantiate_us = self.instantiate_us.load(Ordering::Relaxed);
+        let apply_cancellations_us = self.apply_cancellations_us.load(Ordering::Relaxed);
+        let apply_finality_us = self.apply_finality_us.load(Ordering::Relaxed);
+        let remove_negative_us = self.remove_negative_us.load(Ordering::Relaxed);
+        let union_us = self.union_us.load(Ordering::Relaxed);
+        let tsid_collect_us = self.tsid_collect_us.load(Ordering::Relaxed);
+        let final_collect_us = self.final_collect_us.load(Ordering::Relaxed);
+
+        crate::debug!(
+            4,
+            "Pass2 profile: process_total={:?} ({} calls), templates={}, canonicalize={:?}, cache_lookup={:?}, cache_insert={:?}, dynamic_derive={:?}, instantiate={:?}, cancellations={:?}, finality_fixpoint={:?}, remove_negative={:?}, union={:?}, tsid_collect={:?}, final_collect={:?}",
+            std::time::Duration::from_micros(process_total_us),
+            process_count,
+            template_count,
+            std::time::Duration::from_micros(canonicalize_us),
+            std::time::Duration::from_micros(cache_lookup_us),
+            std::time::Duration::from_micros(cache_insert_us),
+            std::time::Duration::from_micros(dynamic_derive_us),
+            std::time::Duration::from_micros(instantiate_us),
+            std::time::Duration::from_micros(apply_cancellations_us),
+            std::time::Duration::from_micros(apply_finality_us),
+            std::time::Duration::from_micros(remove_negative_us),
+            std::time::Duration::from_micros(union_us),
+            std::time::Duration::from_micros(tsid_collect_us),
+            std::time::Duration::from_micros(final_collect_us),
+        );
+    }
+}
 
 struct WeightBackendOverride {
     previous: Option<BackendChoice>,
@@ -373,6 +451,7 @@ pub fn canonicalize_bundle(terminal_map: BTreeMap<Option<TerminalID>, Weight>) -
 /// 
 /// The resulting DWA is used at runtime for O(1) mask queries.
 pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
+    let total_start = Instant::now();
     crate::debug!(3, "Starting Parser DWA construction. Input terminal_nwa: {} states, {} transitions", 
         terminal_nwa.states.len(), terminal_nwa.states.num_transitions());
     
@@ -723,8 +802,12 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
 
     crate::debug!(4, "Beginning NWA traversal");
 
+    let pass2_start = Instant::now();
+    let pass2_profile = Arc::new(Pass2Profile::new());
+
     // Clone references for use in closures
     let tsid_bodies_for_process = tsid_bodies_arc.clone();
+    let pass2_profile_for_process = pass2_profile.clone();
     let template_cache_ref = &template_cache;
     let super_dwa_opt_ref = &super_dwa_opt;
     let super_signature_opt_ref = &super_signature_opt;
@@ -781,14 +864,30 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
                     TOTAL_TEMPLATE_STATES.load(std::sync::atomic::Ordering::Relaxed));
             }
             
+            let process_start = Instant::now();
+            pass2_profile_for_process
+                .process_count
+                .fetch_add(1, Ordering::Relaxed);
+
             let (nwa_bodies_map, tokens) = val;
             let bodies_count = nwa_bodies_map.len();
             let mut nwa_body = NWABody { start_states: vec![] };
             for (right_body, terminal_map) in &nwa_bodies_map {
+                let canon_start = Instant::now();
                 let (signature, concrete_weights) = canonicalize_bundle(terminal_map.clone());
+                pass2_profile_for_process
+                    .canonicalize_us
+                    .fetch_add(canon_start.elapsed().as_micros() as u64, Ordering::Relaxed);
+
                 let cached_nwa = {
+                    let cache_lookup_start = Instant::now();
                     let cached = template_cache_ref.borrow().get(&signature).cloned();
+                    pass2_profile_for_process.cache_lookup_us.fetch_add(
+                        cache_lookup_start.elapsed().as_micros() as u64,
+                        Ordering::Relaxed,
+                    );
                     if let Some(nwa) = cached { nwa } else {
+                    let dynamic_start = Instant::now();
                     let _rangeset_backend = WeightBackendOverride::new("rangeset");
                     crate::debug!(5, "Dynamic derivation for signature {:?}", signature);
 
@@ -830,13 +929,26 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
                     let mut derived_dwa = specialize_dwa_relative_with_map(super_dwa, &weight_map);
                     derived_dwa.optimize("DynamicSpecializedDWA");
                     let nwa = Arc::new(NWA::from_dwa(&derived_dwa));
+                    pass2_profile_for_process.dynamic_derive_us.fetch_add(
+                        dynamic_start.elapsed().as_micros() as u64,
+                        Ordering::Relaxed,
+                    );
+                    let cache_insert_start = Instant::now();
                     template_cache_ref
                         .borrow_mut()
                         .insert(signature.clone(), nwa.clone());
+                    pass2_profile_for_process.cache_insert_us.fetch_add(
+                        cache_insert_start.elapsed().as_micros() as u64,
+                        Ordering::Relaxed,
+                    );
                     nwa
                     }
                 };
                 let cached_nwa = cached_nwa.as_ref();
+
+                pass2_profile_for_process
+                    .template_count
+                    .fetch_add(1, Ordering::Relaxed);
                 
                 let template_size = cached_nwa.states.len();
                 let count = INSTANTIATE_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -848,16 +960,41 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
                 
                 let mut states = states_arena.borrow_mut();
                 let new_states_offset = states.len();
+                let instantiate_start = Instant::now();
                 let composed_body = instantiate_nwa_template_into(cached_nwa, &concrete_weights, &mut states, right_body);
+                pass2_profile_for_process.instantiate_us.fetch_add(
+                    instantiate_start.elapsed().as_micros() as u64,
+                    Ordering::Relaxed,
+                );
                 let range = new_states_offset..states.len();
                 if !range.is_empty() {
+                    let cancel_start = Instant::now();
                     apply_cancellations_range(&mut states, range.clone());
+                    pass2_profile_for_process.apply_cancellations_us.fetch_add(
+                        cancel_start.elapsed().as_micros() as u64,
+                        Ordering::Relaxed,
+                    );
+                    let finality_start = Instant::now();
                     apply_finality_fixpoint_range(&mut states, range.clone());
+                    pass2_profile_for_process.apply_finality_us.fetch_add(
+                        finality_start.elapsed().as_micros() as u64,
+                        Ordering::Relaxed,
+                    );
+                    let remove_start = Instant::now();
                     remove_negative_transitions_range(&mut states, range);
+                    pass2_profile_for_process.remove_negative_us.fetch_add(
+                        remove_start.elapsed().as_micros() as u64,
+                        Ordering::Relaxed,
+                    );
                     // Note: remove_redundant_default_transitions is NOT called here because it 
                     // requires a global pass over all states. It's called once at the end.
                 }
+                let union_start = Instant::now();
                 nwa_body = NWABody::union(&nwa_body, &composed_body);
+                pass2_profile_for_process.union_us.fetch_add(
+                    union_start.elapsed().as_micros() as u64,
+                    Ordering::Relaxed,
+                );
             }
             
             // In symbol-heavy mode, check if this is a root state (has tsid-labeled edges to original_start_state)
@@ -870,8 +1007,13 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
                             let final_w = intersection_w;
                             crate::debug!(6, "Collecting tsid body at root {} for label {} with {} tokens", 
                                 node_id, tsid_label, final_w.len());
+                            let tsid_collect_start = Instant::now();
                             let mut tb = tsid_bodies_for_process.lock().unwrap();
                             tb.push((nwa_body.clone(), final_w, *tsid_label));
+                            pass2_profile_for_process.tsid_collect_us.fetch_add(
+                                tsid_collect_start.elapsed().as_micros() as u64,
+                                Ordering::Relaxed,
+                            );
                         }
                     }
                 }
@@ -897,18 +1039,31 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
                         node_id, tokens.len(), tokens.ranges_len(), fw.len(), fw.ranges_len(), intersection_w.len(), intersection_w.ranges_len());
                     if !intersection_w.is_empty() {
                         let final_w = intersection_w;
+                        let final_collect_start = Instant::now();
                         let mut fb = final_bodies_arc.lock().unwrap();
                         fb.push((nwa_body.clone(), final_w, node_id));
+                        pass2_profile_for_process.final_collect_us.fetch_add(
+                            final_collect_start.elapsed().as_micros() as u64,
+                            Ordering::Relaxed,
+                        );
                     }
                 }
             }
             
+            let process_elapsed = process_start.elapsed();
+            pass2_profile_for_process.process_total_us.fetch_add(
+                process_elapsed.as_micros() as u64,
+                Ordering::Relaxed,
+            );
+
             if !tokens.is_empty() {
                 let mut next_body_map = BTreeMap::new(); next_body_map.insert(nwa_body, BTreeMap::new());
                 Some((next_body_map, tokens))
             } else { None }
         },
     );
+    pass2_profile.log();
+    crate::debug!(4, "Pass 2 (nwa_special_map) in {:?}", pass2_start.elapsed());
     // Drop the process closure's reference to tsid_bodies
     drop(tsid_bodies_for_process);
 
@@ -953,6 +1108,7 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
         crate::debug!(4, "Parser DWA average path length: {:.2}", avg_path_len);
     }
 
+    crate::debug!(5, "build_parser_dwa total in {:?}", total_start.elapsed());
     final_dwa
 }
 
@@ -1011,14 +1167,21 @@ pub fn precompute_token_bvs_and_signatures(reversed_nwa: &NWA, traversal_data: &
 
 pub fn finalize_and_optimize_and_determinize(parser: &GLRParser, mut combined_nwa: NWA) -> DWA {
     crate::debug!(4, "Pruning continuations from final states for NWA with {} states and {} transitions...", combined_nwa.states.len(), combined_nwa.states.num_transitions());
+    let prune_final_start = std::time::Instant::now();
     combined_nwa.subtract_final_weights_from_outgoing();
+    crate::debug!(5, "subtract_final_weights_from_outgoing in {:?}", prune_final_start.elapsed());
     crate::debug!(4, "Pruned continuations from final states. NWA with {} states and {} transitions remaining.", combined_nwa.states.len(), combined_nwa.states.num_transitions());
     
     // After pruning continuations, some transitions may become empty and states may become unreachable.
     // Prune dead ends before determinization to reduce the NWA size significantly.
     let before_prune = combined_nwa.states.len();
+    let prune_start = std::time::Instant::now();
     combined_nwa.prune_dead_ends();
+    let prune_dead_time = prune_start.elapsed();
+    let prune_unreachable_start = std::time::Instant::now();
     combined_nwa.prune_unreachable();
+    let prune_unreachable_time = prune_unreachable_start.elapsed();
+    crate::debug!(5, "prune_dead_ends in {:?}, prune_unreachable in {:?}", prune_dead_time, prune_unreachable_time);
     crate::debug!(4, "After pruning dead ends: NWA {} -> {} states, {} transitions", 
         before_prune, combined_nwa.states.len(), combined_nwa.states.num_transitions());
     
@@ -1035,7 +1198,9 @@ pub fn finalize_and_optimize_and_determinize(parser: &GLRParser, mut combined_nw
     
     // Use unified determinize_and_minimize with "FinalDWA" profile
     // Pipeline: determinize → prune_dead_ends → minimize
+    let det_min_start = std::time::Instant::now();
     let dwa = combined_nwa.determinize_and_minimize("FinalDWA");
+    crate::debug!(5, "determinize_and_minimize(FinalDWA) in {:?}", det_min_start.elapsed());
     crate::debug!(4, "Final DWA minimization complete. {} states and {} transitions.", dwa.states.len(), dwa.states.num_transitions());
     dwa
 }

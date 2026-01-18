@@ -129,6 +129,9 @@ impl NWA {
 
     pub fn minimize_with_rustfst_full(&mut self) -> bool {
         crate::datastructures::hybrid_bitset::reset_profiling();
+        crate::datastructures::rangemap_weight::reset_profiling();
+        crate::datastructures::abstract_weight::reset_weight_op_profiling();
+        crate::dwa_i32::determinization_rustfst::reset_rustfst_weight_profile();
         
         let min_config = MinimizeConfig::default().with_allow_nondet(true);
         let start = Instant::now();
@@ -142,8 +145,27 @@ impl NWA {
         let start = Instant::now();
         *self = NWA::from_rustfst(&fst);
         let from_time = start.elapsed();
+
+        let div_us = crate::datastructures::rangemap_weight::PROF_RANGEMAP_TIME_DIVIDE_TOTAL
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let div_time = std::time::Duration::from_micros(div_us);
+        let min_non_div = min_time.checked_sub(div_time).unwrap_or(std::time::Duration::ZERO);
+        let total_time = to_time + min_time + from_time;
+        let total_non_div = total_time.checked_sub(div_time).unwrap_or(std::time::Duration::ZERO);
         
         crate::datastructures::hybrid_bitset::print_profiling("NWA Minimize RustFST");
+        crate::datastructures::rangemap_weight::print_profiling("NWA Minimize RustFST");
+        crate::datastructures::abstract_weight::print_weight_op_profiling("NWA Minimize RustFST");
+        crate::dwa_i32::determinization_rustfst::print_rustfst_weight_profile("NWA Minimize RustFST");
+
+        crate::debug!(
+            4,
+            "[NWA::minimize_with_rustfst_full] minimize_non_div≈{:?} (minimize={:?} - div={:?}); total_non_div≈{:?}",
+            min_non_div,
+            min_time,
+            div_time,
+            total_non_div,
+        );
 
         let mut slowest_label = "to_rustfst";
         let mut slowest_time = to_time;

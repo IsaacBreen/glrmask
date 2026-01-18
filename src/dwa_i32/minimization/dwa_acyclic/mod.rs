@@ -62,6 +62,10 @@ fn push_weights_acyclic(dwa: &mut DWA) -> bool {
 
     let start = std::time::Instant::now();
     crate::datastructures::hybrid_bitset::reset_profiling();
+    crate::datastructures::rangemap_weight::reset_profiling();
+    crate::datastructures::abstract_weight::reset_weight_op_profiling();
+
+    let topo_start = std::time::Instant::now();
 
     // Compute topological order using Kahn's algorithm
     let mut in_degree = vec![0usize; n];
@@ -87,12 +91,20 @@ fn push_weights_acyclic(dwa: &mut DWA) -> bool {
     
     if topo_order.len() != n { return false; } // Has cycles
 
+    let topo_time = topo_start.elapsed();
+
     // Compute reachable outputs (backward from leaves)
+    let reachable_start = std::time::Instant::now();
+    let mut reachable_clone_time = std::time::Duration::ZERO;
+    let mut reachable_and_time = std::time::Duration::ZERO;
+    let mut reachable_or_time = std::time::Duration::ZERO;
     let mut reachable = vec![Weight::zeros(); n];
     let mut reachable_is_empty = vec![true; n];
     let mut reachable_is_all = vec![false; n];
     for &u in topo_order.iter().rev() {
+        let clone_start = std::time::Instant::now();
         let mut reach_u = dwa.states[u].final_weight.clone().unwrap_or_else(Weight::zeros);
+        reachable_clone_time += clone_start.elapsed();
         let mut reach_all = reach_u.is_all_fast();
         if !reach_all {
             for (&label, &target) in &dwa.states[u].transitions {
@@ -101,9 +113,17 @@ fn push_weights_acyclic(dwa: &mut DWA) -> bool {
                 let Some(w) = dwa.states[u].trans_weights.get(&label) else { continue; };
                 if w.is_empty() { continue; }
                 if reachable_is_all[target] {
+                    let or_start = std::time::Instant::now();
                     reach_u |= w;
+                    reachable_or_time += or_start.elapsed();
                 } else {
-                    reach_u |= &(w & &reachable[target]);
+                    let and_start = std::time::Instant::now();
+                    let tmp = w & &reachable[target];
+                    reachable_and_time += and_start.elapsed();
+
+                    let or_start = std::time::Instant::now();
+                    reach_u |= &tmp;
+                    reachable_or_time += or_start.elapsed();
                 }
                 if reach_u.is_all_fast() {
                     reach_all = true;
@@ -116,7 +136,11 @@ fn push_weights_acyclic(dwa: &mut DWA) -> bool {
         reachable[u] = reach_u;
     }
 
+    let reachable_time = reachable_start.elapsed();
+
     // Push reachable outputs into transition weights
+    let push_start = std::time::Instant::now();
+    let mut push_and_time = std::time::Duration::ZERO;
     let mut changed = false;
     for u in 0..n {
         let (transitions, trans_weights) = {
@@ -133,14 +157,21 @@ fn push_weights_acyclic(dwa: &mut DWA) -> bool {
                 changed = true;
                 continue;
             }
+            let and_start = std::time::Instant::now();
             let new_w = &*w & &reachable[target];
+            push_and_time += and_start.elapsed();
             if *w != new_w {
                 *w = new_w;
                 changed = true;
             }
         }
     }
+    let push_time = push_start.elapsed();
     crate::datastructures::hybrid_bitset::print_profiling("push_weights_acyclic");
+    crate::datastructures::rangemap_weight::print_profiling("push_weights_acyclic");
+    crate::datastructures::abstract_weight::print_weight_op_profiling("push_weights_acyclic");
+    crate::debug!(5, "push_weights_acyclic breakdown: topo={:?}, reachable={:?}, push={:?}", topo_time, reachable_time, push_time);
+    crate::debug!(5, "push_weights_acyclic ops: reachable_clone={:?}, reachable_and={:?}, reachable_or={:?}, push_and={:?}", reachable_clone_time, reachable_and_time, reachable_or_time, push_and_time);
     crate::debug!(5, "push_weights_acyclic: {:?} (changed={})", start.elapsed(), changed);
     changed
 }
@@ -168,8 +199,12 @@ pub fn minimize_acyclic_exact(dwa: &DWA) -> Result<DWA, DWABuildError> {
     crate::debug!(5, "Acyclic minimize step 0 start (tighten_weights)");
     let step0_start = std::time::Instant::now();
     crate::datastructures::hybrid_bitset::reset_profiling();
+    crate::datastructures::rangemap_weight::reset_profiling();
+    crate::datastructures::abstract_weight::reset_weight_op_profiling();
     let dwa = tighten_weights(dwa)?;
     crate::datastructures::hybrid_bitset::print_profiling("tighten_weights");
+    crate::datastructures::rangemap_weight::print_profiling("tighten_weights");
+    crate::datastructures::abstract_weight::print_weight_op_profiling("tighten_weights");
     crate::debug!(5, "Acyclic minimize step 0 end (tighten_weights): {:?}", step0_start.elapsed());
     crate::debug!(5, "Acyclic minimize step 0 (tighten_weights): {:?}", step0_start.elapsed());
 
@@ -184,13 +219,18 @@ pub fn minimize_acyclic_exact(dwa: &DWA) -> Result<DWA, DWABuildError> {
     crate::debug!(5, "Acyclic minimize step 2 start (needed_sets)");
     let step2_start = std::time::Instant::now();
     crate::datastructures::hybrid_bitset::reset_profiling();
+    crate::datastructures::rangemap_weight::reset_profiling();
+    crate::datastructures::abstract_weight::reset_weight_op_profiling();
     let needed = compute_needed_sets(&dwa, &topo_order);
     crate::datastructures::hybrid_bitset::print_profiling("compute_needed_sets");
+    crate::datastructures::rangemap_weight::print_profiling("compute_needed_sets");
+    crate::datastructures::abstract_weight::print_weight_op_profiling("compute_needed_sets");
     crate::debug!(5, "Acyclic minimize step 2 end (needed_sets): {:?}", step2_start.elapsed());
     crate::debug!(5, "Acyclic minimize step 2 (needed_sets): {:?}", step2_start.elapsed());
 
     // 3. Layer states by topological height (distance to sink).
     let step3_start = std::time::Instant::now();
+    let step3_total_start = std::time::Instant::now();
     let heights = compute_heights(&dwa, &topo_order);
     crate::debug!(5, "Acyclic minimize step 3a (compute_heights): {:?}", step3_start.elapsed());
 
@@ -205,10 +245,17 @@ pub fn minimize_acyclic_exact(dwa: &DWA) -> Result<DWA, DWABuildError> {
     crate::debug!(5, "Acyclic minimize step 3b (states_by_height): {:?}, max_height={}, largest_level={}", 
         step3b_start.elapsed(), max_height,
         states_by_height.iter().map(|v| v.len()).max().unwrap_or(0));
+    crate::debug!(5, "Acyclic minimize step 3 (heights): {:?}", step3_total_start.elapsed());
 
     // 4. Bottom-Up Exact Minimization
+    let step4_start = std::time::Instant::now();
     let mut old_to_new: HashMap<StateID, StateID> = HashMap::new();
     let mut new_states: Vec<MergedStateBuilder> = Vec::new();
+    let mut time_coloring = std::time::Duration::ZERO;
+    let mut time_insert = std::time::Duration::ZERO;
+    let mut time_extend = std::time::Duration::ZERO;
+    let mut time_merge = std::time::Duration::ZERO;
+    let mut merge_and_time_us_total: u64 = 0;
 
     // Process from leaves (height 0) upwards
     let mut last_height_debug = std::time::Instant::now();
@@ -224,7 +271,9 @@ pub fn minimize_acyclic_exact(dwa: &DWA) -> Result<DWA, DWABuildError> {
         }
 
         // Compute coloring - use partition-based method for large candidate sets
+        let color_start = std::time::Instant::now();
         let coloring = compute_height_coloring(&dwa, candidates, &needed, &old_to_new, &new_states);
+        time_coloring += color_start.elapsed();
 
         // Construct new merged states from color classes
         let base_new_id = new_states.len();
@@ -236,10 +285,12 @@ pub fn minimize_acyclic_exact(dwa: &DWA) -> Result<DWA, DWABuildError> {
             old_to_new.insert(candidates[old_idx], base_new_id + color);
         }
         crate::debug!(5, "Height {}: old_to_new insert {:?} ({} items)", h, insert_start.elapsed(), candidates.len());
+        time_insert += insert_start.elapsed();
 
         let extend_start = std::time::Instant::now();
         new_states.extend((0..num_colors).map(|_| MergedStateBuilder::default()));
         crate::debug!(5, "Height {}: new_states extend {:?} ({} new)", h, extend_start.elapsed(), num_colors);
+        time_extend += extend_start.elapsed();
 
         // Merge states into builders
         let (completed, builders) = new_states.split_at_mut(base_new_id);
@@ -285,13 +336,27 @@ pub fn minimize_acyclic_exact(dwa: &DWA) -> Result<DWA, DWABuildError> {
             merge_stats.needed_all,
             needed_all_pct,
         );
+        merge_and_time_us_total = merge_and_time_us_total.saturating_add(merge_stats.and_time_us);
+        time_merge += merge_start.elapsed();
     }
 
+    crate::debug!(
+        5,
+        "Acyclic minimize step 4 breakdown: coloring={:?}, insert={:?}, extend={:?}, merge={:?}, merge_and_time={:?}",
+        time_coloring,
+        time_insert,
+        time_extend,
+        time_merge,
+        std::time::Duration::from_micros(merge_and_time_us_total),
+    );
+    crate::debug!(5, "Acyclic minimize step 4 (bottom_up_merge): {:?}", step4_start.elapsed());
     crate::debug!(6, "Acyclic minimize: {} -> {} states in {:?}", 
         dwa.states.len(), new_states.len(), total_start.elapsed());
 
     // 5. Reconstruct the Final DWA
+    let step5_start = std::time::Instant::now();
     let result = reconstruct_dwa(dwa.body.start_state, &old_to_new, new_states)?;
+    crate::debug!(5, "Acyclic minimize step 5 (reconstruct): {:?}", step5_start.elapsed());
     
     // 6. Stochastic validation (only when STOCHASTIC_MERGE_VALIDATION=1)
     if std::env::var("STOCHASTIC_MERGE_VALIDATION").is_ok() {
@@ -320,20 +385,27 @@ fn compute_height_coloring(
     // Use optimized direct coloring path
     let is_height_0 = candidates.iter().all(|&id| dwa.states[id].transitions.is_empty());
     if is_height_0 && candidates.len() > 1000 {
-        return compute_height_0_coloring_direct(candidates, dwa, needed, start);
+        let colors = compute_height_0_coloring_direct(candidates, dwa, needed, start);
+        crate::debug!(5, "Height 0 coloring total: {:?}", start.elapsed());
+        return colors;
     }
     
     // For large non-height-0 candidate sets, use greedy coloring without building full graph
     // This avoids the O(n²) graph construction bottleneck
     // Use a lower threshold since are_compatible can be expensive
     if candidates.len() > 500 {
-        return greedy_color_without_graph(dwa, candidates, needed, old_to_new, new_states, start);
+        let greedy_start = std::time::Instant::now();
+        let colors = greedy_color_without_graph(dwa, candidates, needed, old_to_new, new_states, start);
+        crate::debug!(5, "Greedy coloring (no graph) total: {:?}", greedy_start.elapsed());
+        return colors;
     }
     
     // Compute signatures first to check if we can use a fast path
+    let sig_start = std::time::Instant::now();
     let signatures: Vec<u128> = candidates.iter().map(|&id| {
         compute_state_signature(id, dwa, needed, old_to_new)
     }).collect();
+    let sig_time = sig_start.elapsed();
     
     // Group by signature
     let mut sig_to_group: HashMap<u128, Vec<usize>> = HashMap::new();
@@ -350,6 +422,7 @@ fn compute_height_coloring(
             num_groups, candidates.len(), signature_coverage * 100.0);
         
         // Assign colors based on signature
+        let assign_start = std::time::Instant::now();
         let mut colors = vec![0; candidates.len()];
         let mut sig_to_color: HashMap<u128, usize> = HashMap::new();
         let mut next_color = 0usize;
@@ -361,27 +434,37 @@ fn compute_height_coloring(
             });
             colors[idx] = color;
         }
+        let assign_time = assign_start.elapsed();
+        let total_time = start.elapsed();
+        let accounted = sig_time + assign_time;
+        let unaccounted = total_time.saturating_sub(accounted);
+        crate::debug!(5, "Coloring fast path breakdown: signature={:?}, assign={:?}, unaccounted={:?}",
+            sig_time, assign_time, unaccounted);
         return colors;
     }
     
     // Build full incompatibility graph
+    let graph_start = std::time::Instant::now();
     let adj = build_incompatibility_graph(dwa, candidates, needed, old_to_new, new_states);
+    let graph_time = graph_start.elapsed();
     
-    let graph_time = start.elapsed();
+    let graph_total = start.elapsed();
     
     // Check for timeout - if graph construction took too long, abort
-    if graph_time.as_secs() > 60 {
+    if graph_total.as_secs() > 60 {
         eprintln!("ERROR: Graph construction took {:?} for {} candidates - aborting", 
-            graph_time, candidates.len());
+            graph_total, candidates.len());
         std::process::exit(1);
     }
     
     // Solve coloring: greedy for large graphs, exact for small ones
+    let color_start = std::time::Instant::now();
     let colors = if candidates.len() > 30 {
         solve_greedy_coloring(&adj)
     } else {
         solve_exact_graph_coloring(&adj)
     };
+    let color_time = color_start.elapsed();
     
     let total_time = start.elapsed();
     if total_time.as_secs() > 60 {
@@ -389,6 +472,10 @@ fn compute_height_coloring(
             total_time, candidates.len());
         std::process::exit(1);
     }
+    let accounted = sig_time + graph_time + color_time;
+    let unaccounted = total_time.saturating_sub(accounted);
+    crate::debug!(5, "Coloring breakdown: signature={:?}, graph={:?}, coloring={:?}, unaccounted={:?}",
+        sig_time, graph_time, color_time, unaccounted);
     
     colors
 }
@@ -409,32 +496,35 @@ fn compute_height_0_coloring_direct(
     use std::collections::hash_map::DefaultHasher;
     
     let n = candidates.len();
-    
+
     // First, analyze the structure to see if we can do better
     // Compute needed footprints and signatures
+    let sig_build_start = std::time::Instant::now();
     let mut sig_groups: HashMap<u64, Vec<usize>> = HashMap::new();
     let mut footprints: Vec<Weight> = Vec::with_capacity(n);
-    
+
     for (idx, &id) in candidates.iter().enumerate() {
         let final_on_needed = dwa.states[id].final_weight.as_ref()
             .map(|w| w & &needed[id])
             .unwrap_or_else(Weight::zeros);
-        
+
         let mut hasher = DefaultHasher::new();
         final_on_needed.fingerprint().hash(&mut hasher);
         let sig = hasher.finish();
-        
+
         sig_groups.entry(sig).or_default().push(idx);
         footprints.push(needed[id].clone());
     }
-    
+    let sig_build_time = sig_build_start.elapsed();
+
     // Analyze overlap structure
     let num_sigs = sig_groups.len();
-    
+
     // Check how many signature pairs have disjoint footprints (could share colors)
     let sig_list: Vec<(u64, Vec<usize>)> = sig_groups.into_iter().collect();
     
     // Compute footprint for each signature group (union of all members' footprints)
+    let footprint_start = std::time::Instant::now();
     let sig_footprints: Vec<Weight> = sig_list.iter().map(|(_, indices)| {
         let mut fp = Weight::zeros();
         for &idx in indices {
@@ -442,10 +532,12 @@ fn compute_height_0_coloring_direct(
         }
         fp
     }).collect();
+    let footprint_time = footprint_start.elapsed();
     
     // Count compatible signature pairs
     let mut compatible_sig_pairs = 0;
     let mut total_sig_pairs = 0;
+    let pairwise_start = std::time::Instant::now();
     for i in 0..sig_list.len() {
         for j in (i+1)..sig_list.len() {
             total_sig_pairs += 1;
@@ -455,34 +547,43 @@ fn compute_height_0_coloring_direct(
             }
         }
     }
+    let pairwise_time = pairwise_start.elapsed();
     
     // If most signature pairs are compatible (disjoint footprints), try interval scheduling
     if compatible_sig_pairs > total_sig_pairs / 2 && num_sigs > 50 {
+        let interval_start = std::time::Instant::now();
         // Try greedy interval-scheduling style approach
         // Sort signatures by footprint start (or size) and greedily assign colors
         let colors = greedy_interval_coloring(&sig_list, &sig_footprints, n);
         let num_colors = colors.iter().max().map(|c| c + 1).unwrap_or(0);
+        let interval_time = interval_start.elapsed();
         
         crate::debug!(5, "Height 0 interval coloring: {} candidates, {} sigs, {}/{} compatible pairs -> {} colors in {:?}",
             n, num_sigs, compatible_sig_pairs, total_sig_pairs, num_colors, start.elapsed());
+        let total_time = start.elapsed();
+        let accounted = sig_build_time + footprint_time + pairwise_time + interval_time;
+        let unaccounted = total_time.saturating_sub(accounted);
+        crate::debug!(5, "Height 0 interval details: sig_build={:?}, footprint={:?}, pairwise={:?}, interval={:?}, unaccounted={:?}",
+            sig_build_time, footprint_time, pairwise_time, interval_time, unaccounted);
         
         return colors;
     }
     
     // Fall back to direct signature coloring
+    let direct_start = std::time::Instant::now();
     let mut colors = Vec::with_capacity(n);
     let mut sig_to_color: HashMap<u64, usize> = HashMap::new();
     let mut next_color = 0usize;
-    
+
     for (idx, &id) in candidates.iter().enumerate() {
         let final_on_needed = dwa.states[id].final_weight.as_ref()
             .map(|w| w & &needed[id])
             .unwrap_or_else(Weight::zeros);
-        
+
         let mut hasher = DefaultHasher::new();
         final_on_needed.fingerprint().hash(&mut hasher);
         let sig = hasher.finish();
-        
+
         let color = *sig_to_color.entry(sig).or_insert_with(|| {
             let c = next_color;
             next_color += 1;
@@ -491,8 +592,14 @@ fn compute_height_0_coloring_direct(
         colors.push(color);
     }
     
+    let direct_time = direct_start.elapsed();
     crate::debug!(5, "Height 0 direct coloring: {} candidates, {} sigs, {}/{} compatible pairs -> {} colors in {:?}",
         n, num_sigs, compatible_sig_pairs, total_sig_pairs, next_color, start.elapsed());
+    let total_time = start.elapsed();
+    let accounted = sig_build_time + footprint_time + pairwise_time + direct_time;
+    let unaccounted = total_time.saturating_sub(accounted);
+    crate::debug!(5, "Height 0 direct details: sig_build={:?}, footprint={:?}, pairwise={:?}, direct={:?}, unaccounted={:?}",
+        sig_build_time, footprint_time, pairwise_time, direct_time, unaccounted);
     
     colors
 }
@@ -716,17 +823,65 @@ fn compute_topo_order(dwa: &DWA) -> Result<Vec<StateID>, DWABuildError> {
 }
 
 fn compute_needed_sets(dwa: &DWA, topo_order: &[StateID]) -> Vec<Weight> {
+    let total_start = std::time::Instant::now();
+    let mut time_final_clone = std::time::Duration::ZERO;
+    let mut time_weight_lookup = std::time::Duration::ZERO;
+    let mut time_and = std::time::Duration::ZERO;
+    let mut time_or = std::time::Duration::ZERO;
+    let mut time_loop = std::time::Duration::ZERO;
+    let mut time_loop_other = std::time::Duration::ZERO;
+    let mut count_transitions = 0usize;
+
     let mut needed = vec![Weight::zeros(); dwa.states.len()];
     for &u in topo_order {
+        let loop_start = std::time::Instant::now();
+        let mut loop_accounted = std::time::Duration::ZERO;
+        let clone_start = std::time::Instant::now();
         let mut acc = dwa.states[u].final_weight.clone().unwrap_or_else(Weight::zeros);
+        let clone_time = clone_start.elapsed();
+        time_final_clone += clone_time;
+        loop_accounted += clone_time;
         for (&lbl, &v) in &dwa.states[u].transitions {
+            count_transitions += 1;
             if v >= dwa.states.len() { continue; }
-            if let Some(w) = dwa.states[u].trans_weights.get(&lbl) {
-                acc |= &(w & &needed[v]);
+            let lookup_start = std::time::Instant::now();
+            let weight_opt = dwa.states[u].trans_weights.get(&lbl);
+            let lookup_time = lookup_start.elapsed();
+            time_weight_lookup += lookup_time;
+            loop_accounted += lookup_time;
+            if let Some(w) = weight_opt {
+                let and_start = std::time::Instant::now();
+                let tmp = w & &needed[v];
+                let and_time = and_start.elapsed();
+                time_and += and_time;
+                loop_accounted += and_time;
+
+                let or_start = std::time::Instant::now();
+                acc |= &tmp;
+                let or_time = or_start.elapsed();
+                time_or += or_time;
+                loop_accounted += or_time;
             }
         }
         needed[u] = acc;
+        let loop_elapsed = loop_start.elapsed();
+        time_loop += loop_elapsed;
+        if let Some(other) = loop_elapsed.checked_sub(loop_accounted) {
+            time_loop_other += other;
+        }
     }
+    crate::debug!(
+        5,
+        "compute_needed_sets breakdown: total={:?}, loop={:?}, loop_other={:?}, final_clone={:?}, weight_lookup={:?}, and={:?}, or={:?}, transitions={}",
+        total_start.elapsed(),
+        time_loop,
+        time_loop_other,
+        time_final_clone,
+        time_weight_lookup,
+        time_and,
+        time_or,
+        count_transitions,
+    );
     needed
 }
 
@@ -1112,12 +1267,16 @@ fn build_incompatibility_graph_height_0(
     let mut edge_count = 0usize;
     let mut compare_count = 0usize;
     let mut skipped_by_footprint = 0usize;
+    let mut footprint_overlap_time = std::time::Duration::ZERO;
+    let mut pair_overlap_time = std::time::Duration::ZERO;
     
     // Compare across groups
     for i in 0..groups.len() {
         for j in (i+1)..groups.len() {
             // Quick check: do the group footprints overlap?
+            let overlap_start = std::time::Instant::now();
             let overlap = &group_footprints[i] & &group_footprints[j];
+            footprint_overlap_time += overlap_start.elapsed();
             if overlap.is_empty() {
                 // No overlap in needed sets means all pairs are compatible
                 skipped_by_footprint += groups[i].1.len() * groups[j].1.len();
@@ -1136,7 +1295,9 @@ fn build_incompatibility_graph_height_0(
             let id_j = candidates[idx_j];
             
             // Check if their needed sets overlap
+            let pair_overlap_start = std::time::Instant::now();
             let pair_overlap = &needed[id_i] & &needed[id_j];
+            pair_overlap_time += pair_overlap_start.elapsed();
             if pair_overlap.is_empty() {
                 // This specific pair is compatible, but others in the group might not be
                 // Need to check all pairs in this case
@@ -1145,7 +1306,9 @@ fn build_incompatibility_graph_height_0(
                         compare_count += 1;
                         let id_i = candidates[idx_i];
                         let id_j = candidates[idx_j];
+                        let pair_overlap_start = std::time::Instant::now();
                         let pair_overlap = &needed[id_i] & &needed[id_j];
+                        pair_overlap_time += pair_overlap_start.elapsed();
                         if !pair_overlap.is_empty() {
                             // Finals differ on overlap (different groups), so incompatible
                             adj[idx_i].push(idx_j);
@@ -1169,8 +1332,13 @@ fn build_incompatibility_graph_height_0(
     }
     
     if n >= 100 {
+        let total_time = start.elapsed();
+        let accounted = footprint_overlap_time + pair_overlap_time;
+        let unaccounted = total_time.saturating_sub(accounted);
         crate::debug!(5, "Incomp graph (h=0): {} candidates, {} signature groups, {} comparisons, {} skipped by footprint, {} edges, {:?}",
-            n, num_groups, compare_count, skipped_by_footprint, edge_count, start.elapsed());
+            n, num_groups, compare_count, skipped_by_footprint, edge_count, total_time);
+        crate::debug!(5, "Incomp graph (h=0) breakdown: footprint_overlap={:?}, pair_overlap={:?}, unaccounted={:?}",
+            footprint_overlap_time, pair_overlap_time, unaccounted);
     }
     
     adj
@@ -1189,17 +1357,23 @@ fn greedy_color_without_graph(
 ) -> Vec<usize> {
     let n = candidates.len();
     if n == 0 { return vec![]; }
+
+    let total_start = std::time::Instant::now();
     
     // Compute signatures for each candidate
+    let sig_start = std::time::Instant::now();
     let signatures: Vec<u128> = candidates.iter().map(|&id| {
         compute_state_signature(id, dwa, needed, old_to_new)
     }).collect();
+    let sig_time = sig_start.elapsed();
     
     // Check if there are many unique signatures - if so, use signatures as colors directly
+    let grouping_start = std::time::Instant::now();
     let mut sig_to_group: HashMap<u128, Vec<usize>> = HashMap::new();
     for (idx, &sig) in signatures.iter().enumerate() {
         sig_to_group.entry(sig).or_default().push(idx);
     }
+    let grouping_time = grouping_start.elapsed();
     let num_groups = sig_to_group.len();
     let signature_coverage = num_groups as f64 / n as f64;
     
@@ -1207,7 +1381,7 @@ fn greedy_color_without_graph(
     if signature_coverage > 0.50 {
         crate::debug!(5, "Greedy fast path: {} sig groups / {} candidates ({:.1}% coverage) -> using signatures as colors",
             num_groups, n, signature_coverage * 100.0);
-        
+        let assign_start = std::time::Instant::now();
         let mut colors = vec![0; n];
         let mut sig_to_color: HashMap<u128, usize> = HashMap::new();
         let mut next_color = 0usize;
@@ -1219,6 +1393,12 @@ fn greedy_color_without_graph(
             });
             colors[idx] = color;
         }
+        let assign_time = assign_start.elapsed();
+        let total_time = total_start.elapsed();
+        let accounted = sig_time + grouping_time + assign_time;
+        let unaccounted = total_time.saturating_sub(accounted);
+        crate::debug!(5, "Greedy fast path breakdown: signature={:?}, grouping={:?}, assign={:?}, unaccounted={:?}",
+            sig_time, grouping_time, assign_time, unaccounted);
         return colors;
     }
     
@@ -1230,6 +1410,8 @@ fn greedy_color_without_graph(
     let mut color_representatives: Vec<Vec<(usize, u128)>> = Vec::new();
     
     let mut compare_count = 0usize;
+    let mut compare_time = std::time::Duration::ZERO;
+    let assign_start = std::time::Instant::now();
     
     for idx in 0..n {
         let sig = signatures[idx];
@@ -1251,7 +1433,10 @@ fn greedy_color_without_graph(
             let mut compatible_with_all = true;
             for &(rep_idx, _rep_sig) in reps {
                 compare_count += 1;
-                if !are_compatible(cand, candidates[rep_idx], dwa, needed, old_to_new, new_states) {
+                let cmp_start = std::time::Instant::now();
+                let compatible = are_compatible(cand, candidates[rep_idx], dwa, needed, old_to_new, new_states);
+                compare_time += cmp_start.elapsed();
+                if !compatible {
                     compatible_with_all = false;
                     break;
                 }
@@ -1282,10 +1467,16 @@ fn greedy_color_without_graph(
             reps.push((idx, sig));
         }
     }
-    
+
+    let assign_time = assign_start.elapsed();
     if n >= 100 {
         let num_colors = color_representatives.len();
+        let total_time = total_start.elapsed();
+        let accounted = sig_time + grouping_time + compare_time + assign_time;
+        let unaccounted = total_time.saturating_sub(accounted);
         crate::debug!(5, "Greedy color: {} candidates -> {} colors, {} comparisons", n, num_colors, compare_count);
+        crate::debug!(5, "Greedy color breakdown: signature={:?}, grouping={:?}, compare={:?}, assign={:?}, unaccounted={:?}",
+            sig_time, grouping_time, compare_time, assign_time, unaccounted);
     }
     
     colors
@@ -1319,6 +1510,7 @@ fn build_incompatibility_graph_general(
     let mut adj = vec![vec![]; n];
     let mut edge_count = 0usize;
     let mut compare_count = 0usize;
+    let mut compare_time = std::time::Duration::ZERO;
     
     // Compare across groups
     for i in 0..groups.len() {
@@ -1326,7 +1518,10 @@ fn build_incompatibility_graph_general(
             for &idx_i in &groups[i] {
                 for &idx_j in &groups[j] {
                     compare_count += 1;
-                    if !are_compatible(candidates[idx_i], candidates[idx_j], dwa, needed, old_to_new, new_states) {
+                    let cmp_start = std::time::Instant::now();
+                    let compatible = are_compatible(candidates[idx_i], candidates[idx_j], dwa, needed, old_to_new, new_states);
+                    compare_time += cmp_start.elapsed();
+                    if !compatible {
                         adj[idx_i].push(idx_j);
                         adj[idx_j].push(idx_i);
                         edge_count += 1;
@@ -1351,8 +1546,12 @@ fn build_incompatibility_graph_general(
     }
     
     if n >= 100 {
+        let total_time = start.elapsed();
+        let unaccounted = total_time.saturating_sub(compare_time);
         crate::debug!(5, "Incomp graph: {} candidates, {} sig groups, {} comparisons, {} edges, {:?}",
-            n, num_groups, compare_count, edge_count, start.elapsed());
+            n, num_groups, compare_count, edge_count, total_time);
+        crate::debug!(5, "Incomp graph breakdown: compare={:?}, unaccounted={:?}",
+            compare_time, unaccounted);
     }
     
     adj

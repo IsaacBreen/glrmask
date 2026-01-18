@@ -24,6 +24,210 @@ static RANGEMAP_WEIGHT_PTRS: Lazy<Mutex<HashSet<usize>>> = Lazy::new(|| Mutex::n
 static FULL_TSIDS_CACHE: Lazy<Mutex<HashMap<usize, RangeSet>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
+// --- Profiling ---
+pub static PROF_RANGEMAP_COUNT_OR: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static PROF_RANGEMAP_COUNT_OR_CACHE_HIT: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static PROF_RANGEMAP_TIME_OR_TOTAL: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static PROF_RANGEMAP_TIME_OR_UNION: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static PROF_RANGEMAP_TIME_OR_INTERN: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static PROF_RANGEMAP_TIME_OR_CACHE: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static PROF_RANGEMAP_COUNT_OR_ASYM: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static PROF_RANGEMAP_TIME_OR_ASYM: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static PROF_RANGEMAP_COUNT_OR_MERGE: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static PROF_RANGEMAP_TIME_OR_MERGE: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static PROF_RANGEMAP_COUNT_DIVIDE: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static PROF_RANGEMAP_TIME_DIVIDE_TOTAL: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static PROF_RANGEMAP_TIME_DIVIDE_RIGHT_COMP: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static PROF_RANGEMAP_TIME_DIVIDE_COMBINE: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static PROF_RANGEMAP_TIME_DIVIDE_INSERT: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static PROF_RANGEMAP_COUNT_DIVIDE_INSERT: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static PROF_RANGEMAP_TIME_DIVIDE_ADVANCE_LEFT: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static PROF_RANGEMAP_TIME_DIVIDE_ADVANCE_RIGHT: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static PROF_RANGEMAP_TIME_DIVIDE_LOOP_TOTAL: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static PROF_RANGEMAP_TIME_DIVIDE_OTHER: std::sync::atomic::AtomicU64 =
+     std::sync::atomic::AtomicU64::new(0);
+pub static PROF_RANGEMAP_TIME_DIVIDE_VALS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static PROF_RANGEMAP_TIME_DIVIDE_IS_SAME: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static PROF_RANGEMAP_INTERN_COUNT: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static PROF_RANGEMAP_INTERN_HIT: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static PROF_RANGEMAP_INTERN_MISS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static PROF_RANGEMAP_INTERN_TIME_TOTAL: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static PROF_RANGEMAP_INTERN_TIME_LOOKUP: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static PROF_RANGEMAP_INTERN_TIME_INSERT: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+pub fn reset_profiling() {
+    PROF_RANGEMAP_COUNT_OR.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_RANGEMAP_COUNT_OR_CACHE_HIT.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_RANGEMAP_TIME_OR_TOTAL.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_RANGEMAP_TIME_OR_UNION.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_RANGEMAP_TIME_OR_INTERN.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_RANGEMAP_TIME_OR_CACHE.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_RANGEMAP_COUNT_OR_ASYM.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_RANGEMAP_TIME_OR_ASYM.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_RANGEMAP_COUNT_OR_MERGE.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_RANGEMAP_TIME_OR_MERGE.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_RANGEMAP_COUNT_DIVIDE.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_RANGEMAP_TIME_DIVIDE_TOTAL.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_RANGEMAP_TIME_DIVIDE_RIGHT_COMP.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_RANGEMAP_TIME_DIVIDE_COMBINE.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_RANGEMAP_TIME_DIVIDE_INSERT.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_RANGEMAP_COUNT_DIVIDE_INSERT.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_RANGEMAP_TIME_DIVIDE_ADVANCE_LEFT.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_RANGEMAP_TIME_DIVIDE_ADVANCE_RIGHT.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_RANGEMAP_TIME_DIVIDE_LOOP_TOTAL.store(0, std::sync::atomic::Ordering::Relaxed);
+        PROF_RANGEMAP_TIME_DIVIDE_OTHER.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_RANGEMAP_TIME_DIVIDE_VALS.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_RANGEMAP_TIME_DIVIDE_IS_SAME.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_RANGEMAP_INTERN_COUNT.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_RANGEMAP_INTERN_HIT.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_RANGEMAP_INTERN_MISS.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_RANGEMAP_INTERN_TIME_TOTAL.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_RANGEMAP_INTERN_TIME_LOOKUP.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_RANGEMAP_INTERN_TIME_INSERT.store(0, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn print_profiling(label: &str) {
+    let count_or = PROF_RANGEMAP_COUNT_OR.load(std::sync::atomic::Ordering::Relaxed);
+    let count_or_cache_hit = PROF_RANGEMAP_COUNT_OR_CACHE_HIT
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let time_or_total = PROF_RANGEMAP_TIME_OR_TOTAL.load(std::sync::atomic::Ordering::Relaxed);
+    let time_or_union = PROF_RANGEMAP_TIME_OR_UNION.load(std::sync::atomic::Ordering::Relaxed);
+    let time_or_intern = PROF_RANGEMAP_TIME_OR_INTERN.load(std::sync::atomic::Ordering::Relaxed);
+    let time_or_cache = PROF_RANGEMAP_TIME_OR_CACHE.load(std::sync::atomic::Ordering::Relaxed);
+    let count_or_asym = PROF_RANGEMAP_COUNT_OR_ASYM.load(std::sync::atomic::Ordering::Relaxed);
+    let time_or_asym = PROF_RANGEMAP_TIME_OR_ASYM.load(std::sync::atomic::Ordering::Relaxed);
+    let count_or_merge = PROF_RANGEMAP_COUNT_OR_MERGE.load(std::sync::atomic::Ordering::Relaxed);
+    let time_or_merge = PROF_RANGEMAP_TIME_OR_MERGE.load(std::sync::atomic::Ordering::Relaxed);
+    let count_divide = PROF_RANGEMAP_COUNT_DIVIDE.load(std::sync::atomic::Ordering::Relaxed);
+    let time_divide_total =
+        PROF_RANGEMAP_TIME_DIVIDE_TOTAL.load(std::sync::atomic::Ordering::Relaxed);
+    let time_divide_right_comp =
+        PROF_RANGEMAP_TIME_DIVIDE_RIGHT_COMP.load(std::sync::atomic::Ordering::Relaxed);
+    let time_divide_combine =
+        PROF_RANGEMAP_TIME_DIVIDE_COMBINE.load(std::sync::atomic::Ordering::Relaxed);
+    let time_divide_insert =
+        PROF_RANGEMAP_TIME_DIVIDE_INSERT.load(std::sync::atomic::Ordering::Relaxed);
+    let count_divide_insert =
+        PROF_RANGEMAP_COUNT_DIVIDE_INSERT.load(std::sync::atomic::Ordering::Relaxed);
+    let time_divide_advance_left =
+        PROF_RANGEMAP_TIME_DIVIDE_ADVANCE_LEFT.load(std::sync::atomic::Ordering::Relaxed);
+    let time_divide_advance_right =
+        PROF_RANGEMAP_TIME_DIVIDE_ADVANCE_RIGHT.load(std::sync::atomic::Ordering::Relaxed);
+    let time_divide_loop_total =
+        PROF_RANGEMAP_TIME_DIVIDE_LOOP_TOTAL.load(std::sync::atomic::Ordering::Relaxed);
+        let time_divide_other =
+            PROF_RANGEMAP_TIME_DIVIDE_OTHER.load(std::sync::atomic::Ordering::Relaxed);
+    let time_divide_vals =
+        PROF_RANGEMAP_TIME_DIVIDE_VALS.load(std::sync::atomic::Ordering::Relaxed);
+    let time_divide_is_same =
+        PROF_RANGEMAP_TIME_DIVIDE_IS_SAME.load(std::sync::atomic::Ordering::Relaxed);
+    let intern_count = PROF_RANGEMAP_INTERN_COUNT.load(std::sync::atomic::Ordering::Relaxed);
+    let intern_hit = PROF_RANGEMAP_INTERN_HIT.load(std::sync::atomic::Ordering::Relaxed);
+    let intern_miss = PROF_RANGEMAP_INTERN_MISS.load(std::sync::atomic::Ordering::Relaxed);
+    let intern_time_total =
+        PROF_RANGEMAP_INTERN_TIME_TOTAL.load(std::sync::atomic::Ordering::Relaxed);
+    let intern_time_lookup =
+        PROF_RANGEMAP_INTERN_TIME_LOOKUP.load(std::sync::atomic::Ordering::Relaxed);
+    let intern_time_insert =
+        PROF_RANGEMAP_INTERN_TIME_INSERT.load(std::sync::atomic::Ordering::Relaxed);
+
+    let count_or_fast = count_or_asym.saturating_add(count_or_merge);
+    if count_or > 0 || count_or_fast > 0 || count_divide > 0 || intern_count > 0 {
+        println!("RANGEMAP_WEIGHT_PROF [{}]:", label);
+        if count_or > 0 {
+            println!(
+                "  OR (arc): {:9} ops, {:9} us (avg {:.2} us)",
+                count_or,
+                time_or_total,
+                time_or_total as f64 / count_or as f64
+            );
+            println!(
+                "  OR (arc) breakdown: union={} us, intern={} us, cache={} us, cache_hits={}",
+                time_or_union,
+                time_or_intern,
+                time_or_cache,
+                count_or_cache_hit,
+            );
+        }
+        if count_or_fast > 0 {
+            let fast_time = time_or_asym.saturating_add(time_or_merge);
+            println!(
+                "  OR (union_fast): {:9} ops, {:9} us (avg {:.2} us)",
+                count_or_fast,
+                fast_time,
+                fast_time as f64 / count_or_fast as f64
+            );
+            println!(
+                "  OR (union_fast) breakdown: asym={} ({} us), merge={} ({} us)",
+                count_or_asym,
+                time_or_asym,
+                count_or_merge,
+                time_or_merge,
+            );
+        }
+        if count_divide > 0 {
+            println!(
+                "  DIV: {:9} ops, {:9} us (avg {:.2} us)",
+                count_divide,
+                time_divide_total,
+                time_divide_total as f64 / count_divide as f64
+            );
+            println!(
+                "  DIV breakdown: right_comp={} us, combine={} us, insert={} us, inserts={}, advance_left={} us, advance_right={} us, vals={} us, is_same={} us, loop_total={} us, other={} us",
+                time_divide_right_comp,
+                time_divide_combine,
+                time_divide_insert,
+                count_divide_insert,
+                time_divide_advance_left,
+                time_divide_advance_right,
+                time_divide_vals,
+                time_divide_is_same,
+                time_divide_loop_total,
+                time_divide_other,
+            );
+        }
+        if intern_count > 0 {
+            println!(
+                "  INTERN: {:9} ops, {:9} us (avg {:.2} us), hits={}, misses={}, lookup={} us, insert={} us",
+                intern_count,
+                intern_time_total,
+                intern_time_total as f64 / intern_count as f64,
+                intern_hit,
+                intern_miss,
+                intern_time_lookup,
+                intern_time_insert,
+            );
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct OpKey {
     op: cache::BinOp,
@@ -118,17 +322,45 @@ fn put_op_cache(
 }
 
 pub fn intern_rangemap(weight: RangeMapWeight) -> Arc<RangeMapWeight> {
+    PROF_RANGEMAP_INTERN_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let total_start = std::time::Instant::now();
     let mut interner = RANGEMAP_WEIGHT_INTERNER.lock().unwrap();
+    let lookup_start = std::time::Instant::now();
     if let Some(existing) = interner.get(&weight) {
+        let lookup_time = lookup_start.elapsed();
+        PROF_RANGEMAP_INTERN_TIME_LOOKUP.fetch_add(
+            lookup_time.as_micros() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        PROF_RANGEMAP_INTERN_HIT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let ptr = Arc::as_ptr(existing) as usize;
         RANGEMAP_WEIGHT_PTRS.lock().unwrap().insert(ptr);
+        PROF_RANGEMAP_INTERN_TIME_TOTAL.fetch_add(
+            total_start.elapsed().as_micros() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
         return existing.clone();
     }
+    let lookup_time = lookup_start.elapsed();
+    PROF_RANGEMAP_INTERN_TIME_LOOKUP.fetch_add(
+        lookup_time.as_micros() as u64,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    PROF_RANGEMAP_INTERN_MISS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let insert_start = std::time::Instant::now();
     let arc = Arc::new(weight);
     let ptr = Arc::as_ptr(&arc) as usize;
     invalidate_rangemap_op_cache_for_ptr(ptr);
     interner.insert(arc.clone());
     RANGEMAP_WEIGHT_PTRS.lock().unwrap().insert(ptr);
+    PROF_RANGEMAP_INTERN_TIME_INSERT.fetch_add(
+        insert_start.elapsed().as_micros() as u64,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    PROF_RANGEMAP_INTERN_TIME_TOTAL.fetch_add(
+        total_start.elapsed().as_micros() as u64,
+        std::sync::atomic::Ordering::Relaxed,
+    );
     arc
 }
 
@@ -493,14 +725,28 @@ impl RangeMapWeight {
         };
 
         let map = if small_ranges.saturating_mul(10) < large_ranges {
-            Self::union_asymmetric(&smaller.map, &larger.map)
+            PROF_RANGEMAP_COUNT_OR_ASYM.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let start = std::time::Instant::now();
+            let map = Self::union_asymmetric(&smaller.map, &larger.map);
+            PROF_RANGEMAP_TIME_OR_ASYM.fetch_add(
+                start.elapsed().as_micros() as u64,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            map
         } else {
-            Self::merge_maps(&self.map, &other.map, |left, right| match (left, right) {
+            PROF_RANGEMAP_COUNT_OR_MERGE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let start = std::time::Instant::now();
+            let map = Self::merge_maps(&self.map, &other.map, |left, right| match (left, right) {
                 (Some(a), Some(b)) => a | b,
                 (Some(a), None) => a.clone(),
                 (None, Some(b)) => b.clone(),
                 (None, None) => RangeSet::zeros(),
-            })
+            });
+            PROF_RANGEMAP_TIME_OR_MERGE.fetch_add(
+                start.elapsed().as_micros() as u64,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            map
         };
         Self { map, num_tsids: self.num_tsids() }
     }
@@ -552,6 +798,7 @@ impl RangeMapWeight {
             1,
             std::sync::atomic::Ordering::Relaxed,
         );
+        PROF_RANGEMAP_COUNT_DIVIDE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let start = std::time::Instant::now();
         let num_tsids = self.num_tsids();
         let full_tsids = Self::full_tsids(num_tsids);
@@ -567,6 +814,10 @@ impl RangeMapWeight {
                 num_tsids,
             };
             crate::datastructures::hybrid_bitset::PROF_TIME_DIVIDE.fetch_add(
+                start.elapsed().as_micros() as u64,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            PROF_RANGEMAP_TIME_DIVIDE_TOTAL.fetch_add(
                 start.elapsed().as_micros() as u64,
                 std::sync::atomic::Ordering::Relaxed,
             );
@@ -591,6 +842,9 @@ impl RangeMapWeight {
         let mut right_ptr: Option<*const RangeSetBlaze<usize>> = None;
 
         loop {
+            let loop_start = std::time::Instant::now();
+            let mut loop_accounted = std::time::Duration::ZERO;
+            let advance_left_start = std::time::Instant::now();
             loop {
                 let advance = match left.as_ref() {
                     Some((range, _)) if pos > *range.end() => true,
@@ -602,6 +856,14 @@ impl RangeMapWeight {
                     break;
                 }
             }
+            let advance_left_time = advance_left_start.elapsed();
+            PROF_RANGEMAP_TIME_DIVIDE_ADVANCE_LEFT.fetch_add(
+                advance_left_time.as_micros() as u64,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            loop_accounted += advance_left_time;
+
+            let advance_right_start = std::time::Instant::now();
             loop {
                 let advance = match right.as_ref() {
                     Some((range, _)) if pos > *range.end() => true,
@@ -613,7 +875,14 @@ impl RangeMapWeight {
                     break;
                 }
             }
+            let advance_right_time = advance_right_start.elapsed();
+            PROF_RANGEMAP_TIME_DIVIDE_ADVANCE_RIGHT.fetch_add(
+                advance_right_time.as_micros() as u64,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            loop_accounted += advance_right_time;
 
+            let vals_start = std::time::Instant::now();
             let (left_val, next_left_change) = match left.as_ref() {
                 Some((range, val)) => {
                     if pos < *range.start() {
@@ -635,18 +904,33 @@ impl RangeMapWeight {
                 }
                 None => (None, None),
             };
+            let vals_time = vals_start.elapsed();
+            PROF_RANGEMAP_TIME_DIVIDE_VALS.fetch_add(
+                vals_time.as_micros() as u64,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            loop_accounted += vals_time;
 
+            let mut right_comp_time = std::time::Duration::ZERO;
             if let Some(rv) = right_val {
                 let ptr = Arc::as_ptr(&rv.inner);
                 if right_ptr != Some(ptr) {
+                    let right_comp_start = std::time::Instant::now();
                     right_comp = Some(&full_tsids - rv);
+                    right_comp_time = right_comp_start.elapsed();
+                    PROF_RANGEMAP_TIME_DIVIDE_RIGHT_COMP.fetch_add(
+                        right_comp_time.as_micros() as u64,
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
                     right_ptr = Some(ptr);
                 }
             } else {
                 right_comp = None;
                 right_ptr = None;
             }
+            loop_accounted += right_comp_time;
 
+            let combine_start = std::time::Instant::now();
             let combined = match (left_val, right_val) {
                 (Some(a), Some(_)) => {
                     let comp = right_comp.as_ref().expect("missing right complement");
@@ -659,6 +943,12 @@ impl RangeMapWeight {
                     .clone(),
                 (None, None) => full_tsids.clone(),
             };
+            let combine_time = combine_start.elapsed();
+            PROF_RANGEMAP_TIME_DIVIDE_COMBINE.fetch_add(
+                combine_time.as_micros() as u64,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            loop_accounted += combine_time;
 
             let next_change = match (next_left_change, next_right_change) {
                 (Some(a), Some(b)) => Some(a.min(b)),
@@ -671,17 +961,45 @@ impl RangeMapWeight {
                 None => usize::MAX,
             };
 
+            let mut insert_time = std::time::Duration::ZERO;
+            let mut is_same_time = std::time::Duration::ZERO;
             if combined.is_empty() {
                 if let Some(range_start) = current_start.take() {
+                    let insert_start = std::time::Instant::now();
                     out.ranges_insert(range_start..=current_end, current_value.clone());
+                    insert_time = insert_start.elapsed();
+                    PROF_RANGEMAP_TIME_DIVIDE_INSERT.fetch_add(
+                        insert_time.as_micros() as u64,
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
+                    PROF_RANGEMAP_COUNT_DIVIDE_INSERT.fetch_add(
+                        1,
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
                 }
             } else if let Some(range_start) = current_start {
+                let is_same_start = std::time::Instant::now();
                 let is_same = Arc::ptr_eq(&current_value.inner, &combined.inner)
                     || current_value == combined;
+                is_same_time = is_same_start.elapsed();
+                PROF_RANGEMAP_TIME_DIVIDE_IS_SAME.fetch_add(
+                    is_same_time.as_micros() as u64,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
                 if is_same && current_end.saturating_add(1) == pos {
                     current_end = end;
                 } else {
+                    let insert_start = std::time::Instant::now();
                     out.ranges_insert(range_start..=current_end, current_value.clone());
+                    insert_time = insert_start.elapsed();
+                    PROF_RANGEMAP_TIME_DIVIDE_INSERT.fetch_add(
+                        insert_time.as_micros() as u64,
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
+                    PROF_RANGEMAP_COUNT_DIVIDE_INSERT.fetch_add(
+                        1,
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
                     current_start = Some(pos);
                     current_end = end;
                     current_value = combined;
@@ -692,6 +1010,21 @@ impl RangeMapWeight {
                 current_value = combined;
             }
 
+            loop_accounted += insert_time;
+            loop_accounted += is_same_time;
+
+            let loop_elapsed = loop_start.elapsed();
+            PROF_RANGEMAP_TIME_DIVIDE_LOOP_TOTAL.fetch_add(
+                loop_elapsed.as_micros() as u64,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            if let Some(other) = loop_elapsed.checked_sub(loop_accounted) {
+                PROF_RANGEMAP_TIME_DIVIDE_OTHER.fetch_add(
+                    other.as_micros() as u64,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+            }
+
             if end == usize::MAX {
                 break;
             }
@@ -699,7 +1032,13 @@ impl RangeMapWeight {
         }
 
         if let Some(range_start) = current_start {
+            let insert_start = std::time::Instant::now();
             out.ranges_insert(range_start..=current_end, current_value);
+            PROF_RANGEMAP_TIME_DIVIDE_INSERT.fetch_add(
+                insert_start.elapsed().as_micros() as u64,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            PROF_RANGEMAP_COUNT_DIVIDE_INSERT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
 
         let result = Self {
@@ -707,6 +1046,10 @@ impl RangeMapWeight {
             num_tsids,
         };
         crate::datastructures::hybrid_bitset::PROF_TIME_DIVIDE.fetch_add(
+            start.elapsed().as_micros() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        PROF_RANGEMAP_TIME_DIVIDE_TOTAL.fetch_add(
             start.elapsed().as_micros() as u64,
             std::sync::atomic::Ordering::Relaxed,
         );
@@ -1050,15 +1393,39 @@ impl WeightBackend for Arc<RangeMapWeight> {
     }
 
     fn union(&self, other: &Self) -> Self {
+        PROF_RANGEMAP_COUNT_OR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if Arc::ptr_eq(self, other) {
             return self.clone();
         }
         if let Some(hit) = get_op_cache(cache::BinOp::Or, self, other) {
+            PROF_RANGEMAP_COUNT_OR_CACHE_HIT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             return hit;
         }
+        let union_start = std::time::Instant::now();
         let out = WeightBackend::union(self.as_ref(), other.as_ref());
+        let union_time = union_start.elapsed();
+        let intern_start = std::time::Instant::now();
         let out = intern_rangemap(out);
+        let intern_time = intern_start.elapsed();
+        let cache_start = std::time::Instant::now();
         put_op_cache(cache::BinOp::Or, self.clone(), other.clone(), out.clone());
+        let cache_time = cache_start.elapsed();
+        PROF_RANGEMAP_TIME_OR_TOTAL.fetch_add(
+            (union_time + intern_time + cache_time).as_micros() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        PROF_RANGEMAP_TIME_OR_UNION.fetch_add(
+            union_time.as_micros() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        PROF_RANGEMAP_TIME_OR_INTERN.fetch_add(
+            intern_time.as_micros() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        PROF_RANGEMAP_TIME_OR_CACHE.fetch_add(
+            cache_time.as_micros() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
         out
     }
 

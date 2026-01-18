@@ -155,17 +155,46 @@ where
     if base_pattern.is_empty() {
         return Weight::zeros();
     }
-    
-    // Tile the pattern across all LLM tokens
-    // For each LLM token n, shift the base pattern by n * num_tsids
-    let mut mask = RangeSetBlaze::new();
-    for n in 0..=max_llm_token {
-        let offset = n * num_tsids;
-        for tsid in base_pattern.iter() {
-            mask.insert(tsid + offset);
+
+    if num_tsids == 0 {
+        return Weight::zeros();
+    }
+
+    let token_count = max_llm_token.saturating_add(1);
+    if token_count == 1 {
+        return Weight::from_rsb(base_pattern);
+    }
+
+    // Fast path: base pattern covers the full tsid block, so the result is one contiguous range.
+    if base_pattern.ranges_len() == 1 {
+        if let Some(r) = base_pattern.ranges().next() {
+            if *r.start() == 0 && r.end().saturating_add(1) == num_tsids {
+                let end = max_llm_token
+                    .saturating_mul(num_tsids)
+                    .saturating_add(num_tsids.saturating_sub(1));
+                let mask: RangeSetBlaze<usize> = std::iter::once(0..=end).collect();
+                return Weight::from_rsb(mask);
+            }
         }
     }
     
+    // Tile the pattern across all LLM tokens
+    // For each LLM token n, shift the base pattern by n * num_tsids
+    let base_ranges: Vec<(usize, usize)> = base_pattern
+        .ranges()
+        .map(|r| (*r.start(), *r.end()))
+        .collect();
+    let mut ranges = Vec::with_capacity(base_ranges.len().saturating_mul(token_count));
+    for (start, end) in base_ranges {
+        for n in 0..token_count {
+            let offset = n.saturating_mul(num_tsids);
+            let shifted_start = start.saturating_add(offset);
+            let shifted_end = end.saturating_add(offset);
+            ranges.push(shifted_start..=shifted_end);
+        }
+    }
+
+    let mask: RangeSetBlaze<usize> = ranges.into_iter().collect();
     Weight::from_rsb(mask)
 }
 

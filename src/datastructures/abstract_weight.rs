@@ -103,6 +103,100 @@ thread_local! {
     static ALLOW_EXPANSION_OVERRIDE: RefCell<Option<bool>> = RefCell::new(None);
 }
 
+// --- AbstractWeight profiling ---
+pub static PROF_ABS_OR_ASSIGN_COUNT_RANGESET: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static PROF_ABS_OR_ASSIGN_TIME_RANGESET: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static PROF_ABS_OR_ASSIGN_COUNT_FACTORIZED: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static PROF_ABS_OR_ASSIGN_TIME_FACTORIZED: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static PROF_ABS_OR_ASSIGN_COUNT_RANGEMAP: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static PROF_ABS_OR_ASSIGN_TIME_RANGEMAP: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static PROF_ABS_DIV_COUNT_RANGESET: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static PROF_ABS_DIV_TIME_RANGESET: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static PROF_ABS_DIV_COUNT_FACTORIZED: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static PROF_ABS_DIV_TIME_FACTORIZED: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static PROF_ABS_DIV_COUNT_RANGEMAP: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static PROF_ABS_DIV_TIME_RANGEMAP: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+pub fn reset_weight_op_profiling() {
+    PROF_ABS_OR_ASSIGN_COUNT_RANGESET.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_ABS_OR_ASSIGN_TIME_RANGESET.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_ABS_OR_ASSIGN_COUNT_FACTORIZED.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_ABS_OR_ASSIGN_TIME_FACTORIZED.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_ABS_OR_ASSIGN_COUNT_RANGEMAP.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_ABS_OR_ASSIGN_TIME_RANGEMAP.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_ABS_DIV_COUNT_RANGESET.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_ABS_DIV_TIME_RANGESET.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_ABS_DIV_COUNT_FACTORIZED.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_ABS_DIV_TIME_FACTORIZED.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_ABS_DIV_COUNT_RANGEMAP.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_ABS_DIV_TIME_RANGEMAP.store(0, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn print_weight_op_profiling(label: &str) {
+    let or_rs_count =
+        PROF_ABS_OR_ASSIGN_COUNT_RANGESET.load(std::sync::atomic::Ordering::Relaxed);
+    let or_rs_time =
+        PROF_ABS_OR_ASSIGN_TIME_RANGESET.load(std::sync::atomic::Ordering::Relaxed);
+    let or_fx_count =
+        PROF_ABS_OR_ASSIGN_COUNT_FACTORIZED.load(std::sync::atomic::Ordering::Relaxed);
+    let or_fx_time =
+        PROF_ABS_OR_ASSIGN_TIME_FACTORIZED.load(std::sync::atomic::Ordering::Relaxed);
+    let or_rm_count =
+        PROF_ABS_OR_ASSIGN_COUNT_RANGEMAP.load(std::sync::atomic::Ordering::Relaxed);
+    let or_rm_time =
+        PROF_ABS_OR_ASSIGN_TIME_RANGEMAP.load(std::sync::atomic::Ordering::Relaxed);
+    let div_rs_count = PROF_ABS_DIV_COUNT_RANGESET.load(std::sync::atomic::Ordering::Relaxed);
+    let div_rs_time = PROF_ABS_DIV_TIME_RANGESET.load(std::sync::atomic::Ordering::Relaxed);
+    let div_fx_count = PROF_ABS_DIV_COUNT_FACTORIZED.load(std::sync::atomic::Ordering::Relaxed);
+    let div_fx_time = PROF_ABS_DIV_TIME_FACTORIZED.load(std::sync::atomic::Ordering::Relaxed);
+    let div_rm_count = PROF_ABS_DIV_COUNT_RANGEMAP.load(std::sync::atomic::Ordering::Relaxed);
+    let div_rm_time = PROF_ABS_DIV_TIME_RANGEMAP.load(std::sync::atomic::Ordering::Relaxed);
+
+    if or_rs_count > 0
+        || or_fx_count > 0
+        || or_rm_count > 0
+        || div_rs_count > 0
+        || div_fx_count > 0
+        || div_rm_count > 0
+    {
+        println!("ABSTRACT_WEIGHT_PROF [{}]:", label);
+        if or_rs_count > 0 || or_fx_count > 0 || or_rm_count > 0 {
+            println!(
+                "  OR_ASSIGN: rs={} ops ({:.2} us avg), fx={} ops ({:.2} us avg), rm={} ops ({:.2} us avg)",
+                or_rs_count,
+                or_rs_time as f64 / or_rs_count as f64,
+                or_fx_count,
+                or_fx_time as f64 / or_fx_count as f64,
+                or_rm_count,
+                or_rm_time as f64 / or_rm_count as f64,
+            );
+        }
+        if div_rs_count > 0 || div_fx_count > 0 || div_rm_count > 0 {
+            println!(
+                "  DIV: rs={} ops ({:.2} us avg), fx={} ops ({:.2} us avg), rm={} ops ({:.2} us avg)",
+                div_rs_count,
+                if div_rs_count > 0 { div_rs_time as f64 / div_rs_count as f64 } else { 0.0 },
+                div_fx_count,
+                if div_fx_count > 0 { div_fx_time as f64 / div_fx_count as f64 } else { 0.0 },
+                div_rm_count,
+                if div_rm_count > 0 { div_rm_time as f64 / div_rm_count as f64 } else { 0.0 },
+            );
+        }
+    }
+}
+
 /// Temporarily override the backend choice for the current thread.
 /// Returns the previous value (if any) which should be restored later.
 pub fn override_backend(choice: BackendChoice) -> Option<BackendChoice> {
@@ -953,11 +1047,40 @@ impl AbstractWeight {
         let start = std::time::Instant::now();
         let result = match (self, other) {
             (AbstractWeight::RangeMap(a), AbstractWeight::RangeMap(b)) => {
-                AbstractWeight::RangeMap(intern_rangemap(a.divide(b)))
+                let branch_start = std::time::Instant::now();
+                let out = AbstractWeight::RangeMap(intern_rangemap(a.divide(b)));
+                let elapsed = branch_start.elapsed();
+                PROF_ABS_DIV_COUNT_RANGEMAP.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                PROF_ABS_DIV_TIME_RANGEMAP.fetch_add(
+                    elapsed.as_micros() as u64,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+                out
             }
-            (AbstractWeight::RangeSet(_), AbstractWeight::RangeSet(_))
-            | (AbstractWeight::Factorized(_), AbstractWeight::Factorized(_)) => {
-                self | &other.complement()
+            (AbstractWeight::RangeSet(_), AbstractWeight::RangeSet(_)) => {
+                let branch_start = std::time::Instant::now();
+                let out = self | &other.complement();
+                let elapsed = branch_start.elapsed();
+                PROF_ABS_DIV_COUNT_RANGESET.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                PROF_ABS_DIV_TIME_RANGESET.fetch_add(
+                    elapsed.as_micros() as u64,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+                out
+            }
+            (AbstractWeight::Factorized(_), AbstractWeight::Factorized(_)) => {
+                let branch_start = std::time::Instant::now();
+                let out = self | &other.complement();
+                let elapsed = branch_start.elapsed();
+                PROF_ABS_DIV_COUNT_FACTORIZED.fetch_add(
+                    1,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+                PROF_ABS_DIV_TIME_FACTORIZED.fetch_add(
+                    elapsed.as_micros() as u64,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+                out
             }
             _ => panic!("AbstractWeight operation requires both operands to be the same variant"),
         };
@@ -1135,13 +1258,43 @@ impl BitOrAssign for AbstractWeight {
     fn bitor_assign(&mut self, rhs: Self) {
         match (self, &rhs) {
             (AbstractWeight::RangeSet(a), AbstractWeight::RangeSet(b)) => {
+                let start = std::time::Instant::now();
                 WeightBackend::union_assign(a, b);
+                let elapsed = start.elapsed();
+                PROF_ABS_OR_ASSIGN_COUNT_RANGESET.fetch_add(
+                    1,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+                PROF_ABS_OR_ASSIGN_TIME_RANGESET.fetch_add(
+                    elapsed.as_micros() as u64,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
             }
             (AbstractWeight::Factorized(a), AbstractWeight::Factorized(b)) => {
+                let start = std::time::Instant::now();
                 WeightBackend::union_assign(a, b);
+                let elapsed = start.elapsed();
+                PROF_ABS_OR_ASSIGN_COUNT_FACTORIZED.fetch_add(
+                    1,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+                PROF_ABS_OR_ASSIGN_TIME_FACTORIZED.fetch_add(
+                    elapsed.as_micros() as u64,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
             }
             (AbstractWeight::RangeMap(a), AbstractWeight::RangeMap(b)) => {
+                let start = std::time::Instant::now();
                 WeightBackend::union_assign(a, b);
+                let elapsed = start.elapsed();
+                PROF_ABS_OR_ASSIGN_COUNT_RANGEMAP.fetch_add(
+                    1,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+                PROF_ABS_OR_ASSIGN_TIME_RANGEMAP.fetch_add(
+                    elapsed.as_micros() as u64,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
             }
             _ => panic!("AbstractWeight operation requires both operands to be the same variant"),
         }
@@ -1152,13 +1305,43 @@ impl BitOrAssign<&AbstractWeight> for AbstractWeight {
     fn bitor_assign(&mut self, rhs: &AbstractWeight) {
         match (self, rhs) {
             (AbstractWeight::RangeSet(a), AbstractWeight::RangeSet(b)) => {
+                let start = std::time::Instant::now();
                 WeightBackend::union_assign(a, b);
+                let elapsed = start.elapsed();
+                PROF_ABS_OR_ASSIGN_COUNT_RANGESET.fetch_add(
+                    1,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+                PROF_ABS_OR_ASSIGN_TIME_RANGESET.fetch_add(
+                    elapsed.as_micros() as u64,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
             }
             (AbstractWeight::Factorized(a), AbstractWeight::Factorized(b)) => {
+                let start = std::time::Instant::now();
                 WeightBackend::union_assign(a, b);
+                let elapsed = start.elapsed();
+                PROF_ABS_OR_ASSIGN_COUNT_FACTORIZED.fetch_add(
+                    1,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+                PROF_ABS_OR_ASSIGN_TIME_FACTORIZED.fetch_add(
+                    elapsed.as_micros() as u64,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
             }
             (AbstractWeight::RangeMap(a), AbstractWeight::RangeMap(b)) => {
+                let start = std::time::Instant::now();
                 WeightBackend::union_assign(a, b);
+                let elapsed = start.elapsed();
+                PROF_ABS_OR_ASSIGN_COUNT_RANGEMAP.fetch_add(
+                    1,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+                PROF_ABS_OR_ASSIGN_TIME_RANGEMAP.fetch_add(
+                    elapsed.as_micros() as u64,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
             }
             _ => panic!("AbstractWeight operation requires both operands to be the same variant"),
         }

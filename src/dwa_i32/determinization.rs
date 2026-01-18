@@ -6,6 +6,7 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::ops::BitOrAssign;
+use std::time::{Duration, Instant};
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use crate::dwa_i32::test_weighted_automata;
 use super::common::{DETERMINIZE_DEBUG, Label, NWAStateID, Weight};
@@ -139,15 +140,29 @@ impl NWA {
             return DWA::new();
         }
 
+        let macro_level = std::env::var("MACRO_DEBUG_LEVEL")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(0);
+        let profile_enabled = std::env::var("PROFILE_DETERMINIZATION_BREAKDOWN")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+            || macro_level >= 5;
+
         crate::debug!(6, "Determinization: Precomputing epsilon closures...");
         
         // 3. Precompute Reachability
+        let eps_start = if profile_enabled { Some(Instant::now()) } else { None };
         let eps_reach = precompute_all_epsilon_closures(&self.states);
 
         // 4. Initialize Determinizer
-        let mut det = Determinizer::new(self, &eps_reach);
+        let mut det = Determinizer::new(self, &eps_reach, profile_enabled);
+        if let Some(start) = eps_start {
+            det.profile.precompute_eps = start.elapsed();
+        }
 
         // 5. Initial State Construction
+        let start_subset_start = if profile_enabled { Some(Instant::now()) } else { None };
         let mut start_map: HashMap<NWAStateID, Weight> = HashMap::new();
         for &s in &self.body.start_states {
             if s < eps_reach.len() {
@@ -164,10 +179,21 @@ impl NWA {
 
         let start_id = det.register_closure(start_subset);
         det.dwa.body.start_state = start_id;
+        if let Some(start) = start_subset_start {
+            det.profile.start_subset = start.elapsed();
+        }
 
         // 6. Main Expansion Loop
         while let Some(sid) = det.queue.pop_front() {
+            let expand_start = if profile_enabled { Some(Instant::now()) } else { None };
             det.expand_state(sid);
+            if let Some(start) = expand_start {
+                det.profile.expand_total += start.elapsed();
+            }
+        }
+
+        if profile_enabled {
+            det.profile.log();
         }
 
         // 7. Debug Verification
@@ -400,10 +426,232 @@ struct Determinizer<'a> {
     closures: Vec<WeightedSubset>,
     
     dwa: DWA,
+
+    profile_enabled: bool,
+    profile: DeterminizeProfile,
+}
+
+#[derive(Default)]
+struct DeterminizeProfile {
+    precompute_eps: Duration,
+    start_subset: Duration,
+    expand_total: Duration,
+    collect_transitions: Duration,
+    collect_weight_ops: Duration,
+    collect_map_ops: Duration,
+    collect_and: Duration,
+    collect_or: Duration,
+    collect_clone: Duration,
+    collect_state_iters: u64,
+    collect_label_iters: u64,
+    collect_target_iters: u64,
+    collect_btree_entry: Duration,
+    collect_btree_hits: u64,
+    collect_btree_misses: u64,
+    collect_edge_entry: Duration,
+    collect_edge_hits: u64,
+    collect_edge_misses: u64,
+    collect_target_lookup: Duration,
+    collect_target_hits: u64,
+    collect_target_misses: u64,
+    collect_target_insert: Duration,
+    collect_target_insert_count: u64,
+    collect_and_count: u64,
+    collect_or_count: u64,
+    build_dest_map: Duration,
+    build_dest_map_weight_ops: Duration,
+    build_dest_map_map_ops: Duration,
+    build_dest_map_and: Duration,
+    build_dest_map_or: Duration,
+    build_dest_map_targets: u64,
+    build_dest_map_pairs: u64,
+    build_dest_map_lookup: Duration,
+    build_dest_map_hits: u64,
+    build_dest_map_misses: u64,
+    build_dest_map_insert: Duration,
+    build_dest_map_insert_count: u64,
+    build_dest_map_and_count: u64,
+    build_dest_map_or_count: u64,
+    normalize_subset: Duration,
+    normalize_invert: Duration,
+    normalize_build: Duration,
+    normalize_sort: Duration,
+    normalize_not: Duration,
+    normalize_or: Duration,
+    normalize_vec_alloc: Duration,
+    normalize_push: Duration,
+    normalize_push_count: u64,
+    normalize_items: u64,
+    normalize_not_count: u64,
+    normalize_or_count: u64,
+    normalize_sort_len: u64,
+    register_closure: Duration,
+    register_lookup: Duration,
+    register_add_state: Duration,
+    register_clone: Duration,
+    register_insert: Duration,
+    register_push_closure: Duration,
+    register_push_queue: Duration,
+    final_weight: Duration,
+    register_and: Duration,
+    register_or: Duration,
+    add_transition: Duration,
+    expand_calls: u64,
+    labels: u64,
+    raw_targets: u64,
+    eps_pairs: u64,
+    closure_size_total: u64,
+}
+
+impl DeterminizeProfile {
+    fn log(&self) {
+        let avg_closure_size = if self.expand_calls > 0 {
+            self.closure_size_total as f64 / self.expand_calls as f64
+        } else {
+            0.0
+        };
+        let avg_us = |dur: Duration, count: u64| -> f64 {
+            if count == 0 {
+                0.0
+            } else {
+                dur.as_micros() as f64 / count as f64
+            }
+        };
+        crate::debug!(
+            5,
+            "Determinization breakdown: eps_reach={:?}, start_subset={:?}, expand_total={:?}, collect_transitions={:?}, build_dest_map={:?}, normalize_subset={:?}, register_closure={:?}, final_weight={:?}, add_transition={:?}",
+            self.precompute_eps,
+            self.start_subset,
+            self.expand_total,
+            self.collect_transitions,
+            self.build_dest_map,
+            self.normalize_subset,
+            self.register_closure,
+            self.final_weight,
+            self.add_transition,
+        );
+        crate::debug!(
+            5,
+            "Determinization detail: collect_weight_ops={:?}, collect_map_ops={:?}, build_dest_map_weight_ops={:?}, build_dest_map_map_ops={:?}, normalize_invert={:?}, normalize_build={:?}, normalize_sort={:?}",
+            self.collect_weight_ops,
+            self.collect_map_ops,
+            self.build_dest_map_weight_ops,
+            self.build_dest_map_map_ops,
+            self.normalize_invert,
+            self.normalize_build,
+            self.normalize_sort,
+        );
+        crate::debug!(
+            5,
+            "Determinization ops: collect(and={:?}, or={:?}, clone={:?}), build_dest_map(and={:?}, or={:?}), normalize(not={:?}, or={:?}), register(and={:?}, or={:?})",
+            self.collect_and,
+            self.collect_or,
+            self.collect_clone,
+            self.build_dest_map_and,
+            self.build_dest_map_or,
+            self.normalize_not,
+            self.normalize_or,
+            self.register_and,
+            self.register_or,
+        );
+        crate::debug!(
+            5,
+            "Determinization collect_transitions primitives: states={}, labels={}, targets={}, btree_entry={:?} (hits={}, misses={}, avg {:.2} us), edge_entry={:?} (hits={}, misses={}, avg {:.2} us), target_lookup={:?} (hits={}, misses={}, avg {:.2} us), target_insert={:?} (count={}, avg {:.2} us), weight_and={:?} (count={}, avg {:.2} us), weight_or={:?} (count={}, avg {:.2} us)",
+            self.collect_state_iters,
+            self.collect_label_iters,
+            self.collect_target_iters,
+            self.collect_btree_entry,
+            self.collect_btree_hits,
+            self.collect_btree_misses,
+            avg_us(self.collect_btree_entry, self.collect_btree_hits + self.collect_btree_misses),
+            self.collect_edge_entry,
+            self.collect_edge_hits,
+            self.collect_edge_misses,
+            avg_us(self.collect_edge_entry, self.collect_edge_hits + self.collect_edge_misses),
+            self.collect_target_lookup,
+            self.collect_target_hits,
+            self.collect_target_misses,
+            avg_us(self.collect_target_lookup, self.collect_target_hits + self.collect_target_misses),
+            self.collect_target_insert,
+            self.collect_target_insert_count,
+            avg_us(self.collect_target_insert, self.collect_target_insert_count),
+            self.collect_and,
+            self.collect_and_count,
+            avg_us(self.collect_and, self.collect_and_count),
+            self.collect_or,
+            self.collect_or_count,
+            avg_us(self.collect_or, self.collect_or_count),
+        );
+        crate::debug!(
+            5,
+            "Determinization build_dest_map primitives: raw_targets={}, eps_pairs={}, lookups={:?} (hits={}, misses={}, avg {:.2} us), inserts={:?} (count={}, avg {:.2} us), weight_and={:?} (count={}, avg {:.2} us), weight_or={:?} (count={}, avg {:.2} us)",
+            self.build_dest_map_targets,
+            self.build_dest_map_pairs,
+            self.build_dest_map_lookup,
+            self.build_dest_map_hits,
+            self.build_dest_map_misses,
+            avg_us(self.build_dest_map_lookup, self.build_dest_map_hits + self.build_dest_map_misses),
+            self.build_dest_map_insert,
+            self.build_dest_map_insert_count,
+            avg_us(self.build_dest_map_insert, self.build_dest_map_insert_count),
+            self.build_dest_map_and,
+            self.build_dest_map_and_count,
+            avg_us(self.build_dest_map_and, self.build_dest_map_and_count),
+            self.build_dest_map_or,
+            self.build_dest_map_or_count,
+            avg_us(self.build_dest_map_or, self.build_dest_map_or_count),
+        );
+        crate::debug!(
+            5,
+            "Determinization normalize primitives: items={}, invert={:?} (count={}, avg {:.2} us), or={:?} (count={}, avg {:.2} us), vec_alloc={:?}, push={:?} (count={}, avg {:.2} us), sort={:?} (len={})",
+            self.normalize_items,
+            self.normalize_not,
+            self.normalize_not_count,
+            avg_us(self.normalize_not, self.normalize_not_count),
+            self.normalize_or,
+            self.normalize_or_count,
+            avg_us(self.normalize_or, self.normalize_or_count),
+            self.normalize_vec_alloc,
+            self.normalize_push,
+            self.normalize_push_count,
+            avg_us(self.normalize_push, self.normalize_push_count),
+            self.normalize_sort,
+            self.normalize_sort_len,
+        );
+        let register_accounted = self.register_lookup
+            + self.register_add_state
+            + self.register_clone
+            + self.register_insert
+            + self.register_push_closure
+            + self.register_push_queue
+            + self.final_weight;
+        let register_unaccounted = self.register_closure.saturating_sub(register_accounted);
+        crate::debug!(
+            5,
+            "Register closure breakdown: lookup={:?}, add_state={:?}, clone={:?}, insert={:?}, push_closure={:?}, push_queue={:?}, final_weight={:?}, unaccounted={:?}",
+            self.register_lookup,
+            self.register_add_state,
+            self.register_clone,
+            self.register_insert,
+            self.register_push_closure,
+            self.register_push_queue,
+            self.final_weight,
+            register_unaccounted,
+        );
+        crate::debug!(
+            5,
+            "Determinization counts: expand_calls={}, labels={}, raw_targets={}, eps_pairs={}, avg_closure_size={:.2}",
+            self.expand_calls,
+            self.labels,
+            self.raw_targets,
+            self.eps_pairs,
+            avg_closure_size,
+        );
+    }
 }
 
 impl<'a> Determinizer<'a> {
-    fn new(nwa: &'a NWA, eps_reach: &'a [WeightedSubset]) -> Self {
+    fn new(nwa: &'a NWA, eps_reach: &'a [WeightedSubset], profile_enabled: bool) -> Self {
         let mut dwa = DWA::new();
         dwa.states.0.clear();
         dwa.body.start_state = 0;
@@ -414,40 +662,105 @@ impl<'a> Determinizer<'a> {
             queue: VecDeque::new(),
             closures: Vec::new(),
             dwa,
+            profile_enabled,
+            profile: DeterminizeProfile::default(),
         }
     }
 
     fn register_closure(&mut self, closure: WeightedSubset) -> usize {
+        let register_start = if self.profile_enabled { Some(Instant::now()) } else { None };
+        let lookup_start = if self.profile_enabled { Some(Instant::now()) } else { None };
         if let Some(&id) = self.seen.get(&closure) {
+            if let Some(start) = lookup_start {
+                self.profile.register_lookup += start.elapsed();
+            }
+            if let Some(start) = register_start {
+                self.profile.register_closure += start.elapsed();
+            }
             return id;
         }
+        if let Some(start) = lookup_start {
+            self.profile.register_lookup += start.elapsed();
+        }
 
+        let add_state_start = if self.profile_enabled { Some(Instant::now()) } else { None };
         let id = self.dwa.add_state();
+        if let Some(start) = add_state_start {
+            self.profile.register_add_state += start.elapsed();
+        }
 
         // Compute final weight for this new DWA state
+        let final_weight_start = if self.profile_enabled { Some(Instant::now()) } else { None };
         let mut finalw = Weight::zeros();
         for (sid, cw) in &closure {
             if let Some(fw) = &self.nwa.states[*sid].final_weight {
+                let and_start = if self.profile_enabled { Some(Instant::now()) } else { None };
                 let cand = cw & fw;
+                if let Some(start) = and_start {
+                    let elapsed = start.elapsed();
+                    self.profile.register_and += elapsed;
+                }
                 if !cand.is_empty() {
+                    let or_start = if self.profile_enabled { Some(Instant::now()) } else { None };
                     finalw |= &cand;
+                    if let Some(start) = or_start {
+                        let elapsed = start.elapsed();
+                        self.profile.register_or += elapsed;
+                    }
                 }
             }
         }
         if !finalw.is_empty() {
             let _ = self.dwa.set_final_weight(id, finalw);
         }
+        if let Some(start) = final_weight_start {
+            self.profile.final_weight += start.elapsed();
+        }
 
-        self.seen.insert(closure.clone(), id);
+        let clone_start = if self.profile_enabled { Some(Instant::now()) } else { None };
+        let closure_clone = closure.clone();
+        if let Some(start) = clone_start {
+            self.profile.register_clone += start.elapsed();
+        }
+
+        let insert_start = if self.profile_enabled { Some(Instant::now()) } else { None };
+        self.seen.insert(closure_clone, id);
+        if let Some(start) = insert_start {
+            self.profile.register_insert += start.elapsed();
+        }
+
+        let push_closure_start = if self.profile_enabled { Some(Instant::now()) } else { None };
         self.closures.push(closure);
+        if let Some(start) = push_closure_start {
+            self.profile.register_push_closure += start.elapsed();
+        }
+
+        let push_queue_start = if self.profile_enabled { Some(Instant::now()) } else { None };
         self.queue.push_back(id);
+        if let Some(start) = push_queue_start {
+            self.profile.register_push_queue += start.elapsed();
+        }
+
+        if let Some(start) = register_start {
+            self.profile.register_closure += start.elapsed();
+        }
         id
     }
 
     fn expand_state(&mut self, sid: usize) {
+        if self.profile_enabled {
+            self.profile.expand_calls += 1;
+        }
+        let closure_clone_start = if self.profile_enabled { Some(Instant::now()) } else { None };
         let closure = self.closures[sid].clone();
+        if let Some(start) = closure_clone_start {
+            self.profile.collect_clone += start.elapsed();
+        }
         if closure.is_empty() {
             return;
+        }
+        if self.profile_enabled {
+            self.profile.closure_size_total += closure.len() as u64;
         }
 
         // Transitions accumulation: Label -> TargetNWA -> Weight
@@ -456,25 +769,119 @@ impl<'a> Determinizer<'a> {
         let mut edge_weights: HashMap<Label, Weight> = HashMap::new();
 
         // 1. Collect outgoing labeled transitions from the subset.
+        let collect_start = if self.profile_enabled { Some(Instant::now()) } else { None };
         for (u, w_u) in &closure {
+            if self.profile_enabled {
+                self.profile.collect_state_iters += 1;
+            }
             let st = &self.nwa.states[*u];
             for (lbl, targets) in &st.transitions {
                 if targets.is_empty() { continue; }
 
-                let target_map = transitions.entry(*lbl).or_default();
-                let edge_acc = edge_weights.entry(*lbl).or_insert_with(Weight::zeros);
+                if self.profile_enabled {
+                    self.profile.collect_label_iters += 1;
+                }
+
+                let target_map = if self.profile_enabled {
+                    let entry_start = Instant::now();
+                    let entry = transitions.entry(*lbl);
+                    let (map_ref, is_new) = match entry {
+                        std::collections::btree_map::Entry::Occupied(o) => (o.into_mut(), false),
+                        std::collections::btree_map::Entry::Vacant(v) => (v.insert(HashMap::new()), true),
+                    };
+                    let elapsed = entry_start.elapsed();
+                    self.profile.collect_btree_entry += elapsed;
+                    self.profile.collect_map_ops += elapsed;
+                    if is_new {
+                        self.profile.collect_btree_misses += 1;
+                    } else {
+                        self.profile.collect_btree_hits += 1;
+                    }
+                    map_ref
+                } else {
+                    transitions.entry(*lbl).or_default()
+                };
+
+                let edge_acc = if self.profile_enabled {
+                    let entry_start = Instant::now();
+                    let entry = edge_weights.entry(*lbl);
+                    let (acc_ref, is_new) = match entry {
+                        std::collections::hash_map::Entry::Occupied(o) => (o.into_mut(), false),
+                        std::collections::hash_map::Entry::Vacant(v) => (v.insert(Weight::zeros()), true),
+                    };
+                    let elapsed = entry_start.elapsed();
+                    self.profile.collect_edge_entry += elapsed;
+                    self.profile.collect_map_ops += elapsed;
+                    if is_new {
+                        self.profile.collect_edge_misses += 1;
+                    } else {
+                        self.profile.collect_edge_hits += 1;
+                    }
+                    acc_ref
+                } else {
+                    edge_weights.entry(*lbl).or_insert_with(Weight::zeros)
+                };
 
                 for (v, w_trans) in targets {
+                    if self.profile_enabled {
+                        self.profile.collect_target_iters += 1;
+                    }
+                    let and_start = if self.profile_enabled { Some(Instant::now()) } else { None };
                     let w_out = w_u & w_trans;
+                    if let Some(start) = and_start {
+                        let elapsed = start.elapsed();
+                        self.profile.collect_weight_ops += elapsed;
+                        self.profile.collect_and += elapsed;
+                        self.profile.collect_and_count += 1;
+                    }
                     if !w_out.is_empty() {
+                        let or_start = if self.profile_enabled { Some(Instant::now()) } else { None };
                         *edge_acc |= &w_out;
-                        
-                        target_map.entry(*v)
-                            .and_modify(|w| *w |= &w_out)
-                            .or_insert(w_out);
+                        if let Some(start) = or_start {
+                            let elapsed = start.elapsed();
+                            self.profile.collect_weight_ops += elapsed;
+                            self.profile.collect_or += elapsed;
+                            self.profile.collect_or_count += 1;
+                        }
+
+                        if self.profile_enabled {
+                            let lookup_start = Instant::now();
+                            if let Some(existing) = target_map.get_mut(v) {
+                                let lookup_elapsed = lookup_start.elapsed();
+                                self.profile.collect_target_lookup += lookup_elapsed;
+                                self.profile.collect_map_ops += lookup_elapsed;
+                                self.profile.collect_target_hits += 1;
+
+                                let inner_or_start = Instant::now();
+                                *existing |= &w_out;
+                                let inner_or_elapsed = inner_or_start.elapsed();
+                                self.profile.collect_weight_ops += inner_or_elapsed;
+                                self.profile.collect_or += inner_or_elapsed;
+                                self.profile.collect_or_count += 1;
+                            } else {
+                                let lookup_elapsed = lookup_start.elapsed();
+                                self.profile.collect_target_lookup += lookup_elapsed;
+                                self.profile.collect_map_ops += lookup_elapsed;
+                                self.profile.collect_target_misses += 1;
+
+                                let insert_start = Instant::now();
+                                target_map.insert(*v, w_out);
+                                let insert_elapsed = insert_start.elapsed();
+                                self.profile.collect_target_insert += insert_elapsed;
+                                self.profile.collect_map_ops += insert_elapsed;
+                                self.profile.collect_target_insert_count += 1;
+                            }
+                        } else if let Some(existing) = target_map.get_mut(v) {
+                            *existing |= &w_out;
+                        } else {
+                            target_map.insert(*v, w_out);
+                        }
                     }
                 }
             }
+        }
+        if let Some(start) = collect_start {
+            self.profile.collect_transitions += start.elapsed();
         }
 
         // 2. For each label, compute the epsilon-closed destination subset.
@@ -482,33 +889,134 @@ impl<'a> Determinizer<'a> {
         for (lbl, raw_targets) in transitions {
             let w_edge = edge_weights.remove(&lbl).unwrap();
 
+            if self.profile_enabled {
+                self.profile.labels += 1;
+                self.profile.raw_targets += raw_targets.len() as u64;
+            }
+
             let mut dest_map: HashMap<NWAStateID, Weight> = HashMap::new();
 
             // Destination = Union_{ t in raw_targets } ( eps_reach[t] intersected with weight(t) )
+            let dest_map_start = if self.profile_enabled { Some(Instant::now()) } else { None };
             for (t, w_t) in raw_targets {
+                if self.profile_enabled {
+                    self.profile.build_dest_map_targets += 1;
+                }
                 if t < self.eps_reach.len() {
+                    if self.profile_enabled {
+                        let reach_len = self.eps_reach[t].len() as u64;
+                        self.profile.eps_pairs += reach_len;
+                        self.profile.build_dest_map_pairs += reach_len;
+                    }
                     for (v_reach, w_reach) in &self.eps_reach[t] {
+                        let and_start = if self.profile_enabled { Some(Instant::now()) } else { None };
                         let combined = &w_t & w_reach;
+                        if let Some(start) = and_start {
+                            let elapsed = start.elapsed();
+                            self.profile.build_dest_map_weight_ops += elapsed;
+                            self.profile.build_dest_map_and += elapsed;
+                            self.profile.build_dest_map_and_count += 1;
+                        }
                         if !combined.is_empty() {
-                            dest_map.entry(*v_reach)
-                                .and_modify(|w| *w |= &combined)
-                                .or_insert(combined);
+                            if self.profile_enabled {
+                                let lookup_start = Instant::now();
+                                if let Some(existing) = dest_map.get_mut(v_reach) {
+                                    let lookup_elapsed = lookup_start.elapsed();
+                                    self.profile.build_dest_map_lookup += lookup_elapsed;
+                                    self.profile.build_dest_map_map_ops += lookup_elapsed;
+                                    self.profile.build_dest_map_hits += 1;
+
+                                    let or_start = Instant::now();
+                                    *existing |= &combined;
+                                    let or_elapsed = or_start.elapsed();
+                                    self.profile.build_dest_map_weight_ops += or_elapsed;
+                                    self.profile.build_dest_map_or += or_elapsed;
+                                    self.profile.build_dest_map_or_count += 1;
+                                } else {
+                                    let lookup_elapsed = lookup_start.elapsed();
+                                    self.profile.build_dest_map_lookup += lookup_elapsed;
+                                    self.profile.build_dest_map_map_ops += lookup_elapsed;
+                                    self.profile.build_dest_map_misses += 1;
+
+                                    let insert_start = Instant::now();
+                                    dest_map.insert(*v_reach, combined);
+                                    let insert_elapsed = insert_start.elapsed();
+                                    self.profile.build_dest_map_insert += insert_elapsed;
+                                    self.profile.build_dest_map_map_ops += insert_elapsed;
+                                    self.profile.build_dest_map_insert_count += 1;
+                                }
+                            } else if let Some(existing) = dest_map.get_mut(v_reach) {
+                                *existing |= &combined;
+                            } else {
+                                dest_map.insert(*v_reach, combined);
+                            }
                         }
                     }
                 }
             }
+            if let Some(start) = dest_map_start {
+                self.profile.build_dest_map += start.elapsed();
+            }
 
             // Normalize weights in the subset by dividing by w_edge.
             // Division in Boolean semiring (loosening): w / v = w | !v.
+            let normalize_start = if self.profile_enabled { Some(Instant::now()) } else { None };
+            let invert_start = if self.profile_enabled { Some(Instant::now()) } else { None };
             let w_edge_inv = !&w_edge;
-            let mut dest_subset: WeightedSubset = dest_map
-                .into_iter()
-                .map(|(sid, w)| (sid, w | &w_edge_inv))
-                .collect();
+            if let Some(start) = invert_start {
+                let elapsed = start.elapsed();
+                self.profile.normalize_invert += elapsed;
+                self.profile.normalize_not += elapsed;
+                self.profile.normalize_not_count += 1;
+            }
+            let build_start = if self.profile_enabled { Some(Instant::now()) } else { None };
+            if self.profile_enabled {
+                self.profile.normalize_items += dest_map.len() as u64;
+            }
+            let vec_alloc_start = if self.profile_enabled { Some(Instant::now()) } else { None };
+            let mut dest_subset: WeightedSubset = Vec::with_capacity(dest_map.len());
+            if let Some(start) = vec_alloc_start {
+                self.profile.normalize_vec_alloc += start.elapsed();
+            }
+            if self.profile_enabled {
+                for (sid, w) in dest_map {
+                    let or_start = Instant::now();
+                    let combined = w | &w_edge_inv;
+                    let elapsed = or_start.elapsed();
+                    self.profile.normalize_or += elapsed;
+                    self.profile.normalize_or_count += 1;
+                    let push_start = Instant::now();
+                    dest_subset.push((sid, combined));
+                    let push_elapsed = push_start.elapsed();
+                    self.profile.normalize_push += push_elapsed;
+                    self.profile.normalize_push_count += 1;
+                }
+            } else {
+                for (sid, w) in dest_map {
+                    dest_subset.push((sid, w | &w_edge_inv));
+                }
+            }
+            if let Some(start) = build_start {
+                self.profile.normalize_build += start.elapsed();
+            }
+            let sort_start = if self.profile_enabled { Some(Instant::now()) } else { None };
+            if self.profile_enabled {
+                self.profile.normalize_sort_len += dest_subset.len() as u64;
+            }
             dest_subset.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+            if let Some(start) = sort_start {
+                self.profile.normalize_sort += start.elapsed();
+            }
+            if let Some(start) = normalize_start {
+                self.profile.normalize_subset += start.elapsed();
+            }
 
             let dest_dwa_id = self.register_closure(dest_subset);
+            let add_start = if self.profile_enabled { Some(Instant::now()) } else { None };
             let _ = self.dwa.add_transition(sid, lbl, dest_dwa_id, w_edge);
+            if let Some(start) = add_start {
+                self.profile.add_transition += start.elapsed();
+            }
         }
     }
 }

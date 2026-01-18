@@ -193,6 +193,7 @@ impl<'r> Precomputer1<'r> {
 
     fn finish(mut self) -> DWA {
         let finish_start = std::time::Instant::now();
+        let debug_scan_start = std::time::Instant::now();
         // Debug: print all states and transitions before processing
         crate::debug!(7, "=== NWA before flush (leaf_state={}, roots={:?}) ===", self.leaf_state, self.roots);
         for (i, state) in self.nwa.states.0.iter().enumerate() {
@@ -237,6 +238,8 @@ impl<'r> Precomputer1<'r> {
             }
         }
         // crate::debug!(5, "Pending transitions: {} total, {} to leaf", total_transitions, transitions_to_leaf);
+
+        crate::debug!(5, "Precompute1 finish: debug scans in {:?}", debug_scan_start.elapsed());
         
         // Flush pending transitions and epsilons into the NWA
         let flush_start = std::time::Instant::now();
@@ -266,34 +269,48 @@ impl<'r> Precomputer1<'r> {
             // All tsids that map to the same representative get their own label but point
             // to the same root state.
             let mut transitions_added = 0;
+            let mut add_transition_time = std::time::Duration::ZERO;
             let mut unique_targets = std::collections::HashSet::new();
             for (tsid, rep_tsid) in &self.state_to_rep {
                 if let Some(&state) = self.roots.get(rep_tsid) {
                     let label = (tsid.0 + self.terminals_count) as Label;
                     let weight = Weight::from_rsb(RangeSetBlaze::from_iter([0..=self.internal_max_llm_token]));
+                    let add_start = std::time::Instant::now();
                     self.nwa.add_transition(new_start_state, label, state, weight).unwrap();
+                    add_transition_time += add_start.elapsed();
                     transitions_added += 1;
                     unique_targets.insert(state);
                 }
             }
+            crate::debug!(4, "Precompute1 start-state breakdown (symbol-heavy): add_transition={:?}", add_transition_time);
             crate::debug!(3, "Symbol-heavy mode: added {} tsid transitions to {} unique root states", 
                 transitions_added, unique_targets.len());
         } else {
             // Weight-heavy mode: create epsilon transitions with tsid-masked weights
             // Group tsids by their representative to call create_tsid_set_mask once per group
+            let group_start = std::time::Instant::now();
             let mut rep_to_tsids: BTreeMap<TokenizerStateID, Vec<usize>> = BTreeMap::new();
             for (tsid, rep_tsid) in &self.state_to_rep {
                 rep_to_tsids.entry(*rep_tsid).or_default().push(tsid.0);
             }
+            let group_time = group_start.elapsed();
+
+            let mut mask_time = std::time::Duration::ZERO;
+            let mut add_eps_time = std::time::Duration::ZERO;
+            let mut group_count = 0usize;
+            let mut tsid_count = 0usize;
 
             // Create one epsilon transition per representative with combined tsid mask
             for (rep_tsid, tsids) in rep_to_tsids {
                 debug_assert!(tsids.contains(&rep_tsid.0));
                 if let Some(&state) = self.roots.get(&rep_tsid) {
+                    group_count += 1;
+                    tsid_count += tsids.len();
                     // Create combined tsid mask for all tsids that map to this representative.
                     // If we have a tsid->offset map, build the mask in the permuted offset space
                     // (this can substantially reduce RangeSet fragmentation when representative
                     // groups are scattered across the original tsid numbering).
+                    let mask_start = std::time::Instant::now();
                     let tsid_mask = create_tsid_set_mask_with_offset_map(
                         tsids,
                         self.num_tsids,
@@ -304,9 +321,21 @@ impl<'r> Precomputer1<'r> {
                             Some(self.tsid_offset_map.as_slice())
                         },
                     );
+                    mask_time += mask_start.elapsed();
+                    let add_eps_start = std::time::Instant::now();
                     self.nwa.add_epsilon(new_start_state, state, tsid_mask);
+                    add_eps_time += add_eps_start.elapsed();
                 }
             }
+            crate::debug!(
+                4,
+                "Precompute1 start-state breakdown: group_build={:?}, mask_build={:?}, add_epsilon={:?}, groups={}, tsids={}",
+                group_time,
+                mask_time,
+                add_eps_time,
+                group_count,
+                tsid_count,
+            );
         }
         self.nwa.body.start_states = vec![new_start_state];
         crate::debug!(4, "Precompute1 finish: added start state transitions in {:?}", start_state_start.elapsed());

@@ -307,9 +307,15 @@ impl NWA {
         crate::debug!(5, "NWA minimization: {} states, {} transitions, {} ranges ({} interned)", 
             self.states.len(), self.states.num_transitions(), self.num_ranges(), self.num_ranges_interned());
 
+        crate::datastructures::hybrid_bitset::reset_profiling();
+        crate::datastructures::rangemap_weight::reset_profiling();
+        crate::datastructures::abstract_weight::reset_weight_op_profiling();
         let det_start = std::time::Instant::now();
         let mut dwa = self.determinize();
         let det_time = det_start.elapsed();
+        crate::datastructures::hybrid_bitset::print_profiling("Determinization");
+        crate::datastructures::rangemap_weight::print_profiling("Determinization");
+        crate::datastructures::abstract_weight::print_weight_op_profiling("Determinization");
         crate::debug!(5, "Determinization: {} states, {} transitions, {} ranges ({} interned) in {:.2?}", 
             dwa.states.len(), dwa.states.num_transitions(), dwa.num_ranges(), dwa.num_ranges_interned(), det_time);
 

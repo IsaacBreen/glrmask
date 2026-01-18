@@ -77,6 +77,16 @@ pub static PROF_COUNT_AND: std::sync::atomic::AtomicU64 = std::sync::atomic::Ato
 pub static PROF_TIME_AND: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub static PROF_COUNT_OR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub static PROF_TIME_OR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static PROF_COUNT_OR_SIMPLE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static PROF_COUNT_OR_CACHE_HIT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static PROF_TIME_OR_UNION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static PROF_TIME_OR_INTERN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static PROF_TIME_OR_CACHE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static PROF_COUNT_AND_SIMPLE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static PROF_COUNT_AND_CACHE_HIT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static PROF_TIME_AND_UNION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static PROF_TIME_AND_INTERN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static PROF_TIME_AND_CACHE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub static PROF_COUNT_SUB: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub static PROF_TIME_SUB: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub static PROF_COUNT_DIVIDE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -89,6 +99,16 @@ pub fn reset_profiling() {
     PROF_TIME_AND.store(0, std::sync::atomic::Ordering::Relaxed);
     PROF_COUNT_OR.store(0, std::sync::atomic::Ordering::Relaxed);
     PROF_TIME_OR.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_COUNT_OR_SIMPLE.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_COUNT_OR_CACHE_HIT.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_TIME_OR_UNION.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_TIME_OR_INTERN.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_TIME_OR_CACHE.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_COUNT_AND_SIMPLE.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_COUNT_AND_CACHE_HIT.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_TIME_AND_UNION.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_TIME_AND_INTERN.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_TIME_AND_CACHE.store(0, std::sync::atomic::Ordering::Relaxed);
     PROF_COUNT_SUB.store(0, std::sync::atomic::Ordering::Relaxed);
     PROF_TIME_SUB.store(0, std::sync::atomic::Ordering::Relaxed);
     PROF_COUNT_DIVIDE.store(0, std::sync::atomic::Ordering::Relaxed);
@@ -102,6 +122,16 @@ pub fn print_profiling(label: &str) {
     let time_and = PROF_TIME_AND.load(std::sync::atomic::Ordering::Relaxed);
     let count_or = PROF_COUNT_OR.load(std::sync::atomic::Ordering::Relaxed);
     let time_or = PROF_TIME_OR.load(std::sync::atomic::Ordering::Relaxed);
+    let count_or_simple = PROF_COUNT_OR_SIMPLE.load(std::sync::atomic::Ordering::Relaxed);
+    let count_or_cache_hit = PROF_COUNT_OR_CACHE_HIT.load(std::sync::atomic::Ordering::Relaxed);
+    let time_or_union = PROF_TIME_OR_UNION.load(std::sync::atomic::Ordering::Relaxed);
+    let time_or_intern = PROF_TIME_OR_INTERN.load(std::sync::atomic::Ordering::Relaxed);
+    let time_or_cache = PROF_TIME_OR_CACHE.load(std::sync::atomic::Ordering::Relaxed);
+    let count_and_simple = PROF_COUNT_AND_SIMPLE.load(std::sync::atomic::Ordering::Relaxed);
+    let count_and_cache_hit = PROF_COUNT_AND_CACHE_HIT.load(std::sync::atomic::Ordering::Relaxed);
+    let time_and_union = PROF_TIME_AND_UNION.load(std::sync::atomic::Ordering::Relaxed);
+    let time_and_intern = PROF_TIME_AND_INTERN.load(std::sync::atomic::Ordering::Relaxed);
+    let time_and_cache = PROF_TIME_AND_CACHE.load(std::sync::atomic::Ordering::Relaxed);
     let count_sub = PROF_COUNT_SUB.load(std::sync::atomic::Ordering::Relaxed);
     let time_sub = PROF_TIME_SUB.load(std::sync::atomic::Ordering::Relaxed);
     let count_divide = PROF_COUNT_DIVIDE.load(std::sync::atomic::Ordering::Relaxed);
@@ -125,6 +155,22 @@ pub fn print_profiling(label: &str) {
         }
         if count_not > 0 {
             println!("  NOT: {:9} ops, {:9} us (avg {:.2} us)", count_not, time_not, time_not as f64 / count_not as f64);
+        }
+        if count_or > 0 || count_and > 0 {
+            println!("  OR breakdown: union={} us, intern={} us, cache={} us, simple={}, cache_hits={}",
+                time_or_union,
+                time_or_intern,
+                time_or_cache,
+                count_or_simple,
+                count_or_cache_hit,
+            );
+            println!("  AND breakdown: union={} us, intern={} us, cache={} us, simple={}, cache_hits={}",
+                time_and_union,
+                time_and_intern,
+                time_and_cache,
+                count_and_simple,
+                count_and_cache_hit,
+            );
         }
     }
 }
@@ -865,27 +911,45 @@ impl BitAnd for &RangeSet {
         PROF_COUNT_AND.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         if self.is_simple() || rhs.is_simple() {
-            let start = std::time::Instant::now();
+            PROF_COUNT_AND_SIMPLE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let union_start = std::time::Instant::now();
             let result_inner = &*self.inner & &*rhs.inner;
+            let union_time = union_start.elapsed();
+            let intern_start = std::time::Instant::now();
             let result = RangeSet {
                 inner: intern_l1_tracked(result_inner),
             };
+            let intern_time = intern_start.elapsed();
             PROF_TIME_AND.fetch_add(
-                start.elapsed().as_micros() as u64,
+                (union_time + intern_time).as_micros() as u64,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            PROF_TIME_AND_UNION.fetch_add(
+                union_time.as_micros() as u64,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            PROF_TIME_AND_INTERN.fetch_add(
+                intern_time.as_micros() as u64,
                 std::sync::atomic::Ordering::Relaxed,
             );
             return result;
         }
         if let Some(cached) = get_l1_op_cache_tracked(cache::BinOp::And, &self.inner, &rhs.inner) {
+            PROF_COUNT_AND_CACHE_HIT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             return RangeSet { inner: cached };
         }
         if let Some(cached) = get_l1_op_cache_tracked(cache::BinOp::And, &rhs.inner, &self.inner) {
+            PROF_COUNT_AND_CACHE_HIT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             return RangeSet { inner: cached };
         }
 
-        let start = std::time::Instant::now();
+        let union_start = std::time::Instant::now();
         let result_inner = &*self.inner & &*rhs.inner;
+        let union_time = union_start.elapsed();
+        let intern_start = std::time::Instant::now();
         let result_acc = intern_l1_tracked(result_inner);
+        let intern_time = intern_start.elapsed();
+        let cache_start = std::time::Instant::now();
 
         put_l1_op_cache_tracked(
             cache::BinOp::And,
@@ -893,10 +957,23 @@ impl BitAnd for &RangeSet {
             rhs.inner.clone(),
             result_acc.clone(),
         );
+        let cache_time = cache_start.elapsed();
 
         let result = RangeSet { inner: result_acc };
         PROF_TIME_AND.fetch_add(
-            start.elapsed().as_micros() as u64,
+            (union_time + intern_time + cache_time).as_micros() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        PROF_TIME_AND_UNION.fetch_add(
+            union_time.as_micros() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        PROF_TIME_AND_INTERN.fetch_add(
+            intern_time.as_micros() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        PROF_TIME_AND_CACHE.fetch_add(
+            cache_time.as_micros() as u64,
             std::sync::atomic::Ordering::Relaxed,
         );
         result
@@ -914,27 +991,45 @@ impl BitOr for &RangeSet {
         PROF_COUNT_OR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         if self.is_simple() || rhs.is_simple() {
-            let start = std::time::Instant::now();
+            PROF_COUNT_OR_SIMPLE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let union_start = std::time::Instant::now();
             let result_inner = &*self.inner | &*rhs.inner;
+            let union_time = union_start.elapsed();
+            let intern_start = std::time::Instant::now();
             let result = RangeSet {
                 inner: intern_l1_tracked(result_inner),
             };
+            let intern_time = intern_start.elapsed();
             PROF_TIME_OR.fetch_add(
-                start.elapsed().as_micros() as u64,
+                (union_time + intern_time).as_micros() as u64,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            PROF_TIME_OR_UNION.fetch_add(
+                union_time.as_micros() as u64,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            PROF_TIME_OR_INTERN.fetch_add(
+                intern_time.as_micros() as u64,
                 std::sync::atomic::Ordering::Relaxed,
             );
             return result;
         }
         if let Some(cached) = get_l1_op_cache_tracked(cache::BinOp::Or, &self.inner, &rhs.inner) {
+            PROF_COUNT_OR_CACHE_HIT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             return RangeSet { inner: cached };
         }
         if let Some(cached) = get_l1_op_cache_tracked(cache::BinOp::Or, &rhs.inner, &self.inner) {
+            PROF_COUNT_OR_CACHE_HIT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             return RangeSet { inner: cached };
         }
 
-        let start = std::time::Instant::now();
+        let union_start = std::time::Instant::now();
         let result_inner = &*self.inner | &*rhs.inner;
+        let union_time = union_start.elapsed();
+        let intern_start = std::time::Instant::now();
         let result_acc = intern_l1_tracked(result_inner);
+        let intern_time = intern_start.elapsed();
+        let cache_start = std::time::Instant::now();
 
         put_l1_op_cache_tracked(
             cache::BinOp::Or,
@@ -942,10 +1037,23 @@ impl BitOr for &RangeSet {
             rhs.inner.clone(),
             result_acc.clone(),
         );
+        let cache_time = cache_start.elapsed();
 
         let result = RangeSet { inner: result_acc };
         PROF_TIME_OR.fetch_add(
-            start.elapsed().as_micros() as u64,
+            (union_time + intern_time + cache_time).as_micros() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        PROF_TIME_OR_UNION.fetch_add(
+            union_time.as_micros() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        PROF_TIME_OR_INTERN.fetch_add(
+            intern_time.as_micros() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        PROF_TIME_OR_CACHE.fetch_add(
+            cache_time.as_micros() as u64,
             std::sync::atomic::Ordering::Relaxed,
         );
         result
