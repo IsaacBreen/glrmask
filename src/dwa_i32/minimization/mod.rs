@@ -31,6 +31,7 @@ pub use nwa::NwaPass;
 
 use crate::dwa_i32::dwa::DWA;
 use crate::dwa_i32::Weight;
+use profiler_macro::time_it;
 
 impl DWA {
     /// Apply DWA optimization passes based on a named config.
@@ -76,6 +77,7 @@ impl DWA {
     /// Dispatches to acyclic or cyclic implementation based on graph structure.
     /// Acyclic uses exact graph coloring (optimal but slower).
     /// Cyclic uses partition refinement (fast but may not be optimal).
+    #[time_it("DWA::minimize")]
     pub fn minimize(&mut self) {
         if self.is_cyclic() {
             self.minimize_cyclic();
@@ -144,6 +146,7 @@ impl DWA {
         }
     }
 
+    #[time_it("DWA::minimize_states")]
     pub fn minimize_states(&mut self) -> bool {
         let is_cyc = self.is_cyclic();
         let before = self.states.len();

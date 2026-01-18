@@ -13,6 +13,7 @@ use bimap::BiBTreeMap;
 use json_convertible_derive::JSONConvertible;
 use range_set_blaze::RangeSetBlaze;
 use rayon::prelude::*;
+use profiler_macro::{time_it, timeit};
 
 use crate::{
     datastructures::{
@@ -650,42 +651,50 @@ impl GrammarConstraint {
 
         // Sort tokens by bytes for consistent ordering
         let mut sorted_tokens: Vec<_> = llm_token_map.iter().collect();
-        sorted_tokens.sort_by_key(|(bytes, _id)| *bytes);
+        timeit!("setup_combined::sort_tokens", {
+            sorted_tokens.sort_by_key(|(bytes, _id)| *bytes);
+        });
 
         let mut llm_token_strings: Vec<Vec<u8>> = Vec::with_capacity(sorted_tokens.len());
         let mut original_ids: Vec<usize> = Vec::with_capacity(sorted_tokens.len());
         let mut highest_original_id = 0usize;
 
-        for (bytes, id) in &sorted_tokens {
-            highest_original_id = highest_original_id.max(id.0);
-            llm_token_strings.push((*bytes).clone());
-            original_ids.push(id.0);
-        }
+        timeit!("setup_combined::collect_token_strings", {
+            for (bytes, id) in &sorted_tokens {
+                highest_original_id = highest_original_id.max(id.0);
+                llm_token_strings.push((*bytes).clone());
+                original_ids.push(id.0);
+            }
+        });
 
         // Get ALL states for equivalence analysis
         let all_states: Vec<usize> = tokenizer.iter_states().map(|s| s.0).collect();
         
         // Use combined equivalence analysis
         // State reduction threshold of 0 means always apply state reduction
-        let combined_result = compute_combined_equivalence(
-            tokenizer,
-            &llm_token_strings,
-            &all_states,
-        );
+        let combined_result = timeit!("setup_combined::compute_equivalence", {
+            compute_combined_equivalence(
+                tokenizer,
+                &llm_token_strings,
+                &all_states,
+            )
+        });
         
         // Derive state_to_rep and representative_states from state_classes
         let mut state_to_rep: BTreeMap<TokenizerStateID, TokenizerStateID> = BTreeMap::new();
         let mut representative_set: BTreeSet<usize> = BTreeSet::new();
         
-        for class in &combined_result.state_classes {
-            // Pick the first (smallest) state as representative
-            if let Some(&rep) = class.iter().next() {
-                representative_set.insert(rep);
-                for &state in class {
-                    state_to_rep.insert(TokenizerStateID(state), TokenizerStateID(rep));
+        timeit!("setup_combined::build_state_to_rep", {
+            for class in &combined_result.state_classes {
+                // Pick the first (smallest) state as representative
+                if let Some(&rep) = class.iter().next() {
+                    representative_set.insert(rep);
+                    for &state in class {
+                        state_to_rep.insert(TokenizerStateID(state), TokenizerStateID(rep));
+                    }
                 }
             }
-        }
+        });
         
         let representative_states: Vec<usize> = representative_set.into_iter().collect();
 
@@ -743,23 +752,25 @@ impl GrammarConstraint {
         let mut original_to_internal_vec: Vec<usize> = vec![usize::MAX; highest_original_id + 1];
         let mut best_rep_by_internal: Vec<usize> = Vec::with_capacity(mask_classes.len());
         let mut internal_id_counter = 0;
-        for string_indices in &mask_classes {
-            if string_indices.is_empty() {
-                continue;
+        timeit!("setup_combined::build_original_to_internal", {
+            for string_indices in &mask_classes {
+                if string_indices.is_empty() {
+                    continue;
+                }
+                let internal_id = internal_id_counter;
+                internal_id_counter += 1;
+                // Find shortest representative while iterating
+                let best_idx = *string_indices
+                    .iter()
+                    .min_by_key(|&&idx| (llm_token_strings[idx].len(), &llm_token_strings[idx]))
+                    .unwrap();
+                best_rep_by_internal.push(best_idx);
+                for &string_index in string_indices {
+                    let original_llm_id = original_ids[string_index];
+                    original_to_internal_vec[original_llm_id] = internal_id;
+                }
             }
-            let internal_id = internal_id_counter;
-            internal_id_counter += 1;
-            // Find shortest representative while iterating
-            let best_idx = *string_indices
-                .iter()
-                .min_by_key(|&&idx| (llm_token_strings[idx].len(), &llm_token_strings[idx]))
-                .unwrap();
-            best_rep_by_internal.push(best_idx);
-            for &string_index in string_indices {
-                let original_llm_id = original_ids[string_index];
-                original_to_internal_vec[original_llm_id] = internal_id;
-            }
-        }
+        });
         // Convert to BTreeMap for compatibility with rest of code
         let original_to_internal_map: BTreeMap<usize, usize> = original_to_internal_vec
             .into_iter()
@@ -773,13 +784,18 @@ impl GrammarConstraint {
 
         // Build internal_llm_token_map using best representatives we already computed
         // This avoids iterating 50K tokens again!
-        let internal_llm_token_map: BTreeMap<Vec<u8>, LLMTokenID> = best_rep_by_internal
-            .into_iter()
-            .enumerate()
-            .map(|(internal_id, string_idx)| {
-                (llm_token_strings[string_idx].clone(), LLMTokenID(internal_id))
-            })
-            .collect();
+        let internal_llm_token_map: BTreeMap<Vec<u8>, LLMTokenID> = timeit!(
+            "setup_combined::build_internal_llm_token_map",
+            {
+                best_rep_by_internal
+                    .into_iter()
+                    .enumerate()
+                    .map(|(internal_id, string_idx)| {
+                        (llm_token_strings[string_idx].clone(), LLMTokenID(internal_id))
+                    })
+                    .collect()
+            }
+        );
         
         crate::debug!(
             4,
@@ -831,6 +847,7 @@ impl GrammarConstraint {
         )
     }
 
+    #[time_it("GrammarConstraint::build_with_config_inner")]
     fn build_with_config_inner(
         tokenizer: Tokenizer,
         parser: GLRParser,
@@ -840,7 +857,7 @@ impl GrammarConstraint {
         config: &GrammarConstraintConfig,
         grammar_definition: Option<Arc<GrammarDefinition>>,
     ) -> Self {
-        let total_start = std::time::Instant::now();
+        crate::profiler::reset();
         // Epsilon tokens are not supported.
         let epsilon_terminal_group_ids: BTreeSet<_> = tokenizer
             .execute_from_state(&[], tokenizer.initial_state_id())
@@ -859,7 +876,6 @@ impl GrammarConstraint {
 
         // Combined equivalence analysis - computes state equivalence, vocab equivalence, and internal mappings
         // State equivalence is computed ONCE and reused for both vocab analysis and building maps
-        let setup_start = std::time::Instant::now();
         let (
             original_to_internal_map,
             commit_vocab_data,
@@ -867,13 +883,14 @@ impl GrammarConstraint {
             mask_classes,
             state_to_rep,
             representative_states,
-        ) = Self::setup_combined(
-            &llm_token_map,
-            &tokenizer,
-            max_original_llm_token_id,
-            &grammar_group_ids,
-        );
-        crate::debug!(5, "setup_combined in {:?}", setup_start.elapsed());
+        ) = timeit!("setup_combined", {
+            Self::setup_combined(
+                &llm_token_map,
+                &tokenizer,
+                max_original_llm_token_id,
+                &grammar_group_ids,
+            )
+        });
         let commit_vocab = Arc::new(commit_vocab_data);
 
         let internal_max_llm_token = original_to_internal_map
@@ -883,70 +900,76 @@ impl GrammarConstraint {
             .unwrap_or(0);
 
         crate::debug!(4, "Building internal_to_original_map");
-        let t_i2o = std::time::Instant::now();
-        // Optimized: Batch collect then create RangeSets from iterators (faster than individual inserts)
-        let mut groups: Vec<Vec<usize>> = vec![Vec::new(); internal_max_llm_token + 1];
-        for (orig, int_id) in &original_to_internal_map {
-            groups[*int_id].push(*orig);
-        }
-        let internal_to_original_map: BTreeMap<usize, LLMTokenBV> = groups
-            .into_iter()
-            .enumerate()
-            .filter(|(_, v)| !v.is_empty())
-            .map(|(int_id, origs)| (int_id, LLMTokenBV::from_iter(origs)))
-            .collect();
-        crate::debug!(4, "Done building internal_to_original_map in {:?}", t_i2o.elapsed());
+        let internal_to_original_map: BTreeMap<usize, LLMTokenBV> = timeit!(
+            "build_internal_to_original_map",
+            {
+                // Optimized: Batch collect then create RangeSets from iterators (faster than individual inserts)
+                let mut groups: Vec<Vec<usize>> = vec![Vec::new(); internal_max_llm_token + 1];
+                for (orig, int_id) in &original_to_internal_map {
+                    groups[*int_id].push(*orig);
+                }
+                groups
+                    .into_iter()
+                    .enumerate()
+                    .filter(|(_, v)| !v.is_empty())
+                    .map(|(int_id, origs)| (int_id, LLMTokenBV::from_iter(origs)))
+                    .collect()
+            }
+        );
 
         // internal_llm_token_map was already computed in setup_combined - no need to iterate 50K tokens again!
 
         // Vocab tree for internal tokens.
         crate::debug!(4, "Building internal vocab prefix tree");
-        let vocab_tree_start = std::time::Instant::now();
         let internal_tokens_for_vocab: Vec<(usize, Vec<u8>)> =
             internal_llm_token_map.iter().map(|(b, id)| (id.0, b.clone())).collect();
         
-        let vocab_tree = VocabPrefixTree::build(&internal_tokens_for_vocab);
+        let vocab_tree = timeit!("build_internal_vocab_tree", {
+            VocabPrefixTree::build(&internal_tokens_for_vocab)
+        });
         crate::debug!(4, "Done building internal vocab prefix tree");
-        crate::debug!(5, "internal vocab prefix tree in {:?}", vocab_tree_start.elapsed());
 
         // State equivalence already computed in setup_combined - reuse it
         crate::debug!(4, "Using precomputed state equivalence: {} representative states", representative_states.len());
 
         crate::debug!(4, "Computing maps and possible_matches (fast parallel pass)");
-        let maps_start = std::time::Instant::now();
-        
-        // Build group_id -> terminal_index mapping
-        // token_name_map maps Terminal -> group_id (from tokenizer regex)
-        // parser.terminal_map maps Terminal -> TerminalID (index used in DWA)
-        // We need to convert tokenizer group_ids to parser terminal IDs
-        let group_id_to_terminal_idx: BTreeMap<usize, usize> = token_name_map
-            .iter()
-            .filter_map(|(terminal, group_id)| {
-                parser.terminal_map.get_by_left(terminal).map(|tid| (*group_id, tid.0))
-            })
-            .collect();
-        
-        // Only compute for representative states, then expand to non-representatives
-        let rep_possible_matches =
-            Self::build_maps_and_matches_for_reps(&tokenizer, &vocab_tree.root, &group_id_to_terminal_idx, &representative_states);
-        let rep_possible_matches_time = maps_start.elapsed();
-        
-        // Expand results to all states via state_to_rep mapping
-        let expand_start = std::time::Instant::now();
-        let mut computed_possible_matches: BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>> = BTreeMap::new();
-        for (s, rep) in &state_to_rep {
-            if let Some(rep_map) = rep_possible_matches.get(rep) {
-                computed_possible_matches.insert(*s, rep_map.clone());
-            }
-        }
-        crate::debug!(5, "possible_matches: reps in {:?}, expand in {:?}", rep_possible_matches_time, expand_start.elapsed());
+        let computed_possible_matches: BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>> =
+            timeit!("build_maps_and_possible_matches", {
+                // Build group_id -> terminal_index mapping
+                // token_name_map maps Terminal -> group_id (from tokenizer regex)
+                // parser.terminal_map maps Terminal -> TerminalID (index used in DWA)
+                // We need to convert tokenizer group_ids to parser terminal IDs
+                let group_id_to_terminal_idx: BTreeMap<usize, usize> = token_name_map
+                    .iter()
+                    .filter_map(|(terminal, group_id)| {
+                        parser.terminal_map.get_by_left(terminal).map(|tid| (*group_id, tid.0))
+                    })
+                    .collect();
+                
+                // Only compute for representative states, then expand to non-representatives
+                let rep_possible_matches = Self::build_maps_and_matches_for_reps(
+                    &tokenizer,
+                    &vocab_tree.root,
+                    &group_id_to_terminal_idx,
+                    &representative_states,
+                );
+                
+                // Expand results to all states via state_to_rep mapping
+                let mut computed_possible_matches: BTreeMap<TokenizerStateID, BTreeMap<TerminalID, LLMTokenBV>> = BTreeMap::new();
+                for (s, rep) in &state_to_rep {
+                    if let Some(rep_map) = rep_possible_matches.get(rep) {
+                        computed_possible_matches.insert(*s, rep_map.clone());
+                    }
+                }
+                computed_possible_matches
+            });
 
         // Compute terminal follow sets, then map to IDs.
         crate::debug!(4, "Computing terminal follow sets");
-        let follow_start = std::time::Instant::now();
-        let terminal_follow_sets_named = compute_terminal_follow_sets(&parser.productions);
+        let terminal_follow_sets_named = timeit!("compute_terminal_follow_sets", {
+            compute_terminal_follow_sets(&parser.productions)
+        });
         crate::debug!(4, "Done computing terminal follow sets");
-        crate::debug!(5, "terminal follow sets in {:?}", follow_start.elapsed());
         let mut terminal_follow_map: BTreeMap<GrammarTokenID, BTreeSet<GrammarTokenID>> =
             BTreeMap::new();
         for (terminal1, following_terminals) in terminal_follow_sets_named {
@@ -1063,20 +1086,16 @@ impl GrammarConstraint {
         };
         
         crate::debug!(4, "Running precompute1 (weight_heavy={}, num_tsids={})...", weight_heavy_enabled, num_tsids);
-        let precompute1_start = std::time::Instant::now();
-        let mut terminal_dwa = run_precompute1(
-            &tokenizer,
-            &internal_llm_token_map,
-            vocab.internal_max_llm_token,
-            parser.terminal_map.len(),
-            state_to_rep.clone(),
-            tsid_offset_map.clone(),
-        );
-        let precompute1_time = precompute1_start.elapsed();
-        crate::debug!(4, "run_precompute1 in {:?}", precompute1_time);
-        crate::debug!(5, "precompute1 total in {:?}", precompute1_time);
-
-        let post_precompute1_start = std::time::Instant::now();
+        let mut terminal_dwa = timeit!("run_precompute1", {
+            run_precompute1(
+                &tokenizer,
+                &internal_llm_token_map,
+                vocab.internal_max_llm_token,
+                parser.terminal_map.len(),
+                state_to_rep.clone(),
+                tsid_offset_map.clone(),
+            )
+        });
 
         crate::debug!(4, "Done precompute1. Terminal DWA (before pruning): {}", terminal_dwa.stats());
 
@@ -2008,15 +2027,10 @@ impl GrammarConstraint {
 
         // Convert the lexical DWA to NWA and build the Parser DWA.
         crate::debug!(3, "Building Parser DWA");
-        crate::debug!(4, "post-precompute1 (before build_parser_dwa) in {:?}", post_precompute1_start.elapsed());
-        let terminal_nwa_start = std::time::Instant::now();
-        let terminal_nwa = NWA::from_dwa(&terminal_dwa);
-        crate::debug!(5, "terminal NWA from DWA in {:?}", terminal_nwa_start.elapsed());
-        let orig_parser_build_start = std::time::Instant::now();
+        let terminal_nwa = timeit!("terminal_nwa_from_dwa", {
+            NWA::from_dwa(&terminal_dwa)
+        });
         let mut parser_dwa = build_parser_dwa(&parser, &terminal_nwa);
-        let orig_parser_build_time = orig_parser_build_start.elapsed();
-        crate::debug!(4, "build_parser_dwa call in {:?}", orig_parser_build_time);
-        crate::debug!(5, "build_parser_dwa in {:?}", orig_parser_build_time);
 
         // EPSILON EXPLOSION EXPERIMENT - Parser DWA from epsilon terminal NWA
         // Test: Build Parser DWA from the epsilon-modified terminal NWA
@@ -2026,7 +2040,7 @@ impl GrammarConstraint {
             use std::time::Instant;
             
             crate::debug!(1, "=== EPSILON EXPLOSION EXPERIMENT: Parser DWA from epsilon terminal NWA ===");
-            crate::debug!(1, "Original Parser DWA build time: {:?}", orig_parser_build_time);
+            crate::debug!(1, "Original Parser DWA build time: <see profiler summary>");
             crate::debug!(1, "Original terminal DWA: {} states, {} trans",
                 terminal_dwa.states.len(), terminal_dwa.states.num_transitions());
             
@@ -2123,9 +2137,9 @@ impl GrammarConstraint {
         };
         
         // Trim weights to domain_max to remove unnecessary range extensions to usize::MAX
-        let trim_start = std::time::Instant::now();
-        parser_dwa.trim_weights_to_domain(domain_max);
-        crate::debug!(5, "parser_dwa.trim_weights_to_domain in {:?}", trim_start.elapsed());
+        timeit!("parser_dwa.trim_weights_to_domain", {
+            parser_dwa.trim_weights_to_domain(domain_max);
+        });
         
         // Symbol-heavy mode: apply clip_weights and optimize_dwa_and_vocab
         // These optimizations assume N-space weights and reduce the token space
@@ -2142,23 +2156,25 @@ impl GrammarConstraint {
             );
         }
 
-        let sparse_start = std::time::Instant::now();
-        let internal_to_original_sparse_matrix =
-            StageVocab::build_internal_to_original_sparse_matrix(
-                &vocab.internal_to_original,
-                max_original_llm_token_id,
-                vocab.internal_max_llm_token,
-            );
-        crate::debug!(5, "internal_to_original_sparse_matrix in {:?}", sparse_start.elapsed());
+        let internal_to_original_sparse_matrix = timeit!(
+            "build_internal_to_original_sparse_matrix",
+            {
+                StageVocab::build_internal_to_original_sparse_matrix(
+                    &vocab.internal_to_original,
+                    max_original_llm_token_id,
+                    vocab.internal_max_llm_token,
+                )
+            }
+        );
         vocab.max_original_llm_token_id = max_original_llm_token_id;
         vocab.internal_to_original_sparse_matrix = internal_to_original_sparse_matrix;
 
         // Build the new trie-based vocab from the LLM token map
-        let vocab_trie_start = std::time::Instant::now();
-        let vocab_trie = Arc::new(LLMVocabTrie::from_token_map(&llm_token_map));
-        crate::debug!(5, "LLMVocabTrie::from_token_map in {:?}", vocab_trie_start.elapsed());
+        let vocab_trie = Arc::new(timeit!("LLMVocabTrie::from_token_map", {
+            LLMVocabTrie::from_token_map(&llm_token_map)
+        }));
         
-        crate::debug!(5, "Constraint build total in {:?}", total_start.elapsed());
+        crate::profiler::print_summary();
         #[allow(deprecated)]
         GrammarConstraint {
             tokenizer,

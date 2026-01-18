@@ -18,6 +18,7 @@
 use super::common::optimize_debug;
 use super::dwa::DWA;
 use super::nwa::NWA;
+use profiler_macro::{time_it, timeit};
 use super::minimization::{DwaPass, NwaPass, MAX_OPTIMIZE_ITERATIONS};
 use std::collections::HashSet;
 
@@ -206,6 +207,7 @@ pub struct DeterminizeAndMinimizeConfig {
 }
 
 impl NWA {
+    #[time_it("NWA::determinize_and_minimize")]
     pub fn determinize_and_minimize(mut self, context: &str) -> DWA {
         if self.states.len() > 1000 && optimize_debug() {
             return Self::run_determinize_and_minimize_experiment(self, context);
@@ -278,6 +280,7 @@ impl NWA {
         Self::determinize_and_minimize_with_config(&mut self, config)
     }
 
+    #[time_it("NWA::determinize_and_minimize_with_config")]
     pub fn determinize_and_minimize_with_config(&mut self, config: DeterminizeAndMinimizeConfig) -> DWA {
         crate::debug!(5, "Determinize and minimize initial stats: {} states, {} transitions, {} ranges ({} interned)",
             self.states.len(), self.states.num_transitions(), self.num_ranges(), self.num_ranges_interned());
@@ -287,22 +290,18 @@ impl NWA {
             if !pass.is_enabled() {
                 continue;
             }
-            let pass_start = std::time::Instant::now();
-            match pass {
-                NwaPass::PruneUnreachable => { self.prune_unreachable(); },
-                NwaPass::PruneDeadEnds => { self.prune_dead_ends(); },
-                NwaPass::PushFinalWeights => { self.push_final_weights_along_epsilons(); },
-                NwaPass::PushWeightsToInitial => { self.push_weights_to_initial(); },
-                NwaPass::CompressTransitions => { self.compress_transitions(); },
-                NwaPass::Minimize => { self.minimize_states(); },
-                NwaPass::RmEpsilon => { self.rm_epsilon(); },
-                NwaPass::MinimizeRustfst => { self.minimize_with_rustfst_full(); },
-            }
-            let pass_time = pass_start.elapsed();
-            if pass_time.as_millis() > 50 {
-                crate::debug!(5, "NWA Pass {:?}: {} states, {} transitions in {:.2?}", 
-                    pass, self.states.len(), self.states.num_transitions(), pass_time);
-            }
+            timeit!(format!("NWA pass {:?}", pass), {
+                match pass {
+                    NwaPass::PruneUnreachable => { self.prune_unreachable(); },
+                    NwaPass::PruneDeadEnds => { self.prune_dead_ends(); },
+                    NwaPass::PushFinalWeights => { self.push_final_weights_along_epsilons(); },
+                    NwaPass::PushWeightsToInitial => { self.push_weights_to_initial(); },
+                    NwaPass::CompressTransitions => { self.compress_transitions(); },
+                    NwaPass::Minimize => { self.minimize_states(); },
+                    NwaPass::RmEpsilon => { self.rm_epsilon(); },
+                    NwaPass::MinimizeRustfst => { self.minimize_with_rustfst_full(); },
+                }
+            });
         }
         crate::debug!(5, "NWA minimization: {} states, {} transitions, {} ranges ({} interned)", 
             self.states.len(), self.states.num_transitions(), self.num_ranges(), self.num_ranges_interned());
@@ -310,14 +309,17 @@ impl NWA {
         crate::datastructures::hybrid_bitset::reset_profiling();
         crate::datastructures::rangemap_weight::reset_profiling();
         crate::datastructures::abstract_weight::reset_weight_op_profiling();
-        let det_start = std::time::Instant::now();
-        let mut dwa = self.determinize();
-        let det_time = det_start.elapsed();
-        crate::datastructures::hybrid_bitset::print_profiling("Determinization");
-        crate::datastructures::rangemap_weight::print_profiling("Determinization");
-        crate::datastructures::abstract_weight::print_weight_op_profiling("Determinization");
-        crate::debug!(5, "Determinization: {} states, {} transitions, {} ranges ({} interned) in {:.2?}", 
-            dwa.states.len(), dwa.states.num_transitions(), dwa.num_ranges(), dwa.num_ranges_interned(), det_time);
+        let mut dwa = timeit!("NWA::determinize", {
+            let det_start = std::time::Instant::now();
+            let mut dwa = self.determinize();
+            let det_time = det_start.elapsed();
+            crate::datastructures::hybrid_bitset::print_profiling("Determinization");
+            crate::datastructures::rangemap_weight::print_profiling("Determinization");
+            crate::datastructures::abstract_weight::print_weight_op_profiling("Determinization");
+            crate::debug!(5, "Determinization: {} states, {} transitions, {} ranges ({} interned) in {:.2?}", 
+                dwa.states.len(), dwa.states.num_transitions(), dwa.num_ranges(), dwa.num_ranges_interned(), det_time);
+            dwa
+        });
 
         // Run DWA passes
         for pass in config.dwa_passes.clone() {
@@ -325,22 +327,18 @@ impl NWA {
             if !pass.is_enabled() {
                 continue;
             }
-            let pass_start = std::time::Instant::now();
-            match pass {
-                DwaPass::PruneUnreachable => { dwa.prune_unreachable(); },
-                DwaPass::PruneDeadEnds => { dwa.prune_dead_ends(); },
-                DwaPass::PushWeights => { dwa.push_weights_into_transitions_and_finals(); },
-                DwaPass::PushWeightsToInitial => { dwa.push_weights_to_initial(); },
-                DwaPass::ResidualPush => { dwa.residuated_push(); },
-                DwaPass::Minimize => { dwa.minimize_states(); },
-                DwaPass::ConsolidateRanges => { dwa.consolidate_ranges(); },
-                DwaPass::TrimWeights => { dwa.trim_weights(); },
-            }
-            let pass_time = pass_start.elapsed();
-            if pass_time.as_millis() > 50 {
-                crate::debug!(5, "DWA Pass {:?}: {} states, {} transitions, {} ranges ({} interned) in {:.2?}", 
-                    pass, dwa.states.len(), dwa.states.num_transitions(), dwa.num_ranges(), dwa.num_ranges_interned(), pass_time);
-            }
+            timeit!(format!("DWA pass {:?}", pass), {
+                match pass {
+                    DwaPass::PruneUnreachable => { dwa.prune_unreachable(); },
+                    DwaPass::PruneDeadEnds => { dwa.prune_dead_ends(); },
+                    DwaPass::PushWeights => { dwa.push_weights_into_transitions_and_finals(); },
+                    DwaPass::PushWeightsToInitial => { dwa.push_weights_to_initial(); },
+                    DwaPass::ResidualPush => { dwa.residuated_push(); },
+                    DwaPass::Minimize => { dwa.minimize_states(); },
+                    DwaPass::ConsolidateRanges => { dwa.consolidate_ranges(); },
+                    DwaPass::TrimWeights => { dwa.trim_weights(); },
+                }
+            });
         }
         crate::debug!(5, "DWA minimization: {} states, {} transitions, {} ranges ({} interned)",
             dwa.states.len(), dwa.states.num_transitions(), dwa.num_ranges(), dwa.num_ranges_interned());

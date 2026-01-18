@@ -7,8 +7,10 @@ use crate::dwa_i32::minimization::common::DwaPass;
 use crate::dwa_i32::minimization::graph_coloring::{solve_greedy_coloring, solve_exact_graph_coloring};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use crate::datastructures::rangemap_weight::intern_rangemap;
+use profiler_macro::{time_it, timeit};
 
 impl DWA {
+    #[time_it("DWA::minimize_acyclic")]
     pub fn minimize_acyclic(&mut self) {
         // Check environment variable for fast minimize option
         let use_fast_minimize = std::env::var("DWA_FAST_MINIMIZE").map(|v| v == "1").unwrap_or(false);
@@ -188,6 +190,7 @@ fn push_weights_acyclic(dwa: &mut DWA) -> bool {
 /// # Complexity
 /// Worst-case exponential due to exact graph coloring, but highly efficient for
 /// typical automata where "incompatibility density" is low.
+#[time_it("minimize_acyclic_exact")]
 pub fn minimize_acyclic_exact(dwa: &DWA) -> Result<DWA, DWABuildError> {
     if dwa.states.len() == 0 {
         return Ok(DWA::new());
@@ -211,7 +214,9 @@ pub fn minimize_acyclic_exact(dwa: &DWA) -> Result<DWA, DWABuildError> {
     // 1. Topological Sort & Reachability Analysis
     crate::debug!(5, "Acyclic minimize step 1 start (topo_order)");
     let step1_start = std::time::Instant::now();
-    let topo_order = compute_topo_order(&dwa)?;
+    let topo_order = timeit!("minimize_acyclic::topo_order", {
+        compute_topo_order(&dwa)?
+    });
     crate::debug!(5, "Acyclic minimize step 1 end (topo_order): {:?}", step1_start.elapsed());
     crate::debug!(5, "Acyclic minimize step 1 (topo_order): {:?}", step1_start.elapsed());
 
@@ -231,7 +236,9 @@ pub fn minimize_acyclic_exact(dwa: &DWA) -> Result<DWA, DWABuildError> {
     // 3. Layer states by topological height (distance to sink).
     let step3_start = std::time::Instant::now();
     let step3_total_start = std::time::Instant::now();
-    let heights = compute_heights(&dwa, &topo_order);
+    let heights = timeit!("minimize_acyclic::compute_heights", {
+        compute_heights(&dwa, &topo_order)
+    });
     crate::debug!(5, "Acyclic minimize step 3a (compute_heights): {:?}", step3_start.elapsed());
 
     let step3b_start = std::time::Instant::now();
@@ -248,7 +255,6 @@ pub fn minimize_acyclic_exact(dwa: &DWA) -> Result<DWA, DWABuildError> {
     crate::debug!(5, "Acyclic minimize step 3 (heights): {:?}", step3_total_start.elapsed());
 
     // 4. Bottom-Up Exact Minimization
-    let step4_start = std::time::Instant::now();
     let mut old_to_new: HashMap<StateID, StateID> = HashMap::new();
     let mut new_states: Vec<MergedStateBuilder> = Vec::new();
     let mut time_coloring = std::time::Duration::ZERO;
@@ -258,87 +264,98 @@ pub fn minimize_acyclic_exact(dwa: &DWA) -> Result<DWA, DWABuildError> {
     let mut merge_and_time_us_total: u64 = 0;
 
     // Process from leaves (height 0) upwards
-    let mut last_height_debug = std::time::Instant::now();
-    for h in 0..=max_height {
-        let candidates = &states_by_height[h];
-        let since_last = last_height_debug.elapsed();
-        crate::debug!(5, "Height {} start: {} candidates, {:?}", h, candidates.len(), since_last);
-        last_height_debug = std::time::Instant::now();
-        if candidates.is_empty() { continue; }
+    timeit!("bottom_up_merge_acyclic", {
+        let mut last_height_debug = std::time::Instant::now();
+        for h in 0..=max_height {
+            let candidates = &states_by_height[h];
+            let since_last = last_height_debug.elapsed();
+            crate::debug!(5, "Height {} start: {} candidates, {:?}", h, candidates.len(), since_last);
+            last_height_debug = std::time::Instant::now();
+            if candidates.is_empty() { continue; }
 
-        if candidates.len() >= 100 {
-            crate::debug!(5, "Height {}: {} candidates", h, candidates.len());
+            if candidates.len() >= 100 {
+                crate::debug!(5, "Height {}: {} candidates", h, candidates.len());
+            }
+
+            // Compute coloring - use partition-based method for large candidate sets
+            let coloring = timeit!("bottom_up_merge_acyclic::coloring", {
+                let color_start = std::time::Instant::now();
+                let coloring = compute_height_coloring(&dwa, candidates, &needed, &old_to_new, &new_states);
+                time_coloring += color_start.elapsed();
+                coloring
+            });
+
+            // Construct new merged states from color classes
+            let base_new_id = new_states.len();
+            let num_colors = coloring.iter().max().map(|&c| c + 1).unwrap_or(0);
+
+            // Map old states to new merged states
+            timeit!("bottom_up_merge_acyclic::insert", {
+                let insert_start = std::time::Instant::now();
+                for (old_idx, &color) in coloring.iter().enumerate() {
+                    old_to_new.insert(candidates[old_idx], base_new_id + color);
+                }
+                crate::debug!(5, "Height {}: old_to_new insert {:?} ({} items)", h, insert_start.elapsed(), candidates.len());
+                time_insert += insert_start.elapsed();
+            });
+
+            timeit!("bottom_up_merge_acyclic::extend", {
+                let extend_start = std::time::Instant::now();
+                new_states.extend((0..num_colors).map(|_| MergedStateBuilder::default()));
+                crate::debug!(5, "Height {}: new_states extend {:?} ({} new)", h, extend_start.elapsed(), num_colors);
+                time_extend += extend_start.elapsed();
+            });
+
+            // Merge states into builders
+            timeit!("bottom_up_merge_acyclic::merge", {
+                let (completed, builders) = new_states.split_at_mut(base_new_id);
+                let merge_start = std::time::Instant::now();
+                let mut merge_stats = MergeStats::default();
+                for (old_idx, &color) in coloring.iter().enumerate() {
+                    merge_state_into_builder(
+                        candidates[old_idx],
+                        color,
+                        &dwa,
+                        &needed,
+                        &old_to_new,
+                        completed,
+                        builders,
+                        &mut merge_stats,
+                    );
+                }
+                let avg_w_orig_ranges = if merge_stats.and_ops > 0 {
+                    merge_stats.w_orig_ranges as f64 / merge_stats.and_ops as f64
+                } else {
+                    0.0
+                };
+                let avg_needed_ranges = if merge_stats.and_ops > 0 {
+                    merge_stats.needed_ranges as f64 / merge_stats.and_ops as f64
+                } else {
+                    0.0
+                };
+                let needed_all_pct = if merge_stats.and_ops > 0 {
+                    (merge_stats.needed_all as f64) * 100.0 / merge_stats.and_ops as f64
+                } else {
+                    0.0
+                };
+                crate::debug!(
+                    5,
+                    "Height {}: merge_state_into_builder {:?} (transitions {}, and_ops {}, and_time {} us, avg_w_orig_ranges {:.2}, avg_needed_ranges {:.2}, needed_all {} ({:.1}%))",
+                    h,
+                    merge_start.elapsed(),
+                    merge_stats.transitions,
+                    merge_stats.and_ops,
+                    merge_stats.and_time_us,
+                    avg_w_orig_ranges,
+                    avg_needed_ranges,
+                    merge_stats.needed_all,
+                    needed_all_pct,
+                );
+                merge_and_time_us_total = merge_and_time_us_total.saturating_add(merge_stats.and_time_us);
+                time_merge += merge_start.elapsed();
+            });
         }
-
-        // Compute coloring - use partition-based method for large candidate sets
-        let color_start = std::time::Instant::now();
-        let coloring = compute_height_coloring(&dwa, candidates, &needed, &old_to_new, &new_states);
-        time_coloring += color_start.elapsed();
-
-        // Construct new merged states from color classes
-        let base_new_id = new_states.len();
-        let num_colors = coloring.iter().max().map(|&c| c + 1).unwrap_or(0);
-
-        // Map old states to new merged states
-        let insert_start = std::time::Instant::now();
-        for (old_idx, &color) in coloring.iter().enumerate() {
-            old_to_new.insert(candidates[old_idx], base_new_id + color);
-        }
-        crate::debug!(5, "Height {}: old_to_new insert {:?} ({} items)", h, insert_start.elapsed(), candidates.len());
-        time_insert += insert_start.elapsed();
-
-        let extend_start = std::time::Instant::now();
-        new_states.extend((0..num_colors).map(|_| MergedStateBuilder::default()));
-        crate::debug!(5, "Height {}: new_states extend {:?} ({} new)", h, extend_start.elapsed(), num_colors);
-        time_extend += extend_start.elapsed();
-
-        // Merge states into builders
-        let (completed, builders) = new_states.split_at_mut(base_new_id);
-        let merge_start = std::time::Instant::now();
-        let mut merge_stats = MergeStats::default();
-        for (old_idx, &color) in coloring.iter().enumerate() {
-            merge_state_into_builder(
-                candidates[old_idx],
-                color,
-                &dwa,
-                &needed,
-                &old_to_new,
-                completed,
-                builders,
-                &mut merge_stats,
-            );
-        }
-        let avg_w_orig_ranges = if merge_stats.and_ops > 0 {
-            merge_stats.w_orig_ranges as f64 / merge_stats.and_ops as f64
-        } else {
-            0.0
-        };
-        let avg_needed_ranges = if merge_stats.and_ops > 0 {
-            merge_stats.needed_ranges as f64 / merge_stats.and_ops as f64
-        } else {
-            0.0
-        };
-        let needed_all_pct = if merge_stats.and_ops > 0 {
-            (merge_stats.needed_all as f64) * 100.0 / merge_stats.and_ops as f64
-        } else {
-            0.0
-        };
-        crate::debug!(
-            5,
-            "Height {}: merge_state_into_builder {:?} (transitions {}, and_ops {}, and_time {} us, avg_w_orig_ranges {:.2}, avg_needed_ranges {:.2}, needed_all {} ({:.1}%))",
-            h,
-            merge_start.elapsed(),
-            merge_stats.transitions,
-            merge_stats.and_ops,
-            merge_stats.and_time_us,
-            avg_w_orig_ranges,
-            avg_needed_ranges,
-            merge_stats.needed_all,
-            needed_all_pct,
-        );
-        merge_and_time_us_total = merge_and_time_us_total.saturating_add(merge_stats.and_time_us);
-        time_merge += merge_start.elapsed();
-    }
+    });
 
     crate::debug!(
         5,
@@ -349,13 +366,14 @@ pub fn minimize_acyclic_exact(dwa: &DWA) -> Result<DWA, DWABuildError> {
         time_merge,
         std::time::Duration::from_micros(merge_and_time_us_total),
     );
-    crate::debug!(5, "Acyclic minimize step 4 (bottom_up_merge): {:?}", step4_start.elapsed());
     crate::debug!(6, "Acyclic minimize: {} -> {} states in {:?}", 
         dwa.states.len(), new_states.len(), total_start.elapsed());
 
     // 5. Reconstruct the Final DWA
     let step5_start = std::time::Instant::now();
-    let result = reconstruct_dwa(dwa.body.start_state, &old_to_new, new_states)?;
+    let result = timeit!("minimize_acyclic::reconstruct", {
+        reconstruct_dwa(dwa.body.start_state, &old_to_new, new_states)?
+    });
     crate::debug!(5, "Acyclic minimize step 5 (reconstruct): {:?}", step5_start.elapsed());
     
     // 6. Stochastic validation (only when STOCHASTIC_MERGE_VALIDATION=1)
@@ -822,6 +840,7 @@ fn compute_topo_order(dwa: &DWA) -> Result<Vec<StateID>, DWABuildError> {
     Ok(order)
 }
 
+#[time_it("compute_needed_sets")]
 fn compute_needed_sets(dwa: &DWA, topo_order: &[StateID]) -> Vec<Weight> {
     let total_start = std::time::Instant::now();
     let mut time_final_clone = std::time::Duration::ZERO;
@@ -886,6 +905,7 @@ fn compute_needed_sets(dwa: &DWA, topo_order: &[StateID]) -> Vec<Weight> {
 }
 
 /// Compute forward reachability: which tokens can reach each state from start
+#[time_it("compute_forward_reachable")]
 fn compute_forward_reachable(dwa: &DWA, topo_order: &[StateID]) -> Vec<Weight> {
     let mut time_init = std::time::Duration::ZERO;
     let mut time_loop_outer = std::time::Duration::ZERO;
@@ -983,6 +1003,7 @@ fn compute_forward_reachable(dwa: &DWA, topo_order: &[StateID]) -> Vec<Weight> {
 
 /// Tighten DWA weights by removing tokens that can never reach a transition.
 /// Semantic-preserving: restricts weights to tokens that can actually reach each state.
+#[time_it("tighten_weights")]
 fn tighten_weights(dwa: &DWA) -> Result<DWA, DWABuildError> {
     if dwa.states.is_empty() { return Ok(DWA::new()); }
     

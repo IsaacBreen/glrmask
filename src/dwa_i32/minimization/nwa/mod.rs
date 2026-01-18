@@ -19,6 +19,7 @@ use rustfst::prelude::MinimizeConfig;
 use std::collections::HashSet;
 use rustfst::algorithms::rm_epsilon::rm_epsilon;
 use std::time::Instant;
+use profiler_macro::{time_it, timeit};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum NwaPass {
@@ -127,6 +128,7 @@ impl NWA {
         *self = NWA::from_rustfst(&fst);
     }
 
+    #[time_it("NWA::minimize_with_rustfst_full")]
     pub fn minimize_with_rustfst_full(&mut self) -> bool {
         crate::datastructures::hybrid_bitset::reset_profiling();
         crate::datastructures::rangemap_weight::reset_profiling();
@@ -134,17 +136,23 @@ impl NWA {
         crate::dwa_i32::determinization_rustfst::reset_rustfst_weight_profile();
         
         let min_config = MinimizeConfig::default().with_allow_nondet(true);
-        let start = Instant::now();
-        let mut fst = self.to_rustfst();
-        let to_time = start.elapsed();
+        let (mut fst, to_time) = timeit!("NWA::minimize_rustfst::to_rustfst", {
+            let start = Instant::now();
+            let fst = self.to_rustfst();
+            (fst, start.elapsed())
+        });
 
-        let start = Instant::now();
-        minimize_with_config(&mut fst, min_config).unwrap();
-        let min_time = start.elapsed();
+        let min_time = timeit!("NWA::minimize_rustfst::minimize", {
+            let start = Instant::now();
+            minimize_with_config(&mut fst, min_config).unwrap();
+            start.elapsed()
+        });
 
-        let start = Instant::now();
-        *self = NWA::from_rustfst(&fst);
-        let from_time = start.elapsed();
+        let from_time = timeit!("NWA::minimize_rustfst::from_rustfst", {
+            let start = Instant::now();
+            *self = NWA::from_rustfst(&fst);
+            start.elapsed()
+        });
 
         let div_us = crate::datastructures::rangemap_weight::PROF_RANGEMAP_TIME_DIVIDE_TOTAL
             .load(std::sync::atomic::Ordering::Relaxed);

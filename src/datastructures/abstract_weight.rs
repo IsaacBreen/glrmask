@@ -21,6 +21,7 @@ use crate::datastructures::factorized_weight::{FactorizedWeight, intern_factoriz
 use crate::datastructures::hybrid_bitset::RangeSet;
 use crate::datastructures::rangemap_weight::{RangeMapWeight, intern_rangemap};
 use crate::json_serialization::{JSONConvertible, JSONNode};
+use profiler_macro::time_it;
 use serde::{Deserialize, Serialize};
 use serde::de::Error;
 use serde_json::Value as JsonValue;
@@ -708,6 +709,7 @@ impl JSONConvertible for AbstractWeight {
 impl std::ops::Not for AbstractWeight {
     type Output = AbstractWeight;
     
+    #[time_it("AbstractWeight::not")]
     fn not(self) -> Self::Output {
         self.complement()
     }
@@ -716,6 +718,7 @@ impl std::ops::Not for AbstractWeight {
 impl std::ops::Not for &AbstractWeight {
     type Output = AbstractWeight;
     
+    #[time_it("AbstractWeight::not_ref")]
     fn not(self) -> Self::Output {
         self.complement()
     }
@@ -1138,6 +1141,7 @@ impl BitAnd<&AbstractWeight> for AbstractWeight {
 impl BitAnd for &AbstractWeight {
     type Output = AbstractWeight;
 
+    #[time_it("AbstractWeight::bitand")]
     fn bitand(self, rhs: Self) -> Self::Output {
         if self.is_empty() || rhs.is_empty() {
             return AbstractWeight::zeros();
@@ -1164,6 +1168,7 @@ impl BitAnd for &AbstractWeight {
 }
 
 impl BitAndAssign for AbstractWeight {
+    #[time_it("AbstractWeight::bitand_assign")]
     fn bitand_assign(&mut self, rhs: Self) {
         match (self, &rhs) {
             (AbstractWeight::RangeSet(a), AbstractWeight::RangeSet(b)) => {
@@ -1181,6 +1186,7 @@ impl BitAndAssign for AbstractWeight {
 }
 
 impl BitAndAssign<&AbstractWeight> for AbstractWeight {
+    #[time_it("AbstractWeight::bitand_assign_ref")]
     fn bitand_assign(&mut self, rhs: &AbstractWeight) {
         match (self, rhs) {
             (AbstractWeight::RangeSet(a), AbstractWeight::RangeSet(b)) => {
@@ -1200,6 +1206,7 @@ impl BitAndAssign<&AbstractWeight> for AbstractWeight {
 impl BitOr for AbstractWeight {
     type Output = Self;
 
+    #[time_it("AbstractWeight::bitor")]
     fn bitor(self, rhs: Self) -> Self::Output {
         match (self, rhs) {
             (AbstractWeight::RangeSet(a), AbstractWeight::RangeSet(b)) => {
@@ -1219,6 +1226,7 @@ impl BitOr for AbstractWeight {
 impl BitOr<&AbstractWeight> for AbstractWeight {
     type Output = AbstractWeight;
 
+    #[time_it("AbstractWeight::bitor_ref")]
     fn bitor(self, rhs: &AbstractWeight) -> Self::Output {
         match (self, rhs) {
             (AbstractWeight::RangeSet(a), AbstractWeight::RangeSet(b)) => {
@@ -1238,6 +1246,7 @@ impl BitOr<&AbstractWeight> for AbstractWeight {
 impl BitOr for &AbstractWeight {
     type Output = AbstractWeight;
 
+    #[time_it("AbstractWeight::bitor_ref_ref")]
     fn bitor(self, rhs: Self) -> Self::Output {
         match (self, rhs) {
             (AbstractWeight::RangeSet(a), AbstractWeight::RangeSet(b)) => {
@@ -1255,6 +1264,7 @@ impl BitOr for &AbstractWeight {
 }
 
 impl BitOrAssign for AbstractWeight {
+    #[time_it("AbstractWeight::bitor_assign")]
     fn bitor_assign(&mut self, rhs: Self) {
         match (self, &rhs) {
             (AbstractWeight::RangeSet(a), AbstractWeight::RangeSet(b)) => {
@@ -1302,6 +1312,7 @@ impl BitOrAssign for AbstractWeight {
 }
 
 impl BitOrAssign<&AbstractWeight> for AbstractWeight {
+    #[time_it("AbstractWeight::bitor_assign_ref")]
     fn bitor_assign(&mut self, rhs: &AbstractWeight) {
         match (self, rhs) {
             (AbstractWeight::RangeSet(a), AbstractWeight::RangeSet(b)) => {

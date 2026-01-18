@@ -2107,9 +2107,16 @@ impl NFA {
     }
 
     pub fn to_dfa(self) -> DFA {
-        crate::profiler::reset();
+        let profile_dfa_only = std::env::var("PROFILE_DFA_ONLY")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        if profile_dfa_only {
+            crate::profiler::reset();
+        }
         let dfa = self.to_dfa_impl();
-        crate::profiler::print_summary();
+        if profile_dfa_only {
+            crate::profiler::print_summary();
+        }
 
         // let nfa = dfa.to_nfa();
         // let start = std::time::Instant::now();
