@@ -38,6 +38,40 @@ impl NoOpPb {
     fn finish(&self) {}
 }
 
+#[derive(Default, Clone)]
+struct DfsProfile {
+    exec_calls: u64,
+    exec_time_us: u64,
+    possible_matches_calls: u64,
+    possible_matches_time_us: u64,
+    tokens_accessible_calls: u64,
+    tokens_accessible_time_us: u64,
+    expanded_item_calls: u64,
+    expanded_item_time_us: u64,
+    expanded_rsb_calls: u64,
+    expanded_rsb_time_us: u64,
+    expanded_all_calls: u64,
+    expanded_all_time_us: u64,
+    add_transition_calls: u64,
+    add_transition_time_us: u64,
+    add_epsilon_calls: u64,
+    add_epsilon_time_us: u64,
+}
+
+impl DfsProfile {
+    fn print(&self) {
+        let ms = |us: u64| us as f64 / 1000.0;
+        crate::debug!(4, "precompute1 dfs profile: exec={} calls, {:.2}ms", self.exec_calls, ms(self.exec_time_us));
+        crate::debug!(4, "precompute1 dfs profile: possible_matches={} calls, {:.2}ms", self.possible_matches_calls, ms(self.possible_matches_time_us));
+        crate::debug!(4, "precompute1 dfs profile: tokens_accessible={} calls, {:.2}ms", self.tokens_accessible_calls, ms(self.tokens_accessible_time_us));
+        crate::debug!(4, "precompute1 dfs profile: expanded_item={} calls, {:.2}ms", self.expanded_item_calls, ms(self.expanded_item_time_us));
+        crate::debug!(4, "precompute1 dfs profile: expanded_rsb={} calls, {:.2}ms", self.expanded_rsb_calls, ms(self.expanded_rsb_time_us));
+        crate::debug!(4, "precompute1 dfs profile: expanded_all={} calls, {:.2}ms", self.expanded_all_calls, ms(self.expanded_all_time_us));
+        crate::debug!(4, "precompute1 dfs profile: add_transition={} calls, {:.2}ms", self.add_transition_calls, ms(self.add_transition_time_us));
+        crate::debug!(4, "precompute1 dfs profile: add_epsilon={} calls, {:.2}ms", self.add_epsilon_calls, ms(self.add_epsilon_time_us));
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Precomputer1
 // ---------------------------------------------------------------------------
@@ -69,6 +103,9 @@ pub(crate) struct Precomputer1<'r> {
     pub(crate) internal_max_llm_token: usize,
     /// Optional tsid->offset mapping for weight-heavy encoding (empty = identity).
     pub(crate) tsid_offset_map: Vec<usize>,
+    expanded_all_weight: Weight,
+    dfs_profile_enabled: bool,
+    dfs_profile: DfsProfile,
 }
 
 impl<'r> Precomputer1<'r> {
@@ -117,6 +154,16 @@ impl<'r> Precomputer1<'r> {
         nwa.states[leaf_state].final_weight = Some(final_weight);
         crate::debug!(6, "Created trie1 leaf state with final weight (num_tsids={})", num_tsids);
 
+        let expanded_all_weight = if num_tsids == 0 {
+            // Symbol-heavy mode: all tokens in N-space
+            Weight::from_rsb(RangeSetBlaze::from_iter([0..=internal_max_llm_token]))
+        } else {
+            // Weight-heavy mode: All tokens in N×M space
+            let max_pos = internal_max_llm_token * num_tsids + num_tsids - 1;
+            // IMPORTANT: Use [0..=max_pos] to create from ONE range, not iterate over all integers!
+            Weight::from_rsb(RangeSetBlaze::from_iter([0..=max_pos]))
+        };
+
         Self {
             tokenizer,
             vocab,
@@ -136,6 +183,11 @@ impl<'r> Precomputer1<'r> {
             num_tsids,
             internal_max_llm_token,
             tsid_offset_map,
+            expanded_all_weight,
+            dfs_profile_enabled: std::env::var("PROFILE_PRECOMPUTE1_DFS")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false),
+            dfs_profile: DfsProfile::default(),
         }
     }
 
@@ -441,8 +493,9 @@ impl<'r> Precomputer1<'r> {
     /// Expands from N-space to N×M-space where M = num_tsids.
     /// If num_tsids == 0 (symbol-heavy mode), returns the token ID directly in N-space.
     #[inline]
-    fn expanded_weight_from_item(&self, token_id: usize) -> Weight {
-        if self.num_tsids == 0 {
+    fn expanded_weight_from_item(&mut self, token_id: usize) -> Weight {
+        let start = self.dfs_profile_enabled.then(std::time::Instant::now);
+        let weight = if self.num_tsids == 0 {
             // Symbol-heavy mode: just use the token ID directly
             Weight::from_rsb(RangeSetBlaze::from_iter([token_id..=token_id]))
         } else {
@@ -452,38 +505,48 @@ impl<'r> Precomputer1<'r> {
             let end = start + self.num_tsids - 1;
             // IMPORTANT: Use [start..=end] to create from ONE range, not iterate over all integers!
             Weight::from_rsb(RangeSetBlaze::from_iter([start..=end]))
+        };
+        if let Some(start) = start {
+            self.dfs_profile.expanded_item_calls += 1;
+            self.dfs_profile.expanded_item_time_us += start.elapsed().as_micros() as u64;
         }
+        weight
     }
 
     /// Create an expanded weight from a RangeSetBlaze of token IDs.
     /// If num_tsids == 0 (symbol-heavy mode), returns the rsb directly.
     #[inline]
-    fn expanded_weight_from_rsb(&self, rsb: RangeSetBlaze<usize>) -> Weight {
-        if self.num_tsids == 0 {
+    fn expanded_weight_from_rsb(&mut self, rsb: RangeSetBlaze<usize>) -> Weight {
+        let start = self.dfs_profile_enabled.then(std::time::Instant::now);
+        let weight = if self.num_tsids == 0 {
             // Symbol-heavy mode: use rsb directly
             Weight::from_rsb(rsb)
         } else {
             // Weight-heavy mode: expand to N×M space
             Weight::from_rsb(expand_rsb(&rsb, self.num_tsids))
+        };
+        if let Some(start) = start {
+            self.dfs_profile.expanded_rsb_calls += 1;
+            self.dfs_profile.expanded_rsb_time_us += start.elapsed().as_micros() as u64;
         }
+        weight
     }
 
     /// Create an expanded "all" weight (all tokens for all tsids).
     /// If num_tsids == 0 (symbol-heavy mode), returns Weight::all().
     #[inline]
-    fn expanded_weight_all(&self) -> Weight {
-        if self.num_tsids == 0 {
-            // Symbol-heavy mode: all tokens in N-space
-            Weight::from_rsb(RangeSetBlaze::from_iter([0..=self.internal_max_llm_token]))
-        } else {
-            // Weight-heavy mode: All tokens in N×M space
-            let max_pos = self.internal_max_llm_token * self.num_tsids + self.num_tsids - 1;
-            // IMPORTANT: Use [0..=max_pos] to create from ONE range, not iterate over all integers!
-            Weight::from_rsb(RangeSetBlaze::from_iter([0..=max_pos]))
+    fn expanded_weight_all(&mut self) -> Weight {
+        let start = self.dfs_profile_enabled.then(std::time::Instant::now);
+        let weight = self.expanded_all_weight.clone();
+        if let Some(start) = start {
+            self.dfs_profile.expanded_all_calls += 1;
+            self.dfs_profile.expanded_all_time_us += start.elapsed().as_micros() as u64;
         }
+        weight
     }
 
     fn add_pending_transition(&mut self, src: NWAStateID, label: Label, dst: NWAStateID, weight: Weight) {
+        let start = self.dfs_profile_enabled.then(std::time::Instant::now);
         self.pending_transitions
             .entry(src)
             .or_default()
@@ -493,9 +556,14 @@ impl<'r> Precomputer1<'r> {
             .and_modify(|w| *w |= &weight)
             .or_insert(weight.clone());
         *self.live_tokens.entry(dst).or_insert_with(Weight::zeros) |= &weight;
+        if let Some(start) = start {
+            self.dfs_profile.add_transition_calls += 1;
+            self.dfs_profile.add_transition_time_us += start.elapsed().as_micros() as u64;
+        }
     }
 
     fn add_pending_epsilon(&mut self, src: NWAStateID, dst: NWAStateID, weight: Weight) {
+        let start = self.dfs_profile_enabled.then(std::time::Instant::now);
         self.pending_epsilons
             .entry(src)
             .or_default()
@@ -503,6 +571,10 @@ impl<'r> Precomputer1<'r> {
             .and_modify(|w| *w |= &weight)
             .or_insert(weight.clone());
         *self.live_tokens.entry(dst).or_insert_with(Weight::zeros) |= &weight;
+        if let Some(start) = start {
+            self.dfs_profile.add_epsilon_calls += 1;
+            self.dfs_profile.add_epsilon_time_us += start.elapsed().as_micros() as u64;
+        }
     }
 
     fn run_dfs(&mut self) {
@@ -518,6 +590,9 @@ impl<'r> Precomputer1<'r> {
         self.dfs(&vocab.root, assoc);
         self.vocab = vocab;
         self.pb.finish();
+        if self.dfs_profile_enabled {
+            self.dfs_profile.print();
+        }
         profiler::print_summary();
         crate::debug!(5, "Precomputation complete");
     }
@@ -563,16 +638,22 @@ impl<'r> Precomputer1<'r> {
                         let next = self.get_or_create_next_state(node, tokenizer_state_id, &mut next_level_assoc);
                         crate::debug!(7, "     State {} (tsid={:?}) -> epsilon to state {}", node, tokenizer_state_id, next);
                         // Use expanded "all" weight
-                        self.add_pending_epsilon(node, next, self.expanded_weight_all());
+                        let weight_all = self.expanded_weight_all();
+                        self.add_pending_epsilon(node, next, weight_all);
                     }
                     continue;
                 }
 
                 for (tokenizer_state_id, src_node) in states_at_pos {
                     let slice = &segment_bytes[pos..];
+                    let exec_start = self.dfs_profile_enabled.then(std::time::Instant::now);
                     let exec_result = self
                         .tokenizer
                         .execute_from_state(slice, tokenizer_state_id);
+                    if let Some(start) = exec_start {
+                        self.dfs_profile.exec_calls += 1;
+                        self.dfs_profile.exec_time_us += start.elapsed().as_micros() as u64;
+                    }
                     
                     crate::debug!(7, "  Tokenizer on {:?} from state {:?} (src_node={}): matches={:?}, end_state={:?}",
                         String::from_utf8_lossy(slice), tokenizer_state_id, src_node, exec_result.matches, exec_result.end_state);
@@ -581,7 +662,15 @@ impl<'r> Precomputer1<'r> {
                         let ts = TokenizerStateID(end_val);
                         possible_matches_at_end_cache
                             .entry(ts)
-                            .or_insert_with(|| self.possible_matches(child_vocab_node, ts))
+                            .or_insert_with(|| {
+                                let start = self.dfs_profile_enabled.then(std::time::Instant::now);
+                                let result = self.possible_matches(child_vocab_node, ts);
+                                if let Some(start) = start {
+                                    self.dfs_profile.possible_matches_calls += 1;
+                                    self.dfs_profile.possible_matches_time_us += start.elapsed().as_micros() as u64;
+                                }
+                                result
+                            })
                     } else {
                         // Dummy empty map
                         possible_matches_at_end_cache
@@ -660,8 +749,13 @@ impl<'r> Precomputer1<'r> {
                         let accessible_terminals: std::rc::Rc<Vec<GrammarTokenID>> = if let Some(cached) = self.accessible_terminals_cache.get(&final_tokenizer_state) {
                             cached.clone() // Rc clone is cheap
                         } else {
+                            let start = self.dfs_profile_enabled.then(std::time::Instant::now);
                             let result = std::rc::Rc::new(self.tokenizer.tokens_accessible_from_state(final_tokenizer_state)
                                 .into_iter().collect::<Vec<_>>());
+                            if let Some(start) = start {
+                                self.dfs_profile.tokens_accessible_calls += 1;
+                                self.dfs_profile.tokens_accessible_time_us += start.elapsed().as_micros() as u64;
+                            }
                             self.accessible_terminals_cache.insert(final_tokenizer_state, result.clone());
                             result
                         };
@@ -687,7 +781,8 @@ impl<'r> Precomputer1<'r> {
                         let next = self.get_or_create_next_state(src_node, final_tokenizer_state, &mut next_level_assoc);
                         crate::debug!(7, "    -> END_STATE epsilon: {} --eps--> {}", src_node, next);
                         // Use expanded "all" weight
-                        self.add_pending_epsilon(src_node, next, self.expanded_weight_all());
+                        let weight_all = self.expanded_weight_all();
+                        self.add_pending_epsilon(src_node, next, weight_all);
                     }
                 }
             }
