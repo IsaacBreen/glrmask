@@ -318,7 +318,7 @@ impl<'r> Precomputer1<'r> {
 
         crate::debug!(3, "Terminal NWA: {} states, {} transitions, num_tsids={}", 
                       self.nwa.states.len(), self.nwa.states.num_transitions(), self.num_tsids);
-        crate::debug!(4, "Precompute1 finish: terminal NWA ready in {:?}", finish_start.elapsed());
+        crate::debug!(4, "Precompute1 finish: terminal NWA (pre-minimize) ready in {:?}", finish_start.elapsed());
 
         if std::env::var("DWA_DUMP_NWA").map(|v| v == "1").unwrap_or(false) {
             crate::debug!(5, "Dumping NWA to nwa_dump.json");
