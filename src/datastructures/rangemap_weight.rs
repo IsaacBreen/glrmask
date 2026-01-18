@@ -79,6 +79,10 @@ pub struct RangeMapWeight {
 }
 
 impl RangeMapWeight {
+    fn map_range_count(map: &RangeMapBlaze<usize, RangeSet>) -> usize {
+        map.range_values().len()
+    }
+
     fn full_tsids(num_tsids: usize) -> RangeSet {
         let mut cache = FULL_TSIDS_CACHE.lock().unwrap();
         if let Some(cached) = cache.get(&num_tsids) {
@@ -314,8 +318,6 @@ impl RangeMapWeight {
                 if cursor > s_end {
                     if *l_range.end() > s_end {
                         keep_current = Some((l_range, l_val));
-                    } else {
-                        keep_current = large_iter.next();
                     }
                     break;
                 }
@@ -328,12 +330,14 @@ impl RangeMapWeight {
                 }
             }
             large_current = keep_current;
+            if large_current.is_none() {
+                large_current = large_iter.next();
+            }
 
             if cursor <= s_end {
                 result.ranges_insert(cursor..=s_end, s_val.clone());
             }
         }
-
         result
     }
 
@@ -412,8 +416,8 @@ impl RangeMapWeight {
     }
 
     fn union_non_negated(&self, other: &Self) -> Self {
-        let left_ranges = self.map.range_values().count();
-        let right_ranges = other.map.range_values().count();
+        let left_ranges = Self::map_range_count(&self.map);
+        let right_ranges = Self::map_range_count(&other.map);
         if left_ranges == 0 {
             return other.clone();
         }
@@ -440,9 +444,13 @@ impl RangeMapWeight {
         Self { map, num_tsids: self.num_tsids() }
     }
 
+    pub(crate) fn union_fast(&self, other: &Self) -> Self {
+        self.union_non_negated(other)
+    }
+
     fn intersect_non_negated(&self, other: &Self) -> Self {
-        let left_ranges = self.map.range_values().count();
-        let right_ranges = other.map.range_values().count();
+        let left_ranges = Self::map_range_count(&self.map);
+        let right_ranges = Self::map_range_count(&other.map);
         if left_ranges == 0 || right_ranges == 0 {
             return Self::new(self.num_tsids());
         }
@@ -836,7 +844,7 @@ impl WeightBackend for RangeMapWeight {
     }
 
     fn ranges_len(&self) -> usize {
-        let map_ranges = self.map.range_values().count();
+        let map_ranges = self.map.range_values().len();
         let tsid_ranges: usize = self
             .map
             .range_values()

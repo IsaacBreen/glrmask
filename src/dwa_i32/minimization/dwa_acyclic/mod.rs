@@ -6,6 +6,7 @@ use crate::dwa_i32::dwa::{DWA, DWABuildError, DWAState, DWAStates};
 use crate::dwa_i32::minimization::common::DwaPass;
 use crate::dwa_i32::minimization::graph_coloring::{solve_greedy_coloring, solve_exact_graph_coloring};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use crate::datastructures::rangemap_weight::intern_rangemap;
 
 impl DWA {
     pub fn minimize_acyclic(&mut self) {
@@ -747,6 +748,17 @@ fn compute_forward_reachable(dwa: &DWA, topo_order: &[StateID]) -> Vec<Weight> {
     forward[dwa.body.start_state] = Weight::all();
     forward_is_all[dwa.body.start_state] = true;
     time_init = init_start.elapsed();
+
+    let mut union_assign_fast = |dst: &mut Weight, src: &Weight| {
+        if let Weight::RangeMap(left) = dst {
+            if let Weight::RangeMap(right) = src {
+                let merged = left.as_ref().union_fast(right.as_ref());
+                *left = intern_rangemap(merged);
+                return;
+            }
+        }
+        *dst |= src;
+    };
     
     for &u in topo_order.iter().rev() {
         let outer_start = std::time::Instant::now();
@@ -772,7 +784,7 @@ fn compute_forward_reachable(dwa: &DWA, topo_order: &[StateID]) -> Vec<Weight> {
                 if w.is_empty() { continue; }
                 if incoming_all {
                     let or_start = std::time::Instant::now();
-                    forward[v] |= w;
+                    union_assign_fast(&mut forward[v], w);
                     time_or += or_start.elapsed();
                     count_ors += 1;
                 } else if let Some(incoming) = &incoming {
@@ -782,7 +794,7 @@ fn compute_forward_reachable(dwa: &DWA, topo_order: &[StateID]) -> Vec<Weight> {
                     count_ands += 1;
 
                     let or_start = std::time::Instant::now();
-                    forward[v] |= &result;
+                    union_assign_fast(&mut forward[v], &result);
                     time_or += or_start.elapsed();
                     count_ors += 1;
                 }
