@@ -314,6 +314,8 @@ impl RangeMapWeight {
                 if cursor > s_end {
                     if *l_range.end() > s_end {
                         keep_current = Some((l_range, l_val));
+                    } else {
+                        keep_current = large_iter.next();
                     }
                     break;
                 }
