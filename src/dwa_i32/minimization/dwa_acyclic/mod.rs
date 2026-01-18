@@ -8,6 +8,18 @@ use crate::dwa_i32::minimization::graph_coloring::{solve_greedy_coloring, solve_
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use profiler_macro::{time_it, timeit};
 
+const UNMAPPED_STATE: StateID = StateID::MAX;
+
+#[inline]
+fn old_to_new_get(old_to_new: &[StateID], id: StateID) -> Option<StateID> {
+    let mapped = old_to_new[id];
+    if mapped == UNMAPPED_STATE {
+        None
+    } else {
+        Some(mapped)
+    }
+}
+
 impl DWA {
     #[time_it("DWA::minimize_acyclic")]
     pub fn minimize_acyclic(&mut self) {
@@ -254,7 +266,7 @@ pub fn minimize_acyclic_exact(dwa: &DWA) -> Result<DWA, DWABuildError> {
     crate::debug!(5, "Acyclic minimize step 3 (heights): {:?}", step3_total_start.elapsed());
 
     // 4. Bottom-Up Exact Minimization
-    let mut old_to_new: HashMap<StateID, StateID> = HashMap::new();
+    let mut old_to_new = vec![UNMAPPED_STATE; dwa.states.len()];
     let mut new_states: Vec<MergedStateBuilder> = Vec::new();
     let mut time_coloring = std::time::Duration::ZERO;
     let mut time_insert = std::time::Duration::ZERO;
@@ -292,7 +304,7 @@ pub fn minimize_acyclic_exact(dwa: &DWA) -> Result<DWA, DWABuildError> {
             timeit!("bottom_up_merge_acyclic::insert", {
                 let insert_start = std::time::Instant::now();
                 for (old_idx, &color) in coloring.iter().enumerate() {
-                    old_to_new.insert(candidates[old_idx], base_new_id + color);
+                    old_to_new[candidates[old_idx]] = base_new_id + color;
                 }
                 crate::debug!(5, "Height {}: old_to_new insert {:?} ({} items)", h, insert_start.elapsed(), candidates.len());
                 time_insert += insert_start.elapsed();
@@ -388,7 +400,7 @@ fn compute_height_coloring(
     dwa: &DWA,
     candidates: &[StateID],
     needed: &[Weight],
-    old_to_new: &HashMap<StateID, StateID>,
+    old_to_new: &[StateID],
     new_states: &[MergedStateBuilder],
 ) -> Vec<usize> {
     let start = std::time::Instant::now();
@@ -695,7 +707,7 @@ fn merge_state_into_builder(
     color: usize,
     dwa: &DWA,
     needed: &[Weight],
-    old_to_new: &HashMap<StateID, StateID>,
+    old_to_new: &[StateID],
     completed: &[MergedStateBuilder],
     builders: &mut [MergedStateBuilder],
     stats: &mut MergeStats,
@@ -715,7 +727,7 @@ fn merge_state_into_builder(
     for (&label, &target_old) in &old_state.transitions {
         stats.transitions += 1;
         if target_old >= dwa.states.len() { continue; }
-        let Some(&target_new) = old_to_new.get(&target_old) else { continue; };
+        let Some(target_new) = old_to_new_get(old_to_new, target_old) else { continue; };
         let Some(w_orig) = old_state.trans_weights.get(&label) else { continue; };
         let needed_weight = &completed[target_new].needed;
         stats.w_orig_ranges = stats.w_orig_ranges.saturating_add(w_orig.num_ranges() as u64);
@@ -1060,7 +1072,7 @@ fn are_compatible(
     v: StateID,
     dwa: &DWA,
     needed: &[Weight],
-    old_to_new: &HashMap<StateID, StateID>,
+    old_to_new: &[StateID],
     new_states: &[MergedStateBuilder]
 ) -> bool {
     let domain_overlap = &needed[u] & &needed[v];
@@ -1130,14 +1142,14 @@ fn targets_compatible(
     tv: StateID,
     w_u: &Weight,
     w_v: &Weight,
-    old_to_new: &HashMap<StateID, StateID>,
+    old_to_new: &[StateID],
     new_states: &[MergedStateBuilder],
 ) -> bool {
-    let mapped_u = old_to_new.get(&tu);
-    let mapped_v = old_to_new.get(&tv);
+    let mapped_u = old_to_new_get(old_to_new, tu);
+    let mapped_v = old_to_new_get(old_to_new, tv);
     
     match (mapped_u, mapped_v) {
-        (Some(&u_new), Some(&v_new)) if u_new != v_new => {
+        (Some(u_new), Some(v_new)) if u_new != v_new => {
             // Different targets: must be equivalent on combined domain
             let w_combined = w_u | w_v;
             targets_equivalent_on_domain(u_new, v_new, &w_combined, new_states)
@@ -1203,7 +1215,7 @@ fn build_incompatibility_graph(
     dwa: &DWA,
     candidates: &[StateID],
     needed: &[Weight],
-    old_to_new: &HashMap<StateID, StateID>,
+    old_to_new: &[StateID],
     new_states: &[MergedStateBuilder]
 ) -> Vec<Vec<usize>> {
     let n = candidates.len();
@@ -1362,7 +1374,7 @@ fn greedy_color_without_graph(
     dwa: &DWA,
     candidates: &[StateID],
     needed: &[Weight],
-    old_to_new: &HashMap<StateID, StateID>,
+    old_to_new: &[StateID],
     new_states: &[MergedStateBuilder],
     _start: std::time::Instant,
 ) -> Vec<usize> {
@@ -1497,7 +1509,7 @@ fn build_incompatibility_graph_general(
     dwa: &DWA,
     candidates: &[StateID],
     needed: &[Weight],
-    old_to_new: &HashMap<StateID, StateID>,
+    old_to_new: &[StateID],
     new_states: &[MergedStateBuilder],
     start: std::time::Instant,
 ) -> Vec<Vec<usize>> {
@@ -1574,7 +1586,7 @@ fn compute_state_signature(
     id: StateID,
     dwa: &DWA,
     needed: &[Weight],
-    old_to_new: &HashMap<StateID, StateID>,
+    old_to_new: &[StateID],
 ) -> u128 {
     use std::hash::{Hash, Hasher};
     use std::collections::hash_map::DefaultHasher;
@@ -1598,7 +1610,7 @@ fn compute_state_signature(
             .unwrap_or_else(Weight::zeros);
         if !weight.is_empty() {
             // Get the new_id for the target (if already mapped)
-            let target_new_id = old_to_new.get(&target).copied();
+            let target_new_id = old_to_new_get(old_to_new, target);
             trans_data.push((label, weight.fingerprint(), target_new_id));
         }
     }
@@ -1626,7 +1638,7 @@ fn compute_state_signature(
 
 fn reconstruct_dwa(
     start_old: StateID,
-    old_to_new: &HashMap<StateID, StateID>,
+    old_to_new: &[StateID],
     builders: Vec<MergedStateBuilder>
 ) -> Result<DWA, DWABuildError> {
     let states: Vec<DWAState> = builders.into_iter().map(|b| {
@@ -1646,7 +1658,7 @@ fn reconstruct_dwa(
     Ok(DWA {
         states: DWAStates(states),
         body: crate::dwa_i32::dwa::DWABody {
-            start_state: old_to_new.get(&start_old).copied().unwrap_or(0),
+            start_state: old_to_new_get(old_to_new, start_old).unwrap_or(0),
         },
     })
 }
