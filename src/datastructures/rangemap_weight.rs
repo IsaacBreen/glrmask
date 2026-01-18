@@ -89,6 +89,12 @@ pub static PROF_RANGEMAP_INTERN_TIME_LOOKUP: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 pub static PROF_RANGEMAP_INTERN_TIME_INSERT: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
+pub static PROF_RANGEMAP_INTERN_RANGE_TOTAL: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static PROF_RANGEMAP_INTERN_RANGE_HIT_TOTAL: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static PROF_RANGEMAP_INTERN_RANGE_MISS_TOTAL: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
 
 pub fn reset_profiling() {
     PROF_RANGEMAP_COUNT_OR.store(0, std::sync::atomic::Ordering::Relaxed);
@@ -119,6 +125,9 @@ pub fn reset_profiling() {
     PROF_RANGEMAP_INTERN_TIME_TOTAL.store(0, std::sync::atomic::Ordering::Relaxed);
     PROF_RANGEMAP_INTERN_TIME_LOOKUP.store(0, std::sync::atomic::Ordering::Relaxed);
     PROF_RANGEMAP_INTERN_TIME_INSERT.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_RANGEMAP_INTERN_RANGE_TOTAL.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_RANGEMAP_INTERN_RANGE_HIT_TOTAL.store(0, std::sync::atomic::Ordering::Relaxed);
+    PROF_RANGEMAP_INTERN_RANGE_MISS_TOTAL.store(0, std::sync::atomic::Ordering::Relaxed);
 }
 
 pub fn print_profiling(label: &str) {
@@ -165,6 +174,12 @@ pub fn print_profiling(label: &str) {
         PROF_RANGEMAP_INTERN_TIME_LOOKUP.load(std::sync::atomic::Ordering::Relaxed);
     let intern_time_insert =
         PROF_RANGEMAP_INTERN_TIME_INSERT.load(std::sync::atomic::Ordering::Relaxed);
+    let intern_range_total =
+        PROF_RANGEMAP_INTERN_RANGE_TOTAL.load(std::sync::atomic::Ordering::Relaxed);
+    let intern_range_hit_total =
+        PROF_RANGEMAP_INTERN_RANGE_HIT_TOTAL.load(std::sync::atomic::Ordering::Relaxed);
+    let intern_range_miss_total =
+        PROF_RANGEMAP_INTERN_RANGE_MISS_TOTAL.load(std::sync::atomic::Ordering::Relaxed);
 
     let count_or_fast = count_or_asym.saturating_add(count_or_merge);
     if count_or > 0 || count_or_fast > 0 || count_divide > 0 || intern_count > 0 {
@@ -231,6 +246,21 @@ pub fn print_profiling(label: &str) {
                 intern_miss,
                 intern_time_lookup,
                 intern_time_insert,
+            );
+            println!(
+                "  INTERN ranges: total={}, avg_total={:.2}, avg_hit={:.2}, avg_miss={:.2}",
+                intern_range_total,
+                intern_range_total as f64 / intern_count as f64,
+                if intern_hit > 0 {
+                    intern_range_hit_total as f64 / intern_hit as f64
+                } else {
+                    0.0
+                },
+                if intern_miss > 0 {
+                    intern_range_miss_total as f64 / intern_miss as f64
+                } else {
+                    0.0
+                }
             );
         }
     }
@@ -324,6 +354,8 @@ fn put_op_cache(
 #[time_it("intern_rangemap")]
 pub fn intern_rangemap(weight: RangeMapWeight) -> Arc<RangeMapWeight> {
     PROF_RANGEMAP_INTERN_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let range_count = RangeMapWeight::map_range_count(&weight.map) as u64;
+    PROF_RANGEMAP_INTERN_RANGE_TOTAL.fetch_add(range_count, std::sync::atomic::Ordering::Relaxed);
     let total_start = std::time::Instant::now();
     let lookup_start = std::time::Instant::now();
     if let Some(existing) = RANGEMAP_WEIGHT_INTERNER.get(&weight) {
@@ -333,6 +365,10 @@ pub fn intern_rangemap(weight: RangeMapWeight) -> Arc<RangeMapWeight> {
             std::sync::atomic::Ordering::Relaxed,
         );
         PROF_RANGEMAP_INTERN_HIT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        PROF_RANGEMAP_INTERN_RANGE_HIT_TOTAL.fetch_add(
+            range_count,
+            std::sync::atomic::Ordering::Relaxed,
+        );
         let existing = Arc::clone(&*existing);
         PROF_RANGEMAP_INTERN_TIME_TOTAL.fetch_add(
             total_start.elapsed().as_micros() as u64,
@@ -346,6 +382,10 @@ pub fn intern_rangemap(weight: RangeMapWeight) -> Arc<RangeMapWeight> {
         std::sync::atomic::Ordering::Relaxed,
     );
     PROF_RANGEMAP_INTERN_MISS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    PROF_RANGEMAP_INTERN_RANGE_MISS_TOTAL.fetch_add(
+        range_count,
+        std::sync::atomic::Ordering::Relaxed,
+    );
     let insert_start = std::time::Instant::now();
     let arc = Arc::new(weight);
     let inserted = RANGEMAP_WEIGHT_INTERNER.insert(arc.clone());
@@ -755,26 +795,37 @@ impl RangeMapWeight {
             return weights[0].union_non_negated(weights[1]);
         }
 
-        let mut boundaries: Vec<usize> = Vec::new();
+        use std::cmp::Reverse;
+        use std::collections::BinaryHeap;
+
+        let mut weight_ranges: Vec<Vec<(usize, usize, RangeSet)>> = Vec::with_capacity(weights.len());
         for weight in weights {
             assert_eq!(
                 weight.num_tsids(),
                 num_tsids,
                 "RangeMapWeight num_tsids mismatch"
             );
-            for (range, _) in weight.map.range_values() {
-                boundaries.push(*range.start());
-                if let Some(next) = range.end().checked_add(1) {
-                    boundaries.push(next);
-                }
+            let mut ranges = Vec::with_capacity(Self::map_range_count(&weight.map));
+            for (range, tsid_set) in weight.map.range_values() {
+                ranges.push((*range.start(), *range.end(), tsid_set.clone()));
+            }
+            weight_ranges.push(ranges);
+        }
+
+        let mut heap: BinaryHeap<Reverse<(usize, u8, usize)>> = BinaryHeap::new();
+        let mut indices: Vec<usize> = vec![0; weights.len()];
+        let mut current_values: Vec<Option<RangeSet>> = vec![None; weights.len()];
+        let mut active_indices: Vec<usize> = Vec::new();
+        let mut active_positions: Vec<Option<usize>> = vec![None; weights.len()];
+
+        for (idx, ranges) in weight_ranges.iter().enumerate() {
+            if let Some((start, _, _)) = ranges.get(0) {
+                heap.push(Reverse((*start, 1u8, idx)));
             }
         }
 
-        boundaries.sort_unstable();
-        boundaries.dedup();
-
         let mut out = RangeMapBlaze::new();
-        if boundaries.is_empty() {
+        if heap.is_empty() {
             return Self::new(num_tsids);
         }
 
@@ -782,43 +833,98 @@ impl RangeMapWeight {
         let mut current_end: usize = 0;
         let mut current_value = RangeSet::zeros();
 
-        for (idx, &start) in boundaries.iter().enumerate() {
-            let end = if idx + 1 < boundaries.len() {
-                boundaries[idx + 1].saturating_sub(1)
+        while let Some(Reverse((boundary, kind, weight_idx))) = heap.pop() {
+            let mut end_events: Vec<usize> = Vec::new();
+            let mut start_events: Vec<usize> = Vec::new();
+
+            if kind == 0 {
+                end_events.push(weight_idx);
             } else {
-                usize::MAX
-            };
-            if start > end {
-                continue;
+                start_events.push(weight_idx);
+            }
+
+            while let Some(Reverse((next_boundary, next_kind, next_idx))) = heap.peek().cloned() {
+                if next_boundary != boundary {
+                    break;
+                }
+                heap.pop();
+                if next_kind == 0 {
+                    end_events.push(next_idx);
+                } else {
+                    start_events.push(next_idx);
+                }
+            }
+
+            for w_idx in end_events {
+                if let Some(pos) = active_positions[w_idx].take() {
+                    let last_idx = active_indices.pop().expect("active_indices empty");
+                    if pos < active_indices.len() {
+                        active_indices[pos] = last_idx;
+                        active_positions[last_idx] = Some(pos);
+                    }
+                }
+                current_values[w_idx] = None;
+                indices[w_idx] += 1;
+                if let Some((next_start, _, _)) = weight_ranges[w_idx].get(indices[w_idx]) {
+                    if *next_start == boundary {
+                        start_events.push(w_idx);
+                    } else {
+                        heap.push(Reverse((*next_start, 1u8, w_idx)));
+                    }
+                }
+            }
+
+            for w_idx in start_events {
+                let (start, end, value) = weight_ranges[w_idx][indices[w_idx]].clone();
+                debug_assert_eq!(start, boundary);
+                current_values[w_idx] = Some(value);
+                if active_positions[w_idx].is_none() {
+                    active_positions[w_idx] = Some(active_indices.len());
+                    active_indices.push(w_idx);
+                }
+                if let Some(next) = end.checked_add(1) {
+                    heap.push(Reverse((next, 0u8, w_idx)));
+                }
             }
 
             let mut combined = RangeSet::zeros();
-            for weight in weights {
-                if let Some(val) = weight.map.get(start) {
+            for &idx in &active_indices {
+                if let Some(val) = &current_values[idx] {
                     combined |= val;
                 }
+            }
+
+            let next_boundary = heap.peek().map(|Reverse((b, _, _))| *b).unwrap_or(usize::MAX);
+            let end = if next_boundary == usize::MAX {
+                usize::MAX
+            } else {
+                next_boundary.saturating_sub(1)
+            };
+            if boundary > end {
+                continue;
             }
 
             if combined.is_empty() {
                 if let Some(range_start) = current_start.take() {
                     out.ranges_insert(range_start..=current_end, current_value.clone());
                 }
-                continue;
-            }
-
-            if let Some(range_start) = current_start {
-                if current_value == combined && current_end.saturating_add(1) == start {
+            } else if let Some(range_start) = current_start {
+                if current_value == combined && current_end.saturating_add(1) == boundary {
                     current_end = end;
                 } else {
                     out.ranges_insert(range_start..=current_end, current_value.clone());
-                    current_start = Some(start);
+                    current_start = Some(boundary);
                     current_end = end;
                     current_value = combined;
                 }
             } else {
-                current_start = Some(start);
+                current_start = Some(boundary);
                 current_end = end;
                 current_value = combined;
+            }
+
+            if next_boundary == usize::MAX {
+                break;
             }
         }
 
