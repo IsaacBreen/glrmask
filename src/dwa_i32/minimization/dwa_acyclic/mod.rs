@@ -935,6 +935,9 @@ fn compute_forward_reachable(dwa: &DWA, topo_order: &[StateID]) -> Vec<Weight> {
     forward_is_all[dwa.body.start_state] = true;
     time_init = init_start.elapsed();
 
+    let mut pending: Vec<Option<Weight>> = vec![None; dwa.states.len()];
+    let mut touched_targets: Vec<StateID> = Vec::new();
+
     for &u in topo_order.iter().rev() {
         let outer_start = std::time::Instant::now();
         let incoming_all = forward_is_all[u];
@@ -950,6 +953,8 @@ fn compute_forward_reachable(dwa: &DWA, topo_order: &[StateID]) -> Vec<Weight> {
             Some(forward[u].clone())
         };
         time_clone += clone_start.elapsed();
+
+        touched_targets.clear();
         
         for (&lbl, &v) in &dwa.states[u].transitions {
             count_transitions += 1;
@@ -958,23 +963,49 @@ fn compute_forward_reachable(dwa: &DWA, topo_order: &[StateID]) -> Vec<Weight> {
             if let Some(w) = dwa.states[u].trans_weights.get(&lbl) {
                 if w.is_empty() { continue; }
                 if incoming_all {
-                    let or_start = std::time::Instant::now();
-                    // Use standard |= which goes through op cache
-                    forward[v] |= w;
-                    time_or += or_start.elapsed();
-                    count_ors += 1;
+                    let result = w.clone();
+                    match &mut pending[v] {
+                        Some(acc) => {
+                            let or_start = std::time::Instant::now();
+                            *acc |= &result;
+                            time_or += or_start.elapsed();
+                            count_ors += 1;
+                        }
+                        None => {
+                            pending[v] = Some(result);
+                            touched_targets.push(v);
+                        }
+                    }
                 } else if let Some(incoming) = &incoming {
                     let and_start = std::time::Instant::now();
                     let result = incoming & w;
                     time_and += and_start.elapsed();
                     count_ands += 1;
 
-                    let or_start = std::time::Instant::now();
-                    // Use standard |= which goes through op cache
-                    forward[v] |= &result;
-                    time_or += or_start.elapsed();
-                    count_ors += 1;
+                    if !result.is_empty() {
+                        match &mut pending[v] {
+                            Some(acc) => {
+                                let or_start = std::time::Instant::now();
+                                *acc |= &result;
+                                time_or += or_start.elapsed();
+                                count_ors += 1;
+                            }
+                            None => {
+                                pending[v] = Some(result);
+                                touched_targets.push(v);
+                            }
+                        }
+                    }
                 }
+            }
+        }
+
+        for &v in &touched_targets {
+            if let Some(contrib) = pending[v].take() {
+                let or_start = std::time::Instant::now();
+                forward[v] |= &contrib;
+                time_or += or_start.elapsed();
+                count_ors += 1;
                 if !forward_is_all[v] && forward[v].is_all_fast() {
                     forward_is_all[v] = true;
                 }
