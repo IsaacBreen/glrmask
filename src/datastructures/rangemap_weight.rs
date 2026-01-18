@@ -15,6 +15,7 @@ use crate::datastructures::hybrid_bitset::RangeSet;
 use profiler_macro::time_it;
 
 const WEIGHT_OP_CACHE_CAPACITY: usize = 100_000;
+const DIVIDE_CACHE_CAPACITY: usize = 50_000;
 
 static RANGEMAP_WEIGHT_INTERNER: Lazy<DashSet<Arc<RangeMapWeight>>> = Lazy::new(DashSet::new);
 static RANGEMAP_OP_CACHE: Lazy<Mutex<LruCache<OpKey, Arc<RangeMapWeight>>>> = Lazy::new(|| {
@@ -22,6 +23,10 @@ static RANGEMAP_OP_CACHE: Lazy<Mutex<LruCache<OpKey, Arc<RangeMapWeight>>>> = La
 });
 static RANGEMAP_OP_CACHE_INDEX: Lazy<Mutex<HashMap<usize, HashSet<OpKey>>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
+// Separate cache for divide operations to avoid polluting the main op cache
+static RANGEMAP_DIVIDE_CACHE: Lazy<Mutex<LruCache<(usize, usize), Arc<RangeMapWeight>>>> = Lazy::new(|| {
+    Mutex::new(LruCache::new(NonZeroUsize::new(DIVIDE_CACHE_CAPACITY).unwrap()))
+});
 static FULL_TSIDS_CACHE: Lazy<Mutex<HashMap<usize, RangeSet>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
@@ -47,6 +52,8 @@ pub static PROF_RANGEMAP_COUNT_OR_MERGE: std::sync::atomic::AtomicU64 =
 pub static PROF_RANGEMAP_TIME_OR_MERGE: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 pub static PROF_RANGEMAP_COUNT_DIVIDE: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub static PROF_RANGEMAP_COUNT_DIVIDE_CACHE_HIT: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 pub static PROF_RANGEMAP_TIME_DIVIDE_TOTAL: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
@@ -1472,4 +1479,39 @@ impl WeightBackend for Arc<RangeMapWeight> {
     fn max_item(&self) -> Option<usize> {
         WeightBackend::max_item(self.as_ref())
     }
+}
+
+/// Cached divide for Arc<RangeMapWeight> - computes self | !other with separate cache.
+pub fn divide_rangemap_cached(a: &Arc<RangeMapWeight>, b: &Arc<RangeMapWeight>) -> Arc<RangeMapWeight> {
+    PROF_RANGEMAP_COUNT_DIVIDE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    
+    // Only cache if both inputs are interned (pointer stability)
+    if !is_interned_rangemap(a) || !is_interned_rangemap(b) {
+        let out = a.divide(b);
+        return intern_rangemap(out);
+    }
+    
+    // Create key from pointers
+    let key = (Arc::as_ptr(a) as usize, Arc::as_ptr(b) as usize);
+    
+    // Check separate divide cache
+    {
+        let mut cache = RANGEMAP_DIVIDE_CACHE.lock().unwrap();
+        if let Some(hit) = cache.get(&key) {
+            PROF_RANGEMAP_COUNT_DIVIDE_CACHE_HIT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return hit.clone();
+        }
+    }
+    
+    // Compute divide: self | !other
+    let out = a.divide(b);
+    let out = intern_rangemap(out);
+    
+    // Cache result in separate divide cache
+    {
+        let mut cache = RANGEMAP_DIVIDE_CACHE.lock().unwrap();
+        cache.push(key, out.clone());
+    }
+    
+    out
 }

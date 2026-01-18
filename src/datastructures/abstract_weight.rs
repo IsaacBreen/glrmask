@@ -1051,7 +1051,8 @@ impl AbstractWeight {
         let result = match (self, other) {
             (AbstractWeight::RangeMap(a), AbstractWeight::RangeMap(b)) => {
                 let branch_start = std::time::Instant::now();
-                let out = AbstractWeight::RangeMap(intern_rangemap(a.divide(b)));
+                // Use separate cached divide operation
+                let out = AbstractWeight::RangeMap(crate::datastructures::rangemap_weight::divide_rangemap_cached(a, b));
                 let elapsed = branch_start.elapsed();
                 PROF_ABS_DIV_COUNT_RANGEMAP.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 PROF_ABS_DIV_TIME_RANGEMAP.fetch_add(

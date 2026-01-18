@@ -17,6 +17,7 @@ pub enum BinOp {
     Or,
     Xor,
     Sub,
+    Divide,  // self | !other (semiring divide for lattice weights)
 }
 
 // --- Cache Keys ---

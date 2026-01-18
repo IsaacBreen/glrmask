@@ -8,6 +8,7 @@ use super::dwa::DWA;
 use super::nwa::NWA;
 use crate::dwa_i32::NWAStateID;
 use anyhow::Result;
+use lru::LruCache;
 use nom::IResult;
 use once_cell::sync::Lazy;
 use range_set_blaze::RangeSetBlaze;
@@ -23,6 +24,7 @@ use profiler_macro::time_it;
 use std::borrow::Borrow;
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
+use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -56,6 +58,20 @@ fn label_to_fst_label(label: Label) -> u32 {
 }
 
 static WEIGHT_INTERNER: Lazy<Mutex<HashSet<Arc<Weight>>>> = Lazy::new(|| Mutex::new(HashSet::new()));
+
+const WEIGHT_DIVIDE_CACHE_CAPACITY: usize = 100_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct DivideKey {
+    a: usize,
+    b: usize,
+}
+
+static WEIGHT_DIVIDE_CACHE: Lazy<Mutex<LruCache<DivideKey, Arc<Weight>>>> = Lazy::new(|| {
+    Mutex::new(LruCache::new(
+        NonZeroUsize::new(WEIGHT_DIVIDE_CACHE_CAPACITY).unwrap(),
+    ))
+});
 
 static RUSTFST_WEIGHT_COUNT_ZERO: AtomicU64 = AtomicU64::new(0);
 static RUSTFST_WEIGHT_TIME_ZERO: AtomicU64 = AtomicU64::new(0);
@@ -467,11 +483,41 @@ impl ReverseBack<BitsetWeight> for BitsetWeight {
 impl WeaklyDivisibleSemiring for BitsetWeight {
     #[time_it("BitsetWeight::divide_assign")]
     fn divide_assign(&mut self, rhs: &Self, _divide_type: DivideType) -> Result<()> {
-        // Use optimized divide: self | !other, avoiding expensive complement
         let prof = rustfst_weight_profile_enabled();
         let start = if prof { Some(Instant::now()) } else { None };
-        let new_weight = self.0.divide(&rhs.0);
-        self.0 = intern_weight(new_weight);
+        let lhs = Arc::clone(&self.0);
+        let rhs = Arc::clone(&rhs.0);
+
+        let new_arc = if Arc::ptr_eq(&lhs, &rhs) {
+            intern_weight(Weight::all())
+        } else if rhs.is_empty() {
+            intern_weight(Weight::all())
+        } else if rhs.is_all_fast() {
+            lhs
+        } else if lhs.is_all_fast() {
+            intern_weight(Weight::all())
+        } else if lhs.is_empty() {
+            intern_weight(rhs.complement())
+        } else {
+            let key = DivideKey {
+                a: Arc::as_ptr(&lhs) as usize,
+                b: Arc::as_ptr(&rhs) as usize,
+            };
+            if let Some(hit) = {
+                let mut cache = WEIGHT_DIVIDE_CACHE.lock().unwrap();
+                cache.get(&key).cloned()
+            } {
+                hit
+            } else {
+                let new_weight = lhs.divide(&rhs);
+                let arc = intern_weight(new_weight);
+                let mut cache = WEIGHT_DIVIDE_CACHE.lock().unwrap();
+                cache.put(key, arc.clone());
+                arc
+            }
+        };
+
+        self.0 = new_arc;
         if let Some(start) = start {
             RUSTFST_WEIGHT_COUNT_DIVIDE.fetch_add(1, Ordering::Relaxed);
             RUSTFST_WEIGHT_TIME_DIVIDE.fetch_add(start.elapsed().as_micros() as u64, Ordering::Relaxed);
