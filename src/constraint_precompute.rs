@@ -140,6 +140,7 @@ impl<'r> Precomputer1<'r> {
     }
 
     fn finish(mut self) -> DWA {
+        let finish_start = std::time::Instant::now();
         // Debug: print all states and transitions before processing
         crate::debug!(7, "=== NWA before flush (leaf_state={}, roots={:?}) ===", self.leaf_state, self.roots);
         for (i, state) in self.nwa.states.0.iter().enumerate() {
@@ -186,6 +187,7 @@ impl<'r> Precomputer1<'r> {
         // crate::debug!(5, "Pending transitions: {} total, {} to leaf", total_transitions, transitions_to_leaf);
         
         // Flush pending transitions and epsilons into the NWA
+        let flush_start = std::time::Instant::now();
         for (src, labels) in std::mem::take(&mut self.pending_transitions) {
             for (label, dsts) in labels {
                 for (dst, weight) in dsts {
@@ -198,8 +200,10 @@ impl<'r> Precomputer1<'r> {
                 self.nwa.add_epsilon(src, dst, weight);
             }
         }
+        crate::debug!(4, "Precompute1 finish: flushed pending transitions/epsilons in {:?}", flush_start.elapsed());
 
         // Create start state with transitions to root states
+        let start_state_start = std::time::Instant::now();
         let new_start_state = self.nwa.add_state();
         
         if self.num_tsids == 0 {
@@ -253,10 +257,12 @@ impl<'r> Precomputer1<'r> {
             }
         }
         self.nwa.body.start_states = vec![new_start_state];
+        crate::debug!(4, "Precompute1 finish: added start state transitions in {:?}", start_state_start.elapsed());
 
         // Stats
         // Find cases where there's multiple instances of same transition - incl symbol/epsilon transition - from one state to another, regardless of weight.
         let mut duplicate_transitions = 0;
+        let duplicate_start = std::time::Instant::now();
         for state in &self.nwa.states.0 {
             let mut dst_counts = HashMap::new();
             for (dst, _) in &state.epsilons {
@@ -283,9 +289,11 @@ impl<'r> Precomputer1<'r> {
         if duplicate_transitions > 0 {
             crate::debug!(6, "NWA: Found {} duplicate transitions (same src, dst, label)", duplicate_transitions);
         }
+        crate::debug!(4, "Precompute1 finish: duplicate transition scan in {:?}", duplicate_start.elapsed());
 
         // Find cases where there's multiple instances of same transition - regardless of symbol/epsilon transition - from one state to another, regardless of weight.
         let mut parallel_connections = 0;
+        let parallel_start = std::time::Instant::now();
         for state in &self.nwa.states.0 {
             let mut dst_counts = HashMap::new();
             for (dst, _) in &state.epsilons {
@@ -306,9 +314,11 @@ impl<'r> Precomputer1<'r> {
         if parallel_connections > 0 {
             crate::debug!(5, "NWA: Found {} pairs of states connected by multiple transitions", parallel_connections);
         }
+        crate::debug!(4, "Precompute1 finish: parallel transition scan in {:?}", parallel_start.elapsed());
 
         crate::debug!(3, "Terminal NWA: {} states, {} transitions, num_tsids={}", 
                       self.nwa.states.len(), self.nwa.states.num_transitions(), self.num_tsids);
+        crate::debug!(4, "Precompute1 finish: terminal NWA ready in {:?}", finish_start.elapsed());
 
         if std::env::var("DWA_DUMP_NWA").map(|v| v == "1").unwrap_or(false) {
             crate::debug!(5, "Dumping NWA to nwa_dump.json");
@@ -715,6 +725,7 @@ pub fn run_precompute1(
     state_to_rep: BTreeMap<TokenizerStateID, TokenizerStateID>,
     tsid_offset_map: Vec<usize>,
 ) -> DWA {
+    let precompute_start = std::time::Instant::now();
     // Compute num_tsids from tokenizer - 0 means symbol-heavy mode
     let num_tsids = if is_weight_heavy_enabled() {
         tokenizer.dfa().states.len()
@@ -747,7 +758,15 @@ pub fn run_precompute1(
         num_tsids,
         tsid_offset_map,
     );
+    crate::debug!(4, "precompute1: setup in {:?}", precompute_start.elapsed());
 
+    let dfs_start = std::time::Instant::now();
     helper.run_dfs();
-    helper.finish()
+    crate::debug!(4, "precompute1: dfs in {:?}", dfs_start.elapsed());
+
+    let finish_start = std::time::Instant::now();
+    let dwa = helper.finish();
+    crate::debug!(4, "precompute1: finish in {:?}", finish_start.elapsed());
+    crate::debug!(4, "precompute1: total in {:?}", precompute_start.elapsed());
+    dwa
 }
