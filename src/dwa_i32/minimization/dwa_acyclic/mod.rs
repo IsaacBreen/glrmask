@@ -5,7 +5,9 @@ use crate::dwa_i32::common::{Label, StateID, Weight};
 use crate::dwa_i32::dwa::{DWA, DWABuildError, DWAState, DWAStates};
 use crate::dwa_i32::minimization::common::DwaPass;
 use crate::dwa_i32::minimization::graph_coloring::{solve_greedy_coloring, solve_exact_graph_coloring};
+use crate::datastructures::RangeMapWeight;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::sync::Arc;
 use profiler_macro::{time_it, timeit};
 
 const UNMAPPED_STATE: StateID = StateID::MAX;
@@ -915,6 +917,45 @@ fn compute_needed_sets(dwa: &DWA, topo_order: &[StateID]) -> Vec<Weight> {
     needed
 }
 
+fn union_forward_pending(forward: &Weight, pending: &[Weight]) -> Weight {
+    if pending.is_empty() {
+        return forward.clone();
+    }
+
+    match forward {
+        Weight::RangeMap(rm) => {
+            let mut rangemaps: Vec<Arc<RangeMapWeight>> =
+                Vec::with_capacity(pending.len().saturating_add(1));
+            if !forward.is_empty() {
+                rangemaps.push(rm.clone());
+            }
+            for weight in pending {
+                if let Weight::RangeMap(other) = weight {
+                    rangemaps.push(other.clone());
+                } else {
+                    let mut acc = forward.clone();
+                    for weight in pending {
+                        acc |= weight;
+                    }
+                    return acc;
+                }
+            }
+            if rangemaps.is_empty() {
+                forward.clone()
+            } else {
+                Weight::RangeMap(RangeMapWeight::union_all(&rangemaps))
+            }
+        }
+        _ => {
+            let mut acc = forward.clone();
+            for weight in pending {
+                acc |= weight;
+            }
+            acc
+        }
+    }
+}
+
 /// Compute forward reachability: which tokens can reach each state from start
 #[time_it("compute_forward_reachable")]
 fn compute_forward_reachable(dwa: &DWA, topo_order: &[StateID]) -> Vec<Weight> {
@@ -935,11 +976,29 @@ fn compute_forward_reachable(dwa: &DWA, topo_order: &[StateID]) -> Vec<Weight> {
     forward_is_all[dwa.body.start_state] = true;
     time_init = init_start.elapsed();
 
-    let mut pending: Vec<Option<Weight>> = vec![None; dwa.states.len()];
-    let mut touched_targets: Vec<StateID> = Vec::new();
+    let mut pending: Vec<Vec<Weight>> = vec![Vec::new(); dwa.states.len()];
+    let mut pending_is_all = vec![false; dwa.states.len()];
 
     for &u in topo_order.iter().rev() {
         let outer_start = std::time::Instant::now();
+        if forward_is_all[u] {
+            pending[u].clear();
+            pending_is_all[u] = false;
+        } else if pending_is_all[u] {
+            forward[u] = Weight::all();
+            forward_is_all[u] = true;
+            pending_is_all[u] = false;
+            pending[u].clear();
+        } else if !pending[u].is_empty() {
+            let or_start = std::time::Instant::now();
+            let new_forward = union_forward_pending(&forward[u], &pending[u]);
+            time_or += or_start.elapsed();
+            count_ors += 1;
+            forward[u] = new_forward;
+            forward_is_all[u] = forward[u].is_all_fast();
+            pending[u].clear();
+        }
+
         let incoming_all = forward_is_all[u];
         if !incoming_all && forward[u].is_empty() {
             time_loop_outer += outer_start.elapsed();
@@ -954,28 +1013,19 @@ fn compute_forward_reachable(dwa: &DWA, topo_order: &[StateID]) -> Vec<Weight> {
         };
         time_clone += clone_start.elapsed();
 
-        touched_targets.clear();
-        
         for (&lbl, &v) in &dwa.states[u].transitions {
             count_transitions += 1;
             if v >= dwa.states.len() { continue; }
-            if forward_is_all[v] { continue; }
+            if forward_is_all[v] || pending_is_all[v] { continue; }
             if let Some(w) = dwa.states[u].trans_weights.get(&lbl) {
                 if w.is_empty() { continue; }
                 if incoming_all {
-                    let result = w.clone();
-                    match &mut pending[v] {
-                        Some(acc) => {
-                            let or_start = std::time::Instant::now();
-                            *acc |= &result;
-                            time_or += or_start.elapsed();
-                            count_ors += 1;
-                        }
-                        None => {
-                            pending[v] = Some(result);
-                            touched_targets.push(v);
-                        }
+                    if w.is_all_fast() {
+                        pending_is_all[v] = true;
+                        pending[v].clear();
+                        continue;
                     }
+                    pending[v].push(w.clone());
                 } else if let Some(incoming) = &incoming {
                     let and_start = std::time::Instant::now();
                     let result = incoming & w;
@@ -983,31 +1033,8 @@ fn compute_forward_reachable(dwa: &DWA, topo_order: &[StateID]) -> Vec<Weight> {
                     count_ands += 1;
 
                     if !result.is_empty() {
-                        match &mut pending[v] {
-                            Some(acc) => {
-                                let or_start = std::time::Instant::now();
-                                *acc |= &result;
-                                time_or += or_start.elapsed();
-                                count_ors += 1;
-                            }
-                            None => {
-                                pending[v] = Some(result);
-                                touched_targets.push(v);
-                            }
-                        }
+                        pending[v].push(result);
                     }
-                }
-            }
-        }
-
-        for &v in &touched_targets {
-            if let Some(contrib) = pending[v].take() {
-                let or_start = std::time::Instant::now();
-                forward[v] |= &contrib;
-                time_or += or_start.elapsed();
-                count_ors += 1;
-                if !forward_is_all[v] && forward[v].is_all_fast() {
-                    forward_is_all[v] = true;
                 }
             }
         }

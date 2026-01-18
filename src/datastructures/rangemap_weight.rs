@@ -741,6 +741,130 @@ impl RangeMapWeight {
         Self::from_token_map(token_map, num_tsids)
     }
 
+    #[time_it("RangeMapWeight::union_all_non_negated")]
+    fn union_all_non_negated(weights: &[&RangeMapWeight]) -> Self {
+        if weights.is_empty() {
+            return Self::new(current_num_tsids());
+        }
+
+        let num_tsids = weights[0].num_tsids();
+        if weights.len() == 1 {
+            return weights[0].clone();
+        }
+        if weights.len() == 2 {
+            return weights[0].union_non_negated(weights[1]);
+        }
+
+        let mut boundaries: Vec<usize> = Vec::new();
+        for weight in weights {
+            assert_eq!(
+                weight.num_tsids(),
+                num_tsids,
+                "RangeMapWeight num_tsids mismatch"
+            );
+            for (range, _) in weight.map.range_values() {
+                boundaries.push(*range.start());
+                if let Some(next) = range.end().checked_add(1) {
+                    boundaries.push(next);
+                }
+            }
+        }
+
+        boundaries.sort_unstable();
+        boundaries.dedup();
+
+        let mut out = RangeMapBlaze::new();
+        if boundaries.is_empty() {
+            return Self::new(num_tsids);
+        }
+
+        let mut current_start: Option<usize> = None;
+        let mut current_end: usize = 0;
+        let mut current_value = RangeSet::zeros();
+
+        for (idx, &start) in boundaries.iter().enumerate() {
+            let end = if idx + 1 < boundaries.len() {
+                boundaries[idx + 1].saturating_sub(1)
+            } else {
+                usize::MAX
+            };
+            if start > end {
+                continue;
+            }
+
+            let mut combined = RangeSet::zeros();
+            for weight in weights {
+                if let Some(val) = weight.map.get(start) {
+                    combined |= val;
+                }
+            }
+
+            if combined.is_empty() {
+                if let Some(range_start) = current_start.take() {
+                    out.ranges_insert(range_start..=current_end, current_value.clone());
+                }
+                continue;
+            }
+
+            if let Some(range_start) = current_start {
+                if current_value == combined && current_end.saturating_add(1) == start {
+                    current_end = end;
+                } else {
+                    out.ranges_insert(range_start..=current_end, current_value.clone());
+                    current_start = Some(start);
+                    current_end = end;
+                    current_value = combined;
+                }
+            } else {
+                current_start = Some(start);
+                current_end = end;
+                current_value = combined;
+            }
+        }
+
+        if let Some(range_start) = current_start {
+            out.ranges_insert(range_start..=current_end, current_value);
+        }
+
+        Self::from_map(out, num_tsids)
+    }
+
+    #[time_it("RangeMapWeight::union_all")]
+    pub(crate) fn union_all(weights: &[Arc<RangeMapWeight>]) -> Arc<RangeMapWeight> {
+        if weights.is_empty() {
+            return intern_rangemap(RangeMapWeight::new(current_num_tsids()));
+        }
+
+        let num_tsids = weights[0].num_tsids();
+        let mut non_empty: Vec<&RangeMapWeight> = Vec::with_capacity(weights.len());
+        let mut single_arc: Option<&Arc<RangeMapWeight>> = None;
+
+        for weight in weights {
+            assert_eq!(
+                weight.num_tsids(),
+                num_tsids,
+                "RangeMapWeight num_tsids mismatch"
+            );
+            if weight.map.is_empty() {
+                continue;
+            }
+            if single_arc.is_none() {
+                single_arc = Some(weight);
+            }
+            non_empty.push(weight.as_ref());
+        }
+
+        if non_empty.is_empty() {
+            return intern_rangemap(RangeMapWeight::new(num_tsids));
+        }
+        if non_empty.len() == 1 {
+            return single_arc.expect("missing non-empty weight").clone();
+        }
+
+        let result = Self::union_all_non_negated(&non_empty);
+        intern_rangemap(result)
+    }
+
     #[time_it("RangeMapWeight::union_non_negated")]
     fn union_non_negated(&self, other: &Self) -> Self {
         let left_ranges = Self::map_range_count(&self.map);
