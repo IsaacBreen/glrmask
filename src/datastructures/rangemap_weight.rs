@@ -1,8 +1,10 @@
+use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 
+use dashmap::DashSet;
 use lru::LruCache;
 use once_cell::sync::Lazy;
 use range_set_blaze::{RangeMapBlaze, RangeSetBlaze};
@@ -10,17 +12,16 @@ use range_set_blaze::{RangeMapBlaze, RangeSetBlaze};
 use crate::datastructures::abstract_weight::{current_num_tsids, normalize_num_tsids, WeightBackend};
 use crate::datastructures::cache;
 use crate::datastructures::hybrid_bitset::RangeSet;
+use profiler_macro::time_it;
 
 const WEIGHT_OP_CACHE_CAPACITY: usize = 100_000;
 
-static RANGEMAP_WEIGHT_INTERNER: Lazy<Mutex<HashSet<Arc<RangeMapWeight>>>> =
-    Lazy::new(|| Mutex::new(HashSet::new()));
+static RANGEMAP_WEIGHT_INTERNER: Lazy<DashSet<Arc<RangeMapWeight>>> = Lazy::new(DashSet::new);
 static RANGEMAP_OP_CACHE: Lazy<Mutex<LruCache<OpKey, Arc<RangeMapWeight>>>> = Lazy::new(|| {
     Mutex::new(LruCache::new(NonZeroUsize::new(WEIGHT_OP_CACHE_CAPACITY).unwrap()))
 });
 static RANGEMAP_OP_CACHE_INDEX: Lazy<Mutex<HashMap<usize, HashSet<OpKey>>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
-static RANGEMAP_WEIGHT_PTRS: Lazy<Mutex<HashSet<usize>>> = Lazy::new(|| Mutex::new(HashSet::new()));
 static FULL_TSIDS_CACHE: Lazy<Mutex<HashMap<usize, RangeSet>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
@@ -244,19 +245,11 @@ fn op_key(op: cache::BinOp, a: &Arc<RangeMapWeight>, b: &Arc<RangeMapWeight>) ->
 }
 
 fn is_interned_rangemap(weight: &Arc<RangeMapWeight>) -> bool {
-    let ptr = Arc::as_ptr(weight) as usize;
-    {
-        let ptrs = RANGEMAP_WEIGHT_PTRS.lock().unwrap();
-        if ptrs.contains(&ptr) {
-            return true;
-        }
+    if let Some(existing) = RANGEMAP_WEIGHT_INTERNER.get(weight) {
+        Arc::ptr_eq(&existing, weight)
+    } else {
+        false
     }
-    let interner = RANGEMAP_WEIGHT_INTERNER.lock().unwrap();
-    let found = interner.iter().any(|arc| Arc::as_ptr(arc) as usize == ptr);
-    if found {
-        RANGEMAP_WEIGHT_PTRS.lock().unwrap().insert(ptr);
-    }
-    found
 }
 
 fn remove_op_key_from_index(index: &mut HashMap<usize, HashSet<OpKey>>, key: OpKey) {
@@ -321,25 +314,24 @@ fn put_op_cache(
     index.entry(key.b).or_default().insert(key);
 }
 
+#[time_it("intern_rangemap")]
 pub fn intern_rangemap(weight: RangeMapWeight) -> Arc<RangeMapWeight> {
     PROF_RANGEMAP_INTERN_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let total_start = std::time::Instant::now();
-    let mut interner = RANGEMAP_WEIGHT_INTERNER.lock().unwrap();
     let lookup_start = std::time::Instant::now();
-    if let Some(existing) = interner.get(&weight) {
+    if let Some(existing) = RANGEMAP_WEIGHT_INTERNER.get(&weight) {
         let lookup_time = lookup_start.elapsed();
         PROF_RANGEMAP_INTERN_TIME_LOOKUP.fetch_add(
             lookup_time.as_micros() as u64,
             std::sync::atomic::Ordering::Relaxed,
         );
         PROF_RANGEMAP_INTERN_HIT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let ptr = Arc::as_ptr(existing) as usize;
-        RANGEMAP_WEIGHT_PTRS.lock().unwrap().insert(ptr);
+        let existing = Arc::clone(&*existing);
         PROF_RANGEMAP_INTERN_TIME_TOTAL.fetch_add(
             total_start.elapsed().as_micros() as u64,
             std::sync::atomic::Ordering::Relaxed,
         );
-        return existing.clone();
+        return existing;
     }
     let lookup_time = lookup_start.elapsed();
     PROF_RANGEMAP_INTERN_TIME_LOOKUP.fetch_add(
@@ -349,10 +341,18 @@ pub fn intern_rangemap(weight: RangeMapWeight) -> Arc<RangeMapWeight> {
     PROF_RANGEMAP_INTERN_MISS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let insert_start = std::time::Instant::now();
     let arc = Arc::new(weight);
-    let ptr = Arc::as_ptr(&arc) as usize;
-    invalidate_rangemap_op_cache_for_ptr(ptr);
-    interner.insert(arc.clone());
-    RANGEMAP_WEIGHT_PTRS.lock().unwrap().insert(ptr);
+    let inserted = RANGEMAP_WEIGHT_INTERNER.insert(arc.clone());
+    if inserted {
+        let ptr = Arc::as_ptr(&arc) as usize;
+        invalidate_rangemap_op_cache_for_ptr(ptr);
+    }
+    let out = if inserted {
+        arc
+    } else if let Some(existing) = RANGEMAP_WEIGHT_INTERNER.get(&arc) {
+        Arc::clone(&*existing)
+    } else {
+        arc
+    };
     PROF_RANGEMAP_INTERN_TIME_INSERT.fetch_add(
         insert_start.elapsed().as_micros() as u64,
         std::sync::atomic::Ordering::Relaxed,
@@ -361,7 +361,7 @@ pub fn intern_rangemap(weight: RangeMapWeight) -> Arc<RangeMapWeight> {
         total_start.elapsed().as_micros() as u64,
         std::sync::atomic::Ordering::Relaxed,
     );
-    arc
+    out
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -369,9 +369,38 @@ pub struct RangeMapWeight {
     /// Maps token_id -> set of tsid values (stored as ranges over token_id).
     pub(crate) map: RangeMapBlaze<usize, RangeSet>,
     pub(crate) num_tsids: usize,
+    cached_hash: u64,
 }
 
 impl RangeMapWeight {
+    fn compute_hash(map: &RangeMapBlaze<usize, RangeSet>, num_tsids: usize) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        num_tsids.hash(&mut hasher);
+        for (token_range, tsid_set) in map.range_values() {
+            token_range.start().hash(&mut hasher);
+            token_range.end().hash(&mut hasher);
+            for tsid_range in tsid_set.ranges() {
+                tsid_range.start().hash(&mut hasher);
+                tsid_range.end().hash(&mut hasher);
+            }
+        }
+        hasher.finish()
+    }
+
+    fn from_map(map: RangeMapBlaze<usize, RangeSet>, num_tsids: usize) -> Self {
+        let num_tsids = normalize_num_tsids(num_tsids);
+        let cached_hash = Self::compute_hash(&map, num_tsids);
+        Self {
+            map,
+            num_tsids,
+            cached_hash,
+        }
+    }
+
+    fn refresh_cached_hash(&mut self) {
+        self.cached_hash = Self::compute_hash(&self.map, self.num_tsids);
+    }
+
     fn map_range_count(map: &RangeMapBlaze<usize, RangeSet>) -> usize {
         map.range_values().len()
     }
@@ -393,10 +422,7 @@ impl RangeMapWeight {
     }
 
     pub(crate) fn new(num_tsids: usize) -> Self {
-        Self {
-            map: RangeMapBlaze::new(),
-            num_tsids: normalize_num_tsids(num_tsids),
-        }
+        Self::from_map(RangeMapBlaze::new(), num_tsids)
     }
 
     pub(crate) fn num_tsids(&self) -> usize {
@@ -662,7 +688,7 @@ impl RangeMapWeight {
             out.ranges_insert(start..=prev, current);
         }
 
-        Self { map: out, num_tsids }
+        Self::from_map(out, num_tsids)
     }
 
     pub(crate) fn from_rsb_with_num_tsids(rsb: &RangeSetBlaze<usize>, num_tsids: usize) -> Self {
@@ -708,6 +734,7 @@ impl RangeMapWeight {
         Self::from_token_map(token_map, num_tsids)
     }
 
+    #[time_it("RangeMapWeight::union_non_negated")]
     fn union_non_negated(&self, other: &Self) -> Self {
         let left_ranges = Self::map_range_count(&self.map);
         let right_ranges = Self::map_range_count(&other.map);
@@ -748,13 +775,15 @@ impl RangeMapWeight {
             );
             map
         };
-        Self { map, num_tsids: self.num_tsids() }
+        Self::from_map(map, self.num_tsids())
     }
 
+    #[time_it("RangeMapWeight::union_fast")]
     pub(crate) fn union_fast(&self, other: &Self) -> Self {
         self.union_non_negated(other)
     }
 
+    #[time_it("RangeMapWeight::intersect_non_negated")]
     fn intersect_non_negated(&self, other: &Self) -> Self {
         let left_ranges = Self::map_range_count(&self.map);
         let right_ranges = Self::map_range_count(&other.map);
@@ -777,7 +806,7 @@ impl RangeMapWeight {
             })
         };
 
-        Self { map, num_tsids: self.num_tsids() }
+        Self::from_map(map, self.num_tsids())
     }
 
     fn difference_non_negated(&self, other: &Self) -> Self {
@@ -786,10 +815,7 @@ impl RangeMapWeight {
             (Some(a), None) => a.clone(),
             _ => RangeSet::zeros(),
         });
-        Self {
-            map,
-            num_tsids: self.num_tsids(),
-        }
+        Self::from_map(map, self.num_tsids())
     }
 
     pub(crate) fn divide(&self, other: &Self) -> Self {
@@ -809,10 +835,7 @@ impl RangeMapWeight {
         let mut right = right_iter.next();
 
         if left.is_none() && right.is_none() {
-            let result = Self {
-                map: RangeMapBlaze::new(),
-                num_tsids,
-            };
+            let result = Self::from_map(RangeMapBlaze::new(), num_tsids);
             crate::datastructures::hybrid_bitset::PROF_TIME_DIVIDE.fetch_add(
                 start.elapsed().as_micros() as u64,
                 std::sync::atomic::Ordering::Relaxed,
@@ -1041,10 +1064,7 @@ impl RangeMapWeight {
             PROF_RANGEMAP_COUNT_DIVIDE_INSERT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
 
-        let result = Self {
-            map: out,
-            num_tsids,
-        };
+        let result = Self::from_map(out, num_tsids);
         crate::datastructures::hybrid_bitset::PROF_TIME_DIVIDE.fetch_add(
             start.elapsed().as_micros() as u64,
             std::sync::atomic::Ordering::Relaxed,
@@ -1097,6 +1117,7 @@ impl RangeMapWeight {
         }
 
         self.map = new_map;
+        self.refresh_cached_hash();
     }
 
     pub(crate) fn expand_to_rsb(&self) -> RangeSetBlaze<usize> {
@@ -1157,15 +1178,7 @@ impl RangeMapWeight {
 
 impl Hash for RangeMapWeight {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.num_tsids.hash(state);
-        for (token_range, tsid_set) in self.map.range_values() {
-            token_range.start().hash(state);
-            token_range.end().hash(state);
-            for tsid_range in tsid_set.ranges() {
-                tsid_range.start().hash(state);
-                tsid_range.end().hash(state);
-            }
-        }
+        self.cached_hash.hash(state);
     }
 }
 
@@ -1191,7 +1204,7 @@ impl WeightBackend for RangeMapWeight {
             if !tsids.is_empty() {
                 map.ranges_insert(0..=0, tsids);
             }
-            return Self { map, num_tsids };
+            return Self::from_map(map, num_tsids);
         }
 
         if max_tsid == num_tsids - 1 {
@@ -1204,7 +1217,7 @@ impl WeightBackend for RangeMapWeight {
             }
         }
 
-        Self { map, num_tsids }
+        Self::from_map(map, num_tsids)
     }
 
     fn from_position(pos: usize) -> Self {
@@ -1218,7 +1231,7 @@ impl WeightBackend for RangeMapWeight {
         let tsid_set = Self::rangeset_from_ranges([tsid..=tsid]);
         let mut map = RangeMapBlaze::new();
         map.ranges_insert(token..=token, tsid_set);
-        Self { map, num_tsids }
+        Self::from_map(map, num_tsids)
     }
 
     fn from_ranges<I: IntoIterator<Item = std::ops::RangeInclusive<usize>>>(ranges: I) -> Self {
@@ -1270,6 +1283,7 @@ impl WeightBackend for RangeMapWeight {
             new_set |= existing;
         }
         self.map.ranges_insert(token..=token, new_set);
+        self.refresh_cached_hash();
     }
 
     fn intersect(&self, other: &Self) -> Self {
