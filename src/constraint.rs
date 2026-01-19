@@ -1097,34 +1097,37 @@ impl GrammarConstraint {
         };
 
         let approx_dfa = if std::env::var("DISABLE_SUFFIX_PRUNE").is_err() {
-            if let Some(ref grammar_def) = grammar_definition {
-                crate::debug!(4, "Building approximate parser DFA (suffix grammar) for precompute1...");
-                let approx_dfa = parser.build_approximate_parser_dfa(grammar_def);
+            crate::debug!(4, "Building approximate parser DFA (lazy, all-states initial) for precompute1...");
+            let approx_dfa = parser.build_approximate_parser_dfa();
 
-                let mut orig_to_suffix_tid = vec![None; parser.terminal_map.len()];
-                for (_term, orig_tid) in parser.terminal_map.iter() {
-                    if orig_tid.0 < orig_to_suffix_tid.len() {
-                        orig_to_suffix_tid[orig_tid.0] = Some(*orig_tid);
-                    }
+            let mut orig_to_suffix_tid = vec![None; parser.terminal_map.len()];
+            for (_term, orig_tid) in parser.terminal_map.iter() {
+                if orig_tid.0 < orig_to_suffix_tid.len() {
+                    orig_to_suffix_tid[orig_tid.0] = Some(*orig_tid);
                 }
+            }
 
-                let mut ignored_terminals = vec![false; parser.terminal_map.len()];
+            let mut ignored_terminals = vec![false; parser.terminal_map.len()];
+            if let Some(ref grammar_def) = grammar_definition {
                 for tid in &grammar_def.ignore_terminal_ids {
                     if tid.0 < ignored_terminals.len() {
                         ignored_terminals[tid.0] = true;
                     }
                 }
-
-                crate::debug!(4, "Approximate parser DFA built (lazy), start_state={}", approx_dfa.start_state);
-                Some(ApproximateDfaPruner {
-                    dfa: approx_dfa,
-                    orig_to_suffix_tid,
-                    ignored_terminals,
-                })
             } else {
-                crate::debug!(4, "Skipping approximate parser DFA (no grammar definition)");
-                None
+                for tid in &parser.ignore_terminal_ids {
+                    if tid.0 < ignored_terminals.len() {
+                        ignored_terminals[tid.0] = true;
+                    }
+                }
             }
+
+            crate::debug!(4, "Approximate parser DFA built (lazy), start_state={}", approx_dfa.start_state);
+            Some(ApproximateDfaPruner {
+                dfa: approx_dfa,
+                orig_to_suffix_tid,
+                ignored_terminals,
+            })
         } else {
             None
         };

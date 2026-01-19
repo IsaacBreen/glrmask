@@ -1,7 +1,6 @@
 use crate::datastructures::bitset::Bitset;
 use crate::glr::parser::GLRParser;
 use crate::glr::table::{Stage7ShiftsAndReducesLookaheadValue, StateID, Table, TerminalID, NonTerminalID};
-use crate::interface::{grammar_to_suffix_grammar, CompiledGrammar, GrammarDefinition};
 use rustc_hash::FxHashMap;
 use rustfst::algorithms::determinize::{determinize_with_config, DeterminizeConfig, DeterminizeType};
 use rustfst::algorithms::minimize_with_config;
@@ -11,7 +10,6 @@ use rustfst::prelude::{ExpandedFst, MinimizeConfig, MutableFst, StateId, Tr, Trs
 use rustfst::semirings::TropicalWeight;
 use rustfst::Semiring;
 use std::collections::BTreeMap;
-use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub struct ApproximateParserNFA {
@@ -52,6 +50,10 @@ impl LazyApproximateDFA {
         if nfa.num_states > 0 {
             initial_set.insert(nfa.start_state.0);
         }
+        Self::new_with_initial(nfa, initial_set)
+    }
+
+    pub fn new_with_initial(nfa: ApproximateParserNFA, initial_set: Bitset) -> Self {
         let mut state_cache = FxHashMap::default();
         state_cache.insert(initial_set.clone(), 0);
 
@@ -119,18 +121,9 @@ impl ReduceStats {
     }
 }
 
-pub fn build_approximate_parser_dfa(grammar: &GrammarDefinition) -> LazyApproximateDFA {
-    crate::debug!(4, "Approximate DFA: building from suffix grammar...");
-    let suffix_grammar = grammar_to_suffix_grammar(grammar);
-    crate::debug!(4, "Approximate DFA: suffix grammar has {} productions", suffix_grammar.productions.len());
-    let suffix_compiled = CompiledGrammar::from_definition(Arc::new(suffix_grammar));
-    let suffix_parser = suffix_compiled.glr_parser();
-    build_approximate_parser_dfa_from_parser(suffix_parser)
-}
-
-fn build_approximate_parser_dfa_from_parser(parser: &GLRParser) -> LazyApproximateDFA {
+pub fn build_approximate_parser_dfa(parser: &GLRParser) -> LazyApproximateDFA {
     let num_states = table_state_count(&parser.table);
-    crate::debug!(4, "Approximate DFA: building from parser with {} states", num_states);
+    crate::debug!(4, "Approximate DFA: building lazy DFA from parser with {} states", num_states);
     let underneath_map = compute_underneath_map(&parser.table, num_states);
     let nfa = build_nfa(parser, num_states, &underneath_map);
     if crate::r#macro::is_debug_level_enabled(5) {
@@ -143,7 +136,8 @@ fn build_approximate_parser_dfa_from_parser(parser: &GLRParser) -> LazyApproxima
         let avg = if nfa.num_states == 0 { 0.0 } else { total_edges as f64 / nfa.num_states as f64 };
         crate::debug!(5, "Approximate DFA: NFA has {} transitions (avg {:.2} per state)", total_edges, avg);
     }
-    LazyApproximateDFA::new(nfa)
+    let initial_set = Bitset::ones(nfa.num_states);
+    LazyApproximateDFA::new_with_initial(nfa, initial_set)
 }
 
 fn table_state_count(table: &Table) -> usize {

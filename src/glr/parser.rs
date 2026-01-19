@@ -4,7 +4,6 @@ use crate::datastructures::leveled_gss::{LeveledGSS, LeveledGSSStats};
 use crate::glr::grammar::{NonTerminal, Production};
 use crate::glr::items::Item;
 use crate::glr::table::{get_row, NonTerminalID, StateID, Table, TerminalID};
-use crate::interface::GrammarDefinition;
 use crate::json_serialization::{JSONConvertible, JSONNode};
 use crate::profiler::GSS_LOGGING_ENABLED;
 use crate::debug;
@@ -402,12 +401,8 @@ impl GLRParser {
         self.init_glr_parser_with_acc()
     }
 
-    pub fn build_approximate_parser_dfa(
-        &self,
-        grammar: &GrammarDefinition,
-    ) -> crate::glr::approximate_dfa::LazyApproximateDFA {
-        let _ = self;
-        crate::glr::approximate_dfa::build_approximate_parser_dfa(grammar)
+    pub fn build_approximate_parser_dfa(&self) -> crate::glr::approximate_dfa::LazyApproximateDFA {
+        crate::glr::approximate_dfa::build_approximate_parser_dfa(self)
     }
 
     pub fn parse(&self, input: &[TerminalID], original_llm_vocab: Option<Arc<LLMVocab>>) -> GLRParserState {

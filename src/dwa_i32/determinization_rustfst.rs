@@ -782,12 +782,12 @@ pub fn vector_fst_to_nwa(fst: &VectorFst<BitsetWeight>) -> NWA {
 
     let mut nwa = NWA::new();
     nwa.states.0.clear();
-    let mut state_map = HashMap::<StateId, NWAStateID>::new();
+    let mut state_map: Vec<NWAStateID> = Vec::with_capacity(fst.num_states());
 
     let add_state_start = std::time::Instant::now();
-    for i in 0..fst.num_states() {
+    for _ in 0..fst.num_states() {
         let s = nwa.states.add_state();
-        state_map.insert(i as StateId, s);
+        state_map.push(s);
     }
     let add_state_time = add_state_start.elapsed();
 
@@ -804,7 +804,7 @@ pub fn vector_fst_to_nwa(fst: &VectorFst<BitsetWeight>) -> NWA {
 
     if let Some(fst_start) = fst.start() {
         let start_set = std::time::Instant::now();
-        nwa.body.start_states = vec![state_map[&fst_start]];
+        nwa.body.start_states = vec![state_map[fst_start as usize]];
         start_time += start_set.elapsed();
     } else {
         let start_set = std::time::Instant::now();
@@ -814,7 +814,7 @@ pub fn vector_fst_to_nwa(fst: &VectorFst<BitsetWeight>) -> NWA {
 
     for i in 0..fst.num_states() {
         let fst_state_id = i as StateId;
-        let nwa_state_id = state_map[&fst_state_id];
+        let nwa_state_id = state_map[fst_state_id as usize];
 
         if let Some(w) = fst.final_weight(fst_state_id).unwrap() {
             if !w.0.is_empty() {
@@ -830,7 +830,7 @@ pub fn vector_fst_to_nwa(fst: &VectorFst<BitsetWeight>) -> NWA {
 
         for tr in fst.get_trs(fst_state_id).unwrap().trs() {
             if !tr.weight.0.is_empty() {
-                let target_nwa_id = state_map[&tr.nextstate];
+                let target_nwa_id = state_map[tr.nextstate as usize];
                 let clone_start = std::time::Instant::now();
                 let weight = tr.weight.value().clone();
                 let clone_time = clone_start.elapsed();
