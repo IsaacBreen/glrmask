@@ -6,19 +6,11 @@ use crate::dwa_i32::dwa::{DWA, DWABuildError, DWAState, DWAStates};
 use crate::dwa_i32::minimization::common::DwaPass;
 use crate::dwa_i32::minimization::graph_coloring::{solve_greedy_coloring, solve_exact_graph_coloring};
 use crate::datastructures::RangeMapWeight;
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use profiler_macro::{time_it, timeit};
 
 const UNMAPPED_STATE: StateID = StateID::MAX;
-static MERGE_TRANSITIONS_TOTAL: AtomicU64 = AtomicU64::new(0);
-static MERGE_TRANS_WEIGHT_LOOKUPS: AtomicU64 = AtomicU64::new(0);
-static MERGE_BUILDER_ENTRY_LOOKUPS: AtomicU64 = AtomicU64::new(0);
-static MERGE_BUILDER_ENTRY_NEW: AtomicU64 = AtomicU64::new(0);
-static MERGE_BUILDER_ENTRY_EXISTING: AtomicU64 = AtomicU64::new(0);
-static MERGE_BUILDER_UNION_OPS: AtomicU64 = AtomicU64::new(0);
-static MERGE_BUILDER_UNION_TIME_US: AtomicU64 = AtomicU64::new(0);
 
 #[inline]
 fn old_to_new_get(old_to_new: &[StateID], id: StateID) -> Option<StateID> {
@@ -218,64 +210,14 @@ pub fn minimize_acyclic_exact(dwa: &DWA) -> Result<DWA, DWABuildError> {
     }
     
     let total_start = std::time::Instant::now();
-
-    MERGE_TRANSITIONS_TOTAL.store(0, Ordering::Relaxed);
-    MERGE_TRANS_WEIGHT_LOOKUPS.store(0, Ordering::Relaxed);
-    MERGE_BUILDER_ENTRY_LOOKUPS.store(0, Ordering::Relaxed);
-    MERGE_BUILDER_ENTRY_NEW.store(0, Ordering::Relaxed);
-    MERGE_BUILDER_ENTRY_EXISTING.store(0, Ordering::Relaxed);
-    MERGE_BUILDER_UNION_OPS.store(0, Ordering::Relaxed);
-    MERGE_BUILDER_UNION_TIME_US.store(0, Ordering::Relaxed);
-
-    let mut label_min: Option<Label> = None;
-    let mut label_max: Option<Label> = None;
-    let mut label_set: HashSet<Label> = HashSet::new();
-    let mut transition_count: usize = 0;
-    for state in dwa.states.iter() {
-        for (&label, _) in &state.transitions {
-            transition_count = transition_count.saturating_add(1);
-            label_set.insert(label);
-            label_min = Some(label_min.map_or(label, |min| min.min(label)));
-            label_max = Some(label_max.map_or(label, |max| max.max(label)));
-        }
-    }
-    let label_min_val = label_min;
-    let label_max_val = label_max;
-    if let (Some(min_label), Some(max_label)) = (label_min_val, label_max_val) {
-        let range = (max_label as i64 - min_label as i64 + 1).max(0) as u64;
-        let unique = label_set.len() as u64;
-        let density = if range > 0 { unique as f64 / range as f64 } else { 0.0 };
-        crate::debug!(
-            5,
-            "Label stats: transitions={}, unique_labels={}, min_label={}, max_label={}, range={}, density={:.4}",
-            transition_count,
-            unique,
-            min_label,
-            max_label,
-            range,
-            density,
-        );
-    } else {
-        crate::debug!(5, "Label stats: transitions=0");
-    }
-
-    let (label_offset, label_count) = match (label_min_val, label_max_val) {
-        (Some(min_label), Some(max_label)) if max_label >= min_label => {
-            let range = (max_label as i64 - min_label as i64 + 1) as usize;
-            (min_label, range)
-        }
-        _ => (0, 0),
-    };
     
     // Step 0: Preprocess - tighten weights by removing unreachable tokens
     crate::debug!(5, "Acyclic minimize step 0 start (tighten_weights)");
     let step0_start = std::time::Instant::now();
-    let tighten_wall_start = std::time::Instant::now();
     crate::datastructures::hybrid_bitset::reset_profiling();
     crate::datastructures::rangemap_weight::reset_profiling();
     crate::datastructures::abstract_weight::reset_weight_op_profiling();
     let dwa = tighten_weights(dwa)?;
-    let tighten_wall_time = tighten_wall_start.elapsed();
     crate::datastructures::hybrid_bitset::print_profiling("tighten_weights");
     crate::datastructures::rangemap_weight::print_profiling("tighten_weights");
     crate::datastructures::abstract_weight::print_weight_op_profiling("tighten_weights");
@@ -285,23 +227,19 @@ pub fn minimize_acyclic_exact(dwa: &DWA) -> Result<DWA, DWABuildError> {
     // 1. Topological Sort & Reachability Analysis
     crate::debug!(5, "Acyclic minimize step 1 start (topo_order)");
     let step1_start = std::time::Instant::now();
-    let topo_wall_start = std::time::Instant::now();
     let topo_order = timeit!("minimize_acyclic::topo_order", {
         compute_topo_order(&dwa)?
     });
-    let topo_wall_time = topo_wall_start.elapsed();
     crate::debug!(5, "Acyclic minimize step 1 end (topo_order): {:?}", step1_start.elapsed());
     crate::debug!(5, "Acyclic minimize step 1 (topo_order): {:?}", step1_start.elapsed());
 
     // 2. Compute "Needed" sets (Reverse Flow Analysis).
     crate::debug!(5, "Acyclic minimize step 2 start (needed_sets)");
     let step2_start = std::time::Instant::now();
-    let needed_wall_start = std::time::Instant::now();
     crate::datastructures::hybrid_bitset::reset_profiling();
     crate::datastructures::rangemap_weight::reset_profiling();
     crate::datastructures::abstract_weight::reset_weight_op_profiling();
     let needed = compute_needed_sets(&dwa, &topo_order);
-    let needed_wall_time = needed_wall_start.elapsed();
     crate::datastructures::hybrid_bitset::print_profiling("compute_needed_sets");
     crate::datastructures::rangemap_weight::print_profiling("compute_needed_sets");
     crate::datastructures::abstract_weight::print_weight_op_profiling("compute_needed_sets");
@@ -376,7 +314,7 @@ pub fn minimize_acyclic_exact(dwa: &DWA) -> Result<DWA, DWABuildError> {
 
             timeit!("bottom_up_merge_acyclic::extend", {
                 let extend_start = std::time::Instant::now();
-                new_states.extend((0..num_colors).map(|_| MergedStateBuilder::new(label_count)));
+                new_states.extend((0..num_colors).map(|_| MergedStateBuilder::default()));
                 crate::debug!(5, "Height {}: new_states extend {:?} ({} new)", h, extend_start.elapsed(), num_colors);
                 time_extend += extend_start.elapsed();
             });
@@ -393,7 +331,6 @@ pub fn minimize_acyclic_exact(dwa: &DWA) -> Result<DWA, DWABuildError> {
                         &dwa,
                         &needed,
                         &old_to_new,
-                        label_offset,
                         completed,
                         builders,
                         &mut merge_stats,
@@ -442,34 +379,15 @@ pub fn minimize_acyclic_exact(dwa: &DWA) -> Result<DWA, DWABuildError> {
         time_merge,
         std::time::Duration::from_micros(merge_and_time_us_total),
     );
-    crate::debug!(
-        5,
-        "Acyclic minimize step 4 merge counters: transitions={}, trans_weight_lookups={}, builder_entry_lookups={}, builder_new={}, builder_existing={}, builder_union_ops={}, builder_union_time_us={}",
-        MERGE_TRANSITIONS_TOTAL.load(Ordering::Relaxed),
-        MERGE_TRANS_WEIGHT_LOOKUPS.load(Ordering::Relaxed),
-        MERGE_BUILDER_ENTRY_LOOKUPS.load(Ordering::Relaxed),
-        MERGE_BUILDER_ENTRY_NEW.load(Ordering::Relaxed),
-        MERGE_BUILDER_ENTRY_EXISTING.load(Ordering::Relaxed),
-        MERGE_BUILDER_UNION_OPS.load(Ordering::Relaxed),
-        MERGE_BUILDER_UNION_TIME_US.load(Ordering::Relaxed),
-    );
     crate::debug!(6, "Acyclic minimize: {} -> {} states in {:?}", 
         dwa.states.len(), new_states.len(), total_start.elapsed());
 
     // 5. Reconstruct the Final DWA
     let step5_start = std::time::Instant::now();
     let result = timeit!("minimize_acyclic::reconstruct", {
-        reconstruct_dwa(dwa.body.start_state, &old_to_new, new_states, label_offset)?
+        reconstruct_dwa(dwa.body.start_state, &old_to_new, new_states)?
     });
     crate::debug!(5, "Acyclic minimize step 5 (reconstruct): {:?}", step5_start.elapsed());
-    crate::debug!(
-        4,
-        "WALL minimize_acyclic_exact: total={:.3}s tighten_weights={:.3}s topo_order={:.3}s compute_needed_sets={:.3}s",
-        total_start.elapsed().as_secs_f64(),
-        tighten_wall_time.as_secs_f64(),
-        topo_wall_time.as_secs_f64(),
-        needed_wall_time.as_secs_f64(),
-    );
     
     // 6. Stochastic validation (only when STOCHASTIC_MERGE_VALIDATION=1)
     if std::env::var("STOCHASTIC_MERGE_VALIDATION").is_ok() {
@@ -792,7 +710,6 @@ fn merge_state_into_builder(
     dwa: &DWA,
     needed: &[Weight],
     old_to_new: &[StateID],
-    label_offset: Label,
     completed: &[MergedStateBuilder],
     builders: &mut [MergedStateBuilder],
     stats: &mut MergeStats,
@@ -811,10 +728,8 @@ fn merge_state_into_builder(
     // Merge Transitions
     for (&label, &target_old) in &old_state.transitions {
         stats.transitions += 1;
-        MERGE_TRANSITIONS_TOTAL.fetch_add(1, Ordering::Relaxed);
         if target_old >= dwa.states.len() { continue; }
         let Some(target_new) = old_to_new_get(old_to_new, target_old) else { continue; };
-        MERGE_TRANS_WEIGHT_LOOKUPS.fetch_add(1, Ordering::Relaxed);
         let Some(w_orig) = old_state.trans_weights.get(&label) else { continue; };
         let needed_weight = &completed[target_new].needed;
         stats.w_orig_ranges = stats.w_orig_ranges.saturating_add(w_orig.num_ranges() as u64);
@@ -826,23 +741,14 @@ fn merge_state_into_builder(
         }
         
         // Restrict weight to what's actually needed at target
-        let w_effective = if needed_weight.is_all_fast() {
-            w_orig.clone()
-        } else if needed_weight.is_empty() {
-            Weight::zeros()
-        } else if w_orig.is_empty() {
-            Weight::zeros()
-        } else {
-            let and_start = std::time::Instant::now();
-            let w_effective = w_orig & needed_weight;
-            stats.and_time_us = stats
-                .and_time_us
-                .saturating_add(and_start.elapsed().as_micros() as u64);
-            stats.and_ops += 1;
-            w_effective
-        };
+        let and_start = std::time::Instant::now();
+        let w_effective = w_orig & needed_weight;
+        stats.and_time_us = stats
+            .and_time_us
+            .saturating_add(and_start.elapsed().as_micros() as u64);
+        stats.and_ops += 1;
         if !w_effective.is_empty() {
-            builder.add_transition(label, label_offset, target_new, w_effective);
+            builder.add_transition(label, target_new, w_effective);
         }
     }
 }
@@ -897,46 +803,19 @@ fn stochastic_merge_validation(dwa: &DWA) -> Result<(), DWABuildError> {
 
 // --- Structures & Helpers ---
 
+#[derive(Default)]
 struct MergedStateBuilder {
     final_weight: Weight,
     needed: Weight,
-    transitions: Vec<Option<(StateID, Weight)>>,
+    transitions: BTreeMap<Label, (StateID, Weight)>,
 }
 
 impl MergedStateBuilder {
-    fn new(label_count: usize) -> Self {
-        Self {
-            final_weight: Weight::zeros(),
-            needed: Weight::zeros(),
-            transitions: vec![None; label_count],
-        }
-    }
-
-    fn add_transition(&mut self, label: Label, label_offset: Label, target: StateID, weight: Weight) {
-        MERGE_BUILDER_ENTRY_LOOKUPS.fetch_add(1, Ordering::Relaxed);
-        let Some(delta) = label.checked_sub(label_offset) else {
-            debug_assert!(false, "label below offset: label={}, offset={}", label, label_offset);
-            return;
-        };
-        let idx = delta as usize;
-        debug_assert!(idx < self.transitions.len(), "label index out of range: idx={}, len={}", idx, self.transitions.len());
-        let entry = &mut self.transitions[idx];
-        match entry {
-            None => {
-                MERGE_BUILDER_ENTRY_NEW.fetch_add(1, Ordering::Relaxed);
-                *entry = Some((target, weight));
-            }
-            Some((_, existing_weight)) => {
-                MERGE_BUILDER_ENTRY_EXISTING.fetch_add(1, Ordering::Relaxed);
-                let union_start = std::time::Instant::now();
-                *existing_weight |= &weight;
-                MERGE_BUILDER_UNION_OPS.fetch_add(1, Ordering::Relaxed);
-                MERGE_BUILDER_UNION_TIME_US.fetch_add(
-                    union_start.elapsed().as_micros() as u64,
-                    Ordering::Relaxed,
-                );
-            }
-        }
+    fn add_transition(&mut self, label: Label, target: StateID, weight: Weight) {
+        let entry = self.transitions.entry(label).or_insert((target, Weight::zeros()));
+        // Incompatibility logic ensures that for a given label, 
+        // if weights overlap, they must target the same new cluster.
+        entry.1 |= &weight;
     }
 }
 
@@ -1187,17 +1066,14 @@ fn compute_forward_reachable(dwa: &DWA, topo_order: &[StateID]) -> Vec<Weight> {
 #[time_it("tighten_weights")]
 fn tighten_weights(dwa: &DWA) -> Result<DWA, DWABuildError> {
     if dwa.states.is_empty() { return Ok(DWA::new()); }
-    let total_start = std::time::Instant::now();
-
+    
     let topo_start = std::time::Instant::now();
     let topo_order = compute_topo_order(dwa)?;
-    let topo_time = topo_start.elapsed();
-    crate::debug!(5, "tighten_weights: topo_order computed in {:?}", topo_time);
+    crate::debug!(5, "tighten_weights: topo_order computed in {:?}", topo_start.elapsed());
 
     let forward_start = std::time::Instant::now();
     let forward = compute_forward_reachable(dwa, &topo_order);
-    let forward_time = forward_start.elapsed();
-    crate::debug!(5, "tighten_weights: forward_reachable computed in {:?}", forward_time);
+    crate::debug!(5, "tighten_weights: forward_reachable computed in {:?}", forward_start.elapsed());
     
     let build_start = std::time::Instant::now();
     let mut new_states = DWAStates(Vec::with_capacity(dwa.states.len()));
@@ -1225,16 +1101,7 @@ fn tighten_weights(dwa: &DWA) -> Result<DWA, DWABuildError> {
         }
         new_states.0.push(new_state);
     }
-    let build_time = build_start.elapsed();
-    crate::debug!(5, "tighten_weights: new DWA built in {:?}", build_time);
-    crate::debug!(
-        4,
-        "WALL tighten_weights: total={:.3}s topo_order={:.3}s forward_reachable={:.3}s rebuild={:.3}s",
-        total_start.elapsed().as_secs_f64(),
-        topo_time.as_secs_f64(),
-        forward_time.as_secs_f64(),
-        build_time.as_secs_f64(),
-    );
+    crate::debug!(5, "tighten_weights: new DWA built in {:?}", build_start.elapsed());
     
     Ok(DWA { states: new_states, body: dwa.body.clone() })
 }
@@ -1375,20 +1242,19 @@ fn targets_equivalent_on_domain(
     }
     
     // Check transitions on domain
-    if bu.transitions.len() != bv.transitions.len() {
-        return false;
-    }
-
-    for (entry_u, entry_v) in bu.transitions.iter().zip(bv.transitions.iter()) {
-        let (target_u, w_u) = match entry_u {
-            Some((t, w)) => (*t, w & domain),
-            None => (usize::MAX, Weight::zeros()),
-        };
-        let (target_v, w_v) = match entry_v {
-            Some((t, w)) => (*t, w & domain),
-            None => (usize::MAX, Weight::zeros()),
-        };
-
+    let all_labels: BTreeSet<Label> = bu.transitions.keys()
+        .chain(bv.transitions.keys())
+        .copied()
+        .collect();
+    
+    for lbl in all_labels {
+        let (target_u, w_u) = bu.transitions.get(&lbl)
+            .map(|(t, w)| (*t, w & domain))
+            .unwrap_or((usize::MAX, Weight::zeros()));
+        let (target_v, w_v) = bv.transitions.get(&lbl)
+            .map(|(t, w)| (*t, w & domain))
+            .unwrap_or((usize::MAX, Weight::zeros()));
+        
         if w_u != w_v || (!w_u.is_empty() && target_u != target_v) {
             return false;
         }
@@ -1831,20 +1697,18 @@ fn compute_state_signature(
 fn reconstruct_dwa(
     start_old: StateID,
     old_to_new: &[StateID],
-    builders: Vec<MergedStateBuilder>,
-    label_offset: Label,
+    builders: Vec<MergedStateBuilder>
 ) -> Result<DWA, DWABuildError> {
     let states: Vec<DWAState> = builders.into_iter().map(|b| {
         let mut state = DWAState::default();
         if !b.final_weight.is_empty() {
             state.final_weight = Some(b.final_weight);
         }
-        for (idx, entry) in b.transitions.into_iter().enumerate() {
-            let Some((target, weight)) = entry else { continue; };
-            if weight.is_empty() { continue; }
-            let lbl = label_offset + idx as Label;
-            state.transitions.insert(lbl, target);
-            state.trans_weights.insert(lbl, weight);
+        for (lbl, (target, weight)) in b.transitions {
+            if !weight.is_empty() {
+                state.transitions.insert(lbl, target);
+                state.trans_weights.insert(lbl, weight);
+            }
         }
         state
     }).collect();

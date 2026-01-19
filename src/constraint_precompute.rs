@@ -343,9 +343,7 @@ impl<'r> Precomputer1<'r> {
                     tsid_count,
                 );
             }
-            let start_state_time = start_state_start.elapsed();
-            crate::debug!(4, "Precompute1 finish: added start state transitions in {:?}", start_state_time);
-            crate::debug!(4, "WALL precompute1::start_state: {:.3}s", start_state_time.as_secs_f64());
+            crate::debug!(4, "Precompute1 finish: added start state transitions in {:?}", start_state_start.elapsed());
             new_start_state
         });
         self.nwa.body.start_states = vec![new_start_state];
@@ -899,9 +897,7 @@ pub fn run_precompute1(
     });
 
     timeit!("precompute1::dfs", {
-        let dfs_wall_start = std::time::Instant::now();
         helper.run_dfs();
-        crate::debug!(4, "WALL precompute1::dfs: {:.3}s", dfs_wall_start.elapsed().as_secs_f64());
     });
 
     timeit!("precompute1::finish", {

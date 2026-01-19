@@ -453,7 +453,6 @@ pub fn canonicalize_bundle(terminal_map: BTreeMap<Option<TerminalID>, Weight>) -
 /// The resulting DWA is used at runtime for O(1) mask queries.
 #[time_it("build_parser_dwa")]
 pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
-    let wall_start = std::time::Instant::now();
     crate::debug!(3, "Starting Parser DWA construction. Input terminal_nwa: {} states, {} transitions", 
         terminal_nwa.states.len(), terminal_nwa.states.num_transitions());
     
@@ -465,7 +464,6 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
         // Add a single start state with no final weight (no tokens are valid)
         let start_state = empty_dwa.states.add_state();
         empty_dwa.body.start_state = start_state;
-        crate::debug!(4, "WALL build_parser_dwa: {:.3}s", wall_start.elapsed().as_secs_f64());
         return empty_dwa;
     }
     
@@ -1138,23 +1136,15 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
     let combined_nwa = NWA { states: combined_nwa_states, body: NWABody { start_states: vec![combined_start_state] } };
     crate::debug!(3, "Combined NWA before determinization: {} states, {} transitions, is_symbol_heavy={}", 
         combined_nwa.states.len(), combined_nwa.states.num_transitions(), is_symbol_heavy);
-    let finalize_wall_start = std::time::Instant::now();
     let mut final_dwa = timeit!("parser_dwa::finalize_and_determinize", {
         finalize_and_optimize_and_determinize(parser, combined_nwa)
     });
-    crate::debug!(
-        4,
-        "WALL parser_dwa::finalize_and_determinize: {:.3}s",
-        finalize_wall_start.elapsed().as_secs_f64()
-    );
     // SKIP final minimization to test performance impact
     // final_dwa.minimize();
     crate::debug!(4, "Parser DWA construction complete. Stats: {}", final_dwa.stats());
     if let Some(avg_path_len) = final_dwa.average_path_length() {
         crate::debug!(4, "Parser DWA average path length: {:.2}", avg_path_len);
     }
-
-    crate::debug!(4, "WALL build_parser_dwa: {:.3}s", wall_start.elapsed().as_secs_f64());
 
     final_dwa
 }

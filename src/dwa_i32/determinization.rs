@@ -99,10 +99,7 @@ impl NWA {
     ///
     /// This defaults to the **Simple** strategy for performance.
     pub fn determinize(&self) -> DWA {
-        let wall_start = std::time::Instant::now();
-        let out = self.determinize_robust();
-        crate::debug!(4, "WALL NWA::determinize: {:.3}s", wall_start.elapsed().as_secs_f64());
-        out
+        self.determinize_robust()
     }
 
     /// Determinizes the NWA using a robust strategy with precomputed epsilon closures.

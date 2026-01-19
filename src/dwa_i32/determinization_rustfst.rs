@@ -59,9 +59,6 @@ fn label_to_fst_label(label: Label) -> u32 {
 
 static WEIGHT_INTERNER: Lazy<Mutex<HashSet<Arc<Weight>>>> = Lazy::new(|| Mutex::new(HashSet::new()));
 
-static WEIGHT_ALL: Lazy<Arc<Weight>> = Lazy::new(|| intern_weight(Weight::all()));
-static WEIGHT_ZERO: Lazy<Arc<Weight>> = Lazy::new(|| intern_weight(Weight::zeros()));
-
 const WEIGHT_DIVIDE_CACHE_CAPACITY: usize = 100_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -90,26 +87,6 @@ static RUSTFST_WEIGHT_COUNT_TIMES: AtomicU64 = AtomicU64::new(0);
 static RUSTFST_WEIGHT_TIME_TIMES: AtomicU64 = AtomicU64::new(0);
 static RUSTFST_WEIGHT_COUNT_DIVIDE: AtomicU64 = AtomicU64::new(0);
 static RUSTFST_WEIGHT_TIME_DIVIDE: AtomicU64 = AtomicU64::new(0);
-static RUSTFST_WEIGHT_DIVIDE_FAST_EQ: AtomicU64 = AtomicU64::new(0);
-static RUSTFST_WEIGHT_DIVIDE_FAST_RHS_EMPTY: AtomicU64 = AtomicU64::new(0);
-static RUSTFST_WEIGHT_DIVIDE_FAST_RHS_ALL: AtomicU64 = AtomicU64::new(0);
-static RUSTFST_WEIGHT_DIVIDE_FAST_LHS_ALL: AtomicU64 = AtomicU64::new(0);
-static RUSTFST_WEIGHT_DIVIDE_FAST_LHS_EMPTY: AtomicU64 = AtomicU64::new(0);
-static RUSTFST_WEIGHT_DIVIDE_CACHE_HIT: AtomicU64 = AtomicU64::new(0);
-static RUSTFST_WEIGHT_DIVIDE_CACHE_MISS: AtomicU64 = AtomicU64::new(0);
-static RUSTFST_WEIGHT_DIVIDE_FAST_CHECK_TIME: AtomicU64 = AtomicU64::new(0);
-static RUSTFST_WEIGHT_DIVIDE_CACHE_LOOKUP_TIME: AtomicU64 = AtomicU64::new(0);
-static RUSTFST_WEIGHT_DIVIDE_CACHE_INSERT_TIME: AtomicU64 = AtomicU64::new(0);
-static RUSTFST_WEIGHT_DIVIDE_CLONE_TIME: AtomicU64 = AtomicU64::new(0);
-static RUSTFST_WEIGHT_DIVIDE_FAST_EXEC_TIME: AtomicU64 = AtomicU64::new(0);
-static RUSTFST_WEIGHT_DIVIDE_KEY_TIME: AtomicU64 = AtomicU64::new(0);
-static RUSTFST_WEIGHT_DIVIDE_CACHE_HIT_TIME: AtomicU64 = AtomicU64::new(0);
-static RUSTFST_WEIGHT_DIVIDE_ASSIGN_TIME: AtomicU64 = AtomicU64::new(0);
-static RUSTFST_WEIGHT_DIVIDE_MISS_TIME_OP: AtomicU64 = AtomicU64::new(0);
-static RUSTFST_WEIGHT_DIVIDE_MISS_TIME_INTERN: AtomicU64 = AtomicU64::new(0);
-static RUSTFST_WEIGHT_DIVIDE_MISS_LHS_RANGES_TOTAL: AtomicU64 = AtomicU64::new(0);
-static RUSTFST_WEIGHT_DIVIDE_MISS_RHS_RANGES_TOTAL: AtomicU64 = AtomicU64::new(0);
-static RUSTFST_WEIGHT_DIVIDE_MISS_RES_RANGES_TOTAL: AtomicU64 = AtomicU64::new(0);
 static RUSTFST_WEIGHT_COUNT_APPROX_EQUAL: AtomicU64 = AtomicU64::new(0);
 static RUSTFST_WEIGHT_TIME_APPROX_EQUAL: AtomicU64 = AtomicU64::new(0);
 static RUSTFST_WEIGHT_COUNT_VALUE: AtomicU64 = AtomicU64::new(0);
@@ -160,26 +137,6 @@ pub fn reset_rustfst_weight_profile() {
     RUSTFST_WEIGHT_TIME_TIMES.store(0, Ordering::Relaxed);
     RUSTFST_WEIGHT_COUNT_DIVIDE.store(0, Ordering::Relaxed);
     RUSTFST_WEIGHT_TIME_DIVIDE.store(0, Ordering::Relaxed);
-    RUSTFST_WEIGHT_DIVIDE_FAST_EQ.store(0, Ordering::Relaxed);
-    RUSTFST_WEIGHT_DIVIDE_FAST_RHS_EMPTY.store(0, Ordering::Relaxed);
-    RUSTFST_WEIGHT_DIVIDE_FAST_RHS_ALL.store(0, Ordering::Relaxed);
-    RUSTFST_WEIGHT_DIVIDE_FAST_LHS_ALL.store(0, Ordering::Relaxed);
-    RUSTFST_WEIGHT_DIVIDE_FAST_LHS_EMPTY.store(0, Ordering::Relaxed);
-    RUSTFST_WEIGHT_DIVIDE_CACHE_HIT.store(0, Ordering::Relaxed);
-    RUSTFST_WEIGHT_DIVIDE_CACHE_MISS.store(0, Ordering::Relaxed);
-    RUSTFST_WEIGHT_DIVIDE_FAST_CHECK_TIME.store(0, Ordering::Relaxed);
-    RUSTFST_WEIGHT_DIVIDE_CACHE_LOOKUP_TIME.store(0, Ordering::Relaxed);
-    RUSTFST_WEIGHT_DIVIDE_CACHE_INSERT_TIME.store(0, Ordering::Relaxed);
-    RUSTFST_WEIGHT_DIVIDE_CLONE_TIME.store(0, Ordering::Relaxed);
-    RUSTFST_WEIGHT_DIVIDE_FAST_EXEC_TIME.store(0, Ordering::Relaxed);
-    RUSTFST_WEIGHT_DIVIDE_KEY_TIME.store(0, Ordering::Relaxed);
-    RUSTFST_WEIGHT_DIVIDE_CACHE_HIT_TIME.store(0, Ordering::Relaxed);
-    RUSTFST_WEIGHT_DIVIDE_ASSIGN_TIME.store(0, Ordering::Relaxed);
-    RUSTFST_WEIGHT_DIVIDE_MISS_TIME_OP.store(0, Ordering::Relaxed);
-    RUSTFST_WEIGHT_DIVIDE_MISS_TIME_INTERN.store(0, Ordering::Relaxed);
-    RUSTFST_WEIGHT_DIVIDE_MISS_LHS_RANGES_TOTAL.store(0, Ordering::Relaxed);
-    RUSTFST_WEIGHT_DIVIDE_MISS_RHS_RANGES_TOTAL.store(0, Ordering::Relaxed);
-    RUSTFST_WEIGHT_DIVIDE_MISS_RES_RANGES_TOTAL.store(0, Ordering::Relaxed);
     RUSTFST_WEIGHT_COUNT_APPROX_EQUAL.store(0, Ordering::Relaxed);
     RUSTFST_WEIGHT_TIME_APPROX_EQUAL.store(0, Ordering::Relaxed);
     RUSTFST_WEIGHT_COUNT_VALUE.store(0, Ordering::Relaxed);
@@ -266,87 +223,6 @@ pub fn print_rustfst_weight_profile(label: &str) {
         RUSTFST_WEIGHT_TIME_DIVIDE.load(Ordering::Relaxed),
         avg_us(RUSTFST_WEIGHT_TIME_DIVIDE.load(Ordering::Relaxed), count_divide)
     );
-    if count_divide > 0 {
-        let fast_eq = RUSTFST_WEIGHT_DIVIDE_FAST_EQ.load(Ordering::Relaxed);
-        let fast_rhs_empty = RUSTFST_WEIGHT_DIVIDE_FAST_RHS_EMPTY.load(Ordering::Relaxed);
-        let fast_rhs_all = RUSTFST_WEIGHT_DIVIDE_FAST_RHS_ALL.load(Ordering::Relaxed);
-        let fast_lhs_all = RUSTFST_WEIGHT_DIVIDE_FAST_LHS_ALL.load(Ordering::Relaxed);
-        let fast_lhs_empty = RUSTFST_WEIGHT_DIVIDE_FAST_LHS_EMPTY.load(Ordering::Relaxed);
-        let cache_hit = RUSTFST_WEIGHT_DIVIDE_CACHE_HIT.load(Ordering::Relaxed);
-        let cache_miss = RUSTFST_WEIGHT_DIVIDE_CACHE_MISS.load(Ordering::Relaxed);
-        let fast_check_us = RUSTFST_WEIGHT_DIVIDE_FAST_CHECK_TIME.load(Ordering::Relaxed);
-        let cache_lookup_us = RUSTFST_WEIGHT_DIVIDE_CACHE_LOOKUP_TIME.load(Ordering::Relaxed);
-        let cache_insert_us = RUSTFST_WEIGHT_DIVIDE_CACHE_INSERT_TIME.load(Ordering::Relaxed);
-        let clone_us = RUSTFST_WEIGHT_DIVIDE_CLONE_TIME.load(Ordering::Relaxed);
-        let fast_exec_us = RUSTFST_WEIGHT_DIVIDE_FAST_EXEC_TIME.load(Ordering::Relaxed);
-        let key_us = RUSTFST_WEIGHT_DIVIDE_KEY_TIME.load(Ordering::Relaxed);
-        let cache_hit_us = RUSTFST_WEIGHT_DIVIDE_CACHE_HIT_TIME.load(Ordering::Relaxed);
-        let assign_us = RUSTFST_WEIGHT_DIVIDE_ASSIGN_TIME.load(Ordering::Relaxed);
-        let miss_op_us = RUSTFST_WEIGHT_DIVIDE_MISS_TIME_OP.load(Ordering::Relaxed);
-        let miss_intern_us = RUSTFST_WEIGHT_DIVIDE_MISS_TIME_INTERN.load(Ordering::Relaxed);
-        let miss_lhs_ranges = RUSTFST_WEIGHT_DIVIDE_MISS_LHS_RANGES_TOTAL.load(Ordering::Relaxed);
-        let miss_rhs_ranges = RUSTFST_WEIGHT_DIVIDE_MISS_RHS_RANGES_TOTAL.load(Ordering::Relaxed);
-        let miss_res_ranges = RUSTFST_WEIGHT_DIVIDE_MISS_RES_RANGES_TOTAL.load(Ordering::Relaxed);
-        let fast_total = fast_eq
-            .saturating_add(fast_rhs_empty)
-            .saturating_add(fast_rhs_all)
-            .saturating_add(fast_lhs_all)
-            .saturating_add(fast_lhs_empty);
-        let slow_total = count_divide.saturating_sub(fast_total);
-        println!(
-            "  divide_fast: eq={} rhs_empty={} rhs_all={} lhs_all={} lhs_empty={} cache_hit={} cache_miss={} slow={}",
-            fast_eq,
-            fast_rhs_empty,
-            fast_rhs_all,
-            fast_lhs_all,
-            fast_lhs_empty,
-            cache_hit,
-            cache_miss,
-            slow_total,
-        );
-        println!(
-            "  divide_overhead: fast_check={} us (avg {:.2} us) cache_lookup={} us (avg {:.2} us) cache_insert={} us (avg {:.2} us)",
-            fast_check_us,
-            avg_us(fast_check_us, count_divide),
-            cache_lookup_us,
-            avg_us(cache_lookup_us, cache_hit.saturating_add(cache_miss)),
-            cache_insert_us,
-            if cache_miss > 0 {
-                cache_insert_us as f64 / cache_miss as f64
-            } else {
-                0.0
-            },
-        );
-        println!(
-            "  divide_steps: clone={} us (avg {:.2} us) fast_exec={} us (avg {:.2} us) key={} us (avg {:.2} us) cache_hit={} us (avg {:.2} us) assign={} us (avg {:.2} us)",
-            clone_us,
-            avg_us(clone_us, count_divide),
-            fast_exec_us,
-            if fast_total > 0 {
-                fast_exec_us as f64 / fast_total as f64
-            } else {
-                0.0
-            },
-            key_us,
-            avg_us(key_us, cache_hit.saturating_add(cache_miss)),
-            cache_hit_us,
-            avg_us(cache_hit_us, cache_hit),
-            assign_us,
-            avg_us(assign_us, count_divide),
-        );
-        if cache_miss > 0 {
-            println!(
-                "  divide_miss: op_us={} (avg {:.2} us) intern_us={} (avg {:.2} us) lhs_ranges_avg={:.2} rhs_ranges_avg={:.2} res_ranges_avg={:.2}",
-                miss_op_us,
-                avg_us(miss_op_us, cache_miss),
-                miss_intern_us,
-                avg_us(miss_intern_us, cache_miss),
-                miss_lhs_ranges as f64 / cache_miss as f64,
-                miss_rhs_ranges as f64 / cache_miss as f64,
-                miss_res_ranges as f64 / cache_miss as f64,
-            );
-        }
-    }
     println!(
         "  zero:          {:9} ops, {:9} us (avg {:.2} us)",
         count_zero,
@@ -499,28 +375,8 @@ impl Semiring for BitsetWeight {
     fn plus_assign<P: Borrow<Self>>(&mut self, rhs: P) -> Result<()> {
         let prof = rustfst_weight_profile_enabled();
         let start = if prof { Some(Instant::now()) } else { None };
-        let rhs = rhs.borrow();
-
-        if Arc::ptr_eq(&self.0, &rhs.0) {
-            if let Some(start) = start {
-                RUSTFST_WEIGHT_COUNT_PLUS.fetch_add(1, Ordering::Relaxed);
-                RUSTFST_WEIGHT_TIME_PLUS.fetch_add(start.elapsed().as_micros() as u64, Ordering::Relaxed);
-            }
-            return Ok(());
-        }
-
-        if self.0.is_empty() {
-            self.0 = rhs.0.clone();
-        } else if rhs.0.is_empty() {
-            // no-op
-        } else if self.0.is_all_fast() {
-            // no-op
-        } else if rhs.0.is_all_fast() {
-            self.0 = rhs.0.clone();
-        } else {
-            let new_weight = &*self.0 | &*rhs.0;
-            self.0 = intern_weight(new_weight);
-        }
+        let new_weight = &*self.0 | &*rhs.borrow().0;
+        self.0 = intern_weight(new_weight);
         if let Some(start) = start {
             RUSTFST_WEIGHT_COUNT_PLUS.fetch_add(1, Ordering::Relaxed);
             RUSTFST_WEIGHT_TIME_PLUS.fetch_add(start.elapsed().as_micros() as u64, Ordering::Relaxed);
@@ -532,28 +388,8 @@ impl Semiring for BitsetWeight {
     fn times_assign<P: Borrow<Self>>(&mut self, rhs: P) -> Result<()> {
         let prof = rustfst_weight_profile_enabled();
         let start = if prof { Some(Instant::now()) } else { None };
-        let rhs = rhs.borrow();
-
-        if Arc::ptr_eq(&self.0, &rhs.0) {
-            if let Some(start) = start {
-                RUSTFST_WEIGHT_COUNT_TIMES.fetch_add(1, Ordering::Relaxed);
-                RUSTFST_WEIGHT_TIME_TIMES.fetch_add(start.elapsed().as_micros() as u64, Ordering::Relaxed);
-            }
-            return Ok(());
-        }
-
-        if self.0.is_empty() {
-            // no-op
-        } else if rhs.0.is_empty() {
-            self.0 = WEIGHT_ZERO.clone();
-        } else if self.0.is_all_fast() {
-            self.0 = rhs.0.clone();
-        } else if rhs.0.is_all_fast() {
-            // no-op
-        } else {
-            let new_weight = &*self.0 & &*rhs.0;
-            self.0 = intern_weight(new_weight);
-        }
+        let new_weight = &*self.0 & &*rhs.borrow().0;
+        self.0 = intern_weight(new_weight);
         if let Some(start) = start {
             RUSTFST_WEIGHT_COUNT_TIMES.fetch_add(1, Ordering::Relaxed);
             RUSTFST_WEIGHT_TIME_TIMES.fetch_add(start.elapsed().as_micros() as u64, Ordering::Relaxed);
@@ -564,8 +400,7 @@ impl Semiring for BitsetWeight {
     fn approx_equal<P: Borrow<Self>>(&self, rhs: P, _delta: f32) -> bool {
         let prof = rustfst_weight_profile_enabled();
         let start = if prof { Some(Instant::now()) } else { None };
-        let rhs = rhs.borrow();
-        let res = Arc::ptr_eq(&self.0, &rhs.0) || *self.0 == *rhs.0;
+        let res = *self.0 == *rhs.borrow().0;
         if let Some(start) = start {
             RUSTFST_WEIGHT_COUNT_APPROX_EQUAL.fetch_add(1, Ordering::Relaxed);
             RUSTFST_WEIGHT_TIME_APPROX_EQUAL.fetch_add(start.elapsed().as_micros() as u64, Ordering::Relaxed);
@@ -650,140 +485,39 @@ impl WeaklyDivisibleSemiring for BitsetWeight {
     fn divide_assign(&mut self, rhs: &Self, _divide_type: DivideType) -> Result<()> {
         let prof = rustfst_weight_profile_enabled();
         let start = if prof { Some(Instant::now()) } else { None };
-        let clone_start = if prof { Some(Instant::now()) } else { None };
         let lhs = Arc::clone(&self.0);
         let rhs = Arc::clone(&rhs.0);
-        if let Some(start) = clone_start {
-            RUSTFST_WEIGHT_DIVIDE_CLONE_TIME
-                .fetch_add(start.elapsed().as_micros() as u64, Ordering::Relaxed);
-        }
-        #[derive(Clone, Copy)]
-        enum DivideFastCase {
-            Eq,
-            RhsEmpty,
-            RhsAll,
-            LhsAll,
-            LhsEmpty,
-        }
 
-        let fast_check_start = if prof { Some(Instant::now()) } else { None };
-        let fast_case = if Arc::ptr_eq(&lhs, &rhs) || *lhs == *rhs {
-            Some(DivideFastCase::Eq)
+        let new_arc = if Arc::ptr_eq(&lhs, &rhs) {
+            intern_weight(Weight::all())
         } else if rhs.is_empty() {
-            Some(DivideFastCase::RhsEmpty)
+            intern_weight(Weight::all())
         } else if rhs.is_all_fast() {
-            Some(DivideFastCase::RhsAll)
+            lhs
         } else if lhs.is_all_fast() {
-            Some(DivideFastCase::LhsAll)
+            intern_weight(Weight::all())
         } else if lhs.is_empty() {
-            Some(DivideFastCase::LhsEmpty)
+            intern_weight(rhs.complement())
         } else {
-            None
-        };
-        if let Some(start) = fast_check_start {
-            RUSTFST_WEIGHT_DIVIDE_FAST_CHECK_TIME
-                .fetch_add(start.elapsed().as_micros() as u64, Ordering::Relaxed);
-        }
-
-        let new_arc = if let Some(case) = fast_case {
-            let fast_exec_start = if prof { Some(Instant::now()) } else { None };
-            let out = match case {
-                DivideFastCase::Eq => {
-                    RUSTFST_WEIGHT_DIVIDE_FAST_EQ.fetch_add(1, Ordering::Relaxed);
-                    WEIGHT_ALL.clone()
-                }
-                DivideFastCase::RhsEmpty => {
-                    RUSTFST_WEIGHT_DIVIDE_FAST_RHS_EMPTY.fetch_add(1, Ordering::Relaxed);
-                    WEIGHT_ALL.clone()
-                }
-                DivideFastCase::RhsAll => {
-                    RUSTFST_WEIGHT_DIVIDE_FAST_RHS_ALL.fetch_add(1, Ordering::Relaxed);
-                    lhs
-                }
-                DivideFastCase::LhsAll => {
-                    RUSTFST_WEIGHT_DIVIDE_FAST_LHS_ALL.fetch_add(1, Ordering::Relaxed);
-                    WEIGHT_ALL.clone()
-                }
-                DivideFastCase::LhsEmpty => {
-                    RUSTFST_WEIGHT_DIVIDE_FAST_LHS_EMPTY.fetch_add(1, Ordering::Relaxed);
-                    intern_weight(rhs.complement())
-                }
-            };
-            if let Some(start) = fast_exec_start {
-                RUSTFST_WEIGHT_DIVIDE_FAST_EXEC_TIME
-                    .fetch_add(start.elapsed().as_micros() as u64, Ordering::Relaxed);
-            }
-            out
-        } else {
-            let key_start = if prof { Some(Instant::now()) } else { None };
             let key = DivideKey {
                 a: Arc::as_ptr(&lhs) as usize,
                 b: Arc::as_ptr(&rhs) as usize,
             };
-            if let Some(start) = key_start {
-                RUSTFST_WEIGHT_DIVIDE_KEY_TIME
-                    .fetch_add(start.elapsed().as_micros() as u64, Ordering::Relaxed);
-            }
-            let lookup_start = if prof { Some(Instant::now()) } else { None };
-            let hit = {
+            if let Some(hit) = {
                 let mut cache = WEIGHT_DIVIDE_CACHE.lock().unwrap();
                 cache.get(&key).cloned()
-            };
-            if let Some(start) = lookup_start {
-                RUSTFST_WEIGHT_DIVIDE_CACHE_LOOKUP_TIME
-                    .fetch_add(start.elapsed().as_micros() as u64, Ordering::Relaxed);
-            }
-            if let Some(hit) = hit {
-                RUSTFST_WEIGHT_DIVIDE_CACHE_HIT.fetch_add(1, Ordering::Relaxed);
-                let hit_start = if prof { Some(Instant::now()) } else { None };
-                let out = hit;
-                if let Some(start) = hit_start {
-                    RUSTFST_WEIGHT_DIVIDE_CACHE_HIT_TIME
-                        .fetch_add(start.elapsed().as_micros() as u64, Ordering::Relaxed);
-                }
-                out
+            } {
+                hit
             } else {
-                RUSTFST_WEIGHT_DIVIDE_CACHE_MISS.fetch_add(1, Ordering::Relaxed);
-                let arc = if prof {
-                    RUSTFST_WEIGHT_DIVIDE_MISS_LHS_RANGES_TOTAL
-                        .fetch_add(lhs.ranges_len() as u64, Ordering::Relaxed);
-                    RUSTFST_WEIGHT_DIVIDE_MISS_RHS_RANGES_TOTAL
-                        .fetch_add(rhs.ranges_len() as u64, Ordering::Relaxed);
-                    let op_start = Instant::now();
-                    let new_weight = lhs.divide(&rhs);
-                    RUSTFST_WEIGHT_DIVIDE_MISS_TIME_OP.fetch_add(
-                        op_start.elapsed().as_micros() as u64,
-                        Ordering::Relaxed,
-                    );
-                    let intern_start = Instant::now();
-                    let arc = intern_weight(new_weight);
-                    RUSTFST_WEIGHT_DIVIDE_MISS_TIME_INTERN.fetch_add(
-                        intern_start.elapsed().as_micros() as u64,
-                        Ordering::Relaxed,
-                    );
-                    RUSTFST_WEIGHT_DIVIDE_MISS_RES_RANGES_TOTAL
-                        .fetch_add(arc.ranges_len() as u64, Ordering::Relaxed);
-                    arc
-                } else {
-                    let new_weight = lhs.divide(&rhs);
-                    intern_weight(new_weight)
-                };
-                let insert_start = if prof { Some(Instant::now()) } else { None };
+                let new_weight = lhs.divide(&rhs);
+                let arc = intern_weight(new_weight);
                 let mut cache = WEIGHT_DIVIDE_CACHE.lock().unwrap();
                 cache.put(key, arc.clone());
-                if let Some(start) = insert_start {
-                    RUSTFST_WEIGHT_DIVIDE_CACHE_INSERT_TIME
-                        .fetch_add(start.elapsed().as_micros() as u64, Ordering::Relaxed);
-                }
                 arc
             }
         };
-        let assign_start = if prof { Some(Instant::now()) } else { None };
+
         self.0 = new_arc;
-        if let Some(start) = assign_start {
-            RUSTFST_WEIGHT_DIVIDE_ASSIGN_TIME
-                .fetch_add(start.elapsed().as_micros() as u64, Ordering::Relaxed);
-        }
         if let Some(start) = start {
             RUSTFST_WEIGHT_COUNT_DIVIDE.fetch_add(1, Ordering::Relaxed);
             RUSTFST_WEIGHT_TIME_DIVIDE.fetch_add(start.elapsed().as_micros() as u64, Ordering::Relaxed);
