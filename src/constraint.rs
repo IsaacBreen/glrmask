@@ -44,7 +44,7 @@ use crate::dwa_i32::{DWA, NWA};
 use crate::dwa_i32::{RangeSet as WARangeSet, Weight};
 
 pub use crate::constraint_vocab::*;
-use crate::constraint_precompute::run_precompute1;
+use crate::constraint_precompute::{run_precompute1, ApproximateDfaPruner};
 
 type GSSNode = LeveledGSS<ParseStateEdgeContent, TerminalsDisallowed>;
 
@@ -1095,6 +1095,42 @@ impl GrammarConstraint {
                 map
             }
         };
+
+        let approx_dfa = if std::env::var("DISABLE_SUFFIX_PRUNE").is_err() {
+            crate::debug!(4, "Building approximate parser DFA (all-states initial) for precompute1...");
+            let approx_dfa = parser.build_approximate_parser_dfa();
+
+            let mut orig_to_suffix_tid = vec![None; parser.terminal_map.len()];
+            for (_term, orig_tid) in parser.terminal_map.iter() {
+                if orig_tid.0 < orig_to_suffix_tid.len() {
+                    orig_to_suffix_tid[orig_tid.0] = Some(*orig_tid);
+                }
+            }
+
+            let mut ignored_terminals = vec![false; parser.terminal_map.len()];
+            if let Some(ref grammar_def) = grammar_definition {
+                for tid in &grammar_def.ignore_terminal_ids {
+                    if tid.0 < ignored_terminals.len() {
+                        ignored_terminals[tid.0] = true;
+                    }
+                }
+            } else {
+                for tid in &parser.ignore_terminal_ids {
+                    if tid.0 < ignored_terminals.len() {
+                        ignored_terminals[tid.0] = true;
+                    }
+                }
+            }
+
+            crate::debug!(4, "Approximate parser DFA built: {} states", approx_dfa.transitions.len());
+            Some(ApproximateDfaPruner {
+                dfa: approx_dfa,
+                orig_to_suffix_tid,
+                ignored_terminals,
+            })
+        } else {
+            None
+        };
         
         crate::debug!(4, "Running precompute1 (weight_heavy={}, num_tsids={})...", weight_heavy_enabled, num_tsids);
         crate::debug!(5, "run_precompute1: start");
@@ -1106,6 +1142,7 @@ impl GrammarConstraint {
                 parser.terminal_map.len(),
                 state_to_rep.clone(),
                 tsid_offset_map.clone(),
+                approx_dfa,
             )
         });
         crate::debug!(5, "run_precompute1: end");

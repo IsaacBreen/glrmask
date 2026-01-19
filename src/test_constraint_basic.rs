@@ -912,6 +912,7 @@ fn test_precompute_a_plus_tokenizer() {
         terminals_count,
         state_to_rep,
         (0..tokenizer.dfa().states.len()).collect(),
+        None,
     );
 
     // --- Verification ---
@@ -995,6 +996,7 @@ fn test_precompute_x_eq() {
         terminals_count,
         state_to_rep,
         (0..tokenizer.dfa().states.len()).collect(),
+        None,
     );
 
     // --- Verification (weight-heavy mode) ---
@@ -2791,6 +2793,7 @@ fn test_tokenizer_vocab_to_terminal_dwa_aa() {
         terminals_count,
         state_to_rep,
         (0..tokenizer.dfa().states.len()).collect(),
+        None,
     );
     
     println!("Actual Terminal DWA:\n{}", terminal_dwa);
@@ -3043,6 +3046,7 @@ fn test_suffix_grammar_validation() {
         terminals_count,
         state_to_rep,
         (0..tokenizer.dfa().states.len()).collect(),
+        None,
     );
     
     // Validate paths against suffix grammar (verbose)
