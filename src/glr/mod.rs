@@ -3,6 +3,7 @@ pub mod grammar;
 pub mod items;
 pub mod parser;
 pub mod stats;
+pub mod approximate_dfa;
 mod tests;
 pub mod analyze;
 pub mod automaton;

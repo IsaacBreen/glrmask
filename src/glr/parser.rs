@@ -401,6 +401,10 @@ impl GLRParser {
         self.init_glr_parser_with_acc()
     }
 
+    pub fn build_approximate_parser_dfa(&self) -> crate::glr::approximate_dfa::ApproximateParserDFA {
+        crate::glr::approximate_dfa::build_approximate_parser_dfa(self)
+    }
+
     pub fn parse(&self, input: &[TerminalID], original_llm_vocab: Option<Arc<LLMVocab>>) -> GLRParserState {
         let mut state = self.init_glr_parser(original_llm_vocab);
         state.parse(input);
