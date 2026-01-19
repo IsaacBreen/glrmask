@@ -222,7 +222,7 @@ impl NWA {
                 nwa_passes: if std::env::var("SKIP_RUSTFST_MIN").map_or(false, |v| v == "1") {
                     vec![NwaPass::CompressTransitions]
                 } else {
-                    vec![NwaPass::MinimizeRustfst, NwaPass::CompressTransitions]
+                    vec![NwaPass::RmEpsilon, NwaPass::MinimizeRustfst, NwaPass::CompressTransitions]
                 },
                 dwa_passes: vec![DwaPass::Minimize, DwaPass::ConsolidateRanges, DwaPass::TrimWeights],
             },
