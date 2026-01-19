@@ -238,10 +238,10 @@ fn compute_sccs(nwa: &NWA) -> (Vec<Vec<usize>>, Vec<usize>) {
             comp_id[u] = current_scc_id;
             while let Some(curr) = stack.pop() {
                 component.push(curr);
-                for &prev in &rev_adj[curr] {
-                    if comp_id[prev] == usize::MAX {
-                        comp_id[prev] = current_scc_id;
-                        stack.push(prev);
+                for &v in &rev_adj[curr] {
+                    if comp_id[v] == usize::MAX {
+                        comp_id[v] = current_scc_id;
+                        stack.push(v);
                     }
                 }
             }
@@ -1224,7 +1224,7 @@ pub fn finalize_and_optimize_and_determinize(parser: &GLRParser, mut combined_nw
     crate::debug!(5, "prune_dead_ends in {:?}, prune_unreachable in {:?}", prune_dead_time, prune_unreachable_time);
     crate::debug!(4, "After pruning dead ends: NWA {} -> {} states, {} transitions", 
         before_prune, combined_nwa.states.len(), combined_nwa.states.num_transitions());
-    
+
     // NWA minimization is expensive - skip it for now
     // The DWA minimization will handle the reduction anyway
     // let nwa_states = combined_nwa.states.len();
@@ -1236,13 +1236,27 @@ pub fn finalize_and_optimize_and_determinize(parser: &GLRParser, mut combined_nw
     //         nwa_states, combined_nwa.states.len(), minimize_time);
     // }
     
-    // Use unified determinize_and_minimize with "FinalDWA" profile
-    // Pipeline: determinize → prune_dead_ends → minimize
-    let det_min_start = std::time::Instant::now();
-    let dwa = combined_nwa.determinize_and_minimize("FinalDWA");
-    crate::debug!(5, "determinize_and_minimize(FinalDWA) in {:?}", det_min_start.elapsed());
-    crate::debug!(4, "Final DWA minimization complete. {} states and {} transitions.", dwa.states.len(), dwa.states.num_transitions());
-    dwa
+    let enable_minimize = std::env::var("PARSER_DWA_MINIMIZE")
+        .map(|v| v == "1")
+        .unwrap_or(false);
+
+    if enable_minimize {
+        crate::debug!(4, "Running parser DWA minimize (PARSER_DWA_MINIMIZE=1)");
+        // Use unified determinize_and_minimize with "FinalDWA" profile
+        // Pipeline: determinize → prune_dead_ends → minimize
+        let det_min_start = std::time::Instant::now();
+        let dwa = combined_nwa.determinize_and_minimize("FinalDWA");
+        crate::debug!(5, "determinize_and_minimize(FinalDWA) in {:?}", det_min_start.elapsed());
+        crate::debug!(4, "Final DWA minimization complete. {} states and {} transitions.", dwa.states.len(), dwa.states.num_transitions());
+        dwa
+    } else {
+        crate::debug!(4, "Skipping parser DWA minimize (set PARSER_DWA_MINIMIZE=1 to enable)");
+        let det_start = std::time::Instant::now();
+        let dwa = combined_nwa.determinize();
+        crate::debug!(5, "determinize(FinalDWA) in {:?}", det_start.elapsed());
+        crate::debug!(4, "Final DWA determinize complete. {} states and {} transitions.", dwa.states.len(), dwa.states.num_transitions());
+        dwa
+    }
 }
 
 pub fn instantiate_nwa_template_into(
