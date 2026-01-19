@@ -62,14 +62,14 @@ struct DfsProfile {
 impl DfsProfile {
     fn print(&self) {
         let ms = |us: u64| us as f64 / 1000.0;
-        crate::debug!(4, "precompute1 dfs profile: exec={} calls, {:.2}ms", self.exec_calls, ms(self.exec_time_us));
-        crate::debug!(4, "precompute1 dfs profile: possible_matches={} calls, {:.2}ms", self.possible_matches_calls, ms(self.possible_matches_time_us));
-        crate::debug!(4, "precompute1 dfs profile: tokens_accessible={} calls, {:.2}ms", self.tokens_accessible_calls, ms(self.tokens_accessible_time_us));
-        crate::debug!(4, "precompute1 dfs profile: expanded_item={} calls, {:.2}ms", self.expanded_item_calls, ms(self.expanded_item_time_us));
-        crate::debug!(4, "precompute1 dfs profile: expanded_rsb={} calls, {:.2}ms", self.expanded_rsb_calls, ms(self.expanded_rsb_time_us));
-        crate::debug!(4, "precompute1 dfs profile: expanded_all={} calls, {:.2}ms", self.expanded_all_calls, ms(self.expanded_all_time_us));
-        crate::debug!(4, "precompute1 dfs profile: add_transition={} calls, {:.2}ms", self.add_transition_calls, ms(self.add_transition_time_us));
-        crate::debug!(4, "precompute1 dfs profile: add_epsilon={} calls, {:.2}ms", self.add_epsilon_calls, ms(self.add_epsilon_time_us));
+        crate::debug!(5, "precompute1 dfs profile: exec={} calls, {:.2}ms", self.exec_calls, ms(self.exec_time_us));
+        crate::debug!(5, "precompute1 dfs profile: possible_matches={} calls, {:.2}ms", self.possible_matches_calls, ms(self.possible_matches_time_us));
+        crate::debug!(5, "precompute1 dfs profile: tokens_accessible={} calls, {:.2}ms", self.tokens_accessible_calls, ms(self.tokens_accessible_time_us));
+        crate::debug!(5, "precompute1 dfs profile: expanded_item={} calls, {:.2}ms", self.expanded_item_calls, ms(self.expanded_item_time_us));
+        crate::debug!(5, "precompute1 dfs profile: expanded_rsb={} calls, {:.2}ms", self.expanded_rsb_calls, ms(self.expanded_rsb_time_us));
+        crate::debug!(5, "precompute1 dfs profile: expanded_all={} calls, {:.2}ms", self.expanded_all_calls, ms(self.expanded_all_time_us));
+        crate::debug!(5, "precompute1 dfs profile: add_transition={} calls, {:.2}ms", self.add_transition_calls, ms(self.add_transition_time_us));
+        crate::debug!(5, "precompute1 dfs profile: add_epsilon={} calls, {:.2}ms", self.add_epsilon_calls, ms(self.add_epsilon_time_us));
     }
 }
 
@@ -428,9 +428,11 @@ impl<'r> Precomputer1<'r> {
             crate::datastructures::factorized_weight::set_factorized_weight_profile_active(true);
             crate::datastructures::factorized_weight::reset_factorized_weight_profile();
         }
+        crate::debug!(5, "precompute1::determinize_and_minimize start");
         let dwa = timeit!("precompute1::determinize_and_minimize", {
             self.nwa.determinize_and_minimize("TerminalDWA")
         });
+        crate::debug!(5, "precompute1::determinize_and_minimize end");
         if profile_minimize_only {
             crate::datastructures::factorized_weight::flush_factorized_weight_profile("terminal_dwa_minimize");
             crate::datastructures::factorized_weight::set_factorized_weight_profile_active(false);

@@ -453,6 +453,7 @@ pub fn canonicalize_bundle(terminal_map: BTreeMap<Option<TerminalID>, Weight>) -
 /// The resulting DWA is used at runtime for O(1) mask queries.
 #[time_it("build_parser_dwa")]
 pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
+    crate::debug!(5, "build_parser_dwa: start");
     crate::debug!(3, "Starting Parser DWA construction. Input terminal_nwa: {} states, {} transitions", 
         terminal_nwa.states.len(), terminal_nwa.states.num_transitions());
     
@@ -464,6 +465,7 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
         // Add a single start state with no final weight (no tokens are valid)
         let start_state = empty_dwa.states.add_state();
         empty_dwa.body.start_state = start_state;
+        crate::debug!(5, "build_parser_dwa: end (empty terminal NWA)");
         return empty_dwa;
     }
     
@@ -1146,6 +1148,7 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
         crate::debug!(4, "Parser DWA average path length: {:.2}", avg_path_len);
     }
 
+    crate::debug!(5, "build_parser_dwa: end");
     final_dwa
 }
 

@@ -15,6 +15,8 @@
 #![allow(dead_code)]
 
 use range_set_blaze::RangeSetBlaze;
+use once_cell::sync::Lazy;
+use std::time::{Duration, Instant};
 use super::common::{Label, Weight};
 use super::dwa::DWA;
 use super::nwa::NWA;
@@ -27,6 +29,24 @@ fn tsid_to_offset(tsid: usize, tsid_offset_map: Option<&[usize]>) -> usize {
     } else {
         tsid
     }
+}
+
+static PROFILE_WEIGHT_EXPANSION: Lazy<bool> = Lazy::new(|| {
+    std::env::var("PROFILE_WEIGHT_EXPANSION")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+});
+
+const PROFILE_WEIGHT_EXPANSION_MIN_MS: u64 = 5;
+
+#[inline]
+fn weight_expansion_profile_enabled() -> bool {
+    *PROFILE_WEIGHT_EXPANSION
+}
+
+#[inline]
+fn should_log_weight_expansion(elapsed: Duration) -> bool {
+    elapsed >= Duration::from_millis(PROFILE_WEIGHT_EXPANSION_MIN_MS)
 }
 
 /// Expand a weight from N-space to N×M-space.
@@ -54,7 +74,9 @@ pub fn expand_weight_rsb(rsb: &std::sync::Arc<RangeSetBlaze<usize>>, num_tsids: 
 /// Internal helper to expand a RangeSetBlaze.
 /// Uses saturating arithmetic to handle large values that would overflow.
 pub fn expand_rsb(rsb: &RangeSetBlaze<usize>, num_tsids: usize) -> RangeSetBlaze<usize> {
-    rsb.ranges()
+    let profile = weight_expansion_profile_enabled();
+    let start = profile.then(Instant::now);
+    let expanded: RangeSetBlaze<usize> = rsb.ranges()
         .map(|r| {
             let start = r.start().saturating_mul(num_tsids);
             let end = r.end()
@@ -62,7 +84,25 @@ pub fn expand_rsb(rsb: &RangeSetBlaze<usize>, num_tsids: usize) -> RangeSetBlaze
                 .saturating_add(num_tsids.saturating_sub(1));
             start..=end
         })
-        .collect()
+        .collect();
+
+    if let Some(start) = start {
+        let elapsed = start.elapsed();
+        if should_log_weight_expansion(elapsed) {
+            let in_ranges = rsb.ranges().count();
+            let out_ranges = expanded.ranges().count();
+            crate::debug!(
+                5,
+                "expand_rsb: ranges {} -> {}, num_tsids={}, elapsed={:?}",
+                in_ranges,
+                out_ranges,
+                num_tsids,
+                elapsed,
+            );
+        }
+    }
+
+    expanded
 }
 
 /// Expand a RangeSetBlaze from N-space to N×M-space using WeightDimensions.
@@ -146,34 +186,104 @@ pub fn create_tsid_set_mask_with_offset_map<I>(
 where
     I: IntoIterator<Item = usize>,
 {
+    let profile = weight_expansion_profile_enabled();
+    let start = profile.then(Instant::now);
+    let token_count = max_llm_token.saturating_add(1);
+    let mut tsid_count = 0usize;
     // Build base pattern from all tsids
     let base_pattern: RangeSetBlaze<usize> = tsids
         .into_iter()
-        .map(|t| tsid_to_offset(t, tsid_offset_map))
+        .map(|t| {
+            tsid_count += 1;
+            tsid_to_offset(t, tsid_offset_map)
+        })
         .collect();
+    let base_ranges_len = if profile { base_pattern.ranges().count() } else { 0 };
     
     if base_pattern.is_empty() {
-        return Weight::zeros();
+        let mask = Weight::zeros();
+        if let Some(start) = start {
+            let elapsed = start.elapsed();
+            if should_log_weight_expansion(elapsed) {
+                crate::debug!(
+                    5,
+                    "create_tsid_set_mask_with_offset_map: tsids={}, num_tsids={}, tokens={}, base_ranges={}, out_ranges={}, elapsed={:?}",
+                    tsid_count,
+                    num_tsids,
+                    token_count,
+                    base_ranges_len,
+                    mask.ranges_len(),
+                    elapsed,
+                );
+            }
+        }
+        return mask;
     }
 
     if num_tsids == 0 {
-        return Weight::zeros();
+        let mask = Weight::zeros();
+        if let Some(start) = start {
+            let elapsed = start.elapsed();
+            if should_log_weight_expansion(elapsed) {
+                crate::debug!(
+                    5,
+                    "create_tsid_set_mask_with_offset_map: tsids={}, num_tsids={}, tokens={}, base_ranges={}, out_ranges={}, elapsed={:?}",
+                    tsid_count,
+                    num_tsids,
+                    token_count,
+                    base_ranges_len,
+                    mask.ranges_len(),
+                    elapsed,
+                );
+            }
+        }
+        return mask;
     }
-
-    let token_count = max_llm_token.saturating_add(1);
     if token_count == 1 {
-        return Weight::from_rsb(base_pattern);
+        let mask = Weight::from_rsb(base_pattern);
+        if let Some(start) = start {
+            let elapsed = start.elapsed();
+            if should_log_weight_expansion(elapsed) {
+                crate::debug!(
+                    5,
+                    "create_tsid_set_mask_with_offset_map: tsids={}, num_tsids={}, tokens={}, base_ranges={}, out_ranges={}, elapsed={:?}",
+                    tsid_count,
+                    num_tsids,
+                    token_count,
+                    base_ranges_len,
+                    mask.ranges_len(),
+                    elapsed,
+                );
+            }
+        }
+        return mask;
     }
 
     // Fast path: base pattern covers the full tsid block, so the result is one contiguous range.
-    if base_pattern.ranges_len() == 1 {
+    if base_ranges_len == 1 {
         if let Some(r) = base_pattern.ranges().next() {
             if *r.start() == 0 && r.end().saturating_add(1) == num_tsids {
                 let end = max_llm_token
                     .saturating_mul(num_tsids)
                     .saturating_add(num_tsids.saturating_sub(1));
                 let mask: RangeSetBlaze<usize> = std::iter::once(0..=end).collect();
-                return Weight::from_rsb(mask);
+                let mask = Weight::from_rsb(mask);
+                if let Some(start) = start {
+                    let elapsed = start.elapsed();
+                    if should_log_weight_expansion(elapsed) {
+                        crate::debug!(
+                            5,
+                            "create_tsid_set_mask_with_offset_map: tsids={}, num_tsids={}, tokens={}, base_ranges={}, out_ranges={}, elapsed={:?}",
+                            tsid_count,
+                            num_tsids,
+                            token_count,
+                            base_ranges_len,
+                            mask.ranges_len(),
+                            elapsed,
+                        );
+                    }
+                }
+                return mask;
             }
         }
     }
@@ -195,7 +305,23 @@ where
     }
 
     let mask: RangeSetBlaze<usize> = ranges.into_iter().collect();
-    Weight::from_rsb(mask)
+    let mask = Weight::from_rsb(mask);
+    if let Some(start) = start {
+        let elapsed = start.elapsed();
+        if should_log_weight_expansion(elapsed) {
+            crate::debug!(
+                5,
+                "create_tsid_set_mask_with_offset_map: tsids={}, num_tsids={}, tokens={}, base_ranges={}, out_ranges={}, elapsed={:?}",
+                tsid_count,
+                num_tsids,
+                token_count,
+                base_ranges_len,
+                mask.ranges_len(),
+                elapsed,
+            );
+        }
+    }
+    mask
 }
 
 /// Create a combined tsid mask using WeightDimensions.

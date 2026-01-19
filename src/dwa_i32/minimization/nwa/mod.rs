@@ -227,6 +227,7 @@ impl NWA {
                     continue;
                 }
 
+                crate::debug!(5, "[NWA::minimize] pass {:?}", pass);
                 let pass_changed = match pass {
                     NwaPass::PruneUnreachable => self.prune_unreachable(),
                     NwaPass::PruneDeadEnds => self.prune_dead_ends(),
@@ -247,6 +248,8 @@ impl NWA {
             if history.len() > 2 {
                 history.remove(0);
             }
+
+            crate::debug!(5, "[NWA::minimize] iteration done");
 
             total_changed |= changed_in_iteration;
             if !changed_in_iteration {
