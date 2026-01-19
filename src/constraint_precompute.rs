@@ -22,7 +22,7 @@ use crate::constraint_vocab::LLMTokenBV;
 use crate::datastructures::hybrid_bitset::RangeSet;
 use crate::datastructures::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
 use crate::dfa_u8::{Tokenizer, Regex};
-use crate::glr::approximate_dfa::ApproximateParserDFA;
+use crate::glr::approximate_dfa::LazyApproximateDFA;
 use crate::glr::parser::GLRParser;
 use crate::dwa_i32::rangeset::RangeSet as WARangeSet;
 use crate::dwa_i32::{DWA, NWA, NWAStateID, Weight};
@@ -89,7 +89,7 @@ impl DfsKey {
 
 #[derive(Clone)]
 pub struct ApproximateDfaPruner {
-    pub dfa: ApproximateParserDFA,
+    pub dfa: LazyApproximateDFA,
     pub orig_to_suffix_tid: Vec<Option<crate::types::TerminalID>>,
     pub ignored_terminals: Vec<bool>,
 }
@@ -544,8 +544,8 @@ impl<'r> Precomputer1<'r> {
     }
 
     #[inline]
-    fn approx_step(&self, approx_state: usize, terminal_id: GrammarTokenID) -> Option<usize> {
-        let Some(approx_dfa) = &self.approx_dfa else {
+    fn approx_step(&mut self, approx_state: usize, terminal_id: GrammarTokenID) -> Option<usize> {
+        let Some(approx_dfa) = self.approx_dfa.as_mut() else {
             return Some(approx_state);
         };
 

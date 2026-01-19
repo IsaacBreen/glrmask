@@ -1,8 +1,17 @@
 use crate::datastructures::bitset::Bitset;
 use crate::glr::parser::GLRParser;
 use crate::glr::table::{Stage7ShiftsAndReducesLookaheadValue, StateID, Table, TerminalID, NonTerminalID};
+use crate::interface::{grammar_to_suffix_grammar, CompiledGrammar, GrammarDefinition};
 use rustc_hash::FxHashMap;
-use std::collections::{BTreeMap, VecDeque};
+use rustfst::algorithms::determinize::{determinize_with_config, DeterminizeConfig, DeterminizeType};
+use rustfst::algorithms::minimize_with_config;
+use rustfst::algorithms::rm_epsilon::rm_epsilon;
+use rustfst::fst_traits::CoreFst;
+use rustfst::prelude::{ExpandedFst, MinimizeConfig, MutableFst, StateId, Tr, Trs, VectorFst, EPS_LABEL};
+use rustfst::semirings::TropicalWeight;
+use rustfst::Semiring;
+use std::collections::BTreeMap;
+use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub struct ApproximateParserNFA {
@@ -23,6 +32,69 @@ impl ApproximateParserDFA {
         self.transitions
             .get(state)
             .and_then(|map| map.get(&terminal).copied())
+    }
+}
+
+const NO_STATE: usize = usize::MAX;
+
+#[derive(Debug, Clone)]
+pub struct LazyApproximateDFA {
+    nfa: ApproximateParserNFA,
+    state_cache: FxHashMap<Bitset, usize>,
+    transitions: Vec<BTreeMap<TerminalID, usize>>,
+    dfa_state_sets: Vec<Bitset>,
+    pub start_state: usize,
+}
+
+impl LazyApproximateDFA {
+    pub fn new(nfa: ApproximateParserNFA) -> Self {
+        let mut initial_set = Bitset::new(nfa.num_states);
+        if nfa.num_states > 0 {
+            initial_set.insert(nfa.start_state.0);
+        }
+        let mut state_cache = FxHashMap::default();
+        state_cache.insert(initial_set.clone(), 0);
+
+        Self {
+            nfa,
+            state_cache,
+            transitions: vec![BTreeMap::new()],
+            dfa_state_sets: vec![initial_set],
+            start_state: 0,
+        }
+    }
+
+    pub fn step(&mut self, state: usize, terminal: TerminalID) -> Option<usize> {
+        if let Some(&next) = self.transitions[state].get(&terminal) {
+            return if next == NO_STATE { None } else { Some(next) };
+        }
+
+        let current_set = &self.dfa_state_sets[state];
+        let mut next_set = Bitset::new(self.nfa.num_states);
+
+        for nfa_state in current_set.iter() {
+            if let Some(targets) = self.nfa.transitions[nfa_state].get(&terminal) {
+                next_set.union_with(targets);
+            }
+        }
+
+        if next_set.is_empty() {
+            self.transitions[state].insert(terminal, NO_STATE);
+            return None;
+        }
+
+        let next_dfa_state = if let Some(&existing) = self.state_cache.get(&next_set) {
+            existing
+        } else {
+            let new_id = self.dfa_state_sets.len();
+            self.state_cache.insert(next_set.clone(), new_id);
+            self.dfa_state_sets.push(next_set);
+            self.transitions.push(BTreeMap::new());
+            new_id
+        };
+
+        self.transitions[state].insert(terminal, next_dfa_state);
+        Some(next_dfa_state)
     }
 }
 
@@ -47,7 +119,16 @@ impl ReduceStats {
     }
 }
 
-pub fn build_approximate_parser_dfa(parser: &GLRParser) -> ApproximateParserDFA {
+pub fn build_approximate_parser_dfa(grammar: &GrammarDefinition) -> LazyApproximateDFA {
+    crate::debug!(4, "Approximate DFA: building from suffix grammar...");
+    let suffix_grammar = grammar_to_suffix_grammar(grammar);
+    crate::debug!(4, "Approximate DFA: suffix grammar has {} productions", suffix_grammar.productions.len());
+    let suffix_compiled = CompiledGrammar::from_definition(Arc::new(suffix_grammar));
+    let suffix_parser = suffix_compiled.glr_parser();
+    build_approximate_parser_dfa_from_parser(suffix_parser)
+}
+
+fn build_approximate_parser_dfa_from_parser(parser: &GLRParser) -> LazyApproximateDFA {
     let num_states = table_state_count(&parser.table);
     crate::debug!(4, "Approximate DFA: building from parser with {} states", num_states);
     let underneath_map = compute_underneath_map(&parser.table, num_states);
@@ -62,9 +143,7 @@ pub fn build_approximate_parser_dfa(parser: &GLRParser) -> ApproximateParserDFA 
         let avg = if nfa.num_states == 0 { 0.0 } else { total_edges as f64 / nfa.num_states as f64 };
         crate::debug!(5, "Approximate DFA: NFA has {} transitions (avg {:.2} per state)", total_edges, avg);
     }
-    let dfa = determinize_nfa(&nfa);
-    crate::debug!(4, "Approximate DFA: determinized to {} states", dfa.transitions.len());
-    dfa
+    LazyApproximateDFA::new(nfa)
 }
 
 fn table_state_count(table: &Table) -> usize {
@@ -374,182 +453,87 @@ fn compute_states_below(
     current
 }
 
+#[inline]
+fn terminal_id_to_fst_label(terminal: TerminalID) -> u32 {
+    let base = u32::try_from(terminal.0).expect("terminal id exceeds fst label range");
+    let label = base.checked_add(1).expect("terminal id too large for fst label");
+    debug_assert_ne!(label, EPS_LABEL);
+    label
+}
+
+#[inline]
+fn fst_label_to_terminal_id(label: u32) -> TerminalID {
+    assert_ne!(label, EPS_LABEL);
+    TerminalID(usize::try_from(label - 1).expect("fst label is not a valid terminal id"))
+}
+
 fn determinize_nfa(nfa: &ApproximateParserNFA) -> ApproximateParserDFA {
-    let mut state_map: FxHashMap<Bitset, usize> = FxHashMap::default();
-    let mut dfa_state_sets: Vec<Bitset> = Vec::new();
-    let mut transitions: Vec<BTreeMap<TerminalID, usize>> = Vec::new();
-    let mut worklist: VecDeque<usize> = VecDeque::new();
-    let debug_enabled = crate::r#macro::is_debug_level_enabled(5);
-    let num_terminals = if debug_enabled {
-        nfa.transitions
-            .iter()
-            .flat_map(|m| m.keys().map(|t| t.0))
-            .max()
-            .map(|m| m + 1)
-            .unwrap_or(0)
-    } else {
-        0
-    };
-    let mut term_new_states = if debug_enabled { vec![0usize; num_terminals] } else { Vec::new() };
-    let mut term_target_sum = if debug_enabled { vec![0usize; num_terminals] } else { Vec::new() };
-    let mut term_target_calls = if debug_enabled { vec![0usize; num_terminals] } else { Vec::new() };
-    let start_time = std::time::Instant::now();
-    let mut next_log = 1000usize;
-    let mut next_term_log = 100_000usize;
-    let mut total_subset_sizes = 0usize;
-    let mut max_subset_size = 0usize;
-    let mut profile_states = 0usize;
-    let mut profile_build_targets_us: u128 = 0;
-    let mut profile_lookup_us: u128 = 0;
-    let mut profile_insert_us: u128 = 0;
-
-    let start_set = Bitset::ones(nfa.num_states);
-    state_map.insert(start_set.clone(), 0);
-    if debug_enabled {
-        let start_size = start_set.len();
-        total_subset_sizes += start_size;
-        max_subset_size = max_subset_size.max(start_size);
+    if nfa.num_states == 0 {
+        return ApproximateParserDFA {
+            start_state: 0,
+            transitions: Vec::new(),
+            dfa_state_sets: Vec::new(),
+        };
     }
-    dfa_state_sets.push(start_set);
-    transitions.push(BTreeMap::new());
-    worklist.push_back(0);
 
-    while let Some(dfa_state_id) = worklist.pop_front() {
-        profile_states += 1;
-        let subset = dfa_state_sets[dfa_state_id].clone();
-        let mut term_to_targets: BTreeMap<TerminalID, Bitset> = BTreeMap::new();
+    let mut fst: VectorFst<TropicalWeight> = VectorFst::new();
+    let state_map: Vec<StateId> = (0..nfa.num_states)
+        .map(|_| fst.add_state())
+        .collect();
 
-        let build_start = debug_enabled.then(std::time::Instant::now);
+    let start_state = state_map[nfa.start_state.0];
+    fst.set_start(start_state).unwrap();
 
-        for nfa_state in subset.iter() {
-            for (terminal, targets) in &nfa.transitions[nfa_state] {
-                term_to_targets
-                    .entry(*terminal)
-                    .or_insert_with(|| Bitset::new(nfa.num_states))
-                    .union_with(targets);
+    for &state in &state_map {
+        fst.set_final(state, TropicalWeight::one()).unwrap();
+    }
+
+    for (from_state, map) in nfa.transitions.iter().enumerate() {
+        let fst_src = state_map[from_state];
+        for (terminal, targets) in map {
+            let label = terminal_id_to_fst_label(*terminal);
+            for to_state in targets.iter() {
+                fst.add_tr(fst_src, Tr::new(label, label, TropicalWeight::one(), state_map[to_state])).unwrap();
             }
         }
-        if let Some(start) = build_start {
-            profile_build_targets_us += start.elapsed().as_micros();
-        }
+    }
 
-        for (terminal, target_set) in term_to_targets {
-            if target_set.is_empty() {
+    rm_epsilon(&mut fst).unwrap();
+    let nfa_min_config = MinimizeConfig::default().with_allow_nondet(true);
+    minimize_with_config(&mut fst, nfa_min_config).unwrap();
+    let start = std::time::Instant::now();
+    let config = DeterminizeConfig::default().with_det_type(DeterminizeType::DeterminizeFunctional);
+    let mut det_fst: VectorFst<TropicalWeight> = determinize_with_config(&fst, config).unwrap();
+    minimize_with_config(&mut det_fst, MinimizeConfig::default()).unwrap();
+
+    let mut transitions = Vec::with_capacity(det_fst.num_states());
+    let mut trans_count = 0usize;
+    for fst_state_id in 0..det_fst.num_states() {
+        let mut map = BTreeMap::new();
+        for tr in det_fst.get_trs(fst_state_id as StateId).unwrap().trs() {
+            if tr.ilabel == EPS_LABEL {
                 continue;
             }
-            if debug_enabled {
-                let idx = terminal.0;
-                if idx < num_terminals {
-                    term_target_calls[idx] += 1;
-                    term_target_sum[idx] += target_set.len();
-                }
-            }
-
-            let lookup_start = debug_enabled.then(std::time::Instant::now);
-            let existing = state_map.get(&target_set).copied();
-            if let Some(start) = lookup_start {
-                profile_lookup_us += start.elapsed().as_micros();
-            }
-
-            let next_id = if let Some(existing) = existing {
-                existing
-            } else {
-                let new_id = dfa_state_sets.len();
-                let insert_start = debug_enabled.then(std::time::Instant::now);
-                state_map.insert(target_set.clone(), new_id);
-                if let Some(start) = insert_start {
-                    profile_insert_us += start.elapsed().as_micros();
-                }
-                if debug_enabled {
-                    let size = target_set.len();
-                    total_subset_sizes += size;
-                    max_subset_size = max_subset_size.max(size);
-                    let idx = terminal.0;
-                    if idx < num_terminals {
-                        term_new_states[idx] += 1;
-                    }
-                }
-                dfa_state_sets.push(target_set);
-                transitions.push(BTreeMap::new());
-                worklist.push_back(new_id);
-                new_id
-            };
-            transitions[dfa_state_id].insert(terminal, next_id);
+            let terminal = fst_label_to_terminal_id(tr.ilabel);
+            map.insert(terminal, tr.nextstate as usize);
+            trans_count += 1;
         }
-
-        if debug_enabled && dfa_state_sets.len() >= next_log {
-            let avg_subset = total_subset_sizes as f64 / dfa_state_sets.len() as f64;
-            let avg_build = profile_build_targets_us as f64 / profile_states as f64;
-            let avg_lookup = profile_lookup_us as f64 / profile_states as f64;
-            let avg_insert = profile_insert_us as f64 / profile_states as f64;
-            crate::debug!(
-                5,
-                "Approximate DFA determinize: states={}, queue={}, avg_subset={:.2}, max_subset={}, elapsed={:?}, avg_build_targets_us={:.2}, avg_lookup_us={:.2}, avg_insert_us={:.2}",
-                dfa_state_sets.len(),
-                worklist.len(),
-                avg_subset,
-                max_subset_size,
-                start_time.elapsed(),
-                avg_build,
-                avg_lookup,
-                avg_insert
-            );
-            next_log += 1000;
-        }
-
-        if debug_enabled && dfa_state_sets.len() >= next_term_log && num_terminals > 0 {
-            let mut term_indices: Vec<usize> = (0..num_terminals).collect();
-            term_indices.sort_by_key(|&i| std::cmp::Reverse(term_new_states[i]));
-            crate::debug!(5, "Approximate DFA determinize: top terminals by new-state count (states={}):", dfa_state_sets.len());
-            for idx in term_indices.into_iter().take(5) {
-                let new_states = term_new_states[idx];
-                if new_states == 0 {
-                    continue;
-                }
-                let calls = term_target_calls[idx];
-                let avg = if calls == 0 { 0.0 } else { term_target_sum[idx] as f64 / calls as f64 };
-                crate::debug!(5, "  tid={} new_states={}, calls={}, avg_target_size={:.2}", idx, new_states, calls, avg);
-            }
-            next_term_log += 100_000;
-        }
+        transitions.push(map);
     }
 
-    if debug_enabled {
-        let avg_subset = total_subset_sizes as f64 / dfa_state_sets.len() as f64;
-        let avg_build = profile_build_targets_us as f64 / profile_states as f64;
-        let avg_lookup = profile_lookup_us as f64 / profile_states as f64;
-        let avg_insert = profile_insert_us as f64 / profile_states as f64;
-        crate::debug!(
-            5,
-            "Approximate DFA determinize complete: states={}, avg_subset={:.2}, max_subset={}, elapsed={:?}, avg_build_targets_us={:.2}, avg_lookup_us={:.2}, avg_insert_us={:.2}",
-            dfa_state_sets.len(),
-            avg_subset,
-            max_subset_size,
-            start_time.elapsed(),
-            avg_build,
-            avg_lookup,
-            avg_insert
-        );
+    crate::debug!(
+        4,
+        "Approximate DFA: rustfst determinize+minimize -> {} states, {} trans in {:?}",
+        transitions.len(),
+        trans_count,
+        start.elapsed()
+    );
 
-        if num_terminals > 0 {
-            let mut term_indices: Vec<usize> = (0..num_terminals).collect();
-            term_indices.sort_by_key(|&i| std::cmp::Reverse(term_new_states[i]));
-            crate::debug!(5, "Approximate DFA determinize: top terminals by new-state count:");
-            for idx in term_indices.into_iter().take(10) {
-                let new_states = term_new_states[idx];
-                if new_states == 0 {
-                    continue;
-                }
-                let calls = term_target_calls[idx];
-                let avg = if calls == 0 { 0.0 } else { term_target_sum[idx] as f64 / calls as f64 };
-                crate::debug!(5, "  tid={} new_states={}, calls={}, avg_target_size={:.2}", idx, new_states, calls, avg);
-            }
-        }
-    }
+    let start_state = det_fst.start().map(|s| s as usize).unwrap_or(0);
 
     ApproximateParserDFA {
-        start_state: 0,
+        start_state,
         transitions,
-        dfa_state_sets,
+        dfa_state_sets: Vec::new(),
     }
 }
