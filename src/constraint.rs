@@ -858,6 +858,7 @@ impl GrammarConstraint {
         grammar_definition: Option<Arc<GrammarDefinition>>,
     ) -> Self {
         crate::profiler::reset();
+        crate::datastructures::rangemap_weight::reset_intern_wall_time();
         // Epsilon tokens are not supported.
         let epsilon_terminal_group_ids: BTreeSet<_> = tokenizer
             .execute_from_state(&[], tokenizer.initial_state_id())
@@ -876,6 +877,7 @@ impl GrammarConstraint {
 
         // Combined equivalence analysis - computes state equivalence, vocab equivalence, and internal mappings
         // State equivalence is computed ONCE and reused for both vocab analysis and building maps
+        let setup_wall_start = std::time::Instant::now();
         let (
             original_to_internal_map,
             commit_vocab_data,
@@ -891,6 +893,7 @@ impl GrammarConstraint {
                 &grammar_group_ids,
             )
         });
+        crate::debug!(4, "WALL setup_combined: {:.3}s", setup_wall_start.elapsed().as_secs_f64());
         let commit_vocab = Arc::new(commit_vocab_data);
 
         let internal_max_llm_token = original_to_internal_map
@@ -2175,6 +2178,7 @@ impl GrammarConstraint {
         }));
         
         crate::profiler::print_summary();
+        crate::datastructures::rangemap_weight::print_intern_wall_time("final");
         #[allow(deprecated)]
         GrammarConstraint {
             tokenizer,

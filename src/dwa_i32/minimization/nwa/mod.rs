@@ -14,6 +14,8 @@ use crate::dwa_i32::common::BENCHMARK_DEBUG;
 use crate::dwa_i32::nwa::NWA;
 
 use rustfst::algorithms::minimize_with_config;
+use rustfst::fst_traits::{CoreFst, ExpandedFst};
+use rustfst::Trs;
 use rustfst::prelude::MinimizeConfig;
 
 use std::collections::HashSet;
@@ -130,6 +132,7 @@ impl NWA {
 
     #[time_it("NWA::minimize_with_rustfst_full")]
     pub fn minimize_with_rustfst_full(&mut self) -> bool {
+        let wall_start = Instant::now();
         crate::datastructures::hybrid_bitset::reset_profiling();
         crate::datastructures::rangemap_weight::reset_profiling();
         crate::datastructures::abstract_weight::reset_weight_op_profiling();
@@ -142,11 +145,25 @@ impl NWA {
             (fst, start.elapsed())
         });
 
+        let pre_states = fst.num_states();
+        let mut pre_trs = 0usize;
+        for s in 0..pre_states {
+            let sid = s as rustfst::prelude::StateId;
+            pre_trs += fst.get_trs(sid).unwrap().trs().len();
+        }
+
         let min_time = timeit!("NWA::minimize_rustfst::minimize", {
             let start = Instant::now();
             minimize_with_config(&mut fst, min_config).unwrap();
             start.elapsed()
         });
+
+        let post_states = fst.num_states();
+        let mut post_trs = 0usize;
+        for s in 0..post_states {
+            let sid = s as rustfst::prelude::StateId;
+            post_trs += fst.get_trs(sid).unwrap().trs().len();
+        }
 
         let from_time = timeit!("NWA::minimize_rustfst::from_rustfst", {
             let start = Instant::now();
@@ -194,6 +211,19 @@ impl NWA {
             from_time,
             slowest_label,
             slowest_time,
+        );
+        crate::debug!(
+            4,
+            "WALL rustfst minimize FST size: states {} -> {}, transitions {} -> {}",
+            pre_states,
+            post_states,
+            pre_trs,
+            post_trs,
+        );
+        crate::debug!(
+            4,
+            "WALL NWA::minimize_with_rustfst_full: {:.3}s",
+            wall_start.elapsed().as_secs_f64()
         );
         true
     }
