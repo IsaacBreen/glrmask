@@ -13,8 +13,6 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ops::BitOrAssign;
 use std::sync::Arc;
-
-
 use range_set_blaze::RangeSetBlaze;
 use profiler_macro::{time_it, timeit};
 
@@ -130,6 +128,7 @@ pub(crate) struct Precomputer1<'r> {
     dfs_profile: DfsProfile,
     approx_dfa: Option<ApproximateDfaPruner>,
     approx_start_state: usize,
+    direct_insert: bool,
 }
 
 impl<'r> Precomputer1<'r> {
@@ -192,6 +191,10 @@ impl<'r> Precomputer1<'r> {
             Weight::from_rsb(RangeSetBlaze::from_iter([0..=max_pos]))
         };
 
+        let direct_insert = std::env::var("PRECOMPUTE1_DIRECT_INSERT")
+            .map(|v| v == "1")
+            .unwrap_or(false);
+
         Self {
             tokenizer,
             vocab,
@@ -218,78 +221,88 @@ impl<'r> Precomputer1<'r> {
             dfs_profile: DfsProfile::default(),
             approx_dfa,
             approx_start_state,
+            direct_insert,
         }
     }
 
     #[time_it("Precompute1::finish")]
     fn finish(mut self) -> DWA {
-        timeit!("precompute1::debug_scan", {
-            let debug_scan_start = std::time::Instant::now();
-            // Debug: print all states and transitions before processing
-            crate::debug!(7, "=== NWA before flush (leaf_state={}, roots={:?}) ===", self.leaf_state, self.roots);
-            for (i, state) in self.nwa.states.0.iter().enumerate() {
-                let trans_count = state.transitions.values().map(|v| v.len()).sum::<usize>();
-                let eps_count = state.epsilons.len();
-                let is_final = state.final_weight.is_some();
-                crate::debug!(7, "State {}: {} transitions, {} epsilons, final={}", i, trans_count, eps_count, is_final);
-            }
-            crate::debug!(7, "Pending transitions:");
-            for (src, labels) in &self.pending_transitions {
-                for (label, dsts) in labels {
-                    for (dst, weight) in dsts {
-                        crate::debug!(7, "  {} --{}--> {} (weight: {:?})", src, label, dst, weight);
+        let run_debug_scan = std::env::var("PRECOMPUTE1_DEBUG_SCAN")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+            || crate::r#macro::is_debug_level_enabled(7);
+        if run_debug_scan && !self.direct_insert {
+            timeit!("precompute1::debug_scan", {
+                let debug_scan_start = std::time::Instant::now();
+                // Debug: print all states and transitions before processing
+                crate::debug!(7, "=== NWA before flush (leaf_state={}, roots={:?}) ===", self.leaf_state, self.roots);
+                for (i, state) in self.nwa.states.0.iter().enumerate() {
+                    let trans_count = state.transitions.values().map(|v| v.len()).sum::<usize>();
+                    let eps_count = state.epsilons.len();
+                    let is_final = state.final_weight.is_some();
+                    crate::debug!(7, "State {}: {} transitions, {} epsilons, final={}", i, trans_count, eps_count, is_final);
+                }
+                crate::debug!(7, "Pending transitions:");
+                for (src, labels) in &self.pending_transitions {
+                    for (label, dsts) in labels {
+                        for (dst, weight) in dsts {
+                            crate::debug!(7, "  {} --{}--> {} (weight: {:?})", src, label, dst, weight);
+                        }
                     }
                 }
-            }
-            crate::debug!(7, "Pending epsilons:");
-            for (src, dsts) in &self.pending_epsilons {
-                for (dst, weight) in dsts {
-                    crate::debug!(7, "  {} --eps--> {} (weight: {:?})", src, dst, weight);
-                }
-            }
-            
-            // Debug: Count transitions
-            let mut total_transitions = 0;
-            let mut transitions_to_leaf = 0;
-            for (src, labels) in &self.pending_transitions {
-                for (label, dsts) in labels {
+                crate::debug!(7, "Pending epsilons:");
+                for (src, dsts) in &self.pending_epsilons {
                     for (dst, weight) in dsts {
-                        total_transitions += 1;
-                        if *dst == self.leaf_state {
-                            transitions_to_leaf += 1;
-                            // Check if token 6 and 31 are in the same weight
-                            if weight.contains(6) && weight.contains(31) {
-                                // Good - merged
-                            } else if weight.contains(6) || weight.contains(31) {
-                                // crate::debug!(7, "SEPARATE: transition from {} on label {} has weight with 6={} 31={}",
-                                //     src, label, weight.contains(6), weight.contains(31));
+                        crate::debug!(7, "  {} --eps--> {} (weight: {:?})", src, dst, weight);
+                    }
+                }
+                
+                // Debug: Count transitions
+                let mut total_transitions = 0;
+                let mut transitions_to_leaf = 0;
+                for (src, labels) in &self.pending_transitions {
+                    for (label, dsts) in labels {
+                        for (dst, weight) in dsts {
+                            total_transitions += 1;
+                            if *dst == self.leaf_state {
+                                transitions_to_leaf += 1;
+                                // Check if token 6 and 31 are in the same weight
+                                if weight.contains(6) && weight.contains(31) {
+                                    // Good - merged
+                                } else if weight.contains(6) || weight.contains(31) {
+                                    // crate::debug!(7, "SEPARATE: transition from {} on label {} has weight with 6={} 31={}",
+                                    //     src, label, weight.contains(6), weight.contains(31));
+                                }
                             }
                         }
                     }
                 }
-            }
-            // crate::debug!(5, "Pending transitions: {} total, {} to leaf", total_transitions, transitions_to_leaf);
+                // crate::debug!(5, "Pending transitions: {} total, {} to leaf", total_transitions, transitions_to_leaf);
 
-            crate::debug!(5, "Precompute1 finish: debug scans in {:?}", debug_scan_start.elapsed());
-        });
+                crate::debug!(5, "Precompute1 finish: debug scans in {:?}", debug_scan_start.elapsed());
+            });
+        }
         
         // Flush pending transitions and epsilons into the NWA
-        timeit!("precompute1::flush_pending", {
-            let flush_start = std::time::Instant::now();
-            for (src, labels) in std::mem::take(&mut self.pending_transitions) {
-                for (label, dsts) in labels {
-                    for (dst, weight) in dsts {
-                        self.nwa.add_transition(src, label, dst, weight).unwrap();
+        if !self.direct_insert {
+            timeit!("precompute1::flush_pending", {
+                let flush_start = std::time::Instant::now();
+                for (src, labels) in std::mem::take(&mut self.pending_transitions) {
+                    let state = &mut self.nwa.states[src];
+                    for (label, dsts) in labels {
+                        let targets = state.transitions.entry(label).or_default();
+                        targets.reserve(dsts.len());
+                        targets.extend(dsts.into_iter());
                     }
                 }
-            }
-            for (src, dsts) in std::mem::take(&mut self.pending_epsilons) {
-                for (dst, weight) in dsts {
-                    self.nwa.add_epsilon(src, dst, weight);
+                for (src, dsts) in std::mem::take(&mut self.pending_epsilons) {
+                    let state = &mut self.nwa.states[src];
+                    state.epsilons.reserve(dsts.len());
+                    state.epsilons.extend(dsts.into_iter());
                 }
-            }
-            crate::debug!(4, "Precompute1 finish: flushed pending transitions/epsilons in {:?}", flush_start.elapsed());
-        });
+                crate::debug!(4, "Precompute1 finish: flushed pending transitions/epsilons in {:?}", flush_start.elapsed());
+            });
+        }
 
         // Create start state with transitions to root states
         let new_start_state = timeit!("precompute1::start_state", {
@@ -336,6 +349,12 @@ impl<'r> Precomputer1<'r> {
                 let mut group_count = 0usize;
                 let mut tsid_count = 0usize;
 
+                let tsid_offset_map = if self.tsid_offset_map.is_empty() {
+                    None
+                } else {
+                    Some(self.tsid_offset_map.as_slice())
+                };
+
                 // Create one epsilon transition per representative with combined tsid mask
                 for (rep_tsid, tsids) in rep_to_tsids {
                     debug_assert!(tsids.contains(&rep_tsid.0));
@@ -352,11 +371,7 @@ impl<'r> Precomputer1<'r> {
                             tsids,
                             self.num_tsids,
                             self.internal_max_llm_token,
-                            if self.tsid_offset_map.is_empty() {
-                                None
-                            } else {
-                                Some(self.tsid_offset_map.as_slice())
-                            },
+                            tsid_offset_map,
                         );
                         mask_time += mask_start.elapsed();
                         let add_eps_start = std::time::Instant::now();
@@ -381,23 +396,17 @@ impl<'r> Precomputer1<'r> {
 
         // Stats
         // Find cases where there's multiple instances of same transition - incl symbol/epsilon transition - from one state to another, regardless of weight.
-        timeit!("precompute1::duplicate_scan", {
-            let mut duplicate_transitions = 0;
-            let duplicate_start = std::time::Instant::now();
-            for state in &self.nwa.states.0 {
-                let mut dst_counts = HashMap::new();
-                for (dst, _) in &state.epsilons {
-                    *dst_counts.entry(*dst).or_insert(0) += 1;
-                }
-                for count in dst_counts.values() {
-                    if *count > 1 {
-                        duplicate_transitions += count - 1;
-                    }
-                }
-
-                for targets in state.transitions.values() {
+        let run_duplicate_scan = std::env::var("PRECOMPUTE1_DUPLICATE_SCAN")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+            || crate::r#macro::is_debug_level_enabled(6);
+        if run_duplicate_scan {
+            timeit!("precompute1::duplicate_scan", {
+                let mut duplicate_transitions = 0;
+                let duplicate_start = std::time::Instant::now();
+                for state in &self.nwa.states.0 {
                     let mut dst_counts = HashMap::new();
-                    for (dst, _) in targets {
+                    for (dst, _) in &state.epsilons {
                         *dst_counts.entry(*dst).or_insert(0) += 1;
                     }
                     for count in dst_counts.values() {
@@ -405,40 +414,58 @@ impl<'r> Precomputer1<'r> {
                             duplicate_transitions += count - 1;
                         }
                     }
+
+                    for targets in state.transitions.values() {
+                        let mut dst_counts = HashMap::new();
+                        for (dst, _) in targets {
+                            *dst_counts.entry(*dst).or_insert(0) += 1;
+                        }
+                        for count in dst_counts.values() {
+                            if *count > 1 {
+                                duplicate_transitions += count - 1;
+                            }
+                        }
+                    }
                 }
-            }
-            if duplicate_transitions > 0 {
-                crate::debug!(6, "NWA: Found {} duplicate transitions (same src, dst, label)", duplicate_transitions);
-            }
-            crate::debug!(4, "Precompute1 finish: duplicate transition scan in {:?}", duplicate_start.elapsed());
-        });
+                if duplicate_transitions > 0 {
+                    crate::debug!(6, "NWA: Found {} duplicate transitions (same src, dst, label)", duplicate_transitions);
+                }
+                crate::debug!(4, "Precompute1 finish: duplicate transition scan in {:?}", duplicate_start.elapsed());
+            });
+        }
 
         // Find cases where there's multiple instances of same transition - regardless of symbol/epsilon transition - from one state to another, regardless of weight.
-        timeit!("precompute1::parallel_scan", {
-            let mut parallel_connections = 0;
-            let parallel_start = std::time::Instant::now();
-            for state in &self.nwa.states.0 {
-                let mut dst_counts = HashMap::new();
-                for (dst, _) in &state.epsilons {
-                    *dst_counts.entry(*dst).or_insert(0) += 1;
-                }
-                for targets in state.transitions.values() {
-                    for (dst, _) in targets {
+        let run_parallel_scan = std::env::var("PRECOMPUTE1_PARALLEL_SCAN")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+            || crate::r#macro::is_debug_level_enabled(6);
+        if run_parallel_scan {
+            timeit!("precompute1::parallel_scan", {
+                let mut parallel_connections = 0;
+                let parallel_start = std::time::Instant::now();
+                for state in &self.nwa.states.0 {
+                    let mut dst_counts = HashMap::new();
+                    for (dst, _) in &state.epsilons {
                         *dst_counts.entry(*dst).or_insert(0) += 1;
                     }
-                }
+                    for targets in state.transitions.values() {
+                        for (dst, _) in targets {
+                            *dst_counts.entry(*dst).or_insert(0) += 1;
+                        }
+                    }
 
-                for count in dst_counts.values() {
-                    if *count > 1 {
-                        parallel_connections += 1;
+                    for count in dst_counts.values() {
+                        if *count > 1 {
+                            parallel_connections += 1;
+                        }
                     }
                 }
-            }
-            if parallel_connections > 0 {
-                crate::debug!(5, "NWA: Found {} pairs of states connected by multiple transitions", parallel_connections);
-            }
-            crate::debug!(4, "Precompute1 finish: parallel transition scan in {:?}", parallel_start.elapsed());
-        });
+                if parallel_connections > 0 {
+                    crate::debug!(5, "NWA: Found {} pairs of states connected by multiple transitions", parallel_connections);
+                }
+                crate::debug!(4, "Precompute1 finish: parallel transition scan in {:?}", parallel_start.elapsed());
+            });
+        }
 
         crate::debug!(3, "Terminal NWA: {} states, {} transitions, num_tsids={}", 
                       self.nwa.states.len(), self.nwa.states.num_transitions(), self.num_tsids);
@@ -647,6 +674,16 @@ impl<'r> Precomputer1<'r> {
 
     fn add_pending_transition(&mut self, src: NWAStateID, label: Label, dst: NWAStateID, weight: Weight) {
         let start = self.dfs_profile_enabled.then(std::time::Instant::now);
+        if self.direct_insert {
+            let state = &mut self.nwa.states[src];
+            *self.live_tokens.entry(dst).or_insert_with(Weight::zeros) |= &weight;
+            state.transitions.entry(label).or_default().push((dst, weight));
+            if let Some(start) = start {
+                self.dfs_profile.add_transition_calls += 1;
+                self.dfs_profile.add_transition_time_us += start.elapsed().as_micros() as u64;
+            }
+            return;
+        }
         self.pending_transitions
             .entry(src)
             .or_default()
@@ -664,6 +701,16 @@ impl<'r> Precomputer1<'r> {
 
     fn add_pending_epsilon(&mut self, src: NWAStateID, dst: NWAStateID, weight: Weight) {
         let start = self.dfs_profile_enabled.then(std::time::Instant::now);
+        if self.direct_insert {
+            let state = &mut self.nwa.states[src];
+            *self.live_tokens.entry(dst).or_insert_with(Weight::zeros) |= &weight;
+            state.epsilons.push((dst, weight));
+            if let Some(start) = start {
+                self.dfs_profile.add_epsilon_calls += 1;
+                self.dfs_profile.add_epsilon_time_us += start.elapsed().as_micros() as u64;
+            }
+            return;
+        }
         self.pending_epsilons
             .entry(src)
             .or_default()
@@ -943,6 +990,12 @@ pub fn run_precompute1(
     } else {
         0
     };
+
+    // Ensure global dimensions are set when run_precompute1 is called directly (e.g., tests).
+    crate::datastructures::set_global_dims(
+        internal_max_llm_token,
+        if num_tsids > 0 { num_tsids } else { 1 },
+    );
 
     let profile_minimize_only = std::env::var("PROFILE_FACTORIZED_WEIGHT_MINIMIZE_ONLY")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))

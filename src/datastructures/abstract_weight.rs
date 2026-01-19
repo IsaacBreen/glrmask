@@ -209,6 +209,11 @@ pub fn restore_backend(previous: Option<BackendChoice>) {
     BACKEND_OVERRIDE.with(|cell| *cell.borrow_mut() = previous);
 }
 
+/// Get the active backend choice for the current thread.
+pub fn current_backend_choice() -> BackendChoice {
+    backend_choice()
+}
+
 /// Check if factorized weight expansion is allowed for the current thread.
 pub fn is_expansion_allowed() -> bool {
     ALLOW_EXPANSION_OVERRIDE.with(|cell| {

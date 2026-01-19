@@ -20,6 +20,9 @@ use std::time::{Duration, Instant};
 use super::common::{Label, Weight};
 use super::dwa::DWA;
 use super::nwa::NWA;
+use crate::datastructures::abstract_weight::{BackendChoice, current_backend_choice};
+use crate::datastructures::hybrid_bitset::RangeSet;
+use crate::datastructures::rangemap_weight::{RangeMapWeight, intern_rangemap};
 
 #[inline]
 fn tsid_to_offset(tsid: usize, tsid_offset_map: Option<&[usize]>) -> usize {
@@ -222,6 +225,29 @@ where
 
     if num_tsids == 0 {
         let mask = Weight::zeros();
+        if let Some(start) = start {
+            let elapsed = start.elapsed();
+            if should_log_weight_expansion(elapsed) {
+                crate::debug!(
+                    5,
+                    "create_tsid_set_mask_with_offset_map: tsids={}, num_tsids={}, tokens={}, base_ranges={}, out_ranges={}, elapsed={:?}",
+                    tsid_count,
+                    num_tsids,
+                    token_count,
+                    base_ranges_len,
+                    mask.ranges_len(),
+                    elapsed,
+                );
+            }
+        }
+        return mask;
+    }
+
+    if matches!(current_backend_choice(), BackendChoice::RangeMap) {
+        let tsid_set = RangeSet::from(base_pattern.clone());
+        let mask = Weight::RangeMap(intern_rangemap(
+            RangeMapWeight::from_uniform_tsid_set(0, max_llm_token, tsid_set, num_tsids),
+        ));
         if let Some(start) = start {
             let elapsed = start.elapsed();
             if should_log_weight_expansion(elapsed) {
