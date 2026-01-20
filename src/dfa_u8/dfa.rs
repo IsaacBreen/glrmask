@@ -2288,13 +2288,13 @@ impl NFA {
             }
         }
 
-        let start_state_set = crate::time!("compress_state_set", CompressedStateSet::from_sparse(&closure_set));
+        let start_state_set = CompressedStateSet::from_sparse(&closure_set);
 
         dfa_state_map.insert(start_state_set.clone(), 0);
         worklist.push(start_state_set.clone());
         stats.max_worklist_len = stats.max_worklist_len.max(worklist.len());
 
-        let (finalizers, non_greedy_finalizers) = crate::time!("compute_finalizers", {
+        let (finalizers, non_greedy_finalizers) = {
             let mut finalizers = DenseStateSet::empty();
             let mut non_greedy_finalizers = DenseStateSet::empty();
             for state in start_state_set.iter() {
@@ -2302,7 +2302,7 @@ impl NFA {
                 non_greedy_finalizers.union_with(&self.states[state].non_greedy_finalizers);
             }
             (finalizers, non_greedy_finalizers)
-        });
+        };
 
         dfa_states.push(DFAState {
             transitions: CharTransitions::new(),

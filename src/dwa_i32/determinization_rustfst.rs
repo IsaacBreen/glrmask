@@ -20,7 +20,6 @@ use rustfst::semirings::{
     DivideType, ReverseBack, SemiringProperties, SerializableSemiring, WeaklyDivisibleSemiring, WeightQuantize,
 };
 use rustfst::{NomCustomError, Semiring};
-use profiler_macro::time_it;
 use std::borrow::Borrow;
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
@@ -371,7 +370,6 @@ impl Semiring for BitsetWeight {
         res
     }
 
-    #[time_it("BitsetWeight::plus_assign")]
     fn plus_assign<P: Borrow<Self>>(&mut self, rhs: P) -> Result<()> {
         let prof = rustfst_weight_profile_enabled();
         let start = if prof { Some(Instant::now()) } else { None };
@@ -384,7 +382,6 @@ impl Semiring for BitsetWeight {
         Ok(())
     }
 
-    #[time_it("BitsetWeight::times_assign")]
     fn times_assign<P: Borrow<Self>>(&mut self, rhs: P) -> Result<()> {
         let prof = rustfst_weight_profile_enabled();
         let start = if prof { Some(Instant::now()) } else { None };
@@ -481,7 +478,6 @@ impl ReverseBack<BitsetWeight> for BitsetWeight {
 }
 
 impl WeaklyDivisibleSemiring for BitsetWeight {
-    #[time_it("BitsetWeight::divide_assign")]
     fn divide_assign(&mut self, rhs: &Self, _divide_type: DivideType) -> Result<()> {
         let prof = rustfst_weight_profile_enabled();
         let start = if prof { Some(Instant::now()) } else { None };

@@ -294,14 +294,14 @@ pub fn minimize_acyclic_exact(dwa: &DWA) -> Result<DWA, DWABuildError> {
             let num_colors = coloring.iter().max().map(|&c| c + 1).unwrap_or(0);
 
             // Map old states to new merged states
-            timeit!("bottom_up_merge_acyclic::insert", {
+            {
                 let insert_start = std::time::Instant::now();
                 for (old_idx, &color) in coloring.iter().enumerate() {
                     old_to_new[candidates[old_idx]] = base_new_id + color;
                 }
                 crate::debug!(6, "Height {}: old_to_new insert {:?} ({} items)", h, insert_start.elapsed(), candidates.len());
                 time_insert += insert_start.elapsed();
-            });
+            }
 
             timeit!("bottom_up_merge_acyclic::extend", {
                 let extend_start = std::time::Instant::now();
@@ -501,7 +501,7 @@ fn compute_height_coloring(
     let colors = if candidates.len() > 30 {
         timeit!("coloring::solve_greedy_coloring", { solve_greedy_coloring(&adj) })
     } else {
-        timeit!("coloring::solve_exact_graph_coloring", { solve_exact_graph_coloring(&adj) })
+        solve_exact_graph_coloring(&adj)
     };
     let color_time = color_start.elapsed();
     
@@ -1389,9 +1389,7 @@ fn build_incompatibility_graph_height_0(
     );
     
     // Build incompatibility graph
-    let mut adj = timeit!("coloring::build_incompatibility_graph::height0::init_adj", {
-        vec![vec![]; n]
-    });
+    let mut adj = vec![vec![]; n];
     let mut edge_count = 0usize;
     let mut compare_count = 0usize;
     let mut skipped_by_footprint = 0usize;
@@ -1404,10 +1402,7 @@ fn build_incompatibility_graph_height_0(
             for j in (i + 1)..groups.len() {
                 // Quick check: do the group footprints overlap?
                 let overlap_start = std::time::Instant::now();
-                let overlap = timeit!(
-                    "coloring::build_incompatibility_graph::height0::footprint_overlap",
-                    { &group_footprints[i] & &group_footprints[j] }
-                );
+                let overlap = &group_footprints[i] & &group_footprints[j];
                 footprint_overlap_time += overlap_start.elapsed();
                 if overlap.is_empty() {
                     // No overlap in needed sets means all pairs are compatible
@@ -1428,10 +1423,7 @@ fn build_incompatibility_graph_height_0(
                 
                 // Check if their needed sets overlap
                 let pair_overlap_start = std::time::Instant::now();
-                let pair_overlap = timeit!(
-                    "coloring::build_incompatibility_graph::height0::pair_overlap",
-                    { &needed[id_i] & &needed[id_j] }
-                );
+                let pair_overlap = &needed[id_i] & &needed[id_j];
                 pair_overlap_time += pair_overlap_start.elapsed();
                 if pair_overlap.is_empty() {
                     // This specific pair is compatible, but others in the group might not be
@@ -1442,10 +1434,7 @@ fn build_incompatibility_graph_height_0(
                             let id_i = candidates[idx_i];
                             let id_j = candidates[idx_j];
                             let pair_overlap_start = std::time::Instant::now();
-                            let pair_overlap = timeit!(
-                                "coloring::build_incompatibility_graph::height0::pair_overlap",
-                                { &needed[id_i] & &needed[id_j] }
-                            );
+                            let pair_overlap = &needed[id_i] & &needed[id_j];
                             pair_overlap_time += pair_overlap_start.elapsed();
                             if !pair_overlap.is_empty() {
                                 // Finals differ on overlap (different groups), so incompatible
@@ -1553,16 +1542,11 @@ fn greedy_color_without_graph(
     let assign_start = std::time::Instant::now();
     let (colors, color_representatives, compare_count, compare_time) = timeit!("greedy_no_graph::assign_colors", {
         // colors[i] = color assigned to candidate i
-        let mut colors = timeit!("greedy_no_graph::assign_colors::init_colors", {
-            vec![usize::MAX; n]
-        });
+        let mut colors = vec![usize::MAX; n];
         
         // color_representatives[c] = list of (candidate_idx, signature) for color c
         // We keep one representative per signature in each color class
-        let mut color_representatives: Vec<Vec<(usize, u128)>> = timeit!(
-            "greedy_no_graph::assign_colors::init_reps",
-            { Vec::new() }
-        );
+        let mut color_representatives: Vec<Vec<(usize, u128)>> = Vec::new();
         
         let mut compare_count = 0usize;
         let mut compare_time = std::time::Duration::ZERO;
@@ -1579,9 +1563,7 @@ fn greedy_color_without_graph(
                     'color_loop: for (color, reps) in color_representatives.iter().enumerate() {
                         // Check if there's already a representative with the same signature
                         // If so, we're guaranteed compatible (by signature design)
-                        let same_sig = timeit!("greedy_no_graph::assign_colors::check_same_sig", {
-                            reps.iter().any(|(_, rep_sig)| *rep_sig == sig)
-                        });
+                        let same_sig = reps.iter().any(|(_, rep_sig)| *rep_sig == sig);
                         if same_sig {
                             assigned_color = Some(color);
                             break 'color_loop;
@@ -1678,9 +1660,7 @@ fn build_incompatibility_graph_general(
     let num_groups = groups.len();
     
     // Build incompatibility graph
-    let mut adj = timeit!("coloring::build_incompatibility_graph::init_adj", {
-        vec![vec![]; n]
-    });
+    let mut adj = vec![vec![]; n];
     let mut edge_count = 0usize;
     let mut compare_count = 0usize;
     let mut compare_time = std::time::Duration::ZERO;

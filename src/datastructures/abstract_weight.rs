@@ -631,7 +631,6 @@ impl std::ops::Not for AbstractWeight {
 impl std::ops::Not for &AbstractWeight {
     type Output = AbstractWeight;
     
-    #[time_it("AbstractWeight::not_ref")]
     fn not(self) -> Self::Output {
         self.complement()
     }
@@ -1151,7 +1150,6 @@ impl BitOr for AbstractWeight {
 impl BitOr<&AbstractWeight> for AbstractWeight {
     type Output = AbstractWeight;
 
-    #[time_it("AbstractWeight::bitor_ref")]
     fn bitor(self, rhs: &AbstractWeight) -> Self::Output {
         match (self, rhs) {
             (AbstractWeight::RangeSet(a), AbstractWeight::RangeSet(b)) => {
@@ -1171,7 +1169,6 @@ impl BitOr<&AbstractWeight> for AbstractWeight {
 impl BitOr for &AbstractWeight {
     type Output = AbstractWeight;
 
-    #[time_it("AbstractWeight::bitor_ref_ref")]
     fn bitor(self, rhs: Self) -> Self::Output {
         match (self, rhs) {
             (AbstractWeight::RangeSet(a), AbstractWeight::RangeSet(b)) => {
@@ -1320,7 +1317,6 @@ impl AbstractWeight {
     }
 
     /// Compute a stable fingerprint for hashing/grouping weights.
-    #[time_it("AbstractWeight::fingerprint")]
     pub fn fingerprint(&self) -> u64 {
         use std::collections::hash_map::DefaultHasher;
         let mut hasher = DefaultHasher::new();

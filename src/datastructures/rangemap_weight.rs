@@ -86,7 +86,6 @@ fn remove_op_key_from_index(index: &mut HashMap<usize, HashSet<OpKey>>, key: OpK
     }
 }
 
-#[time_it("invalidate_rangemap_op_cache_for_ptr")]
 fn invalidate_rangemap_op_cache_for_ptr(ptr: usize) {
     let mut cache = RANGEMAP_OP_CACHE.lock().unwrap();
     let mut index = RANGEMAP_OP_CACHE_INDEX.lock().unwrap();
@@ -697,7 +696,6 @@ impl RangeMapWeight {
         Self::from_token_map(token_map, num_tsids)
     }
 
-    #[time_it("RangeMapWeight::union_all_non_negated")]
     fn union_all_non_negated(weights: &[&RangeMapWeight]) -> Self {
         if weights.is_empty() {
             return Self::new(current_num_tsids());
@@ -851,7 +849,6 @@ impl RangeMapWeight {
         Self::from_map(out, num_tsids)
     }
 
-    #[time_it("RangeMapWeight::union_all")]
     pub(crate) fn union_all(weights: &[Arc<RangeMapWeight>]) -> Arc<RangeMapWeight> {
         if weights.is_empty() {
             return intern_rangemap(RangeMapWeight::new(current_num_tsids()));
@@ -924,7 +921,6 @@ impl RangeMapWeight {
         self.union_non_negated(other)
     }
 
-    #[time_it("RangeMapWeight::bitand")]
     fn intersect_non_negated(&self, other: &Self) -> Self {
         let left_ranges = Self::map_range_count(&self.map);
         let right_ranges = Self::map_range_count(&other.map);
