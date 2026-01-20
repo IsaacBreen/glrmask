@@ -162,16 +162,65 @@ fn print_node_recursive(
 
 pub fn print_summary() {
     let options = PrintOptions {
-        show_own_per_hit: true,
+        show_own_per_hit: false,
         show_percentage_own: false,
         show_percentage_of_parent: false,
     };
-    _print_summary_flat_by_own_time(&options);
+    _print_summary(&options);
+    _print_summary_flat_by_own_time(&PrintOptions {
+        show_own_per_hit: true,
+        show_percentage_own: false,
+        show_percentage_of_parent: false,
+    });
 }
 
 /// Prints a summary of the collected profiling data to stdout.
 pub fn _print_summary(options: &PrintOptions) {
-    _print_summary_flat_by_own_time(options);
+    if !PROFILING_ENABLED {
+        return;
+    }
+    let data = profiler().lock().unwrap();
+    println!("--- Profiler Summary ---");
+
+    let no_timing_data = data.call_tree.children.is_empty();
+
+    if no_timing_data {
+        println!("No data collected.");
+        println!("--- End Profiler Summary ---");
+        return;
+    }
+
+    println!("\n[Hierarchical Timings]");
+    print!(
+        "{:>10} {:>15} {:>15} {:>15}",
+        "Hits", "Total Time", "Total/Hit", "Own Time"
+    );
+    if options.show_own_per_hit {
+        print!(" {:>15}", "Own/Hit");
+    }
+    if options.show_percentage_own {
+        print!(" {:>10}", "% Own");
+    }
+    if options.show_percentage_of_parent {
+        print!(" {:>15}", "% of Parent");
+    }
+    println!("  {}", "Name");
+
+    let root_total_time: Duration = data
+        .call_tree
+        .children
+        .values()
+        .map(|node| node.total_time)
+        .sum();
+
+    let mut sorted_children: Vec<_> = data.call_tree.children.iter().collect();
+    sorted_children.sort_by_key(|(name, _)| *name);
+
+    for (name, node) in sorted_children {
+        print_node_recursive(node, name, 0, root_total_time, options);
+    }
+
+    println!("\n--- End Profiler Summary ---");
 }
 
 fn flatten_tree_recursive(
