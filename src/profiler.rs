@@ -400,6 +400,20 @@ fn sum_subtree_own_time_for_name(nodes: &HashMap<String, ProfileNode>, name: &st
     total
 }
 
+fn sum_subtree_total_time_for_name(nodes: &HashMap<String, ProfileNode>, name: &str) -> Duration {
+    let mut total = Duration::ZERO;
+    for (child_name, child_node) in nodes {
+        if child_name == name {
+            total += child_node.total_time;
+            continue;
+        }
+        if !child_node.children.is_empty() {
+            total += sum_subtree_total_time_for_name(&child_node.children, name);
+        }
+    }
+    total
+}
+
 /// Returns the sum of own-times for all subtrees rooted at `name` (outermost matches only).
 pub fn sum_subtree_own_time(name: &str) -> Duration {
     if !PROFILING_ENABLED {
@@ -407,6 +421,15 @@ pub fn sum_subtree_own_time(name: &str) -> Duration {
     }
     let data = profiler().lock().unwrap();
     sum_subtree_own_time_for_name(&data.call_tree.children, name)
+}
+
+/// Returns the sum of total-times for all subtrees rooted at `name` (outermost matches only).
+pub fn sum_subtree_total_time(name: &str) -> Duration {
+    if !PROFILING_ENABLED {
+        return Duration::ZERO;
+    }
+    let data = profiler().lock().unwrap();
+    sum_subtree_total_time_for_name(&data.call_tree.children, name)
 }
 
 // Internal functions for timing blocks

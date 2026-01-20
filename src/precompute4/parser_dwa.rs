@@ -257,7 +257,7 @@ pub fn nwa_special_map<V, U, I>(
     traversal_data: &NwaTraversalData,
     initial_values: Vec<(StateID, V)>,
     mut step: impl FnMut(&U, Option<Label>, &[(StateID, Weight)]) -> I,
-    mut merge: impl FnMut(&mut V, V),
+    mut merge: impl FnMut(&mut V, V) -> bool,
     mut process: impl FnMut(StateID, V) -> Option<U>,
 ) where
     V: Clone,
@@ -267,7 +267,14 @@ pub fn nwa_special_map<V, U, I>(
     let mut stopped_nodes: FxHashSet<StateID> = FxHashSet::default();
 
     for (state, v) in initial_values {
-        values.entry(state).and_modify(|old| merge(old, v.clone())).or_insert(v);
+        match values.entry(state) {
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                merge(entry.get_mut(), v);
+            }
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(v);
+            }
+        }
     }
 
     let mut in_queue = FxHashSet::default();
@@ -290,7 +297,7 @@ pub fn nwa_special_map<V, U, I>(
 
             if stopped_nodes.contains(&u) { continue; }
 
-            let agg_v = match values.remove(&u) { Some(v) => v, None => continue };
+            let agg_v = match values.get(&u) { Some(v) => v.clone(), None => continue };
             let proceed_val = match process(u, agg_v.clone()) {
                 Some(val) => val,
                 None => { stopped_nodes.insert(u); continue; }
@@ -300,8 +307,16 @@ pub fn nwa_special_map<V, U, I>(
             if !state.epsilons.is_empty() {
                 for (v, new_v) in step(&proceed_val, None, &state.epsilons) {
                     if stopped_nodes.contains(&v) { continue; }
-                    values.entry(v).and_modify(|old| merge(old, new_v.clone())).or_insert(new_v);
-                    if traversal_data.comp_id[v] == scc_idx && !in_queue.contains(&v) {
+                    let changed = match values.entry(v) {
+                        std::collections::hash_map::Entry::Occupied(mut entry) => {
+                            merge(entry.get_mut(), new_v)
+                        }
+                        std::collections::hash_map::Entry::Vacant(entry) => {
+                            entry.insert(new_v);
+                            true
+                        }
+                    };
+                    if changed && traversal_data.comp_id[v] == scc_idx && !in_queue.contains(&v) {
                         local_queue.push_back(v);
                         in_queue.insert(v);
                     }
@@ -310,16 +325,20 @@ pub fn nwa_special_map<V, U, I>(
             for (&label, targets) in &state.transitions {
                 for (v, new_v) in step(&proceed_val, Some(label), targets) {
                     if stopped_nodes.contains(&v) { continue; }
-                    values.entry(v).and_modify(|old| merge(old, new_v.clone())).or_insert(new_v);
-                    if traversal_data.comp_id[v] == scc_idx && !in_queue.contains(&v) {
+                    let changed = match values.entry(v) {
+                        std::collections::hash_map::Entry::Occupied(mut entry) => {
+                            merge(entry.get_mut(), new_v)
+                        }
+                        std::collections::hash_map::Entry::Vacant(entry) => {
+                            entry.insert(new_v);
+                            true
+                        }
+                    };
+                    if changed && traversal_data.comp_id[v] == scc_idx && !in_queue.contains(&v) {
                         local_queue.push_back(v);
                         in_queue.insert(v);
                     }
                 }
-            }
-            if values.contains_key(&u) && !stopped_nodes.contains(&u) && !in_queue.contains(&u) {
-                local_queue.push_back(u);
-                in_queue.insert(u);
             }
         }
     }
@@ -883,11 +902,22 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
             |val1, val2| {
                 let (bodies1, tokens1) = val1;
                 let (bodies2, tokens2) = val2;
+                let mut changed = false;
                 for (right_body, term_map2) in bodies2 {
                     let term_map1 = bodies1.entry(right_body.clone()).or_default();
-                    for (term, weight2) in term_map2 { *term_map1.entry(term).or_insert_with(Weight::zeros) |= &weight2; }
+                    for (term, weight2) in term_map2 {
+                        let entry = term_map1.entry(term).or_insert_with(Weight::zeros);
+                        if !weight2.is_subset_of(entry) {
+                            *entry |= &weight2;
+                            changed = true;
+                        }
+                    }
                 }
-                *tokens1 |= &tokens2;
+                if !tokens2.is_subset_of(tokens1) {
+                    *tokens1 |= &tokens2;
+                    changed = true;
+                }
+                changed
             },
             |node_id, val| {
             static PROCESS_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -1174,7 +1204,14 @@ pub fn precompute_token_bvs_and_signatures(reversed_nwa: &NWA, traversal_data: &
             }
             results
         },
-        |t1, t2| { *t1 |= &t2; },
+        |t1, t2| {
+            if t2.is_subset_of(t1) {
+                false
+            } else {
+                *t1 |= &t2;
+                true
+            }
+        },
         move |node_id, tokens| {
             node_tokens_clone.lock().unwrap().insert(node_id, tokens.clone());
             let mut bundles_by_dest: HashMap<StateID, BTreeMap<Option<TerminalID>, Weight>> = HashMap::new();
@@ -1236,27 +1273,27 @@ pub fn finalize_and_optimize_and_determinize(parser: &GLRParser, mut combined_nw
     //         nwa_states, combined_nwa.states.len(), minimize_time);
     // }
     
-    let enable_minimize = std::env::var("PARSER_DWA_MINIMIZE")
-        .map(|v| v == "1")
+    let disable_minimize = std::env::var("PARSER_DWA_MINIMIZE")
+        .map(|v| v == "0" || v.eq_ignore_ascii_case("false"))
         .unwrap_or(false);
 
-    if enable_minimize {
-        crate::debug!(4, "Running parser DWA minimize (PARSER_DWA_MINIMIZE=1)");
-        // Use unified determinize_and_minimize with "FinalDWA" profile
-        // Pipeline: determinize → prune_dead_ends → minimize
-        let det_min_start = std::time::Instant::now();
-        let dwa = combined_nwa.determinize_and_minimize("FinalDWA");
-        crate::debug!(5, "determinize_and_minimize(FinalDWA) in {:?}", det_min_start.elapsed());
-        crate::debug!(4, "Final DWA minimization complete. {} states and {} transitions.", dwa.states.len(), dwa.states.num_transitions());
-        dwa
-    } else {
-        crate::debug!(4, "Skipping parser DWA minimize (set PARSER_DWA_MINIMIZE=1 to enable)");
+    if disable_minimize {
+        crate::debug!(4, "Parser DWA minimize disabled (PARSER_DWA_MINIMIZE=0)");
         let det_start = std::time::Instant::now();
         let dwa = combined_nwa.determinize();
         crate::debug!(5, "determinize(FinalDWA) in {:?}", det_start.elapsed());
         crate::debug!(4, "Final DWA determinize complete. {} states and {} transitions.", dwa.states.len(), dwa.states.num_transitions());
-        dwa
+        return dwa;
     }
+
+    crate::debug!(4, "Running parser DWA minimize");
+    // Use unified determinize_and_minimize with "FinalDWA" profile
+    // Pipeline: determinize → prune_dead_ends → minimize
+    let det_min_start = std::time::Instant::now();
+    let dwa = combined_nwa.determinize_and_minimize("FinalDWA");
+    crate::debug!(5, "determinize_and_minimize(FinalDWA) in {:?}", det_min_start.elapsed());
+    crate::debug!(4, "Final DWA minimization complete. {} states and {} transitions.", dwa.states.len(), dwa.states.num_transitions());
+    dwa
 }
 
 pub fn instantiate_nwa_template_into(

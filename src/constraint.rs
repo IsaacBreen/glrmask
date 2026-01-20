@@ -816,7 +816,8 @@ impl GrammarConstraint {
         max_original_llm_token_id: usize,
         config: &GrammarConstraintConfig,
     ) -> Self {
-        Self::build_with_config_inner(
+        crate::profiler::reset();
+        let constraint = Self::build_with_config_inner(
             tokenizer,
             parser,
             llm_token_map,
@@ -824,7 +825,24 @@ impl GrammarConstraint {
             max_original_llm_token_id,
             config,
             None,
-        )
+        );
+        if std::env::var("PROFILE_TERMINAL_DWA").is_ok() {
+            crate::profiler::print_summary();
+            let total_own = crate::profiler::sum_flat_own_time();
+            println!("Profiler flat own-time total: {:.3}s", total_own.as_secs_f64());
+            let run_precompute1_total = crate::profiler::sum_subtree_total_time("run_precompute1");
+            println!(
+                "Profiler run_precompute1 total: {:.3}s",
+                run_precompute1_total.as_secs_f64()
+            );
+        }
+        if crate::r#macro::is_debug_level_enabled(4) {
+            let build_total = crate::profiler::sum_subtree_total_time("GrammarConstraint::build_with_config_inner");
+            crate::debug!(4, "Profiler build_with_config_inner total: {:.3}s", build_total.as_secs_f64());
+            let run_precompute1_total = crate::profiler::sum_subtree_total_time("run_precompute1");
+            crate::debug!(4, "Profiler run_precompute1 total: {:.3}s", run_precompute1_total.as_secs_f64());
+        }
+        constraint
     }
 
     fn build_with_config_and_grammar(
@@ -836,7 +854,8 @@ impl GrammarConstraint {
         config: &GrammarConstraintConfig,
         grammar_definition: Arc<GrammarDefinition>,
     ) -> Self {
-        Self::build_with_config_inner(
+        crate::profiler::reset();
+        let constraint = Self::build_with_config_inner(
             tokenizer,
             parser,
             llm_token_map,
@@ -844,7 +863,24 @@ impl GrammarConstraint {
             max_original_llm_token_id,
             config,
             Some(grammar_definition),
-        )
+        );
+        if std::env::var("PROFILE_TERMINAL_DWA").is_ok() {
+            crate::profiler::print_summary();
+            let total_own = crate::profiler::sum_flat_own_time();
+            println!("Profiler flat own-time total: {:.3}s", total_own.as_secs_f64());
+            let run_precompute1_total = crate::profiler::sum_subtree_total_time("run_precompute1");
+            println!(
+                "Profiler run_precompute1 total: {:.3}s",
+                run_precompute1_total.as_secs_f64()
+            );
+        }
+        if crate::r#macro::is_debug_level_enabled(4) {
+            let build_total = crate::profiler::sum_subtree_total_time("GrammarConstraint::build_with_config_inner");
+            crate::debug!(4, "Profiler build_with_config_inner total: {:.3}s", build_total.as_secs_f64());
+            let run_precompute1_total = crate::profiler::sum_subtree_total_time("run_precompute1");
+            crate::debug!(4, "Profiler run_precompute1 total: {:.3}s", run_precompute1_total.as_secs_f64());
+        }
+        constraint
     }
 
     #[time_it("GrammarConstraint::build_with_config_inner")]
@@ -857,7 +893,6 @@ impl GrammarConstraint {
         config: &GrammarConstraintConfig,
         grammar_definition: Option<Arc<GrammarDefinition>>,
     ) -> Self {
-        crate::profiler::reset();
         crate::debug!(5, "GrammarConstraint build_with_config_inner: start");
         // Epsilon tokens are not supported.
         let epsilon_terminal_group_ids: BTreeSet<_> = tokenizer
@@ -1201,19 +1236,6 @@ impl GrammarConstraint {
         
         // Trim weights to domain_max to remove unnecessary range extensions to usize::MAX
         terminal_dwa.trim_weights_to_domain(domain_max);
-
-        // Temporary profiling: print summary after terminal DWA build and exit early.
-        if std::env::var("PROFILE_TERMINAL_DWA").is_ok() {
-            crate::profiler::print_summary();
-            let total_own = crate::profiler::sum_flat_own_time();
-            println!("Profiler flat own-time total: {:.3}s", total_own.as_secs_f64());
-            let run_precompute1_own = crate::profiler::sum_subtree_own_time("run_precompute1");
-            println!(
-                "Profiler run_precompute1 subtree own-time total: {:.3}s",
-                run_precompute1_own.as_secs_f64()
-            );
-            std::process::exit(0);
-        }
 
         // Weight complexity instrumentation (unique weights are interned).
         if crate::r#macro::is_debug_level_enabled(5) {
@@ -2084,6 +2106,34 @@ impl GrammarConstraint {
         }
         // Normal mode: Skip vocab optimization on terminal_dwa (optimization happens on parser_dwa below)
 
+        // Profile-only early return after terminal DWA build.
+        if std::env::var("PROFILE_TERMINAL_DWA").is_ok() {
+            crate::debug!(4, "PROFILE_TERMINAL_DWA=1: returning after terminal DWA build");
+            let internal_to_original_sparse_matrix = StageVocab::build_internal_to_original_sparse_matrix(
+                &vocab.internal_to_original,
+                max_original_llm_token_id,
+                vocab.internal_max_llm_token,
+            );
+            vocab.max_original_llm_token_id = max_original_llm_token_id;
+            vocab.internal_to_original_sparse_matrix = internal_to_original_sparse_matrix;
+
+            let vocab_trie = Arc::new(LLMVocabTrie::from_token_map(&llm_token_map));
+
+            #[allow(deprecated)]
+            return GrammarConstraint {
+                tokenizer,
+                parser,
+                parser_dwa: terminal_dwa,
+                possible_matches: possible_matches_precompute1,
+                vocab_trie,
+                commit_vocab,
+                token_name_map,
+                parser_dwa_vocab: vocab,
+                num_tsids,
+                tsid_offset_map,
+            };
+        }
+
         // Build Parser DWA
         let max_internal_llm_token_id = vocab.internal_max_llm_token;
         // Note: vocab.internal_max_llm_token might have changed due to optimization, which is fine.
@@ -2247,7 +2297,6 @@ impl GrammarConstraint {
         }));
         crate::debug!(5, "LLMVocabTrie::from_token_map: end");
         
-        crate::profiler::print_summary();
         crate::debug!(5, "GrammarConstraint build_with_config_inner: end");
         #[allow(deprecated)]
         GrammarConstraint {

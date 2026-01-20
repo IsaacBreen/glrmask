@@ -215,16 +215,29 @@ impl NWA {
 
         // Production configs based on experiments
         let config = match context {
-            "TerminalDWA" => DeterminizeAndMinimizeConfig {
+            "TerminalDWA" => {
                 // Full pipeline for Terminal DWA construction (precompute1)
-                // OPTIMIZATION: Skip rm_epsilon to save ~2s - determinization can handle epsilons
-                // Trade-off: determinization may be slightly slower but overall faster
-                nwa_passes: if std::env::var("SKIP_RUSTFST_MIN").map_or(false, |v| v == "1") {
+                // Optimization: skip rustfst minimization for large NWAs (correctness unchanged).
+                let skip_minimize_rustfst = std::env::var("TERMINAL_DWA_SKIP_MINIMIZE_RUSTFST")
+                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                    .unwrap_or(false)
+                    || self.states.len() > 1000;
+
+                let nwa_passes = if std::env::var("SKIP_RUSTFST_MIN").map_or(false, |v| v == "1") {
                     vec![NwaPass::CompressTransitions]
                 } else {
-                    vec![NwaPass::RmEpsilon, NwaPass::MinimizeRustfst, NwaPass::CompressTransitions]
-                },
-                dwa_passes: vec![DwaPass::Minimize, DwaPass::ConsolidateRanges, DwaPass::TrimWeights],
+                    let mut passes = vec![NwaPass::RmEpsilon];
+                    if !skip_minimize_rustfst {
+                        passes.push(NwaPass::MinimizeRustfst);
+                    }
+                    passes.push(NwaPass::CompressTransitions);
+                    passes
+                };
+
+                DeterminizeAndMinimizeConfig {
+                    nwa_passes,
+                    dwa_passes: vec![DwaPass::Minimize, DwaPass::ConsolidateRanges, DwaPass::TrimWeights],
+                }
             },
             "TemplateDWA" => DeterminizeAndMinimizeConfig {
                 // Template DWAs are built from terminal characterization NWAs in template_dfa.rs.

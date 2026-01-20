@@ -11,7 +11,7 @@ mod subtract_final_weights;
 
 use super::common::{Partition, MAX_OPTIMIZE_ITERATIONS};
 use crate::dwa_i32::common::{Label, NWAStateID, Weight, BENCHMARK_DEBUG};
-use crate::dwa_i32::nwa::{NWA, NWAState};
+use crate::dwa_i32::nwa::{NWA, NWABody, NWAState, NWAStates};
 
 use rustfst::algorithms::minimize_with_config;
 use rustfst::prelude::MinimizeConfig;
@@ -46,18 +46,463 @@ impl NwaPass {
 }
 
 impl NWA {
-    pub fn rm_epsilon(&mut self) {
-        crate::debug!(6, "[NWA] Removing epsilon transitions...");
-        let initial_states = self.states.len();
-        if initial_states == 0 {
-            return;
+    fn try_rm_epsilon_unweighted_scc(&self) -> Option<Vec<NWAState>> {
+        let states = &self.states.0;
+        let num_states = states.len();
+        if num_states == 0 {
+            return Some(Vec::new());
         }
-        let mut total_epsilons = 0;
-        for st in &self.states.0 {
-            total_epsilons += st.epsilons.len();
-        }
-        crate::debug!(7, "[NWA] Initial number of states: {}, total epsilon transitions: {}", initial_states, total_epsilons);
 
+        let mut adj: Vec<Vec<NWAStateID>> = vec![Vec::new(); num_states];
+        let mut radj: Vec<Vec<NWAStateID>> = vec![Vec::new(); num_states];
+
+        for (u, st) in states.iter().enumerate() {
+            for (v, w) in &st.epsilons {
+                if !w.is_all_fast() {
+                    return None;
+                }
+                adj[u].push(*v);
+                radj[*v].push(u);
+            }
+        }
+
+        let mut visited = vec![false; num_states];
+        let mut order: Vec<usize> = Vec::with_capacity(num_states);
+        for start in 0..num_states {
+            if visited[start] {
+                continue;
+            }
+            let mut stack: Vec<(usize, usize)> = Vec::new();
+            stack.push((start, 0));
+            while let Some((node, idx)) = stack.pop() {
+                if idx == 0 {
+                    if visited[node] {
+                        continue;
+                    }
+                    visited[node] = true;
+                }
+                if idx < adj[node].len() {
+                    stack.push((node, idx + 1));
+                    let next = adj[node][idx];
+                    if !visited[next] {
+                        stack.push((next, 0));
+                    }
+                } else {
+                    order.push(node);
+                }
+            }
+        }
+
+        let mut comp_id = vec![usize::MAX; num_states];
+        let mut comp_nodes: Vec<Vec<usize>> = Vec::new();
+        for &node in order.iter().rev() {
+            if comp_id[node] != usize::MAX {
+                continue;
+            }
+            let cid = comp_nodes.len();
+            comp_nodes.push(Vec::new());
+            let mut stack: Vec<usize> = vec![node];
+            comp_id[node] = cid;
+            while let Some(v) = stack.pop() {
+                comp_nodes[cid].push(v);
+                for &pred in &radj[v] {
+                    if comp_id[pred] == usize::MAX {
+                        comp_id[pred] = cid;
+                        stack.push(pred);
+                    }
+                }
+            }
+        }
+
+        let num_comps = comp_nodes.len();
+        let mut comp_adj: Vec<Vec<usize>> = vec![Vec::new(); num_comps];
+        for u in 0..num_states {
+            let cu = comp_id[u];
+            for &v in &adj[u] {
+                let cv = comp_id[v];
+                if cu != cv {
+                    comp_adj[cu].push(cv);
+                }
+            }
+        }
+        for edges in comp_adj.iter_mut() {
+            edges.sort_unstable();
+            edges.dedup();
+        }
+
+        let mut indegree = vec![0usize; num_comps];
+        for c in 0..num_comps {
+            for &v in &comp_adj[c] {
+                indegree[v] += 1;
+            }
+        }
+        let mut queue: VecDeque<usize> = VecDeque::new();
+        for c in 0..num_comps {
+            if indegree[c] == 0 {
+                queue.push_back(c);
+            }
+        }
+        let mut topo: Vec<usize> = Vec::with_capacity(num_comps);
+        while let Some(c) = queue.pop_front() {
+            topo.push(c);
+            for &v in &comp_adj[c] {
+                indegree[v] -= 1;
+                if indegree[v] == 0 {
+                    queue.push_back(v);
+                }
+            }
+        }
+        if topo.len() != num_comps {
+            return None;
+        }
+
+        let mut comp_transitions: Vec<BTreeMap<Label, HashMap<NWAStateID, Weight>>> =
+            vec![BTreeMap::new(); num_comps];
+        let mut comp_final: Vec<Option<Weight>> = vec![None; num_comps];
+
+        for (cid, nodes) in comp_nodes.iter().enumerate() {
+            let mut trans_map: BTreeMap<Label, HashMap<NWAStateID, Weight>> = BTreeMap::new();
+            let mut final_weight: Option<Weight> = None;
+
+            for &u in nodes {
+                if let Some(fw) = &states[u].final_weight {
+                    if !fw.is_empty() {
+                        final_weight = Some(match final_weight {
+                            Some(cur) => cur | fw,
+                            None => fw.clone(),
+                        });
+                    }
+                }
+
+                for (label, targets) in &states[u].transitions {
+                    let entry = trans_map.entry(*label).or_insert_with(HashMap::new);
+                    for (tgt, w) in targets {
+                        if w.is_empty() {
+                            continue;
+                        }
+                        entry
+                            .entry(*tgt)
+                            .and_modify(|acc| *acc |= w)
+                            .or_insert_with(|| w.clone());
+                    }
+                }
+            }
+
+            comp_transitions[cid] = trans_map;
+            comp_final[cid] = final_weight;
+        }
+
+        for &c in topo.iter().rev() {
+            for &succ in &comp_adj[c] {
+                let (c_final, succ_final) = if c < succ {
+                    let (left, right) = comp_final.split_at_mut(succ);
+                    (&mut left[c], &right[0])
+                } else {
+                    let (left, right) = comp_final.split_at_mut(c);
+                    (&mut right[0], &left[succ])
+                };
+
+                if let Some(fw) = succ_final.as_ref() {
+                    if !fw.is_empty() {
+                        *c_final = Some(match c_final.take() {
+                            Some(cur) => cur | fw,
+                            None => fw.clone(),
+                        });
+                    }
+                }
+
+                let (c_trans, succ_trans) = if c < succ {
+                    let (left, right) = comp_transitions.split_at_mut(succ);
+                    (&mut left[c], &right[0])
+                } else {
+                    let (left, right) = comp_transitions.split_at_mut(c);
+                    (&mut right[0], &left[succ])
+                };
+
+                for (label, targets) in succ_trans {
+                    let entry = c_trans.entry(*label).or_insert_with(HashMap::new);
+                    for (tgt, w) in targets {
+                        if w.is_empty() {
+                            continue;
+                        }
+                        entry
+                            .entry(*tgt)
+                            .and_modify(|acc| *acc |= w)
+                            .or_insert_with(|| w.clone());
+                    }
+                }
+            }
+        }
+
+        let mut new_states: Vec<NWAState> = vec![NWAState::default(); num_states];
+        for cid in 0..num_comps {
+            let nodes = &comp_nodes[cid];
+            let mut new_state = NWAState::default();
+            new_state.final_weight = comp_final[cid].clone();
+            let trans_map = std::mem::take(&mut comp_transitions[cid]);
+            new_state.transitions = trans_map
+                .into_iter()
+                .map(|(label, map)| (label, map.into_iter().collect()))
+                .collect();
+            if nodes.len() == 1 {
+                new_states[nodes[0]] = new_state;
+            } else {
+                for &u in nodes {
+                    new_states[u] = new_state.clone();
+                }
+            }
+        }
+
+        Some(new_states)
+    }
+
+    fn collapse_all_weight_eps(&self) -> Option<NWA> {
+        let states = &self.states.0;
+        let num_states = states.len();
+        if num_states == 0 {
+            return None;
+        }
+
+        let mut adj_all: Vec<Vec<NWAStateID>> = vec![Vec::new(); num_states];
+        let mut radj_all: Vec<Vec<NWAStateID>> = vec![Vec::new(); num_states];
+        let mut all_eps = 0usize;
+
+        for (u, st) in states.iter().enumerate() {
+            for (v, w) in &st.epsilons {
+                if w.is_all_fast() {
+                    adj_all[u].push(*v);
+                    radj_all[*v].push(u);
+                    all_eps += 1;
+                }
+            }
+        }
+
+        if all_eps == 0 {
+            return None;
+        }
+
+        let mut visited = vec![false; num_states];
+        let mut order: Vec<usize> = Vec::with_capacity(num_states);
+        for start in 0..num_states {
+            if visited[start] {
+                continue;
+            }
+            let mut stack: Vec<(usize, usize)> = Vec::new();
+            stack.push((start, 0));
+            while let Some((node, idx)) = stack.pop() {
+                if idx == 0 {
+                    if visited[node] {
+                        continue;
+                    }
+                    visited[node] = true;
+                }
+                if idx < adj_all[node].len() {
+                    stack.push((node, idx + 1));
+                    let next = adj_all[node][idx];
+                    if !visited[next] {
+                        stack.push((next, 0));
+                    }
+                } else {
+                    order.push(node);
+                }
+            }
+        }
+
+        let mut comp_id = vec![usize::MAX; num_states];
+        let mut comp_nodes: Vec<Vec<usize>> = Vec::new();
+        for &node in order.iter().rev() {
+            if comp_id[node] != usize::MAX {
+                continue;
+            }
+            let cid = comp_nodes.len();
+            comp_nodes.push(Vec::new());
+            let mut stack: Vec<usize> = vec![node];
+            comp_id[node] = cid;
+            while let Some(v) = stack.pop() {
+                comp_nodes[cid].push(v);
+                for &pred in &radj_all[v] {
+                    if comp_id[pred] == usize::MAX {
+                        comp_id[pred] = cid;
+                        stack.push(pred);
+                    }
+                }
+            }
+        }
+
+        let num_comps = comp_nodes.len();
+        let mut comp_adj: Vec<Vec<usize>> = vec![Vec::new(); num_comps];
+        for u in 0..num_states {
+            let cu = comp_id[u];
+            for &v in &adj_all[u] {
+                let cv = comp_id[v];
+                if cu != cv {
+                    comp_adj[cu].push(cv);
+                }
+            }
+        }
+        for edges in comp_adj.iter_mut() {
+            edges.sort_unstable();
+            edges.dedup();
+        }
+
+        let mut indegree = vec![0usize; num_comps];
+        for c in 0..num_comps {
+            for &v in &comp_adj[c] {
+                indegree[v] += 1;
+            }
+        }
+        let mut queue: VecDeque<usize> = VecDeque::new();
+        for c in 0..num_comps {
+            if indegree[c] == 0 {
+                queue.push_back(c);
+            }
+        }
+        let mut topo: Vec<usize> = Vec::with_capacity(num_comps);
+        while let Some(c) = queue.pop_front() {
+            topo.push(c);
+            for &v in &comp_adj[c] {
+                indegree[v] -= 1;
+                if indegree[v] == 0 {
+                    queue.push_back(v);
+                }
+            }
+        }
+
+        let mut comp_transitions: Vec<BTreeMap<Label, HashMap<NWAStateID, Weight>>> =
+            vec![BTreeMap::new(); num_comps];
+        let mut comp_eps: Vec<HashMap<NWAStateID, Weight>> = vec![HashMap::new(); num_comps];
+        let mut comp_final: Vec<Option<Weight>> = vec![None; num_comps];
+
+        for (u, st) in states.iter().enumerate() {
+            let cu = comp_id[u];
+            if let Some(fw) = &st.final_weight {
+                if !fw.is_empty() {
+                    comp_final[cu] = Some(match comp_final[cu].take() {
+                        Some(cur) => cur | fw,
+                        None => fw.clone(),
+                    });
+                }
+            }
+
+            for (label, targets) in &st.transitions {
+                let entry = comp_transitions[cu].entry(*label).or_insert_with(HashMap::new);
+                for (tgt, w) in targets {
+                    if w.is_empty() {
+                        continue;
+                    }
+                    let ct = comp_id[*tgt];
+                    entry
+                        .entry(ct)
+                        .and_modify(|acc| *acc |= w)
+                        .or_insert_with(|| w.clone());
+                }
+            }
+
+            for (v, w) in &st.epsilons {
+                if w.is_empty() || w.is_all_fast() {
+                    continue;
+                }
+                let cv = comp_id[*v];
+                comp_eps[cu]
+                    .entry(cv)
+                    .and_modify(|acc| *acc |= w)
+                    .or_insert_with(|| w.clone());
+            }
+        }
+
+        for &c in topo.iter().rev() {
+            for &succ in &comp_adj[c] {
+                let (c_final, succ_final) = if c < succ {
+                    let (left, right) = comp_final.split_at_mut(succ);
+                    (&mut left[c], &right[0])
+                } else {
+                    let (left, right) = comp_final.split_at_mut(c);
+                    (&mut right[0], &left[succ])
+                };
+
+                if let Some(fw) = succ_final.as_ref() {
+                    if !fw.is_empty() {
+                        *c_final = Some(match c_final.take() {
+                            Some(cur) => cur | fw,
+                            None => fw.clone(),
+                        });
+                    }
+                }
+
+                let (c_trans, succ_trans) = if c < succ {
+                    let (left, right) = comp_transitions.split_at_mut(succ);
+                    (&mut left[c], &right[0])
+                } else {
+                    let (left, right) = comp_transitions.split_at_mut(c);
+                    (&mut right[0], &left[succ])
+                };
+                for (label, targets) in succ_trans {
+                    let entry = c_trans.entry(*label).or_insert_with(HashMap::new);
+                    for (tgt, w) in targets {
+                        if w.is_empty() {
+                            continue;
+                        }
+                        entry
+                            .entry(*tgt)
+                            .and_modify(|acc| *acc |= w)
+                            .or_insert_with(|| w.clone());
+                    }
+                }
+
+                let (c_eps, succ_eps) = if c < succ {
+                    let (left, right) = comp_eps.split_at_mut(succ);
+                    (&mut left[c], &right[0])
+                } else {
+                    let (left, right) = comp_eps.split_at_mut(c);
+                    (&mut right[0], &left[succ])
+                };
+                for (tgt, w) in succ_eps {
+                    if w.is_empty() {
+                        continue;
+                    }
+                    c_eps
+                        .entry(*tgt)
+                        .and_modify(|acc| *acc |= w)
+                        .or_insert_with(|| w.clone());
+                }
+            }
+        }
+
+        let mut new_states: Vec<NWAState> = Vec::with_capacity(num_comps);
+        for c in 0..num_comps {
+            let mut new_state = NWAState::default();
+            new_state.final_weight = comp_final[c].clone();
+            let trans_map = std::mem::take(&mut comp_transitions[c]);
+            new_state.transitions = trans_map
+                .into_iter()
+                .map(|(label, map)| (label, map.into_iter().collect()))
+                .collect();
+            let eps_map = std::mem::take(&mut comp_eps[c]);
+            new_state.epsilons = eps_map
+                .into_iter()
+                .filter(|(_, w)| !w.is_empty())
+                .collect();
+            new_states.push(new_state);
+        }
+
+        let mut new_starts: Vec<NWAStateID> = self
+            .body
+            .start_states
+            .iter()
+            .map(|s| comp_id[*s])
+            .collect();
+        new_starts.sort_unstable();
+        new_starts.dedup();
+
+        Some(NWA {
+            states: NWAStates(new_states),
+            body: NWABody {
+                start_states: new_starts,
+            },
+        })
+    }
+
+    fn rm_epsilon_weighted_in_place(&mut self) {
         let weight_all = Weight::all();
         let states = &self.states.0;
         let num_states = states.len();
@@ -169,6 +614,60 @@ impl NWA {
         });
 
         self.states.0 = new_states;
+    }
+
+    pub fn rm_epsilon(&mut self) {
+        crate::debug!(6, "[NWA] Removing epsilon transitions...");
+        let initial_states = self.states.len();
+        if initial_states == 0 {
+            return;
+        }
+        let mut total_epsilons = 0;
+        for st in &self.states.0 {
+            total_epsilons += st.epsilons.len();
+        }
+        crate::debug!(7, "[NWA] Initial number of states: {}, total epsilon transitions: {}", initial_states, total_epsilons);
+
+        if let Some(new_states) = timeit!("NWA::rm_epsilon::dag_fast_path", {
+            self.try_rm_epsilon_unweighted_scc()
+        }) {
+            self.states.0 = new_states;
+            crate::debug!(7, "[NWA] Fast-path epsilon removal applied (all-epsilon SCC)");
+            return;
+        }
+
+        let use_precollapse = std::env::var("NWA_RM_EPS_PRECOLLAPSE")
+            .map(|v| v != "0")
+            .unwrap_or(true);
+        let mut did_precollapse = false;
+        if use_precollapse {
+            if let Some(mut reduced) = timeit!("NWA::rm_epsilon::precollapse_all", {
+                self.collapse_all_weight_eps()
+            }) {
+                let before_states = self.states.len();
+                let before_eps = total_epsilons;
+                let after_states = reduced.states.len();
+                let mut after_eps = 0usize;
+                for st in &reduced.states.0 {
+                    after_eps += st.epsilons.len();
+                }
+                crate::debug!(
+                    6,
+                    "[NWA] Pre-collapsed all-weight eps: states {} -> {}, eps {} -> {}",
+                    before_states,
+                    after_states,
+                    before_eps,
+                    after_eps,
+                );
+                reduced.rm_epsilon_weighted_in_place();
+                *self = reduced;
+                did_precollapse = true;
+            }
+        }
+
+        if !did_precollapse {
+            self.rm_epsilon_weighted_in_place();
+        }
 
         let final_states = self.states.len();
         let mut final_epsilons = 0;
