@@ -57,17 +57,14 @@ impl Semiring for Weight {
     type Type = Weight;
     type ReverseWeight = Weight;
 
-    #[time_it("Weight::zero")]
     fn zero() -> Self {
         Weight::zeros()
     }
 
-    #[time_it("Weight::one")]
     fn one() -> Self {
         Weight::all()
     }
 
-    #[time_it("Weight::new")]
     fn new(value: Self::Type) -> Self {
         value
     }
@@ -89,27 +86,22 @@ impl Semiring for Weight {
         *self == *rhs.borrow()
     }
 
-    #[time_it("Weight::value")]
     fn value(&self) -> &Self::Type {
         self
     }
 
-    #[time_it("Weight::take_value")]
     fn take_value(self) -> Self::Type {
         self
     }
 
-    #[time_it("Weight::set_value")]
     fn set_value(&mut self, value: Self::Type) {
         *self = value;
     }
 
-    #[time_it("Weight::reverse")]
     fn reverse(&self) -> Result<Self::ReverseWeight> {
         Ok(self.clone())
     }
 
-    #[time_it("Weight::properties")]
     fn properties() -> SemiringProperties {
         SemiringProperties::LEFT_SEMIRING
             | SemiringProperties::RIGHT_SEMIRING
@@ -149,14 +141,12 @@ impl WeaklyDivisibleSemiring for Weight {
 }
 
 impl WeightQuantize for Weight {
-    #[time_it("Weight::quantize_assign")]
     fn quantize_assign(&mut self, _delta: f32) -> Result<()> {
         Ok(())
     }
 }
 
 impl SerializableSemiring for Weight {
-    #[time_it("Weight::weight_type")]
     fn weight_type() -> String {
         "bitset".to_string()
     }
