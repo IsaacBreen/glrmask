@@ -1031,7 +1031,6 @@ impl AbstractWeight {
 impl BitAnd for AbstractWeight {
     type Output = Self;
 
-    #[time_it("AbstractWeight::bitand")]
     fn bitand(self, rhs: Self) -> Self::Output {
         match (self, rhs) {
             (AbstractWeight::RangeSet(a), AbstractWeight::RangeSet(b)) => {
@@ -1051,7 +1050,6 @@ impl BitAnd for AbstractWeight {
 impl BitAnd<&AbstractWeight> for AbstractWeight {
     type Output = AbstractWeight;
 
-    #[time_it("AbstractWeight::bitand")]
     fn bitand(self, rhs: &AbstractWeight) -> Self::Output {
         match (self, rhs) {
             (AbstractWeight::RangeSet(a), AbstractWeight::RangeSet(b)) => {
@@ -1071,7 +1069,6 @@ impl BitAnd<&AbstractWeight> for AbstractWeight {
 impl BitAnd for &AbstractWeight {
     type Output = AbstractWeight;
 
-    #[time_it("AbstractWeight::bitand")]
     fn bitand(self, rhs: Self) -> Self::Output {
         if self.is_empty() || rhs.is_empty() {
             return AbstractWeight::zeros();
@@ -1082,23 +1079,24 @@ impl BitAnd for &AbstractWeight {
         if rhs.is_all_fast() {
             return self.clone();
         }
-        match (self, rhs) {
-            (AbstractWeight::RangeSet(a), AbstractWeight::RangeSet(b)) => {
-                AbstractWeight::RangeSet(WeightBackend::intersect(a, b))
+        timeit!("AbstractWeight::bitand::nontrivial", {
+            match (self, rhs) {
+                (AbstractWeight::RangeSet(a), AbstractWeight::RangeSet(b)) => {
+                    AbstractWeight::RangeSet(WeightBackend::intersect(a, b))
+                }
+                (AbstractWeight::Factorized(a), AbstractWeight::Factorized(b)) => {
+                    AbstractWeight::Factorized(WeightBackend::intersect(a, b))
+                }
+                (AbstractWeight::RangeMap(a), AbstractWeight::RangeMap(b)) => {
+                    AbstractWeight::RangeMap(WeightBackend::intersect(a, b))
+                }
+                _ => panic!("AbstractWeight operation requires both operands to be the same variant"),
             }
-            (AbstractWeight::Factorized(a), AbstractWeight::Factorized(b)) => {
-                AbstractWeight::Factorized(WeightBackend::intersect(a, b))
-            }
-            (AbstractWeight::RangeMap(a), AbstractWeight::RangeMap(b)) => {
-                AbstractWeight::RangeMap(WeightBackend::intersect(a, b))
-            }
-            _ => panic!("AbstractWeight operation requires both operands to be the same variant"),
-        }
+        })
     }
 }
 
 impl BitAndAssign for AbstractWeight {
-    #[time_it("AbstractWeight::bitand")]
     fn bitand_assign(&mut self, rhs: Self) {
         match (self, &rhs) {
             (AbstractWeight::RangeSet(a), AbstractWeight::RangeSet(b)) => {
@@ -1116,7 +1114,6 @@ impl BitAndAssign for AbstractWeight {
 }
 
 impl BitAndAssign<&AbstractWeight> for AbstractWeight {
-    #[time_it("AbstractWeight::bitand")]
     fn bitand_assign(&mut self, rhs: &AbstractWeight) {
         match (self, rhs) {
             (AbstractWeight::RangeSet(a), AbstractWeight::RangeSet(b)) => {
