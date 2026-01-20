@@ -21,7 +21,7 @@ use crate::datastructures::factorized_weight::{FactorizedWeight, intern_factoriz
 use crate::datastructures::hybrid_bitset::RangeSet;
 use crate::datastructures::rangemap_weight::{RangeMapWeight, intern_rangemap};
 use crate::json_serialization::{JSONConvertible, JSONNode};
-use profiler_macro::{time_it, timeit};
+use profiler_macro::time_it;
 use serde::{Deserialize, Serialize};
 use serde::de::Error;
 use serde_json::Value as JsonValue;
@@ -1079,20 +1079,18 @@ impl BitAnd for &AbstractWeight {
         if rhs.is_all_fast() {
             return self.clone();
         }
-        timeit!("AbstractWeight::bitand::nontrivial", {
-            match (self, rhs) {
-                (AbstractWeight::RangeSet(a), AbstractWeight::RangeSet(b)) => {
-                    AbstractWeight::RangeSet(WeightBackend::intersect(a, b))
-                }
-                (AbstractWeight::Factorized(a), AbstractWeight::Factorized(b)) => {
-                    AbstractWeight::Factorized(WeightBackend::intersect(a, b))
-                }
-                (AbstractWeight::RangeMap(a), AbstractWeight::RangeMap(b)) => {
-                    AbstractWeight::RangeMap(WeightBackend::intersect(a, b))
-                }
-                _ => panic!("AbstractWeight operation requires both operands to be the same variant"),
+        match (self, rhs) {
+            (AbstractWeight::RangeSet(a), AbstractWeight::RangeSet(b)) => {
+                AbstractWeight::RangeSet(WeightBackend::intersect(a, b))
             }
-        })
+            (AbstractWeight::Factorized(a), AbstractWeight::Factorized(b)) => {
+                AbstractWeight::Factorized(WeightBackend::intersect(a, b))
+            }
+            (AbstractWeight::RangeMap(a), AbstractWeight::RangeMap(b)) => {
+                AbstractWeight::RangeMap(WeightBackend::intersect(a, b))
+            }
+            _ => panic!("AbstractWeight operation requires both operands to be the same variant"),
+        }
     }
 }
 

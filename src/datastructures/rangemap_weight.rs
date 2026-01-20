@@ -924,7 +924,7 @@ impl RangeMapWeight {
         self.union_non_negated(other)
     }
 
-    #[time_it("RangeMapWeight::intersect_non_negated")]
+    #[time_it("RangeMapWeight::bitand")]
     fn intersect_non_negated(&self, other: &Self) -> Self {
         let left_ranges = Self::map_range_count(&self.map);
         let right_ranges = Self::map_range_count(&other.map);
