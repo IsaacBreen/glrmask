@@ -884,7 +884,6 @@ impl RangeMapWeight {
         intern_rangemap(result)
     }
 
-    #[time_it("RangeMapWeight::union_non_negated")]
     fn union_non_negated(&self, other: &Self) -> Self {
         let left_ranges = Self::map_range_count(&self.map);
         let right_ranges = Self::map_range_count(&other.map);
