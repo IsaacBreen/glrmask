@@ -69,19 +69,16 @@ impl Semiring for Weight {
         value
     }
 
-    #[time_it("Weight::plus_assign")]
     fn plus_assign<P: Borrow<Self>>(&mut self, rhs: P) -> Result<()> {
         self.bitor_assign(rhs.borrow());
         Ok(())
     }
 
-    #[time_it("Weight::times_assign")]
     fn times_assign<P: Borrow<Self>>(&mut self, rhs: P) -> Result<()> {
         self.bitand_assign(rhs.borrow());
         Ok(())
     }
 
-    #[time_it("Weight::approx_equal")]
     fn approx_equal<P: Borrow<Self>>(&self, rhs: P, _delta: f32) -> bool {
         *self == *rhs.borrow()
     }
@@ -112,14 +109,12 @@ impl Semiring for Weight {
 }
 
 impl ReverseBack<Weight> for Weight {
-    #[time_it("Weight::reverse_back")]
     fn reverse_back(&self) -> Result<Weight> {
         Ok(self.clone())
     }
 }
 
 impl WeaklyDivisibleSemiring for Weight {
-    #[time_it("Weight::divide_assign")]
     fn divide_assign(&mut self, rhs: &Self, _divide_type: DivideType) -> Result<()> {
         let new_weight = if *self == *rhs {
             Weight::all()
