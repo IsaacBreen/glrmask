@@ -8,7 +8,6 @@ use super::dwa::DWA;
 use super::nwa::NWA;
 use crate::dwa_i32::NWAStateID;
 use anyhow::Result;
-use lru::LruCache;
 use nom::IResult;
 use once_cell::sync::Lazy;
 use range_set_blaze::RangeSetBlaze;
@@ -21,11 +20,10 @@ use rustfst::semirings::{
 };
 use rustfst::{NomCustomError, Semiring};
 use std::borrow::Borrow;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::io::Write;
-use std::num::NonZeroUsize;
+use std::ops::{BitAndAssign, BitOrAssign};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 #[inline]
@@ -55,22 +53,6 @@ fn label_to_fst_label(label: Label) -> u32 {
     assert!(label == remapped, "label: {}, result: {}, remapped: {}", label, result, remapped);
     result
 }
-
-static WEIGHT_INTERNER: Lazy<Mutex<HashSet<Arc<Weight>>>> = Lazy::new(|| Mutex::new(HashSet::new()));
-
-const WEIGHT_DIVIDE_CACHE_CAPACITY: usize = 100_000;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct DivideKey {
-    a: usize,
-    b: usize,
-}
-
-static WEIGHT_DIVIDE_CACHE: Lazy<Mutex<LruCache<DivideKey, Arc<Weight>>>> = Lazy::new(|| {
-    Mutex::new(LruCache::new(
-        NonZeroUsize::new(WEIGHT_DIVIDE_CACHE_CAPACITY).unwrap(),
-    ))
-});
 
 static RUSTFST_WEIGHT_COUNT_ZERO: AtomicU64 = AtomicU64::new(0);
 static RUSTFST_WEIGHT_TIME_ZERO: AtomicU64 = AtomicU64::new(0);
@@ -308,39 +290,14 @@ pub fn print_rustfst_weight_profile(label: &str) {
     );
 }
 
-fn intern_weight(weight: Weight) -> Arc<Weight> {
-    let mut interner = WEIGHT_INTERNER.lock().unwrap();
-    if let Some(w) = interner.get(&weight) {
-        return w.clone();
-    }
-    let arc_weight = Arc::new(weight);
-    interner.insert(arc_weight.clone());
-    arc_weight
-}
-
-/// Semiring over bitset weights: plus = union, times = intersection.
-#[derive(Clone, Debug, PartialOrd, Default, Eq)]
-pub struct BitsetWeight(pub Arc<Weight>);
-
-impl PartialEq for BitsetWeight {
-    fn eq(&self, other: &Self) -> bool { Arc::ptr_eq(&self.0, &other.0) || *self.0 == *other.0 }
-}
-
-impl std::hash::Hash for BitsetWeight {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        // Hash the underlying weight value for consistency with PartialEq
-        self.0.hash(state);
-    }
-}
-
-impl Semiring for BitsetWeight {
+impl Semiring for Weight {
     type Type = Weight;
-    type ReverseWeight = BitsetWeight;
+    type ReverseWeight = Weight;
 
     fn zero() -> Self {
         let prof = rustfst_weight_profile_enabled();
         let start = if prof { Some(Instant::now()) } else { None };
-        let res = BitsetWeight(intern_weight(Weight::zeros()));
+        let res = Weight::zeros();
         if let Some(start) = start {
             RUSTFST_WEIGHT_COUNT_ZERO.fetch_add(1, Ordering::Relaxed);
             RUSTFST_WEIGHT_TIME_ZERO.fetch_add(start.elapsed().as_micros() as u64, Ordering::Relaxed);
@@ -351,7 +308,7 @@ impl Semiring for BitsetWeight {
     fn one() -> Self {
         let prof = rustfst_weight_profile_enabled();
         let start = if prof { Some(Instant::now()) } else { None };
-        let res = BitsetWeight(intern_weight(Weight::all()));
+        let res = Weight::all();
         if let Some(start) = start {
             RUSTFST_WEIGHT_COUNT_ONE.fetch_add(1, Ordering::Relaxed);
             RUSTFST_WEIGHT_TIME_ONE.fetch_add(start.elapsed().as_micros() as u64, Ordering::Relaxed);
@@ -362,7 +319,7 @@ impl Semiring for BitsetWeight {
     fn new(value: Self::Type) -> Self {
         let prof = rustfst_weight_profile_enabled();
         let start = if prof { Some(Instant::now()) } else { None };
-        let res = BitsetWeight(intern_weight(value));
+        let res = value;
         if let Some(start) = start {
             RUSTFST_WEIGHT_COUNT_NEW.fetch_add(1, Ordering::Relaxed);
             RUSTFST_WEIGHT_TIME_NEW.fetch_add(start.elapsed().as_micros() as u64, Ordering::Relaxed);
@@ -373,8 +330,7 @@ impl Semiring for BitsetWeight {
     fn plus_assign<P: Borrow<Self>>(&mut self, rhs: P) -> Result<()> {
         let prof = rustfst_weight_profile_enabled();
         let start = if prof { Some(Instant::now()) } else { None };
-        let new_weight = &*self.0 | &*rhs.borrow().0;
-        self.0 = intern_weight(new_weight);
+        self.bitor_assign(rhs.borrow());
         if let Some(start) = start {
             RUSTFST_WEIGHT_COUNT_PLUS.fetch_add(1, Ordering::Relaxed);
             RUSTFST_WEIGHT_TIME_PLUS.fetch_add(start.elapsed().as_micros() as u64, Ordering::Relaxed);
@@ -385,8 +341,7 @@ impl Semiring for BitsetWeight {
     fn times_assign<P: Borrow<Self>>(&mut self, rhs: P) -> Result<()> {
         let prof = rustfst_weight_profile_enabled();
         let start = if prof { Some(Instant::now()) } else { None };
-        let new_weight = &*self.0 & &*rhs.borrow().0;
-        self.0 = intern_weight(new_weight);
+        self.bitand_assign(rhs.borrow());
         if let Some(start) = start {
             RUSTFST_WEIGHT_COUNT_TIMES.fetch_add(1, Ordering::Relaxed);
             RUSTFST_WEIGHT_TIME_TIMES.fetch_add(start.elapsed().as_micros() as u64, Ordering::Relaxed);
@@ -397,7 +352,7 @@ impl Semiring for BitsetWeight {
     fn approx_equal<P: Borrow<Self>>(&self, rhs: P, _delta: f32) -> bool {
         let prof = rustfst_weight_profile_enabled();
         let start = if prof { Some(Instant::now()) } else { None };
-        let res = *self.0 == *rhs.borrow().0;
+        let res = *self == *rhs.borrow();
         if let Some(start) = start {
             RUSTFST_WEIGHT_COUNT_APPROX_EQUAL.fetch_add(1, Ordering::Relaxed);
             RUSTFST_WEIGHT_TIME_APPROX_EQUAL.fetch_add(start.elapsed().as_micros() as u64, Ordering::Relaxed);
@@ -408,7 +363,7 @@ impl Semiring for BitsetWeight {
     fn value(&self) -> &Self::Type {
         let prof = rustfst_weight_profile_enabled();
         let start = if prof { Some(Instant::now()) } else { None };
-        let res: &Self::Type = &self.0;
+        let res: &Self::Type = self;
         if let Some(start) = start {
             RUSTFST_WEIGHT_COUNT_VALUE.fetch_add(1, Ordering::Relaxed);
             RUSTFST_WEIGHT_TIME_VALUE.fetch_add(start.elapsed().as_micros() as u64, Ordering::Relaxed);
@@ -419,7 +374,7 @@ impl Semiring for BitsetWeight {
     fn take_value(self) -> Self::Type {
         let prof = rustfst_weight_profile_enabled();
         let start = if prof { Some(Instant::now()) } else { None };
-        let res = Arc::try_unwrap(self.0).unwrap_or_else(|arc| (*arc).clone());
+        let res = self;
         if let Some(start) = start {
             RUSTFST_WEIGHT_COUNT_TAKE_VALUE.fetch_add(1, Ordering::Relaxed);
             RUSTFST_WEIGHT_TIME_TAKE_VALUE.fetch_add(start.elapsed().as_micros() as u64, Ordering::Relaxed);
@@ -430,7 +385,7 @@ impl Semiring for BitsetWeight {
     fn set_value(&mut self, value: Self::Type) {
         let prof = rustfst_weight_profile_enabled();
         let start = if prof { Some(Instant::now()) } else { None };
-        self.0 = intern_weight(value);
+        *self = value;
         if let Some(start) = start {
             RUSTFST_WEIGHT_COUNT_SET_VALUE.fetch_add(1, Ordering::Relaxed);
             RUSTFST_WEIGHT_TIME_SET_VALUE.fetch_add(start.elapsed().as_micros() as u64, Ordering::Relaxed);
@@ -464,8 +419,8 @@ impl Semiring for BitsetWeight {
     }
 }
 
-impl ReverseBack<BitsetWeight> for BitsetWeight {
-    fn reverse_back(&self) -> Result<BitsetWeight> {
+impl ReverseBack<Weight> for Weight {
+    fn reverse_back(&self) -> Result<Weight> {
         let prof = rustfst_weight_profile_enabled();
         let start = if prof { Some(Instant::now()) } else { None };
         let res = Ok(self.clone());
@@ -477,43 +432,25 @@ impl ReverseBack<BitsetWeight> for BitsetWeight {
     }
 }
 
-impl WeaklyDivisibleSemiring for BitsetWeight {
+impl WeaklyDivisibleSemiring for Weight {
     fn divide_assign(&mut self, rhs: &Self, _divide_type: DivideType) -> Result<()> {
         let prof = rustfst_weight_profile_enabled();
         let start = if prof { Some(Instant::now()) } else { None };
-        let lhs = Arc::clone(&self.0);
-        let rhs = Arc::clone(&rhs.0);
-
-        let new_arc = if Arc::ptr_eq(&lhs, &rhs) {
-            intern_weight(Weight::all())
+        let new_weight = if *self == *rhs {
+            Weight::all()
         } else if rhs.is_empty() {
-            intern_weight(Weight::all())
+            Weight::all()
         } else if rhs.is_all_fast() {
-            lhs
-        } else if lhs.is_all_fast() {
-            intern_weight(Weight::all())
-        } else if lhs.is_empty() {
-            intern_weight(rhs.complement())
+            self.clone()
+        } else if self.is_all_fast() {
+            Weight::all()
+        } else if self.is_empty() {
+            rhs.complement()
         } else {
-            let key = DivideKey {
-                a: Arc::as_ptr(&lhs) as usize,
-                b: Arc::as_ptr(&rhs) as usize,
-            };
-            if let Some(hit) = {
-                let mut cache = WEIGHT_DIVIDE_CACHE.lock().unwrap();
-                cache.get(&key).cloned()
-            } {
-                hit
-            } else {
-                let new_weight = lhs.divide(&rhs);
-                let arc = intern_weight(new_weight);
-                let mut cache = WEIGHT_DIVIDE_CACHE.lock().unwrap();
-                cache.put(key, arc.clone());
-                arc
-            }
+            self.divide(rhs)
         };
 
-        self.0 = new_arc;
+        *self = new_weight;
         if let Some(start) = start {
             RUSTFST_WEIGHT_COUNT_DIVIDE.fetch_add(1, Ordering::Relaxed);
             RUSTFST_WEIGHT_TIME_DIVIDE.fetch_add(start.elapsed().as_micros() as u64, Ordering::Relaxed);
@@ -522,7 +459,7 @@ impl WeaklyDivisibleSemiring for BitsetWeight {
     }
 }
 
-impl WeightQuantize for BitsetWeight {
+impl WeightQuantize for Weight {
     fn quantize_assign(&mut self, _delta: f32) -> Result<()> {
         let prof = rustfst_weight_profile_enabled();
         let start = if prof { Some(Instant::now()) } else { None };
@@ -535,7 +472,7 @@ impl WeightQuantize for BitsetWeight {
     }
 }
 
-impl SerializableSemiring for BitsetWeight {
+impl SerializableSemiring for Weight {
     fn weight_type() -> String {
         let prof = rustfst_weight_profile_enabled();
         let start = if prof { Some(Instant::now()) } else { None };
@@ -561,7 +498,7 @@ impl SerializableSemiring for BitsetWeight {
             i = next_i;
         }
         let rsb = RangeSetBlaze::from_iter(ranges);
-        let res = Ok((i, BitsetWeight(intern_weight(Weight::from_rsb(rsb)))));
+        let res = Ok((i, Weight::from_rsb(rsb)));
         if let Some(start) = start {
             RUSTFST_WEIGHT_COUNT_PARSE_BINARY.fetch_add(1, Ordering::Relaxed);
             RUSTFST_WEIGHT_TIME_PARSE_BINARY.fetch_add(start.elapsed().as_micros() as u64, Ordering::Relaxed);
@@ -572,7 +509,7 @@ impl SerializableSemiring for BitsetWeight {
     fn write_binary<F: Write>(&self, file: &mut F) -> Result<()> {
         let prof = rustfst_weight_profile_enabled();
         let start = if prof { Some(Instant::now()) } else { None };
-        let ranges: Vec<_> = self.0.to_rsb().ranges().collect();
+        let ranges: Vec<_> = self.to_rsb().ranges().collect();
         file.write_all(&(ranges.len() as u64).to_le_bytes())?;
         for range in ranges {
             file.write_all(&(*range.start() as u64).to_le_bytes())?;
@@ -588,23 +525,15 @@ impl SerializableSemiring for BitsetWeight {
 
     fn parse_text(i: &str) -> IResult<&str, Self> {
         use nom::combinator::map_res;
-        map_res(nom::combinator::rest, |s: &str| -> Result<BitsetWeight, _> {
-            serde_json::from_str::<Weight>(s)
-                .map(|w| BitsetWeight(intern_weight(w)))
-                .map_err(|e| e.to_string())
+        map_res(nom::combinator::rest, |s: &str| -> Result<Weight, _> {
+            serde_json::from_str::<Weight>(s).map_err(|e| e.to_string())
         })(i)
     }
 }
 
-impl std::fmt::Display for BitsetWeight {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", serde_json::to_string(self.0.as_ref()).unwrap_or_else(|_| "err".to_string()))
-    }
-}
-
-pub fn nwa_to_vector_fst(nwa: &NWA) -> VectorFst<BitsetWeight> {
+pub fn nwa_to_vector_fst(nwa: &NWA) -> VectorFst<Weight> {
     let total_start = std::time::Instant::now();
-    let mut fst = VectorFst::<BitsetWeight>::new();
+    let mut fst = VectorFst::<Weight>::new();
     let mut state_map = HashMap::<NWAStateID, StateId>::new();
     let add_state_start = std::time::Instant::now();
     for i in 0..nwa.states.len() {
@@ -628,7 +557,7 @@ pub fn nwa_to_vector_fst(nwa: &NWA) -> VectorFst<BitsetWeight> {
             for &s_idx in &nwa.body.start_states {
                 if let Some(&target) = state_map.get(&s_idx) {
                     let add_start = std::time::Instant::now();
-                    fst.add_tr(super_start, Tr::new(EPS_LABEL, EPS_LABEL, BitsetWeight::one(), target)).unwrap();
+                    fst.add_tr(super_start, Tr::new(EPS_LABEL, EPS_LABEL, Weight::one(), target)).unwrap();
                     start_time += add_start.elapsed();
                     start_eps_count += 1;
                 }
@@ -657,7 +586,7 @@ pub fn nwa_to_vector_fst(nwa: &NWA) -> VectorFst<BitsetWeight> {
                 final_clone_time += clone_start.elapsed();
                 let set_start = std::time::Instant::now();
                 final_count += 1;
-                fst.set_final(fst_state_id, BitsetWeight::new(w_clone)).unwrap();
+                fst.set_final(fst_state_id, Weight::new(w_clone)).unwrap();
                 final_set_time += set_start.elapsed();
             }
         }
@@ -675,7 +604,7 @@ pub fn nwa_to_vector_fst(nwa: &NWA) -> VectorFst<BitsetWeight> {
                         Tr::new(
                             label_to_fst_label(*label),
                             label_to_fst_label(*label),
-                            BitsetWeight::new(w_clone),
+                            Weight::new(w_clone),
                             state_map[target],
                         ),
                     )
@@ -692,7 +621,7 @@ pub fn nwa_to_vector_fst(nwa: &NWA) -> VectorFst<BitsetWeight> {
                 eps_clone_time += clone_start.elapsed();
                 let add_start = std::time::Instant::now();
                 eps_count += 1;
-                fst.add_tr(fst_state_id, Tr::new(EPS_LABEL, EPS_LABEL, BitsetWeight::new(w_clone), state_map[target]))
+                fst.add_tr(fst_state_id, Tr::new(EPS_LABEL, EPS_LABEL, Weight::new(w_clone), state_map[target]))
                     .unwrap();
                 eps_add_time += add_start.elapsed();
             }
@@ -717,7 +646,7 @@ pub fn nwa_to_vector_fst(nwa: &NWA) -> VectorFst<BitsetWeight> {
     fst
 }
 
-pub fn vector_fst_to_dwa(fst: &VectorFst<BitsetWeight>) -> DWA {
+pub fn vector_fst_to_dwa(fst: &VectorFst<Weight>) -> DWA {
     let fst_start = match fst.start() {
         Some(s) => s,
         None => return DWA::new(),
@@ -741,13 +670,13 @@ pub fn vector_fst_to_dwa(fst: &VectorFst<BitsetWeight>) -> DWA {
         let dwa_state_id = state_map[&fst_state_id];
 
         if let Some(w) = fst.final_weight(fst_state_id).unwrap() {
-            if !w.0.is_empty() {
-                dwa.set_final_weight(dwa_state_id, w.value().clone()).unwrap();
+            if !w.is_empty() {
+                dwa.set_final_weight(dwa_state_id, w.clone()).unwrap();
             }
         }
 
         for tr in fst.get_trs(fst_state_id).unwrap().trs() {
-            if !tr.weight.0.is_empty() {
+            if !tr.weight.is_empty() {
                 if !state_map.contains_key(&tr.nextstate) {
                     continue;
                 }
@@ -755,7 +684,7 @@ pub fn vector_fst_to_dwa(fst: &VectorFst<BitsetWeight>) -> DWA {
                     dwa_state_id,
                     fst_label_to_label(tr.ilabel),
                     state_map[&tr.nextstate],
-                    tr.weight.value().clone(),
+                    tr.weight.clone(),
                 );
                 if let Err(e) = res {
                     panic!(
@@ -770,7 +699,7 @@ pub fn vector_fst_to_dwa(fst: &VectorFst<BitsetWeight>) -> DWA {
     dwa
 }
 
-pub fn vector_fst_to_nwa(fst: &VectorFst<BitsetWeight>) -> NWA {
+pub fn vector_fst_to_nwa(fst: &VectorFst<Weight>) -> NWA {
     let total_start = std::time::Instant::now();
     if fst.num_states() == 0 {
         return NWA::new_empty();
@@ -813,9 +742,9 @@ pub fn vector_fst_to_nwa(fst: &VectorFst<BitsetWeight>) -> NWA {
         let nwa_state_id = state_map[fst_state_id as usize];
 
         if let Some(w) = fst.final_weight(fst_state_id).unwrap() {
-            if !w.0.is_empty() {
+            if !w.is_empty() {
                 let clone_start = std::time::Instant::now();
-                let w_clone = w.value().clone();
+                let w_clone = w.clone();
                 final_clone_time += clone_start.elapsed();
                 let set_start = std::time::Instant::now();
                 final_count += 1;
@@ -825,10 +754,10 @@ pub fn vector_fst_to_nwa(fst: &VectorFst<BitsetWeight>) -> NWA {
         }
 
         for tr in fst.get_trs(fst_state_id).unwrap().trs() {
-            if !tr.weight.0.is_empty() {
+            if !tr.weight.is_empty() {
                 let target_nwa_id = state_map[tr.nextstate as usize];
                 let clone_start = std::time::Instant::now();
-                let weight = tr.weight.value().clone();
+                let weight = tr.weight.clone();
                 let clone_time = clone_start.elapsed();
 
                 if tr.ilabel == EPS_LABEL {
@@ -929,17 +858,17 @@ pub fn determinize_nwa_to_dwa(nwa: &NWA) -> DWA {
     rm_epsilon(&mut fst).unwrap();
 
     let det_config = DeterminizeConfig::default().with_det_type(DeterminizeType::DeterminizeFunctional);
-    let det_fst: VectorFst<BitsetWeight> = determinize_with_config(&fst, det_config).unwrap();
+    let det_fst: VectorFst<Weight> = determinize_with_config(&fst, det_config).unwrap();
 
     vector_fst_to_dwa(&det_fst)
 }
 
 impl DWA {
-    pub fn to_rustfst(&self) -> VectorFst<BitsetWeight> {
+    pub fn to_rustfst(&self) -> VectorFst<Weight> {
         nwa_to_vector_fst(&NWA::from_dwa(self))
     }
 
-    pub fn from_rustfst(fst: &VectorFst<BitsetWeight>) -> DWA {
+    pub fn from_rustfst(fst: &VectorFst<Weight>) -> DWA {
         vector_fst_to_dwa(fst)
     }
 }
@@ -949,11 +878,11 @@ impl NWA {
         determinize_nwa_to_dwa(self)
     }
 
-    pub fn to_rustfst(&self) -> VectorFst<BitsetWeight> {
+    pub fn to_rustfst(&self) -> VectorFst<Weight> {
         nwa_to_vector_fst(self)
     }
 
-    pub fn from_rustfst(fst: &VectorFst<BitsetWeight>) -> NWA {
+    pub fn from_rustfst(fst: &VectorFst<Weight>) -> NWA {
         vector_fst_to_nwa(fst)
     }
     
