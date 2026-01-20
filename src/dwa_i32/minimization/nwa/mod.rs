@@ -154,22 +154,6 @@ impl NWA {
             start.elapsed()
         });
 
-        let div_us = crate::datastructures::rangemap_weight::PROF_RANGEMAP_TIME_DIVIDE_TOTAL
-            .load(std::sync::atomic::Ordering::Relaxed);
-        let div_time = std::time::Duration::from_micros(div_us);
-        let min_non_div = min_time.checked_sub(div_time).unwrap_or(std::time::Duration::ZERO);
-        let total_time = to_time + min_time + from_time;
-        let total_non_div = total_time.checked_sub(div_time).unwrap_or(std::time::Duration::ZERO);
-        
-        crate::debug!(
-            4,
-            "[NWA::minimize_with_rustfst_full] minimize_non_div≈{:?} (minimize={:?} - div={:?}); total_non_div≈{:?}",
-            min_non_div,
-            min_time,
-            div_time,
-            total_non_div,
-        );
-
         let mut slowest_label = "to_rustfst";
         let mut slowest_time = to_time;
         if min_time > slowest_time {
