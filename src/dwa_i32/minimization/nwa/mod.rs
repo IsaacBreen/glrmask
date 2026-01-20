@@ -20,6 +20,7 @@ use std::collections::HashSet;
 use rustfst::algorithms::rm_epsilon::rm_epsilon;
 use std::time::Instant;
 use profiler_macro::{time_it, timeit};
+use rustfst::fst_traits::{CoreFst, ExpandedFst, StateIterator};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum NwaPass {
@@ -63,6 +64,8 @@ impl NWA {
         let start2 = std::time::Instant::now();
         rm_epsilon(&mut fst).unwrap();
         let rm_epsilon_time = start2.elapsed();
+
+        crate::debug!(7, "[NWA] Epsilon removal done. RustFST states: {}, transitions: {}", fst.num_states(), fst.states_iter().map(|s| fst.num_trs(s).unwrap()).sum::<usize>());
         
         let start3 = std::time::Instant::now();
         *self = NWA::from_rustfst(&fst);
