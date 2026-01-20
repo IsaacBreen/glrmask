@@ -21,7 +21,7 @@ use crate::datastructures::factorized_weight::{FactorizedWeight, intern_factoriz
 use crate::datastructures::hybrid_bitset::RangeSet;
 use crate::datastructures::rangemap_weight::{RangeMapWeight, intern_rangemap};
 use crate::json_serialization::{JSONConvertible, JSONNode};
-use profiler_macro::time_it;
+use profiler_macro::{time_it, timeit};
 use serde::{Deserialize, Serialize};
 use serde::de::Error;
 use serde_json::Value as JsonValue;
@@ -338,7 +338,6 @@ pub enum AbstractWeight {
 }
 
 impl std::hash::Hash for AbstractWeight {
-    #[time_it("AbstractWeight::hash")]
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         match self {
             AbstractWeight::RangeSet(rsb) => {
@@ -1213,7 +1212,6 @@ impl BitOrAssign for AbstractWeight {
 }
 
 impl BitOrAssign<&AbstractWeight> for AbstractWeight {
-    #[time_it("AbstractWeight::bitor_assign_ref")]
     fn bitor_assign(&mut self, rhs: &AbstractWeight) {
         match (self, rhs) {
             (AbstractWeight::RangeSet(a), AbstractWeight::RangeSet(b)) => {

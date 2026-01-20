@@ -1161,6 +1161,7 @@ fn are_compatible(
     new_states: &[MergedStateBuilder]
 ) -> bool {
     let domain_overlap = &needed[u] & &needed[v];
+    let domain_overlap_empty = domain_overlap.is_empty();
     
     // Helper: get weight restricted to overlap (or zeros if no final/trans weight)
     let final_on_overlap = |s: StateID| -> Weight {
@@ -1170,7 +1171,7 @@ fn are_compatible(
     };
     
     // Check final weights match on overlap
-    if !domain_overlap.is_empty() && final_on_overlap(u) != final_on_overlap(v) {
+    if !domain_overlap_empty && final_on_overlap(u) != final_on_overlap(v) {
         return false;
     }
     
@@ -1191,20 +1192,24 @@ fn are_compatible(
         let w_v = get_weight(v);
 
         // On overlap domain, weights must match
-        if !domain_overlap.is_empty() {
+        if !domain_overlap_empty {
             let w_u_overlap = &w_u & &domain_overlap;
             let w_v_overlap = &w_v & &domain_overlap;
             if w_u_overlap != w_v_overlap {
                 return false;
             }
             // One has transition on overlap, other doesn't = incompatible
-            if w_u_overlap.is_empty() != w_v_overlap.is_empty() {
+            let w_u_overlap_empty = w_u_overlap.is_empty();
+            let w_v_overlap_empty = w_v_overlap.is_empty();
+            if w_u_overlap_empty != w_v_overlap_empty {
                 return false;
             }
         }
 
         // If both have live transitions, check targets are compatible
-        if !w_u.is_empty() && !w_v.is_empty() {
+        let w_u_empty = w_u.is_empty();
+        let w_v_empty = w_v.is_empty();
+        if !w_u_empty && !w_v_empty {
             let tu = dwa.states[u].transitions.get(&lbl);
             let tv = dwa.states[v].transitions.get(&lbl);
             
@@ -1281,8 +1286,8 @@ fn targets_equivalent_on_domain(
         let (target_v, w_v) = bv.transitions.get(&lbl)
             .map(|(t, w)| (*t, w & domain))
             .unwrap_or((usize::MAX, Weight::zeros()));
-        
-        if w_u != w_v || (!w_u.is_empty() && target_u != target_v) {
+        let w_u_empty = w_u.is_empty();
+        if w_u != w_v || (!w_u_empty && target_u != target_v) {
             return false;
         }
     }

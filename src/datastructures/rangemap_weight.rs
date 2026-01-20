@@ -12,7 +12,7 @@ use range_set_blaze::{RangeMapBlaze, RangeSetBlaze};
 use crate::datastructures::abstract_weight::{current_num_tsids, normalize_num_tsids, WeightBackend};
 use crate::datastructures::cache;
 use crate::datastructures::hybrid_bitset::RangeSet;
-use profiler_macro::{time_it, timeit};
+use profiler_macro::time_it;
 
 const WEIGHT_OP_CACHE_CAPACITY: usize = 100_000;
 const DIVIDE_CACHE_CAPACITY: usize = 50_000;
@@ -158,23 +158,16 @@ fn get_rhs_comp_cache(rhs: &Arc<RangeMapWeight>) -> Option<Arc<RhsCompCache>> {
     Some(built)
 }
 
-#[time_it("intern_rangemap")]
 #[track_caller]
 pub fn intern_rangemap(weight: RangeMapWeight) -> Arc<RangeMapWeight> {
-    if let Some(existing) = timeit!("intern_rangemap::get_existing", {
-        RANGEMAP_WEIGHT_INTERNER.get(&weight)
-    }) {
+    if let Some(existing) = RANGEMAP_WEIGHT_INTERNER.get(&weight) {
         return Arc::clone(&*existing);
     }
     let arc = Arc::new(weight);
-    let inserted = timeit!("intern_rangemap::insert", {
-        RANGEMAP_WEIGHT_INTERNER.insert(arc.clone())
-    });
+    let inserted = RANGEMAP_WEIGHT_INTERNER.insert(arc.clone());
     if inserted {
         let ptr = Arc::as_ptr(&arc) as usize;
-        timeit!("intern_rangemap::invalidate_cache", {
-            invalidate_rangemap_op_cache_for_ptr(ptr);
-        });
+        invalidate_rangemap_op_cache_for_ptr(ptr);
     }
     if inserted {
         arc
@@ -194,7 +187,6 @@ pub struct RangeMapWeight {
 }
 
 impl RangeMapWeight {
-    #[time_it("RangeMapWeight::compute_hash")]
     fn compute_hash(map: &RangeMapBlaze<usize, RangeSet>, num_tsids: usize) -> u64 {
         let mut hasher = DefaultHasher::new();
         num_tsids.hash(&mut hasher);
