@@ -4,7 +4,7 @@ mod partition_minimize;
 use crate::dwa_i32::common::{Label, StateID, Weight};
 use crate::dwa_i32::dwa::{DWA, DWABuildError, DWAState, DWAStates};
 use crate::dwa_i32::minimization::common::DwaPass;
-use crate::dwa_i32::minimization::graph_coloring::{solve_greedy_coloring, solve_exact_graph_coloring};
+use crate::dwa_i32::minimization::graph_coloring::{solve_exact_graph_coloring, solve_greedy_coloring};
 use crate::datastructures::RangeMapWeight;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
@@ -397,6 +397,10 @@ fn compute_height_coloring(
     new_states: &[MergedStateBuilder],
 ) -> Vec<usize> {
     let start = std::time::Instant::now();
+    let greedy_no_graph_threshold = std::env::var("DWA_GREEDY_NO_GRAPH_THRESHOLD")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(200);
     
     // Log diagnostic info for large candidate sets
     if candidates.len() >= 100 {
@@ -417,7 +421,7 @@ fn compute_height_coloring(
     // For large non-height-0 candidate sets, use greedy coloring without building full graph
     // This avoids the O(n²) graph construction bottleneck
     // Use a lower threshold since are_compatible can be expensive
-    if candidates.len() > 500 {
+    if candidates.len() > greedy_no_graph_threshold {
         let greedy_start = std::time::Instant::now();
         let colors = timeit!("coloring::greedy_without_graph", {
             greedy_color_without_graph(dwa, candidates, needed, old_to_new, new_states, start)
@@ -435,7 +439,7 @@ fn compute_height_coloring(
             .collect()
     });
     let sig_time = sig_start.elapsed();
-    
+
     // Group by signature
     let group_start = std::time::Instant::now();
     let sig_to_group: HashMap<u128, Vec<usize>> = timeit!("coloring::signature_grouping", {
@@ -447,14 +451,14 @@ fn compute_height_coloring(
     });
     let group_time = group_start.elapsed();
     let num_groups = sig_to_group.len();
-    
+
     // Fast path: if signature groups cover > 70% of candidates, cross-group merging is unlikely
     // to help much. Just use signature-based coloring.
     let signature_coverage = num_groups as f64 / candidates.len() as f64;
     if candidates.len() > 200 && signature_coverage > 0.70 {
         crate::debug!(5, "  Fast path: {} sig groups / {} candidates ({:.1}% coverage) -> using signatures as colors",
             num_groups, candidates.len(), signature_coverage * 100.0);
-        
+
         // Assign colors based on signature
         let assign_start = std::time::Instant::now();
         let colors = timeit!("coloring::signature_assign", {
@@ -1175,26 +1179,55 @@ fn are_compatible(
         return false;
     }
     
-    // Check each label
-    let labels: BTreeSet<Label> = dwa.states[u].transitions.keys()
-        .chain(dwa.states[v].transitions.keys())
-        .copied().collect();
+    // Check each label (merge sorted transition keys without allocation)
+    let mut iter_u = dwa.states[u].transitions.keys().copied().peekable();
+    let mut iter_v = dwa.states[v].transitions.keys().copied().peekable();
 
-    for lbl in labels {
-        // Get effective transition weights (empty if no transition or no weight)
-        let get_weight = |s: StateID| -> Weight {
-            dwa.states[s].transitions.get(&lbl)
-                .and_then(|_| dwa.states[s].trans_weights.get(&lbl))
-                .cloned()
-                .unwrap_or_else(Weight::zeros)
+    loop {
+        let lbl = match (iter_u.peek(), iter_v.peek()) {
+            (Some(&lu), Some(&lv)) => {
+                if lu == lv {
+                    iter_u.next();
+                    iter_v.next();
+                    lu
+                } else if lu < lv {
+                    iter_u.next();
+                    lu
+                } else {
+                    iter_v.next();
+                    lv
+                }
+            }
+            (Some(&lu), None) => {
+                iter_u.next();
+                lu
+            }
+            (None, Some(&lv)) => {
+                iter_v.next();
+                lv
+            }
+            (None, None) => break,
         };
-        let w_u = get_weight(u);
-        let w_v = get_weight(v);
+        // Get effective transition weights (None if no transition or no weight)
+        let (tu, w_u_opt) = match dwa.states[u].transitions.get(&lbl) {
+            Some(&tu) => (Some(tu), dwa.states[u].trans_weights.get(&lbl)),
+            None => (None, None),
+        };
+        let (tv, w_v_opt) = match dwa.states[v].transitions.get(&lbl) {
+            Some(&tv) => (Some(tv), dwa.states[v].trans_weights.get(&lbl)),
+            None => (None, None),
+        };
+        let w_u_empty = w_u_opt.map_or(true, |w| w.is_empty());
+        let w_v_empty = w_v_opt.map_or(true, |w| w.is_empty());
 
         // On overlap domain, weights must match
         if !domain_overlap_empty {
-            let w_u_overlap = &w_u & &domain_overlap;
-            let w_v_overlap = &w_v & &domain_overlap;
+            let w_u_overlap = w_u_opt
+                .map(|w| w & &domain_overlap)
+                .unwrap_or_else(Weight::zeros);
+            let w_v_overlap = w_v_opt
+                .map(|w| w & &domain_overlap)
+                .unwrap_or_else(Weight::zeros);
             if w_u_overlap != w_v_overlap {
                 return false;
             }
@@ -1207,15 +1240,10 @@ fn are_compatible(
         }
 
         // If both have live transitions, check targets are compatible
-        let w_u_empty = w_u.is_empty();
-        let w_v_empty = w_v.is_empty();
         if !w_u_empty && !w_v_empty {
-            let tu = dwa.states[u].transitions.get(&lbl);
-            let tv = dwa.states[v].transitions.get(&lbl);
-            
             match (tu, tv) {
-                (Some(&tu), Some(&tv)) => {
-                    if !targets_compatible(tu, tv, &w_u, &w_v, old_to_new, new_states) {
+                (Some(tu), Some(tv)) => {
+                    if !targets_compatible(tu, tv, w_u_opt.unwrap(), w_v_opt.unwrap(), old_to_new, new_states) {
                         return false;
                     }
                 }
