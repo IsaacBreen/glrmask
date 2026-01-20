@@ -407,7 +407,9 @@ fn compute_height_coloring(
     // Use optimized direct coloring path
     let is_height_0 = candidates.iter().all(|&id| dwa.states[id].transitions.is_empty());
     if is_height_0 && candidates.len() > 1000 {
-        let colors = compute_height_0_coloring_direct(candidates, dwa, needed, start);
+        let colors = timeit!("coloring::height0_direct", {
+            compute_height_0_coloring_direct(candidates, dwa, needed, start)
+        });
         crate::debug!(6, "Height 0 coloring total: {:?}", start.elapsed());
         return colors;
     }
@@ -417,23 +419,33 @@ fn compute_height_coloring(
     // Use a lower threshold since are_compatible can be expensive
     if candidates.len() > 500 {
         let greedy_start = std::time::Instant::now();
-        let colors = greedy_color_without_graph(dwa, candidates, needed, old_to_new, new_states, start);
+        let colors = timeit!("coloring::greedy_without_graph", {
+            greedy_color_without_graph(dwa, candidates, needed, old_to_new, new_states, start)
+        });
         crate::debug!(6, "Greedy coloring (no graph) total: {:?}", greedy_start.elapsed());
         return colors;
     }
     
     // Compute signatures first to check if we can use a fast path
     let sig_start = std::time::Instant::now();
-    let signatures: Vec<u128> = candidates.iter().map(|&id| {
-        compute_state_signature(id, dwa, needed, old_to_new)
-    }).collect();
+    let signatures: Vec<u128> = timeit!("coloring::signature_compute", {
+        candidates
+            .iter()
+            .map(|&id| compute_state_signature(id, dwa, needed, old_to_new))
+            .collect()
+    });
     let sig_time = sig_start.elapsed();
     
     // Group by signature
-    let mut sig_to_group: HashMap<u128, Vec<usize>> = HashMap::new();
-    for (idx, &sig) in signatures.iter().enumerate() {
-        sig_to_group.entry(sig).or_default().push(idx);
-    }
+    let group_start = std::time::Instant::now();
+    let sig_to_group: HashMap<u128, Vec<usize>> = timeit!("coloring::signature_grouping", {
+        let mut sig_to_group: HashMap<u128, Vec<usize>> = HashMap::new();
+        for (idx, &sig) in signatures.iter().enumerate() {
+            sig_to_group.entry(sig).or_default().push(idx);
+        }
+        sig_to_group
+    });
+    let group_time = group_start.elapsed();
     let num_groups = sig_to_group.len();
     
     // Fast path: if signature groups cover > 70% of candidates, cross-group merging is unlikely
@@ -445,20 +457,23 @@ fn compute_height_coloring(
         
         // Assign colors based on signature
         let assign_start = std::time::Instant::now();
-        let mut colors = vec![0; candidates.len()];
-        let mut sig_to_color: HashMap<u128, usize> = HashMap::new();
-        let mut next_color = 0usize;
-        for (idx, &sig) in signatures.iter().enumerate() {
-            let color = *sig_to_color.entry(sig).or_insert_with(|| {
-                let c = next_color;
-                next_color += 1;
-                c
-            });
-            colors[idx] = color;
-        }
+        let colors = timeit!("coloring::signature_assign", {
+            let mut colors = vec![0; candidates.len()];
+            let mut sig_to_color: HashMap<u128, usize> = HashMap::new();
+            let mut next_color = 0usize;
+            for (idx, &sig) in signatures.iter().enumerate() {
+                let color = *sig_to_color.entry(sig).or_insert_with(|| {
+                    let c = next_color;
+                    next_color += 1;
+                    c
+                });
+                colors[idx] = color;
+            }
+            colors
+        });
         let assign_time = assign_start.elapsed();
         let total_time = start.elapsed();
-        let accounted = sig_time + assign_time;
+        let accounted = sig_time + group_time + assign_time;
         let unaccounted = total_time.saturating_sub(accounted);
         crate::debug!(5, "Coloring fast path breakdown: signature={:?}, assign={:?}, unaccounted={:?}",
             sig_time, assign_time, unaccounted);
@@ -467,7 +482,9 @@ fn compute_height_coloring(
     
     // Build full incompatibility graph
     let graph_start = std::time::Instant::now();
-    let adj = build_incompatibility_graph(dwa, candidates, needed, old_to_new, new_states);
+    let adj = timeit!("coloring::build_incompatibility_graph", {
+        build_incompatibility_graph(dwa, candidates, needed, old_to_new, new_states)
+    });
     let graph_time = graph_start.elapsed();
     
     let graph_total = start.elapsed();
@@ -482,9 +499,9 @@ fn compute_height_coloring(
     // Solve coloring: greedy for large graphs, exact for small ones
     let color_start = std::time::Instant::now();
     let colors = if candidates.len() > 30 {
-        solve_greedy_coloring(&adj)
+        timeit!("coloring::solve_greedy_coloring", { solve_greedy_coloring(&adj) })
     } else {
-        solve_exact_graph_coloring(&adj)
+        timeit!("coloring::solve_exact_graph_coloring", { solve_exact_graph_coloring(&adj) })
     };
     let color_time = color_start.elapsed();
     
@@ -494,7 +511,7 @@ fn compute_height_coloring(
             total_time, candidates.len());
         std::process::exit(1);
     }
-    let accounted = sig_time + graph_time + color_time;
+    let accounted = sig_time + group_time + graph_time + color_time;
     let unaccounted = total_time.saturating_sub(accounted);
     crate::debug!(5, "Coloring breakdown: signature={:?}, graph={:?}, coloring={:?}, unaccounted={:?}",
         sig_time, graph_time, color_time, unaccounted);
@@ -522,21 +539,25 @@ fn compute_height_0_coloring_direct(
     // First, analyze the structure to see if we can do better
     // Compute needed footprints and signatures
     let sig_build_start = std::time::Instant::now();
-    let mut sig_groups: HashMap<u64, Vec<usize>> = HashMap::new();
-    let mut footprints: Vec<Weight> = Vec::with_capacity(n);
+    let (sig_groups, footprints) = timeit!("height0::sig_build", {
+        let mut sig_groups: HashMap<u64, Vec<usize>> = HashMap::new();
+        let mut footprints: Vec<Weight> = Vec::with_capacity(n);
 
-    for (idx, &id) in candidates.iter().enumerate() {
-        let final_on_needed = dwa.states[id].final_weight.as_ref()
-            .map(|w| w & &needed[id])
-            .unwrap_or_else(Weight::zeros);
+        for (idx, &id) in candidates.iter().enumerate() {
+            let final_on_needed = dwa.states[id].final_weight.as_ref()
+                .map(|w| w & &needed[id])
+                .unwrap_or_else(Weight::zeros);
 
-        let mut hasher = DefaultHasher::new();
-        final_on_needed.fingerprint().hash(&mut hasher);
-        let sig = hasher.finish();
+            let mut hasher = DefaultHasher::new();
+            final_on_needed.fingerprint().hash(&mut hasher);
+            let sig = hasher.finish();
 
-        sig_groups.entry(sig).or_default().push(idx);
-        footprints.push(needed[id].clone());
-    }
+            sig_groups.entry(sig).or_default().push(idx);
+            footprints.push(needed[id].clone());
+        }
+
+        (sig_groups, footprints)
+    });
     let sig_build_time = sig_build_start.elapsed();
 
     // Analyze overlap structure
@@ -547,28 +568,36 @@ fn compute_height_0_coloring_direct(
     
     // Compute footprint for each signature group (union of all members' footprints)
     let footprint_start = std::time::Instant::now();
-    let sig_footprints: Vec<Weight> = sig_list.iter().map(|(_, indices)| {
-        let mut fp = Weight::zeros();
-        for &idx in indices {
-            fp |= &footprints[idx];
-        }
-        fp
-    }).collect();
+    let sig_footprints: Vec<Weight> = timeit!("height0::footprint_union", {
+        sig_list
+            .iter()
+            .map(|(_, indices)| {
+                let mut fp = Weight::zeros();
+                for &idx in indices {
+                    fp |= &footprints[idx];
+                }
+                fp
+            })
+            .collect()
+    });
     let footprint_time = footprint_start.elapsed();
     
     // Count compatible signature pairs
-    let mut compatible_sig_pairs = 0;
-    let mut total_sig_pairs = 0;
     let pairwise_start = std::time::Instant::now();
-    for i in 0..sig_list.len() {
-        for j in (i+1)..sig_list.len() {
-            total_sig_pairs += 1;
-            let overlap = &sig_footprints[i] & &sig_footprints[j];
-            if overlap.is_empty() {
-                compatible_sig_pairs += 1;
+    let (compatible_sig_pairs, total_sig_pairs) = timeit!("height0::pairwise_overlap", {
+        let mut compatible_sig_pairs = 0;
+        let mut total_sig_pairs = 0;
+        for i in 0..sig_list.len() {
+            for j in (i + 1)..sig_list.len() {
+                total_sig_pairs += 1;
+                let overlap = &sig_footprints[i] & &sig_footprints[j];
+                if overlap.is_empty() {
+                    compatible_sig_pairs += 1;
+                }
             }
         }
-    }
+        (compatible_sig_pairs, total_sig_pairs)
+    });
     let pairwise_time = pairwise_start.elapsed();
     
     // If most signature pairs are compatible (disjoint footprints), try interval scheduling
@@ -576,7 +605,9 @@ fn compute_height_0_coloring_direct(
         let interval_start = std::time::Instant::now();
         // Try greedy interval-scheduling style approach
         // Sort signatures by footprint start (or size) and greedily assign colors
-        let colors = greedy_interval_coloring(&sig_list, &sig_footprints, n);
+        let colors = timeit!("height0::interval_coloring", {
+            greedy_interval_coloring(&sig_list, &sig_footprints, n)
+        });
         let num_colors = colors.iter().max().map(|c| c + 1).unwrap_or(0);
         let interval_time = interval_start.elapsed();
         
@@ -593,30 +624,35 @@ fn compute_height_0_coloring_direct(
     
     // Fall back to direct signature coloring
     let direct_start = std::time::Instant::now();
-    let mut colors = Vec::with_capacity(n);
-    let mut sig_to_color: HashMap<u64, usize> = HashMap::new();
-    let mut next_color = 0usize;
+    let colors = timeit!("height0::direct_coloring", {
+        let mut colors = Vec::with_capacity(n);
+        let mut sig_to_color: HashMap<u64, usize> = HashMap::new();
+        let mut next_color = 0usize;
 
-    for (idx, &id) in candidates.iter().enumerate() {
-        let final_on_needed = dwa.states[id].final_weight.as_ref()
-            .map(|w| w & &needed[id])
-            .unwrap_or_else(Weight::zeros);
+        for (idx, &id) in candidates.iter().enumerate() {
+            let final_on_needed = dwa.states[id].final_weight.as_ref()
+                .map(|w| w & &needed[id])
+                .unwrap_or_else(Weight::zeros);
 
-        let mut hasher = DefaultHasher::new();
-        final_on_needed.fingerprint().hash(&mut hasher);
-        let sig = hasher.finish();
+            let mut hasher = DefaultHasher::new();
+            final_on_needed.fingerprint().hash(&mut hasher);
+            let sig = hasher.finish();
 
-        let color = *sig_to_color.entry(sig).or_insert_with(|| {
-            let c = next_color;
-            next_color += 1;
-            c
-        });
-        colors.push(color);
-    }
+            let color = *sig_to_color.entry(sig).or_insert_with(|| {
+                let c = next_color;
+                next_color += 1;
+                c
+            });
+            colors.push(color);
+        }
+
+        colors
+    });
     
     let direct_time = direct_start.elapsed();
+    let num_colors = colors.iter().max().map(|c| c + 1).unwrap_or(0);
     crate::debug!(6, "Height 0 direct coloring: {} candidates, {} sigs, {}/{} compatible pairs -> {} colors in {:?}",
-        n, num_sigs, compatible_sig_pairs, total_sig_pairs, next_color, start.elapsed());
+        n, num_sigs, compatible_sig_pairs, total_sig_pairs, num_colors, start.elapsed());
     let total_time = start.elapsed();
     let accounted = sig_build_time + footprint_time + pairwise_time + direct_time;
     let unaccounted = total_time.saturating_sub(accounted);
@@ -1305,37 +1341,52 @@ fn build_incompatibility_graph_height_0(
     // Compute signatures: hash of (final_weight & needed)
     let mut sig_to_group: HashMap<u64, Vec<usize>> = HashMap::new();
     
-    for (idx, &id) in candidates.iter().enumerate() {
-        use std::hash::{Hash, Hasher};
-        use std::collections::hash_map::DefaultHasher;
-        
-        let final_on_needed = dwa.states[id].final_weight.as_ref()
-            .map(|w| w & &needed[id])
-            .unwrap_or_else(Weight::zeros);
-        
-        let mut hasher = DefaultHasher::new();
-        final_on_needed.fingerprint().hash(&mut hasher);
-        let sig = hasher.finish();
-        
-        sig_to_group.entry(sig).or_default().push(idx);
-    }
+    timeit!("coloring::build_incompatibility_graph::height0::signatures", {
+        for (idx, &id) in candidates.iter().enumerate() {
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+            
+            let final_on_needed = dwa.states[id].final_weight.as_ref()
+                .map(|w| w & &needed[id])
+                .unwrap_or_else(Weight::zeros);
+            
+            let mut hasher = DefaultHasher::new();
+            final_on_needed.fingerprint().hash(&mut hasher);
+            let sig = hasher.finish();
+            
+            sig_to_group.entry(sig).or_default().push(idx);
+        }
+    });
     
     let num_groups = sig_to_group.len();
     
     // For smaller sets, build the full graph for optimal coloring
-    let groups: Vec<(u64, Vec<usize>)> = sig_to_group.into_iter().collect();
+    let groups: Vec<(u64, Vec<usize>)> = timeit!(
+        "coloring::build_incompatibility_graph::height0::grouping",
+        { sig_to_group.into_iter().collect() }
+    );
     
     // Compute the "needed footprint" for each group (union of all needed sets)
-    let group_footprints: Vec<Weight> = groups.iter().map(|(_, indices)| {
-        let mut footprint = Weight::zeros();
-        for &idx in indices {
-            footprint |= &needed[candidates[idx]];
+    let group_footprints: Vec<Weight> = timeit!(
+        "coloring::build_incompatibility_graph::height0::footprints",
+        {
+            groups
+                .iter()
+                .map(|(_, indices)| {
+                    let mut footprint = Weight::zeros();
+                    for &idx in indices {
+                        footprint |= &needed[candidates[idx]];
+                    }
+                    footprint
+                })
+                .collect()
         }
-        footprint
-    }).collect();
+    );
     
     // Build incompatibility graph
-    let mut adj = vec![vec![]; n];
+    let mut adj = timeit!("coloring::build_incompatibility_graph::height0::init_adj", {
+        vec![vec![]; n]
+    });
     let mut edge_count = 0usize;
     let mut compare_count = 0usize;
     let mut skipped_by_footprint = 0usize;
@@ -1343,65 +1394,76 @@ fn build_incompatibility_graph_height_0(
     let mut pair_overlap_time = std::time::Duration::ZERO;
     
     // Compare across groups
-    for i in 0..groups.len() {
-        for j in (i+1)..groups.len() {
-            // Quick check: do the group footprints overlap?
-            let overlap_start = std::time::Instant::now();
-            let overlap = &group_footprints[i] & &group_footprints[j];
-            footprint_overlap_time += overlap_start.elapsed();
-            if overlap.is_empty() {
-                // No overlap in needed sets means all pairs are compatible
-                skipped_by_footprint += groups[i].1.len() * groups[j].1.len();
-                continue;
-            }
-            
-            // Groups have overlapping footprints - need to check individual pairs
-            // But since all states in a group have the same final signature,
-            // if ANY pair is incompatible, ALL cross-group pairs are incompatible
-            // (because final behavior differs on some shared weight)
-            
-            // Check one representative pair
-            let idx_i = groups[i].1[0];
-            let idx_j = groups[j].1[0];
-            let id_i = candidates[idx_i];
-            let id_j = candidates[idx_j];
-            
-            // Check if their needed sets overlap
-            let pair_overlap_start = std::time::Instant::now();
-            let pair_overlap = &needed[id_i] & &needed[id_j];
-            pair_overlap_time += pair_overlap_start.elapsed();
-            if pair_overlap.is_empty() {
-                // This specific pair is compatible, but others in the group might not be
-                // Need to check all pairs in this case
-                for &idx_i in &groups[i].1 {
-                    for &idx_j in &groups[j].1 {
-                        compare_count += 1;
-                        let id_i = candidates[idx_i];
-                        let id_j = candidates[idx_j];
-                        let pair_overlap_start = std::time::Instant::now();
-                        let pair_overlap = &needed[id_i] & &needed[id_j];
-                        pair_overlap_time += pair_overlap_start.elapsed();
-                        if !pair_overlap.is_empty() {
-                            // Finals differ on overlap (different groups), so incompatible
+    timeit!("coloring::build_incompatibility_graph::height0::compare_groups", {
+        for i in 0..groups.len() {
+            for j in (i + 1)..groups.len() {
+                // Quick check: do the group footprints overlap?
+                let overlap_start = std::time::Instant::now();
+                let overlap = timeit!(
+                    "coloring::build_incompatibility_graph::height0::footprint_overlap",
+                    { &group_footprints[i] & &group_footprints[j] }
+                );
+                footprint_overlap_time += overlap_start.elapsed();
+                if overlap.is_empty() {
+                    // No overlap in needed sets means all pairs are compatible
+                    skipped_by_footprint += groups[i].1.len() * groups[j].1.len();
+                    continue;
+                }
+                
+                // Groups have overlapping footprints - need to check individual pairs
+                // But since all states in a group have the same final signature,
+                // if ANY pair is incompatible, ALL cross-group pairs are incompatible
+                // (because final behavior differs on some shared weight)
+                
+                // Check one representative pair
+                let idx_i = groups[i].1[0];
+                let idx_j = groups[j].1[0];
+                let id_i = candidates[idx_i];
+                let id_j = candidates[idx_j];
+                
+                // Check if their needed sets overlap
+                let pair_overlap_start = std::time::Instant::now();
+                let pair_overlap = timeit!(
+                    "coloring::build_incompatibility_graph::height0::pair_overlap",
+                    { &needed[id_i] & &needed[id_j] }
+                );
+                pair_overlap_time += pair_overlap_start.elapsed();
+                if pair_overlap.is_empty() {
+                    // This specific pair is compatible, but others in the group might not be
+                    // Need to check all pairs in this case
+                    for &idx_i in &groups[i].1 {
+                        for &idx_j in &groups[j].1 {
+                            compare_count += 1;
+                            let id_i = candidates[idx_i];
+                            let id_j = candidates[idx_j];
+                            let pair_overlap_start = std::time::Instant::now();
+                            let pair_overlap = timeit!(
+                                "coloring::build_incompatibility_graph::height0::pair_overlap",
+                                { &needed[id_i] & &needed[id_j] }
+                            );
+                            pair_overlap_time += pair_overlap_start.elapsed();
+                            if !pair_overlap.is_empty() {
+                                // Finals differ on overlap (different groups), so incompatible
+                                adj[idx_i].push(idx_j);
+                                adj[idx_j].push(idx_i);
+                                edge_count += 1;
+                            }
+                        }
+                    }
+                } else {
+                    // Representative pair has overlapping needed sets AND different signatures
+                    // So all pairs between these groups are incompatible
+                    for &idx_i in &groups[i].1 {
+                        for &idx_j in &groups[j].1 {
                             adj[idx_i].push(idx_j);
                             adj[idx_j].push(idx_i);
                             edge_count += 1;
                         }
                     }
                 }
-            } else {
-                // Representative pair has overlapping needed sets AND different signatures
-                // So all pairs between these groups are incompatible
-                for &idx_i in &groups[i].1 {
-                    for &idx_j in &groups[j].1 {
-                        adj[idx_i].push(idx_j);
-                        adj[idx_j].push(idx_i);
-                        edge_count += 1;
-                    }
-                }
             }
         }
-    }
+    });
     
     if n >= 100 {
         let total_time = start.elapsed();
@@ -1434,17 +1496,23 @@ fn greedy_color_without_graph(
     
     // Compute signatures for each candidate
     let sig_start = std::time::Instant::now();
-    let signatures: Vec<u128> = candidates.iter().map(|&id| {
-        compute_state_signature(id, dwa, needed, old_to_new)
-    }).collect();
+    let signatures: Vec<u128> = timeit!("greedy_no_graph::signatures", {
+        candidates
+            .iter()
+            .map(|&id| compute_state_signature(id, dwa, needed, old_to_new))
+            .collect()
+    });
     let sig_time = sig_start.elapsed();
     
     // Check if there are many unique signatures - if so, use signatures as colors directly
     let grouping_start = std::time::Instant::now();
-    let mut sig_to_group: HashMap<u128, Vec<usize>> = HashMap::new();
-    for (idx, &sig) in signatures.iter().enumerate() {
-        sig_to_group.entry(sig).or_default().push(idx);
-    }
+    let sig_to_group: HashMap<u128, Vec<usize>> = timeit!("greedy_no_graph::grouping", {
+        let mut sig_to_group: HashMap<u128, Vec<usize>> = HashMap::new();
+        for (idx, &sig) in signatures.iter().enumerate() {
+            sig_to_group.entry(sig).or_default().push(idx);
+        }
+        sig_to_group
+    });
     let grouping_time = grouping_start.elapsed();
     let num_groups = sig_to_group.len();
     let signature_coverage = num_groups as f64 / n as f64;
@@ -1454,17 +1522,20 @@ fn greedy_color_without_graph(
         crate::debug!(5, "Greedy fast path: {} sig groups / {} candidates ({:.1}% coverage) -> using signatures as colors",
             num_groups, n, signature_coverage * 100.0);
         let assign_start = std::time::Instant::now();
-        let mut colors = vec![0; n];
-        let mut sig_to_color: HashMap<u128, usize> = HashMap::new();
-        let mut next_color = 0usize;
-        for (idx, &sig) in signatures.iter().enumerate() {
-            let color = *sig_to_color.entry(sig).or_insert_with(|| {
-                let c = next_color;
-                next_color += 1;
-                c
-            });
-            colors[idx] = color;
-        }
+        let colors = timeit!("greedy_no_graph::assign_fast", {
+            let mut colors = vec![0; n];
+            let mut sig_to_color: HashMap<u128, usize> = HashMap::new();
+            let mut next_color = 0usize;
+            for (idx, &sig) in signatures.iter().enumerate() {
+                let color = *sig_to_color.entry(sig).or_insert_with(|| {
+                    let c = next_color;
+                    next_color += 1;
+                    c
+                });
+                colors[idx] = color;
+            }
+            colors
+        });
         let assign_time = assign_start.elapsed();
         let total_time = total_start.elapsed();
         let accounted = sig_time + grouping_time + assign_time;
@@ -1474,71 +1545,90 @@ fn greedy_color_without_graph(
         return colors;
     }
     
-    // colors[i] = color assigned to candidate i
-    let mut colors = vec![usize::MAX; n];
-    
-    // color_representatives[c] = list of (candidate_idx, signature) for color c
-    // We keep one representative per signature in each color class
-    let mut color_representatives: Vec<Vec<(usize, u128)>> = Vec::new();
-    
-    let mut compare_count = 0usize;
-    let mut compare_time = std::time::Duration::ZERO;
     let assign_start = std::time::Instant::now();
-    
-    for idx in 0..n {
-        let sig = signatures[idx];
-        let cand = candidates[idx];
+    let (colors, color_representatives, compare_count, compare_time) = timeit!("greedy_no_graph::assign_colors", {
+        // colors[i] = color assigned to candidate i
+        let mut colors = timeit!("greedy_no_graph::assign_colors::init_colors", {
+            vec![usize::MAX; n]
+        });
         
-        // Try to find an existing color where this candidate is compatible
-        let mut assigned_color = None;
+        // color_representatives[c] = list of (candidate_idx, signature) for color c
+        // We keep one representative per signature in each color class
+        let mut color_representatives: Vec<Vec<(usize, u128)>> = timeit!(
+            "greedy_no_graph::assign_colors::init_reps",
+            { Vec::new() }
+        );
         
-        'color_loop: for (color, reps) in color_representatives.iter().enumerate() {
-            // Check if there's already a representative with the same signature
-            // If so, we're guaranteed compatible (by signature design)
-            let same_sig = reps.iter().any(|(_, rep_sig)| *rep_sig == sig);
-            if same_sig {
-                assigned_color = Some(color);
-                break 'color_loop;
-            }
-            
-            // Check compatibility with all representatives of different signatures
-            let mut compatible_with_all = true;
-            for &(rep_idx, _rep_sig) in reps {
-                compare_count += 1;
-                let cmp_start = std::time::Instant::now();
-                let compatible = are_compatible(cand, candidates[rep_idx], dwa, needed, old_to_new, new_states);
-                compare_time += cmp_start.elapsed();
-                if !compatible {
-                    compatible_with_all = false;
-                    break;
+        let mut compare_count = 0usize;
+        let mut compare_time = std::time::Duration::ZERO;
+        
+        timeit!("greedy_no_graph::assign_colors::candidate_loop", {
+            for idx in 0..n {
+                let sig = signatures[idx];
+                let cand = candidates[idx];
+                
+                // Try to find an existing color where this candidate is compatible
+                let assigned_color = timeit!("greedy_no_graph::assign_colors::scan_colors", {
+                    let mut assigned_color = None;
+                    
+                    'color_loop: for (color, reps) in color_representatives.iter().enumerate() {
+                        // Check if there's already a representative with the same signature
+                        // If so, we're guaranteed compatible (by signature design)
+                        let same_sig = timeit!("greedy_no_graph::assign_colors::check_same_sig", {
+                            reps.iter().any(|(_, rep_sig)| *rep_sig == sig)
+                        });
+                        if same_sig {
+                            assigned_color = Some(color);
+                            break 'color_loop;
+                        }
+                        
+                        // Check compatibility with all representatives of different signatures
+                        let mut compatible_with_all = true;
+                        for &(rep_idx, _rep_sig) in reps {
+                            compare_count += 1;
+                            let cmp_start = std::time::Instant::now();
+                            let compatible = timeit!("greedy_no_graph::are_compatible", {
+                                are_compatible(cand, candidates[rep_idx], dwa, needed, old_to_new, new_states)
+                            });
+                            compare_time += cmp_start.elapsed();
+                            if !compatible {
+                                compatible_with_all = false;
+                                break;
+                            }
+                        }
+                        
+                        if compatible_with_all {
+                            assigned_color = Some(color);
+                            break 'color_loop;
+                        }
+                    }
+                    
+                    assigned_color
+                });
+                
+                // Assign color
+                let color = match assigned_color {
+                    Some(c) => c,
+                    None => {
+                        // Need a new color
+                        let c = color_representatives.len();
+                        color_representatives.push(Vec::new());
+                        c
+                    }
+                };
+                
+                colors[idx] = color;
+                
+                // Add as representative if this is a new signature for this color
+                let reps = &mut color_representatives[color];
+                if !reps.iter().any(|(_, rep_sig)| *rep_sig == sig) {
+                    reps.push((idx, sig));
                 }
             }
-            
-            if compatible_with_all {
-                assigned_color = Some(color);
-                break 'color_loop;
-            }
-        }
-        
-        // Assign color
-        let color = match assigned_color {
-            Some(c) => c,
-            None => {
-                // Need a new color
-                let c = color_representatives.len();
-                color_representatives.push(Vec::new());
-                c
-            }
-        };
-        
-        colors[idx] = color;
-        
-        // Add as representative if this is a new signature for this color
-        let reps = &mut color_representatives[color];
-        if !reps.iter().any(|(_, rep_sig)| *rep_sig == sig) {
-            reps.push((idx, sig));
-        }
-    }
+        });
+
+        (colors, color_representatives, compare_count, compare_time)
+    });
 
     let assign_time = assign_start.elapsed();
     if n >= 100 {
@@ -1565,43 +1655,64 @@ fn build_incompatibility_graph_general(
     let n = candidates.len();
     
     // Compute signatures for each candidate
-    let signatures: Vec<u128> = candidates.iter().map(|&id| {
-        compute_state_signature(id, dwa, needed, old_to_new)
-    }).collect();
+    let signatures: Vec<u128> = timeit!("coloring::build_incompatibility_graph::signatures", {
+        candidates
+            .iter()
+            .map(|&id| compute_state_signature(id, dwa, needed, old_to_new))
+            .collect()
+    });
     
     // Group candidates by signature
-    let mut sig_to_candidates: HashMap<u128, Vec<usize>> = HashMap::new();
-    for (idx, &sig) in signatures.iter().enumerate() {
-        sig_to_candidates.entry(sig).or_default().push(idx);
-    }
+    let groups: Vec<Vec<usize>> = timeit!("coloring::build_incompatibility_graph::grouping", {
+        let mut sig_to_candidates: HashMap<u128, Vec<usize>> = HashMap::new();
+        for (idx, &sig) in signatures.iter().enumerate() {
+            sig_to_candidates.entry(sig).or_default().push(idx);
+        }
+        sig_to_candidates.into_values().collect()
+    });
     
-    let num_groups = sig_to_candidates.len();
-    let groups: Vec<Vec<usize>> = sig_to_candidates.into_values().collect();
+    let num_groups = groups.len();
     
     // Build incompatibility graph
-    let mut adj = vec![vec![]; n];
+    let mut adj = timeit!("coloring::build_incompatibility_graph::init_adj", {
+        vec![vec![]; n]
+    });
     let mut edge_count = 0usize;
     let mut compare_count = 0usize;
     let mut compare_time = std::time::Duration::ZERO;
     
     // Compare across groups
-    for i in 0..groups.len() {
-        for j in (i+1)..groups.len() {
-            for &idx_i in &groups[i] {
-                for &idx_j in &groups[j] {
-                    compare_count += 1;
-                    let cmp_start = std::time::Instant::now();
-                    let compatible = are_compatible(candidates[idx_i], candidates[idx_j], dwa, needed, old_to_new, new_states);
-                    compare_time += cmp_start.elapsed();
-                    if !compatible {
-                        adj[idx_i].push(idx_j);
-                        adj[idx_j].push(idx_i);
-                        edge_count += 1;
+    timeit!("coloring::build_incompatibility_graph::compare_pairs", {
+        for i in 0..groups.len() {
+            for j in (i + 1)..groups.len() {
+                for &idx_i in &groups[i] {
+                    for &idx_j in &groups[j] {
+                        compare_count += 1;
+                        let cmp_start = std::time::Instant::now();
+                        let compatible = timeit!(
+                            "coloring::build_incompatibility_graph::are_compatible",
+                            {
+                                are_compatible(
+                                    candidates[idx_i],
+                                    candidates[idx_j],
+                                    dwa,
+                                    needed,
+                                    old_to_new,
+                                    new_states,
+                                )
+                            }
+                        );
+                        compare_time += cmp_start.elapsed();
+                        if !compatible {
+                            adj[idx_i].push(idx_j);
+                            adj[idx_j].push(idx_i);
+                            edge_count += 1;
+                        }
                     }
                 }
             }
         }
-    }
+    });
     
     // Debug assertions for signature correctness
     #[cfg(debug_assertions)]

@@ -255,6 +255,15 @@ pub fn print_summary_flat() {
     _print_summary_flat(&options);
 }
 
+pub fn print_summary_flat_by_own_time() {
+    let options = PrintOptions {
+        show_own_per_hit: false,
+        show_percentage_own: false,
+        show_percentage_of_parent: false,
+    };
+    _print_summary_flat_by_own_time(&options);
+}
+
 /// Prints a summary of the collected profiling data as a flat list, merging all calls to the same function.
 pub fn _print_summary_flat(options: &PrintOptions) {
     if !PROFILING_ENABLED {
@@ -341,6 +350,92 @@ pub fn _print_summary_flat(options: &PrintOptions) {
     println!("\n--- End Profiler Summary (Flat) ---");
 }
 
+/// Prints a flat summary sorted by own (self) time.
+pub fn _print_summary_flat_by_own_time(options: &PrintOptions) {
+    if !PROFILING_ENABLED {
+        return;
+    }
+    let data = profiler().lock().unwrap();
+    println!("--- Profiler Summary (Flat, Own Time) ---");
+
+    let no_timing_data = data.call_tree.children.is_empty();
+    let no_hit_data = data.hits.is_empty();
+
+    if no_timing_data && no_hit_data {
+        println!("No data collected.");
+        println!("--- End Profiler Summary (Flat, Own Time) ---");
+        return;
+    }
+
+    if !no_timing_data {
+        let mut flat_map: HashMap<String, ProfileNode> = HashMap::new();
+        flatten_tree_recursive(&data.call_tree.children, &mut flat_map);
+
+        println!("\n[Flat Timings]");
+        print!(
+            "{:>10} {:>15} {:>15} {:>15}",
+            "Hits", "Total Time", "Total/Hit", "Own Time"
+        );
+        if options.show_own_per_hit {
+            print!(" {:>15}", "Own/Hit");
+        }
+        if options.show_percentage_own {
+            print!(" {:>10}", "% Own");
+        }
+        println!("  {}", "Name");
+
+        let mut sorted_list: Vec<_> = flat_map.iter().collect();
+        sorted_list.sort_by(|a, b| b.1.own_time.cmp(&a.1.own_time));
+
+        for (name, node) in sorted_list {
+            let (total_per_hit, own_per_hit) = if node.hits > 0 {
+                (
+                    node.total_time.mul_f64(1.0 / node.hits as f64),
+                    node.own_time.mul_f64(1.0 / node.hits as f64),
+                )
+            } else {
+                (Duration::from_secs(0), Duration::from_secs(0))
+            };
+
+            let total_str = format_duration(node.total_time);
+            let own_str = format_duration(node.own_time);
+            let total_per_hit_str = format_duration(total_per_hit);
+
+            print!(
+                "{:>10} {:>15} {:>15} {:>15}",
+                node.hits, total_str, total_per_hit_str, own_str
+            );
+
+            if options.show_own_per_hit {
+                let own_per_hit_str = format_duration(own_per_hit);
+                print!(" {:>15}", own_per_hit_str);
+            }
+
+            if options.show_percentage_own {
+                let percentage_own = if !node.total_time.is_zero() {
+                    (node.own_time.as_secs_f64() / node.total_time.as_secs_f64()) * 100.0
+                } else {
+                    0.0
+                };
+                let percentage_own_str = format!("{:.1}%", percentage_own);
+                print!(" {:>10}", percentage_own_str);
+            }
+            println!("  {}", name);
+        }
+    }
+
+    if !no_hit_data {
+        println!("\n[Hits]");
+        let mut sorted_hits: Vec<_> = data.hits.iter().collect();
+        sorted_hits.sort_by_key(|k| k.0);
+        for (name, count) in sorted_hits {
+            println!("  {:>10}x: {}", count, name);
+        }
+    }
+
+    println!("\n--- End Profiler Summary (Flat, Own Time) ---");
+}
+
 /// Returns a clone of the hits data from `hit!` macro.
 pub fn get_hits() -> HashMap<String, u64> {
     profiler().lock().unwrap().hits.clone()
@@ -368,6 +463,48 @@ pub fn get_all_hits() -> HashMap<String, u64> {
     // Recursively traverse the call tree and add hits from timed blocks.
     collect_tree_hits_recursive(&data.call_tree, &mut all_hits);
     all_hits
+}
+
+/// Returns the sum of all flat own-times across the call tree.
+pub fn sum_flat_own_time() -> Duration {
+    if !PROFILING_ENABLED {
+        return Duration::ZERO;
+    }
+    let data = profiler().lock().unwrap();
+    let mut flat_map: HashMap<String, ProfileNode> = HashMap::new();
+    flatten_tree_recursive(&data.call_tree.children, &mut flat_map);
+    flat_map.values().map(|node| node.own_time).sum()
+}
+
+fn sum_subtree_own_time_node(node: &ProfileNode) -> Duration {
+    let mut total = node.own_time;
+    for child in node.children.values() {
+        total += sum_subtree_own_time_node(child);
+    }
+    total
+}
+
+fn sum_subtree_own_time_for_name(nodes: &HashMap<String, ProfileNode>, name: &str) -> Duration {
+    let mut total = Duration::ZERO;
+    for (child_name, child_node) in nodes {
+        if child_name == name {
+            total += sum_subtree_own_time_node(child_node);
+            continue;
+        }
+        if !child_node.children.is_empty() {
+            total += sum_subtree_own_time_for_name(&child_node.children, name);
+        }
+    }
+    total
+}
+
+/// Returns the sum of own-times for all subtrees rooted at `name` (outermost matches only).
+pub fn sum_subtree_own_time(name: &str) -> Duration {
+    if !PROFILING_ENABLED {
+        return Duration::ZERO;
+    }
+    let data = profiler().lock().unwrap();
+    sum_subtree_own_time_for_name(&data.call_tree.children, name)
 }
 
 // Internal functions for timing blocks

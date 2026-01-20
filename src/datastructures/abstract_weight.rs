@@ -104,6 +104,10 @@ thread_local! {
     static ALLOW_EXPANSION_OVERRIDE: RefCell<Option<bool>> = RefCell::new(None);
 }
 
+thread_local! {
+    static CACHED_EMPTY_WEIGHT: RefCell<Option<(BackendChoice, AbstractWeight)>> = RefCell::new(None);
+}
+
 // --- AbstractWeight profiling ---
 // Legacy weight-op profiling removed; keep no-op hooks for callers.
 pub fn reset_weight_op_profiling() {}
@@ -334,6 +338,7 @@ pub enum AbstractWeight {
 }
 
 impl std::hash::Hash for AbstractWeight {
+    #[time_it("AbstractWeight::hash")]
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         match self {
             AbstractWeight::RangeSet(rsb) => {
@@ -349,15 +354,7 @@ impl std::hash::Hash for AbstractWeight {
             }
             AbstractWeight::RangeMap(rm) => {
                 2u8.hash(state);
-                rm.num_tsids.hash(state);
-                for (token_range, tsid_set) in rm.map.range_values() {
-                    token_range.start().hash(state);
-                    token_range.end().hash(state);
-                    for tsid_range in tsid_set.ranges() {
-                        tsid_range.start().hash(state);
-                        tsid_range.end().hash(state);
-                    }
-                }
+                rm.hash(state);
             }
         }
     }
@@ -648,8 +645,7 @@ impl Default for AbstractWeight {
 }
 
 impl AbstractWeight {
-    /// Create an empty weight (no positions).
-    pub fn empty() -> Self {
+    fn empty_uncached() -> Self {
         match backend_choice() {
             BackendChoice::RangeSet => AbstractWeight::RangeSet(RangeSet::zeros()),
             BackendChoice::Factorized => {
@@ -659,6 +655,29 @@ impl AbstractWeight {
                 AbstractWeight::RangeMap(intern_rangemap(RangeMapWeight::new(current_num_tsids())))
             }
         }
+    }
+
+    /// Create an empty weight (no positions).
+    pub fn empty() -> Self {
+        let choice = backend_choice();
+        CACHED_EMPTY_WEIGHT.with(|cell| {
+            let cached = cell
+                .borrow()
+                .as_ref()
+                .and_then(|(cached_choice, cached_weight)| {
+                    if *cached_choice == choice {
+                        Some(cached_weight.clone())
+                    } else {
+                        None
+                    }
+                });
+            if let Some(weight) = cached {
+                return weight;
+            }
+            let weight = Self::empty_uncached();
+            *cell.borrow_mut() = Some((choice, weight.clone()));
+            weight
+        })
     }
     
     /// Create an empty weight (alias for `empty()`).
@@ -850,11 +869,39 @@ impl AbstractWeight {
     pub fn is_all_fast(&self) -> bool {
         let max_llm_token = crate::datastructures::get_max_llm_token();
         let num_tsids = normalize_num_tsids(crate::datastructures::get_num_tsids());
-        let domain_size = max_llm_token
-            .saturating_add(1)
-            .saturating_mul(num_tsids);
-        // Check if ranges_len == 1 and len == domain_size
-        self.ranges_len() == 1 && self.len() == domain_size
+        match self {
+            AbstractWeight::RangeMap(rm) => {
+                let mut ranges = rm.map.range_values();
+                if ranges.len() != 1 {
+                    return false;
+                }
+                let (token_range, tsid_set) = match ranges.next() {
+                    Some(value) => value,
+                    None => return false,
+                };
+                if *token_range.start() != 0 || *token_range.end() != max_llm_token {
+                    return false;
+                }
+                if tsid_set.ranges_len() != 1 {
+                    return false;
+                }
+                let mut tsid_ranges = tsid_set.ranges();
+                let tsid_range = match tsid_ranges.next() {
+                    Some(value) => value,
+                    None => return false,
+                };
+                *tsid_range.start() == 0 && *tsid_range.end() == num_tsids.saturating_sub(1)
+            }
+            _ => {
+                if self.ranges_len() != 1 {
+                    return false;
+                }
+                let domain_size = max_llm_token
+                    .saturating_add(1)
+                    .saturating_mul(num_tsids);
+                self.len() == domain_size
+            }
+        }
     }
     
     /// Check if self is a subset of other.
@@ -985,6 +1032,7 @@ impl AbstractWeight {
 impl BitAnd for AbstractWeight {
     type Output = Self;
 
+    #[time_it("AbstractWeight::bitand")]
     fn bitand(self, rhs: Self) -> Self::Output {
         match (self, rhs) {
             (AbstractWeight::RangeSet(a), AbstractWeight::RangeSet(b)) => {
@@ -1004,6 +1052,7 @@ impl BitAnd for AbstractWeight {
 impl BitAnd<&AbstractWeight> for AbstractWeight {
     type Output = AbstractWeight;
 
+    #[time_it("AbstractWeight::bitand")]
     fn bitand(self, rhs: &AbstractWeight) -> Self::Output {
         match (self, rhs) {
             (AbstractWeight::RangeSet(a), AbstractWeight::RangeSet(b)) => {
@@ -1050,7 +1099,7 @@ impl BitAnd for &AbstractWeight {
 }
 
 impl BitAndAssign for AbstractWeight {
-    #[time_it("AbstractWeight::bitand_assign")]
+    #[time_it("AbstractWeight::bitand")]
     fn bitand_assign(&mut self, rhs: Self) {
         match (self, &rhs) {
             (AbstractWeight::RangeSet(a), AbstractWeight::RangeSet(b)) => {
@@ -1068,7 +1117,7 @@ impl BitAndAssign for AbstractWeight {
 }
 
 impl BitAndAssign<&AbstractWeight> for AbstractWeight {
-    #[time_it("AbstractWeight::bitand_assign_ref")]
+    #[time_it("AbstractWeight::bitand")]
     fn bitand_assign(&mut self, rhs: &AbstractWeight) {
         match (self, rhs) {
             (AbstractWeight::RangeSet(a), AbstractWeight::RangeSet(b)) => {
@@ -1278,6 +1327,7 @@ impl AbstractWeight {
     }
 
     /// Compute a stable fingerprint for hashing/grouping weights.
+    #[time_it("AbstractWeight::fingerprint")]
     pub fn fingerprint(&self) -> u64 {
         use std::collections::hash_map::DefaultHasher;
         let mut hasher = DefaultHasher::new();

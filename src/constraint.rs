@@ -1202,6 +1202,21 @@ impl GrammarConstraint {
         // Trim weights to domain_max to remove unnecessary range extensions to usize::MAX
         terminal_dwa.trim_weights_to_domain(domain_max);
 
+        // Temporary profiling: print summary after terminal DWA build and exit early.
+        if std::env::var("PROFILE_TERMINAL_DWA").is_ok() {
+            crate::profiler::print_summary();
+            crate::profiler::print_summary_flat();
+            crate::profiler::print_summary_flat_by_own_time();
+            let total_own = crate::profiler::sum_flat_own_time();
+            println!("Profiler flat own-time total: {:.3}s", total_own.as_secs_f64());
+            let run_precompute1_own = crate::profiler::sum_subtree_own_time("run_precompute1");
+            println!(
+                "Profiler run_precompute1 subtree own-time total: {:.3}s",
+                run_precompute1_own.as_secs_f64()
+            );
+            std::process::exit(0);
+        }
+
         // Weight complexity instrumentation (unique weights are interned).
         if crate::r#macro::is_debug_level_enabled(5) {
             crate::debug!(5, "Terminal DWA weight complexity (unique): total_ranges_unique={} (total_ranges_all={})", 
