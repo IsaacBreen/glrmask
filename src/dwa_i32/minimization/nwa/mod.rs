@@ -113,21 +113,33 @@ impl NWA {
                         if w_uv.is_empty() {
                             continue;
                         }
+                        let w_uv_all = w_uv.is_all_fast();
 
                         if let Some(fw) = &states[v].final_weight {
-                            let w = w_uv & fw;
-                            if !w.is_empty() {
-                                final_weight = Some(match final_weight {
-                                    Some(cur) => cur | &w,
-                                    None => w,
-                                });
+                            if !fw.is_empty() {
+                                let w = if w_uv_all { fw.clone() } else { w_uv & fw };
+                                if !w.is_empty() {
+                                    final_weight = Some(match final_weight {
+                                        Some(cur) => cur | &w,
+                                        None => w,
+                                    });
+                                }
                             }
                         }
 
                         for (label, targets) in &states[v].transitions {
                             let entry = trans_map.entry(*label).or_insert_with(HashMap::new);
                             for (tgt, w_tr) in targets {
-                                let w = w_uv & w_tr;
+                                if w_tr.is_empty() {
+                                    continue;
+                                }
+                                let w = if w_uv_all {
+                                    w_tr.clone()
+                                } else if w_tr.is_all_fast() {
+                                    w_uv.clone()
+                                } else {
+                                    w_uv & w_tr
+                                };
                                 if w.is_empty() {
                                     continue;
                                 }
