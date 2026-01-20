@@ -9,7 +9,7 @@ use super::nwa::NWA;
 use crate::dwa_i32::NWAStateID;
 use anyhow::Result;
 use nom::IResult;
-use once_cell::sync::Lazy;
+use profiler_macro::time_it;
 use range_set_blaze::RangeSetBlaze;
 use rustfst::algorithms::determinize::{determinize_with_config, DeterminizeConfig, DeterminizeType};
 use rustfst::algorithms::rm_epsilon::rm_epsilon;
@@ -23,7 +23,6 @@ use std::borrow::Borrow;
 use std::collections::HashMap;
 use std::io::Write;
 use std::ops::{BitAndAssign, BitOrAssign};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 #[inline]
@@ -54,388 +53,82 @@ fn label_to_fst_label(label: Label) -> u32 {
     result
 }
 
-static RUSTFST_WEIGHT_COUNT_ZERO: AtomicU64 = AtomicU64::new(0);
-static RUSTFST_WEIGHT_TIME_ZERO: AtomicU64 = AtomicU64::new(0);
-static RUSTFST_WEIGHT_COUNT_ONE: AtomicU64 = AtomicU64::new(0);
-static RUSTFST_WEIGHT_TIME_ONE: AtomicU64 = AtomicU64::new(0);
-static RUSTFST_WEIGHT_COUNT_NEW: AtomicU64 = AtomicU64::new(0);
-static RUSTFST_WEIGHT_TIME_NEW: AtomicU64 = AtomicU64::new(0);
-static RUSTFST_WEIGHT_COUNT_PROPERTIES: AtomicU64 = AtomicU64::new(0);
-static RUSTFST_WEIGHT_TIME_PROPERTIES: AtomicU64 = AtomicU64::new(0);
-static RUSTFST_WEIGHT_COUNT_PLUS: AtomicU64 = AtomicU64::new(0);
-static RUSTFST_WEIGHT_TIME_PLUS: AtomicU64 = AtomicU64::new(0);
-static RUSTFST_WEIGHT_COUNT_TIMES: AtomicU64 = AtomicU64::new(0);
-static RUSTFST_WEIGHT_TIME_TIMES: AtomicU64 = AtomicU64::new(0);
-static RUSTFST_WEIGHT_COUNT_DIVIDE: AtomicU64 = AtomicU64::new(0);
-static RUSTFST_WEIGHT_TIME_DIVIDE: AtomicU64 = AtomicU64::new(0);
-static RUSTFST_WEIGHT_COUNT_APPROX_EQUAL: AtomicU64 = AtomicU64::new(0);
-static RUSTFST_WEIGHT_TIME_APPROX_EQUAL: AtomicU64 = AtomicU64::new(0);
-static RUSTFST_WEIGHT_COUNT_VALUE: AtomicU64 = AtomicU64::new(0);
-static RUSTFST_WEIGHT_TIME_VALUE: AtomicU64 = AtomicU64::new(0);
-static RUSTFST_WEIGHT_COUNT_TAKE_VALUE: AtomicU64 = AtomicU64::new(0);
-static RUSTFST_WEIGHT_TIME_TAKE_VALUE: AtomicU64 = AtomicU64::new(0);
-static RUSTFST_WEIGHT_COUNT_SET_VALUE: AtomicU64 = AtomicU64::new(0);
-static RUSTFST_WEIGHT_TIME_SET_VALUE: AtomicU64 = AtomicU64::new(0);
-static RUSTFST_WEIGHT_COUNT_REVERSE: AtomicU64 = AtomicU64::new(0);
-static RUSTFST_WEIGHT_TIME_REVERSE: AtomicU64 = AtomicU64::new(0);
-static RUSTFST_WEIGHT_COUNT_REVERSE_BACK: AtomicU64 = AtomicU64::new(0);
-static RUSTFST_WEIGHT_TIME_REVERSE_BACK: AtomicU64 = AtomicU64::new(0);
-static RUSTFST_WEIGHT_COUNT_QUANTIZE: AtomicU64 = AtomicU64::new(0);
-static RUSTFST_WEIGHT_TIME_QUANTIZE: AtomicU64 = AtomicU64::new(0);
-static RUSTFST_WEIGHT_COUNT_WEIGHT_TYPE: AtomicU64 = AtomicU64::new(0);
-static RUSTFST_WEIGHT_TIME_WEIGHT_TYPE: AtomicU64 = AtomicU64::new(0);
-static RUSTFST_WEIGHT_COUNT_PARSE_BINARY: AtomicU64 = AtomicU64::new(0);
-static RUSTFST_WEIGHT_TIME_PARSE_BINARY: AtomicU64 = AtomicU64::new(0);
-static RUSTFST_WEIGHT_COUNT_WRITE_BINARY: AtomicU64 = AtomicU64::new(0);
-static RUSTFST_WEIGHT_TIME_WRITE_BINARY: AtomicU64 = AtomicU64::new(0);
-
-fn rustfst_weight_profile_enabled() -> bool {
-    static ENABLED: Lazy<bool> = Lazy::new(|| {
-        let macro_level = std::env::var("MACRO_DEBUG_LEVEL")
-            .ok()
-            .and_then(|v| v.parse::<u32>().ok())
-            .unwrap_or(0);
-        std::env::var("PROFILE_RUSTFST_WEIGHT_OPS")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false)
-            || macro_level >= 5
-    });
-    *ENABLED
-}
-
-pub fn reset_rustfst_weight_profile() {
-    RUSTFST_WEIGHT_COUNT_ZERO.store(0, Ordering::Relaxed);
-    RUSTFST_WEIGHT_TIME_ZERO.store(0, Ordering::Relaxed);
-    RUSTFST_WEIGHT_COUNT_ONE.store(0, Ordering::Relaxed);
-    RUSTFST_WEIGHT_TIME_ONE.store(0, Ordering::Relaxed);
-    RUSTFST_WEIGHT_COUNT_NEW.store(0, Ordering::Relaxed);
-    RUSTFST_WEIGHT_TIME_NEW.store(0, Ordering::Relaxed);
-    RUSTFST_WEIGHT_COUNT_PROPERTIES.store(0, Ordering::Relaxed);
-    RUSTFST_WEIGHT_TIME_PROPERTIES.store(0, Ordering::Relaxed);
-    RUSTFST_WEIGHT_COUNT_PLUS.store(0, Ordering::Relaxed);
-    RUSTFST_WEIGHT_TIME_PLUS.store(0, Ordering::Relaxed);
-    RUSTFST_WEIGHT_COUNT_TIMES.store(0, Ordering::Relaxed);
-    RUSTFST_WEIGHT_TIME_TIMES.store(0, Ordering::Relaxed);
-    RUSTFST_WEIGHT_COUNT_DIVIDE.store(0, Ordering::Relaxed);
-    RUSTFST_WEIGHT_TIME_DIVIDE.store(0, Ordering::Relaxed);
-    RUSTFST_WEIGHT_COUNT_APPROX_EQUAL.store(0, Ordering::Relaxed);
-    RUSTFST_WEIGHT_TIME_APPROX_EQUAL.store(0, Ordering::Relaxed);
-    RUSTFST_WEIGHT_COUNT_VALUE.store(0, Ordering::Relaxed);
-    RUSTFST_WEIGHT_TIME_VALUE.store(0, Ordering::Relaxed);
-    RUSTFST_WEIGHT_COUNT_TAKE_VALUE.store(0, Ordering::Relaxed);
-    RUSTFST_WEIGHT_TIME_TAKE_VALUE.store(0, Ordering::Relaxed);
-    RUSTFST_WEIGHT_COUNT_SET_VALUE.store(0, Ordering::Relaxed);
-    RUSTFST_WEIGHT_TIME_SET_VALUE.store(0, Ordering::Relaxed);
-    RUSTFST_WEIGHT_COUNT_REVERSE.store(0, Ordering::Relaxed);
-    RUSTFST_WEIGHT_TIME_REVERSE.store(0, Ordering::Relaxed);
-    RUSTFST_WEIGHT_COUNT_REVERSE_BACK.store(0, Ordering::Relaxed);
-    RUSTFST_WEIGHT_TIME_REVERSE_BACK.store(0, Ordering::Relaxed);
-    RUSTFST_WEIGHT_COUNT_QUANTIZE.store(0, Ordering::Relaxed);
-    RUSTFST_WEIGHT_TIME_QUANTIZE.store(0, Ordering::Relaxed);
-    RUSTFST_WEIGHT_COUNT_WEIGHT_TYPE.store(0, Ordering::Relaxed);
-    RUSTFST_WEIGHT_TIME_WEIGHT_TYPE.store(0, Ordering::Relaxed);
-    RUSTFST_WEIGHT_COUNT_PARSE_BINARY.store(0, Ordering::Relaxed);
-    RUSTFST_WEIGHT_TIME_PARSE_BINARY.store(0, Ordering::Relaxed);
-    RUSTFST_WEIGHT_COUNT_WRITE_BINARY.store(0, Ordering::Relaxed);
-    RUSTFST_WEIGHT_TIME_WRITE_BINARY.store(0, Ordering::Relaxed);
-}
-
-pub fn print_rustfst_weight_profile(label: &str) {
-    let count_plus = RUSTFST_WEIGHT_COUNT_PLUS.load(Ordering::Relaxed);
-    let count_times = RUSTFST_WEIGHT_COUNT_TIMES.load(Ordering::Relaxed);
-    let count_divide = RUSTFST_WEIGHT_COUNT_DIVIDE.load(Ordering::Relaxed);
-    let count_zero = RUSTFST_WEIGHT_COUNT_ZERO.load(Ordering::Relaxed);
-    let count_one = RUSTFST_WEIGHT_COUNT_ONE.load(Ordering::Relaxed);
-    let count_new = RUSTFST_WEIGHT_COUNT_NEW.load(Ordering::Relaxed);
-    let count_properties = RUSTFST_WEIGHT_COUNT_PROPERTIES.load(Ordering::Relaxed);
-    let count_approx = RUSTFST_WEIGHT_COUNT_APPROX_EQUAL.load(Ordering::Relaxed);
-    let count_value = RUSTFST_WEIGHT_COUNT_VALUE.load(Ordering::Relaxed);
-    let count_take_value = RUSTFST_WEIGHT_COUNT_TAKE_VALUE.load(Ordering::Relaxed);
-    let count_set_value = RUSTFST_WEIGHT_COUNT_SET_VALUE.load(Ordering::Relaxed);
-    let count_reverse = RUSTFST_WEIGHT_COUNT_REVERSE.load(Ordering::Relaxed);
-    let count_reverse_back = RUSTFST_WEIGHT_COUNT_REVERSE_BACK.load(Ordering::Relaxed);
-    let count_quantize = RUSTFST_WEIGHT_COUNT_QUANTIZE.load(Ordering::Relaxed);
-    let count_weight_type = RUSTFST_WEIGHT_COUNT_WEIGHT_TYPE.load(Ordering::Relaxed);
-    let count_parse_binary = RUSTFST_WEIGHT_COUNT_PARSE_BINARY.load(Ordering::Relaxed);
-    let count_write_binary = RUSTFST_WEIGHT_COUNT_WRITE_BINARY.load(Ordering::Relaxed);
-
-    if count_plus
-        + count_times
-        + count_divide
-        + count_zero
-        + count_one
-        + count_new
-        + count_properties
-        + count_approx
-        + count_value
-        + count_take_value
-        + count_set_value
-        + count_reverse
-        + count_reverse_back
-        + count_quantize
-        + count_weight_type
-        + count_parse_binary
-        + count_write_binary
-        == 0
-    {
-        return;
-    }
-
-    let avg_us = |time_us: u64, count: u64| -> f64 {
-        if count == 0 { 0.0 } else { time_us as f64 / count as f64 }
-    };
-
-    println!("RUSTFST_WEIGHT_PROF [{}]:", label);
-    println!(
-        "  plus_assign:   {:9} ops, {:9} us (avg {:.2} us)",
-        count_plus,
-        RUSTFST_WEIGHT_TIME_PLUS.load(Ordering::Relaxed),
-        avg_us(RUSTFST_WEIGHT_TIME_PLUS.load(Ordering::Relaxed), count_plus)
-    );
-    println!(
-        "  times_assign:  {:9} ops, {:9} us (avg {:.2} us)",
-        count_times,
-        RUSTFST_WEIGHT_TIME_TIMES.load(Ordering::Relaxed),
-        avg_us(RUSTFST_WEIGHT_TIME_TIMES.load(Ordering::Relaxed), count_times)
-    );
-    println!(
-        "  divide_assign: {:9} ops, {:9} us (avg {:.2} us)",
-        count_divide,
-        RUSTFST_WEIGHT_TIME_DIVIDE.load(Ordering::Relaxed),
-        avg_us(RUSTFST_WEIGHT_TIME_DIVIDE.load(Ordering::Relaxed), count_divide)
-    );
-    println!(
-        "  zero:          {:9} ops, {:9} us (avg {:.2} us)",
-        count_zero,
-        RUSTFST_WEIGHT_TIME_ZERO.load(Ordering::Relaxed),
-        avg_us(RUSTFST_WEIGHT_TIME_ZERO.load(Ordering::Relaxed), count_zero)
-    );
-    println!(
-        "  one:           {:9} ops, {:9} us (avg {:.2} us)",
-        count_one,
-        RUSTFST_WEIGHT_TIME_ONE.load(Ordering::Relaxed),
-        avg_us(RUSTFST_WEIGHT_TIME_ONE.load(Ordering::Relaxed), count_one)
-    );
-    println!(
-        "  new:           {:9} ops, {:9} us (avg {:.2} us)",
-        count_new,
-        RUSTFST_WEIGHT_TIME_NEW.load(Ordering::Relaxed),
-        avg_us(RUSTFST_WEIGHT_TIME_NEW.load(Ordering::Relaxed), count_new)
-    );
-    println!(
-        "  properties:    {:9} ops, {:9} us (avg {:.2} us)",
-        count_properties,
-        RUSTFST_WEIGHT_TIME_PROPERTIES.load(Ordering::Relaxed),
-        avg_us(RUSTFST_WEIGHT_TIME_PROPERTIES.load(Ordering::Relaxed), count_properties)
-    );
-    println!(
-        "  approx_equal:  {:9} ops, {:9} us (avg {:.2} us)",
-        count_approx,
-        RUSTFST_WEIGHT_TIME_APPROX_EQUAL.load(Ordering::Relaxed),
-        avg_us(RUSTFST_WEIGHT_TIME_APPROX_EQUAL.load(Ordering::Relaxed), count_approx)
-    );
-    println!(
-        "  value:         {:9} ops, {:9} us (avg {:.2} us)",
-        count_value,
-        RUSTFST_WEIGHT_TIME_VALUE.load(Ordering::Relaxed),
-        avg_us(RUSTFST_WEIGHT_TIME_VALUE.load(Ordering::Relaxed), count_value)
-    );
-    println!(
-        "  take_value:    {:9} ops, {:9} us (avg {:.2} us)",
-        count_take_value,
-        RUSTFST_WEIGHT_TIME_TAKE_VALUE.load(Ordering::Relaxed),
-        avg_us(RUSTFST_WEIGHT_TIME_TAKE_VALUE.load(Ordering::Relaxed), count_take_value)
-    );
-    println!(
-        "  set_value:     {:9} ops, {:9} us (avg {:.2} us)",
-        count_set_value,
-        RUSTFST_WEIGHT_TIME_SET_VALUE.load(Ordering::Relaxed),
-        avg_us(RUSTFST_WEIGHT_TIME_SET_VALUE.load(Ordering::Relaxed), count_set_value)
-    );
-    println!(
-        "  reverse:       {:9} ops, {:9} us (avg {:.2} us)",
-        count_reverse,
-        RUSTFST_WEIGHT_TIME_REVERSE.load(Ordering::Relaxed),
-        avg_us(RUSTFST_WEIGHT_TIME_REVERSE.load(Ordering::Relaxed), count_reverse)
-    );
-    println!(
-        "  reverse_back:  {:9} ops, {:9} us (avg {:.2} us)",
-        count_reverse_back,
-        RUSTFST_WEIGHT_TIME_REVERSE_BACK.load(Ordering::Relaxed),
-        avg_us(RUSTFST_WEIGHT_TIME_REVERSE_BACK.load(Ordering::Relaxed), count_reverse_back)
-    );
-    println!(
-        "  quantize:      {:9} ops, {:9} us (avg {:.2} us)",
-        count_quantize,
-        RUSTFST_WEIGHT_TIME_QUANTIZE.load(Ordering::Relaxed),
-        avg_us(RUSTFST_WEIGHT_TIME_QUANTIZE.load(Ordering::Relaxed), count_quantize)
-    );
-    println!(
-        "  weight_type:   {:9} ops, {:9} us (avg {:.2} us)",
-        count_weight_type,
-        RUSTFST_WEIGHT_TIME_WEIGHT_TYPE.load(Ordering::Relaxed),
-        avg_us(RUSTFST_WEIGHT_TIME_WEIGHT_TYPE.load(Ordering::Relaxed), count_weight_type)
-    );
-    println!(
-        "  parse_binary:  {:9} ops, {:9} us (avg {:.2} us)",
-        count_parse_binary,
-        RUSTFST_WEIGHT_TIME_PARSE_BINARY.load(Ordering::Relaxed),
-        avg_us(RUSTFST_WEIGHT_TIME_PARSE_BINARY.load(Ordering::Relaxed), count_parse_binary)
-    );
-    println!(
-        "  write_binary:  {:9} ops, {:9} us (avg {:.2} us)",
-        count_write_binary,
-        RUSTFST_WEIGHT_TIME_WRITE_BINARY.load(Ordering::Relaxed),
-        avg_us(RUSTFST_WEIGHT_TIME_WRITE_BINARY.load(Ordering::Relaxed), count_write_binary)
-    );
-}
-
 impl Semiring for Weight {
     type Type = Weight;
     type ReverseWeight = Weight;
 
+    #[time_it("Weight::zero")]
     fn zero() -> Self {
-        let prof = rustfst_weight_profile_enabled();
-        let start = if prof { Some(Instant::now()) } else { None };
-        let res = Weight::zeros();
-        if let Some(start) = start {
-            RUSTFST_WEIGHT_COUNT_ZERO.fetch_add(1, Ordering::Relaxed);
-            RUSTFST_WEIGHT_TIME_ZERO.fetch_add(start.elapsed().as_micros() as u64, Ordering::Relaxed);
-        }
-        res
+        Weight::zeros()
     }
 
+    #[time_it("Weight::one")]
     fn one() -> Self {
-        let prof = rustfst_weight_profile_enabled();
-        let start = if prof { Some(Instant::now()) } else { None };
-        let res = Weight::all();
-        if let Some(start) = start {
-            RUSTFST_WEIGHT_COUNT_ONE.fetch_add(1, Ordering::Relaxed);
-            RUSTFST_WEIGHT_TIME_ONE.fetch_add(start.elapsed().as_micros() as u64, Ordering::Relaxed);
-        }
-        res
+        Weight::all()
     }
 
+    #[time_it("Weight::new")]
     fn new(value: Self::Type) -> Self {
-        let prof = rustfst_weight_profile_enabled();
-        let start = if prof { Some(Instant::now()) } else { None };
-        let res = value;
-        if let Some(start) = start {
-            RUSTFST_WEIGHT_COUNT_NEW.fetch_add(1, Ordering::Relaxed);
-            RUSTFST_WEIGHT_TIME_NEW.fetch_add(start.elapsed().as_micros() as u64, Ordering::Relaxed);
-        }
-        res
+        value
     }
 
+    #[time_it("Weight::plus_assign")]
     fn plus_assign<P: Borrow<Self>>(&mut self, rhs: P) -> Result<()> {
-        let prof = rustfst_weight_profile_enabled();
-        let start = if prof { Some(Instant::now()) } else { None };
         self.bitor_assign(rhs.borrow());
-        if let Some(start) = start {
-            RUSTFST_WEIGHT_COUNT_PLUS.fetch_add(1, Ordering::Relaxed);
-            RUSTFST_WEIGHT_TIME_PLUS.fetch_add(start.elapsed().as_micros() as u64, Ordering::Relaxed);
-        }
         Ok(())
     }
 
+    #[time_it("Weight::times_assign")]
     fn times_assign<P: Borrow<Self>>(&mut self, rhs: P) -> Result<()> {
-        let prof = rustfst_weight_profile_enabled();
-        let start = if prof { Some(Instant::now()) } else { None };
         self.bitand_assign(rhs.borrow());
-        if let Some(start) = start {
-            RUSTFST_WEIGHT_COUNT_TIMES.fetch_add(1, Ordering::Relaxed);
-            RUSTFST_WEIGHT_TIME_TIMES.fetch_add(start.elapsed().as_micros() as u64, Ordering::Relaxed);
-        }
         Ok(())
     }
 
+    #[time_it("Weight::approx_equal")]
     fn approx_equal<P: Borrow<Self>>(&self, rhs: P, _delta: f32) -> bool {
-        let prof = rustfst_weight_profile_enabled();
-        let start = if prof { Some(Instant::now()) } else { None };
-        let res = *self == *rhs.borrow();
-        if let Some(start) = start {
-            RUSTFST_WEIGHT_COUNT_APPROX_EQUAL.fetch_add(1, Ordering::Relaxed);
-            RUSTFST_WEIGHT_TIME_APPROX_EQUAL.fetch_add(start.elapsed().as_micros() as u64, Ordering::Relaxed);
-        }
-        res
+        *self == *rhs.borrow()
     }
 
+    #[time_it("Weight::value")]
     fn value(&self) -> &Self::Type {
-        let prof = rustfst_weight_profile_enabled();
-        let start = if prof { Some(Instant::now()) } else { None };
-        let res: &Self::Type = self;
-        if let Some(start) = start {
-            RUSTFST_WEIGHT_COUNT_VALUE.fetch_add(1, Ordering::Relaxed);
-            RUSTFST_WEIGHT_TIME_VALUE.fetch_add(start.elapsed().as_micros() as u64, Ordering::Relaxed);
-        }
-        res
+        self
     }
 
+    #[time_it("Weight::take_value")]
     fn take_value(self) -> Self::Type {
-        let prof = rustfst_weight_profile_enabled();
-        let start = if prof { Some(Instant::now()) } else { None };
-        let res = self;
-        if let Some(start) = start {
-            RUSTFST_WEIGHT_COUNT_TAKE_VALUE.fetch_add(1, Ordering::Relaxed);
-            RUSTFST_WEIGHT_TIME_TAKE_VALUE.fetch_add(start.elapsed().as_micros() as u64, Ordering::Relaxed);
-        }
-        res
+        self
     }
 
+    #[time_it("Weight::set_value")]
     fn set_value(&mut self, value: Self::Type) {
-        let prof = rustfst_weight_profile_enabled();
-        let start = if prof { Some(Instant::now()) } else { None };
         *self = value;
-        if let Some(start) = start {
-            RUSTFST_WEIGHT_COUNT_SET_VALUE.fetch_add(1, Ordering::Relaxed);
-            RUSTFST_WEIGHT_TIME_SET_VALUE.fetch_add(start.elapsed().as_micros() as u64, Ordering::Relaxed);
-        }
     }
 
+    #[time_it("Weight::reverse")]
     fn reverse(&self) -> Result<Self::ReverseWeight> {
-        let prof = rustfst_weight_profile_enabled();
-        let start = if prof { Some(Instant::now()) } else { None };
-        let res = Ok(self.clone());
-        if let Some(start) = start {
-            RUSTFST_WEIGHT_COUNT_REVERSE.fetch_add(1, Ordering::Relaxed);
-            RUSTFST_WEIGHT_TIME_REVERSE.fetch_add(start.elapsed().as_micros() as u64, Ordering::Relaxed);
-        }
-        res
+        Ok(self.clone())
     }
 
+    #[time_it("Weight::properties")]
     fn properties() -> SemiringProperties {
-        let prof = rustfst_weight_profile_enabled();
-        let start = if prof { Some(Instant::now()) } else { None };
-        let props = SemiringProperties::LEFT_SEMIRING
+        SemiringProperties::LEFT_SEMIRING
             | SemiringProperties::RIGHT_SEMIRING
             | SemiringProperties::COMMUTATIVE
             | SemiringProperties::IDEMPOTENT
-            | SemiringProperties::PATH;
-        if let Some(start) = start {
-            RUSTFST_WEIGHT_COUNT_PROPERTIES.fetch_add(1, Ordering::Relaxed);
-            RUSTFST_WEIGHT_TIME_PROPERTIES.fetch_add(start.elapsed().as_micros() as u64, Ordering::Relaxed);
-        }
-        props
+            | SemiringProperties::PATH
     }
 }
 
 impl ReverseBack<Weight> for Weight {
+    #[time_it("Weight::reverse_back")]
     fn reverse_back(&self) -> Result<Weight> {
-        let prof = rustfst_weight_profile_enabled();
-        let start = if prof { Some(Instant::now()) } else { None };
-        let res = Ok(self.clone());
-        if let Some(start) = start {
-            RUSTFST_WEIGHT_COUNT_REVERSE_BACK.fetch_add(1, Ordering::Relaxed);
-            RUSTFST_WEIGHT_TIME_REVERSE_BACK.fetch_add(start.elapsed().as_micros() as u64, Ordering::Relaxed);
-        }
-        res
+        Ok(self.clone())
     }
 }
 
 impl WeaklyDivisibleSemiring for Weight {
+    #[time_it("Weight::divide_assign")]
     fn divide_assign(&mut self, rhs: &Self, _divide_type: DivideType) -> Result<()> {
-        let prof = rustfst_weight_profile_enabled();
-        let start = if prof { Some(Instant::now()) } else { None };
         let new_weight = if *self == *rhs {
             Weight::all()
         } else if rhs.is_empty() {
@@ -451,42 +144,25 @@ impl WeaklyDivisibleSemiring for Weight {
         };
 
         *self = new_weight;
-        if let Some(start) = start {
-            RUSTFST_WEIGHT_COUNT_DIVIDE.fetch_add(1, Ordering::Relaxed);
-            RUSTFST_WEIGHT_TIME_DIVIDE.fetch_add(start.elapsed().as_micros() as u64, Ordering::Relaxed);
-        }
         Ok(())
     }
 }
 
 impl WeightQuantize for Weight {
+    #[time_it("Weight::quantize_assign")]
     fn quantize_assign(&mut self, _delta: f32) -> Result<()> {
-        let prof = rustfst_weight_profile_enabled();
-        let start = if prof { Some(Instant::now()) } else { None };
-        let res = Ok(());
-        if let Some(start) = start {
-            RUSTFST_WEIGHT_COUNT_QUANTIZE.fetch_add(1, Ordering::Relaxed);
-            RUSTFST_WEIGHT_TIME_QUANTIZE.fetch_add(start.elapsed().as_micros() as u64, Ordering::Relaxed);
-        }
-        res
+        Ok(())
     }
 }
 
 impl SerializableSemiring for Weight {
+    #[time_it("Weight::weight_type")]
     fn weight_type() -> String {
-        let prof = rustfst_weight_profile_enabled();
-        let start = if prof { Some(Instant::now()) } else { None };
-        let res = "bitset".to_string();
-        if let Some(start) = start {
-            RUSTFST_WEIGHT_COUNT_WEIGHT_TYPE.fetch_add(1, Ordering::Relaxed);
-            RUSTFST_WEIGHT_TIME_WEIGHT_TYPE.fetch_add(start.elapsed().as_micros() as u64, Ordering::Relaxed);
-        }
-        res
+        "bitset".to_string()
     }
 
+    #[time_it("Weight::parse_binary")]
     fn parse_binary(i: &[u8]) -> IResult<&[u8], Self, NomCustomError<&[u8]>> {
-        let prof = rustfst_weight_profile_enabled();
-        let start = if prof { Some(Instant::now()) } else { None };
         use nom::number::complete::le_u64;
 
         let (mut i, num_ranges) = le_u64(i)?;
@@ -498,31 +174,21 @@ impl SerializableSemiring for Weight {
             i = next_i;
         }
         let rsb = RangeSetBlaze::from_iter(ranges);
-        let res = Ok((i, Weight::from_rsb(rsb)));
-        if let Some(start) = start {
-            RUSTFST_WEIGHT_COUNT_PARSE_BINARY.fetch_add(1, Ordering::Relaxed);
-            RUSTFST_WEIGHT_TIME_PARSE_BINARY.fetch_add(start.elapsed().as_micros() as u64, Ordering::Relaxed);
-        }
-        res
+        Ok((i, Weight::from_rsb(rsb)))
     }
 
+    #[time_it("Weight::write_binary")]
     fn write_binary<F: Write>(&self, file: &mut F) -> Result<()> {
-        let prof = rustfst_weight_profile_enabled();
-        let start = if prof { Some(Instant::now()) } else { None };
         let ranges: Vec<_> = self.to_rsb().ranges().collect();
         file.write_all(&(ranges.len() as u64).to_le_bytes())?;
         for range in ranges {
             file.write_all(&(*range.start() as u64).to_le_bytes())?;
             file.write_all(&(*range.end() as u64).to_le_bytes())?;
         }
-        let res = Ok(());
-        if let Some(start) = start {
-            RUSTFST_WEIGHT_COUNT_WRITE_BINARY.fetch_add(1, Ordering::Relaxed);
-            RUSTFST_WEIGHT_TIME_WRITE_BINARY.fetch_add(start.elapsed().as_micros() as u64, Ordering::Relaxed);
-        }
-        res
+        Ok(())
     }
 
+    #[time_it("Weight::parse_text")]
     fn parse_text(i: &str) -> IResult<&str, Self> {
         use nom::combinator::map_res;
         map_res(nom::combinator::rest, |s: &str| -> Result<Weight, _> {

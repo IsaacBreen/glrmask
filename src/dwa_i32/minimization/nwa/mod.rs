@@ -133,7 +133,6 @@ impl NWA {
         crate::datastructures::hybrid_bitset::reset_profiling();
         crate::datastructures::rangemap_weight::reset_profiling();
         crate::datastructures::abstract_weight::reset_weight_op_profiling();
-        crate::dwa_i32::determinization_rustfst::reset_rustfst_weight_profile();
         
         let min_config = MinimizeConfig::default().with_allow_nondet(true);
         let (mut fst, to_time) = timeit!("NWA::minimize_rustfst::to_rustfst", {
