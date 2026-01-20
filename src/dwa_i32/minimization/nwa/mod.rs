@@ -10,17 +10,15 @@ mod rebuild;
 mod subtract_final_weights;
 
 use super::common::{Partition, MAX_OPTIMIZE_ITERATIONS};
-use crate::dwa_i32::common::BENCHMARK_DEBUG;
-use crate::dwa_i32::nwa::NWA;
+use crate::dwa_i32::common::{Label, NWAStateID, Weight, BENCHMARK_DEBUG};
+use crate::dwa_i32::nwa::{NWA, NWAState};
 
 use rustfst::algorithms::minimize_with_config;
 use rustfst::prelude::MinimizeConfig;
 
-use std::collections::HashSet;
-use rustfst::algorithms::rm_epsilon::rm_epsilon;
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::time::Instant;
 use profiler_macro::{time_it, timeit};
-use rustfst::fst_traits::{CoreFst, ExpandedFst, StateIterator};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum NwaPass {
@@ -51,31 +49,114 @@ impl NWA {
     pub fn rm_epsilon(&mut self) {
         crate::debug!(6, "[NWA] Removing epsilon transitions...");
         let initial_states = self.states.len();
+        if initial_states == 0 {
+            return;
+        }
         let mut total_epsilons = 0;
         for st in &self.states.0 {
             total_epsilons += st.epsilons.len();
         }
         crate::debug!(7, "[NWA] Initial number of states: {}, total epsilon transitions: {}", initial_states, total_epsilons);
 
-        let start = std::time::Instant::now();
-        let mut fst = self.to_rustfst();
-        let to_rustfst_time = start.elapsed();
-        
-        let start2 = std::time::Instant::now();
-        rm_epsilon(&mut fst).unwrap();
-        let rm_epsilon_time = start2.elapsed();
+        let weight_all = Weight::all();
+        let states = &self.states.0;
+        let num_states = states.len();
 
-        crate::debug!(7, "[NWA] Epsilon removal done. RustFST states: {}, transitions: {}", fst.num_states(), fst.states_iter().map(|s| fst.num_trs(s).unwrap()).sum::<usize>());
-        
-        let start3 = std::time::Instant::now();
-        *self = NWA::from_rustfst(&fst);
-        let from_rustfst_time = start3.elapsed();
-        
-        // Report timing only if >50ms
-        if to_rustfst_time + rm_epsilon_time + from_rustfst_time > std::time::Duration::from_millis(50) {
-            crate::debug!(5, "│   rm_epsilon breakdown: to_rustfst={:.2?}, rm_epsilon={:.2?}, from_rustfst={:.2?}", 
-                to_rustfst_time, rm_epsilon_time, from_rustfst_time);
-        }
+        let mut new_states: Vec<NWAState> = vec![NWAState::default(); num_states];
+        let mut closure_weights: Vec<Weight> = vec![Weight::zeros(); num_states];
+        let mut in_queue: Vec<bool> = vec![false; num_states];
+        let mut queue: VecDeque<NWAStateID> = VecDeque::new();
+        let mut touched: Vec<NWAStateID> = Vec::new();
+
+        timeit!("NWA::rm_epsilon::build_states", {
+            for u in 0..num_states {
+                timeit!("NWA::rm_epsilon::closure", {
+                    touched.clear();
+                    queue.clear();
+                    closure_weights[u] = weight_all.clone();
+                    touched.push(u);
+                    queue.push_back(u);
+                    in_queue[u] = true;
+
+                    while let Some(v) = queue.pop_front() {
+                        in_queue[v] = false;
+                        let w_uv = closure_weights[v].clone();
+                        if w_uv.is_empty() {
+                            continue;
+                        }
+                        for (t, w_vt) in &states[v].epsilons {
+                            let new_weight = &w_uv & w_vt;
+                            if new_weight.is_empty() {
+                                continue;
+                            }
+                            let updated = &closure_weights[*t] | &new_weight;
+                            if updated != closure_weights[*t] {
+                                if closure_weights[*t].is_empty() {
+                                    touched.push(*t);
+                                }
+                                closure_weights[*t] = updated;
+                                if !in_queue[*t] {
+                                    queue.push_back(*t);
+                                    in_queue[*t] = true;
+                                }
+                            }
+                        }
+                    }
+                });
+
+                let mut final_weight: Option<Weight> = None;
+                let mut trans_map: BTreeMap<Label, HashMap<NWAStateID, Weight>> = BTreeMap::new();
+
+                timeit!("NWA::rm_epsilon::accumulate", {
+                    for &v in &touched {
+                        let w_uv = &closure_weights[v];
+                        if w_uv.is_empty() {
+                            continue;
+                        }
+
+                        if let Some(fw) = &states[v].final_weight {
+                            let w = w_uv & fw;
+                            if !w.is_empty() {
+                                final_weight = Some(match final_weight {
+                                    Some(cur) => cur | &w,
+                                    None => w,
+                                });
+                            }
+                        }
+
+                        for (label, targets) in &states[v].transitions {
+                            let entry = trans_map.entry(*label).or_insert_with(HashMap::new);
+                            for (tgt, w_tr) in targets {
+                                let w = w_uv & w_tr;
+                                if w.is_empty() {
+                                    continue;
+                                }
+                                entry
+                                    .entry(*tgt)
+                                    .and_modify(|acc| *acc |= &w)
+                                    .or_insert(w);
+                            }
+                        }
+                    }
+                });
+
+                let mut new_state = NWAState::default();
+                new_state.final_weight = final_weight;
+                new_state.transitions = trans_map
+                    .into_iter()
+                    .map(|(label, map)| (label, map.into_iter().collect()))
+                    .collect();
+                new_state.epsilons.clear();
+                new_states[u] = new_state;
+
+                for &v in &touched {
+                    closure_weights[v] = Weight::zeros();
+                    in_queue[v] = false;
+                }
+            }
+        });
+
+        self.states.0 = new_states;
 
         let final_states = self.states.len();
         let mut final_epsilons = 0;
