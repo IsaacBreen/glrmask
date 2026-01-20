@@ -888,10 +888,10 @@ pub fn resolve_indirect_right_recursion(
         let cycle = find_cycle_excluding_self_loops(&graph);
         
         if let Some(cycle) = cycle {
-            crate::debug!(5, "Found indirect right recursion: {:?}", cycle.iter().map(|nt| &nt.0).collect::<Vec<_>>());
+            crate::debug!(6, "Found indirect right recursion: {:?}", cycle.iter().map(|nt| &nt.0).collect::<Vec<_>>());
             inline_right_end(productions, &cycle[0], &cycle[1], &nullable);
         } else {
-            crate::debug!(5, "Indirect right recursion resolved after {} iterations", iteration);
+            crate::debug!(6, "Indirect right recursion resolved after {} iterations", iteration);
             break;
         }
     }

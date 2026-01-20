@@ -273,12 +273,12 @@ pub fn minimize_acyclic_exact(dwa: &DWA) -> Result<DWA, DWABuildError> {
         for h in 0..=max_height {
             let candidates = &states_by_height[h];
             let since_last = last_height_debug.elapsed();
-            crate::debug!(5, "Height {} start: {} candidates, {:?}", h, candidates.len(), since_last);
+            crate::debug!(6, "Height {} start: {} candidates, {:?}", h, candidates.len(), since_last);
             last_height_debug = std::time::Instant::now();
             if candidates.is_empty() { continue; }
 
             if candidates.len() >= 100 {
-                crate::debug!(5, "Height {}: {} candidates", h, candidates.len());
+                crate::debug!(6, "Height {}: {} candidates", h, candidates.len());
             }
 
             // Compute coloring - use partition-based method for large candidate sets
@@ -299,14 +299,14 @@ pub fn minimize_acyclic_exact(dwa: &DWA) -> Result<DWA, DWABuildError> {
                 for (old_idx, &color) in coloring.iter().enumerate() {
                     old_to_new[candidates[old_idx]] = base_new_id + color;
                 }
-                crate::debug!(5, "Height {}: old_to_new insert {:?} ({} items)", h, insert_start.elapsed(), candidates.len());
+                crate::debug!(6, "Height {}: old_to_new insert {:?} ({} items)", h, insert_start.elapsed(), candidates.len());
                 time_insert += insert_start.elapsed();
             });
 
             timeit!("bottom_up_merge_acyclic::extend", {
                 let extend_start = std::time::Instant::now();
                 new_states.extend((0..num_colors).map(|_| MergedStateBuilder::default()));
-                crate::debug!(5, "Height {}: new_states extend {:?} ({} new)", h, extend_start.elapsed(), num_colors);
+                crate::debug!(6, "Height {}: new_states extend {:?} ({} new)", h, extend_start.elapsed(), num_colors);
                 time_extend += extend_start.elapsed();
             });
 
@@ -343,7 +343,7 @@ pub fn minimize_acyclic_exact(dwa: &DWA) -> Result<DWA, DWABuildError> {
                     0.0
                 };
                 crate::debug!(
-                    5,
+                    6,
                     "Height {}: merge_state_into_builder {:?} (transitions {}, and_ops {}, and_time {} us, avg_w_orig_ranges {:.2}, avg_needed_ranges {:.2}, needed_all {} ({:.1}%))",
                     h,
                     merge_start.elapsed(),
@@ -408,7 +408,7 @@ fn compute_height_coloring(
     let is_height_0 = candidates.iter().all(|&id| dwa.states[id].transitions.is_empty());
     if is_height_0 && candidates.len() > 1000 {
         let colors = compute_height_0_coloring_direct(candidates, dwa, needed, start);
-        crate::debug!(5, "Height 0 coloring total: {:?}", start.elapsed());
+        crate::debug!(6, "Height 0 coloring total: {:?}", start.elapsed());
         return colors;
     }
     
@@ -418,7 +418,7 @@ fn compute_height_coloring(
     if candidates.len() > 500 {
         let greedy_start = std::time::Instant::now();
         let colors = greedy_color_without_graph(dwa, candidates, needed, old_to_new, new_states, start);
-        crate::debug!(5, "Greedy coloring (no graph) total: {:?}", greedy_start.elapsed());
+        crate::debug!(6, "Greedy coloring (no graph) total: {:?}", greedy_start.elapsed());
         return colors;
     }
     
@@ -580,12 +580,12 @@ fn compute_height_0_coloring_direct(
         let num_colors = colors.iter().max().map(|c| c + 1).unwrap_or(0);
         let interval_time = interval_start.elapsed();
         
-        crate::debug!(5, "Height 0 interval coloring: {} candidates, {} sigs, {}/{} compatible pairs -> {} colors in {:?}",
+        crate::debug!(6, "Height 0 interval coloring: {} candidates, {} sigs, {}/{} compatible pairs -> {} colors in {:?}",
             n, num_sigs, compatible_sig_pairs, total_sig_pairs, num_colors, start.elapsed());
         let total_time = start.elapsed();
         let accounted = sig_build_time + footprint_time + pairwise_time + interval_time;
         let unaccounted = total_time.saturating_sub(accounted);
-        crate::debug!(5, "Height 0 interval details: sig_build={:?}, footprint={:?}, pairwise={:?}, interval={:?}, unaccounted={:?}",
+        crate::debug!(6, "Height 0 interval details: sig_build={:?}, footprint={:?}, pairwise={:?}, interval={:?}, unaccounted={:?}",
             sig_build_time, footprint_time, pairwise_time, interval_time, unaccounted);
         
         return colors;
@@ -615,12 +615,12 @@ fn compute_height_0_coloring_direct(
     }
     
     let direct_time = direct_start.elapsed();
-    crate::debug!(5, "Height 0 direct coloring: {} candidates, {} sigs, {}/{} compatible pairs -> {} colors in {:?}",
+    crate::debug!(6, "Height 0 direct coloring: {} candidates, {} sigs, {}/{} compatible pairs -> {} colors in {:?}",
         n, num_sigs, compatible_sig_pairs, total_sig_pairs, next_color, start.elapsed());
     let total_time = start.elapsed();
     let accounted = sig_build_time + footprint_time + pairwise_time + direct_time;
     let unaccounted = total_time.saturating_sub(accounted);
-    crate::debug!(5, "Height 0 direct details: sig_build={:?}, footprint={:?}, pairwise={:?}, direct={:?}, unaccounted={:?}",
+    crate::debug!(6, "Height 0 direct details: sig_build={:?}, footprint={:?}, pairwise={:?}, direct={:?}, unaccounted={:?}",
         sig_build_time, footprint_time, pairwise_time, direct_time, unaccounted);
     
     colors
