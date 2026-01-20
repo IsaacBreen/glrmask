@@ -182,9 +182,6 @@ fn push_weights_acyclic(dwa: &mut DWA) -> bool {
         }
     }
     let push_time = push_start.elapsed();
-    crate::datastructures::hybrid_bitset::print_profiling("push_weights_acyclic");
-    crate::datastructures::rangemap_weight::print_profiling("push_weights_acyclic");
-    crate::datastructures::abstract_weight::print_weight_op_profiling("push_weights_acyclic");
     crate::debug!(5, "push_weights_acyclic breakdown: topo={:?}, reachable={:?}, push={:?}", topo_time, reachable_time, push_time);
     crate::debug!(5, "push_weights_acyclic ops: reachable_clone={:?}, reachable_and={:?}, reachable_or={:?}, push_and={:?}", reachable_clone_time, reachable_and_time, reachable_or_time, push_and_time);
     crate::debug!(5, "push_weights_acyclic: {:?} (changed={})", start.elapsed(), changed);
@@ -218,9 +215,6 @@ pub fn minimize_acyclic_exact(dwa: &DWA) -> Result<DWA, DWABuildError> {
     crate::datastructures::rangemap_weight::reset_profiling();
     crate::datastructures::abstract_weight::reset_weight_op_profiling();
     let dwa = tighten_weights(dwa)?;
-    crate::datastructures::hybrid_bitset::print_profiling("tighten_weights");
-    crate::datastructures::rangemap_weight::print_profiling("tighten_weights");
-    crate::datastructures::abstract_weight::print_weight_op_profiling("tighten_weights");
     crate::debug!(5, "Acyclic minimize step 0 end (tighten_weights): {:?}", step0_start.elapsed());
     crate::debug!(5, "Acyclic minimize step 0 (tighten_weights): {:?}", step0_start.elapsed());
 
@@ -240,9 +234,6 @@ pub fn minimize_acyclic_exact(dwa: &DWA) -> Result<DWA, DWABuildError> {
     crate::datastructures::rangemap_weight::reset_profiling();
     crate::datastructures::abstract_weight::reset_weight_op_profiling();
     let needed = compute_needed_sets(&dwa, &topo_order);
-    crate::datastructures::hybrid_bitset::print_profiling("compute_needed_sets");
-    crate::datastructures::rangemap_weight::print_profiling("compute_needed_sets");
-    crate::datastructures::abstract_weight::print_weight_op_profiling("compute_needed_sets");
     crate::debug!(5, "Acyclic minimize step 2 end (needed_sets): {:?}", step2_start.elapsed());
     crate::debug!(5, "Acyclic minimize step 2 (needed_sets): {:?}", step2_start.elapsed());
 

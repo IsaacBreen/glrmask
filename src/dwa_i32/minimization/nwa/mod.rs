@@ -161,11 +161,6 @@ impl NWA {
         let total_time = to_time + min_time + from_time;
         let total_non_div = total_time.checked_sub(div_time).unwrap_or(std::time::Duration::ZERO);
         
-        crate::datastructures::hybrid_bitset::print_profiling("NWA Minimize RustFST");
-        crate::datastructures::rangemap_weight::print_profiling("NWA Minimize RustFST");
-        crate::datastructures::abstract_weight::print_weight_op_profiling("NWA Minimize RustFST");
-        crate::dwa_i32::determinization_rustfst::print_rustfst_weight_profile("NWA Minimize RustFST");
-
         crate::debug!(
             4,
             "[NWA::minimize_with_rustfst_full] minimize_non_div≈{:?} (minimize={:?} - div={:?}); total_non_div≈{:?}",
