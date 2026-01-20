@@ -1547,6 +1547,7 @@ fn greedy_color_without_graph(
         // color_representatives[c] = list of (candidate_idx, signature) for color c
         // We keep one representative per signature in each color class
         let mut color_representatives: Vec<Vec<(usize, u128)>> = Vec::new();
+        let mut sig_to_color: HashMap<u128, usize> = HashMap::new();
         
         let mut compare_count = 0usize;
         let mut compare_time = std::time::Duration::ZERO;
@@ -1557,40 +1558,36 @@ fn greedy_color_without_graph(
                 let cand = candidates[idx];
                 
                 // Try to find an existing color where this candidate is compatible
-                let assigned_color = timeit!("greedy_no_graph::assign_colors::scan_colors", {
-                    let mut assigned_color = None;
-                    
-                    'color_loop: for (color, reps) in color_representatives.iter().enumerate() {
-                        // Check if there's already a representative with the same signature
-                        // If so, we're guaranteed compatible (by signature design)
-                        let same_sig = reps.iter().any(|(_, rep_sig)| *rep_sig == sig);
-                        if same_sig {
-                            assigned_color = Some(color);
-                            break 'color_loop;
-                        }
-                        
-                        // Check compatibility with all representatives of different signatures
-                        let mut compatible_with_all = true;
-                        for &(rep_idx, _rep_sig) in reps {
-                            compare_count += 1;
-                            let cmp_start = std::time::Instant::now();
-                            let compatible =
-                                are_compatible(cand, candidates[rep_idx], dwa, needed, old_to_new, new_states);
-                            compare_time += cmp_start.elapsed();
-                            if !compatible {
-                                compatible_with_all = false;
-                                break;
+                let assigned_color = if let Some(&color) = sig_to_color.get(&sig) {
+                    Some(color)
+                } else {
+                    timeit!("greedy_no_graph::assign_colors::scan_colors", {
+                        let mut assigned_color = None;
+
+                        'color_loop: for (color, reps) in color_representatives.iter().enumerate() {
+                            // Check compatibility with all representatives of different signatures
+                            let mut compatible_with_all = true;
+                            for &(rep_idx, _rep_sig) in reps {
+                                compare_count += 1;
+                                let cmp_start = std::time::Instant::now();
+                                let compatible =
+                                    are_compatible(cand, candidates[rep_idx], dwa, needed, old_to_new, new_states);
+                                compare_time += cmp_start.elapsed();
+                                if !compatible {
+                                    compatible_with_all = false;
+                                    break;
+                                }
+                            }
+
+                            if compatible_with_all {
+                                assigned_color = Some(color);
+                                break 'color_loop;
                             }
                         }
-                        
-                        if compatible_with_all {
-                            assigned_color = Some(color);
-                            break 'color_loop;
-                        }
-                    }
-                    
-                    assigned_color
-                });
+
+                        assigned_color
+                    })
+                };
                 
                 // Assign color
                 let color = match assigned_color {
@@ -1606,9 +1603,10 @@ fn greedy_color_without_graph(
                 colors[idx] = color;
                 
                 // Add as representative if this is a new signature for this color
-                let reps = &mut color_representatives[color];
-                if !reps.iter().any(|(_, rep_sig)| *rep_sig == sig) {
+                if !sig_to_color.contains_key(&sig) {
+                    let reps = &mut color_representatives[color];
                     reps.push((idx, sig));
+                    sig_to_color.insert(sig, color);
                 }
             }
         });
