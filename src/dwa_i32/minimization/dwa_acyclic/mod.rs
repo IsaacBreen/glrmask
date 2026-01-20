@@ -1592,9 +1592,8 @@ fn greedy_color_without_graph(
                         for &(rep_idx, _rep_sig) in reps {
                             compare_count += 1;
                             let cmp_start = std::time::Instant::now();
-                            let compatible = timeit!("greedy_no_graph::are_compatible", {
-                                are_compatible(cand, candidates[rep_idx], dwa, needed, old_to_new, new_states)
-                            });
+                            let compatible =
+                                are_compatible(cand, candidates[rep_idx], dwa, needed, old_to_new, new_states);
                             compare_time += cmp_start.elapsed();
                             if !compatible {
                                 compatible_with_all = false;
@@ -1694,18 +1693,13 @@ fn build_incompatibility_graph_general(
                     for &idx_j in &groups[j] {
                         compare_count += 1;
                         let cmp_start = std::time::Instant::now();
-                        let compatible = timeit!(
-                            "coloring::build_incompatibility_graph::are_compatible",
-                            {
-                                are_compatible(
-                                    candidates[idx_i],
-                                    candidates[idx_j],
-                                    dwa,
-                                    needed,
-                                    old_to_new,
-                                    new_states,
-                                )
-                            }
+                        let compatible = are_compatible(
+                            candidates[idx_i],
+                            candidates[idx_j],
+                            dwa,
+                            needed,
+                            old_to_new,
+                            new_states,
                         );
                         compare_time += cmp_start.elapsed();
                         if !compatible {
