@@ -893,6 +893,32 @@ impl RangeMapWeight {
         if right_ranges == 0 {
             return self.clone();
         }
+        if std::ptr::eq(self, other) || self == other {
+            return self.clone();
+        }
+        if left_ranges == 1 || right_ranges == 1 {
+            let max_token = crate::datastructures::get_max_llm_token();
+            if left_ranges == 1 {
+                if let Some((range, tsid_set)) = self.map.range_values().next() {
+                    if *range.start() == 0
+                        && *range.end() == max_token
+                        && *tsid_set == Self::full_tsids(self.num_tsids)
+                    {
+                        return self.clone();
+                    }
+                }
+            }
+            if right_ranges == 1 {
+                if let Some((range, tsid_set)) = other.map.range_values().next() {
+                    if *range.start() == 0
+                        && *range.end() == max_token
+                        && *tsid_set == Self::full_tsids(self.num_tsids)
+                    {
+                        return other.clone();
+                    }
+                }
+            }
+        }
 
         let (smaller, larger, small_ranges, large_ranges) = if left_ranges <= right_ranges {
             (self, other, left_ranges, right_ranges)
