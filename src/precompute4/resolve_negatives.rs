@@ -448,7 +448,18 @@ fn compute_cancellations_range(states: &NWAStates, range: std::ops::Range<NWASta
         return Vec::new();
     }
 
+    let max_steps = std::env::var("NWA_PASS2_CANCELLATIONS_MAX_STEPS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(0);
+    let mut steps = 0usize;
+
     while let Some((s, a, c, w_as)) = worklist.pop_front() {
+        if max_steps > 0 && steps >= max_steps {
+            crate::debug!(4, "Pass2 cancellations: reached max steps {}, truncating", max_steps);
+            break;
+        }
+        steps += 1;
         if let Some(epsilons_from_s) = new_eps_from.get(&s) {
             for (&target, eps_w) in epsilons_from_s {
                 let prop_w = &w_as & eps_w;
@@ -843,7 +854,18 @@ fn compute_finality_fixpoint_range(
         }
     }
 
+    let max_steps = std::env::var("NWA_PASS2_FINALITY_FIXPOINT_MAX_STEPS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(0);
+    let mut steps = 0usize;
+
     while let Some(s) = worklist.pop_front() {
+        if max_steps > 0 && steps >= max_steps {
+            crate::debug!(4, "Pass2 finality fixpoint: reached max steps {}, truncating", max_steps);
+            break;
+        }
+        steps += 1;
         let f_s = match future_final_all.get(&s) {
             Some(w) if !w.is_empty() => w.clone(),
             _ => continue,
