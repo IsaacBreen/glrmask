@@ -339,7 +339,13 @@ impl NWA {
                 }
             },
         };
-        Self::determinize_and_minimize_with_config(&mut self, config)
+        if matches!(profile, DeterminizeAndMinimizeProfile::Parser) {
+            crate::dwa_i32::determinization::with_determinize_progress_enabled(true, || {
+                Self::determinize_and_minimize_with_config(&mut self, config)
+            })
+        } else {
+            Self::determinize_and_minimize_with_config(&mut self, config)
+        }
     }
 
     #[time_it("NWA::determinize_and_minimize_with_config")]

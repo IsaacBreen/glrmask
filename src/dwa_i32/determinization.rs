@@ -2,6 +2,7 @@
 #![allow(clippy::needless_borrow)]
 
 use rustc_hash::FxHashMap;
+use std::cell::Cell;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
@@ -16,6 +17,24 @@ use super::nwa::{NWA, NWAStates};
 // Global counter for determinizations
 static DETERMINIZE_COUNT: AtomicUsize = AtomicUsize::new(0);
 static TOTAL_DETERMINIZE_TIME_MS: AtomicUsize = AtomicUsize::new(0);
+
+thread_local! {
+    static DETERMINIZE_PROGRESS_ENABLED: Cell<bool> = Cell::new(false);
+}
+
+pub(crate) fn with_determinize_progress_enabled<R>(enabled: bool, f: impl FnOnce() -> R) -> R {
+    DETERMINIZE_PROGRESS_ENABLED.with(|flag| {
+        let prev = flag.get();
+        flag.set(enabled);
+        let result = f();
+        flag.set(prev);
+        result
+    })
+}
+
+fn determinize_progress_enabled() -> bool {
+    DETERMINIZE_PROGRESS_ENABLED.with(|flag| flag.get())
+}
 
 pub fn reset_determinize_stats() {
     DETERMINIZE_COUNT.store(0, AtomicOrdering::SeqCst);
@@ -148,6 +167,7 @@ impl NWA {
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false)
             || macro_level >= 5;
+        let progress_enabled = determinize_progress_enabled() && macro_level >= 4;
 
         crate::debug!(6, "Determinization: Precomputing epsilon closures...");
         
@@ -156,7 +176,7 @@ impl NWA {
         let eps_reach = precompute_all_epsilon_closures(&self.states);
 
         // 4. Initialize Determinizer
-        let mut det = Determinizer::new(self, &eps_reach, profile_enabled);
+        let mut det = Determinizer::new(self, &eps_reach, profile_enabled, progress_enabled);
         if let Some(start) = eps_start {
             det.profile.precompute_eps = start.elapsed();
         }
@@ -184,12 +204,44 @@ impl NWA {
         }
 
         // 6. Main Expansion Loop
+        let mut processed_subsets = 0usize;
+        let progress_start = Instant::now();
+        let mut progress_last_log = Instant::now();
+        let progress_log_every = 5_000usize;
+        let progress_log_interval = Duration::from_secs(2);
         while let Some(sid) = det.queue.pop_front() {
             let expand_start = if profile_enabled { Some(Instant::now()) } else { None };
             det.expand_state(sid);
+            processed_subsets += 1;
             if let Some(start) = expand_start {
                 det.profile.expand_total += start.elapsed();
             }
+            if progress_enabled
+                && (processed_subsets % progress_log_every == 0
+                    || progress_last_log.elapsed() >= progress_log_interval)
+            {
+                crate::debug!(
+                    4,
+                    "Determinize progress: subsets_processed={}, dwa_states={}, queue={}, transitions_added={}, elapsed={:?}",
+                    processed_subsets,
+                    det.dwa.states.len(),
+                    det.queue.len(),
+                    det.progress_transitions,
+                    progress_start.elapsed(),
+                );
+                progress_last_log = Instant::now();
+            }
+        }
+
+        if progress_enabled {
+            crate::debug!(
+                4,
+                "Determinize complete: subsets_processed={}, dwa_states={}, transitions_added={}, elapsed={:?}",
+                processed_subsets,
+                det.dwa.states.len(),
+                det.progress_transitions,
+                progress_start.elapsed(),
+            );
         }
 
         if profile_enabled {
@@ -429,6 +481,8 @@ struct Determinizer<'a> {
 
     profile_enabled: bool,
     profile: DeterminizeProfile,
+    progress_enabled: bool,
+    progress_transitions: usize,
 }
 
 #[derive(Default)]
@@ -510,7 +564,7 @@ impl DeterminizeProfile {
 }
 
 impl<'a> Determinizer<'a> {
-    fn new(nwa: &'a NWA, eps_reach: &'a [WeightedSubset], profile_enabled: bool) -> Self {
+    fn new(nwa: &'a NWA, eps_reach: &'a [WeightedSubset], profile_enabled: bool, progress_enabled: bool) -> Self {
         let mut dwa = DWA::new();
         dwa.states.0.clear();
         dwa.body.start_state = 0;
@@ -523,6 +577,8 @@ impl<'a> Determinizer<'a> {
             dwa,
             profile_enabled,
             profile: DeterminizeProfile::default(),
+            progress_enabled,
+            progress_transitions: 0,
         }
     }
 
@@ -873,6 +929,9 @@ impl<'a> Determinizer<'a> {
             let dest_dwa_id = self.register_closure(dest_subset);
             let add_start = if self.profile_enabled { Some(Instant::now()) } else { None };
             let _ = self.dwa.add_transition(sid, lbl, dest_dwa_id, w_edge);
+            if self.progress_enabled {
+                self.progress_transitions += 1;
+            }
             if let Some(start) = add_start {
                 self.profile.add_transition += start.elapsed();
             }
