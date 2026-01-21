@@ -204,6 +204,7 @@ pub fn run_nwa_optimization_experiment(nwa: &mut NWA) {
 pub struct DeterminizeAndMinimizeConfig {
     pub nwa_passes: Vec<NwaPass>,
     pub dwa_passes: Vec<DwaPass>,
+    pub use_rustfst_determinize: bool,
 }
 
 impl NWA {
@@ -237,6 +238,7 @@ impl NWA {
                 DeterminizeAndMinimizeConfig {
                     nwa_passes,
                     dwa_passes: vec![DwaPass::Minimize, DwaPass::ConsolidateRanges, DwaPass::TrimWeights],
+                    use_rustfst_determinize: false,
                 }
             },
             "TemplateDWA" => DeterminizeAndMinimizeConfig {
@@ -247,20 +249,32 @@ impl NWA {
                 // Full minimization is worthwhile since templates are reused many times.
                 nwa_passes: vec![],  // NWA already processed before determinization
                 dwa_passes: vec![DwaPass::Minimize],
+                use_rustfst_determinize: false,
             },
             "Precompute1" => DeterminizeAndMinimizeConfig {
                 // OPTIMIZATION: Skip Minimize to save ~420ms - Precompute1 is just input to precompute4
                 // The final DWA will be minimized, so intermediate minimization is redundant.
                 nwa_passes: vec![NwaPass::PruneDeadEnds, NwaPass::PruneUnreachable, NwaPass::CompressTransitions],
                 dwa_passes: vec![DwaPass::PruneDeadEnds],
+                use_rustfst_determinize: false,
             },
-            "FinalDWA" => DeterminizeAndMinimizeConfig {
+            "FinalDWA" => {
                 // Full pipeline for Parser DWA (finalize_and_optimize_and_determinize)
                 // Includes minimize to get optimal state count
-                // NOTE: NWA MinimizeRustfst is too memory-intensive for large NWAs (2M+ states)
-                // Just do basic pruning before determinization
-                nwa_passes: vec![NwaPass::PruneDeadEnds, NwaPass::PruneUnreachable],
-                dwa_passes: vec![DwaPass::PruneDeadEnds, DwaPass::Minimize, DwaPass::ConsolidateRanges, DwaPass::TrimWeights],
+                // NOTE: NWA MinimizeRustfst can be memory-intensive for large NWAs (2M+ states)
+                // but is now enabled by default for FinalDWA.
+                let use_rustfst_determinize = std::env::var("FINALDWA_RUSTFST_DETERMINIZE")
+                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                    .unwrap_or(false);
+                DeterminizeAndMinimizeConfig {
+                    nwa_passes: vec![
+                        NwaPass::PruneDeadEnds,
+                        NwaPass::PruneUnreachable,
+                        NwaPass::MinimizeRustfst,
+                    ],
+                    dwa_passes: vec![DwaPass::PruneDeadEnds, DwaPass::Minimize, DwaPass::ConsolidateRanges, DwaPass::TrimWeights],
+                    use_rustfst_determinize,
+                }
             },
             "SuperDWA" => DeterminizeAndMinimizeConfig {
                 // SuperDWA is the "universal" DWA that gets specialized into many DWAs.
@@ -268,6 +282,7 @@ impl NWA {
                 // smaller specialized DWAs and smaller combined NWA.
                 nwa_passes: vec![NwaPass::CompressTransitions],
                 dwa_passes: vec![DwaPass::PruneDeadEnds, DwaPass::Minimize],
+                use_rustfst_determinize: false,
             },
             "SpecializedDWA" => DeterminizeAndMinimizeConfig {
                 // Specialized DWAs derived from SuperDWA by weight mapping.
@@ -275,6 +290,7 @@ impl NWA {
                 // Using full minimize but no NWA passes since these are already DWAs.
                 nwa_passes: vec![],
                 dwa_passes: vec![DwaPass::PruneDeadEnds, DwaPass::Minimize],
+                use_rustfst_determinize: false,
             },
             _ => DeterminizeAndMinimizeConfig {
                 // Default fallback
@@ -288,6 +304,7 @@ impl NWA {
                     DwaPass::ConsolidateRanges,
                     DwaPass::TrimWeights,
                 ],
+                use_rustfst_determinize: false,
             }
         };
         Self::determinize_and_minimize_with_config(&mut self, config)
@@ -324,7 +341,11 @@ impl NWA {
         crate::datastructures::abstract_weight::reset_weight_op_profiling();
         let mut dwa = timeit!("NWA::determinize", {
             let det_start = std::time::Instant::now();
-            let mut dwa = self.determinize();
+            let mut dwa = if config.use_rustfst_determinize {
+                self.determinize_to_dwa_with_rustfst()
+            } else {
+                self.determinize()
+            };
             let det_time = det_start.elapsed();
             crate::debug!(5, "Determinization: {} states, {} transitions, {} ranges ({} interned) in {:.2?}", 
                 dwa.states.len(), dwa.states.num_transitions(), dwa.num_ranges(), dwa.num_ranges_interned(), det_time);
@@ -395,6 +416,7 @@ impl NWA {
                 let config = DeterminizeAndMinimizeConfig {
                     nwa_passes: nwa_pass_seq.clone(),
                     dwa_passes: dwa_pass_seq.clone(),
+                    use_rustfst_determinize: false,
                 };
 
                 let dwa = Self::determinize_and_minimize_with_config(&mut nwa_clone, config);
