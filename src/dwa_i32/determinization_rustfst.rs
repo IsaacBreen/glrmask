@@ -13,7 +13,6 @@ use profiler_macro::time_it;
 use range_set_blaze::RangeSetBlaze;
 use rustfst::algorithms::determinize::{determinize_with_config, DeterminizeConfig, DeterminizeType};
 use rustfst::algorithms::rm_epsilon::rm_epsilon;
-use rustfst::fst_properties::FstProperties;
 use rustfst::prelude::{CoreFst, ExpandedFst, MutableFst, StateId, Tr, Trs, VectorFst, EPS_LABEL};
 use rustfst::semirings::{
     DivideType, ReverseBack, SemiringProperties, SerializableSemiring, WeaklyDivisibleSemiring, WeightQuantize,
@@ -502,14 +501,17 @@ pub fn vector_fst_to_nwa(fst: &VectorFst<Weight>) -> NWA {
 }
 
 pub fn determinize_nwa_to_dwa(nwa: &NWA) -> DWA {
+    if let Some(dwa) = try_direct_dwa_from_deterministic_nwa(nwa) {
+        crate::debug!(5, "Determinization: fast-path deterministic NWA -> DWA");
+        return dwa;
+    }
+
+    let has_eps = nwa.body.start_states.len() > 1 || nwa.states.0.iter().any(|s| !s.epsilons.is_empty());
     let mut fst = nwa_to_vector_fst(nwa);
-    fst.compute_and_update_properties_all().unwrap();
-    assert!(fst.properties().contains(FstProperties::ACCEPTOR), "FST should be an acceptor before determinization");
 
     let skip_rm_epsilon = std::env::var("RUSTFST_SKIP_RM_EPSILON")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
-    let has_eps = !fst.properties().contains(FstProperties::NO_EPSILONS);
     if has_eps {
         if skip_rm_epsilon {
             crate::debug!(5, "rustfst: RUSTFST_SKIP_RM_EPSILON set but epsilons present; keeping rm_epsilon for correctness");
@@ -538,6 +540,51 @@ pub fn determinize_nwa_to_dwa(nwa: &NWA) -> DWA {
     let det_fst: VectorFst<Weight> = determinize_with_config(&fst, det_config).unwrap();
 
     vector_fst_to_dwa(&det_fst)
+}
+
+fn try_direct_dwa_from_deterministic_nwa(nwa: &NWA) -> Option<DWA> {
+    if nwa.body.start_states.len() != 1 {
+        return None;
+    }
+    if nwa.states.0.iter().any(|s| !s.epsilons.is_empty()) {
+        return None;
+    }
+
+    for state in &nwa.states.0 {
+        for targets in state.transitions.values() {
+            if targets.len() > 1 {
+                return None;
+            }
+        }
+    }
+
+    let mut dwa = DWA::new();
+    dwa.states.0.clear();
+    let mut state_map = Vec::with_capacity(nwa.states.len());
+    for _ in 0..nwa.states.len() {
+        state_map.push(dwa.add_state());
+    }
+
+    dwa.body.start_state = state_map[nwa.body.start_states[0]];
+
+    for (i, state) in nwa.states.0.iter().enumerate() {
+        let dwa_state = state_map[i];
+        if let Some(w) = &state.final_weight {
+            if !w.is_empty() {
+                let _ = dwa.set_final_weight(dwa_state, w.clone());
+            }
+        }
+        for (label, targets) in &state.transitions {
+            if let Some((target, weight)) = targets.first() {
+                if weight.is_empty() {
+                    continue;
+                }
+                let _ = dwa.add_transition(dwa_state, *label, state_map[*target], weight.clone());
+            }
+        }
+    }
+
+    Some(dwa)
 }
 
 impl DWA {

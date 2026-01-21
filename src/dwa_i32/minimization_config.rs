@@ -349,9 +349,21 @@ impl NWA {
         crate::debug!(5, "Determinize and minimize initial stats: {}",
             self.stats());
 
+        let nwa_minimize_skip_threshold = std::env::var("NWA_MINIMIZE_SKIP_THRESHOLD")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(50_000);
+
         // Run NWA passes
         for pass in config.nwa_passes {
             if !pass.is_enabled() {
+                continue;
+            }
+            let skip_nwa_minimize = nwa_minimize_skip_threshold > 0
+                && self.states.len() >= nwa_minimize_skip_threshold
+                && matches!(pass, NwaPass::Minimize | NwaPass::MinimizeRustfst);
+            if skip_nwa_minimize {
+                crate::debug!(5, "Skipping NWA pass {:?} (states={}, threshold={})", pass, self.states.len(), nwa_minimize_skip_threshold);
                 continue;
             }
             timeit!(format!("NWA pass {:?}", pass), {
