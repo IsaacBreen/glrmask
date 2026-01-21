@@ -298,25 +298,6 @@ impl NWA {
                 dwa_passes: vec![DwaPass::Minimize],
                 use_rustfst_determinize: false,
             },
-            DeterminizeAndMinimizeProfile::Parser => {
-                // Full pipeline for Parser DWA (finalize_and_optimize_and_determinize)
-                // Includes minimize to get optimal state count
-                // NOTE: NWA MinimizeRustfst can be memory-intensive for large NWAs (2M+ states)
-                // but is now enabled by default for Parser.
-                let use_rustfst_determinize = std::env::var("PARSER_DWA_RUSTFST_DETERMINIZE")
-                    .or_else(|_| std::env::var("FINALDWA_RUSTFST_DETERMINIZE"))
-                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                    .unwrap_or(false);
-                DeterminizeAndMinimizeConfig {
-                    nwa_passes: vec![
-                        NwaPass::PruneDeadEnds,
-                        NwaPass::PruneUnreachable,
-                        NwaPass::MinimizeRustfst,
-                    ],
-                    dwa_passes: vec![DwaPass::PruneDeadEnds, DwaPass::Minimize, DwaPass::ConsolidateRanges, DwaPass::TrimWeights],
-                    use_rustfst_determinize,
-                }
-            },
             DeterminizeAndMinimizeProfile::Super => DeterminizeAndMinimizeConfig {
                 // Super is the "universal" DWA that gets specialized into many DWAs.
                 // Full minimization here pays off because the smaller Super means
@@ -332,6 +313,30 @@ impl NWA {
                 nwa_passes: vec![],
                 dwa_passes: vec![DwaPass::PruneDeadEnds, DwaPass::Minimize],
                 use_rustfst_determinize: false,
+            },
+            DeterminizeAndMinimizeProfile::Parser => {
+                // Full pipeline for Parser DWA (finalize_and_optimize_and_determinize)
+                // Includes minimize to get optimal state count
+                // NOTE: NWA MinimizeRustfst can be memory-intensive for large NWAs (2M+ states)
+                // but is now enabled by default for Parser.
+                let use_rustfst_determinize = std::env::var("PARSER_DWA_RUSTFST_DETERMINIZE")
+                    .or_else(|_| std::env::var("FINALDWA_RUSTFST_DETERMINIZE"))
+                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                    .unwrap_or(false);
+                DeterminizeAndMinimizeConfig {
+                    nwa_passes: vec![
+                        NwaPass::PruneDeadEnds,
+                        NwaPass::PruneUnreachable,
+                        NwaPass::RmEpsilon,
+                        NwaPass::MinimizeRustfst,
+                        NwaPass::PushFinalWeights,
+                        NwaPass::PushWeightsToInitial,
+                        NwaPass::MinimizeRustfst,
+                        NwaPass::Minimize,
+                    ],
+                    dwa_passes: vec![DwaPass::PruneDeadEnds, DwaPass::Minimize, DwaPass::ConsolidateRanges, DwaPass::TrimWeights],
+                    use_rustfst_determinize,
+                }
             },
         };
         Self::determinize_and_minimize_with_config(&mut self, config)
