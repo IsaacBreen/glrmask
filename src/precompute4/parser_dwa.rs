@@ -476,6 +476,17 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
     crate::debug!(5, "build_parser_dwa: start");
     crate::debug!(3, "Starting Parser DWA construction. Input terminal_nwa: {}", 
         terminal_nwa.stats());
+
+    if std::env::var("PARSER_DWA_TRIVIAL")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+    {
+        crate::debug!(1, "WARNING: using trivial Parser DWA (unsafe, parser DWA is incorrect)");
+        let mut dwa = DWA::new();
+        let start = dwa.add_state();
+        dwa.body.start_state = start;
+        return dwa;
+    }
     
     // Handle empty terminal NWA (no valid tokens for this grammar/vocabulary combination)
     // Return a minimal DWA with one state and no transitions (always returns empty mask)
