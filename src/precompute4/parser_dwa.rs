@@ -1351,10 +1351,15 @@ pub fn precompute_token_bvs_and_signatures(reversed_nwa: &NWA, traversal_data: &
 }
 
 pub fn finalize_and_optimize_and_determinize(parser: &GLRParser, mut combined_nwa: NWA) -> DWA {
+    let skip_negative_resolve = std::env::var("NWA_SKIP_NEGATIVE_RESOLVE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
     let defer_negative_resolve = std::env::var("NWA_PASS2_GLOBAL_NEGATIVE_RESOLVE")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
-    if defer_negative_resolve {
+    if skip_negative_resolve {
+        crate::debug!(1, "WARNING: skipping negative resolution entirely (unsafe, parser DWA may be incorrect)");
+    } else if defer_negative_resolve {
         crate::debug!(4, "Applying deferred negative resolution (global pass)...");
         resolve_negative_codes_in_nwa(&mut combined_nwa);
         crate::debug!(4, "Deferred negative resolution complete. NWA now {}.", combined_nwa.stats());
