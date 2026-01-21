@@ -871,9 +871,7 @@ impl<'a> Determinizer<'a> {
                                         self.profile.build_dest_map_hits += 1;
 
                                         let or_start = Instant::now();
-                                        timeit!("determinize::build_destinations::weight_or", {
-                                            *existing |= &combined;
-                                        });
+                                        *existing |= &combined;
                                         let or_elapsed = or_start.elapsed();
                                         self.profile.build_dest_map_weight_ops += or_elapsed;
                                         self.profile.build_dest_map_or += or_elapsed;
@@ -929,9 +927,7 @@ impl<'a> Determinizer<'a> {
                 if self.profile_enabled {
                     for (sid, w) in dest_map {
                         let or_start = Instant::now();
-                        let combined = timeit!("determinize::build_destinations::weight_or", {
-                            w | &w_edge_inv
-                        });
+                        let combined = w | &w_edge_inv;
                         let elapsed = or_start.elapsed();
                         self.profile.normalize_or += elapsed;
                         self.profile.normalize_or_count += 1;
