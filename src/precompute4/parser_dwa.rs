@@ -800,7 +800,7 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
                     let before_stats = derived_dwa.stats();
                     // Skip expensive minimization - just prune
                     // Rely on final determinization/minimize to compress
-                    derived_dwa.optimize(DwaOptimizeConfig::SpecializedSuperLightweight);
+                    derived_dwa.optimize(DwaOptimizeConfig::SpecializedSuper);
                     let after_stats = derived_dwa.stats();
                     (target_sig.clone(), NWA::from_dwa(&derived_dwa), before_stats, after_stats)
                 }).collect();
@@ -1029,7 +1029,7 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
                         .collect();
 
                     let mut derived_dwa = specialize_dwa_relative_with_map(super_dwa, &weight_map);
-                    derived_dwa.optimize(DwaOptimizeConfig::SpecializedSuperDynamic);
+                    derived_dwa.optimize(DwaOptimizeConfig::SpecializedSuper);
                     let nwa = Arc::new(NWA::from_dwa(&derived_dwa));
                     pass2_profile_for_process.dynamic_derive_us.fetch_add(
                         dynamic_start.elapsed().as_micros() as u64,

@@ -25,9 +25,6 @@ use std::collections::HashSet;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DwaOptimizeConfig {
     SpecializedSuper,
-    SpecializedSuperLightweight,
-    SpecializedSuperSinglePass,
-    SpecializedSuperDynamic,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -224,21 +221,11 @@ impl DWA {
     pub fn optimize(&mut self, config: DwaOptimizeConfig) {
         let passes = match config {
             // Full minimize - good quality but slow for large DWAs
-            DwaOptimizeConfig::SpecializedSuper => vec![DwaPass::PruneDeadEnds, DwaPass::Minimize],
-            // Lightweight - just pruning, faster but larger output
-            DwaOptimizeConfig::SpecializedSuperLightweight => vec![DwaPass::PruneDeadEnds, DwaPass::PruneUnreachable],
-            // Single pass minimize - one round of state merging, faster than full
-            DwaOptimizeConfig::SpecializedSuperSinglePass => {
-                // Run single pass minimize directly
-                if self.is_cyclic() {
-                    self.minimize_single_pass_cyclic();
-                } else {
-                    self.minimize_acyclic();
-                }
-                return;
-            }
-            // Dynamic derivation path
-            DwaOptimizeConfig::SpecializedSuperDynamic => vec![DwaPass::Minimize],
+            DwaOptimizeConfig::SpecializedSuper => vec![
+                DwaPass::PruneDeadEnds,
+                DwaPass::PruneUnreachable,
+                DwaPass::Minimize,
+            ],
         };
 
         for pass in passes {
