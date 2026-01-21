@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::ops::BitOrAssign;
 use std::time::{Duration, Instant};
+use profiler_macro::timeit;
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use crate::dwa_i32::test_weighted_automata;
 use super::common::{DETERMINIZE_DEBUG, Label, NWAStateID, Weight};
@@ -209,12 +210,11 @@ impl NWA {
         let mut progress_last_log = Instant::now();
         let progress_log_every = 5_000usize;
         let progress_log_interval = Duration::from_secs(2);
-        let mut profiler_last_log = Instant::now();
-        let profiler_log_every = 25_000usize;
-        let profiler_log_interval = Duration::from_secs(10);
         while let Some(sid) = det.queue.pop_front() {
             let expand_start = if profile_enabled { Some(Instant::now()) } else { None };
-            det.expand_state(sid);
+            timeit!("determinize::expand_state", {
+                det.expand_state(sid);
+            });
             processed_subsets += 1;
             if let Some(start) = expand_start {
                 det.profile.expand_total += start.elapsed();
@@ -232,12 +232,6 @@ impl NWA {
                     det.progress_transitions,
                     progress_start.elapsed(),
                 );
-                progress_last_log = Instant::now();
-            }
-            if progress_enabled
-                && (processed_subsets % profiler_log_every == 0
-                    || profiler_last_log.elapsed() >= profiler_log_interval)
-            {
                 crate::debug!(
                     4,
                     "Determinize profiler summary (subsets_processed={}, elapsed={:?})",
@@ -246,7 +240,7 @@ impl NWA {
                 );
                 crate::profiler::print_summary();
                 crate::profiler::reset();
-                profiler_last_log = Instant::now();
+                progress_last_log = Instant::now();
             }
         }
 
@@ -702,123 +696,126 @@ impl<'a> Determinizer<'a> {
 
         // 1. Collect outgoing labeled transitions from the subset.
         let collect_start = if self.profile_enabled { Some(Instant::now()) } else { None };
-        for (u, w_u) in &closure {
-            if self.profile_enabled {
-                self.profile.collect_state_iters += 1;
-            }
-            let st = &self.nwa.states[*u];
-            for (lbl, targets) in &st.transitions {
-                if targets.is_empty() { continue; }
-
+        timeit!("determinize::collect_transitions", {
+            for (u, w_u) in &closure {
                 if self.profile_enabled {
-                    self.profile.collect_label_iters += 1;
+                    self.profile.collect_state_iters += 1;
                 }
+                let st = &self.nwa.states[*u];
+                for (lbl, targets) in &st.transitions {
+                    if targets.is_empty() { continue; }
 
-                let target_map = if self.profile_enabled {
-                    let entry_start = Instant::now();
-                    let entry = transitions.entry(*lbl);
-                    let (map_ref, is_new) = match entry {
-                        std::collections::btree_map::Entry::Occupied(o) => (o.into_mut(), false),
-                        std::collections::btree_map::Entry::Vacant(v) => (v.insert(HashMap::new()), true),
-                    };
-                    let elapsed = entry_start.elapsed();
-                    self.profile.collect_btree_entry += elapsed;
-                    self.profile.collect_map_ops += elapsed;
-                    if is_new {
-                        self.profile.collect_btree_misses += 1;
-                    } else {
-                        self.profile.collect_btree_hits += 1;
-                    }
-                    map_ref
-                } else {
-                    transitions.entry(*lbl).or_default()
-                };
-
-                let edge_acc = if self.profile_enabled {
-                    let entry_start = Instant::now();
-                    let entry = edge_weights.entry(*lbl);
-                    let (acc_ref, is_new) = match entry {
-                        std::collections::hash_map::Entry::Occupied(o) => (o.into_mut(), false),
-                        std::collections::hash_map::Entry::Vacant(v) => (v.insert(Weight::zeros()), true),
-                    };
-                    let elapsed = entry_start.elapsed();
-                    self.profile.collect_edge_entry += elapsed;
-                    self.profile.collect_map_ops += elapsed;
-                    if is_new {
-                        self.profile.collect_edge_misses += 1;
-                    } else {
-                        self.profile.collect_edge_hits += 1;
-                    }
-                    acc_ref
-                } else {
-                    edge_weights.entry(*lbl).or_insert_with(Weight::zeros)
-                };
-
-                for (v, w_trans) in targets {
                     if self.profile_enabled {
-                        self.profile.collect_target_iters += 1;
+                        self.profile.collect_label_iters += 1;
                     }
-                    let and_start = if self.profile_enabled { Some(Instant::now()) } else { None };
-                    let w_out = w_u & w_trans;
-                    if let Some(start) = and_start {
-                        let elapsed = start.elapsed();
-                        self.profile.collect_weight_ops += elapsed;
-                        self.profile.collect_and += elapsed;
-                        self.profile.collect_and_count += 1;
-                    }
-                    if !w_out.is_empty() {
-                        let or_start = if self.profile_enabled { Some(Instant::now()) } else { None };
-                        *edge_acc |= &w_out;
-                        if let Some(start) = or_start {
+
+                    let target_map = if self.profile_enabled {
+                        let entry_start = Instant::now();
+                        let entry = transitions.entry(*lbl);
+                        let (map_ref, is_new) = match entry {
+                            std::collections::btree_map::Entry::Occupied(o) => (o.into_mut(), false),
+                            std::collections::btree_map::Entry::Vacant(v) => (v.insert(HashMap::new()), true),
+                        };
+                        let elapsed = entry_start.elapsed();
+                        self.profile.collect_btree_entry += elapsed;
+                        self.profile.collect_map_ops += elapsed;
+                        if is_new {
+                            self.profile.collect_btree_misses += 1;
+                        } else {
+                            self.profile.collect_btree_hits += 1;
+                        }
+                        map_ref
+                    } else {
+                        transitions.entry(*lbl).or_default()
+                    };
+
+                    let edge_acc = if self.profile_enabled {
+                        let entry_start = Instant::now();
+                        let entry = edge_weights.entry(*lbl);
+                        let (acc_ref, is_new) = match entry {
+                            std::collections::hash_map::Entry::Occupied(o) => (o.into_mut(), false),
+                            std::collections::hash_map::Entry::Vacant(v) => (v.insert(Weight::zeros()), true),
+                        };
+                        let elapsed = entry_start.elapsed();
+                        self.profile.collect_edge_entry += elapsed;
+                        self.profile.collect_map_ops += elapsed;
+                        if is_new {
+                            self.profile.collect_edge_misses += 1;
+                        } else {
+                            self.profile.collect_edge_hits += 1;
+                        }
+                        acc_ref
+                    } else {
+                        edge_weights.entry(*lbl).or_insert_with(Weight::zeros)
+                    };
+
+                    for (v, w_trans) in targets {
+                        if self.profile_enabled {
+                            self.profile.collect_target_iters += 1;
+                        }
+                        let and_start = if self.profile_enabled { Some(Instant::now()) } else { None };
+                        let w_out = w_u & w_trans;
+                        if let Some(start) = and_start {
                             let elapsed = start.elapsed();
                             self.profile.collect_weight_ops += elapsed;
-                            self.profile.collect_or += elapsed;
-                            self.profile.collect_or_count += 1;
+                            self.profile.collect_and += elapsed;
+                            self.profile.collect_and_count += 1;
                         }
-
-                        if self.profile_enabled {
-                            let lookup_start = Instant::now();
-                            if let Some(existing) = target_map.get_mut(v) {
-                                let lookup_elapsed = lookup_start.elapsed();
-                                self.profile.collect_target_lookup += lookup_elapsed;
-                                self.profile.collect_map_ops += lookup_elapsed;
-                                self.profile.collect_target_hits += 1;
-
-                                let inner_or_start = Instant::now();
-                                *existing |= &w_out;
-                                let inner_or_elapsed = inner_or_start.elapsed();
-                                self.profile.collect_weight_ops += inner_or_elapsed;
-                                self.profile.collect_or += inner_or_elapsed;
+                        if !w_out.is_empty() {
+                            let or_start = if self.profile_enabled { Some(Instant::now()) } else { None };
+                            *edge_acc |= &w_out;
+                            if let Some(start) = or_start {
+                                let elapsed = start.elapsed();
+                                self.profile.collect_weight_ops += elapsed;
+                                self.profile.collect_or += elapsed;
                                 self.profile.collect_or_count += 1;
-                            } else {
-                                let lookup_elapsed = lookup_start.elapsed();
-                                self.profile.collect_target_lookup += lookup_elapsed;
-                                self.profile.collect_map_ops += lookup_elapsed;
-                                self.profile.collect_target_misses += 1;
-
-                                let insert_start = Instant::now();
-                                target_map.insert(*v, w_out);
-                                let insert_elapsed = insert_start.elapsed();
-                                self.profile.collect_target_insert += insert_elapsed;
-                                self.profile.collect_map_ops += insert_elapsed;
-                                self.profile.collect_target_insert_count += 1;
                             }
-                        } else if let Some(existing) = target_map.get_mut(v) {
-                            *existing |= &w_out;
-                        } else {
-                            target_map.insert(*v, w_out);
+
+                            if self.profile_enabled {
+                                let lookup_start = Instant::now();
+                                if let Some(existing) = target_map.get_mut(v) {
+                                    let lookup_elapsed = lookup_start.elapsed();
+                                    self.profile.collect_target_lookup += lookup_elapsed;
+                                    self.profile.collect_map_ops += lookup_elapsed;
+                                    self.profile.collect_target_hits += 1;
+
+                                    let inner_or_start = Instant::now();
+                                    *existing |= &w_out;
+                                    let inner_or_elapsed = inner_or_start.elapsed();
+                                    self.profile.collect_weight_ops += inner_or_elapsed;
+                                    self.profile.collect_or += inner_or_elapsed;
+                                    self.profile.collect_or_count += 1;
+                                } else {
+                                    let lookup_elapsed = lookup_start.elapsed();
+                                    self.profile.collect_target_lookup += lookup_elapsed;
+                                    self.profile.collect_map_ops += lookup_elapsed;
+                                    self.profile.collect_target_misses += 1;
+
+                                    let insert_start = Instant::now();
+                                    target_map.insert(*v, w_out);
+                                    let insert_elapsed = insert_start.elapsed();
+                                    self.profile.collect_target_insert += insert_elapsed;
+                                    self.profile.collect_map_ops += insert_elapsed;
+                                    self.profile.collect_target_insert_count += 1;
+                                }
+                            } else if let Some(existing) = target_map.get_mut(v) {
+                                *existing |= &w_out;
+                            } else {
+                                target_map.insert(*v, w_out);
+                            }
                         }
                     }
                 }
             }
-        }
+        });
         if let Some(start) = collect_start {
             self.profile.collect_transitions += start.elapsed();
         }
 
         // 2. For each label, compute the epsilon-closed destination subset.
         //    We use the precomputed `eps_reach` here.
-        for (lbl, raw_targets) in transitions {
+        timeit!("determinize::build_destinations", {
+            for (lbl, raw_targets) in transitions {
             let w_edge = edge_weights.remove(&lbl).unwrap();
 
             if self.profile_enabled {
@@ -952,7 +949,8 @@ impl<'a> Determinizer<'a> {
             if let Some(start) = add_start {
                 self.profile.add_transition += start.elapsed();
             }
-        }
+            }
+        });
     }
 }
 
