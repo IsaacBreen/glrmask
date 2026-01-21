@@ -88,12 +88,27 @@ impl HashedSubset {
         Self { inner, hash }
     }
 
+    fn from_sorted_vec(inner: WeightedSubset) -> Self {
+        use rustc_hash::FxHasher;
+        let mut hasher = FxHasher::default();
+        for (k, v) in &inner {
+            k.hash(&mut hasher);
+            v.hash(&mut hasher);
+        }
+        let hash = hasher.finish();
+        Self { inner, hash }
+    }
+
     fn new(inner: BTreeMap<NWAStateID, Weight>) -> Self {
         Self::from_btreemap(inner)
     }
     
     fn is_empty(&self) -> bool {
         self.inner.is_empty()
+    }
+
+    fn len(&self) -> usize {
+        self.inner.len()
     }
 }
 
@@ -492,10 +507,10 @@ struct Determinizer<'a> {
     eps_reach: &'a [WeightedSubset],
     
     // Map from canonical closure (Sorted Vec) to DWA State ID
-    seen: HashMap<WeightedSubset, usize>,
+    seen: FxHashMap<HashedSubset, NWAStateID>,
     queue: VecDeque<usize>,
     // Store the closure for each DWA state
-    closures: Vec<WeightedSubset>,
+    closures: Vec<HashedSubset>,
     
     dwa: DWA,
 
@@ -591,7 +606,7 @@ impl<'a> Determinizer<'a> {
         Determinizer {
             nwa,
             eps_reach,
-            seen: HashMap::new(),
+            seen: FxHashMap::default(),
             queue: VecDeque::new(),
             closures: Vec::new(),
             dwa,
@@ -604,8 +619,9 @@ impl<'a> Determinizer<'a> {
 
     fn register_closure(&mut self, closure: WeightedSubset) -> usize {
         let register_start = if self.profile_enabled { Some(Instant::now()) } else { None };
+        let hashed = HashedSubset::from_sorted_vec(closure);
         let lookup_start = if self.profile_enabled { Some(Instant::now()) } else { None };
-        if let Some(&id) = self.seen.get(&closure) {
+        if let Some(&id) = self.seen.get(&hashed) {
             if let Some(start) = lookup_start {
                 self.profile.register_lookup += start.elapsed();
             }
@@ -627,7 +643,7 @@ impl<'a> Determinizer<'a> {
         // Compute final weight for this new DWA state
         let final_weight_start = if self.profile_enabled { Some(Instant::now()) } else { None };
         let mut finalw = Weight::zeros();
-        for (sid, cw) in &closure {
+        for (sid, cw) in &hashed.inner {
             if let Some(fw) = &self.nwa.states[*sid].final_weight {
                 let and_start = if self.profile_enabled { Some(Instant::now()) } else { None };
                 let cand = cw & fw;
@@ -653,7 +669,7 @@ impl<'a> Determinizer<'a> {
         }
 
         let clone_start = if self.profile_enabled { Some(Instant::now()) } else { None };
-        let closure_clone = closure.clone();
+        let closure_clone = hashed.clone();
         if let Some(start) = clone_start {
             self.profile.register_clone += start.elapsed();
         }
@@ -665,7 +681,7 @@ impl<'a> Determinizer<'a> {
         }
 
         let push_closure_start = if self.profile_enabled { Some(Instant::now()) } else { None };
-        self.closures.push(closure);
+        self.closures.push(hashed);
         if let Some(start) = push_closure_start {
             self.profile.register_push_closure += start.elapsed();
         }
@@ -706,7 +722,7 @@ impl<'a> Determinizer<'a> {
         // 1. Collect outgoing labeled transitions from the subset.
         let collect_start = if self.profile_enabled { Some(Instant::now()) } else { None };
         timeit!("determinize::collect_transitions", {
-            for (u, w_u) in &closure {
+            for (u, w_u) in &closure.inner {
                 if self.profile_enabled {
                     self.profile.collect_state_iters += 1;
                 }
