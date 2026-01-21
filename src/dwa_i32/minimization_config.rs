@@ -5,11 +5,11 @@
 //! optimization passes to run.
 //!
 //! Main configs:
-//! - `TerminalDWA`: Full pipeline for precompute1 (lexical DWA)
-//! - `TemplateDWA`: Template DWAs built from terminal characterizations  
-//! - `Precompute1`: Input to precompute4 (skip unnecessary minimize)
-//! - `FinalDWA`: Final Parser DWA after composition
-//! - `SuperDWA`: Intermediate composition result
+//! - `Terminal`: Full pipeline for terminal/lexical DWA
+//! - `Template`: Template DWAs built from terminal characterizations  
+//! - `Parser`: Final Parser DWA after composition
+//! - `Super`: Intermediate composition result
+//! - `SpecializedSuper`: Specialized DWAs derived from Super
 //!
 //! Also includes experimental functions for testing different pass orderings.
 
@@ -21,6 +21,23 @@ use super::nwa::NWA;
 use profiler_macro::{time_it, timeit};
 use super::minimization::{DwaPass, NwaPass, MAX_OPTIMIZE_ITERATIONS};
 use std::collections::HashSet;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DwaOptimizeConfig {
+    SpecializedSuper,
+    SpecializedSuperLightweight,
+    SpecializedSuperSinglePass,
+    SpecializedSuperDynamic,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeterminizeAndMinimizeProfile {
+    Terminal,
+    Template,
+    Super,
+    SpecializedSuper,
+    Parser,
+}
 
 const DWA_PASS_ORDERINGS: &[&[DwaPass]] = &[
     &[DwaPass::PruneUnreachable, DwaPass::PruneDeadEnds, DwaPass::PushWeights, DwaPass::Minimize],
@@ -204,16 +221,14 @@ pub fn run_nwa_optimization_experiment(nwa: &mut NWA) {
 
 impl DWA {
     /// Apply DWA optimization passes based on a named config.
-    /// Config names: "SpecializedDWA", "SpecializedDWALightweight", "SpecializedDWASinglePass", "DynamicSpecializedDWA".
-    /// Panics on unknown config names.
-    pub fn optimize(&mut self, config_name: &str) {
-        let passes = match config_name {
+    pub fn optimize(&mut self, config: DwaOptimizeConfig) {
+        let passes = match config {
             // Full minimize - good quality but slow for large DWAs
-            "SpecializedDWA" => vec![DwaPass::PruneDeadEnds, DwaPass::Minimize],
+            DwaOptimizeConfig::SpecializedSuper => vec![DwaPass::PruneDeadEnds, DwaPass::Minimize],
             // Lightweight - just pruning, faster but larger output
-            "SpecializedDWALightweight" => vec![DwaPass::PruneDeadEnds, DwaPass::PruneUnreachable],
+            DwaOptimizeConfig::SpecializedSuperLightweight => vec![DwaPass::PruneDeadEnds, DwaPass::PruneUnreachable],
             // Single pass minimize - one round of state merging, faster than full
-            "SpecializedDWASinglePass" => {
+            DwaOptimizeConfig::SpecializedSuperSinglePass => {
                 // Run single pass minimize directly
                 if self.is_cyclic() {
                     self.minimize_single_pass_cyclic();
@@ -221,10 +236,9 @@ impl DWA {
                     self.minimize_acyclic();
                 }
                 return;
-            },
-            // Dynamic derivation path (previously fell through to Minimize-only default)
-            "DynamicSpecializedDWA" => vec![DwaPass::Minimize],
-            _ => panic!("Unknown DWA optimize config: {}", config_name),
+            }
+            // Dynamic derivation path
+            DwaOptimizeConfig::SpecializedSuperDynamic => vec![DwaPass::Minimize],
         };
 
         for pass in passes {
@@ -255,15 +269,15 @@ pub struct DeterminizeAndMinimizeConfig {
 
 impl NWA {
     #[time_it("NWA::determinize_and_minimize")]
-    pub fn determinize_and_minimize(mut self, context: &str) -> DWA {
+    pub fn determinize_and_minimize(mut self, profile: DeterminizeAndMinimizeProfile) -> DWA {
         if self.states.len() > 1000 && optimize_debug() {
-            return Self::run_determinize_and_minimize_experiment(self, context);
+            return Self::run_determinize_and_minimize_experiment(self, profile);
         }
 
         // Production configs based on experiments
-        let config = match context {
-            "TerminalDWA" => {
-                // Full pipeline for Terminal DWA construction (precompute1)
+        let config = match profile {
+            DeterminizeAndMinimizeProfile::Terminal => {
+                // Full pipeline for Terminal DWA construction
                 // Optimization: skip rustfst minimization for large NWAs (correctness unchanged).
                 let skip_minimize_rustfst = std::env::var("TERMINAL_DWA_SKIP_MINIMIZE_RUSTFST")
                     .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
@@ -287,7 +301,7 @@ impl NWA {
                     use_rustfst_determinize: false,
                 }
             },
-            "TemplateDWA" => DeterminizeAndMinimizeConfig {
+            DeterminizeAndMinimizeProfile::Template => DeterminizeAndMinimizeConfig {
                 // Template DWAs are built from terminal characterization NWAs in template_dfa.rs.
                 // Each terminal has a characterization NWA that encodes how it interacts with
                 // the parse stack (shifts, reduces, reduction cascades). These are determinized
@@ -297,19 +311,13 @@ impl NWA {
                 dwa_passes: vec![DwaPass::Minimize],
                 use_rustfst_determinize: false,
             },
-            "Precompute1" => DeterminizeAndMinimizeConfig {
-                // OPTIMIZATION: Skip Minimize to save ~420ms - Precompute1 is just input to precompute4
-                // The final DWA will be minimized, so intermediate minimization is redundant.
-                nwa_passes: vec![NwaPass::PruneDeadEnds, NwaPass::PruneUnreachable, NwaPass::CompressTransitions],
-                dwa_passes: vec![DwaPass::PruneDeadEnds],
-                use_rustfst_determinize: false,
-            },
-            "FinalDWA" => {
+            DeterminizeAndMinimizeProfile::Parser => {
                 // Full pipeline for Parser DWA (finalize_and_optimize_and_determinize)
                 // Includes minimize to get optimal state count
                 // NOTE: NWA MinimizeRustfst can be memory-intensive for large NWAs (2M+ states)
-                // but is now enabled by default for FinalDWA.
-                let use_rustfst_determinize = std::env::var("FINALDWA_RUSTFST_DETERMINIZE")
+                // but is now enabled by default for Parser.
+                let use_rustfst_determinize = std::env::var("PARSER_DWA_RUSTFST_DETERMINIZE")
+                    .or_else(|_| std::env::var("FINALDWA_RUSTFST_DETERMINIZE"))
                     .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                     .unwrap_or(false);
                 DeterminizeAndMinimizeConfig {
@@ -322,23 +330,22 @@ impl NWA {
                     use_rustfst_determinize,
                 }
             },
-            "SuperDWA" => DeterminizeAndMinimizeConfig {
-                // SuperDWA is the "universal" DWA that gets specialized into many DWAs.
-                // Full minimization here pays off because the smaller SuperDWA means
+            DeterminizeAndMinimizeProfile::Super => DeterminizeAndMinimizeConfig {
+                // Super is the "universal" DWA that gets specialized into many DWAs.
+                // Full minimization here pays off because the smaller Super means
                 // smaller specialized DWAs and smaller combined NWA.
                 nwa_passes: vec![NwaPass::CompressTransitions],
                 dwa_passes: vec![DwaPass::PruneDeadEnds, DwaPass::Minimize],
                 use_rustfst_determinize: false,
             },
-            "SpecializedDWA" => DeterminizeAndMinimizeConfig {
-                // Specialized DWAs derived from SuperDWA by weight mapping.
+            DeterminizeAndMinimizeProfile::SpecializedSuper => DeterminizeAndMinimizeConfig {
+                // Specialized DWAs derived from Super by weight mapping.
                 // These are instantiated many times in the combined NWA, so minimization pays off.
                 // Using full minimize but no NWA passes since these are already DWAs.
                 nwa_passes: vec![],
                 dwa_passes: vec![DwaPass::PruneDeadEnds, DwaPass::Minimize],
                 use_rustfst_determinize: false,
             },
-            _ => panic!("Unknown determinize_and_minimize config: {}", context),
         };
         Self::determinize_and_minimize_with_config(&mut self, config)
     }
@@ -409,9 +416,9 @@ impl NWA {
         dwa
     }
 
-    pub fn run_determinize_and_minimize_experiment(self, context: &str) -> DWA {
+    pub fn run_determinize_and_minimize_experiment(self, profile: DeterminizeAndMinimizeProfile) -> DWA {
         let initial_stats = self.stats();
-        println!("[Det&Min Experiment] [{}] Starting experiment with {}.", context, initial_stats);
+        println!("[Det&Min Experiment] [{:?}] Starting experiment with {}.", profile, initial_stats);
 
         // Define interesting NWA sequences
         let nwa_configs: Vec<Vec<NwaPass>> = vec![
@@ -458,8 +465,8 @@ impl NWA {
                 let final_stats = dwa.stats();
                 let final_states = final_stats.states;
 
-                println!("[Det&Min Experiment] [{}] Config N#{}-D#{}: NWA={:?} | DWA={:?} -> Time: {:.2?}, Stats: {}",
-                         context, n_idx, d_idx, nwa_pass_seq, dwa_pass_seq, elapsed, final_stats);
+                println!("[Det&Min Experiment] [{:?}] Config N#{}-D#{}: NWA={:?} | DWA={:?} -> Time: {:.2?}, Stats: {}",
+                         profile, n_idx, d_idx, nwa_pass_seq, dwa_pass_seq, elapsed, final_stats);
 
                 if best_result.as_ref().map_or(true, |(_, best_time, best_states)| {
                     // Prefer fewer states, then faster time
@@ -471,7 +478,7 @@ impl NWA {
             }
         }
 
-        println!("[Det&Min Experiment] [{}] Winner: Config N#{}-D#{}", context, best_config_idx.0, best_config_idx.1);
+        println!("[Det&Min Experiment] [{:?}] Winner: Config N#{}-D#{}", profile, best_config_idx.0, best_config_idx.1);
         best_result.unwrap().0
     }
 }

@@ -23,7 +23,7 @@ use crate::dfa_u8::{Tokenizer, Regex};
 use crate::glr::approximate_dfa::LazyApproximateDFA;
 use crate::glr::parser::GLRParser;
 use crate::dwa_i32::rangeset::RangeSet as WARangeSet;
-use crate::dwa_i32::{DWA, NWA, NWAStateID, Weight};
+use crate::dwa_i32::{DeterminizeAndMinimizeProfile, DWA, NWA, NWAStateID, Weight};
 use crate::dwa_i32::weight_expansion::{expand_rsb, create_tsid_set_mask_with_offset_map};
 use crate::profiler::{self};
 
@@ -476,7 +476,7 @@ impl<'r> Precomputer1<'r> {
             std::fs::write("nwa_dump.json", json).unwrap();
         }
 
-        // Use unified determinize_and_minimize with "TerminalDWA" profile
+        // Use unified determinize_and_minimize with "Terminal" profile
         // Pipeline: NWA minimize → compress → rm_epsilon → determinize → DWA minimize
         // Expected results: 14647 → 5904 → 5904 → 889 → 189 states
         let profile_minimize_only = std::env::var("PROFILE_FACTORIZED_WEIGHT_MINIMIZE_ONLY")
@@ -488,7 +488,7 @@ impl<'r> Precomputer1<'r> {
         }
         crate::debug!(5, "precompute1::determinize_and_minimize start");
         let dwa = timeit!("precompute1::determinize_and_minimize", {
-            self.nwa.determinize_and_minimize("TerminalDWA")
+            self.nwa.determinize_and_minimize(DeterminizeAndMinimizeProfile::Terminal)
         });
         crate::debug!(5, "precompute1::determinize_and_minimize end");
         if profile_minimize_only {

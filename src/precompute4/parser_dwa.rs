@@ -18,8 +18,8 @@ use crate::precompute4::resolve_negatives::{
 };
 use crate::precompute4::template_dfa::{build_ignore_terminal_dwa, build_template_dwas};
 use crate::dwa_i32::{
-    common::Label, determinization_rustfst::determinize_nwa_to_dwa, dwa::DWAStats, DWA, NWA, NWABody, NWAStateID, NWAStates,
-    StateID, Weight,
+    common::Label, determinization_rustfst::determinize_nwa_to_dwa, dwa::DWAStats, DeterminizeAndMinimizeProfile, DwaOptimizeConfig,
+    DWA, NWA, NWABody, NWAStateID, NWAStates, StateID, Weight,
 };
 use crate::dfa_u8::TokenizerStateID;
 use crate::types::{TerminalID, TerminalID as GrammarTokenID};
@@ -722,7 +722,7 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
         // Full minimization is expensive and not critical for intermediate results.
         let super_dwa = timeit!("parser_dwa::super_dwa_det_min", {
             let start_det = std::time::Instant::now();
-            let super_dwa = super_nwa.determinize_and_minimize("SuperDWA");
+            let super_dwa = super_nwa.determinize_and_minimize(DeterminizeAndMinimizeProfile::Super);
             crate::debug!(5, "  Super DWA det+min: {:?}, {}", start_det.elapsed(), super_dwa.stats());
             super_dwa
         });
@@ -800,7 +800,7 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
                     let before_stats = derived_dwa.stats();
                     // Skip expensive minimization - just prune
                     // Rely on final determinization/minimize to compress
-                    derived_dwa.optimize("SpecializedDWALightweight");
+                    derived_dwa.optimize(DwaOptimizeConfig::SpecializedSuperLightweight);
                     let after_stats = derived_dwa.stats();
                     (target_sig.clone(), NWA::from_dwa(&derived_dwa), before_stats, after_stats)
                 }).collect();
@@ -1029,7 +1029,7 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
                         .collect();
 
                     let mut derived_dwa = specialize_dwa_relative_with_map(super_dwa, &weight_map);
-                    derived_dwa.optimize("DynamicSpecializedDWA");
+                    derived_dwa.optimize(DwaOptimizeConfig::SpecializedSuperDynamic);
                     let nwa = Arc::new(NWA::from_dwa(&derived_dwa));
                     pass2_profile_for_process.dynamic_derive_us.fetch_add(
                         dynamic_start.elapsed().as_micros() as u64,
@@ -1316,18 +1316,18 @@ pub fn finalize_and_optimize_and_determinize(parser: &GLRParser, mut combined_nw
         crate::debug!(4, "Parser DWA minimize disabled (PARSER_DWA_MINIMIZE=0)");
         let det_start = std::time::Instant::now();
         let dwa = combined_nwa.determinize();
-        crate::debug!(5, "determinize(FinalDWA) in {:?}", det_start.elapsed());
-        crate::debug!(4, "Final DWA determinize complete. {}", dwa.stats());
+        crate::debug!(5, "determinize(Parser) in {:?}", det_start.elapsed());
+        crate::debug!(4, "Parser DWA determinize complete. {}", dwa.stats());
         return dwa;
     }
 
     crate::debug!(4, "Running parser DWA minimize");
-    // Use unified determinize_and_minimize with "FinalDWA" profile
+    // Use unified determinize_and_minimize with "Parser" profile
     // Pipeline: determinize → prune_dead_ends → minimize
     let det_min_start = std::time::Instant::now();
-    let dwa = combined_nwa.determinize_and_minimize("FinalDWA");
-    crate::debug!(5, "determinize_and_minimize(FinalDWA) in {:?}", det_min_start.elapsed());
-    crate::debug!(4, "Final DWA minimization complete. {}", dwa.stats());
+    let dwa = combined_nwa.determinize_and_minimize(DeterminizeAndMinimizeProfile::Parser);
+    crate::debug!(5, "determinize_and_minimize(Parser) in {:?}", det_min_start.elapsed());
+    crate::debug!(4, "Parser DWA minimization complete. {}", dwa.stats());
     dwa
 }
 

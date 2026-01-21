@@ -282,7 +282,7 @@ pub fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
     progress_step(4, "Minimize");
     result.minimize();
     *dwa = result;
-    crate::debug!(6, "Stats for final DWA after negative resolution:\n{}", dwa.stats());
+    crate::debug!(6, "Stats for parser DWA after negative resolution:\n{}", dwa.stats());
 
     crate::debug!(5, "Resolve negative codes in DWA: Done");
     crate::debug!(6, "resolve_negative_codes_in_dwa took: {:?}", now.elapsed());

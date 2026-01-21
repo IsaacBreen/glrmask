@@ -373,7 +373,7 @@ pub fn minimize_acyclic_exact(dwa: &DWA) -> Result<DWA, DWABuildError> {
     crate::debug!(6, "Acyclic minimize: {} -> {} states in {:?}", 
         dwa.states.len(), new_states.len(), total_start.elapsed());
 
-    // 5. Reconstruct the Final DWA
+    // 5. Reconstruct the Parser DWA
     let step5_start = std::time::Instant::now();
     let result = timeit!("minimize_acyclic::reconstruct", {
         reconstruct_dwa(dwa.body.start_state, &old_to_new, new_states)?

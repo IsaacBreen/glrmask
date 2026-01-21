@@ -293,8 +293,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "nwa_entry_node": combined_start_state
     });
 
-    // 6. Build Final DWA
-    println!("Building Final DWA...");
+    // 6. Build Parser DWA
+    println!("Building Parser DWA...");
     let mut resolved_nwa = unresolved_nwa.clone();
     resolve_negative_codes_in_nwa(&mut resolved_nwa);
     if is_debug_level_enabled(4) {
@@ -304,7 +304,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut final_dwa = finalize_and_optimize_and_determinize(parser, resolved_nwa.clone());
     final_dwa.minimize();
     if is_debug_level_enabled(4) {
-        println!("Final DWA:");
+        println!("Parser DWA:");
         println!("{}", final_dwa);
     }
 
