@@ -404,10 +404,21 @@ impl NWA {
             dwa
         });
 
+        let dwa_minimize_skip_threshold = std::env::var("DWA_MINIMIZE_SKIP_THRESHOLD")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(10_000);
+        let skip_heavy_dwa_passes = dwa_minimize_skip_threshold > 0
+            && dwa.states.len() >= dwa_minimize_skip_threshold;
+
         // Run DWA passes
         for pass in config.dwa_passes.clone() {
             // Check if pass is enabled (e.g., ConsolidateRanges is disabled in weight-heavy mode)
             if !pass.is_enabled() {
+                continue;
+            }
+            if skip_heavy_dwa_passes && matches!(pass, DwaPass::Minimize | DwaPass::ConsolidateRanges) {
+                crate::debug!(5, "Skipping DWA pass {:?} (states={}, threshold={})", pass, dwa.states.len(), dwa_minimize_skip_threshold);
                 continue;
             }
             timeit!(format!("DWA pass {:?}", pass), {
