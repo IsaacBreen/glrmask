@@ -506,9 +506,35 @@ pub fn determinize_nwa_to_dwa(nwa: &NWA) -> DWA {
     fst.compute_and_update_properties_all().unwrap();
     assert!(fst.properties().contains(FstProperties::ACCEPTOR), "FST should be an acceptor before determinization");
 
-    rm_epsilon(&mut fst).unwrap();
+    let skip_rm_epsilon = std::env::var("RUSTFST_SKIP_RM_EPSILON")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let has_eps = !fst.properties().contains(FstProperties::NO_EPSILONS);
+    if has_eps {
+        if skip_rm_epsilon {
+            crate::debug!(5, "rustfst: RUSTFST_SKIP_RM_EPSILON set but epsilons present; keeping rm_epsilon for correctness");
+        }
+        rm_epsilon(&mut fst).unwrap();
+    } else if skip_rm_epsilon {
+        crate::debug!(5, "rustfst: skipping rm_epsilon (no epsilons)");
+    }
 
-    let det_config = DeterminizeConfig::default().with_det_type(DeterminizeType::DeterminizeFunctional);
+    let det_type = std::env::var("RUSTFST_DETERMINIZE_TYPE")
+        .ok()
+        .and_then(|v| match v.to_ascii_lowercase().as_str() {
+            "functional" => Some(DeterminizeType::DeterminizeFunctional),
+            "nonfunctional" | "non-functional" => Some(DeterminizeType::DeterminizeNonFunctional),
+            "disambiguate" => Some(DeterminizeType::DeterminizeDisambiguate),
+            _ => None,
+        })
+        .unwrap_or(DeterminizeType::DeterminizeFunctional);
+    let det_delta = std::env::var("RUSTFST_DETERMINIZE_DELTA")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok());
+    let mut det_config = DeterminizeConfig::default().with_det_type(det_type);
+    if let Some(delta) = det_delta {
+        det_config = det_config.with_delta(delta);
+    }
     let det_fst: VectorFst<Weight> = determinize_with_config(&fst, det_config).unwrap();
 
     vector_fst_to_dwa(&det_fst)
