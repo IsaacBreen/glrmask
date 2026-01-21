@@ -1335,20 +1335,57 @@ impl GrammarConstraint {
             }
             
             let mut collected: Vec<(String, usize, crate::dwa_i32::Weight)> = Vec::new();
-            let max_attempts = num_sample_paths.saturating_mul(20).max(num_sample_paths);
+            let max_attempts = num_sample_paths.saturating_mul(50).max(num_sample_paths);
+            let max_steps = 512usize;
             let mut attempts = 0usize;
 
             while collected.len() < num_sample_paths && attempts < max_attempts {
-                let mut paths = terminal_dwa.sample_paths(1, &mut rng);
-                let Some(path) = paths.pop() else { break; };
-
-                // Convert labels to terminal names
-                let mut path_strs: Vec<String> = Vec::new();
-                let mut path_weight: Option<crate::dwa_i32::Weight> = None;
                 let mut current_state = terminal_dwa.body.start_state;
+                let mut path_strs: Vec<String> = Vec::new();
+                let mut path_weight = crate::dwa_i32::Weight::all();
+                let mut steps = 0usize;
+                let mut collected_this_attempt = false;
 
-                for (label, next_state) in &path {
-                    let label_usize = *label as usize;
+                loop {
+                    // Check if we can end here with a non-empty weight
+                    let end_weight = terminal_dwa.states[current_state]
+                        .final_weight
+                        .as_ref()
+                        .map(|fw| {
+                            let mut w = path_weight.clone();
+                            w &= fw;
+                            w
+                        });
+
+                    // Collect viable transitions (non-empty weight intersection)
+                    let mut choices: Vec<(crate::dwa_i32::Label, crate::dwa_i32::StateID, crate::dwa_i32::Weight)> = Vec::new();
+                    for (&label, &next_state) in &terminal_dwa.states[current_state].transitions {
+                        if let Some(w) = terminal_dwa.states[current_state].trans_weights.get(&label) {
+                            let mut next_w = path_weight.clone();
+                            next_w &= w;
+                            if !next_w.is_empty() {
+                                choices.push((label, next_state, next_w));
+                            }
+                        }
+                    }
+
+                    if let Some(w) = end_weight {
+                        if !w.is_empty() && (choices.is_empty() || rng.gen_bool(0.3)) {
+                            let path_str = path_strs.join(" → ");
+                            collected.push((path_str, path_strs.len(), w));
+                            collected_this_attempt = true;
+                            break;
+                        }
+                    }
+
+                    if choices.is_empty() || steps >= max_steps {
+                        break;
+                    }
+
+                    let idx = rng.gen_range(0..choices.len());
+                    let (label, next_state, next_weight) = choices.swap_remove(idx);
+
+                    let label_usize = label as usize;
                     let name = if label_usize < terminals_count {
                         tid_to_name.get(&label_usize)
                             .cloned()
@@ -1358,29 +1395,14 @@ impl GrammarConstraint {
                     };
                     path_strs.push(name);
 
-                    // Compute intersected weight along path
-                    if let Some(w) = terminal_dwa.states[current_state].trans_weights.get(label) {
-                        match &mut path_weight {
-                            None => path_weight = Some(w.clone()),
-                            Some(pw) => *pw &= w,
-                        }
-                    }
-                    current_state = *next_state;
+                    path_weight = next_weight;
+                    current_state = next_state;
+                    steps += 1;
                 }
 
-                // Include final weight if any
-                if let Some(fw) = &terminal_dwa.states[current_state].final_weight {
-                    match &mut path_weight {
-                        None => path_weight = Some(fw.clone()),
-                        Some(pw) => *pw &= fw,
-                    }
-                }
-
-                if let Some(w) = path_weight {
-                    if !w.is_empty() {
-                        let path_str = path_strs.join(" → ");
-                        collected.push((path_str, path.len(), w));
-                    }
+                if !collected_this_attempt {
+                    attempts += 1;
+                    continue;
                 }
 
                 attempts += 1;
