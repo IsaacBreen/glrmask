@@ -7,6 +7,7 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::ops::BitOrAssign;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use profiler_macro::timeit;
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
@@ -507,10 +508,10 @@ struct Determinizer<'a> {
     eps_reach: &'a [WeightedSubset],
     
     // Map from canonical closure (Sorted Vec) to DWA State ID
-    seen: FxHashMap<HashedSubset, NWAStateID>,
+    seen: FxHashMap<Arc<HashedSubset>, NWAStateID>,
     queue: VecDeque<usize>,
     // Store the closure for each DWA state
-    closures: Vec<HashedSubset>,
+    closures: Vec<Arc<HashedSubset>>,
     
     dwa: DWA,
 
@@ -668,8 +669,9 @@ impl<'a> Determinizer<'a> {
             self.profile.final_weight += start.elapsed();
         }
 
+        let hashed = Arc::new(hashed);
         let clone_start = if self.profile_enabled { Some(Instant::now()) } else { None };
-        let closure_clone = hashed.clone();
+        let closure_clone = Arc::clone(&hashed);
         if let Some(start) = clone_start {
             self.profile.register_clone += start.elapsed();
         }

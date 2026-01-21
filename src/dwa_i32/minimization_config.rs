@@ -377,9 +377,23 @@ impl NWA {
         crate::datastructures::hybrid_bitset::reset_profiling();
         crate::datastructures::rangemap_weight::reset_profiling();
         crate::datastructures::abstract_weight::reset_weight_op_profiling();
+        let auto_rustfst_threshold = std::env::var("DETERMINIZE_RUSTFST_THRESHOLD")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(10_000);
+        let force_internal = std::env::var("DETERMINIZE_FORCE_INTERNAL")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        let auto_use_rustfst = !force_internal
+            && auto_rustfst_threshold > 0
+            && self.states.len() >= auto_rustfst_threshold;
+
         let mut dwa = timeit!("NWA::determinize", {
             let det_start = std::time::Instant::now();
-            let mut dwa = if config.use_rustfst_determinize {
+            let mut dwa = if config.use_rustfst_determinize || auto_use_rustfst {
+                if auto_use_rustfst && !config.use_rustfst_determinize {
+                    crate::debug!(5, "Determinization: auto rustfst (states={}, threshold={})", self.states.len(), auto_rustfst_threshold);
+                }
                 self.determinize_to_dwa_with_rustfst()
             } else {
                 self.determinize()
