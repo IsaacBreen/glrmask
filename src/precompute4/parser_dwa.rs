@@ -1094,14 +1094,35 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
                 );
                 let range = new_states_offset..states.len();
                 if !range.is_empty() {
+                    let total_states = states.len();
+                    let pass2_skip_cancellations_threshold = std::env::var("NWA_PASS2_SKIP_CANCELLATIONS_THRESHOLD")
+                        .ok()
+                        .and_then(|v| v.parse::<usize>().ok())
+                        .unwrap_or(0);
+                    let pass2_skip_finality_threshold = std::env::var("NWA_PASS2_SKIP_FINALITY_FIXPOINT_THRESHOLD")
+                        .ok()
+                        .and_then(|v| v.parse::<usize>().ok())
+                        .unwrap_or(0);
+                    let skip_cancellations = pass2_skip_cancellations_threshold > 0
+                        && total_states >= pass2_skip_cancellations_threshold;
+                    let skip_finality = pass2_skip_finality_threshold > 0
+                        && total_states >= pass2_skip_finality_threshold;
                     let cancel_start = Instant::now();
-                    apply_cancellations_range(&mut states, range.clone());
+                    if skip_cancellations {
+                        crate::debug!(4, "Pass2: skipping cancellations for range {:?} (states={}, threshold={})", range, total_states, pass2_skip_cancellations_threshold);
+                    } else {
+                        apply_cancellations_range(&mut states, range.clone());
+                    }
                     pass2_profile_for_process.apply_cancellations_us.fetch_add(
                         cancel_start.elapsed().as_micros() as u64,
                         Ordering::Relaxed,
                     );
                     let finality_start = Instant::now();
-                    apply_finality_fixpoint_range(&mut states, range.clone());
+                    if skip_finality {
+                        crate::debug!(4, "Pass2: skipping finality fixpoint for range {:?} (states={}, threshold={})", range, total_states, pass2_skip_finality_threshold);
+                    } else {
+                        apply_finality_fixpoint_range(&mut states, range.clone());
+                    }
                     pass2_profile_for_process.apply_finality_us.fetch_add(
                         finality_start.elapsed().as_micros() as u64,
                         Ordering::Relaxed,
