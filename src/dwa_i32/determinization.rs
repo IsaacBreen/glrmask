@@ -209,6 +209,9 @@ impl NWA {
         let mut progress_last_log = Instant::now();
         let progress_log_every = 5_000usize;
         let progress_log_interval = Duration::from_secs(2);
+        let mut profiler_last_log = Instant::now();
+        let profiler_log_every = 25_000usize;
+        let profiler_log_interval = Duration::from_secs(10);
         while let Some(sid) = det.queue.pop_front() {
             let expand_start = if profile_enabled { Some(Instant::now()) } else { None };
             det.expand_state(sid);
@@ -230,6 +233,20 @@ impl NWA {
                     progress_start.elapsed(),
                 );
                 progress_last_log = Instant::now();
+            }
+            if progress_enabled
+                && (processed_subsets % profiler_log_every == 0
+                    || profiler_last_log.elapsed() >= profiler_log_interval)
+            {
+                crate::debug!(
+                    4,
+                    "Determinize profiler summary (subsets_processed={}, elapsed={:?})",
+                    processed_subsets,
+                    progress_start.elapsed(),
+                );
+                crate::profiler::print_summary();
+                crate::profiler::reset();
+                profiler_last_log = Instant::now();
             }
         }
 
