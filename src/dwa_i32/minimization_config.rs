@@ -202,6 +202,50 @@ pub fn run_nwa_optimization_experiment(nwa: &mut NWA) {
     }
 }
 
+impl DWA {
+    /// Apply DWA optimization passes based on a named config.
+    /// Config names: "SpecializedDWA", "SpecializedDWALightweight", "SpecializedDWASinglePass", "DynamicSpecializedDWA".
+    /// Panics on unknown config names.
+    pub fn optimize(&mut self, config_name: &str) {
+        let passes = match config_name {
+            // Full minimize - good quality but slow for large DWAs
+            "SpecializedDWA" => vec![DwaPass::PruneDeadEnds, DwaPass::Minimize],
+            // Lightweight - just pruning, faster but larger output
+            "SpecializedDWALightweight" => vec![DwaPass::PruneDeadEnds, DwaPass::PruneUnreachable],
+            // Single pass minimize - one round of state merging, faster than full
+            "SpecializedDWASinglePass" => {
+                // Run single pass minimize directly
+                if self.is_cyclic() {
+                    self.minimize_single_pass_cyclic();
+                } else {
+                    self.minimize_acyclic();
+                }
+                return;
+            },
+            // Dynamic derivation path (previously fell through to Minimize-only default)
+            "DynamicSpecializedDWA" => vec![DwaPass::Minimize],
+            _ => panic!("Unknown DWA optimize config: {}", config_name),
+        };
+
+        for pass in passes {
+            // Check if pass is enabled (e.g., ConsolidateRanges is disabled in weight-heavy mode)
+            if !pass.is_enabled() {
+                continue;
+            }
+            match pass {
+                DwaPass::PruneUnreachable => { self.prune_unreachable(); },
+                DwaPass::PruneDeadEnds => { self.prune_dead_ends(); },
+                DwaPass::PushWeights => { self.push_weights_into_transitions_and_finals(); },
+                DwaPass::PushWeightsToInitial => { self.push_weights_to_initial(); },
+                DwaPass::ResidualPush => { self.residuated_push(); },
+                DwaPass::Minimize => { self.minimize_states(); },
+                DwaPass::ConsolidateRanges => { self.consolidate_ranges(); },
+                DwaPass::TrimWeights => { self.trim_weights(); },
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct DeterminizeAndMinimizeConfig {
     pub nwa_passes: Vec<NwaPass>,
@@ -294,20 +338,7 @@ impl NWA {
                 dwa_passes: vec![DwaPass::PruneDeadEnds, DwaPass::Minimize],
                 use_rustfst_determinize: false,
             },
-            _ => DeterminizeAndMinimizeConfig {
-                // Default fallback
-                nwa_passes: vec![NwaPass::CompressTransitions],
-                dwa_passes: vec![
-                    DwaPass::PruneDeadEnds,
-                    DwaPass::Minimize,
-                    DwaPass::PushWeights,
-                    DwaPass::PushWeightsToInitial,
-                    DwaPass::PruneUnreachable,
-                    DwaPass::ConsolidateRanges,
-                    DwaPass::TrimWeights,
-                ],
-                use_rustfst_determinize: false,
-            }
+            _ => panic!("Unknown determinize_and_minimize config: {}", context),
         };
         Self::determinize_and_minimize_with_config(&mut self, config)
     }

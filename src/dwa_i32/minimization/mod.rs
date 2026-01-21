@@ -34,45 +34,6 @@ use crate::dwa_i32::Weight;
 use profiler_macro::time_it;
 
 impl DWA {
-    /// Apply DWA optimization passes based on a named config.
-    /// Config names: "SpecializedDWA", "SpecializedDWALightweight", etc.
-    pub fn optimize(&mut self, config_name: &str) {
-        let passes = match config_name {
-            // Full minimize - good quality but slow for large DWAs
-            "SpecializedDWA" => vec![DwaPass::PruneDeadEnds, DwaPass::Minimize],
-            // Lightweight - just pruning, faster but larger output
-            "SpecializedDWALightweight" => vec![DwaPass::PruneDeadEnds, DwaPass::PruneUnreachable],
-            // Single pass minimize - one round of state merging, faster than full
-            "SpecializedDWASinglePass" => {
-                // Run single pass minimize directly
-                if self.is_cyclic() {
-                    self.minimize_single_pass_cyclic();
-                } else {
-                    self.minimize_acyclic();
-                }
-                return;
-            },
-            _ => vec![DwaPass::Minimize], // Default: just minimize
-        };
-        
-        for pass in passes {
-            // Check if pass is enabled (e.g., ConsolidateRanges is disabled in weight-heavy mode)
-            if !pass.is_enabled() {
-                continue;
-            }
-            match pass {
-                DwaPass::PruneUnreachable => { self.prune_unreachable(); },
-                DwaPass::PruneDeadEnds => { self.prune_dead_ends(); },
-                DwaPass::PushWeights => { self.push_weights_into_transitions_and_finals(); },
-                DwaPass::PushWeightsToInitial => { self.push_weights_to_initial(); },
-                DwaPass::ResidualPush => { self.residuated_push(); },
-                DwaPass::Minimize => { self.minimize_states(); },
-                DwaPass::ConsolidateRanges => { self.consolidate_ranges(); },
-                DwaPass::TrimWeights => { self.trim_weights(); },
-            }
-        }
-    }
-
     /// Minimizes the DWA to its optimal state count.
     /// Dispatches to acyclic or cyclic implementation based on graph structure.
     /// Acyclic uses exact graph coloring (optimal but slower).
