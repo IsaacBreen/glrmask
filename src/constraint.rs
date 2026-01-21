@@ -1292,7 +1292,6 @@ impl GrammarConstraint {
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(10);
-            let sample_paths = terminal_dwa.sample_paths(num_sample_paths, &mut rng);
             
             // In weight-heavy mode, token IDs in weights are expanded: id = internal_id * num_tsids + tsid_offset
             // We need to convert back to internal token ID to look up bytes
@@ -1335,14 +1334,20 @@ impl GrammarConstraint {
                     .or_insert_with(|| bytes.clone());
             }
             
-            crate::debug!(5, "Terminal DWA sample paths (n={}):", sample_paths.len());
-            for (i, path) in sample_paths.iter().enumerate() {
+            let mut collected: Vec<(String, usize, crate::dwa_i32::Weight)> = Vec::new();
+            let max_attempts = num_sample_paths.saturating_mul(20).max(num_sample_paths);
+            let mut attempts = 0usize;
+
+            while collected.len() < num_sample_paths && attempts < max_attempts {
+                let mut paths = terminal_dwa.sample_paths(1, &mut rng);
+                let Some(path) = paths.pop() else { break; };
+
                 // Convert labels to terminal names
                 let mut path_strs: Vec<String> = Vec::new();
                 let mut path_weight: Option<crate::dwa_i32::Weight> = None;
                 let mut current_state = terminal_dwa.body.start_state;
-                
-                for (label, next_state) in path {
+
+                for (label, next_state) in &path {
                     let label_usize = *label as usize;
                     let name = if label_usize < terminals_count {
                         tid_to_name.get(&label_usize)
@@ -1352,7 +1357,7 @@ impl GrammarConstraint {
                         format!("TSID{}", label_usize - terminals_count)
                     };
                     path_strs.push(name);
-                    
+
                     // Compute intersected weight along path
                     if let Some(w) = terminal_dwa.states[current_state].trans_weights.get(label) {
                         match &mut path_weight {
@@ -1362,7 +1367,7 @@ impl GrammarConstraint {
                     }
                     current_state = *next_state;
                 }
-                
+
                 // Include final weight if any
                 if let Some(fw) = &terminal_dwa.states[current_state].final_weight {
                     match &mut path_weight {
@@ -1370,47 +1375,54 @@ impl GrammarConstraint {
                         Some(pw) => *pw &= fw,
                     }
                 }
-                
-                let path_str = path_strs.join(" → ");
-                let weight_info = match &path_weight {
-                    Some(w) if !w.is_empty() => {
-                        // Get the smallest token ID from the weight
-                        if let Some(min_id) = w.min_item() {
-                            // In weight-heavy mode, convert from expanded ID back to internal ID
-                            // expanded_id = internal_id * num_tsids + tsid_offset
-                            let internal_id = if num_tsids_for_conversion > 0 {
-                                min_id / num_tsids_for_conversion
-                            } else {
-                                min_id
-                            };
-                            // Get the bytes for this internal token
-                            let token_str = internal_id_to_bytes.get(&internal_id)
-                                .map(|bytes| {
-                                    // Format as escaped string with single quotes
-                                    // Escape single quotes within the token, keep double quotes as-is
-                                    let escaped: String = bytes.iter()
-                                        .map(|&b| {
-                                            if b == b'\'' {
-                                                "\\'".to_string() // Escape single quotes
-                                            } else if b >= 0x20 && b < 0x7f && b != b'\\' {
-                                                (b as char).to_string()
-                                            } else {
-                                                format!("\\x{:02x}", b)
-                                            }
-                                        })
-                                        .collect();
-                                    format!("'{}'", escaped)
-                                })
-                                .unwrap_or_else(|| format!("?tok{}", internal_id));
-                            format!("n={}, e.g. {} (id={})", w.len(), token_str, internal_id)
-                        } else {
-                            format!("n={}", w.len())
-                        }
+
+                if let Some(w) = path_weight {
+                    if !w.is_empty() {
+                        let path_str = path_strs.join(" → ");
+                        collected.push((path_str, path.len(), w));
                     }
-                    Some(w) => format!("n={}", w.len()),
-                    None => "no_weight".to_string(),
+                }
+
+                attempts += 1;
+            }
+
+            crate::debug!(5, "Terminal DWA sample paths (n={}):", collected.len());
+            for (i, (path_str, path_len, w)) in collected.iter().enumerate() {
+                let weight_info = if let Some(min_id) = w.min_item() {
+                    // In weight-heavy mode, convert from expanded ID back to internal ID
+                    // expanded_id = internal_id * num_tsids + tsid_offset
+                    let internal_id = if num_tsids_for_conversion > 0 {
+                        min_id / num_tsids_for_conversion
+                    } else {
+                        min_id
+                    };
+                    // Get the bytes for this internal token
+                    let token_str = internal_id_to_bytes.get(&internal_id)
+                        .map(|bytes| {
+                            // Format as escaped string with single quotes
+                            // Escape single quotes within the token, keep double quotes as-is
+                            let escaped: String = bytes.iter()
+                                .map(|&b| {
+                                    if b == b'\'' {
+                                        "\\'".to_string() // Escape single quotes
+                                    } else if b >= 0x20 && b < 0x7f && b != b'\\' {
+                                        (b as char).to_string()
+                                    } else {
+                                        format!("\\x{:02x}", b)
+                                    }
+                                })
+                                .collect();
+                            format!("'{}'", escaped)
+                        })
+                        .unwrap_or_else(|| format!("?tok{}", internal_id));
+                    format!("n={}, e.g. {} (id={})", w.len(), token_str, internal_id)
+                } else {
+                    format!("n={}", w.len())
                 };
-                crate::debug!(5, "  Path {}: {} (len={}, {})", i, path_str, path.len(), weight_info);
+                crate::debug!(5, "  Path {}: {} (len={}, {})", i, path_str, path_len, weight_info);
+            }
+            if collected.len() < num_sample_paths {
+                crate::debug!(5, "  (collected {} non-empty paths after {} attempts)", collected.len(), attempts);
             }
         }
         // EPSILON EXPLOSION EXPERIMENT - Terminal DWA
