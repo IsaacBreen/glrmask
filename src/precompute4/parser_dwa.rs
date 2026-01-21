@@ -12,8 +12,9 @@ use profiler_macro::{time_it, timeit};
 
 use crate::glr::parser::{ExpectElse, GLRParser};
 use crate::precompute4::resolve_negatives::{
-    apply_cancellations_range, apply_finality_fixpoint_range, remove_negative_transitions_range
-    // Note: remove_redundant_default_transitions is called once at the end in finalize_and_optimize_and_determinize,
+    apply_cancellations_range, apply_finality_fixpoint_range, remove_negative_transitions_range,
+    resolve_negative_codes_in_nwa,
+    // Note: remove_redundant_default_transitions is only run in a global pass (see resolve_negative_codes_in_nwa),
     // not per-range here, since it requires a global pass over all states.
 };
 use crate::precompute4::template_dfa::{build_ignore_terminal_dwa, build_template_dwas};
@@ -928,6 +929,13 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
 
+    let defer_negative_resolve = std::env::var("NWA_PASS2_GLOBAL_NEGATIVE_RESOLVE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if defer_negative_resolve {
+        crate::debug!(3, "Pass2: deferring cancellations/finality/negative removal to global pass (NWA_PASS2_GLOBAL_NEGATIVE_RESOLVE=1)");
+    }
+
     crate::debug!(4, "Beginning NWA traversal");
 
     let pass2_start = Instant::now();
@@ -1111,47 +1119,49 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
                     );
                     let range = new_states_offset..states.len();
                     if !range.is_empty() {
-                        let total_states = states.len();
-                        let pass2_skip_cancellations_threshold = std::env::var("NWA_PASS2_SKIP_CANCELLATIONS_THRESHOLD")
-                            .ok()
-                            .and_then(|v| v.parse::<usize>().ok())
-                            .unwrap_or(0);
-                        let pass2_skip_finality_threshold = std::env::var("NWA_PASS2_SKIP_FINALITY_FIXPOINT_THRESHOLD")
-                            .ok()
-                            .and_then(|v| v.parse::<usize>().ok())
-                            .unwrap_or(0);
-                        let skip_cancellations = pass2_skip_cancellations_threshold > 0
-                            && total_states >= pass2_skip_cancellations_threshold;
-                        let skip_finality = pass2_skip_finality_threshold > 0
-                            && total_states >= pass2_skip_finality_threshold;
-                        let cancel_start = Instant::now();
-                        if skip_cancellations {
-                            crate::debug!(4, "Pass2: skipping cancellations for range {:?} (states={}, threshold={})", range, total_states, pass2_skip_cancellations_threshold);
-                        } else {
-                            apply_cancellations_range(&mut states, range.clone());
+                        if !defer_negative_resolve {
+                            let total_states = states.len();
+                            let pass2_skip_cancellations_threshold = std::env::var("NWA_PASS2_SKIP_CANCELLATIONS_THRESHOLD")
+                                .ok()
+                                .and_then(|v| v.parse::<usize>().ok())
+                                .unwrap_or(0);
+                            let pass2_skip_finality_threshold = std::env::var("NWA_PASS2_SKIP_FINALITY_FIXPOINT_THRESHOLD")
+                                .ok()
+                                .and_then(|v| v.parse::<usize>().ok())
+                                .unwrap_or(0);
+                            let skip_cancellations = pass2_skip_cancellations_threshold > 0
+                                && total_states >= pass2_skip_cancellations_threshold;
+                            let skip_finality = pass2_skip_finality_threshold > 0
+                                && total_states >= pass2_skip_finality_threshold;
+                            let cancel_start = Instant::now();
+                            if skip_cancellations {
+                                crate::debug!(4, "Pass2: skipping cancellations for range {:?} (states={}, threshold={})", range, total_states, pass2_skip_cancellations_threshold);
+                            } else {
+                                apply_cancellations_range(&mut states, range.clone());
+                            }
+                            pass2_profile_for_process.apply_cancellations_us.fetch_add(
+                                cancel_start.elapsed().as_micros() as u64,
+                                Ordering::Relaxed,
+                            );
+                            let finality_start = Instant::now();
+                            if skip_finality {
+                                crate::debug!(4, "Pass2: skipping finality fixpoint for range {:?} (states={}, threshold={})", range, total_states, pass2_skip_finality_threshold);
+                            } else {
+                                apply_finality_fixpoint_range(&mut states, range.clone());
+                            }
+                            pass2_profile_for_process.apply_finality_us.fetch_add(
+                                finality_start.elapsed().as_micros() as u64,
+                                Ordering::Relaxed,
+                            );
+                            let remove_start = Instant::now();
+                            remove_negative_transitions_range(&mut states, range);
+                            pass2_profile_for_process.remove_negative_us.fetch_add(
+                                remove_start.elapsed().as_micros() as u64,
+                                Ordering::Relaxed,
+                            );
+                            // Note: remove_redundant_default_transitions is NOT called here because it
+                            // requires a global pass over all states (see resolve_negative_codes_in_nwa).
                         }
-                        pass2_profile_for_process.apply_cancellations_us.fetch_add(
-                            cancel_start.elapsed().as_micros() as u64,
-                            Ordering::Relaxed,
-                        );
-                        let finality_start = Instant::now();
-                        if skip_finality {
-                            crate::debug!(4, "Pass2: skipping finality fixpoint for range {:?} (states={}, threshold={})", range, total_states, pass2_skip_finality_threshold);
-                        } else {
-                            apply_finality_fixpoint_range(&mut states, range.clone());
-                        }
-                        pass2_profile_for_process.apply_finality_us.fetch_add(
-                            finality_start.elapsed().as_micros() as u64,
-                            Ordering::Relaxed,
-                        );
-                        let remove_start = Instant::now();
-                        remove_negative_transitions_range(&mut states, range);
-                        pass2_profile_for_process.remove_negative_us.fetch_add(
-                            remove_start.elapsed().as_micros() as u64,
-                            Ordering::Relaxed,
-                        );
-                        // Note: remove_redundant_default_transitions is NOT called here because it 
-                        // requires a global pass over all states. It's called once at the end.
                     }
                     let union_start = Instant::now();
                     nwa_body = NWABody::union(&nwa_body, &composed_body);
@@ -1341,6 +1351,15 @@ pub fn precompute_token_bvs_and_signatures(reversed_nwa: &NWA, traversal_data: &
 }
 
 pub fn finalize_and_optimize_and_determinize(parser: &GLRParser, mut combined_nwa: NWA) -> DWA {
+    let defer_negative_resolve = std::env::var("NWA_PASS2_GLOBAL_NEGATIVE_RESOLVE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if defer_negative_resolve {
+        crate::debug!(4, "Applying deferred negative resolution (global pass)...");
+        resolve_negative_codes_in_nwa(&mut combined_nwa);
+        crate::debug!(4, "Deferred negative resolution complete. NWA now {}.", combined_nwa.stats());
+    }
+
     crate::debug!(4, "Pruning continuations from final states for NWA with {}...", combined_nwa.stats());
     let prune_final_start = std::time::Instant::now();
     combined_nwa.subtract_final_weights_from_outgoing();
