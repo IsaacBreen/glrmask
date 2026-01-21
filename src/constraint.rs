@@ -1292,6 +1292,17 @@ impl GrammarConstraint {
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(10);
+            let sample_long = std::env::var("DWA_SAMPLE_LONG")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
+            let min_len: Option<usize> = std::env::var("DWA_SAMPLE_MIN_LEN")
+                .ok()
+                .and_then(|s| s.parse().ok());
+            let target_samples = if sample_long {
+                num_sample_paths.saturating_mul(20).max(num_sample_paths)
+            } else {
+                num_sample_paths
+            };
             
             // In weight-heavy mode, token IDs in weights are expanded: id = internal_id * num_tsids + tsid_offset
             // We need to convert back to internal token ID to look up bytes
@@ -1320,6 +1331,49 @@ impl GrammarConstraint {
                     (tid.0, name)
                 })
                 .collect();
+
+            let reachable_terminals: std::collections::BTreeSet<usize> = {
+                let mut reachable = std::collections::BTreeSet::new();
+                if !terminal_dwa.states.0.is_empty() {
+                    let mut visited = vec![false; terminal_dwa.states.len()];
+                    let mut queue = std::collections::VecDeque::new();
+                    visited[terminal_dwa.body.start_state] = true;
+                    queue.push_back(terminal_dwa.body.start_state);
+                    while let Some(state_id) = queue.pop_front() {
+                        let state = &terminal_dwa.states[state_id];
+                        for (&label, &next_state) in &state.transitions {
+                            if let Some(w) = state.trans_weights.get(&label) {
+                                if w.is_empty() {
+                                    continue;
+                                }
+                            }
+                            let label_usize = label as usize;
+                            if label_usize < terminals_count {
+                                reachable.insert(label_usize);
+                            }
+                            if !visited[next_state] {
+                                visited[next_state] = true;
+                                queue.push_back(next_state);
+                            }
+                        }
+                    }
+                }
+                reachable
+            };
+
+            let print_terminals = std::env::var("DWA_PRINT_TERMINALS")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
+            if print_terminals {
+                crate::debug!(5, "Terminal list (reachable {} of {}):", reachable_terminals.len(), terminals_count);
+                for tid in reachable_terminals.iter() {
+                    let name = tid_to_name
+                        .get(tid)
+                        .cloned()
+                        .unwrap_or_else(|| format!("T{}", tid));
+                    crate::debug!(5, "  T{}: {}", tid, name);
+                }
+            }
             
             // Build reverse map from internal token ID to bytes (sorted by length for shortest)
             let mut internal_id_to_bytes: std::collections::BTreeMap<usize, Vec<u8>> = std::collections::BTreeMap::new();
@@ -1333,13 +1387,33 @@ impl GrammarConstraint {
                     })
                     .or_insert_with(|| bytes.clone());
             }
+
+            let format_token = |internal_id: usize| -> String {
+                let token_str = internal_id_to_bytes.get(&internal_id)
+                    .map(|bytes| {
+                        let escaped: String = bytes.iter()
+                            .map(|&b| {
+                                if b == b'\'' {
+                                    "\\'".to_string()
+                                } else if b >= 0x20 && b < 0x7f && b != b'\\' {
+                                    (b as char).to_string()
+                                } else {
+                                    format!("\\x{:02x}", b)
+                                }
+                            })
+                            .collect();
+                        format!("'{}'", escaped)
+                    })
+                    .unwrap_or_else(|| format!("?tok{}", internal_id));
+                format!("{}:{}", internal_id, token_str)
+            };
             
             let mut collected: Vec<(String, usize, crate::dwa_i32::Weight)> = Vec::new();
-            let max_attempts = num_sample_paths.saturating_mul(50).max(num_sample_paths);
-            let max_steps = 512usize;
+            let max_attempts = target_samples.saturating_mul(50).max(target_samples);
+            let max_steps = if sample_long { 2048 } else { 512 };
             let mut attempts = 0usize;
 
-            while collected.len() < num_sample_paths && attempts < max_attempts {
+            while collected.len() < target_samples && attempts < max_attempts {
                 let mut current_state = terminal_dwa.body.start_state;
                 let mut path_strs: Vec<String> = Vec::new();
                 let mut path_weight = crate::dwa_i32::Weight::all();
@@ -1370,11 +1444,14 @@ impl GrammarConstraint {
                     }
 
                     if let Some(w) = end_weight {
-                        if !w.is_empty() && (choices.is_empty() || rng.gen_bool(0.3)) {
-                            let path_str = path_strs.join(" → ");
-                            collected.push((path_str, path_strs.len(), w));
-                            collected_this_attempt = true;
-                            break;
+                        let end_prob = if sample_long { 0.1 } else { 0.3 };
+                        if !w.is_empty() && (choices.is_empty() || rng.gen_bool(end_prob)) {
+                            if min_len.map_or(true, |min| path_strs.len() >= min) {
+                                let path_str = path_strs.join(" → ");
+                                collected.push((path_str, path_strs.len(), w));
+                                collected_this_attempt = true;
+                                break;
+                            }
                         }
                     }
 
@@ -1408,43 +1485,95 @@ impl GrammarConstraint {
                 attempts += 1;
             }
 
-            crate::debug!(5, "Terminal DWA sample paths (n={}):", collected.len());
+            let mut deduped: std::collections::BTreeMap<String, (usize, crate::dwa_i32::Weight)> = std::collections::BTreeMap::new();
+            for (path, len, w) in collected.into_iter() {
+                deduped.entry(path).or_insert((len, w));
+            }
+            let mut collected: Vec<(String, usize, crate::dwa_i32::Weight)> = deduped
+                .into_iter()
+                .map(|(path, (len, w))| (path, len, w))
+                .collect();
+
+            let candidates_len = collected.len();
+            let mut distinct_len_count = 0usize;
+            if sample_long {
+                collected.sort_by(|a, b| b.1.cmp(&a.1));
+                let mut selected: Vec<(String, usize, crate::dwa_i32::Weight)> = Vec::new();
+                let mut used_lengths = std::collections::BTreeSet::new();
+                for (path, len, w) in collected.iter() {
+                    if used_lengths.insert(*len) {
+                        selected.push((path.clone(), *len, w.clone()));
+                        if selected.len() >= num_sample_paths {
+                            break;
+                        }
+                    }
+                }
+                if selected.len() < num_sample_paths {
+                    for (path, len, w) in collected.iter() {
+                        if selected.len() >= num_sample_paths {
+                            break;
+                        }
+                        if selected.iter().any(|(p, _, _)| p == path) {
+                            continue;
+                        }
+                        selected.push((path.clone(), *len, w.clone()));
+                    }
+                }
+                distinct_len_count = used_lengths.len();
+                collected = selected;
+            } else if collected.len() > num_sample_paths {
+                collected.sort_by(|a, b| b.1.cmp(&a.1));
+                collected.truncate(num_sample_paths);
+            }
+
+            crate::debug!(5, "Terminal DWA sample paths (n={}, non-empty weights):", collected.len());
             for (i, (path_str, path_len, w)) in collected.iter().enumerate() {
-                let weight_info = if let Some(min_id) = w.min_item() {
-                    // In weight-heavy mode, convert from expanded ID back to internal ID
-                    // expanded_id = internal_id * num_tsids + tsid_offset
-                    let internal_id = if num_tsids_for_conversion > 0 {
-                        min_id / num_tsids_for_conversion
-                    } else {
-                        min_id
-                    };
-                    // Get the bytes for this internal token
-                    let token_str = internal_id_to_bytes.get(&internal_id)
-                        .map(|bytes| {
-                            // Format as escaped string with single quotes
-                            // Escape single quotes within the token, keep double quotes as-is
-                            let escaped: String = bytes.iter()
-                                .map(|&b| {
-                                    if b == b'\'' {
-                                        "\\'".to_string() // Escape single quotes
-                                    } else if b >= 0x20 && b < 0x7f && b != b'\\' {
-                                        (b as char).to_string()
-                                    } else {
-                                        format!("\\x{:02x}", b)
-                                    }
-                                })
-                                .collect();
-                            format!("'{}'", escaped)
-                        })
-                        .unwrap_or_else(|| format!("?tok{}", internal_id));
-                    format!("n={}, e.g. {} (id={})", w.len(), token_str, internal_id)
+                let weight_len = w.len();
+                let max_tokens = if weight_len <= 20 { usize::MAX } else { 3 };
+                let mut token_samples: Vec<usize> = Vec::new();
+                let mut seen_tokens = std::collections::BTreeSet::new();
+                for range in w.ranges() {
+                    let mut pos = *range.start();
+                    let end = *range.end();
+                    while pos <= end && token_samples.len() < max_tokens {
+                        let internal_id = if num_tsids_for_conversion > 0 {
+                            pos / num_tsids_for_conversion
+                        } else {
+                            pos
+                        };
+                        if seen_tokens.insert(internal_id) {
+                            token_samples.push(internal_id);
+                        }
+                        if pos == usize::MAX {
+                            break;
+                        }
+                        pos = pos.saturating_add(1);
+                    }
+                    if token_samples.len() >= max_tokens {
+                        break;
+                    }
+                }
+                let tokens_str = if token_samples.is_empty() {
+                    if weight_len <= 20 { "tokens_all=[]".to_string() } else { "tokens_sample=[]".to_string() }
                 } else {
-                    format!("n={}", w.len())
+                    let formatted: Vec<String> = token_samples.into_iter().map(format_token).collect();
+                    if weight_len <= 20 {
+                        format!("tokens_all=[{}]", formatted.join(", "))
+                    } else {
+                        format!("tokens_sample=[{}]", formatted.join(", "))
+                    }
                 };
+                let weight_info = format!("weight_len={}, {}", weight_len, tokens_str);
                 crate::debug!(5, "  Path {}: {} (len={}, {})", i, path_str, path_len, weight_info);
             }
             if collected.len() < num_sample_paths {
                 crate::debug!(5, "  (collected {} non-empty paths after {} attempts)", collected.len(), attempts);
+            }
+            if sample_long {
+                crate::debug!(5, "  (DWA_SAMPLE_LONG=1: selected {} paths across {} distinct lengths from {} candidates)", collected.len(), distinct_len_count, candidates_len);
+                if candidates_len > 0 && distinct_len_count < 3 {
+                    crate::debug!(5, "  (length diversity limited: {} distinct lengths in candidates)", distinct_len_count);
+                }
             }
         }
         // EPSILON EXPLOSION EXPERIMENT - Terminal DWA
