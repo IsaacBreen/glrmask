@@ -820,6 +820,9 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
                     ranges_interned: 0,
                     transition_multiplicity_hist: BTreeMap::new(),
                 };
+                let mut reduced_count = 0usize;
+                let mut max_state_delta = 0usize;
+                let mut max_transition_delta = 0usize;
                 let mut accumulate_stats = |total: &mut DWAStats, stats: &DWAStats| {
                     total.states += stats.states;
                     total.transitions += stats.transitions;
@@ -833,7 +836,20 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
                 for (_, _, before_stats, after_stats) in &results {
                     accumulate_stats(&mut before_total_stats, before_stats);
                     accumulate_stats(&mut after_total_stats, after_stats);
+                    let state_delta = before_stats.states.saturating_sub(after_stats.states);
+                    let transition_delta = before_stats.transitions.saturating_sub(after_stats.transitions);
+                    if state_delta > 0 || transition_delta > 0 {
+                        reduced_count += 1;
+                    }
+                    if state_delta > max_state_delta {
+                        max_state_delta = state_delta;
+                    }
+                    if transition_delta > max_transition_delta {
+                        max_transition_delta = transition_delta;
+                    }
                 }
+                let total_state_delta = before_total_stats.states.saturating_sub(after_total_stats.states);
+                let total_transition_delta = before_total_stats.transitions.saturating_sub(after_total_stats.transitions);
                 let reduction_pct = if before_total_stats.states == 0 {
                     0.0
                 } else {
@@ -841,6 +857,14 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
                 };
                 crate::debug!(5, "  Specialization ({} DWAs): {:?}, before={}, after={} ({:.1}% reduction)", 
                     results.len(), start_specialize.elapsed(), before_total_stats, after_total_stats, reduction_pct);
+                crate::debug!(5, "  Specialization reduction: reduced_dw_as={}/{}, total_state_delta={}, total_transition_delta={}, max_state_delta={}, max_transition_delta={}",
+                    reduced_count,
+                    results.len(),
+                    total_state_delta,
+                    total_transition_delta,
+                    max_state_delta,
+                    max_transition_delta,
+                );
                 for (idx, (_, _, before_stats, after_stats)) in results.iter().enumerate() {
                     crate::debug!(6, "  Specialized DWA #{}: before={}, after={}", idx, before_stats, after_stats);
                 }
