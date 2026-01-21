@@ -506,7 +506,7 @@ mod tests {
         println!("\n=== DWA info ===");
         let dwa = &constraint.parser_dwa;
         println!("DWA start state: {:?}", dwa.body.start_state);
-        println!("DWA states count: {}", dwa.states.len());
+        println!("DWA stats: {}", dwa.stats());
         let dwa_start_state = &dwa.states[dwa.body.start_state];
         println!("Start state transitions:");
         for (label, target) in &dwa_start_state.transitions {
@@ -630,8 +630,8 @@ mod tests {
             &GrammarConstraintConfig::default(),
         );
         assert!(constraint.is_weight_heavy(), "Should default to weight-heavy");
-        println!("Weight-heavy: {} tsids, {} DWA states", 
-            constraint.num_tsids, constraint.parser_dwa.states.len());
+        println!("Weight-heavy: {} tsids, DWA {}", 
+            constraint.num_tsids, constraint.parser_dwa.stats());
         
         // Test inputs work correctly in weight-heavy mode
         let inputs = &["{}",r#"{"name": "test"}"#, r#"{ "name" : "hello world" }"#];

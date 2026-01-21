@@ -7,7 +7,7 @@ use super::common::{format_i16_char, Label, NWAStateID, Weight, BENCHMARK_DEBUG}
 use super::dwa::DWA;
 use crate::dwa_i32::{DWAState, StateID};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fmt::{self, Display, Formatter};
 use std::ops::{Index, IndexMut};
 
@@ -159,16 +159,24 @@ impl Display for NWABody {
 
 #[derive(Debug, Clone)]
 pub struct NWAStats {
-    pub num_states: usize,
-    pub num_final_states: usize,
-    pub total_epsilon: usize,
-    pub total_labeled: usize,
+    pub states: usize,
+    pub transitions: usize,
+    pub unique_state_pairs: usize,
+    pub ranges: usize,
+    pub ranges_interned: usize,
 }
 
 impl Display for NWAStats {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        writeln!(f, "States: {}, Finals: {}, Eps: {}, Labeled: {}", 
-            self.num_states, self.num_final_states, self.total_epsilon, self.total_labeled)
+        write!(
+            f,
+            "states={}, transitions={}, unique_state_pairs={}, ranges={}, ranges_interned={}",
+            self.states,
+            self.transitions,
+            self.unique_state_pairs,
+            self.ranges,
+            self.ranges_interned
+        )
     }
 }
 
@@ -271,13 +279,24 @@ impl NWA {
     }
 
     pub fn stats(&self) -> NWAStats {
-        let mut st = NWAStats { num_states: self.states.len(), num_final_states: 0, total_epsilon: 0, total_labeled: 0 };
-        for s in &self.states.0 {
-            if s.final_weight.is_some() { st.num_final_states += 1; }
-            st.total_epsilon += s.epsilons.len();
-            st.total_labeled += s.transitions.values().map(|v| v.len()).sum::<usize>();
+        let mut unique_pairs: HashSet<(usize, usize)> = HashSet::new();
+        for (src, state) in self.states.0.iter().enumerate() {
+            for (dst, _) in &state.epsilons {
+                unique_pairs.insert((src, *dst));
+            }
+            for targets in state.transitions.values() {
+                for (dst, _) in targets {
+                    unique_pairs.insert((src, *dst));
+                }
+            }
         }
-        st
+        NWAStats {
+            states: self.states.len(),
+            transitions: self.states.num_transitions(),
+            unique_state_pairs: unique_pairs.len(),
+            ranges: self.num_ranges(),
+            ranges_interned: self.num_ranges_interned(),
+        }
     }
 
     /// Counts the total number of ranges across all weights in this NWA.

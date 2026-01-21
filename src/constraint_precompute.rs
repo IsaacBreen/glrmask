@@ -467,8 +467,8 @@ impl<'r> Precomputer1<'r> {
             });
         }
 
-        crate::debug!(3, "Terminal NWA: {} states, {} transitions, num_tsids={}", 
-                      self.nwa.states.len(), self.nwa.states.num_transitions(), self.num_tsids);
+        crate::debug!(3, "Terminal NWA: {}, num_tsids={}", 
+                  self.nwa.stats(), self.num_tsids);
 
         if std::env::var("DWA_DUMP_NWA").map(|v| v == "1").unwrap_or(false) {
             crate::debug!(5, "Dumping NWA to nwa_dump.json");
@@ -498,8 +498,8 @@ impl<'r> Precomputer1<'r> {
         
         // NOTE: Stats are printed AFTER suffix grammar pruning in constraint.rs
         // This includes path counts, average path lengths, and sample paths.
-        crate::debug!(4, "Terminal DWA (before suffix pruning): {} states, {} transitions", 
-                      dwa.states.len(), dwa.states.num_transitions());
+        crate::debug!(4, "Terminal DWA (before suffix pruning): {}", 
+                  dwa.stats());
 
         dwa
     }

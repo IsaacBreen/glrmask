@@ -264,16 +264,16 @@ pub fn remove_redundant_default_transitions_range(states: &mut NWAStates, range:
 /// Resolve negative codes in a DWA by a single, high-performance, semantics-preserving NWA rewrite.
 pub fn resolve_negative_codes_in_dwa(dwa: &mut DWA) {
     let now = Instant::now();
-    crate::debug!(6, "Resolving negative codes in DWA with {} states...", dwa.states.len());
+    crate::debug!(6, "Resolving negative codes in DWA with {}...", dwa.stats());
 
     progress_step(1, "DWA -> NWA");
     let mut nwa = NWA::from_dwa(dwa);
-    crate::debug!(6, "Converted to NWA with {} states.", nwa.states.len());
+    crate::debug!(6, "Converted to NWA with {}.", nwa.stats());
     crate::debug!(6, "Stats for NWA from DWA:\n{}", nwa.stats());
 
     progress_step(2, "Resolve negatives in NWA");
     resolve_negative_codes_in_nwa(&mut nwa);
-    crate::debug!(6, "Applied changes, NWA has {} states before determinization.", nwa.states.len());
+    crate::debug!(6, "Applied changes, NWA has {} before determinization.", nwa.stats());
     crate::debug!(6, "Stats for NWA after negative resolution:\n{}", nwa.stats());
 
     progress_step(3, "Determinize");

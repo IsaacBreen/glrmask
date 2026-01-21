@@ -289,8 +289,7 @@ pub fn validate_terminal_dwa_paths_verbose(
     
     if verbose {
         println!("\n=== Terminal DWA Info ===");
-        println!("  States: {}", dwa.states.len());
-        println!("  Transitions: {}", dwa.states.num_transitions());
+        println!("  DWA: {}", dwa.stats());
         println!("  Terminals count: {}", terminals_count);
         println!("  Sampled {} paths", paths.len());
     }

@@ -49,8 +49,8 @@ const DWA_PASS_ORDERINGS: &[&[DwaPass]] = &[
 
 pub fn run_dwa_optimization_experiment(dwa: &mut DWA) {
     let initial_clone = dwa.clone();
-    let initial_states = dwa.states.len();
-    println!("[DWA Optimize] Starting experiment with {} states.", initial_states);
+    let initial_stats = dwa.stats();
+    println!("[DWA Optimize] Starting experiment with {}.", initial_stats);
 
     let mut best_result: Option<(DWA, std::time::Duration, usize)> = None;
 
@@ -95,7 +95,8 @@ pub fn run_dwa_optimization_experiment(dwa: &mut DWA) {
         }
 
         let elapsed = start_time.elapsed();
-        let final_states = current_dwa.states.len();
+        let final_stats = current_dwa.stats();
+        let final_states = final_stats.states;
 
         let ordering_str = format!("{:?}", ordering);
         let timeout_str = if timed_out {
@@ -103,7 +104,7 @@ pub fn run_dwa_optimization_experiment(dwa: &mut DWA) {
         } else {
             "".to_string()
         };
-        println!("[DWA Optimize] Ordering #{}: {}, Time: {:.2?}, States: {}{}", i, ordering_str, elapsed, final_states, timeout_str);
+        println!("[DWA Optimize] Ordering #{}: {}, Time: {:.2?}, Stats: {}{}", i, ordering_str, elapsed, final_stats, timeout_str);
 
         if !timed_out && best_result.as_ref().map_or(true, |(_, best_time, best_states)| {
             final_states < *best_states || (final_states == *best_states && elapsed < *best_time)
@@ -132,8 +133,8 @@ const NWA_PASS_ORDERINGS: &[&[NwaPass]] = &[
 
 pub fn run_nwa_optimization_experiment(nwa: &mut NWA) {
     let initial_clone = nwa.clone();
-    let initial_states = nwa.states.len();
-    println!("[NWA Optimize] Starting experiment with {} states.", initial_states);
+    let initial_stats = nwa.stats();
+    println!("[NWA Optimize] Starting experiment with {}.", initial_stats);
 
     let mut best_result: Option<(NWA, std::time::Duration, usize)> = None;
 
@@ -178,7 +179,8 @@ pub fn run_nwa_optimization_experiment(nwa: &mut NWA) {
         }
 
         let elapsed = start_time.elapsed();
-        let final_states = current_nwa.states.len();
+        let final_stats = current_nwa.stats();
+        let final_states = final_stats.states;
 
         let ordering_str = format!("{:?}", ordering);
         let timeout_str = if timed_out {
@@ -186,7 +188,7 @@ pub fn run_nwa_optimization_experiment(nwa: &mut NWA) {
         } else {
             "".to_string()
         };
-        println!("[NWA Optimize] Ordering #{}: {}, Time: {:.2?}, States: {}{}", i, ordering_str, elapsed, final_states, timeout_str);
+        println!("[NWA Optimize] Ordering #{}: {}, Time: {:.2?}, Stats: {}{}", i, ordering_str, elapsed, final_stats, timeout_str);
 
         if !timed_out && best_result.as_ref().map_or(true, |(_, best_time, best_states)| {
             final_states < *best_states || (final_states == *best_states && elapsed < *best_time)
@@ -312,8 +314,8 @@ impl NWA {
 
     #[time_it("NWA::determinize_and_minimize_with_config")]
     pub fn determinize_and_minimize_with_config(&mut self, config: DeterminizeAndMinimizeConfig) -> DWA {
-        crate::debug!(5, "Determinize and minimize initial stats: {} states, {} transitions, {} ranges ({} interned)",
-            self.states.len(), self.states.num_transitions(), self.num_ranges(), self.num_ranges_interned());
+        crate::debug!(5, "Determinize and minimize initial stats: {}",
+            self.stats());
 
         // Run NWA passes
         for pass in config.nwa_passes {
@@ -333,8 +335,8 @@ impl NWA {
                 }
             });
         }
-        crate::debug!(5, "NWA minimization: {} states, {} transitions, {} ranges ({} interned)", 
-            self.states.len(), self.states.num_transitions(), self.num_ranges(), self.num_ranges_interned());
+        crate::debug!(5, "NWA minimization: {}", 
+            self.stats());
 
         crate::datastructures::hybrid_bitset::reset_profiling();
         crate::datastructures::rangemap_weight::reset_profiling();
@@ -347,8 +349,8 @@ impl NWA {
                 self.determinize()
             };
             let det_time = det_start.elapsed();
-            crate::debug!(5, "Determinization: {} states, {} transitions, {} ranges ({} interned) in {:.2?}", 
-                dwa.states.len(), dwa.states.num_transitions(), dwa.num_ranges(), dwa.num_ranges_interned(), det_time);
+            crate::debug!(5, "Determinization: {} in {:.2?}", 
+                dwa.stats(), det_time);
             dwa
         });
 
@@ -371,14 +373,14 @@ impl NWA {
                 }
             });
         }
-        crate::debug!(5, "DWA minimization: {} states, {} transitions, {} ranges ({} interned)",
-            dwa.states.len(), dwa.states.num_transitions(), dwa.num_ranges(), dwa.num_ranges_interned());
+        crate::debug!(5, "DWA minimization: {}",
+            dwa.stats());
         dwa
     }
 
     pub fn run_determinize_and_minimize_experiment(self, context: &str) -> DWA {
-        let initial_states = self.states.len();
-        println!("[Det&Min Experiment] [{}] Starting experiment with {} NWA states.", context, initial_states);
+        let initial_stats = self.stats();
+        println!("[Det&Min Experiment] [{}] Starting experiment with {}.", context, initial_stats);
 
         // Define interesting NWA sequences
         let nwa_configs: Vec<Vec<NwaPass>> = vec![
@@ -422,10 +424,11 @@ impl NWA {
                 let dwa = Self::determinize_and_minimize_with_config(&mut nwa_clone, config);
 
                 let elapsed = start_time.elapsed();
-                let final_states = dwa.states.len();
+                let final_stats = dwa.stats();
+                let final_states = final_stats.states;
 
-                println!("[Det&Min Experiment] [{}] Config N#{}-D#{}: NWA={:?} | DWA={:?} -> Time: {:.2?}, States: {}",
-                         context, n_idx, d_idx, nwa_pass_seq, dwa_pass_seq, elapsed, final_states);
+                println!("[Det&Min Experiment] [{}] Config N#{}-D#{}: NWA={:?} | DWA={:?} -> Time: {:.2?}, Stats: {}",
+                         context, n_idx, d_idx, nwa_pass_seq, dwa_pass_seq, elapsed, final_stats);
 
                 if best_result.as_ref().map_or(true, |(_, best_time, best_states)| {
                     // Prefer fewer states, then faster time

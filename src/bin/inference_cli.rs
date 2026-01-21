@@ -282,7 +282,7 @@ fn cmd_stats(constraint: &GrammarConstraint) {
     println!("Constraint Statistics:");
     println!("  Vocabulary size: {}", constraint.parser_dwa_vocab.max_original_llm_token_id + 1);
     println!("  Internal tokens: {}", constraint.parser_dwa_vocab.internal_to_original.len());
-    println!("  DWA states: {}", constraint.parser_dwa.states.len());
+    println!("  DWA: {}", constraint.parser_dwa.stats());
     println!("  Parser productions: {}", constraint.parser.productions.len());
     println!("  Tokenizer DFA states: {}", constraint.tokenizer.dfa().states.len());
 }

@@ -207,13 +207,14 @@ pub fn minimize_partition_based(dwa: &DWA) -> Result<DWA, DWABuildError> {
     }
     
     let start = std::time::Instant::now();
+    let before_stats = dwa.stats();
     
     // Step 1: Compute partition and signatures
     let (num_elements, fp_to_elem) = compute_partition(dwa);
     let signatures = compute_signatures(dwa, &fp_to_elem);
     
-    crate::debug!(5, "Partition minimize: {} states, {} partition elements", 
-        dwa.states.len(), num_elements);
+    crate::debug!(5, "Partition minimize: {}, {} partition elements", 
+        before_stats, num_elements);
     
     // Step 2: Build incompatibility graph using signatures
     let incompatible = build_incompatibility_from_signatures(&signatures);
@@ -226,7 +227,7 @@ pub fn minimize_partition_based(dwa: &DWA) -> Result<DWA, DWABuildError> {
     let coloring = crate::dwa_i32::minimization::graph_coloring::solve_greedy_coloring(&incompatible);
     let num_colors = coloring.iter().max().map(|&c| c + 1).unwrap_or(0);
     
-    crate::debug!(5, "Graph coloring: {} colors (was {} states)", num_colors, dwa.states.len());
+    crate::debug!(5, "Graph coloring: {} colors (was {})", num_colors, before_stats);
     
     // Step 4: Build color classes
     let mut color_classes: Vec<Vec<StateID>> = vec![vec![]; num_colors];
@@ -273,13 +274,14 @@ pub fn minimize_partition_based(dwa: &DWA) -> Result<DWA, DWABuildError> {
     let old_start = dwa.body.start_state;
     let new_start = old_to_color[&old_start];
     
-    crate::debug!(5, "Partition minimize: {} -> {} states in {:?}", 
-        dwa.states.len(), new_states.len(), start.elapsed());
-    
-    Ok(DWA {
+    let new_dwa = DWA {
         states: new_states,
         body: crate::dwa_i32::dwa::DWABody { start_state: new_start },
-    })
+    };
+    crate::debug!(5, "Partition minimize: {} -> {} in {:?}", 
+        before_stats, new_dwa.stats(), start.elapsed());
+    
+    Ok(new_dwa)
 }
 
 #[cfg(test)]
@@ -290,9 +292,9 @@ mod tests {
     fn test_partition_minimize_empty() {
         // Create an empty DWA by using default which creates 0 states
         let dwa = DWA::default();
-        println!("Input DWA has {} states", dwa.states.len());
+        println!("Input DWA has {}", dwa.stats());
         let result = minimize_partition_based(&dwa).unwrap();
-        println!("Output DWA has {} states", result.states.len());
+        println!("Output DWA has {}", result.stats());
         assert_eq!(result.states.len(), 0);
     }
     
@@ -345,6 +347,6 @@ mod tests {
         }
         
         println!("Semantic equivalence verified!");
-        println!("Original: {} states, Minimized: {} states", dwa.states.len(), result.states.len());
+        println!("Original: {}, Minimized: {}", dwa.stats(), result.stats());
     }
 }

@@ -1211,19 +1211,17 @@ impl GrammarConstraint {
         // Re-minimize after pruning (some states may now be mergeable)
         if did_prune {
             crate::debug!(4, "Re-minimizing terminal DWA after suffix pruning...");
-            let before_states = terminal_dwa.states.len();
-            let before_transitions = terminal_dwa.states.num_transitions();
+            let before_stats = terminal_dwa.stats();
             let rem_start = std::time::Instant::now();
             terminal_dwa.minimize();
             crate::debug!(5, "Terminal DWA re-minimize in {:?}", rem_start.elapsed());
-            crate::debug!(4, "Terminal DWA re-minimization: {} states, {} transitions -> {} states, {} transitions",
-                before_states, before_transitions, 
-                terminal_dwa.states.len(), terminal_dwa.states.num_transitions());
+            crate::debug!(4, "Terminal DWA re-minimization: {} -> {}",
+                before_stats, terminal_dwa.stats());
         }
 
         // Now print terminal DWA stats (after pruning and re-minimization)
-        crate::debug!(3, "Terminal DWA (final): {} states, {} transitions", 
-            terminal_dwa.states.len(), terminal_dwa.states.num_transitions());
+        crate::debug!(3, "Terminal DWA (final): {}", 
+            terminal_dwa.stats());
 
         // Compute domain_max for weight trimming and metrics
         let domain_max = if weight_heavy_enabled {
@@ -1602,8 +1600,8 @@ impl GrammarConstraint {
             // First, minimize the original terminal DWA with rustfst to verify it's minimal
             let mut orig_dwa_for_min = terminal_dwa.clone();
             orig_dwa_for_min.minimize();
-            crate::debug!(1, "Original terminal DWA (after minimize_with_rustfst): {} states, {} trans",
-                orig_dwa_for_min.states.len(), orig_dwa_for_min.states.num_transitions());
+            crate::debug!(1, "Original terminal DWA (after minimize_with_rustfst): {}",
+                orig_dwa_for_min.stats());
             
             // Only dump verbose DWA structure and DOT graphs if DUMP_DWA_DOT is set
             // (These can produce 1000s of lines of output)
@@ -1888,9 +1886,7 @@ impl GrammarConstraint {
             
             crate::debug!(1, "Starting determinize...");
             let mut mod_dwa = terminal_nwa_mod.determinize();
-            let det_states = mod_dwa.states.len();
-            let det_trans = mod_dwa.states.num_transitions();
-            crate::debug!(1, "After determinize: {} states, {} trans", det_states, det_trans);
+            crate::debug!(1, "After determinize: {}", mod_dwa.stats());
             
             // EXPORT DWAs to JSON for Python analysis
             if std::env::var("EXPORT_DWA_JSON").is_ok() {
@@ -2029,9 +2025,9 @@ impl GrammarConstraint {
             let mod_start_out = mod_dwa.states[mod_start_id].transitions.len();
             crate::debug!(1, "Modified start has {} outgoing transitions", mod_start_out);
             
-            crate::debug!(1, "After minimize_with_rustfst: {} states, {} trans", mod_states, mod_trans);
-            crate::debug!(1, "TERMINAL DWA: Original {} states/{} trans -> Modified {} states/{} trans",
-                orig_dwa_for_min.states.len(), orig_dwa_for_min.states.num_transitions(), mod_states, mod_trans);
+            crate::debug!(1, "After minimize_with_rustfst: {}", mod_dwa.stats());
+            crate::debug!(1, "TERMINAL DWA: Original {} -> Modified {}",
+                orig_dwa_for_min.stats(), mod_dwa.stats());
             crate::debug!(1, "TERMINAL DWA: State factor {:.2}x, Trans factor {:.2}x",
                 mod_states as f64 / orig_dwa_for_min.states.len() as f64, 
                 mod_trans as f64 / orig_dwa_for_min.states.num_transitions() as f64);
@@ -2321,14 +2317,14 @@ impl GrammarConstraint {
             
             crate::debug!(1, "=== EPSILON EXPLOSION EXPERIMENT: Parser DWA from epsilon terminal NWA ===");
             crate::debug!(1, "Original Parser DWA build time: <see profiler summary>");
-            crate::debug!(1, "Original terminal DWA: {} states, {} trans",
-                terminal_dwa.states.len(), terminal_dwa.states.num_transitions());
+            crate::debug!(1, "Original terminal DWA: {}",
+                terminal_dwa.stats());
             
             // First, minimize the original parser DWA to verify baseline
             let mut orig_parser_dwa_for_min = parser_dwa.clone();
             orig_parser_dwa_for_min.minimize();
-            crate::debug!(1, "Original Parser DWA (after minimize_with_rustfst): {} states, {} trans",
-                orig_parser_dwa_for_min.states.len(), orig_parser_dwa_for_min.states.num_transitions());
+            crate::debug!(1, "Original Parser DWA (after minimize_with_rustfst): {}",
+                orig_parser_dwa_for_min.stats());
             
             // First, create the epsilon-modified terminal DWA (same as terminal DWA experiment)
             let mut terminal_nwa_mod = terminal_nwa.clone();
@@ -2365,8 +2361,8 @@ impl GrammarConstraint {
             let det_start = Instant::now();
             let mut terminal_dwa_mod = terminal_nwa_mod.determinize();
             terminal_dwa_mod.minimize();
-            crate::debug!(1, "Modified terminal DWA (after minimize): {} states, {} trans (took {:?})",
-                terminal_dwa_mod.states.len(), terminal_dwa_mod.states.num_transitions(), det_start.elapsed());
+            crate::debug!(1, "Modified terminal DWA (after minimize): {} (took {:?})",
+                terminal_dwa_mod.stats(), det_start.elapsed());
             
             // Now build Parser DWA from this modified terminal NWA
             let terminal_nwa_for_parser = NWA::from_dwa(&terminal_dwa_mod);
@@ -2374,12 +2370,12 @@ impl GrammarConstraint {
             let parser_start = Instant::now();
             let mut parser_dwa_mod = build_parser_dwa(&parser, &terminal_nwa_for_parser);
             let build_time = parser_start.elapsed();
-            crate::debug!(1, "Modified Parser DWA (before minimize): {} states, {} trans (took {:?})",
-                parser_dwa_mod.states.len(), parser_dwa_mod.states.num_transitions(), build_time);
+            crate::debug!(1, "Modified Parser DWA (before minimize): {} (took {:?})",
+                parser_dwa_mod.stats(), build_time);
             
             parser_dwa_mod.minimize();
-            crate::debug!(1, "Modified Parser DWA (after minimize): {} states, {} trans",
-                parser_dwa_mod.states.len(), parser_dwa_mod.states.num_transitions());
+            crate::debug!(1, "Modified Parser DWA (after minimize): {}",
+                parser_dwa_mod.stats());
             
             // Compare with original (minimized)
             let orig_term_min = {
@@ -2389,14 +2385,14 @@ impl GrammarConstraint {
             };
             
             crate::debug!(1, "COMPARISON (all minimized):");
-            crate::debug!(1, "  Original terminal DWA: {} states, {} trans",
-                orig_term_min.states.len(), orig_term_min.states.num_transitions());
-            crate::debug!(1, "  Modified terminal DWA: {} states, {} trans",
-                terminal_dwa_mod.states.len(), terminal_dwa_mod.states.num_transitions());
-            crate::debug!(1, "  Original Parser DWA: {} states, {} trans",
-                orig_parser_dwa_for_min.states.len(), orig_parser_dwa_for_min.states.num_transitions());
-            crate::debug!(1, "  Modified Parser DWA: {} states, {} trans",
-                parser_dwa_mod.states.len(), parser_dwa_mod.states.num_transitions());
+            crate::debug!(1, "  Original terminal DWA: {}",
+                orig_term_min.stats());
+            crate::debug!(1, "  Modified terminal DWA: {}",
+                terminal_dwa_mod.stats());
+            crate::debug!(1, "  Original Parser DWA: {}",
+                orig_parser_dwa_for_min.stats());
+            crate::debug!(1, "  Modified Parser DWA: {}",
+                parser_dwa_mod.stats());
         }
 
         // Check if weight-heavy mode is enabled via environment variable

@@ -4,7 +4,7 @@
 #![allow(clippy::needless_borrow)]
 
 pub(crate) use super::common::{format_pos_code, Label, StateID, Weight};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::{self, Display, Formatter};
 use std::ops::{Deref, Index, IndexMut};
 
@@ -126,6 +126,31 @@ pub struct DWA {
     pub body: DWABody,
 }
 
+#[derive(Debug, Clone)]
+pub struct DWAStats {
+    pub states: usize,
+    pub transitions: usize,
+    pub unique_state_pairs: usize,
+    pub ranges: usize,
+    pub ranges_interned: usize,
+    pub transition_multiplicity_hist: BTreeMap<usize, usize>,
+}
+
+impl Display for DWAStats {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "states={}, transitions={}, unique_state_pairs={}, ranges={}, ranges_interned={}, transition_multiplicity_hist={:?}",
+            self.states,
+            self.transitions,
+            self.unique_state_pairs,
+            self.ranges,
+            self.ranges_interned,
+            self.transition_multiplicity_hist
+        )
+    }
+}
+
 impl DWA {
     pub fn new() -> Self {
         let mut states = DWAStates::default();
@@ -231,8 +256,28 @@ impl DWA {
         changed
     }
 
-    pub fn stats(&self) -> String {
-        format!("States: {}, Transitions: {}", self.states.len(), self.states.iter().map(|s| s.transitions.len()).sum::<usize>())
+    pub fn stats(&self) -> DWAStats {
+        let mut transition_multiplicity_hist: BTreeMap<usize, usize> = BTreeMap::new();
+        let mut unique_state_pairs = 0usize;
+        let mut dst_counts: HashMap<StateID, usize> = HashMap::new();
+        for state in self.states.0.iter() {
+            dst_counts.clear();
+            for &dst in state.transitions.values() {
+                *dst_counts.entry(dst).or_insert(0) += 1;
+            }
+            unique_state_pairs += dst_counts.len();
+            for count in dst_counts.values() {
+                *transition_multiplicity_hist.entry(*count).or_insert(0) += 1;
+            }
+        }
+        DWAStats {
+            states: self.states.len(),
+            transitions: self.states.num_transitions(),
+            unique_state_pairs,
+            ranges: self.num_ranges(),
+            ranges_interned: self.num_ranges_interned(),
+            transition_multiplicity_hist,
+        }
     }
 
     /// Computes the average path length across all paths from start to final states.
