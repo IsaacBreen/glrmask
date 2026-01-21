@@ -1130,7 +1130,6 @@ impl BitAndAssign<&AbstractWeight> for AbstractWeight {
 impl BitOr for AbstractWeight {
     type Output = Self;
 
-    #[time_it("AbstractWeight::bitor")]
     fn bitor(self, rhs: Self) -> Self::Output {
         match (self, rhs) {
             (AbstractWeight::RangeSet(a), AbstractWeight::RangeSet(b)) => {
@@ -1151,6 +1150,21 @@ impl BitOr<&AbstractWeight> for AbstractWeight {
     type Output = AbstractWeight;
 
     fn bitor(self, rhs: &AbstractWeight) -> Self::Output {
+        if std::mem::discriminant(&self) != std::mem::discriminant(rhs) {
+            panic!("AbstractWeight operation requires both operands to be the same variant");
+        }
+        if rhs.is_empty() {
+            return self;
+        }
+        if self.is_empty() {
+            return rhs.clone();
+        }
+        if self.is_all_fast() {
+            return self;
+        }
+        if rhs.is_all_fast() {
+            return rhs.clone();
+        }
         match (self, rhs) {
             (AbstractWeight::RangeSet(a), AbstractWeight::RangeSet(b)) => {
                 AbstractWeight::RangeSet(WeightBackend::union(&a, b))
@@ -1186,7 +1200,6 @@ impl BitOr for &AbstractWeight {
 }
 
 impl BitOrAssign for AbstractWeight {
-    #[time_it("AbstractWeight::bitor_assign")]
     fn bitor_assign(&mut self, rhs: Self) {
         match (self, &rhs) {
             (AbstractWeight::RangeSet(a), AbstractWeight::RangeSet(b)) => {
@@ -1205,6 +1218,23 @@ impl BitOrAssign for AbstractWeight {
 
 impl BitOrAssign<&AbstractWeight> for AbstractWeight {
     fn bitor_assign(&mut self, rhs: &AbstractWeight) {
+        if std::mem::discriminant(&*self) != std::mem::discriminant(rhs) {
+            panic!("AbstractWeight operation requires both operands to be the same variant");
+        }
+        if rhs.is_empty() {
+            return;
+        }
+        if self.is_empty() {
+            *self = rhs.clone();
+            return;
+        }
+        if self.is_all_fast() {
+            return;
+        }
+        if rhs.is_all_fast() {
+            *self = rhs.clone();
+            return;
+        }
         match (self, rhs) {
             (AbstractWeight::RangeSet(a), AbstractWeight::RangeSet(b)) => {
                 WeightBackend::union_assign(a, b);
