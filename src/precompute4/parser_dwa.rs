@@ -38,8 +38,6 @@ impl MinimizeRustfstConfig {
 
 #[derive(Clone, Copy)]
 struct WeightTlsSnapshot {
-    max_llm_token: usize,
-    num_tsids: usize,
     backend_choice: BackendChoice,
     expansion_allowed: bool,
 }
@@ -47,18 +45,88 @@ struct WeightTlsSnapshot {
 impl WeightTlsSnapshot {
     fn capture() -> Self {
         Self {
-            max_llm_token: crate::datastructures::get_max_llm_token(),
-            num_tsids: crate::datastructures::get_num_tsids(),
             backend_choice: crate::datastructures::abstract_weight::current_backend_choice(),
             expansion_allowed: crate::datastructures::abstract_weight::is_expansion_allowed(),
         }
     }
 
     fn apply(&self) {
-        crate::datastructures::set_global_dims(self.max_llm_token, self.num_tsids);
         override_backend(self.backend_choice);
         crate::datastructures::abstract_weight::override_expansion_allowed(self.expansion_allowed);
     }
+}
+
+fn validate_nwa_weight_dims(nwa: &NWA, expected_num_tsids: usize) {
+    let mut mismatches = 0usize;
+    let mut total = 0usize;
+    let mut rangeset_weights = 0usize;
+    let mut examples: Vec<String> = Vec::new();
+
+    let mut check_weight = |w: &Weight| {
+        total += 1;
+        match w {
+            crate::datastructures::abstract_weight::AbstractWeight::RangeMap(rm) => {
+                let nt = rm.num_tsids();
+                if nt != expected_num_tsids {
+                    mismatches += 1;
+                    if examples.len() < 5 {
+                        examples.push(format!("RangeMap num_tsids={} (expected {})", nt, expected_num_tsids));
+                    }
+                }
+            }
+            crate::datastructures::abstract_weight::AbstractWeight::Factorized(fw) => {
+                let nt = fw.num_tsids();
+                if nt != expected_num_tsids {
+                    mismatches += 1;
+                    if examples.len() < 5 {
+                        examples.push(format!("Factorized num_tsids={} (expected {})", nt, expected_num_tsids));
+                    }
+                }
+            }
+            crate::datastructures::abstract_weight::AbstractWeight::RangeSet(_) => {
+                rangeset_weights += 1;
+                if expected_num_tsids > 1 {
+                    mismatches += 1;
+                    if examples.len() < 5 {
+                        examples.push("RangeSet weight in weight-heavy mode".to_string());
+                    }
+                }
+            }
+        }
+    };
+
+    for state in &nwa.states.0 {
+        if let Some(w) = &state.final_weight {
+            check_weight(w);
+        }
+        for (_, w) in &state.epsilons {
+            check_weight(w);
+        }
+        for targets in state.transitions.values() {
+            for (_, w) in targets {
+                check_weight(w);
+            }
+        }
+    }
+
+    if mismatches > 0 {
+        panic!(
+            "Parser NWA weight dims mismatch: expected_num_tsids={}, mismatches={}, total_weights={}, rangeset_weights={}, examples={:?}",
+            expected_num_tsids,
+            mismatches,
+            total,
+            rangeset_weights,
+            examples,
+        );
+    }
+
+    crate::debug!(
+        4,
+        "Parser NWA weight dims OK: expected_num_tsids={}, total_weights={}, rangeset_weights={}",
+        expected_num_tsids,
+        total,
+        rangeset_weights,
+    );
 }
 
 pub use crate::precompute4::template_dfa::FullDWABuildError;
@@ -1277,6 +1345,14 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
     }
 
     let combined_nwa = NWA { states: combined_nwa_states, body: NWABody { start_states: vec![combined_start_state] } };
+    let macro_level = std::env::var("MACRO_DEBUG_LEVEL")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(0);
+    if macro_level >= 4 {
+        let expected_num_tsids = crate::datastructures::abstract_weight::current_num_tsids();
+        validate_nwa_weight_dims(&combined_nwa, expected_num_tsids);
+    }
     crate::debug!(3, "Combined NWA before determinization: {}, is_symbol_heavy={}", 
         combined_nwa.stats(), is_symbol_heavy);
     let mut final_dwa = timeit!("parser_dwa::finalize_and_determinize", {

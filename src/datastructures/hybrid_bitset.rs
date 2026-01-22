@@ -60,7 +60,11 @@ pub fn set_global_dims(max_llm_token: usize, num_tsids: usize) {
     crate::debug!(4, "set_global_dims: max_llm_token={}, num_tsids={}", max_llm_token, num_tsids);
     MAX_LLM_TOKEN.with(|value| value.set(max_llm_token));
     NUM_TSIDS.with(|value| value.set(num_tsids));
+}
 
+/// Set global dims for the current thread and propagate to all Rayon workers.
+pub fn set_global_dims_all_threads(max_llm_token: usize, num_tsids: usize) {
+    set_global_dims(max_llm_token, num_tsids);
     rayon::broadcast(|_| {
         MAX_LLM_TOKEN.with(|value| value.set(max_llm_token));
         NUM_TSIDS.with(|value| value.set(num_tsids));

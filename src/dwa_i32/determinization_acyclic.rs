@@ -182,45 +182,6 @@ fn build_destinations(
     results
 }
 
-/// Detect num_tsids from an NWA by inspecting its weights.
-fn detect_num_tsids_from_nwa(nwa: &NWA) -> usize {
-    // Try to find any RangeMap weight and extract its num_tsids
-    for state in &nwa.states.0 {
-        for (_, targets) in &state.transitions {
-            for (_, w) in targets {
-                if let crate::datastructures::abstract_weight::AbstractWeight::RangeMap(rm) = w {
-                    let nt = rm.num_tsids();
-                    if nt > 1 {
-                        return nt;
-                    }
-                }
-                if let crate::datastructures::abstract_weight::AbstractWeight::Factorized(fw) = w {
-                    let nt = fw.num_tsids();
-                    if nt > 1 {
-                        return nt;
-                    }
-                }
-            }
-        }
-        if let Some(ref fw) = state.final_weight {
-            if let crate::datastructures::abstract_weight::AbstractWeight::RangeMap(rm) = fw {
-                let nt = rm.num_tsids();
-                if nt > 1 {
-                    return nt;
-                }
-            }
-            if let crate::datastructures::abstract_weight::AbstractWeight::Factorized(fwi) = fw {
-                let nt = fwi.num_tsids();
-                if nt > 1 {
-                    return nt;
-                }
-            }
-        }
-    }
-    // Default to 1 (symbol-heavy mode)
-    1
-}
-
 pub(crate) fn determinize_acyclic_with_progress(
     nwa: &NWA,
     topo_order: &[usize],
@@ -229,12 +190,6 @@ pub(crate) fn determinize_acyclic_with_progress(
     if nwa.states.0.is_empty() {
         return DWA::new();
     }
-
-    // Ensure global dims are set for this thread before any weight operations.
-    // This is critical because complement() and zeros() use global dims.
-    let detected_tsids = detect_num_tsids_from_nwa(nwa);
-    let max_llm_token = crate::datastructures::get_max_llm_token();
-    crate::datastructures::set_global_dims(max_llm_token, detected_tsids);
 
     let start_time = Instant::now();
     crate::debug!(3, "Determinizing acyclic NWA: precomputing state sets...");
@@ -333,8 +288,6 @@ pub(crate) fn determinize_acyclic_with_progress(
     let log_interval = Duration::from_secs(2);
     let last_log = std::sync::Mutex::new(Instant::now());
 
-    let max_llm_token = crate::datastructures::get_max_llm_token();
-    let num_tsids = crate::datastructures::get_num_tsids();
     let backend_choice = crate::datastructures::abstract_weight::current_backend_choice();
     let expansion_allowed = crate::datastructures::abstract_weight::is_expansion_allowed();
 
@@ -342,7 +295,6 @@ pub(crate) fn determinize_acyclic_with_progress(
         .par_iter()
         .map_init(
             || {
-                crate::datastructures::set_global_dims(max_llm_token, num_tsids);
                 crate::datastructures::override_backend(backend_choice);
                 crate::datastructures::abstract_weight::override_expansion_allowed(expansion_allowed);
             },

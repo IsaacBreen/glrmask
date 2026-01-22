@@ -992,7 +992,7 @@ pub fn run_precompute1(
     };
 
     // Ensure global dimensions are set when run_precompute1 is called directly (e.g., tests).
-    crate::datastructures::set_global_dims(
+    crate::datastructures::set_global_dims_all_threads(
         internal_max_llm_token,
         if num_tsids > 0 { num_tsids } else { 1 },
     );

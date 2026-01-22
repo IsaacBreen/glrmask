@@ -20,4 +20,4 @@ pub use abstract_weight::{AbstractWeight, WeightDimensions, BackendChoice, overr
 pub use factorized_weight::{FactorizedWeight, flush_weight_dump, record_weight_for_dump};
 pub use rangemap_weight::RangeMapWeight;
 pub use entry_api::{EntryApi, OrderedMapEntry};
-pub use hybrid_bitset::{set_global_dims, get_max_llm_token, get_num_tsids};
+pub use hybrid_bitset::{set_global_dims, set_global_dims_all_threads, get_max_llm_token, get_num_tsids};

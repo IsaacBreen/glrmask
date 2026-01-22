@@ -507,7 +507,7 @@ impl JSONConvertible for GrammarConstraint {
 
         // Set global dimensions when deserializing
         let num_tsids_for_dims = if intermediate.num_tsids > 0 { intermediate.num_tsids } else { 1 };
-        crate::datastructures::set_global_dims(
+        crate::datastructures::set_global_dims_all_threads(
             intermediate.vocab.internal_max_llm_token,
             num_tsids_for_dims,
         );
@@ -1054,7 +1054,7 @@ impl GrammarConstraint {
 
         // Set global dimensions for RangeSet operations (LLMTokenBV::max_ones(), etc.)
         // In symbol-heavy mode (num_tsids == 0), we use num_tsids=1 for dimension calculations
-        crate::datastructures::set_global_dims(
+        crate::datastructures::set_global_dims_all_threads(
             internal_max_llm_token,
             if num_tsids > 0 { num_tsids } else { 1 },
         );
