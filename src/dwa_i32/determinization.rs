@@ -13,7 +13,7 @@ use profiler_macro::timeit;
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use crate::dwa_i32::test_weighted_automata;
 use super::common::{DETERMINIZE_DEBUG, Label, NWAStateID, Weight};
-use super::determinization_acyclic::{precompute_all_epsilon_closures_acyclic, topo_order_if_acyclic};
+use super::determinization_acyclic::topo_order_if_acyclic;
 use super::determinization_cyclic::precompute_all_epsilon_closures;
 use super::dwa::DWA;
 use super::nwa::{NWA, NWAStates};
@@ -60,13 +60,13 @@ fn is_zero(w: &Weight) -> bool { w.is_empty() }
 
 /// A pre-hashed wrapper for a weighted subset using sorted Vec for fast iteration.
 #[derive(Clone)]
-struct HashedSubset {
+pub(crate) struct HashedSubset {
     inner: Vec<(NWAStateID, Weight)>,  // Sorted by NWAStateID
     hash: u64,
 }
 
 impl HashedSubset {
-    fn from_btreemap(map: BTreeMap<NWAStateID, Weight>) -> Self {
+    pub(crate) fn from_btreemap(map: BTreeMap<NWAStateID, Weight>) -> Self {
         use rustc_hash::FxHasher;
         let inner: Vec<_> = map.into_iter().collect();
         let mut hasher = FxHasher::default();
@@ -78,7 +78,7 @@ impl HashedSubset {
         Self { inner, hash }
     }
     
-    fn from_fxhashmap(map: FxHashMap<NWAStateID, Weight>) -> Self {
+    pub(crate) fn from_fxhashmap(map: FxHashMap<NWAStateID, Weight>) -> Self {
         use rustc_hash::FxHasher;
         let mut inner: Vec<_> = map.into_iter().collect();
         inner.sort_unstable_by_key(|(k, _)| *k);
@@ -91,7 +91,7 @@ impl HashedSubset {
         Self { inner, hash }
     }
 
-    fn from_sorted_vec(inner: WeightedSubset) -> Self {
+    pub(crate) fn from_sorted_vec(inner: WeightedSubset) -> Self {
         use rustc_hash::FxHasher;
         let mut hasher = FxHasher::default();
         for (k, v) in &inner {
@@ -102,7 +102,7 @@ impl HashedSubset {
         Self { inner, hash }
     }
 
-    fn new(inner: BTreeMap<NWAStateID, Weight>) -> Self {
+    pub(crate) fn new(inner: BTreeMap<NWAStateID, Weight>) -> Self {
         Self::from_btreemap(inner)
     }
     
@@ -112,6 +112,10 @@ impl HashedSubset {
 
     fn len(&self) -> usize {
         self.inner.len()
+    }
+
+    pub(crate) fn iter(&self) -> std::slice::Iter<'_, (NWAStateID, Weight)> {
+        self.inner.iter()
     }
 }
 
@@ -188,20 +192,22 @@ impl NWA {
             || macro_level >= 5;
         let progress_enabled = determinize_progress_enabled() && macro_level >= 4;
 
-        let topo_order = topo_order_if_acyclic(self);
-        if topo_order.is_some() {
+        if let Some(topo_order) = topo_order_if_acyclic(self) {
             crate::debug!(6, "Determinization: Using acyclic fast path...");
-        } else {
-            crate::debug!(6, "Determinization: Precomputing epsilon closures...");
+            let dwa = super::determinization_acyclic::determinize_acyclic_with_progress(self, &topo_order, progress_enabled);
+            if DETERMINIZE_DEBUG {
+                let rustfst_dwa = self.determinize_to_dwa_with_rustfst();
+                crate::debug!(5, "[DETERMINIZE_DEBUG] Comparing custom determinization with rustfst...");
+                test_weighted_automata::stochastic_equivalence_test(dwa.clone(), rustfst_dwa);
+            }
+            return dwa;
         }
 
-        // 3. Precompute Reachability
+        crate::debug!(6, "Determinization: Precomputing epsilon closures...");
+
+        // 3. Precompute Reachability (cyclic)
         let eps_start = if profile_enabled { Some(Instant::now()) } else { None };
-        let eps_reach = if let Some(ref order) = topo_order {
-            precompute_all_epsilon_closures_acyclic(&self.states, order)
-        } else {
-            precompute_all_epsilon_closures(&self.states)
-        };
+        let eps_reach = precompute_all_epsilon_closures(&self.states);
 
         // 4. Initialize Determinizer
         let mut det = Determinizer::new(self, &eps_reach, profile_enabled, progress_enabled);

@@ -330,7 +330,7 @@ impl NWA {
                         NwaPass::Minimize,
                     ],
                     dwa_passes: vec![DwaPass::PruneDeadEnds, DwaPass::Minimize, DwaPass::ConsolidateRanges, DwaPass::TrimWeights],
-                    use_rustfst_determinize: true,
+                    use_rustfst_determinize: false,
                 }
             },
         };
