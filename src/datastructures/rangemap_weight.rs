@@ -1,8 +1,10 @@
+use std::cell::RefCell;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use dashmap::DashSet;
 use lru::LruCache;
@@ -47,6 +49,81 @@ pub fn reset_profiling() {}
 pub fn print_profiling(_label: &str) {}
 
 pub fn print_intern_wall_time(_label: &str) {}
+
+#[derive(Clone, Default)]
+pub(crate) struct UnionTiming {
+    pub(crate) eq_check: Duration,
+    pub(crate) is_all_check: Duration,
+    pub(crate) merge: Duration,
+    pub(crate) from_map: Duration,
+    pub(crate) calls: u64,
+}
+
+impl UnionTiming {
+    fn add_assign(&mut self, other: &UnionTiming) {
+        self.eq_check += other.eq_check;
+        self.is_all_check += other.is_all_check;
+        self.merge += other.merge;
+        self.from_map += other.from_map;
+        self.calls += other.calls;
+    }
+}
+
+thread_local! {
+    static UNION_TIMING: RefCell<UnionTiming> = RefCell::new(UnionTiming::default());
+}
+
+static UNION_TIMING_TOTALS: Lazy<Mutex<UnionTiming>> =
+    Lazy::new(|| Mutex::new(UnionTiming::default()));
+
+pub(crate) struct UnionTimingGuard {
+    enabled: bool,
+}
+
+impl Drop for UnionTimingGuard {
+    fn drop(&mut self) {
+        if self.enabled {
+            flush_union_timing_local();
+        }
+    }
+}
+
+pub(crate) fn reset_union_timing_totals() {
+    if let Ok(mut totals) = UNION_TIMING_TOTALS.lock() {
+        *totals = UnionTiming::default();
+    }
+    UNION_TIMING.with(|timing| {
+        *timing.borrow_mut() = UnionTiming::default();
+    });
+}
+
+pub(crate) fn union_timing_guard(enabled: bool) -> UnionTimingGuard {
+    if enabled {
+        UNION_TIMING.with(|timing| {
+            *timing.borrow_mut() = UnionTiming::default();
+        });
+    }
+    UnionTimingGuard { enabled }
+}
+
+pub(crate) fn flush_union_timing_local() {
+    let local = UNION_TIMING.with(|timing| {
+        let mut timing = timing.borrow_mut();
+        let snapshot = timing.clone();
+        *timing = UnionTiming::default();
+        snapshot
+    });
+    if let Ok(mut totals) = UNION_TIMING_TOTALS.lock() {
+        totals.add_assign(&local);
+    }
+}
+
+pub(crate) fn union_timing_totals() -> UnionTiming {
+    UNION_TIMING_TOTALS
+        .lock()
+        .map(|totals| totals.clone())
+        .unwrap_or_default()
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct OpKey {
@@ -885,6 +962,9 @@ impl RangeMapWeight {
     }
 
     fn union_non_negated(&self, other: &Self) -> Self {
+        UNION_TIMING.with(|timing| {
+            timing.borrow_mut().calls += 1;
+        });
         let left_ranges = Self::map_range_count(&self.map);
         let right_ranges = Self::map_range_count(&other.map);
         if left_ranges == 0 {
@@ -893,10 +973,16 @@ impl RangeMapWeight {
         if right_ranges == 0 {
             return self.clone();
         }
-        if std::ptr::eq(self, other) || self == other {
+        let eq_start = Instant::now();
+        let is_same = std::ptr::eq(self, other) || self == other;
+        UNION_TIMING.with(|timing| {
+            timing.borrow_mut().eq_check += eq_start.elapsed();
+        });
+        if is_same {
             return self.clone();
         }
         if left_ranges == 1 || right_ranges == 1 {
+            let is_all_start = Instant::now();
             let max_token = crate::datastructures::get_max_llm_token();
             if left_ranges == 1 {
                 if let Some((range, tsid_set)) = self.map.range_values().next() {
@@ -904,6 +990,9 @@ impl RangeMapWeight {
                         && *range.end() == max_token
                         && *tsid_set == Self::full_tsids(self.num_tsids)
                     {
+                        UNION_TIMING.with(|timing| {
+                            timing.borrow_mut().is_all_check += is_all_start.elapsed();
+                        });
                         return self.clone();
                     }
                 }
@@ -914,10 +1003,16 @@ impl RangeMapWeight {
                         && *range.end() == max_token
                         && *tsid_set == Self::full_tsids(self.num_tsids)
                     {
+                        UNION_TIMING.with(|timing| {
+                            timing.borrow_mut().is_all_check += is_all_start.elapsed();
+                        });
                         return other.clone();
                     }
                 }
             }
+            UNION_TIMING.with(|timing| {
+                timing.borrow_mut().is_all_check += is_all_start.elapsed();
+            });
         }
 
         let (smaller, larger, small_ranges, large_ranges) = if left_ranges <= right_ranges {
@@ -926,6 +1021,7 @@ impl RangeMapWeight {
             (other, self, right_ranges, left_ranges)
         };
 
+        let merge_start = Instant::now();
         let map = if small_ranges.saturating_mul(10) < large_ranges {
             let map = Self::union_asymmetric(&smaller.map, &larger.map);
             map
@@ -938,7 +1034,15 @@ impl RangeMapWeight {
             });
             map
         };
-        Self::from_map(map, self.num_tsids())
+        UNION_TIMING.with(|timing| {
+            timing.borrow_mut().merge += merge_start.elapsed();
+        });
+        let from_map_start = Instant::now();
+        let result = Self::from_map(map, self.num_tsids());
+        UNION_TIMING.with(|timing| {
+            timing.borrow_mut().from_map += from_map_start.elapsed();
+        });
+        result
     }
 
     #[time_it("RangeMapWeight::union_fast")]
@@ -1509,8 +1613,8 @@ impl WeightBackend for Arc<RangeMapWeight> {
     }
 
     fn complement(&self, max_position: usize) -> Self {
-        let out = WeightBackend::complement(self.as_ref(), max_position);
-        intern_rangemap(out)
+        let all = <Arc<RangeMapWeight> as WeightBackend>::all(max_position);
+        all.difference(self)
     }
 
     fn min_item(&self) -> Option<usize> {

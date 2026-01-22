@@ -29,6 +29,7 @@ use std::cell::RefCell;
 use std::hash::{Hash, Hasher};
 use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Not};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
 /// Dimensions for weight-heavy mode encoding.
 /// 
@@ -105,7 +106,7 @@ thread_local! {
 }
 
 thread_local! {
-    static CACHED_EMPTY_WEIGHT: RefCell<Option<(BackendChoice, AbstractWeight)>> = RefCell::new(None);
+    static CACHED_EMPTY_WEIGHT: RefCell<Option<(BackendChoice, usize, AbstractWeight)>> = RefCell::new(None);
 }
 
 // --- AbstractWeight profiling ---
@@ -113,6 +114,59 @@ thread_local! {
 pub fn reset_weight_op_profiling() {}
 
 pub fn print_weight_op_profiling(_label: &str) {}
+
+#[derive(Clone, Default)]
+pub(crate) struct BitorAssignCounters {
+    pub(crate) owned_calls: u64,
+    pub(crate) ref_calls: u64,
+    pub(crate) rhs_empty: u64,
+    pub(crate) self_empty: u64,
+    pub(crate) self_all: u64,
+    pub(crate) rhs_all: u64,
+    pub(crate) union_total: u64,
+    pub(crate) union_rangeset: u64,
+    pub(crate) union_factorized: u64,
+    pub(crate) union_rangemap: u64,
+}
+
+static BITOR_ASSIGN_OWNED_CALLS: AtomicU64 = AtomicU64::new(0);
+static BITOR_ASSIGN_REF_CALLS: AtomicU64 = AtomicU64::new(0);
+static BITOR_ASSIGN_RHS_EMPTY: AtomicU64 = AtomicU64::new(0);
+static BITOR_ASSIGN_SELF_EMPTY: AtomicU64 = AtomicU64::new(0);
+static BITOR_ASSIGN_SELF_ALL: AtomicU64 = AtomicU64::new(0);
+static BITOR_ASSIGN_RHS_ALL: AtomicU64 = AtomicU64::new(0);
+static BITOR_ASSIGN_UNION_TOTAL: AtomicU64 = AtomicU64::new(0);
+static BITOR_ASSIGN_UNION_RANGESET: AtomicU64 = AtomicU64::new(0);
+static BITOR_ASSIGN_UNION_FACTORIZED: AtomicU64 = AtomicU64::new(0);
+static BITOR_ASSIGN_UNION_RANGEMAP: AtomicU64 = AtomicU64::new(0);
+
+pub(crate) fn reset_bitor_assign_counters() {
+    BITOR_ASSIGN_OWNED_CALLS.store(0, AtomicOrdering::Relaxed);
+    BITOR_ASSIGN_REF_CALLS.store(0, AtomicOrdering::Relaxed);
+    BITOR_ASSIGN_RHS_EMPTY.store(0, AtomicOrdering::Relaxed);
+    BITOR_ASSIGN_SELF_EMPTY.store(0, AtomicOrdering::Relaxed);
+    BITOR_ASSIGN_SELF_ALL.store(0, AtomicOrdering::Relaxed);
+    BITOR_ASSIGN_RHS_ALL.store(0, AtomicOrdering::Relaxed);
+    BITOR_ASSIGN_UNION_TOTAL.store(0, AtomicOrdering::Relaxed);
+    BITOR_ASSIGN_UNION_RANGESET.store(0, AtomicOrdering::Relaxed);
+    BITOR_ASSIGN_UNION_FACTORIZED.store(0, AtomicOrdering::Relaxed);
+    BITOR_ASSIGN_UNION_RANGEMAP.store(0, AtomicOrdering::Relaxed);
+}
+
+pub(crate) fn bitor_assign_counters() -> BitorAssignCounters {
+    BitorAssignCounters {
+        owned_calls: BITOR_ASSIGN_OWNED_CALLS.load(AtomicOrdering::Relaxed),
+        ref_calls: BITOR_ASSIGN_REF_CALLS.load(AtomicOrdering::Relaxed),
+        rhs_empty: BITOR_ASSIGN_RHS_EMPTY.load(AtomicOrdering::Relaxed),
+        self_empty: BITOR_ASSIGN_SELF_EMPTY.load(AtomicOrdering::Relaxed),
+        self_all: BITOR_ASSIGN_SELF_ALL.load(AtomicOrdering::Relaxed),
+        rhs_all: BITOR_ASSIGN_RHS_ALL.load(AtomicOrdering::Relaxed),
+        union_total: BITOR_ASSIGN_UNION_TOTAL.load(AtomicOrdering::Relaxed),
+        union_rangeset: BITOR_ASSIGN_UNION_RANGESET.load(AtomicOrdering::Relaxed),
+        union_factorized: BITOR_ASSIGN_UNION_FACTORIZED.load(AtomicOrdering::Relaxed),
+        union_rangemap: BITOR_ASSIGN_UNION_RANGEMAP.load(AtomicOrdering::Relaxed),
+    }
+}
 
 /// Temporarily override the backend choice for the current thread.
 /// Returns the previous value (if any) which should be restored later.
@@ -658,12 +712,13 @@ impl AbstractWeight {
     /// Create an empty weight (no positions).
     pub fn empty() -> Self {
         let choice = backend_choice();
+        let num_tsids = current_num_tsids();
         CACHED_EMPTY_WEIGHT.with(|cell| {
             let cached = cell
                 .borrow()
                 .as_ref()
-                .and_then(|(cached_choice, cached_weight)| {
-                    if *cached_choice == choice {
+                .and_then(|(cached_choice, cached_tsids, cached_weight)| {
+                    if *cached_choice == choice && *cached_tsids == num_tsids {
                         Some(cached_weight.clone())
                     } else {
                         None
@@ -673,7 +728,7 @@ impl AbstractWeight {
                 return weight;
             }
             let weight = Self::empty_uncached();
-            *cell.borrow_mut() = Some((choice, weight.clone()));
+            *cell.borrow_mut() = Some((choice, num_tsids, weight.clone()));
             weight
         })
     }
@@ -984,7 +1039,7 @@ impl AbstractWeight {
             AbstractWeight::RangeMap(rm) => WeightBackend::max_item(rm),
         }
     }
-    
+
     /// Compute set difference (self - other).
     /// 
     /// Panics if self and other are different variants.
@@ -1201,14 +1256,21 @@ impl BitOr for &AbstractWeight {
 
 impl BitOrAssign for AbstractWeight {
     fn bitor_assign(&mut self, rhs: Self) {
+        BITOR_ASSIGN_OWNED_CALLS.fetch_add(1, AtomicOrdering::Relaxed);
         match (self, &rhs) {
             (AbstractWeight::RangeSet(a), AbstractWeight::RangeSet(b)) => {
+                BITOR_ASSIGN_UNION_TOTAL.fetch_add(1, AtomicOrdering::Relaxed);
+                BITOR_ASSIGN_UNION_RANGESET.fetch_add(1, AtomicOrdering::Relaxed);
                 WeightBackend::union_assign(a, b);
             }
             (AbstractWeight::Factorized(a), AbstractWeight::Factorized(b)) => {
+                BITOR_ASSIGN_UNION_TOTAL.fetch_add(1, AtomicOrdering::Relaxed);
+                BITOR_ASSIGN_UNION_FACTORIZED.fetch_add(1, AtomicOrdering::Relaxed);
                 WeightBackend::union_assign(a, b);
             }
             (AbstractWeight::RangeMap(a), AbstractWeight::RangeMap(b)) => {
+                BITOR_ASSIGN_UNION_TOTAL.fetch_add(1, AtomicOrdering::Relaxed);
+                BITOR_ASSIGN_UNION_RANGEMAP.fetch_add(1, AtomicOrdering::Relaxed);
                 WeightBackend::union_assign(a, b);
             }
             _ => panic!("AbstractWeight operation requires both operands to be the same variant"),
@@ -1218,31 +1280,42 @@ impl BitOrAssign for AbstractWeight {
 
 impl BitOrAssign<&AbstractWeight> for AbstractWeight {
     fn bitor_assign(&mut self, rhs: &AbstractWeight) {
+        BITOR_ASSIGN_REF_CALLS.fetch_add(1, AtomicOrdering::Relaxed);
         if std::mem::discriminant(&*self) != std::mem::discriminant(rhs) {
             panic!("AbstractWeight operation requires both operands to be the same variant");
         }
         if rhs.is_empty() {
+            BITOR_ASSIGN_RHS_EMPTY.fetch_add(1, AtomicOrdering::Relaxed);
             return;
         }
         if self.is_empty() {
+            BITOR_ASSIGN_SELF_EMPTY.fetch_add(1, AtomicOrdering::Relaxed);
             *self = rhs.clone();
             return;
         }
         if self.is_all_fast() {
+            BITOR_ASSIGN_SELF_ALL.fetch_add(1, AtomicOrdering::Relaxed);
             return;
         }
         if rhs.is_all_fast() {
+            BITOR_ASSIGN_RHS_ALL.fetch_add(1, AtomicOrdering::Relaxed);
             *self = rhs.clone();
             return;
         }
         match (self, rhs) {
             (AbstractWeight::RangeSet(a), AbstractWeight::RangeSet(b)) => {
+                BITOR_ASSIGN_UNION_TOTAL.fetch_add(1, AtomicOrdering::Relaxed);
+                BITOR_ASSIGN_UNION_RANGESET.fetch_add(1, AtomicOrdering::Relaxed);
                 WeightBackend::union_assign(a, b);
             }
             (AbstractWeight::Factorized(a), AbstractWeight::Factorized(b)) => {
+                BITOR_ASSIGN_UNION_TOTAL.fetch_add(1, AtomicOrdering::Relaxed);
+                BITOR_ASSIGN_UNION_FACTORIZED.fetch_add(1, AtomicOrdering::Relaxed);
                 WeightBackend::union_assign(a, b);
             }
             (AbstractWeight::RangeMap(a), AbstractWeight::RangeMap(b)) => {
+                BITOR_ASSIGN_UNION_TOTAL.fetch_add(1, AtomicOrdering::Relaxed);
+                BITOR_ASSIGN_UNION_RANGEMAP.fetch_add(1, AtomicOrdering::Relaxed);
                 WeightBackend::union_assign(a, b);
             }
             _ => panic!("AbstractWeight operation requires both operands to be the same variant"),
