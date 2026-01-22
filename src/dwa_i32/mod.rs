@@ -13,6 +13,8 @@
 pub mod rangeset;
 pub mod common;
 pub mod determinization;
+pub mod determinization_acyclic;
+pub mod determinization_cyclic;
 pub mod determinization_rustfst;
 pub mod dwa;
 pub mod json;

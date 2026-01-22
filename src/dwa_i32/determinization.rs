@@ -13,6 +13,8 @@ use profiler_macro::timeit;
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use crate::dwa_i32::test_weighted_automata;
 use super::common::{DETERMINIZE_DEBUG, Label, NWAStateID, Weight};
+use super::determinization_acyclic::{precompute_all_epsilon_closures_acyclic, topo_order_if_acyclic};
+use super::determinization_cyclic::precompute_all_epsilon_closures;
 use super::dwa::DWA;
 use super::nwa::{NWA, NWAStates};
 
@@ -52,7 +54,7 @@ pub fn get_determinize_stats() -> (usize, usize) {
 // ============================================================================
 
 // Invariants: strictly sorted by NWAStateID, no duplicate IDs, no empty Weights.
-type WeightedSubset = Vec<(NWAStateID, Weight)>;
+pub(crate) type WeightedSubset = Vec<(NWAStateID, Weight)>;
 
 fn is_zero(w: &Weight) -> bool { w.is_empty() }
 
@@ -1004,44 +1006,6 @@ impl<'a> Determinizer<'a> {
     }
 }
 
-/// Precomputes the epsilon closure for every state in the NWA.
-fn precompute_all_epsilon_closures(states: &NWAStates) -> Vec<WeightedSubset> {
-    let n = states.len();
-    let mut reachability = Vec::with_capacity(n);
-
-    for start_node in 0..n {
-        let mut dists: HashMap<NWAStateID, Weight> = HashMap::new();
-        let mut queue: VecDeque<NWAStateID> = VecDeque::new();
-
-        // Self-reachability is identity
-        dists.insert(start_node, Weight::all());
-        queue.push_back(start_node);
-
-        while let Some(u) = queue.pop_front() {
-            let w_u = dists.get(&u).unwrap().clone();
-            
-            if u < n {
-                for (v, w_eps) in &states[u].epsilons {
-                    let new_w = &w_u & w_eps;
-                    if new_w.is_empty() { continue; }
-
-                    let entry = dists.entry(*v).or_insert_with(Weight::zeros);
-                    if !new_w.is_subset_of(entry) {
-                        *entry |= &new_w;
-                        queue.push_back(*v);
-                    }
-                }
-            }
-        }
-
-        let mut sub: WeightedSubset = dists.into_iter().collect();
-        sub.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-        reachability.push(sub);
-    }
-
-    reachability
-}
-
 /// Computes epsilon closure for a specific subset on the fly.
 /// Used by the heuristic singleton check.
 fn epsilon_closure_optimized(nwa_states: &NWAStates, seed: &WeightedSubset) -> WeightedSubset {
@@ -1079,106 +1043,6 @@ fn epsilon_closure_optimized(nwa_states: &NWAStates, seed: &WeightedSubset) -> W
     let mut result: Vec<(NWAStateID, Weight)> = closure_map.into_iter().collect();
     result.sort_unstable_by(|a, b| a.0.cmp(&b.0));
     result
-}
-
-fn topo_order_if_acyclic(nwa: &NWA) -> Option<Vec<usize>> {
-    let n = nwa.states.len();
-    if n == 0 {
-        return Some(Vec::new());
-    }
-
-    let mut indegree = vec![0usize; n];
-    for st in &nwa.states.0 {
-        for (v, _w) in &st.epsilons {
-            if *v < n {
-                indegree[*v] += 1;
-            }
-        }
-        for targets in st.transitions.values() {
-            for (v, _w) in targets {
-                if *v < n {
-                    indegree[*v] += 1;
-                }
-            }
-        }
-    }
-
-    let mut queue: VecDeque<usize> = indegree
-        .iter()
-        .enumerate()
-        .filter_map(|(i, &deg)| if deg == 0 { Some(i) } else { None })
-        .collect();
-
-    let mut order = Vec::with_capacity(n);
-    while let Some(u) = queue.pop_front() {
-        order.push(u);
-        let st = &nwa.states[u];
-        for (v, _w) in &st.epsilons {
-            if *v >= n {
-                continue;
-            }
-            indegree[*v] = indegree[*v].saturating_sub(1);
-            if indegree[*v] == 0 {
-                queue.push_back(*v);
-            }
-        }
-        for targets in st.transitions.values() {
-            for (v, _w) in targets {
-                if *v >= n {
-                    continue;
-                }
-                indegree[*v] = indegree[*v].saturating_sub(1);
-                if indegree[*v] == 0 {
-                    queue.push_back(*v);
-                }
-            }
-        }
-    }
-
-    if order.len() == n {
-        Some(order)
-    } else {
-        None
-    }
-}
-
-fn precompute_all_epsilon_closures_acyclic(states: &NWAStates, topo: &[usize]) -> Vec<WeightedSubset> {
-    let n = states.len();
-    let mut closure_maps: Vec<HashMap<NWAStateID, Weight>> = (0..n)
-        .map(|_| HashMap::new())
-        .collect();
-
-    for &u in topo.iter().rev() {
-        let mut closure: HashMap<NWAStateID, Weight> = HashMap::new();
-        closure.insert(u, Weight::all());
-
-        for (v, w_uv) in &states[u].epsilons {
-            if *v >= n {
-                continue;
-            }
-            for (t, w_vt) in &closure_maps[*v] {
-                let combined = w_uv & w_vt;
-                if combined.is_empty() {
-                    continue;
-                }
-                let entry = closure.entry(*t).or_insert_with(Weight::zeros);
-                if !combined.is_subset_of(entry) {
-                    *entry |= &combined;
-                }
-            }
-        }
-
-        closure_maps[u] = closure;
-    }
-
-    closure_maps
-        .into_iter()
-        .map(|map| {
-            let mut vec: WeightedSubset = map.into_iter().collect();
-            vec.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-            vec
-        })
-        .collect()
 }
 
 /// Heuristic optimization for single-state loop unions.
