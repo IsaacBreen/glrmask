@@ -265,11 +265,10 @@ impl NWA {
         let config = match profile {
             DeterminizeAndMinimizeProfile::Terminal => {
                 // Full pipeline for Terminal DWA construction
-                // Optimization: skip rustfst minimization for large NWAs (correctness unchanged).
+                // Allow disabling rustfst minimization via env var.
                 let skip_minimize_rustfst = std::env::var("TERMINAL_DWA_SKIP_MINIMIZE_RUSTFST")
                     .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                    .unwrap_or(false)
-                    || self.states.len() > 1000;
+                    .unwrap_or(false);
 
                 let nwa_passes = if std::env::var("SKIP_RUSTFST_MIN").map_or(false, |v| v == "1") {
                     vec![NwaPass::CompressTransitions]
@@ -302,7 +301,7 @@ impl NWA {
                 // Super is the "universal" DWA that gets specialized into many DWAs.
                 // Full minimization here pays off because the smaller Super means
                 // smaller specialized DWAs and smaller combined NWA.
-                nwa_passes: vec![NwaPass::CompressTransitions],
+                nwa_passes: vec![NwaPass::CompressTransitions, NwaPass::Minimize],
                 dwa_passes: vec![DwaPass::PruneDeadEnds, DwaPass::Minimize],
                 use_rustfst_determinize: false,
             },
@@ -349,21 +348,9 @@ impl NWA {
         crate::debug!(5, "Determinize and minimize initial stats: {}",
             self.stats());
 
-        let nwa_minimize_skip_threshold = std::env::var("NWA_MINIMIZE_SKIP_THRESHOLD")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(50_000);
-
         // Run NWA passes
         for pass in config.nwa_passes {
             if !pass.is_enabled() {
-                continue;
-            }
-            let skip_nwa_minimize = nwa_minimize_skip_threshold > 0
-                && self.states.len() >= nwa_minimize_skip_threshold
-                && matches!(pass, NwaPass::Minimize | NwaPass::MinimizeRustfst);
-            if skip_nwa_minimize {
-                crate::debug!(5, "Skipping NWA pass {:?} (states={}, threshold={})", pass, self.states.len(), nwa_minimize_skip_threshold);
                 continue;
             }
             timeit!(format!("NWA pass {:?}", pass), {
@@ -399,21 +386,10 @@ impl NWA {
             dwa
         });
 
-        let dwa_minimize_skip_threshold = std::env::var("DWA_MINIMIZE_SKIP_THRESHOLD")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(10_000);
-        let skip_heavy_dwa_passes = dwa_minimize_skip_threshold > 0
-            && dwa.states.len() >= dwa_minimize_skip_threshold;
-
         // Run DWA passes
         for pass in config.dwa_passes.clone() {
             // Check if pass is enabled (e.g., ConsolidateRanges is disabled in weight-heavy mode)
             if !pass.is_enabled() {
-                continue;
-            }
-            if skip_heavy_dwa_passes && matches!(pass, DwaPass::Minimize | DwaPass::ConsolidateRanges) {
-                crate::debug!(5, "Skipping DWA pass {:?} (states={}, threshold={})", pass, dwa.states.len(), dwa_minimize_skip_threshold);
                 continue;
             }
             timeit!(format!("DWA pass {:?}", pass), {

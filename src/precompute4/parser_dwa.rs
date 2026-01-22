@@ -13,8 +13,7 @@ use profiler_macro::{time_it, timeit};
 use crate::glr::parser::{ExpectElse, GLRParser};
 use crate::precompute4::resolve_negatives::{
     apply_cancellations_range, apply_finality_fixpoint_range, remove_negative_transitions_range,
-    resolve_negative_codes_in_nwa,
-    // Note: remove_redundant_default_transitions is only run in a global pass (see resolve_negative_codes_in_nwa),
+    // Note: remove_redundant_default_transitions is only run in a global pass,
     // not per-range here, since it requires a global pass over all states.
 };
 use crate::precompute4::template_dfa::{build_ignore_terminal_dwa, build_template_dwas};
@@ -477,17 +476,6 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
     crate::debug!(3, "Starting Parser DWA construction. Input terminal_nwa: {}", 
         terminal_nwa.stats());
 
-    if std::env::var("PARSER_DWA_TRIVIAL")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
-    {
-        crate::debug!(1, "WARNING: using trivial Parser DWA (unsafe, parser DWA is incorrect)");
-        let mut dwa = DWA::new();
-        let start = dwa.add_state();
-        dwa.body.start_state = start;
-        return dwa;
-    }
-    
     // Handle empty terminal NWA (no valid tokens for this grammar/vocabulary combination)
     // Return a minimal DWA with one state and no transitions (always returns empty mask)
     if terminal_nwa.states.0.is_empty() || terminal_nwa.body.start_states.is_empty() {
@@ -658,9 +646,10 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
                 NWA::union_assign(&mut combined_nwa, &NWA::from_dwa(term_dwa));
             }
 
-            // OPTIMIZATION: Skip NWA minimization for simple signatures.
-            // Determinization will merge states anyway, so pre-minimization has minimal benefit.
-            // Use basic pruning on the DWA to avoid expensive minimization.
+            // Always minimize NWA before determinization.
+            let minimize_start = Instant::now();
+            combined_nwa.minimize();
+            crate::debug!(5, "Simple signature NWA minimize in {:?}", minimize_start.elapsed());
             let mut dwa = combined_nwa.determinize();
             dwa.prune_basic();
 
@@ -730,174 +719,165 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
             super_nwa
         });
 
-        let skip_specialization = std::env::var("PARSER_DWA_SKIP_SPECIALIZATION")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
-        if skip_specialization {
-            crate::debug!(1, "WARNING: skipping DWA specialization (unsafe, parser DWA may be incorrect)");
-        } else {
-            // OPTIMIZATION: Use lightweight minimization for super DWA construction.
-            // Full minimization is expensive and not critical for intermediate results.
-            let super_dwa = timeit!("parser_dwa::super_dwa_det_min", {
-                let start_det = std::time::Instant::now();
-                let super_dwa = super_nwa.determinize_and_minimize(DeterminizeAndMinimizeProfile::Super);
-                crate::debug!(5, "  Super DWA det+min: {:?}, {}", start_det.elapsed(), super_dwa.stats());
-                super_dwa
-            });
+        // OPTIMIZATION: Use lightweight minimization for super DWA construction.
+        // Full minimization is expensive and not critical for intermediate results.
+        let super_dwa = timeit!("parser_dwa::super_dwa_det_min", {
+            let start_det = std::time::Instant::now();
+            let super_dwa = super_nwa.determinize_and_minimize(DeterminizeAndMinimizeProfile::Super);
+            crate::debug!(5, "  Super DWA det+min: {:?}, {}", start_det.elapsed(), super_dwa.stats());
+            super_dwa
+        });
 
-            let super_signature: Signature = bit_to_term.iter().map(|t| vec![*t]).collect();
-            
-            // Collect all unique weights from super_dwa once
-            let super_dwa_unique_weights: Vec<Weight> = timeit!("parser_dwa::super_dwa_collect_weights", {
-                let start_weights = std::time::Instant::now();
-                let super_dwa_unique_weights: Vec<Weight> = super_dwa.states.0.par_iter()
-                    .fold(HashSet::new, |mut acc, s| {
-                         if let Some(w) = &s.final_weight { acc.insert(w.clone()); }
-                         for w in s.trans_weights.values() { acc.insert(w.clone()); }
-                         acc
-                    })
-                    .reduce(HashSet::new, |mut a, b| {
-                        for w in b { a.insert(w); }
-                        a
-                    })
-                    .into_iter().collect();
-                crate::debug!(5, "  Collected {} unique weights in {:?}", super_dwa_unique_weights.len(), start_weights.elapsed());
-                super_dwa_unique_weights
-            });
+        let super_signature: Signature = bit_to_term.iter().map(|t| vec![*t]).collect();
+        
+        // Collect all unique weights from super_dwa once
+        let super_dwa_unique_weights: Vec<Weight> = timeit!("parser_dwa::super_dwa_collect_weights", {
+            let start_weights = std::time::Instant::now();
+            let super_dwa_unique_weights: Vec<Weight> = super_dwa.states.0.par_iter()
+                .fold(HashSet::new, |mut acc, s| {
+                     if let Some(w) = &s.final_weight { acc.insert(w.clone()); }
+                     for w in s.trans_weights.values() { acc.insert(w.clone()); }
+                     acc
+                })
+                .reduce(HashSet::new, |mut a, b| {
+                    for w in b { a.insert(w); }
+                    a
+                })
+                .into_iter().collect();
+            crate::debug!(5, "  Collected {} unique weights in {:?}", super_dwa_unique_weights.len(), start_weights.elapsed());
+            super_dwa_unique_weights
+        });
 
-            // PRE-COMPUTE: Build all weight mappings for all complex signatures upfront
-            // This avoids redundant computation inside specialize_dwa_relative, which was creating
-            // a new weight_map HashMap for each of the 199 complex signatures.
-            let all_mappings: Vec<(Signature, Vec<Weight>, HashMap<Weight, Weight>)> = timeit!(
-                "parser_dwa::weight_mappings",
-                {
-                    let start_mappings = std::time::Instant::now();
-                    let all_mappings: Vec<(Signature, Vec<Weight>, HashMap<Weight, Weight>)> = complex_signatures.par_iter().map(|target_sig| {
-                        let target_idx = SignatureIndex::new(target_sig);
-                        let mapping = can_derive(&super_signature, &target_idx).expect("Super signature must derive target");
-                        
-                        // Pre-compute the weight mapping for this target signature
-                        let weight_map: HashMap<Weight, Weight> = super_dwa_unique_weights.iter()
-                            .map(|w| {
-                                let mut accumulator = Weight::zeros();
-                                let mut is_all = false;
+        // PRE-COMPUTE: Build all weight mappings for all complex signatures upfront
+        // This avoids redundant computation inside specialize_dwa_relative, which was creating
+        // a new weight_map HashMap for each of the 199 complex signatures.
+        let all_mappings: Vec<(Signature, Vec<Weight>, HashMap<Weight, Weight>)> = timeit!(
+            "parser_dwa::weight_mappings",
+            {
+                let start_mappings = std::time::Instant::now();
+                let all_mappings: Vec<(Signature, Vec<Weight>, HashMap<Weight, Weight>)> = complex_signatures.par_iter().map(|target_sig| {
+                    let target_idx = SignatureIndex::new(target_sig);
+                    let mapping = can_derive(&super_signature, &target_idx).expect("Super signature must derive target");
+                    
+                    // Pre-compute the weight mapping for this target signature
+                    let weight_map: HashMap<Weight, Weight> = super_dwa_unique_weights.iter()
+                        .map(|w| {
+                            let mut accumulator = Weight::zeros();
+                            let mut is_all = false;
 
-                                for bit in w.iter_up_to_allow_expansion(mapping.len()) {
-                                    if let Some(target_w) = mapping.get(bit) {
-                                        if target_w.is_all_fast() {
-                                            is_all = true;
-                                            break;
-                                        }
-                                        accumulator |= target_w;
+                            for bit in w.iter_up_to_allow_expansion(mapping.len()) {
+                                if let Some(target_w) = mapping.get(bit) {
+                                    if target_w.is_all_fast() {
+                                        is_all = true;
+                                        break;
                                     }
+                                    accumulator |= target_w;
                                 }
+                            }
 
-                                let new_w = if is_all {
-                                    Weight::all()
-                                } else {
-                                    accumulator
-                                };
-                                (w.clone(), new_w)
-                            })
-                            .collect();
-                        
-                        (target_sig.clone(), mapping, weight_map)
-                    }).collect();
-                    crate::debug!(5, "  Weight mappings: {:?}", start_mappings.elapsed());
-                    all_mappings
-                }
-            );
-
-            // PARALLEL OPTIMIZATION: Specialize DWAs using pre-computed weight mappings
-            let results: Vec<(Signature, NWA, DWAStats, DWAStats)> = timeit!(
-                "parser_dwa::specialize_dw_as",
-                {
-                    let start_specialize = std::time::Instant::now();
-                    let results: Vec<(Signature, NWA, DWAStats, DWAStats)> = all_mappings.par_iter().map(|(target_sig, _mapping, weight_map)| {
-                        let mut derived_dwa = specialize_dwa_relative_with_map(&super_dwa, weight_map);
-                        let before_stats = derived_dwa.stats();
-                        // Skip expensive minimization - just prune
-                        // Rely on final determinization/minimize to compress
-                        derived_dwa.optimize(DwaOptimizeConfig::SpecializedSuper);
-                        let after_stats = derived_dwa.stats();
-                        (target_sig.clone(), NWA::from_dwa(&derived_dwa), before_stats, after_stats)
-                    }).collect();
-                    let mut before_total_stats = DWAStats {
-                        states: 0,
-                        transitions: 0,
-                        unique_state_pairs: 0,
-                        ranges: 0,
-                        ranges_interned: 0,
-                        transition_multiplicity_hist: BTreeMap::new(),
-                    };
-                    let mut after_total_stats = DWAStats {
-                        states: 0,
-                        transitions: 0,
-                        unique_state_pairs: 0,
-                        ranges: 0,
-                        ranges_interned: 0,
-                        transition_multiplicity_hist: BTreeMap::new(),
-                    };
-                    let mut reduced_count = 0usize;
-                    let mut max_state_delta = 0usize;
-                    let mut max_transition_delta = 0usize;
-                    let mut accumulate_stats = |total: &mut DWAStats, stats: &DWAStats| {
-                        total.states += stats.states;
-                        total.transitions += stats.transitions;
-                        total.unique_state_pairs += stats.unique_state_pairs;
-                        total.ranges += stats.ranges;
-                        total.ranges_interned += stats.ranges_interned;
-                        for (k, v) in &stats.transition_multiplicity_hist {
-                            *total.transition_multiplicity_hist.entry(*k).or_insert(0) += v;
-                        }
-                    };
-                    for (_, _, before_stats, after_stats) in &results {
-                        accumulate_stats(&mut before_total_stats, before_stats);
-                        accumulate_stats(&mut after_total_stats, after_stats);
-                        let state_delta = before_stats.states.saturating_sub(after_stats.states);
-                        let transition_delta = before_stats.transitions.saturating_sub(after_stats.transitions);
-                        if state_delta > 0 || transition_delta > 0 {
-                            reduced_count += 1;
-                        }
-                        if state_delta > max_state_delta {
-                            max_state_delta = state_delta;
-                        }
-                        if transition_delta > max_transition_delta {
-                            max_transition_delta = transition_delta;
-                        }
-                    }
-                    let total_state_delta = before_total_stats.states.saturating_sub(after_total_stats.states);
-                    let total_transition_delta = before_total_stats.transitions.saturating_sub(after_total_stats.transitions);
-                    let reduction_pct = if before_total_stats.states == 0 {
-                        0.0
-                    } else {
-                        100.0 * (1.0 - after_total_stats.states as f64 / before_total_stats.states as f64)
-                    };
-                    crate::debug!(5, "  Specialization ({} DWAs): {:?}, before={}, after={} ({:.1}% reduction)", 
-                        results.len(), start_specialize.elapsed(), before_total_stats, after_total_stats, reduction_pct);
-                    crate::debug!(5, "  Specialization reduction: reduced_dw_as={}/{}, total_state_delta={}, total_transition_delta={}, max_state_delta={}, max_transition_delta={}",
-                        reduced_count,
-                        results.len(),
-                        total_state_delta,
-                        total_transition_delta,
-                        max_state_delta,
-                        max_transition_delta,
-                    );
-                    for (idx, (_, _, before_stats, after_stats)) in results.iter().enumerate() {
-                        crate::debug!(6, "  Specialized DWA #{}: before={}, after={}", idx, before_stats, after_stats);
-                    }
-                    results
-                }
-            );
-
-            for (sig, nwa, _, _) in results {
-                template_cache.borrow_mut().insert(sig, Arc::new(nwa));
+                            let new_w = if is_all {
+                                Weight::all()
+                            } else {
+                                accumulator
+                            };
+                            (w.clone(), new_w)
+                        })
+                        .collect();
+                    
+                    (target_sig.clone(), mapping, weight_map)
+                }).collect();
+                crate::debug!(5, "  Weight mappings: {:?}", start_mappings.elapsed());
+                all_mappings
             }
+        );
 
-            super_dwa_opt = Some(super_dwa);
-            super_signature_opt = Some(super_signature);
-            super_dwa_unique_weights_opt = Some(super_dwa_unique_weights);
+        // PARALLEL OPTIMIZATION: Specialize DWAs using pre-computed weight mappings
+        let results: Vec<(Signature, NWA, DWAStats, DWAStats)> = timeit!(
+            "parser_dwa::specialize_dw_as",
+            {
+                let start_specialize = std::time::Instant::now();
+                let results: Vec<(Signature, NWA, DWAStats, DWAStats)> = all_mappings.par_iter().map(|(target_sig, _mapping, weight_map)| {
+                    let mut derived_dwa = specialize_dwa_relative_with_map(&super_dwa, weight_map);
+                    let before_stats = derived_dwa.stats();
+                    derived_dwa.optimize(DwaOptimizeConfig::SpecializedSuper);
+                    let after_stats = derived_dwa.stats();
+                    (target_sig.clone(), NWA::from_dwa(&derived_dwa), before_stats, after_stats)
+                }).collect();
+                let mut before_total_stats = DWAStats {
+                    states: 0,
+                    transitions: 0,
+                    unique_state_pairs: 0,
+                    ranges: 0,
+                    ranges_interned: 0,
+                    transition_multiplicity_hist: BTreeMap::new(),
+                };
+                let mut after_total_stats = DWAStats {
+                    states: 0,
+                    transitions: 0,
+                    unique_state_pairs: 0,
+                    ranges: 0,
+                    ranges_interned: 0,
+                    transition_multiplicity_hist: BTreeMap::new(),
+                };
+                let mut reduced_count = 0usize;
+                let mut max_state_delta = 0usize;
+                let mut max_transition_delta = 0usize;
+                let mut accumulate_stats = |total: &mut DWAStats, stats: &DWAStats| {
+                    total.states += stats.states;
+                    total.transitions += stats.transitions;
+                    total.unique_state_pairs += stats.unique_state_pairs;
+                    total.ranges += stats.ranges;
+                    total.ranges_interned += stats.ranges_interned;
+                    for (k, v) in &stats.transition_multiplicity_hist {
+                        *total.transition_multiplicity_hist.entry(*k).or_insert(0) += v;
+                    }
+                };
+                for (_, _, before_stats, after_stats) in &results {
+                    accumulate_stats(&mut before_total_stats, before_stats);
+                    accumulate_stats(&mut after_total_stats, after_stats);
+                    let state_delta = before_stats.states.saturating_sub(after_stats.states);
+                    let transition_delta = before_stats.transitions.saturating_sub(after_stats.transitions);
+                    if state_delta > 0 || transition_delta > 0 {
+                        reduced_count += 1;
+                    }
+                    if state_delta > max_state_delta {
+                        max_state_delta = state_delta;
+                    }
+                    if transition_delta > max_transition_delta {
+                        max_transition_delta = transition_delta;
+                    }
+                }
+                let total_state_delta = before_total_stats.states.saturating_sub(after_total_stats.states);
+                let total_transition_delta = before_total_stats.transitions.saturating_sub(after_total_stats.transitions);
+                let reduction_pct = if before_total_stats.states == 0 {
+                    0.0
+                } else {
+                    100.0 * (1.0 - after_total_stats.states as f64 / before_total_stats.states as f64)
+                };
+                crate::debug!(5, "  Specialization ({} DWAs): {:?}, before={}, after={} ({:.1}% reduction)", 
+                    results.len(), start_specialize.elapsed(), before_total_stats, after_total_stats, reduction_pct);
+                crate::debug!(5, "  Specialization reduction: reduced_dw_as={}/{}, total_state_delta={}, total_transition_delta={}, max_state_delta={}, max_transition_delta={}",
+                    reduced_count,
+                    results.len(),
+                    total_state_delta,
+                    total_transition_delta,
+                    max_state_delta,
+                    max_transition_delta,
+                );
+                for (idx, (_, _, before_stats, after_stats)) in results.iter().enumerate() {
+                    crate::debug!(6, "  Specialized DWA #{}: before={}, after={}", idx, before_stats, after_stats);
+                }
+                results
+            }
+        );
+
+        for (sig, nwa, _, _) in results {
+            template_cache.borrow_mut().insert(sig, Arc::new(nwa));
         }
+
+        super_dwa_opt = Some(super_dwa);
+        super_signature_opt = Some(super_signature);
+        super_dwa_unique_weights_opt = Some(super_dwa_unique_weights);
         });
     }
     // OPTIMIZATION END
@@ -933,20 +913,6 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
     // These are transitions from root states to the original start state in the reversed NWA
     let tsid_bodies_arc: Arc<Mutex<Vec<(NWABody, Weight, Label)>>> = Arc::new(Mutex::new(Vec::new()));
 
-    let skip_pass2 = std::env::var("PARSER_DWA_SKIP_PASS2")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
-    let skip_pass2 = skip_pass2 || std::env::var("PARSER_DWA_SKIP_SPECIALIZATION")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
-
-    let defer_negative_resolve = std::env::var("NWA_PASS2_GLOBAL_NEGATIVE_RESOLVE")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
-    if defer_negative_resolve {
-        crate::debug!(3, "Pass2: deferring cancellations/finality/negative removal to global pass (NWA_PASS2_GLOBAL_NEGATIVE_RESOLVE=1)");
-    }
-
     crate::debug!(4, "Beginning NWA traversal");
 
     let pass2_start = Instant::now();
@@ -962,11 +928,8 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
     let states_arena_ref = &states_arena;
 
     timeit!("parser_dwa::pass2_traversal", {
-        if skip_pass2 {
-            crate::debug!(1, "WARNING: skipping Pass 2 traversal (unsafe, parser DWA may be incorrect)");
-        } else {
-            nwa_special_map(
-                &reversed_nwa, &traversal_data, initial_values_full,
+        nwa_special_map(
+            &reversed_nwa, &traversal_data, initial_values_full,
                 |current_val: &(BTreeMap<NWABody, BTreeMap<Option<TerminalID>, Weight>>, Weight), edge_label, transitions| {
                     let (current_bodies, current_tokens) = current_val;
                     let mut results = Vec::new();
@@ -1130,49 +1093,26 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
                     );
                     let range = new_states_offset..states.len();
                     if !range.is_empty() {
-                        if !defer_negative_resolve {
-                            let total_states = states.len();
-                            let pass2_skip_cancellations_threshold = std::env::var("NWA_PASS2_SKIP_CANCELLATIONS_THRESHOLD")
-                                .ok()
-                                .and_then(|v| v.parse::<usize>().ok())
-                                .unwrap_or(0);
-                            let pass2_skip_finality_threshold = std::env::var("NWA_PASS2_SKIP_FINALITY_FIXPOINT_THRESHOLD")
-                                .ok()
-                                .and_then(|v| v.parse::<usize>().ok())
-                                .unwrap_or(0);
-                            let skip_cancellations = pass2_skip_cancellations_threshold > 0
-                                && total_states >= pass2_skip_cancellations_threshold;
-                            let skip_finality = pass2_skip_finality_threshold > 0
-                                && total_states >= pass2_skip_finality_threshold;
-                            let cancel_start = Instant::now();
-                            if skip_cancellations {
-                                crate::debug!(4, "Pass2: skipping cancellations for range {:?} (states={}, threshold={})", range, total_states, pass2_skip_cancellations_threshold);
-                            } else {
-                                apply_cancellations_range(&mut states, range.clone());
-                            }
-                            pass2_profile_for_process.apply_cancellations_us.fetch_add(
-                                cancel_start.elapsed().as_micros() as u64,
-                                Ordering::Relaxed,
-                            );
-                            let finality_start = Instant::now();
-                            if skip_finality {
-                                crate::debug!(4, "Pass2: skipping finality fixpoint for range {:?} (states={}, threshold={})", range, total_states, pass2_skip_finality_threshold);
-                            } else {
-                                apply_finality_fixpoint_range(&mut states, range.clone());
-                            }
-                            pass2_profile_for_process.apply_finality_us.fetch_add(
-                                finality_start.elapsed().as_micros() as u64,
-                                Ordering::Relaxed,
-                            );
-                            let remove_start = Instant::now();
-                            remove_negative_transitions_range(&mut states, range);
-                            pass2_profile_for_process.remove_negative_us.fetch_add(
-                                remove_start.elapsed().as_micros() as u64,
-                                Ordering::Relaxed,
-                            );
-                            // Note: remove_redundant_default_transitions is NOT called here because it
-                            // requires a global pass over all states (see resolve_negative_codes_in_nwa).
-                        }
+                        let cancel_start = Instant::now();
+                        apply_cancellations_range(&mut states, range.clone());
+                        pass2_profile_for_process.apply_cancellations_us.fetch_add(
+                            cancel_start.elapsed().as_micros() as u64,
+                            Ordering::Relaxed,
+                        );
+                        let finality_start = Instant::now();
+                        apply_finality_fixpoint_range(&mut states, range.clone());
+                        pass2_profile_for_process.apply_finality_us.fetch_add(
+                            finality_start.elapsed().as_micros() as u64,
+                            Ordering::Relaxed,
+                        );
+                        let remove_start = Instant::now();
+                        remove_negative_transitions_range(&mut states, range);
+                        pass2_profile_for_process.remove_negative_us.fetch_add(
+                            remove_start.elapsed().as_micros() as u64,
+                            Ordering::Relaxed,
+                        );
+                        // Note: remove_redundant_default_transitions is NOT called here because it
+                        // requires a global pass over all states.
                     }
                     let union_start = Instant::now();
                     nwa_body = NWABody::union(&nwa_body, &composed_body);
@@ -1247,7 +1187,6 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
                 } else { None }
                 },
             );
-        }
         pass2_profile.log();
         crate::debug!(4, "Pass 2 (nwa_special_map) in {:?}", pass2_start.elapsed());
         // Drop the process closure's reference to tsid_bodies
@@ -1362,20 +1301,6 @@ pub fn precompute_token_bvs_and_signatures(reversed_nwa: &NWA, traversal_data: &
 }
 
 pub fn finalize_and_optimize_and_determinize(parser: &GLRParser, mut combined_nwa: NWA) -> DWA {
-    let skip_negative_resolve = std::env::var("NWA_SKIP_NEGATIVE_RESOLVE")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
-    let defer_negative_resolve = std::env::var("NWA_PASS2_GLOBAL_NEGATIVE_RESOLVE")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
-    if skip_negative_resolve {
-        crate::debug!(1, "WARNING: skipping negative resolution entirely (unsafe, parser DWA may be incorrect)");
-    } else if defer_negative_resolve {
-        crate::debug!(4, "Applying deferred negative resolution (global pass)...");
-        resolve_negative_codes_in_nwa(&mut combined_nwa);
-        crate::debug!(4, "Deferred negative resolution complete. NWA now {}.", combined_nwa.stats());
-    }
-
     crate::debug!(4, "Pruning continuations from final states for NWA with {}...", combined_nwa.stats());
     let prune_final_start = std::time::Instant::now();
     combined_nwa.subtract_final_weights_from_outgoing();
@@ -1395,23 +1320,18 @@ pub fn finalize_and_optimize_and_determinize(parser: &GLRParser, mut combined_nw
     crate::debug!(4, "After pruning dead ends: NWA {} -> {}", 
         before_prune, combined_nwa.stats());
 
-    // NWA minimization is expensive - skip it for now
-    // The DWA minimization will handle the reduction anyway
-    // let nwa_states = combined_nwa.states.len();
-    // if nwa_states > 100_000 {
-    //     let minimize_start = std::time::Instant::now();
-    //     combined_nwa.minimize_internal();
-    //     let minimize_time = minimize_start.elapsed();
-    //     crate::debug!(4, "NWA minimization: {} -> {} states in {:.2?}", 
-    //         nwa_states, combined_nwa.states.len(), minimize_time);
-    // }
+    // Always minimize NWA before determinization.
     
     let disable_minimize = std::env::var("PARSER_DWA_MINIMIZE")
         .map(|v| v == "0" || v.eq_ignore_ascii_case("false"))
         .unwrap_or(false);
 
     if disable_minimize {
-        crate::debug!(4, "Parser DWA minimize disabled (PARSER_DWA_MINIMIZE=0)");
+        crate::debug!(4, "Parser DWA minimize disabled (PARSER_DWA_MINIMIZE=0); running NWA minimization before determinization");
+        let before_minimize = combined_nwa.stats();
+        let minimize_start = Instant::now();
+        combined_nwa.minimize();
+        crate::debug!(4, "Parser NWA minimization: {} -> {} in {:?}", before_minimize, combined_nwa.stats(), minimize_start.elapsed());
         let det_start = std::time::Instant::now();
         let dwa = combined_nwa.determinize();
         crate::debug!(5, "determinize(Parser) in {:?}", det_start.elapsed());
