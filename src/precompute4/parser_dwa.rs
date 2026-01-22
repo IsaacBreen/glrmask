@@ -36,6 +36,31 @@ impl MinimizeRustfstConfig {
     fn with_rm_epsilon(mut self, val: bool) -> Self { self.rm_epsilon = val; self }
 }
 
+#[derive(Clone, Copy)]
+struct WeightTlsSnapshot {
+    max_llm_token: usize,
+    num_tsids: usize,
+    backend_choice: BackendChoice,
+    expansion_allowed: bool,
+}
+
+impl WeightTlsSnapshot {
+    fn capture() -> Self {
+        Self {
+            max_llm_token: crate::datastructures::get_max_llm_token(),
+            num_tsids: crate::datastructures::get_num_tsids(),
+            backend_choice: crate::datastructures::abstract_weight::current_backend_choice(),
+            expansion_allowed: crate::datastructures::abstract_weight::is_expansion_allowed(),
+        }
+    }
+
+    fn apply(&self) {
+        crate::datastructures::set_global_dims(self.max_llm_token, self.num_tsids);
+        override_backend(self.backend_choice);
+        crate::datastructures::abstract_weight::override_expansion_allowed(self.expansion_allowed);
+    }
+}
+
 pub use crate::precompute4::template_dfa::FullDWABuildError;
 
 /// The Parser DWA - the final precomputed artifact used for get_mask queries.
@@ -416,7 +441,13 @@ fn specialize_dwa_relative_with_map(parent_dwa: &DWA, weight_map: &HashMap<Weigh
     // as the weight_map can be computed once and reused.
     
     // We construct the new states in parallel using the pre-computed map.
-    let new_states_vec: Vec<crate::dwa_i32::dwa::DWAState> = parent_dwa.states.0.par_iter().map(|state| {
+    let tls_snapshot = WeightTlsSnapshot::capture();
+    let new_states_vec: Vec<crate::dwa_i32::dwa::DWAState> = parent_dwa.states.0.par_iter()
+        .map_init(
+            move || {
+                tls_snapshot.apply();
+            },
+            |_, state| {
         let map_weight = |w: &Weight| -> Weight {
             if let Some(cw) = weight_map.get(w) { return cw.clone(); }
             // Fallback should not happen if weight_map is complete, but safe to keep
@@ -443,7 +474,8 @@ fn specialize_dwa_relative_with_map(parent_dwa: &DWA, weight_map: &HashMap<Weigh
         }
         
         new_state
-    }).collect();
+    })
+        .collect();
 
     DWA {
         states: crate::dwa_i32::dwa::DWAStates(new_states_vec),
@@ -687,6 +719,7 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
         }
 
         let _rangeset_backend = WeightBackendOverride::new("rangeset");
+        let tls_snapshot = WeightTlsSnapshot::capture();
         let template_dwas_rsb = match build_template_dwas(parser) {
             Ok(m) => m,
             Err(e) => panic!("Failed to build template DWAs for Super DWA: {:?}", e),
@@ -734,6 +767,12 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
         let super_dwa_unique_weights: Vec<Weight> = timeit!("parser_dwa::super_dwa_collect_weights", {
             let start_weights = std::time::Instant::now();
             let super_dwa_unique_weights: Vec<Weight> = super_dwa.states.0.par_iter()
+                .map_init(
+                    move || {
+                        tls_snapshot.apply();
+                    },
+                    |_, s| s,
+                )
                 .fold(HashSet::new, |mut acc, s| {
                      if let Some(w) = &s.final_weight { acc.insert(w.clone()); }
                      for w in s.trans_weights.values() { acc.insert(w.clone()); }
@@ -755,7 +794,13 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
             "parser_dwa::weight_mappings",
             {
                 let start_mappings = std::time::Instant::now();
-                let all_mappings: Vec<(Signature, Vec<Weight>, HashMap<Weight, Weight>)> = complex_signatures.par_iter().map(|target_sig| {
+                let all_mappings: Vec<(Signature, Vec<Weight>, HashMap<Weight, Weight>)> = complex_signatures
+                    .par_iter()
+                    .map_init(
+                        move || {
+                            tls_snapshot.apply();
+                        },
+                        |_, target_sig| {
                     let target_idx = SignatureIndex::new(target_sig);
                     let mapping = can_derive(&super_signature, &target_idx).expect("Super signature must derive target");
                     
@@ -785,7 +830,8 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
                         .collect();
                     
                     (target_sig.clone(), mapping, weight_map)
-                }).collect();
+                })
+                    .collect();
                 crate::debug!(5, "  Weight mappings: {:?}", start_mappings.elapsed());
                 all_mappings
             }
@@ -796,13 +842,20 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
             "parser_dwa::specialize_dw_as",
             {
                 let start_specialize = std::time::Instant::now();
-                let results: Vec<(Signature, NWA, DWAStats, DWAStats)> = all_mappings.par_iter().map(|(target_sig, _mapping, weight_map)| {
+                let results: Vec<(Signature, NWA, DWAStats, DWAStats)> = all_mappings
+                    .par_iter()
+                    .map_init(
+                        move || {
+                            tls_snapshot.apply();
+                        },
+                        |_, (target_sig, _mapping, weight_map)| {
                     let mut derived_dwa = specialize_dwa_relative_with_map(&super_dwa, weight_map);
                     let before_stats = derived_dwa.stats();
                     derived_dwa.optimize(DwaOptimizeConfig::SpecializedSuper);
                     let after_stats = derived_dwa.stats();
                     (target_sig.clone(), NWA::from_dwa(&derived_dwa), before_stats, after_stats)
-                }).collect();
+                })
+                    .collect();
                 let mut before_total_stats = DWAStats {
                     states: 0,
                     transitions: 0,

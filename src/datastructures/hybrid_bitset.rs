@@ -60,6 +60,11 @@ pub fn set_global_dims(max_llm_token: usize, num_tsids: usize) {
     crate::debug!(4, "set_global_dims: max_llm_token={}, num_tsids={}", max_llm_token, num_tsids);
     MAX_LLM_TOKEN.with(|value| value.set(max_llm_token));
     NUM_TSIDS.with(|value| value.set(num_tsids));
+
+    rayon::broadcast(|_| {
+        MAX_LLM_TOKEN.with(|value| value.set(max_llm_token));
+        NUM_TSIDS.with(|value| value.set(num_tsids));
+    });
 }
 
 /// Get the current global max LLM token ID.
