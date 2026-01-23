@@ -6,6 +6,7 @@ use crate::dwa_i32::common::Label;
 
 #[test]
 fn test_resolve_negatives_simple_cancellation() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
     let mut d = DWA::new();
     let s1 = d.add_state();
     let s2 = d.add_state();
@@ -29,6 +30,7 @@ fn test_resolve_negatives_simple_cancellation() {
 
 #[test]
 fn test_resolve_negatives_from_large_nwa_log() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
     let mut nwa = NWA::new_empty();
     let mut states = Vec::new();
     for _ in 0..69 {
@@ -306,6 +308,7 @@ fn test_resolve_negatives_from_large_nwa_log() {
 
 #[test]
 fn test_resolve_negatives_from_nwa_log_2() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
     let mut d = DWA::new();
     let mut states = vec![d.body.start_state];
     for _ in 0..16 {
@@ -344,6 +347,7 @@ fn test_resolve_negatives_from_nwa_log_2() {
 
 #[test]
 fn test_resolve_negatives_long_cancellation_chain() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
     let mut d = DWA::new();
     let s5 = d.add_state();
     let s10 = d.add_state();
@@ -385,6 +389,7 @@ fn test_resolve_negatives_long_cancellation_chain() {
 
 #[test]
 fn test_resolve_negatives_from_debug_log() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
     let mut d = DWA::new();
     let s1 = d.add_state();
     let s2 = d.add_state();
@@ -423,6 +428,7 @@ fn test_resolve_negatives_from_debug_log() {
 
 #[test]
 fn test_resolve_negatives_from_intermediate_debug_log() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
     let mut d = DWA::new();
     let s1 = d.add_state();
     let s2 = d.add_state();
@@ -484,6 +490,7 @@ fn test_resolve_negatives_from_intermediate_debug_log() {
 
 #[test]
 fn test_resolve_negatives_minimal_loop_with_default() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
     let mut d = DWA::new();
     let s1 = d.add_state();
     let s2 = d.add_state();

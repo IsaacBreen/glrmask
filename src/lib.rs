@@ -21,6 +21,10 @@
 
 #![allow(warnings)]
 
+#[cfg(test)]
+pub static GLOBAL_DIMS_MUTEX: once_cell::sync::Lazy<std::sync::Mutex<()>> =
+    once_cell::sync::Lazy::new(|| std::sync::Mutex::new(()));
+
 pub mod dfa_u8;
 /// Backward-compatibility re-export from dfa_u8::dfa
 pub mod finite_automata;

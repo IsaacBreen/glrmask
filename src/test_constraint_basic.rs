@@ -35,6 +35,7 @@ use crate::{choice_fast, groups, seq_fast};
 
 #[test]
 fn test_trivial() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
     // Grammar: S -> "a" "$"
     // Tokenizer: "a", "$"
     // LLM Vocab: "a", "$"
@@ -89,6 +90,7 @@ fn test_trivial() {
 /// This is a minimal reproduction of a bug where semicolon is not allowed after x.
 #[test]
 fn test_x_semicolon_x() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
     // Grammar: program ::= expression_statement expression_statement? EOF
     //          expression_statement ::= expression ';'?
     //          expression ::= 'x'
@@ -164,6 +166,7 @@ fn test_x_semicolon_x() {
 #[ignore]
 #[test]
 fn test_constraint_simple() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
     // LLM tokens: "ab", "ac", "$"
     // Grammar tokens: "a", "ab", "b|c", "$" (EOF)
     // Grammar: S -> X $ ; X -> "a" ("b|c") | "ab"
@@ -252,6 +255,7 @@ fn test_constraint_simple() {
 
 #[test]
 fn test_constraint_simple_minimized() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
     // LLM tokens: "a", "$"
     // Grammar tokens: "a", "$" (EOF)
     // Grammar: S -> X $ ; X -> "a"
@@ -320,6 +324,7 @@ fn test_constraint_simple_minimized() {
 #[ignore]
 #[test]
 fn test_constraint_expression() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
     // Example grammar: E -> E '+' T | T; T -> T '*' F | F; F -> '(' E ')' | 'i'
     // LLM token vocabulary: i, +, *, (, ), (i, +i
     let mut llm_token_map = LLMTokenMap::new();
@@ -406,6 +411,7 @@ fn test_constraint_expression() {
 
 #[test]
 fn test_constraint_expression_minimized_06_11_25() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
     let mut llm_token_map = LLMTokenMap::new();
     llm_token_map.insert(b"+".to_vec(), LLMTokenID(0));
 
@@ -440,6 +446,7 @@ fn test_constraint_expression_minimized_06_11_25() {
 
 #[test]
 fn test_precompute_for_python_name_token() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
     // ignore = rep(choice([
     //     eat_u8(ord(" ")),
     //     seq([eat_u8(ord("#")), rep(eat_u8_negation(ord("\n"))), eat_u8(ord("\n"))]),
@@ -500,6 +507,7 @@ fn test_precompute_for_python_name_token() {
 
 #[test]
 fn test_precompute_explosion() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
     let tokenizer = groups![
         eat_u8(b'a'),
         eat_u8(b'a'),
@@ -533,6 +541,7 @@ fn test_precompute_explosion() {
 
 #[test]
 fn test_aborted_tokenizer_restart_equivalence() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
     // Tokenizer:
     // Group 0: "a" (A_T)
     // Group 1: "#" followed by an optional "a" (HASH_OPT_A_T)
@@ -596,6 +605,7 @@ fn test_aborted_tokenizer_restart_equivalence() {
 
 #[test]
 fn test_multi_commit_aborted_tokenizer_restart_equivalence() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
     // Tokenizer:
     // Group 0: "a" (A_T)
     // Group 1: "#" followed by an optional "aa" (HASH_OPT_AA_T)
@@ -674,6 +684,7 @@ fn test_multi_commit_aborted_tokenizer_restart_equivalence() {
 
 #[test]
 fn test_a_plus_commit_equivalence() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
     // Grammar: S -> A, where A is the terminal for `a+`.
     // This test verifies that committing "a", "a", "a" is equivalent to committing "aaa".
     // This tests the ability of the constraint to handle cases where multiple LLM tokens
@@ -728,6 +739,7 @@ fn test_a_plus_commit_equivalence() {
 
 #[test]
 fn test_ignore_token() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
     // Grammar: S -> A B
     // Tokenizer: A='a', B='b', WS=' ' (ignore)
     // LLM Vocab: "a", "b", " ", "a b"
@@ -783,6 +795,7 @@ fn test_ignore_token() {
 
 #[test]
 fn test_hideous_ambiguity() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
     // 1. Define the grammar
     let ebnf_grammar = indoc! {r#"
         s ::= FSTRING_MIDDLE FSTRING_MIDDLE;
@@ -824,6 +837,7 @@ fn test_hideous_ambiguity() {
 
 #[test]
 fn test_simple_def_match_non_zero_llm_id() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
     // 1. Tokenizer for the grammar terminal "DEF_T" matching "def"
     //    The tokenizer will have one group (GroupID 0) for "def".
     let ebnf_grammar = indoc! {r#"
@@ -872,6 +886,7 @@ fn test_simple_def_match_non_zero_llm_id() {
 #[ignore]
 #[test]
 fn test_precompute_a_plus_tokenizer() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
     use crate::constraint_precompute::run_precompute1;
     use crate::dwa_i32::common::Label;
     use crate::dfa_u8::TokenizerStateID;
@@ -947,6 +962,7 @@ fn test_precompute_a_plus_tokenizer() {
 #[ignore]
 #[test]
 fn test_precompute_x_eq() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
     use crate::constraint_precompute::run_precompute1;
     use crate::dwa_i32::common::Label;
     use crate::dfa_u8::TokenizerStateID;
@@ -1029,6 +1045,7 @@ fn test_precompute_x_eq() {
 
 #[test]
 fn test_constraint_expression_no_times() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
     // Grammar: E -> E '+' T | T; T -> F; F -> '(' E ')' | 'i'
     // LLM token vocabulary: i, +, (, ), (i, +i
     let mut llm_token_map = LLMTokenMap::new();
@@ -1095,6 +1112,7 @@ fn test_constraint_expression_no_times() {
 
 #[test]
 fn test_constraint_expression_no_parens() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
     // Grammar: E -> E '+' T | T; T -> T '*' F | F; F -> 'i'
     // LLM token vocabulary: i, +, *, +i
     let mut llm_token_map = LLMTokenMap::new();
@@ -1157,6 +1175,7 @@ fn test_constraint_expression_no_parens() {
 
 #[test]
 fn test_constraint_expression_no_plus_times() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
     // Grammar: E -> T; T -> F; F -> '(' E ')' | 'i'
     // LLM token vocabulary: i, (, ), (i
     let mut llm_token_map = LLMTokenMap::new();
@@ -1218,6 +1237,7 @@ fn test_constraint_expression_no_plus_times() {
 
 #[test]
 fn test_constraint_expression_no_times_parens() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
     // Grammar: E -> E '+' T | T; T -> F; F -> 'i'
     // LLM token vocabulary: i, +, +i
     let mut llm_token_map = LLMTokenMap::new();
@@ -1276,6 +1296,7 @@ fn test_constraint_expression_no_times_parens() {
 
 #[test]
 fn test_constraint_expression_unbalanced_parens() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
     // Grammar: S -> E EOF; E -> T; T -> F; F -> '(' E | 'i'
     // This is a bit of a weird grammar since parens are never closed,
     // but it's a good test of recursion.
@@ -1346,6 +1367,7 @@ fn test_constraint_expression_unbalanced_parens() {
 
 #[test]
 fn test_constraint_expression_unbalanced_parens2() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
     let mut llm_token_map = LLMTokenMap::new();
     llm_token_map.insert(b"$".to_vec(), LLMTokenID(3));
 
@@ -1400,6 +1422,7 @@ fn test_constraint_expression_unbalanced_parens2() {
 
 #[test]
 fn test_constraint_expression_cycle() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
     // Grammar: S -> E EOF; E -> F; F -> E | I
     // This grammar has a cycle E -> F -> E, which is a good test for the parser.
     // LLM token vocabulary: i, $
@@ -1536,6 +1559,7 @@ fn load_gpt2_vocab() -> Option<(LLMTokenMap, usize)> {
 
 #[test]
 fn test_json_gpt2_initial_mask_bruteforce() -> Result<(), Box<dyn std::error::Error>> {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
     let ebnf_grammar = indoc! {r#"
         #![ignore(WS)]
         value ::= object | array | STRING | NUMBER | 'true' | 'false' | 'null' ;
@@ -1593,6 +1617,7 @@ fn test_json_gpt2_initial_mask_bruteforce() -> Result<(), Box<dyn std::error::Er
 
 #[test]
 fn test_js_minimized_ebnf_string() -> Result<(), Box<dyn std::error::Error>> {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
     // 1. Load and compile the grammar from the EBNF file
     let ebnf_grammar = indoc! {r#"
         program ::= (expression ';')* EOF;
@@ -1655,6 +1680,7 @@ fn test_js_minimized_ebnf_string() -> Result<(), Box<dyn std::error::Error>> {
 
 #[test]
 fn test_js_like_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>> {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
     // 1. Define the EBNF grammar
     // Note: Use lowercase for non-terminals (s, x) since uppercase names are treated as terminals.
     let ebnf_grammar = indoc! {r#"
@@ -1703,6 +1729,7 @@ fn test_js_like_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>>
 
 #[test]
 fn test_js_like_grammar_initial_mask_minimized() -> Result<(), Box<dyn std::error::Error>> {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
     // 1. Define the EBNF grammar
     let ebnf_grammar = indoc! {r#"
         program ::= unary_expression unary_expression '$';
@@ -1747,6 +1774,7 @@ fn test_js_like_grammar_initial_mask_minimized() -> Result<(), Box<dyn std::erro
 
 #[test]
 fn test_ebnf_ignore_directive_with_partial_match() -> Result<(), Box<dyn std::error::Error>> {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
     // This test checks the behavior of the #![ignore(...)] directive with
     // LLM tokens that are either fully ignored or partially ignored.
 
@@ -2035,6 +2063,7 @@ fn test_ebnf_ignore_directive_with_partial_match() -> Result<(), Box<dyn std::er
 
 #[test]
 fn test_ebnf_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>> {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
     // 1. Define the EBNF grammar string
     let ebnf_grammar = indoc! {r#"
         program ::= IGNORE;
@@ -2079,6 +2108,7 @@ fn test_ebnf_grammar_initial_mask() -> Result<(), Box<dyn std::error::Error>> {
 
 #[test]
 fn test_ebnf_grammar_initial_mask_mandatory_pass() -> Result<(), Box<dyn std::error::Error>> {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
     // This test is a minimal pair to the failing `test_ebnf_grammar_initial_mask`.
     let ebnf_grammar = indoc! {r#"
         program ::= IGNORE;
@@ -2124,6 +2154,7 @@ fn test_ebnf_grammar_initial_mask_mandatory_pass() -> Result<(), Box<dyn std::er
 
 #[test]
 fn test_precompute_self_loop_from_shared_states() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
     // This test is designed to reproduce a panic in `Precomputer0::dfs` where
     // the algorithm attempts to create a self-loop on a trie node.
     //
@@ -2179,6 +2210,7 @@ fn test_precompute_self_loop_from_shared_states() {
 #[ignore]
 #[test]
 fn test_js_full_grammar_gss_explosion() -> Result<(), Box<dyn std::error::Error>> {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
     println!("--- Setting up for Full JS Grammar GSS Explosion Test ---");
     let js_grammar_ebnf = fs::read_to_string("src/js.ebnf")?;
     let grammar_definition = GrammarDefinition::from_ebnf(&js_grammar_ebnf)?;
@@ -2252,6 +2284,7 @@ fn test_js_full_grammar_gss_explosion() -> Result<(), Box<dyn std::error::Error>
 
 #[test]
 fn test_js_if_statement_gss_explosion() -> Result<(), Box<dyn std::error::Error>> {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
     // This test reproduces the GSS explosion seen in `test_js_constraint_integration`
     // with the input "if(1){if(1){...". The grammar has a recursive structure for
     // statements (Statement -> IfStatement, IfStatement -> 'if' '(' Expression ')' Statement)
@@ -2396,6 +2429,7 @@ fn test_js_if_statement_gss_explosion() -> Result<(), Box<dyn std::error::Error>
 
 #[test]
 fn test_ambiguous_tokenizer_no_gss_explosion() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
     // Grammar: S -> A, A -> '{' A '}' | ''
     // Tokenizer:
     //   - OPEN_BRACE: '{'
@@ -2493,6 +2527,7 @@ fn test_ambiguous_tokenizer_no_gss_explosion() {
 
 #[test]
 fn test_constraint_indirect_recursion_minimized() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
     // Grammar: S' -> S EOF; S -> a E | b; E -> S
     // This is equivalent to S -> a* b, so valid strings are "b", "ab", "aab", etc.
     // LLM token vocabulary: a, b, $
@@ -2539,6 +2574,7 @@ fn test_constraint_indirect_recursion_minimized() {
 
 #[test]
 fn test_constraint_repetition_a() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
     // Grammar: S' -> S, S -> S A | [], which is equivalent to S -> A*
     // LLM token vocabulary: a
     let mut llm_token_map = LLMTokenMap::new();
@@ -2576,6 +2612,7 @@ fn test_constraint_repetition_a() {
 
 #[test]
 fn test_constraint_expression_split_token() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
     // Grammar: S -> E EOF; E -> LPAREN E | I
     // LLM token vocabulary: "i(", "$"
     // This tests a case where an LLM token "i(" is a sequence of grammar tokens
@@ -2617,6 +2654,7 @@ fn test_constraint_expression_split_token() {
 
 #[test]
 fn test_constraint_expression_trivial_indirect() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
     // Grammar: S -> E EOF; E -> F; F -> LPAREN E | I
     // LLM token vocabulary: i, (, (i, $
     let mut llm_token_map = LLMTokenMap::new();
@@ -2665,6 +2703,7 @@ fn test_constraint_expression_trivial_indirect() {
 
 #[test]
 fn test_constraint_expression_trivial_direct() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
     // Grammar: S -> E EOF; E -> LPAREN E | I
     // LLM token vocabulary: i, (, (i, $
     let mut llm_token_map = LLMTokenMap::new();
@@ -2714,6 +2753,7 @@ fn test_constraint_expression_trivial_direct() {
 
 #[test]
 fn test_constraint_expression_trivial_direct_limited_vocab() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
     // Grammar: S -> E EOF; E -> LPAREN E | I
     // LLM token vocabulary: only "(i"
     let mut llm_token_map = LLMTokenMap::new();
@@ -2761,6 +2801,7 @@ fn test_constraint_expression_trivial_direct_limited_vocab() {
 #[ignore]
 #[test]
 fn test_tokenizer_vocab_to_terminal_dwa_aa() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
     use crate::constraint_precompute::run_precompute1;
     use crate::finite_automata::{Expr, ExprGroups, ExprGroup};
     use crate::dwa_i32::{DWA, Weight};
@@ -2883,6 +2924,7 @@ fn test_tokenizer_vocab_to_terminal_dwa_aa() {
 
 #[test]
 fn test_json_schema_mask_generation() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
     // 1. Define minimal JSON schema mimicking PackageJson structure
     let schema_json = r#"{
         "type": "object",
@@ -2937,6 +2979,7 @@ fn test_json_schema_mask_generation() {
 
 #[test]
 fn test_json_schema_gpt2_real_vocab() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
     // 1. Define minimal JSON schema
     let schema_json = r#"{
         "type": "object",
@@ -3005,6 +3048,7 @@ fn test_json_schema_gpt2_real_vocab() {
 /// what proportion are accepted by the suffix parser.
 #[test]
 fn test_suffix_grammar_validation() {
+    let _guard = crate::GLOBAL_DIMS_MUTEX.lock().unwrap();
     use crate::interface::suffix_grammar::validate_terminal_dwa_paths_verbose;
     use crate::constraint_precompute::run_precompute1;
     
