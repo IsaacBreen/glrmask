@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering as AtomicOrdering};
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::time::{Duration, Instant};
 
 use rayon::prelude::*;
@@ -222,91 +222,27 @@ fn build_destination_for_label(
     nwa: &NWA,
     eps_reach: &[WeightedSubset],
     label: Label,
-    union_ops: &AtomicUsize,
-    subset_true: &AtomicUsize,
-    subset_false: &AtomicUsize,
-    combined_empty: &AtomicUsize,
-    closure_call_count: &AtomicUsize,
-    closure_size_sum: &AtomicUsize,
-    closure_time_ns: &AtomicU64,
-    eps_expand_time_ns: &AtomicU64,
-    subset_time_ns: &AtomicU64,
-    combine_time_ns: &AtomicU64,
-    empty_check_time_ns: &AtomicU64,
-    edge_union_time_ns: &AtomicU64,
-    subset_check_time_ns: &AtomicU64,
-    entry_union_time_ns: &AtomicU64,
-    invert_time_ns: &AtomicU64,
-    subset_union_time_ns: &AtomicU64,
-    subset_sort_time_ns: &AtomicU64,
-    w_uv_all_true: &AtomicUsize,
-    w_uv_all_total: &AtomicUsize,
-    w_u_all_true: &AtomicUsize,
-    w_u_all_total: &AtomicUsize,
-    w_reach_all_true: &AtomicUsize,
-    w_reach_all_total: &AtomicUsize,
 ) -> Option<(WeightedSubset, Weight)> {
-    closure_call_count.fetch_add(1, AtomicOrdering::Relaxed);
-    closure_size_sum.fetch_add(closure.len(), AtomicOrdering::Relaxed);
     let mut edge_weight = Weight::zeros();
     let mut dest_map: HashMap<NWAStateID, Weight> = HashMap::new();
-    let closure_start = Instant::now();
     for (u, w_u) in closure {
-        w_u_all_total.fetch_add(1, AtomicOrdering::Relaxed);
-        if w_u.is_all_fast() {
-            w_u_all_true.fetch_add(1, AtomicOrdering::Relaxed);
-        }
         let st = &nwa.states[*u];
         let Some(targets) = st.transitions.get(&label) else {
             continue;
         };
         for (v, w_uv) in targets {
-            w_uv_all_total.fetch_add(1, AtomicOrdering::Relaxed);
-            if w_uv.is_all_fast() {
-                w_uv_all_true.fetch_add(1, AtomicOrdering::Relaxed);
-            }
-            let combine_start = Instant::now();
             let combined = w_u & w_uv;
-            combine_time_ns.fetch_add(
-                combine_start.elapsed().as_nanos() as u64,
-                AtomicOrdering::Relaxed,
-            );
-            let empty_start = Instant::now();
-            let is_empty = combined.is_empty();
-            empty_check_time_ns.fetch_add(
-                empty_start.elapsed().as_nanos() as u64,
-                AtomicOrdering::Relaxed,
-            );
-            if is_empty {
-                combined_empty.fetch_add(1, AtomicOrdering::Relaxed);
+            if combined.is_empty() {
                 continue;
             }
-            let edge_union_start = Instant::now();
             edge_weight |= &combined;
-            edge_union_time_ns.fetch_add(
-                edge_union_start.elapsed().as_nanos() as u64,
-                AtomicOrdering::Relaxed,
-            );
-            union_ops.fetch_add(1, AtomicOrdering::Relaxed);
             let entry = dest_map.entry(*v).or_insert_with(Weight::zeros);
-            subset_false.fetch_add(1, AtomicOrdering::Relaxed);
-            let entry_union_start = Instant::now();
             *entry |= &combined;
-            entry_union_time_ns.fetch_add(
-                entry_union_start.elapsed().as_nanos() as u64,
-                AtomicOrdering::Relaxed,
-            );
-            union_ops.fetch_add(1, AtomicOrdering::Relaxed);
         }
     }
-    closure_time_ns.fetch_add(
-        closure_start.elapsed().as_nanos() as u64,
-        AtomicOrdering::Relaxed,
-    );
     if edge_weight.is_empty() {
         return None;
     }
-    let expand_start = Instant::now();
     let mut groups: HashMap<NWAStateID, Vec<NWAStateID>> = HashMap::new();
     let mut expanded: HashMap<NWAStateID, Weight> = HashMap::new();
     for (&v, w_v) in dest_map.iter() {
@@ -314,10 +250,8 @@ fn build_destination_for_label(
             continue;
         }
         for (v_reach, w_reach) in &eps_reach[v] {
-            w_reach_all_total.fetch_add(1, AtomicOrdering::Relaxed);
             let is_all = w_reach.is_all_fast();
             if is_all {
-                w_reach_all_true.fetch_add(1, AtomicOrdering::Relaxed);
                 groups.entry(*v_reach).or_default().push(v);
                 continue;
             }
@@ -326,9 +260,7 @@ fn build_destination_for_label(
                 continue;
             }
             let entry = expanded.entry(*v_reach).or_insert_with(Weight::zeros);
-            subset_false.fetch_add(1, AtomicOrdering::Relaxed);
             *entry |= &combined;
-            union_ops.fetch_add(1, AtomicOrdering::Relaxed);
         }
     }
 
@@ -339,57 +271,27 @@ fn build_destination_for_label(
                 continue;
             };
             if w_v.is_empty() {
-                combined_empty.fetch_add(1, AtomicOrdering::Relaxed);
                 continue;
             }
-            subset_false.fetch_add(1, AtomicOrdering::Relaxed);
             acc |= w_v;
-            union_ops.fetch_add(1, AtomicOrdering::Relaxed);
         }
         if !acc.is_empty() {
             let entry = expanded.entry(v_reach).or_insert_with(Weight::zeros);
-            subset_false.fetch_add(1, AtomicOrdering::Relaxed);
             *entry |= &acc;
-            union_ops.fetch_add(1, AtomicOrdering::Relaxed);
         }
     }
-
-    eps_expand_time_ns.fetch_add(
-        expand_start.elapsed().as_nanos() as u64,
-        AtomicOrdering::Relaxed,
-    );
 
     if expanded.is_empty() {
         return None;
     }
 
-    let subset_start = Instant::now();
-    let invert_start = Instant::now();
     let w_edge_inv = !&edge_weight;
-    invert_time_ns.fetch_add(
-        invert_start.elapsed().as_nanos() as u64,
-        AtomicOrdering::Relaxed,
-    );
     let mut subset: WeightedSubset = Vec::with_capacity(expanded.len());
     for (sid, w) in expanded {
-        let union_start = Instant::now();
         let merged = w | &w_edge_inv;
-        subset_union_time_ns.fetch_add(
-            union_start.elapsed().as_nanos() as u64,
-            AtomicOrdering::Relaxed,
-        );
         subset.push((sid, merged));
     }
-    let sort_start = Instant::now();
     subset.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-    subset_sort_time_ns.fetch_add(
-        sort_start.elapsed().as_nanos() as u64,
-        AtomicOrdering::Relaxed,
-    );
-    subset_time_ns.fetch_add(
-        subset_start.elapsed().as_nanos() as u64,
-        AtomicOrdering::Relaxed,
-    );
 
     Some((subset, edge_weight))
 }
@@ -646,47 +548,9 @@ pub(crate) fn determinize_acyclic_with_progress(
 
     let backend_choice = crate::datastructures::abstract_weight::current_backend_choice();
     let expansion_allowed = crate::datastructures::abstract_weight::is_expansion_allowed();
-    let use_union_timing =
-        backend_choice == crate::datastructures::abstract_weight::BackendChoice::RangeMap;
-    if use_union_timing {
-        crate::datastructures::rangemap_weight::reset_union_timing_totals();
-    }
-    crate::datastructures::abstract_weight::reset_bitor_assign_counters();
-    let union_ops = AtomicUsize::new(0);
-    let subset_true = AtomicUsize::new(0);
-    let subset_false = AtomicUsize::new(0);
-    let combined_empty = AtomicUsize::new(0);
-    let closure_call_count = AtomicUsize::new(0);
-    let closure_size_sum = AtomicUsize::new(0);
-    let closure_time_ns = AtomicU64::new(0);
-    let eps_expand_time_ns = AtomicU64::new(0);
-    let subset_time_ns = AtomicU64::new(0);
-    let combine_time_ns = AtomicU64::new(0);
-    let empty_check_time_ns = AtomicU64::new(0);
-    let edge_union_time_ns = AtomicU64::new(0);
-    let subset_check_time_ns = AtomicU64::new(0);
-    let entry_union_time_ns = AtomicU64::new(0);
-    let invert_time_ns = AtomicU64::new(0);
-    let subset_union_time_ns = AtomicU64::new(0);
-    let subset_sort_time_ns = AtomicU64::new(0);
-    let w_uv_all_true = AtomicUsize::new(0);
-    let w_uv_all_total = AtomicUsize::new(0);
-    let w_u_all_true = AtomicUsize::new(0);
-    let w_u_all_total = AtomicUsize::new(0);
-    let w_reach_all_true = AtomicUsize::new(0);
-    let w_reach_all_total = AtomicUsize::new(0);
-
-    let mut topo_time = Duration::ZERO;
-    let mut level_group_time = Duration::ZERO;
-    let mut parallel_time = Duration::ZERO;
-    let mut merge_time = Duration::ZERO;
 
     timeit!("acyclic_det::materialize_weighted_closures", {
-        let topo_start = Instant::now();
         let dwa_topo = compute_unweighted_dwa_topo_order(&transition_cache);
-        topo_time = topo_start.elapsed();
-
-        let level_start = Instant::now();
         let mut levels = vec![0usize; transition_cache.len()];
         for &cid in &dwa_topo {
             let next_level = levels[cid].saturating_add(1);
@@ -701,15 +565,12 @@ pub(crate) fn determinize_acyclic_with_progress(
         for (cid, level) in levels.into_iter().enumerate() {
             states_by_level[level].push(cid);
         }
-        level_group_time = level_start.elapsed();
-
-        for states_at_level in states_by_level {
+        for states_at_level in states_by_level.into_iter() {
             for &cid in &states_at_level {
                 dest_cache[cid].clear();
             }
 
             let updates: Vec<(usize, Vec<(Label, usize, Weight)>, Vec<(usize, WeightedSubset)>)> = {
-                let parallel_start = Instant::now();
                 let weighted_closures_ref = &weighted_closures;
                 let updates = states_at_level
                     .par_iter()
@@ -717,9 +578,8 @@ pub(crate) fn determinize_acyclic_with_progress(
                         || {
                             crate::datastructures::override_backend(backend_choice);
                             crate::datastructures::abstract_weight::override_expansion_allowed(expansion_allowed);
-                            crate::datastructures::rangemap_weight::union_timing_guard(use_union_timing)
                         },
-                        |_union_guard, &cid| {
+                        |_, &cid| {
                             let closure = &weighted_closures_ref[cid];
                             if closure.is_empty() {
                                 return None;
@@ -733,29 +593,6 @@ pub(crate) fn determinize_acyclic_with_progress(
                                     nwa,
                                     &eps_reach,
                                     lbl,
-                                    &union_ops,
-                                    &subset_true,
-                                    &subset_false,
-                                    &combined_empty,
-                                    &closure_call_count,
-                                    &closure_size_sum,
-                                    &closure_time_ns,
-                                    &eps_expand_time_ns,
-                                    &subset_time_ns,
-                                    &combine_time_ns,
-                                    &empty_check_time_ns,
-                                    &edge_union_time_ns,
-                                    &subset_check_time_ns,
-                                    &entry_union_time_ns,
-                                    &invert_time_ns,
-                                    &subset_union_time_ns,
-                                    &subset_sort_time_ns,
-                                    &w_uv_all_true,
-                                    &w_uv_all_total,
-                                    &w_u_all_true,
-                                    &w_u_all_total,
-                                    &w_reach_all_true,
-                                    &w_reach_all_total,
                                 ) else {
                                     continue;
                                 };
@@ -769,161 +606,21 @@ pub(crate) fn determinize_acyclic_with_progress(
                     )
                     .filter_map(|item| item)
                     .collect();
-                parallel_time += parallel_start.elapsed();
                 updates
             };
 
-            let merge_start = Instant::now();
             for (cid, dest_entries, weighted_updates) in updates {
                 dest_cache[cid] = dest_entries;
                 for (dest_id, dest_subset) in weighted_updates {
                     let dest_map = &mut weighted_closures[dest_id];
                     for (sid, w) in dest_subset {
                         let entry = dest_map.entry(sid).or_insert_with(Weight::zeros);
-                        subset_false.fetch_add(1, AtomicOrdering::Relaxed);
                         *entry |= &w;
-                        union_ops.fetch_add(1, AtomicOrdering::Relaxed);
                     }
                 }
             }
-            merge_time += merge_start.elapsed();
         }
     });
-    let closure_calls = closure_call_count.load(AtomicOrdering::Relaxed);
-    let closure_sizes = closure_size_sum.load(AtomicOrdering::Relaxed);
-    let avg_weighted_closure_size = if closure_calls == 0 {
-        0.0
-    } else {
-        closure_sizes as f64 / closure_calls as f64
-    };
-    crate::debug!(
-        3,
-        "Acyclic determinize materialize stats: union_ops={}, subset_true={}, subset_false={}, combined_empty={}, avg_weighted_closure_size={:.2}, closure_calls={}",
-        union_ops.load(AtomicOrdering::Relaxed),
-        subset_true.load(AtomicOrdering::Relaxed),
-        subset_false.load(AtomicOrdering::Relaxed),
-        combined_empty.load(AtomicOrdering::Relaxed),
-        avg_weighted_closure_size,
-        closure_calls,
-    );
-
-    let w_uv_all_true_count = w_uv_all_true.load(AtomicOrdering::Relaxed);
-    let w_uv_all_total_count = w_uv_all_total.load(AtomicOrdering::Relaxed);
-    let w_u_all_true_count = w_u_all_true.load(AtomicOrdering::Relaxed);
-    let w_u_all_total_count = w_u_all_total.load(AtomicOrdering::Relaxed);
-    let w_reach_all_true_count = w_reach_all_true.load(AtomicOrdering::Relaxed);
-    let w_reach_all_total_count = w_reach_all_total.load(AtomicOrdering::Relaxed);
-
-    let w_uv_all_pct = if w_uv_all_total_count == 0 {
-        0.0
-    } else {
-        (w_uv_all_true_count as f64) * 100.0 / (w_uv_all_total_count as f64)
-    };
-    let w_u_all_pct = if w_u_all_total_count == 0 {
-        0.0
-    } else {
-        (w_u_all_true_count as f64) * 100.0 / (w_u_all_total_count as f64)
-    };
-    let w_reach_all_pct = if w_reach_all_total_count == 0 {
-        0.0
-    } else {
-        (w_reach_all_true_count as f64) * 100.0 / (w_reach_all_total_count as f64)
-    };
-
-    crate::debug!(
-        3,
-        "Acyclic determinize materialize all-weight stats: w_u_all={}/{} ({:.2}%), w_uv_all={}/{} ({:.2}%), w_reach_all={}/{} ({:.2}%)",
-        w_u_all_true_count,
-        w_u_all_total_count,
-        w_u_all_pct,
-        w_uv_all_true_count,
-        w_uv_all_total_count,
-        w_uv_all_pct,
-        w_reach_all_true_count,
-        w_reach_all_total_count,
-        w_reach_all_pct,
-    );
-
-    if use_union_timing {
-        crate::datastructures::rangemap_weight::flush_union_timing_local();
-        let union_timing = crate::datastructures::rangemap_weight::union_timing_totals();
-        let eq_ms = union_timing.eq_check.as_secs_f64() * 1000.0;
-        let is_all_ms = union_timing.is_all_check.as_secs_f64() * 1000.0;
-        let merge_ms = union_timing.merge.as_secs_f64() * 1000.0;
-        let from_map_ms = union_timing.from_map.as_secs_f64() * 1000.0;
-        crate::debug!(
-            3,
-            "RangeMap union_non_negated timing: calls={}, eq={:.3}ms, is_all={:.3}ms, merge={:.3}ms, from_map={:.3}ms",
-            union_timing.calls,
-            eq_ms,
-            is_all_ms,
-            merge_ms,
-            from_map_ms,
-        );
-        let bitor_counts = crate::datastructures::abstract_weight::bitor_assign_counters();
-        crate::debug!(
-            3,
-            "AbstractWeight |= counters: ref_calls={}, owned_calls={}, rhs_empty={}, self_empty={}, self_all={}, rhs_all={}, union_total={}, union_rangeset={}, union_factorized={}, union_rangemap={}",
-            bitor_counts.ref_calls,
-            bitor_counts.owned_calls,
-            bitor_counts.rhs_empty,
-            bitor_counts.self_empty,
-            bitor_counts.self_all,
-            bitor_counts.rhs_all,
-            bitor_counts.union_total,
-            bitor_counts.union_rangeset,
-            bitor_counts.union_factorized,
-            bitor_counts.union_rangemap,
-        );
-    }
-
-    let topo_ms = topo_time.as_secs_f64() * 1000.0;
-    let level_group_ms = level_group_time.as_secs_f64() * 1000.0;
-    let parallel_ms = parallel_time.as_secs_f64() * 1000.0;
-    let merge_ms = merge_time.as_secs_f64() * 1000.0;
-    crate::debug!(
-        3,
-        "Materialize breakdown: topo={:.3}ms, level_group={:.3}ms, parallel_total={:.3}ms, merge_total={:.3}ms",
-        topo_ms,
-        level_group_ms,
-        parallel_ms,
-        merge_ms,
-    );
-    let closure_ms = closure_time_ns.load(AtomicOrdering::Relaxed) as f64 / 1_000_000.0;
-    let eps_expand_ms = eps_expand_time_ns.load(AtomicOrdering::Relaxed) as f64 / 1_000_000.0;
-    let subset_ms = subset_time_ns.load(AtomicOrdering::Relaxed) as f64 / 1_000_000.0;
-    crate::debug!(
-        3,
-        "build_destination_for_label breakdown: closure_loop={:.3}ms, eps_expand={:.3}ms, subset={:.3}ms",
-        closure_ms,
-        eps_expand_ms,
-        subset_ms,
-    );
-    let combine_ms = combine_time_ns.load(AtomicOrdering::Relaxed) as f64 / 1_000_000.0;
-    let empty_check_ms = empty_check_time_ns.load(AtomicOrdering::Relaxed) as f64 / 1_000_000.0;
-    let edge_union_ms = edge_union_time_ns.load(AtomicOrdering::Relaxed) as f64 / 1_000_000.0;
-    let subset_check_ms = subset_check_time_ns.load(AtomicOrdering::Relaxed) as f64 / 1_000_000.0;
-    let entry_union_ms = entry_union_time_ns.load(AtomicOrdering::Relaxed) as f64 / 1_000_000.0;
-    crate::debug!(
-        3,
-        "build_destination_for_label closure breakdown: and={:.3}ms, empty_check={:.3}ms, edge_union={:.3}ms, subset_check={:.3}ms, entry_union={:.3}ms",
-        combine_ms,
-        empty_check_ms,
-        edge_union_ms,
-        subset_check_ms,
-        entry_union_ms,
-    );
-    let invert_ms = invert_time_ns.load(AtomicOrdering::Relaxed) as f64 / 1_000_000.0;
-    let subset_union_ms = subset_union_time_ns.load(AtomicOrdering::Relaxed) as f64 / 1_000_000.0;
-    let subset_sort_ms = subset_sort_time_ns.load(AtomicOrdering::Relaxed) as f64 / 1_000_000.0;
-    crate::debug!(
-        3,
-        "build_destination_for_label subset breakdown: invert={:.3}ms, union={:.3}ms, sort={:.3}ms",
-        invert_ms,
-        subset_union_ms,
-        subset_sort_ms,
-    );
-
     let closures: Vec<Arc<HashedSubset>> = timeit!("acyclic_det::finalize_weighted_closures", {
         weighted_closures
             .iter()
