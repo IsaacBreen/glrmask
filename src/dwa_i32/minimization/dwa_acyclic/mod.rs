@@ -952,39 +952,15 @@ fn union_forward_pending(forward: &Weight, pending: &[Weight]) -> Weight {
     if pending.is_empty() {
         return forward.clone();
     }
-
-    match forward {
-        Weight::RangeMap(rm) => {
-            let mut rangemaps: Vec<Arc<RangeMapWeight>> =
-                Vec::with_capacity(pending.len().saturating_add(1));
-            if !forward.is_empty() {
-                rangemaps.push(rm.clone());
-            }
-            for weight in pending {
-                if let Weight::RangeMap(other) = weight {
-                    rangemaps.push(other.clone());
-                } else {
-                    let mut acc = forward.clone();
-                    for weight in pending {
-                        acc |= weight;
-                    }
-                    return acc;
-                }
-            }
-            if rangemaps.is_empty() {
-                forward.clone()
-            } else {
-                Weight::RangeMap(RangeMapWeight::union_all(&rangemaps))
-            }
-        }
-        _ => {
-            let mut acc = forward.clone();
-            for weight in pending {
-                acc |= weight;
-            }
-            acc
-        }
+    if pending.len() == 1 {
+        return forward | &pending[0];
     }
+
+    let mut acc = forward.clone();
+    for weight in pending {
+        acc |= weight;
+    }
+    acc
 }
 
 /// Compute forward reachability: which tokens can reach each state from start
