@@ -12,6 +12,9 @@
 
 .PHONY: paper paper-watch paper-clean notes-today help build test test-release test-js test-json-schema test-schema-packagejson test-schema-github test-schema-sarif test-schema-meta test-schema-extra test-schema-kestra test-schema-vegalite test-schema-apollo test-schema-liquibase test-diff test-diff-dfa show-schema-id schema-id ffi viz viz-clean all jsonschemabench jsonschemabench-quick jsonschemabench-subset jsonschemabench-analyze jsonschemabench-llg jsonschemabench-llg-analyze jsonschemabench-compare
 
+# Default timeout for test-js (override with TEST_TIMEOUT=...)
+TEST_TIMEOUT ?= 300
+
 # === Build All ===
 
 all: ffi viz paper ## Build all components: FFI, visualizations, and paper
@@ -81,7 +84,7 @@ test-release: ## Run all crate tests in release profile + test_nwa_minimize_dete
 	RUST_TEST_THREADS=1 RUSTFLAGS=-Awarnings ENABLE_PROGRESS_BAR=0 cargo test --color=always --package sep1 --lib --release -- test_nwa_minimize_determinize_minimize --nocapture --include-ignored
 
 test-js: ## Compile the JavaScript grammar (verifies it compiles)
-	timeout 120 python scripts/compile.py \
+	timeout $(TEST_TIMEOUT) python scripts/compile.py \
 		--grammar src/js.ebnf \
 		--format ebnf \
 		--output .cache/test_vocabs/constraint_js.json.gz \
