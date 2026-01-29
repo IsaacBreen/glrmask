@@ -241,6 +241,8 @@ fn build_destinations_batched(
             .fetch_add(closure.len() as u64, AtomicOrdering::Relaxed);
     }
 
+    let mut transitions_pending: FxHashMap<Label, FxHashMap<NWAStateID, Vec<Weight>>> =
+        FxHashMap::default();
     let mut transitions: FxHashMap<Label, FxHashMap<NWAStateID, Weight>> = FxHashMap::default();
     let mut edge_weights: FxHashMap<Label, Weight> = FxHashMap::default();
 
@@ -276,44 +278,69 @@ fn build_destinations_batched(
                     if combined.is_empty() {
                         continue;
                     }
-                    let edge_entry = edge_weights.entry(*lbl).or_insert_with(Weight::zeros);
-                    if let Some(timers) = timers {
-                        let start = Instant::now();
-                        *edge_entry |= &combined;
-                        timers
-                            .or_ns
-                            .fetch_add(start.elapsed().as_nanos() as u64, AtomicOrdering::Relaxed);
-                        timers
-                            .or_ops
-                            .fetch_add(1, AtomicOrdering::Relaxed);
-                        timers
-                            .collect_or_ops
-                            .fetch_add(1, AtomicOrdering::Relaxed);
-                    } else {
-                        *edge_entry |= &combined;
-                    }
-                    let target_entry = transitions
+                    transitions_pending
                         .entry(*lbl)
                         .or_default()
                         .entry(*v)
-                        .or_insert_with(Weight::zeros);
-                    if let Some(timers) = timers {
-                        let start = Instant::now();
-                        *target_entry |= &combined;
-                        timers
-                            .or_ns
-                            .fetch_add(start.elapsed().as_nanos() as u64, AtomicOrdering::Relaxed);
-                        timers
-                            .or_ops
-                            .fetch_add(1, AtomicOrdering::Relaxed);
-                        timers
-                            .collect_or_ops
-                            .fetch_add(1, AtomicOrdering::Relaxed);
-                    } else {
-                        *target_entry |= &combined;
-                    }
+                        .or_default()
+                        .push(combined);
                 }
             }
+        }
+
+        let pending = std::mem::take(&mut transitions_pending);
+        for (lbl, target_map) in pending {
+            let mut dest_map: FxHashMap<NWAStateID, Weight> = FxHashMap::default();
+            let mut edge_ops: u64 = 0;
+            for (v, weights) in target_map {
+                edge_ops = edge_ops.saturating_add(weights.len() as u64);
+                let mut refs: Vec<&Weight> = Vec::with_capacity(weights.len());
+                for w in &weights {
+                    refs.push(w);
+                }
+                let unioned = if let Some(timers) = timers {
+                    let start = Instant::now();
+                    let unioned = Weight::bulk_union(&refs);
+                    let elapsed_ns = start.elapsed().as_nanos() as u64;
+                    let ops = weights.len() as u64;
+                    timers
+                        .or_ns
+                        .fetch_add(elapsed_ns, AtomicOrdering::Relaxed);
+                    timers.or_ops.fetch_add(ops, AtomicOrdering::Relaxed);
+                    timers
+                        .collect_or_ops
+                        .fetch_add(ops, AtomicOrdering::Relaxed);
+                    unioned
+                } else {
+                    Weight::bulk_union(&refs)
+                };
+                dest_map.insert(v, unioned);
+            }
+
+            if !dest_map.is_empty() {
+                let mut refs: Vec<&Weight> = Vec::with_capacity(dest_map.len());
+                for w in dest_map.values() {
+                    refs.push(w);
+                }
+                let w_edge = if let Some(timers) = timers {
+                    let start = Instant::now();
+                    let w_edge = Weight::bulk_union(&refs);
+                    let elapsed_ns = start.elapsed().as_nanos() as u64;
+                    timers
+                        .or_ns
+                        .fetch_add(elapsed_ns, AtomicOrdering::Relaxed);
+                    timers.or_ops.fetch_add(edge_ops, AtomicOrdering::Relaxed);
+                    timers
+                        .collect_or_ops
+                        .fetch_add(edge_ops, AtomicOrdering::Relaxed);
+                    w_edge
+                } else {
+                    Weight::bulk_union(&refs)
+                };
+                edge_weights.insert(lbl, w_edge);
+            }
+
+            transitions.insert(lbl, dest_map);
         }
     });
     if let (Some(timers), Some(start)) = (timers, collect_start) {
