@@ -869,6 +869,20 @@ impl AbstractWeight {
                 result |= weights[1];
                 result
             }
+            3 => {
+                let mut result = weights[0].clone();
+                result |= weights[1];
+                result |= weights[2];
+                result
+            }
+            4 => {
+                let mut left = weights[0].clone();
+                left |= weights[1];
+                let mut right = weights[2].clone();
+                right |= weights[3];
+                left |= &right;
+                left
+            }
             _ => match weights[0] {
                 AbstractWeight::RangeSet(_) => {
                     let mut sets: Vec<&RangeSet> = Vec::with_capacity(weights.len());

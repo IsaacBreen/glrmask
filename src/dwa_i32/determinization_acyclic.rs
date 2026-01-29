@@ -245,6 +245,11 @@ fn build_destinations_batched(
         FxHashMap::default();
     let mut transitions: FxHashMap<Label, FxHashMap<NWAStateID, Weight>> = FxHashMap::default();
     let mut edge_weights: FxHashMap<Label, Weight> = FxHashMap::default();
+    let mut collect_union_bulk_stats: Option<BTreeMap<usize, (u64, u64)>> = if timers.is_some() {
+        Some(BTreeMap::new())
+    } else {
+        None
+    };
 
     let collect_start = if timers.is_some() { Some(Instant::now()) } else { None };
     timeit!("acyclic_det::build_destinations_batched::collect_gather", {
@@ -312,6 +317,11 @@ fn build_destinations_batched(
                     timers
                         .collect_or_ops
                         .fetch_add(ops, AtomicOrdering::Relaxed);
+                    if let Some(stats) = collect_union_bulk_stats.as_mut() {
+                        let entry = stats.entry(weights.len()).or_insert((0, 0));
+                        entry.0 = entry.0.saturating_add(1);
+                        entry.1 = entry.1.saturating_add(elapsed_ns);
+                    }
                     unioned
                 } else {
                     Weight::bulk_union(&refs)
@@ -335,6 +345,11 @@ fn build_destinations_batched(
                     timers
                         .collect_or_ops
                         .fetch_add(edge_ops, AtomicOrdering::Relaxed);
+                    if let Some(stats) = collect_union_bulk_stats.as_mut() {
+                        let entry = stats.entry(refs.len()).or_insert((0, 0));
+                        entry.0 = entry.0.saturating_add(1);
+                        entry.1 = entry.1.saturating_add(elapsed_ns);
+                    }
                     w_edge
                 } else {
                     Weight::bulk_union(&refs)
@@ -461,6 +476,23 @@ fn build_destinations_batched(
                 .fetch_add(start.elapsed().as_nanos() as u64, AtomicOrdering::Relaxed);
         }
         results.push((lbl, subset, w_edge));
+    }
+
+    if let Some(stats) = collect_union_bulk_stats {
+        eprintln!("BULK_UNION_STATS (collect_union): size -> (count, avg_ns)");
+        for (size, (count, total_ns)) in &stats {
+            if *count == 0 {
+                continue;
+            }
+            let avg_ns = *total_ns / *count;
+            eprintln!(
+                "  n={}: count={}, avg={}ns, total={:.3}ms",
+                size,
+                count,
+                avg_ns,
+                *total_ns as f64 / 1_000_000.0
+            );
+        }
     }
 
     results
