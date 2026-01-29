@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
+use smallvec::SmallVec;
 use profiler_macro::{time_it, timeit};
 
 use super::common::{Label, NWAStateID, Weight};
@@ -241,7 +242,7 @@ fn build_destinations_batched(
             .fetch_add(closure.len() as u64, AtomicOrdering::Relaxed);
     }
 
-    let mut transitions_pending: FxHashMap<Label, FxHashMap<NWAStateID, Vec<Weight>>> =
+    let mut transitions_pending: FxHashMap<Label, FxHashMap<NWAStateID, SmallVec<[Weight; 2]>>> =
         FxHashMap::default();
     let mut transitions: FxHashMap<Label, FxHashMap<NWAStateID, Weight>> = FxHashMap::default();
     let mut edge_weights: FxHashMap<Label, Weight> = FxHashMap::default();
@@ -255,6 +256,7 @@ fn build_destinations_batched(
     timeit!("acyclic_det::build_destinations_batched::collect_gather", {
         for (u, w_u) in closure {
             let st = &nwa.states[*u];
+            transitions_pending.reserve(st.transitions.len());
             if let Some(timers) = timers {
                 timers
                     .transition_total
@@ -266,6 +268,8 @@ fn build_destinations_batched(
                         .target_total
                         .fetch_add(targets.len() as u64, AtomicOrdering::Relaxed);
                 }
+                let target_map = transitions_pending.entry(*lbl).or_default();
+                target_map.reserve(targets.len());
                 for (v, w_uv) in targets {
                     let combined = if let Some(timers) = timers {
                         let start = Instant::now();
@@ -283,12 +287,7 @@ fn build_destinations_batched(
                     if combined.is_empty() {
                         continue;
                     }
-                    transitions_pending
-                        .entry(*lbl)
-                        .or_default()
-                        .entry(*v)
-                        .or_default()
-                        .push(combined);
+                    target_map.entry(*v).or_default().push(combined);
                 }
             }
         }

@@ -89,29 +89,40 @@ impl DWAStates {
     
     /// Find the actual maximum value present in any weight across all states.
     /// Returns None if there are no weights or all weights are empty/ALL.
-    pub fn find_actual_max(&self) -> Option<usize> {
+    pub fn find_actual_max(&self) -> (Option<usize>, bool) {
         let mut max_val: Option<usize> = None;
+        let mut has_unbounded = false;
         for state in &self.0 {
             if let Some(fw) = &state.final_weight {
-                if !fw.is_all_fast() && !fw.is_empty() {
-                    if let Some(m) = fw.max_item() {
-                        if m != usize::MAX {  // Skip if extends to MAX
-                            max_val = Some(max_val.map_or(m, |cur| cur.max(m)));
-                        }
+                if fw.is_empty() {
+                    continue;
+                }
+                if fw.is_all_fast() {
+                    has_unbounded = true;
+                } else if let Some(m) = fw.max_item() {
+                    if m == usize::MAX {
+                        has_unbounded = true;
+                    } else {
+                        max_val = Some(max_val.map_or(m, |cur| cur.max(m)));
                     }
                 }
             }
             for w in state.trans_weights.values() {
-                if !w.is_all_fast() && !w.is_empty() {
-                    if let Some(m) = w.max_item() {
-                        if m != usize::MAX {  // Skip if extends to MAX
-                            max_val = Some(max_val.map_or(m, |cur| cur.max(m)));
-                        }
+                if w.is_empty() {
+                    continue;
+                }
+                if w.is_all_fast() {
+                    has_unbounded = true;
+                } else if let Some(m) = w.max_item() {
+                    if m == usize::MAX {  // Skip if extends to MAX
+                        has_unbounded = true;
+                    } else {
+                        max_val = Some(max_val.map_or(m, |cur| cur.max(m)));
                     }
                 }
             }
         }
-        max_val
+        (max_val, has_unbounded)
     }
 }
 
@@ -211,22 +222,32 @@ impl DWA {
     /// Returns true if any weights were modified, false otherwise.
     pub fn trim_weights(&mut self) -> bool {
         // Find the actual maximum value across all weights
-        let actual_max = match self.states.find_actual_max() {
-            Some(max) => max,
-            None => return false, // No non-ALL, non-empty weights to trim
+        let (actual_max, has_unbounded) = match self.states.find_actual_max() {
+            (Some(max), has_unbounded) => (max, has_unbounded),
+            (None, _) => return false, // No non-ALL, non-empty weights to trim
         };
+
+        if !has_unbounded {
+            return false;
+        }
+
+        let debug_ranges = crate::r#macro::is_debug_level_enabled(5);
         
         // Count ranges before trimming
-        let ranges_before = self.num_ranges();
+        let ranges_before = if debug_ranges { self.num_ranges() } else { 0 };
         
         // Clip all weights to [0, actual_max]
         self.states.clip_weights(actual_max);
         
         // Count ranges after trimming
-        let ranges_after = self.num_ranges();
+        let ranges_after = if debug_ranges { self.num_ranges() } else { 0 };
         
-        let changed = ranges_before != ranges_after;
-        if changed {
+        let changed = if debug_ranges {
+            ranges_before != ranges_after
+        } else {
+            has_unbounded
+        };
+        if changed && debug_ranges {
             crate::debug!(5, "trim_weights: clipped to max={}, ranges {} -> {} ({:.1}% reduction)",
                 actual_max, ranges_before, ranges_after,
                 100.0 * (1.0 - ranges_after as f64 / ranges_before as f64));
@@ -242,12 +263,13 @@ impl DWA {
     /// 
     /// Returns true if any weights were modified, false otherwise.
     pub fn trim_weights_to_domain(&mut self, domain_max: usize) -> bool {
-        let ranges_before = self.num_ranges();
+        let debug_ranges = crate::r#macro::is_debug_level_enabled(5);
+        let ranges_before = if debug_ranges { self.num_ranges() } else { 0 };
         self.states.clip_weights(domain_max);
-        let ranges_after = self.num_ranges();
+        let ranges_after = if debug_ranges { self.num_ranges() } else { 0 };
         
-        let changed = ranges_before != ranges_after;
-        if changed {
+        let changed = if debug_ranges { ranges_before != ranges_after } else { true };
+        if changed && debug_ranges {
             crate::debug!(5, "trim_weights_to_domain: clipped to max={}, ranges {} -> {} ({:.1}% reduction)",
                 domain_max, ranges_before, ranges_after,
                 100.0 * (1.0 - ranges_after as f64 / ranges_before as f64));

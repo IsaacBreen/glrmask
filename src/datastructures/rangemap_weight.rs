@@ -1505,6 +1505,11 @@ impl RangeMapWeight {
             self.refresh_cached_hash();
             return;
         }
+        if let Some(current_max) = self.max_item() {
+            if current_max <= max {
+                return;
+            }
+        }
         let max_token = max / num_tsids;
         let max_tsid = max % num_tsids;
         if Self::tsid_outer_enabled() {
