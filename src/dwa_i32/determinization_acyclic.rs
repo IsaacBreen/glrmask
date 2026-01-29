@@ -245,75 +245,77 @@ fn build_destinations_batched(
     let mut edge_weights: FxHashMap<Label, Weight> = FxHashMap::default();
 
     let collect_start = if timers.is_some() { Some(Instant::now()) } else { None };
-    for (u, w_u) in closure {
-        let st = &nwa.states[*u];
-        if let Some(timers) = timers {
-            timers
-                .transition_total
-                .fetch_add(st.transitions.len() as u64, AtomicOrdering::Relaxed);
-        }
-        for (lbl, targets) in &st.transitions {
+    timeit!("acyclic_det::build_destinations_batched::collect", {
+        for (u, w_u) in closure {
+            let st = &nwa.states[*u];
             if let Some(timers) = timers {
                 timers
-                    .target_total
-                    .fetch_add(targets.len() as u64, AtomicOrdering::Relaxed);
+                    .transition_total
+                    .fetch_add(st.transitions.len() as u64, AtomicOrdering::Relaxed);
             }
-            for (v, w_uv) in targets {
-                let combined = if let Some(timers) = timers {
-                    let start = Instant::now();
-                    let combined = w_u & w_uv;
-                    timers
-                        .and_ns
-                        .fetch_add(start.elapsed().as_nanos() as u64, AtomicOrdering::Relaxed);
-                    timers
-                        .and_ops
-                        .fetch_add(1, AtomicOrdering::Relaxed);
-                    combined
-                } else {
-                    w_u & w_uv
-                };
-                if combined.is_empty() {
-                    continue;
-                }
-                let edge_entry = edge_weights.entry(*lbl).or_insert_with(Weight::zeros);
+            for (lbl, targets) in &st.transitions {
                 if let Some(timers) = timers {
-                    let start = Instant::now();
-                    *edge_entry |= &combined;
                     timers
-                        .or_ns
-                        .fetch_add(start.elapsed().as_nanos() as u64, AtomicOrdering::Relaxed);
-                    timers
-                        .or_ops
-                        .fetch_add(1, AtomicOrdering::Relaxed);
-                    timers
-                        .collect_or_ops
-                        .fetch_add(1, AtomicOrdering::Relaxed);
-                } else {
-                    *edge_entry |= &combined;
+                        .target_total
+                        .fetch_add(targets.len() as u64, AtomicOrdering::Relaxed);
                 }
-                let target_entry = transitions
-                    .entry(*lbl)
-                    .or_default()
-                    .entry(*v)
-                    .or_insert_with(Weight::zeros);
-                if let Some(timers) = timers {
-                    let start = Instant::now();
-                    *target_entry |= &combined;
-                    timers
-                        .or_ns
-                        .fetch_add(start.elapsed().as_nanos() as u64, AtomicOrdering::Relaxed);
-                    timers
-                        .or_ops
-                        .fetch_add(1, AtomicOrdering::Relaxed);
-                    timers
-                        .collect_or_ops
-                        .fetch_add(1, AtomicOrdering::Relaxed);
-                } else {
-                    *target_entry |= &combined;
+                for (v, w_uv) in targets {
+                    let combined = if let Some(timers) = timers {
+                        let start = Instant::now();
+                        let combined = w_u & w_uv;
+                        timers
+                            .and_ns
+                            .fetch_add(start.elapsed().as_nanos() as u64, AtomicOrdering::Relaxed);
+                        timers
+                            .and_ops
+                            .fetch_add(1, AtomicOrdering::Relaxed);
+                        combined
+                    } else {
+                        w_u & w_uv
+                    };
+                    if combined.is_empty() {
+                        continue;
+                    }
+                    let edge_entry = edge_weights.entry(*lbl).or_insert_with(Weight::zeros);
+                    if let Some(timers) = timers {
+                        let start = Instant::now();
+                        *edge_entry |= &combined;
+                        timers
+                            .or_ns
+                            .fetch_add(start.elapsed().as_nanos() as u64, AtomicOrdering::Relaxed);
+                        timers
+                            .or_ops
+                            .fetch_add(1, AtomicOrdering::Relaxed);
+                        timers
+                            .collect_or_ops
+                            .fetch_add(1, AtomicOrdering::Relaxed);
+                    } else {
+                        *edge_entry |= &combined;
+                    }
+                    let target_entry = transitions
+                        .entry(*lbl)
+                        .or_default()
+                        .entry(*v)
+                        .or_insert_with(Weight::zeros);
+                    if let Some(timers) = timers {
+                        let start = Instant::now();
+                        *target_entry |= &combined;
+                        timers
+                            .or_ns
+                            .fetch_add(start.elapsed().as_nanos() as u64, AtomicOrdering::Relaxed);
+                        timers
+                            .or_ops
+                            .fetch_add(1, AtomicOrdering::Relaxed);
+                        timers
+                            .collect_or_ops
+                            .fetch_add(1, AtomicOrdering::Relaxed);
+                    } else {
+                        *target_entry |= &combined;
+                    }
                 }
             }
         }
-    }
+    });
     if let (Some(timers), Some(start)) = (timers, collect_start) {
         timers
             .collect_ns
@@ -336,47 +338,50 @@ fn build_destinations_batched(
 
         let expand_start = if timers.is_some() { Some(Instant::now()) } else { None };
         let mut expanded: FxHashMap<NWAStateID, Weight> = FxHashMap::default();
-        for (v, w_v) in dest_map {
-            if v >= eps_reach.len() {
-                continue;
-            }
-            for (v_reach, w_reach) in &eps_reach[v] {
-                let combined = if let Some(timers) = timers {
-                    let start = Instant::now();
-                    let combined = &w_v & w_reach;
-                    timers
-                        .and_ns
-                        .fetch_add(start.elapsed().as_nanos() as u64, AtomicOrdering::Relaxed);
-                    timers
-                        .and_ops
-                        .fetch_add(1, AtomicOrdering::Relaxed);
-                    combined
-                } else {
-                    &w_v & w_reach
-                };
-                if combined.is_empty() {
+        timeit!("acyclic_det::build_destinations_batched::expand", {
+            for (v, w_v) in dest_map {
+                if v >= eps_reach.len() {
                     continue;
                 }
-                let entry = expanded.entry(*v_reach).or_insert_with(Weight::zeros);
-                if !combined.is_subset_of(entry) {
-                    if let Some(timers) = timers {
+                for (v_reach, w_reach) in &eps_reach[v] {
+                    let combined = if let Some(timers) = timers {
                         let start = Instant::now();
-                        *entry |= &combined;
+                        let combined = &w_v & w_reach;
                         timers
-                            .or_ns
+                            .and_ns
                             .fetch_add(start.elapsed().as_nanos() as u64, AtomicOrdering::Relaxed);
                         timers
-                            .or_ops
+                            .and_ops
                             .fetch_add(1, AtomicOrdering::Relaxed);
-                        timers
-                            .expand_or_ops
-                            .fetch_add(1, AtomicOrdering::Relaxed);
+                        combined
                     } else {
-                        *entry |= &combined;
+                        &w_v & w_reach
+                    };
+                    if combined.is_empty() {
+                        continue;
+                    }
+                    let entry = expanded.entry(*v_reach).or_insert_with(Weight::zeros);
+                    if !combined.is_subset_of(entry) {
+                        if let Some(timers) = timers {
+                            let start = Instant::now();
+                            *entry |= &combined;
+                            timers
+                                .or_ns
+                                .fetch_add(
+                                    start.elapsed().as_nanos() as u64,
+                                    AtomicOrdering::Relaxed,
+                                );
+                            timers.or_ops.fetch_add(1, AtomicOrdering::Relaxed);
+                            timers
+                                .expand_or_ops
+                                .fetch_add(1, AtomicOrdering::Relaxed);
+                        } else {
+                            *entry |= &combined;
+                        }
                     }
                 }
             }
-        }
+        });
         if let (Some(timers), Some(start)) = (timers, expand_start) {
             timers
                 .expand_ns
@@ -402,25 +407,25 @@ fn build_destinations_batched(
         let normalize_start = if timers.is_some() { Some(Instant::now()) } else { None };
         let w_edge_inv = !&w_edge;
         let mut subset: WeightedSubset = Vec::with_capacity(expanded.len());
-        for (sid, w) in expanded {
-            let combined = if let Some(timers) = timers {
-                let start = Instant::now();
-                let combined = w | &w_edge_inv;
-                timers
-                    .or_ns
-                    .fetch_add(start.elapsed().as_nanos() as u64, AtomicOrdering::Relaxed);
-                timers
-                    .or_ops
-                    .fetch_add(1, AtomicOrdering::Relaxed);
-                timers
-                    .normalize_or_ops
-                    .fetch_add(1, AtomicOrdering::Relaxed);
-                combined
-            } else {
-                w | &w_edge_inv
-            };
-            subset.push((sid, combined));
-        }
+        timeit!("acyclic_det::build_destinations_batched::normalize", {
+            for (sid, w) in expanded {
+                let combined = if let Some(timers) = timers {
+                    let start = Instant::now();
+                    let combined = w | &w_edge_inv;
+                    timers
+                        .or_ns
+                        .fetch_add(start.elapsed().as_nanos() as u64, AtomicOrdering::Relaxed);
+                    timers.or_ops.fetch_add(1, AtomicOrdering::Relaxed);
+                    timers
+                        .normalize_or_ops
+                        .fetch_add(1, AtomicOrdering::Relaxed);
+                    combined
+                } else {
+                    w | &w_edge_inv
+                };
+                subset.push((sid, combined));
+            }
+        });
         if let (Some(timers), Some(start)) = (timers, normalize_start) {
             timers
                 .normalize_ns
