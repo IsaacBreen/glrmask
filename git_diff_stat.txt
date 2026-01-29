@@ -1,0 +1,13 @@
+ src/bin/grammar_compiler.rs                 |  13 +
+ src/constraint.rs                           |  28 ++
+ src/datastructures/hybrid_bitset.rs         |  31 ++
+ src/datastructures/rangemap_weight.rs       | 246 +++++++++-
+ src/dwa_i32/determinization.rs              |  39 +-
+ src/dwa_i32/determinization_acyclic.rs      | 715 +++++++++++++++++++++-------
+ src/dwa_i32/determinization_cyclic.rs       |   5 +-
+ src/dwa_i32/minimization/dwa_acyclic/mod.rs | 118 ++++-
+ src/dwa_i32/minimization_config.rs          |  14 +
+ src/interface/interface.rs                  |   4 +
+ src/precompute4/parser_dwa.rs               | 140 ++++--
+ src/profiler.rs                             |  30 +-
+ 12 files changed, 1135 insertions(+), 248 deletions(-)
