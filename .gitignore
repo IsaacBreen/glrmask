@@ -462,3 +462,6 @@ special_stuff/
 
 # === Aider files ===
 .aider*
+
+# Profiling outputs
+profiling_outputs/
