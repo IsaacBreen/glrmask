@@ -168,6 +168,25 @@ pub(crate) fn bitor_assign_counters() -> BitorAssignCounters {
     }
 }
 
+pub(crate) fn bitor_assign_sample_should_check(counter: u64) -> bool {
+    (counter & 1023) == 0
+}
+
+static BITOR_ASSIGN_NOOP_SAMPLE_TOTAL: AtomicU64 = AtomicU64::new(0);
+static BITOR_ASSIGN_NOOP_SAMPLE_HIT: AtomicU64 = AtomicU64::new(0);
+
+pub(crate) fn reset_bitor_assign_noop_sample() {
+    BITOR_ASSIGN_NOOP_SAMPLE_TOTAL.store(0, AtomicOrdering::Relaxed);
+    BITOR_ASSIGN_NOOP_SAMPLE_HIT.store(0, AtomicOrdering::Relaxed);
+}
+
+pub(crate) fn bitor_assign_noop_sample_counters() -> (u64, u64) {
+    (
+        BITOR_ASSIGN_NOOP_SAMPLE_TOTAL.load(AtomicOrdering::Relaxed),
+        BITOR_ASSIGN_NOOP_SAMPLE_HIT.load(AtomicOrdering::Relaxed),
+    )
+}
+
 /// Temporarily override the backend choice for the current thread.
 /// Returns the previous value (if any) which should be restored later.
 pub fn override_backend(choice: BackendChoice) -> Option<BackendChoice> {
@@ -839,6 +858,49 @@ impl AbstractWeight {
         }
     }
 
+    /// Union multiple weights in a single operation.
+    pub fn bulk_union(weights: &[&AbstractWeight]) -> AbstractWeight {
+        if weights.is_empty() {
+            return AbstractWeight::empty();
+        }
+        if weights.len() == 1 {
+            return weights[0].clone();
+        }
+
+        match weights[0] {
+            AbstractWeight::RangeSet(_) => {
+                let mut sets: Vec<&RangeSet> = Vec::with_capacity(weights.len());
+                for weight in weights {
+                    if let AbstractWeight::RangeSet(rsb) = weight {
+                        sets.push(rsb);
+                    } else {
+                        panic!("AbstractWeight::bulk_union requires all weights to be the same variant");
+                    }
+                }
+                AbstractWeight::RangeSet(RangeSet::bulk_union(&sets))
+            }
+            AbstractWeight::Factorized(_) => {
+                let mut out = weights[0].clone();
+                for weight in &weights[1..] {
+                    out |= *weight;
+                }
+                out
+            }
+            AbstractWeight::RangeMap(_) => {
+                let mut maps: Vec<&RangeMapWeight> = Vec::with_capacity(weights.len());
+                for weight in weights {
+                    if let AbstractWeight::RangeMap(rm) = weight {
+                        maps.push(rm.as_ref());
+                    } else {
+                        panic!("AbstractWeight::bulk_union requires all weights to be the same variant");
+                    }
+                }
+                AbstractWeight::RangeMap(RangeMapWeight::bulk_union(&maps))
+            }
+        }
+    }
+
+
     /// Check if the weight is empty.
     pub fn is_empty(&self) -> bool {
         match self {
@@ -1280,7 +1342,13 @@ impl BitOrAssign for AbstractWeight {
 
 impl BitOrAssign<&AbstractWeight> for AbstractWeight {
     fn bitor_assign(&mut self, rhs: &AbstractWeight) {
-        BITOR_ASSIGN_REF_CALLS.fetch_add(1, AtomicOrdering::Relaxed);
+        let call_idx = BITOR_ASSIGN_REF_CALLS.fetch_add(1, AtomicOrdering::Relaxed) + 1;
+        if bitor_assign_sample_should_check(call_idx) {
+            BITOR_ASSIGN_NOOP_SAMPLE_TOTAL.fetch_add(1, AtomicOrdering::Relaxed);
+            if rhs.is_subset_of(self) {
+                BITOR_ASSIGN_NOOP_SAMPLE_HIT.fetch_add(1, AtomicOrdering::Relaxed);
+            }
+        }
         if std::mem::discriminant(&*self) != std::mem::discriminant(rhs) {
             panic!("AbstractWeight operation requires both operands to be the same variant");
         }

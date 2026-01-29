@@ -1,0 +1,23 @@
+timeout 600 python scripts/compile.py \
+		--grammar src/js.ebnf \
+		--format ebnf \
+		--output .cache/test_vocabs/constraint_js.json.gz \
+		--vocab-url "https://huggingface.co/openai-community/gpt2/raw/main/vocab.json" \
+		
+   Compiling sep1 v0.1.0 (/Users/isaacbreen/Projects2/grammars2024)
+    Finished `release` profile [optimized] target(s) in 34.55s
+
+[1;36mGrammar Constraint Compiler[0m
+[2m─────────────────────────────────────────[0m
+
+TIMING: grammar_definition 22.930916ms
+TIMING: load_vocabulary 39.404209ms
+TIMING: build_tokenizer 13.324375ms
+TIMING: build_glr_parser 35.509875ms
+TIMING: setup_combined 358.241709ms
+TIMING: build_internal_to_original_map 2.400459ms
+TIMING: build_internal_vocab_tree 819.208µs
+TIMING: build_maps_and_possible_matches 10.633625ms
+TIMING: compute_terminal_follow_sets 10.175791ms
+TIMING: build_approximate_parser_dfa 26.882666ms
+TIMING: NWA pass RmEpsilon 197.83075ms

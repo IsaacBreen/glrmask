@@ -1,0 +1,15 @@
+
+--- Loading encoding o200k_base ---
+
+--- Loading encoding o200k_harmony ---
+Vocabulary size: 199886
+
+Overall Max length: 128
+Number of tokens with this length: 1
+ID: 72056, Length: 128, Content: '                                                                                                                                '
+
+Max length (non-space): 113
+Number of tokens with this length: 1
+
+Top 5 non-space tokens with max length:
+ID: 179041, Length: 113, Content: ' ----------------------------------------------------------------------------------------------------------------'

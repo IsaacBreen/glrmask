@@ -1,0 +1,60 @@
+## dev-isaac...origin/dev-isaac [ahead 1]
+ M src/bin/grammar_compiler.rs
+ M src/constraint.rs
+ M src/datastructures/hybrid_bitset.rs
+ M src/datastructures/rangemap_weight.rs
+ M src/dwa_i32/determinization.rs
+ M src/dwa_i32/determinization_acyclic.rs
+ M src/dwa_i32/determinization_cyclic.rs
+ M src/dwa_i32/minimization/dwa_acyclic/mod.rs
+ M src/dwa_i32/minimization_config.rs
+ M src/interface/interface.rs
+ M src/precompute4/parser_dwa.rs
+ M src/profiler.rs
+?? cargo_test_avg_stats.txt
+?? cargo_test_cache_counters.txt
+?? cargo_test_cache_miss_timing.txt
+?? cargo_test_fastpaths.txt
+?? cargo_test_l1_cache.txt
+?? cargo_test_no_btree.txt
+?? cargo_test_or_phase.txt
+?? cargo_test_rangeset_union.txt
+?? cargo_test_segments.txt
+?? cargo_test_union_breakdown.txt
+?? cargo_test_weight_ops.txt
+?? claude_tokenizer.json
+?? find_longest_token.py
+?? find_longest_token_hf.py
+?? find_longest_token_tiktoken.py
+?? gemma3_tokenizer.json
+?? git_diff_stat.txt
+?? git_status.txt
+?? hf_nonspace.txt
+?? parse_height_log.py
+?? ps_make.txt
+?? ps_output.txt
+?? tiktoken_nonspace.txt
+?? timing_cache_counters.txt
+?? timing_cache_miss.txt
+?? timing_determinize_batch.txt
+?? timing_determinize_batch_stdout.txt
+?? timing_determinize_breakdown.txt
+?? timing_determinize_breakdown2.txt
+?? timing_determinize_breakdown2_stdout.txt
+?? timing_determinize_breakdown_stdout.txt
+?? timing_determinize_micro.txt
+?? timing_determinize_micro_stdout.txt
+?? timing_fastpaths.txt
+?? timing_fxhash.txt
+?? timing_fxhash_stdout.txt
+?? timing_l1_cache.txt
+?? timing_l1_cache2.txt
+?? timing_no_btree.txt
+?? timing_no_sort.txt
+?? timing_no_sort_tee.txt
+?? timing_rangeset_union.txt
+?? timing_segments.txt
+?? timing_segments2.txt
+?? timing_union_breakdown.txt
+?? timing_weight_ops.txt
+?? tokenizer_results.txt
