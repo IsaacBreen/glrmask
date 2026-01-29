@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
-use profiler_macro::timeit;
+use profiler_macro::{time_it, timeit};
 
 use super::common::{Label, NWAStateID, Weight};
 use super::determinization::{HashedSubset, WeightedSubset};
@@ -227,6 +227,7 @@ fn compute_unweighted_dwa_topo_order(
     }
 }
 
+#[time_it]
 fn build_destinations_batched(
     closure: &FxHashMap<NWAStateID, Weight>,
     nwa: &NWA,
@@ -451,6 +452,9 @@ struct MaterializeTimers {
     labels: AtomicU64,
     eps_expand_ratios: Mutex<Vec<f64>>,
     total_updates: AtomicU64,
+    closure_lookup_ns: AtomicU64,
+    transition_iter_ns: AtomicU64,
+    pending_insert_ns: AtomicU64,
 }
 
 
@@ -693,6 +697,8 @@ pub(crate) fn determinize_acyclic_with_progress(
         } else {
             None
         };
+        let mut merge_or_ops: u64 = 0;
+        let mut merge_updates: u64 = 0;
         for states_at_level in states_by_level.into_iter() {
             for &cid in &states_at_level {
                 dest_cache[cid].clear();
@@ -710,8 +716,20 @@ pub(crate) fn determinize_acyclic_with_progress(
                             crate::datastructures::abstract_weight::override_expansion_allowed(expansion_allowed);
                         },
                         |_, &cid| {
+                            let timers = timers.as_deref();
+                            let closure_lookup_start = if timers.is_some() {
+                                Some(Instant::now())
+                            } else {
+                                None
+                            };
                             let closure = &weighted_closures_ref[cid];
-                            if closure.is_empty() {
+                            let is_empty = closure.is_empty();
+                            if let (Some(timers), Some(start)) = (timers, closure_lookup_start) {
+                                timers
+                                    .closure_lookup_ns
+                                    .fetch_add(start.elapsed().as_nanos() as u64, AtomicOrdering::Relaxed);
+                            }
+                            if is_empty {
                                 return None;
                             }
 
@@ -725,7 +743,11 @@ pub(crate) fn determinize_acyclic_with_progress(
                                 label_to_dest.insert(lbl, dest_id);
                             }
 
-                            let timers = timers.as_deref();
+                            let transition_iter_start = if timers.is_some() {
+                                Some(Instant::now())
+                            } else {
+                                None
+                            };
                             for (lbl, dest_subset, w_edge) in
                                 build_destinations_batched(closure, nwa, &eps_reach, timers)
                             {
@@ -734,6 +756,11 @@ pub(crate) fn determinize_acyclic_with_progress(
                                 };
                                 dest_entries.push((lbl, dest_id, w_edge));
                                 weighted_updates.push((dest_id, dest_subset));
+                            }
+                            if let (Some(timers), Some(start)) = (timers, transition_iter_start) {
+                                timers
+                                    .transition_iter_ns
+                                    .fetch_add(start.elapsed().as_nanos() as u64, AtomicOrdering::Relaxed);
                             }
 
                             Some((cid, dest_entries, weighted_updates))
@@ -749,10 +776,19 @@ pub(crate) fn determinize_acyclic_with_progress(
 
             let merge_start = if profile_enabled { Some(Instant::now()) } else { None };
             let mut pending: FxHashMap<(usize, NWAStateID), Vec<Weight>> = FxHashMap::default();
+            let pending_insert_start = if materialize_timers.is_some() {
+                Some(Instant::now())
+            } else {
+                None
+            };
             for (cid, dest_entries, weighted_updates) in updates {
                 dest_cache[cid] = dest_entries;
                 for (dest_id, dest_subset) in weighted_updates {
                     for (sid, w) in dest_subset {
+                        if profile_enabled {
+                            merge_or_ops = merge_or_ops.saturating_add(1);
+                            merge_updates = merge_updates.saturating_add(1);
+                        }
                         if let Some(timers) = materialize_timers.as_deref() {
                             timers
                                 .total_updates
@@ -761,6 +797,11 @@ pub(crate) fn determinize_acyclic_with_progress(
                         pending.entry((dest_id, sid)).or_default().push(w);
                     }
                 }
+            }
+            if let (Some(timers), Some(start)) = (materialize_timers.as_deref(), pending_insert_start) {
+                timers
+                    .pending_insert_ns
+                    .fetch_add(start.elapsed().as_nanos() as u64, AtomicOrdering::Relaxed);
             }
             for ((dest_id, sid), weights) in pending.iter_mut() {
                 if let Some(existing) = weighted_closures[*dest_id].get(sid) {
@@ -790,6 +831,21 @@ pub(crate) fn determinize_acyclic_with_progress(
             if let Some(start) = merge_start {
                 materialize_merge_time = Some(start.elapsed());
             }
+        }
+        if profile_enabled {
+            let final_cells: usize = weighted_closures.iter().map(|m| m.len()).sum();
+            let ratio = if final_cells == 0 {
+                0.0
+            } else {
+                (merge_updates as f64) / (final_cells as f64)
+            };
+            eprintln!(
+                "MERGE_STATS: or_ops={} updates={} final_cells={} ratio={:.2}",
+                merge_or_ops,
+                merge_updates,
+                final_cells,
+                ratio,
+            );
         }
         if let Some(stats) = bulk_stats {
             eprintln!("BULK_UNION_STATS: size -> (count, avg_ns)");
@@ -1031,6 +1087,21 @@ pub(crate) fn determinize_acyclic_with_progress(
                 normalize_or,
                 total_or,
                 or_ops,
+            );
+            let closure_lookup = Duration::from_nanos(
+                timers.closure_lookup_ns.load(AtomicOrdering::Relaxed),
+            );
+            let transition_iter = Duration::from_nanos(
+                timers.transition_iter_ns.load(AtomicOrdering::Relaxed),
+            );
+            let pending_insert = Duration::from_nanos(
+                timers.pending_insert_ns.load(AtomicOrdering::Relaxed),
+            );
+            eprintln!(
+                "TIMING: determinize_acyclic::materialize_blocks closure_lookup={:?} transition_iter={:?} pending_insert={:?}",
+                closure_lookup,
+                transition_iter,
+                pending_insert,
             );
             if let Ok(mut ratios) = timers.eps_expand_ratios.lock() {
                 if ratios.is_empty() {
