@@ -54,7 +54,7 @@ impl DWA {
     #[time_it("DWA::minimize_acyclic")]
     pub fn minimize_acyclic(&mut self) {
         // Check environment variable for fast minimize option
-        let use_fast_minimize = std::env::var("DWA_FAST_MINIMIZE").map(|v| v == "1").unwrap_or(false);
+        let use_fast_minimize = std::env::var("DWA_FAST_MINIMIZE").map(|v| v != "0").unwrap_or(true);
         
         if use_fast_minimize {
             // Use partition refinement - faster but may produce slightly larger DWA
