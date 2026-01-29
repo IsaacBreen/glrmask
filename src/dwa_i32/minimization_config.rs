@@ -345,14 +345,18 @@ impl NWA {
 
     #[time_it("NWA::determinize_and_minimize_with_config")]
     pub fn determinize_and_minimize_with_config(&mut self, config: DeterminizeAndMinimizeConfig) -> DWA {
+        let total_start = std::time::Instant::now();
         crate::debug!(5, "Determinize and minimize initial stats: {}",
             self.stats());
 
         // Run NWA passes
+        let nwa_passes_start = std::time::Instant::now();
         for pass in config.nwa_passes {
             if !pass.is_enabled() {
                 continue;
             }
+            let pass_name = format!("{:?}", pass);
+            let pass_start = std::time::Instant::now();
             timeit!(format!("NWA pass {:?}", pass), {
                 match pass {
                     NwaPass::PruneUnreachable => { self.prune_unreachable(); },
@@ -365,7 +369,9 @@ impl NWA {
                     NwaPass::MinimizeRustfst => { self.minimize_with_rustfst_full(); },
                 }
             });
+            eprintln!("TIMING: NWA pass {} {:?}", pass_name, pass_start.elapsed());
         }
+        eprintln!("TIMING: NWA passes total {:?}", nwa_passes_start.elapsed());
         crate::debug!(5, "NWA minimization: {}", 
             self.stats());
 
@@ -373,6 +379,7 @@ impl NWA {
         crate::datastructures::rangemap_weight::reset_profiling();
         crate::datastructures::abstract_weight::reset_weight_op_profiling();
 
+        let det_total_start = std::time::Instant::now();
         let mut dwa = timeit!("NWA::determinize", {
             let det_start = std::time::Instant::now();
             let mut dwa = if config.use_rustfst_determinize {
@@ -385,13 +392,17 @@ impl NWA {
                 dwa.stats(), det_time);
             dwa
         });
+        eprintln!("TIMING: NWA::determinize {:?}", det_total_start.elapsed());
 
         // Run DWA passes
+        let dwa_passes_start = std::time::Instant::now();
         for pass in config.dwa_passes.clone() {
             // Check if pass is enabled (e.g., ConsolidateRanges is disabled in weight-heavy mode)
             if !pass.is_enabled() {
                 continue;
             }
+            let pass_name = format!("{:?}", pass);
+            let pass_start = std::time::Instant::now();
             timeit!(format!("DWA pass {:?}", pass), {
                 match pass {
                     DwaPass::PruneUnreachable => { dwa.prune_unreachable(); },
@@ -404,9 +415,12 @@ impl NWA {
                     DwaPass::TrimWeights => { dwa.trim_weights(); },
                 }
             });
+            eprintln!("TIMING: DWA pass {} {:?}", pass_name, pass_start.elapsed());
         }
+        eprintln!("TIMING: DWA passes total {:?}", dwa_passes_start.elapsed());
         crate::debug!(5, "DWA minimization: {}",
             dwa.stats());
+        eprintln!("TIMING: NWA::determinize_and_minimize_with_config total {:?}", total_start.elapsed());
         dwa
     }
 

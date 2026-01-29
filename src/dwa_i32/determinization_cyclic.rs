@@ -1,4 +1,5 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
+use rustc_hash::FxHashMap;
 
 use super::common::{NWAStateID, Weight};
 use super::determinization::WeightedSubset;
@@ -10,7 +11,7 @@ pub(crate) fn precompute_all_epsilon_closures(states: &NWAStates) -> Vec<Weighte
     let mut reachability = Vec::with_capacity(n);
 
     for start_node in 0..n {
-        let mut dists: HashMap<NWAStateID, Weight> = HashMap::new();
+        let mut dists: FxHashMap<NWAStateID, Weight> = FxHashMap::default();
         let mut queue: VecDeque<NWAStateID> = VecDeque::new();
 
         // Self-reachability is identity

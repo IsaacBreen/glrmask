@@ -1,8 +1,11 @@
+use std::cell::Cell;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
+use std::time::Instant;
 
 use dashmap::DashSet;
 use lru::LruCache;
@@ -37,6 +40,118 @@ static RANGEMAP_DIVIDE_RHS_COMP_CACHE: Lazy<Mutex<LruCache<usize, Arc<RhsCompCac
     });
 static FULL_TSIDS_CACHE: Lazy<Mutex<HashMap<usize, RangeSet>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
+
+thread_local! {
+    static OP_CACHE_OR_MISS_ACTIVE: Cell<bool> = Cell::new(false);
+}
+
+static OP_CACHE_PROFILE_ENABLED: AtomicBool = AtomicBool::new(false);
+static OP_CACHE_OR_HITS: AtomicU64 = AtomicU64::new(0);
+static OP_CACHE_OR_MISSES: AtomicU64 = AtomicU64::new(0);
+static OP_CACHE_OR_MISS_TIME_NS: AtomicU64 = AtomicU64::new(0);
+static OP_CACHE_OR_MISS_COMPUTES: AtomicU64 = AtomicU64::new(0);
+static OP_CACHE_OR_MISS_PREP_NS: AtomicU64 = AtomicU64::new(0);
+static OP_CACHE_OR_MISS_UNION_ASYM_NS: AtomicU64 = AtomicU64::new(0);
+static OP_CACHE_OR_MISS_MERGE_NS: AtomicU64 = AtomicU64::new(0);
+static OP_CACHE_OR_MISS_INTERN_NS: AtomicU64 = AtomicU64::new(0);
+static OP_CACHE_OR_MISS_LEFT_RANGES_TOTAL: AtomicU64 = AtomicU64::new(0);
+static OP_CACHE_OR_MISS_RIGHT_RANGES_TOTAL: AtomicU64 = AtomicU64::new(0);
+static OP_CACHE_OR_MISS_ASYM_COUNT: AtomicU64 = AtomicU64::new(0);
+static OP_CACHE_OR_MISS_MERGE_COUNT: AtomicU64 = AtomicU64::new(0);
+static OP_CACHE_OR_MISS_RANGESET_UNION_NS: AtomicU64 = AtomicU64::new(0);
+static OP_CACHE_OR_MISS_RANGESET_UNION_COUNT: AtomicU64 = AtomicU64::new(0);
+static OP_CACHE_OR_MISS_RANGESET_LEFT_RANGES_TOTAL: AtomicU64 = AtomicU64::new(0);
+static OP_CACHE_OR_MISS_RANGESET_RIGHT_RANGES_TOTAL: AtomicU64 = AtomicU64::new(0);
+static OP_CACHE_OR_MISS_SEGMENTS_TOTAL: AtomicU64 = AtomicU64::new(0);
+static OP_CACHE_OR_MISS_SEGMENTS_BOTH: AtomicU64 = AtomicU64::new(0);
+static OP_CACHE_OR_MISS_SEGMENTS_LEFT_ONLY: AtomicU64 = AtomicU64::new(0);
+static OP_CACHE_OR_MISS_SEGMENTS_RIGHT_ONLY: AtomicU64 = AtomicU64::new(0);
+static OP_CACHE_OR_MISS_SEGMENTS_NONE: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Clone, Copy, Default)]
+pub(crate) struct OpCacheOrMissDetail {
+    pub(crate) prep_ns: u64,
+    pub(crate) union_asym_ns: u64,
+    pub(crate) merge_ns: u64,
+    pub(crate) intern_ns: u64,
+    pub(crate) left_ranges_total: u64,
+    pub(crate) right_ranges_total: u64,
+    pub(crate) asym_count: u64,
+    pub(crate) merge_count: u64,
+    pub(crate) rangeset_union_ns: u64,
+    pub(crate) rangeset_union_count: u64,
+    pub(crate) rangeset_left_ranges_total: u64,
+    pub(crate) rangeset_right_ranges_total: u64,
+    pub(crate) segments_total: u64,
+    pub(crate) segments_both: u64,
+    pub(crate) segments_left_only: u64,
+    pub(crate) segments_right_only: u64,
+    pub(crate) segments_none: u64,
+}
+
+pub(crate) fn set_op_cache_profile_enabled(enabled: bool) {
+    OP_CACHE_PROFILE_ENABLED.store(enabled, AtomicOrdering::Relaxed);
+}
+
+pub(crate) fn reset_op_cache_or_counters() {
+    OP_CACHE_OR_HITS.store(0, AtomicOrdering::Relaxed);
+    OP_CACHE_OR_MISSES.store(0, AtomicOrdering::Relaxed);
+    OP_CACHE_OR_MISS_TIME_NS.store(0, AtomicOrdering::Relaxed);
+    OP_CACHE_OR_MISS_COMPUTES.store(0, AtomicOrdering::Relaxed);
+    OP_CACHE_OR_MISS_PREP_NS.store(0, AtomicOrdering::Relaxed);
+    OP_CACHE_OR_MISS_UNION_ASYM_NS.store(0, AtomicOrdering::Relaxed);
+    OP_CACHE_OR_MISS_MERGE_NS.store(0, AtomicOrdering::Relaxed);
+    OP_CACHE_OR_MISS_INTERN_NS.store(0, AtomicOrdering::Relaxed);
+    OP_CACHE_OR_MISS_LEFT_RANGES_TOTAL.store(0, AtomicOrdering::Relaxed);
+    OP_CACHE_OR_MISS_RIGHT_RANGES_TOTAL.store(0, AtomicOrdering::Relaxed);
+    OP_CACHE_OR_MISS_ASYM_COUNT.store(0, AtomicOrdering::Relaxed);
+    OP_CACHE_OR_MISS_MERGE_COUNT.store(0, AtomicOrdering::Relaxed);
+    OP_CACHE_OR_MISS_RANGESET_UNION_NS.store(0, AtomicOrdering::Relaxed);
+    OP_CACHE_OR_MISS_RANGESET_UNION_COUNT.store(0, AtomicOrdering::Relaxed);
+    OP_CACHE_OR_MISS_RANGESET_LEFT_RANGES_TOTAL.store(0, AtomicOrdering::Relaxed);
+    OP_CACHE_OR_MISS_RANGESET_RIGHT_RANGES_TOTAL.store(0, AtomicOrdering::Relaxed);
+    OP_CACHE_OR_MISS_SEGMENTS_TOTAL.store(0, AtomicOrdering::Relaxed);
+    OP_CACHE_OR_MISS_SEGMENTS_BOTH.store(0, AtomicOrdering::Relaxed);
+    OP_CACHE_OR_MISS_SEGMENTS_LEFT_ONLY.store(0, AtomicOrdering::Relaxed);
+    OP_CACHE_OR_MISS_SEGMENTS_RIGHT_ONLY.store(0, AtomicOrdering::Relaxed);
+    OP_CACHE_OR_MISS_SEGMENTS_NONE.store(0, AtomicOrdering::Relaxed);
+}
+
+pub(crate) fn op_cache_or_counters() -> (u64, u64) {
+    (
+        OP_CACHE_OR_HITS.load(AtomicOrdering::Relaxed),
+        OP_CACHE_OR_MISSES.load(AtomicOrdering::Relaxed),
+    )
+}
+
+pub(crate) fn op_cache_or_miss_time_counters() -> (u64, u64) {
+    (
+        OP_CACHE_OR_MISS_TIME_NS.load(AtomicOrdering::Relaxed),
+        OP_CACHE_OR_MISS_COMPUTES.load(AtomicOrdering::Relaxed),
+    )
+}
+
+pub(crate) fn op_cache_or_miss_detail_counters() -> OpCacheOrMissDetail {
+    OpCacheOrMissDetail {
+        prep_ns: OP_CACHE_OR_MISS_PREP_NS.load(AtomicOrdering::Relaxed),
+        union_asym_ns: OP_CACHE_OR_MISS_UNION_ASYM_NS.load(AtomicOrdering::Relaxed),
+        merge_ns: OP_CACHE_OR_MISS_MERGE_NS.load(AtomicOrdering::Relaxed),
+        intern_ns: OP_CACHE_OR_MISS_INTERN_NS.load(AtomicOrdering::Relaxed),
+        left_ranges_total: OP_CACHE_OR_MISS_LEFT_RANGES_TOTAL.load(AtomicOrdering::Relaxed),
+        right_ranges_total: OP_CACHE_OR_MISS_RIGHT_RANGES_TOTAL.load(AtomicOrdering::Relaxed),
+        asym_count: OP_CACHE_OR_MISS_ASYM_COUNT.load(AtomicOrdering::Relaxed),
+        merge_count: OP_CACHE_OR_MISS_MERGE_COUNT.load(AtomicOrdering::Relaxed),
+        rangeset_union_ns: OP_CACHE_OR_MISS_RANGESET_UNION_NS.load(AtomicOrdering::Relaxed),
+        rangeset_union_count: OP_CACHE_OR_MISS_RANGESET_UNION_COUNT.load(AtomicOrdering::Relaxed),
+        rangeset_left_ranges_total: OP_CACHE_OR_MISS_RANGESET_LEFT_RANGES_TOTAL.load(AtomicOrdering::Relaxed),
+        rangeset_right_ranges_total: OP_CACHE_OR_MISS_RANGESET_RIGHT_RANGES_TOTAL.load(AtomicOrdering::Relaxed),
+        segments_total: OP_CACHE_OR_MISS_SEGMENTS_TOTAL.load(AtomicOrdering::Relaxed),
+        segments_both: OP_CACHE_OR_MISS_SEGMENTS_BOTH.load(AtomicOrdering::Relaxed),
+        segments_left_only: OP_CACHE_OR_MISS_SEGMENTS_LEFT_ONLY.load(AtomicOrdering::Relaxed),
+        segments_right_only: OP_CACHE_OR_MISS_SEGMENTS_RIGHT_ONLY.load(AtomicOrdering::Relaxed),
+        segments_none: OP_CACHE_OR_MISS_SEGMENTS_NONE.load(AtomicOrdering::Relaxed),
+    }
+}
 
 // --- Profiling ---
 // Legacy rangemap profiling removed; keep no-op hooks for callers.
@@ -100,16 +215,26 @@ fn get_op_cache(op: cache::BinOp, a: &Arc<RangeMapWeight>, b: &Arc<RangeMapWeigh
     if !is_interned_rangemap(a) || !is_interned_rangemap(b) {
         return None;
     }
+    let profile_enabled = OP_CACHE_PROFILE_ENABLED.load(AtomicOrdering::Relaxed);
     let mut cache = RANGEMAP_OP_CACHE.lock().unwrap();
     let key = op_key(op, a, b);
     if let Some(hit) = cache.get(&key) {
+        if profile_enabled && matches!(op, cache::BinOp::Or) {
+            OP_CACHE_OR_HITS.fetch_add(1, AtomicOrdering::Relaxed);
+        }
         return Some(hit.clone());
     }
     if matches!(op, cache::BinOp::And | cache::BinOp::Or | cache::BinOp::Xor) {
         let swapped = op_key(op, b, a);
         if let Some(hit) = cache.get(&swapped) {
+            if profile_enabled && matches!(op, cache::BinOp::Or) {
+                OP_CACHE_OR_HITS.fetch_add(1, AtomicOrdering::Relaxed);
+            }
             return Some(hit.clone());
         }
+    }
+    if profile_enabled && matches!(op, cache::BinOp::Or) {
+        OP_CACHE_OR_MISSES.fetch_add(1, AtomicOrdering::Relaxed);
     }
     None
 }
@@ -885,16 +1010,37 @@ impl RangeMapWeight {
     }
 
     fn union_non_negated(&self, other: &Self) -> Self {
+        let profile_active = OP_CACHE_PROFILE_ENABLED.load(AtomicOrdering::Relaxed)
+            && OP_CACHE_OR_MISS_ACTIVE.with(|flag| flag.get());
+        let prep_start = if profile_active { Some(Instant::now()) } else { None };
         let left_ranges = Self::map_range_count(&self.map);
         let right_ranges = Self::map_range_count(&other.map);
+        if profile_active {
+            OP_CACHE_OR_MISS_LEFT_RANGES_TOTAL
+                .fetch_add(left_ranges as u64, AtomicOrdering::Relaxed);
+            OP_CACHE_OR_MISS_RIGHT_RANGES_TOTAL
+                .fetch_add(right_ranges as u64, AtomicOrdering::Relaxed);
+        }
         if left_ranges == 0 {
+            if let Some(start) = prep_start {
+                OP_CACHE_OR_MISS_PREP_NS
+                    .fetch_add(start.elapsed().as_nanos() as u64, AtomicOrdering::Relaxed);
+            }
             return other.clone();
         }
         if right_ranges == 0 {
+            if let Some(start) = prep_start {
+                OP_CACHE_OR_MISS_PREP_NS
+                    .fetch_add(start.elapsed().as_nanos() as u64, AtomicOrdering::Relaxed);
+            }
             return self.clone();
         }
         let is_same = std::ptr::eq(self, other) || self == other;
         if is_same {
+            if let Some(start) = prep_start {
+                OP_CACHE_OR_MISS_PREP_NS
+                    .fetch_add(start.elapsed().as_nanos() as u64, AtomicOrdering::Relaxed);
+            }
             return self.clone();
         }
         if left_ranges == 1 || right_ranges == 1 {
@@ -905,6 +1051,10 @@ impl RangeMapWeight {
                         && *range.end() == max_token
                         && *tsid_set == Self::full_tsids(self.num_tsids)
                     {
+                        if let Some(start) = prep_start {
+                            OP_CACHE_OR_MISS_PREP_NS
+                                .fetch_add(start.elapsed().as_nanos() as u64, AtomicOrdering::Relaxed);
+                        }
                         return self.clone();
                     }
                 }
@@ -915,6 +1065,10 @@ impl RangeMapWeight {
                         && *range.end() == max_token
                         && *tsid_set == Self::full_tsids(self.num_tsids)
                     {
+                        if let Some(start) = prep_start {
+                            OP_CACHE_OR_MISS_PREP_NS
+                                .fetch_add(start.elapsed().as_nanos() as u64, AtomicOrdering::Relaxed);
+                        }
                         return other.clone();
                     }
                 }
@@ -927,17 +1081,68 @@ impl RangeMapWeight {
             (other, self, right_ranges, left_ranges)
         };
 
+        if let Some(start) = prep_start {
+            OP_CACHE_OR_MISS_PREP_NS
+                .fetch_add(start.elapsed().as_nanos() as u64, AtomicOrdering::Relaxed);
+        }
+
         let map = if small_ranges.saturating_mul(10) < large_ranges {
-            let map = Self::union_asymmetric(&smaller.map, &larger.map);
-            map
+            if profile_active {
+                let start = Instant::now();
+                let map = Self::union_asymmetric(&smaller.map, &larger.map);
+                OP_CACHE_OR_MISS_UNION_ASYM_NS
+                    .fetch_add(start.elapsed().as_nanos() as u64, AtomicOrdering::Relaxed);
+                OP_CACHE_OR_MISS_ASYM_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
+                map
+            } else {
+                Self::union_asymmetric(&smaller.map, &larger.map)
+            }
         } else {
-            let map = Self::merge_maps(&self.map, &other.map, |left, right| match (left, right) {
-                (Some(a), Some(b)) => a | b,
-                (Some(a), None) => a.clone(),
-                (None, Some(b)) => b.clone(),
-                (None, None) => RangeSet::zeros(),
-            });
-            map
+            if profile_active {
+                let start = Instant::now();
+                let map = Self::merge_maps(&self.map, &other.map, |left, right| {
+                    OP_CACHE_OR_MISS_SEGMENTS_TOTAL.fetch_add(1, AtomicOrdering::Relaxed);
+                    match (left, right) {
+                        (Some(a), Some(b)) => {
+                            OP_CACHE_OR_MISS_SEGMENTS_BOTH.fetch_add(1, AtomicOrdering::Relaxed);
+                            OP_CACHE_OR_MISS_RANGESET_LEFT_RANGES_TOTAL
+                                .fetch_add(a.ranges_len() as u64, AtomicOrdering::Relaxed);
+                            OP_CACHE_OR_MISS_RANGESET_RIGHT_RANGES_TOTAL
+                                .fetch_add(b.ranges_len() as u64, AtomicOrdering::Relaxed);
+                            let start = Instant::now();
+                            let combined = a | b;
+                            OP_CACHE_OR_MISS_RANGESET_UNION_NS
+                                .fetch_add(start.elapsed().as_nanos() as u64, AtomicOrdering::Relaxed);
+                            OP_CACHE_OR_MISS_RANGESET_UNION_COUNT
+                                .fetch_add(1, AtomicOrdering::Relaxed);
+                            combined
+                        }
+                        (Some(a), None) => {
+                            OP_CACHE_OR_MISS_SEGMENTS_LEFT_ONLY.fetch_add(1, AtomicOrdering::Relaxed);
+                            a.clone()
+                        }
+                        (None, Some(b)) => {
+                            OP_CACHE_OR_MISS_SEGMENTS_RIGHT_ONLY.fetch_add(1, AtomicOrdering::Relaxed);
+                            b.clone()
+                        }
+                        (None, None) => {
+                            OP_CACHE_OR_MISS_SEGMENTS_NONE.fetch_add(1, AtomicOrdering::Relaxed);
+                            RangeSet::zeros()
+                        }
+                    }
+                });
+                OP_CACHE_OR_MISS_MERGE_NS
+                    .fetch_add(start.elapsed().as_nanos() as u64, AtomicOrdering::Relaxed);
+                OP_CACHE_OR_MISS_MERGE_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
+                map
+            } else {
+                Self::merge_maps(&self.map, &other.map, |left, right| match (left, right) {
+                    (Some(a), Some(b)) => a | b,
+                    (Some(a), None) => a.clone(),
+                    (None, Some(b)) => b.clone(),
+                    (None, None) => RangeSet::zeros(),
+                })
+            }
         };
         let result = Self::from_map(map, self.num_tsids());
         result
@@ -1487,8 +1692,29 @@ impl WeightBackend for Arc<RangeMapWeight> {
         if let Some(hit) = get_op_cache(cache::BinOp::Or, self, other) {
             return hit;
         }
-        let out = WeightBackend::union(self.as_ref(), other.as_ref());
+        let profile_enabled = OP_CACHE_PROFILE_ENABLED.load(AtomicOrdering::Relaxed);
+        let miss_start = if profile_enabled { Some(Instant::now()) } else { None };
+        let out = if profile_enabled {
+            OP_CACHE_OR_MISS_ACTIVE.with(|flag| {
+                let prev = flag.replace(true);
+                let out = WeightBackend::union(self.as_ref(), other.as_ref());
+                flag.set(prev);
+                out
+            })
+        } else {
+            WeightBackend::union(self.as_ref(), other.as_ref())
+        };
+        if let Some(start) = miss_start {
+            OP_CACHE_OR_MISS_TIME_NS
+                .fetch_add(start.elapsed().as_nanos() as u64, AtomicOrdering::Relaxed);
+            OP_CACHE_OR_MISS_COMPUTES.fetch_add(1, AtomicOrdering::Relaxed);
+        }
+        let intern_start = if profile_enabled { Some(Instant::now()) } else { None };
         let out = intern_rangemap(out);
+        if let Some(start) = intern_start {
+            OP_CACHE_OR_MISS_INTERN_NS
+                .fetch_add(start.elapsed().as_nanos() as u64, AtomicOrdering::Relaxed);
+        }
         put_op_cache(cache::BinOp::Or, self.clone(), other.clone(), out.clone());
         out
     }

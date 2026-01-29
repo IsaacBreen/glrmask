@@ -7,8 +7,9 @@ use std::time::{Duration, Instant};
 // const PROFILER_CORRECTION: Duration = Duration::from_nanos(1300);
 const PROFILER_CORRECTION: Duration = Duration::from_nanos(0);
 
-/// Set this to `false` to completely disable profiling at runtime.
-pub const PROFILING_ENABLED: bool = true;
+/// Default profiling toggle. Set to `true` to enable profiling by default.
+/// Can be overridden by `PROFILE_ENABLED=1` (or `true`) at runtime.
+pub const PROFILING_ENABLED: bool = false;
 
 /// Controls detailed GSS logging. If false, `log_gss` and `print_gss_forest` are disabled.
 pub const GSS_LOGGING_ENABLED: bool = false;
@@ -59,9 +60,18 @@ fn profiler() -> &'static Mutex<ProfilerData> {
     PROFILER.get_or_init(|| Mutex::new(ProfilerData::default()))
 }
 
+fn profiling_enabled() -> bool {
+    static PROFILING_ENABLED_CACHE: OnceLock<bool> = OnceLock::new();
+    *PROFILING_ENABLED_CACHE.get_or_init(|| {
+        env::var("PROFILE_ENABLED")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(PROFILING_ENABLED)
+    })
+}
+
 /// Records a single hit for a named event (for use with `hit!` macro).
 pub fn hit(name: &str) {
-    if PROFILING_ENABLED {
+    if profiling_enabled() {
         let mut data = profiler().lock().unwrap();
         *data.hits.entry(name.to_string()).or_insert(0) += 1;
     }
@@ -69,7 +79,7 @@ pub fn hit(name: &str) {
 
 /// Resets all profiling data (hits and timings).
 pub fn reset() {
-    if PROFILING_ENABLED {
+    if profiling_enabled() {
         let mut data = profiler().lock().unwrap();
         data.call_tree = ProfileNode::default();
         data.timing_stack.clear();
@@ -176,7 +186,7 @@ pub fn print_summary() {
 
 /// Prints a summary of the collected profiling data to stdout.
 pub fn _print_summary(options: &PrintOptions) {
-    if !PROFILING_ENABLED {
+    if !profiling_enabled() {
         return;
     }
     let data = profiler().lock().unwrap();
@@ -264,7 +274,7 @@ pub fn _print_summary_flat(options: &PrintOptions) {
 
 /// Prints a flat summary sorted by own (self) time.
 pub fn _print_summary_flat_by_own_time(options: &PrintOptions) {
-    if !PROFILING_ENABLED {
+    if !profiling_enabled() {
         return;
     }
     let data = profiler().lock().unwrap();
@@ -369,7 +379,7 @@ pub fn get_all_hits() -> HashMap<String, u64> {
 
 /// Returns the sum of all flat own-times across the call tree.
 pub fn sum_flat_own_time() -> Duration {
-    if !PROFILING_ENABLED {
+    if !profiling_enabled() {
         return Duration::ZERO;
     }
     let data = profiler().lock().unwrap();
@@ -416,7 +426,7 @@ fn sum_subtree_total_time_for_name(nodes: &HashMap<String, ProfileNode>, name: &
 
 /// Returns the sum of own-times for all subtrees rooted at `name` (outermost matches only).
 pub fn sum_subtree_own_time(name: &str) -> Duration {
-    if !PROFILING_ENABLED {
+    if !profiling_enabled() {
         return Duration::ZERO;
     }
     let data = profiler().lock().unwrap();
@@ -425,7 +435,7 @@ pub fn sum_subtree_own_time(name: &str) -> Duration {
 
 /// Returns the sum of total-times for all subtrees rooted at `name` (outermost matches only).
 pub fn sum_subtree_total_time(name: &str) -> Duration {
-    if !PROFILING_ENABLED {
+    if !profiling_enabled() {
         return Duration::ZERO;
     }
     let data = profiler().lock().unwrap();
@@ -520,7 +530,7 @@ impl TimedBlockGuard {
     /// Creates a new guard, starting a timer for the given name.
     /// If profiling is disabled, returns a no-op guard.
     pub fn new(name: String) -> Self {
-        if PROFILING_ENABLED {
+        if profiling_enabled() {
             time_block_start(name);
             TimedBlockGuard { enabled: true }
         } else {

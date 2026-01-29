@@ -106,6 +106,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     // 1. Load and compile the grammar.
     let step = std::time::Instant::now();
+    let grammar_start = std::time::Instant::now();
     
     let grammar_definition = if let Some(json_schema_path) = &args.json_schema {
         // Load from JSON Schema
@@ -146,6 +147,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // (e.g., 446 productions instead of 228, causing 2-3x slower builds).
     let prod_count = grammar_definition.productions.len();
     let term_count = grammar_definition.terminal_to_group_id().len();
+
+    eprintln!("TIMING: grammar_definition {:?}", grammar_start.elapsed());
     
     if is_debug_level_enabled(2) {
         sep1::debug!(2, "└─ {} productions, {} terminals {MAGENTA}({}){RESET}", 
@@ -156,6 +159,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let step = std::time::Instant::now();
     sep1::debug!(2, "Loading vocabulary...");
     
+    let vocab_start = std::time::Instant::now();
     let mut vocab_file = File::open(&args.vocab)?;
     let mut vocab_bytes = Vec::new(); // Read to memory for faster parsing
     vocab_file.read_to_end(&mut vocab_bytes)?;
@@ -190,6 +194,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         llm_token_map.insert(token_bytes, LLMTokenID(token_id));
         max_original_llm_token_id = max_original_llm_token_id.max(token_id);
     }
+
+    eprintln!("TIMING: load_vocabulary {:?}", vocab_start.elapsed());
     
     if is_debug_level_enabled(2) {
         sep1::debug!(2, "└─ {} tokens {MAGENTA}({}){RESET}", 
@@ -209,6 +215,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         max_original_llm_token_id,
         &config,
     );
+
+    eprintln!("TIMING: build_constraint {:?}", build_start.elapsed());
 
     // Record the total compilation time (grammar + vocab loading + constraint building)
     let compilation_time_seconds = total_start.elapsed().as_secs_f64();
@@ -237,6 +245,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Optimized: serialize to memory first, then compress/write in one pass.
     // This is ~6x faster than streaming JSON through the gzip encoder.
     if let Some(output_path) = args.output {
+        let save_start = std::time::Instant::now();
         let step = std::time::Instant::now();
         sep1::debug!(2, "Saving output...");
 
@@ -273,6 +282,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let mut writer = buf_writer;
             writer.write_all(&json_bytes).map_err(|e| e.to_string())?;
         }
+
+        eprintln!("TIMING: save_output {:?}", save_start.elapsed());
         
         if is_debug_level_enabled(2) {
             let file_size = std::fs::metadata(&output_path)?.len();
@@ -292,6 +303,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     if let Err(e) = flush_weight_dump(".cache/factorized_weights_dump.json") {
         eprintln!("Warning: failed to flush weight dump: {}", e);
     }
+
+    eprintln!("TIMING: total {:?}", total_start.elapsed());
 
     Ok(())
 }

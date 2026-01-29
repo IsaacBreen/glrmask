@@ -588,15 +588,19 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
         return empty_dwa;
     }
     
+    let template_dwas_start = Instant::now();
     let template_dwas = timeit!("build_template_dwas", {
         match build_template_dwas(parser) {
             Ok(m) => m,
             Err(e) => panic!("Failed to build template DWAs: {:?}", e),
         }
     });
+    eprintln!("TIMING: parser_dwa::build_template_dwas {:?}", template_dwas_start.elapsed());
+    let ignore_dwa_start = Instant::now();
     let ignore_dwa = timeit!("build_ignore_terminal_dwa", {
         build_ignore_terminal_dwa()
     });
+    eprintln!("TIMING: parser_dwa::build_ignore_terminal_dwa {:?}", ignore_dwa_start.elapsed());
 
     // Check if we're in symbol-heavy mode (tsid encoded as labels, not weights)
     let is_symbol_heavy = !crate::constraint_precompute::is_weight_heavy_enabled();
@@ -635,7 +639,11 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
         );
     }
 
-    let reversed_nwa = terminal_nwa.reverse();
+    let reverse_start = Instant::now();
+    let reversed_nwa = timeit!("parser_dwa::reverse_nwa", {
+        terminal_nwa.reverse()
+    });
+    eprintln!("TIMING: parser_dwa::reverse_nwa {:?}", reverse_start.elapsed());
     crate::debug!(5, "Reversed NWA: {}, start_states={:?}", reversed_nwa.stats(), reversed_nwa.body.start_states);
     for (i, state) in reversed_nwa.states.0.iter().enumerate() {
         crate::debug!(6, "  State {}: final_weight={:?}, epsilons={:?}, transitions={}", 
@@ -645,35 +653,43 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
             state.transitions.len()
         );
     }
+    let traversal_start = Instant::now();
     let traversal_data = timeit!("parser_dwa::compute_traversal_data", {
         reversed_nwa.compute_traversal_data()
     });
+    eprintln!("TIMING: parser_dwa::compute_traversal_data {:?}", traversal_start.elapsed());
     
     // In symbol-heavy mode, build a map of OUTGOING tsid-labeled edges FROM each root state
     // In the reversed NWA, root --[tsid_label]--> original_start
     // We need: root -> [(tsid_label, edge_weight), ...]
+    let outgoing_tsid_edges_start = Instant::now();
     let outgoing_tsid_edges: BTreeMap<StateID, Vec<(Label, Weight)>> = if is_symbol_heavy {
-        let mut outgoing: BTreeMap<StateID, Vec<(Label, Weight)>> = BTreeMap::new();
-        for (src, state) in reversed_nwa.states.0.iter().enumerate() {
-            for (&label, targets) in &state.transitions {
-                if label as usize >= terminals_count {
-                    // This is a tsid-labeled transition
-                    for (dst, weight) in targets {
-                        if *dst == original_start_state {
-                            outgoing.entry(src).or_default().push((label, weight.clone()));
+        timeit!("parser_dwa::outgoing_tsid_edges", {
+            let mut outgoing: BTreeMap<StateID, Vec<(Label, Weight)>> = BTreeMap::new();
+            for (src, state) in reversed_nwa.states.0.iter().enumerate() {
+                for (&label, targets) in &state.transitions {
+                    if label as usize >= terminals_count {
+                        // This is a tsid-labeled transition
+                        for (dst, weight) in targets {
+                            if *dst == original_start_state {
+                                outgoing.entry(src).or_default().push((label, weight.clone()));
+                            }
                         }
                     }
                 }
             }
-        }
-        crate::debug!(5, "Symbol-heavy mode: {} root states with tsid edges", outgoing.len());
-        for (src, edges) in &outgoing {
-            crate::debug!(6, "  Root state {} has tsid edges: {:?}", src, edges.iter().map(|(l,_)|*l).collect::<Vec<_>>());
-        }
-        outgoing
+            crate::debug!(5, "Symbol-heavy mode: {} root states with tsid edges", outgoing.len());
+            for (src, edges) in &outgoing {
+                crate::debug!(6, "  Root state {} has tsid edges: {:?}", src, edges.iter().map(|(l,_)|*l).collect::<Vec<_>>());
+            }
+            outgoing
+        })
     } else {
         BTreeMap::new()
     };
+    if is_symbol_heavy {
+        eprintln!("TIMING: parser_dwa::outgoing_tsid_edges {:?}", outgoing_tsid_edges_start.elapsed());
+    }
 
     let initial_tokens = Weight::all();
     let mut initial_values_bv = Vec::new();
@@ -685,6 +701,7 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
     let (node_tokens, mut unique_signatures) = timeit!("parser_dwa::pass1_precompute", {
         precompute_token_bvs_and_signatures(&reversed_nwa, &traversal_data, initial_values_bv)
     });
+    eprintln!("TIMING: parser_dwa::pass1_precompute {:?}", start_pass1.elapsed());
     unique_signatures.insert(vec![vec![None]]);
     crate::debug!(4, "Pass 1: Tokens & Signatures ({} sigs, {:.2?})", unique_signatures.len(), start_pass1.elapsed());
     let mut unique_term_ids_in_sigs = BTreeSet::new();
@@ -724,6 +741,7 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
     // We don't need bitmasks; we just Union the Templates.
     // NOTE: Parallelizing this was tested but memory contention makes serial faster (143-169ms vs 121ms serial).
 
+    let simple_signatures_start = Instant::now();
     timeit!("parser_dwa::simple_signatures", {
         for sig in simple_signatures {
             let terminals = &sig[0];
@@ -756,10 +774,12 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
             template_cache.borrow_mut().insert(sig, Arc::new(NWA::from_dwa(&dwa)));
         }
     });
+    eprintln!("TIMING: parser_dwa::simple_signatures {:?}", simple_signatures_start.elapsed());
 
     // 2. SLOW PATH: Handle complex signatures via Super DWA
     // Only run this logic if we actually have complex signatures.
     if !complex_signatures.is_empty() {
+        let complex_signatures_start = Instant::now();
         timeit!("parser_dwa::complex_signatures", {
             crate::debug!(4, "Building Super DWA for {} complex signatures", complex_signatures.len());
 
@@ -795,6 +815,7 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
         let ignore_dwa_rsb = build_ignore_terminal_dwa();
         crate::debug!(5, "  Built {} template DWAs with rangeset backend", template_dwas_rsb.len());
 
+        let super_nwa_start = Instant::now();
         let mut super_nwa = timeit!("parser_dwa::super_nwa_build", {
             let start_super_nwa = std::time::Instant::now();
             let mut super_nwa = NWA::new_empty();
@@ -819,19 +840,23 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
                 start_super_nwa.elapsed(), super_nwa.stats());
             super_nwa
         });
+        eprintln!("TIMING: parser_dwa::super_nwa_build {:?}", super_nwa_start.elapsed());
 
         // OPTIMIZATION: Use lightweight minimization for super DWA construction.
         // Full minimization is expensive and not critical for intermediate results.
+        let super_dwa_start = Instant::now();
         let super_dwa = timeit!("parser_dwa::super_dwa_det_min", {
             let start_det = std::time::Instant::now();
             let super_dwa = super_nwa.determinize_and_minimize(DeterminizeAndMinimizeProfile::Super);
             crate::debug!(5, "  Super DWA det+min: {:?}, {}", start_det.elapsed(), super_dwa.stats());
             super_dwa
         });
+        eprintln!("TIMING: parser_dwa::super_dwa_det_min {:?}", super_dwa_start.elapsed());
 
         let super_signature: Signature = bit_to_term.iter().map(|t| vec![*t]).collect();
         
         // Collect all unique weights from super_dwa once
+        let super_weights_start = Instant::now();
         let super_dwa_unique_weights: Vec<Weight> = timeit!("parser_dwa::super_dwa_collect_weights", {
             let start_weights = std::time::Instant::now();
             let super_dwa_unique_weights: Vec<Weight> = super_dwa.states.0.par_iter()
@@ -854,10 +879,12 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
             crate::debug!(5, "  Collected {} unique weights in {:?}", super_dwa_unique_weights.len(), start_weights.elapsed());
             super_dwa_unique_weights
         });
+        eprintln!("TIMING: parser_dwa::super_dwa_collect_weights {:?}", super_weights_start.elapsed());
 
         // PRE-COMPUTE: Build all weight mappings for all complex signatures upfront
         // This avoids redundant computation inside specialize_dwa_relative, which was creating
         // a new weight_map HashMap for each of the 199 complex signatures.
+        let mappings_start = Instant::now();
         let all_mappings: Vec<(Signature, Vec<Weight>, HashMap<Weight, Weight>)> = timeit!(
             "parser_dwa::weight_mappings",
             {
@@ -904,8 +931,10 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
                 all_mappings
             }
         );
+        eprintln!("TIMING: parser_dwa::weight_mappings {:?}", mappings_start.elapsed());
 
         // PARALLEL OPTIMIZATION: Specialize DWAs using pre-computed weight mappings
+        let specialize_start = Instant::now();
         let results: Vec<(Signature, NWA, DWAStats, DWAStats)> = timeit!(
             "parser_dwa::specialize_dw_as",
             {
@@ -991,6 +1020,7 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
                 results
             }
         );
+        eprintln!("TIMING: parser_dwa::specialize_dw_as {:?}", specialize_start.elapsed());
 
         for (sig, nwa, _, _) in results {
             template_cache.borrow_mut().insert(sig, Arc::new(nwa));
@@ -1000,6 +1030,7 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
         super_signature_opt = Some(super_signature);
         super_dwa_unique_weights_opt = Some(super_dwa_unique_weights);
         });
+        eprintln!("TIMING: parser_dwa::complex_signatures {:?}", complex_signatures_start.elapsed());
     }
     // OPTIMIZATION END
 
@@ -1309,6 +1340,22 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
                 },
             );
         pass2_profile.log();
+        eprintln!(
+            "TIMING: parser_dwa::pass2_profile process_total={:?}, canonicalize={:?}, cache_lookup={:?}, cache_insert={:?}, dynamic_derive={:?}, instantiate={:?}, cancellations={:?}, finality_fixpoint={:?}, remove_negative={:?}, union={:?}, tsid_collect={:?}, final_collect={:?}, templates={}",
+            std::time::Duration::from_micros(pass2_profile.process_total_us.load(Ordering::Relaxed)),
+            std::time::Duration::from_micros(pass2_profile.canonicalize_us.load(Ordering::Relaxed)),
+            std::time::Duration::from_micros(pass2_profile.cache_lookup_us.load(Ordering::Relaxed)),
+            std::time::Duration::from_micros(pass2_profile.cache_insert_us.load(Ordering::Relaxed)),
+            std::time::Duration::from_micros(pass2_profile.dynamic_derive_us.load(Ordering::Relaxed)),
+            std::time::Duration::from_micros(pass2_profile.instantiate_us.load(Ordering::Relaxed)),
+            std::time::Duration::from_micros(pass2_profile.apply_cancellations_us.load(Ordering::Relaxed)),
+            std::time::Duration::from_micros(pass2_profile.apply_finality_us.load(Ordering::Relaxed)),
+            std::time::Duration::from_micros(pass2_profile.remove_negative_us.load(Ordering::Relaxed)),
+            std::time::Duration::from_micros(pass2_profile.union_us.load(Ordering::Relaxed)),
+            std::time::Duration::from_micros(pass2_profile.tsid_collect_us.load(Ordering::Relaxed)),
+            std::time::Duration::from_micros(pass2_profile.final_collect_us.load(Ordering::Relaxed)),
+            pass2_profile.template_count.load(Ordering::Relaxed),
+        );
         crate::debug!(4, "Pass 2 (nwa_special_map) in {:?}", pass2_start.elapsed());
         // Drop the process closure's reference to tsid_bodies
         drop(tsid_bodies_for_process);
@@ -1320,31 +1367,35 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
     let avg_template_size = states_arena.borrow().len() as f64 / (final_bodies.len() + tsid_bodies.len()).max(1) as f64;
     crate::debug!(4, "Collected {} final bodies, {} tsid bodies, states_arena has {} states (avg {:.0} states/body)", 
         final_bodies.len(), tsid_bodies.len(), states_arena.borrow().len(), avg_template_size);
-    let mut combined_nwa_states = states_arena.into_inner();
-    let combined_start_state = combined_nwa_states.add_state();
-    
-    if is_symbol_heavy && !tsid_bodies.is_empty() {
-        // Symbol-heavy mode: add labeled transitions with tsid labels
-        // Use the tsid_bodies collected during traversal
-        for (body, weight, tsid_label) in tsid_bodies {
-            crate::debug!(6, "Adding tsid body with label={}, weight len={}", tsid_label, weight.len());
-            for &s in &body.start_states {
-                combined_nwa_states.add_transition(combined_start_state, tsid_label, s, weight.clone()).unwrap();
-            }
-        }
-        crate::debug!(4, "Symbol-heavy mode: added {} tsid-labeled transitions", 
-            combined_nwa_states[combined_start_state].transitions.values().map(|v| v.len()).sum::<usize>());
-    } else {
-        // Weight-heavy mode: no tsid labels, just add epsilon transitions with weights
-        // The weights encode tsid info (positions in N×M space)
-        for (body, weight, _node_id) in final_bodies {
-            for &s in &body.start_states {
-                combined_nwa_states.add_epsilon(combined_start_state, s, weight.clone());
-            }
-        }
-    }
+    let combine_bodies_start = Instant::now();
+    let combined_nwa = timeit!("parser_dwa::combine_bodies", {
+        let mut combined_nwa_states = states_arena.into_inner();
+        let combined_start_state = combined_nwa_states.add_state();
 
-    let combined_nwa = NWA { states: combined_nwa_states, body: NWABody { start_states: vec![combined_start_state] } };
+        if is_symbol_heavy && !tsid_bodies.is_empty() {
+            // Symbol-heavy mode: add labeled transitions with tsid labels
+            // Use the tsid_bodies collected during traversal
+            for (body, weight, tsid_label) in tsid_bodies {
+                crate::debug!(6, "Adding tsid body with label={}, weight len={}", tsid_label, weight.len());
+                for &s in &body.start_states {
+                    combined_nwa_states.add_transition(combined_start_state, tsid_label, s, weight.clone()).unwrap();
+                }
+            }
+            crate::debug!(4, "Symbol-heavy mode: added {} tsid-labeled transitions", 
+                combined_nwa_states[combined_start_state].transitions.values().map(|v| v.len()).sum::<usize>());
+        } else {
+            // Weight-heavy mode: no tsid labels, just add epsilon transitions with weights
+            // The weights encode tsid info (positions in N×M space)
+            for (body, weight, _node_id) in final_bodies {
+                for &s in &body.start_states {
+                    combined_nwa_states.add_epsilon(combined_start_state, s, weight.clone());
+                }
+            }
+        }
+
+        NWA { states: combined_nwa_states, body: NWABody { start_states: vec![combined_start_state] } }
+    });
+    eprintln!("TIMING: parser_dwa::combine_bodies {:?}", combine_bodies_start.elapsed());
     let macro_level = std::env::var("MACRO_DEBUG_LEVEL")
         .ok()
         .and_then(|v| v.parse::<u32>().ok())
@@ -1355,9 +1406,11 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
     }
     crate::debug!(3, "Combined NWA before determinization: {}, is_symbol_heavy={}", 
         combined_nwa.stats(), is_symbol_heavy);
+    let finalize_start = Instant::now();
     let mut final_dwa = timeit!("parser_dwa::finalize_and_determinize", {
         finalize_and_optimize_and_determinize(parser, combined_nwa)
     });
+    eprintln!("TIMING: parser_dwa::finalize_and_determinize {:?}", finalize_start.elapsed());
     // SKIP final minimization to test performance impact
     // final_dwa.minimize();
     crate::debug!(4, "Parser DWA construction complete. Stats: {}", final_dwa.stats());
@@ -1434,6 +1487,7 @@ pub fn finalize_and_optimize_and_determinize(parser: &GLRParser, mut combined_nw
     let prune_final_start = std::time::Instant::now();
     combined_nwa.subtract_final_weights_from_outgoing();
     crate::debug!(5, "subtract_final_weights_from_outgoing in {:?}", prune_final_start.elapsed());
+    eprintln!("TIMING: parser_dwa::finalize::subtract_final_weights_from_outgoing {:?}", prune_final_start.elapsed());
     crate::debug!(4, "Pruned continuations from final states. NWA now {}.", combined_nwa.stats());
     
     // After pruning continuations, some transitions may become empty and states may become unreachable.
@@ -1442,9 +1496,11 @@ pub fn finalize_and_optimize_and_determinize(parser: &GLRParser, mut combined_nw
     let prune_start = std::time::Instant::now();
     combined_nwa.prune_dead_ends();
     let prune_dead_time = prune_start.elapsed();
+    eprintln!("TIMING: parser_dwa::finalize::prune_dead_ends {:?}", prune_dead_time);
     let prune_unreachable_start = std::time::Instant::now();
     combined_nwa.prune_unreachable();
     let prune_unreachable_time = prune_unreachable_start.elapsed();
+    eprintln!("TIMING: parser_dwa::finalize::prune_unreachable {:?}", prune_unreachable_time);
     crate::debug!(5, "prune_dead_ends in {:?}, prune_unreachable in {:?}", prune_dead_time, prune_unreachable_time);
     crate::debug!(4, "After pruning dead ends: NWA {} -> {}", 
         before_prune, combined_nwa.stats());
@@ -1460,10 +1516,14 @@ pub fn finalize_and_optimize_and_determinize(parser: &GLRParser, mut combined_nw
         let before_minimize = combined_nwa.stats();
         let minimize_start = Instant::now();
         combined_nwa.minimize();
-        crate::debug!(4, "Parser NWA minimization: {} -> {} in {:?}", before_minimize, combined_nwa.stats(), minimize_start.elapsed());
+        let minimize_elapsed = minimize_start.elapsed();
+        crate::debug!(4, "Parser NWA minimization: {} -> {} in {:?}", before_minimize, combined_nwa.stats(), minimize_elapsed);
+        eprintln!("TIMING: parser_dwa::finalize::nwa_minimize {:?}", minimize_elapsed);
         let det_start = std::time::Instant::now();
         let dwa = combined_nwa.determinize();
-        crate::debug!(5, "determinize(Parser) in {:?}", det_start.elapsed());
+        let det_elapsed = det_start.elapsed();
+        crate::debug!(5, "determinize(Parser) in {:?}", det_elapsed);
+        eprintln!("TIMING: parser_dwa::finalize::determinize {:?}", det_elapsed);
         crate::debug!(4, "Parser DWA determinize complete. {}", dwa.stats());
         return dwa;
     }
@@ -1473,7 +1533,9 @@ pub fn finalize_and_optimize_and_determinize(parser: &GLRParser, mut combined_nw
     // Pipeline: determinize → prune_dead_ends → minimize
     let det_min_start = std::time::Instant::now();
     let dwa = combined_nwa.determinize_and_minimize(DeterminizeAndMinimizeProfile::Parser);
-    crate::debug!(5, "determinize_and_minimize(Parser) in {:?}", det_min_start.elapsed());
+    let det_min_elapsed = det_min_start.elapsed();
+    crate::debug!(5, "determinize_and_minimize(Parser) in {:?}", det_min_elapsed);
+    eprintln!("TIMING: parser_dwa::finalize::determinize_and_minimize {:?}", det_min_elapsed);
     crate::debug!(4, "Parser DWA minimization complete. {}", dwa.stats());
     dwa
 }

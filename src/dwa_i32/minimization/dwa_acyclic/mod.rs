@@ -6,11 +6,39 @@ use crate::dwa_i32::dwa::{DWA, DWABuildError, DWAState, DWAStates};
 use crate::dwa_i32::minimization::common::DwaPass;
 use crate::dwa_i32::minimization::graph_coloring::{solve_exact_graph_coloring, solve_greedy_coloring};
 use crate::datastructures::RangeMapWeight;
+use rustc_hash::FxHashMap;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use profiler_macro::{time_it, timeit};
 
 const UNMAPPED_STATE: StateID = StateID::MAX;
+
+static ARE_COMPAT_CALLS: AtomicU64 = AtomicU64::new(0);
+static ARE_COMPAT_NANOS: AtomicU64 = AtomicU64::new(0);
+static SCAN_COLORS_CALLS: AtomicU64 = AtomicU64::new(0);
+static SCAN_COLORS_NANOS: AtomicU64 = AtomicU64::new(0);
+static BUILD_GRAPH_CALLS: AtomicU64 = AtomicU64::new(0);
+static BUILD_GRAPH_NANOS: AtomicU64 = AtomicU64::new(0);
+static HEIGHT_COLOR_CALLS: AtomicU64 = AtomicU64::new(0);
+static HEIGHT_COLOR_NANOS: AtomicU64 = AtomicU64::new(0);
+
+struct TimingGuard {
+    start: std::time::Instant,
+    nanos: &'static AtomicU64,
+}
+
+impl TimingGuard {
+    fn new(nanos: &'static AtomicU64) -> Self {
+        Self { start: std::time::Instant::now(), nanos }
+    }
+}
+
+impl Drop for TimingGuard {
+    fn drop(&mut self) {
+        self.nanos.fetch_add(self.start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    }
+}
 
 #[inline]
 fn old_to_new_get(old_to_new: &[StateID], id: StateID) -> Option<StateID> {
@@ -207,6 +235,15 @@ pub fn minimize_acyclic_exact(dwa: &DWA) -> Result<DWA, DWABuildError> {
     }
     
     let total_start = std::time::Instant::now();
+
+    ARE_COMPAT_CALLS.store(0, Ordering::Relaxed);
+    ARE_COMPAT_NANOS.store(0, Ordering::Relaxed);
+    SCAN_COLORS_CALLS.store(0, Ordering::Relaxed);
+    SCAN_COLORS_NANOS.store(0, Ordering::Relaxed);
+    BUILD_GRAPH_CALLS.store(0, Ordering::Relaxed);
+    BUILD_GRAPH_NANOS.store(0, Ordering::Relaxed);
+    HEIGHT_COLOR_CALLS.store(0, Ordering::Relaxed);
+    HEIGHT_COLOR_NANOS.store(0, Ordering::Relaxed);
     
     // Step 0: Preprocess - tighten weights by removing unreachable tokens
     crate::debug!(5, "Acyclic minimize step 0 start (tighten_weights)");
@@ -285,7 +322,9 @@ pub fn minimize_acyclic_exact(dwa: &DWA) -> Result<DWA, DWABuildError> {
             let coloring = timeit!("bottom_up_merge_acyclic::coloring", {
                 let color_start = std::time::Instant::now();
                 let coloring = compute_height_coloring(&dwa, candidates, &needed, &old_to_new, &new_states);
-                time_coloring += color_start.elapsed();
+                let color_elapsed = color_start.elapsed();
+                time_coloring += color_elapsed;
+                eprintln!("TIMING: height {} compute_height_coloring {:?}", h, color_elapsed);
                 coloring
             });
 
@@ -384,6 +423,45 @@ pub fn minimize_acyclic_exact(dwa: &DWA) -> Result<DWA, DWABuildError> {
     if std::env::var("STOCHASTIC_MERGE_VALIDATION").is_ok() {
         stochastic_merge_validation(&result)?;
     }
+
+    let height_calls = HEIGHT_COLOR_CALLS.load(Ordering::Relaxed);
+    let height_nanos = HEIGHT_COLOR_NANOS.load(Ordering::Relaxed);
+    let scan_calls = SCAN_COLORS_CALLS.load(Ordering::Relaxed);
+    let scan_nanos = SCAN_COLORS_NANOS.load(Ordering::Relaxed);
+    let compat_calls = ARE_COMPAT_CALLS.load(Ordering::Relaxed);
+    let compat_nanos = ARE_COMPAT_NANOS.load(Ordering::Relaxed);
+    let graph_calls = BUILD_GRAPH_CALLS.load(Ordering::Relaxed);
+    let graph_nanos = BUILD_GRAPH_NANOS.load(Ordering::Relaxed);
+
+    let height_avg = if height_calls > 0 { height_nanos / height_calls } else { 0 };
+    let scan_avg = if scan_calls > 0 { scan_nanos / scan_calls } else { 0 };
+    let compat_avg = if compat_calls > 0 { compat_nanos / compat_calls } else { 0 };
+    let graph_avg = if graph_calls > 0 { graph_nanos / graph_calls } else { 0 };
+
+    eprintln!(
+        "TIMING SUMMARY: compute_height_coloring total {:?} over {} calls (avg {:?})",
+        std::time::Duration::from_nanos(height_nanos),
+        height_calls,
+        std::time::Duration::from_nanos(height_avg),
+    );
+    eprintln!(
+        "TIMING SUMMARY: scan_colors total {:?} over {} calls (avg {:?})",
+        std::time::Duration::from_nanos(scan_nanos),
+        scan_calls,
+        std::time::Duration::from_nanos(scan_avg),
+    );
+    eprintln!(
+        "TIMING SUMMARY: are_compatible total {:?} over {} calls (avg {:?})",
+        std::time::Duration::from_nanos(compat_nanos),
+        compat_calls,
+        std::time::Duration::from_nanos(compat_avg),
+    );
+    eprintln!(
+        "TIMING SUMMARY: build_incompatibility_graph total {:?} over {} calls (avg {:?})",
+        std::time::Duration::from_nanos(graph_nanos),
+        graph_calls,
+        std::time::Duration::from_nanos(graph_avg),
+    );
     
     Ok(result)
 }
@@ -396,6 +474,8 @@ fn compute_height_coloring(
     old_to_new: &[StateID],
     new_states: &[MergedStateBuilder],
 ) -> Vec<usize> {
+    HEIGHT_COLOR_CALLS.fetch_add(1, Ordering::Relaxed);
+    let _height_timer = TimingGuard::new(&HEIGHT_COLOR_NANOS);
     let start = std::time::Instant::now();
     let greedy_no_graph_threshold = std::env::var("DWA_GREEDY_NO_GRAPH_THRESHOLD")
         .ok()
@@ -442,8 +522,9 @@ fn compute_height_coloring(
 
     // Group by signature
     let group_start = std::time::Instant::now();
-    let sig_to_group: HashMap<u128, Vec<usize>> = timeit!("coloring::signature_grouping", {
-        let mut sig_to_group: HashMap<u128, Vec<usize>> = HashMap::new();
+    let sig_to_group: FxHashMap<u128, Vec<usize>> = timeit!("coloring::signature_grouping", {
+        let mut sig_to_group: FxHashMap<u128, Vec<usize>> = FxHashMap::default();
+        sig_to_group.reserve(signatures.len());
         for (idx, &sig) in signatures.iter().enumerate() {
             sig_to_group.entry(sig).or_default().push(idx);
         }
@@ -544,7 +625,8 @@ fn compute_height_0_coloring_direct(
     // Compute needed footprints and signatures
     let sig_build_start = std::time::Instant::now();
     let (sig_groups, footprints) = timeit!("height0::sig_build", {
-        let mut sig_groups: HashMap<u64, Vec<usize>> = HashMap::new();
+        let mut sig_groups: FxHashMap<u64, Vec<usize>> = FxHashMap::default();
+        sig_groups.reserve(n);
         let mut footprints: Vec<Weight> = Vec::with_capacity(n);
 
         for (idx, &id) in candidates.iter().enumerate() {
@@ -630,7 +712,8 @@ fn compute_height_0_coloring_direct(
     let direct_start = std::time::Instant::now();
     let colors = timeit!("height0::direct_coloring", {
         let mut colors = Vec::with_capacity(n);
-        let mut sig_to_color: HashMap<u64, usize> = HashMap::new();
+        let mut sig_to_color: FxHashMap<u64, usize> = FxHashMap::default();
+        sig_to_color.reserve(n);
         let mut next_color = 0usize;
 
         for (idx, &id) in candidates.iter().enumerate() {
@@ -1140,6 +1223,8 @@ fn are_compatible(
     old_to_new: &[StateID],
     new_states: &[MergedStateBuilder]
 ) -> bool {
+    ARE_COMPAT_CALLS.fetch_add(1, Ordering::Relaxed);
+    let _compat_timer = TimingGuard::new(&ARE_COMPAT_NANOS);
     let domain_overlap = &needed[u] & &needed[v];
     let domain_overlap_empty = domain_overlap.is_empty();
     
@@ -1312,6 +1397,8 @@ fn build_incompatibility_graph(
     old_to_new: &[StateID],
     new_states: &[MergedStateBuilder]
 ) -> Vec<Vec<usize>> {
+    BUILD_GRAPH_CALLS.fetch_add(1, Ordering::Relaxed);
+    let _graph_timer = TimingGuard::new(&BUILD_GRAPH_NANOS);
     let n = candidates.len();
     if n <= 1 { return vec![vec![]; n]; }
     
@@ -1348,7 +1435,8 @@ fn build_incompatibility_graph_height_0(
     let start = std::time::Instant::now();
     
     // Compute signatures: hash of (final_weight & needed)
-    let mut sig_to_group: HashMap<u64, Vec<usize>> = HashMap::new();
+    let mut sig_to_group: FxHashMap<u64, Vec<usize>> = FxHashMap::default();
+    sig_to_group.reserve(n);
     
     timeit!("coloring::build_incompatibility_graph::height0::signatures", {
         for (idx, &id) in candidates.iter().enumerate() {
@@ -1504,8 +1592,9 @@ fn greedy_color_without_graph(
     
     // Check if there are many unique signatures - if so, use signatures as colors directly
     let grouping_start = std::time::Instant::now();
-    let sig_to_group: HashMap<u128, Vec<usize>> = timeit!("greedy_no_graph::grouping", {
-        let mut sig_to_group: HashMap<u128, Vec<usize>> = HashMap::new();
+    let sig_to_group: FxHashMap<u128, Vec<usize>> = timeit!("greedy_no_graph::grouping", {
+        let mut sig_to_group: FxHashMap<u128, Vec<usize>> = FxHashMap::default();
+        sig_to_group.reserve(signatures.len());
         for (idx, &sig) in signatures.iter().enumerate() {
             sig_to_group.entry(sig).or_default().push(idx);
         }
@@ -1522,7 +1611,8 @@ fn greedy_color_without_graph(
         let assign_start = std::time::Instant::now();
         let colors = timeit!("greedy_no_graph::assign_fast", {
             let mut colors = vec![0; n];
-            let mut sig_to_color: HashMap<u128, usize> = HashMap::new();
+            let mut sig_to_color: FxHashMap<u128, usize> = FxHashMap::default();
+            sig_to_color.reserve(n);
             let mut next_color = 0usize;
             for (idx, &sig) in signatures.iter().enumerate() {
                 let color = *sig_to_color.entry(sig).or_insert_with(|| {
@@ -1551,7 +1641,8 @@ fn greedy_color_without_graph(
         // color_representatives[c] = list of (candidate_idx, signature) for color c
         // We keep one representative per signature in each color class
         let mut color_representatives: Vec<Vec<(usize, u128)>> = Vec::new();
-        let mut sig_to_color: HashMap<u128, usize> = HashMap::new();
+        let mut sig_to_color: FxHashMap<u128, usize> = FxHashMap::default();
+        sig_to_color.reserve(n);
         
         let mut compare_count = 0usize;
         let mut compare_time = std::time::Duration::ZERO;
@@ -1566,6 +1657,8 @@ fn greedy_color_without_graph(
                     Some(color)
                 } else {
                     timeit!("greedy_no_graph::assign_colors::scan_colors", {
+                        SCAN_COLORS_CALLS.fetch_add(1, Ordering::Relaxed);
+                        let _scan_timer = TimingGuard::new(&SCAN_COLORS_NANOS);
                         let mut assigned_color = None;
 
                         'color_loop: for (color, reps) in color_representatives.iter().enumerate() {
@@ -1652,13 +1745,14 @@ fn build_incompatibility_graph_general(
     
     // Group candidates by signature
     let groups: Vec<Vec<usize>> = timeit!("coloring::build_incompatibility_graph::grouping", {
-        let mut sig_to_candidates: HashMap<u128, Vec<usize>> = HashMap::new();
+        let mut sig_to_candidates: FxHashMap<u128, Vec<usize>> = FxHashMap::default();
+        sig_to_candidates.reserve(signatures.len());
         for (idx, &sig) in signatures.iter().enumerate() {
             sig_to_candidates.entry(sig).or_default().push(idx);
         }
         sig_to_candidates.into_values().collect()
     });
-    
+
     let num_groups = groups.len();
     
     // Build incompatibility graph

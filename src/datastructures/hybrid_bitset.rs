@@ -22,6 +22,7 @@ use std::ops::{
     BitAnd, BitAndAssign, BitOr, BitOrAssign, BitXor, BitXorAssign, Sub, SubAssign,
 };
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 // ---------------------------------------------------------------------------
 // Thread-local dimensions for weight-heavy/symbol-heavy mode
 // ---------------------------------------------------------------------------
@@ -51,6 +52,26 @@ static L1_OP_CACHE: Lazy<Mutex<LruCache<L1OpKey, Acc<RangeSetBlaze<usize>>>>> = 
 static L1_OP_CACHE_INDEX: Lazy<Mutex<HashMap<usize, HashSet<L1OpKey>>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 static L1_INTERNED_PTRS: Lazy<Mutex<HashSet<usize>>> = Lazy::new(|| Mutex::new(HashSet::new()));
+
+static L1_OP_CACHE_PROFILE_ENABLED: AtomicBool = AtomicBool::new(false);
+static L1_OP_CACHE_OR_HITS: AtomicU64 = AtomicU64::new(0);
+static L1_OP_CACHE_OR_MISSES: AtomicU64 = AtomicU64::new(0);
+
+pub(crate) fn set_l1_op_cache_profile_enabled(enabled: bool) {
+    L1_OP_CACHE_PROFILE_ENABLED.store(enabled, AtomicOrdering::Relaxed);
+}
+
+pub(crate) fn reset_l1_op_cache_counters() {
+    L1_OP_CACHE_OR_HITS.store(0, AtomicOrdering::Relaxed);
+    L1_OP_CACHE_OR_MISSES.store(0, AtomicOrdering::Relaxed);
+}
+
+pub(crate) fn l1_op_cache_or_counters() -> (u64, u64) {
+    (
+        L1_OP_CACHE_OR_HITS.load(AtomicOrdering::Relaxed),
+        L1_OP_CACHE_OR_MISSES.load(AtomicOrdering::Relaxed),
+    )
+}
 
 /// Set the global LLM token dimension.
 /// 
@@ -850,6 +871,7 @@ impl BitOr for &RangeSet {
     type Output = RangeSet;
 
     fn bitor(self, rhs: Self) -> Self::Output {
+        let profile_enabled = L1_OP_CACHE_PROFILE_ENABLED.load(AtomicOrdering::Relaxed);
         if Arc::ptr_eq(&self.inner, &rhs.inner) {
             return self.clone();
         }
@@ -862,10 +884,19 @@ impl BitOr for &RangeSet {
             return result;
         }
         if let Some(cached) = get_l1_op_cache_tracked(cache::BinOp::Or, &self.inner, &rhs.inner) {
+            if profile_enabled {
+                L1_OP_CACHE_OR_HITS.fetch_add(1, AtomicOrdering::Relaxed);
+            }
             return RangeSet { inner: cached };
         }
         if let Some(cached) = get_l1_op_cache_tracked(cache::BinOp::Or, &rhs.inner, &self.inner) {
+            if profile_enabled {
+                L1_OP_CACHE_OR_HITS.fetch_add(1, AtomicOrdering::Relaxed);
+            }
             return RangeSet { inner: cached };
+        }
+        if profile_enabled {
+            L1_OP_CACHE_OR_MISSES.fetch_add(1, AtomicOrdering::Relaxed);
         }
         let result_inner = &*self.inner | &*rhs.inner;
         let result_acc = intern_l1_tracked(result_inner);

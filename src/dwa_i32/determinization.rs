@@ -4,7 +4,7 @@
 use rustc_hash::FxHashMap;
 use std::cell::Cell;
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::ops::BitOrAssign;
 use std::sync::Arc;
@@ -217,7 +217,7 @@ impl NWA {
 
         // 5. Initial State Construction
         let start_subset_start = if profile_enabled { Some(Instant::now()) } else { None };
-        let mut start_map: HashMap<NWAStateID, Weight> = HashMap::new();
+        let mut start_map: FxHashMap<NWAStateID, Weight> = FxHashMap::default();
         for &s in &self.body.start_states {
             if s < eps_reach.len() {
                 for (v, w_reach) in &eps_reach[s] {
@@ -603,7 +603,29 @@ struct DeterminizeProfile {
 
 impl DeterminizeProfile {
     fn log(&self) {
-        let _ = self;
+        if self.expand_calls == 0 {
+            return;
+        }
+        let avg_closure_size = self.closure_size_total as f64 / self.expand_calls as f64;
+        eprintln!("TIMING: determinize::precompute_eps {:?}", self.precompute_eps);
+        eprintln!("TIMING: determinize::start_subset {:?}", self.start_subset);
+        eprintln!(
+            "TIMING: determinize::expand_total {:?} over {} expansions (avg_closure_size={:.2})",
+            self.expand_total,
+            self.expand_calls,
+            avg_closure_size,
+        );
+        eprintln!("TIMING: determinize::collect_transitions {:?}", self.collect_transitions);
+        eprintln!("TIMING: determinize::build_dest_map {:?}", self.build_dest_map);
+        eprintln!("TIMING: determinize::normalize_subset {:?}", self.normalize_subset);
+        eprintln!("TIMING: determinize::register_closure {:?}", self.register_closure);
+        eprintln!("TIMING: determinize::add_transition {:?}", self.add_transition);
+        eprintln!(
+            "TIMING: determinize::counters labels={} raw_targets={} eps_pairs={}",
+            self.labels,
+            self.raw_targets,
+            self.eps_pairs,
+        );
     }
 }
 
@@ -726,8 +748,8 @@ impl<'a> Determinizer<'a> {
 
         // Transitions accumulation: Label -> TargetNWA -> Weight
         // Use BTreeMap for labels to keep them sorted (cleaner DWA), HashMap for targets for speed.
-        let mut transitions: BTreeMap<Label, HashMap<NWAStateID, Weight>> = BTreeMap::new();
-        let mut edge_weights: HashMap<Label, Weight> = HashMap::new();
+        let mut transitions: BTreeMap<Label, FxHashMap<NWAStateID, Weight>> = BTreeMap::new();
+        let mut edge_weights: FxHashMap<Label, Weight> = FxHashMap::default();
 
         // 1. Collect outgoing labeled transitions from the subset.
         let collect_start = if self.profile_enabled { Some(Instant::now()) } else { None };
@@ -750,7 +772,7 @@ impl<'a> Determinizer<'a> {
                             let entry = transitions.entry(*lbl);
                             let (map_ref, is_new) = match entry {
                                 std::collections::btree_map::Entry::Occupied(o) => (o.into_mut(), false),
-                                std::collections::btree_map::Entry::Vacant(v) => (v.insert(HashMap::new()), true),
+                                std::collections::btree_map::Entry::Vacant(v) => (v.insert(FxHashMap::default()), true),
                             };
                             let elapsed = entry_start.elapsed();
                             self.profile.collect_btree_entry += elapsed;
@@ -870,7 +892,7 @@ impl<'a> Determinizer<'a> {
                 self.profile.raw_targets += raw_targets.len() as u64;
             }
 
-            let mut dest_map: HashMap<NWAStateID, Weight> = HashMap::new();
+            let mut dest_map: FxHashMap<NWAStateID, Weight> = FxHashMap::default();
 
             // Destination = Union_{ t in raw_targets } ( eps_reach[t] intersected with weight(t) )
             let dest_map_start = if self.profile_enabled { Some(Instant::now()) } else { None };
@@ -1015,7 +1037,8 @@ impl<'a> Determinizer<'a> {
 /// Computes epsilon closure for a specific subset on the fly.
 /// Used by the heuristic singleton check.
 fn epsilon_closure_optimized(nwa_states: &NWAStates, seed: &WeightedSubset) -> WeightedSubset {
-    let mut closure_map: HashMap<NWAStateID, Weight> = HashMap::with_capacity(seed.len() * 2);
+    let mut closure_map: FxHashMap<NWAStateID, Weight> = FxHashMap::default();
+    closure_map.reserve(seed.len() * 2);
     let mut queue: VecDeque<NWAStateID> = VecDeque::with_capacity(seed.len());
 
     for (sid, w) in seed {

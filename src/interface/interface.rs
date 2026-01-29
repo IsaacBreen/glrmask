@@ -2089,11 +2089,14 @@ impl JSONConvertible for CompiledGrammar {
 impl CompiledGrammar {
     /// Creates a `CompiledGrammar` from an `Arc<GrammarDefinition>`.
     pub fn from_definition(definition: Arc<GrammarDefinition>) -> Self {
+        let tokenizer_start = std::time::Instant::now();
         debug!(3, "Building tokenizer from definition");
         let terminal_expr_groups = definition.get_terminal_expressions_for_tokenizer();
         let tokenizer_expr_groups_obj = groups(terminal_expr_groups);
         let tokenizer = Tokenizer::new(tokenizer_expr_groups_obj.build());
+        eprintln!("TIMING: build_tokenizer {:?}", tokenizer_start.elapsed());
 
+        let parser_start = std::time::Instant::now();
         debug!(3, "Building GLR parser from definition");
         let mut terminal_map: BiBTreeMap<Terminal, TerminalID> =
             definition
@@ -2131,6 +2134,7 @@ impl CompiledGrammar {
             &nullable_terminals,
             definition.ignore_terminal_ids.clone(),
         );
+        eprintln!("TIMING: build_glr_parser {:?}", parser_start.elapsed());
 
         // Report terminal equivalence classes at debug level 5
         // Two terminals are equivalent if they have the same actions in every state
