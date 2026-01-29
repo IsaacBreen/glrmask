@@ -1,4 +1,5 @@
 use std::cell::Cell;
+use std::env;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
@@ -40,6 +41,11 @@ static RANGEMAP_DIVIDE_RHS_COMP_CACHE: Lazy<Mutex<LruCache<usize, Arc<RhsCompCac
     });
 static FULL_TSIDS_CACHE: Lazy<Mutex<HashMap<usize, RangeSet>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
+static RANGEMAP_TSID_OUTER: Lazy<bool> = Lazy::new(|| {
+    env::var("RANGEMAP_TSID_OUTER")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+});
 
 thread_local! {
     static OP_CACHE_OR_MISS_ACTIVE: Cell<bool> = Cell::new(false);
@@ -259,7 +265,7 @@ fn put_op_cache(
 }
 
 fn build_rhs_comp_cache(rhs: &Arc<RangeMapWeight>) -> Arc<RhsCompCache> {
-    let full_tsids = RangeMapWeight::full_tsids(rhs.num_tsids());
+    let full_tsids = RangeMapWeight::full_inner_set(rhs.num_tsids());
     let mut out: RhsCompCache = HashMap::new();
     for (_, rv) in rhs.map.range_values() {
         let ptr = Arc::as_ptr(&rv.inner) as usize;
@@ -311,6 +317,9 @@ pub struct RangeMapWeight {
 }
 
 impl RangeMapWeight {
+    fn tsid_outer_enabled() -> bool {
+        *RANGEMAP_TSID_OUTER
+    }
     fn compute_hash(map: &RangeMapBlaze<usize, RangeSet>, num_tsids: usize) -> u64 {
         let mut hasher = DefaultHasher::new();
         num_tsids.hash(&mut hasher);
@@ -351,6 +360,23 @@ impl RangeMapWeight {
         let full = Self::rangeset_from_ranges([0..=num_tsids.saturating_sub(1)]);
         cache.insert(num_tsids, full.clone());
         full
+    }
+
+    fn full_inner_set(num_tsids: usize) -> RangeSet {
+        if Self::tsid_outer_enabled() {
+            let max_token = crate::datastructures::get_max_llm_token();
+            Self::rangeset_from_ranges([0..=max_token])
+        } else {
+            Self::full_tsids(num_tsids)
+        }
+    }
+
+    fn max_inner_value(num_tsids: usize) -> usize {
+        if Self::tsid_outer_enabled() {
+            crate::datastructures::get_max_llm_token()
+        } else {
+            num_tsids.saturating_sub(1)
+        }
     }
 
     fn rangeset_from_ranges<I: IntoIterator<Item = std::ops::RangeInclusive<usize>>>(
@@ -472,7 +498,7 @@ impl RangeMapWeight {
 
     fn ensure_right_comp<'a>(
         rv: &RangeSet,
-        full_tsids: &RangeSet,
+        full_inner: &RangeSet,
         right_comp: &'a mut Option<RangeSet>,
         right_ptr: &mut Option<*const RangeSetBlaze<usize>>,
         rhs_comp_cache: Option<&RhsCompCache>,
@@ -487,7 +513,7 @@ impl RangeMapWeight {
                     return right_comp.as_ref().expect("missing right complement");
                 }
             }
-            *right_comp = Some(full_tsids - rv);
+            *right_comp = Some(full_inner - rv);
             *right_ptr = Some(ptr);
         }
         right_comp.as_ref().expect("missing right complement")
@@ -732,12 +758,7 @@ impl RangeMapWeight {
         result
     }
 
-    fn from_token_map(map: BTreeMap<usize, RangeSet>, num_tsids: usize) -> Self {
-        let num_tsids = normalize_num_tsids(num_tsids);
-        if map.is_empty() {
-            return Self::new(num_tsids);
-        }
-
+    fn compress_outer_map(map: BTreeMap<usize, RangeSet>) -> RangeMapBlaze<usize, RangeSet> {
         let mut iter = map.into_iter();
         let (mut start, mut current) = iter.next().unwrap();
         let mut prev = start;
@@ -760,6 +781,43 @@ impl RangeMapWeight {
             out.ranges_insert(start..=prev, current);
         }
 
+        out
+    }
+
+    fn invert_outer_map(map: &RangeMapBlaze<usize, RangeSet>) -> RangeMapBlaze<usize, RangeSet> {
+        let mut tsid_map: BTreeMap<usize, RangeSet> = BTreeMap::new();
+        for (token_range, tsid_set) in map.range_values() {
+            if tsid_set.is_empty() {
+                continue;
+            }
+            let token_rs = Self::rangeset_from_ranges([token_range.clone()]);
+            for tsid_range in tsid_set.ranges() {
+                for tsid in *tsid_range.start()..=*tsid_range.end() {
+                    let entry = tsid_map.entry(tsid).or_insert_with(RangeSet::zeros);
+                    *entry |= &token_rs;
+                }
+            }
+        }
+
+        if tsid_map.is_empty() {
+            return RangeMapBlaze::new();
+        }
+
+        Self::compress_outer_map(tsid_map)
+    }
+
+    fn from_token_map(map: BTreeMap<usize, RangeSet>, num_tsids: usize) -> Self {
+        let num_tsids = normalize_num_tsids(num_tsids);
+        if map.is_empty() {
+            return Self::new(num_tsids);
+        }
+
+        let out = Self::compress_outer_map(map);
+        if Self::tsid_outer_enabled() {
+            let inverted = Self::invert_outer_map(&out);
+            return Self::from_map(inverted, num_tsids);
+        }
+
         Self::from_map(out, num_tsids)
     }
 
@@ -772,6 +830,14 @@ impl RangeMapWeight {
         let num_tsids = normalize_num_tsids(num_tsids);
         if tsid_set.is_empty() || token_start > token_end {
             return Self::new(num_tsids);
+        }
+        if Self::tsid_outer_enabled() {
+            let token_rs = Self::rangeset_from_ranges([token_start..=token_end]);
+            let mut map = RangeMapBlaze::new();
+            for tsid_range in tsid_set.ranges() {
+                map.ranges_insert(*tsid_range.start()..=*tsid_range.end(), token_rs.clone());
+            }
+            return Self::from_map(map, num_tsids);
         }
         let mut map = RangeMapBlaze::new();
         map.ranges_insert(token_start..=token_end, tsid_set);
@@ -1083,31 +1149,66 @@ impl RangeMapWeight {
         }
         if left_ranges == 1 || right_ranges == 1 {
             let max_token = crate::datastructures::get_max_llm_token();
-            if left_ranges == 1 {
-                if let Some((range, tsid_set)) = self.map.range_values().next() {
-                    if *range.start() == 0
-                        && *range.end() == max_token
-                        && *tsid_set == Self::full_tsids(self.num_tsids)
-                    {
-                        if let Some(start) = prep_start {
-                            OP_CACHE_OR_MISS_PREP_NS
-                                .fetch_add(start.elapsed().as_nanos() as u64, AtomicOrdering::Relaxed);
+            if Self::tsid_outer_enabled() {
+                let num_tsids = self.num_tsids();
+                if num_tsids > 0 {
+                    let full_tokens = Self::rangeset_from_ranges([0..=max_token]);
+                    if left_ranges == 1 {
+                        if let Some((range, token_set)) = self.map.range_values().next() {
+                            if *range.start() == 0
+                                && *range.end() == num_tsids.saturating_sub(1)
+                                && *token_set == full_tokens
+                            {
+                                if let Some(start) = prep_start {
+                                    OP_CACHE_OR_MISS_PREP_NS
+                                        .fetch_add(start.elapsed().as_nanos() as u64, AtomicOrdering::Relaxed);
+                                }
+                                return self.clone();
+                            }
                         }
-                        return self.clone();
+                    }
+                    if right_ranges == 1 {
+                        if let Some((range, token_set)) = other.map.range_values().next() {
+                            if *range.start() == 0
+                                && *range.end() == num_tsids.saturating_sub(1)
+                                && *token_set == full_tokens
+                            {
+                                if let Some(start) = prep_start {
+                                    OP_CACHE_OR_MISS_PREP_NS
+                                        .fetch_add(start.elapsed().as_nanos() as u64, AtomicOrdering::Relaxed);
+                                }
+                                return other.clone();
+                            }
+                        }
                     }
                 }
-            }
-            if right_ranges == 1 {
-                if let Some((range, tsid_set)) = other.map.range_values().next() {
-                    if *range.start() == 0
-                        && *range.end() == max_token
-                        && *tsid_set == Self::full_tsids(self.num_tsids)
-                    {
-                        if let Some(start) = prep_start {
-                            OP_CACHE_OR_MISS_PREP_NS
-                                .fetch_add(start.elapsed().as_nanos() as u64, AtomicOrdering::Relaxed);
+            } else {
+                if left_ranges == 1 {
+                    if let Some((range, tsid_set)) = self.map.range_values().next() {
+                        if *range.start() == 0
+                            && *range.end() == max_token
+                            && *tsid_set == Self::full_tsids(self.num_tsids)
+                        {
+                            if let Some(start) = prep_start {
+                                OP_CACHE_OR_MISS_PREP_NS
+                                    .fetch_add(start.elapsed().as_nanos() as u64, AtomicOrdering::Relaxed);
+                            }
+                            return self.clone();
                         }
-                        return other.clone();
+                    }
+                }
+                if right_ranges == 1 {
+                    if let Some((range, tsid_set)) = other.map.range_values().next() {
+                        if *range.start() == 0
+                            && *range.end() == max_token
+                            && *tsid_set == Self::full_tsids(self.num_tsids)
+                        {
+                            if let Some(start) = prep_start {
+                                OP_CACHE_OR_MISS_PREP_NS
+                                    .fetch_add(start.elapsed().as_nanos() as u64, AtomicOrdering::Relaxed);
+                            }
+                            return other.clone();
+                        }
                     }
                 }
             }
@@ -1236,8 +1337,8 @@ impl RangeMapWeight {
     ) -> Self {
         assert_eq!(self.num_tsids(), other.num_tsids(), "RangeMapWeight num_tsids mismatch");
         let num_tsids = self.num_tsids();
-        let full_tsids = Self::full_tsids(num_tsids);
-        let max_tsid = num_tsids.saturating_sub(1);
+        let full_tsids = Self::full_inner_set(num_tsids);
+        let max_tsid = Self::max_inner_value(num_tsids);
 
         let mut left_iter = self.map.range_values();
         let mut right_iter = other.map.range_values();
@@ -1399,8 +1500,61 @@ impl RangeMapWeight {
         }
 
         let num_tsids = self.num_tsids();
+        if num_tsids == 0 {
+            self.map = RangeMapBlaze::new();
+            self.refresh_cached_hash();
+            return;
+        }
         let max_token = max / num_tsids;
         let max_tsid = max % num_tsids;
+        if Self::tsid_outer_enabled() {
+            let token_clip_full = Self::rangeset_from_ranges([0..=max_token]);
+            let token_clip_prefix = if max_token > 0 {
+                Self::rangeset_from_ranges([0..=max_token.saturating_sub(1)])
+            } else {
+                RangeSet::zeros()
+            };
+            let mut new_map = RangeMapBlaze::new();
+
+            for (tsid_range, token_set) in self.map.range_values() {
+                let start = *tsid_range.start();
+                let end = *tsid_range.end();
+
+                if start > max_tsid {
+                    let clipped = token_set & &token_clip_prefix;
+                    if !clipped.is_empty() {
+                        new_map.ranges_insert(start..=end, clipped);
+                    }
+                    continue;
+                }
+
+                if end <= max_tsid {
+                    let clipped = token_set & &token_clip_full;
+                    if !clipped.is_empty() {
+                        new_map.ranges_insert(start..=end, clipped);
+                    }
+                    continue;
+                }
+
+                let clipped_full = token_set & &token_clip_full;
+                if !clipped_full.is_empty() {
+                    new_map.ranges_insert(start..=max_tsid, clipped_full.clone());
+                }
+
+                let right_start = max_tsid.saturating_add(1);
+                if right_start <= end {
+                    let clipped_prefix = token_set & &token_clip_prefix;
+                    if !clipped_prefix.is_empty() {
+                        new_map.ranges_insert(right_start..=end, clipped_prefix);
+                    }
+                }
+            }
+
+            self.map = new_map;
+            self.refresh_cached_hash();
+            return;
+        }
+
         let tsid_clip = Self::rangeset_from_ranges([0..=max_tsid]);
 
         let mut new_map = RangeMapBlaze::new();
@@ -1444,13 +1598,26 @@ impl RangeMapWeight {
 
         let num_tsids = self.num_tsids();
         let mut ranges: Vec<std::ops::RangeInclusive<usize>> = Vec::new();
-        for (token_range, tsid_set) in self.map.range_values() {
-            for token in *token_range.start()..=*token_range.end() {
-                for tsid_range in tsid_set.ranges() {
-                    let base = token.saturating_mul(num_tsids);
-                    let tsid_start = *tsid_range.start();
-                    let tsid_end = *tsid_range.end();
-                    ranges.push(base.saturating_add(tsid_start)..=base.saturating_add(tsid_end));
+        if Self::tsid_outer_enabled() {
+            for (tsid_range, token_set) in self.map.range_values() {
+                let tsid_start = *tsid_range.start();
+                let tsid_end = *tsid_range.end();
+                for token_range in token_set.ranges() {
+                    for token in *token_range.start()..=*token_range.end() {
+                        let base = token.saturating_mul(num_tsids);
+                        ranges.push(base.saturating_add(tsid_start)..=base.saturating_add(tsid_end));
+                    }
+                }
+            }
+        } else {
+            for (token_range, tsid_set) in self.map.range_values() {
+                for token in *token_range.start()..=*token_range.end() {
+                    for tsid_range in tsid_set.ranges() {
+                        let base = token.saturating_mul(num_tsids);
+                        let tsid_start = *tsid_range.start();
+                        let tsid_end = *tsid_range.end();
+                        ranges.push(base.saturating_add(tsid_start)..=base.saturating_add(tsid_end));
+                    }
                 }
             }
         }
@@ -1467,24 +1634,66 @@ impl RangeMapWeight {
         let max_tsid = max % num_tsids;
         let mut ranges: Vec<std::ops::RangeInclusive<usize>> = Vec::new();
 
-        for (token_range, tsid_set) in self.map.range_values() {
-            let token_start = *token_range.start();
-            let token_end = (*token_range.end()).min(max_token);
-            if token_start > token_end {
-                continue;
-            }
-            for token in token_start..=token_end {
-                let base = token.saturating_mul(num_tsids);
-                for tsid_range in tsid_set.ranges() {
-                    let tsid_start = *tsid_range.start();
-                    let mut tsid_end = *tsid_range.end();
-                    if token == max_token {
-                        if tsid_start > max_tsid {
+        if Self::tsid_outer_enabled() {
+            for (tsid_range, token_set) in self.map.range_values() {
+                let tsid_start = *tsid_range.start();
+                let tsid_end = *tsid_range.end();
+
+                let left_end = tsid_end.min(max_tsid);
+                if tsid_start <= left_end {
+                    for token_range in token_set.ranges() {
+                        let token_start = *token_range.start();
+                        let mut token_end = *token_range.end();
+                        if token_start > max_token {
                             continue;
                         }
-                        tsid_end = tsid_end.min(max_tsid);
+                        token_end = token_end.min(max_token);
+                        for token in token_start..=token_end {
+                            let base = token.saturating_mul(num_tsids);
+                            ranges.push(base.saturating_add(tsid_start)..=base.saturating_add(left_end));
+                        }
                     }
-                    ranges.push(base.saturating_add(tsid_start)..=base.saturating_add(tsid_end));
+                }
+
+                if tsid_end > max_tsid && max_token > 0 {
+                    let right_start = tsid_start.max(max_tsid.saturating_add(1));
+                    if right_start <= tsid_end {
+                        let token_limit = max_token.saturating_sub(1);
+                        for token_range in token_set.ranges() {
+                            let token_start = *token_range.start();
+                            let mut token_end = *token_range.end();
+                            if token_start > token_limit {
+                                continue;
+                            }
+                            token_end = token_end.min(token_limit);
+                            for token in token_start..=token_end {
+                                let base = token.saturating_mul(num_tsids);
+                                ranges.push(base.saturating_add(right_start)..=base.saturating_add(tsid_end));
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            for (token_range, tsid_set) in self.map.range_values() {
+                let token_start = *token_range.start();
+                let token_end = (*token_range.end()).min(max_token);
+                if token_start > token_end {
+                    continue;
+                }
+                for token in token_start..=token_end {
+                    let base = token.saturating_mul(num_tsids);
+                    for tsid_range in tsid_set.ranges() {
+                        let tsid_start = *tsid_range.start();
+                        let mut tsid_end = *tsid_range.end();
+                        if token == max_token {
+                            if tsid_start > max_tsid {
+                                continue;
+                            }
+                            tsid_end = tsid_end.min(max_tsid);
+                        }
+                        ranges.push(base.saturating_add(tsid_start)..=base.saturating_add(tsid_end));
+                    }
                 }
             }
         }
@@ -1513,6 +1722,24 @@ impl WeightBackend for RangeMapWeight {
 
         let max_token = max_position / num_tsids;
         let max_tsid = max_position % num_tsids;
+        if Self::tsid_outer_enabled() {
+            let mut map = RangeMapBlaze::new();
+            let full_tokens = Self::rangeset_from_ranges([0..=max_token]);
+
+            if max_tsid == num_tsids.saturating_sub(1) {
+                map.ranges_insert(0..=max_tsid, full_tokens);
+                return Self::from_map(map, num_tsids);
+            }
+
+            map.ranges_insert(0..=max_tsid, full_tokens.clone());
+            if max_token > 0 {
+                let prefix_tokens = Self::rangeset_from_ranges([0..=max_token.saturating_sub(1)]);
+                if !prefix_tokens.is_empty() && max_tsid + 1 <= num_tsids.saturating_sub(1) {
+                    map.ranges_insert(max_tsid + 1..=num_tsids.saturating_sub(1), prefix_tokens);
+                }
+            }
+            return Self::from_map(map, num_tsids);
+        }
         let full_tsids = Self::rangeset_from_ranges([0..=num_tsids - 1]);
         let mut map = RangeMapBlaze::new();
 
@@ -1545,9 +1772,14 @@ impl WeightBackend for RangeMapWeight {
         }
         let token = pos / num_tsids;
         let tsid = pos % num_tsids;
-        let tsid_set = Self::rangeset_from_ranges([tsid..=tsid]);
         let mut map = RangeMapBlaze::new();
-        map.ranges_insert(token..=token, tsid_set);
+        if Self::tsid_outer_enabled() {
+            let token_set = Self::rangeset_from_ranges([token..=token]);
+            map.ranges_insert(tsid..=tsid, token_set);
+        } else {
+            let tsid_set = Self::rangeset_from_ranges([tsid..=tsid]);
+            map.ranges_insert(token..=token, tsid_set);
+        }
         Self::from_map(map, num_tsids)
     }
 
@@ -1572,9 +1804,16 @@ impl WeightBackend for RangeMapWeight {
 
     fn contains(&self, pos: usize) -> bool {
         let num_tsids = self.num_tsids();
+        if num_tsids == 0 {
+            return false;
+        }
         let token = pos / num_tsids;
         let tsid = pos % num_tsids;
-        self.map.get(token).map_or(false, |tsids| tsids.contains(tsid))
+        if Self::tsid_outer_enabled() {
+            self.map.get(tsid).map_or(false, |tokens| tokens.contains(token))
+        } else {
+            self.map.get(token).map_or(false, |tsids| tsids.contains(tsid))
+        }
     }
 
     fn ranges_len(&self) -> usize {
@@ -1593,13 +1832,24 @@ impl WeightBackend for RangeMapWeight {
 
     fn insert(&mut self, pos: usize) {
         let num_tsids = self.num_tsids();
+        if num_tsids == 0 {
+            return;
+        }
         let token = pos / num_tsids;
         let tsid = pos % num_tsids;
-        let mut new_set = Self::rangeset_from_ranges([tsid..=tsid]);
-        if let Some(existing) = self.map.get(token) {
-            new_set |= existing;
+        if Self::tsid_outer_enabled() {
+            let mut new_set = Self::rangeset_from_ranges([token..=token]);
+            if let Some(existing) = self.map.get(tsid) {
+                new_set |= existing;
+            }
+            self.map.ranges_insert(tsid..=tsid, new_set);
+        } else {
+            let mut new_set = Self::rangeset_from_ranges([tsid..=tsid]);
+            if let Some(existing) = self.map.get(token) {
+                new_set |= existing;
+            }
+            self.map.ranges_insert(token..=token, new_set);
         }
-        self.map.ranges_insert(token..=token, new_set);
         self.refresh_cached_hash();
     }
 
@@ -1636,12 +1886,23 @@ impl WeightBackend for RangeMapWeight {
     fn min_item(&self) -> Option<usize> {
         let num_tsids = self.num_tsids();
         let mut min_pos: Option<usize> = None;
-        for (token_range, tsid_set) in self.map.range_values() {
-            let token = *token_range.start();
-            let tsid = tsid_set.ranges().next().map(|r| *r.start());
-            if let Some(tsid) = tsid {
-                let pos = token.saturating_mul(num_tsids).saturating_add(tsid);
-                min_pos = Some(min_pos.map_or(pos, |m| m.min(pos)));
+        if Self::tsid_outer_enabled() {
+            for (tsid_range, token_set) in self.map.range_values() {
+                let tsid = *tsid_range.start();
+                let token = token_set.ranges().next().map(|r| *r.start());
+                if let Some(token) = token {
+                    let pos = token.saturating_mul(num_tsids).saturating_add(tsid);
+                    min_pos = Some(min_pos.map_or(pos, |m| m.min(pos)));
+                }
+            }
+        } else {
+            for (token_range, tsid_set) in self.map.range_values() {
+                let token = *token_range.start();
+                let tsid = tsid_set.ranges().next().map(|r| *r.start());
+                if let Some(tsid) = tsid {
+                    let pos = token.saturating_mul(num_tsids).saturating_add(tsid);
+                    min_pos = Some(min_pos.map_or(pos, |m| m.min(pos)));
+                }
             }
         }
         min_pos
@@ -1650,12 +1911,23 @@ impl WeightBackend for RangeMapWeight {
     fn max_item(&self) -> Option<usize> {
         let num_tsids = self.num_tsids();
         let mut max_pos: Option<usize> = None;
-        for (token_range, tsid_set) in self.map.range_values() {
-            let token = *token_range.end();
-            let tsid = tsid_set.ranges().last().map(|r| *r.end());
-            if let Some(tsid) = tsid {
-                let pos = token.saturating_mul(num_tsids).saturating_add(tsid);
-                max_pos = Some(max_pos.map_or(pos, |m| m.max(pos)));
+        if Self::tsid_outer_enabled() {
+            for (tsid_range, token_set) in self.map.range_values() {
+                let tsid = *tsid_range.end();
+                let token = token_set.ranges().last().map(|r| *r.end());
+                if let Some(token) = token {
+                    let pos = token.saturating_mul(num_tsids).saturating_add(tsid);
+                    max_pos = Some(max_pos.map_or(pos, |m| m.max(pos)));
+                }
+            }
+        } else {
+            for (token_range, tsid_set) in self.map.range_values() {
+                let token = *token_range.end();
+                let tsid = tsid_set.ranges().last().map(|r| *r.end());
+                if let Some(tsid) = tsid {
+                    let pos = token.saturating_mul(num_tsids).saturating_add(tsid);
+                    max_pos = Some(max_pos.map_or(pos, |m| m.max(pos)));
+                }
             }
         }
         max_pos
