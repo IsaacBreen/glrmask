@@ -247,7 +247,7 @@ fn build_destinations_batched(
     let mut edge_weights: FxHashMap<Label, Weight> = FxHashMap::default();
 
     let collect_start = if timers.is_some() { Some(Instant::now()) } else { None };
-    timeit!("acyclic_det::build_destinations_batched::collect", {
+    timeit!("acyclic_det::build_destinations_batched::collect_gather", {
         for (u, w_u) in closure {
             let st = &nwa.states[*u];
             if let Some(timers) = timers {
@@ -287,7 +287,9 @@ fn build_destinations_batched(
                 }
             }
         }
+    });
 
+    timeit!("acyclic_det::build_destinations_batched::collect_union", {
         let pending = std::mem::take(&mut transitions_pending);
         for (lbl, target_map) in pending {
             let mut dest_map: FxHashMap<NWAStateID, Weight> = FxHashMap::default();
@@ -490,6 +492,7 @@ struct MaterializeTimers {
 }
 
 
+#[time_it("acyclic_det::determinize")]
 pub(crate) fn determinize_acyclic_with_progress(
     nwa: &NWA,
     topo_order: &[usize],
