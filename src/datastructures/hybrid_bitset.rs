@@ -380,6 +380,53 @@ impl RangeSet {
         }
     }
 
+    /// Union multiple RangeSets in a single operation.
+    pub fn bulk_union(sets: &[&RangeSet]) -> Self {
+        if sets.is_empty() {
+            return RangeSet::zeros();
+        }
+        if sets.len() == 1 {
+            return sets[0].clone();
+        }
+
+        let total_ranges: usize = sets.iter().map(|s| s.ranges_len()).sum();
+        if total_ranges == 0 {
+            return RangeSet::zeros();
+        }
+
+        let mut all_ranges: Vec<(usize, usize)> = Vec::with_capacity(total_ranges);
+        for set in sets {
+            for range in set.ranges() {
+                all_ranges.push((*range.start(), *range.end()));
+            }
+        }
+        if all_ranges.is_empty() {
+            return RangeSet::zeros();
+        }
+
+        all_ranges.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+
+        let mut merged: Vec<std::ops::RangeInclusive<usize>> = Vec::with_capacity(all_ranges.len());
+        let mut current_start = all_ranges[0].0;
+        let mut current_end = all_ranges[0].1;
+        for (start, end) in all_ranges.into_iter().skip(1) {
+            if start <= current_end.saturating_add(1) {
+                if end > current_end {
+                    current_end = end;
+                }
+            } else {
+                merged.push(current_start..=current_end);
+                current_start = start;
+                current_end = end;
+            }
+        }
+        merged.push(current_start..=current_end);
+
+        RangeSet {
+            inner: intern_l1_tracked(RangeSetBlaze::from_iter(merged)),
+        }
+    }
+
     /// A bitset is simple if it has a small number of ranges, making operations fast
     /// enough that caching overhead is not worthwhile.
     pub fn is_simple(&self) -> bool {

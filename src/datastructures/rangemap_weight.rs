@@ -926,12 +926,19 @@ impl RangeMapWeight {
                 }
             }
 
-            let mut combined = RangeSet::zeros();
-            for &idx in &active_indices {
-                if let Some(val) = &current_values[idx] {
-                    combined |= val;
+            let combined = {
+                let mut active_values: Vec<&RangeSet> = Vec::with_capacity(active_indices.len());
+                for &idx in &active_indices {
+                    if let Some(val) = &current_values[idx] {
+                        active_values.push(val);
+                    }
                 }
-            }
+                if active_values.is_empty() {
+                    RangeSet::zeros()
+                } else {
+                    RangeSet::bulk_union(&active_values)
+                }
+            };
 
             let next_boundary = heap.peek().map(|Reverse((b, _, _))| *b).unwrap_or(usize::MAX);
             let end = if next_boundary == usize::MAX {
@@ -972,6 +979,37 @@ impl RangeMapWeight {
         }
 
         Self::from_map(out, num_tsids)
+    }
+
+    pub(crate) fn bulk_union(weights: &[&RangeMapWeight]) -> Arc<RangeMapWeight> {
+        if weights.is_empty() {
+            return intern_rangemap(RangeMapWeight::new(current_num_tsids()));
+        }
+
+        let num_tsids = weights[0].num_tsids();
+        let mut non_empty: Vec<&RangeMapWeight> = Vec::with_capacity(weights.len());
+
+        for weight in weights {
+            assert_eq!(
+                weight.num_tsids(),
+                num_tsids,
+                "RangeMapWeight num_tsids mismatch"
+            );
+            if weight.map.is_empty() {
+                continue;
+            }
+            non_empty.push(*weight);
+        }
+
+        if non_empty.is_empty() {
+            return intern_rangemap(RangeMapWeight::new(num_tsids));
+        }
+        if non_empty.len() == 1 {
+            return intern_rangemap(non_empty[0].clone());
+        }
+
+        let result = Self::union_all_non_negated(&non_empty);
+        intern_rangemap(result)
     }
 
     pub(crate) fn union_all(weights: &[Arc<RangeMapWeight>]) -> Arc<RangeMapWeight> {

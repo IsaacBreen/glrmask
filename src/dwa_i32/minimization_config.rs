@@ -393,6 +393,12 @@ impl NWA {
             dwa
         });
         eprintln!("TIMING: NWA::determinize {:?}", det_total_start.elapsed());
+        let pre_min_stats = dwa.stats();
+        eprintln!(
+            "TIMING: DWA pre_minimize states={} transitions={}",
+            pre_min_stats.states,
+            pre_min_stats.transitions,
+        );
 
         // Run DWA passes
         let dwa_passes_start = std::time::Instant::now();

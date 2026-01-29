@@ -1,6 +1,7 @@
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::env;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering as AtomicOrdering};
 use std::time::{Duration, Instant};
 
@@ -12,6 +13,14 @@ use super::common::{Label, NWAStateID, Weight};
 use super::determinization::{HashedSubset, WeightedSubset};
 use super::dwa::{DWA, DWABody, DWAState, DWAStates};
 use super::nwa::{NWA, NWAStates};
+
+fn percentile_index(len: usize, percentile: f64) -> usize {
+    if len == 0 {
+        0
+    } else {
+        ((len as f64 - 1.0) * percentile).round() as usize
+    }
+}
 
 pub(crate) fn topo_order_if_acyclic(nwa: &NWA) -> Option<Vec<usize>> {
     let n = nwa.states.len();
@@ -322,6 +331,8 @@ fn build_destinations_batched(
             continue;
         }
 
+        let k0 = dest_map.len();
+
         let expand_start = if timers.is_some() { Some(Instant::now()) } else { None };
         let mut expanded: FxHashMap<NWAStateID, Weight> = FxHashMap::default();
         for (v, w_v) in dest_map {
@@ -369,6 +380,18 @@ fn build_destinations_batched(
             timers
                 .expand_ns
                 .fetch_add(start.elapsed().as_nanos() as u64, AtomicOrdering::Relaxed);
+        }
+
+        if let Some(timers) = timers {
+            if let Ok(mut ratios) = timers.eps_expand_ratios.lock() {
+                let k1 = expanded.len();
+                let ratio = if k0 == 0 {
+                    0.0
+                } else {
+                    (k1 as f64) / (k0 as f64)
+                };
+                ratios.push(ratio);
+            }
         }
 
         if expanded.is_empty() {
@@ -426,6 +449,8 @@ struct MaterializeTimers {
     target_total: AtomicU64,
     calls: AtomicU64,
     labels: AtomicU64,
+    eps_expand_ratios: Mutex<Vec<f64>>,
+    total_updates: AtomicU64,
 }
 
 
@@ -464,6 +489,34 @@ pub(crate) fn determinize_acyclic_with_progress(
     let eps_reach = timeit!("acyclic_det::precompute_eps_closures", {
         precompute_all_epsilon_closures_acyclic(&nwa.states, topo_order)
     });
+    if profile_enabled {
+        let mut sizes: Vec<usize> = eps_reach.iter().map(|subset| subset.len()).collect();
+        sizes.sort_unstable();
+        let len = sizes.len();
+        let (avg, p50, p90, p99, max) = if len == 0 {
+            (0.0, 0usize, 0usize, 0usize, 0usize)
+        } else {
+            let sum: usize = sizes.iter().sum();
+            let p50_idx = percentile_index(len, 0.50);
+            let p90_idx = percentile_index(len, 0.90);
+            let p99_idx = percentile_index(len, 0.99);
+            (
+                (sum as f64) / (len as f64),
+                sizes[p50_idx],
+                sizes[p90_idx],
+                sizes[p99_idx],
+                *sizes.last().unwrap(),
+            )
+        };
+        eprintln!(
+            "TIMING: determinize_acyclic::eps_closure_sizes avg={:.2} p50={} p90={} p99={} max={}",
+            avg,
+            p50,
+            p90,
+            p99,
+            max,
+        );
+    }
     let eps_weighted_time = eps_weighted_start.map(|s| s.elapsed());
 
     let mut seen_unweighted: FxHashMap<BTreeSet<NWAStateID>, NWAStateID> = FxHashMap::default();
@@ -612,6 +665,8 @@ pub(crate) fn determinize_acyclic_with_progress(
         crate::datastructures::rangemap_weight::reset_op_cache_or_counters();
         crate::datastructures::hybrid_bitset::set_l1_op_cache_profile_enabled(true);
         crate::datastructures::hybrid_bitset::reset_l1_op_cache_counters();
+        crate::datastructures::abstract_weight::reset_bitor_assign_counters();
+        crate::datastructures::abstract_weight::reset_bitor_assign_noop_sample();
     }
     let mut materialize_parallel_time: Option<Duration> = None;
     let mut materialize_merge_time: Option<Duration> = None;
@@ -688,15 +743,32 @@ pub(crate) fn determinize_acyclic_with_progress(
             }
 
             let merge_start = if profile_enabled { Some(Instant::now()) } else { None };
+            let mut pending: FxHashMap<(usize, NWAStateID), Vec<Weight>> = FxHashMap::default();
             for (cid, dest_entries, weighted_updates) in updates {
                 dest_cache[cid] = dest_entries;
                 for (dest_id, dest_subset) in weighted_updates {
-                    let dest_map = &mut weighted_closures[dest_id];
                     for (sid, w) in dest_subset {
-                        let entry = dest_map.entry(sid).or_insert_with(Weight::zeros);
-                        *entry |= &w;
+                        if let Some(timers) = materialize_timers.as_deref() {
+                            timers
+                                .total_updates
+                                .fetch_add(1, AtomicOrdering::Relaxed);
+                        }
+                        pending.entry((dest_id, sid)).or_default().push(w);
                     }
                 }
+            }
+            for ((dest_id, sid), weights) in pending.iter_mut() {
+                if let Some(existing) = weighted_closures[*dest_id].get(sid) {
+                    weights.push(existing.clone());
+                }
+            }
+            for ((dest_id, sid), weights) in pending {
+                let mut refs: Vec<&Weight> = Vec::with_capacity(weights.len());
+                for w in &weights {
+                    refs.push(w);
+                }
+                let unioned = Weight::bulk_union(&refs);
+                weighted_closures[dest_id].insert(sid, unioned);
             }
             if let Some(start) = merge_start {
                 materialize_merge_time = Some(start.elapsed());
@@ -927,6 +999,78 @@ pub(crate) fn determinize_acyclic_with_progress(
                 total_or,
                 or_ops,
             );
+            if let Ok(mut ratios) = timers.eps_expand_ratios.lock() {
+                if ratios.is_empty() {
+                    eprintln!(
+                        "TIMING: determinize_acyclic::eps_expand_ratio avg=0.00 p50=0.00 p90=0.00 p99=0.00 max=0.00",
+                    );
+                } else {
+                    ratios.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
+                    let len = ratios.len();
+                    let sum: f64 = ratios.iter().sum();
+                    let avg = sum / (len as f64);
+                    let p50 = ratios[percentile_index(len, 0.50)];
+                    let p90 = ratios[percentile_index(len, 0.90)];
+                    let p99 = ratios[percentile_index(len, 0.99)];
+                    let max = *ratios.last().unwrap();
+                    eprintln!(
+                        "TIMING: determinize_acyclic::eps_expand_ratio avg={:.2} p50={:.2} p90={:.2} p99={:.2} max={:.2}",
+                        avg,
+                        p50,
+                        p90,
+                        p99,
+                        max,
+                    );
+                }
+            }
+            let total_updates = timers.total_updates.load(AtomicOrdering::Relaxed);
+            let final_cells: u64 = weighted_closures
+                .iter()
+                .map(|map| map.len() as u64)
+                .sum();
+            let update_ratio = if final_cells == 0 {
+                0.0
+            } else {
+                (total_updates as f64) / (final_cells as f64)
+            };
+            eprintln!(
+                "TIMING: determinize_acyclic::weighted_update_ratio total_updates={} final_cells={} ratio={:.2}",
+                total_updates,
+                final_cells,
+                update_ratio,
+            );
+            let mut total_weights = 0u64;
+            let mut all_weights = 0u64;
+            let mut empty_weights = 0u64;
+            for map in &weighted_closures {
+                for weight in map.values() {
+                    total_weights += 1;
+                    if weight.is_empty() {
+                        empty_weights += 1;
+                    }
+                    if weight.is_all_fast() {
+                        all_weights += 1;
+                    }
+                }
+            }
+            let all_pct = if total_weights == 0 {
+                0.0
+            } else {
+                (all_weights as f64) * 100.0 / (total_weights as f64)
+            };
+            let empty_pct = if total_weights == 0 {
+                0.0
+            } else {
+                (empty_weights as f64) * 100.0 / (total_weights as f64)
+            };
+            eprintln!(
+                "TIMING: determinize_acyclic::weight_density total={} all={} ({:.1}%) empty={} ({:.1}%)",
+                total_weights,
+                all_weights,
+                all_pct,
+                empty_weights,
+                empty_pct,
+            );
         }
         {
             let (hits, misses) = crate::datastructures::rangemap_weight::op_cache_or_counters();
@@ -1099,6 +1243,35 @@ pub(crate) fn determinize_acyclic_with_progress(
                 l1_hits,
                 l1_misses,
                 l1_rate,
+            );
+            let bitor = crate::datastructures::abstract_weight::bitor_assign_counters();
+            let total_sample = bitor.union_total;
+            let noop_sample = bitor.rhs_empty
+                .saturating_add(bitor.self_all)
+                .saturating_add(bitor.rhs_all);
+            let noop_rate = if total_sample == 0 {
+                0.0
+            } else {
+                (noop_sample as f64) * 100.0 / (total_sample as f64)
+            };
+            eprintln!(
+                "TIMING: determinize_acyclic::bitor_assign_noop total={} noop={} rate={:.1}%",
+                total_sample,
+                noop_sample,
+                noop_rate,
+            );
+            let (sample_total, sample_noop) =
+                crate::datastructures::abstract_weight::bitor_assign_noop_sample_counters();
+            let sample_rate = if sample_total == 0 {
+                0.0
+            } else {
+                (sample_noop as f64) * 100.0 / (sample_total as f64)
+            };
+            eprintln!(
+                "TIMING: determinize_acyclic::bitor_assign_noop_sample total={} noop={} rate={:.1}%",
+                sample_total,
+                sample_noop,
+                sample_rate,
             );
         }
         if let Some(t) = finalize_time {
