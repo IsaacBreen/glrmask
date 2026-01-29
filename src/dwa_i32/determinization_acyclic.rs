@@ -688,6 +688,11 @@ pub(crate) fn determinize_acyclic_with_progress(
         for (cid, level) in levels.into_iter().enumerate() {
             states_by_level[level].push(cid);
         }
+        let mut bulk_stats: Option<BTreeMap<usize, (usize, u128)>> = if profile_enabled {
+            Some(BTreeMap::new())
+        } else {
+            None
+        };
         for states_at_level in states_by_level.into_iter() {
             for &cid in &states_at_level {
                 dest_cache[cid].clear();
@@ -763,15 +768,43 @@ pub(crate) fn determinize_acyclic_with_progress(
                 }
             }
             for ((dest_id, sid), weights) in pending {
+                let n = weights.len();
                 let mut refs: Vec<&Weight> = Vec::with_capacity(weights.len());
                 for w in &weights {
                     refs.push(w);
                 }
-                let unioned = Weight::bulk_union(&refs);
+                let (unioned, elapsed_ns) = if profile_enabled {
+                    let start = Instant::now();
+                    let unioned = Weight::bulk_union(&refs);
+                    (unioned, start.elapsed().as_nanos())
+                } else {
+                    (Weight::bulk_union(&refs), 0)
+                };
+                if let Some(stats) = bulk_stats.as_mut() {
+                    let entry = stats.entry(n).or_insert((0, 0));
+                    entry.0 += 1;
+                    entry.1 += elapsed_ns;
+                }
                 weighted_closures[dest_id].insert(sid, unioned);
             }
             if let Some(start) = merge_start {
                 materialize_merge_time = Some(start.elapsed());
+            }
+        }
+        if let Some(stats) = bulk_stats {
+            eprintln!("BULK_UNION_STATS: size -> (count, avg_ns)");
+            for (size, (count, total_ns)) in &stats {
+                if *count == 0 {
+                    continue;
+                }
+                let avg_ns = total_ns / *count as u128;
+                eprintln!(
+                    "  n={}: count={}, avg={:.0}ns, total={:.3}ms",
+                    size,
+                    count,
+                    avg_ns,
+                    *total_ns as f64 / 1_000_000.0
+                );
             }
         }
     });

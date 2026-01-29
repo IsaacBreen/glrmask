@@ -860,43 +860,45 @@ impl AbstractWeight {
 
     /// Union multiple weights in a single operation.
     pub fn bulk_union(weights: &[&AbstractWeight]) -> AbstractWeight {
-        if weights.is_empty() {
-            return AbstractWeight::empty();
-        }
-        if weights.len() == 1 {
-            return weights[0].clone();
-        }
-
-        match weights[0] {
-            AbstractWeight::RangeSet(_) => {
-                let mut sets: Vec<&RangeSet> = Vec::with_capacity(weights.len());
-                for weight in weights {
-                    if let AbstractWeight::RangeSet(rsb) = weight {
-                        sets.push(rsb);
-                    } else {
-                        panic!("AbstractWeight::bulk_union requires all weights to be the same variant");
+        match weights.len() {
+            0 => AbstractWeight::zeros(),
+            1 => weights[0].clone(),
+            2 => {
+                let mut result = weights[0].clone();
+                result |= weights[1];
+                result
+            }
+            _ => match weights[0] {
+                AbstractWeight::RangeSet(_) => {
+                    let mut sets: Vec<&RangeSet> = Vec::with_capacity(weights.len());
+                    for weight in weights {
+                        if let AbstractWeight::RangeSet(rsb) = weight {
+                            sets.push(rsb);
+                        } else {
+                            panic!("AbstractWeight::bulk_union requires all weights to be the same variant");
+                        }
                     }
+                    AbstractWeight::RangeSet(RangeSet::bulk_union(&sets))
                 }
-                AbstractWeight::RangeSet(RangeSet::bulk_union(&sets))
-            }
-            AbstractWeight::Factorized(_) => {
-                let mut out = weights[0].clone();
-                for weight in &weights[1..] {
-                    out |= *weight;
-                }
-                out
-            }
-            AbstractWeight::RangeMap(_) => {
-                let mut maps: Vec<&RangeMapWeight> = Vec::with_capacity(weights.len());
-                for weight in weights {
-                    if let AbstractWeight::RangeMap(rm) = weight {
-                        maps.push(rm.as_ref());
-                    } else {
-                        panic!("AbstractWeight::bulk_union requires all weights to be the same variant");
+                AbstractWeight::Factorized(_) => {
+                    let mut out = weights[0].clone();
+                    for weight in &weights[1..] {
+                        out |= *weight;
                     }
+                    out
                 }
-                AbstractWeight::RangeMap(RangeMapWeight::bulk_union(&maps))
-            }
+                AbstractWeight::RangeMap(_) => {
+                    let mut maps: Vec<&RangeMapWeight> = Vec::with_capacity(weights.len());
+                    for weight in weights {
+                        if let AbstractWeight::RangeMap(rm) = weight {
+                            maps.push(rm.as_ref());
+                        } else {
+                            panic!("AbstractWeight::bulk_union requires all weights to be the same variant");
+                        }
+                    }
+                    AbstractWeight::RangeMap(RangeMapWeight::bulk_union(&maps))
+                }
+            },
         }
     }
 
