@@ -1,0 +1,7 @@
+74613       03:12 /Applications/Xcode.app/Contents/Developer/usr/bin/make test-js
+74614       03:12 timeout 300 python scripts/compile.py --grammar src/js.ebnf --format ebnf --output .cache/test_vocabs/constraint_js.json.gz --vocab-url https://huggingface.co/openai-community/gpt2/raw/main/vocab.json
+74615       03:12 python scripts/compile.py --grammar src/js.ebnf --format ebnf --output .cache/test_vocabs/constraint_js.json.gz --vocab-url https://huggingface.co/openai-community/gpt2/raw/main/vocab.json
+94398       00:29 /Applications/Xcode.app/Contents/Developer/usr/bin/make test-js
+94399       00:29 timeout 300 python scripts/compile.py --grammar src/js.ebnf --format ebnf --output .cache/test_vocabs/constraint_js.json.gz --vocab-url https://huggingface.co/openai-community/gpt2/raw/main/vocab.json
+94400       00:29 python scripts/compile.py --grammar src/js.ebnf --format ebnf --output .cache/test_vocabs/constraint_js.json.gz --vocab-url https://huggingface.co/openai-community/gpt2/raw/main/vocab.json
+94401       00:28 /Users/isaacbreen/.rustup/toolchains/nightly-aarch64-apple-darwin/bin/cargo build --release

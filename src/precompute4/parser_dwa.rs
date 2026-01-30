@@ -12,7 +12,8 @@ use profiler_macro::{time_it, timeit};
 
 use crate::glr::parser::{ExpectElse, GLRParser};
 use crate::precompute4::resolve_negatives::{
-    apply_cancellations_range, apply_finality_fixpoint_range, remove_negative_transitions_range,
+    apply_cancellations_range, apply_finality_fixpoint_range, log_cancellations_range_profile,
+    remove_negative_transitions_range,
     // Note: remove_redundant_default_transitions is only run in a global pass,
     // not per-range here, since it requires a global pass over all states.
 };
@@ -146,6 +147,7 @@ struct Pass2Profile {
     process_total_us: AtomicU64,
     process_count: AtomicU64,
     template_count: AtomicU64,
+    process_other_us: AtomicU64,
     canonicalize_us: AtomicU64,
     cache_lookup_us: AtomicU64,
     cache_insert_us: AtomicU64,
@@ -165,6 +167,7 @@ impl Pass2Profile {
             process_total_us: AtomicU64::new(0),
             process_count: AtomicU64::new(0),
             template_count: AtomicU64::new(0),
+            process_other_us: AtomicU64::new(0),
             canonicalize_us: AtomicU64::new(0),
             cache_lookup_us: AtomicU64::new(0),
             cache_insert_us: AtomicU64::new(0),
@@ -186,6 +189,7 @@ impl Pass2Profile {
         }
         let template_count = self.template_count.load(Ordering::Relaxed);
         let process_total_us = self.process_total_us.load(Ordering::Relaxed);
+        let process_other_us = self.process_other_us.load(Ordering::Relaxed);
         let canonicalize_us = self.canonicalize_us.load(Ordering::Relaxed);
         let cache_lookup_us = self.cache_lookup_us.load(Ordering::Relaxed);
         let cache_insert_us = self.cache_insert_us.load(Ordering::Relaxed);
@@ -200,7 +204,7 @@ impl Pass2Profile {
 
         crate::debug!(
             4,
-            "Pass2 profile: process_total={:?} ({} calls), templates={}, canonicalize={:?}, cache_lookup={:?}, cache_insert={:?}, dynamic_derive={:?}, instantiate={:?}, cancellations={:?}, finality_fixpoint={:?}, remove_negative={:?}, union={:?}, tsid_collect={:?}, final_collect={:?}",
+            "Pass2 profile: process_total={:?} ({} calls), templates={}, canonicalize={:?}, cache_lookup={:?}, cache_insert={:?}, dynamic_derive={:?}, instantiate={:?}, cancellations={:?}, finality_fixpoint={:?}, remove_negative={:?}, union={:?}, tsid_collect={:?}, final_collect={:?}, other={:?}",
             std::time::Duration::from_micros(process_total_us),
             process_count,
             template_count,
@@ -215,6 +219,48 @@ impl Pass2Profile {
             std::time::Duration::from_micros(union_us),
             std::time::Duration::from_micros(tsid_collect_us),
             std::time::Duration::from_micros(final_collect_us),
+            std::time::Duration::from_micros(process_other_us),
+        );
+    }
+}
+
+struct NwaSpecialMapProfile {
+    process_us: AtomicU64,
+    step_us: AtomicU64,
+    merge_us: AtomicU64,
+    process_calls: AtomicU64,
+    step_calls: AtomicU64,
+    merge_calls: AtomicU64,
+}
+
+impl NwaSpecialMapProfile {
+    fn new() -> Self {
+        Self {
+            process_us: AtomicU64::new(0),
+            step_us: AtomicU64::new(0),
+            merge_us: AtomicU64::new(0),
+            process_calls: AtomicU64::new(0),
+            step_calls: AtomicU64::new(0),
+            merge_calls: AtomicU64::new(0),
+        }
+    }
+
+    fn log(&self, label: &str) {
+        let process_us = self.process_us.load(Ordering::Relaxed);
+        let step_us = self.step_us.load(Ordering::Relaxed);
+        let merge_us = self.merge_us.load(Ordering::Relaxed);
+        let process_calls = self.process_calls.load(Ordering::Relaxed);
+        let step_calls = self.step_calls.load(Ordering::Relaxed);
+        let merge_calls = self.merge_calls.load(Ordering::Relaxed);
+        eprintln!(
+            "TIMING: nwa_special_map::{} process={:?} ({} calls), step={:?} ({} calls), merge={:?} ({} calls)",
+            label,
+            std::time::Duration::from_micros(process_us),
+            process_calls,
+            std::time::Duration::from_micros(step_us),
+            step_calls,
+            std::time::Duration::from_micros(merge_us),
+            merge_calls,
         );
     }
 }
@@ -352,6 +398,7 @@ pub fn nwa_special_map<V, U, I>(
     mut step: impl FnMut(&U, Option<Label>, &[(StateID, Weight)]) -> I,
     mut merge: impl FnMut(&mut V, V) -> bool,
     mut process: impl FnMut(StateID, V) -> Option<U>,
+    profile: Option<&NwaSpecialMapProfile>,
 ) where
     V: Clone,
     I: IntoIterator<Item = (StateID, V)>,
@@ -362,7 +409,16 @@ pub fn nwa_special_map<V, U, I>(
     for (state, v) in initial_values {
         match values.entry(state) {
             std::collections::hash_map::Entry::Occupied(mut entry) => {
-                merge(entry.get_mut(), v);
+                if let Some(profile) = profile {
+                    let start = Instant::now();
+                    merge(entry.get_mut(), v);
+                    profile
+                        .merge_us
+                        .fetch_add(start.elapsed().as_micros() as u64, Ordering::Relaxed);
+                    profile.merge_calls.fetch_add(1, Ordering::Relaxed);
+                } else {
+                    merge(entry.get_mut(), v);
+                }
             }
             std::collections::hash_map::Entry::Vacant(entry) => {
                 entry.insert(v);
@@ -391,18 +447,42 @@ pub fn nwa_special_map<V, U, I>(
             if stopped_nodes.contains(&u) { continue; }
 
             let agg_v = match values.get(&u) { Some(v) => v.clone(), None => continue };
-            let proceed_val = match process(u, agg_v.clone()) {
-                Some(val) => val,
-                None => { stopped_nodes.insert(u); continue; }
+            let proceed_val = if let Some(profile) = profile {
+                let start = Instant::now();
+                let result = process(u, agg_v.clone());
+                profile
+                    .process_us
+                    .fetch_add(start.elapsed().as_micros() as u64, Ordering::Relaxed);
+                profile.process_calls.fetch_add(1, Ordering::Relaxed);
+                match result {
+                    Some(val) => val,
+                    None => { stopped_nodes.insert(u); continue; }
+                }
+            } else {
+                match process(u, agg_v.clone()) {
+                    Some(val) => val,
+                    None => { stopped_nodes.insert(u); continue; }
+                }
             };
             let state = &nwa.states[u];
 
             if !state.epsilons.is_empty() {
+                let step_start = profile.map(|_| Instant::now());
                 for (v, new_v) in step(&proceed_val, None, &state.epsilons) {
                     if stopped_nodes.contains(&v) { continue; }
                     let changed = match values.entry(v) {
                         std::collections::hash_map::Entry::Occupied(mut entry) => {
-                            merge(entry.get_mut(), new_v)
+                            if let Some(profile) = profile {
+                                let start = Instant::now();
+                                let changed = merge(entry.get_mut(), new_v);
+                                profile
+                                    .merge_us
+                                    .fetch_add(start.elapsed().as_micros() as u64, Ordering::Relaxed);
+                                profile.merge_calls.fetch_add(1, Ordering::Relaxed);
+                                changed
+                            } else {
+                                merge(entry.get_mut(), new_v)
+                            }
                         }
                         std::collections::hash_map::Entry::Vacant(entry) => {
                             entry.insert(new_v);
@@ -414,13 +494,30 @@ pub fn nwa_special_map<V, U, I>(
                         in_queue.insert(v);
                     }
                 }
+                if let (Some(profile), Some(step_start)) = (profile, step_start) {
+                    profile
+                        .step_us
+                        .fetch_add(step_start.elapsed().as_micros() as u64, Ordering::Relaxed);
+                    profile.step_calls.fetch_add(1, Ordering::Relaxed);
+                }
             }
             for (&label, targets) in &state.transitions {
+                let step_start = profile.map(|_| Instant::now());
                 for (v, new_v) in step(&proceed_val, Some(label), targets) {
                     if stopped_nodes.contains(&v) { continue; }
                     let changed = match values.entry(v) {
                         std::collections::hash_map::Entry::Occupied(mut entry) => {
-                            merge(entry.get_mut(), new_v)
+                            if let Some(profile) = profile {
+                                let start = Instant::now();
+                                let changed = merge(entry.get_mut(), new_v);
+                                profile
+                                    .merge_us
+                                    .fetch_add(start.elapsed().as_micros() as u64, Ordering::Relaxed);
+                                profile.merge_calls.fetch_add(1, Ordering::Relaxed);
+                                changed
+                            } else {
+                                merge(entry.get_mut(), new_v)
+                            }
                         }
                         std::collections::hash_map::Entry::Vacant(entry) => {
                             entry.insert(new_v);
@@ -431,6 +528,12 @@ pub fn nwa_special_map<V, U, I>(
                         local_queue.push_back(v);
                         in_queue.insert(v);
                     }
+                }
+                if let (Some(profile), Some(step_start)) = (profile, step_start) {
+                    profile
+                        .step_us
+                        .fetch_add(step_start.elapsed().as_micros() as u64, Ordering::Relaxed);
+                    profile.step_calls.fetch_add(1, Ordering::Relaxed);
                 }
             }
         }
@@ -741,6 +844,9 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
     // We don't need bitmasks; we just Union the Templates.
     // NOTE: Parallelizing this was tested but memory contention makes serial faster (143-169ms vs 121ms serial).
 
+    let ignore_nwa = Arc::new(NWA::from_dwa(&ignore_dwa));
+    let mut term_nwa_cache: FxHashMap<TerminalID, Arc<NWA>> = FxHashMap::default();
+
     let simple_signatures_start = Instant::now();
     timeit!("parser_dwa::simple_signatures", {
         for sig in simple_signatures {
@@ -750,18 +856,24 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
             // If there are many terminals, this might look expensive, but NWA union is cheap (just adding edges/start states).
             // Determinization handles the complexity.
             for term_opt in terminals {
-                let term_dwa = match term_opt {
+                let term_nwa = match term_opt {
                     Some(term_id) => {
                         if parser.ignore_terminal_ids.contains(term_id) {
-                            &ignore_dwa
+                            Arc::clone(&ignore_nwa)
                         } else {
-                            template_dwas.get(term_id).unwrap_or(&ignore_dwa)
+                            term_nwa_cache
+                                .entry(*term_id)
+                                .or_insert_with(|| {
+                                    Arc::new(NWA::from_dwa(
+                                        template_dwas.get(term_id).unwrap_or(&ignore_dwa)
+                                    ))
+                                })
+                                .clone()
                         }
-                    },
-                    None => &ignore_dwa,
+                    }
+                    None => Arc::clone(&ignore_nwa),
                 };
-                // We can convert DWA to NWA cheaply and union
-                NWA::union_assign(&mut combined_nwa, &NWA::from_dwa(term_dwa));
+                NWA::union_assign(&mut combined_nwa, term_nwa.as_ref());
             }
 
             // Always minimize NWA before determinization.
@@ -1069,6 +1181,11 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
 
     let pass2_start = Instant::now();
     let pass2_profile = Arc::new(Pass2Profile::new());
+    let pass2_traversal_profile_enabled = std::env::var("PROFILE_PARSER_DWA_PASS2_TRAVERSAL")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let pass2_traversal_profile = pass2_traversal_profile_enabled.then(NwaSpecialMapProfile::new);
+    let pass2_traversal_profile_ref = pass2_traversal_profile.as_ref();
 
     // Clone references for use in closures
     let tsid_bodies_for_process = tsid_bodies_arc.clone();
@@ -1145,6 +1262,7 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
                 pass2_profile_for_process
                     .process_count
                     .fetch_add(1, Ordering::Relaxed);
+                let mut accounted_us: u64 = 0;
 
                 let (nwa_bodies_map, tokens) = val;
                 let bodies_count = nwa_bodies_map.len();
@@ -1152,17 +1270,21 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
                 for (right_body, terminal_map) in &nwa_bodies_map {
                     let canon_start = Instant::now();
                     let (signature, concrete_weights) = canonicalize_bundle(terminal_map.clone());
+                    let canon_us = canon_start.elapsed().as_micros() as u64;
                     pass2_profile_for_process
                         .canonicalize_us
-                        .fetch_add(canon_start.elapsed().as_micros() as u64, Ordering::Relaxed);
+                        .fetch_add(canon_us, Ordering::Relaxed);
+                    accounted_us = accounted_us.saturating_add(canon_us);
 
                     let cached_nwa = {
                         let cache_lookup_start = Instant::now();
                         let cached = template_cache_ref.borrow().get(&signature).cloned();
+                        let cache_lookup_us = cache_lookup_start.elapsed().as_micros() as u64;
                         pass2_profile_for_process.cache_lookup_us.fetch_add(
-                            cache_lookup_start.elapsed().as_micros() as u64,
+                            cache_lookup_us,
                             Ordering::Relaxed,
                         );
+                        accounted_us = accounted_us.saturating_add(cache_lookup_us);
                         if let Some(nwa) = cached { nwa } else {
                         let dynamic_start = Instant::now();
                         let _rangeset_backend = WeightBackendOverride::new("rangeset");
@@ -1206,18 +1328,22 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
                         let mut derived_dwa = specialize_dwa_relative_with_map(super_dwa, &weight_map);
                         derived_dwa.optimize(DwaOptimizeConfig::SpecializedSuper);
                         let nwa = Arc::new(NWA::from_dwa(&derived_dwa));
+                        let dynamic_us = dynamic_start.elapsed().as_micros() as u64;
                         pass2_profile_for_process.dynamic_derive_us.fetch_add(
-                            dynamic_start.elapsed().as_micros() as u64,
+                            dynamic_us,
                             Ordering::Relaxed,
                         );
+                        accounted_us = accounted_us.saturating_add(dynamic_us);
                         let cache_insert_start = Instant::now();
                         template_cache_ref
                             .borrow_mut()
                             .insert(signature.clone(), nwa.clone());
+                        let cache_insert_us = cache_insert_start.elapsed().as_micros() as u64;
                         pass2_profile_for_process.cache_insert_us.fetch_add(
-                            cache_insert_start.elapsed().as_micros() as u64,
+                            cache_insert_us,
                             Ordering::Relaxed,
                         );
+                        accounted_us = accounted_us.saturating_add(cache_insert_us);
                         nwa
                         }
                     };
@@ -1239,39 +1365,49 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
                     let new_states_offset = states.len();
                     let instantiate_start = Instant::now();
                     let composed_body = instantiate_nwa_template_into(cached_nwa, &concrete_weights, &mut states, right_body);
+                    let instantiate_us = instantiate_start.elapsed().as_micros() as u64;
                     pass2_profile_for_process.instantiate_us.fetch_add(
-                        instantiate_start.elapsed().as_micros() as u64,
+                        instantiate_us,
                         Ordering::Relaxed,
                     );
+                    accounted_us = accounted_us.saturating_add(instantiate_us);
                     let range = new_states_offset..states.len();
                     if !range.is_empty() {
                         let cancel_start = Instant::now();
                         apply_cancellations_range(&mut states, range.clone());
+                        let cancel_us = cancel_start.elapsed().as_micros() as u64;
                         pass2_profile_for_process.apply_cancellations_us.fetch_add(
-                            cancel_start.elapsed().as_micros() as u64,
+                            cancel_us,
                             Ordering::Relaxed,
                         );
+                        accounted_us = accounted_us.saturating_add(cancel_us);
                         let finality_start = Instant::now();
                         apply_finality_fixpoint_range(&mut states, range.clone());
+                        let finality_us = finality_start.elapsed().as_micros() as u64;
                         pass2_profile_for_process.apply_finality_us.fetch_add(
-                            finality_start.elapsed().as_micros() as u64,
+                            finality_us,
                             Ordering::Relaxed,
                         );
+                        accounted_us = accounted_us.saturating_add(finality_us);
                         let remove_start = Instant::now();
                         remove_negative_transitions_range(&mut states, range);
+                        let remove_us = remove_start.elapsed().as_micros() as u64;
                         pass2_profile_for_process.remove_negative_us.fetch_add(
-                            remove_start.elapsed().as_micros() as u64,
+                            remove_us,
                             Ordering::Relaxed,
                         );
+                        accounted_us = accounted_us.saturating_add(remove_us);
                         // Note: remove_redundant_default_transitions is NOT called here because it
                         // requires a global pass over all states.
                     }
                     let union_start = Instant::now();
                     nwa_body = NWABody::union(&nwa_body, &composed_body);
+                    let union_us = union_start.elapsed().as_micros() as u64;
                     pass2_profile_for_process.union_us.fetch_add(
-                        union_start.elapsed().as_micros() as u64,
+                        union_us,
                         Ordering::Relaxed,
                     );
+                    accounted_us = accounted_us.saturating_add(union_us);
                 }
                 
                 // In symbol-heavy mode, check if this is a root state (has tsid-labeled edges to original_start_state)
@@ -1287,10 +1423,12 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
                                 let tsid_collect_start = Instant::now();
                                 let mut tb = tsid_bodies_for_process.lock().unwrap();
                                 tb.push((nwa_body.clone(), final_w, *tsid_label));
+                                let tsid_collect_us = tsid_collect_start.elapsed().as_micros() as u64;
                                 pass2_profile_for_process.tsid_collect_us.fetch_add(
-                                    tsid_collect_start.elapsed().as_micros() as u64,
+                                    tsid_collect_us,
                                     Ordering::Relaxed,
                                 );
+                                accounted_us = accounted_us.saturating_add(tsid_collect_us);
                             }
                         }
                     }
@@ -1319,17 +1457,25 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
                             let final_collect_start = Instant::now();
                             let mut fb = final_bodies_arc.lock().unwrap();
                             fb.push((nwa_body.clone(), final_w, node_id));
+                            let final_collect_us = final_collect_start.elapsed().as_micros() as u64;
                             pass2_profile_for_process.final_collect_us.fetch_add(
-                                final_collect_start.elapsed().as_micros() as u64,
+                                final_collect_us,
                                 Ordering::Relaxed,
                             );
+                            accounted_us = accounted_us.saturating_add(final_collect_us);
                         }
                     }
                 }
                 
                 let process_elapsed = process_start.elapsed();
+                let process_elapsed_us = process_elapsed.as_micros() as u64;
                 pass2_profile_for_process.process_total_us.fetch_add(
-                    process_elapsed.as_micros() as u64,
+                    process_elapsed_us,
+                    Ordering::Relaxed,
+                );
+                let other_us = process_elapsed_us.saturating_sub(accounted_us);
+                pass2_profile_for_process.process_other_us.fetch_add(
+                    other_us,
                     Ordering::Relaxed,
                 );
 
@@ -1338,10 +1484,15 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
                     Some((next_body_map, tokens))
                 } else { None }
                 },
+                pass2_traversal_profile_ref,
             );
         pass2_profile.log();
+        if let Some(profile) = pass2_traversal_profile_ref {
+            profile.log("pass2_traversal");
+        }
+        log_cancellations_range_profile();
         eprintln!(
-            "TIMING: parser_dwa::pass2_profile process_total={:?}, canonicalize={:?}, cache_lookup={:?}, cache_insert={:?}, dynamic_derive={:?}, instantiate={:?}, cancellations={:?}, finality_fixpoint={:?}, remove_negative={:?}, union={:?}, tsid_collect={:?}, final_collect={:?}, templates={}",
+            "TIMING: parser_dwa::pass2_profile process_total={:?}, canonicalize={:?}, cache_lookup={:?}, cache_insert={:?}, dynamic_derive={:?}, instantiate={:?}, cancellations={:?}, finality_fixpoint={:?}, remove_negative={:?}, union={:?}, tsid_collect={:?}, final_collect={:?}, other={:?}, templates={}",
             std::time::Duration::from_micros(pass2_profile.process_total_us.load(Ordering::Relaxed)),
             std::time::Duration::from_micros(pass2_profile.canonicalize_us.load(Ordering::Relaxed)),
             std::time::Duration::from_micros(pass2_profile.cache_lookup_us.load(Ordering::Relaxed)),
@@ -1354,6 +1505,7 @@ pub fn build_parser_dwa(parser: &GLRParser, terminal_nwa: &NWA) -> DWA {
             std::time::Duration::from_micros(pass2_profile.union_us.load(Ordering::Relaxed)),
             std::time::Duration::from_micros(pass2_profile.tsid_collect_us.load(Ordering::Relaxed)),
             std::time::Duration::from_micros(pass2_profile.final_collect_us.load(Ordering::Relaxed)),
+            std::time::Duration::from_micros(pass2_profile.process_other_us.load(Ordering::Relaxed)),
             pass2_profile.template_count.load(Ordering::Relaxed),
         );
         crate::debug!(4, "Pass 2 (nwa_special_map) in {:?}", pass2_start.elapsed());
@@ -1478,6 +1630,7 @@ pub fn precompute_token_bvs_and_signatures(reversed_nwa: &NWA, traversal_data: &
             }
             Some(tokens)
         },
+        None,
     );
     (Arc::try_unwrap(node_tokens).unwrap().into_inner().unwrap(), Arc::try_unwrap(signatures).unwrap().into_inner().unwrap())
 }

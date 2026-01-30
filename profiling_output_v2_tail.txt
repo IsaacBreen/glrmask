@@ -1,0 +1,200 @@
+         1       116.750µs       116.750µs        50.459µs                                                                  sep1::dwa_i32::determinization_acyclic::build_destinations_batched
+         1        14.667µs        14.667µs        10.251µs                                                                    acyclic_det::build_destinations_batched::collect_union
+         1         4.416µs         4.416µs         4.416µs                                                                      sep1::datastructures::abstract_weight::bulk_union
+         1        16.375µs        16.375µs         8.000µs                                                                    acyclic_det::build_destinations_batched::expand
+         1         8.375µs         8.375µs         8.375µs                                                                      acyclic_det::build_destinations_batched::collect_gather
+         1         3.958µs         3.958µs         3.958µs                                                                    acyclic_det::build_destinations_batched::normalize
+         1        31.291µs        31.291µs        17.207µs                                                                    sep1::datastructures::abstract_weight::bulk_union
+         3        14.084µs         4.695µs        14.084µs                                                                      sep1::datastructures::abstract_weight::bulk_union
+         1        48.125µs        48.125µs        15.209µs                                                                acyclic_det::build_destinations_batched::expand
+         1         4.625µs         4.625µs         4.625µs                                                                  acyclic_det::build_destinations_batched::expand
+         1        28.291µs        28.291µs        16.750µs                                                                  sep1::dwa_i32::determinization_acyclic::build_destinations_batched
+         1         5.083µs         5.083µs         5.083µs                                                                    acyclic_det::build_destinations_batched::collect_gather
+         1         6.458µs         6.458µs         6.458µs                                                                    acyclic_det::build_destinations_batched::collect_union
+         1       146.666µs       146.666µs        39.749µs                                                                acyclic_det::build_destinations_batched::normalize
+         1        70.209µs        70.209µs        39.500µs                                                                  acyclic_det::build_destinations_batched::collect_union
+         6        30.709µs         5.118µs        30.709µs                                                                    sep1::datastructures::abstract_weight::bulk_union
+         1         6.083µs         6.083µs         6.083µs                                                                  acyclic_det::build_destinations_batched::expand
+         1         4.583µs         4.583µs         4.583µs                                                                  acyclic_det::build_destinations_batched::normalize
+         2        26.042µs        13.021µs        18.709µs                                                                  sep1::datastructures::abstract_weight::bulk_union
+         1         7.333µs         7.333µs         7.333µs                                                                    sep1::datastructures::abstract_weight::bulk_union
+         3        15.249µs         5.083µs        15.249µs                                                                sep1::datastructures::abstract_weight::bulk_union
+         1        67.250µs        67.250µs        14.709µs                                                                sep1::dwa_i32::determinization_acyclic::build_destinations_batched
+         1         7.708µs         7.708µs         7.708µs                                                                  acyclic_det::build_destinations_batched::collect_gather
+         1        44.833µs        44.833µs        23.792µs                                                                  acyclic_det::build_destinations_batched::collect_union
+         4        21.041µs         5.260µs        21.041µs                                                                    sep1::datastructures::abstract_weight::bulk_union
+         2        61.709µs        30.855µs        37.335µs                                                              acyclic_det::build_destinations_batched::collect_union
+         5        24.374µs         4.875µs        24.374µs                                                                sep1::datastructures::abstract_weight::bulk_union
+         4        54.209µs        13.552µs        29.959µs                                                              acyclic_det::build_destinations_batched::expand
+         1         4.625µs         4.625µs         4.625µs                                                                acyclic_det::build_destinations_batched::expand
+         1        19.625µs        19.625µs        10.709µs                                                                sep1::datastructures::abstract_weight::bulk_union
+         1         8.916µs         8.916µs         8.916µs                                                                  sep1::datastructures::abstract_weight::bulk_union
+         5        84.291µs        16.858µs        59.291µs                                                              acyclic_det::build_destinations_batched::normalize
+         1         4.708µs         4.708µs         4.708µs                                                                acyclic_det::build_destinations_batched::expand
+         1         4.625µs         4.625µs         4.625µs                                                                acyclic_det::build_destinations_batched::normalize
+         3        15.667µs         5.222µs        15.667µs                                                                sep1::datastructures::abstract_weight::bulk_union
+         2        12.291µs         6.145µs        12.291µs                                                              sep1::datastructures::abstract_weight::bulk_union
+         1        32.667µs        32.667µs        19.709µs                                                              sep1::dwa_i32::determinization_acyclic::build_destinations_batched
+         1         4.333µs         4.333µs         4.333µs                                                                acyclic_det::build_destinations_batched::expand
+         2         8.625µs         4.312µs         8.625µs                                                                acyclic_det::build_destinations_batched::normalize
+         2        16.875µs         8.438µs        16.875µs                                                        acyclic_det::build_destinations_batched::normalize
+         3        85.750µs        28.583µs        54.625µs                                                        sep1::datastructures::abstract_weight::bulk_union
+         4        23.208µs         5.802µs        23.208µs                                                          sep1::datastructures::abstract_weight::bulk_union
+         2         7.917µs         3.959µs         7.917µs                                                          sep1::dwa_i32::determinization_acyclic::build_destinations_batched
+         1         2.333µs         2.333µs         2.333µs                                                    acyclic_det::build_destinations_batched::normalize
+         1         4.458µs         4.458µs         4.458µs                                                    sep1::datastructures::abstract_weight::bulk_union
+         3        22.666µs         7.555µs        20.041µs                                                  acyclic_det::build_destinations_batched::normalize
+         1         2.625µs         2.625µs         2.625µs                                                    acyclic_det::build_destinations_batched::expand
+         1         4.291µs         4.291µs         4.291µs                                          acyclic_det::build_destinations_batched::expand
+         1        18.834µs        18.834µs        11.834µs                                          acyclic_det::build_destinations_batched::normalize
+         2         7.000µs         3.500µs         7.000µs                                            sep1::datastructures::abstract_weight::bulk_union
+         1        28.792µs        28.792µs        19.667µs                                          sep1::datastructures::abstract_weight::bulk_union
+         2         9.125µs         4.562µs         9.125µs                                            sep1::datastructures::abstract_weight::bulk_union
+         1         6.167µs         6.167µs         6.167µs                                          sep1::dwa_i32::determinization_acyclic::build_destinations_batched
+         2         9.375µs         4.687µs         9.375µs                                        sep1::datastructures::abstract_weight::bulk_union
+         1         3.167µs         3.167µs         3.167µs                                      acyclic_det::build_destinations_batched::expand
+         2         6.042µs         3.021µs         6.042µs                                      acyclic_det::build_destinations_batched::normalize
+         1         2.525ms         2.525ms         2.525ms                      acyclic_det::precompute_eps_closures
+         1       143.875µs       143.875µs       143.875µs                      acyclic_det::precompute_eps_closures_unweighted
+         1        44.439ms        44.439ms        19.840ms                      acyclic_det::precompute_loop
+      5920         8.976ms         1.516µs         8.976ms                        acyclic_det::precompute_build_destinations_unweighted
+     17146        15.621ms           911ns        15.621ms                        acyclic_det::register_closure_unweighted
+         1         3.209µs         3.209µs         3.209µs                      acyclic_det::register_closure_unweighted
+         1        24.417ms        24.417ms        24.417ms            precompute1::flush_pending
+         1       483.667µs       483.667µs       483.667µs            precompute1::start_state
+         1         2.173ms         2.173ms         2.173ms        precompute1::setup
+         1       153.807ms       153.807ms       119.415ms    sep1::glr::table::generate_glr_parser_with_maps
+         1        14.253ms        14.253ms        14.253ms      sep1::glr::table::compute_final_table
+         1        16.081ms        16.081ms        16.081ms      sep1::glr::table::optimize_table
+         1         4.057ms         4.057ms         4.057ms      sep1::glr::table::stage_1
+         1       486.067ms       486.067ms         2.710ms    setup_combined
+         1       223.541µs       223.541µs       223.541µs      setup_combined::build_internal_llm_token_map
+         1       194.875µs       194.875µs       194.875µs      setup_combined::build_original_to_internal
+         1        32.667µs        32.667µs        32.667µs      setup_combined::build_state_to_rep
+         1         1.352ms         1.352ms         1.352ms      setup_combined::collect_token_strings
+         1       480.869ms       480.869ms       480.869ms      setup_combined::compute_equivalence
+         1       683.916µs       683.916µs       683.916µs      setup_combined::sort_tokens
+         1       542.917µs       542.917µs       542.917µs    terminal_nwa_from_dwa
+         1         3.099ms         3.099ms        15.291µs    to_dfa
+         1         3.084ms         3.084ms         2.067ms      sep1::dfa_u8::dfa::to_dfa_impl
+         1        36.500µs        36.500µs        36.500µs        compute_equivalence_classes
+         1       959.000µs       959.000µs       959.000µs        recompute_metadata
+         1        21.292µs        21.292µs        21.292µs        remap_transitions
+
+--- End Profiler Summary ---
+--- Profiler Summary (Flat, Own Time) ---
+
+[Flat Timings]
+      Hits      Total Time       Total/Hit        Own Time         Own/Hit  Name
+         1         22.102s         22.102s         22.102s         22.102s  parser_dwa::pass2_traversal
+         1         15.664s         15.664s         15.664s         15.664s  precompute1::dfs
+   2255781         65.207s        28.907µs         12.763s         5.658µs  sep1::datastructures::abstract_weight::bulk_union
+         3          6.789s          2.263s          6.789s          2.263s  NWA::minimize_rustfst::minimize
+    189283          6.454s        34.099µs          6.454s        34.099µs  NWA::rm_epsilon::accumulate
+         1         24.490s         24.490s          5.618s          5.618s  parser_dwa::finalize_and_determinize
+         1          2.998s          2.998s          2.998s          2.998s  parser_dwa::weight_mappings
+    361443         14.534s        40.211µs          2.522s         6.976µs  acyclic_det::build_destinations_batched::expand
+    361443         11.034s        30.527µs          2.392s         6.618µs  acyclic_det::build_destinations_batched::normalize
+         2          2.201s          1.101s          2.201s          1.101s  NWA pass Minimize
+     79327        133.095s         1.677ms          1.900s        23.950µs  sep1::dwa_i32::determinization_acyclic::build_destinations_batched
+     79327         37.827s       476.854µs          1.622s        20.446µs  acyclic_det::build_destinations_batched::collect_union
+    361443          6.236s        17.254µs          1.392s         3.852µs  acyclic_det::state_seen_lookup
+         1          1.299s          1.299s          1.299s          1.299s  build_template_dwas
+       144          8.149s        56.593ms          1.271s         8.824ms  DWA::minimize_acyclic
+         1         11.663s         11.663s          1.116s          1.116s  parser_dwa::complex_signatures
+         1          9.616s          9.616s          1.086s          1.086s  parser_dwa::simple_signatures
+     79327         72.583s       914.981µs       940.792ms        11.860µs  acyclic_det::build_destinations_batched::collect_gather
+       146         22.936s       157.093ms       796.159ms         5.453ms  acyclic_det::materialize_weighted_closures
+         3       595.319ms       198.439ms       595.319ms       198.439ms  NWA::minimize_rustfst::to_rustfst
+         2          7.251s          3.625s       497.737ms       248.868ms  NWA::rm_epsilon::build_states
+         1       480.869ms       480.869ms       480.869ms       480.869ms  setup_combined::compute_equivalence
+     79327          2.739s        34.525µs       424.781ms         5.355µs  acyclic_det::state_final_weights
+         1         69.512s         69.512s       307.110ms       307.110ms  build_parser_dwa
+    189283       298.686ms         1.578µs       298.686ms         1.578µs  NWA::rm_epsilon::closure
+       146       584.379ms         4.002ms       229.788ms         1.573ms  acyclic_det::precompute_loop
+         1       215.199ms       215.199ms       215.199ms       215.199ms  NWA pass PushWeightsToInitial
+    361589       211.459ms           585ns       211.459ms           585ns  acyclic_det::register_closure_unweighted
+     79327       143.451ms         1.808µs       143.451ms         1.808µs  acyclic_det::precompute_build_destinations_unweighted
+         1       153.807ms       153.807ms       119.415ms       119.415ms  sep1::glr::table::generate_glr_parser_with_maps
+         3        91.759ms        30.586ms        91.759ms        30.586ms  NWA::minimize_rustfst::from_rustfst
+       143         10.205s        71.364ms        82.396ms       576.202µs  DWA::minimize_states
+         3         34.415s         11.472s        77.526ms        25.842ms  NWA::determinize_and_minimize_with_config
+         1        63.828ms        63.828ms        63.828ms        63.828ms  parser_dwa.trim_weights_to_domain
+       146        61.320ms       420.003µs        61.320ms       420.003µs  acyclic_det::precompute_eps_closures
+       146          1.864s        12.766ms        46.760ms       320.281µs  acyclic_det::build_states_parallel
+         1         95.304s         95.304s        46.693ms        46.693ms  GrammarConstraint::build_with_config_inner
+       146         25.508s       174.715ms        44.120ms       302.193µs  acyclic_det::determinize
+         2        34.658ms        17.329ms        34.658ms        17.329ms  DWA pass TrimWeights
+         1        33.677ms        33.677ms        33.677ms        33.677ms  parser_dwa::pass1_precompute
+         1        31.706ms        31.706ms        31.706ms        31.706ms  parser_dwa::super_nwa_build
+         1        24.417ms        24.417ms        24.417ms        24.417ms  precompute1::flush_pending
+         2          7.278s          3.639s        23.675ms        11.837ms  NWA pass RmEpsilon
+         2        23.657ms        11.828ms        23.657ms        11.828ms  NWA pass CompressTransitions
+         1        16.081ms        16.081ms        16.081ms        16.081ms  sep1::glr::table::optimize_table
+       146        15.031ms       102.957µs        15.031ms       102.957µs  acyclic_det::finalize_weighted_closures
+         1          1.256s          1.256s        14.607ms        14.607ms  parser_dwa::specialize_dw_as
+         1        14.253ms        14.253ms        14.253ms        14.253ms  sep1::glr::table::compute_final_table
+         1        12.725ms        12.725ms        12.725ms        12.725ms  NWA pass PruneDeadEnds
+         1        12.286ms        12.286ms        12.286ms        12.286ms  build_maps_and_possible_matches
+         1        10.096ms        10.096ms        10.096ms        10.096ms  compute_terminal_follow_sets
+         1         7.684ms         7.684ms         7.684ms         7.684ms  minimize_dfa
+         3         16.986s          5.662s         7.071ms         2.357ms  NWA::determinize
+         1         5.862ms         5.862ms         5.862ms         5.862ms  parser_dwa::super_dwa_collect_weights
+         1          6.256s          6.256s         4.428ms         4.428ms  parser_dwa::super_dwa_det_min
+         3          7.481s          2.494s         4.292ms         1.430ms  NWA::minimize_with_rustfst_full
+         1         4.279ms         4.279ms         4.279ms         4.279ms  NWA pass PruneUnreachable
+         1         4.057ms         4.057ms         4.057ms         4.057ms  sep1::glr::table::stage_1
+       146         3.832ms        26.247µs         3.832ms        26.247µs  acyclic_det::precompute_eps_closures_unweighted
+         1          9.320s          9.320s         3.243ms         3.243ms  precompute1::finish
+         1         2.741ms         2.741ms         2.741ms         2.741ms  LLMVocabTrie::from_token_map
+         1       486.067ms       486.067ms         2.710ms         2.710ms  setup_combined
+         2         2.542ms         1.271ms         2.542ms         1.271ms  NWA::rm_epsilon::precollapse_all
+         1         2.540ms         2.540ms         2.540ms         2.540ms  build_internal_to_original_map
+         1         2.173ms         2.173ms         2.173ms         2.173ms  precompute1::setup
+         1         3.084ms         3.084ms         2.067ms         2.067ms  sep1::dfa_u8::dfa::to_dfa_impl
+         1         1.943ms         1.943ms         1.943ms         1.943ms  build_internal_to_original_sparse_matrix
+         1         1.352ms         1.352ms         1.352ms         1.352ms  setup_combined::collect_token_strings
+         1         1.053ms         1.053ms         1.053ms         1.053ms  parser_dwa::compute_traversal_data
+         1       959.000µs       959.000µs       959.000µs       959.000µs  recompute_metadata
+         2       869.209µs       434.605µs       869.209µs       434.605µs  NWA::rm_epsilon::dag_fast_path
+         1       797.000µs       797.000µs       797.000µs       797.000µs  build_internal_vocab_tree
+         1       683.916µs       683.916µs       683.916µs       683.916µs  setup_combined::sort_tokens
+         2       637.458µs       318.729µs       637.458µs       318.729µs  DWA pass PruneDeadEnds
+         2         49.974s         24.987s       617.583µs       308.791µs  run_precompute1
+         1       563.125µs       563.125µs       563.125µs       563.125µs  parser_dwa::reverse_nwa
+         1       542.917µs       542.917µs       542.917µs       542.917µs  terminal_nwa_from_dwa
+         1       483.667µs       483.667µs       483.667µs       483.667µs  precompute1::start_state
+         1          9.292s          9.292s       477.499µs       477.499µs  precompute1::determinize_and_minimize
+         1       432.958µs       432.958µs       432.958µs       432.958µs  NWA pass PushFinalWeights
+         1       223.541µs       223.541µs       223.541µs       223.541µs  setup_combined::build_internal_llm_token_map
+         1       194.875µs       194.875µs       194.875µs       194.875µs  setup_combined::build_original_to_internal
+         1        11.710ms        11.710ms        82.417µs        82.417µs  DWA::minimize
+         3         34.415s         11.472s        59.459µs        19.820µs  NWA::determinize_and_minimize
+         1        48.208µs        48.208µs        48.208µs        48.208µs  optimize_expr
+         1        39.667µs        39.667µs        39.667µs        39.667µs  build_nfa
+         1        36.500µs        36.500µs        36.500µs        36.500µs  compute_equivalence_classes
+         1        32.667µs        32.667µs        32.667µs        32.667µs  setup_combined::build_state_to_rep
+         3          7.481s          2.494s        27.209µs         9.070µs  NWA pass MinimizeRustfst
+         1        21.292µs        21.292µs        21.292µs        21.292µs  remap_transitions
+         1         3.099ms         3.099ms        15.291µs        15.291µs  to_dfa
+         1          9.317s          9.317s        13.292µs        13.292µs  Precompute1::finish
+         1        11.166µs        11.166µs        11.166µs        11.166µs  condense_epsilon_sccs
+         3        99.821ms        33.273ms        10.792µs         3.597µs  DWA pass Minimize
+         1         3.667µs         3.667µs         3.667µs         3.667µs  parser_dwa::combine_bodies
+         1         3.292µs         3.292µs         3.292µs         3.292µs  build_ignore_terminal_dwa
+
+--- End Profiler Summary (Flat, Own Time) ---
+Profiler flat own-time total: 95.304s
+Profiler run_precompute1 total: 24.987s
+TIMING: build_constraint 96.89130175s
+TIMING: save_output 50.010983959s
+
+[2m─────────────────────────────────────────[0m
+[1;32m✓ Complete in 2.5m[0m
+
+[DUMP] No weights collected (min threshold: 10 pairs)
+TIMING: total 149.453101416s
+
+[1mPython Wrapper Timings:[0m
+  Resolve Vocabulary Path        : 0.72ms
+  Run Rust Compiler              : 183923.49ms

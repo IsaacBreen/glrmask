@@ -1,0 +1,66 @@
+--- /Users/isaacbreen/Projects2/grammars2024/nwa_mod_head.txt	2026-01-30 11:20:59
++++ /Users/isaacbreen/Projects2/grammars2024/src/dwa_i32/minimization/nwa/mod.rs	2026-01-30 11:22:21
+@@ -515,39 +515,37 @@
+ 
+         timeit!("NWA::rm_epsilon::build_states", {
+             for u in 0..num_states {
+-                timeit!("NWA::rm_epsilon::closure", {
+-                    touched.clear();
+-                    queue.clear();
+-                    closure_weights[u] = weight_all.clone();
+-                    touched.push(u);
+-                    queue.push_back(u);
+-                    in_queue[u] = true;
++                touched.clear();
++                queue.clear();
++                closure_weights[u] = weight_all.clone();
++                touched.push(u);
++                queue.push_back(u);
++                in_queue[u] = true;
+ 
+-                    while let Some(v) = queue.pop_front() {
+-                        in_queue[v] = false;
+-                        let w_uv = closure_weights[v].clone();
+-                        if w_uv.is_empty() {
++                while let Some(v) = queue.pop_front() {
++                    in_queue[v] = false;
++                    let w_uv = closure_weights[v].clone();
++                    if w_uv.is_empty() {
++                        continue;
++                    }
++                    for (t, w_vt) in &states[v].epsilons {
++                        let new_weight = &w_uv & w_vt;
++                        if new_weight.is_empty() {
+                             continue;
+                         }
+-                        for (t, w_vt) in &states[v].epsilons {
+-                            let new_weight = &w_uv & w_vt;
+-                            if new_weight.is_empty() {
+-                                continue;
++                        let updated = &closure_weights[*t] | &new_weight;
++                        if updated != closure_weights[*t] {
++                            if closure_weights[*t].is_empty() {
++                                touched.push(*t);
+                             }
+-                            let updated = &closure_weights[*t] | &new_weight;
+-                            if updated != closure_weights[*t] {
+-                                if closure_weights[*t].is_empty() {
+-                                    touched.push(*t);
+-                                }
+-                                closure_weights[*t] = updated;
+-                                if !in_queue[*t] {
+-                                    queue.push_back(*t);
+-                                    in_queue[*t] = true;
+-                                }
++                            closure_weights[*t] = updated;
++                            if !in_queue[*t] {
++                                queue.push_back(*t);
++                                in_queue[*t] = true;
+                             }
+                         }
+                     }
+-                });
++                }
+ 
+                 let mut final_weight: Option<Weight> = None;
+                 let mut trans_map: BTreeMap<Label, HashMap<NWAStateID, Weight>> = BTreeMap::new();

@@ -1,0 +1,2 @@
+91:         1         95.304s         95.304s        46.693ms  GrammarConstraint::build_with_config_inner
+466967:         1         95.304s         95.304s        46.693ms        46.693ms  GrammarConstraint::build_with_config_inner

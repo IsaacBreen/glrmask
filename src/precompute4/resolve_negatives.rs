@@ -2,12 +2,51 @@ use crate::precompute4::utils::DEFAULT_TRANSITION_SYMBOL;
 use crate::dwa_i32::common::Label;
 use crate::dwa_i32::{DWA, NWA, NWAStateID, NWAStates, Weight};
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::time::Instant;
+use once_cell::sync::Lazy;
 
 type Code = Label;
 type QueryKey = (NWAStateID, Code);
+
+static PROFILE_PASS2_CANCELLATIONS: Lazy<bool> = Lazy::new(|| {
+    std::env::var("PROFILE_PASS2_CANCELLATIONS")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+});
+
+static CANCELLATIONS_RANGE_CALLS: AtomicU64 = AtomicU64::new(0);
+static CANCELLATIONS_RANGE_TIME_US: AtomicU64 = AtomicU64::new(0);
+static CANCELLATIONS_RANGE_STEPS: AtomicU64 = AtomicU64::new(0);
+static CANCELLATIONS_RANGE_SEEDS: AtomicU64 = AtomicU64::new(0);
+static CANCELLATIONS_RANGE_EPS_ADDED: AtomicU64 = AtomicU64::new(0);
+
+#[inline]
+fn cancellations_range_profile_enabled() -> bool {
+    *PROFILE_PASS2_CANCELLATIONS
+}
+
+pub fn log_cancellations_range_profile() {
+    if !cancellations_range_profile_enabled() {
+        return;
+    }
+    let calls = CANCELLATIONS_RANGE_CALLS.load(AtomicOrdering::Relaxed).max(1);
+    let total_us = CANCELLATIONS_RANGE_TIME_US.load(AtomicOrdering::Relaxed);
+    let steps = CANCELLATIONS_RANGE_STEPS.load(AtomicOrdering::Relaxed);
+    let seeds = CANCELLATIONS_RANGE_SEEDS.load(AtomicOrdering::Relaxed);
+    let eps_added = CANCELLATIONS_RANGE_EPS_ADDED.load(AtomicOrdering::Relaxed);
+    eprintln!(
+        "PASS2 cancellations profile: calls={}, total={:?}, avg={:?}, avg_steps={}, avg_seeds={}, avg_eps_added={}",
+        calls,
+        std::time::Duration::from_micros(total_us),
+        std::time::Duration::from_micros(total_us / calls),
+        steps / calls,
+        seeds / calls,
+        eps_added / calls,
+    );
+}
 
 #[inline]
 fn is_negative_symbol(label: Code) -> bool { label < 0 && label != DEFAULT_TRANSITION_SYMBOL }
@@ -46,7 +85,18 @@ pub fn apply_cancellations(states: &mut NWAStates, source_states_filter: &HashSe
 
 /// Range-based version for contiguous state ranges - avoids HashSet allocation
 pub fn apply_cancellations_range(states: &mut NWAStates, range: std::ops::Range<NWAStateID>) {
+    let profile = cancellations_range_profile_enabled();
+    let start = profile.then(Instant::now);
     let epsilons_to_add = compute_cancellations_range(states, range);
+    if profile {
+        CANCELLATIONS_RANGE_CALLS.fetch_add(1, AtomicOrdering::Relaxed);
+        if let Some(start) = start {
+            CANCELLATIONS_RANGE_TIME_US
+                .fetch_add(start.elapsed().as_micros() as u64, AtomicOrdering::Relaxed);
+        }
+        CANCELLATIONS_RANGE_EPS_ADDED
+            .fetch_add(epsilons_to_add.len() as u64, AtomicOrdering::Relaxed);
+    }
     crate::debug!(8, "Computed {} new epsilon transitions from cancellations.", epsilons_to_add.len());
     for (from, to, w) in epsilons_to_add {
         states.add_epsilon(from, to, w);
@@ -416,10 +466,23 @@ fn compute_cancellations(states: &NWAStates, source_states_filter: &HashSet<NWAS
 /// Range-based version of compute_cancellations for contiguous state ranges
 fn compute_cancellations_range(states: &NWAStates, range: std::ops::Range<NWAStateID>) -> Vec<(NWAStateID, NWAStateID, Weight)> {
     let n = states.len();
+    let profile = cancellations_range_profile_enabled();
+    let mut seed_count: u64 = 0;
     
     let mut queries: FxHashMap<NWAStateID, FxHashMap<QueryKey, Weight>> = FxHashMap::default();
-    let mut worklist: VecDeque<(NWAStateID, NWAStateID, Code, Weight)> = VecDeque::new();
+    let mut worklist: VecDeque<(NWAStateID, NWAStateID, Code)> = VecDeque::new();
+    let mut in_queue: FxHashSet<(NWAStateID, NWAStateID, Code)> = FxHashSet::default();
     let mut new_eps_from: FxHashMap<NWAStateID, FxHashMap<NWAStateID, Weight>> = FxHashMap::default();
+    let mut enqueue = |worklist: &mut VecDeque<(NWAStateID, NWAStateID, Code)>,
+                       in_queue: &mut FxHashSet<(NWAStateID, NWAStateID, Code)>,
+                       s: NWAStateID,
+                       a: NWAStateID,
+                       c: Code| {
+        let key = (s, a, c);
+        if in_queue.insert(key) {
+            worklist.push_back(key);
+        }
+    };
 
     // Seed from negative transitions in the range
     for a in range.clone() {
@@ -437,7 +500,8 @@ fn compute_cancellations_range(states: &NWAStates, range: std::ops::Range<NWASta
                 let old_w = query_weight.clone();
                 *query_weight |= w_ab;
                 if *query_weight != old_w {
-                    worklist.push_back((*b, a, c, query_weight.clone()));
+                    enqueue(&mut worklist, &mut in_queue, *b, a, c);
+                    seed_count = seed_count.saturating_add(1);
                 }
             }
         }
@@ -445,6 +509,10 @@ fn compute_cancellations_range(states: &NWAStates, range: std::ops::Range<NWASta
     
     // Early exit if no negative transitions were found
     if worklist.is_empty() {
+        if profile {
+            CANCELLATIONS_RANGE_SEEDS.fetch_add(seed_count, AtomicOrdering::Relaxed);
+            CANCELLATIONS_RANGE_STEPS.fetch_add(0, AtomicOrdering::Relaxed);
+        }
         return Vec::new();
     }
 
@@ -454,12 +522,17 @@ fn compute_cancellations_range(states: &NWAStates, range: std::ops::Range<NWASta
         .unwrap_or(0);
     let mut steps = 0usize;
 
-    while let Some((s, a, c, w_as)) = worklist.pop_front() {
+    while let Some((s, a, c)) = worklist.pop_front() {
+        in_queue.remove(&(s, a, c));
         if max_steps > 0 && steps >= max_steps {
             crate::debug!(4, "Pass2 cancellations: reached max steps {}, truncating", max_steps);
             break;
         }
         steps += 1;
+        let w_as = match queries.get(&s).and_then(|m| m.get(&(a, c))) {
+            Some(w) => w.clone(),
+            None => continue,
+        };
         if let Some(epsilons_from_s) = new_eps_from.get(&s) {
             for (&target, eps_w) in epsilons_from_s {
                 let prop_w = &w_as & eps_w;
@@ -471,14 +544,16 @@ fn compute_cancellations_range(states: &NWAStates, range: std::ops::Range<NWASta
                 let old_qw = query_weight.clone();
                 *query_weight |= &prop_w;
                 if *query_weight != old_qw {
-                    worklist.push_back((target, a, c, query_weight.clone()));
+                    enqueue(&mut worklist, &mut in_queue, target, a, c);
                 }
             }
         }
 
         let mut check_cancellations = |target: NWAStateID,
-                                       w_st: &Weight,
-                                       worklist: &mut VecDeque<(NWAStateID, NWAStateID, Code, Weight)>| {
+                           w_st: &Weight,
+                           worklist: &mut VecDeque<(NWAStateID, NWAStateID, Code)>,
+                           in_queue: &mut FxHashSet<(NWAStateID, NWAStateID, Code)>,
+                           enqueue: &mut dyn FnMut(&mut VecDeque<(NWAStateID, NWAStateID, Code)>, &mut FxHashSet<(NWAStateID, NWAStateID, Code)>, NWAStateID, NWAStateID, Code)| {
             let new_eps_w = &w_as & w_st;
             if new_eps_w.is_empty() {
                 return;
@@ -501,7 +576,7 @@ fn compute_cancellations_range(states: &NWAStates, range: std::ops::Range<NWASta
                         let old_qw = query_weight.clone();
                         *query_weight |= &prop_w;
                         if *query_weight != old_qw {
-                            worklist.push_back((target, a_prime, c_prime, query_weight.clone()));
+                            enqueue(worklist, in_queue, target, a_prime, c_prime);
                         }
                     }
                 }
@@ -511,13 +586,13 @@ fn compute_cancellations_range(states: &NWAStates, range: std::ops::Range<NWASta
         if let Some(pos_targets) = states[s].transitions.get(&c) {
             for (t, w_st) in pos_targets {
                 if *t < n {
-                    check_cancellations(*t, w_st, &mut worklist);
+                    check_cancellations(*t, w_st, &mut worklist, &mut in_queue, &mut enqueue);
                 }
             }
         }
         if let Some(default_targets) = states[s].transitions.get(&DEFAULT_TRANSITION_SYMBOL) {
             for (target, weight) in default_targets {
-                check_cancellations(*target, weight, &mut worklist);
+                check_cancellations(*target, weight, &mut worklist, &mut in_queue, &mut enqueue);
             }
         }
 
@@ -534,9 +609,14 @@ fn compute_cancellations_range(states: &NWAStates, range: std::ops::Range<NWASta
             let old_qw = query_weight.clone();
             *query_weight |= &prop_w;
             if *query_weight != old_qw {
-                worklist.push_back((*t, a, c, query_weight.clone()));
+                enqueue(&mut worklist, &mut in_queue, *t, a, c);
             }
         }
+    }
+
+    if profile {
+        CANCELLATIONS_RANGE_SEEDS.fetch_add(seed_count, AtomicOrdering::Relaxed);
+        CANCELLATIONS_RANGE_STEPS.fetch_add(steps as u64, AtomicOrdering::Relaxed);
     }
 
     let mut result = Vec::new();
