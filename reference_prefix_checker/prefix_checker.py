@@ -488,7 +488,12 @@ def build_from_json_schema(schema_json: str) -> EarleyPrefixChecker:
         import _sep1 as sep1
     except Exception as exc:  # pragma: no cover
         raise RuntimeError("_sep1 is required for JSON Schema import") from exc
-    ebnf = sep1.json_schema_to_ebnf(schema_json)
+    if hasattr(sep1, "json_schema_to_ebnf"):
+        ebnf = sep1.json_schema_to_ebnf(schema_json)
+    elif hasattr(sep1, "json_schema_to_ebnf_py"):
+        ebnf = sep1.json_schema_to_ebnf_py(schema_json)
+    else:
+        raise RuntimeError("_sep1 does not expose json_schema_to_ebnf")
     return build_from_ebnf_string(ebnf)
 
 
