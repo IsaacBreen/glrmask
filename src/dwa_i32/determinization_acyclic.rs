@@ -234,6 +234,7 @@ fn build_destinations_batched(
     nwa: &NWA,
     eps_reach: &[WeightedSubset],
     timers: Option<&MaterializeTimers>,
+    bulk_stats_enabled: bool,
 ) -> Vec<(Label, WeightedSubset, Weight)> {
     if let Some(timers) = timers {
         timers.calls.fetch_add(1, AtomicOrdering::Relaxed);
@@ -246,11 +247,12 @@ fn build_destinations_batched(
         FxHashMap::default();
     let mut transitions: FxHashMap<Label, FxHashMap<NWAStateID, Weight>> = FxHashMap::default();
     let mut edge_weights: FxHashMap<Label, Weight> = FxHashMap::default();
-    let mut collect_union_bulk_stats: Option<BTreeMap<usize, (u64, u64)>> = if timers.is_some() {
-        Some(BTreeMap::new())
-    } else {
-        None
-    };
+    let mut collect_union_bulk_stats: Option<BTreeMap<usize, (u64, u64)>> =
+        if timers.is_some() && bulk_stats_enabled {
+            Some(BTreeMap::new())
+        } else {
+            None
+        };
 
     let collect_start = if timers.is_some() { Some(Instant::now()) } else { None };
     timeit!("acyclic_det::build_destinations_batched::collect_gather", {
@@ -534,6 +536,11 @@ pub(crate) fn determinize_acyclic_with_progress(
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
         || macro_level >= 5;
+    let bulk_stats_enabled = profile_enabled
+        && (env::var("PROFILE_DETERMINIZATION_BULK_STATS")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+            || macro_level >= 7);
 
     let start_time = Instant::now();
     crate::debug!(3, "Determinizing acyclic NWA: precomputing state sets...");
@@ -743,7 +750,7 @@ pub(crate) fn determinize_acyclic_with_progress(
         for (cid, level) in levels.into_iter().enumerate() {
             states_by_level[level].push(cid);
         }
-        let mut bulk_stats: Option<BTreeMap<usize, (usize, u128)>> = if profile_enabled {
+        let mut bulk_stats: Option<BTreeMap<usize, (usize, u128)>> = if bulk_stats_enabled {
             Some(BTreeMap::new())
         } else {
             None
@@ -799,9 +806,13 @@ pub(crate) fn determinize_acyclic_with_progress(
                             } else {
                                 None
                             };
-                            for (lbl, dest_subset, w_edge) in
-                                build_destinations_batched(closure, nwa, &eps_reach, timers)
-                            {
+                            for (lbl, dest_subset, w_edge) in build_destinations_batched(
+                                closure,
+                                nwa,
+                                &eps_reach,
+                                timers,
+                                bulk_stats_enabled,
+                            ) {
                                 let Some(&dest_id) = label_to_dest.get(&lbl) else {
                                     continue;
                                 };
