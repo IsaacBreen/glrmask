@@ -60,7 +60,7 @@ fn profiler() -> &'static Mutex<ProfilerData> {
     PROFILER.get_or_init(|| Mutex::new(ProfilerData::default()))
 }
 
-fn profiling_enabled() -> bool {
+pub(crate) fn profiling_enabled() -> bool {
     static PROFILING_ENABLED_CACHE: OnceLock<bool> = OnceLock::new();
     *PROFILING_ENABLED_CACHE.get_or_init(|| {
         env::var("PROFILE_ENABLED")

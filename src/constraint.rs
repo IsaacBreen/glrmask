@@ -808,6 +808,7 @@ impl GrammarConstraint {
         (original_to_internal_map, commit_vocab, internal_llm_token_map, mask_classes, state_to_rep, representative_states)
     }
 
+    #[time_it("GrammarConstraint::build_with_config")]
     fn build_with_config(
         tokenizer: Tokenizer,
         parser: GLRParser,
@@ -826,7 +827,13 @@ impl GrammarConstraint {
             config,
             None,
         );
-        if std::env::var("PROFILE_TERMINAL_DWA").is_ok() {
+        if crate::r#macro::is_debug_level_enabled(4) {
+            let build_total = crate::profiler::sum_subtree_total_time("GrammarConstraint::build_with_config_inner");
+            crate::debug!(4, "Profiler build_with_config_inner total: {:.3}s", build_total.as_secs_f64());
+            let run_precompute1_total = crate::profiler::sum_subtree_total_time("run_precompute1");
+            crate::debug!(4, "Profiler run_precompute1 total: {:.3}s", run_precompute1_total.as_secs_f64());
+        }
+        if crate::profiler::profiling_enabled() {
             crate::profiler::print_summary();
             let total_own = crate::profiler::sum_flat_own_time();
             println!("Profiler flat own-time total: {:.3}s", total_own.as_secs_f64());
@@ -836,15 +843,10 @@ impl GrammarConstraint {
                 run_precompute1_total.as_secs_f64()
             );
         }
-        if crate::r#macro::is_debug_level_enabled(4) {
-            let build_total = crate::profiler::sum_subtree_total_time("GrammarConstraint::build_with_config_inner");
-            crate::debug!(4, "Profiler build_with_config_inner total: {:.3}s", build_total.as_secs_f64());
-            let run_precompute1_total = crate::profiler::sum_subtree_total_time("run_precompute1");
-            crate::debug!(4, "Profiler run_precompute1 total: {:.3}s", run_precompute1_total.as_secs_f64());
-        }
         constraint
     }
 
+    #[time_it("GrammarConstraint::build_with_config_and_grammar")]
     fn build_with_config_and_grammar(
         tokenizer: Tokenizer,
         parser: GLRParser,
@@ -864,7 +866,13 @@ impl GrammarConstraint {
             config,
             Some(grammar_definition),
         );
-        if std::env::var("PROFILE_TERMINAL_DWA").is_ok() {
+        if crate::r#macro::is_debug_level_enabled(4) {
+            let build_total = crate::profiler::sum_subtree_total_time("GrammarConstraint::build_with_config_inner");
+            crate::debug!(4, "Profiler build_with_config_inner total: {:.3}s", build_total.as_secs_f64());
+            let run_precompute1_total = crate::profiler::sum_subtree_total_time("run_precompute1");
+            crate::debug!(4, "Profiler run_precompute1 total: {:.3}s", run_precompute1_total.as_secs_f64());
+        }
+        if crate::profiler::profiling_enabled() {
             crate::profiler::print_summary();
             let total_own = crate::profiler::sum_flat_own_time();
             println!("Profiler flat own-time total: {:.3}s", total_own.as_secs_f64());
@@ -873,12 +881,6 @@ impl GrammarConstraint {
                 "Profiler run_precompute1 total: {:.3}s",
                 run_precompute1_total.as_secs_f64()
             );
-        }
-        if crate::r#macro::is_debug_level_enabled(4) {
-            let build_total = crate::profiler::sum_subtree_total_time("GrammarConstraint::build_with_config_inner");
-            crate::debug!(4, "Profiler build_with_config_inner total: {:.3}s", build_total.as_secs_f64());
-            let run_precompute1_total = crate::profiler::sum_subtree_total_time("run_precompute1");
-            crate::debug!(4, "Profiler run_precompute1 total: {:.3}s", run_precompute1_total.as_secs_f64());
         }
         constraint
     }
