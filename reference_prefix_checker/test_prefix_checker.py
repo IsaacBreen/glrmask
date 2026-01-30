@@ -201,6 +201,55 @@ class TestReferencePrefixChecker(unittest.TestCase):
         constraint = BruteForcePrefixConstraint(checker, vocab)
         self.assertEqual(constraint.get_mask(), [True, True, False])
 
+    def test_regex_number_prefix(self):
+        digit_set = {"variant": "U8Class", "u8set": [[48, 57]]}
+        number_expr = {
+            "variant": "Quantifier",
+            "expr": digit_set,
+            "q_type": "OneOrMore",
+        }
+        grammar = {
+            "productions": [
+                {"lhs": "S", "rhs": [_sym_term_regex("NUMBER")]}
+            ],
+            "start_production_id": 0,
+            "ignore_terminal_ids": [],
+            "external_name_to_group_id": {},
+            "regex_terminals": [
+                _terminal_regex("NUMBER", 0, number_expr),
+            ],
+            "literal_terminals": [],
+        }
+        checker = ReferencePrefixChecker.from_grammar_definition_json(_to_json(grammar))
+        self.assertTrue(checker.is_valid_prefix(""))
+        self.assertTrue(checker.is_valid_prefix("1"))
+        self.assertTrue(checker.is_valid_prefix("123"))
+        self.assertFalse(checker.is_valid_prefix("a"))
+
+    def test_bruteforce_mask_regex_number(self):
+        digit_set = {"variant": "U8Class", "u8set": [[48, 57]]}
+        number_expr = {
+            "variant": "Quantifier",
+            "expr": digit_set,
+            "q_type": "OneOrMore",
+        }
+        grammar = {
+            "productions": [
+                {"lhs": "S", "rhs": [_sym_term_regex("NUMBER")]}
+            ],
+            "start_production_id": 0,
+            "ignore_terminal_ids": [],
+            "external_name_to_group_id": {},
+            "regex_terminals": [
+                _terminal_regex("NUMBER", 0, number_expr),
+            ],
+            "literal_terminals": [],
+        }
+        checker = ReferencePrefixChecker.from_grammar_definition_json(_to_json(grammar))
+        vocab = [b"1", b"12", b"a"]
+        constraint = BruteForcePrefixConstraint(checker, vocab)
+        self.assertEqual(constraint.get_mask(), [True, True, False])
+
     def test_from_ebnf_string_optional(self):
         try:
             import _sep1  # noqa: F401
