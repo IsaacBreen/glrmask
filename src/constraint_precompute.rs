@@ -147,6 +147,15 @@ impl<'r> Precomputer1<'r> {
             .map(|(bytes, id)| (id.0 as usize, bytes.clone()))
             .collect();
 
+        if crate::r#macro::is_debug_level_enabled(3) {
+            eprintln!(
+                "Precompute1 tokens: internal_llm_token_map entries={}, internal_max_llm_token={}, num_tsids={}",
+                internal_llm_token_map.len(),
+                internal_max_llm_token,
+                num_tsids,
+            );
+        }
+
         crate::debug!(6, "Building vocab prefix tree");
         let vocab = VocabPrefixTree::build(&tokens);
         crate::debug!(6, "Done building vocab prefix tree");
@@ -164,7 +173,13 @@ impl<'r> Precomputer1<'r> {
                 roots.insert(key, root_state);
             }
         }
-        crate::debug!(5, "Created trie1 roots ({} states for {} total tsids)", roots.len(), state_to_rep.len());
+        if crate::r#macro::is_debug_level_enabled(3) {
+            eprintln!(
+                "Created trie1 roots ({} states for {} total tsids)",
+                roots.len(),
+                state_to_rep.len()
+            );
+        }
 
         let pb = NoOpPb;
 
@@ -726,12 +741,16 @@ impl<'r> Precomputer1<'r> {
 
     fn run_dfs(&mut self) {
         let assoc = self.roots.clone();
-        crate::debug!(5, "Starting precompute DFS for {} tokenizer states", self.roots.len());
+        if crate::r#macro::is_debug_level_enabled(3) {
+            eprintln!("Starting precompute DFS for {} tokenizer states", self.roots.len());
+        }
         let vocab = std::mem::replace(&mut self.vocab, VocabPrefixTree::new());
         
         // Count vocab nodes for progress tracking
         let vocab_node_count = count_vocab_nodes(&vocab.root);
-        crate::debug!(5, "Vocab tree has {} nodes", vocab_node_count);
+        if crate::r#macro::is_debug_level_enabled(3) {
+            eprintln!("Vocab tree has {} nodes", vocab_node_count);
+        }
         
         self.dfs(&vocab.root, assoc);
         self.vocab = vocab;
@@ -748,6 +767,7 @@ impl<'r> Precomputer1<'r> {
         assoc_by_state: BTreeMap<DfsKey, NWAStateID>,
     ) {
         self.pb.inc(1);
+        let mut total_pending_iters = 0usize;
         for (segment_bytes, child_vocab_node) in vocab_node.iter_children() {
             crate::debug!(7, "=== Processing vocab segment: {:?} (token_id={}) ===",
                 String::from_utf8_lossy(segment_bytes), child_vocab_node.token_id());
@@ -769,7 +789,10 @@ impl<'r> Precomputer1<'r> {
                 BTreeMap<GrammarTokenID, LLMTokenBV>,
             > = HashMap::new();
 
+            let mut segment_pending_iters = 0usize;
             while let Some((pos, states_at_pos)) = pending.pop_first() {
+                segment_pending_iters += 1;
+                total_pending_iters += 1;
                 crate::debug!(7, "--- Position {} (segment len={}) ---", pos, segment_bytes.len());
                 crate::debug!(7, "States at pos: {:?}", states_at_pos);
                 
@@ -949,12 +972,25 @@ impl<'r> Precomputer1<'r> {
                 }
             }
 
+            if crate::r#macro::is_debug_level_enabled(3) {
+                eprintln!(
+                    "DFS segment done: segment_len={}, pending_iters={}, next_level_assoc={}",
+                    segment_bytes.len(),
+                    segment_pending_iters,
+                    next_level_assoc.len()
+                );
+            }
+
             crate::debug!(7, "=== Done processing segment {:?}, next_level_assoc={:?} ===",
                 String::from_utf8_lossy(segment_bytes), next_level_assoc);
 
             if !next_level_assoc.is_empty() {
                 self.dfs(child_vocab_node, next_level_assoc);
             }
+        }
+
+        if crate::r#macro::is_debug_level_enabled(3) {
+            eprintln!("DFS total pending iterations: {}", total_pending_iters);
         }
     }
 }
