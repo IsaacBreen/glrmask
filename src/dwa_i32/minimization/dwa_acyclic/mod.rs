@@ -311,7 +311,7 @@ pub fn minimize_acyclic_exact(dwa: &DWA) -> Result<DWA, DWABuildError> {
             // Compute coloring - use partition-based method for large candidate sets
             let coloring = timeit!("bottom_up_merge_acyclic::coloring", {
                 let color_start = std::time::Instant::now();
-                let coloring = compute_height_coloring(&dwa, candidates, &needed, &old_to_new, &new_states);
+                let coloring = compute_height_coloring(h, &dwa, candidates, &needed, &old_to_new, &new_states);
                 let color_elapsed = color_start.elapsed();
                 time_coloring += color_elapsed;
                 eprintln!("TIMING: height {} compute_height_coloring {:?}", h, color_elapsed);
@@ -458,6 +458,7 @@ pub fn minimize_acyclic_exact(dwa: &DWA) -> Result<DWA, DWABuildError> {
 
 /// Compute coloring for a height level's candidates.
 fn compute_height_coloring(
+    height: usize,
     dwa: &DWA,
     candidates: &[StateID],
     needed: &[Weight],
@@ -471,6 +472,12 @@ fn compute_height_coloring(
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(200);
+    let force_height0_exact = std::env::var("DWA_HEIGHT0_EXACT")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let force_graph_coloring = std::env::var("DWA_FORCE_GRAPH_COLORING")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
     
     // Log diagnostic info for large candidate sets
     if candidates.len() >= 100 {
@@ -480,23 +487,30 @@ fn compute_height_coloring(
     // Check if this is height 0 (no transitions) with large candidate set
     // Use optimized direct coloring path
     let is_height_0 = candidates.iter().all(|&id| dwa.states[id].transitions.is_empty());
-    if is_height_0 && candidates.len() > 1000 {
+    if is_height_0 && candidates.len() > 1000 && !force_height0_exact && !force_graph_coloring {
         let colors = timeit!("coloring::height0_direct", {
             compute_height_0_coloring_direct(candidates, dwa, needed, start)
         });
         crate::debug!(6, "Height 0 coloring total: {:?}", start.elapsed());
+        let num_colors = colors.iter().max().map(|c| c + 1).unwrap_or(0);
+        crate::debug!(5, "height {} coloring: candidates={}, path=height0_direct, colors={}", height, candidates.len(), num_colors);
         return colors;
     }
     
     // For large non-height-0 candidate sets, use greedy coloring without building full graph
     // This avoids the O(n²) graph construction bottleneck
     // Use a lower threshold since are_compatible can be expensive
-    if candidates.len() > greedy_no_graph_threshold {
+    if candidates.len() > greedy_no_graph_threshold
+        && !(is_height_0 && force_height0_exact)
+        && !force_graph_coloring
+    {
         let greedy_start = std::time::Instant::now();
         let colors = timeit!("coloring::greedy_without_graph", {
             greedy_color_without_graph(dwa, candidates, needed, old_to_new, new_states, start)
         });
         crate::debug!(6, "Greedy coloring (no graph) total: {:?}", greedy_start.elapsed());
+        let num_colors = colors.iter().max().map(|c| c + 1).unwrap_or(0);
+        crate::debug!(5, "height {} coloring: candidates={}, path=greedy_no_graph, colors={}", height, candidates.len(), num_colors);
         return colors;
     }
     
@@ -591,6 +605,9 @@ fn compute_height_coloring(
     crate::debug!(5, "Coloring breakdown: signature={:?}, graph={:?}, coloring={:?}, unaccounted={:?}",
         sig_time, graph_time, color_time, unaccounted);
     
+    let num_colors = colors.iter().max().map(|c| c + 1).unwrap_or(0);
+    let path = if candidates.len() > 30 { "graph_greedy" } else { "graph_exact" };
+    crate::debug!(5, "height {} coloring: candidates={}, path={}, colors={}", height, candidates.len(), path, num_colors);
     colors
 }
 
@@ -1492,45 +1509,19 @@ fn build_incompatibility_graph_height_0(
                     continue;
                 }
                 
-                // Groups have overlapping footprints - need to check individual pairs
-                // But since all states in a group have the same final signature,
-                // if ANY pair is incompatible, ALL cross-group pairs are incompatible
-                // (because final behavior differs on some shared weight)
-                
-                // Check one representative pair
-                let idx_i = groups[i].1[0];
-                let idx_j = groups[j].1[0];
-                let id_i = candidates[idx_i];
-                let id_j = candidates[idx_j];
-                
-                // Check if their needed sets overlap
-                let pair_overlap_start = std::time::Instant::now();
-                let pair_overlap = &needed[id_i] & &needed[id_j];
-                pair_overlap_time += pair_overlap_start.elapsed();
-                if pair_overlap.is_empty() {
-                    // This specific pair is compatible, but others in the group might not be
-                    // Need to check all pairs in this case
-                    for &idx_i in &groups[i].1 {
-                        for &idx_j in &groups[j].1 {
-                            compare_count += 1;
-                            let id_i = candidates[idx_i];
-                            let id_j = candidates[idx_j];
-                            let pair_overlap_start = std::time::Instant::now();
-                            let pair_overlap = &needed[id_i] & &needed[id_j];
-                            pair_overlap_time += pair_overlap_start.elapsed();
-                            if !pair_overlap.is_empty() {
-                                // Finals differ on overlap (different groups), so incompatible
-                                adj[idx_i].push(idx_j);
-                                adj[idx_j].push(idx_i);
-                                edge_count += 1;
-                            }
-                        }
-                    }
-                } else {
-                    // Representative pair has overlapping needed sets AND different signatures
-                    // So all pairs between these groups are incompatible
-                    for &idx_i in &groups[i].1 {
-                        for &idx_j in &groups[j].1 {
+                // Groups have overlapping footprints - need to check individual pairs.
+                // Even with overlapping group footprints, specific state pairs may have
+                // disjoint needed sets and remain compatible.
+                for &idx_i in &groups[i].1 {
+                    for &idx_j in &groups[j].1 {
+                        compare_count += 1;
+                        let id_i = candidates[idx_i];
+                        let id_j = candidates[idx_j];
+                        let pair_overlap_start = std::time::Instant::now();
+                        let pair_overlap = &needed[id_i] & &needed[id_j];
+                        pair_overlap_time += pair_overlap_start.elapsed();
+                        if !pair_overlap.is_empty() {
+                            // Finals differ on overlap (different groups), so incompatible
                             adj[idx_i].push(idx_j);
                             adj[idx_j].push(idx_i);
                             edge_count += 1;
