@@ -200,6 +200,52 @@ fn build_incompatibility_from_signatures(
     incompatible
 }
 
+fn compute_heights_acyclic(dwa: &DWA) -> Result<Vec<usize>, DWABuildError> {
+    let n = dwa.states.len();
+    let mut visited = vec![0u8; n];
+    let mut order = Vec::with_capacity(n);
+
+    fn visit(
+        u: usize,
+        dwa: &DWA,
+        visited: &mut Vec<u8>,
+        order: &mut Vec<usize>,
+    ) -> Result<(), DWABuildError> {
+        visited[u] = 1;
+        for &v in dwa.states[u].transitions.values() {
+            if v < dwa.states.len() {
+                if visited[v] == 1 {
+                    return Err(DWABuildError::StateOutOfBounds { state: u });
+                }
+                if visited[v] == 0 {
+                    visit(v, dwa, visited, order)?;
+                }
+            }
+        }
+        visited[u] = 2;
+        order.push(u);
+        Ok(())
+    }
+
+    for i in 0..n {
+        if visited[i] == 0 {
+            visit(i, dwa, &mut visited, &mut order)?;
+        }
+    }
+
+    let mut heights = vec![0usize; n];
+    for &u in &order {
+        heights[u] = dwa.states[u]
+            .transitions
+            .values()
+            .filter(|&&v| v < n)
+            .map(|&v| heights[v] + 1)
+            .max()
+            .unwrap_or(0);
+    }
+    Ok(heights)
+}
+
 /// Partition-based minimization using signatures.
 pub fn minimize_partition_based(dwa: &DWA) -> Result<DWA, DWABuildError> {
     if dwa.states.len() == 0 {
@@ -211,10 +257,19 @@ pub fn minimize_partition_based(dwa: &DWA) -> Result<DWA, DWABuildError> {
     
     // Step 1: Compute partition and signatures
     let (num_elements, fp_to_elem) = compute_partition(dwa);
-    let signatures = compute_signatures(dwa, &fp_to_elem);
-    
+    let mut signatures = compute_signatures(dwa, &fp_to_elem);
+    let heights = compute_heights_acyclic(dwa)?;
+    let height_elem = PartitionElement(num_elements);
+    for (id, sig) in signatures.iter_mut().enumerate() {
+        let mut hasher = DefaultHasher::new();
+        heights[id].hash(&mut hasher);
+        let height_hash = hasher.finish();
+        sig.insert(height_elem, height_hash);
+    }
+    let num_elements_with_height = num_elements + 1;
+
     crate::debug!(5, "Partition minimize: {}, {} partition elements", 
-        before_stats, num_elements);
+        before_stats, num_elements_with_height);
     
     // Step 2: Build incompatibility graph using signatures
     let incompatible = build_incompatibility_from_signatures(&signatures);
@@ -391,7 +446,6 @@ mod tests {
     }
     
     #[test]
-    #[ignore] // minimize_partition_based has a bug with state references
     fn test_two_pass_greedy_then_exact() {
         // Create a DWA where greedy might miss some merges
         let mut dwa = DWA::new();

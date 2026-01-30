@@ -232,7 +232,7 @@ pub fn minimize_acyclic_exact(dwa: &DWA) -> Result<DWA, DWABuildError> {
     if use_two_pass {
         crate::debug!(5, "Acyclic minimize: two-pass enabled (fast -> exact)");
         let fast = timeit!("minimize_acyclic_two_pass_fast", {
-            minimize_acyclic_with_mode(dwa, ColoringMode::Fast)
+            partition_minimize::minimize_partition_based(dwa)
         })?;
         crate::debug!(5, "Acyclic minimize: fast pass states={}", fast.states.len());
         return timeit!("minimize_acyclic_two_pass_exact", {
@@ -240,6 +240,11 @@ pub fn minimize_acyclic_exact(dwa: &DWA) -> Result<DWA, DWABuildError> {
         });
     }
     minimize_acyclic_with_mode(dwa, ColoringMode::Exact)
+}
+
+#[time_it("minimize_acyclic_fast")]
+pub(crate) fn minimize_acyclic_fast(dwa: &DWA) -> Result<DWA, DWABuildError> {
+    minimize_acyclic_with_mode(dwa, ColoringMode::Fast)
 }
 
 fn minimize_acyclic_with_mode(dwa: &DWA, coloring_mode: ColoringMode) -> Result<DWA, DWABuildError> {
