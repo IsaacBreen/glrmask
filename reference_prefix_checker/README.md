@@ -32,7 +32,7 @@ The script provides helpers:
 These require the `_sep1` Python bindings.
 
 ## Notes
-- Tokenization uses **max‑munch** (longest match across terminals at a position).
+- Tokenization uses **per‑terminal longest match** (matches the tokenizer’s per‑group max length).
 - Uses the `regex` Python module for partial matching.
 - Honors `ignore_terminal_ids` by consuming those tokens without advancing the parse state.
 - Designed to be correct over performance.

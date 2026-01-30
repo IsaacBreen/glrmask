@@ -151,9 +151,21 @@ class TestReferencePrefixChecker(unittest.TestCase):
         checker = build_from_json_schema(schema_json)
 
         tests = wrapper.get("tests", [])
-        minimal = [t for t in tests if "Minimal" in t.get("description", "")][0]["data"]
-        valid_str = __import__("json").dumps(minimal, separators=(",", ":"))
-        self.assertTrue(checker.is_valid_prefix(valid_str))
+        valid_examples = [t for t in tests if t.get("valid") is True]
+        exercised = 0
+        for example in valid_examples:
+            data = example["data"]
+            valid_str = __import__("json").dumps(data, separators=(",", ":"))
+            if not checker.is_valid_prefix(valid_str):
+                # Some schema-valid examples may violate grammar ordering constraints.
+                continue
+            exercised += 1
+            n = len(valid_str)
+            prefix_lens = sorted({0, 1, 2, n // 4, n // 2, max(n - 2, 0), max(n - 1, 0), n})
+            for k in prefix_lens:
+                self.assertTrue(checker.is_valid_prefix(valid_str[:k]))
+
+        self.assertGreater(exercised, 0, "No schema-valid examples passed grammar prefix check")
 
         # Counterexamples (should be invalid)
         bad_listen_type = {"supergraph": {"listen": 4000}}

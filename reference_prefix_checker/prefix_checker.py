@@ -193,13 +193,11 @@ class EarleyPrefixChecker:
         start_symbol: str,
         token_matchers: Dict[TerminalKey, RegexMatcher],
         ignore_terminals: Optional[set[TerminalKey]] = None,
-        max_munch: bool = True,
     ) -> None:
         self.productions = list(productions)
         self.start_symbol = start_symbol
         self.token_matchers = token_matchers
         self.ignore_terminals = ignore_terminals or set()
-        self.max_munch = max_munch
 
         self._prods_by_lhs: Dict[str, List[int]] = {}
         for i, prod in enumerate(self.productions):
@@ -241,13 +239,12 @@ class EarleyPrefixChecker:
             chart[0].add(Item(pid, 0, 0))
 
         prefix_ok = False
-        match_cache: Dict[int, Tuple[int, Dict[TerminalKey, int], Dict[TerminalKey, bool]]] = {}
+        match_cache: Dict[int, Tuple[Dict[TerminalKey, int], Dict[TerminalKey, bool]]] = {}
 
-        def compute_matches(pos: int) -> Tuple[int, Dict[TerminalKey, int], Dict[TerminalKey, bool]]:
+        def compute_matches(pos: int) -> Tuple[Dict[TerminalKey, int], Dict[TerminalKey, bool]]:
             if pos in match_cache:
                 return match_cache[pos]
             remaining = text_bytes[pos:]
-            max_len = 0
             full_len_by_term: Dict[TerminalKey, int] = {}
             partial_by_term: Dict[TerminalKey, bool] = {}
             for term, matcher in self.token_matchers.items():
@@ -255,9 +252,7 @@ class EarleyPrefixChecker:
                 partial = matcher.partial_at_end(remaining)
                 full_len_by_term[term] = full_len
                 partial_by_term[term] = partial
-                if full_len > max_len:
-                    max_len = full_len
-            match_cache[pos] = (max_len, full_len_by_term, partial_by_term)
+            match_cache[pos] = (full_len_by_term, partial_by_term)
             return match_cache[pos]
 
         for i in range(n + 1):
@@ -288,7 +283,7 @@ class EarleyPrefixChecker:
 
             # Scan
             if i <= n:
-                max_len, full_len_by_term, partial_by_term = compute_matches(i)
+                full_len_by_term, partial_by_term = compute_matches(i)
                 for item in list(chart[i]):
                     prod = self.productions[item.prod_id]
                     if item.dot >= len(prod.rhs):
@@ -299,10 +294,9 @@ class EarleyPrefixChecker:
                     term = sym.value
                     full_len = full_len_by_term.get(term, 0)
                     if full_len > 0:
-                        if (not self.max_munch) or (full_len == max_len):
-                            next_pos = i + full_len
-                            if next_pos <= n:
-                                chart[next_pos].add(Item(item.prod_id, item.dot + 1, item.origin))
+                        next_pos = i + full_len
+                        if next_pos <= n:
+                            chart[next_pos].add(Item(item.prod_id, item.dot + 1, item.origin))
                     # Prefix via partial token match that consumes all remaining input
                     if partial_by_term.get(term, False):
                         prefix_ok = True
@@ -311,7 +305,7 @@ class EarleyPrefixChecker:
                 if self.ignore_terminals:
                     for term in self.ignore_terminals:
                         full_len = full_len_by_term.get(term, 0)
-                        if full_len > 0 and ((not self.max_munch) or (full_len == max_len)):
+                        if full_len > 0:
                             next_pos = i + full_len
                             if next_pos <= n:
                                 for item in chart[i]:
@@ -375,7 +369,8 @@ def _parse_symbol_json(
             parsed = _parse_quoted_literal(value)
             if parsed is not None:
                 return Symbol("T", TerminalKey("literal", parsed))
-            return Symbol("T", TerminalKey("regex", value))
+            # Fallback: treat as literal bytes if it isn't a known regex name
+            return Symbol("T", TerminalKey("literal", value.encode("utf-8")))
     raise ValueError(f"Unknown Symbol variant: {variant}")
 
 
@@ -426,6 +421,16 @@ def build_from_grammar_definition_json(json_str: str) -> EarleyPrefixChecker:
         rhs_nodes = p.get("rhs", [])
         rhs = tuple(_parse_symbol_json(n, literal_map, regex_names) for n in rhs_nodes)
         productions.append(Production(lhs, rhs))
+
+    # Ensure matchers exist for any literal terminals referenced in productions
+    for prod in productions:
+        for sym in prod.rhs:
+            if sym.kind == "T":
+                term = sym.value
+                if isinstance(term, TerminalKey) and term.kind == "literal":
+                    if term not in token_matchers:
+                        expr = Expr("U8Seq", list(term.value))
+                        token_matchers[term] = RegexMatcher(expr)
 
     start_prod_id = data.get("start_production_id", 0)
     start_symbol = productions[start_prod_id].lhs if productions else ""
