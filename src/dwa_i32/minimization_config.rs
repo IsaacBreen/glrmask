@@ -426,6 +426,12 @@ impl NWA {
         eprintln!("TIMING: DWA passes total {:?}", dwa_passes_start.elapsed());
         crate::debug!(5, "DWA minimization: {}",
             dwa.stats());
+        let post_min_stats = dwa.stats();
+        eprintln!(
+            "TIMING: DWA post_minimize states={} transitions={}",
+            post_min_stats.states,
+            post_min_stats.transitions
+        );
         eprintln!("TIMING: NWA::determinize_and_minimize_with_config total {:?}", total_start.elapsed());
         dwa
     }
