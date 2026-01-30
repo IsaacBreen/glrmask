@@ -117,6 +117,8 @@ pub(crate) struct Precomputer1<'r> {
     pub(crate) live_tokens: HashMap<NWAStateID, Weight>,
     // Cache for tokens_accessible_from_state - only 389 unique states but called 700k+ times
     accessible_terminals_cache: HashMap<TokenizerStateID, std::rc::Rc<Vec<GrammarTokenID>>>,
+    // Cache for expanded single-token weights (indexed by token id)
+    expanded_item_cache: Vec<Option<Weight>>,
     // Weight-heavy mode: number of tokenizer states
     pub(crate) num_tsids: usize,
     // Max LLM token ID for creating tsid masks
@@ -226,6 +228,7 @@ impl<'r> Precomputer1<'r> {
             pending_epsilons: HashMap::new(),
             live_tokens: HashMap::new(),
             accessible_terminals_cache: HashMap::new(),
+            expanded_item_cache: vec![None; internal_max_llm_token.saturating_add(1)],
             num_tsids,
             internal_max_llm_token,
             tsid_offset_map,
@@ -637,6 +640,14 @@ impl<'r> Precomputer1<'r> {
     #[inline]
     fn expanded_weight_from_item(&mut self, token_id: usize) -> Weight {
         let start = self.dfs_profile_enabled.then(std::time::Instant::now);
+        if let Some(Some(cached)) = self.expanded_item_cache.get(token_id) {
+            if let Some(start) = start {
+                self.dfs_profile.expanded_item_calls += 1;
+                self.dfs_profile.expanded_item_time_us += start.elapsed().as_micros() as u64;
+            }
+            return cached.clone();
+        }
+
         let weight = if self.num_tsids == 0 {
             // Symbol-heavy mode: just use the token ID directly
             Weight::from_rsb(RangeSetBlaze::from_iter([token_id..=token_id]))
@@ -648,6 +659,10 @@ impl<'r> Precomputer1<'r> {
             // IMPORTANT: Use [start..=end] to create from ONE range, not iterate over all integers!
             Weight::from_rsb(RangeSetBlaze::from_iter([start..=end]))
         };
+
+        if let Some(slot) = self.expanded_item_cache.get_mut(token_id) {
+            *slot = Some(weight.clone());
+        }
         if let Some(start) = start {
             self.dfs_profile.expanded_item_calls += 1;
             self.dfs_profile.expanded_item_time_us += start.elapsed().as_micros() as u64;
@@ -658,14 +673,14 @@ impl<'r> Precomputer1<'r> {
     /// Create an expanded weight from a RangeSetBlaze of token IDs.
     /// If num_tsids == 0 (symbol-heavy mode), returns the rsb directly.
     #[inline]
-    fn expanded_weight_from_rsb(&mut self, rsb: RangeSetBlaze<usize>) -> Weight {
+    fn expanded_weight_from_rsb(&mut self, rsb: &RangeSetBlaze<usize>) -> Weight {
         let start = self.dfs_profile_enabled.then(std::time::Instant::now);
         let weight = if self.num_tsids == 0 {
             // Symbol-heavy mode: use rsb directly
-            Weight::from_rsb(rsb)
+            Weight::from_rsb(rsb.clone())
         } else {
             // Weight-heavy mode: expand to N×M space
-            Weight::from_rsb(expand_rsb(&rsb, self.num_tsids))
+            Weight::from_rsb(expand_rsb(rsb, self.num_tsids))
         };
         if let Some(start) = start {
             self.dfs_profile.expanded_rsb_calls += 1;
@@ -895,7 +910,7 @@ impl<'r> Precomputer1<'r> {
 
                         let initial_tsid = self.tokenizer.initial_state_id();
                         // Use expanded weight from rsb
-                        let weight = self.expanded_weight_from_rsb(final_bv.into_owned());
+                        let weight = self.expanded_weight_from_rsb(final_bv.as_ref());
 
                         let target_entry = dest_map.entry(DfsKey::new(initial_tsid, next_approx_state));
                         let target = match target_entry {
