@@ -53,16 +53,6 @@ fn old_to_new_get(old_to_new: &[StateID], id: StateID) -> Option<StateID> {
 impl DWA {
     #[time_it("DWA::minimize_acyclic")]
     pub fn minimize_acyclic(&mut self) {
-        // Check environment variable for fast minimize option
-        let use_fast_minimize = std::env::var("DWA_FAST_MINIMIZE").map(|v| v != "0").unwrap_or(true);
-        
-        if use_fast_minimize {
-            // Use partition refinement - faster but may produce slightly larger DWA
-            // (doesn't exploit the "diamond case" optimization)
-            self.minimize_states_cyclic();
-            return;
-        }
-        
         // Skip expensive validation in non-debug builds
         #[cfg(debug_assertions)]
         let x = self.clone();
