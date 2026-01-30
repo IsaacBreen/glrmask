@@ -206,6 +206,12 @@ fn push_weights_acyclic(dwa: &mut DWA) -> bool {
     changed
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ColoringMode {
+    Exact,
+    Fast,
+}
+
 /// Minimizes an Acyclic DWA to its globally optimal state count.
 ///
 /// # Theoretical Guarantees
@@ -220,6 +226,23 @@ fn push_weights_acyclic(dwa: &mut DWA) -> bool {
 /// typical automata where "incompatibility density" is low.
 #[time_it("minimize_acyclic_exact")]
 pub fn minimize_acyclic_exact(dwa: &DWA) -> Result<DWA, DWABuildError> {
+    let use_two_pass = std::env::var("DWA_TWO_PASS_MINIMIZE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if use_two_pass {
+        crate::debug!(5, "Acyclic minimize: two-pass enabled (fast -> exact)");
+        let fast = timeit!("minimize_acyclic_two_pass_fast", {
+            minimize_acyclic_with_mode(dwa, ColoringMode::Fast)
+        })?;
+        crate::debug!(5, "Acyclic minimize: fast pass states={}", fast.states.len());
+        return timeit!("minimize_acyclic_two_pass_exact", {
+            minimize_acyclic_with_mode(&fast, ColoringMode::Exact)
+        });
+    }
+    minimize_acyclic_with_mode(dwa, ColoringMode::Exact)
+}
+
+fn minimize_acyclic_with_mode(dwa: &DWA, coloring_mode: ColoringMode) -> Result<DWA, DWABuildError> {
     if dwa.states.len() == 0 {
         return Ok(DWA::new());
     }
@@ -311,7 +334,15 @@ pub fn minimize_acyclic_exact(dwa: &DWA) -> Result<DWA, DWABuildError> {
             // Compute coloring - use partition-based method for large candidate sets
             let coloring = timeit!("bottom_up_merge_acyclic::coloring", {
                 let color_start = std::time::Instant::now();
-                let coloring = compute_height_coloring(h, &dwa, candidates, &needed, &old_to_new, &new_states);
+                let coloring = compute_height_coloring(
+                    h,
+                    &dwa,
+                    candidates,
+                    &needed,
+                    &old_to_new,
+                    &new_states,
+                    coloring_mode,
+                );
                 let color_elapsed = color_start.elapsed();
                 time_coloring += color_elapsed;
                 eprintln!("TIMING: height {} compute_height_coloring {:?}", h, color_elapsed);
@@ -464,45 +495,29 @@ fn compute_height_coloring(
     needed: &[Weight],
     old_to_new: &[StateID],
     new_states: &[MergedStateBuilder],
+    coloring_mode: ColoringMode,
 ) -> Vec<usize> {
     HEIGHT_COLOR_CALLS.fetch_add(1, Ordering::Relaxed);
     let _height_timer = TimingGuard::new(&HEIGHT_COLOR_NANOS);
     let start = std::time::Instant::now();
-    let greedy_no_graph_threshold = std::env::var("DWA_GREEDY_NO_GRAPH_THRESHOLD")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(200);
     let force_height0_exact = std::env::var("DWA_HEIGHT0_EXACT")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
     let force_graph_coloring = std::env::var("DWA_FORCE_GRAPH_COLORING")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
-    
+
     // Log diagnostic info for large candidate sets
     if candidates.len() >= 100 {
         crate::debug!(5, "  {} new_states (targets) available", new_states.len());
     }
-    
+
     // Check if this is height 0 (no transitions) with large candidate set
-    // Use optimized direct coloring path
     let is_height_0 = candidates.iter().all(|&id| dwa.states[id].transitions.is_empty());
-    if is_height_0 && candidates.len() > 1000 && !force_height0_exact && !force_graph_coloring {
-        let colors = timeit!("coloring::height0_direct", {
-            compute_height_0_coloring_direct(candidates, dwa, needed, start)
-        });
-        crate::debug!(6, "Height 0 coloring total: {:?}", start.elapsed());
-        let num_colors = colors.iter().max().map(|c| c + 1).unwrap_or(0);
-        crate::debug!(5, "height {} coloring: candidates={}, path=height0_direct, colors={}", height, candidates.len(), num_colors);
-        return colors;
-    }
-    
-    // For large non-height-0 candidate sets, use greedy coloring without building full graph
-    // This avoids the O(n²) graph construction bottleneck
-    // Use a lower threshold since are_compatible can be expensive
-    if candidates.len() > greedy_no_graph_threshold
-        && !(is_height_0 && force_height0_exact)
+
+    if matches!(coloring_mode, ColoringMode::Fast)
         && !force_graph_coloring
+        && !(is_height_0 && force_height0_exact)
     {
         let greedy_start = std::time::Instant::now();
         let colors = timeit!("coloring::greedy_without_graph", {
@@ -513,7 +528,17 @@ fn compute_height_coloring(
         crate::debug!(5, "height {} coloring: candidates={}, path=greedy_no_graph, colors={}", height, candidates.len(), num_colors);
         return colors;
     }
-    
+
+    // Use optimized direct coloring path for large height-0 candidate sets
+    if is_height_0 && candidates.len() > 1000 && !force_height0_exact && !force_graph_coloring {
+        let colors = timeit!("coloring::height0_direct", {
+            compute_height_0_coloring_direct(candidates, dwa, needed, start)
+        });
+        crate::debug!(6, "Height 0 coloring total: {:?}", start.elapsed());
+        let num_colors = colors.iter().max().map(|c| c + 1).unwrap_or(0);
+        crate::debug!(5, "height {} coloring: candidates={}, path=height0_direct, colors={}", height, candidates.len(), num_colors);
+        return colors;
+    }
     // Compute signatures first to check if we can use a fast path
     let sig_start = std::time::Instant::now();
     let signatures: Vec<u128> = timeit!("coloring::signature_compute", {
@@ -536,7 +561,6 @@ fn compute_height_coloring(
     });
     let group_time = group_start.elapsed();
     let num_groups = sig_to_group.len();
-
     // Fast path: if signature groups cover > 70% of candidates, cross-group merging is unlikely
     // to help much. Just use signature-based coloring.
     let signature_coverage = num_groups as f64 / candidates.len() as f64;
@@ -568,7 +592,7 @@ fn compute_height_coloring(
             sig_time, assign_time, unaccounted);
         return colors;
     }
-    
+
     // Build full incompatibility graph
     let graph_start = std::time::Instant::now();
     let adj = timeit!("coloring::build_incompatibility_graph", {
@@ -585,13 +609,9 @@ fn compute_height_coloring(
         std::process::exit(1);
     }
     
-    // Solve coloring: greedy for large graphs, exact for small ones
+    // Solve coloring: exact graph coloring
     let color_start = std::time::Instant::now();
-    let colors = if candidates.len() > 30 {
-        timeit!("coloring::solve_greedy_coloring", { solve_greedy_coloring(&adj) })
-    } else {
-        solve_exact_graph_coloring(&adj)
-    };
+    let colors = solve_exact_graph_coloring(&adj);
     let color_time = color_start.elapsed();
     
     let total_time = start.elapsed();
@@ -606,8 +626,7 @@ fn compute_height_coloring(
         sig_time, graph_time, color_time, unaccounted);
     
     let num_colors = colors.iter().max().map(|c| c + 1).unwrap_or(0);
-    let path = if candidates.len() > 30 { "graph_greedy" } else { "graph_exact" };
-    crate::debug!(5, "height {} coloring: candidates={}, path={}, colors={}", height, candidates.len(), path, num_colors);
+    crate::debug!(5, "height {} coloring: candidates={}, path=graph_exact, colors={}", height, candidates.len(), num_colors);
     colors
 }
 
