@@ -464,7 +464,7 @@ fn compute_cancellations(states: &NWAStates, source_states_filter: &HashSet<NWAS
 }
 
 /// Range-based version of compute_cancellations for contiguous state ranges
-fn compute_cancellations_range(states: &NWAStates, range: std::ops::Range<NWAStateID>) -> Vec<(NWAStateID, NWAStateID, Weight)> {
+pub(crate) fn compute_cancellations_range(states: &NWAStates, range: std::ops::Range<NWAStateID>) -> Vec<(NWAStateID, NWAStateID, Weight)> {
     let n = states.len();
     let profile = cancellations_range_profile_enabled();
     let mut seed_count: u64 = 0;
